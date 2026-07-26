@@ -113,6 +113,23 @@ Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 - **Control** — your IPs, your reputation, your retention. No rate limits, no
   account suspensions, no sudden API deprecations.
 
+## Server requirements
+
+Measured on our own production instance, idle: **~190 MB RAM total, ~0% CPU**,
+and ~2 GB of disk for the Docker images. Mail itself is a rounding error —
+retention auto-deletes after 30 days.
+
+| Tier | Spec | Notes |
+|---|---|---|
+| Minimum | 1 vCPU / 1 GB RAM / 10 GB disk | works with the defaults (ClamAV and SpamAssassin off) |
+| Comfortable | 1 vCPU / 2 GB RAM / 20 GB disk | headroom to enable SpamAssassin |
+| With antivirus | 4 GB RAM | ClamAV alone needs ~1 GB extra |
+
+That's a $5/mo VPS — or a $10–15/**year** deal box. The real prerequisite isn't
+size, it's **port 25**: AWS, GCP, Azure, DigitalOcean and Vultr block it by
+default (some unblock on request). Check before you buy — or route outbound
+through a [relay](docs/deliverability.md) and you don't need port 25 out at all.
+
 ## Comparison
 
 | | **openagent.email** | AgentMail.to | MailSlurp |
