@@ -1,0 +1,94 @@
+# openagentemail-mcp
+
+MCP server (stdio transport) for [openagent.email](https://github.com/) — gives your AI agent unlimited mailboxes on your own domain: create identities, read/wait for mail, extract OTP codes & verification links, and send email. It wraps the openagent.email REST API over MCP so any MCP-capable client can use it.
+
+## Configuration
+
+The server is configured entirely via environment variables:
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `OPENAGENTEMAIL_API_URL` | no | `http://localhost:3100` | Base URL of the openagent.email API |
+| `OPENAGENTEMAIL_API_KEY` | **yes** | — | Bearer key; must match one of the `API_KEYS` in your server's `.env` |
+
+If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear error.
+
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `mail_new_identity(name?)` | Create an identity; returns `{address}` (random localpart like `fox-k7d2`) |
+| `mail_list_identities()` | List all identities |
+| `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet) |
+| `mail_read_message(address, id)` | Full message: text, html?, and `otp:{codes:[],links:[]}` |
+| `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
+| `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
+
+Errors come back as `isError` tool results with actionable messages (e.g. a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 on send tells you the `from` address must be an existing identity).
+
+## Client setup
+
+Requires [Bun](https://bun.sh) on the machine running the MCP client.
+
+### Claude Code
+
+```sh
+claude mcp add openagentemail \
+  --env OPENAGENTEMAIL_API_URL=http://localhost:3100 \
+  --env OPENAGENTEMAIL_API_KEY=<your-api-key> \
+  -- bunx openagentemail-mcp
+```
+
+Or run from a local checkout: replace `bunx openagentemail-mcp` with `bun run /path/to/openagentemail/packages/mcp/src/main.ts`.
+
+### Claude Desktop / Cursor
+
+Add to `claude_desktop_config.json` (Claude Desktop) or `~/.cursor/mcp.json` (Cursor):
+
+```json
+{
+  "mcpServers": {
+    "openagentemail": {
+      "command": "bunx",
+      "args": ["openagentemail-mcp"],
+      "env": {
+        "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
+        "OPENAGENTEMAIL_API_KEY": "<your-api-key>"
+      }
+    }
+  }
+}
+```
+
+For a local checkout, use `"command": "bun"` and `"args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"]` instead.
+
+### Kimi Code
+
+Add to `~/.kimi-code/mcp.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "openagentemail": {
+      "command": "bunx",
+      "args": ["openagentemail-mcp"],
+      "env": {
+        "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
+        "OPENAGENTEMAIL_API_KEY": "<your-api-key>"
+      }
+    }
+  }
+}
+```
+
+Or, from a local checkout, use `"command": "bun"` and `"args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"]` instead.
+
+## Development
+
+```sh
+cd packages/mcp
+bun install
+OPENAGENTEMAIL_API_KEY=dev-key bun run src/main.ts   # stdio; speaks JSON-RPC on stdin/stdout
+```
+
+The server connects to the API lazily — it starts fine even if the API isn't up yet, and reports a connection error on the first tool call if not.

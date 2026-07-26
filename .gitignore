@@ -1,0 +1,11 @@
+# Local config & runtime state
+.env
+docker-data/
+data/
+
+# Dependencies & build output
+node_modules/
+dist/
+
+# OS noise
+.DS_Store

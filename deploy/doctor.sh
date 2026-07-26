@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# openagent.email — deliverability doctor.
+#
+# Checks everything that decides whether your agents' mail actually lands in
+# an inbox, and prints PASS / WARN / FAIL with a fix hint for each item.
+#
+#   DNS:   MX, A, SPF, DKIM, DMARC
+#   IP:    PTR (reverse DNS), outbound port 25, DNSBL listings
+#   TLS:   certificate validity/expiry on 465 + 993
+#
+# Deps: dig, curl, openssl (all standard on macOS/Linux). Read-only.
+# Usage: ./deploy/doctor.sh [server-public-ipv4]
+
+cd "$(dirname "$0")/.." 2>/dev/null || true
+
+# ── config ───────────────────────────────────────────────────────────────────
+DOMAIN=""
+if [ -f .env ]; then
+  DOMAIN="$(grep -E '^DOMAIN=' .env | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+fi
+if [ -z "$DOMAIN" ]; then
+  echo "ERROR: DOMAIN not found. Create .env (cp .env.example .env) first." >&2
+  exit 1
+fi
+MAIL_HOST="mail.${DOMAIN}"
+DKIM_SELECTOR="mail"
+
+PASS=0; WARN=0; FAIL=0
+ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
+warn() { WARN=$((WARN+1)); printf '  \033[33mWARN\033[0m  %s\n  %s\n' "$1" "$2"; }
+bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n  %s\n' "$1" "$2"; }
+hint() { printf '       hint: %s\n' "$1"; }
+
+for cmd in dig curl openssl; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' not found in PATH" >&2; exit 1; }
+done
+
+# ── server IP: arg > A record of mail host > prompt ─────────────────────────
+SERVER_IP="${1:-}"
+if [ -z "$SERVER_IP" ]; then
+  SERVER_IP="$(dig +short A "$MAIL_HOST" | grep -E '^[0-9.]+$' | head -1 || true)"
+fi
+if [ -z "$SERVER_IP" ] && [ -t 0 ]; then
+  read -rp "Public IPv4 of this server: " SERVER_IP
+fi
+
+reverse_ip() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1}'; }
+
+echo ""
+echo "openagent.email doctor — ${DOMAIN} (${MAIL_HOST}${SERVER_IP:+, ${SERVER_IP}})"
+echo "──────────────────────────────────────────────────────────────"
+
+# ── 1. MX ────────────────────────────────────────────────────────────────────
+echo "[DNS] MX record"
+MX="$(dig +short MX "$DOMAIN" | sort -n | head -1 | awk '{print $2}' | sed 's/\.$//')"
+if [ "$MX" = "$MAIL_HOST" ]; then
+  ok "MX ${DOMAIN} -> ${MX}"
+elif [ -n "$MX" ]; then
+  bad "MX points to '${MX}', expected '${MAIL_HOST}'"
+  hint "set: ${DOMAIN}. MX 10 ${MAIL_HOST}."
+else
+  bad "no MX record for ${DOMAIN}"
+  hint "create: ${DOMAIN}. MX 10 ${MAIL_HOST}. (run ./deploy/dns-records.sh)"
+fi
+
+# ── 2. A record ─────────────────────────────────────────────────────────────
+echo "[DNS] A record"
+A="$(dig +short A "$MAIL_HOST" | grep -E '^[0-9.]+$' | head -1 || true)"
+if [ -n "$A" ]; then
+  ok "A ${MAIL_HOST} -> ${A}"
+  [ -n "$SERVER_IP" ] && [ "$A" != "$SERVER_IP" ] && \
+    warn "A record (${A}) differs from the server IP you gave (${SERVER_IP})" \
+         "       make sure ${SERVER_IP} is this machine's real public IP"
+else
+  bad "no A record for ${MAIL_HOST}"
+  hint "create: ${MAIL_HOST}. A <server-ip>"
+fi
+
+# ── 3. SPF ───────────────────────────────────────────────────────────────────
+echo "[DNS] SPF"
+TXT="$(dig +short TXT "$DOMAIN" | tr -d '\\"')"
+if echo "$TXT" | grep -q 'v=spf1'; then
+  SPF="$(echo "$TXT" | tr ' ' '\n' | grep '^v=spf1' | head -1)"
+  ok "SPF present ($(dig +short TXT "$DOMAIN" | grep -i 'v=spf1' | head -1 | tr -d '"'))"
+  echo "$TXT" | grep -q 'v=spf1 [^ ]*mx\|v=spf1 mx\|v=spf1.* mx' || \
+    warn "SPF does not include 'mx'" "       hint: recommended value: \"v=spf1 mx ~all\""
+else
+  bad "no SPF record for ${DOMAIN}"
+  hint "create TXT: ${DOMAIN}. \"v=spf1 mx ~all\""
+fi
+
+# ── 4. DKIM ──────────────────────────────────────────────────────────────────
+echo "[DNS] DKIM (${DKIM_SELECTOR}._domainkey)"
+DKIM="$(dig +short TXT "${DKIM_SELECTOR}._domainkey.${DOMAIN}" | tr -d '" ')"
+if echo "$DKIM" | grep -q 'v=DKIM1'; then
+  ok "DKIM public key published"
+else
+  bad "no DKIM record at ${DKIM_SELECTOR}._domainkey.${DOMAIN}"
+  if [ -f "docker-data/dms/config/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.txt" ]; then
+    hint "publish the key from ./deploy/dns-records.sh output (it's generated locally already)"
+  else
+    hint "start the stack once (docker compose up -d), then run ./deploy/dns-records.sh"
+  fi
+fi
+
+# ── 5. DMARC ─────────────────────────────────────────────────────────────────
+echo "[DNS] DMARC"
+DMARC="$(dig +short TXT "_dmarc.${DOMAIN}" | tr -d '\\"')"
+if echo "$DMARC" | grep -q 'v=DMARC1'; then
+  ok "DMARC present ($(dig +short TXT "_dmarc.${DOMAIN}" | grep -i 'v=DMARC1' | head -1 | tr -d '"'))"
+  echo "$DMARC" | grep -q 'p=none' && \
+    warn "DMARC policy is p=none (monitoring only)" \
+         "       hint: fine for launch; move to p=quarantine then p=reject once mail flows cleanly"
+else
+  bad "no DMARC record"
+  hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=none; rua=mailto:postmaster@${DOMAIN}\""
+fi
+
+# ── 6. PTR (reverse DNS) ────────────────────────────────────────────────────
+echo "[IP] PTR (reverse DNS)"
+if [ -n "$SERVER_IP" ]; then
+  PTR="$(dig +short -x "$SERVER_IP" | sed 's/\.$//' | head -1)"
+  if [ "$PTR" = "$MAIL_HOST" ]; then
+    ok "PTR ${SERVER_IP} -> ${PTR}"
+  elif [ -n "$PTR" ]; then
+    warn "PTR is '${PTR}', expected '${MAIL_HOST}'" \
+         "       hint: set rDNS at your VPS host (many providers: rename the instance to ${MAIL_HOST})"
+  else
+    bad "no PTR record for ${SERVER_IP}"
+    hint "set reverse DNS to ${MAIL_HOST} at your VPS provider — many spam filters reject mail without it"
+  fi
+else
+  warn "server IP unknown — skipping PTR/DNSBL/port-25 checks" \
+       "       hint: re-run as ./deploy/doctor.sh <server-public-ipv4>"
+fi
+
+# ── 7. Outbound port 25 ─────────────────────────────────────────────────────
+echo "[NET] Outbound port 25"
+if curl -s --max-time 6 "telnet://gmail-smtp-in.l.google.com:25" </dev/null 2>/dev/null | grep -q '^220'; then
+  ok "can reach an external MX on port 25 (direct sending possible)"
+else
+  warn "outbound port 25 appears blocked/filtered" \
+       "       hint: many VPS providers block it — request unblocking, or configure a relay in .env (RELAY_HOST, e.g. Amazon SES)"
+fi
+
+# ── 8. DNSBL listings ───────────────────────────────────────────────────────
+echo "[IP] DNS blocklists"
+if [ -n "$SERVER_IP" ]; then
+  REV="$(reverse_ip "$SERVER_IP")"
+  for BL in zen.spamhaus.org bl.spamcop.net b.barracudacentral.org; do
+    R="$(dig +short "${REV}.${BL}" | grep -E '^127\.' | head -1 || true)"
+    if [ -n "$R" ]; then
+      bad "IP ${SERVER_IP} is LISTED on ${BL} (${R})"
+      hint "delisting: check ${BL}'s lookup page; if this is a fresh VPS IP, consider replacing it or using a relay"
+    else
+      ok "not listed on ${BL}"
+    fi
+  done
+fi
+
+# ── 9. TLS on 465 / 993 ─────────────────────────────────────────────────────
+echo "[TLS] Certificates"
+for PORT in 465 993; do
+  CERT="$(echo | openssl s_client -connect "${MAIL_HOST}:${PORT}" -servername "$MAIL_HOST" 2>/dev/null)"
+  if echo "$CERT" | openssl x509 -noout -enddate -checkend 604800 >/dev/null 2>&1; then
+    EXPIRY="$(echo "$CERT" | openssl x509 -noout -enddate | cut -d= -f2)"
+    ok "port ${PORT}: cert valid until ${EXPIRY}"
+  elif echo "$CERT" | openssl x509 -noout >/dev/null 2>&1; then
+    warn "port ${PORT}: cert expires within 7 days" \
+         "       hint: if using Let's Encrypt, check DMS cert renewal; else re-issue"
+  else
+    VERIFY="$(echo "$CERT" | grep -i 'verify error' | head -1)"
+    if echo "$CERT" | grep -q 'BEGIN CERTIFICATE'; then
+      warn "port ${PORT}: cert present but not trusted/expired (${VERIFY:-unparsable})" \
+           "       hint: a self-signed cert is OK for agent-to-agent use; enable SSL_TYPE=letsencrypt in .env for real trust"
+    else
+      bad "port ${PORT}: no TLS cert (is the mailserver up? DNS pointed here?)"
+      hint "docker compose ps; docker compose logs mailserver"
+    fi
+  fi
+done
+
+# ── summary ──────────────────────────────────────────────────────────────────
+echo "──────────────────────────────────────────────────────────────"
+printf 'Result: \033[32m%d pass\033[0m, \033[33m%d warn\033[0m, \033[31m%d fail\033[0m\n' "$PASS" "$WARN" "$FAIL"
+[ "$FAIL" -gt 0 ] && exit 1
+exit 0
