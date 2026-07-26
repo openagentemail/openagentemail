@@ -21,7 +21,7 @@ bun run typecheck
 | --- | --- | --- |
 | `PORT` | `3100` | HTTP listen port |
 | `DOMAIN` | — | identity domain (`localpart@DOMAIN`) |
-| `API_KEYS` | — | comma-separated Bearer keys |
+| `API_KEYS` | — | comma-separated **admin** Bearer keys (full access; agents should use per-identity tokens instead) |
 | `IMAP_HOST/PORT/USER/PASS` | `127.0.0.1:993` | catch-all mailbox login |
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |

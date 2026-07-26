@@ -1,18 +1,28 @@
 # REST API reference
 
-Base URL: `http://localhost:3100` (the compose stack maps the API to port 3100).
+Base URL: `http://localhost:3100` (the compose stack binds the API to
+localhost by default — see [security.md](security.md) for reaching it
+remotely).
 
 All endpoints except `GET /healthz` require a bearer token:
 
 ```
-Authorization: Bearer <one of the keys in the API_KEYS env var>
+Authorization: Bearer <admin key or identity token>
 ```
 
-Failures return `401 {"error":"unauthorized"}`. Examples below assume:
+Two token kinds (details in [security.md](security.md)):
+
+- **Admin key** (from the `API_KEYS` env) — full access, every endpoint below.
+- **Identity token** (`oa_…`, returned by `POST /v1/identities`) — scoped to
+  one address: only the `messages`/`wait`/`send` endpoints, and only for its
+  own address. Anything else returns `403`.
+
+Failures return `401 {"error":"unauthorized"}` for bad tokens. Examples below
+assume:
 
 ```bash
 export API=http://localhost:3100
-export KEY=your-api-key
+export KEY=your-admin-key
 ```
 
 ---
@@ -26,16 +36,19 @@ curl $API/healthz
 # → 200 {"ok":true}
 ```
 
-## `POST /v1/identities`
+## `POST /v1/identities` — admin only
 
 Create an identity. With no `localpart`, a random one like `fox-k7d2` is generated.
 The address is always on the `DOMAIN` the server was configured with.
+
+The response includes the identity's **scoped token, shown exactly once** —
+hand this one to your agent, not the admin key.
 
 ```bash
 curl -X POST $API/v1/identities \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"name":"signup-bot"}'
-# → 201 {"address":"fox-k7d2@example.com","name":"signup-bot"}
+# → 201 {"address":"fox-k7d2@example.com","name":"signup-bot","token":"oa_…"}
 ```
 
 | Field | Type | Notes |
@@ -43,16 +56,40 @@ curl -X POST $API/v1/identities \
 | `name` | string? | Free-form label for the identity |
 | `localpart` | string? | Force a specific address, e.g. `billing` → `billing@example.com` |
 
-## `GET /v1/identities`
+## `GET /v1/identities` — admin only
 
 ```bash
 curl $API/v1/identities -H "Authorization: Bearer $KEY"
 # → 200 {"identities":[{"address":"fox-k7d2@example.com","name":"signup-bot","createdAt":"2026-07-26T00:00:00.000Z"}]}
 ```
 
+Token hashes are never included in responses.
+
+## `POST /v1/identities/:address/token` — admin only
+
+Rotate an identity's token. The old token stops working immediately; the new
+plaintext is returned once.
+
+```bash
+curl -X POST $API/v1/identities/fox-k7d2@example.com/token \
+  -H "Authorization: Bearer $KEY"
+# → 200 {"address":"fox-k7d2@example.com","token":"oa_…"}
+```
+
+## `DELETE /v1/identities/:address` — admin only
+
+Delete an identity (and invalidate its token). Its mail stays in the catch-all
+mailbox until the retention sweeper removes it.
+
+```bash
+curl -X DELETE $API/v1/identities/fox-k7d2@example.com -H "Authorization: Bearer $KEY"
+# → 200 {"deleted":true}
+```
+
 ## `GET /v1/messages?address=x@y&limit=50`
 
 List an identity's inbox, newest first. `limit` defaults to 50.
+Identity tokens may only list their own address.
 
 ```bash
 curl "$API/v1/messages?address=fox-k7d2@example.com&limit=10" \
@@ -109,7 +146,8 @@ Set your HTTP client timeout comfortably above `timeoutSec`.
 ## `POST /v1/send`
 
 Send from an existing identity. `from` must be an identity you created —
-otherwise `403 {"error":"from is not a known identity"}`.
+otherwise `403 {"error":"from is not a known identity"}`. Identity tokens may
+only send as themselves.
 
 ```bash
 curl -X POST $API/v1/send \
@@ -127,6 +165,13 @@ curl -X POST $API/v1/send \
 | `text` | string | Plain-text body (required) |
 | `html` | string? | Optional HTML alternative |
 
+Each identity is limited to `SEND_RATE_LIMIT` messages per rolling hour
+(default 20). Over the limit:
+
+```
+429 {"error":"rate_limited","limit":20,"retryAfterSec":1234}
+```
+
 `queued:true` means the mailserver accepted it — not that the recipient's provider
 did. Deliverability is your infrastructure's job; see
 [deliverability.md](deliverability.md).
@@ -137,6 +182,7 @@ did. Deliverability is your infrastructure's job; see
 |---|---|
 | `200` / `201` | Success |
 | `401` | Missing/invalid bearer token |
-| `403` | Valid token, disallowed action (e.g. sending from a non-identity address) |
+| `403` | Valid token, disallowed action (identity token outside its scope, non-identity `from`, non-admin managing identities) |
 | `408` | `wait` timed out |
+| `429` | Send rate limit hit — back off `retryAfterSec` |
 | `5xx` | Mailserver unreachable or internal error — check `docker compose logs api` |

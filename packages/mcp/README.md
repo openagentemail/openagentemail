@@ -9,7 +9,7 @@ The server is configured entirely via environment variables:
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `OPENAGENTEMAIL_API_URL` | no | `http://localhost:3100` | Base URL of the openagent.email API |
-| `OPENAGENTEMAIL_API_KEY` | **yes** | — | Bearer key; must match one of the `API_KEYS` in your server's `.env` |
+| `OPENAGENTEMAIL_API_KEY` | **yes** | — | Bearer key. Best: the identity token (`oa_…`) returned by `POST /v1/identities`. An admin key from the server's `API_KEYS` also works, but grants full access — avoid handing those to agents. |
 
 If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear error.
 
@@ -24,7 +24,7 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
 | `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
 
-Errors come back as `isError` tool results with actionable messages (e.g. a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 on send tells you the `from` address must be an existing identity).
+Errors come back as `isError` tool results with actionable messages (a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 means the token's scope doesn't cover what you asked for — identity tokens only touch their own address, and identity management is admin-only; a 429 means the per-identity send rate limit kicked in).
 
 ## Client setup
 

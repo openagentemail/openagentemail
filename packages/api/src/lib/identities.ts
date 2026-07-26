@@ -3,19 +3,26 @@
  * all land in the single catch-all mailbox; the api matches messages to
  * identities by the To/Delivered-To header at read time.
  *
+ * Each identity carries a scoped API token (stored as a SHA-256 hash; the
+ * plaintext is shown exactly once at creation/rotation). An identity token
+ * may only read mail for, and send from, its own address — day-to-day agent
+ * usage should use identity tokens and keep the admin API_KEYS offline.
+ *
  * Persisted as a JSON file under DATA_DIR — simple and durable enough for
- * v0.1; swap for sqlite if identity volume ever matters.
+ * v0.x; swap for sqlite if identity volume ever matters.
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
 
 export interface Identity {
   address: string;
   name?: string;
   createdAt: string;
+  /** SHA-256 hex of the identity's API token. Absent on pre-token stores. */
+  tokenHash?: string;
 }
 
 const WORDS = [
@@ -58,7 +65,7 @@ export function randomLocalpart(): string {
 }
 
 export function listIdentities(): Identity[] {
-  return load();
+  return load().map(({ tokenHash: _tokenHash, ...rest }) => rest);
 }
 
 export function findIdentity(address: string): Identity | undefined {
@@ -66,8 +73,34 @@ export function findIdentity(address: string): Identity | undefined {
   return load().find((i) => i.address === needle);
 }
 
-/** Returns the created identity, or null if the address is already taken. */
-export function createIdentity(input: { name?: string; localpart?: string }): Identity | null {
+/** Generate a new scoped token. Plaintext is returned once; only its hash persists. */
+function generateToken(): { token: string; tokenHash: string } {
+  const token = `oa_${randomBytes(24).toString('base64url')}`;
+  return { token, tokenHash: hashToken(token) };
+}
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+/** Constant-time-ish hash comparison. */
+function hashEquals(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/** Resolve an identity by its plaintext API token; undefined if no match. */
+export function findIdentityByToken(token: string): Identity | undefined {
+  const hash = hashToken(token);
+  return load().find((i) => i.tokenHash && hashEquals(i.tokenHash, hash));
+}
+
+/** Returns the created identity plus its one-time plaintext token, or null if taken. */
+export function createIdentity(input: {
+  name?: string;
+  localpart?: string;
+}): { identity: Identity; token: string } | null {
   const identities = load();
   let localpart = input.localpart?.toLowerCase();
   if (localpart) {
@@ -89,12 +122,42 @@ export function createIdentity(input: { name?: string; localpart?: string }): Id
   const address = `${localpart}@${config.domain}`;
   if (identities.some((i) => i.address === address)) return null;
 
+  const { token, tokenHash } = generateToken();
   const identity: Identity = {
     address,
     ...(input.name ? { name: input.name } : {}),
     createdAt: new Date().toISOString(),
+    tokenHash,
   };
   identities.push(identity);
   save(identities);
-  return identity;
+  return { identity, token };
+}
+
+/**
+ * Replace an identity's token (the old one stops working immediately).
+ * Returns the new plaintext token, or null if the address doesn't exist.
+ */
+export function rotateIdentityToken(address: string): string | null {
+  const identities = load();
+  const needle = address.toLowerCase();
+  const identity = identities.find((i) => i.address === needle);
+  if (!identity) return null;
+  const { token, tokenHash } = generateToken();
+  identity.tokenHash = tokenHash;
+  save(identities);
+  return token;
+}
+
+/**
+ * Remove an identity (its mail stays in the catch-all until retention
+ * sweeps it). Returns false if the address didn't exist.
+ */
+export function deleteIdentity(address: string): boolean {
+  const identities = load();
+  const needle = address.toLowerCase();
+  const kept = identities.filter((i) => i.address !== needle);
+  if (kept.length === identities.length) return false;
+  save(kept);
+  return true;
 }

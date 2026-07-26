@@ -37,11 +37,13 @@ export function htmlToText(html: string): string {
   s = s.replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ');
   // Keep anchor destinations visible so bare-URL extraction still works.
   s = s.replace(/<a\b[^>]*>/gi, ' ');
-  // Block-level boundaries become newlines.
+  // Block-level boundaries become newlines (open and close tags).
   s = s.replace(/<\/(p|div|li|tr|td|th|h[1-6]|section|article|table|ul|ol)>/gi, '\n');
+  s = s.replace(/<(p|div|li|tr|td|th|h[1-6]|section|article|table|ul|ol)\b[^>]*>/gi, '\n');
   s = s.replace(/<br\s*\/?>/gi, '\n');
-  // Everything else just goes.
-  s = s.replace(/<[^>]+>/g, ' ');
+  // Inline tags vanish WITHOUT a space — codes are often split across
+  // spans ("G- <span>77</span><span>4102</span>") and must rejoin.
+  s = s.replace(/<[^>]+>/g, '');
   s = decodeEntities(s);
   // Tidy whitespace per line, collapse blank runs.
   s = s

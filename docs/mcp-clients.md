@@ -7,7 +7,7 @@ running the MCP client, plus two environment variables:
 | Variable | Purpose | Default |
 |---|---|---|
 | `OPENAGENTEMAIL_API_URL` | Base URL of the API | `http://localhost:3100` |
-| `OPENAGENTEMAIL_API_KEY` | One of the keys from the server's `API_KEYS` env | — (required) |
+| `OPENAGENTEMAIL_API_KEY` | The identity token (`oa_…`) from `POST /v1/identities` — or an admin key for full access | — (required) |
 
 In the examples below, `/path/to/openagentemail` is wherever you cloned the repo.
 From a local checkout the server starts with
@@ -34,7 +34,7 @@ address → `mail_wait_for(address, subjectContains="verify")` → open `otp.lin
 ```bash
 claude mcp add openagentemail \
   --env OPENAGENTEMAIL_API_URL=http://localhost:3100 \
-  --env OPENAGENTEMAIL_API_KEY=your-api-key \
+  --env OPENAGENTEMAIL_API_KEY=oa_your-identity-token \
   -- bun run /path/to/openagentemail/packages/mcp/src/main.ts
 ```
 
@@ -56,7 +56,7 @@ Edit `claude_desktop_config.json`:
       "args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
-        "OPENAGENTEMAIL_API_KEY": "your-api-key"
+        "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
       }
     }
   }
@@ -79,7 +79,7 @@ Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in the project:
       "args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
-        "OPENAGENTEMAIL_API_KEY": "your-api-key"
+        "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
       }
     }
   }
@@ -101,7 +101,7 @@ Edit `~/.kimi-code/mcp.json` (user level) or `.kimi-code/mcp.json` in the projec
       "args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
-        "OPENAGENTEMAIL_API_KEY": "your-api-key"
+        "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
       }
     }
   }
@@ -123,7 +123,7 @@ Any client that speaks stdio MCP can run the server the same way:
       "args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
-        "OPENAGENTEMAIL_API_KEY": "your-api-key"
+        "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
       }
     }
   }
@@ -138,7 +138,7 @@ point anywhere the API is reachable — e.g. your VPS:
 ```json
 "env": {
   "OPENAGENTEMAIL_API_URL": "https://api.example.com",
-  "OPENAGENTEMAIL_API_KEY": "your-api-key"
+  "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
 }
 ```
 
@@ -146,8 +146,12 @@ The API key is sent as a bearer token, so use HTTPS when the API is off localhos
 
 ## Troubleshooting
 
-- **Server starts but every tool errors with 401** — `OPENAGENTEMAIL_API_KEY` doesn't
-  match any key in the API's `API_KEYS` env.
+- **Server starts but every tool errors with 401** — `OPENAGENTEMAIL_API_KEY` matches
+  neither an admin key (`API_KEYS` env) nor an identity token. If you lost the
+  token, rotate a new one: `POST /v1/identities/:address/token` (admin).
+- **Tools error with 403** — the identity token is scoped to one address; you're
+  asking for another one, or calling an admin-only tool (create/list identities
+  needs the admin key).
 - **Server exits immediately at startup** — `OPENAGENTEMAIL_API_KEY` is missing
   (the server refuses to run without it).
 - **Server fails to start** — check Bun is installed and the absolute path to

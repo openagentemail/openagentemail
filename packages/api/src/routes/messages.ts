@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getMessage, listMessages, waitForMessage } from '../lib/imap.ts';
+import { forbidUnlessAddress } from '../lib/auth.ts';
 
 const listQuerySchema = z.object({
   address: z.string().email(),
@@ -24,6 +25,8 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
+    const denied = forbidUnlessAddress(c, parsed.data.address);
+    if (denied) return denied;
     const messages = await listMessages(parsed.data.address, parsed.data.limit);
     return c.json({ messages });
   })
@@ -32,6 +35,8 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
+    const denied = forbidUnlessAddress(c, parsed.data.address);
+    if (denied) return denied;
     const message = await getMessage(parsed.data.address, c.req.param('id'));
     if (!message) {
       return c.json({ error: 'not_found' }, 404);
@@ -50,6 +55,8 @@ export const messagesRoute = new Hono()
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
     const { address, fromContains, subjectContains, timeoutSec } = parsed.data;
+    const denied = forbidUnlessAddress(c, address);
+    if (denied) return denied;
     const message = await waitForMessage(address, { fromContains, subjectContains }, timeoutSec);
     if (!message) {
       return c.json({ error: 'timeout' }, 408);

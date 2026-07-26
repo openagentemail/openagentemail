@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { sendMail } from '../lib/smtp.ts';
+import { forbidUnlessAddress } from '../lib/auth.ts';
+import { checkSendLimit } from '../lib/ratelimit.ts';
 
 const sendSchema = z.object({
   from: z.string().email(),
@@ -25,10 +27,23 @@ export const sendRoute = new Hono().post('/', async (c) => {
   }
   const { from, to, subject, text, html } = parsed.data;
 
+  // Identity tokens may only send as themselves.
+  const denied = forbidUnlessAddress(c, from);
+  if (denied) return denied;
+
   // `from` must be an existing identity on an allowed domain.
   const fromDomain = from.split('@')[1]?.toLowerCase() ?? '';
   if (!config.allowedSendDomains.includes(fromDomain) || !findIdentity(from)) {
     return c.json({ error: 'forbidden: from is not a known identity' }, 403);
+  }
+
+  // Per-identity rate limit (rolling hour; 0 disables in config).
+  const limit = checkSendLimit(from, config.sendRateLimit);
+  if (!limit.allowed) {
+    return c.json(
+      { error: 'rate_limited', limit: config.sendRateLimit, retryAfterSec: limit.retryAfterSec },
+      429,
+    );
   }
 
   try {

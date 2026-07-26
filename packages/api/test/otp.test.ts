@@ -123,3 +123,84 @@ describe('extractOtp (combined)', () => {
     expect(otp).toEqual({ codes: [], links: [] });
   });
 });
+
+/**
+ * Fixtures modelled on the real mails agents actually receive when signing
+ * up for services. Formats sampled from live mail (codes anonymized).
+ */
+describe('provider fixtures — codes', () => {
+  test('Google: "G-123456 is your Google verification code"', () => {
+    expect(extractCodes('G-482916 is your Google verification code.')).toEqual(['482916']);
+  });
+
+  test('GitHub launch code (8 digits)', () => {
+    const text = 'Here’s your GitHub launch code, @agent!\n\n59162834\n\nOpen GitHub';
+    expect(extractCodes(text)).toEqual(['59162834']);
+  });
+
+  test('Amazon OTP', () => {
+    const text = 'Your One Time Password (OTP) is: 774201\nDo not share this OTP with anyone.';
+    expect(extractCodes(text)).toEqual(['774201']);
+  });
+
+  test('Microsoft account security code', () => {
+    const text = 'Microsoft account\n\nYour security code is: 5519283\n\nIf you didn’t request this, ignore.';
+    expect(extractCodes(text)).toEqual(['5519283']);
+  });
+
+  test('OpenAI / ChatGPT code', () => {
+    expect(extractCodes('Your ChatGPT code is 662130')).toEqual(['662130']);
+  });
+
+  test('Discord security code', () => {
+    expect(extractCodes('Your Discord security code is: 318844')).toEqual(['318844']);
+  });
+
+  test('阿里云', () => {
+    const text = '【阿里云】您正在注册阿里云账号，验证码：509227，请在15分钟内完成验证。';
+    expect(extractCodes(text)).toEqual(['509227']);
+  });
+
+  test('腾讯云（验证码与数字之间无空格）', () => {
+    const text = '【腾讯云】您的验证码为746103，该验证码5分钟内有效，请勿泄露于他人。';
+    expect(extractCodes(text)).toEqual(['746103']);
+  });
+
+  test('网易邮箱大师', () => {
+    const text = '【网易】验证码：2281，您正在登录邮箱，请勿将验证码告诉他人。';
+    expect(extractCodes(text)).toEqual(['2281']);
+  });
+
+  test('code first, keyword after (digit-led format)', () => {
+    expect(extractCodes('830214 is your verification code. It expires in 10 minutes.')).toEqual(['830214']);
+  });
+
+  test('HTML part with the code split across tags', () => {
+    const html = `<body><p>Your Google verification code</p>
+      <h2>G- <span>77</span><span>4102</span></h2></body>`;
+    const otp = extractOtp('', html);
+    expect(otp.codes).toEqual(['774102']);
+  });
+});
+
+describe('provider fixtures — links', () => {
+  test('GitHub verify-email button', () => {
+    const html = `<body><p>Welcome to GitHub!</p>
+      <a href="https://github.com/users/agent/emails/confirm_verification/abc123?via_launch_code_email=true">Verify email address</a></body>`;
+    const links = extractLinks(htmlToText(html), html);
+    expect(links).toEqual([
+      'https://github.com/users/agent/emails/confirm_verification/abc123?via_launch_code_email=true',
+    ]);
+  });
+
+  test('Slack magic sign-in link', () => {
+    const text = 'Sign in to Slack: https://slack.com/signin/magic/xyz-123 — expires in 30 minutes.';
+    expect(extractLinks(text)).toEqual(['https://slack.com/signin/magic/xyz-123']);
+  });
+
+  test('magic link with neutral URL but action anchor text', () => {
+    const html = '<p><a href="https://app.example.com/e/clkn?d=xyz">Confirm your account</a></p>';
+    const links = extractLinks(htmlToText(html), html);
+    expect(links).toEqual(['https://app.example.com/e/clkn?d=xyz']);
+  });
+});

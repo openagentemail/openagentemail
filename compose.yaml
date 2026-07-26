@@ -126,10 +126,19 @@ services:
       TLS_REJECT_UNAUTHORIZED: "0"
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
+      # Per-identity send limit (messages/hour, 0 = off):
+      SEND_RATE_LIMIT: ${SEND_RATE_LIMIT:-20}
+      # Auto-delete mail older than this many days (0 = keep forever):
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      RETENTION_CHECK_HOURS: ${RETENTION_CHECK_HOURS:-6}
     volumes:
       - api-data:/app/data
     ports:
-      - "3100:3100"
+      # SAFETY DEFAULT: localhost only. Reach it from your agent host over an
+      # SSH tunnel (ssh -L 3100:127.0.0.1:3100 user@server) or put a TLS
+      # reverse proxy in front (see docs/security.md). Set API_BIND=0.0.0.0
+      # in .env only if you know exactly why you need it.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-3100}:3100"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "bun -e 'fetch(\"http://localhost:3100/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"]

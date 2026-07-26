@@ -4,7 +4,7 @@
  *
  * Env:
  *   OPENAGENTEMAIL_API_URL  base URL of the API (default http://localhost:3100)
- *   OPENAGENTEMAIL_API_KEY  bearer key (required; must match server API_KEYS)
+ *   OPENAGENTEMAIL_API_KEY  bearer key (required: identity token oa_… or an admin key)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,7 +17,8 @@ const apiKey = process.env.OPENAGENTEMAIL_API_KEY;
 if (!apiKey) {
   console.error(
     "openagentemail-mcp: OPENAGENTEMAIL_API_KEY is not set.\n" +
-      "Set it to one of the API_KEYS configured on your openagent.email server, e.g.:\n" +
+      "Set it to an identity token (oa_…, from POST /v1/identities) or an admin\n" +
+    "key from the server's API_KEYS, e.g.:\n" +
       '  OPENAGENTEMAIL_API_KEY=... bunx openagentemail-mcp',
   );
   process.exit(1);

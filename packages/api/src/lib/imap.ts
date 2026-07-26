@@ -213,6 +213,22 @@ export async function listMessages(address: string, limit = 50): Promise<Message
   return withInbox((client) => listMessagesWith(client, address, limit));
 }
 
+/**
+ * Permanently delete every message with an internal date before `cutoff`
+ * from the catch-all mailbox. Used by the retention sweeper; identity
+ * scoping is irrelevant here — retention applies to the whole mailbox.
+ * Returns the number of messages deleted.
+ */
+export async function deleteMessagesBefore(cutoff: Date): Promise<number> {
+  return withInbox(async (client) => {
+    const uids = await client.search({ before: cutoff }, { uid: true });
+    if (!uids || uids.length === 0) return 0;
+    // messageDelete flags \Deleted AND expunges in one go (imapflow default).
+    await client.messageDelete(uids, { uid: true });
+    return uids.length;
+  });
+}
+
 /** Fetch one message by UID; null if missing or not addressed to `address`. */
 async function getMessageWith(
   client: ImapFlow,

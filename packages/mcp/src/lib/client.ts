@@ -91,7 +91,7 @@ export class OpenAgentEmailClient {
       if (res.status === 401) {
         throw new ApiError(
           401,
-          `Unauthorized (401). Check OPENAGENTEMAIL_API_KEY — it must match one of the API_KEYS configured on the server.`,
+          `Unauthorized (401). Check OPENAGENTEMAIL_API_KEY — it must be an identity token (oa_…) or one of the admin API_KEYS configured on the server.`,
         );
       }
       if (res.status === 403) {
