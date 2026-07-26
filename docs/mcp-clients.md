@@ -1,8 +1,9 @@
 # MCP client setup
 
 The MCP server wraps the REST API one-to-one, so your agent gets email as native
-tool calls. It runs over **stdio** and needs [Bun](https://bun.sh) on the machine
-running the MCP client, plus two environment variables:
+tool calls. It runs over **stdio** and needs Node.js 18+ on the machine running
+the MCP client (a local checkout runs with [Bun](https://bun.sh) instead), plus
+two environment variables:
 
 | Variable | Purpose | Default |
 |---|---|---|
@@ -11,8 +12,8 @@ running the MCP client, plus two environment variables:
 
 In the examples below, `/path/to/openagentemail` is wherever you cloned the repo.
 From a local checkout the server starts with
-`bun run /path/to/openagentemail/packages/mcp/src/main.ts`; once published to npm,
-`bunx openagentemail-mcp` works without a checkout. See
+`bun run /path/to/openagentemail/packages/mcp/src/main.ts`; without a checkout,
+`npx -y @openagentemail/mcp` runs the published npm package. See
 [packages/mcp/README.md](../packages/mcp/README.md) for server internals.
 
 ## Tools your agent gets

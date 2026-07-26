@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * openagentemail-mcp — MCP server (stdio) wrapping the openagent.email REST API.
  *
@@ -19,7 +19,7 @@ if (!apiKey) {
     "openagentemail-mcp: OPENAGENTEMAIL_API_KEY is not set.\n" +
       "Set it to an identity token (oa_…, from POST /v1/identities) or an admin\n" +
     "key from the server's API_KEYS, e.g.:\n" +
-      '  OPENAGENTEMAIL_API_KEY=... bunx openagentemail-mcp',
+      '  OPENAGENTEMAIL_API_KEY=... npx -y @openagentemail/mcp',
   );
   process.exit(1);
 }

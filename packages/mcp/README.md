@@ -1,6 +1,6 @@
-# openagentemail-mcp
+# @openagentemail/mcp
 
-MCP server (stdio transport) for [openagent.email](https://github.com/) — gives your AI agent unlimited mailboxes on your own domain: create identities, read/wait for mail, extract OTP codes & verification links, and send email. It wraps the openagent.email REST API over MCP so any MCP-capable client can use it.
+MCP server (stdio transport) for [openagent.email](https://openagent.email) — gives your AI agent unlimited mailboxes on your own domain: create identities, read/wait for mail, extract OTP codes & verification links, and send email. It wraps the openagent.email REST API over MCP so any MCP-capable client can use it.
 
 ## Configuration
 
@@ -28,7 +28,7 @@ Errors come back as `isError` tool results with actionable messages (a 401 tells
 
 ## Client setup
 
-Requires [Bun](https://bun.sh) on the machine running the MCP client.
+Requires Node.js 18 or newer on the machine running the MCP client — no install step, `npx` downloads and runs the package on first use.
 
 ### Claude Code
 
@@ -36,10 +36,10 @@ Requires [Bun](https://bun.sh) on the machine running the MCP client.
 claude mcp add openagentemail \
   --env OPENAGENTEMAIL_API_URL=http://localhost:3100 \
   --env OPENAGENTEMAIL_API_KEY=<your-api-key> \
-  -- bunx openagentemail-mcp
+  -- npx -y @openagentemail/mcp
 ```
 
-Or run from a local checkout: replace `bunx openagentemail-mcp` with `bun run /path/to/openagentemail/packages/mcp/src/main.ts`.
+Or run from a local checkout: replace `npx -y @openagentemail/mcp` with `bun run /path/to/openagentemail/packages/mcp/src/main.ts`.
 
 ### Claude Desktop / Cursor
 
@@ -49,8 +49,8 @@ Add to `claude_desktop_config.json` (Claude Desktop) or `~/.cursor/mcp.json` (Cu
 {
   "mcpServers": {
     "openagentemail": {
-      "command": "bunx",
-      "args": ["openagentemail-mcp"],
+      "command": "npx",
+      "args": ["-y", "@openagentemail/mcp"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
         "OPENAGENTEMAIL_API_KEY": "<your-api-key>"
@@ -70,8 +70,8 @@ Add to `~/.kimi-code/mcp.json` under `mcpServers`:
 {
   "mcpServers": {
     "openagentemail": {
-      "command": "bunx",
-      "args": ["openagentemail-mcp"],
+      "command": "npx",
+      "args": ["-y", "@openagentemail/mcp"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
         "OPENAGENTEMAIL_API_KEY": "<your-api-key>"

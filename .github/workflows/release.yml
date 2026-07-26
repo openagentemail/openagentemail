@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC for npm trusted publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Trusted publishing requires npm CLI >= 11.5.1 (node 22 ships npm 10)
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Test
+        working-directory: packages/api
+        run: |
+          bun install
+          bun test
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: packages/mcp
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION=${GITHUB_REF_NAME#v}
+          echo "package.json: $PKG_VERSION, tag: $TAG_VERSION"
+          test "$PKG_VERSION" = "$TAG_VERSION"
+
+      - name: Build @openagentemail/mcp
+        working-directory: packages/mcp
+        run: |
+          bun install
+          bun run build
+
+      - name: Publish to npm
+        working-directory: packages/mcp
+        run: npm publish --provenance --access public --ignore-scripts
