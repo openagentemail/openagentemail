@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Test packages/api
+        working-directory: packages/api
+        run: |
+          bun install
+          bun test
+
+      - name: Typecheck + build packages/mcp
+        working-directory: packages/mcp
+        run: |
+          bun install
+          bunx tsc --noEmit
+          bun run build
