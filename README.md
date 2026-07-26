@@ -2,6 +2,8 @@
 
 **Self-hosted email for AI agents. The open-source alternative to AgentMail.**
 
+**[openagent.email](https://openagent.email)** · website: [openagentemail/website](https://github.com/openagentemail/website)
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/openagentemail/openagentemail.svg?style=social)](https://github.com/openagentemail/openagentemail)
 
