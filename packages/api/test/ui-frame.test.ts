@@ -50,6 +50,11 @@ function getFrame(app: InstanceType<typeof Hono>, cookie?: string, address = 'fo
   });
 }
 
+function expectFrameSecurityHeaders(response: Response): void {
+  expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+  expect(response.headers.get('content-security-policy')).toBe(FRAME_CSP);
+}
+
 describe('/ui/frame isolation response', () => {
   test('returns only sanitized HTML under the exact browser containment headers', async () => {
     const { app, cookie } = frameApp({ kind: 'admin' });
@@ -71,14 +76,31 @@ describe('/ui/frame isolation response', () => {
     const unauthenticated = frameApp({ kind: 'admin' });
     const missing = await getFrame(unauthenticated.app);
     expect(missing.status).toBe(401);
-    expect(missing.headers.get('content-type')).toContain('text/html');
+    expectFrameSecurityHeaders(missing);
     expect(await missing.text()).toContain('OpenAgent Inbox');
 
     const scoped = frameApp({ kind: 'identity', address: 'fox@test.example' });
     const denied = await getFrame(scoped.app, scoped.cookie, 'owl@test.example');
     expect(denied.status).toBe(403);
-    expect(denied.headers.get('content-security-policy')).toBe(FRAME_CSP);
+    expectFrameSecurityHeaders(denied);
     expect(await denied.text()).not.toContain('owl@test.example');
+  });
+
+  test('invalid queries and messages without HTML keep frame containment', async () => {
+    const { app, cookie } = frameApp(
+      { kind: 'admin' },
+      { getMessage: mock(async () => ({ ...detail, html: undefined })) },
+    );
+    const invalid = await app.request('/ui/frame/7', {
+      headers: { cookie },
+    });
+    expect(invalid.status).toBe(400);
+    expectFrameSecurityHeaders(invalid);
+
+    const noHtml = await getFrame(app, cookie);
+    expect(noHtml.status).toBe(404);
+    expectFrameSecurityHeaders(noHtml);
+    expect(await noHtml.text()).toContain('OpenAgent Inbox');
   });
 
   test('missing, oversized, malformed and parser-failed messages never expose raw HTML', async () => {
@@ -121,8 +143,7 @@ describe('/ui/frame isolation response', () => {
       const response = await getFrame(app, cookie);
       const body = await response.text();
       expect(response.status).toBe(testCase.status);
-      expect(response.headers.get('content-security-policy')).toBe(FRAME_CSP);
-      expect(response.headers.get('content-type')).toContain('text/html');
+      expectFrameSecurityHeaders(response);
       expect(body).not.toContain(testCase.forbidden);
       expect(body).toContain('OpenAgent Inbox');
     }
@@ -137,7 +158,7 @@ describe('/ui/frame isolation response', () => {
         { headers: { cookie } },
       );
       expect(response.status).toBe(400);
-      expect(response.headers.get('content-type')).toContain('text/html');
+      expectFrameSecurityHeaders(response);
     }
     expect(getMessage).not.toHaveBeenCalled();
   });

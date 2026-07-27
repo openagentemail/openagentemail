@@ -113,17 +113,27 @@ describe('UI session cookie', () => {
     expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
   });
 
-  test('idle, absolute, rotation and deletion all invalidate a session', () => {
+  test('idle refresh and absolute expiry use their exact time boundaries', () => {
+    const store = new UiSessionStore({ resolveToken: adminResolver });
+    const session = store.create('valid-admin', '127.0.0.1', 0);
+    expect(session.ok).toBe(true);
+    if (!session.ok) throw new Error('expected a session');
+
+    expect(store.authenticate(session.sid, 6 * 60 * 60 * 1000)).not.toBeNull();
+    expect(store.authenticate(session.sid, 18 * 60 * 60 * 1000 - 1)).not.toBeNull();
+    expect(store.authenticate(session.sid, 24 * 60 * 60 * 1000)).toBeNull();
+
+    const idle = store.create('valid-admin', '127.0.0.1', 0);
+    expect(idle.ok).toBe(true);
+    if (!idle.ok) throw new Error('expected a session');
+    expect(store.authenticate(idle.sid, 12 * 60 * 60 * 1000)).toBeNull();
+  });
+
+  test('token rotation and deletion invalidate a session', () => {
     let tokenValid = true;
     const store = new UiSessionStore({
       resolveToken: () => (tokenValid ? { kind: 'identity', address: 'fox@test.example' } : null),
     });
-
-    const idle = store.create('token-a', '127.0.0.1', 0);
-    expect(idle.ok).toBe(true);
-    if (!idle.ok) throw new Error('expected a session');
-    expect(store.authenticate(idle.sid, 12 * 60 * 60 * 1000)).not.toBeNull();
-    expect(store.authenticate(idle.sid, 24 * 60 * 60 * 1000 + 1)).toBeNull();
 
     const rotated = store.create('token-b', '127.0.0.1', 1);
     expect(rotated.ok).toBe(true);

@@ -43,8 +43,8 @@ function sha256(value: string): string {
 
 function isExpired(session: Session, now: number): boolean {
   return (
-    now - session.lastSeenAt > IDLE_TIMEOUT_MS ||
-    now - session.createdAt > ABSOLUTE_TIMEOUT_MS
+    now - session.lastSeenAt >= IDLE_TIMEOUT_MS ||
+    now - session.createdAt >= ABSOLUTE_TIMEOUT_MS
   );
 }
 

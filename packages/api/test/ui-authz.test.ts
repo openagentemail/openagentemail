@@ -133,6 +133,7 @@ describe('UI authorization boundaries', () => {
       headers: { cookie },
     });
     expect(cookieAgainstRest.status).toBe(401);
+    expect(await cookieAgainstRest.json()).toEqual({ error: 'unauthorized' });
   });
 
   test('frame authorization uses the same identity boundary', async () => {
