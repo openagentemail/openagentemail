@@ -23,13 +23,26 @@ type FakeMessage = {
 };
 
 let fakeMessages: FakeMessage[] = [];
+let failMailboxLock = false;
+const createdClients: FakeImapFlow[] = [];
 
 class FakeImapFlow {
   closed = false;
+  loggedOut = false;
+
+  constructor() {
+    createdClients.push(this);
+  }
+
+  /** 连接是否已经被收掉（正常登出或强制关闭都算）。 */
+  get released() {
+    return this.closed || this.loggedOut;
+  }
 
   async connect() {}
 
   async getMailboxLock() {
+    if (failMailboxLock) throw new Error('mailbox lock failed');
     return { release() {} };
   }
 
@@ -57,7 +70,10 @@ class FakeImapFlow {
     };
   }
 
-  async logout() {}
+  async logout() {
+    this.loggedOut = true;
+  }
+
   close() {
     this.closed = true;
   }
@@ -65,7 +81,7 @@ class FakeImapFlow {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
-const { listMessages } = await import('../src/lib/imap.ts');
+const { listMessages, waitForMessage } = await import('../src/lib/imap.ts');
 
 function inboxMessage(uid: number, to: string, deliveredTo: string): FakeMessage {
   return {
@@ -85,6 +101,8 @@ function inboxMessage(uid: number, to: string, deliveredTo: string): FakeMessage
 describe('IMAP identity isolation (end to end)', () => {
   beforeEach(() => {
     fakeMessages = [];
+    failMailboxLock = false;
+    createdClients.length = 0;
   });
 
   test('别的身份的邮件不会出现在 listMessages 结果里', async () => {
@@ -148,5 +166,28 @@ describe('POST /v1/messages/wait 并发上限（端到端）', () => {
     const statuses = responses.map((r) => r.status).sort();
     expect(statuses.filter((s) => s === 429)).toHaveLength(1);
     expect(statuses.filter((s) => s === 408)).toHaveLength(MAX_WAITS_PER_ADDRESS);
+  });
+});
+
+// 打开信箱这一步是可能失败的（INBOX 不存在、连接中途断）。失败时如果不收
+// 连接，反复失败就会把 catch-all 账号的连接名额漏光——和 wait 并发上限是
+// 同一类资源耗尽，而且能绕过槽位（槽位已归还，连接却还挂着）。
+describe('IMAP 连接清理', () => {
+  beforeEach(() => {
+    fakeMessages = [];
+    failMailboxLock = true;
+    createdClients.length = 0;
+  });
+
+  test('一次性操作：加锁失败时关掉已连接的 client', async () => {
+    await expect(listMessages('victim@test.example')).rejects.toThrow('mailbox lock failed');
+    expect(createdClients).toHaveLength(1);
+    expect(createdClients[0]!.released).toBe(true);
+  });
+
+  test('wait 路径：加锁失败也不留下悬挂连接', async () => {
+    expect(await waitForMessage('victim@test.example', {}, 1)).toBeNull();
+    expect(createdClients.length).toBeGreaterThan(0);
+    expect(createdClients.every((client) => client.released)).toBe(true);
   });
 });

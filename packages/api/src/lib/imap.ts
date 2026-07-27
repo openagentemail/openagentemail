@@ -70,14 +70,17 @@ function connectImap(): Promise<ImapFlow> {
 async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const client = await connectImap();
   let failed = false;
-  const lock = await client.getMailboxLock('INBOX');
+  // Locking is inside the try: getMailboxLock can throw (INBOX missing, socket
+  // dropped) and a connected client must never escape without being torn down.
+  let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
   try {
+    lock = await client.getMailboxLock('INBOX');
     return await fn(client);
   } catch (err) {
     failed = true;
     throw err;
   } finally {
-    lock.release();
+    lock?.release();
     if (failed) {
       try {
         client.close();
@@ -394,8 +397,10 @@ async function waitWithIdle(
   deadline: number,
 ): Promise<MessageDetail | null> {
   const client = await connectImap();
-  const lock = await client.getMailboxLock('INBOX');
+  let failed = false;
+  let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
   try {
+    lock = await client.getMailboxLock('INBOX');
     while (Date.now() < deadline) {
       const found = await findMatchWith(client, address, filters);
       if (found) return found;
@@ -408,15 +413,28 @@ async function waitWithIdle(
       }
     }
     return null;
+  } catch (err) {
+    failed = true;
+    throw err;
   } finally {
-    lock.release();
-    try {
-      await client.logout();
-    } catch {
+    lock?.release();
+    if (failed) {
+      // Same reasoning as withInbox: on the error path drop the socket
+      // instead of waiting on a LOGOUT that may queue behind a stuck command.
       try {
         client.close();
       } catch {
-        /* already closed */
+        /* already dead */
+      }
+    } else {
+      try {
+        await client.logout();
+      } catch {
+        try {
+          client.close();
+        } catch {
+          /* already closed */
+        }
       }
     }
   }
