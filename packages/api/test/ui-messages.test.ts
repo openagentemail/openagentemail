@@ -37,6 +37,15 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
         hasOtp: false,
       },
     ]),
+    // Overview 的门面依赖：本文件不测它，给一个 0 身份语义的常量结果即可。
+    getMailboxScan: mock(async () => ({
+      kind: 'ready' as const,
+      now: Date.now(),
+      snapshot: null,
+      cached: false,
+      revalidating: false,
+      refreshError: false,
+    })),
     getMessage: mock(async () => ({
       id: '2',
       from: 'new@example.net',

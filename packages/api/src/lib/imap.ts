@@ -45,13 +45,42 @@ export interface WaitFilters {
   subjectContains?: string;
 }
 
+/** 单条消息的最小统计记录：只保留统计所需的三个字段，绝不留正文/主题/发件人。 */
+export interface ScanRecord {
+  /** receivedAtMs(msg)，0 表示未知 */
+  t: number;
+  /** 是否已置 \Seen */
+  s: boolean;
+  /** 过滤后的收件人（小写整地址），可能被上界截断 */
+  r: string[];
+}
+
+/** 一次窗口扫描的结果。`scannedAt` 不在此处 —— 由缓存层用注入时钟盖章（唯一时钟 seam）。 */
+export interface MailboxScanResult {
+  records: ScanRecord[];
+  scanned: number;
+  mailboxTotal: number;
+  truncated: boolean;
+  /** 触到任一内存上界 */
+  partial: boolean;
+  /** 被截断规则牺牲过的**身份**地址；投机地址被丢弃时不记名，故 |incompleteFor| ≤ 身份数 */
+  incompleteFor: Set<string>;
+  /** 扫描时刻的身份集，用于判定"扫描后才建的身份是否可信" */
+  identityAddressesAtScan: string[];
+}
+
 /** How far back listMessages scans for address matches. */
-const SCAN_BACK = 500;
+export const SCAN_BACK = 500;
 /** Per-connection socket guard. */
 const SOCKET_TIMEOUT_MS = 30_000;
+/** 单封信保留的收件人上限。 */
+export const PER_MSG_MAX = 200;
+/** 一次快照里保留的地址 key 总上限。 */
+export const TOTAL_KEY_MAX = 5_000;
 
-function connectImap(): Promise<ImapFlow> {
-  const client = new ImapFlow({
+/** 只构造，不连接 —— 让取消监听能在 connect() 之前就拿到实例引用。 */
+function createImapClient(): ImapFlow {
+  return new ImapFlow({
     host: config.imap.host,
     port: config.imap.port,
     secure: config.imap.secure,
@@ -62,7 +91,12 @@ function connectImap(): Promise<ImapFlow> {
     logger: false,
     socketTimeout: SOCKET_TIMEOUT_MS,
   });
-  return client.connect().then(() => client);
+}
+
+export async function connectImap(): Promise<ImapFlow> {
+  const client = createImapClient();
+  await client.connect();
+  return client;
 }
 
 /**
@@ -104,18 +138,180 @@ async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * 与 `withInbox` 同构，但受 `AbortSignal` 管辖，且**连接阶段也在管辖内**。
+ *
+ * 连接被拆成"同步构造 + 异步 connect"，取消监听在 `connect()` 之前就挂好：
+ * 否则 DNS/TCP/TLS/LOGIN 卡住时无从取消，上层的扫描截止时间形同虚设，只能
+ * 干等 30 s socket 超时。`closeOnce` 让 abort 路径与 finally 收尾共用一次
+ * `close()`，因此"恰好关一次"是可断言的契约。
+ */
+export async function withInboxAbortable<T>(
+  signal: AbortSignal,
+  fn: (client: ImapFlow) => Promise<T>,
+  { createClient = createImapClient }: { createClient?: () => ImapFlow } = {},
+): Promise<T> {
+  // ① 连接前就已取消
+  if (signal.aborted) throw new Error('scan_aborted');
+  // ② 同步拿到实例引用
+  const client = createClient();
+  let closed = false;
+  const closeOnce = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      client.close();
+    } catch {
+      /* already dead / not connected */
+    }
+  };
+  const onAbort = () => closeOnce();
+  // ③ 先挂监听，再连接
+  signal.addEventListener('abort', onAbort, { once: true });
+  let failed = false;
+  let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
+  try {
+    // ④ 本阶段起，任何 stall 都会被 abort → close() 掐断
+    await client.connect();
+    if (signal.aborted) throw new Error('scan_aborted');
+    lock = await client.getMailboxLock('INBOX');
+    return await fn(client);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    lock?.release();
+    if (!failed && !closed) {
+      try {
+        await client.logout();
+      } catch {
+        /* fall through to closeOnce */
+      }
+    }
+    closeOnce();
+  }
+}
+
+/**
+ * 一次窗口扫描：SEARCH 全部 UID，取最新 `SCAN_BACK` 条的信封/标记/收件头，
+ * 折成 per-UID 的最小记录。当前身份优先保留，被牺牲的身份逐个记名。
+ */
+export async function scanMailboxWindow(opts: {
+  signal: AbortSignal;
+  identityAddresses: string[];
+  perMessageMax?: number;
+  totalKeyMax?: number;
+  createClient?: () => ImapFlow;
+}): Promise<MailboxScanResult> {
+  const perMessageMax = opts.perMessageMax ?? PER_MSG_MAX;
+  const totalKeyMax = opts.totalKeyMax ?? TOTAL_KEY_MAX;
+  const identitySet = new Set(opts.identityAddresses.map((a) => a.toLowerCase()));
+  const domainSuffix = `@${config.domain}`;
+
+  return withInboxAbortable(
+    opts.signal,
+    async (client) => {
+      const found = await client.search({ all: true }, { uid: true });
+      const uids = Array.isArray(found) ? found : [];
+      const mailboxTotal = uids.length;
+      const identityAddressesAtScan = [...identitySet];
+      if (mailboxTotal === 0) {
+        return {
+          records: [],
+          scanned: 0,
+          mailboxTotal: 0,
+          truncated: false,
+          partial: false,
+          incompleteFor: new Set<string>(),
+          identityAddressesAtScan,
+        };
+      }
+
+      const recent = uids.slice(-SCAN_BACK);
+      const records: ScanRecord[] = [];
+      // keys 只为全局上限计数
+      const keys = new Set<string>();
+      const incompleteFor = new Set<string>();
+      let partial = false;
+
+      // ⓪ 全局身份预留：身份集先于任何消息装进 keys，投机地址只能占剩余预算，
+      //    身份永不被先到的投机地址跨消息挤掉。
+      for (const address of identitySet) {
+        if (keys.size < totalKeyMax) keys.add(address);
+        else {
+          incompleteFor.add(address);
+          partial = true;
+        }
+      }
+
+      for await (const msg of client.fetch(
+        recent,
+        { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
+        { uid: true },
+      )) {
+        // ① 先过滤：只留"可能是身份"的地址
+        const idHits: string[] = [];
+        const domainOnly: string[] = [];
+        for (const address of messageRecipients(msg)) {
+          if (identitySet.has(address)) idHits.push(address);
+          else if (address.endsWith(domainSuffix)) domainOnly.push(address);
+        }
+
+        // ② 单封上限：身份先进，剩余预算才给投机地址
+        const kept: string[] = [];
+        for (const address of idHits) {
+          if (kept.length < perMessageMax) kept.push(address);
+          else {
+            incompleteFor.add(address);
+            partial = true;
+          }
+        }
+        for (const address of domainOnly) {
+          if (kept.length < perMessageMax) kept.push(address);
+          // 投机地址被丢弃只置 partial，不记名（保证 incompleteFor 有界）
+          else partial = true;
+        }
+
+        // ③ 全局 key 上限：身份已在 ⓪ 预留，撞顶的只能是投机地址
+        const final: string[] = [];
+        for (const address of kept) {
+          if (keys.has(address) || keys.size < totalKeyMax) {
+            keys.add(address);
+            final.push(address);
+          } else {
+            // 身份分支理论不可达，防御性记名
+            if (identitySet.has(address)) incompleteFor.add(address);
+            partial = true;
+          }
+        }
+
+        records.push({
+          t: receivedAtMs(msg),
+          s: msg.flags?.has('\\Seen') ?? false,
+          r: final,
+        });
+      }
+
+      return {
+        records,
+        scanned: records.length,
+        mailboxTotal,
+        truncated: mailboxTotal > records.length,
+        partial,
+        incompleteFor,
+        identityAddressesAtScan,
+      };
+    },
+    opts.createClient ? { createClient: opts.createClient } : {},
+  );
+}
+
 function formatAddresses(list?: MessageEnvelopeObject['from']): string {
   if (!list || list.length === 0) return '';
   return list
     .map((a) => (a.name ? `${a.name} <${a.address ?? ''}>` : (a.address ?? '')))
     .join(', ');
-}
-
-function envelopeHasAddress(
-  list: MessageEnvelopeObject['from'],
-  needle: string,
-): boolean {
-  return (list ?? []).some((a) => (a.address ?? '').toLowerCase() === needle);
 }
 
 /**
@@ -189,15 +385,29 @@ function headerRecipients(headers?: Buffer): Set<string> {
  * delivery with `Delivered-To: agent@d`).
  */
 export function messageMatchesAddress(msg: FetchMessageObject, address: string): boolean {
-  const needle = address.toLowerCase();
+  return messageRecipients(msg).has(address.toLowerCase());
+}
+
+/**
+ * 这条消息按可信收件人头都投给了谁。无 envelope 一律空集合（保留 fail-closed）。
+ *
+ * 这里**没有任何上限或域名过滤** —— 它是授权与统计共用的唯一原语，一旦在此
+ * 截断，`listMessages` / `getMessage` 的读权限边界就会跟着变窄。上界只存在于
+ * `scanMailboxWindow` 的快照构建里。
+ */
+export function messageRecipients(msg: FetchMessageObject): Set<string> {
+  const out = new Set<string>();
   const env = msg.envelope;
-  if (!env) return false;
-  return (
-    envelopeHasAddress(env.to, needle) ||
-    envelopeHasAddress(env.cc, needle) ||
-    envelopeHasAddress(env.bcc, needle) ||
-    headerRecipients(msg.headers).has(needle)
-  );
+  // 与旧实现的 `if (!env) return false` 等价：没有信封就不承认任何收件人。
+  if (!env) return out;
+  for (const list of [env.to, env.cc, env.bcc]) {
+    for (const a of list ?? []) {
+      const addr = (a.address ?? '').toLowerCase();
+      if (addr) out.add(addr);
+    }
+  }
+  for (const addr of headerRecipients(msg.headers)) out.add(addr);
+  return out;
 }
 
 /**

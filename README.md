@@ -62,6 +62,64 @@ result in a separately sandboxed frame with a restrictive CSP. The
 `sanitize-html` 2.x dependency is deliberately pinned to an exact version;
 upgrade it in a dedicated change and rerun the full poison-message corpus.
 
+### Admin overview
+
+An admin session lands on **Overview**: every identity in one table with the
+message count, unseen count, last delivery, and creation day, plus totals across
+the top. Identity sessions never see it — they go straight to their own inbox.
+The page is served from the same in-process API as the rest of `/ui`; there is no
+new public endpoint outside `/ui/api`.
+
+What the numbers mean, and where they stop:
+
+- **Counts are a window, not a lifetime total.** One scan reads the newest 500
+  messages in the catch-all mailbox and attributes each one to the identities it
+  was delivered to. The header says `newest N of M in the mailbox` so the window
+  is never mistaken for history. A message addressed to two identities counts
+  once for each row and once — not twice — in the totals.
+- **Honest instead of round.** Messages with enormous recipient lists can exceed
+  the scanner's per-message and global memory bounds. Rows the scanner could not
+  fully account for show `≥N` or `Unknown` rather than a confident wrong number,
+  the page explains why, and `unmatchedInWindow` is reported as `null` instead of
+  a made-up zero. The same applies to an identity created after the last scan:
+  it reads `Unknown` until the next one, never a false `0`.
+- **Snapshots are cached in memory for 15 seconds** and reused for up to
+  10 minutes while a refresh runs in the background, so opening Overview or
+  walking in and out of inboxes does not hammer IMAP. Refresh is floored at
+  5 seconds. Restarting the API drops the cache — the first request afterwards
+  pays for a fresh scan.
+- **Failures cool down and never lie.** If a scan fails, the next attempt waits
+  5 seconds (the API sends `Retry-After`), the table keeps showing the previous
+  numbers, and the header says the last refresh failed. Once a snapshot is older
+  than 10 minutes it is not revived by a failed refresh: the page reports the
+  counts as unavailable instead of showing stale data as current. While a cold
+  scan is still running the endpoint answers `202` and the address list renders
+  immediately with `Loading…` in the count columns.
+- **`GET /ui/api/overview`** (browser session only, admin only) returns exactly
+  the fields the page renders — never message content. `?refresh=1` asks for a
+  new scan, subject to the 5-second floor and the failure cooldown.
+
+Deliberate limits, so nothing here is a surprise later:
+
+- Overview shows counts and timestamps only. Subjects, senders, and verification
+  codes need per-message parsing, which is what the inbox view is for.
+- New mail can be up to 15 seconds late on the page; `Refresh` fetches sooner.
+  There is no steady-state polling: the page only schedules a follow-up while
+  counts are loading or a refresh is pending, capped at 15 attempts over 20
+  seconds and paced by the server's own retry hint.
+- A scan that misses its deadline is abandoned even if IMAP answers a moment
+  later, and the next request scans again. The deadline covers connecting as well
+  as fetching, so a hung server does not park a request behind IMAP's own
+  30-second socket timeout.
+- Up to 200 identities render in one pass. Beyond that, expect to want paging or
+  virtual scrolling; filtering and sorting happen in the browser today.
+- No font files are shipped and `font-src` stays `'none'`; `Inter` is used only if
+  it is already installed locally. The favicon is an SVG (`/ui/favicon.svg`) so it
+  needs no build step, and `/ui/favicon.ico` keeps returning 204 as before.
+- Form controls use a dedicated `--line-control` border token so their outlines
+  stay above 3:1 contrast. It is the one intentional deviation from the website's
+  palette and is a one-line revert.
+
 ## Features
 
 - **Unlimited identities** — one catch-all mailbox, unlimited `anything@yourdomain`

@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
-import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS } from '../ui/assets.ts';
+import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
 
 function commonHeaders(c: Context): void {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -35,6 +35,14 @@ export function registerUiAssets(app: Hono): void {
     c.header('Content-Type', 'text/css; charset=utf-8');
     return c.body(UI_CSS);
   });
+  app.get('/ui/favicon.svg', (c) => {
+    commonHeaders(c);
+    c.header('Content-Type', 'image/svg+xml; charset=utf-8');
+    // 被直接导航打开时也不可能跑脚本、不可能取任何子资源
+    c.header('Content-Security-Policy', "default-src 'none'");
+    return c.body(UI_LOGO_SVG);
+  });
+  // 旧外壳可能仍在缓存里，保留 204 以免它拿到 404。
   app.get('/ui/favicon.ico', (c) => {
     commonHeaders(c);
     return c.body(null, 204);

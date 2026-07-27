@@ -1,6 +1,18 @@
 export const OUTER_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
+// ⚠ 模块私有：这一行前面**不得**加 export —— 整个模块只允许导出一个 logo 常量
+// （`UI_LOGO_SVG`）。几何与 website/public/logo.svg 逐字一致。
+const logoGeometry = `  <rect width="32" height="32" rx="7" fill="#0c0d12"/>
+  <rect x="5" y="5" width="22" height="22" rx="6" fill="none" stroke="#fbbf24" stroke-width="2.2"/>
+  <path d="M11.1 10q.55 1.65 2.2 2.2-1.65.55-2.2 2.2-.55-1.65-2.2-2.2 1.65-.55 2.2-2.2z" fill="#fbbf24"/>
+  <path d="M20.9 10q.55 1.65 2.2 2.2-1.65.55-2.2 2.2-.55-1.65-2.2-2.2 1.65-.55 2.2-2.2z" fill="#fbbf24"/>
+  <path d="M5.8 15.8 16 23 26.2 15.8" fill="none" stroke="#fbbf24" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+/** 唯一导出的 logo 常量：favicon 路由与"与官网文件逐字比对"的测试都只认它。 */
+export const UI_LOGO_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\n${logoGeometry}\n</svg>\n`;
+
 export const UI_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -8,17 +20,20 @@ export const UI_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>OpenAgent Inbox</title>
-  <link rel="icon" href="/ui/favicon.ico">
+  <link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to inbox</a>
+  <a id="skip-link" class="skip-link" href="#main-content">Skip to inbox</a>
+
+  <svg class="svg-defs" aria-hidden="true" focusable="false" width="0" height="0">
+    <symbol id="oa-mark" viewBox="0 0 32 32">${logoGeometry}</symbol>
+  </svg>
 
   <main id="login-view" class="login-view">
     <section class="login-card" aria-labelledby="login-title">
-      <div class="brand-mark" aria-hidden="true">OA</div>
-      <p class="eyebrow">OpenAgent.email</p>
+      <div class="brand-row"><svg class="brand-logo" aria-hidden="true" focusable="false" width="40" height="40"><use href="#oa-mark"/></svg><span class="wordmark">OpenAgent.email</span></div>
       <h1 id="login-title">Your inbox, without the noise.</h1>
       <p class="muted">Paste an admin or identity API token. It is exchanged for a private, browser-only session cookie.</p>
       <form id="login-form">
@@ -32,11 +47,12 @@ export const UI_HTML = `<!doctype html>
     </section>
   </main>
 
-  <section id="inbox-view" class="inbox-view" data-mobile-view="list" hidden>
+  <section id="inbox-view" class="inbox-view" data-session="identity" data-scope="inbox" data-mobile-view="list" hidden>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">OpenAgent.email</p>
-        <h1>Inbox</h1>
+      <div class="topbar-brand">
+        <svg class="brand-logo" aria-hidden="true" focusable="false" width="24" height="24"><use href="#oa-mark"/></svg>
+        <span class="wordmark">OpenAgent.email</span>
+        <h1 id="view-title">Inbox</h1>
       </div>
       <div class="topbar-actions">
         <span id="session-label" class="session-label"></span>
@@ -57,31 +73,58 @@ export const UI_HTML = `<!doctype html>
         </nav>
       </aside>
 
-      <section class="message-panel" aria-labelledby="messages-title">
-        <div class="panel-heading message-heading">
-          <div>
-            <p id="active-address" class="active-address"></p>
-            <h2 id="messages-title">Messages</h2>
-          </div>
-          <button id="refresh-button" class="quiet" type="button">Refresh</button>
-        </div>
-        <div class="mobile-identity">
-          <label for="mobile-identity-select">Address</label>
-          <select id="mobile-identity-select"></select>
-        </div>
-        <div id="message-state" class="empty-state"></div>
-        <ol id="message-list" class="message-list"></ol>
-      </section>
+      <div class="mobile-identity">
+        <label for="mobile-identity-select">Address</label>
+        <select id="mobile-identity-select"></select>
+      </div>
 
-      <main id="main-content" class="detail-panel" tabindex="-1">
-        <button id="mobile-back" class="quiet mobile-back" type="button">Back to messages</button>
-        <div id="detail-content" class="detail-content">
-          <div class="detail-placeholder">
-            <p class="eyebrow">Message preview</p>
-            <h2>Select a message</h2>
-            <p class="muted">Choose a message to read its plain text, codes, links, or isolated HTML preview.</p>
+      <main id="overview-panel" class="overview-panel" tabindex="-1" aria-labelledby="overview-title" hidden>
+        <div class="panel-heading overview-heading">
+          <div>
+            <h2 id="overview-title">Overview</h2>
+            <p id="overview-subtitle" class="overview-subtitle">All addresses · counts from the newest 500 messages</p>
+            <p id="overview-overlap" class="overview-subtitle">Counts overlap when one email is addressed to several addresses.</p>
+            <p id="overview-updated" class="overview-updated"></p>
           </div>
+          <button id="overview-refresh" class="quiet" type="button">Refresh</button>
         </div>
+        <p id="overview-notice" class="notice warning" hidden></p>
+        <div id="overview-stats" class="overview-stats"></div>
+        <p id="overview-disclosure" class="overview-disclosure" hidden></p>
+        <div class="overview-controls">
+          <label class="search-label" for="overview-search">Filter addresses</label>
+          <input id="overview-search" class="search-input" type="search" placeholder="Filter addresses" autocomplete="off">
+          <span id="overview-shown" class="count"></span>
+        </div>
+        <div id="overview-sort" class="overview-sort" role="group" aria-label="Sort addresses"></div>
+        <p id="overview-state" class="empty-state"></p>
+        <div id="overview-rows" class="overview-rows"></div>
+      </main>
+
+      <main id="main-content" class="inbox-main" tabindex="-1">
+        <section id="message-panel" class="message-panel" aria-labelledby="messages-title">
+          <div class="panel-heading message-heading">
+            <div>
+              <button id="back-to-overview" class="quiet back-link" type="button">← Overview</button>
+              <p id="active-address" class="active-address"></p>
+              <h2 id="messages-title" tabindex="-1">Messages</h2>
+            </div>
+            <button id="refresh-button" class="quiet" type="button">Refresh</button>
+          </div>
+          <div id="message-state" class="empty-state"></div>
+          <ol id="message-list" class="message-list"></ol>
+        </section>
+
+        <section id="detail-panel" class="detail-panel" tabindex="-1">
+          <button id="mobile-back" class="quiet mobile-back" type="button">Back to messages</button>
+          <div id="detail-content" class="detail-content">
+            <div class="detail-placeholder">
+              <p class="eyebrow">Message preview</p>
+              <h2>Select a message</h2>
+              <p class="muted">Choose a message to read its plain text, codes, links, or isolated HTML preview.</p>
+            </div>
+          </div>
+        </section>
       </main>
     </div>
   </section>
@@ -93,14 +136,21 @@ export const UI_HTML = `<!doctype html>
 export const UI_CSS = `:root {
   color-scheme: dark;
   --bg: #0c0d12;
-  --panel: #12141b;
-  --panel-2: #171a23;
-  --line: #2a2e3a;
-  --text: #f5f5f4;
-  --muted: #a4a7b2;
-  --amber: #fbbf24;
-  --amber-soft: #3b2d0b;
-  --danger: #fca5a5;
+  --bg-raise: #12141c;
+  --bg-card: #14161f;
+  --ink: #f3f4f6;
+  --ink-dim: #9ca3af;
+  --ink-faint: #6b7280;
+  --gold: #fbbf24;
+  --gold-soft: #fde68a;
+  --gold-dim: rgba(251, 191, 36, 0.14);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --line-control: rgba(255, 255, 255, 0.34);
+  --green: #34d399;
+  --red: #f87171;
+  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --radius: 14px;
 }
 
@@ -109,22 +159,26 @@ html, body { min-height: 100%; }
 body {
   margin: 0;
   background: var(--bg);
-  color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
 }
 button, input, select { font: inherit; }
 button, select { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
-  outline: 3px solid var(--amber);
+  outline: 3px solid var(--gold);
   outline-offset: 2px;
 }
 [hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+.svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .skip-link {
   position: fixed;
   left: 12px;
   top: -60px;
   z-index: 20;
-  background: var(--amber);
+  background: var(--gold);
   color: #18120a;
   padding: 9px 14px;
   border-radius: 8px;
@@ -132,20 +186,25 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .skip-link:focus { top: 12px; }
 .eyebrow {
   margin: 0 0 5px;
-  color: var(--amber);
+  color: var(--gold);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: .13em;
   text-transform: uppercase;
 }
-.muted { color: var(--muted); }
+.muted { color: var(--ink-dim); }
+.brand-row { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+.brand-row .wordmark { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.brand-logo { display: block; flex: none; }
 .login-view {
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 24px;
   background:
-    radial-gradient(circle at 20% 15%, rgba(251, 191, 36, .09), transparent 30%),
+    radial-gradient(42rem 24rem at 70% 8%, rgba(251, 191, 36, 0.10), transparent 70%),
+    radial-gradient(30rem 20rem at 15% 30%, rgba(251, 191, 36, 0.05), transparent 70%),
+    radial-gradient(26rem 18rem at 50% 42%, var(--gold-dim), transparent 70%),
     var(--bg);
 }
 .login-card {
@@ -153,60 +212,54 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   padding: 38px;
   border: 1px solid var(--line);
   border-radius: 22px;
-  background: rgba(18, 20, 27, .96);
-  box-shadow: 0 26px 80px rgba(0, 0, 0, .32);
+  background: var(--bg-card);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
 }
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  margin-bottom: 24px;
-  border-radius: 12px;
-  background: var(--amber);
-  color: #17120a;
-  font-weight: 900;
-}
-.login-card h1 { margin: 0; font-size: clamp(28px, 6vw, 40px); line-height: 1.08; }
+.login-card h1 { margin: 0; font-size: clamp(28px, 6vw, 40px); line-height: 1.08; letter-spacing: -0.02em; }
 .login-card form { display: grid; gap: 9px; margin-top: 28px; }
 label { color: #d6d7dc; font-size: 13px; font-weight: 700; }
 input, select {
   width: 100%;
   min-height: 44px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
+  border: 1px solid var(--line-control);
+  border-radius: 10px;
   background: #0d0f15;
-  color: var(--text);
+  color: var(--ink);
   padding: 10px 12px;
 }
 button {
   min-height: 40px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--panel-2);
-  color: var(--text);
+  border: 1px solid var(--line-control);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--ink);
   padding: 8px 13px;
 }
-button:hover { border-color: #555b6b; }
+button:hover { border-color: var(--gold-soft); }
 button:disabled { cursor: not-allowed; opacity: .55; }
 .primary {
   margin-top: 7px;
-  border-color: var(--amber);
-  background: var(--amber);
-  color: #18120a;
-  font-weight: 800;
+  min-height: 44px;
+  border-color: var(--gold);
+  background: var(--gold);
+  color: #111;
+  font-weight: 700;
+  border-radius: 10px;
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
 }
+.primary:hover { background: var(--gold-soft); border-color: var(--gold-soft); transform: translateY(-1px); }
+.primary:disabled:hover { transform: none; background: var(--gold); border-color: var(--gold); }
 .quiet { background: transparent; }
 .notice { min-height: 1.5em; margin: 13px 0 0; }
-.notice.error { color: var(--danger); }
+.notice.error { color: var(--red); }
 .notice.warning {
   padding: 10px 12px;
-  border: 1px solid #7c5b15;
-  border-radius: 9px;
-  background: var(--amber-soft);
-  color: #fde68a;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 10px;
+  background: var(--gold-dim);
+  color: var(--gold-soft);
 }
-.fine-print { margin: 20px 0 0; color: #7f8390; font-size: 12px; }
+.fine-print { margin: 20px 0 0; color: var(--ink-dim); font-size: 12px; }
 .inbox-view { min-height: 100vh; }
 .topbar {
   height: 74px;
@@ -215,22 +268,31 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   justify-content: space-between;
   gap: 20px;
   padding: 0 22px;
-  border-bottom: 1px solid var(--line);
-  background: #0e1016;
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--bg);
 }
-.topbar h1 { margin: 0; font-size: 21px; }
+.topbar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.topbar-brand .wordmark { font-size: 14px; font-weight: 700; color: var(--ink); }
+.topbar h1 { margin: 0 0 0 8px; padding-left: 12px; border-left: 1px solid var(--line-strong); font-size: 21px; }
 .topbar-actions { display: flex; align-items: center; gap: 12px; }
-.session-label { color: var(--muted); font-size: 13px; }
+.session-label { color: var(--ink-dim); font-size: 13px; }
 .inbox-layout {
   min-height: calc(100vh - 74px);
   display: grid;
-  grid-template-columns: 240px 360px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
 }
-.identity-panel, .message-panel, .detail-panel { min-width: 0; }
-.identity-panel, .message-panel { border-right: 1px solid var(--line); }
-.identity-panel { padding: 20px 14px; background: #0f1117; }
-.message-panel { background: var(--panel); }
-.detail-panel { background: #0e1016; }
+.inbox-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+}
+.identity-panel, .message-panel, .detail-panel, .overview-panel { min-width: 0; }
+.identity-panel, .message-panel { border-right: 1px solid var(--line-strong); }
+.identity-panel { padding: 20px 14px; background: var(--bg); }
+.inbox-view[data-scope="overview"] .identity-panel { border-right-color: var(--line-strong); }
+.message-panel { background: var(--bg-raise); }
+.detail-panel { background: var(--bg); }
+.overview-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
 .panel-heading {
   display: flex;
   align-items: center;
@@ -239,12 +301,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   padding: 0 7px 14px;
 }
 .panel-heading h2 { margin: 0; font-size: 16px; }
+.overview-heading { align-items: flex-start; padding: 4px 0 18px; }
+.overview-heading h2 { font-size: 22px; letter-spacing: -0.01em; }
+.overview-subtitle { margin: 6px 0 0; color: var(--ink-dim); font-size: 14px; }
+.overview-updated { margin: 4px 0 0; color: var(--ink-dim); font-size: 14px; }
 .count {
   min-width: 25px;
   padding: 2px 7px;
   border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--muted);
+  background: var(--bg-card);
+  color: var(--ink-dim);
   text-align: center;
   font-size: 12px;
 }
@@ -259,13 +325,68 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   text-align: left;
 }
 .identity-button strong, .identity-button span { display: block; overflow: hidden; text-overflow: ellipsis; }
-.identity-button span { color: var(--muted); font-size: 12px; }
+.identity-button span { color: var(--ink-dim); font-size: 12px; }
 .identity-button[aria-current="true"] {
-  border-color: #624b16;
-  background: var(--amber-soft);
+  border-color: rgba(251, 191, 36, 0.4);
+  background: var(--gold-dim);
 }
-.message-heading { min-height: 88px; padding: 18px; border-bottom: 1px solid var(--line); }
-.active-address { margin: 0 0 3px; color: var(--amber); font-size: 12px; overflow-wrap: anywhere; }
+.overview-nav { margin-bottom: 6px; border-bottom: 1px solid var(--line); border-radius: 10px 10px 0 0; }
+.overview-stats {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.stat-card {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.stat-label { display: block; color: var(--ink-dim); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.stat-value { display: block; margin-top: 6px; color: var(--gold); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.overview-panel.is-stale .stat-value { color: var(--ink-dim); font-style: italic; }
+.overview-disclosure { margin: 12px 0 0; color: var(--ink-dim); font-size: 14px; }
+.overview-controls { display: flex; align-items: center; gap: 10px; margin-top: 20px; }
+.overview-controls .search-input { margin-bottom: 0; }
+.overview-sort { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.sort-button { min-height: 34px; padding: 4px 10px; font-size: 13px; }
+.sort-button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+.overview-rows { border-top: 1px solid var(--line); }
+.overview-row {
+  width: 100%;
+  display: grid;
+  align-items: baseline;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 104px 96px 132px 96px;
+  min-height: 56px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 10px;
+  text-align: left;
+}
+.overview-row:hover, .overview-row[aria-current="true"] { background: var(--gold-dim); }
+.overview-row .cell { display: block; overflow: hidden; text-overflow: ellipsis; }
+.overview-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
+.cell-value { font-variant-numeric: tabular-nums; }
+.cell-unit { color: var(--ink-dim); font-size: 12px; }
+.row-name { display: block; font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+.row-address { display: block; color: var(--ink-dim); font-size: 13px; overflow-wrap: anywhere; }
+.row-note { display: block; color: var(--ink-faint); font-size: 14px; }
+.row-flat { color: var(--ink-faint); }
+.active-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--green);
+}
+.overview-panel.is-error .overview-rows, .overview-panel.is-error .overview-stats { opacity: .8; }
+.back-link { margin: 0 0 8px; padding: 4px 8px; min-height: 32px; font-size: 13px; }
+.message-heading { min-height: 88px; padding: 18px; border-bottom: 1px solid var(--line-strong); }
+.active-address { margin: 0 0 3px; color: var(--gold); font-size: 12px; overflow-wrap: anywhere; }
 .message-item { border-bottom: 1px solid var(--line); }
 .message-button {
   width: 100%;
@@ -275,35 +396,35 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   padding: 16px 18px;
   text-align: left;
 }
-.message-button:hover, .message-button[aria-current="true"] { background: var(--panel-2); }
+.message-button:hover, .message-button[aria-current="true"] { background: var(--bg-card); }
 .message-line { display: flex; justify-content: space-between; gap: 10px; }
 .message-from, .message-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-from { font-weight: 750; }
-.message-date { flex: none; color: #858997; font-size: 11px; }
+.message-date { flex: none; color: var(--ink-dim); font-size: 11px; }
 .message-subject { margin-top: 4px; }
-.message-snippet { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.message-snippet { margin: 5px 0 0; color: var(--ink-dim); font-size: 12px; }
 .otp-badge {
   display: inline-block;
   margin-top: 8px;
   padding: 2px 7px;
   border-radius: 999px;
-  background: var(--amber-soft);
-  color: #fde68a;
+  background: var(--gold-dim);
+  color: var(--gold-soft);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: .06em;
 }
-.empty-state { padding: 28px 20px; color: var(--muted); }
+.empty-state { padding: 28px 20px; color: var(--ink-dim); }
 .detail-content { max-width: 920px; margin: auto; padding: 32px clamp(20px, 5vw, 54px); }
 .detail-placeholder { max-width: 520px; margin: 12vh auto 0; }
 .detail-placeholder h2 { margin: 3px 0 8px; font-size: 28px; }
 .detail-header h2 { margin: 5px 0 18px; font-size: clamp(24px, 4vw, 34px); line-height: 1.18; overflow-wrap: anywhere; }
 .meta { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 5px 14px; margin: 0 0 22px; }
-.meta dt { color: var(--muted); }
+.meta dt { color: var(--ink-dim); }
 .meta dd { margin: 0; overflow-wrap: anywhere; }
-.tabs { display: flex; gap: 8px; margin: 22px 0 14px; border-bottom: 1px solid var(--line); }
-.tab { border: 0; border-radius: 0; background: transparent; color: var(--muted); }
-.tab[aria-selected="true"] { border-bottom: 2px solid var(--amber); color: var(--text); }
+.tabs { display: flex; gap: 8px; margin: 22px 0 14px; border-bottom: 1px solid var(--line-strong); }
+.tab { border: 0; border-radius: 0; background: transparent; color: var(--ink-dim); }
+.tab[aria-selected="true"] { border-bottom: 2px solid var(--gold); color: var(--ink); }
 .plain-body {
   min-height: 180px;
   margin: 0;
@@ -317,7 +438,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .mail-frame {
   width: 100%;
   min-height: 440px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: white;
 }
@@ -331,16 +452,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   padding: 11px 13px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: var(--panel);
+  background: var(--bg-raise);
 }
-.code-value { color: var(--amber); font: 800 20px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+.code-value { color: var(--gold); font: 800 20px/1 var(--mono); letter-spacing: .1em; }
+.copied { border-color: var(--green); color: var(--green); }
 .link-copy { margin-left: auto; }
 .link-text { min-width: 0; flex: 1; }
 .link-host, .link-url { display: block; overflow-wrap: anywhere; }
 .link-host { font-weight: 750; }
-.link-url { color: var(--muted); font-size: 11px; }
-.open-link { color: var(--amber); }
-.sender-warning { color: #fcd34d; font-size: 12px; }
+.link-url { color: var(--ink-dim); font-size: 11px; }
+.open-link { color: var(--gold); }
+.sender-warning { color: var(--gold-soft); font-size: 12px; }
 .mobile-back, .mobile-identity { display: none; }
 .sr-only {
   position: absolute;
@@ -355,19 +477,40 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 
 @media (max-width: 900px) {
-  .inbox-layout { grid-template-columns: 210px 320px minmax(0, 1fr); }
+  .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
+  .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
+  .overview-row { grid-template-columns: minmax(0, 1fr) 92px 88px 120px 88px; }
   .session-label { display: none; }
 }
 
 @media (max-width: 719px) {
-  .topbar { height: 66px; padding: 0 14px; }
+  .topbar { height: 66px; padding: 0 14px; gap: 10px; }
+  .topbar h1 { font-size: 18px; }
+  /* 375 px 下品牌名让位给 scope 标题与 Sign out，logo 与按钮都不许换行溢出 */
+  .topbar-brand .wordmark { display: none; }
+  .topbar-actions .quiet { white-space: nowrap; }
   .inbox-layout { min-height: calc(100vh - 66px); display: block; }
+  .inbox-main { display: block; }
   .identity-panel { display: none; }
-  .message-panel, .detail-panel { min-height: calc(100vh - 66px); border: 0; }
+  .message-panel, .detail-panel, .overview-panel { min-height: calc(100vh - 66px); border: 0; }
   .mobile-identity { display: grid; gap: 5px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
   .mobile-back { display: inline-block; margin: 14px 16px 0; }
   .inbox-view[data-mobile-view="list"] .detail-panel { display: none; }
   .inbox-view[data-mobile-view="detail"] .message-panel { display: none; }
+  .inbox-view[data-mobile-view="overview"] .overview-stats { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .inbox-view[data-mobile-view="overview"] .stat-card {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    border-radius: 0;
+    border-width: 0 0 1px;
+  }
+  .inbox-view[data-mobile-view="overview"] .stat-value { margin-top: 0; font-size: 20px; }
+  .overview-row { display: block; min-height: 44px; }
+  .overview-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; }
+  .overview-row .cell-label { display: inline; }
+  .overview-row .cell-unit { display: none; }
   .detail-content { padding: 22px 16px 40px; }
   .code-row, .link-row { align-items: flex-start; flex-wrap: wrap; }
   .link-copy { margin-left: 0; }
@@ -379,6 +522,19 @@ export const UI_JS = `(function () {
 
   history.replaceState(null, '', window.location.pathname);
 
+  /* 客户端唯一的新鲜度阈值（与服务端 FRESH_MS 同值）。不存在第二个 TTL。 */
+  var FRESH_MS = 15000;
+  var POLL_LIMIT = 15;
+  var POLL_WINDOW_MS = 20000;
+  var SORT_COLUMNS = [
+    { key: 'address', label: 'Address' },
+    { key: 'name', label: 'Name' },
+    { key: 'count', label: 'Messages' },
+    { key: 'unseen', label: 'Unseen' },
+    { key: 'last', label: 'Last' },
+    { key: 'created', label: 'Created' }
+  ];
+
   var state = {
     me: null,
     identities: [],
@@ -386,11 +542,25 @@ export const UI_JS = `(function () {
     activeAddress: '',
     messages: [],
     activeMessageId: '',
-    detail: null
+    detail: null,
+    scope: 'inbox',
+    overviewStatus: 'idle',
+    overview: null,
+    overviewMessage: '',
+    overviewFilter: '',
+    overviewSort: { key: 'last', dir: 'desc' },
+    overviewGen: 0,
+    overviewPolls: 0,
+    overviewRetryAt: 0,
+    overviewPending: false,
+    overviewLoadingSince: 0,
+    returnAddress: ''
   };
   var refreshTask = null;
   var refreshController = null;
   var detailController = null;
+  var overviewController = null;
+  var overviewTimer = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -410,9 +580,25 @@ export const UI_JS = `(function () {
   var activeAddress = byId('active-address');
   var messageList = byId('message-list');
   var messageState = byId('message-state');
+  var messagesTitle = byId('messages-title');
   var refreshButton = byId('refresh-button');
   var detailContent = byId('detail-content');
+  var detailPanel = byId('detail-panel');
   var mainContent = byId('main-content');
+  var overviewPanel = byId('overview-panel');
+  var overviewStats = byId('overview-stats');
+  var overviewRows = byId('overview-rows');
+  var overviewSearch = byId('overview-search');
+  var overviewSort = byId('overview-sort');
+  var overviewStateNode = byId('overview-state');
+  var overviewNotice = byId('overview-notice');
+  var overviewUpdated = byId('overview-updated');
+  var overviewDisclosure = byId('overview-disclosure');
+  var overviewShown = byId('overview-shown');
+  var overviewRefresh = byId('overview-refresh');
+  var backToOverview = byId('back-to-overview');
+  var skipLink = byId('skip-link');
+  var viewTitle = byId('view-title');
   var statusRegion = byId('status');
 
   function announce(message) {
@@ -436,6 +622,7 @@ export const UI_JS = `(function () {
   }
 
   function showLogin(message) {
+    cancelOverview();
     inboxView.hidden = true;
     loginView.hidden = false;
     loginError.textContent = message || '';
@@ -447,6 +634,16 @@ export const UI_JS = `(function () {
     loginView.hidden = true;
     inboxView.hidden = false;
     loginError.textContent = '';
+  }
+
+  function isAdmin() {
+    return Boolean(state.me) && state.me.kind === 'admin';
+  }
+
+  function configureSession() {
+    inboxView.dataset.session = isAdmin() ? 'admin' : 'identity';
+    /* identity 会话下 Overview 相关节点不可见，因此也不在 tab 序里。 */
+    backToOverview.hidden = !isAdmin();
   }
 
   async function apiJson(path, options) {
@@ -476,6 +673,37 @@ export const UI_JS = `(function () {
     }).format(date);
   }
 
+  function formatDay(value) {
+    var date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+  }
+
+  function formatClock(value, withSeconds) {
+    var date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    var options = withSeconds
+      ? { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+      : { hour: '2-digit', minute: '2-digit' };
+    return new Intl.DateTimeFormat(undefined, options).format(date);
+  }
+
+  function formatNumber(value) {
+    return new Intl.NumberFormat().format(value);
+  }
+
+  function formatAgo(value) {
+    var when = Date.parse(value);
+    if (Number.isNaN(when)) return '—';
+    var seconds = Math.max(0, Math.round((Date.now() - when) / 1000));
+    if (seconds < 60) return 'just now';
+    var minutes = Math.round(seconds / 60);
+    if (minutes < 60) return minutes + ' min ago';
+    var hours = Math.round(minutes / 60);
+    if (hours < 24) return hours + ' h ago';
+    return Math.round(hours / 24) + ' d ago';
+  }
+
   function clearDetail() {
     state.activeMessageId = '';
     state.detail = null;
@@ -494,6 +722,34 @@ export const UI_JS = `(function () {
     detailContent.append(placeholder);
   }
 
+  /* ---- scope 迁移：任一时刻恰好一个可见 <main> ---- */
+  function applyScope(next, options) {
+    var opts = options || {};
+    var overviewActive = next === 'overview';
+    state.scope = next;
+    inboxView.dataset.scope = next;
+    overviewPanel.hidden = !overviewActive;
+    mainContent.hidden = overviewActive;
+    viewTitle.textContent = overviewActive ? 'Overview' : 'Inbox';
+    document.title = overviewActive ? 'OpenAgent Overview' : 'OpenAgent Inbox';
+    skipLink.textContent = overviewActive ? 'Skip to overview' : 'Skip to inbox';
+    skipLink.setAttribute('href', overviewActive ? '#overview-panel' : '#main-content');
+    if (overviewActive) inboxView.dataset.mobileView = 'overview';
+    renderIdentities();
+    if (opts.announce) announce(opts.announce);
+  }
+
+  /* 侧栏地址项与移动 <select> 是 Overview 之外的两条入口：在 overview scope 下
+     它们必须和表格行走同一条路（openAddress 会切 scope、播报、聚焦），否则会在
+     不可见的 inbox 里取消息、画面却停在 Overview。 */
+  function activateAddress(address) {
+    if (state.scope === 'overview') {
+      openAddress(address);
+      return;
+    }
+    selectIdentity(address);
+  }
+
   function filteredIdentities() {
     var needle = state.identityFilter.toLowerCase();
     if (!needle) return state.identities;
@@ -508,27 +764,57 @@ export const UI_JS = `(function () {
     mobileIdentity.replaceChildren();
     identityCount.textContent = String(state.identities.length);
 
+    if (isAdmin()) {
+      /* 空串永不可能是合法地址，所以它是安全的"回总览"哨兵值。 */
+      var overviewOption = document.createElement('option');
+      overviewOption.value = '';
+      overviewOption.textContent = 'Overview — all addresses';
+      overviewOption.selected = state.scope === 'overview';
+      mobileIdentity.append(overviewOption);
+    }
+
     state.identities.forEach(function (identity) {
       var option = document.createElement('option');
       option.value = identity.address;
       option.textContent = identity.name ? identity.name + ' — ' + identity.address : identity.address;
-      option.selected = identity.address === state.activeAddress;
+      option.selected = state.scope === 'inbox' && identity.address === state.activeAddress;
       mobileIdentity.append(option);
     });
+
+    if (isAdmin()) {
+      var item = document.createElement('li');
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'identity-button overview-nav';
+      button.setAttribute('aria-current', state.scope === 'overview' ? 'true' : 'false');
+      var overviewName = document.createElement('strong');
+      overviewName.textContent = 'Overview';
+      var overviewHint = document.createElement('span');
+      overviewHint.textContent = 'All addresses';
+      button.append(overviewName, overviewHint);
+      button.addEventListener('click', function () {
+        enterOverview({ announce: 'Back to overview' });
+      });
+      item.append(button);
+      identityList.append(item);
+    }
 
     filteredIdentities().forEach(function (identity) {
       var item = document.createElement('li');
       var button = document.createElement('button');
       button.type = 'button';
       button.className = 'identity-button';
-      button.setAttribute('aria-current', identity.address === state.activeAddress ? 'true' : 'false');
+      button.setAttribute(
+        'aria-current',
+        state.scope === 'inbox' && identity.address === state.activeAddress ? 'true' : 'false'
+      );
       var name = document.createElement('strong');
       name.textContent = identity.name || identity.address.split('@')[0];
       var address = document.createElement('span');
       address.textContent = identity.address;
       button.append(name, address);
       button.addEventListener('click', function () {
-        selectIdentity(identity.address);
+        activateAddress(identity.address);
       });
       item.append(button);
       identityList.append(item);
@@ -586,6 +872,547 @@ export const UI_JS = `(function () {
       item.append(button);
       messageList.append(item);
     });
+  }
+
+  /* ---- Overview 渲染 ---- */
+  function statsRow(address) {
+    var payload = state.overview;
+    if (!payload || !Array.isArray(payload.addresses)) return null;
+    for (var index = 0; index < payload.addresses.length; index += 1) {
+      if (payload.addresses[index].address === address) return payload.addresses[index];
+    }
+    return null;
+  }
+
+  function countParts(row, key) {
+    /* 数值的诚实呈现：截断影响到该行时只给下界，下界为 0 时说 Unknown。 */
+    if (!row) return { text: state.overviewStatus === 'loading' || state.overviewStatus === 'idle' ? 'Loading…' : 'Unavailable', flat: true };
+    var value = row[key];
+    if (row.complete) return { text: formatNumber(value), unit: key === 'unseen' ? 'unseen' : 'msgs', flat: value === 0 };
+    if (value > 0) {
+      return {
+        text: '≥' + formatNumber(value),
+        unit: key === 'unseen' ? 'unseen' : 'msgs',
+        title: 'Lower bound — this scan hit its recipient limit.'
+      };
+    }
+    return { text: 'Unknown', flat: true, title: 'Not counted — this scan hit its recipient limit.' };
+  }
+
+  /* 聚合卡片与行级共用同一套界向口径：totals.exact===false 时 IN WINDOW /
+     UNSEEN / ACTIVE 24H 都是下界，下界为 0 就只能说 Unknown。 */
+  function boundParts(value, exact) {
+    if (exact) return { text: formatNumber(value) };
+    if (value > 0) {
+      return {
+        text: '≥' + formatNumber(value),
+        title: 'Lower bound — this scan hit its recipient limit.'
+      };
+    }
+    return { text: 'Unknown', title: 'Not counted — this scan hit its recipient limit.' };
+  }
+
+  function appendCell(parent, labelText, parts, extra) {
+    var cell = document.createElement('span');
+    cell.className = 'cell';
+    var label = document.createElement('span');
+    label.className = 'cell-label';
+    label.textContent = labelText;
+    var value = document.createElement('span');
+    value.className = 'cell-value' + (parts.flat ? ' row-flat' : '');
+    if (extra) value.append(extra);
+    value.append(document.createTextNode(parts.text));
+    if (parts.title) value.title = parts.title;
+    cell.append(label, value);
+    if (parts.unit) {
+      var unit = document.createElement('span');
+      unit.className = 'cell-unit';
+      unit.textContent = parts.unit;
+      cell.append(unit);
+    }
+    parent.append(cell);
+    return parts.text + (parts.unit ? ' ' + parts.unit : '');
+  }
+
+  function isActiveRow(row) {
+    if (!row || !row.lastReceivedAt || !state.overview || !state.overview.totals) return false;
+    var since = Date.parse(state.overview.totals.recentSince);
+    return !Number.isNaN(since) && Date.parse(row.lastReceivedAt) >= since;
+  }
+
+  function overviewModels() {
+    var needle = state.overviewFilter.toLowerCase();
+    var models = [];
+    state.identities.forEach(function (identity) {
+      if (needle &&
+        identity.address.toLowerCase().indexOf(needle) === -1 &&
+        (identity.name || '').toLowerCase().indexOf(needle) === -1) return;
+      models.push({ identity: identity, stats: statsRow(identity.address) });
+    });
+    return models;
+  }
+
+  /* Unknown / Unavailable / 无命中的行始终排在同组末尾。 */
+  function sortRank(model) {
+    if (!model.stats) return 1;
+    if (!model.stats.complete && model.stats.count === 0) return 1;
+    if (state.overviewSort.key === 'last' && !model.stats.lastReceivedAt) return 1;
+    return 0;
+  }
+
+  function sortValue(model) {
+    var key = state.overviewSort.key;
+    var stats = model.stats;
+    if (key === 'address') return model.identity.address.toLowerCase();
+    if (key === 'name') return (model.identity.name || '').toLowerCase();
+    if (key === 'created') return Date.parse(model.identity.createdAt) || 0;
+    if (key === 'count') return stats ? stats.count : -1;
+    if (key === 'unseen') return stats ? stats.unseen : -1;
+    return stats && stats.lastReceivedAt ? Date.parse(stats.lastReceivedAt) : 0;
+  }
+
+  function sortedModels() {
+    var direction = state.overviewSort.dir === 'asc' ? 1 : -1;
+    return overviewModels().slice().sort(function (left, right) {
+      var rank = sortRank(left) - sortRank(right);
+      if (rank !== 0) return rank;
+      var a = sortValue(left);
+      var b = sortValue(right);
+      if (a < b) return -1 * direction;
+      if (a > b) return 1 * direction;
+      var created = (Date.parse(right.identity.createdAt) || 0) - (Date.parse(left.identity.createdAt) || 0);
+      if (created !== 0) return created;
+      return left.identity.address < right.identity.address ? -1 : 1;
+    });
+  }
+
+  function buildSortControls() {
+    overviewSort.replaceChildren();
+    SORT_COLUMNS.forEach(function (column) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'sort-button';
+      button.dataset.sortKey = column.key;
+      button.addEventListener('click', function () {
+        if (state.overviewSort.key === column.key) {
+          state.overviewSort.dir = state.overviewSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.overviewSort.key = column.key;
+          state.overviewSort.dir = column.key === 'address' || column.key === 'name' ? 'asc' : 'desc';
+        }
+        renderOverview();
+      });
+      overviewSort.append(button);
+    });
+  }
+
+  function renderSortControls() {
+    Array.prototype.forEach.call(overviewSort.children, function (button) {
+      var column = SORT_COLUMNS.filter(function (candidate) {
+        return candidate.key === button.dataset.sortKey;
+      })[0];
+      var active = state.overviewSort.key === button.dataset.sortKey;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.textContent = active
+        ? column.label + (state.overviewSort.dir === 'asc' ? ' ▲' : ' ▼')
+        : column.label;
+    });
+  }
+
+  function renderOverviewStats() {
+    overviewStats.replaceChildren();
+    var payload = state.overview;
+    var scan = payload ? payload.scan : null;
+    var totals = payload ? payload.totals : null;
+    var pending = state.overviewStatus === 'loading' || state.overviewStatus === 'idle';
+    var fallback = { text: pending ? 'Loading…' : 'Unavailable' };
+    var exact = !totals || totals.exact !== false;
+
+    function card(label, parts) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'stat-card';
+      var labelNode = document.createElement('span');
+      labelNode.className = 'stat-label';
+      labelNode.textContent = label;
+      var valueNode = document.createElement('span');
+      valueNode.className = 'stat-value';
+      valueNode.textContent = parts.text;
+      if (parts.title) valueNode.title = parts.title;
+      wrapper.append(labelNode, valueNode);
+      overviewStats.append(wrapper);
+    }
+
+    /* 地址数是身份派生量，永远精确。 */
+    card('Addresses', {
+      text: totals ? formatNumber(totals.addresses) : String(state.identities.length)
+    });
+    /* skipped:true 时窗口派生量未被观测，整张卡片不进 DOM。 */
+    if (!scan || !scan.skipped) {
+      var windowed = fallback;
+      if (totals && scan && scan.scanned !== null) {
+        windowed = boundParts(totals.matchedInWindow, exact);
+        /* Unknown 是"没数过"，再除以窗口大小没有意义；有下界时才写 N / 窗口。 */
+        if (windowed.text !== 'Unknown') {
+          windowed.text += ' / ' + formatNumber(scan.scanned);
+        }
+      }
+      card('In window', windowed);
+    }
+    card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);
+    card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);
+  }
+
+  function renderOverviewMeta() {
+    var payload = state.overview;
+    overviewPanel.classList.toggle('is-ready', state.overviewStatus === 'ready');
+    overviewPanel.classList.toggle('is-stale', state.overviewStatus === 'stale');
+    overviewPanel.classList.toggle(
+      'is-error',
+      state.overviewStatus === 'unavailable' || state.overviewStatus === 'error'
+    );
+
+    if (!payload) {
+      overviewUpdated.textContent = state.overviewStatus === 'loading' ? 'Counting messages…' : '';
+    } else if (payload.scan && payload.scan.skipped) {
+      overviewUpdated.textContent = 'Updated ' + formatClock(payload.generatedAt, true);
+    } else {
+      var line = 'Updated ' + formatClock(payload.generatedAt, true) +
+        ' · newest ' + formatNumber(payload.scan.scanned) + ' of ' +
+        formatNumber(payload.scan.mailboxTotal) + ' in the mailbox';
+      if (state.overviewStatus === 'stale' && payload.refreshError) {
+        line = 'Counts from ' + formatClock(payload.generatedAt, false) + ' · last refresh failed';
+      }
+      overviewUpdated.textContent = line;
+    }
+
+    var exact = !payload || !payload.totals || payload.totals.exact !== false;
+    overviewDisclosure.hidden = exact;
+    overviewDisclosure.textContent = exact
+      ? ''
+      : 'Some counts are incomplete for messages with very large recipient lists (shown as ≥ or Unknown).';
+
+    overviewNotice.hidden = !state.overviewMessage;
+    overviewNotice.textContent = state.overviewMessage;
+  }
+
+  function renderOverviewRows() {
+    overviewRows.replaceChildren();
+    var models = sortedModels();
+    overviewShown.textContent = state.overviewFilter
+      ? models.length + ' of ' + state.identities.length
+      : models.length + ' shown';
+
+    if (state.identities.length === 0) {
+      overviewStateNode.textContent =
+        'No addresses yet. Create one with the REST API or the MCP server, then it appears here.';
+      return;
+    }
+    if (models.length === 0) {
+      overviewStateNode.textContent = 'No addresses match your filter.';
+      return;
+    }
+    overviewStateNode.textContent = '';
+
+    models.forEach(function (model) {
+      var row = model.stats;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'overview-row';
+      button.dataset.address = model.identity.address;
+      button.setAttribute('aria-current', 'false');
+
+      var identityCell = document.createElement('span');
+      identityCell.className = 'cell';
+      var name = document.createElement('span');
+      name.className = 'row-name';
+      name.textContent = model.identity.name || model.identity.address.split('@')[0];
+      var addressNode = document.createElement('span');
+      addressNode.className = 'row-address';
+      addressNode.textContent = model.identity.address;
+      identityCell.append(name, addressNode);
+      if (row && row.complete && row.count === 0) {
+        var note = document.createElement('span');
+        note.className = 'row-note';
+        note.textContent = '(no mail in the current window)';
+        identityCell.append(note);
+      }
+      button.append(identityCell);
+
+      var countText = appendCell(button, 'Messages', countParts(row, 'count'));
+      var unseenText = appendCell(button, 'Unseen', countParts(row, 'unseen'));
+
+      var dot = null;
+      if (isActiveRow(row)) {
+        dot = document.createElement('span');
+        dot.className = 'active-dot';
+      }
+      var lastParts = row && row.lastReceivedAt
+        ? { text: formatAgo(row.lastReceivedAt) }
+        : { text: row ? '—' : 'Unavailable', flat: true };
+      var lastText = appendCell(button, 'Last', lastParts, dot);
+      var createdText = appendCell(button, 'Created', { text: formatDay(model.identity.createdAt) });
+
+      button.setAttribute(
+        'aria-label',
+        [
+          model.identity.name || model.identity.address,
+          model.identity.address,
+          countText,
+          unseenText,
+          'last ' + lastText,
+          'created ' + createdText
+        ].join(', ')
+      );
+      button.addEventListener('click', function () {
+        openAddress(model.identity.address);
+      });
+      overviewRows.append(button);
+    });
+  }
+
+  function updateOverviewRefreshButton() {
+    if (state.overviewPending) {
+      overviewRefresh.disabled = true;
+      overviewRefresh.textContent = 'Refreshing…';
+      return;
+    }
+    overviewRefresh.disabled = false;
+    var payload = state.overview;
+    if (state.overviewStatus === 'stale' && payload && payload.refreshError && payload.retryAfterMs) {
+      /* 冷却期不假装正在刷新：明说下一次重试还有几秒。 */
+      overviewRefresh.textContent = 'Retrying in ' + Math.ceil(payload.retryAfterMs / 1000) + 's…';
+      return;
+    }
+    overviewRefresh.textContent =
+      state.overviewStatus === 'unavailable' || state.overviewStatus === 'error' ? 'Retry' : 'Refresh';
+  }
+
+  function renderOverview() {
+    renderOverviewMeta();
+    renderOverviewStats();
+    renderSortControls();
+    renderOverviewRows();
+    updateOverviewRefreshButton();
+  }
+
+  function rowButtonFor(address) {
+    var buttons = overviewRows.children;
+    for (var index = 0; index < buttons.length; index += 1) {
+      if (buttons[index].dataset.address === address) return buttons[index];
+    }
+    return null;
+  }
+
+  function cancelOverviewPoll() {
+    if (overviewTimer !== null) {
+      window.clearTimeout(overviewTimer);
+      overviewTimer = null;
+    }
+  }
+
+  function cancelOverview() {
+    cancelOverviewPoll();
+    if (overviewController) {
+      overviewController.abort();
+      overviewController = null;
+    }
+    state.overviewPending = false;
+    state.overviewPolls = 0;
+    state.overviewLoadingSince = 0;
+  }
+
+  /* 服务端给的 retryAfterMs 是"最早可再来"的时刻，客户端必须遵守它。 */
+  function scheduleOverviewPoll(retryAfterMs) {
+    cancelOverviewPoll();
+    var delay = Math.max(retryAfterMs || 1500, 1000);
+    state.overviewRetryAt = Date.now() + delay;
+    overviewTimer = window.setTimeout(function () {
+      overviewTimer = null;
+      loadOverviewCycle({ refresh: false });
+    }, delay);
+  }
+
+  function readyAnnouncement(payload) {
+    var totals = payload.totals;
+    if (payload.scan && payload.scan.skipped) {
+      return 'Overview loaded: 0 addresses.';
+    }
+    return 'Overview loaded: ' + totals.addresses + ' addresses, ' +
+      totals.matchedInWindow + ' messages in the newest ' + payload.scan.scanned +
+      ', ' + totals.unseenInWindow + ' unseen.';
+  }
+
+  function applyOverviewPayload(payload) {
+    cancelOverviewPoll();
+    if (payload.status === 'loading') {
+      /* 202 不覆盖上一次的载荷：表格继续显示旧数值，而不是掉回 0。 */
+      state.overviewStatus = 'loading';
+      state.overviewMessage = '';
+      if (!state.overviewLoadingSince) state.overviewLoadingSince = Date.now();
+      state.overviewPolls += 1;
+      if (state.overviewPolls >= POLL_LIMIT ||
+        Date.now() - state.overviewLoadingSince > POLL_WINDOW_MS) {
+        state.overviewStatus = 'unavailable';
+        state.overviewMessage = 'Message counts are taking too long.';
+        announce('Message counts are taking too long.');
+        return;
+      }
+      scheduleOverviewPoll(payload.retryAfterMs);
+      announce('Overview counts are still loading.');
+      return;
+    }
+
+    state.overview = payload;
+    state.overviewStatus = payload.status === 'stale' ? 'stale' : 'ready';
+    state.overviewPolls = 0;
+    state.overviewLoadingSince = 0;
+    state.overviewMessage = '';
+
+    if (state.overviewStatus === 'ready') {
+      announce(readyAnnouncement(payload));
+      return;
+    }
+    if (payload.refreshError) {
+      state.overviewMessage = 'The last refresh failed. Showing the previous counts.';
+      announce('Showing counts from ' + formatClock(payload.generatedAt, false) + '. Refresh failed.');
+    } else {
+      announce(readyAnnouncement(payload));
+    }
+    /* 唯一轮询规则：只有在途 flight 或待重试的失败才安排下一周期。 */
+    if (payload.revalidating || payload.refreshError) scheduleOverviewPoll(payload.retryAfterMs);
+  }
+
+  function applyOverviewError(error) {
+    cancelOverviewPoll();
+    if (error.message === 'session_expired') return;
+    if (error.status === 500) {
+      state.overviewStatus = 'error';
+      state.overviewMessage = 'Addresses could not be read from the server.';
+      announce('Addresses could not be read from the server.');
+      return;
+    }
+    state.overviewStatus = 'unavailable';
+    state.overviewMessage = 'Message counts are unavailable right now.';
+    announce('Overview counts are unavailable. Addresses are listed without counts.');
+  }
+
+  function handleIdentitiesError(error) {
+    if (error.message === 'session_expired') return;
+    state.overviewStatus = 'error';
+    state.overviewMessage = 'Addresses could not be read from the server.';
+    announce('Addresses could not be read from the server.');
+    renderOverview();
+  }
+
+  /* 新一轮 /identities 里活动地址消失了（被删/被 retention 清掉）：不能把用户留在
+     一个失效的 inbox 里反复报"邮件加载失败"，清掉活动状态并回 Overview + 播报。 */
+  function reconcileActiveAddress() {
+    if (!state.activeAddress) return;
+    var survivors = state.identities.filter(function (identity) {
+      return identity.address === state.activeAddress;
+    });
+    if (survivors.length) return;
+    var lost = state.activeAddress;
+    state.activeAddress = '';
+    state.messages = [];
+    state.returnAddress = '';
+    clearDetail();
+    renderMessages();
+    if (state.scope !== 'inbox') return;
+    enterOverview({ announce: lost + ' is no longer available. Back to overview.' });
+  }
+
+  /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
+     周期是停掉的（cancelOverview），所以这是"活动地址被删"能被发现的那一刻。 */
+  function refreshInboxIdentities() {
+    apiJson('/ui/api/identities').then(function (payload) {
+      if (state.scope !== 'inbox') return;
+      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+      renderIdentities();
+      reconcileActiveAddress();
+    }).catch(function () {
+      /* 名单取不到就沿用旧名单：邮件本身的失败由 refreshMessages 自己报。 */
+    });
+  }
+
+  /* 一个 Overview 周期：同一代际下并发发起两条请求，且两条各自独立落地 ——
+     /identities 一到就渲染地址骨架，绝不等 /overview 的扫描预算。 */
+  function loadOverviewCycle(options) {
+    var opts = options || {};
+    var generation = ++state.overviewGen;
+    cancelOverviewPoll();
+    if (overviewController) overviewController.abort();
+    overviewController = new AbortController();
+    var signal = overviewController.signal;
+    state.overviewPending = true;
+    updateOverviewRefreshButton();
+
+    var identitiesPromise = apiJson('/ui/api/identities', { signal: signal });
+    var overviewPromise = apiJson(
+      opts.refresh ? '/ui/api/overview?refresh=1' : '/ui/api/overview',
+      { signal: signal }
+    );
+
+    identitiesPromise.then(function (payload) {
+      if (generation !== state.overviewGen) return;
+      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+      /* 侧栏与总览行都吃这份名单，两边都得重画（只重画总览会让侧栏一直空着）。 */
+      renderIdentities();
+      renderOverview();
+      reconcileActiveAddress();
+    }).catch(function (error) {
+      if (generation !== state.overviewGen) return;
+      handleIdentitiesError(error);
+    });
+
+    overviewPromise.then(function (payload) {
+      if (generation !== state.overviewGen) return;
+      state.overviewPending = false;
+      applyOverviewPayload(payload);
+      renderOverview();
+    }).catch(function (error) {
+      if (generation !== state.overviewGen) return;
+      state.overviewPending = false;
+      if (error.name === 'AbortError') return;
+      applyOverviewError(error);
+      renderOverview();
+    });
+  }
+
+  /* Overview 面板在 375 px 下 min-height 就有 calc(100vh - 66px)，顶上还压着 topbar 与
+     Address 标签，所以普通 focus() 会为了"把整块拉进视口"往下滚一截，首屏看不到 topbar/
+     Sign out/Address（CONSOLIDATED §1.4 要求首屏从 topbar 开始，A66 要求 logo 可见）。
+     面板只是个 tabindex="-1" 的落焦点，本来就不需要滚动，所以这条路径一律 preventScroll。 */
+  function focusOverviewPanel() {
+    overviewPanel.focus({ preventScroll: true });
+  }
+
+  function enterOverview(options) {
+    var opts = options || {};
+    cancelOverviewPoll();
+    applyScope('overview', { announce: opts.announce });
+    renderOverview();
+    /* 两条聚焦路径分开处理：从 inbox 返回时焦点回到原来那一行，那一行可能在长表格深处，
+       必须照常滚动过去；没有返回行时焦点落在面板上，不滚。 */
+    var returnRow = opts.returnTo ? rowButtonFor(opts.returnTo) : null;
+    if (returnRow) returnRow.focus();
+    else focusOverviewPanel();
+    /* 唯一新鲜度口径：generatedAt 的本机年龄 <15 s 就直接重渲染，0 请求。 */
+    var age = state.overview
+      ? Math.max(0, Date.now() - Date.parse(state.overview.generatedAt))
+      : Infinity;
+    if (state.overviewStatus === 'ready' && age < FRESH_MS) return;
+    loadOverviewCycle({ refresh: false });
+  }
+
+  function openAddress(address) {
+    state.returnAddress = address;
+    cancelOverview();
+    applyScope('inbox');
+    inboxView.dataset.mobileView = 'list';
+    announce('Opened ' + address);
+    messagesTitle.focus();
+    selectIdentity(address);
   }
 
   async function waitForPreviousRefresh() {
@@ -667,10 +1494,17 @@ export const UI_JS = `(function () {
     return selection.toString() === sourceNode.textContent;
   }
 
-  async function copyValue(value, sourceNode) {
+  async function copyValue(value, sourceNode, sourceButton) {
     try {
       await navigator.clipboard.writeText(value);
       announce('Copied to clipboard');
+      /* 颜色不是唯一信号：播报先行，绿色只是附加确认。 */
+      if (sourceButton) {
+        sourceButton.classList.add('copied');
+        window.setTimeout(function () {
+          sourceButton.classList.remove('copied');
+        }, 1200);
+      }
     } catch {
       var selected = selectForManualCopy(sourceNode);
       announce(selected
@@ -709,7 +1543,7 @@ export const UI_JS = `(function () {
     copy.className = 'quiet link-copy';
     copy.textContent = 'Copy';
     copy.addEventListener('click', function () {
-      copyValue(parsed.href, url);
+      copyValue(parsed.href, url, copy);
     });
 
     var open = document.createElement('a');
@@ -765,7 +1599,7 @@ export const UI_JS = `(function () {
         copy.className = 'quiet';
         copy.textContent = 'Copy';
         copy.addEventListener('click', function () {
-          copyValue(code, value);
+          copyValue(code, value, copy);
         });
         row.append(value, copy);
         list.append(row);
@@ -885,7 +1719,7 @@ export const UI_JS = `(function () {
       ) return;
       state.detail = detail;
       renderDetail(detail);
-      mainContent.focus();
+      detailPanel.focus();
     } catch (error) {
       if (error.name !== 'AbortError' && error.message !== 'session_expired') {
         loading.textContent = 'This message could not be loaded.';
@@ -903,6 +1737,23 @@ export const UI_JS = `(function () {
     renderMessages();
     clearDetail();
     if (state.activeAddress) await refreshMessages();
+  }
+
+  async function startSession() {
+    configureSession();
+    byId('session-label').textContent = state.me.kind === 'admin'
+      ? 'Admin session'
+      : state.me.address;
+    if (isAdmin()) {
+      /* admin 落地 Overview：首屏零 IMAP，不碰 /ui/api/messages。 */
+      applyScope('overview');
+      renderOverview();
+      focusOverviewPanel();
+      loadOverviewCycle({ refresh: false });
+      return;
+    }
+    applyScope('inbox');
+    await loadInbox();
   }
 
   loginForm.addEventListener('submit', async function (event) {
@@ -927,10 +1778,7 @@ export const UI_JS = `(function () {
       }
       state.me = await response.json();
       showInbox();
-      byId('session-label').textContent = state.me.kind === 'admin'
-        ? 'Admin session'
-        : state.me.address;
-      await loadInbox();
+      await startSession();
     } catch {
       loginError.textContent = 'Could not reach the server.';
     } finally {
@@ -948,6 +1796,8 @@ export const UI_JS = `(function () {
       state.me = null;
       state.identities = [];
       state.messages = [];
+      state.overview = null;
+      state.overviewStatus = 'idle';
       showLogin('');
     }
   });
@@ -956,17 +1806,38 @@ export const UI_JS = `(function () {
     state.identityFilter = identitySearch.value;
     renderIdentities();
   });
+  overviewSearch.addEventListener('input', function () {
+    state.overviewFilter = overviewSearch.value;
+    renderOverview();
+    announce(sortedModels().length + ' addresses match your filter.');
+  });
   mobileIdentity.addEventListener('change', function () {
-    selectIdentity(mobileIdentity.value);
+    if (mobileIdentity.value === '') {
+      enterOverview({ announce: 'Back to overview' });
+      return;
+    }
+    activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
+    /* identity 会话只有一个地址、也没有 Overview 可回，所以只有 admin 需要这一步。 */
+    if (isAdmin()) refreshInboxIdentities();
     refreshMessages();
+  });
+  overviewRefresh.addEventListener('click', function () {
+    state.overviewPolls = 0;
+    state.overviewLoadingSince = 0;
+    loadOverviewCycle({ refresh: true });
+  });
+  backToOverview.addEventListener('click', function () {
+    enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });
   });
   byId('mobile-back').addEventListener('click', function () {
     inboxView.dataset.mobileView = 'list';
     var active = messageList.querySelector('[aria-current="true"]');
     if (active) active.focus();
   });
+
+  buildSortControls();
 
   (async function start() {
     configureLoginGate();
@@ -976,10 +1847,7 @@ export const UI_JS = `(function () {
       if (!response.ok) throw new Error('request_failed');
       state.me = await response.json();
       showInbox();
-      byId('session-label').textContent = state.me.kind === 'admin'
-        ? 'Admin session'
-        : state.me.address;
-      await loadInbox();
+      await startSession();
     } catch {
       showLogin('Could not reach the server.');
     }
