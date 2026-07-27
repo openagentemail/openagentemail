@@ -296,10 +296,11 @@ export function createUiSessionRoutes(store: UiSessionStore): Hono {
     }
   });
 
-  routes.delete('/', uiSessionAuth(store), (c) => {
-    store.destroy(c.get('uiSessionSid'));
+  routes.delete('/', (c) => {
+    const sid = getCookie(c, COOKIE_NAME);
+    if (sid) store.destroy(sid);
     expireSessionCookie(c);
-    return c.json({ ok: true });
+    return c.body(null, 204);
   });
 
   return routes;

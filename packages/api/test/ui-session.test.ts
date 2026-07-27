@@ -92,13 +92,25 @@ describe('UI session cookie', () => {
         'sec-fetch-site': 'same-origin',
       },
     });
-    expect(logout.status).toBe(200);
+    expect(logout.status).toBe(204);
     expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
 
     const after = await app.request('http://localhost/ui/api/private', {
       headers: { cookie },
     });
     expect(after.status).toBe(401);
+  });
+
+  test('logout is idempotent when no session cookie exists', async () => {
+    const logout = await makeApp().request('http://localhost/ui/api/session', {
+      method: 'DELETE',
+      headers: {
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    expect(logout.status).toBe(204);
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
   });
 
   test('idle, absolute, rotation and deletion all invalidate a session', () => {
