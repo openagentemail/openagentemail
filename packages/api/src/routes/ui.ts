@@ -13,6 +13,7 @@ import {
   uiPrivateHeaders,
   uiSessionAuth,
 } from '../lib/ui-session.ts';
+import { MAX_EMAIL_HTML_LENGTH } from '../lib/sanitize-email-html.ts';
 
 export type UiApiDependencies = {
   listIdentities: () => Identity[];
@@ -94,7 +95,13 @@ export function createUiApiRoutes(
     const detail = await dependencies.getMessage(address, id);
     if (!detail) return c.json({ error: 'not_found' }, 404);
     const { html: _html, ...safeDetail } = detail;
-    return c.json({ ...safeDetail, hasHtml: Boolean(detail.html) });
+    return c.json({
+      ...safeDetail,
+      hasHtml: Boolean(detail.html),
+      htmlTooLarge:
+        typeof detail.html === 'string' &&
+        detail.html.length > MAX_EMAIL_HTML_LENGTH,
+    });
   });
 
   return routes;

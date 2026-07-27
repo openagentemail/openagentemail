@@ -67,6 +67,11 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('allow-scripts');
   });
 
+  test('oversized HTML disables its tab and explains the plain-text fallback', () => {
+    expect(UI_JS).toContain('detail.htmlTooLarge');
+    expect(UI_JS).toContain('too large to preview');
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 

@@ -15,6 +15,7 @@ import type { FetchMessageObject, MessageEnvelopeObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { config } from './config.ts';
 import { extractHttpLinks, extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
+import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
 export interface MessageSummary {
   id: string;
@@ -227,10 +228,12 @@ async function parseSource(source: Buffer) {
 function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>): MessageDetail {
   const text = (parsed.text ?? '').trim() || (parsed.html ? htmlToText(parsed.html) : '');
   const html = typeof parsed.html === 'string' ? parsed.html : undefined;
+  const extractableHtml =
+    html && html.length <= MAX_EMAIL_HTML_LENGTH ? html : undefined;
   const toText = Array.isArray(parsed.to)
     ? parsed.to.map((a) => a.text).join(', ')
     : (parsed.to?.text ?? '');
-  const otp = extractOtp(text, html);
+  const otp = extractOtp(text, extractableHtml);
   return {
     id: String(uid),
     from: parsed.from?.text ?? '',
@@ -240,7 +243,7 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     text,
     ...(html ? { html } : {}),
     otp,
-    links: extractHttpLinks(text, html),
+    links: extractHttpLinks(text, extractableHtml),
   };
 }
 

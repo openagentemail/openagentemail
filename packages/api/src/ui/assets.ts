@@ -817,7 +817,10 @@ export const UI_JS = `(function () {
     htmlTab.textContent = 'HTML preview';
     htmlTab.setAttribute('role', 'tab');
     htmlTab.setAttribute('aria-selected', 'false');
-    htmlTab.disabled = !detail.hasHtml;
+    htmlTab.disabled = !detail.hasHtml || detail.htmlTooLarge;
+    if (detail.htmlTooLarge) {
+      htmlTab.title = 'This email is too large to preview safely.';
+    }
     tabs.append(plainTab, htmlTab);
 
     var body = document.createElement('section');
@@ -834,7 +837,15 @@ export const UI_JS = `(function () {
       renderHtmlBody(body, detail);
     });
 
-    detailContent.append(header, tabs, body);
+    detailContent.append(header, tabs);
+    if (detail.htmlTooLarge) {
+      var htmlUnavailable = document.createElement('p');
+      htmlUnavailable.className = 'notice warning';
+      htmlUnavailable.textContent =
+        'This email is too large to preview safely. Use the plain-text view instead.';
+      detailContent.append(htmlUnavailable);
+    }
+    detailContent.append(body);
     appendOtp(detailContent, detail.otp);
     appendLinks(detailContent, 'Links in this message', detail.links);
   }

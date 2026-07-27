@@ -88,11 +88,13 @@ describe('UI message JSON contract', () => {
     const body = (await response.json()) as {
       html?: string;
       hasHtml?: boolean;
+      htmlTooLarge?: boolean;
       otp: { codes: string[]; links: string[] };
       links: string[];
     };
     expect(body.html).toBeUndefined();
     expect(body.hasHtml).toBe(true);
+    expect(body.htmlTooLarge).toBe(false);
     expect(body.otp).toEqual({
       codes: ['123456'],
       links: ['https://example.net/verify'],
@@ -101,6 +103,31 @@ describe('UI message JSON contract', () => {
       'https://example.net/news',
       'https://example.net/verify',
     ]);
+  });
+
+  test('oversized HTML is disclosed without returning the HTML itself', async () => {
+    const { app, cookie } = makeApp({
+      getMessage: mock(async () => ({
+        id: '3',
+        from: 'large@example.net',
+        to: 'fox@test.example',
+        subject: 'Large',
+        date: '2026-07-27T03:00:00.000Z',
+        text: 'Use the plain-text version.',
+        html: 'x'.repeat(512 * 1024 + 1),
+        otp: { codes: [], links: [] },
+        links: [],
+      })),
+    });
+    const response = await app.request(
+      '/ui/api/messages/3?address=fox%40test.example',
+      { headers: { cookie } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.html).toBeUndefined();
+    expect(body.hasHtml).toBe(true);
+    expect(body.htmlTooLarge).toBe(true);
   });
 
   test('limit is 1-200, defaults to 50 and is passed as an integer', async () => {

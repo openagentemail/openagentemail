@@ -84,7 +84,7 @@ class FakeImapFlow {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
-const { listMessages, waitForMessage } = await import('../src/lib/imap.ts');
+const { getMessage, listMessages, waitForMessage } = await import('../src/lib/imap.ts');
 
 function inboxMessage(uid: number, to: string, deliveredTo: string): FakeMessage {
   return {
@@ -152,6 +152,28 @@ describe('IMAP 列表排序（端到端）', () => {
 
     const summaries = await listMessages('victim@test.example');
     expect(summaries[0]?.hasOtp).toBe(true);
+  });
+});
+
+describe('IMAP 超大 HTML 详情', () => {
+  test('链接与 OTP 提取跳过超限 HTML 部分', async () => {
+    const message = inboxMessage(14, 'victim@test.example', 'victim@test.example');
+    message.source = Buffer.from(
+      'From: sender@example.net\r\n' +
+        'To: victim@test.example\r\n' +
+        'Subject: Oversized HTML\r\n' +
+        'Content-Type: multipart/alternative; boundary=oae\r\n\r\n' +
+        '--oae\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n' +
+        'Plain link https://plain.example/path\r\n' +
+        '--oae\r\nContent-Type: text/html; charset=utf-8\r\n\r\n' +
+        `<a href="https://html.example/should-not-scan">Verify</a>${'x'.repeat(512 * 1024)}\r\n` +
+        '--oae--\r\n',
+    );
+    fakeMessages = [message];
+
+    const detail = await getMessage('victim@test.example', '14');
+    expect(detail?.links).toEqual(['https://plain.example/path']);
+    expect(detail?.otp.links).toEqual([]);
   });
 });
 
