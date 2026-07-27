@@ -41,13 +41,17 @@ describe('email HTML sanitizer', () => {
       '<DIV class=x><P id=y>Hello <STRONG onclick=x>world</STRONG></P>' +
       '<table><thead><tr><th colspan="2" rowspan="-1" title=x>Head</th></tr></thead>' +
       '<tbody><tr><td rowspan="03" colspan="1.5" style=x>Cell</td></tr></tbody></table>' +
+      '<table><tr><td colspan="999" rowspan="1000">Bounded</td>' +
+      '<td colspan="0" rowspan="1">Positive</td></tr></table>' +
       '<section data-x=x>kept text</section></DIV>';
     expect(sanitizeEmailHtml(input)).toEqual({
       kind: 'ok',
       html:
         '<div><p>Hello <strong>world</strong></p>' +
         '<table><thead><tr><th colspan="2">Head</th></tr></thead>' +
-        '<tbody><tr><td rowspan="03">Cell</td></tr></tbody></table>' +
+        '<tbody><tr><td>Cell</td></tr></tbody></table>' +
+        '<table><tr><td colspan="999">Bounded</td>' +
+        '<td rowspan="1">Positive</td></tr></table>' +
         'kept text</div>',
     });
   });

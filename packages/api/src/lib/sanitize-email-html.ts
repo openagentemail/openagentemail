@@ -61,7 +61,7 @@ function tableCellTransform(
   const numericAttributes: Record<string, string> = {};
   for (const name of ['colspan', 'rowspan']) {
     const value = attributes[name];
-    if (value !== undefined && /^\d+$/.test(value)) {
+    if (value !== undefined && /^[1-9]\d{0,2}$/.test(value)) {
       numericAttributes[name] = value;
     }
   }
