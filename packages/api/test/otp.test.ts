@@ -17,6 +17,36 @@ describe('htmlToText', () => {
   test('decodes entities', () => {
     expect(htmlToText('<p>Tom &amp; Jerry &lt;3&nbsp;!</p>')).toBe('Tom & Jerry <3 !');
   });
+
+  // 任何人都能给身份地址发信，所以恶意 HTML 绝不能让读信路径抛异常：
+  // 一封投毒邮件会让 GET /v1/messages/:id 500，并让命中过滤器的 wait_for
+  // 一直空转到超时。
+  describe('malformed numeric entities must not throw', () => {
+    test('十进制码点越界', () => {
+      expect(() => htmlToText('<p>your code &#99999999; 123456</p>')).not.toThrow();
+    });
+
+    test('十六进制码点越界', () => {
+      expect(() => htmlToText('<p>your code &#xFFFFFFFF; 123456</p>')).not.toThrow();
+    });
+
+    test('超长数字（Number() 溢出成 Infinity）', () => {
+      expect(() => htmlToText(`<p>&#${'9'.repeat(400)};</p>`)).not.toThrow();
+    });
+
+    test('越界实体被丢弃，不会被当成验证码提取出来', () => {
+      const otp = extractOtp('', '<p>Your verification code &#99999999; is 123456</p>');
+      expect(otp.codes).toEqual(['123456']);
+    });
+
+    test('合法实体照常解码（U+1F600 等星光面字符）', () => {
+      expect(htmlToText('<p>&#128512;&#x1F600;</p>')).toBe('\u{1F600}\u{1F600}');
+    });
+
+    test('孤立代理项不会漏进输出', () => {
+      expect(htmlToText('<p>a&#55296;b</p>')).toBe('ab');
+    });
+  });
 });
 
 describe('extractCodes', () => {

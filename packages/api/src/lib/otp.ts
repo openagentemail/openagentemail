@@ -54,10 +54,23 @@ export function htmlToText(html: string): string {
   return s.trim();
 }
 
+/**
+ * Numeric entities come from untrusted mail, so an out-of-range code point
+ * must not throw (String.fromCodePoint raises RangeError above U+10FFFF) and
+ * must not survive as digits either — `&#99999999;` left as text would be
+ * mistaken for an 8-digit OTP. Lone surrogates are dropped for the same
+ * reason: they only produce mojibake in the JSON response.
+ */
+function codePointToString(cp: number): string {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return '';
+  if (cp >= 0xd800 && cp <= 0xdfff) return '';
+  return String.fromCodePoint(cp);
+}
+
 function decodeEntities(s: string): string {
   return s
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => codePointToString(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => codePointToString(parseInt(n, 16)))
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
