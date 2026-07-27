@@ -33,6 +33,10 @@ class FakeImapFlow {
     return { release() {} };
   }
 
+  async idle() {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
   async search() {
     return fakeMessages.map((message) => message.uid);
   }
@@ -112,5 +116,37 @@ describe('IMAP 列表排序（端到端）', () => {
 
     const ids = (await listMessages('victim@test.example')).map((m) => m.id);
     expect(ids).toEqual(['12', '11']);
+  });
+});
+
+// 路由层的并发闸门：wait 会占住 IMAP 长连接，超过上限必须直接 429，
+// 而不是再开一条连接。这里跑的是真的 waitForMessage（对着假 IMAP 服务器）。
+describe('POST /v1/messages/wait 并发上限（端到端）', () => {
+  test('同一地址第 4 个并发 wait 拿到 429，而不是第 4 条 IMAP 连接', async () => {
+    const { Hono } = await import('hono');
+    const { messagesRoute } = await import('../src/routes/messages.ts');
+    const { resetWaitSlots, MAX_WAITS_PER_ADDRESS } = await import('../src/lib/ratelimit.ts');
+    resetWaitSlots();
+
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'admin' });
+      await next();
+    });
+    app.route('/v1/messages', messagesRoute);
+
+    const wait = () =>
+      app.request('/v1/messages/wait', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ address: 'busy@test.example', timeoutSec: 1 }),
+      });
+
+    const responses = await Promise.all(
+      Array.from({ length: MAX_WAITS_PER_ADDRESS + 1 }, () => wait()),
+    );
+    const statuses = responses.map((r) => r.status).sort();
+    expect(statuses.filter((s) => s === 429)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 408)).toHaveLength(MAX_WAITS_PER_ADDRESS);
   });
 });

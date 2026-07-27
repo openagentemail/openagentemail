@@ -36,6 +36,6 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `GET /v1/identities` → `{identities:[{address,name?,createdAt}]}`
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
-- `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout"}` (IMAP IDLE + 3 s polling hybrid)
+- `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout"}` (IMAP IDLE + 3 s polling hybrid). Each wait holds an IMAP connection, so they are capped: 3 concurrent per address, 8 in total → `429 {error:"too_many_waits"}`. Each wait holds an IMAP connection, so they are capped: 3 concurrent per address, 8 in total → `429 {error:"too_many_waits"}`
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
 - `GET /healthz` → `{ok:true}`

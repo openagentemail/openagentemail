@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getMessage, listMessages, waitForMessage } from '../lib/imap.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
+import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 
 const listQuerySchema = z.object({
   address: z.string().email(),
@@ -57,9 +58,18 @@ export const messagesRoute = new Hono()
     const { address, fromContains, subjectContains, timeoutSec } = parsed.data;
     const denied = forbidUnlessAddress(c, address);
     if (denied) return denied;
-    const message = await waitForMessage(address, { fromContains, subjectContains }, timeoutSec);
-    if (!message) {
-      return c.json({ error: 'timeout' }, 408);
+    // Each wait pins an IMAP connection for up to 10 minutes; cap how many
+    // can be in flight so one caller can't starve the whole mailbox.
+    if (!acquireWaitSlot(address)) {
+      return c.json({ error: 'too_many_waits', retryAfterSec: 5 }, 429);
     }
-    return c.json(message);
+    try {
+      const message = await waitForMessage(address, { fromContains, subjectContains }, timeoutSec);
+      if (!message) {
+        return c.json({ error: 'timeout' }, 408);
+      }
+      return c.json(message);
+    } finally {
+      releaseWaitSlot(address);
+    }
   });
