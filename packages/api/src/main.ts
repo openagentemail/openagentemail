@@ -16,6 +16,7 @@
  */
 
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { config } from './lib/config.ts';
 import { bearerAuth } from './lib/auth.ts';
 import { startRetentionLoop } from './lib/retention.ts';
@@ -27,6 +28,18 @@ const app = new Hono();
 
 app.get('/healthz', (c) => c.json({ ok: true }));
 
+// Bound the allocation before anything parses JSON. The send schema allows up
+// to 1M characters each for text and html, so 16 MiB leaves room for UTF-8 and
+// JSON escaping while refusing payloads sized to exhaust the process. Ahead of
+// auth on purpose: an unauthenticated caller shouldn't get to stream GiBs in
+// either.
+app.use(
+  '/v1/*',
+  bodyLimit({
+    maxSize: 16 * 1024 * 1024,
+    onError: (c) => c.json({ error: 'request_too_large' }, 413),
+  }),
+);
 app.use('/v1/*', bearerAuth);
 app.route('/v1/identities', identitiesRoute);
 app.route('/v1/messages', messagesRoute);
