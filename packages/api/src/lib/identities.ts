@@ -12,7 +12,7 @@
  * v0.x; swap for sqlite if identity volume ever matters.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
@@ -50,10 +50,21 @@ function load(): Identity[] {
 }
 
 function save(identities: Identity[]): void {
-  mkdirSync(config.dataDir, { recursive: true });
+  // The store holds every identity's token hash — keep it to the owner.
+  // chmod explicitly in both places: mkdirSync's mode does nothing when the
+  // directory already exists, and writeFileSync's mode is masked by umask
+  // and ignored altogether when the temp file already exists.
+  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(config.dataDir, 0o700);
+  } catch {
+    // A bind mount may be owned by another uid; the file mode below still
+    // applies, so this is best effort rather than fatal.
+  }
   const path = storePath();
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(identities, null, 2));
+  writeFileSync(tmp, JSON.stringify(identities, null, 2), { mode: 0o600 });
+  chmodSync(tmp, 0o600);
   renameSync(tmp, path);
 }
 

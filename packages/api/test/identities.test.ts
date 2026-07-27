@@ -1,6 +1,6 @@
 // Identity-store tests. config.ts parses env at import time, so set the
 // required variables BEFORE importing anything that pulls it in.
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -69,5 +69,16 @@ describe('identity tokens', () => {
 
   test('duplicate address returns null', () => {
     expect(createIdentity({ localpart: 'tok-one' })).toBeNull();
+  });
+
+  // 身份库里存着所有身份的令牌哈希，别的本地用户不该读得到。
+  test('store file and data dir are not readable by other users', () => {
+    const dir = process.env.DATA_DIR!;
+    // 模拟"目录已经存在且权限宽松"——mkdirSync 的 mode 对已存在目录不生效，
+    // 只测 mkdtemp 造出来的 0700 目录等于没测（Codex 复核指出的盲点）。
+    chmodSync(dir, 0o755);
+    createIdentity({ localpart: 'tok-perm' });
+    expect(statSync(join(dir, 'identities.json')).mode & 0o077).toBe(0);
+    expect(statSync(dir).mode & 0o077).toBe(0);
   });
 });
