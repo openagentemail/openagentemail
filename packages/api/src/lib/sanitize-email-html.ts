@@ -90,13 +90,14 @@ export type SanitizedEmailHtml =
   | { kind: 'too_large' | 'failed'; html: '' };
 
 export function sanitizeEmailHtml(
-  html: string,
+  html: unknown,
   sanitizer: (dirty: string, options: sanitizeHtml.IOptions) => string = sanitizeHtml,
 ): SanitizedEmailHtml {
-  if (html.length > MAX_EMAIL_HTML_LENGTH) {
-    return { kind: 'too_large', html: '' };
-  }
   try {
+    if (typeof html !== 'string') return { kind: 'failed', html: '' };
+    if (html.length > MAX_EMAIL_HTML_LENGTH) {
+      return { kind: 'too_large', html: '' };
+    }
     return { kind: 'ok', html: sanitizer(html, OPTIONS) };
   } catch {
     return { kind: 'failed', html: '' };

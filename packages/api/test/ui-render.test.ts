@@ -78,4 +78,22 @@ describe('email HTML sanitizer', () => {
     expect(result).toEqual({ kind: 'failed', html: '' });
     expect(result.html).not.toContain('secret');
   });
+
+  test('non-string and hostile runtime inputs fail closed without throwing', () => {
+    for (const input of [undefined, null, 42, { length: 1 }]) {
+      expect(sanitizeEmailHtml(input as unknown as string)).toEqual({
+        kind: 'failed',
+        html: '',
+      });
+    }
+    const hostile = Object.defineProperty({}, 'length', {
+      get() {
+        throw new Error('hostile length getter');
+      },
+    });
+    expect(sanitizeEmailHtml(hostile as unknown as string)).toEqual({
+      kind: 'failed',
+      html: '',
+    });
+  });
 });
