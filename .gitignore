@@ -6,6 +6,7 @@ data/
 # Dependencies & build output
 node_modules/
 dist/
+output/playwright/
 
 # OS noise
 .DS_Store

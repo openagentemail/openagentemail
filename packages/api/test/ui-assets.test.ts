@@ -21,6 +21,7 @@ describe('UI static asset contract', () => {
     expect(await bare.text()).toBe(await slash.text());
     expect(UI_HTML).toContain('href="/ui/styles.css"');
     expect(UI_HTML).toContain('src="/ui/app.js"');
+    expect(UI_HTML).toContain('<link rel="icon" href="data:,">');
   });
 
   test('shell and assets have strict types and an outer CSP', async () => {

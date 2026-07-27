@@ -8,6 +8,7 @@ export const UI_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>OpenAgent Inbox</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/app.js" defer></script>
 </head>
