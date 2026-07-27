@@ -51,6 +51,8 @@ describe('UI session cookie', () => {
     expect(setCookie).not.toContain('Domain=');
     expect(setCookie).not.toContain('Max-Age=');
     expect(setCookie).not.toContain('Secure');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
   });
 
   test('non-local deployments always receive Secure cookies', async () => {

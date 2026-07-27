@@ -220,6 +220,12 @@ export const requireUiOrigin = createMiddleware(async (c, next) => {
   await next();
 });
 
+export const uiPrivateHeaders = createMiddleware(async (c, next) => {
+  c.header('Cache-Control', 'no-store');
+  c.header('Vary', 'Authorization, Cookie');
+  await next();
+});
+
 export function uiSessionAuth(store: UiSessionStore) {
   return createMiddleware(async (c, next) => {
     const sid = getCookie(c, COOKIE_NAME);
@@ -239,6 +245,8 @@ export function uiSessionAuth(store: UiSessionStore) {
 
 export function createUiSessionRoutes(store: UiSessionStore): Hono {
   const routes = new Hono();
+
+  routes.use('*', uiPrivateHeaders);
 
   routes.post('/', async (c) => {
     try {

@@ -14,7 +14,7 @@ import { ImapFlow } from 'imapflow';
 import type { FetchMessageObject, MessageEnvelopeObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { config } from './config.ts';
-import { extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
+import { extractHttpLinks, extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
 
 export interface MessageSummary {
   id: string;
@@ -24,6 +24,7 @@ export interface MessageSummary {
   date: string;
   seen: boolean;
   snippet: string;
+  hasOtp: boolean;
 }
 
 export interface MessageDetail {
@@ -35,6 +36,7 @@ export interface MessageDetail {
   text: string;
   html?: string;
   otp: OtpExtraction;
+  links: string[];
 }
 
 export interface WaitFilters {
@@ -228,6 +230,7 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
   const toText = Array.isArray(parsed.to)
     ? parsed.to.map((a) => a.text).join(', ')
     : (parsed.to?.text ?? '');
+  const otp = extractOtp(text, html);
   return {
     id: String(uid),
     from: parsed.from?.text ?? '',
@@ -236,7 +239,8 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     date: (parsed.date ?? new Date(0)).toISOString(),
     text,
     ...(html ? { html } : {}),
-    otp: extractOtp(text, html),
+    otp,
+    links: extractHttpLinks(text, html),
   };
 }
 
@@ -270,13 +274,17 @@ async function listMessagesWith(
   const summaries: MessageSummary[] = [];
   for (const msg of page) {
     let snippet = '';
+    let hasOtp = false;
     const full = await client.fetchOne(msg.uid, { source: true }, { uid: true });
     if (full && full.source) {
       try {
         const parsed = await parseSource(full.source);
-        snippet = makeSnippet(
-          (parsed.text ?? '').trim() || (parsed.html ? htmlToText(parsed.html) : ''),
-        );
+        const text =
+          (parsed.text ?? '').trim() || (parsed.html ? htmlToText(parsed.html) : '');
+        const html = typeof parsed.html === 'string' ? parsed.html : undefined;
+        snippet = makeSnippet(text);
+        const otp = extractOtp(text, html);
+        hasOtp = otp.codes.length > 0 || otp.links.length > 0;
       } catch {
         // Unparseable message: summary still returns, just without snippet.
       }
@@ -290,6 +298,7 @@ async function listMessagesWith(
       date: (env?.date ?? new Date(0)).toISOString(),
       seen: msg.flags?.has('\\Seen') ?? false,
       snippet,
+      hasOtp,
     });
   }
   return summaries;

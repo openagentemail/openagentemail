@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { extractCodes, extractLinks, extractOtp, htmlToText } from '../src/lib/otp.ts';
+import {
+  extractCodes,
+  extractHttpLinks,
+  extractLinks,
+  extractOtp,
+  htmlToText,
+} from '../src/lib/otp.ts';
 
 describe('htmlToText', () => {
   test('strips tags, scripts and styles, keeps readable text', () => {
@@ -176,6 +182,27 @@ describe('extractOtp (combined)', () => {
   test('newsletter yields nothing', () => {
     const otp = extractOtp('This week in tech: 2024 trends. Read more at https://blog.example.com/posts/42');
     expect(otp).toEqual({ codes: [], links: [] });
+  });
+});
+
+describe('extractHttpLinks', () => {
+  test('collects ordinary body links independently of OTP intent', () => {
+    const html =
+      '<a href="https://example.com/docs?a=1&amp;b=2">Docs</a>' +
+      '<a href="javascript:alert(1)">bad</a>';
+    expect(extractHttpLinks('News: http://news.example/path', html)).toEqual([
+      'https://example.com/docs?a=1&b=2',
+      'http://news.example/path',
+    ]);
+  });
+
+  test('rejects malformed and non-http schemes after URL parsing', () => {
+    expect(
+      extractHttpLinks(
+        'mailto:user@example.com javascript:alert(1) https://valid.example/x',
+        '<a href="data:text/html,bad">bad</a>',
+      ),
+    ).toEqual(['https://valid.example/x']);
   });
 });
 

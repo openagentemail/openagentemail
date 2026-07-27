@@ -130,6 +130,15 @@ function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);
 }
 
+function validatedHttpUrl(candidate: string): string | null {
+  try {
+    const url = new URL(candidate);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract verification-ish links. Prefers the HTML part's anchors (so
  * anchor text like "Verify your email" can qualify a neutral URL), then
@@ -140,9 +149,10 @@ export function extractLinks(text: string, html?: string): string[] {
   const seen = new Set<string>();
   const push = (url: string) => {
     const clean = url.replace(/[.,;]+$/, '');
-    if (!seen.has(clean)) {
-      seen.add(clean);
-      links.push(clean);
+    const validated = validatedHttpUrl(clean);
+    if (validated && !seen.has(validated)) {
+      seen.add(validated);
+      links.push(validated);
     }
   };
 
@@ -164,9 +174,32 @@ export interface OtpExtraction {
 
 /** Full extraction: codes from text, links from text + HTML. */
 export function extractOtp(text: string, html?: string): OtpExtraction {
-  const effectiveText = text.trim() || (html ? htmlToText(html) : '');
+  const effectiveText = [text.trim(), html ? htmlToText(html) : '']
+    .filter(Boolean)
+    .join('\n');
   return {
     codes: extractCodes(effectiveText),
     links: extractLinks(effectiveText, html),
   };
+}
+
+/** All body links for the human UI, independent of OTP intent matching. */
+export function extractHttpLinks(text: string, html?: string): string[] {
+  const links: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate: string) => {
+    const clean = candidate.replace(/[.,;]+$/, '');
+    const validated = validatedHttpUrl(clean);
+    if (validated && !seen.has(validated)) {
+      seen.add(validated);
+      links.push(validated);
+    }
+  };
+
+  if (html) {
+    for (const anchor of extractAnchors(html)) push(anchor.url);
+  }
+  const visibleText = [text, html ? htmlToText(html) : ''].join('\n');
+  for (const match of visibleText.matchAll(BARE_URL_RE)) push(match[0]);
+  return links;
 }

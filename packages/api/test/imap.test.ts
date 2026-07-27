@@ -20,6 +20,7 @@ type FakeMessage = {
   internalDate: Date;
   flags: Set<string>;
   headers: Buffer;
+  source?: Buffer;
 };
 
 let fakeMessages: FakeMessage[] = [];
@@ -63,10 +64,12 @@ class FakeImapFlow {
     if (!message) return false;
     return {
       ...message,
-      source: Buffer.from(
-        `From: sender@example.net\r\nTo: ${message.envelope.to[0]?.address}\r\n` +
-          `Subject: ${message.envelope.subject}\r\n\r\nsecret body`,
-      ),
+      source:
+        message.source ??
+        Buffer.from(
+          `From: sender@example.net\r\nTo: ${message.envelope.to[0]?.address}\r\n` +
+            `Subject: ${message.envelope.subject}\r\n\r\nsecret body`,
+        ),
     };
   }
 
@@ -134,6 +137,21 @@ describe('IMAP 列表排序（端到端）', () => {
 
     const ids = (await listMessages('victim@test.example')).map((m) => m.id);
     expect(ids).toEqual(['12', '11']);
+  });
+
+  test('HTML-only OTP appears in the summary without another IMAP fetch', async () => {
+    const message = inboxMessage(13, 'victim@test.example', 'victim@test.example');
+    message.source = Buffer.from(
+      'From: sender@example.net\r\n' +
+        'To: victim@test.example\r\n' +
+        'Subject: HTML OTP\r\n' +
+        'Content-Type: text/html; charset=utf-8\r\n\r\n' +
+        '<p>Your verification code is <strong>482731</strong>.</p>',
+    );
+    fakeMessages = [message];
+
+    const summaries = await listMessages('victim@test.example');
+    expect(summaries[0]?.hasOtp).toBe(true);
   });
 });
 

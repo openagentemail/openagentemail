@@ -1,0 +1,136 @@
+import { describe, expect, mock, test } from 'bun:test';
+import { Hono } from 'hono';
+import type { Auth } from '../src/lib/auth.ts';
+import type { UiApiDependencies } from '../src/routes/ui.ts';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'imap-secret';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'smtp-secret';
+
+const { bearerAuth } = await import('../src/lib/auth.ts');
+const { UiSessionStore } = await import('../src/lib/ui-session.ts');
+const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+
+const identities = [
+  {
+    address: 'fox@test.example',
+    name: 'Fox',
+    createdAt: '2026-07-27T00:00:00.000Z',
+    tokenHash: 'must-never-leak',
+  },
+  {
+    address: 'owl@test.example',
+    createdAt: '2026-07-27T00:01:00.000Z',
+  },
+];
+
+function dependencies(): UiApiDependencies {
+  return {
+    listIdentities: () => identities,
+    listMessages: mock(async () => []),
+    getMessage: mock(async () => null),
+  };
+}
+
+function authenticatedApp(auth: Auth, deps = dependencies()) {
+  const store = new UiSessionStore({
+    resolveToken: (token) => (token === 'session-token' ? auth : null),
+  });
+  const created = store.create('session-token', '127.0.0.1', Date.now());
+  if (!created.ok) throw new Error('test session was not created');
+
+  const app = new Hono();
+  app.route('/ui/api', createUiApiRoutes(store, deps));
+  return { app, cookie: `oae_ui=${created.sid}`, deps };
+}
+
+describe('UI authorization boundaries', () => {
+  test('admin sees projected identities without internal token fields', async () => {
+    const { app, cookie } = authenticatedApp({ kind: 'admin' });
+    const response = await app.request('/ui/api/identities', {
+      headers: { cookie },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      identities: [
+        {
+          address: 'fox@test.example',
+          name: 'Fox',
+          createdAt: '2026-07-27T00:00:00.000Z',
+        },
+        {
+          address: 'owl@test.example',
+          createdAt: '2026-07-27T00:01:00.000Z',
+        },
+      ],
+    });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
+  });
+
+  test('identity sees only itself and cannot read another inbox', async () => {
+    const deps = dependencies();
+    const { app, cookie } = authenticatedApp(
+      { kind: 'identity', address: 'fox@test.example' },
+      deps,
+    );
+
+    const identityResponse = await app.request('/ui/api/identities', {
+      headers: { cookie },
+    });
+    const identityBody = (await identityResponse.json()) as {
+      identities: unknown[];
+    };
+    expect(identityBody.identities).toEqual([
+      {
+        address: 'fox@test.example',
+        name: 'Fox',
+        createdAt: '2026-07-27T00:00:00.000Z',
+      },
+    ]);
+
+    const denied = await app.request(
+      '/ui/api/messages?address=owl%40test.example',
+      { headers: { cookie } },
+    );
+    expect(denied.status).toBe(403);
+    expect(deps.listMessages).not.toHaveBeenCalled();
+  });
+
+  test('admin may read any inbox while identity may read its own', async () => {
+    for (const auth of [
+      { kind: 'admin' } as const,
+      { kind: 'identity', address: 'fox@test.example' } as const,
+    ]) {
+      const deps = dependencies();
+      const { app, cookie } = authenticatedApp(auth, deps);
+      const response = await app.request(
+        '/ui/api/messages?address=fox%40test.example',
+        { headers: { cookie } },
+      );
+      expect(response.status).toBe(200);
+      expect(deps.listMessages).toHaveBeenCalledWith('fox@test.example', 50);
+    }
+  });
+
+  test('the REST and UI credential entrances never cross', async () => {
+    const { app: uiApp, cookie } = authenticatedApp({ kind: 'admin' });
+    const bearerAgainstUi = await uiApp.request('/ui/api/me', {
+      headers: { authorization: 'Bearer session-token' },
+    });
+    expect(bearerAgainstUi.status).toBe(401);
+    expect(await bearerAgainstUi.json()).toEqual({ error: 'invalid_token' });
+
+    const restApp = new Hono();
+    restApp.use('/v1/*', bearerAuth);
+    restApp.get('/v1/probe', (c) => c.json({ auth: c.get('auth') }));
+    const cookieAgainstRest = await restApp.request('/v1/probe', {
+      headers: { cookie },
+    });
+    expect(cookieAgainstRest.status).toBe(401);
+  });
+});
