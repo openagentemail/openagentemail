@@ -1406,6 +1406,44 @@ try {
       );
       // 让卡片、行与 notice 都画完再拍，否则截到的是半张骨架
       await delay(250);
+      // N1 / §1.4：375×812 首屏必须从 topbar 开始，落焦 Overview 面板不许把页面滚下去
+      if (viewport.mobile) {
+        const firstScreen = await evaluate(`(() => {
+          const box = (selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect();
+            return { top: Math.round(rect.top), bottom: Math.round(rect.bottom) };
+          };
+          return {
+            scrollY: Math.round(window.scrollY),
+            viewport: window.innerHeight,
+            topbar: box('#inbox-view .topbar'),
+            logo: box('.topbar-brand .brand-logo'),
+            signOut: box('#logout-button'),
+            label: box('.mobile-identity label'),
+            labelText: document.querySelector('.mobile-identity label').textContent.trim(),
+            selector: box('#mobile-identity-select')
+          };
+        })()`);
+        const inside = (rect) => rect.top >= 0 && rect.bottom <= firstScreen.viewport;
+        check(
+          firstScreen.scrollY === 0,
+          `N1 the ${fixture.name} mobile first screen starts unscrolled (saw scrollY ${firstScreen.scrollY})`,
+        );
+        check(
+          inside(firstScreen.topbar) && inside(firstScreen.logo) && inside(firstScreen.signOut),
+          `N1 the ${fixture.name} mobile first screen keeps the topbar, logo and Sign out in the viewport ` +
+            `(topbar ${firstScreen.topbar.top}..${firstScreen.topbar.bottom}, ` +
+            `logo ${firstScreen.logo.top}, sign out ${firstScreen.signOut.top})`,
+        );
+        check(
+          firstScreen.labelText === 'Address' &&
+            inside(firstScreen.label) &&
+            inside(firstScreen.selector),
+          `N1 the ${fixture.name} mobile first screen keeps the Address label above its selector in the ` +
+            `viewport (label ${firstScreen.label.top}..${firstScreen.label.bottom}, ` +
+            `selector ${firstScreen.selector.top}..${firstScreen.selector.bottom})`,
+        );
+      }
       matrixShots.push(await screenshot(`${fixture.name}-${viewport.name}`));
       overviewStub = null;
       identitiesStub = null;

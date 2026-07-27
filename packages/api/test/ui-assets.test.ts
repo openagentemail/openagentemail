@@ -229,6 +229,31 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
   });
 
+  // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
+  test('landing on the overview keeps the first screen while a return row still scrolls', () => {
+    expect(UI_JS).toContain('overviewPanel.focus({ preventScroll: true });');
+    // 面板落焦只有这一个入口，别处不许再裸调 overviewPanel.focus()
+    expect(UI_JS).not.toContain('overviewPanel.focus();');
+    expect(UI_JS.split('overviewPanel.focus(').length - 1).toBe(1);
+
+    const enter = UI_JS.slice(
+      UI_JS.indexOf('function enterOverview('),
+      UI_JS.indexOf('function openAddress('),
+    );
+    expect(enter).toContain('var returnRow = opts.returnTo ? rowButtonFor(opts.returnTo) : null;');
+    // 返回行照常 focus()（要滚到那一行）；没有返回行才走不滚动的面板落焦
+    expect(enter).toContain('if (returnRow) returnRow.focus();');
+    expect(enter).toContain('else focusOverviewPanel();');
+    expect(enter).not.toContain('preventScroll');
+
+    // admin 登录落地也走同一个不滚动的入口
+    const startSession = UI_JS.slice(
+      UI_JS.indexOf('async function startSession('),
+      UI_JS.indexOf("loginForm.addEventListener('submit'"),
+    );
+    expect(startSession).toContain('focusOverviewPanel();');
+  });
+
   // F5 / §6 行 11：一封信投给多个地址时计数会重叠，页面上必须解释
   test('the overview explains overlapping counts in its own copy', () => {
     expect(UI_HTML).toContain(

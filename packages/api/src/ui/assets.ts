@@ -1379,13 +1379,24 @@ export const UI_JS = `(function () {
     });
   }
 
+  /* Overview 面板在 375 px 下 min-height 就有 calc(100vh - 66px)，顶上还压着 topbar 与
+     Address 标签，所以普通 focus() 会为了"把整块拉进视口"往下滚一截，首屏看不到 topbar/
+     Sign out/Address（CONSOLIDATED §1.4 要求首屏从 topbar 开始，A66 要求 logo 可见）。
+     面板只是个 tabindex="-1" 的落焦点，本来就不需要滚动，所以这条路径一律 preventScroll。 */
+  function focusOverviewPanel() {
+    overviewPanel.focus({ preventScroll: true });
+  }
+
   function enterOverview(options) {
     var opts = options || {};
     cancelOverviewPoll();
     applyScope('overview', { announce: opts.announce });
     renderOverview();
-    var target = (opts.returnTo && rowButtonFor(opts.returnTo)) || overviewPanel;
-    target.focus();
+    /* 两条聚焦路径分开处理：从 inbox 返回时焦点回到原来那一行，那一行可能在长表格深处，
+       必须照常滚动过去；没有返回行时焦点落在面板上，不滚。 */
+    var returnRow = opts.returnTo ? rowButtonFor(opts.returnTo) : null;
+    if (returnRow) returnRow.focus();
+    else focusOverviewPanel();
     /* 唯一新鲜度口径：generatedAt 的本机年龄 <15 s 就直接重渲染，0 请求。 */
     var age = state.overview
       ? Math.max(0, Date.now() - Date.parse(state.overview.generatedAt))
@@ -1737,7 +1748,7 @@ export const UI_JS = `(function () {
       /* admin 落地 Overview：首屏零 IMAP，不碰 /ui/api/messages。 */
       applyScope('overview');
       renderOverview();
-      overviewPanel.focus();
+      focusOverviewPanel();
       loadOverviewCycle({ refresh: false });
       return;
     }
