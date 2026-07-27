@@ -90,3 +90,41 @@ packages/mcp
 安全变更升级并重跑投毒语料。
 
 DONE
+
+## 返工记录
+
+返工依据：`.arena/JUDGING_B2.md` 的 10 条返工清单。全部变更均在
+`arena/b2-codex` 上追加提交，没有改写历史或 push。
+
+| # | 返工项 | commit / 文件 | 红 → 绿与验证 |
+|---|---|---|---|
+| 1 | token 主体规范化 | `43f44ae`；`packages/api/src/lib/ui-session.ts`、`test/ui-login-limit.test.ts` | `key` 与带空白别名起初无法按同一主体解析；在 `create()` 内先 `trim()` 后，5 个别名会话成功，第 6 个返回 `principal_limit`，目标测试与 typecheck 通过 |
+| 2 | 超大 HTML 显式状态与提取止损 | `6a248f4`；`src/routes/ui.ts`、`src/ui/assets.ts`、`src/lib/imap.ts` | 新增 `htmlTooLarge`、页签禁用与说明、超限 HTML 不参与 OTP/链接提取；4 个失败用例修复后，messages/assets/imap/frame 共 25 项通过 |
+| 3 | 净化器 total function | `f495090`；`src/lib/sanitize-email-html.ts`、`test/ui-render.test.ts` | `undefined/null/number/object` 与恶意 `length` getter 起初会抛错；修复后统一 fail-closed 为 `{kind:"failed",html:""}`，29 项净化/frame 测试通过 |
+| 4 | `colspan/rowspan` 边界 | `178822f`；`src/lib/sanitize-email-html.ts`、`test/ui-render.test.ts` | `0`、前导零、4 位数原会保留；改为只收 1–3 位正整数后快照、frame 与 typecheck 通过 |
+| 5 | 外壳浏览器隔离头 | `c9422cf`；`src/routes/ui-assets.ts`、`test/ui-assets.test.ts` | COOP/CORP/Permissions-Policy 断言先红；补齐 `same-origin` 与禁用敏感能力策略后全绿 |
+| 6 | 客户端详情竞态 | `7580a2f`；`src/ui/assets.ts`、`test/ui-assets.test.ts` | 旧详情请求原先未绑定 identity，且切身份等待 refresh 后才取消；现在切换立即 abort，并以捕获的 address + controller 双重校验，目标测试与 typecheck 通过 |
+| 7 | 复制失败降级 | `5a5f723`；`src/ui/assets.ts`、`test/ui-assets.test.ts` | 抽出可验证的 `selectForManualCopy()`，用 Range/Selection 选中来源节点并核对选中文本；无法选中时给准确人工复制提示 |
+| 8 | 清理截图与 favicon | `c822d1d`、`d6656ef`；`.gitignore`、`src/ui/assets.ts`、`src/routes/ui-assets.ts` | 删除 10 张跟踪截图并忽略 `output/playwright/`；首次 data favicon 在真实 Chrome 被 CSP 拦截，追加改为 `/ui/favicon.ico` 204 + `img-src 'self'`，无 404/CSP 报错 |
+| 9 | 幂等登出 | `a3ab989`；`src/lib/ui-session.ts`、`test/ui-session.test.ts` | 无 cookie 原返回 401、有 cookie 原返回 200；两条失败断言修复后均为 204，cookie 仍 `Max-Age=0`，旧 sid 仍失效 |
+| 10 | 扩大安全验收面 | `0f25cee`、`4ca42d3`；`test/ui-frame.test.ts`、`test/ui-session.test.ts`、`test/ui-authz.test.ts`、`dev/acceptance.mjs` | frame 400/401/403/404/413/500 均精确检查 Content-Type+CSP；12h/24h 精确过期、双凭据入口 401；Chromium 探针监听 `Network.loadingFailed`、所有非预期 ≥400、Log/console/exception/dialog/navigation/外域请求。探针选择器首跑两次超时后按实际 DOM 契约修正，最终真实浏览器通过 |
+
+### 返工最终验证
+
+```text
+packages/api
+  npx -y bun@1.2.21 test             180 pass / 0 fail / 646 expect
+  npx -y bun@1.2.21 run typecheck    PASS
+  npx -y bun@1.2.21 run build        PASS（dist/main.js 4.24 MB）
+
+packages/mcp
+  npx -y bun@1.2.21 test             9 pass / 0 fail / 45 expect
+  npx -y bun@1.2.21 x tsc --noEmit   PASS
+  npx -y bun@1.2.21 run build        PASS（dist/main.js 0.67 MB）
+
+真实 Chromium
+  dev/acceptance.mjs                 PASS
+  资源错误 / script / dialog / 外域请求 / 导航逃逸 / frame 隔离失败：0
+```
+
+REWORK-DONE
