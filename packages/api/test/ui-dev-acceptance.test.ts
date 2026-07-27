@@ -11,5 +11,9 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('Log.entryAdded');
     expect(source).toContain('Page.javascriptDialogOpening');
     expect(source).toContain('Runtime.consoleAPICalled');
+    expect(source).toContain("document.querySelector('.detail-header h2')");
+    expect(source).toContain("candidate.textContent === 'HTML preview'");
+    expect(source).toContain("document.querySelector('.mail-frame')");
+    expect(source).toContain('isExpectedUnauthenticatedProbe');
   });
 });

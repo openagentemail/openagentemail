@@ -59,6 +59,10 @@ function record(kind, value) {
   violations.push(`${kind}: ${String(value).slice(0, 300)}`);
 }
 
+function isExpectedUnauthenticatedProbe(status, url) {
+  return status === 401 && url === `${base}/ui/api/me`;
+}
+
 function send(method, params = {}) {
   const id = ++nextId;
   return new Promise((resolve, reject) => {
@@ -127,7 +131,11 @@ try {
       record('Network.loadingFailed', message.params.errorText);
     } else if (
       message.method === 'Network.responseReceived' &&
-      message.params.response.status >= 400
+      message.params.response.status >= 400 &&
+      !isExpectedUnauthenticatedProbe(
+        message.params.response.status,
+        message.params.response.url,
+      )
     ) {
       record(
         'Network.responseReceived',
@@ -141,7 +149,13 @@ try {
       requestedExternalUrls.add(message.params.request.url);
     } else if (
       message.method === 'Log.entryAdded' &&
-      message.params.entry.level === 'error'
+      message.params.entry.level === 'error' &&
+      !(
+        message.params.entry.source === 'network' &&
+        /^Failed to load resource: the server responded with a status of 401\b/.test(
+          message.params.entry.text,
+        )
+      )
     ) {
       record('Log.entryAdded', message.params.entry.text);
     } else if (message.method === 'Page.javascriptDialogOpening') {
@@ -190,24 +204,24 @@ try {
   );
   await evaluate("document.querySelector('.message-button').click()");
   await waitFor(
-    "document.querySelector('.detail-subject') !== null",
+    "document.querySelector('.detail-header h2') !== null",
     'plain-text detail',
   );
   await evaluate(`(() => {
     const tab = Array.from(document.querySelectorAll('.tab')).find(
-      (candidate) => candidate.textContent === 'HTML'
+      (candidate) => candidate.textContent === 'HTML preview'
     );
     tab.click();
     return true;
   })()`);
   await waitFor(
-    "document.querySelector('.html-frame') !== null",
+    "document.querySelector('.mail-frame') !== null",
     'isolated HTML frame',
   );
   await delay(250);
 
   const containment = await evaluate(`(() => {
-    const frame = document.querySelector('.html-frame');
+    const frame = document.querySelector('.mail-frame');
     return {
       parentMarked: document.body.dataset.pwned === 'yes',
       frameOpaque: frame.contentDocument === null,
