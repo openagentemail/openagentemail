@@ -946,14 +946,17 @@ export const UI_JS = `(function () {
   (async function start() {
     configureLoginGate();
     try {
-      state.me = await apiJson('/ui/api/me');
+      var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
+      if (response.status === 401) { showLogin(''); return; }
+      if (!response.ok) throw new Error('request_failed');
+      state.me = await response.json();
       showInbox();
       byId('session-label').textContent = state.me.kind === 'admin'
         ? 'Admin session'
         : state.me.address;
       await loadInbox();
-    } catch (error) {
-      if (error.message !== 'session_expired') showLogin('');
+    } catch {
+      showLogin('Could not reach the server.');
     }
   })();
 })();`;

@@ -54,6 +54,10 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('window.isSecureContext');
   });
 
+  test('a first visit is not mislabeled as an expired session', () => {
+    expect(UI_JS).toContain("if (response.status === 401) { showLogin(''); return; }");
+  });
+
   test('link and frame creation retain both execution-point defenses', () => {
     expect(UI_JS).toContain("new URL(");
     expect(UI_JS).toContain("protocol !== 'http:'");
