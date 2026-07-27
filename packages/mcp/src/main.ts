@@ -55,7 +55,15 @@ function fail(err: unknown): ToolResult {
 server.tool(
   "mail_new_identity",
   "Create a new email identity (mailbox address) on this openagent.email server. Returns the full address; a random localpart like 'fox-k7d2' is generated.",
-  { name: z.string().optional().describe("Optional display name for the identity") },
+  {
+    // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
+    name: z
+      .string()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Optional display name for the identity"),
+  },
   async ({ name }) => {
     try {
       return ok(await client.createIdentity(name));
@@ -82,7 +90,7 @@ server.tool(
   "mail_list_messages",
   "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet.",
   {
-    address: z.string().describe("Full email address of the identity"),
+    address: z.string().email().describe("Full email address of the identity"),
     limit: z
       .number()
       .int()
@@ -106,8 +114,15 @@ server.tool(
   "mail_read_message",
   "Read a full message: text, html (if any), and extracted OTP verification codes and links.",
   {
-    address: z.string().describe("Full email address of the identity that received it"),
-    id: z.string().describe("Message id from mail_list_messages / mail_wait_for"),
+    address: z
+      .string()
+      .email()
+      .describe("Full email address of the identity that received it"),
+    // 服务端按 Number(id) 要求正整数 UID。
+    id: z
+      .string()
+      .regex(/^[1-9]\d*$/)
+      .describe("Message id from mail_list_messages / mail_wait_for"),
   },
   async ({ address, id }) => {
     try {
@@ -122,13 +137,15 @@ server.tool(
   "mail_wait_for",
   "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error.",
   {
-    address: z.string().describe("Full email address of the identity to watch"),
+    address: z.string().email().describe("Full email address of the identity to watch"),
     fromContains: z
       .string()
+      .max(200)
       .optional()
       .describe("Only match messages whose From contains this substring"),
     subjectContains: z
       .string()
+      .max(200)
       .optional()
       .describe("Only match messages whose Subject contains this substring"),
     timeoutSec: z
@@ -154,11 +171,11 @@ server.tool(
   "mail_send",
   "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
   {
-    from: z.string().describe("Sender address (must be an existing identity)"),
-    to: z.string().describe("Recipient address"),
-    subject: z.string().describe("Subject line"),
-    text: z.string().describe("Plain-text body"),
-    html: z.string().optional().describe("Optional HTML body"),
+    from: z.string().email().describe("Sender address (must be an existing identity)"),
+    to: z.string().email().describe("Recipient address"),
+    subject: z.string().max(998).describe("Subject line"),
+    text: z.string().max(1_000_000).describe("Plain-text body"),
+    html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
   },
   async ({ from, to, subject, text, html }) => {
     try {
