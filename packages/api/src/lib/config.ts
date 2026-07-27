@@ -35,6 +35,9 @@ const envSchema = z.object({
   // Directory for the identity store JSON file.
   DATA_DIR: z.string().default('./data'),
 
+  // Built-in, read-only human inbox. Disable to make every /ui route 404.
+  UI_ENABLED: z.enum(['true', 'false']).default('true'),
+
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
@@ -75,6 +78,7 @@ export const config = {
     ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
     : [raw.DOMAIN.toLowerCase()],
   dataDir: raw.DATA_DIR,
+  uiEnabled: raw.UI_ENABLED === 'true',
   sendRateLimit: raw.SEND_RATE_LIMIT,
   retentionDays: raw.RETENTION_DAYS,
   retentionCheckHours: raw.RETENTION_CHECK_HOURS,

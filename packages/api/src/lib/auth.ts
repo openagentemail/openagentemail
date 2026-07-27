@@ -25,20 +25,27 @@ declare module 'hono' {
   }
 }
 
+/**
+ * Resolve either supported credential to its authorization scope.
+ *
+ * Both Bearer auth and the UI session exchange call this function so token
+ * rotation/deletion and admin-key semantics cannot drift between entrances.
+ */
+export function resolveToken(token: string): Auth | null {
+  if (config.apiKeys.has(token)) return { kind: 'admin' };
+  const identity = findIdentityByToken(token);
+  return identity ? { kind: 'identity', address: identity.address } : null;
+}
+
 export const bearerAuth = createMiddleware(async (c, next) => {
   const header = c.req.header('authorization') ?? '';
   const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
   if (!token) {
     return c.json({ error: 'unauthorized' }, 401);
   }
-  if (config.apiKeys.has(token)) {
-    c.set('auth', { kind: 'admin' });
-    await next();
-    return;
-  }
-  const identity = findIdentityByToken(token);
-  if (identity) {
-    c.set('auth', { kind: 'identity', address: identity.address });
+  const auth = resolveToken(token);
+  if (auth) {
+    c.set('auth', auth);
     await next();
     return;
   }
