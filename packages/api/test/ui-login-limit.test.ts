@@ -89,6 +89,19 @@ describe('UI login resource limits', () => {
     });
   });
 
+  test('whitespace aliases resolve and count as the same token principal', () => {
+    const store = new UiSessionStore({
+      resolveToken: (token) => (token === 'same-token' ? { kind: 'admin' } : null),
+    });
+    for (let i = 0; i < 5; i++) {
+      expect(store.create(`same-token${' '.repeat(i)}`, `192.0.2.${i}`, i).ok).toBe(true);
+    }
+    expect(store.create('\tsame-token\t', '192.0.2.99', 10)).toEqual({
+      ok: false,
+      reason: 'principal_limit',
+    });
+  });
+
   test('a full table never evicts another active session', () => {
     const store = new UiSessionStore({
       resolveToken: anyToken,

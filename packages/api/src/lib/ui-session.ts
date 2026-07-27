@@ -64,6 +64,7 @@ export class UiSessionStore {
 
   create(token: string, ip: string, now = Date.now()): CreateResult {
     this.cleanup(now);
+    token = token.trim();
 
     const ipFailures = this.recentIpFailures(ip, now);
     if (
