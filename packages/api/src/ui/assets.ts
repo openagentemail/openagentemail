@@ -598,9 +598,12 @@ export const UI_JS = `(function () {
 
   async function selectIdentity(address) {
     if (address === state.activeAddress && state.messages.length) return;
+    if (detailController) {
+      detailController.abort();
+      detailController = null;
+    }
     if (refreshController) refreshController.abort();
     await waitForPreviousRefresh();
-    if (detailController) detailController.abort();
     state.activeAddress = address;
     state.messages = [];
     clearDetail();
@@ -853,6 +856,7 @@ export const UI_JS = `(function () {
   async function selectMessage(id) {
     if (detailController) detailController.abort();
     var controller = new AbortController();
+    var requestedDetailAddress = state.activeAddress;
     detailController = controller;
     state.activeMessageId = id;
     renderMessages();
@@ -865,10 +869,13 @@ export const UI_JS = `(function () {
     try {
       var detail = await apiJson(
         '/ui/api/messages/' + encodeURIComponent(id) +
-          '?address=' + encodeURIComponent(state.activeAddress),
+          '?address=' + encodeURIComponent(requestedDetailAddress),
         { signal: controller.signal }
       );
-      if (detailController !== controller) return;
+      if (
+        detailController !== controller ||
+        state.activeAddress !== requestedDetailAddress
+      ) return;
       state.detail = detail;
       renderDetail(detail);
       mainContent.focus();

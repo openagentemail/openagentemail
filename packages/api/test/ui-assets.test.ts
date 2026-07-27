@@ -77,6 +77,20 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('too large to preview');
   });
 
+  test('detail requests cannot cross an identity switch or overwrite newer state', () => {
+    expect(UI_JS).toContain('var requestedDetailAddress = state.activeAddress;');
+    expect(UI_JS).toContain('state.activeAddress !== requestedDetailAddress');
+
+    const selectIdentity = UI_JS.slice(
+      UI_JS.indexOf('async function selectIdentity'),
+      UI_JS.indexOf('async function refreshMessages'),
+    );
+    expect(selectIdentity.indexOf('detailController.abort()')).toBeGreaterThan(-1);
+    expect(selectIdentity.indexOf('detailController.abort()')).toBeLessThan(
+      selectIdentity.indexOf('await waitForPreviousRefresh()'),
+    );
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 
