@@ -5,6 +5,7 @@ import { findIdentity } from '../lib/identities.ts';
 import { sendMail } from '../lib/smtp.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
 import { checkSendLimit } from '../lib/ratelimit.ts';
+import { describeFailure } from '../lib/redact.ts';
 
 const sendSchema = z.object({
   from: z.string().email(),
@@ -56,6 +57,10 @@ export const sendRoute = new Hono().post('/', async (c) => {
     });
     return c.json({ queued: true, messageId }, 200);
   } catch (err) {
-    return c.json({ error: `smtp_error: ${(err as Error).message}` }, 502);
+    // SMTP errors carry server responses, relay hostnames and adapter context
+    // (some adapters even echo the configured password). The operator needs
+    // that in the log; the caller only gets a stable code.
+    console.warn('[smtp] send failed:', describeFailure(err));
+    return c.json({ error: 'smtp_error' }, 502);
   }
 });
