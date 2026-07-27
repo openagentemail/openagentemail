@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { Auth } from '../src/lib/auth.ts';
 import type { UiApiDependencies } from '../src/routes/ui.ts';
+import type { UiFrameDependencies } from '../src/routes/ui-frame.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -132,5 +133,28 @@ describe('UI authorization boundaries', () => {
       headers: { cookie },
     });
     expect(cookieAgainstRest.status).toBe(401);
+  });
+
+  test('frame authorization uses the same identity boundary', async () => {
+    const { createUiFrameRoutes } = await import('../src/routes/ui-frame.ts');
+    const store = new UiSessionStore({
+      resolveToken: (token) =>
+        token === 'frame-token'
+          ? { kind: 'identity', address: 'fox@test.example' }
+          : null,
+    });
+    const created = store.create('frame-token', '127.0.0.1');
+    if (!created.ok) throw new Error('test session was not created');
+    const deps: UiFrameDependencies = {
+      getMessage: mock(async () => null),
+    };
+    const app = new Hono();
+    app.route('/ui/frame', createUiFrameRoutes(store, deps));
+    const response = await app.request(
+      '/ui/frame/1?address=owl%40test.example',
+      { headers: { cookie: `oae_ui=${created.sid}` } },
+    );
+    expect(response.status).toBe(403);
+    expect(deps.getMessage).not.toHaveBeenCalled();
   });
 });

@@ -30,6 +30,7 @@ import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
 import { createUiApiRoutes } from './routes/ui.ts';
+import { createUiFrameRoutes } from './routes/ui-frame.ts';
 
 const app = new Hono();
 
@@ -58,6 +59,7 @@ if (config.uiEnabled) {
   app.use('/ui/api/session', requireUiOrigin);
   app.route('/ui/api/session', createUiSessionRoutes(uiSessions));
   app.route('/ui/api', createUiApiRoutes(uiSessions));
+  app.route('/ui/frame', createUiFrameRoutes(uiSessions));
 }
 
 app.onError((err, c) => {

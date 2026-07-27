@@ -43,7 +43,7 @@ function identityProjection(identity: Identity) {
   };
 }
 
-function validUid(id: string): boolean {
+export function isValidMessageUid(id: string): boolean {
   if (!/^[1-9]\d{0,9}$/.test(id)) return false;
   const uid = Number(id);
   return Number.isSafeInteger(uid) && uid <= 4_294_967_295;
@@ -89,7 +89,7 @@ export function createUiApiRoutes(
     const denied = forbidUnlessAddress(c, address);
     if (denied) return denied;
     const id = c.req.param('id');
-    if (!validUid(id)) return c.json({ error: 'invalid_request' }, 400);
+    if (!isValidMessageUid(id)) return c.json({ error: 'invalid_request' }, 400);
 
     const detail = await dependencies.getMessage(address, id);
     if (!detail) return c.json({ error: 'not_found' }, 404);
