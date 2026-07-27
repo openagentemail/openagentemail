@@ -1,6 +1,6 @@
 // Identity-store tests. config.ts parses env at import time, so set the
 // required variables BEFORE importing anything that pulls it in.
-import { chmodSync, mkdtempSync, statSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -80,5 +80,41 @@ describe('identity tokens', () => {
     createIdentity({ localpart: 'tok-perm' });
     expect(statSync(join(dir, 'identities.json')).mode & 0o077).toBe(0);
     expect(statSync(dir).mode & 0o077).toBe(0);
+  });
+});
+
+// 身份库损坏时绝不能"当成空库继续跑"：随便一次创建/轮换都会把损坏文件
+// 覆盖成"空库 + 新身份"，所有既有身份和令牌一次性丢光。
+describe('identity store 损坏时 fail closed', () => {
+  const storeFile = () => join(process.env.DATA_DIR!, 'identities.json');
+
+  test('截断的 JSON：读取直接抛错，而不是静默返回空库', () => {
+    createIdentity({ localpart: 'before-corrupt' });
+    const good = readFileSync(storeFile(), 'utf8');
+    try {
+      writeFileSync(storeFile(), '[{"address":"x@test.example"');
+      expect(() => listIdentities()).toThrow('identity_store_corrupt');
+      expect(() => findIdentity('before-corrupt@test.example')).toThrow('identity_store_corrupt');
+      expect(() => findIdentityByToken('oa_whatever')).toThrow('identity_store_corrupt');
+      expect(() => createIdentity({ localpart: 'after-corrupt' })).toThrow('identity_store_corrupt');
+    } finally {
+      writeFileSync(storeFile(), good);
+    }
+  });
+
+  test('结构不对（不是身份数组）也算损坏', () => {
+    const good = readFileSync(storeFile(), 'utf8');
+    try {
+      writeFileSync(storeFile(), '{"identities":[]}');
+      expect(() => listIdentities()).toThrow('identity_store_corrupt');
+      writeFileSync(storeFile(), '[{"address":123}]');
+      expect(() => listIdentities()).toThrow('identity_store_corrupt');
+    } finally {
+      writeFileSync(storeFile(), good);
+    }
+  });
+
+  test('修好之后一切照常', () => {
+    expect(listIdentities().some((i) => i.address === 'before-corrupt@test.example')).toBe(true);
   });
 });

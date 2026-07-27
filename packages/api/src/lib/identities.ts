@@ -37,15 +37,31 @@ function storePath(): string {
   return join(config.dataDir, 'identities.json');
 }
 
+function isIdentity(value: unknown): value is Identity {
+  if (!value || typeof value !== 'object') return false;
+  const identity = value as Record<string, unknown>;
+  return (
+    typeof identity.address === 'string' &&
+    typeof identity.createdAt === 'string' &&
+    (identity.name === undefined || typeof identity.name === 'string') &&
+    (identity.tokenHash === undefined || typeof identity.tokenHash === 'string')
+  );
+}
+
 function load(): Identity[] {
   const path = storePath();
   if (!existsSync(path)) return [];
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    return Array.isArray(parsed) ? (parsed as Identity[]) : [];
+    if (!Array.isArray(parsed) || !parsed.every(isIdentity)) {
+      throw new Error('invalid identity store shape');
+    }
+    return parsed;
   } catch {
-    // Corrupt store: better to start empty than to wedge the service.
-    return [];
+    // Fail closed. Treating a damaged store as empty looks harmless until the
+    // next create/rotate saves over it: every existing identity and token is
+    // gone. The message carries no file content on purpose.
+    throw new Error('identity_store_corrupt');
   }
 }
 
