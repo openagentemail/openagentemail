@@ -1,5 +1,5 @@
 export const OUTER_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; font-src 'none'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 export const UI_HTML = `<!doctype html>
 <html lang="en">
@@ -8,7 +8,7 @@ export const UI_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>OpenAgent Inbox</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/ui/favicon.ico">
   <link rel="stylesheet" href="/ui/styles.css">
   <script src="/ui/app.js" defer></script>
 </head>

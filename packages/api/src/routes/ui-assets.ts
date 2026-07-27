@@ -35,4 +35,8 @@ export function registerUiAssets(app: Hono): void {
     c.header('Content-Type', 'text/css; charset=utf-8');
     return c.body(UI_CSS);
   });
+  app.get('/ui/favicon.ico', (c) => {
+    commonHeaders(c);
+    return c.body(null, 204);
+  });
 }
