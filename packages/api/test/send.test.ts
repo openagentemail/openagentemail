@@ -25,6 +25,9 @@ mock.module('../src/lib/smtp.ts', () => ({ sendMail }));
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { describeFailure, redactSecrets } = await import('../src/lib/redact.ts');
+const { isLocalSendFailure } = await import('../src/lib/sendfailure.ts');
+const { checkSendLimit, resetRateLimits } = await import('../src/lib/ratelimit.ts');
+const { config } = await import('../src/lib/config.ts');
 
 const app = new Hono();
 app.use('*', async (c, next) => {
@@ -81,5 +84,54 @@ describe('SMTP 错误脱敏', () => {
     expect(redactSecrets('keep me', ['x'])).toBe('keep me');
     expect(describeFailure('plain string failure')).toContain('plain string failure');
     expect(describeFailure(undefined)).toBeTypeOf('string');
+  });
+});
+
+// 失败的发信要不要退还限流额度，取决于这封信到底走到哪一步了：
+// 对端（或本机邮局）已经应答过 = 信真的打出去过，照常计数；
+// 连都没连上 = 本机故障，不该扣用户的配额。
+describe('发信失败后的配额处理', () => {
+  test('对端拒收（有 SMTP 应答码）不算本机故障', () => {
+    expect(isLocalSendFailure(Object.assign(new Error('rejected'), {
+      code: 'EENVELOPE',
+      responseCode: 550,
+    }))).toBe(false);
+    expect(isLocalSendFailure(Object.assign(new Error('greylisted'), { responseCode: 450 }))).toBe(false);
+  });
+
+  test('连不上/认证失败这类本机故障才退还', () => {
+    expect(isLocalSendFailure(Object.assign(new Error('no route'), { code: 'ECONNECTION' }))).toBe(true);
+    expect(isLocalSendFailure(Object.assign(new Error('bad creds'), { code: 'EAUTH' }))).toBe(true);
+  });
+
+  test('认不出来的错误按"已消耗"处理（宁可严，不给绕过面）', () => {
+    expect(isLocalSendFailure(new Error('mystery'))).toBe(false);
+    expect(isLocalSendFailure(undefined)).toBe(false);
+    expect(isLocalSendFailure({ code: 42 })).toBe(false);
+  });
+
+  test('对端拒收照常计数：限额用完后必须 429，不能无限重试', async () => {
+    expect(config.sendRateLimit).toBeGreaterThan(0);
+    createIdentity({ localpart: 'quota-remote' });
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('550 recipient rejected'), {
+      code: 'EENVELOPE',
+      responseCode: 550,
+    });
+
+    for (let i = 0; i < config.sendRateLimit; i++) {
+      expect((await post('quota-remote@test.example')).status).toBe(502);
+    }
+    expect((await post('quota-remote@test.example')).status).toBe(429);
+  });
+
+  test('本机故障退还额度：配额没被吃掉', async () => {
+    createIdentity({ localpart: 'quota-local' });
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
+
+    expect((await post('quota-local@test.example')).status).toBe(502);
+    // 桶应该是空的：limit=1 的探测仍然放行。
+    expect(checkSendLimit('quota-local@test.example', 1).allowed).toBe(true);
   });
 });

@@ -4,7 +4,8 @@ import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { sendMail } from '../lib/smtp.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
-import { checkSendLimit } from '../lib/ratelimit.ts';
+import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
+import { isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
 
 const sendSchema = z.object({
@@ -57,6 +58,9 @@ export const sendRoute = new Hono().post('/', async (c) => {
     });
     return c.json({ queued: true, messageId }, 200);
   } catch (err) {
+    // Our own mail server being unreachable shouldn't cost the user a slot;
+    // anything the server actually answered to stays counted.
+    if (isLocalSendFailure(err)) releaseSendLimit(from, limit.reservation);
     // SMTP errors carry server responses, relay hostnames and adapter context
     // (some adapters even echo the configured password). The operator needs
     // that in the log; the caller only gets a stable code.

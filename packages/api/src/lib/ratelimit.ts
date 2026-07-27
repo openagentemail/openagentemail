@@ -14,6 +14,8 @@ export interface RateLimitResult {
   retryAfterSec: number;
   /** Messages sent within the current window (after counting this one). */
   count: number;
+  /** Handle for releaseSendLimit(), set only when the send was allowed. */
+  reservation?: number;
 }
 
 const buckets = new Map<string, number[]>();
@@ -38,7 +40,23 @@ export function checkSendLimit(
 
   stamps.push(now);
   buckets.set(key, stamps);
-  return { allowed: true, retryAfterSec: 0, count: stamps.length };
+  return { allowed: true, retryAfterSec: 0, count: stamps.length, reservation: now };
+}
+
+/**
+ * Hand a slot back. Only for failures that never reached the mail server —
+ * see isLocalSendFailure(); refunding rejected deliveries would let a caller
+ * retry forever without ever spending quota.
+ */
+export function releaseSendLimit(address: string, reservation: number | undefined): void {
+  if (reservation === undefined) return;
+  const key = address.toLowerCase();
+  const stamps = buckets.get(key);
+  if (!stamps) return;
+  const index = stamps.lastIndexOf(reservation);
+  if (index < 0) return;
+  stamps.splice(index, 1);
+  if (stamps.length === 0) buckets.delete(key);
 }
 
 /** Test helper: wipe all windows. */
