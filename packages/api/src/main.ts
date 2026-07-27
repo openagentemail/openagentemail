@@ -18,8 +18,14 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { config } from './lib/config.ts';
-import { bearerAuth } from './lib/auth.ts';
+import { bearerAuth, resolveToken } from './lib/auth.ts';
 import { startRetentionLoop } from './lib/retention.ts';
+import {
+  UiSessionStore,
+  createUiSessionRoutes,
+  requireUiOrigin,
+  uiSessionBodyLimit,
+} from './lib/ui-session.ts';
 import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
@@ -44,6 +50,13 @@ app.use('/v1/*', bearerAuth);
 app.route('/v1/identities', identitiesRoute);
 app.route('/v1/messages', messagesRoute);
 app.route('/v1/send', sendRoute);
+
+if (config.uiEnabled) {
+  const uiSessions = new UiSessionStore({ resolveToken });
+  app.use('/ui/api/session', uiSessionBodyLimit);
+  app.use('/ui/api/session', requireUiOrigin);
+  app.route('/ui/api/session', createUiSessionRoutes(uiSessions));
+}
 
 app.onError((err, c) => {
   console.error('[api] unhandled error:', err);
