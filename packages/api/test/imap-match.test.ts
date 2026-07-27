@@ -19,7 +19,7 @@ process.env.SMTP_PASS = 'x';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-imap-'));
 
 const { describe, expect, test } = await import('bun:test');
-const { messageMatchesAddress } = await import('../src/lib/imap.ts');
+const { messageMatchesAddress, receivedAtMs } = await import('../src/lib/imap.ts');
 
 /** 造一个只带必要字段的 IMAP 抓取结果（envelope + 收件头）。 */
 function fakeMessage(opts: {
@@ -136,5 +136,39 @@ describe('messageMatchesAddress — 越权读取必须被挡住', () => {
 
   test('没有任何头且信封不含自己时不匹配', () => {
     expect(messageMatchesAddress(fakeMessage({ to: ['a@test.example'] }), 'b@test.example')).toBe(false);
+  });
+});
+
+// 排序决定 wait_for 认哪封是"最新的一封"。信封里的 Date 是发件人自己写的，
+// 可以随便伪造；必须以 IMAP 服务器记录的收信时间（INTERNALDATE）为准。
+describe('receivedAtMs — 按服务器收信时间排序', () => {
+  const dated = (internal?: string, claimed?: string): any => ({
+    uid: 1,
+    ...(internal ? { internalDate: new Date(internal) } : {}),
+    envelope: claimed ? { date: new Date(claimed) } : {},
+  });
+
+  test('优先用 internalDate，而不是发件人声明的 Date', () => {
+    expect(receivedAtMs(dated('2026-07-01T00:00:00Z', '2999-01-01T00:00:00Z'))).toBe(
+      Date.parse('2026-07-01T00:00:00Z'),
+    );
+  });
+
+  test('没有 internalDate 时回落到信封 Date', () => {
+    expect(receivedAtMs(dated(undefined, '2026-07-01T00:00:00Z'))).toBe(
+      Date.parse('2026-07-01T00:00:00Z'),
+    );
+  });
+
+  test('两者都没有时给 0，不会产生 NaN 把排序打乱', () => {
+    expect(receivedAtMs(dated())).toBe(0);
+    expect(receivedAtMs({ uid: 1, envelope: { date: new Date('not a date') } } as any)).toBe(0);
+  });
+
+  test('伪造未来 Date 的邮件不能顶到最前面', () => {
+    // 攻击者把 Date 写成 2999 年，想让自己的假验证码永远排在真验证码前面。
+    const spoofed = dated('2026-07-01T10:00:00Z', '2999-01-01T00:00:00Z');
+    const real = dated('2026-07-01T10:05:00Z', '2026-07-01T10:05:00Z');
+    expect([spoofed, real].sort((a, b) => receivedAtMs(b) - receivedAtMs(a))[0]).toBe(real);
   });
 });

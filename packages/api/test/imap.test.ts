@@ -95,3 +95,22 @@ describe('IMAP identity isolation (end to end)', () => {
     expect((await listMessages('victim@test.example')).map((m) => m.id)).toEqual(['8']);
   });
 });
+
+describe('IMAP 列表排序（端到端）', () => {
+  beforeEach(() => {
+    fakeMessages = [];
+  });
+
+  test('按服务器收信时间排序，伪造的未来 Date 顶不上去', async () => {
+    const spoofed = inboxMessage(11, 'victim@test.example', 'victim@test.example');
+    spoofed.envelope.date = new Date('2999-01-01T00:00:00Z');
+    spoofed.internalDate = new Date('2026-07-27T09:00:00Z');
+    const real = inboxMessage(12, 'victim@test.example', 'victim@test.example');
+    real.envelope.date = new Date('2026-07-27T09:05:00Z');
+    real.internalDate = new Date('2026-07-27T09:05:00Z');
+    fakeMessages = [spoofed, real];
+
+    const ids = (await listMessages('victim@test.example')).map((m) => m.id);
+    expect(ids).toEqual(['12', '11']);
+  });
+});

@@ -194,6 +194,22 @@ export function messageMatchesAddress(msg: FetchMessageObject, address: string):
   );
 }
 
+/**
+ * When the server actually received the message. The envelope Date is written
+ * by the sender and can be anything (spam routinely carries far-future
+ * dates), so INTERNALDATE wins — otherwise one forged header pins a message
+ * to the top of the list and shadows the real mail from `wait_for`.
+ */
+export function receivedAtMs(msg: FetchMessageObject): number {
+  // imapflow hands back a Date normally, a string on some servers.
+  const toMs = (value?: string | Date): number | undefined => {
+    if (!value) return undefined;
+    const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+    return Number.isFinite(ms) ? ms : undefined;
+  };
+  return toMs(msg.internalDate) ?? toMs(msg.envelope?.date) ?? 0;
+}
+
 function makeSnippet(text: string, max = 140): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
@@ -239,15 +255,13 @@ async function listMessagesWith(
   const matched: FetchMessageObject[] = [];
   for await (const msg of client.fetch(
     recent,
-    { envelope: true, flags: true, headers: ['delivered-to'] },
+    { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
     { uid: true },
   )) {
     if (messageMatchesAddress(msg, address)) matched.push(msg);
   }
 
-  matched.sort(
-    (a, b) => (b.envelope?.date?.getTime() ?? 0) - (a.envelope?.date?.getTime() ?? 0),
-  );
+  matched.sort((a, b) => receivedAtMs(b) - receivedAtMs(a));
   const page = matched.slice(0, limit);
 
   const summaries: MessageSummary[] = [];
