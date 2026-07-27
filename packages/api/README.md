@@ -34,7 +34,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?}` (409 if taken)
 - `GET /v1/identities` → `{identities:[{address,name?,createdAt}]}`
-- `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`
+- `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout"}` (IMAP IDLE + 3 s polling hybrid). Each wait holds an IMAP connection, so they are capped: 3 concurrent per address, 8 in total → `429 {error:"too_many_waits"}`
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
@@ -42,6 +42,12 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 
 ## Operating notes
 
+- **Inbox scan window.** Every identity reads the same catch-all mailbox, and
+  list/wait scan its newest 500 messages (`SCAN_BACK` in `src/lib/imap.ts`) to
+  find the ones addressed to the caller. Mail that is still within
+  `RETENTION_DAYS` but sits behind 500 newer messages is invisible to the API.
+  Keep `RETENTION_DAYS` tight enough that the mailbox stays well under that,
+  or raise `SCAN_BACK` (it costs one envelope fetch per message per call).
 - **Identity store integrity.** `DATA_DIR/identities.json` is the only copy of
   every identity and its token hash, and it is written 0600 in a 0700 dir. If
   it is ever damaged (manual edit, filesystem trouble) the API **fails closed**
