@@ -79,3 +79,13 @@
 - **测试与 `config` 单例的耦合**：`config.ts` 在 import 时解析环境变量，同一次 `bun test` 里由最先 import 它的文件定终身。本次新增的测试凡是涉及密码/限额的，都改成显式传参或只断言与配置无关的性质（例如"不是 413"而不是"是 403"），避免出现依赖文件执行顺序的假绿。
 
 DONE
+
+## 终检返工（2026-07-27）
+
+- **FAIL-1（蓝图 #9）** `170a533` —— `packages/api/src/lib/redact.ts` 跳过长度 <4 的密码，而 config 对 `IMAP_PASS`/`SMTP_PASS` 只要求 `min(1)`，1–3 字符的合法密码会原样进服务端日志。改为**任意长度的非空密码一律脱敏**（按长度降序替换，避免长短密码互相截断；空串跳过以免把整段文本切碎）。回归测试 `test/send.test.ts`："再短的配置密码也要脱敏"、"空密码不会把整段文本切碎"、"多个密码同时脱敏，长的优先，避免互相截断"，改前 2 红改后全绿；顺带把一条依赖 config 单例密码的旧断言改成显式传参。API 104 pass / 0 fail。
+- **FAIL-2（蓝图 #12）** `62e27a0` —— `packages/mcp/src/lib/client.ts` 的 `apiUrlForDisplay` 在 `new URL()` 失败时只剥 userinfo、其余原样返回，而 URL 之所以非法通常正是因为用户手敲错了，凭据就在那串错东西里（`http://[::1?token=…`、`://bad?api_key=…` 实测全泄漏）。解析失败路径现在同样脱敏 **userinfo + 形似凭据的 key=value（token/key/secret/pass/auth/credential）+ 整个 fragment**，同时保留主机和无关参数（`?apiKey=REDACTED&page=2`）。回归测试 `packages/mcp/test/client.test.ts`"解析失败的 URL 也要把敏感 query 抹掉"含终检给的两个非法 URL 加一个 userinfo+query+fragment 混合用例，改前红改后绿。MCP 9 pass / 0 fail，tsc + build 通过。
+
+返工后全量：**API 104 pass / 0 fail，MCP 9 pass / 0 fail**，两包 `tsc --noEmit` 与 `bun run build` 均通过；历史未回滚，两处修复以追加 commit 落在 `arena/b1-final` 上。
+
+REWORK-DONE
+
