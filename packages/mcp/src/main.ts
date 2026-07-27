@@ -87,9 +87,11 @@ server.tool(
       .number()
       .int()
       .min(1)
-      .max(500)
+      // The API rejects anything above 200 with 400 invalid_request, so the
+      // tool schema must not advertise a range the server refuses.
+      .max(200)
       .optional()
-      .describe("Max messages to return (server default 50)"),
+      .describe("Max messages to return (1-200, server default 50)"),
   },
   async ({ address, limit }) => {
     try {

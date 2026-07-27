@@ -15,7 +15,8 @@
   "scripts": {
     "build": "bun build src/main.ts --target node --outfile dist/main.js",
     "prepublishOnly": "bun run build",
-    "start": "bun run src/main.ts"
+    "start": "bun run src/main.ts",
+    "test": "bun test"
   },
   "engines": {
     "node": ">=18"
