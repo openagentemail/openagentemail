@@ -1429,6 +1429,80 @@ describe('Overview 缓存状态机', () => {
     }
   });
 
+  // A49 / A50：同步 throw 的扫描函数（注入依赖完全可以是同步实现）
+  test('同步抛错的扫描不会让 getOverview reject，也不会遗留截止定时器', async () => {
+    const SCAN_DEADLINE_MS = 7654;
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const deadlines = new Map<unknown, { cleared: boolean; fired: boolean }>();
+    globalThis.setTimeout = ((handler: (...args: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+      let id: unknown;
+      const tracked = ms === SCAN_DEADLINE_MS;
+      const wrapped = tracked
+        ? () => {
+            const entry = deadlines.get(id);
+            if (entry) entry.fired = true;
+            handler();
+          }
+        : handler;
+      id = (realSetTimeout as unknown as (...args: unknown[]) => unknown)(wrapped, ms, ...rest);
+      if (tracked) deadlines.set(id, { cleared: false, fired: false });
+      return id;
+    }) as unknown as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((id: unknown) => {
+      const entry = deadlines.get(id);
+      if (entry) entry.cleared = true;
+      (realClearTimeout as unknown as (value: unknown) => void)(id);
+    }) as unknown as typeof globalThis.clearTimeout;
+
+    let unhandled = 0;
+    const counter = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', counter);
+    try {
+      let calls = 0;
+      const cache = createOverviewCache({
+        // 同步 throw：既没有 async 包装，也没有返回 Promise
+        scan: () => {
+          calls += 1;
+          throw new Error('sync boom');
+        },
+        clock: () => T0,
+        scanDeadlineMs: SCAN_DEADLINE_MS,
+        responseBudgetMs: 500,
+        failureCooldownMs: 5000,
+      });
+
+      // ①不 reject：走的是正常的 unavailable 出口
+      const outcome = await cache.getOverview({ refresh: false, identityAddresses: ADDRESSES });
+      expect(outcome.kind).toBe('unavailable');
+      expect(outcome.kind === 'unavailable' && outcome.reason).toBe('imap_unavailable');
+      expect(outcome.kind === 'unavailable' && outcome.retryAfterSeconds).toBe(5);
+      expect(calls).toBe(1);
+
+      // ②截止定时器已被 finally 清掉，永远不会烧到 9 s 后才触发
+      expect(deadlines.size).toBe(1);
+      for (const entry of deadlines.values()) {
+        expect(entry.cleared).toBe(true);
+        expect(entry.fired).toBe(false);
+      }
+
+      // ③失败照常进冷却：期间不再起新扫描，且仍然不 reject
+      const cooling = await cache.getOverview({ refresh: true, identityAddresses: ADDRESSES });
+      expect(cooling.kind).toBe('unavailable');
+      expect(calls).toBe(1);
+
+      // ④没有未处理的 rejection
+      await delay(20);
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', counter);
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  });
+
   // A50b：单一时钟域
   test('整条链路只用注入的时钟，真实 Date.now 拨快一小时也影响不到它', async () => {
     // 注入的时钟永远落后真实时间一小时

@@ -197,6 +197,66 @@ describe('UI static asset contract', () => {
     expect(selectMessage).not.toContain('mainContent.focus()');
   });
 
+  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview 之外的两条入口
+  test('the sidebar address and the mobile selector both reach the inbox from the overview', () => {
+    // 唯一的移动 selector 必须挂在两个 <main> 之外，否则 scope=overview 会把它一起藏掉
+    const layout = UI_HTML.indexOf('<div class="inbox-layout">');
+    const selector = UI_HTML.indexOf('id="mobile-identity-select"');
+    const overviewMain = UI_HTML.indexOf('<main id="overview-panel"');
+    const inboxMain = UI_HTML.indexOf('<main id="main-content"');
+    expect(UI_HTML.split('id="mobile-identity-select"').length - 1).toBe(1);
+    expect(selector).toBeGreaterThan(layout);
+    expect(selector).toBeLessThan(overviewMain);
+    expect(selector).toBeLessThan(inboxMain);
+    expect(UI_HTML).toContain('<label for="mobile-identity-select">Address</label>');
+    // 移动端只有 .inbox-layout 展开成 block，所以这层包装在两个 scope 都可见
+    expect(UI_CSS).toContain('.mobile-back, .mobile-identity { display: none; }');
+    expect(UI_CSS).toContain('.mobile-identity { display: grid;');
+
+    // 两条入口在 overview scope 下都走 openAddress（它才会切 scope、播报、聚焦）
+    expect(UI_JS).toContain('function activateAddress(address) {');
+    const activate = UI_JS.slice(
+      UI_JS.indexOf('function activateAddress(address) {'),
+      UI_JS.indexOf('function filteredIdentities('),
+    );
+    expect(activate).toContain("if (state.scope === 'overview') {");
+    expect(activate).toContain('openAddress(address);');
+    expect(activate).toContain('selectIdentity(address);');
+    expect(UI_JS).toContain('activateAddress(identity.address);');
+    expect(UI_JS).toContain('activateAddress(mobileIdentity.value);');
+    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview）
+    expect(UI_JS).not.toContain('selectIdentity(identity.address);');
+    expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
+  });
+
+  // F5 / §6 行 11：一封信投给多个地址时计数会重叠，页面上必须解释
+  test('the overview explains overlapping counts in its own copy', () => {
+    expect(UI_HTML).toContain(
+      '<p id="overview-overlap" class="overview-subtitle">Counts overlap when one email is addressed to several addresses.</p>',
+    );
+    const subtitle = UI_HTML.indexOf('id="overview-subtitle"');
+    const overlap = UI_HTML.indexOf('id="overview-overlap"');
+    const updated = UI_HTML.indexOf('id="overview-updated"');
+    expect(subtitle).toBeLessThan(overlap);
+    expect(overlap).toBeLessThan(updated);
+  });
+
+  // F6 / §6 行 19：活动地址消失 → 回 Overview 并播报
+  test('a deleted active address migrates the inbox back to the overview', () => {
+    const reconcile = UI_JS.slice(
+      UI_JS.indexOf('function reconcileActiveAddress() {'),
+      UI_JS.indexOf('function refreshInboxIdentities() {'),
+    );
+    expect(reconcile).toContain('if (!state.activeAddress) return;');
+    expect(reconcile).toContain("state.activeAddress = '';");
+    expect(reconcile).toContain("if (state.scope !== 'inbox') return;");
+    expect(reconcile).toContain("announce: lost + ' is no longer available. Back to overview.'");
+    // 两个触发点：Overview 周期的 /identities，以及 inbox 里 admin 的手动 Refresh
+    expect(UI_JS).toContain('      reconcileActiveAddress();');
+    expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
+    expect(UI_JS.split('reconcileActiveAddress();').length - 1).toBe(2);
+  });
+
   // A18 / A19 / A20 / A21
   test('the three assets stay free of parser sinks, remote references and CSP drift', () => {
     for (const asset of [UI_HTML, UI_CSS, UI_JS]) {
@@ -302,6 +362,37 @@ describe('UI static asset contract', () => {
       'Some counts are incomplete for messages with very large recipient lists (shown as ≥ or Unknown).',
     );
     expect(UI_JS).toContain("if (!scan || !scan.skipped) {");
+  });
+
+  // F3 / §2.4 / §10 条 1：exact:false 时总计卡片也是下界，不许摆出精确外观
+  test('total cards fall back to the same lower-bound format as the rows', () => {
+    const bound = UI_JS.slice(
+      UI_JS.indexOf('function boundParts(value, exact) {'),
+      UI_JS.indexOf('function appendCell('),
+    );
+    expect(bound).toContain('if (exact) return { text: formatNumber(value) };');
+    expect(bound).toContain("text: '≥' + formatNumber(value)");
+    expect(bound).toContain("text: 'Unknown'");
+    expect(bound).toContain('Lower bound — this scan hit its recipient limit.');
+    expect(bound).toContain('Not counted — this scan hit its recipient limit.');
+
+    const stats = UI_JS.slice(
+      UI_JS.indexOf('function renderOverviewStats() {'),
+      UI_JS.indexOf('function renderOverviewMeta() {'),
+    );
+    expect(stats).toContain('var exact = !totals || totals.exact !== false;');
+    expect(stats).toContain('windowed = boundParts(totals.matchedInWindow, exact);');
+    expect(stats).toContain("card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);");
+    expect(stats).toContain(
+      "card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);",
+    );
+    // 三个下界字段都不许再无条件 formatNumber；地址数是身份派生量，仍然精确
+    expect(stats).not.toContain('formatNumber(totals.matchedInWindow)');
+    expect(stats).not.toContain('formatNumber(totals.unseenInWindow)');
+    expect(stats).not.toContain('formatNumber(totals.activeAddresses)');
+    expect(stats).toContain('formatNumber(totals.addresses)');
+    // unmatchedInWindow 从来不进 DOM
+    expect(UI_JS).not.toContain('unmatchedInWindow');
   });
 
   // §5.5：唯一轮询规则 + 15 次/20 s 上限

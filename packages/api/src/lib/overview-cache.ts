@@ -198,8 +198,14 @@ export function createOverviewCache(deps: OverviewCacheDependencies): OverviewCa
       controller.abort();
     }, scanDeadlineMs);
 
-    flight.promise = deps
-      .scan({ signal: controller.signal, identityAddresses })
+    // Promise 边界：注入的扫描函数**同步**抛错时，异常必须也变成下面 .catch 的
+    // 输入，否则它会直接从 ensureFlight/getOverview 冒出去（违反"永不 reject"），
+    // 而且 .finally 还没建立，上面那个截止定时器就没人清了。
+    // 用 async IIFE 而不是 Promise.resolve().then(...)：两者都建立 Promise 边界，
+    // 但 IIFE 的函数体同步执行到底，扫描仍在本函数内**同步发起** —— 截止定时器、
+    // abort 监听与底层 connect 的相对顺序（H3）因此一个字节都没变。
+    flight.promise = (async () =>
+      deps.scan({ signal: controller.signal, identityAddresses }))()
       .then((result) => {
         // 迟到结果不写回
         if (flight.deadlineExceeded) return;

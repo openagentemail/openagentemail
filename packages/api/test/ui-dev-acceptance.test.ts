@@ -104,6 +104,49 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A60 exactly one sort button is pressed');
   });
 
+  // F2：侧栏地址与移动 selector 两条激活路径
+  test('both non-row entries into the inbox are exercised in a real browser', () => {
+    expect(source).toContain('F2 the sidebar address opens its own inbox');
+    expect(source).toContain('F2 the sidebar address switches the visible main to the inbox');
+    expect(source).toContain('F2 the mobile overview shows the address selector');
+    expect(source).toContain(
+      'F2 the selector lives outside the inbox main, so scope=overview cannot hide it',
+    );
+    expect(source).toContain('F2 the mobile selector enters the chosen inbox');
+    expect(source).toContain("new Event('change', { bubbles: true })");
+  });
+
+  // F3：exact:false 的总计卡片
+  test('the inexact fixture asserts the total cards render bounds', () => {
+    expect(source).toContain('F3 the IN WINDOW card shows a bound');
+    expect(source).toContain('F3 a zero lower bound reads Unknown, never 0');
+    expect(source).toContain('F3 the exact ADDRESSES card keeps its plain number');
+    expect(source).toContain('F3 the disclosure now matches what the DOM actually shows');
+    expect(source).toContain('exact: false');
+  });
+
+  // F6：活动地址被删后的自愈迁移
+  test('the removed-identity probe drives the migration back to the overview', () => {
+    expect(source).toContain('F6 the removal is announced');
+    expect(source).toContain('F6 the stale active address is cleared');
+    expect(source).toContain('F6 the user lands back on the overview');
+    expect(source).toContain("document.querySelector('#refresh-button').click()");
+    expect(source).toContain('new MutationObserver(');
+  });
+
+  // A69：五状态 × 桌面/移动 的 10 张截图矩阵
+  test('the screenshot matrix covers five states on both breakpoints and is verified on disk', () => {
+    expect(source).toContain('MATRIX_VIEWPORTS');
+    expect(source).toContain('width: 1440');
+    expect(source).toContain('height: 900');
+    expect(source).toContain('A69 all 10 matrix screenshots exist');
+    for (const stateName of ['ready', 'stale', 'loading', 'unavailable', 'empty']) {
+      expect(source).toContain(`name: '${stateName}'`);
+    }
+    expect(source).toContain("for (const viewportName of ['desktop', 'mobile'])");
+    expect(source).toContain('missingShots');
+  });
+
   // A66 / A67 / A68：品牌、安全上下文闸门、复制反馈
   test('brand, insecure-context, and copy probes are present', () => {
     expect(source).toContain('A66 topbar logo is 24x24');

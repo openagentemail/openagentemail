@@ -73,11 +73,17 @@ export const UI_HTML = `<!doctype html>
         </nav>
       </aside>
 
+      <div class="mobile-identity">
+        <label for="mobile-identity-select">Address</label>
+        <select id="mobile-identity-select"></select>
+      </div>
+
       <main id="overview-panel" class="overview-panel" tabindex="-1" aria-labelledby="overview-title" hidden>
         <div class="panel-heading overview-heading">
           <div>
             <h2 id="overview-title">Overview</h2>
             <p id="overview-subtitle" class="overview-subtitle">All addresses · counts from the newest 500 messages</p>
+            <p id="overview-overlap" class="overview-subtitle">Counts overlap when one email is addressed to several addresses.</p>
             <p id="overview-updated" class="overview-updated"></p>
           </div>
           <button id="overview-refresh" class="quiet" type="button">Refresh</button>
@@ -104,10 +110,6 @@ export const UI_HTML = `<!doctype html>
               <h2 id="messages-title" tabindex="-1">Messages</h2>
             </div>
             <button id="refresh-button" class="quiet" type="button">Refresh</button>
-          </div>
-          <div class="mobile-identity">
-            <label for="mobile-identity-select">Address</label>
-            <select id="mobile-identity-select"></select>
           </div>
           <div id="message-state" class="empty-state"></div>
           <ol id="message-list" class="message-list"></ol>
@@ -737,6 +739,17 @@ export const UI_JS = `(function () {
     if (opts.announce) announce(opts.announce);
   }
 
+  /* 侧栏地址项与移动 <select> 是 Overview 之外的两条入口：在 overview scope 下
+     它们必须和表格行走同一条路（openAddress 会切 scope、播报、聚焦），否则会在
+     不可见的 inbox 里取消息、画面却停在 Overview。 */
+  function activateAddress(address) {
+    if (state.scope === 'overview') {
+      openAddress(address);
+      return;
+    }
+    selectIdentity(address);
+  }
+
   function filteredIdentities() {
     var needle = state.identityFilter.toLowerCase();
     if (!needle) return state.identities;
@@ -801,7 +814,7 @@ export const UI_JS = `(function () {
       address.textContent = identity.address;
       button.append(name, address);
       button.addEventListener('click', function () {
-        selectIdentity(identity.address);
+        activateAddress(identity.address);
       });
       item.append(button);
       identityList.append(item);
@@ -884,6 +897,19 @@ export const UI_JS = `(function () {
       };
     }
     return { text: 'Unknown', flat: true, title: 'Not counted — this scan hit its recipient limit.' };
+  }
+
+  /* 聚合卡片与行级共用同一套界向口径：totals.exact===false 时 IN WINDOW /
+     UNSEEN / ACTIVE 24H 都是下界，下界为 0 就只能说 Unknown。 */
+  function boundParts(value, exact) {
+    if (exact) return { text: formatNumber(value) };
+    if (value > 0) {
+      return {
+        text: '≥' + formatNumber(value),
+        title: 'Lower bound — this scan hit its recipient limit.'
+      };
+    }
+    return { text: 'Unknown', title: 'Not counted — this scan hit its recipient limit.' };
   }
 
   function appendCell(parent, labelText, parts, extra) {
@@ -999,9 +1025,10 @@ export const UI_JS = `(function () {
     var scan = payload ? payload.scan : null;
     var totals = payload ? payload.totals : null;
     var pending = state.overviewStatus === 'loading' || state.overviewStatus === 'idle';
-    var fallback = pending ? 'Loading…' : 'Unavailable';
+    var fallback = { text: pending ? 'Loading…' : 'Unavailable' };
+    var exact = !totals || totals.exact !== false;
 
-    function card(label, value) {
+    function card(label, parts) {
       var wrapper = document.createElement('div');
       wrapper.className = 'stat-card';
       var labelNode = document.createElement('span');
@@ -1009,23 +1036,30 @@ export const UI_JS = `(function () {
       labelNode.textContent = label;
       var valueNode = document.createElement('span');
       valueNode.className = 'stat-value';
-      valueNode.textContent = value;
+      valueNode.textContent = parts.text;
+      if (parts.title) valueNode.title = parts.title;
       wrapper.append(labelNode, valueNode);
       overviewStats.append(wrapper);
     }
 
-    card('Addresses', totals ? formatNumber(totals.addresses) : String(state.identities.length));
+    /* 地址数是身份派生量，永远精确。 */
+    card('Addresses', {
+      text: totals ? formatNumber(totals.addresses) : String(state.identities.length)
+    });
     /* skipped:true 时窗口派生量未被观测，整张卡片不进 DOM。 */
     if (!scan || !scan.skipped) {
-      card(
-        'In window',
-        totals && scan && scan.scanned !== null
-          ? formatNumber(totals.matchedInWindow) + ' / ' + formatNumber(scan.scanned)
-          : fallback
-      );
+      var windowed = fallback;
+      if (totals && scan && scan.scanned !== null) {
+        windowed = boundParts(totals.matchedInWindow, exact);
+        /* Unknown 是"没数过"，再除以窗口大小没有意义；有下界时才写 N / 窗口。 */
+        if (windowed.text !== 'Unknown') {
+          windowed.text += ' / ' + formatNumber(scan.scanned);
+        }
+      }
+      card('In window', windowed);
     }
-    card('Unseen', totals ? formatNumber(totals.unseenInWindow) : fallback);
-    card('Active 24h', totals ? formatNumber(totals.activeAddresses) : fallback);
+    card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);
+    card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);
   }
 
   function renderOverviewMeta() {
@@ -1270,6 +1304,37 @@ export const UI_JS = `(function () {
     renderOverview();
   }
 
+  /* 新一轮 /identities 里活动地址消失了（被删/被 retention 清掉）：不能把用户留在
+     一个失效的 inbox 里反复报"邮件加载失败"，清掉活动状态并回 Overview + 播报。 */
+  function reconcileActiveAddress() {
+    if (!state.activeAddress) return;
+    var survivors = state.identities.filter(function (identity) {
+      return identity.address === state.activeAddress;
+    });
+    if (survivors.length) return;
+    var lost = state.activeAddress;
+    state.activeAddress = '';
+    state.messages = [];
+    state.returnAddress = '';
+    clearDetail();
+    renderMessages();
+    if (state.scope !== 'inbox') return;
+    enterOverview({ announce: lost + ' is no longer available. Back to overview.' });
+  }
+
+  /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
+     周期是停掉的（cancelOverview），所以这是"活动地址被删"能被发现的那一刻。 */
+  function refreshInboxIdentities() {
+    apiJson('/ui/api/identities').then(function (payload) {
+      if (state.scope !== 'inbox') return;
+      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+      renderIdentities();
+      reconcileActiveAddress();
+    }).catch(function () {
+      /* 名单取不到就沿用旧名单：邮件本身的失败由 refreshMessages 自己报。 */
+    });
+  }
+
   /* 一个 Overview 周期：同一代际下并发发起两条请求，且两条各自独立落地 ——
      /identities 一到就渲染地址骨架，绝不等 /overview 的扫描预算。 */
   function loadOverviewCycle(options) {
@@ -1294,6 +1359,7 @@ export const UI_JS = `(function () {
       /* 侧栏与总览行都吃这份名单，两边都得重画（只重画总览会让侧栏一直空着）。 */
       renderIdentities();
       renderOverview();
+      reconcileActiveAddress();
     }).catch(function (error) {
       if (generation !== state.overviewGen) return;
       handleIdentitiesError(error);
@@ -1739,9 +1805,11 @@ export const UI_JS = `(function () {
       enterOverview({ announce: 'Back to overview' });
       return;
     }
-    selectIdentity(mobileIdentity.value);
+    activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
+    /* identity 会话只有一个地址、也没有 Overview 可回，所以只有 admin 需要这一步。 */
+    if (isAdmin()) refreshInboxIdentities();
     refreshMessages();
   });
   overviewRefresh.addEventListener('click', function () {

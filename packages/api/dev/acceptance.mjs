@@ -685,6 +685,40 @@ try {
     'A55 a fresh snapshot (<15 s) is not refetched when going back',
   );
 
+  /* ============ F2：侧栏地址是 Overview 之外的第二条入口 ============ */
+  const sidebarClicked = await evaluate(`(() => {
+    const button = [...document.querySelectorAll('#identity-list .identity-button')]
+      .filter((el) => !el.classList.contains('overview-nav'))
+      .filter((el) => el.textContent.includes('fox@preview.test'))[0];
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  check(sidebarClicked, 'F2 the overview sidebar offers the fox address');
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelectorAll('.message-button').length > 0",
+    'the inbox after activating the sidebar address',
+  );
+  await injectProbes();
+  const sidebarDrill = await evaluate(`(() => ({
+    active: __oae.text('#active-address').trim(),
+    mains: __oae.visibleMains().map((main) => main.id),
+    status: __oae.text('#status')
+  }))()`);
+  check(
+    sidebarDrill.active === 'fox@preview.test',
+    `F2 the sidebar address opens its own inbox (saw ${sidebarDrill.active})`,
+  );
+  check(
+    sidebarDrill.mains.length === 1 && sidebarDrill.mains[0] === 'main-content',
+    `F2 the sidebar address switches the visible main to the inbox (saw ${sidebarDrill.mains.join(',')})`,
+  );
+  await evaluate("document.querySelector('#back-to-overview').click()");
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'the overview after the sidebar probe',
+  );
+
   /* ============ A68：复制反馈 ============ */
   await evaluate(FOX_ROW_CLICK);
   await waitFor("document.querySelectorAll('.message-button').length > 0", 'messages for copy probe');
@@ -781,6 +815,67 @@ try {
     'A59 mobile lands in the overview view',
   );
   const mobileOverviewShot = await screenshot('mobile-overview');
+
+  /* ============ F2 / §1.4：移动 Overview 必须能看见并使用地址 selector ============ */
+  const mobileSelector = await evaluate(`(() => {
+    const select = document.querySelector('#mobile-identity-select');
+    return {
+      visible: __oae.visible('#mobile-identity-select'),
+      insideInboxMain: !!select.closest('#main-content'),
+      options: [...select.options].map((option) => option.value),
+      value: select.value,
+      height: Math.round(select.getBoundingClientRect().height)
+    };
+  })()`);
+  check(mobileSelector.visible, 'F2 the mobile overview shows the address selector');
+  check(
+    !mobileSelector.insideInboxMain,
+    'F2 the selector lives outside the inbox main, so scope=overview cannot hide it',
+  );
+  check(
+    mobileSelector.options[0] === '' && mobileSelector.value === '',
+    'F2 the selector starts on the empty back-to-overview sentinel',
+  );
+  check(
+    mobileSelector.options.includes('fox@preview.test'),
+    'F2 the selector lists the addresses',
+  );
+  check(
+    mobileSelector.height >= 44,
+    `A59 the mobile selector keeps a 44px touch target in the overview (saw ${mobileSelector.height})`,
+  );
+  await evaluate(`(() => {
+    const select = document.querySelector('#mobile-identity-select');
+    select.value = 'fox@preview.test';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.mobileView === 'list' && document.querySelectorAll('.message-button').length > 0",
+    'the mobile list after choosing an address in the selector',
+  );
+  await injectProbes();
+  const selectorDrill = await evaluate(`(() => ({
+    active: __oae.text('#active-address').trim(),
+    scope: document.querySelector('#inbox-view').dataset.scope,
+    selectorVisible: __oae.visible('#mobile-identity-select')
+  }))()`);
+  check(
+    selectorDrill.active === 'fox@preview.test' && selectorDrill.scope === 'inbox',
+    `F2 the mobile selector enters the chosen inbox (saw ${selectorDrill.scope}/${selectorDrill.active})`,
+  );
+  check(selectorDrill.selectorVisible, 'F2 the selector stays visible inside the mobile inbox');
+  await evaluate("document.querySelector('#back-to-overview').click()");
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.mobileView === 'overview'",
+    'the mobile overview after the selector probe',
+  );
+  await waitFor(
+    "document.querySelectorAll('.overview-row').length > 0",
+    'the mobile rows after the selector probe',
+  );
+  await injectProbes();
+
   await evaluate(FOX_ROW_CLICK);
   await waitFor(
     "document.querySelector('#inbox-view').dataset.mobileView === 'list'",
@@ -901,6 +996,40 @@ try {
         })),
       },
     });
+  }
+
+  /** 0 身份的 ready 载荷：窗口派生量未被观测，所以是 null（A64 与截图矩阵共用）。 */
+  function emptyOverviewStub() {
+    return {
+      status: 200,
+      body: {
+        status: 'ready',
+        generatedAt: new Date().toISOString(),
+        ageSeconds: 0,
+        cached: false,
+        revalidating: false,
+        refreshError: false,
+        scan: {
+          scanBack: 500,
+          scanned: null,
+          mailboxTotal: null,
+          truncated: false,
+          skipped: true,
+          partial: false,
+        },
+        totals: {
+          addresses: 0,
+          matchedInWindow: 0,
+          unmatchedInWindow: null,
+          unseenInWindow: 0,
+          activeAddresses: 0,
+          exact: true,
+          recentHours: 24,
+          recentSince: new Date().toISOString(),
+        },
+        addresses: [],
+      },
+    };
   }
 
   // A61：loading 骨架 + 轮询 + 放弃
@@ -1054,36 +1183,7 @@ try {
 
   // A64：0 身份
   identitiesStub = stubbedIdentities(0);
-  overviewStub = () => ({
-    status: 200,
-    body: {
-      status: 'ready',
-      generatedAt: new Date().toISOString(),
-      ageSeconds: 0,
-      cached: false,
-      revalidating: false,
-      refreshError: false,
-      scan: {
-        scanBack: 500,
-        scanned: null,
-        mailboxTotal: null,
-        truncated: false,
-        skipped: true,
-        partial: false,
-      },
-      totals: {
-        addresses: 0,
-        matchedInWindow: 0,
-        unmatchedInWindow: null,
-        unseenInWindow: 0,
-        activeAddresses: 0,
-        exact: true,
-        recentHours: 24,
-        recentSince: new Date().toISOString(),
-      },
-      addresses: [],
-    },
-  });
+  overviewStub = emptyOverviewStub;
   await login('preview-token');
   await waitFor(
     "/No addresses yet/.test(document.querySelector('#overview-state').textContent)",
@@ -1109,6 +1209,211 @@ try {
   identitiesStub = null;
   overviewStub = null;
 
+  /* ============ F3 / A37：exact:false 时总计卡片也必须是下界 ============ */
+  overviewStub = () => ({
+    status: 200,
+    body: {
+      ...readyBody,
+      totals: {
+        ...readyBody.totals,
+        exact: false,
+        unmatchedInWindow: null,
+        matchedInWindow: 128,
+        unseenInWindow: 0,
+        activeAddresses: 4,
+      },
+      addresses: readyBody.addresses.map((row, index) =>
+        index === 0 ? { ...row, complete: false, count: 0, unseen: 0 } : row,
+      ),
+    },
+  });
+  const inexactAddress = readyBody.addresses[0].address;
+  await login('preview-token');
+  await waitFor("document.querySelectorAll('.overview-row').length > 0", 'inexact fixture rows');
+  await injectProbes();
+  const inexact = await evaluate(`(() => ({
+    cards: [...document.querySelectorAll('#overview-stats .stat-card')].map((card) => ({
+      label: card.querySelector('.stat-label').textContent,
+      value: card.querySelector('.stat-value').textContent,
+      title: card.querySelector('.stat-value').title
+    })),
+    disclosureHidden: document.querySelector('#overview-disclosure').hidden,
+    disclosure: __oae.text('#overview-disclosure'),
+    affectedRow: (document.querySelector(
+      '.overview-row[data-address="' + ${JSON.stringify(inexactAddress)} + '"]'
+    ) || {}).ariaLabel
+  }))()`);
+  const cardFor = (label) => inexact.cards.filter((card) => card.label === label)[0];
+  check(
+    cardFor('In window') !== undefined && /^≥128 \/ /.test(cardFor('In window').value),
+    `F3 the IN WINDOW card shows a bound (saw ${cardFor('In window')?.value})`,
+  );
+  check(
+    cardFor('Unseen') !== undefined && cardFor('Unseen').value === 'Unknown',
+    `F3 a zero lower bound reads Unknown, never 0 (saw ${cardFor('Unseen')?.value})`,
+  );
+  check(
+    cardFor('Active 24h') !== undefined && cardFor('Active 24h').value === '≥4',
+    `F3 the ACTIVE 24H card shows a bound (saw ${cardFor('Active 24h')?.value})`,
+  );
+  check(
+    cardFor('Addresses') !== undefined && /^[\d,]+$/.test(cardFor('Addresses').value),
+    `F3 the exact ADDRESSES card keeps its plain number (saw ${cardFor('Addresses')?.value})`,
+  );
+  check(
+    /Lower bound/.test(cardFor('In window')?.title ?? '') &&
+      /Not counted/.test(cardFor('Unseen')?.title ?? ''),
+    'F3 the bound cards explain themselves in a title',
+  );
+  check(
+    !inexact.disclosureHidden && /shown as ≥ or Unknown/.test(inexact.disclosure),
+    'F3 the disclosure now matches what the DOM actually shows',
+  );
+  check(
+    /Unknown/.test(inexact.affectedRow ?? ''),
+    `F3 the affected row still reads Unknown (saw ${inexact.affectedRow})`,
+  );
+  overviewStub = null;
+
+  /* ============ F6 / §6 行 19：活动地址被删 → 回 Overview 并播报 ============ */
+  await login('preview-token');
+  await waitFor(
+    "document.querySelectorAll('.overview-row').length > 0",
+    'the overview before the removal probe',
+  );
+  await evaluate(FOX_ROW_CLICK);
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelectorAll('.message-button').length > 0",
+    'the inbox before the removal probe',
+  );
+  await injectProbes();
+  // 播报会被后续消息覆盖，所以把 live region 的每次变化都记下来
+  await evaluate(`(() => {
+    window.__announcements = [];
+    const region = document.querySelector('#status');
+    new MutationObserver(() => {
+      const text = region.textContent.trim();
+      if (text) window.__announcements.push(text);
+    }).observe(region, { childList: true, characterData: true, subtree: true });
+    return true;
+  })()`);
+  // 下一次身份刷新里 fox 不见了；inbox 里的 Refresh 就是发现它的那一刻
+  identitiesStub = () => ({
+    status: 200,
+    body: {
+      identities: [
+        {
+          address: 'empty@preview.test',
+          name: 'Empty Inbox',
+          createdAt: '2026-07-27T08:05:00.000Z',
+        },
+      ],
+    },
+  });
+  await evaluate("document.querySelector('#refresh-button').click()");
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'the overview after the active address disappeared',
+  );
+  await injectProbes();
+  const removed = await evaluate(`(() => ({
+    announcements: window.__announcements || [],
+    active: __oae.text('#active-address').trim(),
+    addresses: [...document.querySelectorAll('.overview-row')].map((row) => row.dataset.address),
+    mains: __oae.visibleMains().map((main) => main.id)
+  }))()`);
+  check(
+    removed.announcements.some((text) => /no longer available/.test(text)),
+    `F6 the removal is announced (saw ${removed.announcements.join(' | ')})`,
+  );
+  check(removed.active === '', `F6 the stale active address is cleared (saw ${removed.active})`);
+  check(
+    !removed.addresses.includes('fox@preview.test'),
+    'F6 the removed address leaves the overview roster',
+  );
+  check(
+    removed.mains.length === 1 && removed.mains[0] === 'overview-panel',
+    `F6 the user lands back on the overview (saw ${removed.mains.join(',')})`,
+  );
+  identitiesStub = null;
+
+  /* ============ A69：五状态 × 桌面/移动 的 10 张截图矩阵 ============ */
+  const MATRIX_VIEWPORTS = [
+    { name: 'desktop', width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+    { name: 'mobile', width: 375, height: 812, deviceScaleFactor: 2, mobile: true },
+  ];
+  const MATRIX_STATES = [
+    {
+      name: 'ready',
+      overview: () => ({ status: 200, body: readyBody }),
+      settled: "document.querySelector('#overview-panel').classList.contains('is-ready')",
+    },
+    {
+      name: 'stale',
+      overview: () => ({
+        status: 200,
+        body: {
+          ...readyBody,
+          status: 'stale',
+          cached: true,
+          revalidating: false,
+          refreshError: true,
+          retryAfterMs: 5000,
+        },
+      }),
+      settled: "document.querySelector('#overview-panel').classList.contains('is-stale')",
+    },
+    {
+      name: 'loading',
+      // 3 s 的 retryAfterMs：截图期间只轮询一次，不会跑进放弃态
+      overview: () => ({
+        status: 202,
+        body: { status: 'loading', generatedAt: null, retryAfterMs: 3000 },
+      }),
+      settled: "/Loading…/.test(document.querySelector('#overview-stats').textContent)",
+    },
+    {
+      name: 'unavailable',
+      overview: () => ({
+        status: 503,
+        body: { status: 'unavailable', reason: 'imap_unavailable', retryAfterSeconds: 5 },
+      }),
+      settled: "/unavailable/i.test(document.querySelector('#overview-notice').textContent)",
+    },
+    {
+      name: 'empty',
+      identities: stubbedIdentities(0),
+      overview: emptyOverviewStub,
+      settled: "/No addresses yet/.test(document.querySelector('#overview-state').textContent)",
+    },
+  ];
+  const matrixShots = [];
+  for (const viewport of MATRIX_VIEWPORTS) {
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: viewport.deviceScaleFactor,
+      mobile: viewport.mobile,
+    });
+    await send('Emulation.setTouchEmulationEnabled', { enabled: viewport.mobile });
+    for (const fixture of MATRIX_STATES) {
+      overviewStub = fixture.overview;
+      identitiesStub = fixture.identities ?? null;
+      await login('preview-token');
+      await waitFor(
+        fixture.settled,
+        `the ${fixture.name} state for the ${viewport.name} screenshot`,
+      );
+      // 让卡片、行与 notice 都画完再拍，否则截到的是半张骨架
+      await delay(250);
+      matrixShots.push(await screenshot(`${fixture.name}-${viewport.name}`));
+      overviewStub = null;
+      identitiesStub = null;
+    }
+    await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  }
+  await send('Emulation.clearDeviceMetricsOverride');
+
   /* ============ A67：不安全上下文闸门 ============ */
   const insecure = base.replace(/\/\/[^:]+/, '//0.0.0.0');
   await send('Page.navigate', { url: `${insecure}/ui` });
@@ -1125,6 +1430,19 @@ try {
 
   for (const url of requestedExternalUrls) record('external request', url);
 
+  // A69：发布前视觉矩阵必须真的落在磁盘上，五状态 × 两个断点一张都不能少
+  const expectedMatrix = [];
+  for (const stateName of ['ready', 'stale', 'loading', 'unavailable', 'empty']) {
+    for (const viewportName of ['desktop', 'mobile']) {
+      expectedMatrix.push(`${stateName}-${viewportName}.png`);
+    }
+  }
+  const missingShots = expectedMatrix.filter((name) => !existsSync(join(shotDir, name)));
+  check(
+    expectedMatrix.length === 10 && missingShots.length === 0,
+    `A69 all 10 matrix screenshots exist (missing ${missingShots.join(',') || 'none'})`,
+  );
+
   if (violations.length) {
     throw new Error(`Browser acceptance violations:\n${violations.join('\n')}`);
   }
@@ -1133,6 +1451,7 @@ try {
       'five fixtures, brand geometry, contrast, and email isolation.',
   );
   console.log(`screenshots: ${[mobileOverviewShot, mobileListShot, mobileDetailShot].join(' ')}`);
+  console.log(`A69 matrix (${matrixShots.length}): ${matrixShots.join(' ')}`);
 } finally {
   if (socket?.readyState === WebSocket.OPEN) socket.close();
   browser.kill('SIGTERM');
