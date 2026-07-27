@@ -9,7 +9,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ApiError, OpenAgentEmailClient } from "./lib/client.ts";
+import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "./lib/client.ts";
 
 const apiUrl = process.env.OPENAGENTEMAIL_API_URL ?? "http://localhost:3100";
 const apiKey = process.env.OPENAGENTEMAIL_API_KEY;
@@ -171,4 +171,4 @@ server.tool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`openagentemail-mcp connected (api: ${apiUrl})`);
+console.error(`openagentemail-mcp connected (api: ${apiUrlForDisplay(apiUrl)})`);

@@ -42,6 +42,45 @@ export interface Message extends MessageSummary {
   otp: { codes: string[]; links: string[] };
 }
 
+/**
+ * Safe rendering of the configured API URL for diagnostics: the string ends
+ * up in the agent's context and in client logs, and a reverse proxy in front
+ * of the API may well be configured as https://user:pass@host.
+ */
+function stripUserinfo(text: string): string {
+  return text.replace(/(^|\/\/)[^/@\s]*@/, "$1[redacted]@");
+}
+
+export function apiUrlForDisplay(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (url.username) url.username = "REDACTED";
+    if (url.password) url.password = "REDACTED";
+    for (const key of [...url.searchParams.keys()]) {
+      if (/token|key|secret|pass|auth/i.test(key)) url.searchParams.set(key, "REDACTED");
+    }
+    if (url.hash) url.hash = "#REDACTED";
+    // stripUserinfo again on the way out: a scheme-less string like
+    // "agent:pw@host:3100" still *parses* (scheme "agent:", the rest is the
+    // path), so URL's username/password fields never see the credentials.
+    return stripUserinfo(url.toString().replace(/\/$/, ""));
+  } catch {
+    // Unparseable — usually a missing scheme, which is the single most common
+    // misconfiguration. Show it anyway (hiding it leaves the user guessing),
+    // minus anything that looks like userinfo.
+    return stripUserinfo(raw);
+  }
+}
+
+/** Network failure code (ECONNREFUSED, ENOTFOUND, ...), if the runtime gave one. */
+function networkErrorCode(err: unknown): string | undefined {
+  for (const candidate of [err, (err as { cause?: unknown })?.cause]) {
+    const code = (candidate as { code?: unknown } | undefined)?.code;
+    if (typeof code === "string" && code) return code;
+  }
+  return undefined;
+}
+
 export class OpenAgentEmailClient {
   constructor(
     private readonly baseUrl: string,
@@ -66,9 +105,14 @@ export class OpenAgentEmailClient {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (err) {
+      // Never interpolate err.message: Node's fetch puts the whole URL —
+      // credentials included — into the text when it refuses a URL with
+      // userinfo. The failure code is enough to tell the user what broke.
+      const code = networkErrorCode(err);
       throw new ApiError(
         0,
-        `Cannot reach openagent.email API at ${this.baseUrl} (${err instanceof Error ? err.message : String(err)}). ` +
+        `Cannot reach openagent.email API at ${apiUrlForDisplay(this.baseUrl)}` +
+          `${code ? ` (${code})` : ""}. ` +
           `Is the stack running (docker compose up -d)? Check OPENAGENTEMAIL_API_URL.`,
       );
     }
