@@ -91,6 +91,13 @@ describe('UI static asset contract', () => {
     );
   });
 
+  test('clipboard fallback selects the visible source for manual copying', () => {
+    expect(UI_JS).toContain('function selectForManualCopy(sourceNode)');
+    expect(UI_JS).toContain('range.selectNodeContents(sourceNode)');
+    expect(UI_JS).toContain('selection.addRange(range)');
+    expect(UI_JS).toContain('return selection.toString() === sourceNode.textContent');
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 

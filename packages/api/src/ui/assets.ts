@@ -656,19 +656,25 @@ export const UI_JS = `(function () {
     list.append(term, value);
   }
 
+  function selectForManualCopy(sourceNode) {
+    var range = document.createRange();
+    range.selectNodeContents(sourceNode);
+    var selection = window.getSelection();
+    if (!selection) return false;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString() === sourceNode.textContent;
+  }
+
   async function copyValue(value, sourceNode) {
     try {
       await navigator.clipboard.writeText(value);
       announce('Copied to clipboard');
     } catch {
-      var range = document.createRange();
-      range.selectNodeContents(sourceNode);
-      var selection = window.getSelection();
-      if (selection) {
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      announce('Clipboard unavailable. The value is selected for manual copying.');
+      var selected = selectForManualCopy(sourceNode);
+      announce(selected
+        ? 'Clipboard unavailable. The value is selected for manual copying.'
+        : 'Clipboard unavailable. Select the value and copy it manually.');
     }
   }
 
