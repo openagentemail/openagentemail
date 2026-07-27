@@ -65,4 +65,19 @@ describe('UI unsafe-method Origin gate', () => {
     const ambiguous = await post({ 'content-type': 'application/json' });
     expect(ambiguous.status).toBe(403);
   });
+
+  test('TLS termination may change only the upstream scheme, not the public host', async () => {
+    const app = appWithOriginGuard();
+    const response = await app.request('http://mail.example/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://mail.example',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: '{"token":"ok"}',
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('set-cookie')).toContain('Secure');
+  });
 });

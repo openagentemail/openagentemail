@@ -210,10 +210,24 @@ export const requireUiOrigin = createMiddleware(async (c, next) => {
     return;
   }
 
-  const expected = new URL(c.req.url).origin;
+  const expectedUrl = new URL(c.req.url);
   const origin = c.req.header('origin');
   const sameOriginSignal = c.req.header('sec-fetch-site') === 'same-origin';
-  if ((origin && origin !== expected) || (!origin && !sameOriginSignal)) {
+  let allowed = !origin && sameOriginSignal;
+  if (origin) {
+    try {
+      const originUrl = new URL(origin);
+      allowed =
+        originUrl.origin === expectedUrl.origin ||
+        (sameOriginSignal &&
+          originUrl.protocol === 'https:' &&
+          expectedUrl.protocol === 'http:' &&
+          originUrl.host === expectedUrl.host);
+    } catch {
+      allowed = false;
+    }
+  }
+  if (!allowed) {
     return c.json({ error: 'forbidden_origin' }, 403);
   }
 
