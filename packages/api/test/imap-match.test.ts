@@ -18,8 +18,39 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'x';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-imap-'));
 
-const { describe, expect, test } = await import('bun:test');
-const { messageMatchesAddress, receivedAtMs } = await import('../src/lib/imap.ts');
+const { describe, expect, mock, test } = await import('bun:test');
+
+// 授权路径的回归需要跑真的 listMessages，所以在导入 imap.ts 之前先替掉 imapflow。
+let fakeMessages: any[] = [];
+
+class FakeImapFlow {
+  async connect() {}
+  async getMailboxLock() {
+    return { release() {} };
+  }
+  async search() {
+    return fakeMessages.map((message) => message.uid);
+  }
+  async *fetch() {
+    yield* fakeMessages;
+  }
+  async fetchOne(uid: number) {
+    const message = fakeMessages.find((candidate) => candidate.uid === uid);
+    if (!message) return false;
+    return {
+      ...message,
+      source: Buffer.from('From: sender@example.net\r\nSubject: hi\r\n\r\nbody'),
+    };
+  }
+  async logout() {}
+  close() {}
+}
+
+mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
+
+const { listMessages, messageMatchesAddress, messageRecipients, receivedAtMs } = await import(
+  '../src/lib/imap.ts'
+);
 
 /** 造一个只带必要字段的 IMAP 抓取结果（envelope + 收件头）。 */
 function fakeMessage(opts: {
@@ -136,6 +167,127 @@ describe('messageMatchesAddress — 越权读取必须被挡住', () => {
 
   test('没有任何头且信封不含自己时不匹配', () => {
     expect(messageMatchesAddress(fakeMessage({ to: ['a@test.example'] }), 'b@test.example')).toBe(false);
+  });
+});
+
+// messageRecipients 是授权与统计共用的唯一原语。它一旦跟 messageMatchesAddress
+// 的结论分叉，"这封信属于谁"就有了两个答案；一旦在它里面加上限，读权限边界会
+// 跟着统计的内存上界一起变窄。
+describe('messageRecipients — 与匹配原语同源，且没有任何上限', () => {
+  // A23：无 envelope 一律 fail-closed
+  test('没有 envelope 时收件人集合为空，Delivered-To 也不算', () => {
+    const msg = {
+      uid: 1,
+      headers: Buffer.from('Delivered-To: fox-k7d2@test.example\r\n', 'utf8'),
+    } as any;
+    expect(messageRecipients(msg).size).toBe(0);
+    expect(messageMatchesAddress(msg, 'fox-k7d2@test.example')).toBe(false);
+  });
+
+  // A25：既有投毒语料逐条对齐
+  test('投毒语料下两个函数的结论逐条一致', () => {
+    const corpus: Array<{ msg: any; address: string; expected: boolean }> = [
+      {
+        msg: fakeMessage({ headers: 'Subject: fox-k7d2@test.example\r\n' }),
+        address: 'fox-k7d2@test.example',
+        expected: false,
+      },
+      {
+        msg: fakeMessage({ headers: 'Delivered-To: "victim@test.example" <other@test.example>\r\n' }),
+        address: 'victim@test.example',
+        expected: false,
+      },
+      {
+        msg: fakeMessage({ headers: 'Delivered-To: "victim@test.example" <other@test.example>\r\n' }),
+        address: 'other@test.example',
+        expected: true,
+      },
+      {
+        msg: fakeMessage({ headers: 'Delivered-To: victim@test.example (fox-k7d2@test.example)\r\n' }),
+        address: 'fox-k7d2@test.example',
+        expected: false,
+      },
+      {
+        msg: fakeMessage({ headers: 'Delivered-To: fox-k7d2@test.example\r\n' }),
+        address: 'k7d2@test.example',
+        expected: false,
+      },
+      {
+        msg: fakeMessage({ headers: 'Delivered-To:\r\n owl-9x1a@test.example\r\n' }),
+        address: 'owl-9x1a@test.example',
+        expected: true,
+      },
+    ];
+    for (const entry of corpus) {
+      expect(messageRecipients(entry.msg).has(entry.address)).toBe(entry.expected);
+      expect(messageMatchesAddress(entry.msg, entry.address)).toBe(entry.expected);
+    }
+  });
+
+  // A26：私有的 RECIPIENT_HEADERS / stripComments / parseRecipient / ADDRESS_RE
+  // 行为快照 —— 通过唯一原语观察，改动它们这条断言就会红。
+  test('收件字段集合、注释剥离、角括号取址、地址正则的行为快照不变', () => {
+    const msg = fakeMessage({
+      to: ['To-Env@Test.Example'],
+      cc: ['cc@test.example'],
+      bcc: ['bcc@test.example'],
+      headers:
+        'Delivered-To: delivered@test.example\r\n' +
+        'X-Original-To: original@test.example\r\n' +
+        'Envelope-To: envelope@test.example\r\n' +
+        'X-Forwarded-To: forwarded@test.example\r\n' +
+        'To: header-to@test.example\r\n' +
+        'Cc: header-cc@test.example\r\n' +
+        'Bcc: header-bcc@test.example\r\n' +
+        'X-Note: ignored@test.example\r\n' +
+        'Subject: subject@test.example\r\n' +
+        'Reply-To: reply@test.example\r\n' +
+        'Delivered-To: spaced@test.example ;\r\n' +
+        'Delivered-To: not an address\r\n' +
+        'Delivered-To: two@at@signs\r\n',
+    });
+    expect([...messageRecipients(msg)].sort()).toEqual([
+      'bcc@test.example',
+      'cc@test.example',
+      'delivered@test.example',
+      'envelope@test.example',
+      'forwarded@test.example',
+      'header-bcc@test.example',
+      'header-cc@test.example',
+      'header-to@test.example',
+      'original@test.example',
+      'spaced@test.example',
+      'to-env@test.example',
+    ]);
+  });
+
+  // A24：201 个域内收件人、第 201 个是身份 —— 授权路径不受统计层截断影响
+  test('一封 201 个收件人的信，第 201 个身份仍读得到它', async () => {
+    const recipients: string[] = [];
+    for (let index = 0; index < 200; index += 1) {
+      recipients.push(`bystander-${index}@test.example`);
+    }
+    recipients.push('fox-k7d2@test.example');
+    const crowded = {
+      uid: 21,
+      envelope: {
+        from: [{ address: 'sender@example.net' }],
+        to: recipients.map((address) => ({ address })),
+        subject: 'crowded',
+        date: new Date('2026-07-27T00:00:00Z'),
+      },
+      internalDate: new Date('2026-07-27T00:00:00Z'),
+      flags: new Set<string>(),
+      headers: Buffer.from('Delivered-To: agent@test.example\r\n', 'utf8'),
+    } as any;
+
+    expect(messageRecipients(crowded).size).toBe(202);
+    expect(messageMatchesAddress(crowded, 'fox-k7d2@test.example')).toBe(true);
+
+    fakeMessages = [crowded];
+    const summaries = await listMessages('fox-k7d2@test.example');
+    expect(summaries.map((summary) => summary.id)).toEqual(['21']);
+    fakeMessages = [];
   });
 });
 

@@ -30,9 +30,17 @@ const identities = [
 
 function dependencies(): UiApiDependencies {
   return {
-    listIdentities: () => identities,
+    listIdentities: mock(() => identities),
     listMessages: mock(async () => []),
     getMessage: mock(async () => null),
+    getMailboxScan: mock(async () => ({
+      kind: 'ready' as const,
+      now: Date.now(),
+      snapshot: null,
+      cached: false,
+      revalidating: false,
+      refreshError: false,
+    })),
   };
 }
 
@@ -134,6 +142,46 @@ describe('UI authorization boundaries', () => {
     });
     expect(cookieAgainstRest.status).toBe(401);
     expect(await cookieAgainstRest.json()).toEqual({ error: 'unauthorized' });
+  });
+
+  // A2 / A3 / A4：Overview 是 admin-only，且授权先于一切 I/O。
+  test('an identity session is refused the overview before any I/O happens', async () => {
+    for (const path of ['/ui/api/overview', '/ui/api/overview?refresh=1']) {
+      const deps = dependencies();
+      const { app, cookie } = authenticatedApp(
+        { kind: 'identity', address: 'fox@test.example' },
+        deps,
+      );
+      const response = await app.request(path, { headers: { cookie } });
+
+      expect(response.status).toBe(403);
+      const body = await response.text();
+      expect(JSON.parse(body)).toEqual({ error: 'forbidden: admin session required' });
+      // 403 的响应体不得提到任何地址
+      expect(body).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+/i);
+      expect(deps.listIdentities).not.toHaveBeenCalled();
+      expect(deps.getMailboxScan).not.toHaveBeenCalled();
+    }
+  });
+
+  test('the overview is reachable for an admin session and never for a bearer token', async () => {
+    const deps = dependencies();
+    const { app, cookie } = authenticatedApp({ kind: 'admin' }, deps);
+
+    const allowed = await app.request('/ui/api/overview', { headers: { cookie } });
+    expect(allowed.status).toBe(200);
+    expect(deps.getMailboxScan).toHaveBeenCalledTimes(1);
+
+    // A9：Bearer 走 REST 入口，UI 入口只认 cookie
+    const bearer = await app.request('/ui/api/overview', {
+      headers: { authorization: 'Bearer admin-key' },
+    });
+    expect(bearer.status).toBe(401);
+    expect(await bearer.json()).toEqual({ error: 'invalid_token' });
+
+    const anonymous = await app.request('/ui/api/overview');
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: 'invalid_token' });
   });
 
   test('frame authorization uses the same identity boundary', async () => {
