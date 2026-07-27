@@ -87,10 +87,12 @@ describe('UI message JSON contract', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       html?: string;
+      hasHtml?: boolean;
       otp: { codes: string[]; links: string[] };
       links: string[];
     };
     expect(body.html).toBeUndefined();
+    expect(body.hasHtml).toBe(true);
     expect(body.otp).toEqual({
       codes: ['123456'],
       links: ['https://example.net/verify'],

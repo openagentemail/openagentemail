@@ -94,7 +94,7 @@ export function createUiApiRoutes(
     const detail = await dependencies.getMessage(address, id);
     if (!detail) return c.json({ error: 'not_found' }, 404);
     const { html: _html, ...safeDetail } = detail;
-    return c.json(safeDetail);
+    return c.json({ ...safeDetail, hasHtml: Boolean(detail.html) });
   });
 
   return routes;
