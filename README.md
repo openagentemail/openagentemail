@@ -37,7 +37,7 @@ curl -X POST http://localhost:3100/v1/identities \
 ```
 
 The API binds to `127.0.0.1` by default — reach it from other hosts over an
-SSH tunnel or a TLS proxy: [docs/security.md](docs/security.md).
+SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guides/security/).
 
 ## Features
 
@@ -101,7 +101,7 @@ Tools: `mail_new_identity`, `mail_list_identities`, `mail_list_messages`,
 `mail_read_message`, `mail_wait_for`, `mail_send`.
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
-[docs/mcp-clients.md](docs/mcp-clients.md) · server details:
+[docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:
 [packages/mcp/README.md](packages/mcp/README.md)
 
 ## Why self-host?
@@ -128,7 +128,7 @@ retention auto-deletes after 30 days.
 That's a $5/mo VPS — or a $10–15/**year** deal box. The real prerequisite isn't
 size, it's **port 25**: AWS, GCP, Azure, DigitalOcean and Vultr block it by
 default (some unblock on request). Check before you buy — or route outbound
-through a [relay](docs/deliverability.md) and you don't need port 25 out at all.
+through a [relay](https://openagent.email/docs/guides/deliverability/) and you don't need port 25 out at all.
 
 ## Comparison
 
@@ -155,11 +155,11 @@ through a [relay](docs/deliverability.md) and you don't need port 25 out at all.
 
 ## Docs
 
-- [docs/api.md](docs/api.md) — REST API reference with curl examples
-- [docs/security.md](docs/security.md) — tokens, exposure, rate limits, retention
-- [docs/mcp-clients.md](docs/mcp-clients.md) — MCP setup for every major client
-- [docs/dns-setup.md](docs/dns-setup.md) — DNS records, explained one by one
-- [docs/deliverability.md](docs/deliverability.md) — the field guide to actually
+- [docs/api.md](https://openagent.email/docs/reference/api/) — REST API reference with curl examples
+- [docs/security.md](https://openagent.email/docs/guides/security/) — tokens, exposure, rate limits, retention
+- [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) — MCP setup for every major client
+- [docs/dns-setup.md](https://openagent.email/docs/guides/dns-setup/) — DNS records, explained one by one
+- [docs/deliverability.md](https://openagent.email/docs/guides/deliverability/) — the field guide to actually
   landing in the inbox
 
 ## Contributing
