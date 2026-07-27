@@ -73,10 +73,36 @@ describe('SMTP 错误脱敏', () => {
       code: 'EENVELOPE',
       responseCode: 550,
     });
-    const text = describeFailure(err);
+    // 显式传密码列表：config 单例里的密码由最先 import 它的测试文件决定，
+    // 而现在任意长度的密码都会被脱敏（连 1 个字符的也算），不指定就会误伤。
+    const text = describeFailure(err, ['zzz-not-in-this-message']);
     expect(text).toContain('EENVELOPE');
     expect(text).toContain('550');
     expect(text).toContain('Mailbox unavailable');
+  });
+
+  // config 允许 API_KEYS/邮箱密码短到 1 个字符（zod 是 min(1)），"太短就不脱敏"
+  // 等于给最弱的那类口令开了个后门：它会原样落进服务端日志。
+  test('再短的配置密码也要脱敏', () => {
+    expect(describeFailure(new Error('535 auth failed with password abc'), ['abc'])).not.toContain(
+      'abc',
+    );
+    expect(describeFailure(new Error('535 auth failed with password abc'), ['abc'])).toContain(
+      '[redacted]',
+    );
+    expect(redactSecrets('login failed for pw x', ['x'])).not.toContain(' x');
+    expect(redactSecrets('login failed for pw ab', ['ab'])).toBe('login failed for pw [redacted]');
+  });
+
+  test('空密码不会把整段文本切碎', () => {
+    expect(redactSecrets('nothing to hide', [''])).toBe('nothing to hide');
+    expect(redactSecrets('nothing to hide', ['', 'hide'])).toBe('nothing to [redacted]');
+  });
+
+  test('多个密码同时脱敏，长的优先，避免互相截断', () => {
+    expect(redactSecrets('a=secret b=secretlong', ['secret', 'secretlong'])).toBe(
+      'a=[redacted] b=[redacted]',
+    );
   });
 
   test('redactSecrets 对非字符串输入和空密码不炸', () => {

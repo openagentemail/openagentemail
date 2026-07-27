@@ -13,12 +13,20 @@ function configuredSecrets(): string[] {
   return [config.smtp.pass, config.imap.pass];
 }
 
-/** Replace secrets with a marker. Defaults to the configured mail passwords. */
+/**
+ * Replace secrets with a marker. Defaults to the configured mail passwords.
+ *
+ * Every non-empty secret is redacted regardless of length. A short password is
+ * still a password — config only requires min(1) — and skipping those (an
+ * earlier attempt did, to keep the log readable) means the weakest credentials
+ * are exactly the ones that end up in the log verbatim. A noisy log beats a
+ * leaked one. Longest first, so a secret that contains another one is not
+ * chopped up into a partially readable form.
+ */
 export function redactSecrets(text: string, secrets: string[] = configuredSecrets()): string {
   let out = text;
-  for (const secret of secrets) {
-    // Very short values would match everywhere and turn the log to noise.
-    if (secret && secret.length >= 4) out = out.split(secret).join('[redacted]');
+  for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    out = out.split(secret).join('[redacted]');
   }
   return out;
 }
