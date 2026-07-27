@@ -111,6 +111,7 @@ services:
       DOMAIN: ${DOMAIN}
       API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}
       PORT: 3100
+      UI_ENABLED: ${UI_ENABLED:-true}
       # --- catch-all mailbox access (same account for IMAP read + SMTP send) ---
       IMAP_HOST: mailserver
       IMAP_PORT: 993

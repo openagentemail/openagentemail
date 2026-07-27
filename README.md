@@ -39,6 +39,29 @@ curl -X POST http://localhost:3100/v1/identities \
 The API binds to `127.0.0.1` by default — reach it from other hosts over an
 SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guides/security/).
 
+## Read mail in a browser
+
+Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
+or identity API token. The built-in inbox is read-only: it lists the addresses
+the token may access, shows messages, extracts verification codes and links,
+and offers plain-text or isolated HTML previews.
+
+The browser exchanges the token once for an `HttpOnly` session cookie; the
+token never enters the URL or browser storage. Sessions live only in API
+process memory, so restarting the API signs every browser out. They also expire
+after 12 idle hours or 24 hours total.
+
+For another computer, use the same SSH tunnel recommended for the API or put a
+TLS reverse proxy in front. The login form refuses non-local plain HTTP, and
+session cookies are `Secure` away from localhost. Set `UI_ENABLED=false` in
+`.env` to make every `/ui` route return 404.
+
+HTML email is treated as hostile input. The UI removes scripts, images, forms,
+links, sender CSS, and all attributes except numeric table spans, then loads the
+result in a separately sandboxed frame with a restrictive CSP. The
+`sanitize-html` 2.x dependency is deliberately pinned to an exact version;
+upgrade it in a dedicated change and rerun the full poison-message corpus.
+
 ## Features
 
 - **Unlimited identities** — one catch-all mailbox, unlimited `anything@yourdomain`
@@ -50,6 +73,8 @@ SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guide
 - **`mail_wait_for` / `POST /v1/messages/wait`** — long-poll an inbox until a
   matching message arrives, with OTP codes and verification links already extracted.
   Built for automated signups.
+- **Read-only web inbox** — inspect identities and messages at `/ui`, with
+  responsive layouts and doubly isolated HTML previews.
 - **Safety rails built in** — per-identity send rate limits (20/hour default),
   automatic mail retention (30 days default), localhost-only API binding.
 - **Bring your own relay** — send directly from the VPS, or route outbound through
@@ -148,8 +173,8 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
   extraction, DNS wizard + doctor, optional SMTP relay.
 - **v0.2 (current)** — scoped per-identity tokens, send rate limits, automatic
   retention, localhost-safe defaults, expanded OTP corpus.
-- **Next** — outbound webhooks (push instead of `wait_for` polling), admin web UI,
-  multi-domain support, Sieve-style per-identity rules.
+- **Next** — outbound webhooks (push instead of `wait_for` polling), optional
+  write actions in the web UI, multi-domain support, Sieve-style per-identity rules.
 - **Distribution** — planned one-click app in the
   [OpenShip](https://github.com/oblien/openship) catalog.
 
