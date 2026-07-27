@@ -123,6 +123,31 @@ describe('extractLinks', () => {
     expect(links).toEqual(['https://example.com/confirm?x=1']);
   });
 
+  // 真实邮件的 href 里 & 一律写成 &amp;（HTML 规范要求）。不还原的话，
+  // agent 拿到的验证链接会带着字面量 "&amp;"，多数服务端会判参数非法。
+  test('decodes entities inside the href', () => {
+    const html =
+      '<a href="https://app.example.com/verify?token=abc&amp;uid=42&#38;sig=zz">Verify your email</a>';
+    expect(extractLinks(htmlToText(html), html)).toEqual([
+      'https://app.example.com/verify?token=abc&uid=42&sig=zz',
+    ]);
+  });
+
+  test('trims whitespace around the href', () => {
+    const html = '<a href="  https://app.example.com/confirm?x=1  ">Confirm</a>';
+    expect(extractLinks(htmlToText(html), html)).toEqual(['https://app.example.com/confirm?x=1']);
+  });
+
+  // href 解码必须建立在实体解码器已经防越界之后（blueprint 2），否则一封
+  // "有纯文本正文 + 锚点 href 里带越界实体"的邮件会在这里抛 RangeError。
+  test('href 里的越界实体不会把提取过程打崩', () => {
+    const html = '<a href="https://x.example/verify?u=1&#99999999;">Verify your email</a>';
+    expect(() => extractOtp('Please confirm your address.', html)).not.toThrow();
+    expect(extractOtp('Please confirm your address.', html).links).toEqual([
+      'https://x.example/verify?u=1',
+    ]);
+  });
+
   test('returns empty for unrelated links only', () => {
     expect(extractLinks('Docs at https://example.com/docs and https://example.com/about')).toEqual([]);
   });

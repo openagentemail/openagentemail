@@ -108,12 +108,18 @@ interface Anchor {
   anchorText: string;
 }
 
-/** Pull href + anchor text pairs out of an HTML part. */
+/**
+ * Pull href + anchor text pairs out of an HTML part. The href is an HTML
+ * attribute value, so it must be entity-decoded: real mail writes query
+ * separators as `&amp;`, and handing the agent a link with a literal
+ * "&amp;" in it makes the verification request fail. Safe to decode here
+ * only because codePointToString() already refuses out-of-range entities.
+ */
 function extractAnchors(html: string): Anchor[] {
   const anchors: Anchor[] = [];
   const re = /<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   for (const m of html.matchAll(re)) {
-    anchors.push({ url: m[1], anchorText: htmlToText(m[2]) });
+    anchors.push({ url: decodeEntities(m[1]).trim(), anchorText: htmlToText(m[2]) });
   }
   return anchors;
 }
