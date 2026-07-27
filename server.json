@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.openagentemail/mcp",
+  "description": "Unlimited agent mailboxes — create identities, read/wait for mail, extract OTPs, send email.",
+  "repository": {
+    "url": "https://github.com/openagentemail/openagentemail",
+    "source": "github"
+  },
+  "version": "0.1.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@openagentemail/mcp",
+      "version": "0.1.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OPENAGENTEMAIL_API_KEY",
+          "description": "Bearer key for the openagent.email API — best: the identity token (oa_…) returned by POST /v1/identities.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "OPENAGENTEMAIL_API_URL",
+          "description": "Base URL of the openagent.email API.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "default": "http://localhost:3100"
+        }
+      ]
+    }
+  ]
+}
