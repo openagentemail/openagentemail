@@ -121,9 +121,10 @@ services:
       SMTP_PORT: 587
       SMTP_USER: ${MAIL_ACCOUNT:-agent}@${DOMAIN}
       SMTP_PASS: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
-      # DMS ships a self-signed cert until you configure Let's Encrypt; the api
-      # talks to the mailserver over the private compose network, so allow it.
-      TLS_REJECT_UNAUTHORIZED: "0"
+      # NOTE: the api talks to the mailserver over the private compose network
+      # and DMS ships a self-signed cert until you configure Let's Encrypt, so
+      # it skips chain verification for those two hops. That is done in code
+      # (src/lib/imap.ts, src/lib/smtp.ts) — there is no env switch for it.
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):
