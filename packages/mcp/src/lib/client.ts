@@ -51,6 +51,28 @@ function stripUserinfo(text: string): string {
   return text.replace(/(^|\/\/)[^/@\s]*@/, "$1[redacted]@");
 }
 
+const SENSITIVE_PARAM = /token|key|secret|pass|auth|credential/i;
+
+/**
+ * Text-level scrub for strings new URL() could not parse. This is the path
+ * that matters most: a URL is usually malformed *because* the user typed it
+ * by hand, and the credential is sitting right there in the string they typed.
+ */
+function stripSensitiveText(text: string): string {
+  return (
+    stripUserinfo(text)
+      // key=value pairs whose key looks like a credential, anywhere in the
+      // string (no reliable ?/& structure to rely on once parsing failed).
+      .replace(
+        /([?&#;][^=&#;\s]*=)([^&#;\s]*)/g,
+        (match, prefix: string, value: string) =>
+          SENSITIVE_PARAM.test(prefix) && value ? `${prefix}REDACTED` : match,
+      )
+      // A fragment can carry a bare token with no key at all.
+      .replace(/#(?![A-Z]*REDACTED)[^\s]+/gi, "#REDACTED")
+  );
+}
+
 export function apiUrlForDisplay(raw: string): string {
   try {
     const url = new URL(raw);
@@ -65,10 +87,11 @@ export function apiUrlForDisplay(raw: string): string {
     // path), so URL's username/password fields never see the credentials.
     return stripUserinfo(url.toString().replace(/\/$/, ""));
   } catch {
-    // Unparseable — usually a missing scheme, which is the single most common
-    // misconfiguration. Show it anyway (hiding it leaves the user guessing),
-    // minus anything that looks like userinfo.
-    return stripUserinfo(raw);
+    // Unparseable — usually a missing scheme or a typo'd host, the two most
+    // common misconfigurations. Show it anyway (hiding it behind "[invalid
+    // URL]" leaves the user guessing), minus userinfo, credential-looking
+    // query parameters and any fragment.
+    return stripSensitiveText(raw);
   }
 }
 

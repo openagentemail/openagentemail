@@ -37,6 +37,24 @@ describe("apiUrlForDisplay", () => {
     expect(apiUrlForDisplay("http://127.0.0.1:3100/base")).toBe("http://127.0.0.1:3100/base");
   });
 
+  // new URL() 失败的路径才是最容易出事的：用户填错 URL 的同时，凭据往往就
+  // 写在那串错的东西里。只剥 userinfo、其余原样返回等于全泄漏。
+  test("解析失败的 URL 也要把敏感 query 抹掉", () => {
+    const cases = [
+      "http://[::1?token=super-secret",
+      "://bad?api_key=super-secret",
+      "http://[::1?apiKey=super-secret&page=2",
+      "https://agent:super-secret@[::1?auth=super-secret#tok-super-secret",
+    ];
+    for (const raw of cases) {
+      const shown = apiUrlForDisplay(raw);
+      expect(shown).not.toContain("super-secret");
+    }
+    // 无关参数要保留，否则等于什么都没告诉用户。
+    expect(apiUrlForDisplay("http://[::1?apiKey=super-secret&page=2")).toContain("page=2");
+    expect(apiUrlForDisplay("http://[::1?token=super-secret")).toContain("[::1");
+  });
+
   test("解析不了的 URL 仍然告诉用户他填了什么，但去掉 user:pass", () => {
     // 最常见的配置错误就是漏掉 http:// —— 显示成 "[invalid URL]" 等于没提示。
     expect(apiUrlForDisplay("localhost:3100")).toContain("localhost:3100");
