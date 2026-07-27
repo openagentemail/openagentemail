@@ -112,8 +112,77 @@ function envelopeHasAddress(
   return (list ?? []).some((a) => (a.address ?? '').toLowerCase() === needle);
 }
 
-/** Does this message belong to the identity `address`? */
-function messageMatchesAddress(msg: FetchMessageObject, address: string): boolean {
+/**
+ * Header fields that actually say "this message was delivered to X".
+ * Anything else (Subject, X-*, ...) may quote an address without the message
+ * belonging to it, so it must never grant read access. Only `delivered-to` is
+ * fetched today; the rest are here so that widening the fetch later cannot
+ * silently widen the trust boundary.
+ */
+const RECIPIENT_HEADERS = new Set([
+  'delivered-to',
+  'x-original-to',
+  'envelope-to',
+  'x-forwarded-to',
+  'to',
+  'cc',
+  'bcc',
+]);
+
+const ADDRESS_RE = /^[^\s@<>,;:"]+@[^\s@<>,;:"]+$/;
+
+/** Drop RFC 5322 comments — an address inside `(...)` is not a recipient. */
+function stripComments(value: string): string {
+  let out = value;
+  // Bounded loop so nested comments can't spin on pathological input.
+  for (let depth = 0; depth < 8 && out.includes('('); depth++) {
+    const next = out.replace(/\([^()]*\)/g, ' ');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/**
+ * One address-list entry -> the mailbox it denotes, or undefined.
+ * For `Name <mailbox>` only the angle-bracketed mailbox counts: a display
+ * name may itself look like an address (`"victim@d" <other@d>`) and must not
+ * be treated as a recipient.
+ */
+function parseRecipient(item: string): string | undefined {
+  const angle = /<([^<>]*)>/.exec(item);
+  const candidate = (angle ? angle[1] : item).trim().replace(/^[;,\s]+|[;,\s]+$/g, '');
+  return ADDRESS_RE.test(candidate) ? candidate.toLowerCase() : undefined;
+}
+
+/** Every address the fetched recipient headers say this message went to. */
+function headerRecipients(headers?: Buffer): Set<string> {
+  const found = new Set<string>();
+  if (!headers) return found;
+  // Unfold continuation lines (leading whitespace) back onto their header.
+  const unfolded = headers.toString('utf8').replace(/\r?\n[ \t]+/g, ' ');
+  for (const line of unfolded.split(/\r?\n/)) {
+    const sep = line.indexOf(':');
+    if (sep <= 0) continue;
+    if (!RECIPIENT_HEADERS.has(line.slice(0, sep).trim().toLowerCase())) continue;
+    for (const item of stripComments(line.slice(sep + 1)).split(',')) {
+      const address = parseRecipient(item);
+      if (address) found.add(address);
+    }
+  }
+  return found;
+}
+
+/**
+ * Does this message belong to the identity `address`?
+ *
+ * Matching is EXACT on whole mailboxes, never a substring: every identity
+ * shares one catch-all mailbox, so this comparison is the only boundary
+ * between identities. A substring test would let `k7d2@d` read mail for
+ * `fox-k7d2@d`, and `ent@d` read the whole mailbox (Postfix stamps every
+ * delivery with `Delivered-To: agent@d`).
+ */
+export function messageMatchesAddress(msg: FetchMessageObject, address: string): boolean {
   const needle = address.toLowerCase();
   const env = msg.envelope;
   if (!env) return false;
@@ -121,7 +190,7 @@ function messageMatchesAddress(msg: FetchMessageObject, address: string): boolea
     envelopeHasAddress(env.to, needle) ||
     envelopeHasAddress(env.cc, needle) ||
     envelopeHasAddress(env.bcc, needle) ||
-    (msg.headers?.toString('utf8').toLowerCase().includes(needle) ?? false)
+    headerRecipients(msg.headers).has(needle)
   );
 }
 
