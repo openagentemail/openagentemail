@@ -13,6 +13,12 @@ function shell(c: Context) {
   c.header('Content-Type', 'text/html; charset=utf-8');
   c.header('Content-Security-Policy', OUTER_CSP);
   c.header('X-Frame-Options', 'DENY');
+  c.header('Cross-Origin-Opener-Policy', 'same-origin');
+  c.header('Cross-Origin-Resource-Policy', 'same-origin');
+  c.header(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  );
   return c.body(UI_HTML);
 }
 

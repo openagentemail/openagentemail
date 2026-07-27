@@ -27,6 +27,11 @@ describe('UI static asset contract', () => {
     const shell = await app.request('/ui');
     expect(shell.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(shell.headers.get('content-security-policy')).toBe(OUTER_CSP);
+    expect(shell.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    expect(shell.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+    expect(shell.headers.get('permissions-policy')).toBe(
+      'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+    );
     expect(OUTER_CSP).toContain("default-src 'none'");
     expect(OUTER_CSP).toContain("frame-src 'self'");
     expect(OUTER_CSP).not.toContain("'unsafe-inline'");
