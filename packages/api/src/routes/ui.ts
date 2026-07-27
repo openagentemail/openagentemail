@@ -3,11 +3,14 @@ import { z } from 'zod';
 import { forbidUnlessAddress, getAuth } from '../lib/auth.ts';
 import { listIdentities, type Identity } from '../lib/identities.ts';
 import {
+  SCAN_BACK,
   getMessage,
   listMessages,
+  scanMailboxWindow,
   type MessageDetail,
   type MessageSummary,
 } from '../lib/imap.ts';
+import { createOverviewCache, type ScanOutcome } from '../lib/overview-cache.ts';
 import {
   UiSessionStore,
   uiPrivateHeaders,
@@ -19,13 +22,31 @@ export type UiApiDependencies = {
   listIdentities: () => Identity[];
   listMessages: (address: string, limit: number) => Promise<MessageSummary[]>;
   getMessage: (address: string, id: string) => Promise<MessageDetail | null>;
+  /**
+   * Overview 的唯一入口：缓存与 IMAP 细节都在它后面。
+   * 注意**没有** now 尾参 —— 时刻读数一律由缓存层的注入时钟给出，
+   * 并经 `outcome.now` 回传，路由自己不取时间。
+   */
+  getMailboxScan: (opts: {
+    refresh: boolean;
+    identityAddresses: string[];
+  }) => Promise<ScanOutcome>;
 };
+
+/** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
+const overviewCache = createOverviewCache({
+  scan: (opts) => scanMailboxWindow(opts),
+});
 
 const defaultDependencies: UiApiDependencies = {
   listIdentities,
   listMessages,
   getMessage,
+  getMailboxScan: (opts) => overviewCache.getOverview(opts),
 };
+
+/** 「最近活跃」的窗口长度（小时）。 */
+const RECENT_HOURS = 24;
 
 const listQuerySchema = z.object({
   address: z.string().email(),
@@ -41,6 +62,106 @@ function identityProjection(identity: Identity) {
     address: identity.address,
     ...(identity.name ? { name: identity.name } : {}),
     createdAt: identity.createdAt,
+  };
+}
+
+/**
+ * 响应时刻的 join：per-UID 记录 × 当前身份列表 → 每行统计 + 总计。
+ *
+ * 去重口径在这里重算（一封投给两个身份的信只让 `matchedInWindow` +1），
+ * `activeAddresses` / `recentSince` 也按 `outcome.now` 重算，因此身份增删
+ * 立刻反映、无需重扫。逐行完整性判据是 `affected` 集合而不是 `partial`：
+ * 只挤掉投机域内地址的快照，所有身份计数仍然精确。
+ */
+function overviewPayload(
+  identities: Identity[],
+  outcome: Extract<ScanOutcome, { kind: 'ready' | 'stale' }>,
+) {
+  const now = outcome.now;
+  const snapshot = outcome.snapshot;
+  const recentSince = now - RECENT_HOURS * 3_600_000;
+
+  const idSet = new Set(identities.map((identity) => identity.address.toLowerCase()));
+  const per = new Map<string, { count: number; unseen: number; lastMs: number }>();
+  for (const address of idSet) per.set(address, { count: 0, unseen: 0, lastMs: 0 });
+
+  let matched = 0;
+  let unseenMatched = 0;
+  for (const record of snapshot?.records ?? []) {
+    let hit = false;
+    for (const address of record.r) {
+      const bucket = per.get(address);
+      if (!bucket) continue;
+      bucket.count += 1;
+      if (!record.s) bucket.unseen += 1;
+      if (record.t > bucket.lastMs) bucket.lastMs = record.t;
+      hit = true;
+    }
+    if (hit) {
+      matched += 1;
+      if (!record.s) unseenMatched += 1;
+    }
+  }
+
+  // 逐行完整性判定：截断绝不表现为 0
+  const scanIdSet = new Set(snapshot?.identityAddressesAtScan ?? []);
+  const affected = new Set<string>();
+  if (snapshot) {
+    for (const address of idSet) {
+      // ① 该身份确实被截断规则牺牲过
+      if (snapshot.incompleteFor.has(address)) affected.add(address);
+      // ② 扫描后才建的身份 + 快照不完整 → 无法证明它没被当作投机地址丢掉
+      else if (snapshot.partial && !scanIdSet.has(address)) affected.add(address);
+    }
+  }
+  const exact = affected.size === 0;
+
+  let activeAddresses = 0;
+  for (const bucket of per.values()) {
+    if (bucket.lastMs > 0 && bucket.lastMs >= recentSince) activeAddresses += 1;
+  }
+
+  const addresses = identities.map((identity) => {
+    const key = identity.address.toLowerCase();
+    const bucket = per.get(key) ?? { count: 0, unseen: 0, lastMs: 0 };
+    return {
+      ...identityProjection(identity),
+      complete: !affected.has(key),
+      count: bucket.count,
+      unseen: bucket.unseen,
+      lastReceivedAt: bucket.lastMs > 0 ? new Date(bucket.lastMs).toISOString() : null,
+    };
+  });
+
+  return {
+    status: outcome.kind,
+    generatedAt: new Date(snapshot ? snapshot.scannedAt : now).toISOString(),
+    ageSeconds: snapshot ? Math.max(0, Math.floor((now - snapshot.scannedAt) / 1000)) : 0,
+    cached: outcome.cached,
+    revalidating: outcome.revalidating,
+    refreshError: outcome.refreshError,
+    ...(outcome.retryAfterMs === undefined ? {} : { retryAfterMs: outcome.retryAfterMs }),
+    scan: {
+      scanBack: SCAN_BACK,
+      // 跳过扫描时窗口派生量未被观测，用 null 而不是 0
+      scanned: snapshot ? snapshot.scanned : null,
+      mailboxTotal: snapshot ? snapshot.mailboxTotal : null,
+      truncated: snapshot ? snapshot.truncated : false,
+      skipped: snapshot === null,
+      partial: snapshot ? snapshot.partial : false,
+    },
+    totals: {
+      addresses: addresses.length,
+      matchedInWindow: matched,
+      // exact:false 时方向变成上界，skipped 时未观测 —— 两种都置 null
+      unmatchedInWindow: snapshot && exact ? snapshot.scanned - matched : null,
+      unseenInWindow: unseenMatched,
+      activeAddresses,
+      exact,
+      recentHours: RECENT_HOURS,
+      recentSince: new Date(recentSince).toISOString(),
+    },
+    addresses,
   };
 }
 
@@ -69,6 +190,38 @@ export function createUiApiRoutes(
         ? all
         : all.filter((identity) => identity.address === auth.address);
     return c.json({ identities: visible.map(identityProjection) });
+  });
+
+  routes.get('/overview', async (c) => {
+    // 授权先于一切 I/O：identity 会话下 listIdentities / 缓存 / IMAP 均为零次
+    const auth = getAuth(c);
+    if (auth.kind !== 'admin') {
+      return c.json({ error: 'forbidden: admin session required' }, 403);
+    }
+    // ?refresh 只认字面 1，其他值等同不传
+    const refresh = c.req.query('refresh') === '1';
+    const identities = dependencies.listIdentities();
+    const outcome = await dependencies.getMailboxScan({
+      refresh,
+      identityAddresses: identities.map((identity) => identity.address.toLowerCase()),
+    });
+
+    if (outcome.kind === 'loading') {
+      return c.json({ status: 'loading', retryAfterMs: outcome.retryAfterMs }, 202);
+    }
+    if (outcome.kind === 'unavailable') {
+      c.header('Retry-After', String(outcome.retryAfterSeconds));
+      return c.json(
+        {
+          status: 'unavailable',
+          error: 'overview_unavailable',
+          reason: outcome.reason,
+          retryAfterSeconds: outcome.retryAfterSeconds,
+        },
+        503,
+      );
+    }
+    return c.json(overviewPayload(identities, outcome));
   });
 
   routes.get('/messages', async (c) => {
