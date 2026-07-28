@@ -4,6 +4,8 @@
 
 **[openagent.email](https://openagent.email)** · website: [openagentemail/website](https://github.com/openagentemail/website)
 
+![Web dashboard: a message with its extracted verification code](docs/images/message-detail.png)
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/openagentemail/openagentemail.svg?style=social)](https://github.com/openagentemail/openagentemail)
 
@@ -175,23 +177,44 @@ low-latency waits.
 
 ## Use it from your agent (MCP)
 
+Requires Node.js 18+ on the machine running the MCP client — no install step,
+`npx` downloads and runs the package on first use.
+
+```bash
+claude mcp add openagentemail \
+  --env OPENAGENTEMAIL_API_URL=http://localhost:3100 \
+  --env OPENAGENTEMAIL_API_KEY=oa_your-identity-token \
+  -- npx -y @openagentemail/mcp
+```
+
+Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
+
 ```json
 {
   "mcpServers": {
     "openagentemail": {
-      "command": "bun",
-      "args": ["run", "/path/to/openagentemail/packages/mcp/src/main.ts"],
+      "command": "npx",
+      "args": ["-y", "@openagentemail/mcp"],
       "env": {
         "OPENAGENTEMAIL_API_URL": "http://localhost:3100",
-        "OPENAGENTEMAIL_API_KEY": "oa_…identity-token"
+        "OPENAGENTEMAIL_API_KEY": "oa_your-identity-token"
       }
     }
   }
 }
 ```
 
-Tools: `mail_new_identity`, `mail_list_identities`, `mail_list_messages`,
-`mail_read_message`, `mail_wait_for`, `mail_send`, `mail_mark_seen`.
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `mail_new_identity(name?)` | Create an identity; returns `{address}` (random localpart like `fox-k7d2`) |
+| `mail_list_identities()` | List all identities |
+| `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet) |
+| `mail_read_message(address, id)` | Full message: text, html?, and `otp:{codes:[],links:[]}` |
+| `mail_mark_seen(address, id, seen?)` | Mark a message read (default) or unread — reading never changes the flag by itself |
+| `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
+| `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:
