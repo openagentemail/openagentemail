@@ -7,6 +7,10 @@
 ![Web dashboard: a message with its extracted verification code](docs/images/message-detail.png)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@openagentemail/mcp.svg)](https://www.npmjs.com/package/@openagentemail/mcp)
+[![release](https://github.com/openagentemail/openagentemail/actions/workflows/release.yml/badge.svg)](https://github.com/openagentemail/openagentemail/actions/workflows/release.yml)
+[![Glama](https://glama.ai/mcp/servers/openagentemail/openagentemail/badges/score.svg)](https://glama.ai/mcp/servers/openagentemail/openagentemail)
+[![Smithery](https://smithery.ai/badge/tizerluo/openagentemail)](https://smithery.ai/servers/tizerluo/openagentemail)
 [![GitHub stars](https://img.shields.io/github/stars/openagentemail/openagentemail.svg?style=social)](https://github.com/openagentemail/openagentemail)
 
 One `docker compose up` on your own VPS gives every agent you run unlimited real
