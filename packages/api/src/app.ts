@@ -46,6 +46,10 @@ export function createApp(options: AppOptions = {}): Hono {
     app.use('/ui/api/session', uiSessionBodyLimit);
     app.use('/ui/api/session', requireUiOrigin);
     app.route('/ui/api/session', createUiSessionRoutes(uiSessions));
+    // /ui/api/* now has unsafe methods too (POST messages/:id/seen); the gate
+    // passes GET/HEAD/OPTIONS through, so this only guards the writes.
+    app.use('/ui/api/*', uiSessionBodyLimit);
+    app.use('/ui/api/*', requireUiOrigin);
     app.route('/ui/api', createUiApiRoutes(uiSessions));
     app.route('/ui/frame', createUiFrameRoutes(uiSessions));
   }

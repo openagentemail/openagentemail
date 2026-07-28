@@ -6,6 +6,7 @@
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt}]}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
+ *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
  *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId}
  */
@@ -210,6 +211,10 @@ export class OpenAgentEmailClient {
   readMessage(address: string, id: string): Promise<Message> {
     const params = new URLSearchParams({ address });
     return this.request("GET", `/v1/messages/${encodeURIComponent(id)}?${params.toString()}`);
+  }
+
+  markSeen(address: string, id: string, seen: boolean): Promise<{ id: string; seen: boolean }> {
+    return this.request("POST", `/v1/messages/${encodeURIComponent(id)}/seen`, { address, seen });
   }
 
   waitFor(

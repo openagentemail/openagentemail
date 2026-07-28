@@ -33,6 +33,7 @@ function dependencies(): UiApiDependencies {
     listIdentities: mock(() => identities),
     listMessages: mock(async () => []),
     getMessage: mock(async () => null),
+    setMessageSeen: mock(async () => true),
     getMailboxScan: mock(async () => ({
       kind: 'ready' as const,
       now: Date.now(),
@@ -108,6 +109,22 @@ describe('UI authorization boundaries', () => {
     );
     expect(denied.status).toBe(403);
     expect(deps.listMessages).not.toHaveBeenCalled();
+
+    const deniedSeen = await app.request('/ui/api/messages/2/seen', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ address: 'owl@test.example', seen: true }),
+    });
+    expect(deniedSeen.status).toBe(403);
+    expect(deps.setMessageSeen).not.toHaveBeenCalled();
+
+    const ownSeen = await app.request('/ui/api/messages/2/seen', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ address: 'fox@test.example', seen: true }),
+    });
+    expect(ownSeen.status).toBe(200);
+    expect(deps.setMessageSeen).toHaveBeenCalledWith('fox@test.example', '2', true);
   });
 
   test('admin may read any inbox while identity may read its own', async () => {

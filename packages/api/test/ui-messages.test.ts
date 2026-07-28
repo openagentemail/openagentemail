@@ -37,6 +37,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
         hasOtp: false,
       },
     ]),
+    setMessageSeen: mock(async () => true),
     // Overview 的门面依赖：本文件不测它，给一个 0 身份语义的常量结果即可。
     getMailboxScan: mock(async () => ({
       kind: 'ready' as const,
@@ -175,5 +176,54 @@ describe('UI message JSON contract', () => {
     );
     expect([400, 404]).toContain(traversal.status);
     expect(getMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('UI mark-seen endpoint', () => {
+  function postSeen(app: Hono, cookie: string, id: string, body: unknown) {
+    return app.request(`/ui/api/messages/${encodeURIComponent(id)}/seen`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test('a valid toggle reaches the store with the lowercased address', async () => {
+    const { app, deps, cookie } = makeApp();
+    const response = await postSeen(app, cookie, '2', {
+      address: 'FOX@test.example',
+      seen: true,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: '2', seen: true });
+    expect(deps.setMessageSeen).toHaveBeenLastCalledWith('fox@test.example', '2', true);
+  });
+
+  test('unknown or foreign messages surface as 404', async () => {
+    const { app, cookie } = makeApp({ setMessageSeen: mock(async () => false) });
+    const response = await postSeen(app, cookie, '2', {
+      address: 'fox@test.example',
+      seen: false,
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'not_found' });
+  });
+
+  test('malformed ids and bodies are rejected before touching the store', async () => {
+    const { app, deps, cookie } = makeApp();
+    for (const id of ['1e3', '0', '-1', '%2E%2E%2F7']) {
+      expect(
+        (await postSeen(app, cookie, id, { address: 'fox@test.example', seen: true })).status,
+      ).toBe(400);
+    }
+    for (const body of [
+      { address: 'fox@test.example' }, // missing seen
+      { address: 'fox@test.example', seen: 'yes' }, // non-boolean
+      { address: 'fox@test.example', seen: true, extra: 1 }, // strict shape
+      { seen: true }, // missing address
+    ]) {
+      expect((await postSeen(app, cookie, '2', body)).status).toBe(400);
+    }
+    expect(deps.setMessageSeen).not.toHaveBeenCalled();
   });
 });

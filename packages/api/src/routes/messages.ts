@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { getMessage, listMessages, waitForMessage } from '../lib/imap.ts';
+import { getMessage, listMessages, setMessageSeen, waitForMessage } from '../lib/imap.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 
@@ -12,6 +12,13 @@ const listQuerySchema = z.object({
 const getQuerySchema = z.object({
   address: z.string().email(),
 });
+
+const seenSchema = z
+  .object({
+    address: z.string().email(),
+    seen: z.boolean(),
+  })
+  .strict();
 
 const waitSchema = z.object({
   address: z.string().email(),
@@ -43,6 +50,29 @@ export const messagesRoute = new Hono()
       return c.json({ error: 'not_found' }, 404);
     }
     return c.json(message);
+  })
+  .post('/:id/seen', async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    const parsed = seenSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const id = c.req.param('id');
+    if (!/^[1-9]\d{0,9}$/.test(id)) {
+      return c.json({ error: 'invalid_request' }, 400);
+    }
+    const denied = forbidUnlessAddress(c, parsed.data.address);
+    if (denied) return denied;
+    const marked = await setMessageSeen(parsed.data.address, id, parsed.data.seen);
+    if (!marked) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    return c.json({ id, seen: parsed.data.seen });
   })
   .post('/wait', async (c) => {
     let body: unknown;

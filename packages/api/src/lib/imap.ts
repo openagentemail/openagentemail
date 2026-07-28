@@ -555,6 +555,32 @@ export async function getMessage(address: string, id: string): Promise<MessageDe
   return withInbox((client) => getMessageWith(client, address, id));
 }
 
+/**
+ * Set or clear the \Seen flag on one message. The same address-matching rule
+ * as reads applies first, so an identity token can only flag mail addressed
+ * to itself. Returns false when the message does not exist or is not
+ * addressed to `address` (routes map that to 404, same as reads).
+ */
+export async function setMessageSeen(
+  address: string,
+  id: string,
+  seen: boolean,
+): Promise<boolean> {
+  return withInbox(async (client) => {
+    const uid = Number(id);
+    if (!Number.isInteger(uid) || uid <= 0) return false;
+    const msg = await client.fetchOne(
+      uid,
+      { envelope: true, headers: ['delivered-to'] },
+      { uid: true },
+    );
+    if (!msg || !messageMatchesAddress(msg, address)) return false;
+    if (seen) await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
+    else await client.messageFlagsRemove(uid, ['\\Seen'], { uid: true });
+    return true;
+  });
+}
+
 function summaryPassesFilters(summary: MessageSummary, filters: WaitFilters): boolean {
   if (
     filters.fromContains &&

@@ -53,6 +53,16 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(read, "id", "0")).toBe(false);
   expect(ok(read, "address", "not-an-email")).toBe(false);
 
+  const markSeen = toolSchemas.get("mail_mark_seen")!;
+  expect(markSeen).toBeDefined();
+  expect(ok(markSeen, "id", "7")).toBe(true);
+  expect(ok(markSeen, "id", "../7")).toBe(false);
+  expect(ok(markSeen, "id", "0")).toBe(false);
+  expect(ok(markSeen, "address", "not-an-email")).toBe(false);
+  expect(ok(markSeen, "seen", true)).toBe(true);
+  expect(ok(markSeen, "seen", false)).toBe(true);
+  expect(ok(markSeen, "seen", "yes")).toBe(false); // API: z.boolean()
+
   const waitFor = toolSchemas.get("mail_wait_for")!;
   expect(ok(waitFor, "address", "not-an-email")).toBe(false);
   expect(ok(waitFor, "fromContains", "x".repeat(200))).toBe(true);

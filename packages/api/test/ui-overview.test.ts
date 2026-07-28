@@ -183,6 +183,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
     listIdentities: mock(() => identities),
     listMessages: mock(async () => []),
     getMessage: mock(async () => null),
+    setMessageSeen: mock(async () => true),
     getMailboxScan: mock(async () => zeroSnapshotOutcome()),
     ...overrides,
   };

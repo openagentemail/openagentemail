@@ -21,6 +21,7 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `mail_list_identities()` | List all identities |
 | `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet) |
 | `mail_read_message(address, id)` | Full message: text, html?, and `otp:{codes:[],links:[]}` |
+| `mail_mark_seen(address, id, seen?)` | Mark a message read (default) or unread — reading never changes the flag by itself |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
 | `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
 

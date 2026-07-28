@@ -134,6 +134,32 @@ server.tool(
 );
 
 server.tool(
+  "mail_mark_seen",
+  "Mark a message as read (seen=true) or unread (seen=false). Call this after processing a message so the unseen count reflects what is still unhandled. Reading a message never changes this flag by itself.",
+  {
+    address: z
+      .string()
+      .email()
+      .describe("Full email address of the identity that received it"),
+    id: z
+      .string()
+      .regex(/^[1-9]\d*$/)
+      .describe("Message id from mail_list_messages / mail_wait_for"),
+    seen: z
+      .boolean()
+      .optional()
+      .describe("true = mark as read (default), false = mark as unread"),
+  },
+  async ({ address, id, seen }) => {
+    try {
+      return ok(await client.markSeen(address, id, seen ?? true));
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.tool(
   "mail_wait_for",
   "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error.",
   {

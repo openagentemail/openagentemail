@@ -301,6 +301,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .primary:hover { background: var(--gold-soft); border-color: var(--gold-soft); transform: translateY(-1px); }
 .primary:disabled:hover { transform: none; background: var(--gold); border-color: var(--gold); }
 .quiet { background: transparent; }
+.seen-toggle { margin-top: 14px; font-size: 13px; }
 .notice { min-height: 1.5em; margin: 13px 0 0; }
 .notice.error { color: var(--red); }
 .notice.warning {
@@ -1699,6 +1700,21 @@ export const UI_JS = `(function () {
     appendMeta(meta, 'Date', formatDate(detail.date));
     header.append(label, title, meta);
 
+    var summary = null;
+    for (var mi = 0; mi < state.messages.length; mi++) {
+      if (state.messages[mi].id === detail.id) { summary = state.messages[mi]; break; }
+    }
+    if (summary) {
+      var seenToggle = document.createElement('button');
+      seenToggle.type = 'button';
+      seenToggle.className = 'quiet seen-toggle';
+      seenToggle.textContent = summary.seen ? 'Mark as unread' : 'Mark as read';
+      seenToggle.addEventListener('click', function () {
+        toggleSeen(detail.id, summary, seenToggle);
+      });
+      header.append(seenToggle);
+    }
+
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
     tabs.setAttribute('role', 'tablist');
@@ -1745,6 +1761,27 @@ export const UI_JS = `(function () {
     detailContent.append(body);
     appendOtp(detailContent, detail.otp);
     appendLinks(detailContent, 'Links in this message', detail.links);
+  }
+
+  async function toggleSeen(id, summary, button) {
+    button.disabled = true;
+    try {
+      await apiJson('/ui/api/messages/' + encodeURIComponent(id) + '/seen', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ address: state.activeAddress, seen: !summary.seen })
+      });
+      summary.seen = !summary.seen;
+      button.textContent = summary.seen ? 'Mark as unread' : 'Mark as read';
+      renderMessages();
+      announce(summary.seen ? 'Marked as read.' : 'Marked as unread.');
+    } catch (error) {
+      if (error.message !== 'session_expired') {
+        announce('Could not update the message. Try again.');
+      }
+    } finally {
+      button.disabled = false;
+    }
   }
 
   async function selectMessage(id) {

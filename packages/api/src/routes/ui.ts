@@ -7,6 +7,7 @@ import {
   getMessage,
   listMessages,
   scanMailboxWindow,
+  setMessageSeen,
   type MessageDetail,
   type MessageSummary,
 } from '../lib/imap.ts';
@@ -22,6 +23,8 @@ export type UiApiDependencies = {
   listIdentities: () => Identity[];
   listMessages: (address: string, limit: number) => Promise<MessageSummary[]>;
   getMessage: (address: string, id: string) => Promise<MessageDetail | null>;
+  /** 标记/清除 \Seen；消息不存在或不属于该地址时返回 false（路由折成 404）。 */
+  setMessageSeen: (address: string, id: string, seen: boolean) => Promise<boolean>;
   /**
    * Overview 的唯一入口：缓存与 IMAP 细节都在它后面。
    * 注意**没有** now 尾参 —— 时刻读数一律由缓存层的注入时钟给出，
@@ -42,6 +45,7 @@ const defaultDependencies: UiApiDependencies = {
   listIdentities,
   listMessages,
   getMessage,
+  setMessageSeen,
   getMailboxScan: (opts) => overviewCache.getOverview(opts),
 };
 
@@ -56,6 +60,13 @@ const listQuerySchema = z.object({
 const detailQuerySchema = z.object({
   address: z.string().email(),
 });
+
+const seenBodySchema = z
+  .object({
+    address: z.string().email(),
+    seen: z.boolean(),
+  })
+  .strict();
 
 function identityProjection(identity: Identity) {
   return {
@@ -255,6 +266,27 @@ export function createUiApiRoutes(
         typeof detail.html === 'string' &&
         detail.html.length > MAX_EMAIL_HTML_LENGTH,
     });
+  });
+
+  routes.post('/messages/:id/seen', async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_request' }, 400);
+    }
+    const parsed = seenBodySchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+
+    const address = parsed.data.address.toLowerCase();
+    const denied = forbidUnlessAddress(c, address);
+    if (denied) return denied;
+    const id = c.req.param('id');
+    if (!isValidMessageUid(id)) return c.json({ error: 'invalid_request' }, 400);
+
+    const marked = await dependencies.setMessageSeen(address, id, parsed.data.seen);
+    if (!marked) return c.json({ error: 'not_found' }, 404);
+    return c.json({ id, seen: parsed.data.seen });
   });
 
   return routes;
