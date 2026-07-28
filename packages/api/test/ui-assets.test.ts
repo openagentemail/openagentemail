@@ -128,7 +128,9 @@ describe('UI static asset contract', () => {
       '/ui',
       '/ui/',
       '/ui/app.js',
+      '/ui/styles.css',
       '/ui/favicon.svg',
+      '/ui/fonts/Satoshi-Regular.woff2',
       '/ui/api/me',
       '/ui/api/overview',
       '/ui/frame/1?address=fox%40test.example',
@@ -283,7 +285,7 @@ describe('UI static asset contract', () => {
   });
 
   // A18 / A19 / A20 / A21
-  test('the three assets stay free of parser sinks, remote references and CSP drift', () => {
+  test('the three assets stay free of parser sinks and remote references', () => {
     for (const asset of [UI_HTML, UI_CSS, UI_JS]) {
       expect(asset).not.toMatch(
         /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b|createElementNS/,
@@ -291,17 +293,47 @@ describe('UI static asset contract', () => {
       expect(asset).not.toMatch(/\bhttps?:\/\//);
       expect(asset).not.toMatch(/["'(=]\s*\/\//);
       expect(asset).not.toContain('@import');
-      expect(asset).not.toContain('@font-face');
       expect(asset).not.toContain('data:');
-      expect(asset).not.toContain('url(');
-      expect(asset).not.toContain('Satoshi');
       expect(asset).not.toMatch(/tabindex="[1-9]/);
     }
+    // @font-face / url() / Satoshi 只允许出现在 CSS 里，且只指向同源 /ui/fonts/
+    for (const asset of [UI_HTML, UI_JS]) {
+      expect(asset).not.toContain('@font-face');
+      expect(asset).not.toContain('url(');
+      expect(asset).not.toContain('Satoshi');
+    }
+    expect(UI_CSS.match(/url\(/g)?.length).toBe(4);
+    for (const weight of ['Regular', 'Medium', 'Bold', 'Black']) {
+      expect(UI_CSS).toContain(`url('/ui/fonts/Satoshi-${weight}.woff2') format('woff2')`);
+    }
+    expect(UI_CSS).toContain("--sans: 'Satoshi', system-ui");
     expect(OUTER_CSP).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     );
     expect(UI_JS).toContain("'/ui/api/overview'");
     expect(UI_JS).toContain("'/ui/api/overview?refresh=1'");
+  });
+
+  // Satoshi 与 website/public/fonts/ 同源同文件：sha256 钉死，官网换字体这里会红
+  test('font routes serve the website Satoshi files with immutable caching', async () => {
+    const expected: Record<string, string> = {
+      'Satoshi-Regular.woff2': '5aa97d938f523dd893c52473c3a021a0bf4ba0f95290edcc0749c088717f951f',
+      'Satoshi-Medium.woff2': 'd492ce178ab9042bd6bcad1b9ef49b1436ba5f4f833dee4a7a2ed94e9d8c922e',
+      'Satoshi-Bold.woff2': '6f979e75eb9d6de6af2eacc0c72fd2cbe613922b27db92217dd204c8080de930',
+      'Satoshi-Black.woff2': 'a4f962f7f9c049b2d58d848746206adf99bb7b89407d6cc29a36b7eb0d77d032',
+    };
+    for (const [name, sha256] of Object.entries(expected)) {
+      const res = await app.request(`/ui/fonts/${name}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('font/woff2');
+      expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      const digest = new Bun.CryptoHasher('sha256')
+        .update(new Uint8Array(await res.arrayBuffer()))
+        .digest('hex');
+      expect(digest).toBe(sha256);
+    }
+    expect((await app.request('/ui/fonts/Satoshi-Thin.woff2')).status).toBe(404);
   });
 
   // A22：断点值不动，其内规则按嵌套栅格适配
@@ -359,7 +391,7 @@ describe('UI static asset contract', () => {
       expect(UI_CSS).toContain(token);
     }
     expect(UI_CSS).toContain(
-      "--sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;",
+      "--sans: 'Satoshi', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;",
     );
     expect(UI_CSS).not.toContain('Helvetica Neue');
     expect(UI_CSS).toContain('@media (prefers-reduced-motion: reduce)');

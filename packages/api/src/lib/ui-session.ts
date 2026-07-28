@@ -10,6 +10,8 @@ import type { Auth } from './auth.ts';
 const COOKIE_NAME = 'oae_ui';
 const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const ABSOLUTE_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const REMEMBER_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
+const REMEMBER_COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60;
 const IP_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const GLOBAL_FAILURE_WINDOW_MS = 60 * 1000;
 const MAX_IP_FAILURES = 10;
@@ -20,13 +22,14 @@ type Session = {
   tokenHash: string;
   createdAt: number;
   lastSeenAt: number;
+  remembered: boolean;
 };
 
 type CreateResult =
   | { ok: true; sid: string; auth: Auth; reason?: undefined }
   | {
       ok: false;
-      reason: 'invalid_token' | 'rate_limited' | 'principal_limit' | 'capacity';
+      reason: 'invalid_token' | 'rate_limited' | 'capacity';
       sid?: undefined;
       auth?: undefined;
     };
@@ -42,6 +45,12 @@ function sha256(value: string): string {
 }
 
 function isExpired(session: Session, now: number): boolean {
+  // Remembered sessions ("trust this device") use a single 30-day sliding
+  // idle window. There is no extra absolute cap server-side: the persistent
+  // cookie's own 30-day Max-Age bounds the lifetime at the browser.
+  if (session.remembered) {
+    return now - session.lastSeenAt >= REMEMBER_TIMEOUT_MS;
+  }
   return (
     now - session.lastSeenAt >= IDLE_TIMEOUT_MS ||
     now - session.createdAt >= ABSOLUTE_TIMEOUT_MS
@@ -62,7 +71,7 @@ export class UiSessionStore {
     this.maxSessionsPerToken = options.maxSessionsPerToken ?? 5;
   }
 
-  create(token: string, ip: string, now = Date.now()): CreateResult {
+  create(token: string, ip: string, now = Date.now(), remember = false): CreateResult {
     this.cleanup(now);
     token = token.trim();
 
@@ -84,11 +93,20 @@ export class UiSessionStore {
 
     const tokenHash = sha256(token);
     let principalSessions = 0;
-    for (const session of this.sessions.values()) {
-      if (session.tokenHash === tokenHash) principalSessions += 1;
+    let oldestPrincipalHash: string | null = null;
+    let oldestPrincipalSeen = Infinity;
+    for (const [sidHash, session] of this.sessions) {
+      if (session.tokenHash !== tokenHash) continue;
+      principalSessions += 1;
+      if (session.lastSeenAt < oldestPrincipalSeen) {
+        oldestPrincipalSeen = session.lastSeenAt;
+        oldestPrincipalHash = sidHash;
+      }
     }
     if (principalSessions >= this.maxSessionsPerToken) {
-      return { ok: false, reason: 'principal_limit' };
+      // The caller just proved they hold this token, so rather than locking
+      // them out for hours, drop their own least-recently-used session.
+      if (oldestPrincipalHash) this.sessions.delete(oldestPrincipalHash);
     }
     if (this.sessions.size >= this.maxSessions) {
       return { ok: false, reason: 'capacity' };
@@ -100,6 +118,7 @@ export class UiSessionStore {
       tokenHash,
       createdAt: now,
       lastSeenAt: now,
+      remembered: remember,
     });
     return { ok: true, sid, auth };
   }
@@ -161,7 +180,9 @@ declare module 'hono' {
   }
 }
 
-const loginSchema = z.object({ token: z.string().min(1).max(512) }).strict();
+const loginSchema = z
+  .object({ token: z.string().min(1).max(512), remember: z.boolean().optional() })
+  .strict();
 
 function cookieSecure(url: string): boolean {
   const parsed = new URL(url);
@@ -172,12 +193,19 @@ function cookieSecure(url: string): boolean {
   return !(parsed.protocol === 'http:' && localHost);
 }
 
-function setSessionCookie(c: Parameters<typeof setCookie>[0], sid: string): void {
+function setSessionCookie(
+  c: Parameters<typeof setCookie>[0],
+  sid: string,
+  remember: boolean,
+): void {
   setCookie(c, COOKIE_NAME, sid, {
     httpOnly: true,
     sameSite: 'Strict',
     path: '/ui',
     secure: cookieSecure(c.req.url),
+    // Only remembered sessions get a persistent cookie; the default stays a
+    // browser-session cookie so closing the browser signs the user out.
+    ...(remember ? { maxAge: REMEMBER_COOKIE_MAX_AGE_S } : {}),
   });
 }
 
@@ -273,7 +301,8 @@ export function createUiSessionRoutes(store: UiSessionStore): Hono {
       const parsed = loginSchema.safeParse(parsedBody);
       if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
 
-      const result = store.create(parsed.data.token, connectionIp(c));
+      const remember = parsed.data.remember === true;
+      const result = store.create(parsed.data.token, connectionIp(c), undefined, remember);
       if (!result.ok) {
         if (result.reason === 'invalid_token') {
           return c.json({ error: 'invalid_token' }, 401);
@@ -287,7 +316,7 @@ export function createUiSessionRoutes(store: UiSessionStore): Hono {
         );
       }
 
-      setSessionCookie(c, result.sid);
+      setSessionCookie(c, result.sid, remember);
       return c.json(result.auth);
     } catch {
       // Keep credentials out of the global error logger even if parsing or the

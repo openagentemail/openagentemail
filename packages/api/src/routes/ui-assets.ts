@@ -1,6 +1,15 @@
+import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
+
+// Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
+const UI_FONTS: Record<string, Uint8Array> = {
+  'Satoshi-Regular.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Regular.woff2', import.meta.url)),
+  'Satoshi-Medium.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Medium.woff2', import.meta.url)),
+  'Satoshi-Bold.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Bold.woff2', import.meta.url)),
+  'Satoshi-Black.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Black.woff2', import.meta.url)),
+};
 
 function commonHeaders(c: Context): void {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -41,6 +50,16 @@ export function registerUiAssets(app: Hono): void {
     // 被直接导航打开时也不可能跑脚本、不可能取任何子资源
     c.header('Content-Security-Policy', "default-src 'none'");
     return c.body(UI_LOGO_SVG);
+  });
+  app.get('/ui/fonts/:name', (c) => {
+    const data = UI_FONTS[c.req.param('name')];
+    if (!data) return c.body(null, 404);
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Referrer-Policy', 'no-referrer');
+    // 文件名随官网字体变更而同步换内容（sha256 钉在测试里），可安全长缓存。
+    c.header('Cache-Control', 'public, max-age=31536000, immutable');
+    c.header('Content-Type', 'font/woff2');
+    return c.body(data);
   });
   // 旧外壳可能仍在缓存里，保留 204 以免它拿到 404。
   app.get('/ui/favicon.ico', (c) => {

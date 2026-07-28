@@ -129,6 +129,59 @@ describe('UI session cookie', () => {
     expect(store.authenticate(idle.sid, 12 * 60 * 60 * 1000)).toBeNull();
   });
 
+  test('remembered login sets a persistent 30-day cookie', async () => {
+    const app = makeApp();
+    const response = await app.request('https://mail.example/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://mail.example',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ token: 'valid-admin', remember: true }),
+    });
+    expect(response.status).toBe(200);
+
+    const setCookie = response.headers.get('set-cookie')!;
+    expect(setCookie).toContain('Max-Age=2592000');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Strict');
+    expect(setCookie).toContain('Secure');
+  });
+
+  test('a non-boolean remember flag is rejected', async () => {
+    const response = await makeApp().request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ token: 'valid-admin', remember: 'yes' }),
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  test('remembered sessions use the 30-day sliding window instead of the short timeouts', () => {
+    const store = new UiSessionStore({ resolveToken: adminResolver });
+    const session = store.create('valid-admin', '127.0.0.1', 0, true);
+    expect(session.ok).toBe(true);
+    if (!session.ok) throw new Error('expected a session');
+
+    // Past the default 12h idle / 24h absolute limits a remembered session
+    // is still alive, and activity keeps sliding the 30-day window.
+    expect(store.authenticate(session.sid, 25 * 60 * 60 * 1000)).not.toBeNull();
+    const lastSeen = 25 * 60 * 60 * 1000 + 30 * 24 * 60 * 60 * 1000 - 1;
+    expect(store.authenticate(session.sid, lastSeen)).not.toBeNull();
+    expect(store.authenticate(session.sid, lastSeen + 30 * 24 * 60 * 60 * 1000)).toBeNull();
+
+    const idle = store.create('valid-admin', '127.0.0.1', 0, true);
+    expect(idle.ok).toBe(true);
+    if (!idle.ok) throw new Error('expected a session');
+    expect(store.authenticate(idle.sid, 30 * 24 * 60 * 60 * 1000)).toBeNull();
+  });
+
   test('token rotation and deletion invalidate a session', () => {
     let tokenValid = true;
     const store = new UiSessionStore({

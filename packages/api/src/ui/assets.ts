@@ -1,5 +1,6 @@
+// font-src 'self'：Satoshi 由 /ui/fonts/ 同源提供（见 routes/ui-assets.ts），不放行任何外源。
 export const OUTER_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 // ⚠ 模块私有：这一行前面**不得**加 export —— 整个模块只允许导出一个 logo 常量
 // （`UI_LOGO_SVG`）。几何与 website/public/logo.svg 逐字一致。
@@ -39,6 +40,10 @@ export const UI_HTML = `<!doctype html>
       <form id="login-form">
         <label for="login-token">API token</label>
         <input id="login-token" name="credential" type="password" autocomplete="current-password" maxlength="512" required>
+        <label class="remember-row" for="login-remember">
+          <input id="login-remember" type="checkbox">
+          <span>Trust this device for 30 days</span>
+        </label>
         <button id="login-submit" class="primary" type="submit">Open inbox</button>
       </form>
       <p id="insecure-warning" class="notice warning" hidden>This connection is not secure. Open the inbox over HTTPS or an SSH tunnel before entering a token.</p>
@@ -133,7 +138,37 @@ export const UI_HTML = `<!doctype html>
 </body>
 </html>`;
 
-export const UI_CSS = `:root {
+export const UI_CSS = `/* Satoshi 与官网同源同文件（website/public/fonts/，sha256 由测试钉死）。 */
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/ui/fonts/Satoshi-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/ui/fonts/Satoshi-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/ui/fonts/Satoshi-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/ui/fonts/Satoshi-Black.woff2') format('woff2');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
   color-scheme: dark;
   --bg: #0c0d12;
   --bg-raise: #12141c;
@@ -149,7 +184,7 @@ export const UI_CSS = `:root {
   --line-control: rgba(255, 255, 255, 0.34);
   --green: #34d399;
   --red: #f87171;
-  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --sans: 'Satoshi', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --radius: 14px;
 }
@@ -217,6 +252,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 }
 .login-card h1 { margin: 0; font-size: clamp(28px, 6vw, 40px); line-height: 1.08; letter-spacing: -0.02em; }
 .login-card form { display: grid; gap: 9px; margin-top: 28px; }
+.remember-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 3px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.remember-row input[type="checkbox"] {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
 label { color: #d6d7dc; font-size: 13px; font-weight: 700; }
 input, select {
   width: 100%;
@@ -570,6 +621,7 @@ export const UI_JS = `(function () {
   var inboxView = byId('inbox-view');
   var loginForm = byId('login-form');
   var loginToken = byId('login-token');
+  var loginRemember = byId('login-remember');
   var loginSubmit = byId('login-submit');
   var loginError = byId('login-error');
   var insecureWarning = byId('insecure-warning');
@@ -616,6 +668,7 @@ export const UI_JS = `(function () {
   function configureLoginGate() {
     var safe = isLoginContextSafe();
     loginToken.disabled = !safe;
+    loginRemember.disabled = !safe;
     loginSubmit.disabled = !safe;
     insecureWarning.hidden = safe;
     return safe;
@@ -1768,7 +1821,7 @@ export const UI_JS = `(function () {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token: credential })
+        body: JSON.stringify({ token: credential, remember: loginRemember.checked })
       });
       if (!response.ok) {
         loginError.textContent = response.status === 401

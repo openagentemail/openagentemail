@@ -78,28 +78,41 @@ describe('UI login resource limits', () => {
     expect(global.create('global-over', '198.51.100.1', 61).reason).toBe('rate_limited');
   });
 
-  test('one principal gets at most five active sessions', () => {
+  test('a sixth login evicts the principal’s own least-recently-used session', () => {
     const store = new UiSessionStore({ resolveToken: anyToken });
+    const sids: string[] = [];
     for (let i = 0; i < 5; i++) {
-      expect(store.create('same-token', `192.0.2.${i}`, i).ok).toBe(true);
+      const created = store.create('same-token', `192.0.2.${i}`, i);
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error('expected a session');
+      sids.push(created.sid);
+      // Touch every session so lastSeenAt ordering is deterministic.
+      expect(store.authenticate(created.sid, i + 1)).not.toBeNull();
     }
-    expect(store.create('same-token', '192.0.2.99', 10)).toEqual({
-      ok: false,
-      reason: 'principal_limit',
-    });
+
+    const sixth = store.create('same-token', '192.0.2.99', 10);
+    expect(sixth.ok).toBe(true);
+    // The oldest session is gone; the other four are untouched.
+    expect(store.authenticate(sids[0]!, 11)).toBeNull();
+    for (const sid of sids.slice(1)) {
+      expect(store.authenticate(sid, 11)).not.toBeNull();
+    }
   });
 
-  test('whitespace aliases resolve and count as the same token principal', () => {
+  test('whitespace aliases resolve and share the same principal session budget', () => {
     const store = new UiSessionStore({
       resolveToken: (token) => (token === 'same-token' ? { kind: 'admin' } : null),
     });
+    const sids: string[] = [];
     for (let i = 0; i < 5; i++) {
-      expect(store.create(`same-token${' '.repeat(i)}`, `192.0.2.${i}`, i).ok).toBe(true);
+      const created = store.create(`same-token${' '.repeat(i)}`, `192.0.2.${i}`, i);
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error('expected a session');
+      sids.push(created.sid);
     }
-    expect(store.create('\tsame-token\t', '192.0.2.99', 10)).toEqual({
-      ok: false,
-      reason: 'principal_limit',
-    });
+    const sixth = store.create('\tsame-token\t', '192.0.2.99', 10);
+    expect(sixth.ok).toBe(true);
+    expect(store.authenticate(sids[0]!, 11)).toBeNull();
   });
 
   test('a full table never evicts another active session', () => {
