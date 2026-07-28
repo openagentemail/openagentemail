@@ -437,7 +437,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .overview-panel.is-error .overview-rows, .overview-panel.is-error .overview-stats { opacity: .8; }
 .back-link { margin: 0 0 8px; padding: 4px 8px; min-height: 32px; font-size: 13px; }
-.message-heading { min-height: 88px; padding: 18px; border-bottom: 1px solid var(--line-strong); }
+.message-heading { min-height: 88px; padding: 18px; border-bottom: 1px solid var(--line-strong); align-items: flex-end; }
 .active-address { margin: 0 0 3px; color: var(--gold); font-size: 12px; overflow-wrap: anywhere; }
 .message-item { border-bottom: 1px solid var(--line); }
 .message-button {
@@ -467,6 +467,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   letter-spacing: .06em;
 }
 .empty-state { padding: 28px 20px; color: var(--ink-dim); }
+.empty-state:empty { display: none; }
 .detail-content { max-width: 920px; margin: auto; padding: 32px clamp(20px, 5vw, 54px); }
 .detail-placeholder { max-width: 520px; margin: 12vh auto 0; }
 .detail-placeholder h2 { margin: 3px 0 8px; font-size: 28px; }
