@@ -42,14 +42,18 @@ SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guide
 ## Read mail in a browser
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
-or identity API token. The built-in inbox is read-only: it lists the addresses
-the token may access, shows messages, extracts verification codes and links,
-and offers plain-text or isolated HTML previews.
+or identity API token. The built-in dashboard lists the addresses the token
+may access, shows messages, extracts verification codes and links, offers
+plain-text or isolated HTML previews, and can mark messages read or unread —
+its only write action.
 
 The browser exchanges the token once for an `HttpOnly` session cookie; the
 token never enters the URL or browser storage. Sessions live only in API
-process memory, so restarting the API signs every browser out. They also expire
-after 12 idle hours or 24 hours total.
+process memory, so restarting the API signs every browser out. They expire
+after 12 idle hours or 24 hours total — or tick **Trust this device** at
+login to keep a sliding 30-day session on that browser. Each token holds at
+most five sessions; a sixth login evicts that token's least-recently-used one
+instead of locking you out.
 
 For another computer, use the same SSH tunnel recommended for the API or put a
 TLS reverse proxy in front. The login form refuses non-local plain HTTP, and
@@ -113,8 +117,9 @@ Deliberate limits, so nothing here is a surprise later:
   30-second socket timeout.
 - Up to 200 identities render in one pass. Beyond that, expect to want paging or
   virtual scrolling; filtering and sorting happen in the browser today.
-- No font files are shipped and `font-src` stays `'none'`; `Inter` is used only if
-  it is already installed locally. The favicon is an SVG (`/ui/favicon.svg`) so it
+- The dashboard self-hosts the Satoshi webfont (`/ui/fonts/*`, the same
+  typeface as the website) so it renders identically on every machine;
+  `font-src` is `'self'`. The favicon is an SVG (`/ui/favicon.svg`) so it
   needs no build step, and `/ui/favicon.ico` keeps returning 204 as before.
 - Form controls use a dedicated `--line-control` border token so their outlines
   stay above 3:1 contrast. It is the one intentional deviation from the website's
@@ -126,13 +131,18 @@ Deliberate limits, so nothing here is a surprise later:
   addresses. No provisioning, no per-inbox cost.
 - **Scoped tokens** — every identity gets its own token that can only read and
   send as that address. The admin key never has to touch your agents.
-- **REST + MCP** — the same six operations over a plain HTTP API and a first-class
+- **REST + MCP** — the same seven operations over a plain HTTP API and a first-class
   MCP server your agents can call directly.
 - **`mail_wait_for` / `POST /v1/messages/wait`** — long-poll an inbox until a
   matching message arrives, with OTP codes and verification links already extracted.
   Built for automated signups.
-- **Read-only web inbox** — inspect identities and messages at `/ui`, with
-  responsive layouts and doubly isolated HTML previews.
+- **Read/unread state** — `mail_mark_seen` / `POST /v1/messages/:id/seen` lets an
+  agent (or the human in the dashboard) mark a message handled, so the unseen
+  count means "still needs attention". Reading a message never changes the flag
+  by itself.
+- **Web dashboard for humans** — inspect identities and messages at `/ui`, with
+  an admin overview across all identities, responsive layouts, and doubly
+  isolated HTML previews.
 - **Safety rails built in** — per-identity send rate limits (20/hour default),
   automatic mail retention (30 days default), localhost-only API binding.
 - **Bring your own relay** — send directly from the VPS, or route outbound through
@@ -181,7 +191,7 @@ low-latency waits.
 ```
 
 Tools: `mail_new_identity`, `mail_list_identities`, `mail_list_messages`,
-`mail_read_message`, `mail_wait_for`, `mail_send`.
+`mail_read_message`, `mail_wait_for`, `mail_send`, `mail_mark_seen`.
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:
@@ -231,8 +241,8 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
   extraction, DNS wizard + doctor, optional SMTP relay.
 - **v0.2 (current)** — scoped per-identity tokens, send rate limits, automatic
   retention, localhost-safe defaults, expanded OTP corpus.
-- **Next** — outbound webhooks (push instead of `wait_for` polling), optional
-  write actions in the web UI, multi-domain support, Sieve-style per-identity rules.
+- **Next** — outbound webhooks (push instead of `wait_for` polling), more write
+  actions in the web dashboard, multi-domain support, Sieve-style per-identity rules.
 - **Distribution** — planned one-click app in the
   [OpenShip](https://github.com/oblien/openship) catalog.
 
