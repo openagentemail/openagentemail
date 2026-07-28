@@ -1,6 +1,6 @@
 {
   "name": "@openagentemail/mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.openagentemail/mcp",
   "description": "MCP server for openagent.email — unlimited agent mailboxes via REST + MCP",
   "license": "Apache-2.0",

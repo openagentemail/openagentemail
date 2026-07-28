@@ -6,10 +6,17 @@
  *   OPENAGENTEMAIL_API_URL  base URL of the API (default http://localhost:3100)
  *   OPENAGENTEMAIL_API_KEY  bearer key (required: identity token oa_… or an admin key)
  */
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "./lib/client.ts";
+
+// Read our own version from package.json (works from both src/ and dist/):
+// hardcoding it here once drifted a full release behind the published package.
+const pkg = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 const apiUrl = process.env.OPENAGENTEMAIL_API_URL ?? "http://localhost:3100";
 const apiKey = process.env.OPENAGENTEMAIL_API_KEY;
@@ -28,7 +35,7 @@ const client = new OpenAgentEmailClient(apiUrl, apiKey);
 
 const server = new McpServer({
   name: "openagentemail",
-  version: "0.1.0",
+  version: pkg.version,
 });
 
 type ToolResult = {
