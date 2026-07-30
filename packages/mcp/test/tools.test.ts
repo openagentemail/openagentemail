@@ -29,8 +29,8 @@ class FakeMcpServer {
   async connect() {}
 }
 
-mock.module("@modelcontextprotocol/sdk/server/mcp.js", () => ({ McpServer: FakeMcpServer }));
-mock.module("@modelcontextprotocol/sdk/server/stdio.js", () => ({
+mock.module("@modelcontextprotocol/server", () => ({ McpServer: FakeMcpServer }));
+mock.module("@modelcontextprotocol/server/stdio", () => ({
   StdioServerTransport: class {},
 }));
 

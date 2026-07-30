@@ -7,9 +7,9 @@
  *   OPENAGENTEMAIL_API_KEY  bearer key (required: identity token oa_… or an admin key)
  */
 import { readFileSync } from "node:fs";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "./lib/client.ts";
 
@@ -54,15 +54,15 @@ const mutatingAnnotations = {
 } as const;
 
 const identitySchema = {
-  address: z.string().email(),
+  address: z.email(),
   name: z.string().optional(),
   createdAt: z.string().optional(),
 };
 
 const messageSummarySchema = {
   id: z.string(),
-  from: z.string(),
-  to: z.string(),
+  from: z.email(),
+  to: z.email(),
   subject: z.string(),
   date: z.string(),
   seen: z.boolean(),
@@ -88,10 +88,7 @@ const messageListOutputSchema = {
 };
 
 const receivedMessageInputSchema = {
-  address: z
-    .string()
-    .email()
-    .describe("Full email address of the identity that received it"),
+  address: z.email().describe("Full email address of the identity that received it"),
   // 服务端按 Number(id) 要求正整数 UID。
   id: z
     .string()
@@ -179,7 +176,7 @@ server.registerTool(
     description:
       "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet.",
     inputSchema: {
-      address: z.string().email().describe("Full email address of the identity"),
+      address: z.email().describe("Full email address of the identity"),
       limit: z
         .number()
         .int()
@@ -240,7 +237,7 @@ server.registerTool(
     description:
       "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error.",
     inputSchema: {
-      address: z.string().email().describe("Full email address of the identity to watch"),
+      address: z.email().describe("Full email address of the identity to watch"),
       fromContains: z
         .string()
         .max(200)
@@ -275,8 +272,8 @@ server.registerTool(
     description:
       "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
     inputSchema: {
-      from: z.string().email().describe("Sender address (must be an existing identity)"),
-      to: z.string().email().describe("Recipient address"),
+      from: z.email().describe("Sender address (must be an existing identity)"),
+      to: z.email().describe("Recipient address"),
       subject: z.string().max(998).describe("Subject line"),
       text: z.string().max(1_000_000).describe("Plain-text body"),
       html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
