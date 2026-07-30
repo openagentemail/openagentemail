@@ -50,8 +50,9 @@ SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guide
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
 or identity API token. The built-in dashboard lists the addresses the token
 may access, shows messages, extracts verification codes and links, offers
-plain-text or isolated HTML previews, and can mark messages read or unread —
-its only write action.
+plain-text or isolated HTML previews, and can mark messages read or unread.
+Admin sessions can also create identities (with custom address prefixes),
+rotate tokens, and delete identities directly from the overview table.
 
 The browser exchanges the token once for an `HttpOnly` session cookie; the
 token never enters the URL or browser storage. Sessions live only in API
@@ -76,7 +77,12 @@ upgrade it in a dedicated change and rerun the full poison-message corpus.
 
 An admin session lands on **Overview**: every identity in one table with the
 message count, unseen count, last delivery, and creation day, plus totals across
-the top. Identity sessions never see it — they go straight to their own inbox.
+the top. Each row also shows whether the identity has a token (green dot) and
+has **Rotate** and **Delete** action buttons. A **Create Identity** button
+above the table opens a form where you can set a custom address prefix (e.g.
+`qa-bot`) or leave it blank for a random one; the new token is shown once in a
+copy-to-clipboard modal. Identity sessions never see the overview or management
+controls — they go straight to their own inbox.
 The page is served from the same in-process API as the rest of `/ui`; there is no
 new public endpoint outside `/ui/api`.
 
@@ -147,8 +153,9 @@ Deliberate limits, so nothing here is a surprise later:
   count means "still needs attention". Reading a message never changes the flag
   by itself.
 - **Web dashboard for humans** — inspect identities and messages at `/ui`, with
-  an admin overview across all identities, responsive layouts, and doubly
-  isolated HTML previews.
+  an admin overview across all identities, token status and rotation, identity
+  creation with custom addresses, responsive layouts, and doubly isolated HTML
+  previews.
 - **Safety rails built in** — per-identity send rate limits (20/hour default),
   automatic mail retention (30 days default), localhost-only API binding.
 - **Bring your own relay** — send directly from the VPS, or route outbound through
@@ -268,8 +275,8 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
   extraction, DNS wizard + doctor, optional SMTP relay.
 - **v0.2 (current)** — scoped per-identity tokens, send rate limits, automatic
   retention, localhost-safe defaults, expanded OTP corpus.
-- **Next** — outbound webhooks (push instead of `wait_for` polling), more write
-  actions in the web dashboard, multi-domain support, Sieve-style per-identity rules.
+- **Next** — outbound webhooks (push instead of `wait_for` polling),
+  multi-domain support, Sieve-style per-identity rules.
 - **Distribution** — planned one-click app in the
   [OpenShip](https://github.com/oblien/openship) catalog.
 
