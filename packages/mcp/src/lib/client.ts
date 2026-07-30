@@ -2,7 +2,7 @@
  * Minimal REST client for the openagent.email API.
  *
  * API contract (shared):
- *   POST /v1/identities            {name?, localpart?} -> 201 {address, name?}
+ *   POST /v1/identities            {name?, localpart?} -> 201 {address, name?, token}
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt}]}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
@@ -186,8 +186,11 @@ export class OpenAgentEmailClient {
     return data as T;
   }
 
-  createIdentity(name?: string): Promise<{ address: string; name?: string }> {
-    return this.request("POST", "/v1/identities", name ? { name } : {});
+  createIdentity(opts: { name?: string; localpart?: string }): Promise<{ address: string; name?: string }> {
+    const body: Record<string, string> = {};
+    if (opts.name) body.name = opts.name;
+    if (opts.localpart) body.localpart = opts.localpart;
+    return this.request("POST", "/v1/identities", body);
   }
 
   async listIdentities(): Promise<Identity[]> {

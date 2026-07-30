@@ -142,7 +142,7 @@ server.registerTool(
   {
     title: "Create Email Identity",
     description:
-      "Create a new email identity (mailbox address) on this openagent.email server. Returns the full address; a random localpart like 'fox-k7d2' is generated.",
+      "Create a new email identity (mailbox address) on this openagent.email server. Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address; the address also gets a scoped API token.",
     inputSchema: {
       // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
       name: z
@@ -151,11 +151,21 @@ server.registerTool(
         .max(100)
         .optional()
         .describe("Optional display name for the identity"),
+      localpart: z
+        .string()
+        .regex(
+          /^[a-z0-9][a-z0-9._-]{0,62}$/,
+          "must start with alphanumeric, then a-z0-9._-, max 63 chars",
+        )
+        .optional()
+        .describe(
+          "Custom email localpart (e.g. 'my-bot' for my-bot@domain). If omitted, a random one is generated.",
+        ),
     },
     outputSchema: identitySchema,
     annotations: mutatingAnnotations,
   },
-  ({ name }) => callApi(() => client.createIdentity(name)),
+  ({ name, localpart }) => callApi(() => client.createIdentity({ name, localpart })),
 );
 
 server.registerTool(

@@ -83,6 +83,11 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(newIdentity, "name", "Fox")).toBe(true);
   expect(ok(newIdentity, "name", "")).toBe(false); // API: z.string().min(1)
   expect(ok(newIdentity, "name", "x".repeat(101))).toBe(false); // API: .max(100)
+  expect(ok(newIdentity, "localpart", "my-bot")).toBe(true);
+  expect(ok(newIdentity, "localpart", "qoder-cn-mbp")).toBe(true);
+  expect(ok(newIdentity, "localpart", "My-Bot")).toBe(false); // uppercase not allowed
+  expect(ok(newIdentity, "localpart", "-bot")).toBe(false); // must start alphanumeric
+  expect(ok(newIdentity, "localpart", "a".repeat(64))).toBe(false); // max 63 chars
 
   const list = toolSchemas.get("mail_list_messages")!;
   expect(ok(list, "address", "fox-k7d2@test.example")).toBe(true);

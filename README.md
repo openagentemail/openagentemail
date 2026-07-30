@@ -212,7 +212,7 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 
 | Tool | Description |
 | --- | --- |
-| `mail_new_identity(name?)` | Create an identity; returns `{address}` (random localpart like `fox-k7d2`) |
+| `mail_new_identity(name?, localpart?)` | Create an identity; pass `localpart` for a custom address (e.g. `qa-bot`), or omit for a random one like `fox-k7d2` |
 | `mail_list_identities()` | List all identities |
 | `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet) |
 | `mail_read_message(address, id)` | Full message: text, html?, and `otp:{codes:[],links:[]}` |
