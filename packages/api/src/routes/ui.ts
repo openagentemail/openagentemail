@@ -1,7 +1,16 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { z } from 'zod';
 import { forbidUnlessAddress, getAuth } from '../lib/auth.ts';
-import { listIdentities, type Identity } from '../lib/identities.ts';
+import {
+  createIdentity,
+  deleteIdentity,
+  findIdentity,
+  listIdentities,
+  LOCALPART_RE,
+  rotateIdentityToken,
+  type Identity,
+} from '../lib/identities.ts';
 import {
   SCAN_BACK,
   getMessage,
@@ -42,7 +51,8 @@ const overviewCache = createOverviewCache({
 });
 
 const defaultDependencies: UiApiDependencies = {
-  listIdentities,
+  listIdentities: () =>
+    listIdentities().map((identity) => findIdentity(identity.address) ?? identity),
   listMessages,
   getMessage,
   setMessageSeen,
@@ -73,7 +83,15 @@ function identityProjection(identity: Identity) {
     address: identity.address,
     ...(identity.name ? { name: identity.name } : {}),
     createdAt: identity.createdAt,
+    hasToken: Boolean(identity.tokenHash),
   };
+}
+
+function requireUiAdmin(c: Context): Response | null {
+  if (getAuth(c).kind !== 'admin') {
+    return c.json({ error: 'forbidden: admin session required' }, 403);
+  }
+  return null;
 }
 
 /**
@@ -201,6 +219,60 @@ export function createUiApiRoutes(
         ? all
         : all.filter((identity) => identity.address === auth.address);
     return c.json({ identities: visible.map(identityProjection) });
+  });
+
+  routes.post('/identities', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      body = {};
+    }
+    const name = (body as any)?.name;
+    const localpart = (body as any)?.localpart;
+    const input: { name?: string; localpart?: string } = {};
+    if (typeof name === 'string' && name.length >= 1 && name.length <= 100) {
+      input.name = name;
+    }
+    if (typeof localpart === 'string' && LOCALPART_RE.test(localpart)) {
+      input.localpart = localpart.toLowerCase();
+    }
+    try {
+      const created = createIdentity(input);
+      if (!created) return c.json({ error: 'address_exists' }, 409);
+      return c.json(
+        {
+          address: created.identity.address,
+          ...(created.identity.name ? { name: created.identity.name } : {}),
+          token: created.token,
+        },
+        201,
+      );
+    } catch (err) {
+      if ((err as Error).message === 'invalid_localpart') {
+        return c.json({ error: 'invalid_localpart' }, 400);
+      }
+      throw err;
+    }
+  });
+
+  routes.post('/identities/:address/token', (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    const token = rotateIdentityToken(c.req.param('address'));
+    if (!token) return c.json({ error: 'not_found' }, 404);
+    return c.json({ address: c.req.param('address').toLowerCase(), token });
+  });
+
+  routes.delete('/identities/:address', (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    if (!deleteIdentity(c.req.param('address'))) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    return c.json({ deleted: true });
   });
 
   routes.get('/overview', async (c) => {

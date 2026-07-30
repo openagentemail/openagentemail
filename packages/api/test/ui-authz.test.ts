@@ -71,10 +71,12 @@ describe('UI authorization boundaries', () => {
           address: 'fox@test.example',
           name: 'Fox',
           createdAt: '2026-07-27T00:00:00.000Z',
+          hasToken: true,
         },
         {
           address: 'owl@test.example',
           createdAt: '2026-07-27T00:01:00.000Z',
+          hasToken: false,
         },
       ],
     });
@@ -100,6 +102,7 @@ describe('UI authorization boundaries', () => {
         address: 'fox@test.example',
         name: 'Fox',
         createdAt: '2026-07-27T00:00:00.000Z',
+        hasToken: true,
       },
     ]);
 

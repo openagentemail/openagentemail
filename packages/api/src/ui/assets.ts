@@ -91,7 +91,10 @@ export const UI_HTML = `<!doctype html>
             <p id="overview-overlap" class="overview-subtitle">Counts overlap when one email is addressed to several addresses.</p>
             <p id="overview-updated" class="overview-updated"></p>
           </div>
-          <button id="overview-refresh" class="quiet" type="button">Refresh</button>
+          <div class="overview-heading-actions">
+            <button id="create-identity-button" class="primary" type="button" hidden>Create Identity</button>
+            <button id="overview-refresh" class="quiet" type="button">Refresh</button>
+          </div>
         </div>
         <p id="overview-notice" class="notice warning" hidden></p>
         <div id="overview-stats" class="overview-stats"></div>
@@ -103,6 +106,15 @@ export const UI_HTML = `<!doctype html>
         </div>
         <div id="overview-sort" class="overview-sort" role="group" aria-label="Sort addresses"></div>
         <p id="overview-state" class="empty-state"></p>
+        <div class="overview-header" aria-hidden="true">
+          <span>Identity</span>
+          <span>Token</span>
+          <span>Messages</span>
+          <span>Unseen</span>
+          <span>Last</span>
+          <span>Created</span>
+          <span>Actions</span>
+        </div>
         <div id="overview-rows" class="overview-rows"></div>
       </main>
 
@@ -131,6 +143,51 @@ export const UI_HTML = `<!doctype html>
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="modal-overlay" id="token-modal" hidden>
+      <div class="modal-card">
+        <h2 id="token-modal-title">Token</h2>
+        <p class="modal-warn">Copy this token now. It will not be shown again.</p>
+        <div class="token-display">
+          <code id="token-value"></code>
+          <button class="quiet" id="token-copy-button" type="button">Copy</button>
+        </div>
+        <div class="modal-actions">
+          <button class="primary" id="token-modal-close" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="confirm-modal" hidden>
+      <div class="modal-card">
+        <h2>Delete Identity</h2>
+        <p id="confirm-modal-text"></p>
+        <div class="modal-actions">
+          <button class="quiet" id="confirm-modal-cancel" type="button">Cancel</button>
+          <button class="primary" id="confirm-modal-confirm" type="button">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="create-modal" hidden>
+      <div class="modal-card">
+        <h2>Create Identity</h2>
+        <label>Display name (optional)
+          <input type="text" id="create-name" maxlength="100" placeholder="My Bot">
+        </label>
+        <label>Custom address (optional)
+          <div class="localpart-input">
+            <input type="text" id="create-localpart" pattern="[a-z0-9][a-z0-9._-]*" maxlength="63" placeholder="my-bot">
+            <span class="localpart-suffix">@<span id="create-domain"></span></span>
+          </div>
+        </label>
+        <p class="form-hint">Leave address blank for a random one.</p>
+        <div class="modal-actions">
+          <button class="quiet" id="create-modal-cancel" type="button">Cancel</button>
+          <button class="primary" id="create-modal-submit" type="button">Create</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -355,6 +412,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .panel-heading h2 { margin: 0; font-size: 16px; }
 .overview-heading { align-items: flex-start; padding: 4px 0 18px; }
 .overview-heading h2 { font-size: 22px; letter-spacing: -0.01em; }
+.overview-heading-actions { display: flex; align-items: center; gap: 8px; }
+.overview-heading-actions .primary { margin-top: 0; }
 .overview-subtitle { margin: 6px 0 0; color: var(--ink-dim); font-size: 14px; }
 .overview-updated { margin: 4px 0 0; color: var(--ink-dim); font-size: 14px; }
 .count {
@@ -403,13 +462,24 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .overview-sort { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .sort-button { min-height: 34px; padding: 4px 10px; font-size: 13px; }
 .sort-button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+.overview-header {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
+  padding: 8px 10px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
 .overview-rows { border-top: 1px solid var(--line); }
 .overview-row {
   width: 100%;
   display: grid;
   align-items: baseline;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) 104px 96px 132px 96px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
   min-height: 56px;
   border: 0;
   border-bottom: 1px solid var(--line);
@@ -419,6 +489,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   text-align: left;
 }
 .overview-row:hover, .overview-row[aria-current="true"] { background: var(--gold-dim); }
+.overview-row:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
 .overview-row .cell { display: block; overflow: hidden; text-overflow: ellipsis; }
 .overview-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
 .cell-value { font-variant-numeric: tabular-nums; }
@@ -435,7 +506,69 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   border-radius: 999px;
   background: var(--green);
 }
+.token-cell .cell-value { display: inline-flex; align-items: center; }
+.token-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--red);
+  opacity: .65;
+}
+.token-dot.has-token { background: var(--green); opacity: 1; }
+.row-actions { display: grid !important; gap: 4px; align-self: center; overflow: visible !important; }
+.row-action { min-height: 26px; padding: 2px 6px; font-size: 11px; }
+.delete-action { color: var(--red); }
 .overview-panel.is-error .overview-rows, .overview-panel.is-error .overview-stats { opacity: .8; }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .72);
+}
+.modal-card {
+  width: min(100%, 440px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+}
+.modal-card h2 { margin: 0 0 14px; }
+.modal-card label { display: grid; gap: 7px; margin-top: 14px; }
+.modal-warn { margin: 0 0 14px; color: var(--gold); }
+.token-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #090b10;
+}
+.token-display code { min-width: 0; flex: 1; color: var(--gold-soft); font-family: var(--mono); overflow-wrap: anywhere; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.modal-actions .primary { margin-top: 0; }
+.localpart-input { display: flex; align-items: stretch; }
+.localpart-input input { min-width: 0; border-radius: 10px 0 0 10px; }
+.localpart-suffix {
+  display: flex;
+  align-items: center;
+  padding: 0 11px;
+  border: 1px solid var(--line-control);
+  border-left: 0;
+  border-radius: 0 10px 10px 0;
+  background: #0d0f15;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.form-hint { margin: 8px 0 0; color: var(--ink-dim); font-size: 12px; }
 .back-link { margin: 0 0 8px; padding: 4px 8px; min-height: 32px; font-size: 13px; }
 .message-heading { min-height: 88px; padding: 18px; border-bottom: 1px solid var(--line-strong); align-items: flex-end; }
 .active-address { margin: 0 0 3px; color: var(--gold); font-size: 12px; overflow-wrap: anywhere; }
@@ -532,7 +665,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 @media (max-width: 900px) {
   .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
-  .overview-row { grid-template-columns: minmax(0, 1fr) 92px 88px 120px 88px; }
+  .overview-header, .overview-row {
+    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 58px;
+  }
   .session-label { display: none; }
 }
 
@@ -560,10 +696,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     border-width: 0 0 1px;
   }
   .inbox-view[data-mobile-view="overview"] .stat-value { margin-top: 0; font-size: 20px; }
+  .overview-heading { flex-wrap: wrap; }
+  .overview-header { display: none; }
   .overview-row { display: block; min-height: 44px; }
   .overview-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; }
   .overview-row .cell-label { display: inline; }
   .overview-row .cell-unit { display: none; }
+  .row-actions { display: flex !important; justify-content: flex-end !important; }
   .detail-content { padding: 22px 16px 40px; }
   .code-row, .link-row { align-items: flex-start; flex-wrap: wrap; }
   .link-copy { margin-left: 0; }
@@ -650,10 +789,26 @@ export const UI_JS = `(function () {
   var overviewDisclosure = byId('overview-disclosure');
   var overviewShown = byId('overview-shown');
   var overviewRefresh = byId('overview-refresh');
+  var createIdentityButton = byId('create-identity-button');
   var backToOverview = byId('back-to-overview');
   var skipLink = byId('skip-link');
   var viewTitle = byId('view-title');
   var statusRegion = byId('status');
+  var tokenModal = byId('token-modal');
+  var tokenModalTitle = byId('token-modal-title');
+  var tokenValue = byId('token-value');
+  var tokenCopyButton = byId('token-copy-button');
+  var tokenModalClose = byId('token-modal-close');
+  var confirmModal = byId('confirm-modal');
+  var confirmModalText = byId('confirm-modal-text');
+  var confirmModalCancel = byId('confirm-modal-cancel');
+  var confirmModalConfirm = byId('confirm-modal-confirm');
+  var createModal = byId('create-modal');
+  var createName = byId('create-name');
+  var createLocalpart = byId('create-localpart');
+  var createDomain = byId('create-domain');
+  var createModalCancel = byId('create-modal-cancel');
+  var createModalSubmit = byId('create-modal-submit');
 
   function announce(message) {
     statusRegion.textContent = '';
@@ -678,6 +833,7 @@ export const UI_JS = `(function () {
 
   function showLogin(message) {
     cancelOverview();
+    closeAllModals();
     inboxView.hidden = true;
     loginView.hidden = false;
     loginError.textContent = message || '';
@@ -699,6 +855,7 @@ export const UI_JS = `(function () {
     inboxView.dataset.session = isAdmin() ? 'admin' : 'identity';
     /* identity 会话下 Overview 相关节点不可见，因此也不在 tab 序里。 */
     backToOverview.hidden = !isAdmin();
+    createIdentityButton.hidden = !isAdmin();
   }
 
   async function apiJson(path, options) {
@@ -715,6 +872,111 @@ export const UI_JS = `(function () {
       throw failure;
     }
     return response.json();
+  }
+
+  function closeAllModals() {
+    tokenModal.hidden = true;
+    confirmModal.hidden = true;
+    createModal.hidden = true;
+    tokenValue.textContent = '';
+    tokenModalTitle.textContent = 'Token';
+    tokenCopyButton.classList.remove('copied');
+    confirmModalText.textContent = '';
+    confirmModalConfirm.onclick = null;
+  }
+
+  function showTokenModal(token, title) {
+    closeAllModals();
+    tokenModalTitle.textContent = title || 'Token';
+    tokenValue.textContent = token;
+    tokenModal.hidden = false;
+    tokenCopyButton.focus();
+  }
+
+  function showCreateModal() {
+    if (!isAdmin()) return;
+    closeAllModals();
+    createName.value = '';
+    createLocalpart.value = '';
+    var firstAddress = state.identities[0] ? state.identities[0].address : '';
+    var separator = firstAddress.lastIndexOf('@');
+    createDomain.textContent = separator === -1
+      ? window.location.hostname
+      : firstAddress.slice(separator + 1);
+    createModal.hidden = false;
+    createName.focus();
+  }
+
+  async function handleCreateSubmit() {
+    if (!isAdmin()) return;
+    if (!createLocalpart.checkValidity()) {
+      createLocalpart.reportValidity();
+      return;
+    }
+    var name = createName.value.trim();
+    var localpart = createLocalpart.value.trim();
+    createModalSubmit.disabled = true;
+    try {
+      var payload = await apiJson('/ui/api/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: name || undefined, localpart: localpart || undefined })
+      });
+      showTokenModal(payload.token);
+      loadOverviewCycle({ refresh: false });
+    } catch (error) {
+      if (error.status === 409) {
+        window.alert('address already exists');
+      } else if (error.message !== 'session_expired') {
+        announce('Could not create the identity. Try again.');
+      }
+    } finally {
+      createModalSubmit.disabled = false;
+    }
+  }
+
+  async function handleRotateToken(address) {
+    try {
+      var payload = await apiJson(
+        '/ui/api/identities/' + encodeURIComponent(address) + '/token',
+        { method: 'POST' }
+      );
+      showTokenModal(payload.token, 'Rotated Token');
+      loadOverviewCycle({ refresh: false });
+    } catch (error) {
+      if (error.message !== 'session_expired') {
+        announce('Could not rotate the token. Try again.');
+      }
+    }
+  }
+
+  function handleDeleteIdentity(address) {
+    if (!isAdmin()) return;
+    closeAllModals();
+    confirmModalText.textContent = 'Delete ' + address + '? This cannot be undone.';
+    confirmModal.hidden = false;
+    confirmModalConfirm.onclick = async function () {
+      confirmModalConfirm.disabled = true;
+      try {
+        await apiJson('/ui/api/identities/' + encodeURIComponent(address), {
+          method: 'DELETE'
+        });
+        state.identities = state.identities.filter(function (identity) {
+          return identity.address !== address;
+        });
+        closeAllModals();
+        state.returnAddress = '';
+        enterOverview({ announce: address + ' deleted. Back to overview.' });
+        loadOverviewCycle({ refresh: false });
+      } catch (error) {
+        if (error.message !== 'session_expired') {
+          announce('Could not delete the identity. Try again.');
+        }
+      } finally {
+        confirmModalConfirm.disabled = false;
+      }
+    };
+    confirmModalConfirm.focus();
   }
 
   function formatDate(value) {
@@ -1170,11 +1432,12 @@ export const UI_JS = `(function () {
 
     models.forEach(function (model) {
       var row = model.stats;
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'overview-row';
-      button.dataset.address = model.identity.address;
-      button.setAttribute('aria-current', 'false');
+      var rowNode = document.createElement('div');
+      rowNode.className = 'overview-row';
+      rowNode.dataset.address = model.identity.address;
+      rowNode.tabIndex = 0;
+      rowNode.setAttribute('role', 'button');
+      rowNode.setAttribute('aria-current', 'false');
 
       var identityCell = document.createElement('span');
       identityCell.className = 'cell';
@@ -1191,10 +1454,23 @@ export const UI_JS = `(function () {
         note.textContent = '(no mail in the current window)';
         identityCell.append(note);
       }
-      button.append(identityCell);
+      rowNode.append(identityCell);
 
-      var countText = appendCell(button, 'Messages', countParts(row, 'count'));
-      var unseenText = appendCell(button, 'Unseen', countParts(row, 'unseen'));
+      var tokenCell = document.createElement('span');
+      tokenCell.className = 'cell token-cell';
+      var tokenLabel = document.createElement('span');
+      tokenLabel.className = 'cell-label';
+      tokenLabel.textContent = 'Token';
+      var tokenStatus = document.createElement('span');
+      tokenStatus.className = 'cell-value' + (model.identity.hasToken ? '' : ' row-flat');
+      var tokenDot = document.createElement('span');
+      tokenDot.className = 'token-dot' + (model.identity.hasToken ? ' has-token' : '');
+      tokenStatus.append(tokenDot, document.createTextNode(model.identity.hasToken ? 'Set' : 'None'));
+      tokenCell.append(tokenLabel, tokenStatus);
+      rowNode.append(tokenCell);
+
+      var countText = appendCell(rowNode, 'Messages', countParts(row, 'count'));
+      var unseenText = appendCell(rowNode, 'Unseen', countParts(row, 'unseen'));
 
       var dot = null;
       if (isActiveRow(row)) {
@@ -1204,24 +1480,56 @@ export const UI_JS = `(function () {
       var lastParts = row && row.lastReceivedAt
         ? { text: formatAgo(row.lastReceivedAt) }
         : { text: row ? '—' : 'Unavailable', flat: true };
-      var lastText = appendCell(button, 'Last', lastParts, dot);
-      var createdText = appendCell(button, 'Created', { text: formatDay(model.identity.createdAt) });
+      var lastText = appendCell(rowNode, 'Last', lastParts, dot);
+      var createdText = appendCell(rowNode, 'Created', { text: formatDay(model.identity.createdAt) });
 
-      button.setAttribute(
+      if (isAdmin()) {
+        var actionsCell = document.createElement('span');
+        actionsCell.className = 'cell row-actions';
+        var actionsLabel = document.createElement('span');
+        actionsLabel.className = 'cell-label';
+        actionsLabel.textContent = 'Actions';
+        var rotateButton = document.createElement('button');
+        rotateButton.type = 'button';
+        rotateButton.className = 'quiet row-action';
+        rotateButton.textContent = 'Rotate';
+        rotateButton.addEventListener('click', function (event) {
+          event.stopPropagation();
+          handleRotateToken(model.identity.address);
+        });
+        var deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'quiet row-action delete-action';
+        deleteButton.textContent = 'Delete';
+        deleteButton.addEventListener('click', function (event) {
+          event.stopPropagation();
+          handleDeleteIdentity(model.identity.address);
+        });
+        actionsCell.append(actionsLabel, rotateButton, deleteButton);
+        rowNode.append(actionsCell);
+      }
+
+      rowNode.setAttribute(
         'aria-label',
         [
           model.identity.name || model.identity.address,
           model.identity.address,
+          model.identity.hasToken ? 'token set' : 'no token',
           countText,
           unseenText,
           'last ' + lastText,
           'created ' + createdText
         ].join(', ')
       );
-      button.addEventListener('click', function () {
+      rowNode.addEventListener('click', function () {
         openAddress(model.identity.address);
       });
-      overviewRows.append(button);
+      rowNode.addEventListener('keydown', function (event) {
+        if (event.target !== rowNode || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        openAddress(model.identity.address);
+      });
+      overviewRows.append(rowNode);
     });
   }
 
@@ -1919,6 +2227,14 @@ export const UI_JS = `(function () {
     state.overviewLoadingSince = 0;
     loadOverviewCycle({ refresh: true });
   });
+  createIdentityButton.addEventListener('click', showCreateModal);
+  createModalSubmit.addEventListener('click', handleCreateSubmit);
+  tokenCopyButton.addEventListener('click', function () {
+    copyValue(tokenValue.textContent, tokenValue, tokenCopyButton);
+  });
+  tokenModalClose.addEventListener('click', closeAllModals);
+  confirmModalCancel.addEventListener('click', closeAllModals);
+  createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
     enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });
   });

@@ -388,6 +388,7 @@ describe('Overview 端点契约', () => {
       'complete',
       'count',
       'createdAt',
+      'hasToken',
       'lastReceivedAt',
       'name',
       'unseen',
