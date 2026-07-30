@@ -1,16 +1,29 @@
 // MCP 工具 schema 必须和 REST API 的契约一致：schema 放行、服务端却拒绝的
 // 输入，只会让 agent 拿到一个 400，而不是它要的数据。
 //
-// 这里把 SDK 换成假的，好把 server.tool() 注册的 zod schema 抓出来直接断言。
+// 这里把 SDK 换成假的，好把 registerTool() 的配置抓出来直接断言。
 import { expect, mock, test } from "bun:test";
 
 type SchemaMap = Record<string, { safeParse(value: unknown): { success: boolean } }>;
+type ToolConfig = {
+  title?: string;
+  inputSchema?: SchemaMap;
+  outputSchema?: SchemaMap;
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+};
 
 const toolSchemas = new Map<string, SchemaMap>();
+const toolConfigs = new Map<string, ToolConfig>();
 
 class FakeMcpServer {
-  tool(name: string, _description: string, schema: SchemaMap) {
-    toolSchemas.set(name, schema);
+  registerTool(name: string, config: ToolConfig) {
+    toolConfigs.set(name, config);
+    toolSchemas.set(name, config.inputSchema ?? {});
   }
 
   async connect() {}
@@ -23,6 +36,34 @@ mock.module("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
+
+test("7 个工具都公布新 SDK 支持的元数据", () => {
+  expect([...toolConfigs.keys()]).toEqual([
+    "mail_new_identity",
+    "mail_list_identities",
+    "mail_list_messages",
+    "mail_read_message",
+    "mail_mark_seen",
+    "mail_wait_for",
+    "mail_send",
+  ]);
+
+  for (const config of toolConfigs.values()) {
+    expect(config.title).toBeTruthy();
+    expect(config.outputSchema).toBeDefined();
+    expect(config.annotations).toBeDefined();
+    expect(config.annotations?.openWorldHint).toBe(true);
+  }
+
+  expect(toolConfigs.get("mail_list_messages")?.annotations?.readOnlyHint).toBe(true);
+  expect(toolConfigs.get("mail_send")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("mail_send")?.annotations?.destructiveHint).toBe(false);
+  expect(toolConfigs.get("mail_mark_seen")?.annotations?.destructiveHint).toBe(false);
+  expect(toolConfigs.get("mail_mark_seen")?.annotations?.idempotentHint).toBe(true);
+  expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
+    toolConfigs.get("mail_wait_for")?.outputSchema,
+  );
+});
 
 test("mail_list_messages limit 不能超出 REST API 接受的范围", () => {
   const limit = toolSchemas.get("mail_list_messages")!.limit;

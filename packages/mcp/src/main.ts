@@ -9,6 +9,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "./lib/client.ts";
 
@@ -38,18 +39,88 @@ const server = new McpServer({
   version: pkg.version,
 });
 
-type ToolResult = {
-  content: { type: "text"; text: string }[];
-  isError?: boolean;
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+const mutatingAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+const identitySchema = {
+  address: z.string().email(),
+  name: z.string().optional(),
+  createdAt: z.string().optional(),
 };
 
-function ok(data: unknown): ToolResult {
+const messageSummarySchema = {
+  id: z.string(),
+  from: z.string(),
+  to: z.string(),
+  subject: z.string(),
+  date: z.string(),
+  seen: z.boolean(),
+  snippet: z.string(),
+};
+
+const messageOutputSchema = {
+  ...messageSummarySchema,
+  text: z.string(),
+  html: z.string().optional(),
+  otp: z.object({
+    codes: z.array(z.string()),
+    links: z.array(z.string()),
+  }),
+};
+
+const identityListOutputSchema = {
+  identities: z.array(z.object(identitySchema)),
+};
+
+const messageListOutputSchema = {
+  messages: z.array(z.object(messageSummarySchema)),
+};
+
+const receivedMessageInputSchema = {
+  address: z
+    .string()
+    .email()
+    .describe("Full email address of the identity that received it"),
+  // 服务端按 Number(id) 要求正整数 UID。
+  id: z
+    .string()
+    .regex(/^[1-9]\d*$/)
+    .describe("Message id from mail_list_messages / mail_wait_for"),
+};
+
+const seenOutputSchema = {
+  id: z.string(),
+  seen: z.boolean(),
+};
+
+const sendOutputSchema = {
+  queued: z.boolean(),
+  messageId: z.string(),
+};
+
+function ok(data: unknown): CallToolResult {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new TypeError("Tool output must be a JSON object");
+  }
+
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+    structuredContent: data as Record<string, unknown>,
   };
 }
 
-function fail(err: unknown): ToolResult {
+function fail(err: unknown): CallToolResult {
   const message =
     err instanceof ApiError
       ? err.message
@@ -59,164 +130,162 @@ function fail(err: unknown): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-server.tool(
+async function callApi(
+  operation: () => Promise<unknown>,
+): Promise<CallToolResult> {
+  try {
+    return ok(await operation());
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+server.registerTool(
   "mail_new_identity",
-  "Create a new email identity (mailbox address) on this openagent.email server. Returns the full address; a random localpart like 'fox-k7d2' is generated.",
   {
-    // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
-    name: z
-      .string()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Optional display name for the identity"),
+    title: "Create Email Identity",
+    description:
+      "Create a new email identity (mailbox address) on this openagent.email server. Returns the full address; a random localpart like 'fox-k7d2' is generated.",
+    inputSchema: {
+      // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
+      name: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Optional display name for the identity"),
+    },
+    outputSchema: identitySchema,
+    annotations: mutatingAnnotations,
   },
-  async ({ name }) => {
-    try {
-      return ok(await client.createIdentity(name));
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ name }) => callApi(() => client.createIdentity(name)),
 );
 
-server.tool(
+server.registerTool(
   "mail_list_identities",
-  "List all email identities (addresses) on this server.",
-  {},
-  async () => {
-    try {
-      return ok({ identities: await client.listIdentities() });
-    } catch (err) {
-      return fail(err);
-    }
+  {
+    title: "List Email Identities",
+    description: "List all email identities (addresses) on this server.",
+    outputSchema: identityListOutputSchema,
+    annotations: readOnlyAnnotations,
   },
+  () => callApi(async () => ({ identities: await client.listIdentities() })),
 );
 
-server.tool(
+server.registerTool(
   "mail_list_messages",
-  "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet.",
   {
-    address: z.string().email().describe("Full email address of the identity"),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      // The API rejects anything above 200 with 400 invalid_request, so the
-      // tool schema must not advertise a range the server refuses.
-      .max(200)
-      .optional()
-      .describe("Max messages to return (1-200, server default 50)"),
+    title: "List Email Messages",
+    description:
+      "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet.",
+    inputSchema: {
+      address: z.string().email().describe("Full email address of the identity"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        // The API rejects anything above 200 with 400 invalid_request, so the
+        // tool schema must not advertise a range the server refuses.
+        .max(200)
+        .optional()
+        .describe("Max messages to return (1-200, server default 50)"),
+    },
+    outputSchema: messageListOutputSchema,
+    annotations: readOnlyAnnotations,
   },
-  async ({ address, limit }) => {
-    try {
-      return ok({ messages: await client.listMessages(address, limit) });
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ address, limit }) =>
+    callApi(async () => ({ messages: await client.listMessages(address, limit) })),
 );
 
-server.tool(
+server.registerTool(
   "mail_read_message",
-  "Read a full message: text, html (if any), and extracted OTP verification codes and links.",
   {
-    address: z
-      .string()
-      .email()
-      .describe("Full email address of the identity that received it"),
-    // 服务端按 Number(id) 要求正整数 UID。
-    id: z
-      .string()
-      .regex(/^[1-9]\d*$/)
-      .describe("Message id from mail_list_messages / mail_wait_for"),
+    title: "Read Email Message",
+    description:
+      "Read a full message: text, html (if any), and extracted OTP verification codes and links.",
+    inputSchema: receivedMessageInputSchema,
+    outputSchema: messageOutputSchema,
+    annotations: readOnlyAnnotations,
   },
-  async ({ address, id }) => {
-    try {
-      return ok(await client.readMessage(address, id));
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ address, id }) => callApi(() => client.readMessage(address, id)),
 );
 
-server.tool(
+server.registerTool(
   "mail_mark_seen",
-  "Mark a message as read (seen=true) or unread (seen=false). Call this after processing a message so the unseen count reflects what is still unhandled. Reading a message never changes this flag by itself.",
   {
-    address: z
-      .string()
-      .email()
-      .describe("Full email address of the identity that received it"),
-    id: z
-      .string()
-      .regex(/^[1-9]\d*$/)
-      .describe("Message id from mail_list_messages / mail_wait_for"),
-    seen: z
-      .boolean()
-      .optional()
-      .describe("true = mark as read (default), false = mark as unread"),
+    title: "Mark Email Seen",
+    description:
+      "Mark a message as read (seen=true) or unread (seen=false). Call this after processing a message so the unseen count reflects what is still unhandled. Reading a message never changes this flag by itself.",
+    inputSchema: {
+      ...receivedMessageInputSchema,
+      seen: z
+        .boolean()
+        .optional()
+        .describe("true = mark as read (default), false = mark as unread"),
+    },
+    outputSchema: seenOutputSchema,
+    annotations: {
+      ...mutatingAnnotations,
+      idempotentHint: true,
+    },
   },
-  async ({ address, id, seen }) => {
-    try {
-      return ok(await client.markSeen(address, id, seen ?? true));
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ address, id, seen }) =>
+    callApi(() => client.markSeen(address, id, seen ?? true)),
 );
 
-server.tool(
+server.registerTool(
   "mail_wait_for",
-  "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error.",
   {
-    address: z.string().email().describe("Full email address of the identity to watch"),
-    fromContains: z
-      .string()
-      .max(200)
-      .optional()
-      .describe("Only match messages whose From contains this substring"),
-    subjectContains: z
-      .string()
-      .max(200)
-      .optional()
-      .describe("Only match messages whose Subject contains this substring"),
-    timeoutSec: z
-      .number()
-      .int()
-      .min(1)
-      .max(600)
-      .optional()
-      .describe("Seconds to wait (default 120, max 600)"),
+    title: "Wait for Email",
+    description:
+      "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error.",
+    inputSchema: {
+      address: z.string().email().describe("Full email address of the identity to watch"),
+      fromContains: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Only match messages whose From contains this substring"),
+      subjectContains: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Only match messages whose Subject contains this substring"),
+      timeoutSec: z
+        .number()
+        .int()
+        .min(1)
+        .max(600)
+        .optional()
+        .describe("Seconds to wait (default 120, max 600)"),
+    },
+    outputSchema: messageOutputSchema,
+    annotations: { ...readOnlyAnnotations, idempotentHint: false },
   },
-  async ({ address, fromContains, subjectContains, timeoutSec }) => {
-    try {
-      return ok(
-        await client.waitFor(address, { fromContains, subjectContains, timeoutSec }),
-      );
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ address, fromContains, subjectContains, timeoutSec }) =>
+    callApi(() =>
+      client.waitFor(address, { fromContains, subjectContains, timeoutSec }),
+    ),
 );
 
-server.tool(
+server.registerTool(
   "mail_send",
-  "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
   {
-    from: z.string().email().describe("Sender address (must be an existing identity)"),
-    to: z.string().email().describe("Recipient address"),
-    subject: z.string().max(998).describe("Subject line"),
-    text: z.string().max(1_000_000).describe("Plain-text body"),
-    html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
+    title: "Send Email",
+    description:
+      "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
+    inputSchema: {
+      from: z.string().email().describe("Sender address (must be an existing identity)"),
+      to: z.string().email().describe("Recipient address"),
+      subject: z.string().max(998).describe("Subject line"),
+      text: z.string().max(1_000_000).describe("Plain-text body"),
+      html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
+    },
+    outputSchema: sendOutputSchema,
+    annotations: mutatingAnnotations,
   },
-  async ({ from, to, subject, text, html }) => {
-    try {
-      return ok(await client.send(from, to, subject, text, html));
-    } catch (err) {
-      return fail(err);
-    }
-  },
+  ({ from, to, subject, text, html }) =>
+    callApi(() => client.send(from, to, subject, text, html)),
 );
 
 const transport = new StdioServerTransport();
