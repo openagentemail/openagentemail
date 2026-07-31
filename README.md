@@ -19,7 +19,16 @@ extraction built in. No per-inbox pricing, no third party ever seeing your mail.
 
 ## Quickstart
 
-Prerequisites: a VPS with outbound/inbound port 25 open, and a domain you control.
+```bash
+npx -y @openagentemail/setup
+```
+
+A guided wizard: it checks what you already have, helps you pick a VPS and a
+domain if you're missing either, and connects your agent clients (Claude Code,
+Cursor, Kimi Code…) once the server is up.
+
+The manual path needs a VPS with outbound/inbound port 25 open and a domain
+you control:
 
 ```bash
 git clone https://github.com/openagentemail/openagentemail.git && cd openagentemail
