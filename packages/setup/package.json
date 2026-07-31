@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "openagentemail-setup": "./dist/main.js"
+    "openagentemail-setup": "dist/main.js"
   },
   "files": [
     "dist",

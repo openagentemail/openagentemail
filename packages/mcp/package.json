@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "openagentemail-mcp": "./dist/main.js"
+    "openagentemail-mcp": "dist/main.js"
   },
   "files": [
     "dist",
