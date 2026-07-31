@@ -1,0 +1,45 @@
+{
+  "name": "@openagentemail/setup",
+  "version": "0.1.0",
+  "description": "Interactive setup wizard for openagent.email",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "openagentemail-setup": "./dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build src/main.ts --target node --outfile dist/main.js",
+    "prepublishOnly": "bun run build",
+    "start": "bun run src/main.ts",
+    "test": "bun test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openagentemail/openagentemail.git",
+    "directory": "packages/setup"
+  },
+  "homepage": "https://openagent.email",
+  "bugs": "https://github.com/openagentemail/openagentemail/issues",
+  "keywords": [
+    "email",
+    "mcp",
+    "setup",
+    "wizard",
+    "openagentemail"
+  ],
+  "devDependencies": {
+    "@clack/prompts": "^1.7.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

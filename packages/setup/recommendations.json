@@ -1,0 +1,103 @@
+{
+  "version": 2,
+  "updated": "2026-07-31",
+  "disclosure": "Links marked (ad) are affiliate links — same price for you, they support the project.",
+  "vps": [
+    {
+      "name": "Contabo",
+      "price": "From $4.50/mo",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": false,
+      "groups": ["global"],
+      "note": "4 vCPU/8GB; port 25 open both ways (new accounts throttled to ~25 messages/min)"
+    },
+    {
+      "name": "RackNerd",
+      "price": "~$11/yr",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "groups": ["alipay", "global"],
+      "note": "Port 25 open both ways; clean IP pool"
+    },
+    {
+      "name": "GreenCloud",
+      "price": "See current flash deals",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "groups": ["alipay"],
+      "note": "Proven by us: our own mail server runs on it; Alipay/WeChat accepted"
+    },
+    {
+      "name": "Evoxt",
+      "price": "From $2.99/mo",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "groups": ["alipay"],
+      "note": "Affordable monthly plans; outbound port 25 via support ticket"
+    },
+    {
+      "name": "UpCloud",
+      "price": "From $3.50/mo",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": false,
+      "groups": ["global"],
+      "note": "API/Terraform friendly; outbound port 25 via support ticket"
+    },
+    {
+      "name": "Vultr",
+      "price": "From $3.50/mo",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "groups": ["fallback"],
+      "note": "Fine for receiving; outbound port 25 rarely approved since 2026 — plan to send via a relay (SES)"
+    }
+  ],
+  "registrars": [
+    {
+      "name": "Spaceship",
+      "price": ".com ~$9",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "note": "Simple DNS management; compare renewal pricing before checkout"
+    },
+    {
+      "name": "Porkbun",
+      "price": ".com ~$11",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": false,
+      "note": "Clear pricing and a friendly DNS interface"
+    },
+    {
+      "name": "NameSilo",
+      "price": ".com ~$11",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": false,
+      "note": "Long-running registrar with bulk-friendly controls"
+    },
+    {
+      "name": "Dynadot",
+      "price": ".com ~$11",
+      "url": "<PENDING_OWNER_LINK>",
+      "ad": true,
+      "alipay": true,
+      "note": "Broad TLD selection and flexible payment options"
+    },
+    {
+      "name": "Cloudflare Registrar",
+      "price": "At-cost renewals",
+      "url": "https://www.cloudflare.com/products/registrar/",
+      "ad": false,
+      "alipay": false,
+      "note": "Good fit when the domain already uses Cloudflare DNS"
+    }
+  ]
+}
