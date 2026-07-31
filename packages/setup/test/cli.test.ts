@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from '../src/args.ts';
 import { runCli } from '../src/main.ts';
 
@@ -11,6 +16,34 @@ function sink() {
 }
 
 describe('CLI contract', () => {
+  test('built CLI runs through an npx-style binary symlink', async () => {
+    const packageDirectory = fileURLToPath(new URL('..', import.meta.url));
+    const directory = await mkdtemp(join(tmpdir(), 'oae-setup-bin-'));
+    try {
+      const build = spawnSync(process.execPath, [
+        'build',
+        'src/main.ts',
+        '--target',
+        'node',
+        '--outfile',
+        'dist/main.js',
+      ], {
+        cwd: packageDirectory,
+        encoding: 'utf8',
+      });
+      expect(build.status).toBe(0);
+
+      const binary = join(directory, 'openagentemail-setup');
+      await symlink(join(packageDirectory, 'dist', 'main.js'), binary);
+      const result = spawnSync('node', [binary, '--version'], { encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('0.1.1');
+      expect(result.stderr).toBe('');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('parses documented non-interactive flags and explicit no-client mode', () => {
     expect(parseArgs([
       'connect', '--api-url', 'https://api.example', '--token', 'secret',

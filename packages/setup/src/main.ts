@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import { parseArgs } from './args.ts';
 import { runConnect } from './connect.ts';
 import { runDemo } from './demo.ts';
@@ -84,8 +83,10 @@ export async function runCli(
   }
 }
 
-const isEntrypoint = process.argv[1] &&
-  resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1]);
+const entrypoint = process.argv[1];
+const isEntrypoint = entrypoint &&
+  existsSync(entrypoint) &&
+  realpathSync(entrypoint) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {
   process.exitCode = await runCli(process.argv.slice(2));
