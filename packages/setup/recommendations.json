@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "updated": "2026-07-31",
   "disclosure": "Links marked (ad) are affiliate links — same price for you, they support the project.",
   "vps": [
@@ -23,7 +23,7 @@
     },
     {
       "name": "GreenCloud",
-      "price": "See current flash deals",
+      "price": "~$15/yr",
       "url": "https://greencloudvps.com/billing/aff.php?aff=9969",
       "ad": true,
       "alipay": true,

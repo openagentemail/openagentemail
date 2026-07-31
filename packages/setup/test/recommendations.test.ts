@@ -9,7 +9,7 @@ import {
 describe('recommendations.json', () => {
   test('bundled data matches the offline schema and link rules', () => {
     expect(isRecommendationData(BUNDLED_RECOMMENDATIONS)).toBe(true);
-    expect(BUNDLED_RECOMMENDATIONS.version).toBe(3);
+    expect(BUNDLED_RECOMMENDATIONS.version).toBe(4);
     expect(BUNDLED_RECOMMENDATIONS.vps.length).toBeGreaterThanOrEqual(6);
     expect(BUNDLED_RECOMMENDATIONS.registrars.length).toBeGreaterThanOrEqual(4);
     for (const item of [
