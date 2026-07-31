@@ -7,16 +7,24 @@ import {
 } from '../src/recommendations.ts';
 
 describe('recommendations.json', () => {
-  test('bundled data matches the offline schema and only ads use placeholders', () => {
+  test('bundled data matches the offline schema and link rules', () => {
     expect(isRecommendationData(BUNDLED_RECOMMENDATIONS)).toBe(true);
-    expect(BUNDLED_RECOMMENDATIONS.version).toBe(2);
+    expect(BUNDLED_RECOMMENDATIONS.version).toBe(3);
     expect(BUNDLED_RECOMMENDATIONS.vps.length).toBeGreaterThanOrEqual(6);
     expect(BUNDLED_RECOMMENDATIONS.registrars.length).toBeGreaterThanOrEqual(4);
     for (const item of [
       ...BUNDLED_RECOMMENDATIONS.vps,
       ...BUNDLED_RECOMMENDATIONS.registrars,
-    ].filter((item) => item.ad)) {
-      expect(item.url).toBe('<PENDING_OWNER_LINK>');
+    ]) {
+      if (item.ad) {
+        // Affiliate entries carry a real owner link or await one.
+        expect(
+          item.url === '<PENDING_OWNER_LINK>' || item.url.startsWith('https://'),
+        ).toBe(true);
+      } else {
+        // Non-affiliate entries always link directly.
+        expect(item.url.startsWith('https://')).toBe(true);
+      }
     }
     const cloudflare = BUNDLED_RECOMMENDATIONS.registrars.find(
       (item) => item.name === 'Cloudflare Registrar',
