@@ -19,6 +19,7 @@ export interface RateLimitResult {
 }
 
 const buckets = new Map<string, number[]>();
+const notifyUserBuckets = new Map<string, number[]>();
 
 export function checkSendLimit(
   address: string,
@@ -62,6 +63,50 @@ export function releaseSendLimit(address: string, reservation: number | undefine
 /** Test helper: wipe all windows. */
 export function resetRateLimits(): void {
   buckets.clear();
+}
+
+/**
+ * Separate budget for human-alert notifications. This is deliberately not
+ * shared with mail_send: one action wakes a person rather than sending mail,
+ * so a mail allowance is the wrong safety boundary.
+ */
+export function checkNotifyUserLimit(
+  address: string,
+  limit: number,
+  windowMs = 3_600_000,
+  now = Date.now(),
+): RateLimitResult {
+  if (limit <= 0) return { allowed: true, retryAfterSec: 0, count: 0 };
+
+  const key = address.toLowerCase();
+  const cutoff = now - windowMs;
+  const stamps = (notifyUserBuckets.get(key) ?? []).filter((t) => t > cutoff);
+  if (stamps.length >= limit) {
+    const retryAfterSec = Math.ceil((stamps[0] + windowMs - now) / 1000);
+    notifyUserBuckets.set(key, stamps);
+    return { allowed: false, retryAfterSec, count: stamps.length };
+  }
+
+  stamps.push(now);
+  notifyUserBuckets.set(key, stamps);
+  return { allowed: true, retryAfterSec: 0, count: stamps.length, reservation: now };
+}
+
+/** Return a user-notification slot when no request reached ntfy. */
+export function releaseNotifyUserLimit(address: string, reservation: number | undefined): void {
+  if (reservation === undefined) return;
+  const key = address.toLowerCase();
+  const stamps = notifyUserBuckets.get(key);
+  if (!stamps) return;
+  const index = stamps.lastIndexOf(reservation);
+  if (index < 0) return;
+  stamps.splice(index, 1);
+  if (stamps.length === 0) notifyUserBuckets.delete(key);
+}
+
+/** Test helper: wipe the independent human-notification budget. */
+export function resetNotifyUserLimits(): void {
+  notifyUserBuckets.clear();
 }
 
 /**

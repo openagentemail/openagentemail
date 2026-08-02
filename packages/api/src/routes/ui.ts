@@ -11,6 +11,7 @@ import {
   rotateIdentityToken,
   type Identity,
 } from '../lib/identities.ts';
+import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import {
   SCAN_BACK,
   getMessage,
@@ -242,6 +243,13 @@ export function createUiApiRoutes(
     try {
       const created = createIdentity(input);
       if (!created) return c.json({ error: 'address_exists' }, 409);
+      try {
+        await provisionIdentityNotifications(created.identity);
+      } catch (err) {
+        deleteIdentity(created.identity.address);
+        if (err instanceof NotifyError) return c.json({ error: err.code }, 503);
+        throw err;
+      }
       return c.json(
         {
           address: created.identity.address,

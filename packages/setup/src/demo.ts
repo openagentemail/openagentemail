@@ -25,6 +25,10 @@ const DEMO_COMPOSE_OVERRIDE_CONTENT = `services:
     container_name: openagent-demo-provision
   mailserver:
     container_name: openagent-demo-mailserver
+  ntfy-provision:
+    container_name: openagent-demo-ntfy-provision
+  ntfy:
+    container_name: openagent-demo-ntfy
   api:
     container_name: openagent-demo-api
 `;
@@ -133,6 +137,7 @@ async function writeDemoEnv(path: string, runtime: DemoRuntime): Promise<void> {
     'DOMAIN=demo.local',
     `API_KEYS=${runtime.randomHex(32)}`,
     `MAIL_PASSWORD=${runtime.randomHex(24)}`,
+    `NTFY_ADMIN_PASSWORD=${runtime.randomHex(24)}`,
     'ENABLE_FAIL2BAN=0',
     '',
   ].join('\n');

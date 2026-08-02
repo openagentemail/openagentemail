@@ -16,12 +16,18 @@
  */
 
 import { config } from './lib/config.ts';
+import { initializeNotifications } from './lib/notify.ts';
+import { startNotificationWatcher } from './lib/notification-watcher.ts';
 import { startRetentionLoop } from './lib/retention.ts';
 import { createApp } from './app.ts';
 
 const app = createApp();
 
 startRetentionLoop();
+if (config.ntfy.enabled) {
+  await initializeNotifications();
+  startNotificationWatcher();
+}
 
 console.log(`[api] listening on :${config.port} (domain ${config.domain})`);
 

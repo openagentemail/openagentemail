@@ -32,7 +32,7 @@ you control:
 
 ```bash
 git clone https://github.com/openagentemail/openagentemail.git && cd openagentemail
-cp .env.example .env   # set DOMAIN, API_KEYS, and the mailbox password
+cp .env.example .env   # set DOMAIN, API_KEYS, mailbox password, and NTFY_ADMIN_PASSWORD
 docker compose up -d && ./deploy/dns-records.sh   # prints the exact DNS records to create
 ```
 
@@ -160,8 +160,12 @@ Deliberate limits, so nothing here is a surprise later:
   addresses. No provisioning, no per-inbox cost.
 - **Scoped tokens** — every identity gets its own token that can only read and
   send as that address. The admin key never has to touch your agents.
-- **REST + MCP** — the same seven operations over a plain HTTP API and a first-class
+- **REST + MCP** — the same operations over a plain HTTP API and a first-class
   MCP server your agents can call directly.
+- **Server-side notifications** — private ntfy transport for human alerts and
+  managed-agent wake-ups, with OTP-only mail notifications by default. Topics
+  and ntfy credentials stay on the server; phone setup is deliberately a later
+  v0.3.1 step.
 - **`mail_wait_for` / `POST /v1/messages/wait`** — long-poll an inbox until a
   matching message arrives, with OTP codes and verification links already extracted.
   Built for automated signups.
@@ -179,8 +183,9 @@ Deliberate limits, so nothing here is a surprise later:
   Amazon SES / SMTP2GO / any SMTP relay with one env var.
 - **DNS wizard + doctor** — `deploy/dns-records.sh` generates your exact DNS records;
   `deploy/doctor.sh` diagnoses deliverability before your agents depend on it.
-- **Single dependency: Docker.** The stack is the API plus
-  [docker-mailserver](https://github.com/docker-mailserver/docker-mailserver). Nothing else.
+- **Single dependency: Docker.** The stack is the API,
+  [docker-mailserver](https://github.com/docker-mailserver/docker-mailserver),
+  and a private ntfy container. Nothing else.
 
 ## How it works
 
@@ -243,6 +248,10 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 | `mail_mark_seen(address, id, seen?)` | Mark a message read (default) or unread — reading never changes the flag by itself |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
 | `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
+| `notify_user(title, message, level?, tags?)` | Send a human alert (needs the server-side `can_notify_user` grant) |
+| `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing an ntfy topic or token |
+| `notify_check(since?)` | Read recent notifications for the calling identity only |
+| `notify_verify()` | Publish and poll a harmless server-side notification self-check |
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:
@@ -290,10 +299,11 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
 
 - **v0.1** — REST + MCP, catch-all identities, `wait_for` with OTP/link
   extraction, DNS wizard + doctor, optional SMTP relay.
-- **v0.2 (current)** — scoped per-identity tokens, send rate limits, automatic
-  retention, localhost-safe defaults, expanded OTP corpus.
-- **Next** — outbound webhooks (push instead of `wait_for` polling),
-  multi-domain support, Sieve-style per-identity rules.
+- **v0.2** — scoped per-identity tokens, send rate limits, automatic retention,
+  localhost-safe defaults, expanded OTP corpus.
+- **v0.3 (current)** — built-in private ntfy notifications, OTP-aware IMAP
+  watcher, server-side agent wake-ups and notification ACLs. Phone delivery and
+  webhooks are intentionally out of this first release.
 - **Distribution** — planned one-click app in the
   [OpenShip](https://github.com/oblien/openship) catalog.
 

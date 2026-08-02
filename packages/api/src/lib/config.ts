@@ -4,6 +4,7 @@
  * that is intentional: fail fast at boot, not on first request.
  */
 
+import { join } from 'node:path';
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -43,6 +44,26 @@ const envSchema = z.object({
 
   // Built-in, read-only human inbox. Disable to make every /ui route 404.
   UI_ENABLED: z.enum(['true', 'false']).default('true'),
+
+  // Notification transport. Docker Compose enables ntfy by default; keeping
+  // the bare-process default off preserves the lightweight API test/runtime.
+  NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
+  NTFY_INTERNAL_URL: z.string().url().default('http://ntfy'),
+  // Path as seen by the ntfy container. The API writes the same named volume
+  // at /app/data, so this must not be derived from DATA_DIR.
+  NTFY_STORAGE_DIR: z.string().min(1).default('/var/lib/openagentemail/ntfy'),
+  // This can stay on a private address in v0.3. Public phone delivery starts
+  // in v0.3.1, when a TLS reverse proxy is configured deliberately.
+  NOTIFY_PUBLIC_URL: z.string().url().default('http://127.0.0.1:2586'),
+  // Forward unknown topics to ntfy.sh unless an operator explicitly disables
+  // it with NTFY_UPSTREAM=false.
+  NTFY_UPSTREAM: z.enum(['true', 'false']).default('true'),
+  // Required by the Compose provisioner when notifications are enabled. Keep
+  // it optional here so importing config alone never materializes a secret.
+  NTFY_ADMIN_PASSWORD: z.string().min(1).optional(),
+  // Only identities explicitly granted can_notify_user may spend this budget.
+  NOTIFY_RATE_LIMIT: z.coerce.number().int().min(0).default(10),
+  PUSH_POLICY: z.enum(['otp', 'all', 'none']).default('otp'),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
@@ -89,6 +110,17 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       : [raw.DOMAIN.toLowerCase()],
     dataDir: raw.DATA_DIR,
     uiEnabled: raw.UI_ENABLED === 'true',
+    ntfy: {
+      enabled: raw.NTFY_ENABLED === 'true',
+      internalUrl: raw.NTFY_INTERNAL_URL.replace(/\/+$/, ''),
+      storageDir: raw.NTFY_STORAGE_DIR,
+      publicUrl: raw.NOTIFY_PUBLIC_URL.replace(/\/+$/, ''),
+      upstreamEnabled: raw.NTFY_UPSTREAM === 'true',
+      adminPassword: raw.NTFY_ADMIN_PASSWORD,
+      configPath: join(raw.DATA_DIR, 'ntfy', 'server.yml'),
+      pushPolicy: raw.PUSH_POLICY,
+      notifyRateLimit: raw.NOTIFY_RATE_LIMIT,
+    },
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,

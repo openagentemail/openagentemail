@@ -100,11 +100,66 @@ services:
       retries: 10
       start_period: 90s   # first boot generates DH params / DKIM keys — be patient
 
+  # One-shot API helper: writes the private ntfy server.yml and JSON topic/token
+  # map before ntfy starts. It uses the same code as API startup, not a second
+  # shell implementation of the notification security model.
+  ntfy-provision:
+    build: ./packages/api
+    container_name: openagent-ntfy-provision
+    command: ["bun", "run", "src/ntfy-provision.ts"]
+    environment:
+      DOMAIN: ${DOMAIN}
+      API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}
+      IMAP_HOST: mailserver
+      IMAP_PORT: 993
+      IMAP_TLS: "true"
+      IMAP_USER: ${MAIL_ACCOUNT:-agent}@${DOMAIN}
+      IMAP_PASS: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
+      SMTP_HOST: mailserver
+      SMTP_PORT: 587
+      SMTP_USER: ${MAIL_ACCOUNT:-agent}@${DOMAIN}
+      SMTP_PASS: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
+      DATA_DIR: /app/data
+      NTFY_STORAGE_DIR: /var/lib/openagentemail/ntfy
+      NOTIFY_PUBLIC_URL: ${NOTIFY_PUBLIC_URL:-http://127.0.0.1:2586}
+      NTFY_UPSTREAM: ${NTFY_UPSTREAM:-true}
+      NTFY_ADMIN_PASSWORD: ${NTFY_ADMIN_PASSWORD:?Set NTFY_ADMIN_PASSWORD in .env (openssl rand -hex 24)}
+    volumes:
+      - api-data:/app/data
+    restart: "no"
+
+  ntfy:
+    # Pin the major release line rather than a floating latest tag.
+    image: binwiederhier/ntfy:v2
+    container_name: openagent-ntfy
+    depends_on:
+      ntfy-provision:
+        condition: service_completed_successfully
+    command: ["serve", "--config", "/var/lib/openagentemail/ntfy/server.yml"]
+    init: true
+    volumes:
+      # ntfy's own cache/auth files and openagent's JSON route/token map stay
+      # together with the API's owner-only data volume.
+      - api-data:/var/lib/openagentemail
+    ports:
+      # v0.3 has no phone/public setup. A future reverse proxy may expose this
+      # deliberately; never publish it to the internet by accident today.
+      - "127.0.0.1:${NTFY_PORT:-2586}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     build: ./packages/api
     container_name: openagent-api
     depends_on:
       mailserver:
+        condition: service_healthy
+      ntfy:
         condition: service_healthy
     environment:
       # --- shared API contract env ---
@@ -127,6 +182,15 @@ services:
       # Set either switch true in .env after configuring a trusted certificate.
       IMAP_TLS_REJECT_UNAUTHORIZED: ${IMAP_TLS_REJECT_UNAUTHORIZED:-false}
       SMTP_TLS_REJECT_UNAUTHORIZED: ${SMTP_TLS_REJECT_UNAUTHORIZED:-false}
+      # --- server-side ntfy notifications (agents never receive these creds) ---
+      NTFY_ENABLED: ${NTFY_ENABLED:-true}
+      NTFY_INTERNAL_URL: http://ntfy
+      NTFY_STORAGE_DIR: /var/lib/openagentemail/ntfy
+      NOTIFY_PUBLIC_URL: ${NOTIFY_PUBLIC_URL:-http://127.0.0.1:2586}
+      NTFY_UPSTREAM: ${NTFY_UPSTREAM:-true}
+      NTFY_ADMIN_PASSWORD: ${NTFY_ADMIN_PASSWORD:?Set NTFY_ADMIN_PASSWORD in .env (openssl rand -hex 24)}
+      NOTIFY_RATE_LIMIT: ${NOTIFY_RATE_LIMIT:-10}
+      PUSH_POLICY: ${PUSH_POLICY:-otp}
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):

@@ -3,8 +3,11 @@ import {
   MAX_WAITS_PER_ADDRESS,
   MAX_WAITS_TOTAL,
   acquireWaitSlot,
+  checkNotifyUserLimit,
   checkSendLimit,
+  releaseNotifyUserLimit,
   releaseWaitSlot,
+  resetNotifyUserLimits,
   resetRateLimits,
   resetWaitSlots,
 } from '../src/lib/ratelimit.ts';
@@ -53,6 +56,21 @@ describe('checkSendLimit', () => {
     for (let i = 0; i < 50; i++) {
       expect(checkSendLimit('a@x.com', 0, 60_000).allowed).toBe(true);
     }
+  });
+});
+
+describe('checkNotifyUserLimit', () => {
+  test('uses an independent human-alert budget and refunds local failures', () => {
+    resetRateLimits();
+    resetNotifyUserLimits();
+    checkSendLimit('agent@test.example', 1, 60_000, 10_000);
+    expect(checkSendLimit('agent@test.example', 1, 60_000, 10_000).allowed).toBe(false);
+
+    const granted = checkNotifyUserLimit('agent@test.example', 1, 60_000, 10_000);
+    expect(granted.allowed).toBe(true);
+    expect(checkNotifyUserLimit('agent@test.example', 1, 60_000, 10_000).allowed).toBe(false);
+    releaseNotifyUserLimit('agent@test.example', granted.reservation);
+    expect(checkNotifyUserLimit('agent@test.example', 1, 60_000, 10_000).allowed).toBe(true);
   });
 });
 

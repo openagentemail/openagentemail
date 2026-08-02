@@ -2,7 +2,7 @@
  * Minimal REST client for the openagent.email API.
  *
  * API contract (shared):
- *   POST /v1/identities            {name?, localpart?} -> 201 {address, name?, token}
+ *   POST /v1/identities            {name?, localpart?, canNotifyUser?} -> 201 {address, name?, token}
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt}]}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
@@ -25,6 +25,7 @@ export interface Identity {
   address: string;
   name?: string;
   createdAt?: string;
+  canNotifyUser?: boolean;
 }
 
 export interface MessageSummary {
@@ -41,6 +42,15 @@ export interface Message extends MessageSummary {
   text: string;
   html?: string;
   otp: { codes: string[]; links: string[] };
+}
+
+export interface NotificationMessage {
+  id: string;
+  time: number;
+  title: string;
+  message: string;
+  priority: number;
+  tags: string[];
 }
 
 /**
@@ -186,10 +196,11 @@ export class OpenAgentEmailClient {
     return data as T;
   }
 
-  createIdentity(opts: { name?: string; localpart?: string }): Promise<{ address: string; name?: string }> {
-    const body: Record<string, string> = {};
+  createIdentity(opts: { name?: string; localpart?: string; canNotifyUser?: boolean }): Promise<{ address: string; name?: string; canNotifyUser?: boolean }> {
+    const body: Record<string, string | boolean> = {};
     if (opts.name) body.name = opts.name;
     if (opts.localpart) body.localpart = opts.localpart;
+    if (opts.canNotifyUser) body.canNotifyUser = true;
     return this.request("POST", "/v1/identities", body);
   }
 
@@ -235,5 +246,38 @@ export class OpenAgentEmailClient {
     html?: string,
   ): Promise<{ queued: boolean; messageId: string }> {
     return this.request("POST", "/v1/send", { from, to, subject, text, html });
+  }
+
+  notifyUser(
+    title: string,
+    message: string,
+    level: "urgent" | "normal" | "low" = "normal",
+    tags?: string[],
+  ): Promise<{ target: "user"; title: string; level: "urgent" | "normal" | "low" }> {
+    return this.request("POST", "/v1/notify", { target: "user", title, message, level, tags });
+  }
+
+  notifyAgent(
+    name: string,
+    title: string,
+    message: string,
+    level: "urgent" | "normal" | "low" = "normal",
+    tags?: string[],
+  ): Promise<{ target: string; title: string; level: "urgent" | "normal" | "low" }> {
+    return this.request("POST", "/v1/notify", { target: `agent:${name}`, title, message, level, tags });
+  }
+
+  async notificationCheck(since?: string): Promise<NotificationMessage[]> {
+    const params = new URLSearchParams({ topic: "self" });
+    if (since) params.set("since", since);
+    const data = await this.request<{ messages: NotificationMessage[] }>(
+      "GET",
+      `/v1/notify/messages?${params.toString()}`,
+    );
+    return data.messages;
+  }
+
+  verifyNotifications(): Promise<{ ok: true }> {
+    return this.request("POST", "/v1/notify/verify");
   }
 }

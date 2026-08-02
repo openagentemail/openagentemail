@@ -11,6 +11,7 @@ import {
 import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
+import { notifyRoute } from './routes/notify.ts';
 import { createUiApiRoutes } from './routes/ui.ts';
 import { registerUiAssets } from './routes/ui-assets.ts';
 import { createUiFrameRoutes } from './routes/ui-frame.ts';
@@ -37,6 +38,7 @@ export function createApp(options: AppOptions = {}): Hono {
   app.route('/v1/identities', identitiesRoute);
   app.route('/v1/messages', messagesRoute);
   app.route('/v1/send', sendRoute);
+  app.route('/v1/notify', notifyRoute);
 
   if (options.uiEnabled ?? config.uiEnabled) {
     const uiSessions = new UiSessionStore({

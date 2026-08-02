@@ -21,6 +21,8 @@ export interface Identity {
   address: string;
   name?: string;
   createdAt: string;
+  /** Explicit root-level permission to notify the human-alert topics. */
+  canNotifyUser?: boolean;
   /** SHA-256 hex of the identity's API token. Absent on pre-token stores. */
   tokenHash?: string;
 }
@@ -44,6 +46,7 @@ function isIdentity(value: unknown): value is Identity {
     typeof identity.address === 'string' &&
     typeof identity.createdAt === 'string' &&
     (identity.name === undefined || typeof identity.name === 'string') &&
+    (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
     (identity.tokenHash === undefined || typeof identity.tokenHash === 'string')
   );
 }
@@ -127,6 +130,7 @@ export function findIdentityByToken(token: string): Identity | undefined {
 export function createIdentity(input: {
   name?: string;
   localpart?: string;
+  canNotifyUser?: boolean;
 }): { identity: Identity; token: string } | null {
   const identities = load();
   let localpart = input.localpart?.toLowerCase();
@@ -153,6 +157,7 @@ export function createIdentity(input: {
   const identity: Identity = {
     address,
     ...(input.name ? { name: input.name } : {}),
+    ...(input.canNotifyUser ? { canNotifyUser: true } : {}),
     createdAt: new Date().toISOString(),
     tokenHash,
   };

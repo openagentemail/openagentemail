@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
+import { notifyTrustedAgentDelivery } from '../lib/notify.ts';
 import { sendMail } from '../lib/smtp.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
@@ -56,6 +57,12 @@ export const sendRoute = new Hono().post('/', async (c) => {
       text,
       ...(html ? { html } : {}),
     });
+    // This is the only path that wakes an agent topic: it is a successful,
+    // authenticated server-side send to another managed address. Inbound mail
+    // never gets this capability because any sender header can be forged.
+    for (const recipient of (Array.isArray(to) ? to : [to])) {
+      void notifyTrustedAgentDelivery(recipient);
+    }
     return c.json({ queued: true, messageId }, 200);
   } catch (err) {
     // Our own mail server being unreachable shouldn't cost the user a slot;

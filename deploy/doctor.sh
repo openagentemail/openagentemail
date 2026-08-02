@@ -7,6 +7,7 @@
 #   DNS:   MX, A, SPF, DKIM, DMARC
 #   IP:    PTR (reverse DNS), outbound port 25, DNSBL listings
 #   TLS:   certificate validity/expiry on 465 + 993
+#   ntfy:  private notification transport via POST /v1/notify/verify
 #
 # Deps: dig, curl, openssl (all standard on macOS/Linux). Read-only.
 # Usage: ./deploy/doctor.sh [server-public-ipv4]
@@ -15,13 +16,21 @@ cd "$(dirname "$0")/.." 2>/dev/null || true
 
 # ── config ───────────────────────────────────────────────────────────────────
 DOMAIN=""
+API_KEY=""
+API_PORT="3100"
+NTFY_ENABLED="true"
 if [ -f .env ]; then
-  DOMAIN="$(grep -E '^DOMAIN=' .env | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+  DOMAIN="$(grep -E '^DOMAIN=' .env | head -1 | cut -d= -f2- | tr -d ' "')"
+  API_KEY="$(grep -E '^API_KEYS=' .env | head -1 | cut -d= -f2- | cut -d, -f1 | tr -d ' "')"
+  API_PORT="$(grep -E '^API_PORT=' .env | head -1 | cut -d= -f2- | tr -d ' "')"
+  NTFY_ENABLED="$(grep -E '^NTFY_ENABLED=' .env | head -1 | cut -d= -f2- | tr -d ' "')"
 fi
 if [ -z "$DOMAIN" ]; then
   echo "ERROR: DOMAIN not found. Create .env (cp .env.example .env) first." >&2
   exit 1
 fi
+[ -n "$API_PORT" ] || API_PORT="3100"
+[ -n "$NTFY_ENABLED" ] || NTFY_ENABLED="true"
 MAIL_HOST="mail.${DOMAIN}"
 DKIM_SELECTOR="mail"
 
@@ -30,6 +39,16 @@ ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 warn() { WARN=$((WARN+1)); printf '  \033[33mWARN\033[0m  %s\n  %s\n' "$1" "$2"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n  %s\n' "$1" "$2"; }
 hint() { printf '       hint: %s\n' "$1"; }
+
+# .env includes mail and ntfy administrator passwords. Keep it owner-readable
+# only; accepting a looser mode here would turn doctor into a false assurance.
+echo "[SECURITY] .env permissions"
+ENV_MODE="$(stat -c '%a' .env 2>/dev/null || stat -f '%Lp' .env 2>/dev/null || true)"
+if [ "$ENV_MODE" = "600" ]; then
+  ok ".env mode is 600"
+else
+  warn ".env mode is ${ENV_MODE:-unknown}, expected 600" "       hint: chmod 600 .env"
+fi
 
 for cmd in dig curl openssl; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' not found in PATH" >&2; exit 1; }
@@ -179,6 +198,27 @@ for PORT in 465 993; do
     fi
   fi
 done
+
+# ── 10. ntfy server-side self-check ─────────────────────────────────────────
+echo "[NTFY] Notification transport"
+if [ "$NTFY_ENABLED" = "false" ]; then
+  warn "ntfy API/watcher disabled (NTFY_ENABLED=false)" \
+       "       hint: the ntfy container still runs by design; set true to enable server-side notifications"
+elif [ -z "$API_KEY" ]; then
+  bad "API_KEYS missing; cannot run notify_verify"
+  hint "set API_KEYS in .env, then re-run doctor"
+else
+  VERIFY_RESPONSE="$(curl -sS --max-time 12 \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H 'Content-Type: application/json' \
+    -X POST "http://127.0.0.1:${API_PORT}/v1/notify/verify" 2>/dev/null || true)"
+  if echo "$VERIFY_RESPONSE" | grep -q '"ok":true'; then
+    ok "ntfy publish + cache poll verified"
+  else
+    bad "ntfy notify_verify failed"
+    hint "docker compose ps ntfy; docker compose logs ntfy api"
+  fi
+fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
 echo "──────────────────────────────────────────────────────────────"

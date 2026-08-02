@@ -57,6 +57,7 @@ const identitySchema = {
   address: z.email(),
   name: z.string().optional(),
   createdAt: z.string().optional(),
+  canNotifyUser: z.boolean().optional(),
 };
 
 const messageSummarySchema = {
@@ -104,6 +105,29 @@ const seenOutputSchema = {
 const sendOutputSchema = {
   queued: z.boolean(),
   messageId: z.string(),
+};
+
+const notifyLevelSchema = z.enum(["urgent", "normal", "low"]);
+
+const notifyOutputSchema = {
+  target: z.string(),
+  title: z.string(),
+  level: notifyLevelSchema,
+};
+
+const notifyCheckOutputSchema = {
+  messages: z.array(z.object({
+    id: z.string(),
+    time: z.number(),
+    title: z.string(),
+    message: z.string(),
+    priority: z.number(),
+    tags: z.array(z.string()),
+  })),
+};
+
+const notifyVerifyOutputSchema = {
+  ok: z.literal(true),
 };
 
 function ok(data: unknown): CallToolResult {
@@ -161,11 +185,15 @@ server.registerTool(
         .describe(
           "Custom email localpart (e.g. 'my-bot' for my-bot@domain). If omitted, a random one is generated.",
         ),
+      canNotifyUser: z
+        .boolean()
+        .optional()
+        .describe("Admin only: allow this identity to send human-alert notifications"),
     },
     outputSchema: identitySchema,
     annotations: mutatingAnnotations,
   },
-  ({ name, localpart }) => callApi(() => client.createIdentity({ name, localpart })),
+  ({ name, localpart, canNotifyUser }) => callApi(() => client.createIdentity({ name, localpart, canNotifyUser })),
 );
 
 server.registerTool(
@@ -293,6 +321,74 @@ server.registerTool(
   },
   ({ from, to, subject, text, html }) =>
     callApi(() => client.send(from, to, subject, text, html)),
+);
+
+const notificationInputSchema = {
+  title: z.string().min(1).max(256).describe("Short notification title"),
+  message: z.string().min(1).max(4_000).describe("Notification body"),
+  level: notifyLevelSchema.optional().describe("urgent, normal (default), or low"),
+  tags: z.array(z.string().min(1).max(64)).max(5).optional().describe("Optional ntfy tags"),
+};
+
+server.registerTool(
+  "notify_user",
+  {
+    title: "Notify User",
+    description:
+      "Send a human-alert notification. Identity tokens need the server-side can_notify_user grant; this tool never needs a topic or ntfy credential.",
+    inputSchema: notificationInputSchema,
+    outputSchema: notifyOutputSchema,
+    annotations: mutatingAnnotations,
+  },
+  ({ title, message, level, tags }) =>
+    callApi(() => client.notifyUser(title, message, level ?? "normal", tags)),
+);
+
+server.registerTool(
+  "notify_agent",
+  {
+    title: "Notify Agent",
+    description:
+      "Wake a named agent through the server-side notification route. The server owns topics and credentials; pass the target agent's identity localpart only.",
+    inputSchema: {
+      name: z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9._-]{0,62}$/)
+        .describe("Target agent identity localpart, for example qa-bot"),
+      ...notificationInputSchema,
+    },
+    outputSchema: notifyOutputSchema,
+    annotations: mutatingAnnotations,
+  },
+  ({ name, title, message, level, tags }) =>
+    callApi(() => client.notifyAgent(name, title, message, level ?? "normal", tags)),
+);
+
+server.registerTool(
+  "notify_check",
+  {
+    title: "Check Agent Notifications",
+    description:
+      "Read recent notifications for this identity only. The server maps the token to its own topic, so no topic name or ntfy credential is exposed.",
+    inputSchema: {
+      since: z.string().min(1).max(64).optional().describe("Optional ntfy duration or timestamp filter"),
+    },
+    outputSchema: notifyCheckOutputSchema,
+    annotations: readOnlyAnnotations,
+  },
+  ({ since }) => callApi(async () => ({ messages: await client.notificationCheck(since) })),
+);
+
+server.registerTool(
+  "notify_verify",
+  {
+    title: "Verify Notification Delivery",
+    description:
+      "Send a harmless server-side notification check and poll it back. Requires the same human-alert permission as notify_user.",
+    outputSchema: notifyVerifyOutputSchema,
+    annotations: mutatingAnnotations,
+  },
+  () => callApi(() => client.verifyNotifications()),
 );
 
 const transport = new StdioServerTransport();

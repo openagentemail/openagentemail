@@ -24,6 +24,10 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `mail_mark_seen(address, id, seen?)` | Mark a message read (default) or unread — reading never changes the flag by itself |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
 | `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
+| `notify_user(title, message, level?, tags?)` | Send a human alert; needs the server-side `can_notify_user` grant |
+| `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing a topic or ntfy credential |
+| `notify_check(since?)` | Read recent notifications for the calling identity only |
+| `notify_verify()` | Send and poll a harmless server-side notification self-check |
 
 Errors come back as `isError` tool results with actionable messages (a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 means the token's scope doesn't cover what you asked for — identity tokens only touch their own address, and identity management is admin-only; a 429 means the per-identity send rate limit kicked in).
 

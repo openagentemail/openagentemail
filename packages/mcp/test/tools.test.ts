@@ -37,7 +37,7 @@ mock.module("@modelcontextprotocol/server/stdio", () => ({
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
 
-test("7 个工具都公布新 SDK 支持的元数据", () => {
+test("11 个工具都公布新 SDK 支持的元数据", () => {
   expect([...toolConfigs.keys()]).toEqual([
     "mail_new_identity",
     "mail_list_identities",
@@ -46,6 +46,10 @@ test("7 个工具都公布新 SDK 支持的元数据", () => {
     "mail_mark_seen",
     "mail_wait_for",
     "mail_send",
+    "notify_user",
+    "notify_agent",
+    "notify_check",
+    "notify_verify",
   ]);
 
   for (const config of toolConfigs.values()) {
@@ -60,6 +64,8 @@ test("7 个工具都公布新 SDK 支持的元数据", () => {
   expect(toolConfigs.get("mail_send")?.annotations?.destructiveHint).toBe(false);
   expect(toolConfigs.get("mail_mark_seen")?.annotations?.destructiveHint).toBe(false);
   expect(toolConfigs.get("mail_mark_seen")?.annotations?.idempotentHint).toBe(true);
+  expect(toolConfigs.get("notify_check")?.annotations?.readOnlyHint).toBe(true);
+  expect(toolConfigs.get("notify_user")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
     toolConfigs.get("mail_wait_for")?.outputSchema,
   );
@@ -122,4 +128,17 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(send, "subject", "x".repeat(999))).toBe(false); // API: .max(998)
   expect(ok(send, "text", "x".repeat(1_000_001))).toBe(false); // API: .max(1_000_000)
   expect(ok(send, "html", "x".repeat(1_000_001))).toBe(false);
+
+  const notifyUser = toolSchemas.get("notify_user")!;
+  expect(ok(notifyUser, "title", "wake")).toBe(true);
+  expect(ok(notifyUser, "title", "")).toBe(false);
+  expect(ok(notifyUser, "message", "x".repeat(4_000))).toBe(true);
+  expect(ok(notifyUser, "message", "x".repeat(4_001))).toBe(false);
+  expect(ok(notifyUser, "level", "urgent")).toBe(true);
+  expect(ok(notifyUser, "level", "loud")).toBe(false);
+
+  const notifyAgent = toolSchemas.get("notify_agent")!;
+  expect(ok(notifyAgent, "name", "qa-bot")).toBe(true);
+  expect(ok(notifyAgent, "name", "QA-Bot")).toBe(false);
+  expect(ok(notifyAgent, "name", "-bot")).toBe(false);
 });

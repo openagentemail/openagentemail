@@ -8,11 +8,15 @@ import {
   rotateIdentityToken,
   LOCALPART_RE,
 } from '../lib/identities.ts';
+import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import { getAuth } from '../lib/auth.ts';
 
 const createSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   localpart: z.string().regex(LOCALPART_RE, 'invalid localpart').optional(),
+  // This is intentionally opt-in and admin-only: it authorizes an identity
+  // to interrupt the human notification channel.
+  canNotifyUser: z.boolean().optional(),
 });
 
 // Identity management is admin-only: identity tokens may not mint, list or
@@ -44,10 +48,22 @@ export const identitiesRoute = new Hono()
         return c.json({ error: 'address_exists' }, 409);
       }
       const { identity, token } = created;
+      try {
+        await provisionIdentityNotifications(identity);
+      } catch (err) {
+        // Do not hand out a usable mail identity if its promised ntfy reader
+        // could not be created in the same live stack.
+        deleteIdentity(identity.address);
+        if (err instanceof NotifyError) {
+          return c.json({ error: err.code }, 503);
+        }
+        throw err;
+      }
       return c.json(
         {
           address: identity.address,
           ...(identity.name ? { name: identity.name } : {}),
+          ...(identity.canNotifyUser ? { canNotifyUser: true } : {}),
           // Shown exactly once — store it now. Only its hash persists.
           token,
         },
