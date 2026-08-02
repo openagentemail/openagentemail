@@ -22,11 +22,17 @@ const envSchema = z.object({
   IMAP_PASS: z.string().min(1),
   // 'true' = implicit TLS (993), 'false' = plaintext/STARTTLS (143).
   IMAP_TLS: z.enum(['true', 'false']).default('true'),
+  // Keep the bundled self-signed mailserver working by default. Set true for
+  // a public IMAP server with a certificate from a trusted CA.
+  IMAP_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).default('false'),
 
   SMTP_HOST: z.string().min(1).default('127.0.0.1'),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
   SMTP_USER: z.string().min(1),
   SMTP_PASS: z.string().min(1),
+  // Same default as IMAP: bundled docker-mailserver starts with a self-signed
+  // certificate, while external public SMTP servers should normally use true.
+  SMTP_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).default('false'),
 
   // Comma-separated domains allowed as the `from` domain of an identity.
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
@@ -55,31 +61,38 @@ function splitCsv(value: string): string[] {
     .filter(Boolean);
 }
 
-const raw = envSchema.parse(process.env);
+/** Parse an environment object so TLS defaults and validation stay testable. */
+export function parseConfig(env: NodeJS.ProcessEnv) {
+  const raw = envSchema.parse(env);
 
-export const config = {
-  port: raw.PORT,
-  domain: raw.DOMAIN.toLowerCase(),
-  apiKeys: new Set(splitCsv(raw.API_KEYS)),
-  imap: {
-    host: raw.IMAP_HOST,
-    port: raw.IMAP_PORT,
-    user: raw.IMAP_USER,
-    pass: raw.IMAP_PASS,
-    secure: raw.IMAP_TLS === 'true',
-  },
-  smtp: {
-    host: raw.SMTP_HOST,
-    port: raw.SMTP_PORT,
-    user: raw.SMTP_USER,
-    pass: raw.SMTP_PASS,
-  },
-  allowedSendDomains: raw.ALLOWED_SEND_DOMAINS
-    ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
-    : [raw.DOMAIN.toLowerCase()],
-  dataDir: raw.DATA_DIR,
-  uiEnabled: raw.UI_ENABLED === 'true',
-  sendRateLimit: raw.SEND_RATE_LIMIT,
-  retentionDays: raw.RETENTION_DAYS,
-  retentionCheckHours: raw.RETENTION_CHECK_HOURS,
-} as const;
+  return {
+    port: raw.PORT,
+    domain: raw.DOMAIN.toLowerCase(),
+    apiKeys: new Set(splitCsv(raw.API_KEYS)),
+    imap: {
+      host: raw.IMAP_HOST,
+      port: raw.IMAP_PORT,
+      user: raw.IMAP_USER,
+      pass: raw.IMAP_PASS,
+      secure: raw.IMAP_TLS === 'true',
+      tlsRejectUnauthorized: raw.IMAP_TLS_REJECT_UNAUTHORIZED === 'true',
+    },
+    smtp: {
+      host: raw.SMTP_HOST,
+      port: raw.SMTP_PORT,
+      user: raw.SMTP_USER,
+      pass: raw.SMTP_PASS,
+      tlsRejectUnauthorized: raw.SMTP_TLS_REJECT_UNAUTHORIZED === 'true',
+    },
+    allowedSendDomains: raw.ALLOWED_SEND_DOMAINS
+      ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
+      : [raw.DOMAIN.toLowerCase()],
+    dataDir: raw.DATA_DIR,
+    uiEnabled: raw.UI_ENABLED === 'true',
+    sendRateLimit: raw.SEND_RATE_LIMIT,
+    retentionDays: raw.RETENTION_DAYS,
+    retentionCheckHours: raw.RETENTION_CHECK_HOURS,
+  } as const;
+}
+
+export const config = parseConfig(process.env);

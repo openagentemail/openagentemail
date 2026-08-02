@@ -85,9 +85,9 @@ function createImapClient(): ImapFlow {
     port: config.imap.port,
     secure: config.imap.secure,
     auth: { user: config.imap.user, pass: config.imap.pass },
-    // docker-mailserver ships a self-signed cert by default; the api reaches it
-    // over the private compose network, so skip chain verification.
-    tls: { rejectUnauthorized: false },
+    // The bundled mailserver starts with a self-signed cert. External public
+    // mail servers should set IMAP_TLS_REJECT_UNAUTHORIZED=true.
+    tls: { rejectUnauthorized: config.imap.tlsRejectUnauthorized },
     logger: false,
     socketTimeout: SOCKET_TIMEOUT_MS,
   });

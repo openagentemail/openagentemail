@@ -23,9 +23,9 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
     secure: config.smtp.port === 465,
     auth: { user: config.smtp.user, pass: config.smtp.pass },
     tls: {
-      // docker-mailserver ships with a self-signed cert by default; the
-      // SMTP hop is usually container-to-container on the same host.
-      rejectUnauthorized: false,
+      // The bundled mailserver starts with a self-signed cert. External public
+      // mail servers should set SMTP_TLS_REJECT_UNAUTHORIZED=true.
+      rejectUnauthorized: config.smtp.tlsRejectUnauthorized,
     },
   });
 

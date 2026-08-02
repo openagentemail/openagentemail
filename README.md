@@ -54,6 +54,14 @@ curl -X POST http://localhost:3100/v1/identities \
 The API binds to `127.0.0.1` by default — reach it from other hosts over an
 SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guides/security/).
 
+## Using your own mail server
+
+Already have a mail provider for your domain? Run the API by itself with
+[`compose.api-only.yaml`](compose.api-only.yaml), connected to that provider's
+catch-all mailbox. The [external mail server guide](https://openagent.email/docs/guides/external-mailserver/)
+covers the required catch-all setup, Portainer deployment, SMTP sender limits,
+and TLS certificate verification.
+
 ## Read mail in a browser
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin

@@ -1,0 +1,56 @@
+# openagent.email API-only deployment for an existing external mail server.
+#
+# Use this when your mail provider already hosts your domain. It runs only the
+# API: IMAP reads one catch-all mailbox and SMTP sends through that provider.
+# Copy .env.api-only.example to .env, fill every required value, then run:
+#   docker compose -f compose.api-only.yaml up -d
+
+name: openagentemail
+
+services:
+  api:
+    build: ./packages/api
+    container_name: openagent-api
+    environment:
+      # --- shared API contract env ---
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}
+      PORT: 3100
+      UI_ENABLED: ${UI_ENABLED:-true}
+      ALLOWED_SEND_DOMAINS: ${ALLOWED_SEND_DOMAINS:-}
+      # --- external catch-all mailbox access ---
+      IMAP_HOST: ${IMAP_HOST:?Set IMAP_HOST in .env}
+      IMAP_PORT: ${IMAP_PORT:?Set IMAP_PORT in .env}
+      IMAP_TLS: ${IMAP_TLS:?Set IMAP_TLS in .env}
+      IMAP_TLS_REJECT_UNAUTHORIZED: ${IMAP_TLS_REJECT_UNAUTHORIZED:-false}
+      IMAP_USER: ${IMAP_USER:?Set IMAP_USER in .env}
+      IMAP_PASS: ${IMAP_PASS:?Set IMAP_PASS in .env}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST in .env}
+      SMTP_PORT: ${SMTP_PORT:?Set SMTP_PORT in .env}
+      SMTP_TLS_REJECT_UNAUTHORIZED: ${SMTP_TLS_REJECT_UNAUTHORIZED:-false}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER in .env}
+      SMTP_PASS: ${SMTP_PASS:?Set SMTP_PASS in .env}
+      # Identity store (json) survives container recreation:
+      DATA_DIR: /app/data
+      # Per-identity send limit (messages/hour, 0 = off):
+      SEND_RATE_LIMIT: ${SEND_RATE_LIMIT:-20}
+      # Auto-delete mail older than this many days (0 = keep forever):
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+    volumes:
+      - api-data:/app/data
+    ports:
+      # SAFETY DEFAULT: localhost only. Reach it from your agent host over an
+      # SSH tunnel (ssh -L 3100:127.0.0.1:3100 user@server) or put a TLS
+      # reverse proxy in front (see docs/security.md). Set API_BIND=0.0.0.0
+      # in .env only if you know exactly why you need it.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-3100}:3100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e 'fetch(\"http://localhost:3100/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  api-data:
