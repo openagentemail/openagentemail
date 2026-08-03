@@ -26,6 +26,7 @@ type FakeMessage = {
 let fakeMessages: FakeMessage[] = [];
 let failMailboxLock = false;
 const createdClients: FakeImapFlow[] = [];
+let deletedUids: number[] = [];
 
 class FakeImapFlow {
   closed = false;
@@ -77,6 +78,11 @@ class FakeImapFlow {
     this.loggedOut = true;
   }
 
+  async messageDelete(uids: number[]) {
+    deletedUids = uids;
+    return true;
+  }
+
   close() {
     this.closed = true;
   }
@@ -84,7 +90,7 @@ class FakeImapFlow {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
-const { getMessage, listMessages, waitForMessage } = await import('../src/lib/imap.ts');
+const { deleteMessagesBefore, getMessage, listMessages, waitForMessage } = await import('../src/lib/imap.ts');
 
 function inboxMessage(uid: number, to: string, deliveredTo: string): FakeMessage {
   return {
@@ -106,6 +112,7 @@ describe('IMAP identity isolation (end to end)', () => {
     fakeMessages = [];
     failMailboxLock = false;
     createdClients.length = 0;
+    deletedUids = [];
   });
 
   test('别的身份的邮件不会出现在 listMessages 结果里', async () => {
@@ -118,6 +125,21 @@ describe('IMAP identity isolation (end to end)', () => {
     expect(await listMessages('ent@test.example')).toEqual([]);
     // 真正的收件人仍然读得到（信封 To 命中）。
     expect((await listMessages('victim@test.example')).map((m) => m.id)).toEqual(['8']);
+  });
+});
+
+describe('retention task exemption', () => {
+  test('retention skips any message carrying an X-OA-Task thread header', async () => {
+    const ordinary = inboxMessage(30, 'victim@test.example', 'victim@test.example');
+    const taskMail = inboxMessage(31, 'victim@test.example', 'victim@test.example');
+    taskMail.headers = Buffer.from(
+      'Delivered-To: victim@test.example\r\n' +
+      'X-OA-Task: 0fdc3207-056e-47c1-a65c-b29d39f66b83\r\n',
+    );
+    fakeMessages = [ordinary, taskMail];
+
+    expect(await deleteMessagesBefore(new Date())).toBe(1);
+    expect(deletedUids).toEqual([30]);
   });
 });
 

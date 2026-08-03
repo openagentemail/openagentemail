@@ -252,6 +252,10 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 | `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing an ntfy topic or token |
 | `notify_check(since?)` | Read recent notifications for the calling identity only |
 | `notify_verify()` | Publish and poll a harmless server-side notification self-check |
+| `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity |
+| `task_list(state?)` | List task threads visible to the calling identity |
+| `task_get(id, wait?)` | Read a task thread and its stamped state history; optionally wait up to 10 minutes |
+| `task_update(id, state, body?, result?)` | Advance a participating task; structured output goes in `result` |
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:

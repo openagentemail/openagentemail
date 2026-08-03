@@ -14,6 +14,8 @@ export interface SendInput {
   subject: string;
   text: string;
   html?: string;
+  /** Server-stamped protocol metadata, for example X-OA-Task headers. */
+  headers?: Record<string, string>;
 }
 
 export async function sendMail(input: SendInput): Promise<{ messageId: string }> {
@@ -36,6 +38,7 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
       subject: input.subject,
       text: input.text,
       ...(input.html ? { html: input.html } : {}),
+      ...(input.headers ? { headers: input.headers } : {}),
     });
     return { messageId: info.messageId };
   } finally {

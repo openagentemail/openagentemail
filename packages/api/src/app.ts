@@ -12,6 +12,8 @@ import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
 import { notifyRoute } from './routes/notify.ts';
+import { tasksRoute } from './routes/tasks.ts';
+import { agentCardRoute } from './routes/agent-card.ts';
 import { createUiApiRoutes } from './routes/ui.ts';
 import { registerUiAssets } from './routes/ui-assets.ts';
 import { createUiFrameRoutes } from './routes/ui-frame.ts';
@@ -25,6 +27,7 @@ export function createApp(options: AppOptions = {}): Hono {
   const app = new Hono();
 
   app.get('/healthz', (c) => c.json({ ok: true }));
+  app.route('/.well-known', agentCardRoute);
 
   // Bound allocation before auth or JSON parsing.
   app.use(
@@ -39,6 +42,7 @@ export function createApp(options: AppOptions = {}): Hono {
   app.route('/v1/messages', messagesRoute);
   app.route('/v1/send', sendRoute);
   app.route('/v1/notify', notifyRoute);
+  app.route('/v1/tasks', tasksRoute);
 
   if (options.uiEnabled ?? config.uiEnabled) {
     const uiSessions = new UiSessionStore({

@@ -35,6 +35,10 @@ const envSchema = z.object({
   // certificate, while external public SMTP servers should normally use true.
   SMTP_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).default('false'),
 
+  // Stable private key for task-header stamps. This must outlive SMTP account
+  // password rotations so old task threads remain verifiable.
+  TASK_SIGNING_SECRET: z.string().min(16).optional(),
+
   // Comma-separated domains allowed as the `from` domain of an identity.
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
@@ -105,6 +109,10 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       pass: raw.SMTP_PASS,
       tlsRejectUnauthorized: raw.SMTP_TLS_REJECT_UNAUTHORIZED === 'true',
     },
+    // The fallback supports an upgrade where the new variable has not reached
+    // a bare-process config yet. Both Compose variants require the dedicated
+    // secret, which is the supported v0.4 deployment path.
+    taskSigningSecret: raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS,
     allowedSendDomains: raw.ALLOWED_SEND_DOMAINS
       ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
       : [raw.DOMAIN.toLowerCase()],

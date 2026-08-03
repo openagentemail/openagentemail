@@ -38,11 +38,19 @@ export interface MessageDetail {
   html?: string;
   otp: OtpExtraction;
   links: string[];
+  /** Present only for server-stamped task mail. */
+  taskId?: string;
+  /** Present only for server-stamped task mail. */
+  taskState?: string;
 }
 
 export interface WaitFilters {
   fromContains?: string;
   subjectContains?: string;
+  /** Internal task wait filter. This is not exposed by the generic mail API. */
+  taskId?: string;
+  /** Internal task wait filter. Matches a server-stamped X-OA-Task-State. */
+  taskStates?: string[];
 }
 
 /** 单条消息的最小统计记录：只保留统计所需的三个字段，绝不留正文/主题/发件人。 */
@@ -104,7 +112,7 @@ export async function connectImap(): Promise<ImapFlow> {
  * On error the socket is dropped synchronously — a graceful LOGOUT can
  * queue behind a stuck command and re-block the caller.
  */
-async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
+export async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const client = await connectImap();
   let failed = false;
   // Locking is inside the try: getMailboxLock can throw (INBOX missing, socket
@@ -444,6 +452,8 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     ? parsed.to.map((a) => a.text).join(', ')
     : (parsed.to?.text ?? '');
   const otp = extractOtp(text, extractableHtml);
+  const taskId = parsed.headers.get('x-oa-task');
+  const taskState = parsed.headers.get('x-oa-task-state');
   return {
     id: String(uid),
     from: parsed.from?.text ?? '',
@@ -454,6 +464,8 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     ...(html ? { html } : {}),
     otp,
     links: extractHttpLinks(text, extractableHtml),
+    ...(typeof taskId === 'string' ? { taskId } : {}),
+    ...(typeof taskState === 'string' ? { taskState } : {}),
   };
 }
 
@@ -531,9 +543,25 @@ export async function deleteMessagesBefore(cutoff: Date): Promise<number> {
   return withInbox(async (client) => {
     const uids = await client.search({ before: cutoff }, { uid: true });
     if (!uids || uids.length === 0) return 0;
+    const deletable: number[] = [];
+    // Task threads are durable state. Retention may delete ordinary mail in
+    // the shared catch-all mailbox, but must never silently remove a message
+    // carrying the task thread key.
+    for await (const message of client.fetch(
+      uids,
+      { headers: ['x-oa-task'] },
+      { uid: true },
+    )) {
+      const taskHeader = message.headers
+        ?.toString('utf8')
+        .replace(/\r?\n[ \t]+/g, ' ')
+        .match(/^x-oa-task\s*:/im);
+      if (!taskHeader) deletable.push(message.uid);
+    }
+    if (deletable.length === 0) return 0;
     // messageDelete flags \Deleted AND expunges in one go (imapflow default).
-    await client.messageDelete(uids, { uid: true });
-    return uids.length;
+    await client.messageDelete(deletable, { uid: true });
+    return deletable.length;
   });
 }
 
@@ -597,17 +625,33 @@ function summaryPassesFilters(summary: MessageSummary, filters: WaitFilters): bo
   return true;
 }
 
+function detailPassesFilters(detail: MessageDetail, filters: WaitFilters): boolean {
+  if (filters.taskId && detail.taskId !== filters.taskId) return false;
+  if (filters.taskStates && !filters.taskStates.includes(detail.taskState ?? '')) return false;
+  return true;
+}
+
 /** Newest matching full message for the filters, or null. */
 async function findMatchWith(
   client: ImapFlow,
   address: string,
   filters: WaitFilters,
 ): Promise<MessageDetail | null> {
+  // Task waits must not be limited by the ordinary newest-20 mailbox view:
+  // a busy identity can receive many unrelated messages while a task runs.
+  if (filters.taskId) {
+    const uids = await client.search({ header: { 'x-oa-task': filters.taskId } }, { uid: true });
+    for (const uid of (Array.isArray(uids) ? [...uids] : []).reverse()) {
+      const detail = await getMessageWith(client, address, String(uid));
+      if (detail && detailPassesFilters(detail, filters)) return detail;
+    }
+    return null;
+  }
   const summaries = await listMessagesWith(client, address, 20);
   for (const summary of summaries) {
     if (!summaryPassesFilters(summary, filters)) continue;
     const detail = await getMessageWith(client, address, summary.id);
-    if (detail) return detail;
+    if (detail && detailPassesFilters(detail, filters)) return detail;
   }
   return null;
 }

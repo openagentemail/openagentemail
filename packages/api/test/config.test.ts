@@ -47,3 +47,18 @@ describe('TLS certificate verification configuration', () => {
     ).toThrow();
   });
 });
+
+describe('task signing configuration', () => {
+  test('uses a dedicated stable secret when configured', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      SMTP_PASS: 'rotated-smtp-password',
+      TASK_SIGNING_SECRET: 'stable-task-signing-secret-2026',
+    });
+    expect(config.taskSigningSecret).toBe('stable-task-signing-secret-2026');
+  });
+
+  test('keeps a fallback only for pre-v0.4 bare-process upgrades', () => {
+    expect(parseConfig(requiredEnv).taskSigningSecret).toBe('smtp-secret');
+  });
+});

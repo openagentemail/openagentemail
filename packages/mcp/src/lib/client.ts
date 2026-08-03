@@ -9,6 +9,10 @@
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
  *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId}
+ *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
+ *   GET  /v1/tasks?state=          -> {tasks:[task]}
+ *   GET  /v1/tasks/:id             -> task
+ *   POST /v1/tasks/:id/state       {state,body?,result?} -> task
  */
 
 export class ApiError extends Error {
@@ -51,6 +55,31 @@ export interface NotificationMessage {
   message: string;
   priority: number;
   tags: string[];
+}
+
+export type TaskState = "submitted" | "working" | "input-required" | "completed" | "failed";
+
+export interface TaskMessage {
+  id: string;
+  from: string;
+  to: string;
+  subject: string;
+  date: string;
+  state: TaskState;
+  body: string;
+  result?: unknown;
+}
+
+export interface Task {
+  id: string;
+  from: string;
+  to: string;
+  subject: string;
+  state: TaskState;
+  createdAt: string;
+  updatedAt: string;
+  messages: TaskMessage[];
+  result?: unknown;
 }
 
 /**
@@ -279,5 +308,39 @@ export class OpenAgentEmailClient {
 
   verifyNotifications(): Promise<{ ok: true }> {
     return this.request("POST", "/v1/notify/verify");
+  }
+
+  createTask(
+    to: string,
+    subject: string,
+    body: string,
+    wait = false,
+  ): Promise<Task> {
+    return this.request("POST", "/v1/tasks", { to, subject, body, wait });
+  }
+
+  async listTasks(state?: TaskState): Promise<Task[]> {
+    const params = new URLSearchParams();
+    if (state) params.set("state", state);
+    const suffix = params.size ? `?${params.toString()}` : "";
+    const data = await this.request<{ tasks: Task[] }>("GET", `/v1/tasks${suffix}`);
+    return data.tasks;
+  }
+
+  getTask(id: string, wait = false): Promise<Task> {
+    return this.request("GET", `/v1/tasks/${encodeURIComponent(id)}${wait ? "?wait=true" : ""}`);
+  }
+
+  updateTask(
+    id: string,
+    state: TaskState,
+    body?: string,
+    result?: unknown,
+  ): Promise<Task> {
+    return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/state`, {
+      state,
+      ...(body === undefined ? {} : { body }),
+      ...(result === undefined ? {} : { result }),
+    });
   }
 }

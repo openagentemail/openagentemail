@@ -37,7 +37,7 @@ mock.module("@modelcontextprotocol/server/stdio", () => ({
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
 
-test("11 个工具都公布新 SDK 支持的元数据", () => {
+test("15 个工具都公布新 SDK 支持的元数据", () => {
   expect([...toolConfigs.keys()]).toEqual([
     "mail_new_identity",
     "mail_list_identities",
@@ -50,6 +50,10 @@ test("11 个工具都公布新 SDK 支持的元数据", () => {
     "notify_agent",
     "notify_check",
     "notify_verify",
+    "task_create",
+    "task_list",
+    "task_get",
+    "task_update",
   ]);
 
   for (const config of toolConfigs.values()) {
@@ -66,6 +70,10 @@ test("11 个工具都公布新 SDK 支持的元数据", () => {
   expect(toolConfigs.get("mail_mark_seen")?.annotations?.idempotentHint).toBe(true);
   expect(toolConfigs.get("notify_check")?.annotations?.readOnlyHint).toBe(true);
   expect(toolConfigs.get("notify_user")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_list")?.annotations?.readOnlyHint).toBe(true);
+  expect(toolConfigs.get("task_get")?.annotations?.readOnlyHint).toBe(true);
+  expect(toolConfigs.get("task_create")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_update")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
     toolConfigs.get("mail_wait_for")?.outputSchema,
   );
@@ -141,4 +149,20 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(notifyAgent, "name", "qa-bot")).toBe(true);
   expect(ok(notifyAgent, "name", "QA-Bot")).toBe(false);
   expect(ok(notifyAgent, "name", "-bot")).toBe(false);
+
+  const taskCreate = toolSchemas.get("task_create")!;
+  expect(ok(taskCreate, "to", "bravo@test.example")).toBe(true);
+  expect(ok(taskCreate, "to", "not-an-email")).toBe(false);
+  expect(ok(taskCreate, "subject", "x".repeat(998))).toBe(true);
+  expect(ok(taskCreate, "subject", "x".repeat(999))).toBe(false);
+  expect(ok(taskCreate, "body", "x".repeat(1_000_001))).toBe(false);
+  expect(ok(taskCreate, "wait", true)).toBe(true);
+  expect(ok(taskCreate, "wait", "yes")).toBe(false);
+
+  const taskUpdate = toolSchemas.get("task_update")!;
+  expect(ok(taskUpdate, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
+  expect(ok(taskUpdate, "id", "not-a-task")).toBe(false);
+  expect(ok(taskUpdate, "state", "input-required")).toBe(true);
+  expect(ok(taskUpdate, "state", "reopened")).toBe(false);
+  expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
 });

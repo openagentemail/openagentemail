@@ -130,6 +130,35 @@ const notifyVerifyOutputSchema = {
   ok: z.literal(true),
 };
 
+const taskStateSchema = z.enum(["submitted", "working", "input-required", "completed", "failed"]);
+
+const taskMessageSchema = z.object({
+  id: z.string(),
+  from: z.email(),
+  to: z.email(),
+  subject: z.string(),
+  date: z.string(),
+  state: taskStateSchema,
+  body: z.string(),
+  result: z.unknown().optional(),
+});
+
+const taskOutputSchema = {
+  id: z.string().uuid(),
+  from: z.email(),
+  to: z.email(),
+  subject: z.string(),
+  state: taskStateSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  messages: z.array(taskMessageSchema),
+  result: z.unknown().optional(),
+};
+
+const taskListOutputSchema = {
+  tasks: z.array(z.object(taskOutputSchema)),
+};
+
 function ok(data: unknown): CallToolResult {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new TypeError("Tool output must be a JSON object");
@@ -389,6 +418,71 @@ server.registerTool(
     annotations: mutatingAnnotations,
   },
   () => callApi(() => client.verifyNotifications()),
+);
+
+server.registerTool(
+  "task_create",
+  {
+    title: "Create Email Task",
+    description:
+      "Assign a task to another managed identity. The server creates a stamped email thread and wakes that identity's agent route. With wait=true it waits up to 10 minutes for completed or failed; call task_get again for longer work.",
+    inputSchema: {
+      to: z.email().describe("Managed recipient identity address"),
+      subject: z.string().min(1).max(998).describe("Task subject"),
+      body: z.string().max(1_000_000).describe("Task instructions in plain text"),
+      wait: z.boolean().optional().describe("Wait up to 600 seconds for completed or failed (default false)"),
+    },
+    outputSchema: taskOutputSchema,
+    annotations: mutatingAnnotations,
+  },
+  ({ to, subject, body, wait }) => callApi(() => client.createTask(to, subject, body, wait ?? false)),
+);
+
+server.registerTool(
+  "task_list",
+  {
+    title: "List Email Tasks",
+    description: "List this identity's email-backed tasks, optionally filtered by their current state.",
+    inputSchema: {
+      state: taskStateSchema.optional().describe("Optional current state filter"),
+    },
+    outputSchema: taskListOutputSchema,
+    annotations: readOnlyAnnotations,
+  },
+  ({ state }) => callApi(async () => ({ tasks: await client.listTasks(state) })),
+);
+
+server.registerTool(
+  "task_get",
+  {
+    title: "Get Email Task",
+    description: "Read one task thread and its server-stamped state history.",
+    inputSchema: {
+      id: z.string().uuid().describe("Task UUID from task_create or task_list"),
+      wait: z.boolean().optional().describe("Wait up to 600 seconds for completed or failed before returning"),
+    },
+    outputSchema: taskOutputSchema,
+    annotations: readOnlyAnnotations,
+  },
+  ({ id, wait }) => callApi(() => client.getTask(id, wait ?? false)),
+);
+
+server.registerTool(
+  "task_update",
+  {
+    title: "Update Email Task",
+    description:
+      "Advance a task as one of its two participants. The API stamps the state header; completed and failed are terminal. Put structured output in result, which the server writes as a JSON result block in the reply body.",
+    inputSchema: {
+      id: z.string().uuid().describe("Task UUID"),
+      state: taskStateSchema.describe("Next server-stamped task state"),
+      body: z.string().max(1_000_000).optional().describe("Optional human-readable update"),
+      result: z.unknown().optional().describe("Optional JSON result for a completed or failed task"),
+    },
+    outputSchema: taskOutputSchema,
+    annotations: mutatingAnnotations,
+  },
+  ({ id, state, body, result }) => callApi(() => client.updateTask(id, state, body, result)),
 );
 
 const transport = new StdioServerTransport();
