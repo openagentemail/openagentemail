@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './args.ts';
 import { runConnect } from './connect.ts';
@@ -8,10 +8,7 @@ import { ClackPromptAdapter } from './prompts.ts';
 import { Reporter } from './reporter.ts';
 import { CliError, EXIT, type PromptAdapter } from './types.ts';
 import { runWizard } from './wizard.ts';
-
-const pkg = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-) as { version: string };
+import { packageVersion } from './version.ts';
 
 const HELP = `@openagentemail/setup
 
@@ -52,7 +49,7 @@ export async function runCli(
       return EXIT.OK;
     }
     if (options.version) {
-      (dependencies.stdout ?? process.stdout).write(`${pkg.version}\n`);
+      (dependencies.stdout ?? process.stdout).write(`${packageVersion.version}\n`);
       return EXIT.OK;
     }
     if (options.yes && !options.command) {

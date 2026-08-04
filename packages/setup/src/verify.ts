@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { CliError, EXIT } from './types.ts';
+import { packageVersion } from './version.ts';
 
 type SpawnMcp = (
   command: string,
@@ -108,7 +109,7 @@ export async function verifyMcpServer(
       params: {
         protocolVersion: '2025-06-18',
         capabilities: {},
-        clientInfo: { name: '@openagentemail/setup', version: '0.1.0' },
+        clientInfo: { name: '@openagentemail/setup', version: packageVersion.version },
       },
     })}\n`);
   });

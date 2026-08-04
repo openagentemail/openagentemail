@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,9 @@ function sink() {
 describe('CLI contract', () => {
   test('built CLI runs through an npx-style binary symlink', async () => {
     const packageDirectory = fileURLToPath(new URL('..', import.meta.url));
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
     const directory = await mkdtemp(join(tmpdir(), 'oae-setup-bin-'));
     try {
       const build = spawnSync(process.execPath, [
@@ -37,7 +41,7 @@ describe('CLI contract', () => {
       await symlink(join(packageDirectory, 'dist', 'main.js'), binary);
       const result = spawnSync('node', [binary, '--version'], { encoding: 'utf8' });
       expect(result.status).toBe(0);
-      expect(result.stdout.trim()).toBe('0.1.1');
+      expect(result.stdout.trim()).toBe(pkg.version);
       expect(result.stderr).toBe('');
     } finally {
       await rm(directory, { recursive: true, force: true });
