@@ -23,6 +23,13 @@ The connect flow:
 
 Supported clients: Claude Code, Cursor, Kimi Code, Claude Desktop, Windsurf, Codex CLI, and Gemini CLI.
 
+After a successful interactive connection, setup also offers an optional phone
+notification branch. It only creates a dedicated read-only ntfy reader after
+you confirm a public HTTPS ntfy hostname and a full-stack restart with that
+hostname in `NOTIFY_PUBLIC_URL`. It prints the server, account, password, and
+two human topics once; save them privately, then follow the
+[phone notification guide](https://openagent.email/docs/guides/phone-notifications/).
+
 ## Local demo
 
 ```sh

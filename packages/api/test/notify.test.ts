@@ -10,14 +10,19 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-notify-'));
+process.env.NOTIFY_PUBLIC_URL = 'https://notify.test';
+process.env.NTFY_ENABLED = 'true';
+process.env.NTFY_ADMIN_PASSWORD = 'ntfy-admin-secret';
 
 const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
+const { config } = await import('../src/lib/config.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { resetNotifyUserLimits } = await import('../src/lib/ratelimit.ts');
 const { createNotifyRoutes } = await import('../src/routes/notify.ts');
 const {
   commitNotificationState,
+  createNotificationDevice,
   createRuntimeReader,
   physicalAgentTopic,
   userRouteKey,
@@ -45,13 +50,16 @@ const service: NotifyService = {
 const allowed = createIdentity({ localpart: 'allowed', canNotifyUser: true })!.identity;
 const ordinary = createIdentity({ localpart: 'ordinary' })!.identity;
 
-function appFor(auth: { kind: 'admin' } | { kind: 'identity'; address: string }) {
+function appFor(
+  auth: { kind: 'admin' } | { kind: 'identity'; address: string },
+  createDevice?: () => Promise<{ username: string; password: string; serverUrl: string; topics: { userAlerts: string; userLow: string } }>,
+) {
   const app = new Hono();
   app.use('*', async (c, next) => {
     c.set('auth', auth);
     await next();
   });
-  app.route('/v1/notify', createNotifyRoutes({ service }));
+  app.route('/v1/notify', createNotifyRoutes({ service, createDevice, publicUrl: 'https://notify.test' }));
   return app;
 }
 
@@ -122,6 +130,100 @@ describe('notification history ACL', () => {
       .request('/v1/notify/messages?topic=user-alerts');
     expect(human.status).toBe(403);
     expect(readCalls).toHaveLength(1);
+  });
+});
+
+describe('phone device ACL', () => {
+  const device = {
+    username: 'phone-x7k2',
+    password: 'one-time-phone-password',
+    serverUrl: 'https://notify.test',
+    topics: { userAlerts: 'user-alerts-x7k2', userLow: 'user-low-x7k2' },
+  };
+
+  test('only an admin can create the human phone reader', async () => {
+    let calls = 0;
+    const response = await appFor(
+      { kind: 'identity', address: allowed.address },
+      async () => { calls += 1; return device; },
+    ).request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.test' }),
+    });
+    expect(response.status).toBe(403);
+    expect(calls).toBe(0);
+  });
+
+  test('requires the active HTTPS public URL before emitting credentials', async () => {
+    let calls = 0;
+    const response = await appFor(
+      { kind: 'admin' },
+      async () => { calls += 1; return device; },
+    ).request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://old-localhost.test' }),
+    });
+    expect(response.status).toBe(409);
+    expect(calls).toBe(0);
+  });
+
+  test('returns the two read-only human topics to an admin once', async () => {
+    let calls = 0;
+    const response = await appFor(
+      { kind: 'admin' },
+      async () => { calls += 1; return device; },
+    ).request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.test' }),
+    });
+    expect(response.status).toBe(201);
+    expect(calls).toBe(1);
+    expect(await response.json()).toEqual(device);
+  });
+
+  test('removes a phone account if granting the second human topic fails', async () => {
+    const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-reader-test', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return new Response('', { status: calls.length === 3 ? 503 : 200 });
+    }) as typeof fetch;
+
+    try {
+      await expect(createNotificationDevice()).rejects.toThrow('notify_unavailable');
+
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'POST http://ntfy/v1/users',
+        'POST http://ntfy/v1/users/access',
+        'POST http://ntfy/v1/users/access',
+        'DELETE http://ntfy/v1/users',
+      ]);
+      expect(calls.slice(1, 3).map((call) => call.body)).toEqual([
+        expect.objectContaining({ topic: expect.stringMatching(/^user-alerts-/), permission: 'read-only' }),
+        expect.objectContaining({ topic: expect.stringMatching(/^user-low-/), permission: 'read-only' }),
+      ]);
+      expect(calls[3]?.body).toEqual({ username: expect.stringMatching(/^phone-/) });
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 });
 

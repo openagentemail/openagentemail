@@ -2,9 +2,10 @@
  * Server-side ntfy adapter.
  *
  * Topics and ntfy credentials never leave this process. Agents talk only to
- * the REST/MCP notify operations; v0.3 deliberately does not expose phone or
- * device setup yet. The JSON state mirrors identities.json: small, atomic and
- * owner-only. ntfy itself uses its own auth database for ACL enforcement.
+ * the REST/MCP notify operations. Phone setup is an admin-only REST action;
+ * its one-time reader password is never written into this JSON state. The
+ * state mirrors identities.json: small, atomic and owner-only. ntfy itself
+ * uses its own auth database for ACL enforcement.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -39,6 +40,17 @@ export interface NotifyService {
   messages(topic: NotifyTopic, identityAddress?: string, since?: string): Promise<NotifyMessage[]>;
   verify(): Promise<{ ok: true }>;
 }
+
+/** One-time credentials for a human phone, never persisted by this API. */
+export type NotificationDevice = {
+  username: string;
+  password: string;
+  serverUrl: string;
+  topics: {
+    userAlerts: string;
+    userLow: string;
+  };
+};
 
 export class NotifyError extends Error {
   constructor(
@@ -376,6 +388,10 @@ export async function createRuntimeReader(entry: Route): Promise<void> {
 }
 
 async function deleteRuntimeReader(entry: Route): Promise<void> {
+  await deleteNtfyUser(entry.reader.username);
+}
+
+async function deleteNtfyUser(username: string): Promise<void> {
   try {
     await fetch(providerUrl('/v1/users'), {
       method: 'DELETE',
@@ -383,12 +399,56 @@ async function deleteRuntimeReader(entry: Route): Promise<void> {
         ...basic('admin', config.ntfy.adminPassword!),
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ username: entry.reader.username }),
+      body: JSON.stringify({ username }),
     });
   } catch {
     // The retry uses a unique reader username. A failed best-effort cleanup
     // cannot expose a route because its token was never persisted.
   }
+}
+
+/**
+ * Create one human-facing reader account for the two user alert channels.
+ * Agent routes are deliberately absent: a phone is for the owner, not an
+ * alternate credential for an agent's private wake-up topic.
+ */
+export async function createNotificationDevice(): Promise<NotificationDevice> {
+  if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
+  if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
+  const current = await state();
+  const topics = [current.userAlerts.topic, current.userLow.topic];
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const username = `phone-${randomFrom(TOKEN_ALPHABET, 8)}`;
+    const password = randomBytes(24).toString('base64url');
+    let created = false;
+    try {
+      const response = await ntfyAdminJson('/v1/users', { username, password });
+      if (response.status === 409) continue;
+      if (!response.ok) throw new NotifyError('notify_unavailable');
+      created = true;
+
+      for (const topic of topics) {
+        const access = await ntfyAdminJson('/v1/users/access', {
+          username,
+          topic,
+          permission: 'read-only',
+        });
+        if (!access.ok) throw new NotifyError('notify_unavailable');
+      }
+      return {
+        username,
+        password,
+        serverUrl: config.ntfy.publicUrl,
+        topics: { userAlerts: current.userAlerts.topic, userLow: current.userLow.topic },
+      };
+    } catch (err) {
+      if (created) await deleteNtfyUser(username);
+      if (err instanceof NotifyError) throw err;
+      throw new NotifyError('notify_unavailable');
+    }
+  }
+  throw new NotifyError('notify_unavailable');
 }
 
 function parseMessages(text: string): NotifyMessage[] {
@@ -557,8 +617,8 @@ export async function initializeNotifications(): Promise<void> {
   const current = await state();
   let changed = false;
   // Provision a reader account for every identity that already exists before
-  // ntfy boots. v0.3 keeps those device credentials server-side; v0.3.1 will
-  // add the explicit per-device pairing flow that hands them to a phone.
+  // ntfy boots. These private routes remain server-only; phone pairing grants
+  // a separate account only to the two human topics.
   for (const identity of listIdentities()) {
     const agent = identity.address.split('@')[0];
     if (!agent || isUsableAgentRoute(current.agents[agent])) continue;

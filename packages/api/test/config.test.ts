@@ -62,3 +62,13 @@ describe('task signing configuration', () => {
     expect(parseConfig(requiredEnv).taskSigningSecret).toBe('smtp-secret');
   });
 });
+
+describe('notification URL configuration', () => {
+  test('normalizes the configured public URL before device pairing compares it', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      NOTIFY_PUBLIC_URL: 'https://NTFY.EXAMPLE.COM/',
+    });
+    expect(config.ntfy.publicUrl).toBe('https://ntfy.example.com');
+  });
+});

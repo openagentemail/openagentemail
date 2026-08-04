@@ -6,6 +6,8 @@ import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import {
   NotifyError,
+  createNotificationDevice,
+  type NotificationDevice,
   type NotifyLevel,
   type NotifyService,
   type NotifyTarget,
@@ -31,6 +33,12 @@ const historySchema = z.object({
   topic: z.string().min(1).max(80),
   since: z.string().min(1).max(64).optional(),
 });
+
+const deviceSchema = z.object({
+  // This must match the active server config. It prevents handing out a phone
+  // reader before NOTIFY_PUBLIC_URL has been made public and the stack restarted.
+  publicUrl: z.string().url(),
+}).strict();
 
 function toTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
@@ -68,11 +76,16 @@ function requireUserNotifyPermission(c: Context, find = findIdentity) {
 export type NotifyRouteOptions = {
   service?: NotifyService;
   findIdentity?: typeof findIdentity;
+  createDevice?: () => Promise<NotificationDevice>;
+  /** Test seam; production always uses the active ntfy configuration. */
+  publicUrl?: string;
 };
 
 export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
   const service = options.service ?? notificationService();
   const find = options.findIdentity ?? findIdentity;
+  const createDevice = options.createDevice ?? createNotificationDevice;
+  const activePublicUrl = options.publicUrl ?? config.ntfy.publicUrl;
 
   return new Hono()
     .post('/', async (c) => {
@@ -118,6 +131,36 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       } catch (err) {
         // A local transport failure must not let a caller burn the alert budget.
         if (actor) releaseNotifyUserLimit(actor, reservation);
+        return notificationError(c, err);
+      }
+    })
+    .post('/devices', async (c) => {
+      if (getAuth(c).kind !== 'admin') {
+        return c.json({ error: 'forbidden: admin key required' }, 403);
+      }
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: 'invalid_json' }, 400);
+      }
+      const parsed = deviceSchema.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+      let requestedPublicUrl: URL;
+      try {
+        requestedPublicUrl = new URL(parsed.data.publicUrl);
+      } catch {
+        return c.json({ error: 'invalid_request' }, 400);
+      }
+      if (requestedPublicUrl.protocol !== 'https:') {
+        return c.json({ error: 'invalid_request: publicUrl must use https' }, 400);
+      }
+      if (requestedPublicUrl.href.replace(/\/$/, '') !== activePublicUrl) {
+        return c.json({ error: 'notify_public_url_mismatch: set NOTIFY_PUBLIC_URL and restart the stack first' }, 409);
+      }
+      try {
+        return c.json(await createDevice(), 201);
+      } catch (err) {
         return notificationError(c, err);
       }
     })

@@ -142,8 +142,8 @@ services:
       # together with the API's owner-only data volume.
       - api-data:/var/lib/openagentemail
     ports:
-      # v0.3 has no phone/public setup. A future reverse proxy may expose this
-      # deliberately; never publish it to the internet by accident today.
+      # Phone delivery may use a deliberate HTTPS reverse proxy. Never publish
+      # this Docker port to the internet directly.
       - "127.0.0.1:${NTFY_PORT:-2586}:80"
     restart: unless-stopped
     healthcheck:

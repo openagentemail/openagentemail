@@ -56,8 +56,8 @@ const envSchema = z.object({
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
   NTFY_STORAGE_DIR: z.string().min(1).default('/var/lib/openagentemail/ntfy'),
-  // This can stay on a private address in v0.3. Public phone delivery starts
-  // in v0.3.1, when a TLS reverse proxy is configured deliberately.
+  // This can stay on a private address for server-only notifications. Phone
+  // delivery needs a deliberate public HTTPS reverse proxy and full restart.
   NOTIFY_PUBLIC_URL: z.string().url().default('http://127.0.0.1:2586'),
   // Forward unknown topics to ntfy.sh unless an operator explicitly disables
   // it with NTFY_UPSTREAM=false.
@@ -84,6 +84,11 @@ function splitCsv(value: string): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/** Canonical form keeps configured and request URLs comparable as origins. */
+function normalizeUrl(value: string): string {
+  return new URL(value).href.replace(/\/+$/, '');
 }
 
 /** Parse an environment object so TLS defaults and validation stay testable. */
@@ -120,9 +125,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     uiEnabled: raw.UI_ENABLED === 'true',
     ntfy: {
       enabled: raw.NTFY_ENABLED === 'true',
-      internalUrl: raw.NTFY_INTERNAL_URL.replace(/\/+$/, ''),
+      internalUrl: normalizeUrl(raw.NTFY_INTERNAL_URL),
       storageDir: raw.NTFY_STORAGE_DIR,
-      publicUrl: raw.NOTIFY_PUBLIC_URL.replace(/\/+$/, ''),
+      publicUrl: normalizeUrl(raw.NOTIFY_PUBLIC_URL),
       upstreamEnabled: raw.NTFY_UPSTREAM === 'true',
       adminPassword: raw.NTFY_ADMIN_PASSWORD,
       configPath: join(raw.DATA_DIR, 'ntfy', 'server.yml'),

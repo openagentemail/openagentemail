@@ -15,6 +15,24 @@ import {
   writeSetupState,
 } from './state.ts';
 import type { CliResult, PromptAdapter } from './types.ts';
+import { offerPhonePairing } from './phone.ts';
+
+async function connectAndOfferPhone(
+  options: CliOptions,
+  prompts: PromptAdapter,
+  reporter: Reporter,
+  dependencies: WizardDependencies,
+  statePath: string,
+): Promise<Omit<CliResult, 'ok' | 'warnings'>> {
+  const result = await runConnect(options, prompts, reporter, {
+    fetcher: dependencies.fetcher,
+    clientContext: dependencies.clientContext,
+    verifyMcp: dependencies.verifyMcp,
+    statePath,
+  });
+  await offerPhonePairing(prompts, reporter, { fetcher: dependencies.fetcher });
+  return result;
+}
 
 type WizardDependencies = {
   fetcher?: typeof fetch;
@@ -45,12 +63,7 @@ async function continueSavedState(
     { value: 'save', label: 'Keep my progress and exit' },
   ], 'connect');
   if (next === 'save') return saveShoppingProgress(reporter, statePath);
-  return runConnect(options, prompts, reporter, {
-    fetcher: dependencies.fetcher,
-    clientContext: dependencies.clientContext,
-    verifyMcp: dependencies.verifyMcp,
-    statePath,
-  });
+  return connectAndOfferPhone(options, prompts, reporter, dependencies, statePath);
 }
 
 async function recommendationBranch(
@@ -103,12 +116,7 @@ async function recommendationBranch(
     { value: 'save', label: 'Save progress and exit' },
   ], 'save');
   if (next === 'save') return saveShoppingProgress(reporter, statePath);
-  return runConnect(options, prompts, reporter, {
-    fetcher: dependencies.fetcher,
-    clientContext: dependencies.clientContext,
-    verifyMcp: dependencies.verifyMcp,
-    statePath,
-  });
+  return connectAndOfferPhone(options, prompts, reporter, dependencies, statePath);
 }
 
 export async function runWizard(
@@ -137,12 +145,7 @@ export async function runWizard(
     false,
   );
   if (running) {
-    return runConnect(options, prompts, reporter, {
-      fetcher: dependencies.fetcher,
-      clientContext: dependencies.clientContext,
-      verifyMcp: dependencies.verifyMcp,
-      statePath,
-    });
+    return connectAndOfferPhone(options, prompts, reporter, dependencies, statePath);
   }
 
   const route = await prompts.select('What would you like to do?', [
