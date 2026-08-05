@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a defect in the mail server, API, MCP server, setup CLI, or dashboard.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Include a minimal reproduction and exact environment details so we can confirm and fix the problem quickly.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of openagent.email is affected?
+      options:
+        - REST API
+        - MCP server (agent tools)
+        - Setup CLI (@openagentemail/setup)
+        - Web dashboard (/ui)
+        - Mail delivery (SMTP/IMAP)
+        - Push notifications (ntfy)
+        - Docker / deployment
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence of commands or actions that shows the problem.
+      placeholder: |
+        1. docker compose up -d
+        2. curl -X POST ...
+        3. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker version, package version (`npm view @openagentemail/mcp version`), and how you installed.
+      placeholder: |
+        - OS: Ubuntu 24.04
+        - Docker: 28.x
+        - @openagentemail/mcp: 0.4.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the smallest useful excerpt. Remove passwords and tokens first.
+      render: text

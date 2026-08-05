@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a capability or an improvement.
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us the problem you are trying to solve. Concrete use cases help us prioritize.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve for you?
+      description: Describe the situation, not just the feature. What are you trying to do, and what blocks you today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: If you have a shape in mind, sketch it. Rough is fine.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered (optional)
+      description: Other tools or workarounds you tried.
