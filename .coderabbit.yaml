@@ -1,0 +1,15 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/guides/configure-coderabbit
+language: en
+reviews:
+  profile: chill
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    # Generated or vendored files carry no review value.
+    - "!**/bun.lock"
+    - "!**/package-lock.json"
+    - "!**/dist/**"
+    - "!**/*.min.js"
+chat:
+  auto_reply: true
