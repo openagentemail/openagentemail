@@ -328,6 +328,59 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('https://');
   });
 
+  test('tier 2 masks bracketed IPv6 host URLs in the subject', async () => {
+    const subject = 'Verify https://[2001:db8::1]/confirm?token=secret';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('2001:db8::1');
+    expect(body).not.toContain('token=secret');
+    expect(body).not.toContain('https://');
+  });
+
+  test('tier 2 masks a URL inside free brackets without swallowing the trailing ]', async () => {
+    // Outer [ ... ] is prose; only the bare URL is redacted.
+    const subject = 'Note [see https://example.com/verify?token=a]';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).toContain('[');
+    expect(body).toContain(']');
+    expect(body).not.toContain('example.com');
+    expect(body).not.toContain('token=a');
+    expect(body).not.toContain('https://');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(
