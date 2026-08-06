@@ -128,8 +128,9 @@ function splitCsv(value: string): string[] {
  * Canonical form keeps configured and request URLs comparable as origins.
  * Only drops a redundant trailing slash on the pathname — never rewrites
  * query values or fragments (e.g. `?next=/` and `#/` must survive).
+ * Exported so notify device pairing uses the same normalizer as config.
  */
-function normalizeUrl(value: string): string {
+export function normalizeUrl(value: string): string {
   const url = new URL(value);
   if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
     url.pathname = url.pathname.replace(/\/+$/, '') || '/';

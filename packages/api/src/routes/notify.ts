@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
-import { config } from '../lib/config.ts';
+import { config, normalizeUrl } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import {
   NotifyError,
@@ -85,7 +85,8 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
   const service = options.service ?? notificationService();
   const find = options.findIdentity ?? findIdentity;
   const createDevice = options.createDevice ?? createNotificationDevice;
-  const activePublicUrl = options.publicUrl ?? config.ntfy.publicUrl;
+  // Same normalizer as config (pathname trailing slash, not string-end slash).
+  const activePublicUrl = normalizeUrl(options.publicUrl ?? config.ntfy.publicUrl);
 
   return new Hono()
     .post('/', async (c) => {
@@ -155,7 +156,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       if (requestedPublicUrl.protocol !== 'https:') {
         return c.json({ error: 'invalid_request: publicUrl must use https' }, 400);
       }
-      if (requestedPublicUrl.href.replace(/\/$/, '') !== activePublicUrl) {
+      if (normalizeUrl(parsed.data.publicUrl) !== activePublicUrl) {
         return c.json({ error: 'notify_public_url_mismatch: set NOTIFY_PUBLIC_URL and restart the stack first' }, 409);
       }
       try {

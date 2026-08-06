@@ -184,6 +184,70 @@ describe('phone device ACL', () => {
     expect(await response.json()).toEqual(device);
   });
 
+  test('device pairing accepts path trailing slash + query via shared normalizeUrl', async () => {
+    // config/active: pathname trailing slash stripped; query kept.
+    // Old compare only did href.replace(/\/$/, '') and would 409 on /base/?x=1.
+    let calls = 0;
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'admin' });
+      await next();
+    });
+    app.route(
+      '/v1/notify',
+      createNotifyRoutes({
+        service,
+        createDevice: async () => {
+          calls += 1;
+          return device;
+        },
+        publicUrl: 'https://notify.example/base/',
+      }),
+    );
+    const response = await app.request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.example/base/?x=1' }),
+    });
+    // Path /base/ normalizes to /base on both sides; query must match too.
+    // Active without query vs request with query is a real mismatch:
+    expect(response.status).toBe(409);
+    expect(calls).toBe(0);
+
+    const match = await app.request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.example/base/' }),
+    });
+    expect(match.status).toBe(201);
+    expect(calls).toBe(1);
+
+    const withQueryApp = new Hono();
+    withQueryApp.use('*', async (c, next) => {
+      c.set('auth', { kind: 'admin' });
+      await next();
+    });
+    let qCalls = 0;
+    withQueryApp.route(
+      '/v1/notify',
+      createNotifyRoutes({
+        service,
+        createDevice: async () => {
+          qCalls += 1;
+          return device;
+        },
+        publicUrl: 'https://notify.example/base?x=1',
+      }),
+    );
+    const qMatch = await withQueryApp.request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.example/base/?x=1' }),
+    });
+    expect(qMatch.status).toBe(201);
+    expect(qCalls).toBe(1);
+  });
+
   test('removes a phone account if granting the second human topic fails', async () => {
     const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
     const previousNtfy = { ...config.ntfy };

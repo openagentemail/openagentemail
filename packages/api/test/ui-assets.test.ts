@@ -282,6 +282,14 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('      reconcileActiveAddress();');
     expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
     expect(UI_JS.split('reconcileActiveAddress();').length - 1).toBe(2);
+    // Inbox identity refresh shares overviewGen so a late response cannot
+    // clobber a push-tier save that bumped the epoch mid-flight.
+    const inboxRefresh = UI_JS.slice(
+      UI_JS.indexOf('function refreshInboxIdentities() {'),
+      UI_JS.indexOf('function loadOverviewCycle('),
+    );
+    expect(inboxRefresh).toContain('var generation = state.overviewGen;');
+    expect(inboxRefresh).toContain('if (generation !== state.overviewGen) return;');
   });
 
   // A18 / A19 / A20 / A21

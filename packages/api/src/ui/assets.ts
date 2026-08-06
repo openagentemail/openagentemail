@@ -1877,8 +1877,12 @@ export const UI_JS = `(function () {
   /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
      周期是停掉的（cancelOverview），所以这是"活动地址被删"能被发现的那一刻。 */
   function refreshInboxIdentities() {
+    // Same epoch as loadOverviewCycle: a tier save mid-flight must not be
+    // overwritten by a slower inbox identity refresh.
+    var generation = state.overviewGen;
     apiJson('/ui/api/identities').then(function (payload) {
       if (state.scope !== 'inbox') return;
+      if (generation !== state.overviewGen) return;
       state.identities = Array.isArray(payload.identities) ? payload.identities : [];
       renderIdentities();
       reconcileActiveAddress();
