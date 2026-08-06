@@ -340,7 +340,7 @@ describe('UI static asset contract', () => {
   test('both breakpoints survive and the nested inbox grid collapses on mobile', () => {
     const flat = UI_CSS.replace(/\s+/g, ' ');
     expect(UI_CSS).toContain('@media (max-width: 1100px)');
-    expect(UI_CSS).toContain('@media (max-width: 719px)');
+    expect(UI_CSS).toContain('@media (max-width: 820px)');
     expect(UI_CSS).toContain('[data-scope="overview"]');
     expect(UI_CSS).toContain('[data-mobile-view="overview"]');
     expect(flat).toContain('.inbox-layout { min-height: calc(100vh - 74px); display: grid; grid-template-columns: 240px minmax(0, 1fr); }');
@@ -477,6 +477,13 @@ describe('UI static asset contract', () => {
     expect(cycle.indexOf('identitiesPromise.then')).toBeLessThan(cycle.indexOf('overviewPromise.then'));
     expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(4);
     expect(cycle).toContain('renderOverview();');
+    // Tier save / delete must bump the epoch so a late /identities cannot clobber them.
+    expect(UI_JS).toContain('function bumpIdentityEpoch()');
+    const saveTier = UI_JS.slice(
+      UI_JS.indexOf('async function savePushContentTier('),
+      UI_JS.indexOf('function handlePushTierChange('),
+    );
+    expect(saveTier).toContain('bumpIdentityEpoch()');
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

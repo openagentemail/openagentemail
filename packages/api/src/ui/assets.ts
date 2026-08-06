@@ -674,7 +674,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   border: 0;
 }
 
-/* Desktop overview fixed tracks+gaps ≈724px + 240px sidebar + panel pad ≈1044px; compact (≈812px) covers that band. */
+/*
+ * Desktop overview fixed tracks+gaps ≈724px + 240 sidebar + panel pad ≈1044px → compact to 1100px.
+ * Compact fixed tracks+gaps+row pad ≈542px + 210 sidebar + panel pad ≈800px → stack below 820px
+ * so portrait tablets (720–800) do not collapse the identity track.
+ */
 @media (max-width: 1100px) {
   .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
@@ -685,7 +689,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .session-label { display: none; }
 }
 
-@media (max-width: 719px) {
+@media (max-width: 820px) {
   .topbar { height: 66px; padding: 0 14px; gap: 10px; }
   .topbar h1 { font-size: 18px; }
   /* 375 px 下品牌名让位给 scope 标题与 Sign out，logo 与按钮都不许换行溢出 */
@@ -995,6 +999,7 @@ export const UI_JS = `(function () {
         await apiJson('/ui/api/identities/' + encodeURIComponent(address), {
           method: 'DELETE'
         });
+        bumpIdentityEpoch();
         state.identities = state.identities.filter(function (identity) {
           return identity.address !== address;
         });
@@ -1013,6 +1018,12 @@ export const UI_JS = `(function () {
     confirmModalConfirm.focus();
   }
 
+  /* Invalidate in-flight overview identity loads so a stale /identities
+     response cannot overwrite a local mutation (tier save, delete, …). */
+  function bumpIdentityEpoch() {
+    state.overviewGen += 1;
+  }
+
   async function savePushContentTier(address, tier, confirmRisk) {
     var body = { pushContentTier: tier };
     if (confirmRisk) body.confirm_risk = true;
@@ -1024,6 +1035,7 @@ export const UI_JS = `(function () {
         body: JSON.stringify(body)
       }
     );
+    bumpIdentityEpoch();
     state.identities = state.identities.map(function (identity) {
       if (identity.address !== address) return identity;
       return Object.assign({}, identity, {

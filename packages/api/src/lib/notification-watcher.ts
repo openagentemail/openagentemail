@@ -36,6 +36,11 @@ export const PUSH_OTP_ENTRY_CHARS = 200;
  * Measured as encoded bytes, not JS string length (CJK/emoji are multi-byte).
  */
 export const PUSH_MESSAGE_MAX_BYTES = 3500;
+/**
+ * Per-field UTF-8 byte cap for tier-2+ From/Subject lines so a huge subject
+ * cannot consume the whole message budget before Preview/Codes/Links.
+ */
+export const PUSH_META_FIELD_MAX_BYTES = 400;
 /** UTF-8 ellipsis used when the body is truncated to stay under the byte budget. */
 const PUSH_BODY_ELLIPSIS = '…';
 const PUSH_BODY_ELLIPSIS_BYTES = Buffer.byteLength(PUSH_BODY_ELLIPSIS, 'utf8');
@@ -102,24 +107,29 @@ export function boundPushOtpEntries(items: string[]): string[] {
 }
 
 /**
- * Enforce the total-body UTF-8 byte cap. Truncates on a code-point boundary
- * (never mid-surrogate or mid multi-byte sequence) and reserves room for `…`.
+ * Truncate `text` to at most `maxBytes` UTF-8 bytes on a code-point boundary
+ * (never mid-surrogate or mid multi-byte sequence), reserving room for `…`.
  */
-export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES): string {
-  if (Buffer.byteLength(body, 'utf8') <= maxBytes) return body;
+export function boundTextBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
   if (maxBytes < PUSH_BODY_ELLIPSIS_BYTES) return '';
   const budget = maxBytes - PUSH_BODY_ELLIPSIS_BYTES;
   if (budget <= 0) return PUSH_BODY_ELLIPSIS;
 
   let used = 0;
   let end = 0;
-  for (const point of body) {
+  for (const point of text) {
     const cost = Buffer.byteLength(point, 'utf8');
     if (used + cost > budget) break;
     used += cost;
     end += point.length;
   }
-  return `${body.slice(0, end)}${PUSH_BODY_ELLIPSIS}`;
+  return `${text.slice(0, end)}${PUSH_BODY_ELLIPSIS}`;
+}
+
+/** Enforce the total-body UTF-8 byte cap (final backstop after field caps). */
+export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES): string {
+  return boundTextBytes(body, maxBytes);
 }
 
 /** Build the human-facing push body for one identity's content tier. */
@@ -136,8 +146,13 @@ export function buildMailArrivalMessage(
   ];
 
   if (tier >= 2) {
-    if (extras.from) lines.push(`From: ${extras.from}`);
-    if (extras.subject) lines.push(`Subject: ${extras.subject}`);
+    // Cap From/Subject independently so OTP/preview content still fits.
+    if (extras.from) {
+      lines.push(`From: ${boundTextBytes(extras.from, PUSH_META_FIELD_MAX_BYTES)}`);
+    }
+    if (extras.subject) {
+      lines.push(`Subject: ${boundTextBytes(extras.subject, PUSH_META_FIELD_MAX_BYTES)}`);
+    }
   }
 
   if (tier >= 3) {

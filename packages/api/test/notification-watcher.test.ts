@@ -13,6 +13,7 @@ const {
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
   PUSH_MESSAGE_MAX_BYTES,
+  PUSH_META_FIELD_MAX_BYTES,
   PUSH_OTP_ENTRY_CHARS,
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
@@ -276,5 +277,30 @@ describe('mail-arrival notification watcher', () => {
 
     // Walked body must re-encode cleanly (round-trip through UTF-8).
     expect(Buffer.from(capped, 'utf8').toString('utf8')).toBe(capped);
+  });
+
+  test('tier 3 keeps Codes/Links when subject would otherwise exhaust the byte budget', () => {
+    // ~4000 UTF-8 bytes of CJK subject (each char 3 bytes) without field caps
+    // would starve Preview/Codes/Links under the shared body limit.
+    const hugeSubject = '验'.repeat(1400);
+    expect(Buffer.byteLength(hugeSubject, 'utf8')).toBeGreaterThan(4000);
+
+    const body = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: hugeSubject,
+      from: 'sender@example.com',
+      preview: 'Your verification code is 112233',
+      codes: ['112233'],
+      links: ['https://example.com/verify?token=abc'],
+    });
+
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    expect(body).toContain('Codes: 112233');
+    expect(body).toContain('https://example.com/verify?token=abc');
+    expect(body).toContain('Subject:');
+    const subjectLine = body.split('\n').find((line) => line.startsWith('Subject: '))!;
+    expect(subjectLine.endsWith('…')).toBe(true);
+    expect(Buffer.byteLength(subjectLine.slice('Subject: '.length), 'utf8')).toBeLessThanOrEqual(
+      PUSH_META_FIELD_MAX_BYTES,
+    );
   });
 });
