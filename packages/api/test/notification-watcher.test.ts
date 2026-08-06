@@ -7,11 +7,12 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { describe, expect, test } = await import('bun:test');
 const {
+  boundPushMessage,
   buildMailArrivalMessage,
   processWatchedMessage,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
-  PUSH_MESSAGE_MAX_CHARS,
+  PUSH_MESSAGE_MAX_BYTES,
   PUSH_OTP_ENTRY_CHARS,
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
@@ -228,7 +229,7 @@ describe('mail-arrival notification watcher', () => {
 
     expect(calls).toHaveLength(1);
     const body = calls[0].message as string;
-    expect(body.length).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_CHARS);
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
     // At most PUSH_OTP_ITEM_MAX codes appear after "Codes: ".
     const codesLine = body.split('\n').find((line) => line.startsWith('Codes: '));
     if (codesLine) {
@@ -251,7 +252,29 @@ describe('mail-arrival notification watcher', () => {
       codes: Array.from({ length: 40 }, (_, i) => `${'1'.repeat(300)}${i}`),
       links: Array.from({ length: 40 }, (_, i) => `https://example.com/${'x'.repeat(300)}/${i}`),
     });
-    expect(huge.length).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_CHARS);
-    expect(huge.endsWith('…') || huge.length < PUSH_MESSAGE_MAX_CHARS).toBe(true);
+    expect(Buffer.byteLength(huge, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    expect(
+      huge.endsWith('…') || Buffer.byteLength(huge, 'utf8') < PUSH_MESSAGE_MAX_BYTES,
+    ).toBe(true);
+  });
+
+  test('boundPushMessage caps UTF-8 bytes and truncates on a code-point boundary', () => {
+    // ~2000 CJK (3 bytes each) + emoji (4 bytes) far exceed 3500 bytes while
+    // looking "short" under String.length.
+    const multiByte = `${'验证码通知'.repeat(400)}${'😀'.repeat(50)}`;
+    expect(multiByte.length).toBeLessThan(PUSH_MESSAGE_MAX_BYTES);
+    expect(Buffer.byteLength(multiByte, 'utf8')).toBeGreaterThan(PUSH_MESSAGE_MAX_BYTES);
+
+    const capped = boundPushMessage(multiByte);
+    expect(Buffer.byteLength(capped, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    expect(capped.endsWith('…')).toBe(true);
+    expect(capped).not.toContain('\uFFFD');
+    // No dangling high/low surrogates after truncation.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(capped)).toBe(
+      false,
+    );
+
+    // Walked body must re-encode cleanly (round-trip through UTF-8).
+    expect(Buffer.from(capped, 'utf8').toString('utf8')).toBe(capped);
   });
 });

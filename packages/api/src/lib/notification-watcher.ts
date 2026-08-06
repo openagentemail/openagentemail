@@ -30,11 +30,15 @@ export const PUSH_OTP_ITEM_MAX = 5;
 /** Max characters per code/link entry before truncation. */
 export const PUSH_OTP_ENTRY_CHARS = 200;
 /**
- * Hard cap on the full ntfy message body. ntfy rejects ~4096 bytes; leave
- * headroom for title/tags/JSON framing so one oversized mail cannot make
- * publish() throw and stall the UID watermark forever.
+ * Hard cap on the full ntfy message body in UTF-8 bytes. ntfy rejects ~4096
+ * bytes; leave headroom for title/tags/JSON framing so one oversized mail
+ * cannot make publish() throw and stall the UID watermark forever.
+ * Measured as encoded bytes, not JS string length (CJK/emoji are multi-byte).
  */
-export const PUSH_MESSAGE_MAX_CHARS = 3500;
+export const PUSH_MESSAGE_MAX_BYTES = 3500;
+/** UTF-8 ellipsis used when the body is truncated to stay under the byte budget. */
+const PUSH_BODY_ELLIPSIS = '…';
+const PUSH_BODY_ELLIPSIS_BYTES = Buffer.byteLength(PUSH_BODY_ELLIPSIS, 'utf8');
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
@@ -97,11 +101,25 @@ export function boundPushOtpEntries(items: string[]): string[] {
   });
 }
 
-/** Enforce the total-body cap, appending an ellipsis when truncated. */
-export function boundPushMessage(body: string): string {
-  if (body.length <= PUSH_MESSAGE_MAX_CHARS) return body;
-  if (PUSH_MESSAGE_MAX_CHARS <= 1) return '…';
-  return `${body.slice(0, PUSH_MESSAGE_MAX_CHARS - 1)}…`;
+/**
+ * Enforce the total-body UTF-8 byte cap. Truncates on a code-point boundary
+ * (never mid-surrogate or mid multi-byte sequence) and reserves room for `…`.
+ */
+export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES): string {
+  if (Buffer.byteLength(body, 'utf8') <= maxBytes) return body;
+  if (maxBytes < PUSH_BODY_ELLIPSIS_BYTES) return '';
+  const budget = maxBytes - PUSH_BODY_ELLIPSIS_BYTES;
+  if (budget <= 0) return PUSH_BODY_ELLIPSIS;
+
+  let used = 0;
+  let end = 0;
+  for (const point of body) {
+    const cost = Buffer.byteLength(point, 'utf8');
+    if (used + cost > budget) break;
+    used += cost;
+    end += point.length;
+  }
+  return `${body.slice(0, end)}${PUSH_BODY_ELLIPSIS}`;
 }
 
 /** Build the human-facing push body for one identity's content tier. */
