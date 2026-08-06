@@ -168,15 +168,18 @@ export function buildMailArrivalMessage(
 
   if (tier >= 2) {
     // Cap From/Subject independently so OTP/preview content still fits.
-    // Tier 2 must not leak OTP/link strings that sit in the subject line.
-    const from =
-      tier < 3
-        ? maskSensitiveFragments(extras.from, extras.codes, extras.links)
-        : extras.from;
-    const subject =
-      tier < 3
-        ? maskSensitiveFragments(extras.subject, extras.codes, extras.links)
-        : extras.subject;
+    // Tier 2 must not leak OTP/link strings in metadata — needles come from
+    // body extractOtp (extras) plus a separate extractOtp over subject/from
+    // (not mixed into extras, which tier-3 Codes/Links still use).
+    let from = extras.from;
+    let subject = extras.subject;
+    if (tier < 3) {
+      const metaOtp = extractOtp([extras.from, extras.subject].filter(Boolean).join('\n'));
+      const maskCodes = [...extras.codes, ...metaOtp.codes];
+      const maskLinks = [...extras.links, ...metaOtp.links];
+      from = maskSensitiveFragments(from, maskCodes, maskLinks);
+      subject = maskSensitiveFragments(subject, maskCodes, maskLinks);
+    }
     if (from) {
       lines.push(`From: ${boundTextBytes(from, PUSH_META_FIELD_MAX_BYTES)}`);
     }

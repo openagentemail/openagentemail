@@ -196,6 +196,57 @@ describe('mail-arrival notification watcher', () => {
     expect(body).toContain('Codes: 654321');
   });
 
+  test('tier 2 masks a code that appears only in the subject (policy=all, plain body)', async () => {
+    // Body has no OTP — extras.codes is empty; needles must come from meta extractOtp.
+    const subject = 'Your login code is 654321';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).not.toContain('654321');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('Codes:');
+  });
+
+  test('tier 2 masks a subject-only code when body only has a verification link', async () => {
+    // otp policy fires because of the link; the code lives only in the subject.
+    const subject = 'Your login code is 654321';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nVisit https://example.com/verify?token=abc to continue.`,
+        subject,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).not.toContain('654321');
+    expect(body).toContain('•••');
+    // Link may also appear in subject only if it was there; body link is not in Subject.
+    expect(body).not.toContain('Codes:');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(
