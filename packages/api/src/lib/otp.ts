@@ -126,11 +126,12 @@ function extractAnchors(html: string): Anchor[] {
 
 /**
  * Bare http(s) URL *candidates* in plain text (scheme case-insensitive).
- * Intentionally greedy and linear — nested/paired delimiters are not expressed
- * in the regex. Call splitBareUrlCandidate() to peel free trailing `)].,;`
- * while keeping balanced brackets (IPv6 hosts, wiki paths, confirm(foo(bar))).
+ * Intentionally greedy and linear. `'` is kept (RFC 3986 sub-delim / path
+ * apostrophes); only whitespace, `<`, `>`, `"` stay excluded — those never
+ * appear unencoded in a legal URL. Call splitBareUrlCandidate() to peel free
+ * trailing prose delimiters while keeping balanced brackets and in-URL `'`.
  */
-export const BARE_URL_RE = /https?:\/\/[^\s<>"']+/gi;
+export const BARE_URL_RE = /https?:\/\/[^\s<>"]+/gi;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);
@@ -152,10 +153,10 @@ export function validatedHttpUrl(candidate: string): string | null {
 
 /**
  * Split a bare-URL regex match into the real URL (`clean`) and prose tail
- * (`trail`). One O(n) count of brackets, then one right-to-left pass:
- * strip trailing `.,;`, and strip a trailing `)`/`]` only while closers
- * outnumber openers. Balanced nested `()`/`[]` stay on the URL; free outer
- * brackets and trailing punctuation stay in `trail` for the caller to reattach.
+ * (`trail`). One O(n) count of brackets/apostrophes, then one right-to-left pass:
+ * strip trailing `.,;`; strip trailing `)`/`]` only while closers outnumber
+ * openers; strip a trailing `'` while the remaining apostrophe count is odd
+ * (prose closer `'…url'` → peel one; even count or mid-string `it's` stays).
  * Must stay O(n) — never re-count on each trim (that reintroduces O(n²)).
  */
 export function splitBareUrlCandidate(candidate: string): { clean: string; trail: string } {
@@ -165,12 +166,14 @@ export function splitBareUrlCandidate(candidate: string): { clean: string; trail
   let closeParen = 0;
   let openBracket = 0;
   let closeBracket = 0;
+  let apostrophes = 0;
   for (let i = 0; i < candidate.length; i++) {
     const ch = candidate[i]!;
     if (ch === '(') openParen += 1;
     else if (ch === ')') closeParen += 1;
     else if (ch === '[') openBracket += 1;
     else if (ch === ']') closeBracket += 1;
+    else if (ch === "'") apostrophes += 1;
   }
 
   let end = candidate.length;
@@ -187,6 +190,12 @@ export function splitBareUrlCandidate(candidate: string): { clean: string; trail
     }
     if (ch === ']' && closeBracket > openBracket) {
       closeBracket -= 1;
+      end -= 1;
+      continue;
+    }
+    // Odd remaining apostrophe count ⇒ peel a free prose closer; even ⇒ keep.
+    if (ch === "'" && apostrophes % 2 === 1) {
+      apostrophes -= 1;
       end -= 1;
       continue;
     }

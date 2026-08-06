@@ -192,6 +192,23 @@ describe('extractLinks', () => {
       clean: 'https://[2001:db8::1]/confirm?token=secret',
       trail: '',
     });
+    // Apostrophe is a legal URL char; only an odd trailing prose closer peels.
+    expect(splitBareUrlCandidate("https://example.com/confirm?'token=secret")).toEqual({
+      clean: "https://example.com/confirm?'token=secret",
+      trail: '',
+    });
+    expect(splitBareUrlCandidate("https://x.com/it's")).toEqual({
+      clean: "https://x.com/it's",
+      trail: '',
+    });
+    expect(splitBareUrlCandidate("https://example.com/verify?token=a'")).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: "'",
+    });
+    expect(splitBareUrlCandidate("https://example.com/verify?token=a'.")).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: "'.",
+    });
   });
 });
 
