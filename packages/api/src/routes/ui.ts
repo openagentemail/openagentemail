@@ -13,6 +13,7 @@ import {
   rotateIdentityToken,
   setIdentityPushContentTier,
   type Identity,
+  type PushContentTier,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import {
@@ -47,6 +48,8 @@ export type UiApiDependencies = {
     refresh: boolean;
     identityAddresses: string[];
   }) => Promise<ScanOutcome>;
+  /** Persist an identity's mail-arrival push content tier (admin UI). */
+  setPushContentTier: (address: string, tier: PushContentTier) => Identity | null;
 };
 
 /** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
@@ -61,6 +64,7 @@ const defaultDependencies: UiApiDependencies = {
   getMessage,
   setMessageSeen,
   getMailboxScan: (opts) => overviewCache.getOverview(opts),
+  setPushContentTier: setIdentityPushContentTier,
 };
 
 /** 「最近活跃」的窗口长度（小时）。 */
@@ -310,7 +314,7 @@ export function createUiApiRoutes(
         400,
       );
     }
-    const updated = setIdentityPushContentTier(c.req.param('address'), tier);
+    const updated = dependencies.setPushContentTier(c.req.param('address'), tier);
     if (!updated) return c.json({ error: 'not_found' }, 404);
     const resolved = resolvePushContentTier(updated);
     return c.json({

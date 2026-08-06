@@ -42,6 +42,7 @@ function dependencies(): UiApiDependencies {
       revalidating: false,
       refreshError: false,
     })),
+    setPushContentTier: mock(() => null),
   };
 }
 

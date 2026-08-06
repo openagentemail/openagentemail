@@ -25,6 +25,16 @@ import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 const RECONNECT_MS = 3_000;
 /** Bounded plain-text preview length for tier-3 mail-arrival pushes. */
 export const PUSH_BODY_PREVIEW_CHARS = 280;
+/** Max OTP codes/links included in a tier-3 push (each list). */
+export const PUSH_OTP_ITEM_MAX = 5;
+/** Max characters per code/link entry before truncation. */
+export const PUSH_OTP_ENTRY_CHARS = 200;
+/**
+ * Hard cap on the full ntfy message body. ntfy rejects ~4096 bytes; leave
+ * headroom for title/tags/JSON framing so one oversized mail cannot make
+ * publish() throw and stall the UID watermark forever.
+ */
+export const PUSH_MESSAGE_MAX_CHARS = 3500;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
@@ -79,6 +89,21 @@ function formatAddressList(
     .join(', ');
 }
 
+/** Cap list length and per-entry size for tier-3 OTP fields. */
+export function boundPushOtpEntries(items: string[]): string[] {
+  return items.slice(0, PUSH_OTP_ITEM_MAX).map((item) => {
+    if (item.length <= PUSH_OTP_ENTRY_CHARS) return item;
+    return `${item.slice(0, PUSH_OTP_ENTRY_CHARS)}…`;
+  });
+}
+
+/** Enforce the total-body cap, appending an ellipsis when truncated. */
+export function boundPushMessage(body: string): string {
+  if (body.length <= PUSH_MESSAGE_MAX_CHARS) return body;
+  if (PUSH_MESSAGE_MAX_CHARS <= 1) return '…';
+  return `${body.slice(0, PUSH_MESSAGE_MAX_CHARS - 1)}…`;
+}
+
 /** Build the human-facing push body for one identity's content tier. */
 export function buildMailArrivalMessage(
   address: string,
@@ -99,11 +124,13 @@ export function buildMailArrivalMessage(
 
   if (tier >= 3) {
     if (extras.preview) lines.push(`Preview: ${extras.preview}`);
-    if (extras.codes.length) lines.push(`Codes: ${extras.codes.join(', ')}`);
-    if (extras.links.length) lines.push(`Links:\n${extras.links.join('\n')}`);
+    const codes = boundPushOtpEntries(extras.codes);
+    const links = boundPushOtpEntries(extras.links);
+    if (codes.length) lines.push(`Codes: ${codes.join(', ')}`);
+    if (links.length) lines.push(`Links:\n${links.join('\n')}`);
   }
 
-  return lines.join('\n');
+  return boundPushMessage(lines.join('\n'));
 }
 
 /** Process one newly delivered message. Exported for policy/security tests. */

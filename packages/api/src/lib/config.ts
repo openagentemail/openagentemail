@@ -89,9 +89,22 @@ function splitCsv(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Canonical form keeps configured and request URLs comparable as origins. */
+/**
+ * Canonical form keeps configured and request URLs comparable as origins.
+ * Only drops a redundant trailing slash on the pathname — never rewrites
+ * query values or fragments (e.g. `?next=/` and `#/` must survive).
+ */
 function normalizeUrl(value: string): string {
-  return new URL(value).href.replace(/\/+$/, '');
+  const url = new URL(value);
+  if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  }
+  // Root path serializes as "https://host/"; strip that slash for stable
+  // origin comparison without touching search/hash when they are present.
+  if (url.pathname === '/' && url.search === '' && url.hash === '') {
+    return url.origin;
+  }
+  return url.href;
 }
 
 /** Parse an environment object so TLS defaults and validation stay testable. */

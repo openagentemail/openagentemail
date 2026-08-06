@@ -185,6 +185,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
     getMessage: mock(async () => null),
     setMessageSeen: mock(async () => true),
     getMailboxScan: mock(async () => zeroSnapshotOutcome()),
+    setPushContentTier: mock(() => null),
     ...overrides,
   };
   const store = new UiSessionStore({

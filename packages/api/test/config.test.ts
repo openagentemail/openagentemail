@@ -81,4 +81,25 @@ describe('notification URL configuration', () => {
       }).dashboardPublicUrl,
     ).toBe('https://mail.example.com/ui');
   });
+
+  test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui?next=/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui?next=/');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui#/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui#/');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://NTFY.EXAMPLE.COM/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com');
+  });
 });

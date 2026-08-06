@@ -62,7 +62,13 @@ function storePath(): string {
   return join(config.dataDir, 'identities.json');
 }
 
-function isIdentity(value: unknown): value is Identity {
+/**
+ * Structural identity check. `pushContentTier` is intentionally *not*
+ * validated here: an unknown enum value is a compatibility case (normalize
+ * to default tier 1), not store corruption that should take every identity
+ * offline.
+ */
+function isIdentityShape(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object') return false;
   const identity = value as Record<string, unknown>;
   return (
@@ -70,9 +76,23 @@ function isIdentity(value: unknown): value is Identity {
     typeof identity.createdAt === 'string' &&
     (identity.name === undefined || typeof identity.name === 'string') &&
     (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
-    (identity.pushContentTier === undefined || isPushContentTier(identity.pushContentTier)) &&
     (identity.tokenHash === undefined || typeof identity.tokenHash === 'string')
   );
+}
+
+/** Drop an invalid pushContentTier so resolvePushContentTier falls back to 1. */
+function coerceIdentity(raw: Record<string, unknown>): Identity {
+  const identity: Identity = {
+    address: raw.address as string,
+    createdAt: raw.createdAt as string,
+    ...(typeof raw.name === 'string' ? { name: raw.name } : {}),
+    ...(raw.canNotifyUser === true ? { canNotifyUser: true } : {}),
+    ...(typeof raw.tokenHash === 'string' ? { tokenHash: raw.tokenHash } : {}),
+  };
+  if (isPushContentTier(raw.pushContentTier)) {
+    identity.pushContentTier = raw.pushContentTier;
+  }
+  return identity;
 }
 
 function load(): Identity[] {
@@ -80,10 +100,10 @@ function load(): Identity[] {
   if (!existsSync(path)) return [];
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    if (!Array.isArray(parsed) || !parsed.every(isIdentity)) {
+    if (!Array.isArray(parsed) || !parsed.every(isIdentityShape)) {
       throw new Error('invalid identity store shape');
     }
-    return parsed;
+    return parsed.map((entry) => coerceIdentity(entry as Record<string, unknown>));
   } catch {
     // Fail closed. Treating a damaged store as empty looks harmless until the
     // next create/rotate saves over it: every existing identity and token is

@@ -262,4 +262,23 @@ describe('push content tier store and REST', () => {
     const row = body.identities.find((i) => i.address === fresh.address);
     expect(row?.pushContentTier).toBe(resolvePushContentTier(findIdentity(fresh.address)!));
   });
+
+  test('invalid persisted pushContentTier normalizes to tier 1 without corrupting the store', () => {
+    const good = createIdentity({ localpart: 'compat-good' })!;
+    setIdentityPushContentTier(good.identity.address, 2);
+    const other = createIdentity({ localpart: 'compat-bad-tier' })!;
+
+    const raw = JSON.parse(readFileSync(storeFile(), 'utf8')) as Array<Record<string, unknown>>;
+    const bad = raw.find((entry) => entry.address === other.identity.address);
+    expect(bad).toBeDefined();
+    bad!.pushContentTier = 99;
+    writeFileSync(storeFile(), JSON.stringify(raw, null, 2));
+
+    // Store still loads; invalid enum is stripped to default tier 1.
+    expect(listIdentities().some((i) => i.address === good.identity.address)).toBe(true);
+    expect(resolvePushContentTier(findIdentity(other.identity.address)!)).toBe(1);
+    expect(findIdentity(other.identity.address)?.pushContentTier).toBeUndefined();
+    // Sibling entry keeps its valid tier.
+    expect(findIdentity(good.identity.address)?.pushContentTier).toBe(2);
+  });
 });

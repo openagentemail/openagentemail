@@ -58,6 +58,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
       otp: { codes: ['123456'], links: ['https://example.net/verify'] },
       links: ['https://example.net/news', 'https://example.net/verify'],
     })),
+    setPushContentTier: mock(() => null),
     ...overrides,
   };
   const store = new UiSessionStore({

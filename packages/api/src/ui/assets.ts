@@ -885,10 +885,19 @@ export const UI_JS = `(function () {
     if (!response.ok) {
       var failure = new Error('request_failed');
       failure.status = response.status;
+      failure.body = null;
+      try {
+        failure.body = await response.json();
+      } catch (_parseError) {
+        /* body optional */
+      }
       throw failure;
     }
     return response.json();
   }
+
+  /* Optional cancel side-effect (e.g. restore a select) — run once on Cancel. */
+  var confirmModalOnCancel = null;
 
   function closeAllModals() {
     tokenModal.hidden = true;
@@ -903,6 +912,7 @@ export const UI_JS = `(function () {
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = 'Confirm';
     confirmModalConfirm.onclick = null;
+    confirmModalOnCancel = null;
   }
 
   function showTokenModal(token, title) {
@@ -1042,7 +1052,11 @@ export const UI_JS = `(function () {
         renderOverviewRows();
       } catch (error) {
         restore();
-        if (error.status === 400) {
+        if (
+          error.status === 400 &&
+          error.body &&
+          error.body.error === 'confirm_risk_required'
+        ) {
           announce('Tier 3 requires explicit risk confirmation.');
         } else if (error.message !== 'session_expired') {
           announce('Could not update push content tier. Try again.');
@@ -1065,6 +1079,10 @@ export const UI_JS = `(function () {
     confirmModalRisk.hidden = false;
     confirmModalConfirm.textContent = 'Enable tier 3';
     confirmModal.hidden = false;
+    // Restore the previous tier once on Cancel; closeAllModals clears this.
+    confirmModalOnCancel = function () {
+      restore();
+    };
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
       try {
@@ -1073,12 +1091,6 @@ export const UI_JS = `(function () {
       } finally {
         confirmModalConfirm.disabled = false;
       }
-    };
-    var previousCancel = confirmModalCancel.onclick;
-    confirmModalCancel.onclick = function () {
-      restore();
-      closeAllModals();
-      confirmModalCancel.onclick = previousCancel;
     };
     confirmModalConfirm.focus();
   }
@@ -2377,7 +2389,13 @@ export const UI_JS = `(function () {
     copyValue(tokenValue.textContent, tokenValue, tokenCopyButton);
   });
   tokenModalClose.addEventListener('click', closeAllModals);
-  confirmModalCancel.addEventListener('click', closeAllModals);
+  confirmModalCancel.addEventListener('click', function () {
+    // Run cancel side-effect (e.g. restore tier select) before clearing state.
+    var onCancel = confirmModalOnCancel;
+    confirmModalOnCancel = null;
+    if (onCancel) onCancel();
+    closeAllModals();
+  });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
     enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });

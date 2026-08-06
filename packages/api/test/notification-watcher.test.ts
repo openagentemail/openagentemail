@@ -11,6 +11,9 @@ const {
   processWatchedMessage,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
+  PUSH_MESSAGE_MAX_CHARS,
+  PUSH_OTP_ENTRY_CHARS,
+  PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
 
 const baseIdentities = [
@@ -196,5 +199,59 @@ describe('mail-arrival notification watcher', () => {
         links: ['https://example.com'],
       }),
     ).toBe('a@test.example received new email');
+  });
+
+  test('tier 3 caps codes/links count, entry length, and total body size', async () => {
+    const longCode = '9'.repeat(PUSH_OTP_ENTRY_CHARS + 80);
+    const longLink = `https://example.com/verify?token=${'a'.repeat(PUSH_OTP_ENTRY_CHARS + 80)}`;
+    // Many keyword-adjacent codes so extractOtp returns a long list.
+    const codeLines = Array.from({ length: 20 }, (_, i) => {
+      const digits = String(100000 + i);
+      return `Your verification code is ${digits}`;
+    }).join('\n');
+    const linkLines = Array.from({ length: 20 }, (_, i) =>
+      `https://example.com/verify-login-${i}?token=${'z'.repeat(50)}`,
+    ).join('\n');
+    const calls = await dispatches(
+      message(
+        'flood@example.net',
+        `From: flood@example.net\r\nSubject: Flood\r\n\r\n${codeLines}\n${linkLines}\ncode ${longCode}\n${longLink}`,
+        'Flood',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body.length).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_CHARS);
+    // At most PUSH_OTP_ITEM_MAX codes appear after "Codes: ".
+    const codesLine = body.split('\n').find((line) => line.startsWith('Codes: '));
+    if (codesLine) {
+      const listed = codesLine.slice('Codes: '.length).split(', ');
+      expect(listed.length).toBeLessThanOrEqual(PUSH_OTP_ITEM_MAX);
+      for (const entry of listed) {
+        // Truncated entries end with …; raw length never exceeds cap+ellipsis.
+        expect(entry.replace(/…$/, '').length).toBeLessThanOrEqual(PUSH_OTP_ENTRY_CHARS);
+      }
+    }
+    const linkSection = body.includes('Links:\n') ? body.split('Links:\n')[1]! : '';
+    const linkEntries = linkSection.split('\n').filter(Boolean);
+    expect(linkEntries.length).toBeLessThanOrEqual(PUSH_OTP_ITEM_MAX);
+
+    // Direct builder path with deliberately huge inputs.
+    const huge = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: 'S'.repeat(500),
+      from: 'f'.repeat(500),
+      preview: 'p'.repeat(PUSH_BODY_PREVIEW_CHARS),
+      codes: Array.from({ length: 40 }, (_, i) => `${'1'.repeat(300)}${i}`),
+      links: Array.from({ length: 40 }, (_, i) => `https://example.com/${'x'.repeat(300)}/${i}`),
+    });
+    expect(huge.length).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_CHARS);
+    expect(huge.endsWith('…') || huge.length < PUSH_MESSAGE_MAX_CHARS).toBe(true);
   });
 });
