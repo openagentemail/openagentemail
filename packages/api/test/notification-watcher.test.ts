@@ -149,6 +149,53 @@ describe('mail-arrival notification watcher', () => {
     expect(calls[0].level).toBe('urgent');
   });
 
+  test('tier 2 masks OTP codes that appear in the subject line', async () => {
+    const subject = 'Your login code is 654321';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: Auth <auth@example.net>\r\nSubject: ${subject}\r\n\r\nYour verification code is 654321`,
+        subject,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).not.toContain('654321');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('Preview:');
+    expect(body).not.toContain('Codes:');
+  });
+
+  test('tier 3 still exposes Codes when the subject also contains the OTP', async () => {
+    const subject = 'Your login code is 654321';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nYour verification code is 654321`,
+        subject,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject: Your login code is 654321');
+    expect(body).toContain('Codes: 654321');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(

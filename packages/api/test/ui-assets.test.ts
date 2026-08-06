@@ -474,9 +474,13 @@ describe('UI static asset contract', () => {
     expect(cycle).not.toContain('await ');
     expect(cycle).not.toContain('Promise.all');
     expect(cycle).toContain('var generation = ++state.overviewGen;');
+    expect(cycle).toContain('state.overviewCycleGen = generation;');
     expect(cycle.indexOf('identitiesPromise.then')).toBeLessThan(cycle.indexOf('overviewPromise.then'));
     expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(4);
     expect(cycle).toContain('renderOverview();');
+    // Stale overview responses clear stuck pending without writing data.
+    expect(cycle).toContain('state.overviewCycleGen !== state.overviewGen');
+    expect(cycle).toContain('state.overviewPending = false;');
     // Tier save / delete must bump the epoch so a late /identities cannot clobber them.
     expect(UI_JS).toContain('function bumpIdentityEpoch()');
     const saveTier = UI_JS.slice(
@@ -484,6 +488,15 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function handlePushTierChange('),
     );
     expect(saveTier).toContain('bumpIdentityEpoch()');
+    // Tier save restarts the overview cycle so Refresh cannot stick on "Refreshing…".
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    expect(handleTier).toContain("loadOverviewCycle({ refresh: false })");
+    // Tier-3 confirm disables Cancel while the PUT is in flight.
+    expect(handleTier).toContain('confirmModalCancel.disabled = true;');
+    expect(handleTier).toContain('confirmModalCancel.disabled = false;');
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

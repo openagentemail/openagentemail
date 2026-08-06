@@ -759,6 +759,8 @@ export const UI_JS = `(function () {
     overviewFilter: '',
     overviewSort: { key: 'last', dir: 'desc' },
     overviewGen: 0,
+    /* Generation of the in-flight loadOverviewCycle (0 when none owns pending). */
+    overviewCycleGen: 0,
     overviewPolls: 0,
     overviewRetryAt: 0,
     overviewPending: false,
@@ -1063,6 +1065,9 @@ export const UI_JS = `(function () {
         selectEl.dataset.currentTier = String(tier);
         announce('Push content set to tier ' + tier + ' for ' + address + '.');
         renderOverviewRows();
+        // Restart overview so bumpIdentityEpoch cannot leave overviewPending stuck
+        // after a superseded in-flight /overview response skips clearing it.
+        loadOverviewCycle({ refresh: false });
       } catch (error) {
         restore();
         if (
@@ -1097,12 +1102,16 @@ export const UI_JS = `(function () {
       restore();
     };
     confirmModalConfirm.onclick = async function () {
+      // Disable both actions for the in-flight PUT so Cancel cannot restore
+      // the select while a successful response still enables tier 3.
       confirmModalConfirm.disabled = true;
+      confirmModalCancel.disabled = true;
       try {
         await apply(3, true);
         closeAllModals();
       } finally {
         confirmModalConfirm.disabled = false;
+        confirmModalCancel.disabled = false;
       }
     };
     confirmModalConfirm.focus();
@@ -1877,6 +1886,7 @@ export const UI_JS = `(function () {
     overviewController = new AbortController();
     var signal = overviewController.signal;
     state.overviewPending = true;
+    state.overviewCycleGen = generation;
     updateOverviewRefreshButton();
 
     var identitiesPromise = apiJson('/ui/api/identities', { signal: signal });
@@ -1898,12 +1908,26 @@ export const UI_JS = `(function () {
     });
 
     overviewPromise.then(function (payload) {
-      if (generation !== state.overviewGen) return;
+      if (generation !== state.overviewGen) {
+        // Superseded by bumpIdentityEpoch or a newer cycle: never write data,
+        // but if no live cycle owns the current gen, clear a stuck Refresh.
+        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
+          state.overviewPending = false;
+          updateOverviewRefreshButton();
+        }
+        return;
+      }
       state.overviewPending = false;
       applyOverviewPayload(payload);
       renderOverview();
     }).catch(function (error) {
-      if (generation !== state.overviewGen) return;
+      if (generation !== state.overviewGen) {
+        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
+          state.overviewPending = false;
+          updateOverviewRefreshButton();
+        }
+        return;
+      }
       state.overviewPending = false;
       if (error.name === 'AbortError') return;
       applyOverviewError(error);

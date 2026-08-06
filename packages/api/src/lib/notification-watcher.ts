@@ -132,6 +132,27 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
   return boundTextBytes(body, maxBytes);
 }
 
+/**
+ * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
+ * Uses the same extractOtp results as policy matching — no second regex set.
+ */
+export function maskSensitiveFragments(
+  text: string,
+  codes: string[],
+  links: string[],
+): string {
+  if (!text) return text;
+  const needles = [...links, ...codes]
+    .filter((value) => value.length > 0)
+    .sort((a, b) => b.length - a.length);
+  let result = text;
+  for (const needle of needles) {
+    if (!result.includes(needle)) continue;
+    result = result.split(needle).join('•••');
+  }
+  return result;
+}
+
 /** Build the human-facing push body for one identity's content tier. */
 export function buildMailArrivalMessage(
   address: string,
@@ -147,11 +168,20 @@ export function buildMailArrivalMessage(
 
   if (tier >= 2) {
     // Cap From/Subject independently so OTP/preview content still fits.
-    if (extras.from) {
-      lines.push(`From: ${boundTextBytes(extras.from, PUSH_META_FIELD_MAX_BYTES)}`);
+    // Tier 2 must not leak OTP/link strings that sit in the subject line.
+    const from =
+      tier < 3
+        ? maskSensitiveFragments(extras.from, extras.codes, extras.links)
+        : extras.from;
+    const subject =
+      tier < 3
+        ? maskSensitiveFragments(extras.subject, extras.codes, extras.links)
+        : extras.subject;
+    if (from) {
+      lines.push(`From: ${boundTextBytes(from, PUSH_META_FIELD_MAX_BYTES)}`);
     }
-    if (extras.subject) {
-      lines.push(`Subject: ${boundTextBytes(extras.subject, PUSH_META_FIELD_MAX_BYTES)}`);
+    if (subject) {
+      lines.push(`Subject: ${boundTextBytes(subject, PUSH_META_FIELD_MAX_BYTES)}`);
     }
   }
 
