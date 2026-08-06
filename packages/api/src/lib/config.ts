@@ -68,6 +68,9 @@ const envSchema = z.object({
   // Only identities explicitly granted can_notify_user may spend this budget.
   NOTIFY_RATE_LIMIT: z.coerce.number().int().min(0).default(10),
   PUSH_POLICY: z.enum(['otp', 'all', 'none']).default('otp'),
+  // Optional public origin of the human dashboard. When set, mail-arrival
+  // ntfy pushes include a click action that opens this URL (no deep link).
+  DASHBOARD_PUBLIC_URL: z.string().url().optional(),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
@@ -134,6 +137,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       pushPolicy: raw.PUSH_POLICY,
       notifyRateLimit: raw.NOTIFY_RATE_LIMIT,
     },
+    dashboardPublicUrl: raw.DASHBOARD_PUBLIC_URL
+      ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)
+      : undefined,
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,

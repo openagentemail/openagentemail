@@ -165,7 +165,10 @@ Deliberate limits, so nothing here is a surprise later:
 - **Server-side notifications** — private ntfy transport for human alerts and
   managed-agent wake-ups, with OTP-only mail notifications by default. Topics
   and ntfy credentials stay on the server; phone setup is deliberately a later
-  v0.3.1 step.
+  v0.3.1 step. Per-identity **push content tiers** control how much of each
+  mail-arrival alert leaves the server: tier 1 interrupt only (default),
+  tier 2 adds subject/from, tier 3 (admin + explicit risk confirm) adds a
+  short body preview and extracted OTP codes/links.
 - **`mail_wait_for` / `POST /v1/messages/wait`** — long-poll an inbox until a
   matching message arrives, with OTP codes and verification links already extracted.
   Built for automated signups.

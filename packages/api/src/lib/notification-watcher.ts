@@ -11,13 +11,20 @@
 import { simpleParser } from 'mailparser';
 import type { FetchMessageObject, ImapFlow } from 'imapflow';
 import { config } from './config.ts';
-import { listIdentities, type Identity } from './identities.ts';
+import {
+  listIdentities,
+  resolvePushContentTier,
+  type Identity,
+  type PushContentTier,
+} from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
 import { type NotifyService, notificationService } from './notify.ts';
 import { extractOtp, htmlToText } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
 const RECONNECT_MS = 3_000;
+/** Bounded plain-text preview length for tier-3 mail-arrival pushes. */
+export const PUSH_BODY_PREVIEW_CHARS = 280;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
@@ -26,8 +33,22 @@ export type WatcherDispatch = {
   publish: NotifyService['publish'];
 };
 
+/** Optional processWatchedMessage knobs (tests inject clickUrl; prod uses config). */
+export type ProcessWatchedOptions = {
+  /** When set, each mail-arrival push includes ntfy `click` = this URL. */
+  clickUrl?: string;
+};
+
 /** In-memory watermark survives a dropped IMAP connection in this process. */
 export type WatcherWatermark = { uid?: number };
+
+export type MailContentExtras = {
+  subject: string;
+  from: string;
+  preview: string;
+  codes: string[];
+  links: string[];
+};
 
 /**
  * The first successful connection starts at the mailbox high-water mark so an
@@ -43,12 +64,55 @@ export function unseenWatcherUids(uids: number[], watermark: WatcherWatermark): 
   return uids.filter((uid) => uid > watermark.uid!);
 }
 
+function formatAddressList(
+  list: Array<{ name?: string | null; address?: string | null }> | undefined,
+): string {
+  if (!list?.length) return '';
+  return list
+    .map((entry) => {
+      const address = (entry.address ?? '').trim();
+      const name = (entry.name ?? '').trim();
+      if (name && address) return `${name} <${address}>`;
+      return address || name;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** Build the human-facing push body for one identity's content tier. */
+export function buildMailArrivalMessage(
+  address: string,
+  tier: PushContentTier,
+  hasOtpOrLink: boolean,
+  extras: MailContentExtras,
+): string {
+  const lines: string[] = [
+    hasOtpOrLink
+      ? `${address} received new email (contains OTP or verification link)`
+      : `${address} received new email`,
+  ];
+
+  if (tier >= 2) {
+    if (extras.from) lines.push(`From: ${extras.from}`);
+    if (extras.subject) lines.push(`Subject: ${extras.subject}`);
+  }
+
+  if (tier >= 3) {
+    if (extras.preview) lines.push(`Preview: ${extras.preview}`);
+    if (extras.codes.length) lines.push(`Codes: ${extras.codes.join(', ')}`);
+    if (extras.links.length) lines.push(`Links:\n${extras.links.join('\n')}`);
+  }
+
+  return lines.join('\n');
+}
+
 /** Process one newly delivered message. Exported for policy/security tests. */
 export async function processWatchedMessage(
   message: WatchedMessage,
   identities: Identity[],
   policy: 'otp' | 'all' | 'none',
   dispatch: WatcherDispatch,
+  options: ProcessWatchedOptions = {},
 ): Promise<void> {
   if (policy === 'none') return;
   const recipients = messageRecipients(message as FetchMessageObject);
@@ -56,15 +120,32 @@ export async function processWatchedMessage(
   if (matched.length === 0) return;
 
   let hasOtpOrLink = false;
+  const extras: MailContentExtras = {
+    subject: typeof message.envelope?.subject === 'string' ? message.envelope.subject : '',
+    from: formatAddressList(message.envelope?.from as Array<{ name?: string | null; address?: string | null }> | undefined),
+    preview: '',
+    codes: [],
+    links: [],
+  };
+
   if (message.source) {
     try {
       const parsed = await simpleParser(message.source);
+      if (!extras.subject && typeof parsed.subject === 'string') {
+        extras.subject = parsed.subject;
+      }
+      if (!extras.from && parsed.from?.text) {
+        extras.from = parsed.from.text;
+      }
       const html = typeof parsed.html === 'string' && parsed.html.length <= MAX_EMAIL_HTML_LENGTH
         ? parsed.html
         : undefined;
       const text = (parsed.text ?? '').trim() || (html ? htmlToText(html) : '');
       const otp = extractOtp(text, html);
       hasOtpOrLink = otp.codes.length > 0 || otp.links.length > 0;
+      extras.codes = otp.codes;
+      extras.links = otp.links;
+      extras.preview = text.slice(0, PUSH_BODY_PREVIEW_CHARS);
     } catch {
       // A malformed message is never an OTP match. `all` policy still sends a
       // payload with no message content, which is safe and useful.
@@ -72,12 +153,10 @@ export async function processWatchedMessage(
   }
   if (policy === 'otp' && !hasOtpOrLink) return;
 
+  const clickUrl = options.clickUrl;
   for (const identity of matched) {
-    // The payload intentionally contains no subject, sender, preview or OTP.
-    // It is only an interrupt; agents fetch the protected mailbox to read it.
-    const body = hasOtpOrLink
-      ? `${identity.address} received new email (contains OTP or verification link)`
-      : `${identity.address} received new email`;
+    const tier = resolvePushContentTier(identity);
+    const body = buildMailArrivalMessage(identity.address, tier, hasOtpOrLink, extras);
     const level = hasOtpOrLink ? 'urgent' : 'normal';
     await dispatch.publish({
       target: 'user',
@@ -85,6 +164,7 @@ export async function processWatchedMessage(
       message: body,
       level,
       tags: ['email'],
+      ...(clickUrl ? { click: clickUrl } : {}),
     });
   }
 }
@@ -108,7 +188,13 @@ async function watchConnection(
           { envelope: true, headers: ['delivered-to'], source: true },
           { uid: true },
         )) {
-          await processWatchedMessage(message, listIdentities(), config.ntfy.pushPolicy, dispatch);
+          await processWatchedMessage(
+            message,
+            listIdentities(),
+            config.ntfy.pushPolicy,
+            dispatch,
+            { clickUrl: config.dashboardPublicUrl },
+          );
           watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
         }
       }

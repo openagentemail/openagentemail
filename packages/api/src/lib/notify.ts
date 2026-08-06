@@ -24,6 +24,8 @@ export interface NotifyInput {
   message: string;
   level: NotifyLevel;
   tags?: string[];
+  /** Optional ntfy click action URL (e.g. dashboard origin for mail-arrival pushes). */
+  click?: string;
 }
 
 export interface NotifyMessage {
@@ -492,6 +494,7 @@ export class NtfyNotificationService implements NotifyService {
         message: input.message,
         priority: priority(input.level),
         ...(input.tags?.length ? { tags: input.tags } : {}),
+        ...(input.click ? { click: input.click } : {}),
       }),
     });
     if (!response.ok) throw new NotifyError('notify_unavailable');

@@ -17,14 +17,37 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
 
+/** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
+export type PushContentTier = 1 | 2 | 3;
+
+export const DEFAULT_PUSH_CONTENT_TIER: PushContentTier = 1;
+
+/** Shown when tier 3 is set or returned; body/OTP leave the server via ntfy. */
+export const PUSH_TIER3_WARNING =
+  'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
+
 export interface Identity {
   address: string;
   name?: string;
   createdAt: string;
   /** Explicit root-level permission to notify the human-alert topics. */
   canNotifyUser?: boolean;
+  /**
+   * How much content mail-arrival user pushes include for this identity.
+   * Absent means tier 1 (interrupt only) for backward compatibility.
+   */
+  pushContentTier?: PushContentTier;
   /** SHA-256 hex of the identity's API token. Absent on pre-token stores. */
   tokenHash?: string;
+}
+
+export function resolvePushContentTier(identity: Pick<Identity, 'pushContentTier'>): PushContentTier {
+  const tier = identity.pushContentTier;
+  return tier === 2 || tier === 3 ? tier : DEFAULT_PUSH_CONTENT_TIER;
+}
+
+function isPushContentTier(value: unknown): value is PushContentTier {
+  return value === 1 || value === 2 || value === 3;
 }
 
 const WORDS = [
@@ -47,6 +70,7 @@ function isIdentity(value: unknown): value is Identity {
     typeof identity.createdAt === 'string' &&
     (identity.name === undefined || typeof identity.name === 'string') &&
     (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
+    (identity.pushContentTier === undefined || isPushContentTier(identity.pushContentTier)) &&
     (identity.tokenHash === undefined || typeof identity.tokenHash === 'string')
   );
 }
@@ -192,4 +216,24 @@ export function deleteIdentity(address: string): boolean {
   if (kept.length === identities.length) return false;
   save(kept);
   return true;
+}
+
+/**
+ * Set the mail-arrival push content tier for an identity (admin-only at the
+ * route layer). Returns the updated public identity fields, or null if missing.
+ * Tier 1 is stored explicitly so list/read stay stable after a deliberate set.
+ */
+export function setIdentityPushContentTier(
+  address: string,
+  tier: PushContentTier,
+): Identity | null {
+  if (!isPushContentTier(tier)) throw new Error('invalid_push_content_tier');
+  const identities = load();
+  const needle = address.toLowerCase();
+  const identity = identities.find((i) => i.address === needle);
+  if (!identity) return null;
+  identity.pushContentTier = tier;
+  save(identities);
+  const { tokenHash: _tokenHash, ...rest } = identity;
+  return rest;
 }

@@ -113,6 +113,7 @@ export const UI_HTML = `<!doctype html>
           <span>Unseen</span>
           <span>Last</span>
           <span>Created</span>
+          <span>Push</span>
           <span>Actions</span>
         </div>
         <div id="overview-rows" class="overview-rows"></div>
@@ -161,11 +162,12 @@ export const UI_HTML = `<!doctype html>
 
     <div class="modal-overlay" id="confirm-modal" hidden>
       <div class="modal-card">
-        <h2>Delete Identity</h2>
+        <h2 id="confirm-modal-title">Confirm</h2>
         <p id="confirm-modal-text"></p>
+        <p id="confirm-modal-risk" class="modal-warn" hidden></p>
         <div class="modal-actions">
           <button class="quiet" id="confirm-modal-cancel" type="button">Cancel</button>
-          <button class="primary" id="confirm-modal-confirm" type="button">Delete</button>
+          <button class="primary" id="confirm-modal-confirm" type="button">Confirm</button>
         </div>
       </div>
     </div>
@@ -465,7 +467,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .overview-header {
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px minmax(110px, 130px) 72px;
   padding: 8px 10px;
   color: var(--ink-dim);
   font-size: 11px;
@@ -479,7 +481,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   display: grid;
   align-items: baseline;
   gap: 10px;
-  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px minmax(110px, 130px) 72px;
   min-height: 56px;
   border: 0;
   border-bottom: 1px solid var(--line);
@@ -520,6 +522,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .row-actions { display: grid !important; gap: 4px; align-self: center; overflow: visible !important; }
 .row-action { min-height: 26px; padding: 2px 6px; font-size: 11px; }
 .delete-action { color: var(--red); }
+.push-tier-cell { display: grid !important; gap: 4px; align-self: center; overflow: visible !important; }
+.push-tier-select {
+  min-height: 28px;
+  width: 100%;
+  max-width: 118px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+.push-tier-hint { color: var(--ink-faint); font-size: 11px; line-height: 1.3; }
 .overview-panel.is-error .overview-rows, .overview-panel.is-error .overview-stats { opacity: .8; }
 .modal-overlay {
   position: fixed;
@@ -667,7 +679,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
   .overview-header, .overview-row {
     gap: 6px;
-    grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 58px;
+    grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 100px 58px;
   }
   .session-label { display: none; }
 }
@@ -800,9 +812,13 @@ export const UI_JS = `(function () {
   var tokenCopyButton = byId('token-copy-button');
   var tokenModalClose = byId('token-modal-close');
   var confirmModal = byId('confirm-modal');
+  var confirmModalTitle = byId('confirm-modal-title');
   var confirmModalText = byId('confirm-modal-text');
+  var confirmModalRisk = byId('confirm-modal-risk');
   var confirmModalCancel = byId('confirm-modal-cancel');
   var confirmModalConfirm = byId('confirm-modal-confirm');
+  var PUSH_TIER3_WARNING =
+    'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
   var createModal = byId('create-modal');
   var createName = byId('create-name');
   var createLocalpart = byId('create-localpart');
@@ -881,7 +897,11 @@ export const UI_JS = `(function () {
     tokenValue.textContent = '';
     tokenModalTitle.textContent = 'Token';
     tokenCopyButton.classList.remove('copied');
+    confirmModalTitle.textContent = 'Confirm';
     confirmModalText.textContent = '';
+    confirmModalRisk.textContent = '';
+    confirmModalRisk.hidden = true;
+    confirmModalConfirm.textContent = 'Confirm';
     confirmModalConfirm.onclick = null;
   }
 
@@ -953,7 +973,10 @@ export const UI_JS = `(function () {
   function handleDeleteIdentity(address) {
     if (!isAdmin()) return;
     closeAllModals();
+    confirmModalTitle.textContent = 'Delete Identity';
     confirmModalText.textContent = 'Delete ' + address + '? This cannot be undone.';
+    confirmModalRisk.hidden = true;
+    confirmModalConfirm.textContent = 'Delete';
     confirmModal.hidden = false;
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
@@ -975,6 +998,87 @@ export const UI_JS = `(function () {
       } finally {
         confirmModalConfirm.disabled = false;
       }
+    };
+    confirmModalConfirm.focus();
+  }
+
+  async function savePushContentTier(address, tier, confirmRisk) {
+    var body = { pushContentTier: tier };
+    if (confirmRisk) body.confirm_risk = true;
+    var payload = await apiJson(
+      '/ui/api/identities/' + encodeURIComponent(address) + '/push-tier',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      }
+    );
+    state.identities = state.identities.map(function (identity) {
+      if (identity.address !== address) return identity;
+      return Object.assign({}, identity, {
+        pushContentTier: payload.pushContentTier,
+        pushContentTierWarning: payload.warning
+      });
+    });
+    return payload;
+  }
+
+  function handlePushTierChange(address, selectEl) {
+    if (!isAdmin()) return;
+    var previous = Number(selectEl.dataset.currentTier || '1');
+    var next = Number(selectEl.value);
+    if (next === previous) return;
+
+    function restore() {
+      selectEl.value = String(previous);
+    }
+
+    async function apply(tier, confirmRisk) {
+      selectEl.disabled = true;
+      try {
+        await savePushContentTier(address, tier, confirmRisk);
+        selectEl.dataset.currentTier = String(tier);
+        announce('Push content set to tier ' + tier + ' for ' + address + '.');
+        renderOverviewRows();
+      } catch (error) {
+        restore();
+        if (error.status === 400) {
+          announce('Tier 3 requires explicit risk confirmation.');
+        } else if (error.message !== 'session_expired') {
+          announce('Could not update push content tier. Try again.');
+        }
+      } finally {
+        selectEl.disabled = false;
+      }
+    }
+
+    if (next !== 3) {
+      apply(next, false);
+      return;
+    }
+
+    closeAllModals();
+    confirmModalTitle.textContent = 'Enable sensitive push content';
+    confirmModalText.textContent =
+      'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
+    confirmModalRisk.textContent = PUSH_TIER3_WARNING;
+    confirmModalRisk.hidden = false;
+    confirmModalConfirm.textContent = 'Enable tier 3';
+    confirmModal.hidden = false;
+    confirmModalConfirm.onclick = async function () {
+      confirmModalConfirm.disabled = true;
+      try {
+        await apply(3, true);
+        closeAllModals();
+      } finally {
+        confirmModalConfirm.disabled = false;
+      }
+    };
+    var previousCancel = confirmModalCancel.onclick;
+    confirmModalCancel.onclick = function () {
+      restore();
+      closeAllModals();
+      confirmModalCancel.onclick = previousCancel;
     };
     confirmModalConfirm.focus();
   }
@@ -1484,6 +1588,46 @@ export const UI_JS = `(function () {
       var createdText = appendCell(rowNode, 'Created', { text: formatDay(model.identity.createdAt) });
 
       if (isAdmin()) {
+        var currentTier = model.identity.pushContentTier === 2 || model.identity.pushContentTier === 3
+          ? model.identity.pushContentTier
+          : 1;
+        var tierCell = document.createElement('span');
+        tierCell.className = 'cell push-tier-cell';
+        var tierLabelNode = document.createElement('span');
+        tierLabelNode.className = 'cell-label';
+        tierLabelNode.textContent = 'Push content';
+        var tierSelect = document.createElement('select');
+        tierSelect.className = 'push-tier-select';
+        tierSelect.setAttribute('aria-label', 'Push content tier for ' + model.identity.address);
+        tierSelect.dataset.currentTier = String(currentTier);
+        [
+          { value: 1, label: '1 · interrupt only' },
+          { value: 2, label: '2 · + subject / from' },
+          { value: 3, label: '3 · + body / OTP (sensitive)' }
+        ].forEach(function (optionDef) {
+          var option = document.createElement('option');
+          option.value = String(optionDef.value);
+          option.textContent = optionDef.label;
+          if (optionDef.value === currentTier) option.selected = true;
+          tierSelect.append(option);
+        });
+        tierSelect.addEventListener('click', function (event) {
+          event.stopPropagation();
+        });
+        tierSelect.addEventListener('change', function (event) {
+          event.stopPropagation();
+          handlePushTierChange(model.identity.address, tierSelect);
+        });
+        tierCell.append(tierLabelNode, tierSelect);
+        if (currentTier === 3) {
+          var riskHint = document.createElement('span');
+          riskHint.className = 'push-tier-hint';
+          riskHint.textContent = 'Body/OTP leave server';
+          riskHint.title = model.identity.pushContentTierWarning || PUSH_TIER3_WARNING;
+          tierCell.append(riskHint);
+        }
+        rowNode.append(tierCell);
+
         var actionsCell = document.createElement('span');
         actionsCell.className = 'cell row-actions';
         var actionsLabel = document.createElement('span');

@@ -391,6 +391,7 @@ describe('Overview 端点契约', () => {
       'hasToken',
       'lastReceivedAt',
       'name',
+      'pushContentTier',
       'unseen',
     ]);
     expect(body.scan.scanBack).toBe(500);

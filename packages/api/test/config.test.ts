@@ -71,4 +71,14 @@ describe('notification URL configuration', () => {
     });
     expect(config.ntfy.publicUrl).toBe('https://ntfy.example.com');
   });
+
+  test('DASHBOARD_PUBLIC_URL is optional and normalized when present', () => {
+    expect(parseConfig(requiredEnv).dashboardPublicUrl).toBeUndefined();
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://MAIL.EXAMPLE.COM/ui/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+  });
 });
