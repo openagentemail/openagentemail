@@ -434,6 +434,83 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('https://');
   });
 
+  test('tier 2 masks nested-parenthesis URLs whole (no truncated tail leak)', async () => {
+    const subject = 'Reset https://example.com/confirm(foo(bar))?token=secret';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('confirm');
+    expect(body).not.toContain('token=secret');
+    expect(body).not.toContain('https://');
+  });
+
+  test('tier 2 masks Wikipedia-style paths with balanced underscores parens', async () => {
+    const subject = 'See https://en.wikipedia.org/wiki/Foo_(bar)';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('•••');
+    expect(body).not.toContain('wikipedia.org');
+    expect(body).not.toContain('Foo_');
+    expect(body).not.toContain('https://');
+  });
+
+  test('tier 2 peels free trailing ). and .) without leaving the URL half-masked', async () => {
+    for (const subject of [
+      'See https://example.com/verify?token=a).',
+      'See https://example.com/verify?token=a.)',
+    ]) {
+      const calls = await dispatches(
+        message(
+          'auth@example.net',
+          `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+          subject,
+        ),
+        'all',
+        [{
+          address: 'target@test.example',
+          createdAt: '2026-08-02T00:00:00.000Z',
+          pushContentTier: 2,
+        }],
+      );
+      expect(calls).toHaveLength(1);
+      const body = calls[0].message as string;
+      expect(body).toContain('•••');
+      expect(body).toContain(')');
+      expect(body).not.toContain('example.com');
+      expect(body).not.toContain('token=a');
+      expect(body).not.toContain('https://');
+    }
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(

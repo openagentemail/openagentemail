@@ -6,6 +6,7 @@ import {
   extractLinks,
   extractOtp,
   htmlToText,
+  splitBareUrlCandidate,
 } from '../src/lib/otp.ts';
 
 describe('htmlToText', () => {
@@ -159,14 +160,38 @@ describe('extractLinks', () => {
     expect(extractLinks('Docs at https://example.com/docs and https://example.com/about')).toEqual([]);
   });
 
-  test('BARE_URL_RE stays linear on a long run of free brackets', () => {
-    // Overlapping alternatives that re-scan free `[` are O(n²); keep a budget.
-    const poison = `https://${'['.repeat(10_000)}`;
+  test('BARE_URL_RE and splitBareUrlCandidate stay linear on adversarial inputs', () => {
+    const freeBrackets = `https://${'['.repeat(10_000)}`;
+    const nestedParens = `https://x.com/${'('.repeat(5_000)}${')'.repeat(5_000)}`;
     const started = performance.now();
-    const matches = poison.match(BARE_URL_RE);
-    const elapsed = performance.now() - started;
-    expect(matches).toBeNull();
-    expect(elapsed).toBeLessThan(1_000);
+    freeBrackets.match(BARE_URL_RE);
+    nestedParens.match(BARE_URL_RE);
+    splitBareUrlCandidate(freeBrackets);
+    splitBareUrlCandidate(nestedParens);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test('splitBareUrlCandidate keeps nested balanced parens and peels free trailers', () => {
+    expect(splitBareUrlCandidate('https://example.com/confirm(foo(bar))?token=secret')).toEqual({
+      clean: 'https://example.com/confirm(foo(bar))?token=secret',
+      trail: '',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a)')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: ')',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a).')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: ').',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a.)')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: '.)',
+    });
+    expect(splitBareUrlCandidate('https://[2001:db8::1]/confirm?token=secret')).toEqual({
+      clean: 'https://[2001:db8::1]/confirm?token=secret',
+      trail: '',
+    });
   });
 });
 

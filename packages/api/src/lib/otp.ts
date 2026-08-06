@@ -125,13 +125,12 @@ function extractAnchors(html: string): Anchor[] {
 }
 
 /**
- * Bare http(s) URLs in plain text; scheme is case-insensitive (RFC 3986).
- * Paired `[...]` (IPv6 hosts) and `(...)` path segments are allowed as their
- * own alternatives; the general class excludes `[]()` so free trailing brackets
- * are not swallowed and a run of lone `[`/`(` stays O(n) (no nested backtrack).
+ * Bare http(s) URL *candidates* in plain text (scheme case-insensitive).
+ * Intentionally greedy and linear — nested/paired delimiters are not expressed
+ * in the regex. Call splitBareUrlCandidate() to peel free trailing `)].,;`
+ * while keeping balanced brackets (IPv6 hosts, wiki paths, confirm(foo(bar))).
  */
-export const BARE_URL_RE =
-  /https?:\/\/(?:\[[^\s\]]+\]|\([^()\s]*\)|[^\s<>"'()\[\]])+/gi;
+export const BARE_URL_RE = /https?:\/\/[^\s<>"']+/gi;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);
@@ -152,6 +151,52 @@ export function validatedHttpUrl(candidate: string): string | null {
 }
 
 /**
+ * Split a bare-URL regex match into the real URL (`clean`) and prose tail
+ * (`trail`). One O(n) count of brackets, then one right-to-left pass:
+ * strip trailing `.,;`, and strip a trailing `)`/`]` only while closers
+ * outnumber openers. Balanced nested `()`/`[]` stay on the URL; free outer
+ * brackets and trailing punctuation stay in `trail` for the caller to reattach.
+ * Must stay O(n) — never re-count on each trim (that reintroduces O(n²)).
+ */
+export function splitBareUrlCandidate(candidate: string): { clean: string; trail: string } {
+  if (!candidate) return { clean: '', trail: '' };
+
+  let openParen = 0;
+  let closeParen = 0;
+  let openBracket = 0;
+  let closeBracket = 0;
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i]!;
+    if (ch === '(') openParen += 1;
+    else if (ch === ')') closeParen += 1;
+    else if (ch === '[') openBracket += 1;
+    else if (ch === ']') closeBracket += 1;
+  }
+
+  let end = candidate.length;
+  while (end > 0) {
+    const ch = candidate[end - 1]!;
+    if (ch === '.' || ch === ',' || ch === ';') {
+      end -= 1;
+      continue;
+    }
+    if (ch === ')' && closeParen > openParen) {
+      closeParen -= 1;
+      end -= 1;
+      continue;
+    }
+    if (ch === ']' && closeBracket > openBracket) {
+      closeBracket -= 1;
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+
+  return { clean: candidate.slice(0, end), trail: candidate.slice(end) };
+}
+
+/**
  * Replace bare URLs in `text` whose validatedHttpUrl form is in `normalizedLinks`
  * with `placeholder`, keeping the original spelling span as the match (so
  * EXAMPLE.com:443 still redacts when the needle is https://example.com/...).
@@ -165,8 +210,7 @@ export function maskNormalizedHttpUrls(
   const targets = new Set(normalizedLinks.filter(Boolean));
   if (targets.size === 0) return text;
   return text.replace(BARE_URL_RE, (raw) => {
-    const clean = raw.replace(/[.,;]+$/, '');
-    const trail = raw.slice(clean.length);
+    const { clean, trail } = splitBareUrlCandidate(raw);
     const validated = validatedHttpUrl(clean);
     if (validated && targets.has(validated)) return `${placeholder}${trail}`;
     return raw;
@@ -182,7 +226,7 @@ export function extractLinks(text: string, html?: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
   const push = (url: string) => {
-    const clean = url.replace(/[.,;]+$/, '');
+    const { clean } = splitBareUrlCandidate(url);
     const validated = validatedHttpUrl(clean);
     if (validated && !seen.has(validated)) {
       seen.add(validated);
@@ -222,7 +266,7 @@ export function extractHttpLinks(text: string, html?: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
   const push = (candidate: string) => {
-    const clean = candidate.replace(/[.,;]+$/, '');
+    const { clean } = splitBareUrlCandidate(candidate);
     const validated = validatedHttpUrl(clean);
     if (validated && !seen.has(validated)) {
       seen.add(validated);
