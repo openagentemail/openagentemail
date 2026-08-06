@@ -124,19 +124,47 @@ function extractAnchors(html: string): Anchor[] {
   return anchors;
 }
 
-const BARE_URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+/** Bare http(s) URLs in plain text; shared by extractors and tier-2 masking. */
+export const BARE_URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);
 }
 
-function validatedHttpUrl(candidate: string): string | null {
+/**
+ * Canonical WHATWG form for http(s) candidates (hostname lowercased, default
+ * ports dropped). Returns null for non-http(s) or unparseable input.
+ * Shared by extractLinks and tier-2 URL masking so both use one normalizer.
+ */
+export function validatedHttpUrl(candidate: string): string | null {
   try {
     const url = new URL(candidate);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Replace bare URLs in `text` whose validatedHttpUrl form is in `normalizedLinks`
+ * with `placeholder`, keeping the original spelling span as the match (so
+ * EXAMPLE.com:443 still redacts when the needle is https://example.com/...).
+ */
+export function maskNormalizedHttpUrls(
+  text: string,
+  normalizedLinks: string[],
+  placeholder = '•••',
+): string {
+  if (!text || normalizedLinks.length === 0) return text;
+  const targets = new Set(normalizedLinks.filter(Boolean));
+  if (targets.size === 0) return text;
+  return text.replace(BARE_URL_RE, (raw) => {
+    const clean = raw.replace(/[.,;]+$/, '');
+    const trail = raw.slice(clean.length);
+    const validated = validatedHttpUrl(clean);
+    if (validated && targets.has(validated)) return `${placeholder}${trail}`;
+    return raw;
+  });
 }
 
 /**

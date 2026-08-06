@@ -19,7 +19,7 @@ import {
 } from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
 import { type NotifyService, notificationService } from './notify.ts';
-import { extractOtp, htmlToText } from './otp.ts';
+import { extractOtp, htmlToText, maskNormalizedHttpUrls } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
 const RECONNECT_MS = 3_000;
@@ -134,7 +134,9 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
- * Uses the same extractOtp results as policy matching — no second regex set.
+ * Codes: exact string replace. Links: normalize via validatedHttpUrl then
+ * replace the original spelling (maskNormalizedHttpUrls) so EXAMPLE.com:443
+ * still redacts when extractOtp returned https://example.com/....
  */
 export function maskSensitiveFragments(
   text: string,
@@ -142,11 +144,12 @@ export function maskSensitiveFragments(
   links: string[],
 ): string {
   if (!text) return text;
-  const needles = [...links, ...codes]
+  // URLs first so a full verify link is one unit before digit-code scans.
+  let result = maskNormalizedHttpUrls(text, links);
+  const codeNeedles = codes
     .filter((value) => value.length > 0)
     .sort((a, b) => b.length - a.length);
-  let result = text;
-  for (const needle of needles) {
+  for (const needle of codeNeedles) {
     if (!result.includes(needle)) continue;
     result = result.split(needle).join('•••');
   }
