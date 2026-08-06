@@ -497,6 +497,16 @@ describe('UI static asset contract', () => {
     // Tier-3 confirm disables Cancel while the PUT is in flight.
     expect(handleTier).toContain('confirmModalCancel.disabled = true;');
     expect(handleTier).toContain('confirmModalCancel.disabled = false;');
+    // Per-address pending lock survives re-render so a second select cannot race.
+    expect(UI_JS).toContain('tierPending: {}');
+    expect(handleTier).toContain('state.tierPending[address] = true;');
+    expect(handleTier).toContain('delete state.tierPending[address];');
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderOverviewRows('),
+      UI_JS.indexOf('function updateOverviewRefreshButton('),
+    );
+    expect(renderRows).toContain('state.tierPending[model.identity.address]');
+    expect(renderRows).toContain('tierSelect.disabled = true;');
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

@@ -124,8 +124,8 @@ function extractAnchors(html: string): Anchor[] {
   return anchors;
 }
 
-/** Bare http(s) URLs in plain text; shared by extractors and tier-2 masking. */
-export const BARE_URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+/** Bare http(s) URLs in plain text; scheme is case-insensitive (RFC 3986). */
+export const BARE_URL_RE = /https?:\/\/[^\s<>"')\]]+/gi;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);

@@ -275,6 +275,33 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('https://');
   });
 
+  test('tier 2 masks subject URLs with uppercase HTTPS scheme', async () => {
+    // BARE_URL_RE must be case-insensitive or HTTPS:// never enters extract/mask.
+    const subject = 'Verify HTTPS://EXAMPLE.com:443/verify?token=secret';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('token=secret');
+    expect(body).not.toContain('EXAMPLE.com');
+    expect(body).not.toContain('example.com');
+    expect(body.toLowerCase()).not.toContain('https://');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(

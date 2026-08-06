@@ -765,7 +765,9 @@ export const UI_JS = `(function () {
     overviewRetryAt: 0,
     overviewPending: false,
     overviewLoadingSince: 0,
-    returnAddress: ''
+    returnAddress: '',
+    /* address -> true while a push-tier PUT is in flight (survives re-render). */
+    tierPending: {}
   };
   var refreshTask = null;
   var refreshController = null;
@@ -1059,6 +1061,7 @@ export const UI_JS = `(function () {
     }
 
     async function apply(tier, confirmRisk) {
+      state.tierPending[address] = true;
       selectEl.disabled = true;
       try {
         await savePushContentTier(address, tier, confirmRisk);
@@ -1080,7 +1083,10 @@ export const UI_JS = `(function () {
           announce('Could not update push content tier. Try again.');
         }
       } finally {
+        delete state.tierPending[address];
         selectEl.disabled = false;
+        // Re-render so a select recreated mid-flight drops disabled correctly.
+        if (state.scope === 'overview') renderOverviewRows();
       }
     }
 
@@ -1634,6 +1640,9 @@ export const UI_JS = `(function () {
         tierSelect.className = 'push-tier-select';
         tierSelect.setAttribute('aria-label', 'Push content tier for ' + model.identity.address);
         tierSelect.dataset.currentTier = String(currentTier);
+        if (state.tierPending[model.identity.address]) {
+          tierSelect.disabled = true;
+        }
         [
           { value: 1, label: '1 · interrupt only' },
           { value: 2, label: '2 · + subject / from' },
