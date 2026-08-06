@@ -674,7 +674,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   border: 0;
 }
 
-@media (max-width: 900px) {
+/* Desktop overview fixed tracks+gaps ≈724px + 240px sidebar + panel pad ≈1044px; compact (≈812px) covers that band. */
+@media (max-width: 1100px) {
   .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
   .overview-header, .overview-row {

@@ -7,6 +7,25 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
+/**
+ * Compose `${VAR:-}` injects "" when the var is unset. Treat empty/whitespace
+ * as missing so optional fields stay optional and `.default()` can apply.
+ */
+function emptyAsUndefined(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  return value.trim() === '' ? undefined : value;
+}
+
+/** URL env: empty string → undefined (optional or fall through to default). */
+function envUrl(): z.ZodType<string | undefined>;
+function envUrl(fallback: string): z.ZodType<string>;
+function envUrl(fallback?: string) {
+  if (fallback !== undefined) {
+    return z.preprocess(emptyAsUndefined, z.string().url().default(fallback));
+  }
+  return z.preprocess(emptyAsUndefined, z.string().url().optional());
+}
+
 const envSchema = z.object({
   // HTTP port for the API service.
   PORT: z.coerce.number().int().positive().default(3100),
@@ -52,13 +71,13 @@ const envSchema = z.object({
   // Notification transport. Docker Compose enables ntfy by default; keeping
   // the bare-process default off preserves the lightweight API test/runtime.
   NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
-  NTFY_INTERNAL_URL: z.string().url().default('http://ntfy'),
+  NTFY_INTERNAL_URL: envUrl('http://ntfy'),
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
   NTFY_STORAGE_DIR: z.string().min(1).default('/var/lib/openagentemail/ntfy'),
   // This can stay on a private address for server-only notifications. Phone
   // delivery needs a deliberate public HTTPS reverse proxy and full restart.
-  NOTIFY_PUBLIC_URL: z.string().url().default('http://127.0.0.1:2586'),
+  NOTIFY_PUBLIC_URL: envUrl('http://127.0.0.1:2586'),
   // Forward unknown topics to ntfy.sh unless an operator explicitly disables
   // it with NTFY_UPSTREAM=false.
   NTFY_UPSTREAM: z.enum(['true', 'false']).default('true'),
@@ -70,7 +89,7 @@ const envSchema = z.object({
   PUSH_POLICY: z.enum(['otp', 'all', 'none']).default('otp'),
   // Optional public origin of the human dashboard. When set, mail-arrival
   // ntfy pushes include a click action that opens this URL (no deep link).
-  DASHBOARD_PUBLIC_URL: z.string().url().optional(),
+  DASHBOARD_PUBLIC_URL: envUrl(),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),

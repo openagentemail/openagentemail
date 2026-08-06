@@ -82,6 +82,29 @@ describe('notification URL configuration', () => {
     ).toBe('https://mail.example.com/ui');
   });
 
+  test('empty or whitespace optional URL env values are treated as unset', () => {
+    // Compose ${DASHBOARD_PUBLIC_URL:-} injects "" when the var is absent.
+    expect(() =>
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '' }),
+    ).not.toThrow();
+    expect(
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '' }).dashboardPublicUrl,
+    ).toBeUndefined();
+    expect(
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '   ' }).dashboardPublicUrl,
+    ).toBeUndefined();
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://dash.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('https://dash.example.com/ui');
+    // Same empty-string safety for defaulted URL fields (fall through to default).
+    expect(
+      parseConfig({ ...requiredEnv, NOTIFY_PUBLIC_URL: '' }).ntfy.publicUrl,
+    ).toBe('http://127.0.0.1:2586');
+  });
+
   test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {
     expect(
       parseConfig({

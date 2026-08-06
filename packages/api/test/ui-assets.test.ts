@@ -339,7 +339,7 @@ describe('UI static asset contract', () => {
   // A22：断点值不动，其内规则按嵌套栅格适配
   test('both breakpoints survive and the nested inbox grid collapses on mobile', () => {
     const flat = UI_CSS.replace(/\s+/g, ' ');
-    expect(UI_CSS).toContain('@media (max-width: 900px)');
+    expect(UI_CSS).toContain('@media (max-width: 1100px)');
     expect(UI_CSS).toContain('@media (max-width: 719px)');
     expect(UI_CSS).toContain('[data-scope="overview"]');
     expect(UI_CSS).toContain('[data-mobile-view="overview"]');
