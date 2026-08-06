@@ -19,7 +19,7 @@ import {
 } from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
 import { type NotifyService, notificationService } from './notify.ts';
-import { extractOtp, htmlToText, maskNormalizedHttpUrls } from './otp.ts';
+import { extractHttpLinks, extractOtp, htmlToText, maskNormalizedHttpUrls } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
 const RECONNECT_MS = 3_000;
@@ -171,15 +171,18 @@ export function buildMailArrivalMessage(
 
   if (tier >= 2) {
     // Cap From/Subject independently so OTP/preview content still fits.
-    // Tier 2 must not leak OTP/link strings in metadata — needles come from
-    // body extractOtp (extras) plus a separate extractOtp over subject/from
-    // (not mixed into extras, which tier-3 Codes/Links still use).
+    // Tier 2 must not leak OTP/link strings in metadata. Codes: body extras +
+    // extractOtp over subject/from. Links in metadata: ALL http(s) URLs
+    // (extractHttpLinks — no LINK_INTENT filter) so "Verify here: https://…"
+    // still redacts; extras.links stay intent-filtered for policy/tier-3 only.
     let from = extras.from;
     let subject = extras.subject;
     if (tier < 3) {
-      const metaOtp = extractOtp([extras.from, extras.subject].filter(Boolean).join('\n'));
+      const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
+      const metaOtp = extractOtp(metaText);
+      const metaHttpLinks = extractHttpLinks(metaText);
       const maskCodes = [...extras.codes, ...metaOtp.codes];
-      const maskLinks = [...extras.links, ...metaOtp.links];
+      const maskLinks = [...extras.links, ...metaHttpLinks];
       from = maskSensitiveFragments(from, maskCodes, maskLinks);
       subject = maskSensitiveFragments(subject, maskCodes, maskLinks);
     }

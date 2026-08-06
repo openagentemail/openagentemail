@@ -1068,9 +1068,11 @@ export const UI_JS = `(function () {
         selectEl.dataset.currentTier = String(tier);
         announce('Push content set to tier ' + tier + ' for ' + address + '.');
         renderOverviewRows();
-        // Restart overview so bumpIdentityEpoch cannot leave overviewPending stuck
-        // after a superseded in-flight /overview response skips clearing it.
-        loadOverviewCycle({ refresh: false });
+        // Restart overview only while still on Overview: unstick Refresh after
+        // bumpIdentityEpoch, but do not revive overview polling after openAddress.
+        if (state.scope === 'overview') {
+          loadOverviewCycle({ refresh: false });
+        }
       } catch (error) {
         restore();
         if (

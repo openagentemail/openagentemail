@@ -302,6 +302,32 @@ describe('mail-arrival notification watcher', () => {
     expect(body.toLowerCase()).not.toContain('https://');
   });
 
+  test('tier 2 masks subject URLs when LINK_INTENT is only adjacent text', async () => {
+    // extractOtp requires intent in the URL itself; "Verify here:" is outside the URL.
+    const subject = 'Verify here: https://x.example/t/secret';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('x.example');
+    expect(body).not.toContain('/t/secret');
+    expect(body).not.toContain('https://');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(

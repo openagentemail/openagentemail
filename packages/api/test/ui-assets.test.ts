@@ -494,6 +494,8 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function formatDate('),
     );
     expect(handleTier).toContain("loadOverviewCycle({ refresh: false })");
+    // Only restart while still on Overview (do not revive polling after openAddress).
+    expect(handleTier).toContain("state.scope === 'overview'");
     // Tier-3 confirm disables Cancel while the PUT is in flight.
     expect(handleTier).toContain('confirmModalCancel.disabled = true;');
     expect(handleTier).toContain('confirmModalCancel.disabled = false;');
