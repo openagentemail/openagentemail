@@ -16,14 +16,30 @@ function emptyAsUndefined(value: unknown): unknown {
   return value.trim() === '' ? undefined : value;
 }
 
+/** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
+const httpUrl = z
+  .string()
+  .url()
+  .refine(
+    (value) => {
+      try {
+        const protocol = new URL(value).protocol;
+        return protocol === 'http:' || protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'URL must use http or https' },
+  );
+
 /** URL env: empty string → undefined (optional or fall through to default). */
 function envUrl(): z.ZodType<string | undefined>;
 function envUrl(fallback: string): z.ZodType<string>;
 function envUrl(fallback?: string) {
   if (fallback !== undefined) {
-    return z.preprocess(emptyAsUndefined, z.string().url().default(fallback));
+    return z.preprocess(emptyAsUndefined, httpUrl.default(fallback));
   }
-  return z.preprocess(emptyAsUndefined, z.string().url().optional());
+  return z.preprocess(emptyAsUndefined, httpUrl.optional());
 }
 
 const envSchema = z.object({

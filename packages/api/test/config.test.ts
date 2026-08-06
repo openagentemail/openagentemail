@@ -105,6 +105,33 @@ describe('notification URL configuration', () => {
     ).toBe('http://127.0.0.1:2586');
   });
 
+  test('envUrl rejects non-http(s) schemes', () => {
+    for (const bad of [
+      'ftp://example.com',
+      'file:///tmp/x',
+      'mailto:user@example.com',
+    ]) {
+      expect(() =>
+        parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: bad }),
+      ).toThrow(/http or https/i);
+      expect(() =>
+        parseConfig({ ...requiredEnv, NOTIFY_PUBLIC_URL: bad }),
+      ).toThrow(/http or https/i);
+    }
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'http://dash.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('http://dash.example.com/ui');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://notify.example.com',
+      }).ntfy.publicUrl,
+    ).toBe('https://notify.example.com');
+  });
+
   test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {
     expect(
       parseConfig({
