@@ -126,10 +126,12 @@ function extractAnchors(html: string): Anchor[] {
 
 /**
  * Bare http(s) URLs in plain text; scheme is case-insensitive (RFC 3986).
- * Allows a balanced `[...]` host segment (IPv6 literals) but still stops before
- * a free trailing `]` / `)` so `[see https://x.example]` keeps the outer bracket.
+ * Paired `[...]` (IPv6 hosts) and `(...)` path segments are allowed as their
+ * own alternatives; the general class excludes `[]()` so free trailing brackets
+ * are not swallowed and a run of lone `[`/`(` stays O(n) (no nested backtrack).
  */
-export const BARE_URL_RE = /https?:\/\/(?:\[[^\s\]]+\]|[^\s<>"')\]])+/gi;
+export const BARE_URL_RE =
+  /https?:\/\/(?:\[[^\s\]]+\]|\([^()\s]*\)|[^\s<>"'()\[\]])+/gi;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);

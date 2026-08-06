@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  BARE_URL_RE,
   extractCodes,
   extractHttpLinks,
   extractLinks,
@@ -156,6 +157,16 @@ describe('extractLinks', () => {
 
   test('returns empty for unrelated links only', () => {
     expect(extractLinks('Docs at https://example.com/docs and https://example.com/about')).toEqual([]);
+  });
+
+  test('BARE_URL_RE stays linear on a long run of free brackets', () => {
+    // Overlapping alternatives that re-scan free `[` are O(n²); keep a budget.
+    const poison = `https://${'['.repeat(10_000)}`;
+    const started = performance.now();
+    const matches = poison.match(BARE_URL_RE);
+    const elapsed = performance.now() - started;
+    expect(matches).toBeNull();
+    expect(elapsed).toBeLessThan(1_000);
   });
 });
 
