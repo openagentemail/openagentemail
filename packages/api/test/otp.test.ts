@@ -362,6 +362,68 @@ describe('extractLinks', () => {
     expect(onlySecond).toContain('example.com/confirm');
   });
 
+  test('quote/angle hard-cut tails are redacted with the URL (F55)', () => {
+    // Codex original: " after confirm hard-cuts; tail must not leak.
+    const q = 'Verify https://example.com/confirm"token=secret';
+    expect(extractHttpLinks(q)).toEqual(['https://example.com/confirm']);
+    const qSpans = [...bareUrlSpans(q)];
+    expect(qSpans).toHaveLength(1);
+    expect(qSpans[0]!.tailAfter).toEqual({
+      start: q.indexOf('"token=secret'),
+      end: q.length,
+    });
+    const qMasked = maskNormalizedHttpUrls(q, extractHttpLinks(q));
+    expect(qMasked).toBe('Verify ••••••');
+    expect(qMasked).not.toContain('token');
+    expect(qMasked).not.toContain('secret');
+
+    // > glued tail
+    const gt = 'Verify https://example.com/confirm>token=secret';
+    expect(maskNormalizedHttpUrls(gt, extractHttpLinks(gt))).toBe('Verify ••••••');
+    expect(maskNormalizedHttpUrls(gt, extractHttpLinks(gt))).not.toContain('token');
+
+    // <url>token=secret — closer > glued to tail
+    const lt = 'See <https://example.com/confirm>token=secret';
+    const ltMasked = maskNormalizedHttpUrls(lt, extractHttpLinks(lt));
+    expect(ltMasked).toBe('See <••••••');
+    expect(ltMasked).not.toContain('token');
+    expect(ltMasked).not.toContain('secret');
+
+    // Balanced quote: whitespace after closer → no tail; delimiters stay.
+    const bal = 'Say "https://example.com/confirm" end';
+    expect(maskNormalizedHttpUrls(bal, extractHttpLinks(bal))).toBe('Say "•••" end');
+
+    // Autolink with space after >
+    const auto = 'See <https://example.com/confirm> end';
+    expect(maskNormalizedHttpUrls(auto, extractHttpLinks(auto))).toBe('See <•••> end');
+
+    // Apostrophe stays inside URL (whole span masked).
+    const ap = "See https://example.com/confirm'token=secret";
+    expect(extractHttpLinks(ap)).toEqual(["https://example.com/confirm'token=secret"]);
+    expect(maskNormalizedHttpUrls(ap, extractHttpLinks(ap))).toBe('See •••');
+
+    // Tail contains a scheme: stop tail at that scheme; second URL independent.
+    const nested = 'Verify https://a.example/x"https://b.example/y';
+    const nestedSpans = [...bareUrlSpans(nested)];
+    expect(nestedSpans.map((s) => s.clean)).toEqual([
+      'https://a.example/x',
+      'https://b.example/y',
+    ]);
+    expect(nestedSpans[0]!.tailAfter).toEqual({
+      start: nested.indexOf('"https://'),
+      end: nested.indexOf('https://b.example/y'),
+    });
+    const nestedMasked = maskNormalizedHttpUrls(nested, extractHttpLinks(nested));
+    expect(nestedMasked).toBe('Verify •••••••••');
+    expect(nestedMasked).not.toContain('a.example');
+    expect(nestedMasked).not.toContain('b.example');
+
+    // F54 glue still works alongside F55 (no cross-regression).
+    const glue =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    expect(maskNormalizedHttpUrls(glue, extractHttpLinks(glue))).not.toContain('token');
+  });
+
   test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {
     const text = 'Verify https://example.com/confirm)[token=secret';
     const full = 'https://example.com/confirm)[token=secret';

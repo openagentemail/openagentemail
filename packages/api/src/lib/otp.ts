@@ -243,6 +243,14 @@ export type BareUrlSpan = {
    * maskNormalizedHttpUrls redacts it with the adjacent URLs.
    */
   glueAfter?: { start: number; end: number };
+  /**
+   * When this span ended on a `"`, `<`, or `>` hard cut with a glued non-whitespace
+   * tail (e.g. `"token=secret` or `>token=secret`), the half-open range from the
+   * boundary char through that tail (stops before the next scheme if one sits
+   * inside the tail). Extractors ignore this; maskNormalizedHttpUrls redacts it
+   * when the URL itself is a redaction target.
+   */
+  tailAfter?: { start: number; end: number };
 };
 
 /**
@@ -293,11 +301,35 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     let probeIdx = schemeIdx + 1;
     // Set when we hard-cut on Markdown chain glue (closer index + next scheme).
     let glueCut: { closer: number; nextScheme: number } | undefined;
+    // Set when we hard-cut on " < > with a glued non-whitespace tail (F55).
+    let tailCut: { start: number; end: number } | undefined;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
       if (isJsWhitespace(ch) || ch === '<' || ch === '>' || ch === '"') {
         end = i;
+        // Quote/angle hard cut: glued non-ws tail may hold secrets (e.g. "token=).
+        // Whitespace cuts never record a tail (balanced "url" / <url> keep delimiters).
+        if (
+          (ch === '<' || ch === '>' || ch === '"') &&
+          i + 1 < text.length &&
+          !isJsWhitespace(text[i + 1]!)
+        ) {
+          let tailEnd = i + 1;
+          while (tailEnd < text.length && !isJsWhitespace(text[tailEnd]!)) {
+            tailEnd += 1;
+          }
+          while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) {
+            probeIdx += 1;
+          }
+          const nextScheme = schemePos[probeIdx];
+          if (nextScheme !== undefined && nextScheme < tailEnd) {
+            tailEnd = nextScheme;
+          }
+          if (tailEnd > i) {
+            tailCut = { start: i, end: tailEnd };
+          }
+        }
         break;
       }
       if (ch === '(') {
@@ -350,6 +382,10 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     if (glueCut) {
       span.glueAfter = { start: glueCut.closer, end: glueCut.nextScheme };
     }
+    // Tail is [boundary, tailEnd); independent of peel (boundary was never in raw).
+    if (tailCut) {
+      span.tailAfter = tailCut;
+    }
     yield span;
 
     // Skip schemes that fell inside this span (e.g. nested ?next=https://…).
@@ -365,6 +401,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
  * EXAMPLE.com:443 still redacts when the needle is https://example.com/...).
  * Markdown-chain glue (span.glueAfter) adjacent to a target URL on either side
  * is redacted too so labels like `)[token=secret](` cannot leak between spans.
+ * Quote/angle tails (span.tailAfter) are redacted when this URL is a target so
+ * `"token=secret` / `>token=secret` cannot leak after a hard cut (F55).
  */
 export function maskNormalizedHttpUrls(
   text: string,
@@ -386,18 +424,26 @@ export function maskNormalizedHttpUrls(
     cursor = span.end;
 
     const glue = span.glueAfter;
-    if (!glue || glue.end <= glue.start) continue;
-    // Mask glue when either adjacent URL is a redaction target (label may hold secrets).
-    let maskNext = false;
-    const next = spans[i + 1];
-    if (next) {
-      const nextValidated = validatedHttpUrl(next.clean);
-      maskNext = Boolean(nextValidated && targets.has(nextValidated));
+    if (glue && glue.end > glue.start) {
+      // Mask glue when either adjacent URL is a redaction target (label may hold secrets).
+      let maskNext = false;
+      const next = spans[i + 1];
+      if (next) {
+        const nextValidated = validatedHttpUrl(next.clean);
+        maskNext = Boolean(nextValidated && targets.has(nextValidated));
+      }
+      if (maskThis || maskNext) {
+        // Skip any peel gap before the closer, then redact [closer, nextScheme).
+        out += placeholder;
+        cursor = glue.end;
+      }
     }
-    if (maskThis || maskNext) {
-      // Skip any peel gap before the closer, then redact [closer, nextScheme).
+
+    const tail = span.tailAfter;
+    if (maskThis && tail && tail.end > tail.start && tail.end > cursor) {
+      // URL was redacted: redact glued " / < / > tail so secrets cannot stick.
       out += placeholder;
-      cursor = glue.end;
+      cursor = tail.end;
     }
   }
   out += text.slice(cursor);
