@@ -243,9 +243,10 @@ const META_ALNUM_LETTER = 'A-Za-z\\uFF21-\\uFF3A\\uFF41-\\uFF5A';
 const META_ALNUM_DIGIT = '0-9\\uFF10-\\uFF19';
 
 /**
- * Continuous alnum OTP for tier-2 *metadata only* (F77/F81/F86): 4–8 alnum
- * (ASCII and/or fullwidth) with ≥1 letter + ≥1 digit after NFKC. Bounds exclude
- * adjacent alnum (incl. fullwidth) so CJK-glued forms still match.
+ * Continuous alnum OTP for tier-2 *metadata only* (F77/F81/F86/F95): 4–8 alnum
+ * (ASCII and/or fullwidth). Accepted after match when mixed (letter+digit) or
+ * letter-only all-caps (F95). Bounds exclude adjacent alnum (incl. fullwidth)
+ * so CJK-glued forms still match.
  */
 const META_ALNUM_OTP_RE = new RegExp(
   `${META_ALNUM_BOUND_LEFT}([${META_ALNUM_CHAR}]{4,8})${META_ALNUM_BOUND_RIGHT}`,
@@ -324,6 +325,28 @@ function isMixedAlnumOtp(form: string): boolean {
   return /[A-Za-z]/.test(nfkc) && /[0-9]/.test(nfkc);
 }
 
+/**
+ * Letter-only continuous OTP for tier-2 metadata under a strong cue (F95).
+ * NFKC then `/^[A-Z]{4,8}$/`: real letter-only codes are almost always
+ * shouted (`WXYZ`); all-uppercase excludes prose (`pending`, `Ready`, `wxyz`).
+ * Fullwidth uppercase (ＷＸＹＺ) NFKC-normalizes to ASCII and is covered.
+ *
+ * Tradeoff under the strong-cue gate: an all-caps non-code word of length 4–8
+ * (e.g. `READY` in `Your verification code is READY NOW`) is masked — accepted
+ * for the metadata privacy boundary; the rest of the subject stays readable.
+ *
+ * Delimited letter-only forms (`WX-YZ`) are out of scope: this predicate only
+ * matches continuous tokens, so tight/space loops never accept them.
+ */
+function isLetterOnlyOtp(form: string): boolean {
+  return /^[A-Z]{4,8}$/.test(form.normalize('NFKC'));
+}
+
+/** Mixed alnum or strongly labeled letter-only continuous form (F77/F95). */
+function isMetaAlnumOtpForm(form: string): boolean {
+  return isMixedAlnumOtp(form) || isLetterOnlyOtp(form);
+}
+
 function splitSpaceAlnumGroups(form: string): string[] {
   return form.split(new RegExp(META_ALNUM_SEP_SPACE)).filter(Boolean);
 }
@@ -363,15 +386,16 @@ function escapeRegExpLiteral(s: string): string {
 
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
- * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth).
- * Does not touch body extract semantics.
+ * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
+ * F95 letter-only all-caps continuous). Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
   const codes: string[] = [];
   const seen = new Set<string>();
   const push = (form: string) => {
-    if (!isMixedAlnumOtp(form) || seen.has(form)) return;
+    // Delimited letter-only (WX-YZ) stays rejected: isLetterOnlyOtp is continuous-only.
+    if (!isMetaAlnumOtpForm(form) || seen.has(form)) return;
     seen.add(form);
     codes.push(form);
   };
@@ -431,10 +455,11 @@ export function buildAlnumMaskRe(forms: string[]): RegExp | null {
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Alnum codes (F77/F83/F91): exact-form alternation
- * before digit runs so `ABC-1234` is not half-masked to `ABC-•••` when both
- * `ABC-1234` and `1234` are in the code set. Digit codes: otpCodeRunRe +
- * canonicalDigits (F69/F75) after alnum.
+ * (maskNormalizedHttpUrls). Alnum codes (F77/F83/F91/F95): exact-form
+ * alternation before digit runs so `ABC-1234` is not half-masked to `ABC-•••`
+ * when both spellings are in the code set, and letter-only `WXYZ` is bucketed
+ * as exact alnum (not silently dropped via empty canonicalDigits). Digit codes:
+ * otpCodeRunRe + canonicalDigits (F69/F75) after alnum.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -448,7 +473,7 @@ export function maskSensitiveFragments(
   const exactAlnum: string[] = [];
   for (const code of codes) {
     if (!code) continue;
-    if (isMixedAlnumOtp(code)) {
+    if (isMetaAlnumOtpForm(code)) {
       exactAlnum.push(code);
       continue;
     }

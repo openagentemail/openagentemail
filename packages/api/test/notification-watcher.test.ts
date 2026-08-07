@@ -1068,6 +1068,83 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('A1B2C3');
   });
 
+  test('tier 2 masks letter-only all-caps OTP under strong cue (F95)', async () => {
+    // Continuous uppercase 4–8 under strong cue (shouted letter-only codes).
+    expect(extractMetaAlnumCodes('Your verification code is WXYZ')).toEqual(['WXYZ']);
+    expect(extractMetaAlnumCodes('Your verification code is WXYZJK')).toEqual(['WXYZJK']);
+    expect(extractMetaAlnumCodes('您的验证码是 ＷＸＹＺ')).toEqual(['ＷＸＹＺ']);
+    // Length bounds on continuous META_ALNUM_OTP_RE (4–8).
+    expect(extractMetaAlnumCodes('Your verification code is ABC')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your verification code is ABCDEFGHI')).toEqual([]);
+    // Prose locks: lowercase / title case must not extract.
+    expect(extractMetaAlnumCodes('Your verification code is wxyz')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your verification code is Pending')).toEqual([]);
+    // Delimited letter-only remains out of scope.
+    expect(extractMetaAlnumCodes('Your verification code is WX-YZ')).toEqual([]);
+    // Mixed regression anchor.
+    expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toEqual(['ABC-123']);
+
+    expect(maskSensitiveFragments('Your verification code is WXYZ', ['WXYZ'], [])).toBe(
+      'Your verification code is •••',
+    );
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is WXYZ',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is WXYZJK',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '您的验证码是 ＷＸＹＺ',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的验证码是 •••');
+    // Lowercase / title case stay unmasked.
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is wxyz',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is wxyz');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is Pending',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is Pending');
+
+    const subject = 'Your verification code is WXYZ';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('WXYZ');
+  });
+
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toEqual(['ABC-123']);
     expect(extractMetaAlnumCodes('您的校验码是A1B-2C3')).toEqual(['A1B-2C3']);
