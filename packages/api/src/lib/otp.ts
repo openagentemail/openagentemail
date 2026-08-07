@@ -143,22 +143,34 @@ export const DELIMITED_OTP_SEP_CLASS =
   '[-–—.\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
 
 /**
- * One to three separator chars between digit halves (F72). Covers ` - `,
+ * One to three separator chars between digit groups (F72). Covers ` - `,
  * double space, ` – `; four+ seps (e.g. `123    456`) intentionally miss —
  * rare layout, prefer a bounded false-positive surface over open-ended sep runs.
  */
 const DELIMITED_OTP_SEP_MAX = 3;
 const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_SEP_MAX}}`;
-/** Lookbehind for half-suppress: max half digits + max seps + small margin. */
+
+/**
+ * One digit group of a delimited OTP (F73): 2–4 digits. Full form is 2–3 such
+ * groups joined by SEP_RUN: `\d{2,4}(?:SEP_RUN\d{2,4}){1,2}` → e.g. `12 34 56`,
+ * `12-34-56`, `1234 - 56`, as well as classic two-group `123-456`.
+ *
+ * Not matched (intentional): 4+ groups (`1 2 3 4 5 6`); total digit count may
+ * reach 9–12 (privacy-safe over-mask of long labeled number strings).
+ */
+const DELIMITED_OTP_GROUP = '\\d{2,4}';
+const DELIMITED_OTP_FORM = `${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,2}`;
+
+/** Lookbehind for half-suppress: max group digits + max seps + small margin. */
 const HALF_OF_DELIMITED_BEFORE_CHARS = 4 + DELIMITED_OTP_SEP_MAX + 3;
 
-/** Non-global: continuous run followed by sep-run + 3–4 digits (half of delimited). */
+/** Non-global: continuous run followed by sep-run + 2–4 digit group. */
 const HALF_OF_DELIMITED_AFTER = new RegExp(
-  `^${DELIMITED_OTP_SEP_RUN}\\d{3,4}\\b`,
+  `^${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}\\b`,
 );
-/** Non-global: 3–4 digits + sep-run immediately before a continuous run. */
+/** Non-global: 2–4 digit group + sep-run immediately before a continuous run. */
 const HALF_OF_DELIMITED_BEFORE = new RegExp(
-  `\\b\\d{3,4}${DELIMITED_OTP_SEP_RUN}$`,
+  `\\b${DELIMITED_OTP_GROUP}${DELIMITED_OTP_SEP_RUN}$`,
 );
 
 /**
@@ -166,30 +178,27 @@ const HALF_OF_DELIMITED_BEFORE = new RegExp(
  * Callers must not share a single global instance across concurrent scans.
  */
 export function delimitedOtpCaptureRe(): RegExp {
-  return new RegExp(`\\b(\\d{3,4}${DELIMITED_OTP_SEP_RUN}\\d{3,4})\\b`, 'g');
+  return new RegExp(`\\b(${DELIMITED_OTP_FORM})\\b`, 'g');
 }
 
 /**
  * Fresh global regex for continuous 4–8 digit runs and delimited OTP forms.
- * Delimited alternative is first so `1234-5678` / `1234 - 5678` is one span.
- * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70/F72);
- * half-suppress uses HALF_OF_DELIMITED_* built from the same SEP_RUN.
+ * Delimited alternative is first so `12 34 56` / `1234-5678` is one span.
+ * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70–F73);
+ * half-suppress uses HALF_OF_DELIMITED_* built from the same SEP_RUN/GROUP.
  */
 export function otpCodeRunRe(): RegExp {
-  return new RegExp(
-    `\\b\\d{3,4}${DELIMITED_OTP_SEP_RUN}\\d{3,4}\\b|\\b\\d{4,8}\\b`,
-    'g',
-  );
+  return new RegExp(`\\b${DELIMITED_OTP_FORM}\\b|\\b\\d{4,8}\\b`, 'g');
 }
 
 /**
- * True when a continuous \d{4,8} run is one half of a delimited OTP shape
- * (`1234-5678` / `1234 - 5678`). Only 3–4 digit sides participate (continuous
- * matches are ≥4, so length must be exactly 4); longer runs like
- * `123456-7890` stay continuous so they are not dropped without recovery.
+ * True when a continuous \d{4,8} run is one side of a delimited OTP shape
+ * (`1234-5678` / `1234 - 56`). Continuous extract only yields 4–8 digit runs,
+ * and only a **4-digit** run can be a delimited group (`\d{2,4}`); longer runs
+ * like `123456-7890` stay continuous so they are not dropped without recovery.
  */
 function isHalfOfDelimitedOtp(text: string, idx: number, digits: string): boolean {
-  if (digits.length < 3 || digits.length > 4) return false;
+  if (digits.length !== 4) return false;
   const after = text.slice(idx + digits.length);
   if (HALF_OF_DELIMITED_AFTER.test(after)) return true;
   const before = text.slice(Math.max(0, idx - HALF_OF_DELIMITED_BEFORE_CHARS), idx);

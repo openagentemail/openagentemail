@@ -112,7 +112,7 @@ describe('extractCodes', () => {
 
   test('delimited OTP forms need strong cues (F68)', () => {
     expect(extractCodes('Your verification code is 123-456')).toEqual(['123-456']);
-    // Full form only — continuous halves of a real 3–4|3–4 shape are suppressed.
+    // Full form only — continuous 4-digit halves of a delimited shape are suppressed.
     expect(extractCodes('Your PIN is 1234-5678')).toEqual(['1234-5678']);
     // Longer continuous runs are not delimited halves; keep continuous extract.
     expect(extractCodes('Your code is 123456-7890')).toEqual(['123456', '7890']);
@@ -172,6 +172,21 @@ describe('extractCodes', () => {
     expect(extractCodes('Your code is 1234 - 5678')).toEqual(['1234 - 5678']);
     // Four+ seps intentionally miss (bounded false-positive surface).
     expect(extractCodes('Your code is 123    456')).toEqual([]);
+  });
+
+  test('three digit-group delimited OTP extracts with original spelling (F73)', () => {
+    expect(extractCodes('Your code is 12 34 56')).toEqual(['12 34 56']);
+    expect(extractCodes('Your PIN is 12-34-56')).toEqual(['12-34-56']);
+    // Two-group short halves still work (2+2).
+    expect(extractCodes('Your code is 12 34')).toEqual(['12 34']);
+    // Continuous left half suppressed when right group is only 2 digits.
+    expect(extractCodes('Your code is 1234 - 56')).toEqual(['1234 - 56']);
+    // F68 long continuous regression: not one delimited form.
+    expect(extractCodes('Your code is 123456-7890')).toEqual(['123456', '7890']);
+    // No strong cue / roadmap range.
+    expect(extractCodes('12 34 56')).toEqual([]);
+    expect(extractCodes('roadmap 2024-2025')).toEqual([]);
+    expect(extractCodes('call 555-12')).toEqual([]);
   });
 
   test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {
