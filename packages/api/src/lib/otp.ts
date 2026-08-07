@@ -82,9 +82,14 @@ function buildStrongOtpCueRe(cues: readonly string[]): RegExp {
 
 const STRONG_OTP_CUE = buildStrongOtpCueRe(STRONG_OTP_CUES);
 
-/** True when text contains a strong OTP cue (F71 list; case-folded for Latin). */
+/**
+ * True when text contains a strong OTP cue (F71 list; case-folded for Latin).
+ * NFKC first so compatibility-form cues match: fullwidth `ｃｏｄｅ` lowercases
+ * to fullwidth, never to ASCII `code`, so a labeled fullwidth subject would
+ * otherwise bypass tier-2 masking entirely (F103).
+ */
 export function hasStrongOtpCue(text: string): boolean {
-  return STRONG_OTP_CUE.test(text.toLowerCase());
+  return STRONG_OTP_CUE.test(text.normalize('NFKC').toLowerCase());
 }
 
 export function htmlToText(html: string): string {

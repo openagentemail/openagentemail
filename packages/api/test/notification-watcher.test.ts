@@ -29,6 +29,7 @@ const {
   jsonEscapedByteLength,
   notifyAvailableMessageBytes,
 } = await import('../src/lib/notify.ts');
+const { hasStrongOtpCue } = await import('../src/lib/otp.ts');
 
 /** Mock publish that honors beforeSend like NtfyNotificationService. */
 function publishWithBeforeSend(calls: any[]) {
@@ -1419,6 +1420,46 @@ describe('mail-arrival notification watcher', () => {
     // Exact original spelling: fullwidth extract does not mask halfwidth form.
     expect(maskSensitiveFragments('code A1B2C3', ['Ａ１Ｂ２Ｃ３'], [])).toBe('code A1B2C3');
     expect(maskSensitiveFragments('code Ａ１Ｂ２Ｃ３', ['Ａ１Ｂ２Ｃ３'], [])).toBe('code •••');
+  });
+
+  test('tier 2 masks OTP under fullwidth Latin cue (F103)', () => {
+    // Fullwidth cue words: lowercasing alone never reaches ASCII `code`.
+    expect(hasStrongOtpCue('Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ Ａ１Ｂ２')).toBe(true);
+    // Fullwidth cue + fullwidth alnum code masks.
+    expect(extractMetaAlnumCodes('Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ Ａ１Ｂ２')).toContain('Ａ１Ｂ２');
+    const alnum = maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ Ａ１Ｂ２',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(alnum.subject).toContain('•••');
+    expect(alnum.subject).not.toContain('Ａ１Ｂ２');
+    // Fullwidth cue + fullwidth numeric code masks (F102 digit-run path).
+    const numeric = maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ １２３４５６',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(numeric.subject).toContain('•••');
+    expect(numeric.subject).not.toContain('１２３４５６');
+    // Halfwidth cue-only mix: cue fullwidth, code ASCII.
+    const half = maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'ｃｏｄｅ A1B2',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(half.subject).toContain('•••');
+    expect(half.subject).not.toContain('A1B2');
+    // ASCII and CJK cue regressions.
+    expect(hasStrongOtpCue('Your verification code is A1B2')).toBe(true);
+    expect(hasStrongOtpCue('您的验证码是 123456')).toBe(true);
+    expect(hasStrongOtpCue('Ｙｏｕｒ ｏｒｄｅｒ ｓｈｉｐｐｅｄ')).toBe(false);
   });
 
   test('space-separated alnum runs mask whole chain not halves (F85)', () => {
