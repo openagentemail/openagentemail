@@ -935,7 +935,8 @@ export const UI_JS = `(function () {
     return response.json();
   }
 
-  /* Optional cancel side-effect (e.g. restore a select) — run once on Cancel. */
+  /* Optional cancel side-effect (e.g. restore a select) — run once when the
+     dialog closes unconfirmed (Cancel button or indirect close; F107). */
   var confirmModalOnCancel = null;
 
   function closeAllModals() {
@@ -951,7 +952,12 @@ export const UI_JS = `(function () {
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = 'Confirm';
     confirmModalConfirm.onclick = null;
+    // F107: an indirect close (background action opening another modal) must
+    // still run the pending cancel side-effect (restore tier select) — the
+    // callback is consumed exactly once either way.
+    var onCancel = confirmModalOnCancel;
     confirmModalOnCancel = null;
+    if (onCancel) onCancel();
   }
 
   function showTokenModal(token, title) {
@@ -1172,7 +1178,8 @@ export const UI_JS = `(function () {
     confirmModalRisk.hidden = false;
     confirmModalConfirm.textContent = 'Enable tier 3';
     confirmModal.hidden = false;
-    // Restore the previous tier once on Cancel; closeAllModals clears this.
+    // Restore the previous tier if the dialog closes unconfirmed (Cancel or an
+    // indirect close runs it via closeAllModals); the success path clears it.
     confirmModalOnCancel = function () {
       restore();
     };
@@ -1183,6 +1190,9 @@ export const UI_JS = `(function () {
       confirmModalCancel.disabled = true;
       try {
         await apply(3, true);
+        // F107: confirmed — consume the pending restore before closeAllModals
+        // would run it and drop the select back to the old tier.
+        confirmModalOnCancel = null;
         closeAllModals();
       } finally {
         confirmModalConfirm.disabled = false;
@@ -2517,10 +2527,7 @@ export const UI_JS = `(function () {
   });
   tokenModalClose.addEventListener('click', closeAllModals);
   confirmModalCancel.addEventListener('click', function () {
-    // Run cancel side-effect (e.g. restore tier select) before clearing state.
-    var onCancel = confirmModalOnCancel;
-    confirmModalOnCancel = null;
-    if (onCancel) onCancel();
+    // closeAllModals consumes the pending cancel side-effect exactly once (F107).
     closeAllModals();
   });
   createModalCancel.addEventListener('click', closeAllModals);

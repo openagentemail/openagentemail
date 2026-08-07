@@ -376,14 +376,15 @@ describe('extractLinks', () => {
       clean: 'https://[2001:db8::1]/confirm?token=secret',
       trail: '',
     });
-    // Apostrophe is a legal URL char; only an odd trailing prose closer peels.
+    // Apostrophe is a legal URL char mid-URL; an odd trailing prose closer peels,
+    // and a trailing possessive/contraction `'s` peels as prose (F108).
     expect(splitBareUrlCandidate("https://example.com/confirm?'token=secret")).toEqual({
       clean: "https://example.com/confirm?'token=secret",
       trail: '',
     });
     expect(splitBareUrlCandidate("https://x.com/it's")).toEqual({
-      clean: "https://x.com/it's",
-      trail: '',
+      clean: 'https://x.com/it',
+      trail: "'s",
     });
     expect(splitBareUrlCandidate("https://example.com/verify?token=a'")).toEqual({
       clean: 'https://example.com/verify?token=a',
@@ -977,6 +978,32 @@ describe('extractLinks', () => {
     ]);
     expect(extractHttpLinks('go https://example.com/a:b now')).toEqual([
       'https://example.com/a:b',
+    ]);
+  });
+
+  test("peels English possessive 's from bare URL tails (F108)", () => {
+    // Possessive prose glued to the URL peels `'s`.
+    expect(extractHttpLinks("Check https://example.com/verify's status")).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks("Check https://example.com/verify's.")).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Internal apostrophes are never trailing and stay put.
+    expect(extractHttpLinks("see https://example.com/don't/verify now")).toEqual([
+      "https://example.com/don't/verify",
+    ]);
+    // Quoted span regression: outer quotes still peel around the URL.
+    expect(extractHttpLinks("go 'https://example.com/verify' now")).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Uppercase 'S is not peeled (conservative).
+    expect(extractHttpLinks("Check https://example.com/verify'S end")).toEqual([
+      "https://example.com/verify'S",
+    ]);
+    // Bare trailing apostrophe still peels via the odd-parity rule (F61 regression).
+    expect(extractHttpLinks("see https://example.com/verify' end")).toEqual([
+      'https://example.com/verify',
     ]);
   });
 });

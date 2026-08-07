@@ -589,6 +589,34 @@ describe('UI static asset contract', () => {
     expect(sessionBranch).not.toContain("apiJson('/ui/api/identities')");
   });
 
+  // F107: an indirect close (background action) must still restore the tier
+  // select; the confirmed success path must not restore.
+  test('tier-3 dialog restores on indirect close but not after confirm (F107)', () => {
+    const closeAll = UI_JS.slice(
+      UI_JS.indexOf('function closeAllModals()'),
+      UI_JS.indexOf('function showTokenModal('),
+    );
+    // Pending cancel side-effect is consumed exactly once on any close.
+    expect(closeAll).toContain('var onCancel = confirmModalOnCancel;');
+    expect(closeAll.indexOf('var onCancel = confirmModalOnCancel;')).toBeLessThan(
+      closeAll.indexOf('confirmModalOnCancel = null;'),
+    );
+    expect(closeAll.indexOf('confirmModalOnCancel = null;')).toBeLessThan(
+      closeAll.indexOf('if (onCancel) onCancel();'),
+    );
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    // Success path clears the restore hook before closing so a confirmed tier 3 sticks.
+    const applyIdx = handleTier.indexOf('await apply(3, true);');
+    const clearIdx = handleTier.indexOf('confirmModalOnCancel = null;');
+    const closeIdx = handleTier.indexOf('closeAllModals();', applyIdx);
+    expect(applyIdx).toBeGreaterThanOrEqual(0);
+    expect(clearIdx).toBeGreaterThan(applyIdx);
+    expect(closeIdx).toBeGreaterThan(clearIdx);
+  });
+
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动
   test('a successful copy adds a transient class without replacing the announcement', () => {
     expect(UI_JS).toContain("announce('Copied to clipboard');");

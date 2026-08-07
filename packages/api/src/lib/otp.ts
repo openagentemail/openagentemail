@@ -499,6 +499,9 @@ function trailerForcesQuestionPeel(trailer: string): boolean {
  * - openQuoted true (span started after prose `'`): peel exactly one closing
  *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
  *   legal URL-terminal `'` would be stripped after the outer closer (F63).
+ * - Terminal `'s` (F108): an English possessive at the candidate end peels
+ *   (`verify's` → `verify`); internal apostrophes (`don't/verify`) are never
+ *   trailing and stay put. Skipped under preserveApostrophes.
  *
  * F98: closer-context look-back is cached per contiguous terminal-punct run so
  * a long `!!!!` / `::::` / `????` suffix is O(length), not O(length²).
@@ -540,6 +543,20 @@ function peelTrailingProse(
       // Unconditional peel may exit/enter a conditional run — drop cache.
       cachedBoundary = null;
       end -= 1;
+      continue;
+    }
+    // F108: English possessive at candidate end (`verify's`) peels `'s`;
+    // internal apostrophes (`don't/verify`) are never trailing and stay put.
+    if (
+      !preserveApostrophes &&
+      ch === 's' &&
+      end >= 3 &&
+      candidate[end - 2] === "'" &&
+      /[A-Za-z0-9]/.test(candidate[end - 3]!)
+    ) {
+      apostrophes -= 1;
+      cachedBoundary = null;
+      end -= 2;
       continue;
     }
     // F100: conditional `?` — keep first bare empty-query; peel later / prose.
