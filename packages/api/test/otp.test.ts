@@ -123,6 +123,23 @@ describe('extractCodes', () => {
     expect(extractCodes('call 555-1234')).toEqual([]);
   });
 
+  test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {
+    const nbsp = '\u00A0';
+    const nnbsp = '\u202F';
+    const emsp = '\u2003';
+    expect(extractCodes(`Your verification code is 123${nbsp}456`)).toEqual([`123${nbsp}456`]);
+    expect(extractCodes(`Your PIN is 123${nnbsp}456`)).toEqual([`123${nnbsp}456`]);
+    expect(extractCodes(`Your OTP is 123${emsp}456`)).toEqual([`123${emsp}456`]);
+    // Half-suppression still applies with Unicode separators.
+    expect(extractCodes(`Your code is 1234${nbsp}5678`)).toEqual([`1234${nbsp}5678`]);
+    // No strong cue → skip.
+    expect(extractCodes(`call 555${nbsp}1234`)).toEqual([]);
+    // Newlines must not act as separators (meta/text joins use \n).
+    expect(extractCodes('Your verification code is 123\n456')).toEqual([]);
+    expect(extractCodes('Your verification code is 1234\n5678')).toEqual(['1234', '5678']);
+    expect(extractCodes('Your verification code is 123\r456')).toEqual([]);
+  });
+
   test('dedupes repeated codes', () => {
     expect(extractCodes('code 552211. Again: your code is 552211.')).toEqual(['552211']);
   });

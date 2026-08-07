@@ -781,6 +781,65 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('123456');
   });
 
+  test('maskSensitiveFragments masks NBSP-delimited OTP (F70)', () => {
+    const nbsp = '\u00A0';
+    const form = `123${nbsp}456`;
+    // Same spelling in the code set.
+    expect(maskSensitiveFragments(`code ${form}`, [form], [])).toBe('code •••');
+    // F69 canonical cross-form: continuous needle masks Unicode-space run.
+    expect(maskSensitiveFragments(`code ${form}`, ['123456'], [])).toBe('code •••');
+  });
+
+  test('maskTier2Metadata does not glue digits across from\\nsubject (F70)', () => {
+    // metaText is from + '\\n' + subject; newlines must not act as OTP separators.
+    // 4+4 across \\n would become one delimited form if \\n were a sep.
+    const masked = maskTier2Metadata({
+      from: 'user 1234',
+      subject: '5678 提醒',
+      codes: ['12345678'],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toBe('5678 提醒');
+    expect(masked.from).toBe('user 1234');
+  });
+
+  test('maskTier2Metadata masks subject NBSP form from body continuous (F70×F69)', () => {
+    const nbsp = '\u00A0';
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: `123${nbsp}456`,
+      codes: ['123456'],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toBe('•••');
+  });
+
+  test('tier 2 masks NBSP-delimited OTP in subject under policy=all (F70)', async () => {
+    const nbsp = '\u00A0';
+    const subject = `Your verification code is 123${nbsp}456`;
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('123');
+    expect(body).not.toContain(`${nbsp}456`);
+  });
+
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
     const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
       // 6-digit distinct codes that do not appear in the short subject.

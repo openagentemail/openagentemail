@@ -87,17 +87,58 @@ function decodeEntities(s: string): string {
 const STRONG_OTP_CUE = /\b(?:code|otp|passcode|pin)\b|验证码|动态码/;
 
 /**
+ * Single separator class for delimited OTP (F68/F70): hyphen, en/em dash,
+ * period, ASCII space/tab, and common Unicode spaces (NBSP, NNBSP, em space,
+ * ideographic space, BOM as space, …).
+ *
+ * Newlines (\n \r \u2028 \u2029) are intentionally excluded: maskTier2Metadata
+ * joins from/subject with `\n`, and allowing line breaks would glue digits
+ * across fields into a fake delimited form.
+ */
+export const DELIMITED_OTP_SEP_CLASS =
+  '[-–—.\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
+
+/** Non-global: continuous run followed by sep + 3–4 digits (half of delimited). */
+const HALF_OF_DELIMITED_AFTER = new RegExp(
+  `^${DELIMITED_OTP_SEP_CLASS}\\d{3,4}\\b`,
+);
+/** Non-global: 3–4 digits + sep immediately before a continuous run. */
+const HALF_OF_DELIMITED_BEFORE = new RegExp(
+  `\\b\\d{3,4}${DELIMITED_OTP_SEP_CLASS}$`,
+);
+
+/**
+ * Fresh global regex for one delimited OTP form (capture group 1 = full form).
+ * Callers must not share a single global instance across concurrent scans.
+ */
+export function delimitedOtpCaptureRe(): RegExp {
+  return new RegExp(`\\b(\\d{3,4}${DELIMITED_OTP_SEP_CLASS}\\d{3,4})\\b`, 'g');
+}
+
+/**
+ * Fresh global regex for continuous 4–8 digit runs and delimited OTP forms.
+ * Delimited alternative is first so `1234-5678` / `1234\u00A05678` is one span.
+ * Shared by extract half-suppression consumers and tier-2 mask scans (F70).
+ */
+export function otpCodeRunRe(): RegExp {
+  return new RegExp(
+    `\\b\\d{3,4}${DELIMITED_OTP_SEP_CLASS}\\d{3,4}\\b|\\b\\d{4,8}\\b`,
+    'g',
+  );
+}
+
+/**
  * True when a continuous \d{4,8} run is one half of a delimited OTP shape
- * (`1234-5678`). Only 3–4 digit sides participate in that shape (continuous
+ * (`1234-5678` / `1234\u00A05678`). Only 3–4 digit sides participate (continuous
  * matches are ≥4, so length must be exactly 4); longer runs like
  * `123456-7890` stay continuous so they are not dropped without recovery.
  */
 function isHalfOfDelimitedOtp(text: string, idx: number, digits: string): boolean {
   if (digits.length < 3 || digits.length > 4) return false;
   const after = text.slice(idx + digits.length);
-  if (/^[-–—. ]\d{3,4}\b/.test(after)) return true;
+  if (HALF_OF_DELIMITED_AFTER.test(after)) return true;
   const before = text.slice(Math.max(0, idx - 6), idx);
-  return /\b\d{3,4}[-–—. ]$/.test(before);
+  return HALF_OF_DELIMITED_BEFORE.test(before);
 }
 
 /** Extract 4–8 digit codes (continuous or delimited) near an OTP keyword. */
@@ -109,7 +150,7 @@ export function extractCodes(text: string): string[] {
   for (const match of text.matchAll(/\b(\d{4,8})\b/g)) {
     const digits = match[1];
     const idx = match.index ?? 0;
-    // Leave `1234-5678` halves to the delimited pass (F68).
+    // Leave `1234-5678` / Unicode-space halves to the delimited pass (F68/F70).
     if (isHalfOfDelimitedOtp(text, idx, digits)) continue;
     const window = lower.slice(
       Math.max(0, idx - KEYWORD_WINDOW),
@@ -128,10 +169,9 @@ export function extractCodes(text: string): string[] {
     }
   }
 
-  // F68: `123-456` / `1234–5678` only with a strong cue (not phone/roadmap).
-  // Separators: hyphen, en dash, em dash, period, space. Keep original spelling
-  // so maskSensitiveFragments can match the span.
-  for (const match of text.matchAll(/\b(\d{3,4}[-–—. ]\d{3,4})\b/g)) {
+  // F68/F70: `123-456` / `1234\u00A05678` only with a strong cue (not phone/roadmap).
+  // Keep original spelling (including NBSP) so maskSensitiveFragments can match.
+  for (const match of text.matchAll(delimitedOtpCaptureRe())) {
     const form = match[1]!;
     const idx = match.index ?? 0;
     const window = lower.slice(

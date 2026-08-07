@@ -20,7 +20,13 @@ import {
 } from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
 import { NotifyError, type NotifyService, notificationService } from './notify.ts';
-import { extractHttpLinks, extractOtp, htmlToText, maskNormalizedHttpUrls } from './otp.ts';
+import {
+  extractHttpLinks,
+  extractOtp,
+  htmlToText,
+  maskNormalizedHttpUrls,
+  otpCodeRunRe,
+} from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
 const RECONNECT_MS = 3_000;
@@ -140,15 +146,6 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
   return boundTextBytes(body, maxBytes);
 }
 
-/**
- * Fresh each call: continuous 4–8 digit runs and delimited OTP forms (F68)
- * that extractCodes may yield. Delimited alternative is first so `1234-5678`
- * is one span, not two continuous runs.
- */
-function metaCodeRunRe(): RegExp {
-  return /\b\d{3,4}[-–—. ]\d{3,4}\b|\b\d{4,8}\b/g;
-}
-
 /** Digit-only form so body `123456` and subject `123-456` compare equal (F69). */
 function canonicalDigits(s: string): string {
   return s.replace(/\D/g, '');
@@ -157,9 +154,9 @@ function canonicalDigits(s: string): string {
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Codes: scan continuous \b\d{4,8}\b and delimited
- * \b\d{3,4}[-–—. ]\d{3,4}\b runs; replace when the run's digit-only form is in
- * the code set (F69 — body continuous / meta delimited are the same OTP).
+ * (maskNormalizedHttpUrls). Codes: scan continuous / delimited runs via shared
+ * otpCodeRunRe (F68/F70 separators including Unicode spaces); replace when the
+ * run's digit-only form is in the code set (F69 cross-form).
  *
  * Membership is O(text) Set lookups on canonical digits — no multi-branch
  * needle alternation. Extract still yields original spelling (extractCodes).
@@ -179,7 +176,7 @@ export function maskSensitiveFragments(
     if (canon) codeSet.add(canon);
   }
   if (codeSet.size === 0) return result;
-  return result.replace(metaCodeRunRe(), (run) =>
+  return result.replace(otpCodeRunRe(), (run) =>
     codeSet.has(canonicalDigits(run)) ? '•••' : run,
   );
 }
@@ -204,8 +201,9 @@ export function maskTier2Metadata(
   // Body codes enter the mask list when their digit-only form appears as any
   // continuous/delimited meta run (F69: body `123456` ↔ subject `123-456`).
   // O(|meta|) collect + O(|codes|) filter — not a per-needle scan of meta.
+  // otpCodeRunRe excludes newlines so from\nsubject cannot glue digits (F70).
   const metaCanonRuns = new Set<string>();
-  for (const match of metaText.matchAll(metaCodeRunRe())) {
+  for (const match of metaText.matchAll(otpCodeRunRe())) {
     const canon = canonicalDigits(match[0]!);
     if (canon) metaCanonRuns.add(canon);
   }
