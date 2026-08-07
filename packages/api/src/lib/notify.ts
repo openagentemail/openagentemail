@@ -485,17 +485,25 @@ export class NtfyNotificationService implements NotifyService {
   async publish(input: NotifyInput): Promise<{ target: NotifyTarget; title: string; level: NotifyLevel }> {
     const current = await this.assertEnabled();
     const topic = await physicalTopic(input.target, input.level);
+    // ntfy rejects bodies near ~4096 bytes. message is capped at 3500; a long
+    // DASHBOARD_PUBLIC_URL click can still blow the request — drop click first.
+    const basePayload = {
+      topic,
+      title: input.title,
+      message: input.message,
+      priority: priority(input.level),
+      ...(input.tags?.length ? { tags: input.tags } : {}),
+    };
+    let body = JSON.stringify(
+      input.click ? { ...basePayload, click: input.click } : basePayload,
+    );
+    if (input.click && Buffer.byteLength(body, 'utf8') > 4_000) {
+      body = JSON.stringify(basePayload);
+    }
     const response = await fetch(providerUrl('/'), {
       method: 'POST',
       headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
-      body: JSON.stringify({
-        topic,
-        title: input.title,
-        message: input.message,
-        priority: priority(input.level),
-        ...(input.tags?.length ? { tags: input.tags } : {}),
-        ...(input.click ? { click: input.click } : {}),
-      }),
+      body,
     });
     if (!response.ok) throw new NotifyError('notify_unavailable');
     return { target: input.target, title: input.title, level: input.level };

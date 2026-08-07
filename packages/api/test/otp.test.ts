@@ -279,6 +279,25 @@ describe('extractLinks', () => {
       'https://b.example/c',
     ]);
   });
+
+  test('bareUrlSpans stays linear when many unbalanced closers precede whitespace', () => {
+    // Each closer used to re-scan to the distant whitespace (O(n²)); nextWs is O(1).
+    const adversarial =
+      `https://a.example/path${')'.repeat(40_000)} https://b.example/other`;
+    const started = performance.now();
+    const links = extractHttpLinks(adversarial);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    // Free trailing ) peel leaves path; second URL still found after whitespace.
+    expect(links).toEqual(['https://a.example/path', 'https://b.example/other']);
+  });
+
+  test('JS whitespace (NBSP, em space) ends a bare URL candidate', () => {
+    const nbsp = `https://example.com/verify?token=abc\u00A0NEXT`;
+    expect(extractHttpLinks(nbsp)).toEqual(['https://example.com/verify?token=abc']);
+    expect(extractHttpLinks(nbsp)[0]).not.toContain('%C2%A0');
+    const em = `https://example.com/verify?token=abc\u2003NEXT`;
+    expect(extractHttpLinks(em)).toEqual(['https://example.com/verify?token=abc']);
+  });
 });
 
 describe('extractOtp (combined)', () => {

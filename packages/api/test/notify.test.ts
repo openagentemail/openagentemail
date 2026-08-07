@@ -24,6 +24,7 @@ const {
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
+  NtfyNotificationService,
   physicalAgentTopic,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
@@ -285,6 +286,60 @@ describe('phone device ACL', () => {
         expect.objectContaining({ topic: expect.stringMatching(/^user-low-/), permission: 'read-only' }),
       ]);
       expect(calls[3]?.body).toEqual({ username: expect.stringMatching(/^phone-/) });
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+});
+
+describe('ntfy publish payload budget', () => {
+  test('drops click when serialized JSON would exceed 4000 bytes', async () => {
+    const captured: string[] = [];
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (_input, init) => {
+      captured.push(String(init?.body ?? ''));
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      const longClick = `https://dash.example/ui/${'x'.repeat(800)}`;
+      await svc.publish({
+        target: 'user',
+        title: 'openagent.email new mail',
+        message: 'm'.repeat(3_500),
+        level: 'normal',
+        tags: ['email'],
+        click: longClick,
+      });
+      expect(captured).toHaveLength(1);
+      expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(4_000);
+      const parsed = JSON.parse(captured[0]!) as Record<string, unknown>;
+      expect(parsed.click).toBeUndefined();
+      expect(parsed.message).toBe('m'.repeat(3_500));
+
+      captured.length = 0;
+      await svc.publish({
+        target: 'user',
+        title: 'short',
+        message: 'hello',
+        level: 'normal',
+        click: 'https://dash.example/ui',
+      });
+      expect(captured).toHaveLength(1);
+      expect(JSON.parse(captured[0]!)).toMatchObject({
+        message: 'hello',
+        click: 'https://dash.example/ui',
+      });
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }

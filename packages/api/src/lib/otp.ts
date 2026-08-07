@@ -148,16 +148,9 @@ export function validatedHttpUrl(candidate: string): string | null {
   }
 }
 
-function isAsciiWhitespace(ch: string): boolean {
-  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f';
-}
-
-/** True if [from, to) has no ASCII whitespace (Markdown glue between links). */
-function isWhitespaceFree(text: string, from: number, to: number): boolean {
-  for (let i = from; i < to; i++) {
-    if (isAsciiWhitespace(text[i]!)) return false;
-  }
-  return true;
+/** JS `\\s` set (NBSP, em space, etc.) — same rule for scan and glue checks. */
+function isJsWhitespace(ch: string): boolean {
+  return /\s/.test(ch);
 }
 
 /** Non-overlapping positions of https?:// (case-insensitive). O(n). */
@@ -251,21 +244,31 @@ export type BareUrlSpan = {
  * an unbalanced closer is a hard cut only when the next scheme is glued with
  * no whitespace (Markdown chain); otherwise it stays in the URL (WHATWG).
  * Bounded tail peel removes free trailers without re-matching the remainder.
+ *
+ * Glue checks use a monotonic nextWs pointer (first JS-whitespace index at or
+ * after the current probe) so 40k unbalanced closers stay O(n), not O(n²).
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
   const schemePos = findSchemePositions(text);
   let schemeIdx = 0;
+  // First whitespace index at or after this value; only advances.
+  let nextWs = 0;
+  const ensureNextWs = (from: number) => {
+    if (nextWs < from) nextWs = from;
+    while (nextWs < text.length && !isJsWhitespace(text[nextWs]!)) nextWs += 1;
+  };
 
   while (schemeIdx < schemePos.length) {
     const start = schemePos[schemeIdx]!;
     let parenDepth = 0;
     let bracketDepth = 0;
     let end = text.length;
+    ensureNextWs(start);
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
-      if (isAsciiWhitespace(ch) || ch === '<' || ch === '>' || ch === '"') {
+      if (isJsWhitespace(ch) || ch === '<' || ch === '>' || ch === '"') {
         end = i;
         break;
       }
@@ -282,13 +285,11 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           parenDepth -= 1;
           continue;
         }
-        // Unbalanced closer: cut only if next scheme is glued (no whitespace).
+        // Unbalanced closer: glued to next scheme iff no whitespace in between.
+        // nextWs is the first whitespace index >= i+1 (monotonic O(1) query).
+        ensureNextWs(i + 1);
         const nextScheme = schemePos[schemeIdx + 1];
-        if (
-          nextScheme !== undefined &&
-          nextScheme > i &&
-          isWhitespaceFree(text, i + 1, nextScheme)
-        ) {
+        if (nextScheme !== undefined && nextScheme > i && nextWs >= nextScheme) {
           end = i;
           break;
         }
@@ -299,12 +300,9 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           bracketDepth -= 1;
           continue;
         }
+        ensureNextWs(i + 1);
         const nextScheme = schemePos[schemeIdx + 1];
-        if (
-          nextScheme !== undefined &&
-          nextScheme > i &&
-          isWhitespaceFree(text, i + 1, nextScheme)
-        ) {
+        if (nextScheme !== undefined && nextScheme > i && nextWs >= nextScheme) {
           end = i;
           break;
         }
