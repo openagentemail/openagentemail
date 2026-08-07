@@ -330,6 +330,8 @@ describe('ntfy publish payload budget', () => {
       level: 'normal',
       tags: ['email'],
       click: longClick,
+      // Fits after click-drop; overflow mode must not matter.
+      overflow: 'error',
     });
     expect(captured).toHaveLength(1);
     expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
@@ -367,6 +369,7 @@ describe('ntfy publish payload budget', () => {
       level: 'urgent',
       tags: ['email'],
       click: 'https://dash.example/ui',
+      overflow: 'truncate', // watcher path (F76)
     });
     expect(captured).toHaveLength(1);
     const raw = captured[0]!;
@@ -416,6 +419,7 @@ describe('ntfy publish payload budget', () => {
       level: 'urgent',
       tags: ['email'],
       click: 'https://dash.example/ui',
+      overflow: 'truncate',
     });
     expect(captured).toHaveLength(1);
     const raw = captured[0]!;
@@ -424,6 +428,66 @@ describe('ntfy publish payload budget', () => {
     expect(parsed.click).toBeUndefined();
     expect(typeof parsed.message).toBe('string');
     expect((parsed.message as string).endsWith('…')).toBe(true);
+  }));
+
+  test('default overflow errors on oversize ASCII; truncate mode still sends (F76)', withPublishCapture(async (svc, captured) => {
+    const huge = 'a'.repeat(4_000);
+    await expect(
+      svc.publish({
+        target: 'user',
+        title: 'openagent.email new mail',
+        message: huge,
+        level: 'normal',
+        tags: ['email'],
+      }),
+    ).rejects.toMatchObject({
+      code: 'message_too_large',
+      details: {
+        maxRequestBytes: NTFY_REQUEST_MAX_BYTES,
+        availableMessageBytes: expect.any(Number),
+      },
+    } satisfies Partial<NotifyError>);
+    expect(captured).toHaveLength(0);
+
+    await svc.publish({
+      target: 'user',
+      title: 'openagent.email new mail',
+      message: huge,
+      level: 'normal',
+      tags: ['email'],
+      overflow: 'truncate',
+    });
+    expect(captured).toHaveLength(1);
+    const parsed = JSON.parse(captured[0]!) as { message: string };
+    expect(parsed.message.endsWith('…')).toBe(true);
+    expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+  }));
+
+  test('default overflow errors on oversize CJK; truncate stays code-point safe (F76)', withPublishCapture(async (svc, captured) => {
+    const hugeCjk = '字'.repeat(4_000);
+    await expect(
+      svc.publish({
+        target: 'user',
+        title: 't',
+        message: hugeCjk,
+        level: 'normal',
+      }),
+    ).rejects.toMatchObject({ code: 'message_too_large' } satisfies Partial<NotifyError>);
+    expect(captured).toHaveLength(0);
+
+    await svc.publish({
+      target: 'user',
+      title: 't',
+      message: hugeCjk,
+      level: 'normal',
+      overflow: 'truncate',
+    });
+    expect(captured).toHaveLength(1);
+    const parsed = JSON.parse(captured[0]!) as { message: string };
+    expect(parsed.message.endsWith('…')).toBe(true);
+    // No lone high/low surrogate split — JSON round-trip stays valid.
+    expect(() => JSON.parse(captured[0]!)).not.toThrow();
+    expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
   }));
 
   test('beforeSend false aborts before fetch; true allows send (F47)', withPublishCapture(async (svc, captured) => {
@@ -449,6 +513,76 @@ describe('ntfy publish payload budget', () => {
     expect(JSON.parse(captured[0]!)).toMatchObject({ message: 'm' });
   }));
 });
+
+describe('manual notify overflow via /v1/notify (F76)', () => {
+  test('oversize message returns 413 with budget fields; in-budget delivers full body', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    const captured: string[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      captured.push(String(init?.body ?? ''));
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'admin' });
+      await next();
+    });
+    app.route('/v1/notify', createNotifyRoutes({
+      service: new NtfyNotificationService(),
+      publicUrl: 'https://notify.test',
+    }));
+    try {
+      const over = await app.request('/v1/notify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          target: 'user',
+          title: 'wake',
+          message: 'a'.repeat(4_000),
+          level: 'normal',
+        }),
+      });
+      expect(over.status).toBe(413);
+      const errBody = await over.json() as {
+        error: string;
+        maxRequestBytes: number;
+        availableMessageBytes: number;
+      };
+      expect(errBody.error).toBe('message_too_large');
+      expect(errBody.maxRequestBytes).toBe(NTFY_REQUEST_MAX_BYTES);
+      expect(errBody.availableMessageBytes).toBeGreaterThan(0);
+      expect(errBody.availableMessageBytes).toBeLessThan(NTFY_REQUEST_MAX_BYTES);
+      expect(captured).toHaveLength(0);
+
+      const ok = await app.request('/v1/notify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          target: 'user',
+          title: 'wake',
+          message: 'fits fine',
+          level: 'normal',
+        }),
+      });
+      expect(ok.status).toBe(200);
+      expect(captured).toHaveLength(1);
+      expect(JSON.parse(captured[0]!)).toMatchObject({ message: 'fits fine' });
+      expect(String(JSON.parse(captured[0]!).message)).not.toMatch(/…$/);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+});
+
 describe('private ntfy topic mapping', () => {
   test('low alerts use the separate low-priority user route', () => {
     expect(userRouteKey('urgent')).toBe('userAlerts');

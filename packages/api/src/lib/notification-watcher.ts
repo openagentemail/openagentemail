@@ -342,6 +342,9 @@ export async function processWatchedMessage(
           message: body,
           level,
           tags: ['email'],
+          // Truncate rather than throw: publish errors before UID advance stall
+          // the watcher (F76). Manual /v1/notify keeps the default overflow=error.
+          overflow: 'truncate',
           ...(clickUrl ? { click: clickUrl } : {}),
           ...(beforeSend ? { beforeSend } : {}),
         });

@@ -6,6 +6,7 @@ import { config, normalizeUrl } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import {
   NotifyError,
+  NTFY_REQUEST_MAX_BYTES,
   createNotificationDevice,
   type NotificationDevice,
   type NotifyLevel,
@@ -53,6 +54,17 @@ function notificationError(c: Context, err: unknown) {
     return c.json({ error: err.code }, 503);
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  if (err.code === 'message_too_large') {
+    // 413: payload exceeds the ntfy request budget after framing (F76).
+    return c.json(
+      {
+        error: err.code,
+        maxRequestBytes: err.details?.maxRequestBytes ?? NTFY_REQUEST_MAX_BYTES,
+        availableMessageBytes: err.details?.availableMessageBytes ?? 0,
+      },
+      413,
+    );
+  }
   return c.json({ error: err.code }, 502);
 }
 

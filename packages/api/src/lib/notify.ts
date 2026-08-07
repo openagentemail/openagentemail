@@ -17,6 +17,15 @@ import { findIdentity, listIdentities, type Identity } from './identities.ts';
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
 export type NotifyTopic = 'self' | 'user-alerts' | 'user-low' | `agent:${string}`;
+/**
+ * When serialized ntfy JSON still exceeds NTFY_REQUEST_MAX_BYTES after optional
+ * click-drop (F76):
+ * - `truncate` — shorten message with ellipsis (mail-arrival watcher only; must
+ *   not throw or the UID watermark stalls).
+ * - `error` — throw message_too_large (default; manual /v1/notify must not
+ *   silently cut the body and return 200).
+ */
+export type NotifyOverflow = 'truncate' | 'error';
 
 export interface NotifyInput {
   target: NotifyTarget;
@@ -31,6 +40,8 @@ export interface NotifyInput {
    * immediately before fetch(). Return false to abort without sending.
    */
   beforeSend?: () => boolean;
+  /** Default `error`. Watcher passes `truncate`. Click-drop runs before this. */
+  overflow?: NotifyOverflow;
 }
 
 export interface NotifyMessage {
@@ -67,7 +78,12 @@ export class NotifyError extends Error {
       | 'notify_unavailable'
       | 'notify_cancelled'
       | 'verify_failed'
-      | 'unknown_agent',
+      | 'unknown_agent'
+      | 'message_too_large',
+    public readonly details?: {
+      maxRequestBytes: number;
+      availableMessageBytes: number;
+    },
   ) {
     super(code);
   }
@@ -548,10 +564,10 @@ export class NtfyNotificationService implements NotifyService {
     const current = await this.assertEnabled();
     const topic = await physicalTopic(input.target, input.level);
     // ntfy rejects bodies near ~4096 bytes. Prefer keeping click; if the
-    // serialized body is still over budget after dropping click, truncate only
-    // message (topic/title/tags are our short bounded strings, not attacker
-    // mail content). JSON escaping can expand control chars past the watcher
-    // raw-byte cap, so this is the final serialization-layer backstop.
+    // serialized body is still over budget after dropping click, either
+    // truncate message (watcher) or error (manual). Click-drop always runs
+    // first so its budget relief still counts for both overflow modes (F76).
+    const overflow = input.overflow ?? 'error';
     const basePayload = {
       topic,
       title: input.title,
@@ -572,10 +588,14 @@ export class NtfyNotificationService implements NotifyService {
         JSON.stringify({ ...basePayload, message: '' }),
         'utf8',
       );
-      basePayload.message = boundJsonEscapedText(
-        input.message,
-        NTFY_REQUEST_MAX_BYTES - overhead,
-      );
+      const availableMessageBytes = Math.max(0, NTFY_REQUEST_MAX_BYTES - overhead);
+      if (overflow === 'error') {
+        throw new NotifyError('message_too_large', {
+          maxRequestBytes: NTFY_REQUEST_MAX_BYTES,
+          availableMessageBytes,
+        });
+      }
+      basePayload.message = boundJsonEscapedText(input.message, availableMessageBytes);
       body = JSON.stringify(basePayload);
     }
     // After assertEnabled/physicalTopic awaits: last chance to drop a payload

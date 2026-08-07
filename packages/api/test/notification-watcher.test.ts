@@ -96,6 +96,8 @@ describe('mail-arrival notification watcher', () => {
     expect(calls[0].target).toBe('user');
     expect(calls[0].message).toBe('target@test.example received new email (contains OTP or verification link)');
     expect(calls[0].level).toBe('urgent');
+    // Watcher must truncate on ntfy budget overflow, never throw (F76 UID safety).
+    expect(calls[0].overflow).toBe('truncate');
     // Tier 1 (default): no subject, sender, or code content in the payload.
     expect(JSON.stringify(calls[0])).not.toContain(subject);
     expect(JSON.stringify(calls[0])).not.toContain('stranger@example.net');
