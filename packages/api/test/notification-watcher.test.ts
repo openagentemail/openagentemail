@@ -1826,6 +1826,29 @@ describe('mail-arrival notification watcher', () => {
     expect(linksBlock).not.toMatch(/verify\?token=abc\)!/);
   });
 
+  test('tier 3 push keeps clean URL from closer-colon wrapper (F96)', async () => {
+    const mailBody =
+      'See this link (secure: https://example.com/verify?token=abc): Finish setup.';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: Verify\r\n\r\n${mailBody}`,
+        'Verify',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    const linksBlock = body.split('\nLinks:\n')[1] ?? '';
+    expect(linksBlock.split('\n')[0]).toBe('https://example.com/verify?token=abc');
+    expect(linksBlock).not.toMatch(/verify\?token=abc\):/);
+  });
+
   test('click field is present only when clickUrl is provided', async () => {
     const mail = message(
       'stranger@example.net',

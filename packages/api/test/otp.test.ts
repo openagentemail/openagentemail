@@ -856,6 +856,38 @@ describe('extractLinks', () => {
       'https://example.com/verify',
     ]);
   });
+
+  test('peels colon after prose closers; keeps bare trailing colon (F96)', () => {
+    // Non-adjacent wrappers with closer-glued colon.
+    expect(extractHttpLinks('See this link (secure: https://example.com/verify): now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('docs [see: https://example.com/d]: next')).toEqual([
+      'https://example.com/d',
+    ]);
+    expect(extractHttpLinks("note 'see https://example.com/v': end")).toEqual([
+      'https://example.com/v',
+    ]);
+    // Stacked punct after closer-colon.
+    expect(extractHttpLinks('See (secure: https://example.com/verify):.')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Balanced path parens kept; colon peels.
+    expect(extractHttpLinks('see https://example.com/a_(b): end')).toEqual([
+      'https://example.com/a_(b)',
+    ]);
+    // Bare trailing colon kept (conservative; not closer-preceded).
+    expect(extractHttpLinks('see https://example.com/v: done')).toEqual([
+      'https://example.com/v:',
+    ]);
+    // Port and mid-URL colon unchanged.
+    expect(extractHttpLinks('see https://example.com:8080/x?q=1 ok')).toEqual([
+      'https://example.com:8080/x?q=1',
+    ]);
+    expect(extractHttpLinks('go https://example.com/a:b now')).toEqual([
+      'https://example.com/a:b',
+    ]);
+  });
 });
 
 describe('extractOtp (combined)', () => {

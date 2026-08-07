@@ -409,18 +409,29 @@ function findSchemePositions(text: string): number[] {
   return positions;
 }
 
-/** Prose terminal punctuation that may trail a URL (peel loop / F90–F92). */
+/**
+ * Prose terminal punctuation that may trail a URL (peel loop / F90–F96).
+ * Includes `:` for look-back over stacked trailers (e.g. `):.`) but bare `:`
+ * peels only with closer context (F96) — never unconditional.
+ */
 function isUrlTerminalPunct(ch: string): boolean {
-  return ch === '.' || ch === ',' || ch === ';' || ch === '!' || ch === '?';
+  return (
+    ch === '.' ||
+    ch === ',' ||
+    ch === ';' ||
+    ch === '!' ||
+    ch === '?' ||
+    ch === ':'
+  );
 }
 
 /**
- * Whether a trailing `!` at candidate[end-1] is prose punctuation glued to a
- * closer `)`/`]`/`'` (possibly with other terminal punct in between), not a
- * legal URL-final bang (F92). Look-back is O(length) over the suffix only.
+ * Whether a trailing `!` or `:` at candidate[end-1] is prose punctuation glued
+ * to a closer `)`/`]`/`'` (possibly with other terminal punct in between), not
+ * a legal URL-final bang/colon (F92/F96). Look-back is O(length) over the suffix.
  */
-function bangHasCloserContext(candidate: string, end: number): boolean {
-  // Skip the `!` itself, then any run of terminal punct, then require a closer.
+function terminalPunctHasCloserContext(candidate: string, end: number): boolean {
+  // Skip the terminal char itself, then any run of terminal punct, then require a closer.
   let i = end - 2;
   while (i >= 0 && isUrlTerminalPunct(candidate[i]!)) i -= 1;
   if (i < 0) return false;
@@ -430,11 +441,14 @@ function bangHasCloserContext(candidate: string, end: number): boolean {
 
 /**
  * Peel trailing prose from a bounded candidate [0, length): `.,;?`, conditional
- * trailing `!`, unbalanced trailing `)`/`]`, and trailing `'`.
+ * trailing `!`/`:`, unbalanced trailing `)`/`]`, and trailing `'`.
  * - Terminal `?` peels like `.`/`,`/`;` (empty query ≈ no query; sentence `?`
  *   is common). Mid-URL `?query` is never trailing and stays put.
  * - Terminal `!` peels only with closer context (`)!` / `]!` / `'!` / `).!`),
  *   so bare `…/token!` keeps the bang (F90 + F92). Mid-URL `!` stays put.
+ * - Terminal `:` peels only with closer context (`)!` form twin: `):` / `]:` /
+ *   `':` / `):.`), so bare `…/v:` keeps the colon (F96). Port/mid-URL `:` are
+ *   never trailing and stay put.
  * - openQuoted false: peel `'` only while the remaining apostrophe count is odd.
  * - openQuoted true (span started after prose `'`): peel exactly one closing
  *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
@@ -463,7 +477,7 @@ function peelTrailingProse(
     else if (ch === "'") apostrophes += 1;
   }
 
-  // openQuoted: authorize exactly one outer closer peel (after any .,;!?).
+  // openQuoted: authorize exactly one outer closer peel (after any .,;!?:).
   let peelOpenQuote = openQuoted;
   let end = candidate.length;
   while (end > 0) {
@@ -472,9 +486,9 @@ function peelTrailingProse(
       end -= 1;
       continue;
     }
-    // F92: peel `!` only when glued to ) ] ' (skip other terminal punct in between).
-    if (ch === '!') {
-      if (bangHasCloserContext(candidate, end)) {
+    // F92/F96: peel `!` or `:` only when glued to ) ] ' (skip other terminal punct).
+    if (ch === '!' || ch === ':') {
+      if (terminalPunctHasCloserContext(candidate, end)) {
         end -= 1;
         continue;
       }
