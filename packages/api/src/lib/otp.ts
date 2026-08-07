@@ -153,43 +153,52 @@ export function validatedHttpUrl(candidate: string): string | null {
 
 /**
  * Split a bare-URL regex match into the real URL (`clean`) and prose tail
- * (`trail`). One O(n) count of brackets/apostrophes, then one right-to-left pass:
- * strip trailing `.,;`; strip trailing `)`/`]` only while closers outnumber
- * openers; strip a trailing `'` while the remaining apostrophe count is odd
- * (prose closer `'…url'` → peel one; even count or mid-string `it's` stays).
- * Must stay O(n) — never re-count on each trim (that reintroduces O(n²)).
+ * (`trail`). O(n):
+ * 1) Left-to-right depth scan — first `)`/`]` that makes its depth negative is
+ *    a hard cut (covers free trailers and mid-string boundaries like
+ *    `…/verify)[Confirm](https://…` between adjacent Markdown links).
+ * 2) On the remaining clean prefix, right-to-left peel of trailing `.,;` and
+ *    of a trailing `'` while the remaining apostrophe count is odd; peeled
+ *    chars are prepended onto trail to preserve order.
+ * Balanced nested `()`/`[]` never go negative and stay on the URL.
  */
 export function splitBareUrlCandidate(candidate: string): { clean: string; trail: string } {
   if (!candidate) return { clean: '', trail: '' };
 
-  let openParen = 0;
-  let closeParen = 0;
-  let openBracket = 0;
-  let closeBracket = 0;
-  let apostrophes = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let cut = candidate.length;
   for (let i = 0; i < candidate.length; i++) {
     const ch = candidate[i]!;
-    if (ch === '(') openParen += 1;
-    else if (ch === ')') closeParen += 1;
-    else if (ch === '[') openBracket += 1;
-    else if (ch === ']') closeBracket += 1;
-    else if (ch === "'") apostrophes += 1;
+    if (ch === '(') parenDepth += 1;
+    else if (ch === ')') {
+      parenDepth -= 1;
+      if (parenDepth < 0) {
+        cut = i;
+        break;
+      }
+    } else if (ch === '[') bracketDepth += 1;
+    else if (ch === ']') {
+      bracketDepth -= 1;
+      if (bracketDepth < 0) {
+        cut = i;
+        break;
+      }
+    }
   }
 
-  let end = candidate.length;
+  let clean = candidate.slice(0, cut);
+  let trail = candidate.slice(cut);
+
+  let apostrophes = 0;
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] === "'") apostrophes += 1;
+  }
+
+  let end = clean.length;
   while (end > 0) {
-    const ch = candidate[end - 1]!;
+    const ch = clean[end - 1]!;
     if (ch === '.' || ch === ',' || ch === ';') {
-      end -= 1;
-      continue;
-    }
-    if (ch === ')' && closeParen > openParen) {
-      closeParen -= 1;
-      end -= 1;
-      continue;
-    }
-    if (ch === ']' && closeBracket > openBracket) {
-      closeBracket -= 1;
       end -= 1;
       continue;
     }
@@ -202,13 +211,54 @@ export function splitBareUrlCandidate(candidate: string): { clean: string; trail
     break;
   }
 
-  return { clean: candidate.slice(0, end), trail: candidate.slice(end) };
+  if (end < clean.length) {
+    trail = clean.slice(end) + trail;
+    clean = clean.slice(0, end);
+  }
+
+  return { clean, trail };
+}
+
+/** One prose URL span after splitBareUrlCandidate (indices into the full text). */
+export type BareUrlSpan = {
+  /** Start index of `clean` in the full text. */
+  start: number;
+  /** Exclusive end index of `clean` in the full text. */
+  end: number;
+  clean: string;
+};
+
+/**
+ * Walk prose for bare URL cleans. After each hit, resume scanning at
+ * matchStart + clean.length so trail (e.g. `)[Confirm](https://…`) re-enters
+ * the scan and adjacent Markdown links split correctly.
+ */
+export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
+  if (!text) return;
+  const re = new RegExp(BARE_URL_RE.source, BARE_URL_RE.flags);
+  let pos = 0;
+  while (pos < text.length) {
+    re.lastIndex = pos;
+    const match = re.exec(text);
+    if (!match) break;
+    const matchStart = match.index;
+    const { clean } = splitBareUrlCandidate(match[0]);
+    if (clean.length === 0) {
+      // Avoid an infinite loop on a pathological zero-length clean.
+      pos = matchStart + Math.max(1, match[0].length);
+      continue;
+    }
+    // clean is always a prefix of the regex match under splitBareUrlCandidate.
+    yield { start: matchStart, end: matchStart + clean.length, clean };
+    pos = matchStart + clean.length;
+  }
 }
 
 /**
  * Replace bare URLs in `text` whose validatedHttpUrl form is in `normalizedLinks`
  * with `placeholder`, keeping the original spelling span as the match (so
  * EXAMPLE.com:443 still redacts when the needle is https://example.com/...).
+ * Each adjacent link is a separate span so Markdown chains mask fully.
  */
 export function maskNormalizedHttpUrls(
   text: string,
@@ -218,12 +268,16 @@ export function maskNormalizedHttpUrls(
   if (!text || normalizedLinks.length === 0) return text;
   const targets = new Set(normalizedLinks.filter(Boolean));
   if (targets.size === 0) return text;
-  return text.replace(BARE_URL_RE, (raw) => {
-    const { clean, trail } = splitBareUrlCandidate(raw);
-    const validated = validatedHttpUrl(clean);
-    if (validated && targets.has(validated)) return `${placeholder}${trail}`;
-    return raw;
-  });
+  let out = '';
+  let cursor = 0;
+  for (const span of bareUrlSpans(text)) {
+    out += text.slice(cursor, span.start);
+    const validated = validatedHttpUrl(span.clean);
+    out += validated && targets.has(validated) ? placeholder : span.clean;
+    cursor = span.end;
+  }
+  out += text.slice(cursor);
+  return out;
 }
 
 /**
@@ -234,9 +288,8 @@ export function maskNormalizedHttpUrls(
 export function extractLinks(text: string, html?: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
-  const push = (url: string) => {
-    const { clean } = splitBareUrlCandidate(url);
-    const validated = validatedHttpUrl(clean);
+  const pushValidated = (candidate: string) => {
+    const validated = validatedHttpUrl(candidate);
     if (validated && !seen.has(validated)) {
       seen.add(validated);
       links.push(validated);
@@ -244,12 +297,15 @@ export function extractLinks(text: string, html?: string): string[] {
   };
 
   if (html) {
+    // Anchor hrefs are attribute-delimited — never prose-trim their tails.
     for (const a of extractAnchors(html)) {
-      if (/^https?:\/\//i.test(a.url) && looksLikeActionLink(a.url, a.anchorText)) push(a.url);
+      if (/^https?:\/\//i.test(a.url) && looksLikeActionLink(a.url, a.anchorText)) {
+        pushValidated(a.url);
+      }
     }
   }
-  for (const m of text.matchAll(BARE_URL_RE)) {
-    if (looksLikeActionLink(m[0])) push(m[0]);
+  for (const span of bareUrlSpans(text)) {
+    if (looksLikeActionLink(span.clean)) pushValidated(span.clean);
   }
   return links;
 }
@@ -274,9 +330,8 @@ export function extractOtp(text: string, html?: string): OtpExtraction {
 export function extractHttpLinks(text: string, html?: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
-  const push = (candidate: string) => {
-    const { clean } = splitBareUrlCandidate(candidate);
-    const validated = validatedHttpUrl(clean);
+  const pushValidated = (candidate: string) => {
+    const validated = validatedHttpUrl(candidate);
     if (validated && !seen.has(validated)) {
       seen.add(validated);
       links.push(validated);
@@ -284,9 +339,10 @@ export function extractHttpLinks(text: string, html?: string): string[] {
   };
 
   if (html) {
-    for (const anchor of extractAnchors(html)) push(anchor.url);
+    // Anchor hrefs are attribute-delimited — never prose-trim their tails.
+    for (const anchor of extractAnchors(html)) pushValidated(anchor.url);
   }
   const visibleText = [text, html ? htmlToText(html) : ''].join('\n');
-  for (const match of visibleText.matchAll(BARE_URL_RE)) push(match[0]);
+  for (const span of bareUrlSpans(visibleText)) pushValidated(span.clean);
   return links;
 }

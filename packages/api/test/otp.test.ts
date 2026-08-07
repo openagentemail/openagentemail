@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
   BARE_URL_RE,
+  bareUrlSpans,
   extractCodes,
   extractHttpLinks,
   extractLinks,
   extractOtp,
   htmlToText,
+  maskNormalizedHttpUrls,
   splitBareUrlCandidate,
 } from '../src/lib/otp.ts';
 
@@ -209,6 +211,45 @@ describe('extractLinks', () => {
       clean: 'https://example.com/verify?token=a',
       trail: "'.",
     });
+    // Mid-string free closer between adjacent Markdown links.
+    expect(
+      splitBareUrlCandidate(
+        'https://a.example/verify)[Confirm](https://b.example/confirm',
+      ),
+    ).toEqual({
+      clean: 'https://a.example/verify',
+      trail: ')[Confirm](https://b.example/confirm',
+    });
+  });
+
+  test('HTML anchor hrefs keep a literal trailing ) that prose trim would peel', () => {
+    const html =
+      '<a href="https://example.com/confirm?token=abc)">Confirm your account</a>';
+    expect(extractLinks('Confirm your account', html)).toEqual([
+      'https://example.com/confirm?token=abc)',
+    ]);
+    // Prose path still peels free trailers.
+    expect(extractHttpLinks('(see https://x.com/a)')).toEqual(['https://x.com/a']);
+  });
+
+  test('adjacent Markdown links split into two bare spans and mask fully', () => {
+    const text = '[Verify](https://a.example/verify)[Confirm](https://b.example/confirm)';
+    const spans = [...bareUrlSpans(text)].map((s) => s.clean);
+    expect(spans).toEqual([
+      'https://a.example/verify',
+      'https://b.example/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual([
+      'https://a.example/verify',
+      'https://b.example/confirm',
+    ]);
+    // Monster merge must not appear as a single extracted URL.
+    expect(extractHttpLinks(text).join(' ')).not.toContain(')[Confirm](');
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    expect(masked).toBe('[Verify](•••)[Confirm](•••)');
+    expect(masked).not.toContain('a.example');
+    expect(masked).not.toContain('b.example');
+    expect(masked).not.toContain('https://');
   });
 });
 

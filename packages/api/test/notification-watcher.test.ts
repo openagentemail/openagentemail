@@ -538,6 +538,34 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('https://');
   });
 
+  test('tier 2 masks every link in an adjacent Markdown chain in the subject', async () => {
+    const subject =
+      '[Verify](https://a.example/verify)[Confirm](https://b.example/confirm)';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('a.example');
+    expect(body).not.toContain('b.example');
+    expect(body).not.toContain('https://');
+    // Markdown structure may remain between placeholders; URLs must not.
+    expect(body).toContain('[Verify](•••)[Confirm](•••)');
+  });
+
   test('tier 2 masks a subject code even when the body has many unrelated codes', () => {
     const bodyCodes = Array.from({ length: 100 }, (_, i) => String(100000 + i));
     const bodyText = bodyCodes.map((code) => `Your verification code is ${code}.`).join(' ');
