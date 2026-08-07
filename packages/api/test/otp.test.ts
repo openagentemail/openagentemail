@@ -189,6 +189,19 @@ describe('extractCodes', () => {
     expect(extractCodes('call 555-12')).toEqual([]);
   });
 
+  test('four digit-group form extracts whole; five+ groups rejected (F74)', () => {
+    expect(extractCodes('Your verification code is 12 34 56 78')).toEqual(['12 34 56 78']);
+    expect(extractCodes('Your PIN is 12-34-56-78')).toEqual(['12-34-56-78']);
+    // 5+ groups: no prefix/suffix partial matches.
+    expect(extractCodes('Your code is 12 34 56 78 90')).toEqual([]);
+    // F73/F68 regressions.
+    expect(extractCodes('Your code is 12 34 56')).toEqual(['12 34 56']);
+    expect(extractCodes('Your code is 123-456')).toEqual(['123-456']);
+    // Trailing incomplete group: full-run integrity rejects partial prefix.
+    // (Previously F73 could yield ['123-456'] from '123-456-7'.)
+    expect(extractCodes('Your code is 123-456-7')).toEqual([]);
+  });
+
   test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {
     const nbsp = '\u00A0';
     const nnbsp = '\u202F';

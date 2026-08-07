@@ -151,15 +151,28 @@ const DELIMITED_OTP_SEP_MAX = 3;
 const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_SEP_MAX}}`;
 
 /**
- * One digit group of a delimited OTP (F73): 2–4 digits. Full form is 2–3 such
- * groups joined by SEP_RUN: `\d{2,4}(?:SEP_RUN\d{2,4}){1,2}` → e.g. `12 34 56`,
- * `12-34-56`, `1234 - 56`, as well as classic two-group `123-456`.
+ * One digit group of a delimited OTP (F73/F74): 2–4 digits. Full form is 2–4
+ * such groups joined by SEP_RUN:
+ * `\d{2,4}(?:SEP_RUN\d{2,4}){1,3}` → e.g. `12 34 56`, `12 34 56 78`,
+ * `12-34-56-78`, classic two-group `123-456`.
  *
- * Not matched (intentional): 4+ groups (`1 2 3 4 5 6`); total digit count may
- * reach 9–12 (privacy-safe over-mask of long labeled number strings).
+ * End guards (F74, shared by capture + run) reject 5+ group chains without
+ * taking a 3–4 group prefix/suffix: trailing `(?!SEP_RUN\d)` and leading
+ * `(?<!\d SEP_RUN)` so engines cannot leave a partial match. Total digits may
+ * reach 4–16 (privacy-safe over-mask of long labeled number strings).
+ * Partial forms like `code 123-456-7` (trailing single digit after sep) no
+ * longer extract a 2-group prefix — full-run integrity wins.
  */
 const DELIMITED_OTP_GROUP = '\\d{2,4}';
-const DELIMITED_OTP_FORM = `${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,2}`;
+const DELIMITED_OTP_FORM = `${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,3}`;
+/**
+ * Leading guard: not immediately after digit+sep (blocks mid-chain starts).
+ * Tradeoff: a valid form glued after e.g. `1 12 34 56` is also refused — rare in OTP mail.
+ */
+const DELIMITED_OTP_LEAD_GUARD = `(?<!\\d${DELIMITED_OTP_SEP_RUN})`;
+/** Trailing guard: not immediately before sep+digit (blocks short prefixes). */
+const DELIMITED_OTP_TAIL_GUARD = `(?!${DELIMITED_OTP_SEP_RUN}\\d)`;
+const DELIMITED_OTP_BOUNDED = `${DELIMITED_OTP_LEAD_GUARD}\\b${DELIMITED_OTP_FORM}\\b${DELIMITED_OTP_TAIL_GUARD}`;
 
 /** Lookbehind for half-suppress: max group digits + max seps + small margin. */
 const HALF_OF_DELIMITED_BEFORE_CHARS = 4 + DELIMITED_OTP_SEP_MAX + 3;
@@ -178,17 +191,20 @@ const HALF_OF_DELIMITED_BEFORE = new RegExp(
  * Callers must not share a single global instance across concurrent scans.
  */
 export function delimitedOtpCaptureRe(): RegExp {
-  return new RegExp(`\\b(${DELIMITED_OTP_FORM})\\b`, 'g');
+  return new RegExp(
+    `${DELIMITED_OTP_LEAD_GUARD}\\b(${DELIMITED_OTP_FORM})\\b${DELIMITED_OTP_TAIL_GUARD}`,
+    'g',
+  );
 }
 
 /**
  * Fresh global regex for continuous 4–8 digit runs and delimited OTP forms.
- * Delimited alternative is first so `12 34 56` / `1234-5678` is one span.
- * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70–F73);
+ * Delimited alternative is first so `12 34 56 78` / `1234-5678` is one span.
+ * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70–F74);
  * half-suppress uses HALF_OF_DELIMITED_* built from the same SEP_RUN/GROUP.
  */
 export function otpCodeRunRe(): RegExp {
-  return new RegExp(`\\b${DELIMITED_OTP_FORM}\\b|\\b\\d{4,8}\\b`, 'g');
+  return new RegExp(`${DELIMITED_OTP_BOUNDED}|\\b\\d{4,8}\\b`, 'g');
 }
 
 /**

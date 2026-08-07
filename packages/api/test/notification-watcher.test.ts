@@ -895,6 +895,45 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('12 34 56');
   });
 
+  test('maskSensitiveFragments masks full four-group form only (F74)', () => {
+    expect(maskSensitiveFragments('code 12 34 56 78', ['12345678'], [])).toBe('code •••');
+    // Shorter canonical must not partial-mask a four-group run.
+    expect(maskSensitiveFragments('code 12 34 56 78', ['123456'], [])).toBe('code 12 34 56 78');
+    expect(maskSensitiveFragments('code 12 34 56 78', ['123456'], [])).not.toContain('•••');
+    // Five+ groups are not a code run at all (including prefix-canon needles).
+    expect(maskSensitiveFragments('code 12 34 56 78 90', ['1234567890'], [])).toBe(
+      'code 12 34 56 78 90',
+    );
+    expect(maskSensitiveFragments('code 12 34 56 78 90', ['12345678'], [])).toBe(
+      'code 12 34 56 78 90',
+    );
+    expect(maskSensitiveFragments('code 12 34 56 78 90', ['12345678'], [])).not.toContain('•••');
+  });
+
+  test('tier 2 masks four-group OTP in subject under policy=all (F74)', async () => {
+    const subject = 'Your verification code is 12 34 56 78';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('12 34 56 78');
+    expect(body).not.toContain('12 34 56');
+    expect(body).not.toContain('78');
+  });
+
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
     const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
       // 6-digit distinct codes that do not appear in the short subject.
