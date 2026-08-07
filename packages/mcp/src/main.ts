@@ -62,12 +62,18 @@ const identitySchema = {
 
 const messageSummarySchema = {
   id: z.string(),
-  from: z.email(),
-  to: z.email(),
+  // from/to carry raw RFC-5322 header values ("Name <addr>"), not bare
+  // addresses — z.email() rejects any real sender with a display name.
+  from: z.string(),
+  to: z.string(),
+  // Optional for forward compatibility with API responses that carry them.
+  fromName: z.string().optional(),
+  toName: z.string().optional(),
   subject: z.string(),
   date: z.string(),
   seen: z.boolean(),
   snippet: z.string(),
+  hasOtp: z.boolean().optional(),
 };
 
 const messageOutputSchema = {
@@ -134,8 +140,8 @@ const taskStateSchema = z.enum(["submitted", "working", "input-required", "compl
 
 const taskMessageSchema = z.object({
   id: z.string(),
-  from: z.email(),
-  to: z.email(),
+  from: z.string(),
+  to: z.string(),
   subject: z.string(),
   date: z.string(),
   state: taskStateSchema,
@@ -145,8 +151,8 @@ const taskMessageSchema = z.object({
 
 const taskOutputSchema = {
   id: z.string().uuid(),
-  from: z.email(),
-  to: z.email(),
+  from: z.string(),
+  to: z.string(),
   subject: z.string(),
   state: taskStateSchema,
   createdAt: z.string(),

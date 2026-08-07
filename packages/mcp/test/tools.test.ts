@@ -166,3 +166,37 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskUpdate, "state", "reopened")).toBe(false);
   expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
 });
+
+test("消息输出 schema 要接受带 display name 的 RFC-5322 From/To（回归）", () => {
+  const ok = (schema: SchemaMap, field: string, value: unknown) =>
+    schema[field]!.safeParse(value).success;
+
+  // 回归：API 原样返回 From/To 头（"Alice <alice@example.com>"），旧 schema
+  // 的 z.email() 会让所有带 display name 的真实邮件过不了 structured output
+  // 校验（zod  strict 模式下 fromName/hasOtp 这类额外字段同理被挡）。
+  const readOut = toolConfigs.get("mail_read_message")!.outputSchema!;
+  expect(ok(readOut, "from", "Alice <alice@example.com>")).toBe(true);
+  expect(ok(readOut, "to", "Bob <bob@example.com>, carol@example.com")).toBe(true);
+  expect(ok(readOut, "from", "plain@example.com")).toBe(true);
+  expect(ok(readOut, "fromName", "Alice")).toBe(true);
+  expect(ok(readOut, "toName", "Bob")).toBe(true);
+
+  const listOut = toolConfigs.get("mail_list_messages")!.outputSchema!;
+  const summary = {
+    id: "5",
+    from: "Alice <alice@example.com>",
+    to: "bob@example.com",
+    subject: "hi",
+    date: "2026-08-06T00:00:00.000Z",
+    seen: false,
+    snippet: "hi",
+    hasOtp: true,
+  };
+  const parsed = listOut.messages!.safeParse([summary]) as {
+    success: boolean;
+    data?: Array<Record<string, unknown>>;
+  };
+  expect(parsed.success).toBe(true);
+  // hasOtp 是已声明的 optional 字段：校验后必须保留，而不是被 strip 掉。
+  expect(parsed.data?.[0]?.hasOtp).toBe(true);
+});
