@@ -346,6 +346,21 @@ const META_ALNUM_DELIMITED_SPACE_LETTER = new RegExp(
     `${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
+/**
+ * Space-separated single-character chains (F106): `A 1 B 2`. Each internal
+ * group is a single alnum **not glued to a following alnum**, so the run
+ * cannot eat the first char of a following word (`A 1 B 2 today` stops at
+ * `2`). Unbounded consume: the whole run is matched, then the predicate
+ * accepts 4–8 groups / drops others whole (F85 doctrine). Candidate only —
+ * mixed acceptance happens in push(); pure-digit and letter-only chains drop.
+ */
+const META_ALNUM_SINGLE = `[${META_ALNUM_CHAR}](?![${META_ALNUM_CHAR}])`;
+const META_ALNUM_DELIMITED_SPACE_SINGLE = new RegExp(
+  `${META_ALNUM_BOUND_LEFT}` +
+    `([${META_ALNUM_CHAR}](?:${META_ALNUM_SEP_SPACE}+${META_ALNUM_SINGLE})+)` +
+    `${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
 /** Split form into groups on any tight or space sep run (F97). */
 const META_ALNUM_SEP_ANY_RUN = new RegExp(
   `(?:${META_ALNUM_SEP_TIGHT}|${META_ALNUM_SEP_SPACE})+`,
@@ -424,6 +439,19 @@ function isPlausibleSingleChain(form: string): boolean {
   return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
 }
 
+/**
+ * Accept a space single-char chain (F106): NFKC, split on space runs, 4–8
+ * groups of exactly 1 char. Mixed/letter acceptance happens in push() via
+ * isMetaAlnumOtpForm — pure-digit and letter-only chains drop there.
+ */
+function isPlausibleSpaceSingleChain(form: string): boolean {
+  const parts = form
+    .normalize('NFKC')
+    .split(new RegExp(`${META_ALNUM_SEP_SPACE}+`))
+    .filter(Boolean);
+  return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
+}
+
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
 function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
@@ -456,8 +484,9 @@ function escapeRegExpLiteral(s: string): string {
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
- * F95 letter-only continuous + F97 letter-only delimited + F105 single-char
- * tight chains). Does not touch body extract semantics.
+ * F95 letter-only continuous + F97 letter-only delimited + F105 tight
+ * single-char chains + F106 space single-char chains). Does not touch body
+ * extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
@@ -503,6 +532,12 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
   for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT_SINGLE)) {
     const form = match[1]!;
     if (!isPlausibleSingleChain(form)) continue;
+    push(form);
+  }
+  // F106: space single-char chains (`A 1 B 2`); same predicate split as F105.
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceSingleChain(form)) continue;
     push(form);
   }
   return codes;
