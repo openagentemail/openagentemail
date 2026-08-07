@@ -81,7 +81,7 @@ export type ProcessWatchedOptions = {
 };
 
 /** In-memory watermark survives a dropped IMAP connection in this process. */
-export type WatcherWatermark = { uid?: number };
+export type WatcherWatermark = { uid?: number; uidValidity?: bigint };
 
 export type MailContentExtras = {
   subject: string;
@@ -95,9 +95,23 @@ export type MailContentExtras = {
  * The first successful connection starts at the mailbox high-water mark so an
  * enable does not replay old mail. Later connections reuse that watermark and
  * therefore pick up mail delivered while the socket was reconnecting.
+ * F111: a recreated mailbox (new UIDVALIDITY) restarts UIDs from scratch, so
+ * the old numeric watermark would reject every replacement message until its
+ * counter climbs back; re-anchor at the new generation's high-water mark.
  */
-export function unseenWatcherUids(uids: number[], watermark: WatcherWatermark): number[] {
+export function unseenWatcherUids(
+  uids: number[],
+  watermark: WatcherWatermark,
+  uidValidity?: bigint,
+): number[] {
   const currentHighWater = Math.max(0, ...uids);
+  if (uidValidity !== undefined && watermark.uidValidity !== uidValidity) {
+    // First sight of this mailbox generation, or a recreated INBOX: re-anchor
+    // instead of comparing against the previous generation's UIDs.
+    watermark.uidValidity = uidValidity;
+    watermark.uid = currentHighWater;
+    return [];
+  }
   if (watermark.uid === undefined) {
     watermark.uid = currentHighWater;
     return [];
@@ -361,6 +375,20 @@ const META_ALNUM_DELIMITED_SPACE_SINGLE = new RegExp(
     `${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
+/**
+ * Mixed-separator single-character chains (F109): `A 1-B 2` — sep runs mixing
+ * whitespace and tight chars of any length between 4–8 groups of exactly 1
+ * alnum. Whole-run consume + SINGLE tail chars mirror F106: a following word's
+ * first char cannot join, and a 9+-group chain drops whole at the predicate.
+ * Pure-space chains stay F106's; push()'s seen set dedupes any overlap.
+ */
+const META_ALNUM_SEP_RUN_MIXED = `(?:${META_ALNUM_SEP_TIGHT}|${META_ALNUM_SEP_SPACE})+`;
+const META_ALNUM_DELIMITED_MIXED_SINGLE = new RegExp(
+  `${META_ALNUM_BOUND_LEFT}` +
+    `([${META_ALNUM_CHAR}](?:${META_ALNUM_SEP_RUN_MIXED}${META_ALNUM_SINGLE})+)` +
+    `${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
 /** Split form into groups on any tight or space sep run (F97). */
 const META_ALNUM_SEP_ANY_RUN = new RegExp(
   `(?:${META_ALNUM_SEP_TIGHT}|${META_ALNUM_SEP_SPACE})+`,
@@ -485,8 +513,8 @@ function escapeRegExpLiteral(s: string): string {
  * Collect alnum OTPs from from/subject when a strong cue is present
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
  * F95 letter-only continuous + F97 letter-only delimited + F105 tight
- * single-char chains + F106 space single-char chains). Does not touch body
- * extract semantics.
+ * single-char chains + F106 space single-char chains + F109 mixed-separator
+ * single-char chains). Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
@@ -538,6 +566,13 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
   for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_SINGLE)) {
     const form = match[1]!;
     if (!isPlausibleSpaceSingleChain(form)) continue;
+    push(form);
+  }
+  // F109: mixed-separator single-char chains (`A 1-B 2`); same predicate as
+  // F105 — overlaps with the tight/space matchers dedupe in push().
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_MIXED_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSingleChain(form)) continue;
     push(form);
   }
   return codes;
@@ -877,6 +912,14 @@ export async function processWatchedMessage(
       // payload with no message content, which is safe and useful.
     }
   }
+  // F110: classify on the subject too — a subject-only code or verify link
+  // (`Subject: Your verification code is 123456` with a plain body) must still
+  // pass the `otp` policy. extras.codes/links stay body-sourced; the subject
+  // line itself shows at tier ≥2 (masked at tier 2), so no payload merge.
+  if (!hasOtpOrLink && extras.subject) {
+    const subjectOtp = extractOtp(extras.subject);
+    hasOtpOrLink = subjectOtp.codes.length > 0 || subjectOtp.links.length > 0;
+  }
   if (policy === 'otp' && !hasOtpOrLink) return;
 
   const clickUrl = options.clickUrl;
@@ -953,8 +996,12 @@ async function watchConnection(
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
   try {
     lock = await client.getMailboxLock('INBOX');
+    // F111: track the selected mailbox generation so a recreated INBOX
+    // re-anchors the watermark instead of starving notifications.
+    // (client.mailbox is `false | MailboxObject` before/without selection.)
+    const uidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
     const initial = await client.search({ all: true }, { uid: true });
-    let pending = unseenWatcherUids(Array.isArray(initial) ? initial : [], watermark);
+    let pending = unseenWatcherUids(Array.isArray(initial) ? initial : [], watermark, uidValidity);
 
     while (!signal.aborted) {
       if (pending.length > 0) {
@@ -986,7 +1033,7 @@ async function watchConnection(
       await Promise.race([client.idle(), sleep(3_000)]);
       if (signal.aborted) break;
       const found = await client.search({ all: true }, { uid: true });
-      pending = unseenWatcherUids(Array.isArray(found) ? found : [], watermark);
+      pending = unseenWatcherUids(Array.isArray(found) ? found : [], watermark, uidValidity);
     }
   } finally {
     lock?.release();

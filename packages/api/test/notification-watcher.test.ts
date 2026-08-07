@@ -91,6 +91,27 @@ describe('mail-arrival notification watcher', () => {
     expect(unseenWatcherUids([10, 11, 12], watermark)).toEqual([12]);
   });
 
+  test('uidvalidity change re-anchors the watermark instead of starving mail (F111)', () => {
+    const watermark: { uid?: number; uidValidity?: bigint } = {};
+    // First sight of the mailbox: anchor at high-water, no replay.
+    expect(unseenWatcherUids([10, 11], watermark, 1000n)).toEqual([]);
+    expect(watermark.uid).toBe(11);
+    expect(watermark.uidValidity).toBe(1000n);
+    // Same generation: only strictly newer UIDs are unseen.
+    expect(unseenWatcherUids([10, 11, 12], watermark, 1000n)).toEqual([12]);
+    // INBOX recreated (new UIDVALIDITY): UIDs restart below the old watermark;
+    // re-anchor on the replacement generation instead of rejecting all of it.
+    expect(unseenWatcherUids([1, 2, 3], watermark, 2000n)).toEqual([]);
+    expect(watermark.uid).toBe(3);
+    expect(watermark.uidValidity).toBe(2000n);
+    // Mail delivered after the re-anchor flows again.
+    expect(unseenWatcherUids([1, 2, 3, 4], watermark, 2000n)).toEqual([4]);
+    // Legacy callers without uidValidity keep numeric-only behavior.
+    const legacy: { uid?: number } = {};
+    expect(unseenWatcherUids([5], legacy)).toEqual([]);
+    expect(unseenWatcherUids([5, 6], legacy)).toEqual([6]);
+  });
+
   test('external OTP mail alerts the user but can never wake an agent', async () => {
     const subject = 'private subject from outside';
     const calls = await dispatches(
@@ -130,6 +151,56 @@ describe('mail-arrival notification watcher', () => {
     expect(await dispatches(ordinary, 'otp')).toEqual([]);
     expect((await dispatches(ordinary, 'all')).map((call) => call.target)).toEqual(['user']);
     expect(await dispatches(ordinary, 'none')).toEqual([]);
+  });
+
+  test('otp policy classifies subject-only codes and links (F110)', async () => {
+    // Subject carries the code while the body is plain: must still alert.
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Your verification code is 123456\r\n\r\nHello there, no code in this body.',
+      ),
+      'otp',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toBe('target@test.example received new email (contains OTP or verification link)');
+    expect(calls[0].level).toBe('urgent');
+    // Tier 1 (default): the subject code still does not enter the payload.
+    expect(JSON.stringify(calls[0])).not.toContain('123456');
+
+    // Envelope-subject fallback (no parseable source) classifies too.
+    const envelopeOnly = await dispatches(
+      {
+        envelope: {
+          from: [{ address: 'stranger@example.net' }],
+          to: [{ address: 'target@test.example' }],
+          subject: 'Your verification code is 654321',
+        },
+        headers: Buffer.from('Delivered-To: target@test.example\r\n'),
+      } as any,
+      'otp',
+    );
+    expect(envelopeOnly).toHaveLength(1);
+
+    // Subject verify-link without a body link alerts as well.
+    const linkCalls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: verify https://example.com/verify?token=abc123\r\n\r\nplain body',
+      ),
+      'otp',
+    );
+    expect(linkCalls).toHaveLength(1);
+
+    // No OTP in subject or body: still gated out.
+    const none = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: lunch tomorrow?\r\n\r\nsee you at noon',
+      ),
+      'otp',
+    );
+    expect(none).toEqual([]);
   });
 
   test('default push content tier is interrupt-only when unset', async () => {
@@ -1358,6 +1429,49 @@ describe('mail-arrival notification watcher', () => {
     // F85/F84 space path regressions.
     expect(extractMetaAlnumCodes('Your verification code is A1 B2 C3')).toContain('A1 B2 C3');
     expect(extractMetaAlnumCodes('Your code is ABC 123')).toContain('ABC 123');
+  });
+
+  test('tier 2 masks mixed-separator single-char chain OTP under strong cue (F109)', () => {
+    // Alternating space/tight chain bypasses both F105 and F106: extract + mask.
+    expect(extractMetaAlnumCodes('Your verification code is A 1-B 2')).toContain('A 1-B 2');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A 1-B 2',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('A 1-B 2');
+    // Alternating styles across the whole chain.
+    expect(extractMetaAlnumCodes('Your verification code is A-1 B-2 C-3')).toContain('A-1 B-2 C-3');
+    // Lowercase + fullwidth mixtures.
+    expect(extractMetaAlnumCodes('Your verification code is a 1-b 2')).toContain('a 1-b 2');
+    expect(extractMetaAlnumCodes('您的验证码是 Ａ １-Ｂ ２')).toContain('Ａ １-Ｂ ２');
+    // Run stops before a following word: chain masks, word stays intact.
+    const prose = maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Your verification code is A 1-B 2 yesterday',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(prose.subject).toContain('yesterday');
+    expect(prose.subject).not.toContain('A 1-B 2');
+    // Shape locks: 3-group too short; 9+-group chain rejected whole (embedded
+    // pure-space 4-group runs may still extract via F106 — pre-existing).
+    expect(extractMetaAlnumCodes('Your verification code is A 1-B')).not.toContain('A 1-B');
+    expect(extractMetaAlnumCodes('Your verification code is A 1-B 2 C-3 D 4 E-5')).not.toContain(
+      'A 1-B 2 C-3 D 4 E-5',
+    );
+    // Letter-only / pure-digit mixed chains stay rejected (F105/F106 policy).
+    expect(extractMetaAlnumCodes('Your verification code is A B-C D')).not.toContain('A B-C D');
+    expect(extractMetaAlnumCodes('Your verification code is 1 2-3 4')).not.toContain('1 2-3 4');
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference A 1-B 2 attached')).toEqual([]);
+    // F105/F106 regressions: pure tight and pure space chains still extract.
+    expect(extractMetaAlnumCodes('Your verification code is A-1-B-2')).toContain('A-1-B-2');
+    expect(extractMetaAlnumCodes('Your verification code is A 1 B 2')).toContain('A 1 B 2');
   });
 
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
