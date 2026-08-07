@@ -141,14 +141,23 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 }
 
 /**
+ * Fresh each call: continuous 4–8 digit runs and delimited OTP forms (F68)
+ * that extractCodes may yield. Delimited alternative is first so `1234-5678`
+ * is one span, not two continuous runs.
+ */
+function metaCodeRunRe(): RegExp {
+  return /\b\d{3,4}[-–—. ]\d{3,4}\b|\b\d{4,8}\b/g;
+}
+
+/**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Codes: scan text for \b\d{4,8}\b and replace when
- * present in the code set (O(text) Set lookups — no multi-branch regex).
+ * (maskNormalizedHttpUrls). Codes: scan continuous \b\d{4,8}\b and delimited
+ * \b\d{3,4}[-–—. ]\d{3,4}\b runs; replace when present in the code set
+ * (O(text) Set lookups — no multi-branch needle alternation).
  *
- * Codes from extractCodes are those same digit runs; scanning the text with
- * the same shape and checking membership masks the same spans without
- * compiling a needle-count alternation.
+ * Codes from extractCodes are those same shapes; scanning with the same forms
+ * and checking membership masks the same spans.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -160,7 +169,7 @@ export function maskSensitiveFragments(
   let result = maskNormalizedHttpUrls(text, links);
   const codeSet = new Set(codes.filter(Boolean));
   if (codeSet.size === 0) return result;
-  return result.replace(/\b\d{4,8}\b/g, (run) => (codeSet.has(run) ? '•••' : run));
+  return result.replace(metaCodeRunRe(), (run) => (codeSet.has(run) ? '•••' : run));
 }
 
 /**
@@ -180,12 +189,12 @@ export function maskTier2Metadata(
   const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
   const metaOtp = extractOtp(metaText);
   const metaHttpLinks = extractHttpLinks(metaText);
-  // Body codes only enter the mask list if they appear as a longest
-  // \b\d{4,8}\b run in metadata (same shape extractCodes would yield).
-  // Intersecting against meta digit runs is O(|meta|) instead of scanning
-  // every body code into per-needle replaces on short subject/from.
+  // Body codes only enter the mask list if they appear as the same continuous
+  // or delimited shape extractCodes yields (F68). Intersecting against meta
+  // runs is O(|meta|) instead of scanning every body code into per-needle
+  // replaces on short subject/from.
   const metaDigitRuns = new Set<string>();
-  for (const match of metaText.matchAll(/\b\d{4,8}\b/g)) {
+  for (const match of metaText.matchAll(metaCodeRunRe())) {
     metaDigitRuns.add(match[0]!);
   }
   const maskCodes = [

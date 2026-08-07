@@ -108,6 +108,21 @@ describe('extractCodes', () => {
     expect(extractCodes('This week in tech: 2024 trends.')).toEqual([]);
   });
 
+  test('delimited OTP forms need strong cues (F68)', () => {
+    expect(extractCodes('Your verification code is 123-456')).toEqual(['123-456']);
+    // Full form only — continuous halves of a real 3–4|3–4 shape are suppressed.
+    expect(extractCodes('Your PIN is 1234-5678')).toEqual(['1234-5678']);
+    // Longer continuous runs are not delimited halves; keep continuous extract.
+    expect(extractCodes('Your code is 123456-7890')).toEqual(['123456', '7890']);
+    expect(extractCodes('code 1234-567890')).toEqual(['1234', '567890']);
+    // Other separators with strong cues.
+    expect(extractCodes('Your OTP is 123–456')).toEqual(['123–456']);
+    expect(extractCodes('验证码 123-456')).toEqual(['123-456']);
+    // No strong cue: roadmap ranges and phone-like numbers stay out.
+    expect(extractCodes('roadmap 2024-2025')).toEqual([]);
+    expect(extractCodes('call 555-1234')).toEqual([]);
+  });
+
   test('dedupes repeated codes', () => {
     expect(extractCodes('code 552211. Again: your code is 552211.')).toEqual(['552211']);
   });
@@ -624,6 +639,31 @@ describe('extractLinks', () => {
     expect(extractHttpLinks("See 'https://example.com/verify/token'' now")).toEqual([
       "https://example.com/verify/token'",
     ]);
+  });
+
+  test('prose brackets cut before free closing ] (F67)', () => {
+    expect(extractHttpLinks('Visit [https://example.com/verify]: now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Free-`]` cut (not only peel): `!` / glued tail are not trailer peel chars.
+    expect(extractHttpLinks('Visit [https://example.com/verify]!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(
+      [...bareUrlSpans('[https://example.com/verify]token=secret')].map((s) => s.clean),
+    ).toEqual(['https://example.com/verify']);
+    // Balanced paren inside still peels outer brackets.
+    expect(extractHttpLinks('[https://a.com/f(1)]')).toEqual(['https://a.com/f(1)']);
+    // Nested brackets: inner [1] is balanced; free outer ] cuts.
+    expect(
+      [...bareUrlSpans('[https://a.com/f[1]]')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f[1]']);
+    // IPv6 host balanced; free outer ] cuts after path.
+    expect(extractHttpLinks('[http://[::1]:8080/v]')).toEqual(['http://[::1]:8080/v']);
+    // No prose `[` opener: free `]` mid-path stays (not a wrapper cut).
+    expect(
+      [...bareUrlSpans('https://a.com/x[1]')].map((s) => s.clean),
+    ).toEqual(['https://a.com/x[1]']);
   });
 });
 

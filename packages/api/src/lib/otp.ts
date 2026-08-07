@@ -79,7 +79,28 @@ function decodeEntities(s: string): string {
     .replace(/&#39;|&apos;/g, "'");
 }
 
-/** Extract 4–8 digit codes appearing near an OTP keyword. */
+/**
+ * Strong OTP cues for year-shaped continuous codes (F65) and delimited forms
+ * (F68). Broader CODE_KEYWORDS alone would false-positive on roadmap years and
+ * phone-like `555-1234` near "call".
+ */
+const STRONG_OTP_CUE = /\b(?:code|otp|passcode|pin)\b|验证码|动态码/;
+
+/**
+ * True when a continuous \d{4,8} run is one half of a delimited OTP shape
+ * (`1234-5678`). Only 3–4 digit sides participate in that shape (continuous
+ * matches are ≥4, so length must be exactly 4); longer runs like
+ * `123456-7890` stay continuous so they are not dropped without recovery.
+ */
+function isHalfOfDelimitedOtp(text: string, idx: number, digits: string): boolean {
+  if (digits.length < 3 || digits.length > 4) return false;
+  const after = text.slice(idx + digits.length);
+  if (/^[-–—. ]\d{3,4}\b/.test(after)) return true;
+  const before = text.slice(Math.max(0, idx - 6), idx);
+  return /\b\d{3,4}[-–—. ]$/.test(before);
+}
+
+/** Extract 4–8 digit codes (continuous or delimited) near an OTP keyword. */
 export function extractCodes(text: string): string[] {
   const lower = text.toLowerCase();
   const codes: string[] = [];
@@ -88,6 +109,8 @@ export function extractCodes(text: string): string[] {
   for (const match of text.matchAll(/\b(\d{4,8})\b/g)) {
     const digits = match[1];
     const idx = match.index ?? 0;
+    // Leave `1234-5678` halves to the delimited pass (F68).
+    if (isHalfOfDelimitedOtp(text, idx, digits)) continue;
     const window = lower.slice(
       Math.max(0, idx - KEYWORD_WINDOW),
       Math.min(lower.length, idx + digits.length + KEYWORD_WINDOW),
@@ -96,15 +119,29 @@ export function extractCodes(text: string): string[] {
     // Years need a strong OTP cue (not mere "verification"/"identity") so
     // roadmap copy like "for 2026" does not fire false OTP alerts (F65).
     // "verification PIN is 2026" still matches \bpin\b.
-    if (
-      /^(19|20)\d{2}$/.test(digits) &&
-      !/\b(?:code|otp|passcode|pin)\b|验证码|动态码/.test(window)
-    ) {
+    if (/^(19|20)\d{2}$/.test(digits) && !STRONG_OTP_CUE.test(window)) {
       continue;
     }
     if (!seen.has(digits)) {
       seen.add(digits);
       codes.push(digits);
+    }
+  }
+
+  // F68: `123-456` / `1234–5678` only with a strong cue (not phone/roadmap).
+  // Separators: hyphen, en dash, em dash, period, space. Keep original spelling
+  // so maskSensitiveFragments can match the span.
+  for (const match of text.matchAll(/\b(\d{3,4}[-–—. ]\d{3,4})\b/g)) {
+    const form = match[1]!;
+    const idx = match.index ?? 0;
+    const window = lower.slice(
+      Math.max(0, idx - KEYWORD_WINDOW),
+      Math.min(lower.length, idx + form.length + KEYWORD_WINDOW),
+    );
+    if (!STRONG_OTP_CUE.test(window)) continue;
+    if (!seen.has(form)) {
+      seen.add(form);
+      codes.push(form);
     }
   }
   return codes;
@@ -312,7 +349,8 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
  * an unbalanced closer is a hard cut when (1) the next scheme is a proven
  * Markdown chain (tight `)(`, `](`, `)[`, `][`, or `)[label](` / `][label](`),
  * or (2) the span opened after `](` / prose `(` (first free `)` closes the
- * wrapper — F59/F64). Bare URLs keep free `)` in-path (e.g. F48 `confirm)[token=`).
+ * wrapper — F59/F64) or after prose `[` (first free `]` closes — F67; not
+ * `][` chain glue). Bare URLs keep free `)` in-path (e.g. F48 `confirm)[token=`).
  * openQuoted spans also cut before a closing `'` when the next char is prose
  * close context (F64). Nested redirects stay inside the URL when no cut applies.
  * Bounded tail peel removes free trailers without re-matching.
@@ -342,6 +380,11 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
       text[start - 1] === '(' &&
       (start < 2 || text[start - 2] !== ']');
     const cutOnFreeParen = markdownLinkOpen || proseParenOpen;
+    // F67: prose `[https://…]` — not `][` (Markdown/reference chain glue).
+    const proseBracketOpen =
+      start >= 1 &&
+      text[start - 1] === '[' &&
+      (start < 2 || text[start - 2] !== ']');
     // F61/F63: span opened after a prose apostrophe.
     const openQuoted = start >= 1 && text[start - 1] === "'";
     // True when F64 cut left the outer closer outside the raw span — peel must
@@ -413,6 +456,11 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         if (isMarkdownChainGlue(text, i, nextScheme)) {
           end = i;
           glueCut = { closer: i, nextScheme: nextScheme! };
+          break;
+        }
+        // After glue: prose `[` opener cuts at first free closer (F67).
+        if (proseBracketOpen) {
+          end = i;
           break;
         }
         continue;

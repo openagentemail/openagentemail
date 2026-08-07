@@ -10,6 +10,7 @@ const {
   boundPushMessage,
   buildMailArrivalMessage,
   maskSensitiveFragments,
+  maskTier2Metadata,
   processWatchedMessage,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
@@ -655,6 +656,48 @@ describe('mail-arrival notification watcher', () => {
     expect(maskSensitiveFragments('dup 1111 and 1111', ['1111', '1111'], [])).toBe(
       'dup ••• and •••',
     );
+    // F68: delimited form only when the full original spelling is in the set.
+    expect(maskSensitiveFragments('Your verification code is 123-456', ['123-456'], [])).toBe(
+      'Your verification code is •••',
+    );
+    expect(maskSensitiveFragments('code 123-456', ['123', '456'], [])).toBe('code 123-456');
+  });
+
+  test('maskTier2Metadata redacts delimited OTP in subject (F68)', () => {
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is 123-456',
+      codes: ['123-456'],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toBe('Your verification code is •••');
+    expect(masked.subject).not.toContain('123-456');
+  });
+
+  test('tier 2 masks delimited OTP in subject under policy=all (F68)', async () => {
+    // Body also carries the delimited form so hasOtpOrLink is true (urgent path).
+    const subject = 'Your verification code is 123-456';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nYour verification code is 123-456`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].level).toBe('urgent');
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('123-456');
+    expect(body).toContain('(contains OTP or verification link)');
   });
 
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
