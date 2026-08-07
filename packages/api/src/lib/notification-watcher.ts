@@ -205,18 +205,22 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 }
 
 /**
- * Alphanumeric OTP shape for tier-2 *metadata only* (F77): 6–8 ASCII alnum
- * with at least one letter and one digit. Bounds exclude adjacent alnum so
- * CJK-glued `验证码是A1B2C3` still matches (same no-\p{L} idea as F75).
+ * Alphanumeric OTP shape for tier-2 *metadata only* (F77/F81): 4–8 ASCII alnum
+ * with at least one letter and one digit (aligned with digit-code min length 4).
+ * Bounds exclude adjacent alnum so CJK-glued `验证码是A1B2C3` still matches.
  */
-const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{6,8})(?![A-Za-z0-9])/g;
+const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])/g;
 
 function isMixedAlnumOtp(form: string): boolean {
   return /[A-Za-z]/.test(form) && /[0-9]/.test(form);
 }
 
+function escapeRegExpLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Collect alnum OTPs from from/subject when a strong cue is present (F77).
+ * Collect alnum OTPs from from/subject when a strong cue is present (F77/F81).
  * Does not touch body extractCodes / extractOtp semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
@@ -233,10 +237,30 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
 }
 
 /**
+ * One global regex that masks every exact alnum form in a single left-to-right
+ * pass (F83). Forms are length-desc so longer spellings win at each position.
+ * Empty input → null (caller skips). Exported for structural unit tests.
+ */
+export function buildAlnumMaskRe(forms: string[]): RegExp | null {
+  if (forms.length === 0) return null;
+  // Dedupe while preserving longest-first order for alternation priority.
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const form of [...forms].sort((a, b) => b.length - a.length || a.localeCompare(b))) {
+    if (!form || seen.has(form)) continue;
+    seen.add(form);
+    ordered.push(form);
+  }
+  if (ordered.length === 0) return null;
+  const alt = ordered.map(escapeRegExpLiteral).join('|');
+  return new RegExp(`(?<![A-Za-z0-9])(?:${alt})(?![A-Za-z0-9])`, 'g');
+}
+
+/**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
  * (maskNormalizedHttpUrls). Digit codes: otpCodeRunRe + canonicalDigits
- * (F69/F75). Alnum codes (F77): exact spelling replace with alnum bounds.
+ * (F69/F75). Alnum codes (F77/F83): single alternation replace with alnum bounds.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -262,16 +286,28 @@ export function maskSensitiveFragments(
       digitCanon.has(canonicalDigits(run)) ? '•••' : run,
     );
   }
-  // Longest first so overlapping spellings prefer the full form.
-  exactAlnum.sort((a, b) => b.length - a.length);
-  for (const form of exactAlnum) {
-    const re = new RegExp(
-      `(?<![A-Za-z0-9])${form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9])`,
-      'g',
-    );
-    result = result.replace(re, '•••');
+  const alnumRe = buildAlnumMaskRe(exactAlnum);
+  if (alnumRe) {
+    result = result.replace(alnumRe, '•••');
   }
   return result;
+}
+
+/**
+ * Truncate plain-text preview on a Unicode code-point boundary (F82).
+ * Avoids lone surrogates from `String#slice` mid-emoji. Count is code points,
+ * same numeric cap as PUSH_BODY_PREVIEW_CHARS.
+ */
+export function boundPreviewChars(text: string, maxChars = PUSH_BODY_PREVIEW_CHARS): string {
+  if (!text) return text;
+  let count = 0;
+  let end = 0;
+  for (const point of text) {
+    if (count >= maxChars) break;
+    count += 1;
+    end += point.length;
+  }
+  return text.slice(0, end);
 }
 
 /**
@@ -393,7 +429,7 @@ export async function processWatchedMessage(
       hasOtpOrLink = otp.codes.length > 0 || otp.links.length > 0;
       extras.codes = otp.codes;
       extras.links = otp.links;
-      extras.preview = text.slice(0, PUSH_BODY_PREVIEW_CHARS);
+      extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
     } catch {
       // A malformed message is never an OTP match. `all` policy still sends a
       // payload with no message content, which is safe and useful.

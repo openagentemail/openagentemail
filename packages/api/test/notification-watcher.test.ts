@@ -7,8 +7,10 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { describe, expect, test } = await import('bun:test');
 const {
+  boundPreviewChars,
   boundPushLinkEntries,
   boundPushMessage,
+  buildAlnumMaskRe,
   buildMailArrivalMessage,
   extractMetaAlnumCodes,
   maskSensitiveFragments,
@@ -968,12 +970,31 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('123456');
   });
 
-  test('tier 2 masks alnum OTP in subject with strong cue only (F77)', async () => {
+  test('tier 2 masks alnum OTP in subject with strong cue only (F77/F81)', async () => {
     expect(extractMetaAlnumCodes('Your verification code is A1B2C3')).toEqual(['A1B2C3']);
     expect(extractMetaAlnumCodes('Order ABC12345 shipped')).toEqual([]);
+    // F81: 4–5 char mixed alnum under strong cue; 3-char stays out.
+    expect(extractMetaAlnumCodes('Your verification code is A1B2')).toEqual(['A1B2']);
+    expect(extractMetaAlnumCodes('Your verification code is AB12')).toEqual(['AB12']);
+    expect(extractMetaAlnumCodes('Your verification code is A1B')).toEqual([]);
+    expect(extractMetaAlnumCodes('Order AB12 shipped')).toEqual([]);
     expect(maskTier2Metadata({
       from: 'auth@example.net',
       subject: 'Your verification code is A1B2C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A1B2',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is AB12',
       codes: [],
       links: [],
       preview: '',
@@ -985,6 +1006,13 @@ describe('mail-arrival notification watcher', () => {
       links: [],
       preview: '',
     }).subject).toBe('Order ABC12345 shipped');
+    expect(maskTier2Metadata({
+      from: 'shop@example.net',
+      subject: 'Order AB12 shipped',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Order AB12 shipped');
     // CJK strong cue glued to alnum (bounds are ASCII-alnum only).
     expect(maskTier2Metadata({
       from: 'auth@example.net',
@@ -1012,6 +1040,68 @@ describe('mail-arrival notification watcher', () => {
     const body = calls[0].message as string;
     expect(body).toContain('•••');
     expect(body).not.toContain('A1B2C3');
+  });
+
+  test('alnum mask uses one alternation regex (F83)', () => {
+    const forms = ['A1B2C3', 'XY99ZZ', 'Ab12'];
+    const re = buildAlnumMaskRe(forms);
+    expect(re).not.toBeNull();
+    // Single pattern with all three forms (longest-first).
+    expect(re!.source).toContain('A1B2C3');
+    expect(re!.source).toContain('XY99ZZ');
+    expect(re!.source).toContain('Ab12');
+    expect(re!.source.indexOf('A1B2C3')).toBeLessThan(re!.source.indexOf('Ab12'));
+    // Exactly one alnum alternation replace (not one pass per token).
+    const text = 'code A1B2C3 and XY99ZZ and Ab12 again A1B2C3';
+    let alnumReplaceCalls = 0;
+    const originalReplace = String.prototype.replace;
+    String.prototype.replace = function (
+      this: string,
+      searchValue: string | RegExp,
+      ...rest: unknown[]
+    ) {
+      if (
+        searchValue instanceof RegExp &&
+        searchValue.source.includes('(?:') &&
+        searchValue.source.includes('A1B2C3') &&
+        searchValue.source.includes('XY99ZZ')
+      ) {
+        alnumReplaceCalls += 1;
+      }
+      return (originalReplace as (s: string | RegExp, ...r: unknown[]) => string).apply(
+        this,
+        [searchValue, ...rest],
+      );
+    };
+    let masked: string;
+    try {
+      masked = maskSensitiveFragments(text, forms, []);
+    } finally {
+      String.prototype.replace = originalReplace;
+    }
+    expect(alnumReplaceCalls).toBe(1);
+    expect(masked).toBe('code ••• and ••• and ••• again •••');
+    // Case-sensitive exact spelling (AB12 ≠ Ab12).
+    expect(maskSensitiveFragments('code AB12', ['Ab12'], [])).toBe('code AB12');
+    expect(maskSensitiveFragments('code Ab12', ['Ab12'], [])).toBe('code •••');
+    expect(buildAlnumMaskRe([])).toBeNull();
+  });
+
+  test('preview truncates on code-point boundaries (F82)', () => {
+    const emoji = '😀'; // one code point, two UTF-16 units
+    expect(emoji.length).toBe(2);
+    // 279 ASCII + emoji → maxChars=280 keeps the full emoji (no lone surrogate).
+    const text = `${'a'.repeat(279)}${emoji}${'b'.repeat(10)}`;
+    const preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
+    expect([...preview].length).toBe(PUSH_BODY_PREVIEW_CHARS);
+    expect(preview.endsWith(emoji)).toBe(true);
+    expect(preview).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    // Short text unchanged.
+    expect(boundPreviewChars('hi', PUSH_BODY_PREVIEW_CHARS)).toBe('hi');
+    // Cap mid-string still code-point safe when cut falls before emoji.
+    const cutBefore = boundPreviewChars(`${'a'.repeat(280)}${emoji}`, PUSH_BODY_PREVIEW_CHARS);
+    expect(cutBefore).toBe('a'.repeat(280));
+    expect(cutBefore).not.toContain(emoji);
   });
 
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
