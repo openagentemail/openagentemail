@@ -93,8 +93,16 @@ describe('extractCodes', () => {
     expect(extractCodes('Call us at 5551234 anytime.')).toEqual([]);
   });
 
-  test('ignores years without an explicit code keyword', () => {
-    expect(extractCodes('Our verification team, since 2024, sends regards.')).toEqual([]);
+  test('years next to OTP keywords are extracted as codes (F62)', () => {
+    // "verification" + "pin" are CODE_KEYWORDS; year guard no longer drops 2026.
+    expect(extractCodes('Your verification PIN is 2026')).toEqual(['2026']);
+    // "verification" alone also counts — update from prior "skip years" expectation.
+    expect(extractCodes('Our verification team, since 2024, sends regards.')).toEqual(['2024']);
+  });
+
+  test('years without any OTP keyword stay unextracted (F62)', () => {
+    expect(extractCodes('Born 1990, see link')).toEqual([]);
+    expect(extractCodes('This week in tech: 2024 trends.')).toEqual([]);
   });
 
   test('dedupes repeated codes', () => {
@@ -564,6 +572,26 @@ describe('extractLinks', () => {
     expect(extractHttpLinks(nbsp)[0]).not.toContain('%C2%A0');
     const em = `https://example.com/verify?token=abc\u2003NEXT`;
     expect(extractHttpLinks(em)).toEqual(['https://example.com/verify?token=abc']);
+  });
+
+  test('outer single quotes peel even with internal apostrophes (F61)', () => {
+    const text = "Use 'https://example.com/verify/o'brien' now";
+    expect(extractHttpLinks(text)).toEqual(["https://example.com/verify/o'brien"]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe("Use '•••' now");
+
+    // Trailing prose punctuation after outer closer still peels the quote (even count).
+    expect(extractHttpLinks("See 'https://example.com/verify/o'brien'.")).toEqual([
+      "https://example.com/verify/o'brien",
+    ]);
+
+    // Balanced outer quotes without internal apostrophe — still peel closer.
+    expect(extractHttpLinks("'https://a.com/x'")).toEqual(['https://a.com/x']);
+
+    // Bare URL with trailing ' and even/odd count: no openQuoted (start===0 path via split).
+    expect(splitBareUrlCandidate("https://a.com/x'")).toEqual({
+      clean: 'https://a.com/x',
+      trail: "'",
+    });
   });
 });
 

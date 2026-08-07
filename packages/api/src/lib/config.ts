@@ -135,10 +135,11 @@ export function normalizeUrl(value: string): string {
   if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
     url.pathname = url.pathname.replace(/\/+$/, '') || '/';
   }
-  // Root path serializes as "https://host/"; strip that slash for stable
-  // origin comparison without touching search/hash when they are present.
+  // Root path serializes as "https://host/" (or with userinfo). Prefer href so
+  // publisher:secret@host credentials survive; origin alone drops userinfo.
+  // Only apply when search/hash are empty so those branches keep full href.
   if (url.pathname === '/' && url.search === '' && url.hash === '') {
-    return url.origin;
+    return url.href.replace(/\/+$/, '');
   }
   return url.href;
 }

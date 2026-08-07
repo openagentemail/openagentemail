@@ -8,7 +8,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
 import { describe, expect, test } from 'bun:test';
-import { parseConfig } from '../src/lib/config.ts';
+import { normalizeUrl, parseConfig } from '../src/lib/config.ts';
 
 const requiredEnv: NodeJS.ProcessEnv = {
   DOMAIN: 'example.com',
@@ -130,6 +130,18 @@ describe('notification URL configuration', () => {
         NOTIFY_PUBLIC_URL: 'https://notify.example.com',
       }).ntfy.publicUrl,
     ).toBe('https://notify.example.com');
+  });
+
+  test('normalizeUrl root path keeps userinfo credentials (F60)', () => {
+    expect(normalizeUrl('https://publisher:secret@ntfy.example/')).toBe(
+      'https://publisher:secret@ntfy.example',
+    );
+    expect(normalizeUrl('https://ntfy.example/')).toBe('https://ntfy.example');
+    expect(normalizeUrl('https://ntfy.example:8443/')).toBe('https://ntfy.example:8443');
+    // Non-root still keeps credentials (href branch).
+    expect(normalizeUrl('https://publisher:secret@ntfy.example/v1/path/')).toBe(
+      'https://publisher:secret@ntfy.example/v1/path',
+    );
   });
 
   test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {

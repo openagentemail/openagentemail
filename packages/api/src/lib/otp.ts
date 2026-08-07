@@ -92,9 +92,10 @@ export function extractCodes(text: string): string[] {
       Math.max(0, idx - KEYWORD_WINDOW),
       Math.min(lower.length, idx + digits.length + KEYWORD_WINDOW),
     );
+    // No separate year guard: 19xx/20xx next to any CODE_KEYWORDS token is
+    // treated as an OTP (prefer over-mask to leaking "verification PIN is 2026").
+    // Without a keyword in the window the run is skipped here.
     if (!CODE_KEYWORDS.some((kw) => window.includes(kw))) continue;
-    // Skip obvious years that merely sit next to a keyword.
-    if (/^(19|20)\d{2}$/.test(digits) && !/code|otp|passcode|验证码|动态码/.test(window)) continue;
     if (!seen.has(digits)) {
       seen.add(digits);
       codes.push(digits);
@@ -166,9 +167,15 @@ function findSchemePositions(text: string): number[] {
 
 /**
  * Peel trailing prose from a bounded candidate [0, length): `.,;`, unbalanced
- * trailing `)`/`]`, and an odd trailing `'`. O(length).
+ * trailing `)`/`]`, and trailing `'` when the apostrophe count is odd — or when
+ * the span opened after a prose `'` (outer quote; F61) so even counts still
+ * drop one closing quote after an internal apostrophe (e.g. o'brien').
+ * O(length).
  */
-function peelTrailingProse(candidate: string): { clean: string; trail: string } {
+function peelTrailingProse(
+  candidate: string,
+  openQuoted = false,
+): { clean: string; trail: string } {
   if (!candidate) return { clean: '', trail: '' };
 
   let openParen = 0;
@@ -185,6 +192,8 @@ function peelTrailingProse(candidate: string): { clean: string; trail: string } 
     else if (ch === "'") apostrophes += 1;
   }
 
+  // At most one openQuoted peel, after any trailing .,; (not only original EOS).
+  let peelOpenQuote = openQuoted;
   let end = candidate.length;
   while (end > 0) {
     const ch = candidate[end - 1]!;
@@ -202,9 +211,12 @@ function peelTrailingProse(candidate: string): { clean: string; trail: string } 
       end -= 1;
       continue;
     }
-    if (ch === "'" && apostrophes % 2 === 1) {
+    if (ch === "'" && (apostrophes % 2 === 1 || peelOpenQuote)) {
+      // Odd count: classic prose closer. openQuoted: peel one outer closer even
+      // when an internal apostrophe made the total even (F61), including after .,;
       apostrophes -= 1;
       end -= 1;
+      peelOpenQuote = false;
       continue;
     }
     break;
@@ -309,6 +321,9 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     // even with no following scheme / whitespace (bare URLs keep free `)` in-path).
     const markdownLinkOpen =
       start >= 2 && text[start - 1] === '(' && text[start - 2] === ']';
+    // F61: span opened after a prose apostrophe — peel one trailing ' even if
+    // internal apostrophes made the count even (e.g. '…o'brien').
+    const openQuoted = start >= 1 && text[start - 1] === "'";
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -382,7 +397,7 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     }
 
     const raw = text.slice(start, end);
-    const { clean } = peelTrailingProse(raw);
+    const { clean } = peelTrailingProse(raw, openQuoted);
     if (clean.length === 0) {
       schemeIdx += 1;
       continue;

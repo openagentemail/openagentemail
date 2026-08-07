@@ -524,6 +524,28 @@ describe('mail-arrival notification watcher', () => {
     }
   });
 
+  test('tier 2 masks a year-shaped PIN next to verification keywords (F62)', async () => {
+    const subject = 'Your verification PIN is 2026';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('2026');
+  });
+
   test('tier 2 masks URLs that contain a legal apostrophe before the token', async () => {
     // BARE_URL_RE used to exclude '; match stopped at confirm? and leaked 'token=secret.
     const subject = "Reset https://example.com/confirm?'token=secret";
