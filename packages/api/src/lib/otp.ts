@@ -241,30 +241,22 @@ export type BareUrlSpan = {
 /**
  * Single-pass bare URL tokenizer. O(n) over the full text:
  * pre-scan scheme positions, then for each start scan once with depth tracking;
- * an unbalanced closer is a hard cut only when the next scheme is glued with
- * no whitespace (Markdown chain); otherwise it stays in the URL (WHATWG).
- * Bounded tail peel removes free trailers without re-matching the remainder.
- *
- * Glue checks use a monotonic nextWs pointer (first JS-whitespace index at or
- * after the current probe) so 40k unbalanced closers stay O(n), not O(n²).
+ * an unbalanced closer is a hard cut only when immediately followed by `[` or
+ * `(` (Markdown chain glue: `)[`, `)(`, `][`, `](`). Nested redirects like
+ * `)token=…?next=https://` keep the closer inside the URL (WHATWG); the inner
+ * scheme is skipped by the post-span scheme advance. Bounded tail peel removes
+ * free trailers without re-matching the remainder.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
   const schemePos = findSchemePositions(text);
   let schemeIdx = 0;
-  // First whitespace index at or after this value; only advances.
-  let nextWs = 0;
-  const ensureNextWs = (from: number) => {
-    if (nextWs < from) nextWs = from;
-    while (nextWs < text.length && !isJsWhitespace(text[nextWs]!)) nextWs += 1;
-  };
 
   while (schemeIdx < schemePos.length) {
     const start = schemePos[schemeIdx]!;
     let parenDepth = 0;
     let bracketDepth = 0;
     let end = text.length;
-    ensureNextWs(start);
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -285,11 +277,10 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           parenDepth -= 1;
           continue;
         }
-        // Unbalanced closer: glued to next scheme iff no whitespace in between.
-        // nextWs is the first whitespace index >= i+1 (monotonic O(1) query).
-        ensureNextWs(i + 1);
-        const nextScheme = schemePos[schemeIdx + 1];
-        if (nextScheme !== undefined && nextScheme > i && nextWs >= nextScheme) {
+        // Unbalanced closer: hard-cut only for tightly adjacent Markdown chain
+        // openers. `?next=https://` after `)token=…` is not a chain — keep ) in URL.
+        const next = text[i + 1];
+        if (next === '[' || next === '(') {
           end = i;
           break;
         }
@@ -300,9 +291,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           bracketDepth -= 1;
           continue;
         }
-        ensureNextWs(i + 1);
-        const nextScheme = schemePos[schemeIdx + 1];
-        if (nextScheme !== undefined && nextScheme > i && nextWs >= nextScheme) {
+        const next = text[i + 1];
+        if (next === '[' || next === '(') {
           end = i;
           break;
         }

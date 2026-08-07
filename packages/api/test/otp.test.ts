@@ -165,11 +165,11 @@ describe('extractLinks', () => {
   test('bareUrlSpans stays linear on free brackets and dense adjacent candidates', () => {
     const freeBrackets = `https://${'['.repeat(10_000)}`;
     const nestedParens = `https://x.com/${'('.repeat(5_000)}${')'.repeat(5_000)}`;
-    // 8000 glued candidates (~200KB) must not re-match the remainder after each cut.
+    // 8000 tight Markdown-chain cuts `)(` (~200KB) must stay O(n).
     const dense = Array.from(
       { length: 8_000 },
-      (_, i) => `https://a${i}.example/verify)`,
-    ).join('');
+      (_, i) => `https://a${i}.example/verify`,
+    ).join(')(');
     const started = performance.now();
     freeBrackets.match(BARE_URL_RE);
     [...bareUrlSpans(freeBrackets)];
@@ -269,6 +269,38 @@ describe('extractLinks', () => {
     expect(maskNormalizedHttpUrls(`See ${url}`, [url])).toBe('See •••');
   });
 
+  test('nested ?next=https:// after unbalanced ) stays one span (F45)', () => {
+    // Old glue (no-whitespace-to-next-scheme) hard-cut at ) and leaked token=.
+    const text =
+      'Verify https://example.com/confirm)token=secret?next=https://safe.example/';
+    const full =
+      'https://example.com/confirm)token=secret?next=https://safe.example/';
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.clean).toBe(full);
+    expect(extractHttpLinks(text)).toEqual([full]);
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    expect(masked).toBe('Verify •••');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://');
+  });
+
+  test('tight Markdown chain glue )[ and )( still splits adjacent URLs', () => {
+    const md = '[a](https://x.example/pay)[b](https://y.example/confirm)';
+    expect([...bareUrlSpans(md)].map((s) => s.clean)).toEqual([
+      'https://x.example/pay',
+      'https://y.example/confirm',
+    ]);
+    expect(maskNormalizedHttpUrls(md, extractHttpLinks(md))).toBe('[a](•••)[b](•••)');
+
+    const tight = 'https://x.example/a)(https://y.example/b';
+    expect([...bareUrlSpans(tight)].map((s) => s.clean)).toEqual([
+      'https://x.example/a',
+      'https://y.example/b',
+    ]);
+  });
+
   test('space- or comma-separated adjacent URLs split without glue', () => {
     expect(extractHttpLinks('https://a.example/v https://b.example/c')).toEqual([
       'https://a.example/v',
@@ -281,7 +313,7 @@ describe('extractLinks', () => {
   });
 
   test('bareUrlSpans stays linear when many unbalanced closers precede whitespace', () => {
-    // Each closer used to re-scan to the distant whitespace (O(n²)); nextWs is O(1).
+    // Unbalanced ) with non-adjacent next scheme stays in-URL (O(n) depth walk + peel).
     const adversarial =
       `https://a.example/path${')'.repeat(40_000)} https://b.example/other`;
     const started = performance.now();
