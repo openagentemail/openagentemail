@@ -271,7 +271,7 @@ const META_ALNUM_OTP_RE = new RegExp(
  * Delimited mixed alnum OTP (F84/F85/F86): 2–4 groups of 2–4 alnum
  * (ASCII + fullwidth).
  *
- * Non-whitespace seps (hyphen/dash/dot/fullwidth) allow 2–4 groups with F74-style
+ * Non-whitespace seps (hyphen/dash/dot/slash + fullwidth) allow 2–4 groups with F74-style
  * mid-chain lead/tail guards.
  *
  * Whitespace seps (F85):
@@ -288,8 +288,10 @@ const META_ALNUM_GROUP = `[${META_ALNUM_CHAR}]{2,4}`;
  * F87: sep runs of 1–3 that include **at least one tight** sep so `ABC - 123`
  * and `ABC--123` match, while pure-space chains stay on F85 paths and English
  * `code is ABC-123` cannot glue via space-only gaps.
+ * F112: slash (ASCII + fullwidth) joins the tight class — `A1/B2` metadata
+ * codes bypassed every matcher; URLs are unaffected (link-masked first).
  */
-const META_ALNUM_SEP_TIGHT = '[-–—.\uFF0D\uFF0E]';
+const META_ALNUM_SEP_TIGHT = '[-–—./\uFF0D\uFF0E\uFF0F]';
 const META_ALNUM_SEP_SPACE =
   '[\\t \\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF]';
 const T = META_ALNUM_SEP_TIGHT;

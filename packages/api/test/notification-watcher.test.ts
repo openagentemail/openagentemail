@@ -1474,6 +1474,34 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is A 1 B 2')).toContain('A 1 B 2');
   });
 
+  test('tier 2 masks slash-delimited alnum OTP under strong cue (F112)', () => {
+    // Slash-joined mixed groups: extract + mask.
+    expect(extractMetaAlnumCodes('Your verification code is A1/B2')).toContain('A1/B2');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A1/B2',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('A1/B2');
+    // Three groups; fullwidth slash.
+    expect(extractMetaAlnumCodes('Your verification code is A1/B2/C3')).toContain('A1/B2/C3');
+    expect(extractMetaAlnumCodes('您的验证码是 Ａ１／Ｂ２')).toContain('Ａ１／Ｂ２');
+    // Slash single-char chain (4–8 groups) via the tight/mixed chain paths.
+    expect(extractMetaAlnumCodes('Your verification code is A/1/B/2')).toContain('A/1/B/2');
+    // Pure-digit slash forms (dates, fractions) stay unextracted — no letter.
+    expect(extractMetaAlnumCodes('Your verification code is 08/07')).not.toContain('08/07');
+    // Letter-only lowercase slash words stay rejected.
+    expect(extractMetaAlnumCodes('Your verification code is and/or')).not.toContain('and/or');
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference A1/B2 attached')).toEqual([]);
+    // Regression: hyphen/dot tight forms still extract.
+    expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
+    expect(extractMetaAlnumCodes('Your verification code is ABC.123')).toContain('ABC.123');
+  });
+
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
     expect(extractMetaAlnumCodes('您的校验码是A1B-2C3')).toContain('A1B-2C3');
