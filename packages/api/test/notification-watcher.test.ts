@@ -566,6 +566,31 @@ describe('mail-arrival notification watcher', () => {
     expect(body).toContain('[Verify](•••)[Confirm](•••)');
   });
 
+  test('tier 2 masks a full URL that contains an unbalanced ) mid-path', async () => {
+    // WHATWG accepts confirm)foo; must not hard-cut and leak ?token=.
+    const subject = 'Reset https://example.com/confirm)foo?token=secret';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('•••');
+    expect(body).not.toContain('confirm)foo');
+    expect(body).not.toContain('token=secret');
+    expect(body).not.toContain('https://');
+  });
+
   test('tier 2 masks a subject code even when the body has many unrelated codes', () => {
     const bodyCodes = Array.from({ length: 100 }, (_, i) => String(100000 + i));
     const bodyText = bodyCodes.map((code) => `Your verification code is ${code}.`).join(' ');

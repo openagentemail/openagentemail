@@ -125,13 +125,10 @@ function extractAnchors(html: string): Anchor[] {
 }
 
 /**
- * Bare http(s) URL *candidates* in plain text (scheme case-insensitive).
- * Intentionally greedy and linear. `'` is kept (RFC 3986 sub-delim / path
- * apostrophes); only whitespace, `<`, `>`, `"` stay excluded — those never
- * appear unencoded in a legal URL. Call splitBareUrlCandidate() to peel free
- * trailing prose delimiters while keeping balanced brackets and in-URL `'`.
+ * Scheme finder / tests only. Prose extraction uses bareUrlSpans (single-pass
+ * tokenizer). Kept for callers and tests that still import the pattern.
  */
-export const BARE_URL_RE = /https?:\/\/[^\s<>"]+/gi;
+export const BARE_URL_RE = /https?:\/\//gi;
 
 function looksLikeActionLink(url: string, anchorText = ''): boolean {
   return LINK_INTENT.test(url) || LINK_INTENT.test(anchorText);
@@ -151,58 +148,67 @@ export function validatedHttpUrl(candidate: string): string | null {
   }
 }
 
+function isAsciiWhitespace(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f';
+}
+
+/** True if [from, to) has no ASCII whitespace (Markdown glue between links). */
+function isWhitespaceFree(text: string, from: number, to: number): boolean {
+  for (let i = from; i < to; i++) {
+    if (isAsciiWhitespace(text[i]!)) return false;
+  }
+  return true;
+}
+
+/** Non-overlapping positions of https?:// (case-insensitive). O(n). */
+function findSchemePositions(text: string): number[] {
+  const positions: number[] = [];
+  const re = /https?:\/\//gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    positions.push(match.index);
+  }
+  return positions;
+}
+
 /**
- * Split a bare-URL regex match into the real URL (`clean`) and prose tail
- * (`trail`). O(n):
- * 1) Left-to-right depth scan — first `)`/`]` that makes its depth negative is
- *    a hard cut (covers free trailers and mid-string boundaries like
- *    `…/verify)[Confirm](https://…` between adjacent Markdown links).
- * 2) On the remaining clean prefix, right-to-left peel of trailing `.,;` and
- *    of a trailing `'` while the remaining apostrophe count is odd; peeled
- *    chars are prepended onto trail to preserve order.
- * Balanced nested `()`/`[]` never go negative and stay on the URL.
+ * Peel trailing prose from a bounded candidate [0, length): `.,;`, unbalanced
+ * trailing `)`/`]`, and an odd trailing `'`. O(length).
  */
-export function splitBareUrlCandidate(candidate: string): { clean: string; trail: string } {
+function peelTrailingProse(candidate: string): { clean: string; trail: string } {
   if (!candidate) return { clean: '', trail: '' };
 
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let cut = candidate.length;
+  let openParen = 0;
+  let closeParen = 0;
+  let openBracket = 0;
+  let closeBracket = 0;
+  let apostrophes = 0;
   for (let i = 0; i < candidate.length; i++) {
     const ch = candidate[i]!;
-    if (ch === '(') parenDepth += 1;
-    else if (ch === ')') {
-      parenDepth -= 1;
-      if (parenDepth < 0) {
-        cut = i;
-        break;
-      }
-    } else if (ch === '[') bracketDepth += 1;
-    else if (ch === ']') {
-      bracketDepth -= 1;
-      if (bracketDepth < 0) {
-        cut = i;
-        break;
-      }
-    }
+    if (ch === '(') openParen += 1;
+    else if (ch === ')') closeParen += 1;
+    else if (ch === '[') openBracket += 1;
+    else if (ch === ']') closeBracket += 1;
+    else if (ch === "'") apostrophes += 1;
   }
 
-  let clean = candidate.slice(0, cut);
-  let trail = candidate.slice(cut);
-
-  let apostrophes = 0;
-  for (let i = 0; i < clean.length; i++) {
-    if (clean[i] === "'") apostrophes += 1;
-  }
-
-  let end = clean.length;
+  let end = candidate.length;
   while (end > 0) {
-    const ch = clean[end - 1]!;
+    const ch = candidate[end - 1]!;
     if (ch === '.' || ch === ',' || ch === ';') {
       end -= 1;
       continue;
     }
-    // Odd remaining apostrophe count ⇒ peel a free prose closer; even ⇒ keep.
+    if (ch === ')' && closeParen > openParen) {
+      closeParen -= 1;
+      end -= 1;
+      continue;
+    }
+    if (ch === ']' && closeBracket > openBracket) {
+      closeBracket -= 1;
+      end -= 1;
+      continue;
+    }
     if (ch === "'" && apostrophes % 2 === 1) {
       apostrophes -= 1;
       end -= 1;
@@ -211,15 +217,26 @@ export function splitBareUrlCandidate(candidate: string): { clean: string; trail
     break;
   }
 
-  if (end < clean.length) {
-    trail = clean.slice(end) + trail;
-    clean = clean.slice(0, end);
-  }
-
-  return { clean, trail };
+  return { clean: candidate.slice(0, end), trail: candidate.slice(end) };
 }
 
-/** One prose URL span after splitBareUrlCandidate (indices into the full text). */
+/**
+ * Split a single candidate (typically starting at a scheme) into clean URL +
+ * trail using the same glue/peel rules as bareUrlSpans. Prefer bareUrlSpans for
+ * full-text walks; this remains for unit tests and single-match call sites.
+ */
+export function splitBareUrlCandidate(candidate: string): { clean: string; trail: string } {
+  if (!candidate) return { clean: '', trail: '' };
+  for (const span of bareUrlSpans(candidate)) {
+    if (span.start === 0) {
+      return { clean: span.clean, trail: candidate.slice(span.end) };
+    }
+    break;
+  }
+  return { clean: candidate, trail: '' };
+}
+
+/** One prose URL span (indices into the full text). */
 export type BareUrlSpan = {
   /** Start index of `clean` in the full text. */
   start: number;
@@ -229,28 +246,85 @@ export type BareUrlSpan = {
 };
 
 /**
- * Walk prose for bare URL cleans. After each hit, resume scanning at
- * matchStart + clean.length so trail (e.g. `)[Confirm](https://…`) re-enters
- * the scan and adjacent Markdown links split correctly.
+ * Single-pass bare URL tokenizer. O(n) over the full text:
+ * pre-scan scheme positions, then for each start scan once with depth tracking;
+ * an unbalanced closer is a hard cut only when the next scheme is glued with
+ * no whitespace (Markdown chain); otherwise it stays in the URL (WHATWG).
+ * Bounded tail peel removes free trailers without re-matching the remainder.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
-  const re = new RegExp(BARE_URL_RE.source, BARE_URL_RE.flags);
-  let pos = 0;
-  while (pos < text.length) {
-    re.lastIndex = pos;
-    const match = re.exec(text);
-    if (!match) break;
-    const matchStart = match.index;
-    const { clean } = splitBareUrlCandidate(match[0]);
+  const schemePos = findSchemePositions(text);
+  let schemeIdx = 0;
+
+  while (schemeIdx < schemePos.length) {
+    const start = schemePos[schemeIdx]!;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let end = text.length;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]!;
+      if (isAsciiWhitespace(ch) || ch === '<' || ch === '>' || ch === '"') {
+        end = i;
+        break;
+      }
+      if (ch === '(') {
+        parenDepth += 1;
+        continue;
+      }
+      if (ch === '[') {
+        bracketDepth += 1;
+        continue;
+      }
+      if (ch === ')') {
+        if (parenDepth > 0) {
+          parenDepth -= 1;
+          continue;
+        }
+        // Unbalanced closer: cut only if next scheme is glued (no whitespace).
+        const nextScheme = schemePos[schemeIdx + 1];
+        if (
+          nextScheme !== undefined &&
+          nextScheme > i &&
+          isWhitespaceFree(text, i + 1, nextScheme)
+        ) {
+          end = i;
+          break;
+        }
+        continue;
+      }
+      if (ch === ']') {
+        if (bracketDepth > 0) {
+          bracketDepth -= 1;
+          continue;
+        }
+        const nextScheme = schemePos[schemeIdx + 1];
+        if (
+          nextScheme !== undefined &&
+          nextScheme > i &&
+          isWhitespaceFree(text, i + 1, nextScheme)
+        ) {
+          end = i;
+          break;
+        }
+        continue;
+      }
+    }
+
+    const raw = text.slice(start, end);
+    const { clean } = peelTrailingProse(raw);
     if (clean.length === 0) {
-      // Avoid an infinite loop on a pathological zero-length clean.
-      pos = matchStart + Math.max(1, match[0].length);
+      schemeIdx += 1;
       continue;
     }
-    // clean is always a prefix of the regex match under splitBareUrlCandidate.
-    yield { start: matchStart, end: matchStart + clean.length, clean };
-    pos = matchStart + clean.length;
+    const cleanEnd = start + clean.length;
+    yield { start, end: cleanEnd, clean };
+
+    // Skip schemes that fell inside this span (e.g. nested ?next=https://…).
+    while (schemeIdx < schemePos.length && schemePos[schemeIdx]! < cleanEnd) {
+      schemeIdx += 1;
+    }
   }
 }
 

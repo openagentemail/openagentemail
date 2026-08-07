@@ -162,15 +162,21 @@ describe('extractLinks', () => {
     expect(extractLinks('Docs at https://example.com/docs and https://example.com/about')).toEqual([]);
   });
 
-  test('BARE_URL_RE and splitBareUrlCandidate stay linear on adversarial inputs', () => {
+  test('bareUrlSpans stays linear on free brackets and dense adjacent candidates', () => {
     const freeBrackets = `https://${'['.repeat(10_000)}`;
     const nestedParens = `https://x.com/${'('.repeat(5_000)}${')'.repeat(5_000)}`;
+    // 8000 glued candidates (~200KB) must not re-match the remainder after each cut.
+    const dense = Array.from(
+      { length: 8_000 },
+      (_, i) => `https://a${i}.example/verify)`,
+    ).join('');
     const started = performance.now();
     freeBrackets.match(BARE_URL_RE);
-    nestedParens.match(BARE_URL_RE);
-    splitBareUrlCandidate(freeBrackets);
-    splitBareUrlCandidate(nestedParens);
+    [...bareUrlSpans(freeBrackets)];
+    [...bareUrlSpans(nestedParens)];
+    const denseSpans = [...bareUrlSpans(dense)];
     expect(performance.now() - started).toBeLessThan(1_000);
+    expect(denseSpans).toHaveLength(8_000);
   });
 
   test('splitBareUrlCandidate keeps nested balanced parens and peels free trailers', () => {
@@ -211,7 +217,7 @@ describe('extractLinks', () => {
       clean: 'https://example.com/verify?token=a',
       trail: "'.",
     });
-    // Mid-string free closer between adjacent Markdown links.
+    // Mid-string free closer between adjacent Markdown links (glued next scheme).
     expect(
       splitBareUrlCandidate(
         'https://a.example/verify)[Confirm](https://b.example/confirm',
@@ -219,6 +225,11 @@ describe('extractLinks', () => {
     ).toEqual({
       clean: 'https://a.example/verify',
       trail: ')[Confirm](https://b.example/confirm',
+    });
+    // Unbalanced ) with no following scheme is URL content (WHATWG), not a cut.
+    expect(splitBareUrlCandidate('https://example.com/confirm)foo?token=secret')).toEqual({
+      clean: 'https://example.com/confirm)foo?token=secret',
+      trail: '',
     });
   });
 
@@ -250,6 +261,23 @@ describe('extractLinks', () => {
     expect(masked).not.toContain('a.example');
     expect(masked).not.toContain('b.example');
     expect(masked).not.toContain('https://');
+  });
+
+  test('unbalanced ) without a glued next scheme stays inside the URL', () => {
+    const url = 'https://example.com/confirm)foo?token=secret';
+    expect(extractHttpLinks(url)).toEqual([url]);
+    expect(maskNormalizedHttpUrls(`See ${url}`, [url])).toBe('See •••');
+  });
+
+  test('space- or comma-separated adjacent URLs split without glue', () => {
+    expect(extractHttpLinks('https://a.example/v https://b.example/c')).toEqual([
+      'https://a.example/v',
+      'https://b.example/c',
+    ]);
+    expect(extractHttpLinks('https://a.example/v, https://b.example/c')).toEqual([
+      'https://a.example/v',
+      'https://b.example/c',
+    ]);
   });
 });
 
