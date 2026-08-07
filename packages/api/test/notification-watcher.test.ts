@@ -1042,6 +1042,54 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('A1B2C3');
   });
 
+  test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
+    expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toEqual(['ABC-123']);
+    expect(extractMetaAlnumCodes('您的校验码是A1B-2C3')).toEqual(['A1B-2C3']);
+    expect(extractMetaAlnumCodes('Your code is A1-B2-C3')).toEqual(['A1-B2-C3']);
+    expect(extractMetaAlnumCodes('Ref ABC-123 attached')).toEqual([]);
+    // 5+ groups rejected whole (no prefix half).
+    expect(extractMetaAlnumCodes('Your code is AB-12-CD-34-EF')).toEqual([]);
+    // Short English glue / year-ish space forms must not extract.
+    expect(extractMetaAlnumCodes('Your code is to A1B2')).toEqual(['A1B2']); // continuous only
+    expect(extractMetaAlnumCodes('Your code is to A1B2')).not.toContain('to A1B2');
+    expect(extractMetaAlnumCodes('Your verification code expires Mar 2026')).toEqual([]);
+    // Separator variants.
+    expect(extractMetaAlnumCodes('Your code is ABC.123')).toEqual(['ABC.123']);
+    expect(extractMetaAlnumCodes('Your code is ABC 123')).toEqual(['ABC 123']);
+    expect(extractMetaAlnumCodes('Your code is ABC\uFF0D123')).toEqual(['ABC\uFF0D123']);
+
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is ABC-123',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '您的校验码是A1B-2C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的校验码是•••');
+    expect(maskTier2Metadata({
+      from: 'shop@example.net',
+      subject: 'Ref ABC-123 attached',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Ref ABC-123 attached');
+    // Pure digit delimited still masks via digit path (not alnum channel).
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is 123-456',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(extractMetaAlnumCodes('Your verification code is 123-456')).toEqual([]);
+  });
+
   test('alnum mask uses one alternation regex (F83)', () => {
     const forms = ['A1B2C3', 'XY99ZZ', 'Ab12'];
     const re = buildAlnumMaskRe(forms);

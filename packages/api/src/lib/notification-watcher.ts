@@ -205,14 +205,64 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 }
 
 /**
- * Alphanumeric OTP shape for tier-2 *metadata only* (F77/F81): 4–8 ASCII alnum
- * with at least one letter and one digit (aligned with digit-code min length 4).
- * Bounds exclude adjacent alnum so CJK-glued `验证码是A1B2C3` still matches.
+ * Continuous alnum OTP for tier-2 *metadata only* (F77/F81): 4–8 ASCII alnum
+ * with at least one letter and one digit. Bounds exclude adjacent alnum so
+ * CJK-glued `验证码是A1B2C3` still matches.
  */
 const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])/g;
 
+/**
+ * Delimited mixed alnum OTP (F84): 2–4 groups of 2–4 ASCII alnum.
+ *
+ * Non-whitespace seps (hyphen/dash/dot/fullwidth) allow 2–4 groups with F74-style
+ * mid-chain lead/tail guards. Whitespace seps only allow **exactly two** groups
+ * so English words (`is ABC-123`) cannot glue into a false 3-group form when
+ * space is both a word break and an OTP separator.
+ *
+ * Pure-digit forms are left to the digit delimited path (≥1 letter + ≥1 digit).
+ */
+const META_ALNUM_GROUP = '[A-Za-z0-9]{2,4}';
+/**
+ * Split of otp.ts DELIMITED_OTP_SEP_CLASS: non-whitespace vs whitespace.
+ * Whitespace is restricted to exactly-two-group forms (see above).
+ */
+const META_ALNUM_SEP_TIGHT = '[-–—.\uFF0D\uFF0E]';
+const META_ALNUM_SEP_SPACE =
+  '[\\t \\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF]';
+// 2–4 groups with tight seps; lead blocks mid-chain after alnum+tight-sep.
+const META_ALNUM_DELIMITED_TIGHT = new RegExp(
+  `(?<![A-Za-z0-9]${META_ALNUM_SEP_TIGHT})(?<![A-Za-z0-9])` +
+    `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_TIGHT}${META_ALNUM_GROUP}){1,3})` +
+    `(?!${META_ALNUM_SEP_TIGHT}[A-Za-z0-9])(?![A-Za-z0-9])`,
+  'g',
+);
+// Exactly two groups with a whitespace sep (e.g. `ABC 123`).
+const META_ALNUM_DELIMITED_SPACE = new RegExp(
+  `(?<![A-Za-z0-9])` +
+    `(${META_ALNUM_GROUP}${META_ALNUM_SEP_SPACE}${META_ALNUM_GROUP})` +
+    `(?!${META_ALNUM_SEP_SPACE}[A-Za-z0-9])(?![A-Za-z0-9])`,
+  'g',
+);
+
 function isMixedAlnumOtp(form: string): boolean {
   return /[A-Za-z]/.test(form) && /[0-9]/.test(form);
+}
+
+/**
+ * Space-separated forms only: reject English glue like `is 123` / `is A1B2`
+ * (1–2 letter pure-letter group) and year-ish pure digits (`Mar 2026`, F65).
+ * Real OTPs use ≥3 letter blocks (`ABC 123`) or a mixed group on either side.
+ */
+function isPlausibleSpaceDelimitedAlnum(form: string): boolean {
+  if (!isMixedAlnumOtp(form)) return false;
+  const parts = form.split(new RegExp(META_ALNUM_SEP_SPACE));
+  if (parts.length !== 2) return false;
+  for (const g of parts) {
+    if (/^[A-Za-z]{1,2}$/.test(g)) return false;
+    // Year-shaped pure digits next to a letter block are not alnum OTPs.
+    if (/^(19|20)\d{2}$/.test(g)) return false;
+  }
+  return true;
 }
 
 function escapeRegExpLiteral(s: string): string {
@@ -220,25 +270,36 @@ function escapeRegExpLiteral(s: string): string {
 }
 
 /**
- * Collect alnum OTPs from from/subject when a strong cue is present (F77/F81).
- * Does not touch body extractCodes / extractOtp semantics.
+ * Collect alnum OTPs from from/subject when a strong cue is present
+ * (F77/F81 continuous + F84 delimited). Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
   const codes: string[] = [];
   const seen = new Set<string>();
-  for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {
-    const form = match[1]!;
-    if (!isMixedAlnumOtp(form) || seen.has(form)) continue;
+  const push = (form: string) => {
+    if (!isMixedAlnumOtp(form) || seen.has(form)) return;
     seen.add(form);
     codes.push(form);
+  };
+  for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {
+    push(match[1]!);
+  }
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT)) {
+    push(match[1]!);
+  }
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceDelimitedAlnum(form)) continue;
+    push(form);
   }
   return codes;
 }
 
 /**
  * One global regex that masks every exact alnum form in a single left-to-right
- * pass (F83). Forms are length-desc so longer spellings win at each position.
+ * pass (F83/F84). Forms are length-desc so longer spellings win at each
+ * position. Separators in forms (e.g. `ABC-123`) are escaped as literals.
  * Empty input → null (caller skips). Exported for structural unit tests.
  */
 export function buildAlnumMaskRe(forms: string[]): RegExp | null {
@@ -253,6 +314,8 @@ export function buildAlnumMaskRe(forms: string[]): RegExp | null {
   }
   if (ordered.length === 0) return null;
   const alt = ordered.map(escapeRegExpLiteral).join('|');
+  // Bounds are ASCII-alnum only so forms containing hyphens/spaces still match
+  // when adjacent to punctuation or CJK (not glued to a longer alnum run).
   return new RegExp(`(?<![A-Za-z0-9])(?:${alt})(?![A-Za-z0-9])`, 'g');
 }
 
