@@ -149,15 +149,20 @@ function metaCodeRunRe(): RegExp {
   return /\b\d{3,4}[-–—. ]\d{3,4}\b|\b\d{4,8}\b/g;
 }
 
+/** Digit-only form so body `123456` and subject `123-456` compare equal (F69). */
+function canonicalDigits(s: string): string {
+  return s.replace(/\D/g, '');
+}
+
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
  * (maskNormalizedHttpUrls). Codes: scan continuous \b\d{4,8}\b and delimited
- * \b\d{3,4}[-–—. ]\d{3,4}\b runs; replace when present in the code set
- * (O(text) Set lookups — no multi-branch needle alternation).
+ * \b\d{3,4}[-–—. ]\d{3,4}\b runs; replace when the run's digit-only form is in
+ * the code set (F69 — body continuous / meta delimited are the same OTP).
  *
- * Codes from extractCodes are those same shapes; scanning with the same forms
- * and checking membership masks the same spans.
+ * Membership is O(text) Set lookups on canonical digits — no multi-branch
+ * needle alternation. Extract still yields original spelling (extractCodes).
  */
 export function maskSensitiveFragments(
   text: string,
@@ -167,9 +172,16 @@ export function maskSensitiveFragments(
   if (!text) return text;
   // URLs first so a full verify link is one unit before digit-code scans.
   let result = maskNormalizedHttpUrls(text, links);
-  const codeSet = new Set(codes.filter(Boolean));
+  const codeSet = new Set<string>();
+  for (const code of codes) {
+    if (!code) continue;
+    const canon = canonicalDigits(code);
+    if (canon) codeSet.add(canon);
+  }
   if (codeSet.size === 0) return result;
-  return result.replace(metaCodeRunRe(), (run) => (codeSet.has(run) ? '•••' : run));
+  return result.replace(metaCodeRunRe(), (run) =>
+    codeSet.has(canonicalDigits(run)) ? '•••' : run,
+  );
 }
 
 /**
@@ -189,17 +201,17 @@ export function maskTier2Metadata(
   const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
   const metaOtp = extractOtp(metaText);
   const metaHttpLinks = extractHttpLinks(metaText);
-  // Body codes only enter the mask list if they appear as the same continuous
-  // or delimited shape extractCodes yields (F68). Intersecting against meta
-  // runs is O(|meta|) instead of scanning every body code into per-needle
-  // replaces on short subject/from.
-  const metaDigitRuns = new Set<string>();
+  // Body codes enter the mask list when their digit-only form appears as any
+  // continuous/delimited meta run (F69: body `123456` ↔ subject `123-456`).
+  // O(|meta|) collect + O(|codes|) filter — not a per-needle scan of meta.
+  const metaCanonRuns = new Set<string>();
   for (const match of metaText.matchAll(metaCodeRunRe())) {
-    metaDigitRuns.add(match[0]!);
+    const canon = canonicalDigits(match[0]!);
+    if (canon) metaCanonRuns.add(canon);
   }
   const maskCodes = [
     ...metaOtp.codes,
-    ...extras.codes.filter((code) => metaDigitRuns.has(code)),
+    ...extras.codes.filter((code) => metaCanonRuns.has(canonicalDigits(code))),
   ];
   const maskLinks = [...extras.links, ...metaHttpLinks];
   from = maskSensitiveFragments(from, maskCodes, maskLinks);

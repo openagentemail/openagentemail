@@ -656,11 +656,18 @@ describe('mail-arrival notification watcher', () => {
     expect(maskSensitiveFragments('dup 1111 and 1111', ['1111', '1111'], [])).toBe(
       'dup ••• and •••',
     );
-    // F68: delimited form only when the full original spelling is in the set.
+    // Full run's digit sequence must match the set — half-codes do not mask.
     expect(maskSensitiveFragments('Your verification code is 123-456', ['123-456'], [])).toBe(
       'Your verification code is •••',
     );
     expect(maskSensitiveFragments('code 123-456', ['123', '456'], [])).toBe('code 123-456');
+    // F69: same OTP across continuous vs delimited spelling (digit-only match).
+    expect(maskSensitiveFragments('code 123-456', ['123456'], [])).toBe('code •••');
+    expect(maskSensitiveFragments('code 123 456', ['123456'], [])).toBe('code •••');
+    expect(maskSensitiveFragments('code 123-789', ['123456'], [])).toBe('code 123-789');
+    // Reverse cross-form + 8-digit continuous ↔ 4+4 delimited.
+    expect(maskSensitiveFragments('code 123456', ['123-456'], [])).toBe('code •••');
+    expect(maskSensitiveFragments('code 1234-5678', ['12345678'], [])).toBe('code •••');
   });
 
   test('maskTier2Metadata redacts delimited OTP in subject (F68)', () => {
@@ -673,6 +680,31 @@ describe('mail-arrival notification watcher', () => {
     });
     expect(masked.subject).toBe('Your verification code is •••');
     expect(masked.subject).not.toContain('123-456');
+  });
+
+  test('maskTier2Metadata masks subject delimited form from body continuous (F69)', () => {
+    // Body extractCodes yields continuous; subject has separator and no keyword.
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '123-456',
+      codes: ['123456'],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toBe('•••');
+    expect(masked.subject).not.toContain('123-456');
+    expect(masked.subject).not.toContain('123456');
+  });
+
+  test('maskTier2Metadata masks subject continuous form from body delimited (F69)', () => {
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '123456',
+      codes: ['123-456'],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toBe('•••');
   });
 
   test('tier 2 masks delimited OTP in subject under policy=all (F68)', async () => {
@@ -698,6 +730,55 @@ describe('mail-arrival notification watcher', () => {
     expect(body).toContain('•••');
     expect(body).not.toContain('123-456');
     expect(body).toContain('(contains OTP or verification link)');
+  });
+
+  test('tier 2 masks subject delimited OTP from continuous body under otp policy (F69)', async () => {
+    // Body continuous with keyword → extractCodes ['123456']; subject is bare
+    // delimited with no cue (meta extractOtp empty). Canonical intersect must mask.
+    const subject = '123-456';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nYour verification code is 123456`,
+        subject,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].level).toBe('urgent');
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('123-456');
+    expect(body).not.toContain('123456');
+  });
+
+  test('tier 2 masks subject delimited OTP from continuous body under policy=all (F69)', async () => {
+    const subject = '123-456';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nYour verification code is 123456`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('123-456');
+    expect(body).not.toContain('123456');
   });
 
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
