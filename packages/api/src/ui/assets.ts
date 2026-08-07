@@ -1086,9 +1086,12 @@ export const UI_JS = `(function () {
           restore();
         } else {
           // Fuzzy failure (network/parse/5xx): PUT may already have persisted.
-          // Re-fetch authoritative identities so UI matches server tier.
+          // Invalidate in-flight overview identity loads, then re-fetch.
+          bumpIdentityEpoch();
+          var recoveryGen = state.overviewGen;
           try {
             var payload = await apiJson('/ui/api/identities');
+            if (recoveryGen !== state.overviewGen) return;
             state.identities = Array.isArray(payload.identities) ? payload.identities : [];
             var row = state.identities.find(function (identity) {
               return identity.address === address;
@@ -1113,6 +1116,7 @@ export const UI_JS = `(function () {
               renderOverviewRows();
             }
           } catch (_refreshErr) {
+            if (recoveryGen !== state.overviewGen) return;
             restore();
             announce('Could not update push content tier. Try again.');
           }

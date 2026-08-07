@@ -281,6 +281,9 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     let parenDepth = 0;
     let bracketDepth = 0;
     let end = text.length;
+    // First scheme strictly after the current closer; skips nested schemes that
+    // fell inside this span (e.g. ?next=https:// before a Markdown )[label]().
+    let probeIdx = schemeIdx + 1;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -301,7 +304,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           parenDepth -= 1;
           continue;
         }
-        if (isMarkdownChainGlue(text, i, schemePos[schemeIdx + 1])) {
+        while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) probeIdx += 1;
+        if (isMarkdownChainGlue(text, i, schemePos[probeIdx])) {
           end = i;
           break;
         }
@@ -312,7 +316,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           bracketDepth -= 1;
           continue;
         }
-        if (isMarkdownChainGlue(text, i, schemePos[schemeIdx + 1])) {
+        while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) probeIdx += 1;
+        if (isMarkdownChainGlue(text, i, schemePos[probeIdx])) {
           end = i;
           break;
         }

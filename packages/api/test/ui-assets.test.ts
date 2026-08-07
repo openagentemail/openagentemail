@@ -536,6 +536,16 @@ describe('UI static asset contract', () => {
     expect(catchBody).toContain('selectEl.value = String(authoritative)');
     expect(catchBody).toContain('selectEl.dataset.currentTier = String(authoritative)');
     expect(catchBody).toContain("(refreshed).");
+    // F53: bump epoch before recovery re-fetch so stale overview identities cannot clobber.
+    const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
+    expect(fuzzyStart).toBeGreaterThanOrEqual(0);
+    const fuzzyBranch = catchBody.slice(fuzzyStart);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeGreaterThanOrEqual(0);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
+      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
+    );
+    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
+    expect(fuzzyBranch).toContain('if (recoveryGen !== state.overviewGen) return;');
 
     // confirm_risk_required: restore before announce (server clearly rejected).
     const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");

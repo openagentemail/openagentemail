@@ -307,6 +307,22 @@ describe('extractLinks', () => {
     ]);
   });
 
+  test('nested ?next= scheme does not hide following Markdown chain (F52)', () => {
+    const text =
+      '[Verify](https://a.example/verify?next=https://x.example/)[Confirm](https://b.example/confirm)';
+    expect([...bareUrlSpans(text)].map((s) => s.clean)).toEqual([
+      'https://a.example/verify?next=https://x.example/',
+      'https://b.example/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual([
+      'https://a.example/verify?next=https://x.example/',
+      'https://b.example/confirm',
+    ]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe(
+      '[Verify](•••)[Confirm](•••)',
+    );
+  });
+
   test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {
     const text = 'Verify https://example.com/confirm)[token=secret';
     const full = 'https://example.com/confirm)[token=secret';
