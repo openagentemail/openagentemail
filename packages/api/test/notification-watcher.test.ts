@@ -1685,6 +1685,30 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Reference AB:12:CD attached')).toEqual([]);
   });
 
+  test('tier 2 masks underscore-delimited alnum OTP under strong cue (F124)', () => {
+    // Underscore-joined mixed groups: extract + mask.
+    expect(extractMetaAlnumCodes('Your verification code is AB_12')).toContain('AB_12');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is AB_12',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('AB_12');
+    // Three groups; single-char chain; fullwidth underscore.
+    expect(extractMetaAlnumCodes('Your verification code is AB_12_CD')).toContain('AB_12_CD');
+    expect(extractMetaAlnumCodes('Your verification code is A_1_B_2')).toContain('A_1_B_2');
+    expect(extractMetaAlnumCodes('您的验证码是 ＡＢ＿１２')).toContain('ＡＢ＿１２');
+    // snake_case words stay unextracted — letter-only joins drop.
+    expect(extractMetaAlnumCodes('Your verification code is otp_code')).not.toContain('otp_code');
+    // Pure-digit underscore forms (ids) stay unextracted — no letter.
+    expect(extractMetaAlnumCodes('Your verification code is 12_30')).not.toContain('12_30');
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference AB_12 attached')).toEqual([]);
+  });
+
   test('tier 2 masks compatibility-form alnum OTP beyond fullwidth (F113)', () => {
     // Circled letters/digits NFKC-normalize to A1B2: extract original spelling + mask.
     expect(extractMetaAlnumCodes('Your verification code is Ⓐ①Ⓑ②')).toContain('Ⓐ①Ⓑ②');

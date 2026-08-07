@@ -344,30 +344,54 @@ const META_ALNUM_DELIMITED_TIGHT_SINGLE = new RegExp(
   'g',
 );
 /**
- * Colon-delimited codes (F117): `AB:12:CD`. Colon (ASCII + fullwidth) stays
- * OUT of the tight class — there it would glue `x:ABC-123` into mid-chain
- * blocks and URLs/versions into unrelated matchers. These two bounded forms
- * mirror the tight pair: 2–4 groups of 2–4, and 4–8 single-char chains.
- * Pure-digit joins (12:30) and letter-only joins drop at the push() predicate;
- * http(s) URLs are link-masked before the alnum pass.
+ * Bounded single-separator delimited pair (F117 colon, F124 underscore):
+ * 2–4 groups of 2–4 alnum, and 4–8 single-char chains, joined by ONE sep
+ * each. The separator stays OUT of the tight class on purpose:
+ * - colon would glue `x:ABC-123` into mid-chain blocks and URLs/versions into
+ *   unrelated matchers;
+ * - underscore is a word char — snake_case tokens (`otp_code`) would glue.
+ * Pure-digit joins (12:30) and letter-only joins (snake_case words) drop at
+ * the push() predicate; http(s) URLs are link-masked before the alnum pass.
  */
+function boundedDelimitedMatchers(sepClass: string): { multi: RegExp; single: RegExp } {
+  /** Lead: not immediately after `alnum<sep>` (blocks mid-chain restarts). */
+  const lead = `(?<![${META_ALNUM_CHAR}]${sepClass})`;
+  return {
+    multi: new RegExp(
+      `${lead}${META_ALNUM_BOUND_LEFT}` +
+        `(${META_ALNUM_GROUP}(?:${sepClass}${META_ALNUM_GROUP}){1,3})` +
+        `(?!${sepClass}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+      'g',
+    ),
+    single: new RegExp(
+      `${lead}${META_ALNUM_BOUND_LEFT}` +
+        `([${META_ALNUM_CHAR}](?:${sepClass}[${META_ALNUM_CHAR}]){3,7})` +
+        `(?!${sepClass}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+      'g',
+    ),
+  };
+}
+
+/** Single-chain acceptance for one separator class: NFKC, split on sep runs,
+ * 4–8 groups of exactly 1 char. Mixed/letter acceptance happens in push() via
+ * isMetaAlnumOtpForm — pure-digit and letter-only chains drop there.
+ */
+function singleChainPredicate(sepClass: string): (form: string) => boolean {
+  const splitRe = new RegExp(`${sepClass}+`);
+  return (form) => {
+    const parts = form.normalize('NFKC').split(splitRe).filter(Boolean);
+    return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
+  };
+}
+
+/** F117: `AB:12:CD`, `A:1:B:2` (ASCII + fullwidth colon). */
 const META_ALNUM_SEP_COLON = '[:：]';
-/** Lead: not immediately after `alnum:` (blocks mid-chain restarts). */
-const META_ALNUM_LEAD_COLON = `(?<![${META_ALNUM_CHAR}]${META_ALNUM_SEP_COLON})`;
-// 2–4 groups of 2–4 alnum joined by single colons.
-const META_ALNUM_DELIMITED_COLON = new RegExp(
-  `${META_ALNUM_LEAD_COLON}${META_ALNUM_BOUND_LEFT}` +
-    `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_COLON}${META_ALNUM_GROUP}){1,3})` +
-    `(?!${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
-  'g',
-);
-// 4–8 groups of exactly 1 alnum joined by single colons (`A:1:B:2`).
-const META_ALNUM_DELIMITED_COLON_SINGLE = new RegExp(
-  `${META_ALNUM_LEAD_COLON}${META_ALNUM_BOUND_LEFT}` +
-    `([${META_ALNUM_CHAR}](?:${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}]){3,7})` +
-    `(?!${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
-  'g',
-);
+const META_ALNUM_DELIMITED_COLON_PAIR = boundedDelimitedMatchers(META_ALNUM_SEP_COLON);
+const isPlausibleColonSingleChain = singleChainPredicate(META_ALNUM_SEP_COLON);
+/** F124: `AB_12`, `A_1_B_2` (ASCII + fullwidth underscore). */
+const META_ALNUM_SEP_UNDER = '[_＿]';
+const META_ALNUM_DELIMITED_UNDER_PAIR = boundedDelimitedMatchers(META_ALNUM_SEP_UNDER);
+const isPlausibleUnderSingleChain = singleChainPredicate(META_ALNUM_SEP_UNDER);
 /**
  * 2–4 alnum chars that include a digit after NFKC (lookahead fixes length).
  * Used for space runs so pure-letter English tokens are not groups.
@@ -525,18 +549,6 @@ function isPlausibleSpaceSingleChain(form: string): boolean {
   return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
 }
 
-/**
- * Accept a colon single-char chain (F117): NFKC, split on colon runs, 4–8
- * groups of exactly 1 char. Same push() predicate split as F105.
- */
-function isPlausibleColonSingleChain(form: string): boolean {
-  const parts = form
-    .normalize('NFKC')
-    .split(new RegExp(`${META_ALNUM_SEP_COLON}+`))
-    .filter(Boolean);
-  return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
-}
-
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
 function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
@@ -648,20 +660,24 @@ function collectMetaAlnumForms(
     if (!isPlausibleSingleChain(form)) continue;
     emit(match);
   }
-  // F117: colon-delimited forms (`AB:12:CD`, `A:1:B:2`) — bounded matchers,
-  // colon never joins the tight class.
-  for (const match of text.matchAll(META_ALNUM_DELIMITED_COLON)) {
-    const form = match[1]!;
-    const groups = form
-      .split(new RegExp(`${META_ALNUM_SEP_COLON}+`))
-      .filter(Boolean);
-    if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
-    emit(match);
-  }
-  for (const match of text.matchAll(META_ALNUM_DELIMITED_COLON_SINGLE)) {
-    const form = match[1]!;
-    if (!isPlausibleColonSingleChain(form)) continue;
-    emit(match);
+  // F117/F124: colon- and underscore-delimited forms (`AB:12:CD`, `AB_12` and
+  // single-char chains) — bounded matcher pairs, neither separator joins the
+  // tight class.
+  for (const pair of [
+    { sep: META_ALNUM_SEP_COLON, matchers: META_ALNUM_DELIMITED_COLON_PAIR, plausible: isPlausibleColonSingleChain },
+    { sep: META_ALNUM_SEP_UNDER, matchers: META_ALNUM_DELIMITED_UNDER_PAIR, plausible: isPlausibleUnderSingleChain },
+  ]) {
+    for (const match of text.matchAll(pair.matchers.multi)) {
+      const form = match[1]!;
+      const groups = form.split(new RegExp(`${pair.sep}+`)).filter(Boolean);
+      if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
+      emit(match);
+    }
+    for (const match of text.matchAll(pair.matchers.single)) {
+      const form = match[1]!;
+      if (!pair.plausible(form)) continue;
+      emit(match);
+    }
   }
 }
 
@@ -670,8 +686,8 @@ function collectMetaAlnumForms(
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
  * F95 letter-only continuous + F97 letter-only delimited + F105 tight
  * single-char chains + F106 space single-char chains + F109 mixed-separator
- * single-char chains + F113 compatibility forms + F117 colon-delimited
- * forms). Does not touch body extract semantics.
+ * single-char chains + F113 compatibility forms + F117 colon-delimited +
+ * F124 underscore-delimited forms). Does not touch body extract semantics.
  *
  * F113: compatibility characters beyond the fullwidth ranges (Ⓐ①Ⓑ②, 𝐀𝟏𝐁𝟐)
  * normalize to valid codes but never matched the classes above. When NFKC
