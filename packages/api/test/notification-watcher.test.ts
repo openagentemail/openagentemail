@@ -836,6 +836,44 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('100000');
   });
 
+  test('tier 1/2 prefers dropping the click over truncating the alert (F123)', () => {
+    // A ~3800-char DASHBOARD_PUBLIC_URL shrinks the with-click budget below
+    // the interrupt text; the click must go, not the alert.
+    const hugeClick = `https://dashboard.example.com/${'p'.repeat(3800)}`;
+    const tier1 = buildMailArrivalMessage(
+      'fox@example.com',
+      1,
+      false,
+      { subject: '', from: '', preview: '', codes: [], links: [] },
+      undefined,
+      { clickUrl: hugeClick },
+    );
+    expect(tier1).toBe('fox@example.com received new email');
+
+    const tier2 = buildMailArrivalMessage(
+      'fox@example.com',
+      2,
+      true,
+      { subject: 'hi', from: 'auth@example.com', preview: '', codes: [], links: [] },
+      undefined,
+      { clickUrl: hugeClick },
+    );
+    expect(tier2).toContain('fox@example.com received new email (contains OTP or verification link)');
+    expect(tier2).toContain('From: auth@example.com');
+    expect(tier2).not.toContain('…');
+
+    // Short click still fits alongside the body — no behavior change.
+    const withClick = buildMailArrivalMessage(
+      'fox@example.com',
+      1,
+      false,
+      { subject: '', from: '', preview: '', codes: [], links: [] },
+      undefined,
+      { clickUrl: 'https://dash.example.com' },
+    );
+    expect(withClick).toBe('fox@example.com received new email');
+  });
+
   test('maskSensitiveFragments masks digit runs present in the code set only', () => {
     expect(maskSensitiveFragments('plain subject', [], [])).toBe('plain subject');
     expect(maskSensitiveFragments('code 112233 and 445566', ['112233', '445566'], [])).toBe(

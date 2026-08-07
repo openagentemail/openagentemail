@@ -991,10 +991,17 @@ export function buildMailArrivalMessage(
   }
 
   // Tier 1–2: raw byte bound is fine (no long verify links).
-  return boundPushMessage(
-    lines.join('\n'),
-    Math.min(PUSH_MESSAGE_MAX_BYTES, maxWithClick),
-  );
+  const body = lines.join('\n');
+  const withClickCap = Math.min(PUSH_MESSAGE_MAX_BYTES, maxWithClick);
+  // F123: never truncate the core alert to preserve the click action — a long
+  // DASHBOARD_PUBLIC_URL would otherwise shrink the with-click budget below
+  // the interrupt text itself (`fox@example.…`). When the body only fits
+  // without the click, pack under the no-click budget; publish()'s click-drop
+  // fallback (F76) delivers it minus the action.
+  if (options.clickUrl && Buffer.byteLength(body, 'utf8') > withClickCap) {
+    return boundPushMessage(body, Math.min(PUSH_MESSAGE_MAX_BYTES, maxNoClick));
+  }
+  return boundPushMessage(body, withClickCap);
 }
 
 /** Process one newly delivered message. Exported for policy/security tests. */
