@@ -412,6 +412,27 @@ function isJsWhitespace(ch: string): boolean {
   return /\s/.test(ch);
 }
 
+/**
+ * Prose close-context after a quote closer (F64/F122): end of text,
+ * whitespace, or terminal punctuation — an internal apostrophe (`o'brien`)
+ * or quote-joined URL content sees anything else.
+ */
+function isProseCloseContext(next: string): boolean {
+  return (
+    next === '' ||
+    isJsWhitespace(next) ||
+    next === '!' ||
+    next === '.' ||
+    next === ',' ||
+    next === ';' ||
+    next === ':' ||
+    next === '?' ||
+    next === ')' ||
+    next === ']' ||
+    next === '}'
+  );
+}
+
 /** Non-overlapping positions of https?:// (case-insensitive). O(n). */
 function findSchemePositions(text: string): number[] {
   const positions: number[] = [];
@@ -704,6 +725,9 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
  * openQuoted spans also cut before a closing `'` when the next char is prose
  * close context (F64). Nested redirects stay inside the URL when no cut applies.
  * Bounded tail peel removes free trailers without re-matching.
+ * Smart-quoted spans (“…”/‘…’) likewise cut before the matching closing
+ * smart quote in close context (F122) so the quote is not percent-encoded
+ * into the published destination.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
@@ -740,6 +764,16 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     // True when F64 cut left the outer closer outside the raw span — peel must
     // not also strip a legal URL-terminal ' (F63).
     let openQuotedCut = false;
+    // F122: span opened after a smart-quote opener (“…”/‘…’) — the matching
+    // closing quote is prose context, not URL content (the WHATWG parser
+    // percent-encodes it into a different, unusable destination).
+    const smartOpener = start >= 1 ? text[start - 1]! : '';
+    const openSmartQuote =
+      smartOpener === '\u201C'
+        ? '\u201D'
+        : smartOpener === '\u2018'
+          ? '\u2019'
+          : undefined;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -820,21 +854,19 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
       // (token'' + space → cut only the outer closer) stay in the URL.
       if (ch === "'" && openQuoted) {
         const next = i + 1 < text.length ? text[i + 1]! : '';
-        const closes =
-          next === '' ||
-          isJsWhitespace(next) ||
-          next === '!' ||
-          next === '.' ||
-          next === ',' ||
-          next === ';' ||
-          next === ':' ||
-          next === '?' ||
-          next === ')' ||
-          next === ']' ||
-          next === '}';
-        if (closes) {
+        if (isProseCloseContext(next)) {
           end = i;
           openQuotedCut = true;
+          break;
+        }
+        continue;
+      }
+      // F122: matching smart closer closes a smart-quoted span in close
+      // context; anything else keeps the quote as (rare, invalid) URL content.
+      if (openSmartQuote !== undefined && ch === openSmartQuote) {
+        const next = i + 1 < text.length ? text[i + 1]! : '';
+        if (isProseCloseContext(next)) {
+          end = i;
           break;
         }
         continue;

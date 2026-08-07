@@ -792,6 +792,22 @@ describe('extractLinks', () => {
     ]);
   });
 
+  test('smart quotes do not extend verification URLs (F122)', () => {
+    // Typographic double/single quotes around a link: the closing smart quote
+    // is prose context, not URL content (WHATWG would percent-encode it).
+    expect(extractHttpLinks('“https://example.com/verify”')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('‘https://example.com/verify’,')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('see “https://example.com/verify?token=abc123” now')).toEqual([
+      'https://example.com/verify?token=abc123',
+    ]);
+    // Closing quote without close-context stays (conservative, mirrors F64).
+    expect(extractHttpLinks('“https://a.com/x”y')).toEqual(['https://a.com/x%E2%80%9Dy']);
+  });
+
   test('prose brackets cut before free closing ] (F67)', () => {
     expect(extractHttpLinks('Visit [https://example.com/verify]: now')).toEqual([
       'https://example.com/verify',

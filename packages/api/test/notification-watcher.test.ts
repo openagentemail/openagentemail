@@ -1624,6 +1624,18 @@ describe('mail-arrival notification watcher', () => {
     // Fullwidth colon; colon single-char chain (4–8 groups).
     expect(extractMetaAlnumCodes('您的验证码是 ＡＢ：１２')).toContain('ＡＢ：１２');
     expect(extractMetaAlnumCodes('Your verification code is A:1:B:2')).toContain('A:1:B:2');
+    // F121: nonbreaking hyphen (U+2011) and its NFKC form (U+2010) mask too.
+    expect(extractMetaAlnumCodes('Your verification code is AB\u201112')).toContain('AB\u201112');
+    expect(extractMetaAlnumCodes('Your verification code is AB\u201012')).toContain('AB\u201012');
+    const nbMasked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is AB\u201112',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(nbMasked.subject).not.toContain('AB\u201112');
+    expect(nbMasked.subject).toContain('•••');
     // Pure-digit colon forms (times) stay unextracted — no letter.
     expect(extractMetaAlnumCodes('Your verification code is 12:30')).not.toContain('12:30');
     // Letter-only lowercase colon words stay rejected.

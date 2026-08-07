@@ -305,8 +305,11 @@ const META_ALNUM_GROUP = `[${META_ALNUM_CHAR}]{2,4}`;
  * `code is ABC-123` cannot glue via space-only gaps.
  * F112: slash (ASCII + fullwidth) joins the tight class — `A1/B2` metadata
  * codes bypassed every matcher; URLs are unaffected (link-masked first).
+ * F121: nonbreaking hyphen U+2011 and its NFKC form U+2010 join too —
+ * `AB‑12` (U+2011) published unmasked; NFKC maps U+2011 → U+2010, so the
+ * compatibility pass only recovers it when both are in the class.
  */
-const META_ALNUM_SEP_TIGHT = '[-–—./\uFF0D\uFF0E\uFF0F]';
+const META_ALNUM_SEP_TIGHT = '[-–—./\u2010\u2011\uFF0D\uFF0E\uFF0F]';
 const META_ALNUM_SEP_SPACE =
   '[\\t \\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF]';
 const T = META_ALNUM_SEP_TIGHT;
