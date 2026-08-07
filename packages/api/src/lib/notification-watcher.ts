@@ -132,11 +132,19 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
   return boundTextBytes(body, maxBytes);
 }
 
+/** Escape a needle for use as a single RegExp alternative. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
- * Codes: exact string replace. Links: normalize via validatedHttpUrl then
- * replace the original spelling (maskNormalizedHttpUrls) so EXAMPLE.com:443
- * still redacts when extractOtp returned https://example.com/....
+ * Links: normalize via validatedHttpUrl then replace original spelling
+ * (maskNormalizedHttpUrls). Codes: one alternation regex replace (O(text)),
+ * not per-needle includes+split which is O(codes × text) DoS.
+ *
+ * Codes are longest \b\d{4,8}\b runs and do not overlap, so longest-first
+ * alternation matches the same spans as sequential split/join.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -146,14 +154,17 @@ export function maskSensitiveFragments(
   if (!text) return text;
   // URLs first so a full verify link is one unit before digit-code scans.
   let result = maskNormalizedHttpUrls(text, links);
-  const codeNeedles = codes
-    .filter((value) => value.length > 0)
-    .sort((a, b) => b.length - a.length);
-  for (const needle of codeNeedles) {
-    if (!result.includes(needle)) continue;
-    result = result.split(needle).join('•••');
+  const seen = new Set<string>();
+  const codeNeedles: string[] = [];
+  for (const value of codes) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    codeNeedles.push(value);
   }
-  return result;
+  codeNeedles.sort((a, b) => b.length - a.length);
+  if (codeNeedles.length === 0) return result;
+  const pattern = codeNeedles.map(escapeRegExp).join('|');
+  return result.replace(new RegExp(pattern, 'g'), '•••');
 }
 
 /** Build the human-facing push body for one identity's content tier. */
@@ -181,7 +192,18 @@ export function buildMailArrivalMessage(
       const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
       const metaOtp = extractOtp(metaText);
       const metaHttpLinks = extractHttpLinks(metaText);
-      const maskCodes = [...extras.codes, ...metaOtp.codes];
+      // Body codes only enter the mask list if they appear as a longest
+      // \b\d{4,8}\b run in metadata (same shape extractCodes would yield).
+      // Intersecting against meta digit runs is O(|meta|) instead of scanning
+      // every body code into per-needle replaces on short subject/from.
+      const metaDigitRuns = new Set<string>();
+      for (const match of metaText.matchAll(/\b\d{4,8}\b/g)) {
+        metaDigitRuns.add(match[0]!);
+      }
+      const maskCodes = [
+        ...metaOtp.codes,
+        ...extras.codes.filter((code) => metaDigitRuns.has(code)),
+      ];
       const maskLinks = [...extras.links, ...metaHttpLinks];
       from = maskSensitiveFragments(from, maskCodes, maskLinks);
       subject = maskSensitiveFragments(subject, maskCodes, maskLinks);

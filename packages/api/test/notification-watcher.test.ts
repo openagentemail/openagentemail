@@ -9,6 +9,7 @@ const { describe, expect, test } = await import('bun:test');
 const {
   boundPushMessage,
   buildMailArrivalMessage,
+  maskSensitiveFragments,
   processWatchedMessage,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
@@ -535,6 +536,57 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('confirm');
     expect(body).not.toContain('token=secret');
     expect(body).not.toContain('https://');
+  });
+
+  test('tier 2 masks a subject code even when the body has many unrelated codes', () => {
+    const bodyCodes = Array.from({ length: 100 }, (_, i) => String(100000 + i));
+    const bodyText = bodyCodes.map((code) => `Your verification code is ${code}.`).join(' ');
+    // Direct builder: extras.codes is huge, subject holds only 654321.
+    const body = buildMailArrivalMessage('a@test.example', 2, true, {
+      subject: 'Your login code is 654321',
+      from: 'auth@example.com',
+      preview: bodyText.slice(0, 280),
+      codes: [...bodyCodes, '654321'],
+      links: [],
+    });
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('654321');
+    // Unrelated body codes must not appear either (they are not in subject).
+    expect(body).not.toContain('100000');
+  });
+
+  test('maskSensitiveFragments uses one-pass code replace and handles empty needles', () => {
+    expect(maskSensitiveFragments('plain subject', [], [])).toBe('plain subject');
+    expect(maskSensitiveFragments('code 112233 and 445566', ['112233', '445566'], [])).toBe(
+      'code ••• and •••',
+    );
+    // Longest-first: overlapping would prefer longer if both listed.
+    expect(maskSensitiveFragments('code 11223399', ['1122', '112233'], [])).toBe('code •••99');
+    expect(maskSensitiveFragments('dup 1111 and 1111', ['1111', '1111'], [])).toBe(
+      'dup ••• and •••',
+    );
+  });
+
+  test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
+    const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
+      // 6-digit distinct codes that do not appear in the short subject.
+      return String(200000 + (i % 800_000)).padStart(6, '0');
+    });
+    // Folded-looking subject with many digit runs that are not the body codes.
+    const subjectDigits = Array.from({ length: 2_000 }, (_, i) => String(900000 + (i % 1000)).padStart(6, '0'));
+    const subject = `codes ${subjectDigits.join(' ')} and secret 654321`;
+    const started = performance.now();
+    const body = buildMailArrivalMessage('a@test.example', 2, true, {
+      subject,
+      from: 'auth@example.com',
+      preview: 'x'.repeat(280),
+      codes: bodyCodes,
+      links: [],
+    });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(body).toContain('•••');
+    expect(body).not.toContain('654321');
   });
 
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
