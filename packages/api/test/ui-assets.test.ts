@@ -511,18 +511,48 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('tierPending: {}');
     expect(handleTier).toContain('state.tierPending[address] = true;');
     expect(handleTier).toContain('delete state.tierPending[address];');
-    // F51: fuzzy PUT failure re-fetches authoritative tier; known failures restore.
-    expect(handleTier).toContain("apiJson('/ui/api/identities')");
-    expect(handleTier).toContain('selectEl.dataset.currentTier = String(authoritative)');
-    expect(handleTier).toContain("(refreshed).");
-    expect(handleTier).toContain("error.body.error === 'confirm_risk_required'");
-    expect(handleTier).toContain("error.message === 'session_expired'");
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderOverviewRows('),
       UI_JS.indexOf('function updateOverviewRefreshButton('),
     );
     expect(renderRows).toContain('state.tierPending[model.identity.address]');
     expect(renderRows).toContain('tierSelect.disabled = true;');
+  });
+
+  // F51: fuzzy push-tier PUT failure must re-fetch authoritative tier; known rejects restore.
+  test('handlePushTierChange fuzzy failure re-fetches tier; known failures restore (F51)', () => {
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    const catchStart = handleTier.indexOf('} catch (error) {');
+    const finallyStart = handleTier.indexOf('} finally {', catchStart);
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    expect(finallyStart).toBeGreaterThan(catchStart);
+    const catchBody = handleTier.slice(catchStart, finallyStart);
+
+    // Fuzzy path: re-fetch list, write select + dataset from server tier, announce refresh.
+    expect(catchBody).toContain("apiJson('/ui/api/identities')");
+    expect(catchBody).toContain('selectEl.value = String(authoritative)');
+    expect(catchBody).toContain('selectEl.dataset.currentTier = String(authoritative)');
+    expect(catchBody).toContain("(refreshed).");
+
+    // confirm_risk_required: restore before announce (server clearly rejected).
+    const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
+    expect(confirmIdx).toBeGreaterThanOrEqual(0);
+    const afterConfirm = catchBody.slice(confirmIdx);
+    expect(afterConfirm.indexOf('restore()')).toBeGreaterThanOrEqual(0);
+    expect(afterConfirm.indexOf('restore()')).toBeLessThan(
+      afterConfirm.indexOf("announce('Tier 3 requires explicit risk confirmation.')"),
+    );
+
+    // session_expired: restore only (session flow takes over).
+    const sessionIdx = catchBody.indexOf("error.message === 'session_expired'");
+    expect(sessionIdx).toBeGreaterThan(confirmIdx);
+    const sessionBranch = catchBody.slice(sessionIdx, catchBody.indexOf('} else {', sessionIdx));
+    expect(sessionBranch).toContain('restore()');
+    // Fuzzy re-fetch must not live inside the session_expired branch.
+    expect(sessionBranch).not.toContain("apiJson('/ui/api/identities')");
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动
