@@ -19,7 +19,7 @@ import {
   type PushContentTier,
 } from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
-import { type NotifyService, notificationService } from './notify.ts';
+import { NotifyError, type NotifyService, notificationService } from './notify.ts';
 import { extractHttpLinks, extractOtp, htmlToText, maskNormalizedHttpUrls } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
@@ -50,6 +50,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
 
 export type WatcherDispatch = {
+  /** May carry NotifyInput.beforeSend for final tier/delete checks at fetch boundary. */
   publish: NotifyService['publish'];
 };
 
@@ -281,14 +282,29 @@ export async function processWatchedMessage(
     const tier = resolvePushContentTier(current);
     const body = buildMailArrivalMessage(current.address, tier, hasOtpOrLink, extras);
     const level = hasOtpOrLink ? 'urgent' : 'normal';
-    await dispatch.publish({
-      target: 'user',
-      title: 'openagent.email new mail',
-      message: body,
-      level,
-      tags: ['email'],
-      ...(clickUrl ? { click: clickUrl } : {}),
-    });
+    // Re-check at the publish fetch boundary (after publish's own awaits).
+    // Abort only when privacy tightened (delete or downgrade); upgrades keep
+    // the already-safe lower-tier body.
+    const beforeSend = options.refreshIdentity
+      ? (): boolean => {
+          const again = options.refreshIdentity!(identity.address);
+          return again !== undefined && resolvePushContentTier(again) >= tier;
+        }
+      : undefined;
+    try {
+      await dispatch.publish({
+        target: 'user',
+        title: 'openagent.email new mail',
+        message: body,
+        level,
+        tags: ['email'],
+        ...(clickUrl ? { click: clickUrl } : {}),
+        ...(beforeSend ? { beforeSend } : {}),
+      });
+    } catch (err) {
+      if (err instanceof NotifyError && err.code === 'notify_cancelled') continue;
+      throw err;
+    }
   }
 }
 

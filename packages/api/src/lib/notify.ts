@@ -26,6 +26,11 @@ export interface NotifyInput {
   tags?: string[];
   /** Optional ntfy click action URL (e.g. dashboard origin for mail-arrival pushes). */
   click?: string;
+  /**
+   * Final privacy check after all internal awaits and body serialization,
+   * immediately before fetch(). Return false to abort without sending.
+   */
+  beforeSend?: () => boolean;
 }
 
 export interface NotifyMessage {
@@ -60,6 +65,7 @@ export class NotifyError extends Error {
       | 'notifications_disabled'
       | 'notifications_unconfigured'
       | 'notify_unavailable'
+      | 'notify_cancelled'
       | 'verify_failed'
       | 'unknown_agent',
   ) {
@@ -571,6 +577,11 @@ export class NtfyNotificationService implements NotifyService {
         NTFY_REQUEST_MAX_BYTES - overhead,
       );
       body = JSON.stringify(basePayload);
+    }
+    // After assertEnabled/physicalTopic awaits: last chance to drop a payload
+    // whose privacy floor moved mid-flight (tier downgrade or DELETE).
+    if (input.beforeSend && !input.beforeSend()) {
+      throw new NotifyError('notify_cancelled');
     }
     const response = await fetch(providerUrl('/'), {
       method: 'POST',

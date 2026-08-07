@@ -18,6 +18,18 @@ const {
   PUSH_OTP_ENTRY_CHARS,
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
+const { NotifyError } = await import('../src/lib/notify.ts');
+
+/** Mock publish that honors beforeSend like NtfyNotificationService. */
+function publishWithBeforeSend(calls: any[]) {
+  return async (payload: any) => {
+    if (payload.beforeSend && !payload.beforeSend()) {
+      throw new NotifyError('notify_cancelled');
+    }
+    calls.push(payload);
+    return { target: payload.target, title: payload.title, level: payload.level };
+  };
+}
 
 const baseIdentities = [
   { address: 'target@test.example', createdAt: '2026-08-02T00:00:00.000Z' },
@@ -789,12 +801,7 @@ describe('mail-arrival notification watcher', () => {
       } as any,
       [alive, deleted],
       'otp',
-      {
-        publish: async (payload) => {
-          calls.push(payload);
-          return { target: payload.target, title: payload.title, level: payload.level };
-        },
-      },
+      { publish: publishWithBeforeSend(calls) },
       {
         // First recipient still live; second deleted mid-flight (after prior publish).
         refreshIdentity: (address) => (address === alive.address ? alive : undefined),
@@ -803,6 +810,91 @@ describe('mail-arrival notification watcher', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].message).toContain('Subject:');
     expect(calls[0].message).not.toContain('Codes:');
+  });
+
+  test('beforeSend aborts when tier is downgraded after build (F47)', async () => {
+    const address = 'target@test.example';
+    let reads = 0;
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{ address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 }],
+      'otp',
+      { publish: publishWithBeforeSend(calls) },
+      {
+        refreshIdentity: () => {
+          reads += 1;
+          // First read: build tier-3 body; beforeSend re-read: privacy tightened to tier 1.
+          if (reads === 1) {
+            return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 as const };
+          }
+          return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 1 as const };
+        },
+      },
+    );
+    expect(reads).toBe(2);
+    expect(calls).toHaveLength(0);
+  });
+
+  test('beforeSend keeps lower-tier body when tier is upgraded mid-flight', async () => {
+    const address = 'target@test.example';
+    let reads = 0;
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{ address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 1 }],
+      'otp',
+      { publish: publishWithBeforeSend(calls) },
+      {
+        refreshIdentity: () => {
+          reads += 1;
+          if (reads === 1) {
+            return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 1 as const };
+          }
+          return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 as const };
+        },
+      },
+    );
+    expect(reads).toBe(2);
+    expect(calls).toHaveLength(1);
+    // Already-built tier-1 body is still safe under a higher floor.
+    expect(calls[0].message).not.toContain('Codes:');
+    expect(calls[0].message).not.toContain('Subject:');
+  });
+
+  test('beforeSend aborts when identity is deleted after build', async () => {
+    const address = 'target@test.example';
+    let reads = 0;
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{ address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 }],
+      'otp',
+      { publish: publishWithBeforeSend(calls) },
+      {
+        refreshIdentity: () => {
+          reads += 1;
+          if (reads === 1) {
+            return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 as const };
+          }
+          return undefined;
+        },
+      },
+    );
+    expect(reads).toBe(2);
+    expect(calls).toHaveLength(0);
   });
 
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {

@@ -25,6 +25,7 @@ const {
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
+  NotifyError,
   NTFY_REQUEST_MAX_BYTES,
   NtfyNotificationService,
   physicalAgentTopic,
@@ -424,8 +425,30 @@ describe('ntfy publish payload budget', () => {
     expect(typeof parsed.message).toBe('string');
     expect((parsed.message as string).endsWith('…')).toBe(true);
   }));
-});
 
+  test('beforeSend false aborts before fetch; true allows send (F47)', withPublishCapture(async (svc, captured) => {
+    await expect(
+      svc.publish({
+        target: 'user',
+        title: 't',
+        message: 'm',
+        level: 'normal',
+        beforeSend: () => false,
+      }),
+    ).rejects.toMatchObject({ code: 'notify_cancelled' } satisfies Partial<NotifyError>);
+    expect(captured).toHaveLength(0);
+
+    await svc.publish({
+      target: 'user',
+      title: 't',
+      message: 'm',
+      level: 'normal',
+      beforeSend: () => true,
+    });
+    expect(captured).toHaveLength(1);
+    expect(JSON.parse(captured[0]!)).toMatchObject({ message: 'm' });
+  }));
+});
 describe('private ntfy topic mapping', () => {
   test('low alerts use the separate low-priority user route', () => {
     expect(userRouteKey('urgent')).toBe('userAlerts');
