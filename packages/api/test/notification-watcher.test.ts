@@ -1090,6 +1090,63 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is 123-456')).toEqual([]);
   });
 
+  test('space-separated alnum runs mask whole chain not halves (F85)', () => {
+    // Bug repro: 3-group must not leave leading A1 unmasked as B2 C3 only.
+    expect(extractMetaAlnumCodes('Your verification code is A1 B2 C3')).toEqual(['A1 B2 C3']);
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A1 B2 C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    const three = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A1 B2 C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject;
+    expect(three).not.toContain('A1');
+    expect(three).not.toContain('B2');
+    expect(three).not.toContain('C3');
+
+    // 4 groups, every group has a digit.
+    expect(extractMetaAlnumCodes('Your code is A1 B2 C3 D4')).toEqual(['A1 B2 C3 D4']);
+    expect(maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Your code is A1 B2 C3 D4',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your code is •••');
+
+    // No digits → reject whole run (no mid-chain letter-only halves).
+    expect(extractMetaAlnumCodes('Your code is AB CD EF GH')).toEqual([]);
+    expect(maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Your code is AB CD EF GH',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your code is AB CD EF GH');
+
+    // 5+ groups rejected whole.
+    expect(extractMetaAlnumCodes('Your code is A1 B2 C3 D4 E5')).toEqual([]);
+    expect(maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Your code is A1 B2 C3 D4 E5',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your code is A1 B2 C3 D4 E5');
+
+    // 2-group regressions.
+    expect(extractMetaAlnumCodes('Your code is ABC 123')).toEqual(['ABC 123']);
+    expect(extractMetaAlnumCodes('Your code is to A1B2')).not.toContain('to A1B2');
+    expect(extractMetaAlnumCodes('Your verification code expires Mar 2026')).toEqual([]);
+  });
+
   test('alnum mask uses one alternation regex (F83)', () => {
     const forms = ['A1B2C3', 'XY99ZZ', 'Ab12'];
     const re = buildAlnumMaskRe(forms);

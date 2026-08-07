@@ -212,19 +212,22 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])/g;
 
 /**
- * Delimited mixed alnum OTP (F84): 2–4 groups of 2–4 ASCII alnum.
+ * Delimited mixed alnum OTP (F84/F85): 2–4 groups of 2–4 ASCII alnum.
  *
  * Non-whitespace seps (hyphen/dash/dot/fullwidth) allow 2–4 groups with F74-style
- * mid-chain lead/tail guards. Whitespace seps only allow **exactly two** groups
- * so English words (`is ABC-123`) cannot glue into a false 3-group form when
- * space is both a word break and an OTP separator.
+ * mid-chain lead/tail guards.
+ *
+ * Whitespace seps (F85):
+ * - Longest run of **digit-bearing** groups (`A1 B2 C3`) so English words never
+ *   join the chain; accept 2–4 groups, reject 5+ whole.
+ * - Classic two-group letter-block (3–4 letters) + digit-block (`ABC 123`).
+ * No “tail rejects more space+alnum” half-window: consume the full run then decide.
  *
  * Pure-digit forms are left to the digit delimited path (≥1 letter + ≥1 digit).
  */
 const META_ALNUM_GROUP = '[A-Za-z0-9]{2,4}';
 /**
  * Split of otp.ts DELIMITED_OTP_SEP_CLASS: non-whitespace vs whitespace.
- * Whitespace is restricted to exactly-two-group forms (see above).
  */
 const META_ALNUM_SEP_TIGHT = '[-–—.\uFF0D\uFF0E]';
 const META_ALNUM_SEP_SPACE =
@@ -236,11 +239,24 @@ const META_ALNUM_DELIMITED_TIGHT = new RegExp(
     `(?!${META_ALNUM_SEP_TIGHT}[A-Za-z0-9])(?![A-Za-z0-9])`,
   'g',
 );
-// Exactly two groups with a whitespace sep (e.g. `ABC 123`).
-const META_ALNUM_DELIMITED_SPACE = new RegExp(
+/**
+ * 2–4 alnum chars that include a digit (lookahead fixes length; then consume).
+ * Used for space runs so pure-letter English tokens are not groups.
+ */
+const META_ALNUM_GROUP_WITH_DIGIT =
+  '(?=[A-Za-z0-9]{2,4}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{2,4}';
+// Longest space-separated digit-bearing group run (F85).
+const META_ALNUM_DELIMITED_SPACE_DIGIT = new RegExp(
   `(?<![A-Za-z0-9])` +
-    `(${META_ALNUM_GROUP}${META_ALNUM_SEP_SPACE}${META_ALNUM_GROUP})` +
-    `(?!${META_ALNUM_SEP_SPACE}[A-Za-z0-9])(?![A-Za-z0-9])`,
+    `(${META_ALNUM_GROUP_WITH_DIGIT}(?:${META_ALNUM_SEP_SPACE}${META_ALNUM_GROUP_WITH_DIGIT})+)` +
+    `(?![A-Za-z0-9])`,
+  'g',
+);
+// Classic `ABC 123` (letter block 3–4 + digit block 2–4); year filter applied after.
+const META_ALNUM_DELIMITED_SPACE_CLASSIC = new RegExp(
+  `(?<![A-Za-z0-9])` +
+    `([A-Za-z]{3,4}${META_ALNUM_SEP_SPACE}[0-9]{2,4})` +
+    `(?![A-Za-z0-9])`,
   'g',
 );
 
@@ -248,20 +264,28 @@ function isMixedAlnumOtp(form: string): boolean {
   return /[A-Za-z]/.test(form) && /[0-9]/.test(form);
 }
 
-/**
- * Space-separated forms only: reject English glue like `is 123` / `is A1B2`
- * (1–2 letter pure-letter group) and year-ish pure digits (`Mar 2026`, F65).
- * Real OTPs use ≥3 letter blocks (`ABC 123`) or a mixed group on either side.
- */
-function isPlausibleSpaceDelimitedAlnum(form: string): boolean {
+function splitSpaceAlnumGroups(form: string): string[] {
+  return form.split(new RegExp(META_ALNUM_SEP_SPACE)).filter(Boolean);
+}
+
+/** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
+function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
-  const parts = form.split(new RegExp(META_ALNUM_SEP_SPACE));
+  const parts = splitSpaceAlnumGroups(form);
+  if (parts.length < 2 || parts.length > 4) return false;
+  // Every group already digit-bearing by construction; still reject years as a side.
+  return parts.every((g) => /[0-9]/.test(g) && !/^(19|20)\d{2}$/.test(g));
+}
+
+/** Accept classic two-group letter-block + digit-block (`ABC 123`). */
+function isPlausibleSpaceClassic(form: string): boolean {
+  if (!isMixedAlnumOtp(form)) return false;
+  const parts = splitSpaceAlnumGroups(form);
   if (parts.length !== 2) return false;
-  for (const g of parts) {
-    if (/^[A-Za-z]{1,2}$/.test(g)) return false;
-    // Year-shaped pure digits next to a letter block are not alnum OTPs.
-    if (/^(19|20)\d{2}$/.test(g)) return false;
-  }
+  const [letters, digits] = parts;
+  if (!/^[A-Za-z]{3,4}$/.test(letters!)) return false;
+  if (!/^[0-9]{2,4}$/.test(digits!)) return false;
+  if (/^(19|20)\d{2}$/.test(digits!)) return false;
   return true;
 }
 
@@ -271,7 +295,8 @@ function escapeRegExpLiteral(s: string): string {
 
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
- * (F77/F81 continuous + F84 delimited). Does not touch body extract semantics.
+ * (F77/F81 continuous + F84 tight delimited + F85 space runs).
+ * Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
@@ -282,16 +307,22 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
     seen.add(form);
     codes.push(form);
   };
+  // Space digit-bearing runs first: whole-chain consume, then 2–4 accept / 5+ drop.
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_DIGIT)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceDigitRun(form)) continue;
+    push(form);
+  }
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_CLASSIC)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceClassic(form)) continue;
+    push(form);
+  }
   for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {
     push(match[1]!);
   }
   for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT)) {
     push(match[1]!);
-  }
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE)) {
-    const form = match[1]!;
-    if (!isPlausibleSpaceDelimitedAlnum(form)) continue;
-    push(form);
   }
   return codes;
 }
