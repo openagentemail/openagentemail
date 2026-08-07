@@ -280,11 +280,13 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
 /**
  * Single-pass bare URL tokenizer. O(n) over the full text:
  * pre-scan scheme positions, then for each start scan once with depth tracking;
- * an unbalanced closer is a hard cut only when the next scheme is a proven
- * Markdown chain (tight `)(`, `](`, `)[`, `][`, or `)[label](` / `][label](`).
- * Nested redirects and path segments like `)[token=` stay inside the URL
- * (WHATWG); inner schemes are skipped by the post-span scheme advance.
- * Bounded tail peel removes free trailers without re-matching the remainder.
+ * an unbalanced closer is a hard cut when (1) the next scheme is a proven
+ * Markdown chain (tight `)(`, `](`, `)[`, `][`, or `)[label](` / `][label](`),
+ * or (2) the span opened as Markdown `](https://…)` (first free `)` closes the
+ * link even without a following scheme — F59). Bare URLs keep free `)` in-path
+ * (e.g. F48 `confirm)[token=`). Nested redirects and path segments stay inside
+ * the URL when neither cut applies; inner schemes are skipped by post-span
+ * advance. Bounded tail peel removes free trailers without re-matching.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
@@ -303,6 +305,10 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     let glueCut: { closer: number; nextScheme: number } | undefined;
     // Set when we hard-cut on " < > with a glued non-whitespace tail (F55).
     let tailCut: { start: number; end: number } | undefined;
+    // F59: URL opened as Markdown `](https://…)` — first free `)` closes the link,
+    // even with no following scheme / whitespace (bare URLs keep free `)` in-path).
+    const markdownLinkOpen =
+      start >= 2 && text[start - 1] === '(' && text[start - 2] === ']';
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -350,6 +356,11 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         if (isMarkdownChainGlue(text, i, nextScheme)) {
           end = i;
           glueCut = { closer: i, nextScheme: nextScheme! };
+          break;
+        }
+        // After glue check: MD link openers cut at the first free closer (no glue/tail meta).
+        if (markdownLinkOpen) {
+          end = i;
           break;
         }
         continue;

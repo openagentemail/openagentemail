@@ -459,6 +459,38 @@ describe('extractLinks', () => {
     expect(glueMasked).not.toContain('https://[');
   });
 
+  test('Markdown link closer cuts free ) before glued prose (F59)', () => {
+    const text = '[Verify](https://example.com/confirm)now';
+    expect([...bareUrlSpans(text)].map((s) => s.clean)).toEqual([
+      'https://example.com/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual(['https://example.com/confirm']);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe(
+      '[Verify](•••)now',
+    );
+
+    expect(
+      [...bareUrlSpans('[x](https://a.com/f(1))tail')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f(1)']);
+    expect(
+      [...bareUrlSpans('[x](https://a.com/p)foo)bar')].map((s) => s.clean),
+    ).toEqual(['https://a.com/p']);
+
+    // Space after MD closer — still clean URL (peel/cut both fine).
+    expect(
+      extractHttpLinks('[Verify](https://example.com/confirm) now'),
+    ).toEqual(['https://example.com/confirm']);
+    expect(extractHttpLinks('[Verify](https://example.com/confirm)')).toEqual([
+      'https://example.com/confirm',
+    ]);
+
+    // Bare URL free ) path must not use MD-link cutting (F48).
+    const bare = 'Verify https://example.com/confirm)[token=secret';
+    expect([...bareUrlSpans(bare)].map((s) => s.clean)).toEqual([
+      'https://example.com/confirm)[token=secret',
+    ]);
+  });
+
   test('dense quote-tail fragments stay linear (F58)', () => {
     // 4000 glued fragments: each "x= before the next https:// must not O(n²) scan.
     const n = 4_000;
