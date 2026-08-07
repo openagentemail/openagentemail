@@ -297,6 +297,19 @@ const META_ALNUM_DELIMITED_TIGHT = new RegExp(
   'g',
 );
 /**
+ * Tight-delimited single-character chains (F105): 4–8 groups of exactly 1
+ * alnum (`A-1-B-2`). LEAD_MID + the tail guard reject 9+-group chains whole
+ * (no mid-chain restart after a tight sep). Candidate only — acceptance is
+ * the predicate: joined form must be mixed (letter+digit); letter-only chains
+ * stay rejected (delimited letter-only = F97 uppercase 2–4 groups of 2–4).
+ */
+const META_ALNUM_DELIMITED_TIGHT_SINGLE = new RegExp(
+  `${META_ALNUM_LEAD_MID}${META_ALNUM_BOUND_LEFT}` +
+    `([${META_ALNUM_CHAR}](?:${META_ALNUM_SEP_RUN_WITH_TIGHT}[${META_ALNUM_CHAR}]){3,7})` +
+    `(?!${META_ALNUM_SEP_RUN_WITH_TIGHT}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
+/**
  * 2–4 alnum chars that include a digit after NFKC (lookahead fixes length).
  * Used for space runs so pure-letter English tokens are not groups.
  */
@@ -398,6 +411,19 @@ function isPlausibleSpaceLetterRun(form: string): boolean {
   return isLetterOnlyDelimitedOtp(form);
 }
 
+/**
+ * Accept a tight single-char chain (F105): NFKC, split on any sep run, 4–8
+ * groups of exactly 1 char. Mixed/letter acceptance happens in push() via
+ * isMetaAlnumOtpForm — pure-digit and letter-only chains drop there.
+ */
+function isPlausibleSingleChain(form: string): boolean {
+  const parts = form
+    .normalize('NFKC')
+    .split(META_ALNUM_SEP_ANY_RUN)
+    .filter(Boolean);
+  return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
+}
+
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
 function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
@@ -430,8 +456,8 @@ function escapeRegExpLiteral(s: string): string {
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
- * F95 letter-only continuous + F97 letter-only delimited). Does not touch body
- * extract semantics.
+ * F95 letter-only continuous + F97 letter-only delimited + F105 single-char
+ * tight chains). Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
@@ -470,6 +496,13 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
       .map((g) => g.trim())
       .filter(Boolean);
     if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
+    push(form);
+  }
+  // F105: tight single-char chains (`A-1-B-2`); mixed passes push(), pure-digit
+  // and letter-only chains drop at the predicate.
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSingleChain(form)) continue;
     push(form);
   }
   return codes;

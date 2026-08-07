@@ -1284,6 +1284,38 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('WX');
   });
 
+  test('tier 2 masks tight single-char chain OTP under strong cue (F105)', () => {
+    // Mixed single-char chain: extract + mask.
+    expect(extractMetaAlnumCodes('Your verification code is A-1-B-2')).toContain('A-1-B-2');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A-1-B-2',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('A-1-B-2');
+    // Fullwidth chain (NFKC single chars).
+    expect(extractMetaAlnumCodes('您的验证码是 Ａ-１-Ｂ-２')).toContain('Ａ-１-Ｂ-２');
+    // Lowercase mixed chain (mixed is case-insensitive).
+    expect(extractMetaAlnumCodes('Your verification code is a-1-b-2')).toContain('a-1-b-2');
+    // Longer chain within 4–8 total.
+    expect(extractMetaAlnumCodes('Your verification code is A-1-B-2-C-3')).toContain('A-1-B-2-C-3');
+    // Shape locks: 3-group chain too short; 9-group chain rejected whole.
+    expect(extractMetaAlnumCodes('Your verification code is A-1-B')).not.toContain('A-1-B');
+    expect(extractMetaAlnumCodes('Your verification code is A-1-B-2-C-3-D-4-E')).not.toContain('A-1-B-2-C-3-D-4-E');
+    // Letter-only single chains stay rejected (delimited letter-only = F97 groups of 2–4).
+    expect(extractMetaAlnumCodes('Your verification code is A-B-C-D')).not.toContain('A-B-C-D');
+    // Pure-digit chain stays on the digit path (not alnum extract).
+    expect(extractMetaAlnumCodes('Your verification code is 1-2-3-4')).not.toContain('1-2-3-4');
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference A-1-B-2 attached')).toEqual([]);
+    // 2-4-char group regression (F84/F97 paths unaffected).
+    expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
+    expect(extractMetaAlnumCodes('Your verification code is WX-YZ')).toContain('WX-YZ');
+  });
+
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
     expect(extractMetaAlnumCodes('您的校验码是A1B-2C3')).toContain('A1B-2C3');
