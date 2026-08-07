@@ -1,6 +1,15 @@
 // Identity-store tests. config.ts parses env at import time, so set the
 // required variables BEFORE importing anything that pulls it in.
-import { chmodSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -387,5 +396,57 @@ describe('identity store mtime cache + address index (F41)', () => {
     const tier1Body = bodies[1];
     expect(tier1Body).not.toContain('Subject:');
     expect(tier1Body).not.toContain('Codes:');
+  });
+});
+
+describe('identity store save failure drops cache (F42)', () => {
+  /**
+   * Force save() to throw after invalidateStoreCache(). save() re-chmods the
+   * data dir to 0o700 before writing, so a read-only data dir is not a reliable
+   * fault injection; blocking the identities.json.tmp write path is.
+   */
+  function withBlockedSaveTmp(run: () => void): void {
+    const tmpPath = `${storeFile()}.tmp`;
+    rmSync(tmpPath, { recursive: true, force: true });
+    mkdirSync(tmpPath);
+    try {
+      run();
+    } finally {
+      rmSync(tmpPath, { recursive: true, force: true });
+      try {
+        chmodSync(storeDir(), 0o700);
+      } catch {
+        // best effort restore
+      }
+    }
+  }
+
+  test('failed rotateIdentityToken keeps the old token hash after reload', () => {
+    const created = createIdentity({ localpart: 'save-fail-rotate' })!;
+    const address = created.identity.address;
+    const oldToken = created.token;
+    const oldHash = findIdentity(address)!.tokenHash;
+    expect(oldHash).toBeDefined();
+    expect(findIdentityByToken(oldToken)?.address).toBe(address);
+
+    withBlockedSaveTmp(() => {
+      expect(() => rotateIdentityToken(address)).toThrow();
+    });
+
+    // Cache was dropped before the failed write; disk still has the old hash.
+    expect(findIdentity(address)?.tokenHash).toBe(oldHash);
+    expect(findIdentityByToken(oldToken)?.address).toBe(address);
+  });
+
+  test('failed createIdentity leaves no ghost identity after reload', () => {
+    const ghost = 'ghost-save-fail@test.example';
+    expect(findIdentity(ghost)).toBeUndefined();
+
+    withBlockedSaveTmp(() => {
+      expect(() => createIdentity({ localpart: 'ghost-save-fail' })).toThrow();
+    });
+
+    expect(findIdentity(ghost)).toBeUndefined();
+    expect(listIdentities().some((i) => i.address === ghost)).toBe(false);
   });
 });

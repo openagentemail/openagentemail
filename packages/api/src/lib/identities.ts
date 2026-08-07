@@ -163,6 +163,13 @@ function load(): Identity[] {
 }
 
 function save(identities: Identity[]): void {
+  // Drop the cache *before* any write attempt. Callers mutate the array/objects
+  // returned by load() then call save(); if we only invalidated after rename,
+  // a failed write (disk full, read-only volume) would leave those unpersisted
+  // mutations in cache and diverge memory from disk until restart. Invalidate
+  // first: success → next load re-reads the new file; failure → next load
+  // re-reads the old file. Same-ms in-process rewrites stay visible either way.
+  invalidateStoreCache();
   // The store holds every identity's token hash — keep it to the owner.
   // chmod explicitly in both places: mkdirSync's mode does nothing when the
   // directory already exists, and writeFileSync's mode is masked by umask
@@ -179,8 +186,6 @@ function save(identities: Identity[]): void {
   writeFileSync(tmp, JSON.stringify(identities, null, 2), { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
-  // Explicit invalidate: same-ms rewrites must be visible without mtime help.
-  invalidateStoreCache();
 }
 
 export function randomLocalpart(): string {
