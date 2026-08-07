@@ -56,6 +56,12 @@ export type WatcherDispatch = {
 export type ProcessWatchedOptions = {
   /** When set, each mail-arrival push includes ntfy `click` = this URL. */
   clickUrl?: string;
+  /**
+   * Re-read identity tier immediately before each payload so a mid-flight
+   * admin downgrade is not applied against a stale listIdentities() snapshot.
+   * Undefined means keep the matched snapshot entry.
+   */
+  refreshIdentity?: (address: string) => Identity | undefined;
 };
 
 /** In-memory watermark survives a dropped IMAP connection in this process. */
@@ -132,19 +138,15 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
   return boundTextBytes(body, maxBytes);
 }
 
-/** Escape a needle for use as a single RegExp alternative. */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Codes: one alternation regex replace (O(text)),
- * not per-needle includes+split which is O(codes × text) DoS.
+ * (maskNormalizedHttpUrls). Codes: scan text for \b\d{4,8}\b and replace when
+ * present in the code set (O(text) Set lookups — no multi-branch regex).
  *
- * Codes are longest \b\d{4,8}\b runs and do not overlap, so longest-first
- * alternation matches the same spans as sequential split/join.
+ * Codes from extractCodes are those same digit runs; scanning the text with
+ * the same shape and checking membership masks the same spans without
+ * compiling a needle-count alternation.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -154,17 +156,9 @@ export function maskSensitiveFragments(
   if (!text) return text;
   // URLs first so a full verify link is one unit before digit-code scans.
   let result = maskNormalizedHttpUrls(text, links);
-  const seen = new Set<string>();
-  const codeNeedles: string[] = [];
-  for (const value of codes) {
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    codeNeedles.push(value);
-  }
-  codeNeedles.sort((a, b) => b.length - a.length);
-  if (codeNeedles.length === 0) return result;
-  const pattern = codeNeedles.map(escapeRegExp).join('|');
-  return result.replace(new RegExp(pattern, 'g'), '•••');
+  const codeSet = new Set(codes.filter(Boolean));
+  if (codeSet.size === 0) return result;
+  return result.replace(/\b\d{4,8}\b/g, (run) => (codeSet.has(run) ? '•••' : run));
 }
 
 /** Build the human-facing push body for one identity's content tier. */
@@ -276,8 +270,11 @@ export async function processWatchedMessage(
 
   const clickUrl = options.clickUrl;
   for (const identity of matched) {
-    const tier = resolvePushContentTier(identity);
-    const body = buildMailArrivalMessage(identity.address, tier, hasOtpOrLink, extras);
+    // Re-read per identity after await simpleParser / previous publish so a
+    // concurrent tier downgrade is visible before the next payload is built.
+    const current = options.refreshIdentity?.(identity.address) ?? identity;
+    const tier = resolvePushContentTier(current);
+    const body = buildMailArrivalMessage(current.address, tier, hasOtpOrLink, extras);
     const level = hasOtpOrLink ? 'urgent' : 'normal';
     await dispatch.publish({
       target: 'user',
@@ -314,7 +311,11 @@ async function watchConnection(
             listIdentities(),
             config.ntfy.pushPolicy,
             dispatch,
-            { clickUrl: config.dashboardPublicUrl },
+            {
+              clickUrl: config.dashboardPublicUrl,
+              refreshIdentity: (address) =>
+                listIdentities().find((entry) => entry.address === address),
+            },
           );
           watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
         }

@@ -556,13 +556,14 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('100000');
   });
 
-  test('maskSensitiveFragments uses one-pass code replace and handles empty needles', () => {
+  test('maskSensitiveFragments masks digit runs present in the code set only', () => {
     expect(maskSensitiveFragments('plain subject', [], [])).toBe('plain subject');
     expect(maskSensitiveFragments('code 112233 and 445566', ['112233', '445566'], [])).toBe(
       'code ••• and •••',
     );
-    // Longest-first: overlapping would prefer longer if both listed.
-    expect(maskSensitiveFragments('code 11223399', ['1122', '112233'], [])).toBe('code •••99');
+    // Whole \b\d{4,8}\b run must be in the set — partial needles do not mask.
+    expect(maskSensitiveFragments('code 11223399', ['1122', '112233'], [])).toBe('code 11223399');
+    expect(maskSensitiveFragments('code 11223399', ['11223399'], [])).toBe('code •••');
     expect(maskSensitiveFragments('dup 1111 and 1111', ['1111', '1111'], [])).toBe(
       'dup ••• and •••',
     );
@@ -587,6 +588,97 @@ describe('mail-arrival notification watcher', () => {
     expect(performance.now() - started).toBeLessThan(1_000);
     expect(body).toContain('•••');
     expect(body).not.toContain('654321');
+  });
+
+  test('tier-2 build stays linear on a large subject full of keyword-adjacent codes', () => {
+    // 8000 distinct meta codes (~96KB folded subject) must not build a huge alternation.
+    const metaCodes = Array.from({ length: 8_000 }, (_, i) => String(100000 + i));
+    const subject = metaCodes.map((code) => `code ${code}`).join(' ');
+    expect(subject.length).toBeGreaterThan(80_000);
+    const started = performance.now();
+    const body = buildMailArrivalMessage('a@test.example', 2, true, {
+      subject,
+      from: 'auth@example.com',
+      preview: 'x'.repeat(280),
+      codes: ['654321'],
+      links: [],
+    });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(body).toContain('•••');
+    // Every 6-digit meta code should be masked; non-code digits would stay.
+    expect(body).not.toContain('100000');
+    expect(body).not.toContain('107999');
+  });
+
+  test('refreshIdentity is consulted after parsing so a tier downgrade is applied', async () => {
+    let reads = 0;
+    const snapshot = {
+      address: 'target@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 3 as const,
+    };
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\nVisit https://example.com/verify?token=abc\r\n',
+        'Verify',
+      ),
+      [snapshot],
+      'otp',
+      {
+        publish: async (payload) => {
+          calls.push(payload);
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      {
+        refreshIdentity: () => {
+          reads += 1;
+          // First read after parse: still elevated; second path unused for one identity.
+          // Simulate admin downgrade completed during simpleParser await.
+          return {
+            address: 'target@test.example',
+            createdAt: '2026-08-02T00:00:00.000Z',
+            pushContentTier: 2 as const,
+          };
+        },
+      },
+    );
+    expect(reads).toBe(1);
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    // Tier 2: subject/from only, no preview/codes/links content.
+    expect(body).toContain('Subject:');
+    expect(body).not.toContain('Preview:');
+    expect(body).not.toContain('Codes:');
+    expect(body).not.toContain('Links:');
+    expect(body).not.toContain('482731');
+    expect(body).not.toContain('https://example.com/verify');
+  });
+
+  test('without refreshIdentity the snapshot tier is used unchanged', async () => {
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+      'otp',
+      {
+        publish: async (payload) => {
+          calls.push(payload);
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+    );
+    expect(calls[0].message).toContain('Codes: 482731');
   });
 
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
