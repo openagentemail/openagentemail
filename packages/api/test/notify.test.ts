@@ -21,9 +21,11 @@ const { createIdentity } = await import('../src/lib/identities.ts');
 const { resetNotifyUserLimits } = await import('../src/lib/ratelimit.ts');
 const { createNotifyRoutes } = await import('../src/routes/notify.ts');
 const {
+  boundJsonEscapedText,
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
+  NTFY_REQUEST_MAX_BYTES,
   NtfyNotificationService,
   physicalAgentTopic,
   userRouteKey,
@@ -293,56 +295,108 @@ describe('phone device ACL', () => {
 });
 
 describe('ntfy publish payload budget', () => {
-  test('drops click when serialized JSON would exceed 4000 bytes', async () => {
-    const captured: string[] = [];
-    const previousNtfy = { ...config.ntfy };
-    Object.assign(config.ntfy as {
-      enabled: boolean;
-      adminPassword?: string;
-      publicUrl: string;
-    }, {
-      enabled: true,
-      adminPassword: 'ntfy-admin-secret',
-      publicUrl: 'https://notify.test',
+  function withPublishCapture(run: (svc: NtfyNotificationService, captured: string[]) => Promise<void>) {
+    return async () => {
+      const captured: string[] = [];
+      const previousNtfy = { ...config.ntfy };
+      Object.assign(config.ntfy as {
+        enabled: boolean;
+        adminPassword?: string;
+        publicUrl: string;
+      }, {
+        enabled: true,
+        adminPassword: 'ntfy-admin-secret',
+        publicUrl: 'https://notify.test',
+      });
+      globalThis.fetch = (async (_input, init) => {
+        captured.push(String(init?.body ?? ''));
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+      try {
+        await run(new NtfyNotificationService(), captured);
+      } finally {
+        Object.assign(config.ntfy, previousNtfy);
+      }
+    };
+  }
+
+  test('drops click when serialized JSON would exceed 4000 bytes', withPublishCapture(async (svc, captured) => {
+    const longClick = `https://dash.example/ui/${'x'.repeat(800)}`;
+    await svc.publish({
+      target: 'user',
+      title: 'openagent.email new mail',
+      message: 'm'.repeat(3_500),
+      level: 'normal',
+      tags: ['email'],
+      click: longClick,
     });
-    globalThis.fetch = (async (_input, init) => {
-      captured.push(String(init?.body ?? ''));
-      return new Response('{}', { status: 200 });
-    }) as typeof fetch;
+    expect(captured).toHaveLength(1);
+    expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    const parsed = JSON.parse(captured[0]!) as Record<string, unknown>;
+    expect(parsed.click).toBeUndefined();
+    // Message fits base payload after click drop — no ellipsis truncation.
+    expect(parsed.message).toBe('m'.repeat(3_500));
+    expect(String(parsed.message)).not.toMatch(/…$/);
+  }));
 
-    try {
-      const svc = new NtfyNotificationService();
-      const longClick = `https://dash.example/ui/${'x'.repeat(800)}`;
-      await svc.publish({
-        target: 'user',
-        title: 'openagent.email new mail',
-        message: 'm'.repeat(3_500),
-        level: 'normal',
-        tags: ['email'],
-        click: longClick,
-      });
-      expect(captured).toHaveLength(1);
-      expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(4_000);
-      const parsed = JSON.parse(captured[0]!) as Record<string, unknown>;
-      expect(parsed.click).toBeUndefined();
-      expect(parsed.message).toBe('m'.repeat(3_500));
+  test('keeps click and full message when the serialized body fits', withPublishCapture(async (svc, captured) => {
+    await svc.publish({
+      target: 'user',
+      title: 'short',
+      message: 'hello',
+      level: 'normal',
+      click: 'https://dash.example/ui',
+    });
+    expect(captured).toHaveLength(1);
+    expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    expect(JSON.parse(captured[0]!)).toMatchObject({
+      message: 'hello',
+      click: 'https://dash.example/ui',
+    });
+  }));
 
-      captured.length = 0;
-      await svc.publish({
-        target: 'user',
-        title: 'short',
-        message: 'hello',
-        level: 'normal',
-        click: 'https://dash.example/ui',
-      });
-      expect(captured).toHaveLength(1);
-      expect(JSON.parse(captured[0]!)).toMatchObject({
-        message: 'hello',
-        click: 'https://dash.example/ui',
-      });
-    } finally {
-      Object.assign(config.ntfy, previousNtfy);
-    }
+  test('truncates JSON-expanded poison message so publish stays under budget', withPublishCapture(async (svc, captured) => {
+    // Control chars expand 1 → 6 bytes under JSON.stringify (\\u0001).
+    // 3500 of them blow past ntfy even after click is dropped.
+    const poison = '\u0001'.repeat(3_500);
+    await svc.publish({
+      target: 'user',
+      title: 'openagent.email new mail',
+      message: poison,
+      level: 'urgent',
+      tags: ['email'],
+      click: 'https://dash.example/ui',
+    });
+    expect(captured).toHaveLength(1);
+    const raw = captured[0]!;
+    expect(Buffer.byteLength(raw, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    expect(parsed.click).toBeUndefined();
+    expect(typeof parsed.message).toBe('string');
+    const message = parsed.message as string;
+    expect(message.endsWith('…')).toBe(true);
+    // Escaped length of message content alone must fit the residual budget.
+    const overhead = Buffer.byteLength(
+      JSON.stringify({ ...parsed, message: '' }),
+      'utf8',
+    );
+    const escapedMessageBytes = Buffer.byteLength(JSON.stringify(message), 'utf8') - 2; // strip surrounding quotes
+    expect(escapedMessageBytes).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES - overhead);
+    expect(escapedMessageBytes).toBe(
+      Buffer.byteLength(JSON.stringify(boundJsonEscapedText(poison, NTFY_REQUEST_MAX_BYTES - overhead)), 'utf8') - 2,
+    );
+  }));
+
+  test('boundJsonEscapedText accounts for control-char expansion', () => {
+    expect(boundJsonEscapedText('hi', 100)).toBe('hi');
+    // Each \\u0001 costs 6 escaped bytes; budget 10 → one control (6) + ellipsis (3).
+    const truncated = boundJsonEscapedText('\u0001'.repeat(10), 10);
+    expect(truncated).toBe('\u0001…');
+    expect(Buffer.byteLength(JSON.stringify(truncated), 'utf8') - 2).toBeLessThanOrEqual(10);
+    // Budget smaller than ellipsis → empty (same discipline as boundTextBytes).
+    expect(boundJsonEscapedText('abcdef', 2)).toBe('');
+    // Quote/backslash double under JSON escape.
+    expect(boundJsonEscapedText('""', 3)).toBe('…'); // each " costs 2; cannot keep either + ellipsis
   });
 });
 

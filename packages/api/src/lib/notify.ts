@@ -475,6 +475,58 @@ function parseMessages(text: string): NotifyMessage[] {
   return messages;
 }
 
+/**
+ * ntfy rejects request bodies near ~4096 bytes. Cap serialized publish JSON
+ * under this so a poison message cannot make publish throw and stall the
+ * watcher UID watermark forever.
+ */
+export const NTFY_REQUEST_MAX_BYTES = 4_000;
+
+/** UTF-8 ellipsis appended when JSON-escaped message content is truncated. */
+const JSON_MESSAGE_ELLIPSIS = '…';
+const JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES = Buffer.byteLength(JSON_MESSAGE_ELLIPSIS, 'utf8');
+
+/**
+ * Cost of one code point inside a JSON string (UTF-8 of the escaped form).
+ * Matches JSON.stringify: quotes/backslash and the five single-letter escapes
+ * cost 2; other C0 controls become \\u00XX (6); everything else is raw UTF-8.
+ */
+function jsonStringEscapeCost(point: string): number {
+  const cp = point.codePointAt(0)!;
+  if (point === '"' || point === '\\') return 2;
+  if (cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d) return 2;
+  if (cp < 0x20) return 6;
+  return Buffer.byteLength(point, 'utf8');
+}
+
+/**
+ * Truncate `text` so its JSON string-escape length is ≤ maxEscapedBytes.
+ * Code-point aligned (same discipline as boundTextBytes); reserves room for `…`.
+ * Used only for ntfy publish message bodies after field caps — a second line of
+ * defense against JSON expansion of control characters.
+ */
+export function boundJsonEscapedText(text: string, maxEscapedBytes: number): string {
+  let total = 0;
+  for (const point of text) {
+    total += jsonStringEscapeCost(point);
+    if (total > maxEscapedBytes) break;
+  }
+  if (total <= maxEscapedBytes) return text;
+  if (maxEscapedBytes < JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES) return '';
+  const budget = maxEscapedBytes - JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES;
+  if (budget <= 0) return JSON_MESSAGE_ELLIPSIS;
+
+  let used = 0;
+  let end = 0;
+  for (const point of text) {
+    const cost = jsonStringEscapeCost(point);
+    if (used + cost > budget) break;
+    used += cost;
+    end += point.length;
+  }
+  return `${text.slice(0, end)}${JSON_MESSAGE_ELLIPSIS}`;
+}
+
 export class NtfyNotificationService implements NotifyService {
   private async assertEnabled(): Promise<NotifyState> {
     if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
@@ -485,8 +537,11 @@ export class NtfyNotificationService implements NotifyService {
   async publish(input: NotifyInput): Promise<{ target: NotifyTarget; title: string; level: NotifyLevel }> {
     const current = await this.assertEnabled();
     const topic = await physicalTopic(input.target, input.level);
-    // ntfy rejects bodies near ~4096 bytes. message is capped at 3500; a long
-    // DASHBOARD_PUBLIC_URL click can still blow the request — drop click first.
+    // ntfy rejects bodies near ~4096 bytes. Prefer keeping click; if the
+    // serialized body is still over budget after dropping click, truncate only
+    // message (topic/title/tags are our short bounded strings, not attacker
+    // mail content). JSON escaping can expand control chars past the watcher
+    // raw-byte cap, so this is the final serialization-layer backstop.
     const basePayload = {
       topic,
       title: input.title,
@@ -497,7 +552,20 @@ export class NtfyNotificationService implements NotifyService {
     let body = JSON.stringify(
       input.click ? { ...basePayload, click: input.click } : basePayload,
     );
-    if (input.click && Buffer.byteLength(body, 'utf8') > 4_000) {
+    if (input.click && Buffer.byteLength(body, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+      body = JSON.stringify(basePayload);
+    }
+    if (Buffer.byteLength(body, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+      // overhead = all keys/quotes/commas except the message *content* (empty
+      // string still contributes the surrounding "" which stays in the final body).
+      const overhead = Buffer.byteLength(
+        JSON.stringify({ ...basePayload, message: '' }),
+        'utf8',
+      );
+      basePayload.message = boundJsonEscapedText(
+        input.message,
+        NTFY_REQUEST_MAX_BYTES - overhead,
+      );
       body = JSON.stringify(basePayload);
     }
     const response = await fetch(providerUrl('/'), {
