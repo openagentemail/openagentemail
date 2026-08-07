@@ -301,9 +301,20 @@ function continuousOtpCaptureRe(): RegExp {
   return new RegExp(`${OTP_BOUND_LEFT}(${ND}{4,8})${OTP_BOUND_RIGHT}`, 'gu');
 }
 
+/**
+ * Keyword window around a match: slice the **original** text at original
+ * offsets, then lowercase only the window (F99). Whole-string `toLowerCase()`
+ * shifts later indices when case-fold expands (Turkish `İ` → `i`+combining
+ * dot), so a pre-lowercased buffer must not be sliced with source indices.
+ */
+function keywordWindow(text: string, idx: number, matchLen: number): string {
+  return text
+    .slice(Math.max(0, idx - KEYWORD_WINDOW), Math.min(text.length, idx + matchLen + KEYWORD_WINDOW))
+    .toLowerCase();
+}
+
 /** Extract 4–8 digit codes (continuous or delimited) near an OTP keyword. */
 export function extractCodes(text: string): string[] {
-  const lower = text.toLowerCase();
   const codes: string[] = [];
   const seen = new Set<string>();
 
@@ -312,10 +323,7 @@ export function extractCodes(text: string): string[] {
     const idx = match.index ?? 0;
     // Leave `1234-5678` / Unicode-space halves to the delimited pass (F68/F70).
     if (isHalfOfDelimitedOtp(text, idx, digits)) continue;
-    const window = lower.slice(
-      Math.max(0, idx - KEYWORD_WINDOW),
-      Math.min(lower.length, idx + digits.length + KEYWORD_WINDOW),
-    );
+    const window = keywordWindow(text, idx, digits.length);
     if (!CODE_KEYWORDS.some((kw) => window.includes(kw))) continue;
     // Years need a strong OTP cue (not mere "verification"/"identity") so
     // roadmap copy like "for 2026" does not fire false OTP alerts (F65).
@@ -335,10 +343,7 @@ export function extractCodes(text: string): string[] {
   for (const match of text.matchAll(delimitedOtpCaptureRe())) {
     const form = match[1]!;
     const idx = match.index ?? 0;
-    const window = lower.slice(
-      Math.max(0, idx - KEYWORD_WINDOW),
-      Math.min(lower.length, idx + form.length + KEYWORD_WINDOW),
-    );
+    const window = keywordWindow(text, idx, form.length);
     if (!STRONG_OTP_CUE.test(window)) continue;
     if (!seen.has(form)) {
       seen.add(form);
@@ -426,17 +431,21 @@ function isUrlTerminalPunct(ch: string): boolean {
 }
 
 /**
- * Whether a trailing `!` or `:` at candidate[end-1] is prose punctuation glued
- * to a closer `)`/`]`/`'` (possibly with other terminal punct in between), not
- * a legal URL-final bang/colon (F92/F96). Look-back is O(length) over the suffix.
+ * Look-back from candidate[end-1]: skip terminal punct, return the index of the
+ * first non-punct char (or -1) and whether it is a closer `)`/`]`/`'` (F92/F96).
  */
-function terminalPunctHasCloserContext(candidate: string, end: number): boolean {
-  // Skip the terminal char itself, then any run of terminal punct, then require a closer.
+function scanTerminalPunctCloserContext(
+  candidate: string,
+  end: number,
+): { boundary: number; verdict: boolean } {
   let i = end - 2;
   while (i >= 0 && isUrlTerminalPunct(candidate[i]!)) i -= 1;
-  if (i < 0) return false;
+  if (i < 0) return { boundary: -1, verdict: false };
   const ch = candidate[i]!;
-  return ch === ')' || ch === ']' || ch === "'";
+  return {
+    boundary: i,
+    verdict: ch === ')' || ch === ']' || ch === "'",
+  };
 }
 
 /**
@@ -446,14 +455,16 @@ function terminalPunctHasCloserContext(candidate: string, end: number): boolean 
  *   is common). Mid-URL `?query` is never trailing and stays put.
  * - Terminal `!` peels only with closer context (`)!` / `]!` / `'!` / `).!`),
  *   so bare `…/token!` keeps the bang (F90 + F92). Mid-URL `!` stays put.
- * - Terminal `:` peels only with closer context (`)!` form twin: `):` / `]:` /
- *   `':` / `):.`), so bare `…/v:` keeps the colon (F96). Port/mid-URL `:` are
- *   never trailing and stay put.
+ * - Terminal `:` peels only with closer context (`):` / `]:` / `':` / `):.`),
+ *   so bare `…/v:` keeps the colon (F96). Port/mid-URL `:` are never trailing.
  * - openQuoted false: peel `'` only while the remaining apostrophe count is odd.
  * - openQuoted true (span started after prose `'`): peel exactly one closing
  *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
  *   legal URL-terminal `'` would be stripped after the outer closer (F63).
- * O(length).
+ *
+ * F98: closer-context look-back is cached per contiguous terminal-punct run so
+ * a long `!!!!` / `::::` suffix is O(length), not O(length²). Verdicts are
+ * bit-identical to rescanning every iteration.
  */
 function peelTrailingProse(
   candidate: string,
@@ -480,15 +491,26 @@ function peelTrailingProse(
   // openQuoted: authorize exactly one outer closer peel (after any .,;!?:).
   let peelOpenQuote = openQuoted;
   let end = candidate.length;
+  // F98: cache look-back for one contiguous `!`/`:` (and mixed terminal) run.
+  let cachedBoundary: number | null = null;
+  let cachedVerdict = false;
   while (end > 0) {
     const ch = candidate[end - 1]!;
     if (ch === '.' || ch === ',' || ch === ';' || ch === '?') {
+      // Unconditional peel may exit/enter a conditional run — drop cache.
+      cachedBoundary = null;
       end -= 1;
       continue;
     }
     // F92/F96: peel `!` or `:` only when glued to ) ] ' (skip other terminal punct).
     if (ch === '!' || ch === ':') {
-      if (terminalPunctHasCloserContext(candidate, end)) {
+      // Same run while end-2 is still strictly after the first non-punct char.
+      if (cachedBoundary === null || !(end - 2 > cachedBoundary)) {
+        const scan = scanTerminalPunctCloserContext(candidate, end);
+        cachedBoundary = scan.boundary;
+        cachedVerdict = scan.verdict;
+      }
+      if (cachedVerdict) {
         end -= 1;
         continue;
       }
@@ -496,11 +518,13 @@ function peelTrailingProse(
     }
     if (ch === ')' && closeParen > openParen) {
       closeParen -= 1;
+      cachedBoundary = null;
       end -= 1;
       continue;
     }
     if (ch === ']' && closeBracket > openBracket) {
       closeBracket -= 1;
+      cachedBoundary = null;
       end -= 1;
       continue;
     }
@@ -510,11 +534,13 @@ function peelTrailingProse(
         if (!peelOpenQuote) break;
         peelOpenQuote = false;
         apostrophes -= 1;
+        cachedBoundary = null;
         end -= 1;
         continue;
       }
       if (apostrophes % 2 === 1) {
         apostrophes -= 1;
+        cachedBoundary = null;
         end -= 1;
         continue;
       }

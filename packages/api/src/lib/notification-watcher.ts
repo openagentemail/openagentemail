@@ -318,6 +318,25 @@ const META_ALNUM_DELIMITED_SPACE_CLASSIC = new RegExp(
     `${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
+/**
+ * 2–4 all-caps letter groups of 2–4 (ASCII A–Z + fullwidth FF21–FF3A),
+ * space-joined (F97). Uppercase-only groups prevent English glue (`code is WX YZ`
+ * must not form one space chain). isLetterOnlyDelimitedOtp still NFKC-checks.
+ */
+const META_ALNUM_UPPER = 'A-Z\\uFF21-\\uFF3A';
+const META_ALNUM_GROUP_UPPER =
+  `(?=[${META_ALNUM_UPPER}]{2,4}(?![${META_ALNUM_CHAR}]))` +
+  `[${META_ALNUM_UPPER}]{2,4}`;
+const META_ALNUM_DELIMITED_SPACE_LETTER = new RegExp(
+  `${META_ALNUM_BOUND_LEFT}` +
+    `(${META_ALNUM_GROUP_UPPER}(?:${META_ALNUM_SEP_SPACE}${META_ALNUM_GROUP_UPPER})+)` +
+    `${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
+/** Split form into groups on any tight or space sep run (F97). */
+const META_ALNUM_SEP_ANY_RUN = new RegExp(
+  `(?:${META_ALNUM_SEP_TIGHT}|${META_ALNUM_SEP_SPACE})+`,
+);
 
 /** NFKC then require ≥1 Latin letter and ≥1 digit (F86 fullwidth → ASCII). */
 function isMixedAlnumOtp(form: string): boolean {
@@ -334,17 +353,34 @@ function isMixedAlnumOtp(form: string): boolean {
  * Tradeoff under the strong-cue gate: an all-caps non-code word of length 4–8
  * (e.g. `READY` in `Your verification code is READY NOW`) is masked — accepted
  * for the metadata privacy boundary; the rest of the subject stays readable.
- *
- * Delimited letter-only forms (`WX-YZ`) are out of scope: this predicate only
- * matches continuous tokens, so tight/space loops never accept them.
  */
 function isLetterOnlyOtp(form: string): boolean {
   return /^[A-Z]{4,8}$/.test(form.normalize('NFKC'));
 }
 
-/** Mixed alnum or strongly labeled letter-only continuous form (F77/F95). */
+/**
+ * Letter-only delimited OTP under a strong cue (F97): NFKC, split on tight or
+ * space sep runs, require 2–4 groups each `/^[A-Z]{2,4}$/`. All-uppercase keeps
+ * prose out (`Wx-Yz` rejected). Tradeoff: all-caps acronym chains under a
+ * strong cue (`NASA HQ`, `GO NOW`) may mask — accepted for privacy.
+ *
+ * Tight path reuses META_ALNUM_DELIMITED_TIGHT; space path uses
+ * META_ALNUM_DELIMITED_SPACE_LETTER (consume full run, reject 5+ whole).
+ */
+function isLetterOnlyDelimitedOtp(form: string): boolean {
+  const parts = form
+    .normalize('NFKC')
+    .split(META_ALNUM_SEP_ANY_RUN)
+    .filter(Boolean);
+  if (parts.length < 2 || parts.length > 4) return false;
+  return parts.every((g) => /^[A-Z]{2,4}$/.test(g));
+}
+
+/** Mixed, continuous letter-only, or delimited letter-only form (F77/F95/F97). */
 function isMetaAlnumOtpForm(form: string): boolean {
-  return isMixedAlnumOtp(form) || isLetterOnlyOtp(form);
+  return (
+    isMixedAlnumOtp(form) || isLetterOnlyOtp(form) || isLetterOnlyDelimitedOtp(form)
+  );
 }
 
 function splitSpaceAlnumGroups(form: string): string[] {
@@ -353,6 +389,11 @@ function splitSpaceAlnumGroups(form: string): string[] {
 
 function nfkcGroup(g: string): string {
   return g.normalize('NFKC');
+}
+
+/** Accept space letter-only run: 2–4 all-caps groups (5+ refused whole, F97). */
+function isPlausibleSpaceLetterRun(form: string): boolean {
+  return isLetterOnlyDelimitedOtp(form);
 }
 
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
@@ -387,14 +428,14 @@ function escapeRegExpLiteral(s: string): string {
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
- * F95 letter-only all-caps continuous). Does not touch body extract semantics.
+ * F95 letter-only continuous + F97 letter-only delimited). Does not touch body
+ * extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
   const codes: string[] = [];
   const seen = new Set<string>();
   const push = (form: string) => {
-    // Delimited letter-only (WX-YZ) stays rejected: isLetterOnlyOtp is continuous-only.
     if (!isMetaAlnumOtpForm(form) || seen.has(form)) return;
     seen.add(form);
     codes.push(form);
@@ -408,6 +449,12 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
   for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_CLASSIC)) {
     const form = match[1]!;
     if (!isPlausibleSpaceClassic(form)) continue;
+    push(form);
+  }
+  // F97: space letter-only runs (`WX YZ`); 2–4 groups after full-run consume.
+  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_LETTER)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceLetterRun(form)) continue;
     push(form);
   }
   for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {

@@ -125,6 +125,23 @@ describe('extractCodes', () => {
     expect(extractCodes('call 555-1234')).toEqual([]);
   });
 
+  test('keyword window uses original offsets under expanding lowercasing (F99)', () => {
+    // Turkish İ (U+0130) lowercases to two code units; whole-string lower shifts
+    // later indices so a pre-lowercased window misses the cue (F99).
+    const labeled = 'Your verification code is 123456';
+    const prefixLong = 'İ'.repeat(100);
+    const prefixShort = 'İ'.repeat(10);
+    const asciiPrefix = 'A'.repeat(100);
+    expect(extractCodes(`${prefixLong}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${prefixShort}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${asciiPrefix}${labeled}`)).toEqual(['123456']);
+    // Delimited form with expanding prefix.
+    expect(extractCodes(`${prefixLong}Your verification code is 123-456`)).toEqual(['123-456']);
+    // Other expanders (ligature / Greek dialytika-tonos).
+    expect(extractCodes(`${'ﬀ'.repeat(50)}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${'ΐ'.repeat(50)}${labeled}`)).toEqual(['123456']);
+  });
+
   test('strong cues cover CJK/JP code words for delimited and years (F71)', () => {
     expect(extractCodes('您的校验码是 123-456')).toEqual(['123-456']);
     expect(extractCodes('確認コードは 123-456')).toEqual(['123-456']);
@@ -853,6 +870,21 @@ describe('extractLinks', () => {
       'https://example.com/verify',
     ]);
     expect(extractHttpLinks('See (secure: https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+  });
+
+  test('peel trailing punct stays linear on long colon runs (F98)', () => {
+    const base = 'go https://example.com/verify)';
+    const text = `${base}${':'.repeat(50_000)} end`;
+    const started = performance.now();
+    const links = extractHttpLinks(text);
+    const elapsed = performance.now() - started;
+    expect(links).toEqual(['https://example.com/verify']);
+    // Quadratic code took ~10s+ on 50k; linear must stay well under 1s.
+    expect(elapsed).toBeLessThan(1_000);
+    // Stacked mixed terminal punct still peels (verdict cache must not diverge).
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!.:.?')).toEqual([
       'https://example.com/verify',
     ]);
   });

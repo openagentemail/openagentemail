@@ -1079,8 +1079,6 @@ describe('mail-arrival notification watcher', () => {
     // Prose locks: lowercase / title case must not extract.
     expect(extractMetaAlnumCodes('Your verification code is wxyz')).toEqual([]);
     expect(extractMetaAlnumCodes('Your verification code is Pending')).toEqual([]);
-    // Delimited letter-only remains out of scope.
-    expect(extractMetaAlnumCodes('Your verification code is WX-YZ')).toEqual([]);
     // Mixed regression anchor.
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toEqual(['ABC-123']);
 
@@ -1143,6 +1141,61 @@ describe('mail-arrival notification watcher', () => {
     expect(body).toContain('Subject:');
     expect(body).toContain('•••');
     expect(body).not.toContain('WXYZ');
+  });
+
+  test('tier 2 masks delimited letter-only OTP under strong cue (F97)', async () => {
+    expect(extractMetaAlnumCodes('Your verification code is WX-YZ')).toEqual(['WX-YZ']);
+    expect(extractMetaAlnumCodes('Your verification code is WX YZ')).toEqual(['WX YZ']);
+    expect(extractMetaAlnumCodes('Your verification code is AB-CD-EF')).toEqual(['AB-CD-EF']);
+    // Fullwidth letter-only delimited (NFKC uppercase groups).
+    expect(extractMetaAlnumCodes('您的验证码是 ＷＸ ＹＺ')).toEqual(['ＷＸ ＹＺ']);
+    expect(extractMetaAlnumCodes('您的验证码是 ＷＸ－ＹＺ')).toEqual(['ＷＸ－ＹＺ']);
+    // Continuous F95 anchor still works.
+    expect(extractMetaAlnumCodes('Your verification code is WXYZ')).toEqual(['WXYZ']);
+    // Prose / shape locks.
+    expect(extractMetaAlnumCodes('Your verification code is Wx-Yz')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your verification code is W-XYZ')).toEqual([]); // group <2
+    expect(extractMetaAlnumCodes('Your verification code is ABCDEFGHI-JK')).toEqual([]); // group >4
+    // 5-group space/tight runs rejected whole (F85 doctrine).
+    expect(extractMetaAlnumCodes('Your verification code is AB CD EF GH IJ')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your verification code is AB-CD-EF-GH-IJ')).toEqual([]);
+    expect(maskSensitiveFragments('Your verification code is WX-YZ', ['WX-YZ'], [])).toBe(
+      'Your verification code is •••',
+    );
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is WX-YZ',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is WX YZ',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+
+    const subject = 'Your verification code is WX-YZ';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('•••');
+    expect(body).not.toContain('WX-YZ');
+    expect(body).not.toContain('WX');
   });
 
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
@@ -1314,17 +1367,19 @@ describe('mail-arrival notification watcher', () => {
       preview: '',
     }).subject).toBe('Your code is •••');
 
-    // No digits → reject whole run (no mid-chain letter-only halves).
-    expect(extractMetaAlnumCodes('Your code is AB CD EF GH')).toEqual([]);
+    // F97: pure letter space runs (2–4 all-caps groups) are now accepted under cue.
+    expect(extractMetaAlnumCodes('Your code is AB CD EF GH')).toEqual(['AB CD EF GH']);
     expect(maskTier2Metadata({
       from: 'a@b.c',
       subject: 'Your code is AB CD EF GH',
       codes: [],
       links: [],
       preview: '',
-    }).subject).toBe('Your code is AB CD EF GH');
+    }).subject).toBe('Your code is •••');
+    // 5+ letter groups still rejected whole (same F85 consume-full-run doctrine).
+    expect(extractMetaAlnumCodes('Your code is AB CD EF GH IJ')).toEqual([]);
 
-    // 5+ groups rejected whole.
+    // 5+ digit-bearing groups rejected whole.
     expect(extractMetaAlnumCodes('Your code is A1 B2 C3 D4 E5')).toEqual([]);
     expect(maskTier2Metadata({
       from: 'a@b.c',
