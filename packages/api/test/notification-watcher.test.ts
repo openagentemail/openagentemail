@@ -734,6 +734,77 @@ describe('mail-arrival notification watcher', () => {
     expect(calls[0].message).toContain('Codes: 482731');
   });
 
+  test('refreshIdentity undefined skips deleted recipient (F46)', async () => {
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+      'otp',
+      {
+        publish: async (payload) => {
+          calls.push(payload);
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      {
+        refreshIdentity: () => undefined,
+      },
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test('refreshIdentity skip is per-recipient; live sibling still publishes', async () => {
+    const alive = {
+      address: 'alive@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 2 as const,
+    };
+    const deleted = {
+      address: 'deleted@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 3 as const,
+    };
+    const calls: any[] = [];
+    await processWatchedMessage(
+      {
+        envelope: {
+          from: [{ name: 'auth', address: 'auth@example.net' }],
+          to: [{ address: alive.address }, { address: deleted.address }],
+          subject: 'Verify',
+        },
+        headers: Buffer.from(
+          `Delivered-To: ${alive.address}\r\nDelivered-To: ${deleted.address}\r\n`,
+        ),
+        source: Buffer.from(
+          'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        ),
+      } as any,
+      [alive, deleted],
+      'otp',
+      {
+        publish: async (payload) => {
+          calls.push(payload);
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      {
+        // First recipient still live; second deleted mid-flight (after prior publish).
+        refreshIdentity: (address) => (address === alive.address ? alive : undefined),
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toContain('Subject:');
+    expect(calls[0].message).not.toContain('Codes:');
+  });
+
   test('tier 3 adds bounded preview plus OTP codes and links', async () => {
     const longBody = `Your verification code is 998877. Visit https://example.com/verify?token=abc to continue. ${'x'.repeat(400)}`;
     const calls = await dispatches(

@@ -58,9 +58,9 @@ export type ProcessWatchedOptions = {
   /** When set, each mail-arrival push includes ntfy `click` = this URL. */
   clickUrl?: string;
   /**
-   * Re-read identity tier immediately before each payload so a mid-flight
-   * admin downgrade is not applied against a stale listIdentities() snapshot.
-   * Undefined means keep the matched snapshot entry.
+   * Re-read identity immediately before each payload so a mid-flight admin
+   * tier change is visible. When provided, `undefined` means the identity was
+   * deleted (skip publish); when omitted, the matched snapshot is used.
    */
   refreshIdentity?: (address: string) => Identity | undefined;
 };
@@ -272,8 +272,12 @@ export async function processWatchedMessage(
   const clickUrl = options.clickUrl;
   for (const identity of matched) {
     // Re-read per identity after await simpleParser / previous publish so a
-    // concurrent tier downgrade is visible before the next payload is built.
-    const current = options.refreshIdentity?.(identity.address) ?? identity;
+    // concurrent tier change or DELETE is visible before the next payload.
+    const refreshed = options.refreshIdentity?.(identity.address);
+    // findIdentity undefined = deleted (store corrupt throws). Do not fall back
+    // to the pre-parse snapshot — that would still emit tier-3 OTP after DELETE.
+    if (options.refreshIdentity && !refreshed) continue;
+    const current = refreshed ?? identity;
     const tier = resolvePushContentTier(current);
     const body = buildMailArrivalMessage(current.address, tier, hasOtpOrLink, extras);
     const level = hasOtpOrLink ? 'urgent' : 'normal';
