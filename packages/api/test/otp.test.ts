@@ -826,9 +826,9 @@ describe('extractLinks', () => {
     expect(extractHttpLinks('see https://example.com/a_(b)! end')).toEqual([
       'https://example.com/a_(b)',
     ]);
-    // Trailing `?` (sentence interrogative, not query) — unconditional.
+    // Trailing bare `?` kept as empty query (F100).
     expect(extractHttpLinks('have you seen https://example.com/y?')).toEqual([
-      'https://example.com/y',
+      'https://example.com/y?',
     ]);
     // Mid-URL `!` preserved.
     expect(extractHttpLinks('go https://example.com/a!b now')).toEqual([
@@ -886,6 +886,49 @@ describe('extractLinks', () => {
     // Stacked mixed terminal punct still peels (verdict cache must not diverge).
     expect(extractHttpLinks('See (secure: https://example.com/verify)!.:.?')).toEqual([
       'https://example.com/verify',
+    ]);
+    // F100: long trailing `?` run after a real query stays linear (peel extras).
+    const q = `go https://example.com/v?t=1${'?'.repeat(50_000)} end`;
+    const t0 = performance.now();
+    expect(extractHttpLinks(q)).toEqual(['https://example.com/v?t=1']);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+  });
+
+  test('preserves structural terminal ? empty query; peels prose ? (F100)', () => {
+    // Bare empty query kept (WHATWG-significant).
+    expect(extractHttpLinks('go https://example.com/verify? end')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?\nNEXT')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    // Second bare `?` after a real query is prose — peel.
+    expect(extractHttpLinks('go https://example.com/v?t=1? end')).toEqual([
+      'https://example.com/v?t=1',
+    ]);
+    // `??` keeps one structural empty-query `?`.
+    expect(extractHttpLinks('go https://example.com/verify?? end')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    // Closer / punct after `?` peels the `?` too (sentence context).
+    expect(extractHttpLinks('See (secure: https://example.com/verify?) now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify?). now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See [docs: https://example.com/verify?] next')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?. end')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Internal query regression.
+    expect(extractHttpLinks('Click https://example.com/verify?token=abc to continue')).toEqual([
+      'https://example.com/verify?token=abc',
     ]);
   });
 

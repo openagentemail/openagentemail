@@ -449,10 +449,39 @@ function scanTerminalPunctCloserContext(
 }
 
 /**
- * Peel trailing prose from a bounded candidate [0, length): `.,;?`, conditional
- * trailing `!`/`:`, unbalanced trailing `)`/`]`, and trailing `'`.
- * - Terminal `?` peels like `.`/`,`/`;` (empty query ≈ no query; sentence `?`
- *   is common). Mid-URL `?query` is never trailing and stays put.
+ * Whether an already-peeled trailer forces peeling a structural first `?` (F100).
+ * Closers / quotes / non-`?` terminal punct after the `?` mean sentence context
+ * (`verify?)`, `verify?).`). A trailer of only extra `?` does **not** force peel
+ * of the first (`??` → keep one empty-query `?`).
+ */
+function trailerForcesQuestionPeel(trailer: string): boolean {
+  for (let i = 0; i < trailer.length; i++) {
+    const ch = trailer[i]!;
+    if (
+      ch === ')' ||
+      ch === ']' ||
+      ch === "'" ||
+      ch === '.' ||
+      ch === ',' ||
+      ch === ';' ||
+      ch === '!'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Peel trailing prose from a bounded candidate [0, length): `.,;`, conditional
+ * trailing `?`/`!`/`:`, unbalanced trailing `)`/`]`, and trailing `'`.
+ * - Terminal `.`/`,`/`;` peel unconditionally.
+ * - Terminal `?` (F100): **keep** the first bare `?` (WHATWG empty query is
+ *   significant for strict servers; usually same route as no-query). **Peel**
+ *   a later `?` (query already started — prose question mark wins), or a first
+ *   `?` followed by peeled closers/quotes/`!.,;` (`verify?)`), or a first `?`
+ *   with closer-context look-back (`)!?` stacked prose). Mid-URL `?query` is
+ *   never trailing.
  * - Terminal `!` peels only with closer context (`)!` / `]!` / `'!` / `).!`),
  *   so bare `…/token!` keeps the bang (F90 + F92). Mid-URL `!` stays put.
  * - Terminal `:` peels only with closer context (`):` / `]:` / `':` / `):.`),
@@ -463,8 +492,7 @@ function scanTerminalPunctCloserContext(
  *   legal URL-terminal `'` would be stripped after the outer closer (F63).
  *
  * F98: closer-context look-back is cached per contiguous terminal-punct run so
- * a long `!!!!` / `::::` suffix is O(length), not O(length²). Verdicts are
- * bit-identical to rescanning every iteration.
+ * a long `!!!!` / `::::` / `????` suffix is O(length), not O(length²).
  */
 function peelTrailingProse(
   candidate: string,
@@ -488,19 +516,43 @@ function peelTrailingProse(
     else if (ch === "'") apostrophes += 1;
   }
 
+  // O(1) later-`?` checks for F100 (single scan budget per peel call).
+  const firstQuestionIdx = candidate.indexOf('?');
+
   // openQuoted: authorize exactly one outer closer peel (after any .,;!?:).
   let peelOpenQuote = openQuoted;
   let end = candidate.length;
-  // F98: cache look-back for one contiguous `!`/`:` (and mixed terminal) run.
+  // F98: cache look-back for one contiguous `!`/`:`/`?` (mixed terminal) run.
   let cachedBoundary: number | null = null;
   let cachedVerdict = false;
   while (end > 0) {
     const ch = candidate[end - 1]!;
-    if (ch === '.' || ch === ',' || ch === ';' || ch === '?') {
+    if (ch === '.' || ch === ',' || ch === ';') {
       // Unconditional peel may exit/enter a conditional run — drop cache.
       cachedBoundary = null;
       end -= 1;
       continue;
+    }
+    // F100: conditional `?` — keep first bare empty-query; peel later / prose.
+    if (ch === '?') {
+      const laterQuestion = firstQuestionIdx >= 0 && firstQuestionIdx < end - 1;
+      if (laterQuestion || trailerForcesQuestionPeel(candidate.slice(end))) {
+        cachedBoundary = null;
+        end -= 1;
+        continue;
+      }
+      // First `?` with empty/only-`?` trailer: peel only with closer context
+      // (stacked `)!?` / `]?`); otherwise keep structural empty query.
+      if (cachedBoundary === null || !(end - 2 > cachedBoundary)) {
+        const scan = scanTerminalPunctCloserContext(candidate, end);
+        cachedBoundary = scan.boundary;
+        cachedVerdict = scan.verdict;
+      }
+      if (cachedVerdict) {
+        end -= 1;
+        continue;
+      }
+      break;
     }
     // F92/F96: peel `!` or `:` only when glued to ) ] ' (skip other terminal punct).
     if (ch === '!' || ch === ':') {
