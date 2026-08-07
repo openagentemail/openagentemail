@@ -21,6 +21,7 @@ import {
 import { connectImap, messageRecipients } from './imap.ts';
 import { NotifyError, type NotifyService, notificationService } from './notify.ts';
 import {
+  canonicalDigits,
   extractHttpLinks,
   extractOtp,
   htmlToText,
@@ -146,17 +147,12 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
   return boundTextBytes(body, maxBytes);
 }
 
-/** Digit-only form so body `123456` and subject `123-456` compare equal (F69). */
-function canonicalDigits(s: string): string {
-  return s.replace(/\D/g, '');
-}
-
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
  * (maskNormalizedHttpUrls). Codes: scan continuous / delimited runs via shared
- * otpCodeRunRe (F68/F70 separators including Unicode spaces); replace when the
- * run's digit-only form is in the code set (F69 cross-form).
+ * otpCodeRunRe (Unicode Nd + seps, F68–F75); replace when the run's
+ * canonicalDigits form is in the code set (F69/F75 cross-form/script).
  *
  * Membership is O(text) Set lookups on canonical digits — no multi-branch
  * needle alternation. Extract still yields original spelling (extractCodes).

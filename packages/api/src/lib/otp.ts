@@ -131,16 +131,31 @@ function decodeEntities(s: string): string {
 }
 
 /**
- * Single separator class for delimited OTP (F68/F70): hyphen, en/em dash,
- * period, ASCII space/tab, and common Unicode spaces (NBSP, NNBSP, em space,
- * ideographic space, BOM as space, …).
+ * Unicode decimal digit (F75). JS `\d` is ASCII-only; fullwidth / Arabic-Indic
+ * / etc. need `\p{Nd}` with the `u` flag on every consuming pattern.
+ */
+const ND = '\\p{Nd}';
+
+/**
+ * OTP token edges (F75). Equivalent to classic `\b` for ASCII `\w` text, but
+ * treats any `\p{Nd}` as a "word" char so fullwidth/Arabic runs get edges.
+ * **Must not** use `\p{L}` — CJK letters would then glue to ASCII digits and
+ * break `验证码是123456` (CJK is non-word under old `\b` and must stay that way).
+ */
+const OTP_BOUND_LEFT = `(?<![A-Za-z0-9_${ND}])`;
+const OTP_BOUND_RIGHT = `(?![A-Za-z0-9_${ND}])`;
+
+/**
+ * Single separator class for delimited OTP (F68/F70/F75): hyphen, en/em dash,
+ * period, fullwidth hyphen/period, ASCII space/tab, and common Unicode spaces
+ * (NBSP, NNBSP, em space, ideographic space, BOM as space, …).
  *
  * Newlines (\n \r \u2028 \u2029) are intentionally excluded: maskTier2Metadata
  * joins from/subject with `\n`, and allowing line breaks would glue digits
  * across fields into a fake delimited form.
  */
 export const DELIMITED_OTP_SEP_CLASS =
-  '[-–—.\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
+  '[-–—.\uFF0D\uFF0E\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
 
 /**
  * One to three separator chars between digit groups (F72). Covers ` - `,
@@ -151,40 +166,90 @@ const DELIMITED_OTP_SEP_MAX = 3;
 const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_SEP_MAX}}`;
 
 /**
- * One digit group of a delimited OTP (F73/F74): 2–4 digits. Full form is 2–4
- * such groups joined by SEP_RUN:
- * `\d{2,4}(?:SEP_RUN\d{2,4}){1,3}` → e.g. `12 34 56`, `12 34 56 78`,
- * `12-34-56-78`, classic two-group `123-456`.
+ * One digit group of a delimited OTP (F73–F75): 2–4 Unicode decimal digits.
+ * Full form is 2–4 such groups joined by SEP_RUN.
  *
  * End guards (F74, shared by capture + run) reject 5+ group chains without
- * taking a 3–4 group prefix/suffix: trailing `(?!SEP_RUN\d)` and leading
- * `(?<!\d SEP_RUN)` so engines cannot leave a partial match. Total digits may
- * reach 4–16 (privacy-safe over-mask of long labeled number strings).
- * Partial forms like `code 123-456-7` (trailing single digit after sep) no
- * longer extract a 2-group prefix — full-run integrity wins.
+ * taking a 3–4 group prefix/suffix. Total digits may reach 4–16 (privacy-safe
+ * over-mask). Partial forms like `code 123-456-7` no longer extract a 2-group
+ * prefix — full-run integrity wins.
  */
-const DELIMITED_OTP_GROUP = '\\d{2,4}';
+const DELIMITED_OTP_GROUP = `${ND}{2,4}`;
 const DELIMITED_OTP_FORM = `${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,3}`;
 /**
  * Leading guard: not immediately after digit+sep (blocks mid-chain starts).
  * Tradeoff: a valid form glued after e.g. `1 12 34 56` is also refused — rare in OTP mail.
  */
-const DELIMITED_OTP_LEAD_GUARD = `(?<!\\d${DELIMITED_OTP_SEP_RUN})`;
+const DELIMITED_OTP_LEAD_GUARD = `(?<!${ND}${DELIMITED_OTP_SEP_RUN})`;
 /** Trailing guard: not immediately before sep+digit (blocks short prefixes). */
-const DELIMITED_OTP_TAIL_GUARD = `(?!${DELIMITED_OTP_SEP_RUN}\\d)`;
-const DELIMITED_OTP_BOUNDED = `${DELIMITED_OTP_LEAD_GUARD}\\b${DELIMITED_OTP_FORM}\\b${DELIMITED_OTP_TAIL_GUARD}`;
+const DELIMITED_OTP_TAIL_GUARD = `(?!${DELIMITED_OTP_SEP_RUN}${ND})`;
+const DELIMITED_OTP_BOUNDED = `${DELIMITED_OTP_LEAD_GUARD}${OTP_BOUND_LEFT}${DELIMITED_OTP_FORM}${OTP_BOUND_RIGHT}${DELIMITED_OTP_TAIL_GUARD}`;
 
 /** Lookbehind for half-suppress: max group digits + max seps + small margin. */
 const HALF_OF_DELIMITED_BEFORE_CHARS = 4 + DELIMITED_OTP_SEP_MAX + 3;
 
 /** Non-global: continuous run followed by sep-run + 2–4 digit group. */
 const HALF_OF_DELIMITED_AFTER = new RegExp(
-  `^${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}\\b`,
+  `^${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}${OTP_BOUND_RIGHT}`,
+  'u',
 );
 /** Non-global: 2–4 digit group + sep-run immediately before a continuous run. */
 const HALF_OF_DELIMITED_BEFORE = new RegExp(
-  `\\b${DELIMITED_OTP_GROUP}${DELIMITED_OTP_SEP_RUN}$`,
+  `${OTP_BOUND_LEFT}${DELIMITED_OTP_GROUP}${DELIMITED_OTP_SEP_RUN}$`,
+  'u',
 );
+
+/**
+ * Starts of contiguous 10-wide Nd decades (F75). Fullwidth/math digits usually
+ * NFKC to ASCII; these cover common scripts that do not. Keep in sync when
+ * adding extract languages — unmapped Nd fail closed to raw Nd sequence below.
+ */
+const ND_BLOCK_STARTS = [
+  0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66,
+  0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810,
+  0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0,
+  0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0x104a0, 0x10d30, 0x11066, 0x110f0,
+  0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0, 0x11730, 0x118e0,
+  0x11950, 0x11c50, 0x11d50, 0x11da0, 0x16a60, 0x16b50, 0x16d70, 0x1d7ce, 0x1d7d8,
+  0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e950, 0x1fbf0,
+] as const;
+
+function mapNdToAscii(ch: string): string | null {
+  if (ch >= '0' && ch <= '9') return ch;
+  if (!/\p{Nd}/u.test(ch)) return null;
+  const nfkc = ch.normalize('NFKC');
+  if (nfkc.length === 1 && nfkc >= '0' && nfkc <= '9') return nfkc;
+  const cp = ch.codePointAt(0)!;
+  for (const start of ND_BLOCK_STARTS) {
+    if (cp >= start && cp < start + 10) return String(cp - start);
+  }
+  // Last resort: NFKC may expand to ASCII digits for some forms.
+  const only = nfkc.replace(/\D/g, '');
+  return only.length === 1 ? only : null;
+}
+
+/**
+ * Digit-only form for cross-script OTP equality (F69/F75): body `123456` and
+ * subject `１２３４５６` / `١٢٣٤٥٦` compare equal after mapping to ASCII.
+ * Non-digits are stripped. If any Nd cannot be mapped, fall back to the raw
+ * Nd sequence (same-script mask still works; avoids empty-canon fail-open).
+ */
+export function canonicalDigits(s: string): string {
+  let out = '';
+  let rawNd = '';
+  let unmapped = false;
+  for (const ch of s) {
+    if (!/\p{Nd}/u.test(ch)) continue;
+    rawNd += ch;
+    const mapped = mapNdToAscii(ch);
+    if (mapped === null) {
+      unmapped = true;
+    } else if (!unmapped) {
+      out += mapped;
+    }
+  }
+  return unmapped ? rawNd : out;
+}
 
 /**
  * Fresh global regex for one delimited OTP form (capture group 1 = full form).
@@ -192,33 +257,43 @@ const HALF_OF_DELIMITED_BEFORE = new RegExp(
  */
 export function delimitedOtpCaptureRe(): RegExp {
   return new RegExp(
-    `${DELIMITED_OTP_LEAD_GUARD}\\b(${DELIMITED_OTP_FORM})\\b${DELIMITED_OTP_TAIL_GUARD}`,
-    'g',
+    `${DELIMITED_OTP_LEAD_GUARD}${OTP_BOUND_LEFT}(${DELIMITED_OTP_FORM})${OTP_BOUND_RIGHT}${DELIMITED_OTP_TAIL_GUARD}`,
+    'gu',
   );
 }
 
 /**
  * Fresh global regex for continuous 4–8 digit runs and delimited OTP forms.
  * Delimited alternative is first so `12 34 56 78` / `1234-5678` is one span.
- * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70–F74);
+ * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70–F75);
  * half-suppress uses HALF_OF_DELIMITED_* built from the same SEP_RUN/GROUP.
  */
 export function otpCodeRunRe(): RegExp {
-  return new RegExp(`${DELIMITED_OTP_BOUNDED}|\\b\\d{4,8}\\b`, 'g');
+  return new RegExp(
+    `${DELIMITED_OTP_BOUNDED}|${OTP_BOUND_LEFT}${ND}{4,8}${OTP_BOUND_RIGHT}`,
+    'gu',
+  );
 }
 
 /**
- * True when a continuous \d{4,8} run is one side of a delimited OTP shape
+ * True when a continuous 4–8 Nd run is one side of a delimited OTP shape
  * (`1234-5678` / `1234 - 56`). Continuous extract only yields 4–8 digit runs,
- * and only a **4-digit** run can be a delimited group (`\d{2,4}`); longer runs
- * like `123456-7890` stay continuous so they are not dropped without recovery.
+ * and only a **4-digit** run can be a delimited group; longer runs like
+ * `123456-7890` stay continuous so they are not dropped without recovery.
  */
 function isHalfOfDelimitedOtp(text: string, idx: number, digits: string): boolean {
-  if (digits.length !== 4) return false;
+  // Continuous matches are 4–8 Nd code points; only a 4-digit run is a group half.
+  // BMP Nd (fullwidth/Arabic/…) have length === code-point count.
+  if ([...digits].length !== 4) return false;
   const after = text.slice(idx + digits.length);
   if (HALF_OF_DELIMITED_AFTER.test(after)) return true;
   const before = text.slice(Math.max(0, idx - HALF_OF_DELIMITED_BEFORE_CHARS), idx);
   return HALF_OF_DELIMITED_BEFORE.test(before);
+}
+
+/** Continuous 4–8 Nd run with OTP bounds (capture group 1 = run). */
+function continuousOtpCaptureRe(): RegExp {
+  return new RegExp(`${OTP_BOUND_LEFT}(${ND}{4,8})${OTP_BOUND_RIGHT}`, 'gu');
 }
 
 /** Extract 4–8 digit codes (continuous or delimited) near an OTP keyword. */
@@ -227,8 +302,8 @@ export function extractCodes(text: string): string[] {
   const codes: string[] = [];
   const seen = new Set<string>();
 
-  for (const match of text.matchAll(/\b(\d{4,8})\b/g)) {
-    const digits = match[1];
+  for (const match of text.matchAll(continuousOtpCaptureRe())) {
+    const digits = match[1]!;
     const idx = match.index ?? 0;
     // Leave `1234-5678` / Unicode-space halves to the delimited pass (F68/F70).
     if (isHalfOfDelimitedOtp(text, idx, digits)) continue;
@@ -239,8 +314,9 @@ export function extractCodes(text: string): string[] {
     if (!CODE_KEYWORDS.some((kw) => window.includes(kw))) continue;
     // Years need a strong OTP cue (not mere "verification"/"identity") so
     // roadmap copy like "for 2026" does not fire false OTP alerts (F65).
-    // "verification PIN is 2026" still matches \bpin\b.
-    if (/^(19|20)\d{2}$/.test(digits) && !STRONG_OTP_CUE.test(window)) {
+    // Compare on ASCII-mapped digits so fullwidth years get the same guard.
+    const yearCanon = canonicalDigits(digits);
+    if (/^(19|20)\d{2}$/.test(yearCanon) && !STRONG_OTP_CUE.test(window)) {
       continue;
     }
     if (!seen.has(digits)) {

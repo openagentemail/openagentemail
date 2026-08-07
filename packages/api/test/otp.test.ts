@@ -202,6 +202,27 @@ describe('extractCodes', () => {
     expect(extractCodes('Your code is 123-456-7')).toEqual([]);
   });
 
+  test('Unicode decimal digits extract with original spelling (F75)', () => {
+    // Fullwidth continuous + CJK cue.
+    expect(extractCodes('您的验证码是 １２３４５６')).toEqual(['１２３４５６']);
+    // Fullwidth hyphen separator (U+FF0D).
+    expect(extractCodes('您的验证码是 １２３\uFF0D４５６')).toEqual(['１２３\uFF0D４５６']);
+    // Arabic-Indic (U+0660…) and Persian/Extended Arabic-Indic (U+06F0…).
+    expect(extractCodes('Your code is \u0661\u0662\u0663\u0664\u0665\u0666')).toEqual([
+      '\u0661\u0662\u0663\u0664\u0665\u0666',
+    ]);
+    expect(extractCodes('Your code is \u06F1\u06F2\u06F3\u06F4\u06F5\u06F6')).toEqual([
+      '\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6',
+    ]);
+    // Fullwidth parens are non-alnum → bounds hold.
+    expect(extractCodes('验证码（１２３４５６）')).toEqual(['１２３４５６']);
+    // CJK glued to ASCII digits still works (must not regress: no \\p{L} in bounds).
+    expect(extractCodes('您的验证码是123456')).toEqual(['123456']);
+    // Latin letter glued → reject (same as old \\b).
+    expect(extractCodes('code abc１２３４５６')).toEqual([]);
+    expect(extractCodes('code １２３４５６x')).toEqual([]);
+  });
+
   test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {
     const nbsp = '\u00A0';
     const nnbsp = '\u202F';

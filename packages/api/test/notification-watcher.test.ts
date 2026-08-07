@@ -934,6 +934,35 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('78');
   });
 
+  test('maskSensitiveFragments masks Unicode digits via canonicalDigits (F75)', () => {
+    expect(maskSensitiveFragments('验证码 １２３４５６', ['123456'], [])).toBe('验证码 •••');
+    expect(maskSensitiveFragments('code ١٢٣٤٥٦', ['123456'], [])).toBe('code •••');
+    expect(maskSensitiveFragments('code ۱۲۳۴۵۶', ['123456'], [])).toBe('code •••');
+  });
+
+  test('tier 2 masks fullwidth OTP in subject under policy=all (F75)', async () => {
+    const subject = '您的验证码是 １２３４５６';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('１２３４５６');
+    expect(body).not.toContain('123456');
+  });
+
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
     const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
       // 6-digit distinct codes that do not appear in the short subject.
