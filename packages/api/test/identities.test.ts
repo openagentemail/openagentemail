@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -448,5 +449,86 @@ describe('identity store save failure drops cache (F42)', () => {
 
     expect(findIdentity(ghost)).toBeUndefined();
     expect(listIdentities().some((i) => i.address === ghost)).toBe(false);
+  });
+});
+
+describe('identity store composite cache version (F56)', () => {
+  /** Pin mtime to whole milliseconds so utimes can reproduce the cached value. */
+  function stabilizeMtimeAndRecache(address: string) {
+    const st = statSync(storeFile());
+    const ms = Math.floor(st.mtimeMs);
+    utimesSync(storeFile(), new Date(ms), new Date(ms));
+    // Composite key sees ctime change → reload with rounded mtime in cache.
+    findIdentity(address);
+    return statSync(storeFile());
+  }
+
+  test('atomic replace with forced same mtime reloads new content', () => {
+    const created = createIdentity({ localpart: 'f56-atomic' })!;
+    const address = created.identity.address;
+    const oldToken = created.token;
+    const oldHash = findIdentity(address)!.tokenHash!;
+    expect(oldHash.length).toBe(64);
+    expect(findIdentityByToken(oldToken)?.address).toBe(address);
+
+    const before = stabilizeMtimeAndRecache(address);
+    const raw = readFileSync(storeFile(), 'utf8');
+    // Same-size body: only swap the 64-hex hash so size stays put.
+    const nextRaw = raw.replace(oldHash, 'a'.repeat(64));
+    expect(nextRaw).not.toBe(raw);
+    expect(Buffer.byteLength(nextRaw)).toBe(Buffer.byteLength(raw));
+
+    const tmp = `${storeFile()}.f56-atomic.tmp`;
+    writeFileSync(tmp, nextRaw, { mode: 0o600 });
+    renameSync(tmp, storeFile());
+    utimesSync(storeFile(), new Date(before.mtimeMs), new Date(before.mtimeMs));
+
+    const after = statSync(storeFile());
+    // Prove mtime-only would still hit; composite must see ino.
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.size).toBe(before.size);
+    expect(after.ino).not.toBe(before.ino);
+
+    expect(findIdentityByToken(oldToken)).toBeUndefined();
+    expect(findIdentity(address)?.tokenHash).toBe('a'.repeat(64));
+  });
+
+  test('in-place rewrite with same size and mtime reloads new content', () => {
+    const created = createIdentity({ localpart: 'f56-inplace' })!;
+    const address = created.identity.address;
+    setIdentityPushContentTier(address, 3);
+    expect(findIdentity(address)?.pushContentTier).toBe(3);
+
+    const before = stabilizeMtimeAndRecache(address);
+    const raw = readFileSync(storeFile(), 'utf8');
+    // Same byte length: swap tier 3 → tier 1 in place without size change.
+    expect(raw).toContain('"pushContentTier": 3');
+    const rewritten = raw.replace('"pushContentTier": 3', '"pushContentTier": 1');
+    expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(raw));
+
+    writeFileSync(storeFile(), rewritten, { mode: 0o600 });
+    utimesSync(storeFile(), new Date(before.mtimeMs), new Date(before.mtimeMs));
+
+    const after = statSync(storeFile());
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    // ctimeMs must diverge so a composite key misses (mtime-only would hit).
+    expect(after.ctimeMs).not.toBe(before.ctimeMs);
+
+    expect(findIdentity(address)?.pushContentTier).toBe(1);
+    expect(resolvePushContentTier(findIdentity(address)!)).toBe(1);
+  });
+
+  test('unchanged file returns the same cached identity object', () => {
+    createIdentity({ localpart: 'f56-stable' });
+    const first = listIdentities();
+    // Same Map value object ⇒ storeCache was not rebuilt between loads.
+    const a = findIdentity('f56-stable@test.example');
+    const b = findIdentity('f56-stable@test.example');
+    expect(a).toBe(b);
+    expect(listIdentities().map((i) => i.address).sort()).toEqual(
+      first.map((i) => i.address).sort(),
+    );
   });
 });

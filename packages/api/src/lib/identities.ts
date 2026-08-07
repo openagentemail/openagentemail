@@ -104,12 +104,35 @@ function coerceIdentity(raw: Record<string, unknown>): Identity {
 }
 
 /**
- * Parsed store cache keyed by mtimeMs. Cross-process writers rely on mtime
- * changes (ms precision). In-process writers call invalidateStoreCache() so a
- * same-tick rewrite is visible without waiting on mtime.
+ * Identity-store parse cache keyed by a composite file-version signal (one
+ * statSync): dev, ino, mtimeMs, ctimeMs, size. Cross-process writers are
+ * detected without relying on mtime alone:
+ * - atomic replace (tmp + rename) → ino (and usually mtime) changes;
+ * - in-place rewrite with preserved mtime → ctimeMs and/or size change;
+ * - if ino is 0/unstable on a filesystem, keys may thrash (extra re-reads)
+ *   but correctness is preserved — never serve stale identities/tokens.
+ * In-process writers call invalidateStoreCache() before writing so same-tick
+ * rewrites stay visible without waiting on stat.
  */
-type StoreCache = {
+type StoreFileVersion = {
+  dev: number;
+  ino: number;
   mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+};
+
+/** Sentinel version for a missing store file (mtimeMs === -1). */
+const MISSING_STORE_VERSION: StoreFileVersion = {
+  dev: 0,
+  ino: 0,
+  mtimeMs: -1,
+  ctimeMs: -1,
+  size: -1,
+};
+
+type StoreCache = {
+  version: StoreFileVersion;
   identities: Identity[];
   byAddress: Map<string, Identity>;
 };
@@ -118,6 +141,32 @@ let storeCache: StoreCache | undefined;
 
 function invalidateStoreCache(): void {
   storeCache = undefined;
+}
+
+function fileVersionFromStat(st: {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+}): StoreFileVersion {
+  return {
+    dev: st.dev,
+    ino: st.ino,
+    mtimeMs: st.mtimeMs,
+    ctimeMs: st.ctimeMs,
+    size: st.size,
+  };
+}
+
+function storeVersionsEqual(a: StoreFileVersion, b: StoreFileVersion): boolean {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs &&
+    a.size === b.size
+  );
 }
 
 function buildAddressIndex(identities: Identity[]): Map<string, Identity> {
@@ -131,14 +180,20 @@ function buildAddressIndex(identities: Identity[]): Map<string, Identity> {
 function load(): Identity[] {
   const path = storePath();
   if (!existsSync(path)) {
-    // Sentinel mtime so a later create is detected (file appears with real mtime).
-    if (storeCache?.mtimeMs === -1) return storeCache.identities;
-    storeCache = { mtimeMs: -1, identities: [], byAddress: new Map() };
+    // Sentinel so a later create is detected (file appears with a real version).
+    if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
+      return storeCache.identities;
+    }
+    storeCache = {
+      version: MISSING_STORE_VERSION,
+      identities: [],
+      byAddress: new Map(),
+    };
     return storeCache.identities;
   }
   try {
-    const mtimeMs = statSync(path).mtimeMs;
-    if (storeCache && storeCache.mtimeMs === mtimeMs) {
+    const version = fileVersionFromStat(statSync(path));
+    if (storeCache && storeVersionsEqual(storeCache.version, version)) {
       return storeCache.identities;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -147,7 +202,7 @@ function load(): Identity[] {
     }
     const identities = parsed.map((entry) => coerceIdentity(entry as Record<string, unknown>));
     storeCache = {
-      mtimeMs,
+      version,
       identities,
       byAddress: buildAddressIndex(identities),
     };
