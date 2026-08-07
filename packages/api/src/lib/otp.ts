@@ -82,6 +82,11 @@ function buildStrongOtpCueRe(cues: readonly string[]): RegExp {
 
 const STRONG_OTP_CUE = buildStrongOtpCueRe(STRONG_OTP_CUES);
 
+/** True when text contains a strong OTP cue (F71 list; case-folded for Latin). */
+export function hasStrongOtpCue(text: string): boolean {
+  return STRONG_OTP_CUE.test(text.toLowerCase());
+}
+
 export function htmlToText(html: string): string {
   let s = html;
   // Drop non-content blocks entirely.

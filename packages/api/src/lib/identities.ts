@@ -217,6 +217,14 @@ function load(): Identity[] {
   }
 }
 
+/**
+ * Persist the identity store. DATA_DIR is designed for a **single writer**
+ * process (the Compose/API-only stacks run one API). `save` uses tmp+rename
+ * so one process never tears the JSON file, but concurrent writers across
+ * multiple processes sharing the same DATA_DIR are **unsupported** — last
+ * writer wins without CAS/file locking (F78: document only; no multi-process
+ * storage rewrite in this product).
+ */
 function save(identities: Identity[]): void {
   // Drop the cache *before* any write attempt. Callers mutate the array/objects
   // returned by load() then call save(); if we only invalidated after rename,

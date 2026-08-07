@@ -132,6 +132,35 @@ describe('notification URL configuration', () => {
     ).toBe('https://notify.example.com');
   });
 
+  test('DASHBOARD_PUBLIC_URL rejects userinfo credentials (F80)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://admin:secret@mail.example/ui',
+      }),
+    ).toThrow(/credentials|userinfo/i);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://admin@mail.example/ui',
+      }),
+    ).toThrow(/credentials|userinfo/i);
+    // Plain public origin still accepted.
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+    // Internal ntfy URL may still carry credentials (private network auth).
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NTFY_INTERNAL_URL: 'http://publisher:secret@ntfy.internal',
+      }).ntfy.internalUrl,
+    ).toMatch(/publisher:secret@ntfy\.internal/);
+  });
+
   test('normalizeUrl root path keeps userinfo credentials (F60)', () => {
     expect(normalizeUrl('https://publisher:secret@ntfy.example/')).toBe(
       'https://publisher:secret@ntfy.example',

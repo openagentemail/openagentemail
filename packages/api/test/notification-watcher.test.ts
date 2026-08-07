@@ -7,10 +7,13 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { describe, expect, test } = await import('bun:test');
 const {
+  boundPushLinkEntries,
   boundPushMessage,
   buildMailArrivalMessage,
+  extractMetaAlnumCodes,
   maskSensitiveFragments,
   maskTier2Metadata,
+  packPushLinkLines,
   processWatchedMessage,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
@@ -965,6 +968,52 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('123456');
   });
 
+  test('tier 2 masks alnum OTP in subject with strong cue only (F77)', async () => {
+    expect(extractMetaAlnumCodes('Your verification code is A1B2C3')).toEqual(['A1B2C3']);
+    expect(extractMetaAlnumCodes('Order ABC12345 shipped')).toEqual([]);
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A1B2C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    expect(maskTier2Metadata({
+      from: 'shop@example.net',
+      subject: 'Order ABC12345 shipped',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Order ABC12345 shipped');
+    // CJK strong cue glued to alnum (bounds are ASCII-alnum only).
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '您的校验码是A1B2C3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的校验码是•••');
+
+    const subject = 'Your verification code is A1B2C3';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('•••');
+    expect(body).not.toContain('A1B2C3');
+  });
+
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
     const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
       // 6-digit distinct codes that do not appear in the short subject.
@@ -1424,13 +1473,22 @@ describe('mail-arrival notification watcher', () => {
       const listed = codesLine.slice('Codes: '.length).split(', ');
       expect(listed.length).toBeLessThanOrEqual(PUSH_OTP_ITEM_MAX);
       for (const entry of listed) {
-        // Truncated entries end with …; raw length never exceeds cap+ellipsis.
+        // Truncated code entries end with …; raw length never exceeds cap+ellipsis.
         expect(entry.replace(/…$/, '').length).toBeLessThanOrEqual(PUSH_OTP_ENTRY_CHARS);
       }
     }
     const linkSection = body.includes('Links:\n') ? body.split('Links:\n')[1]! : '';
-    const linkEntries = linkSection.split('\n').filter(Boolean);
+    const linkEntries = linkSection
+      .split('\n')
+      .filter((line) => line && !line.startsWith('(+'));
     expect(linkEntries.length).toBeLessThanOrEqual(PUSH_OTP_ITEM_MAX);
+    // Links are never mid-truncated with … (F79); long verify links stay whole.
+    for (const entry of linkEntries) {
+      expect(entry.endsWith('…')).toBe(false);
+    }
+    if (body.includes(longLink.slice(0, 40))) {
+      expect(body).toContain(longLink);
+    }
 
     // Direct builder path with deliberately huge inputs.
     const huge = buildMailArrivalMessage('a@test.example', 3, true, {
@@ -1442,8 +1500,50 @@ describe('mail-arrival notification watcher', () => {
     });
     expect(Buffer.byteLength(huge, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
     expect(
-      huge.endsWith('…') || Buffer.byteLength(huge, 'utf8') < PUSH_MESSAGE_MAX_BYTES,
+      huge.endsWith('…') || Buffer.byteLength(huge, 'utf8') < PUSH_MESSAGE_MAX_BYTES || huge.includes('more links'),
     ).toBe(true);
+  });
+
+  test('tier 3 keeps full verification links over 200 chars (F79)', () => {
+    const longLink = `https://example.com/verify?token=${'a'.repeat(PUSH_OTP_ENTRY_CHARS + 80)}&sig=${'b'.repeat(40)}`;
+    expect(longLink.length).toBeGreaterThan(PUSH_OTP_ENTRY_CHARS);
+    expect(boundPushLinkEntries([longLink])).toEqual([longLink]);
+
+    const body = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: 'Verify',
+      from: 'auth@example.com',
+      preview: 'hi',
+      codes: [],
+      links: [longLink],
+    });
+    expect(body).toContain(longLink);
+    expect(body).not.toContain(`${longLink.slice(0, PUSH_OTP_ENTRY_CHARS)}…`);
+  });
+
+  test('tier 3 drops tail links with +N note under budget (F79)', () => {
+    const links = Array.from(
+      { length: 12 },
+      (_, i) => `https://example.com/verify?token=${'z'.repeat(180)}&i=${i}`,
+    );
+    const packed = packPushLinkLines(
+      'a@test.example received new email\nFrom: x\nSubject: y\nPreview: p',
+      links,
+    );
+    const linksBlock = packed.find((line) => line.startsWith('Links:\n'));
+    expect(linksBlock).toBeDefined();
+    const keptUrls = linksBlock!.slice('Links:\n'.length).split('\n').filter(Boolean);
+    expect(keptUrls.length).toBeGreaterThan(0);
+    expect(keptUrls.length).toBeLessThanOrEqual(PUSH_OTP_ITEM_MAX);
+    for (const url of keptUrls) {
+      expect(links).toContain(url);
+      expect(url.endsWith('…')).toBe(false);
+      expect(url.startsWith('https://example.com/verify?token=')).toBe(true);
+    }
+    const note = packed.find((line) => line.startsWith('(+'));
+    expect(note).toMatch(/\(\+\d+ more links, open the dashboard to view\)/);
+    const n = Number(note!.match(/\+(\d+)/)?.[1]);
+    expect(n).toBe(links.length - keptUrls.length);
+    expect(n).toBeGreaterThan(0);
   });
 
   test('boundPushMessage caps UTF-8 bytes and truncates on a code-point boundary', () => {

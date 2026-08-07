@@ -24,6 +24,7 @@ import {
   canonicalDigits,
   extractHttpLinks,
   extractOtp,
+  hasStrongOtpCue,
   htmlToText,
   maskNormalizedHttpUrls,
   otpCodeRunRe,
@@ -113,12 +114,68 @@ function formatAddressList(
     .join(', ');
 }
 
-/** Cap list length and per-entry size for tier-3 OTP fields. */
+/** Cap list length and per-entry size for tier-3 OTP *code* fields. */
 export function boundPushOtpEntries(items: string[]): string[] {
   return items.slice(0, PUSH_OTP_ITEM_MAX).map((item) => {
     if (item.length <= PUSH_OTP_ENTRY_CHARS) return item;
     return `${item.slice(0, PUSH_OTP_ENTRY_CHARS)}…`;
   });
+}
+
+/**
+ * Tier-3 verification links must stay complete (F79) — truncating mid-token
+ * yields unusable URLs. Keep full strings up to PUSH_OTP_ITEM_MAX; callers pack
+ * under the total body byte budget and omit the tail with an honest note.
+ */
+export function boundPushLinkEntries(items: string[]): string[] {
+  return items.slice(0, PUSH_OTP_ITEM_MAX);
+}
+
+const MORE_LINKS_NOTE = (n: number) =>
+  `(+${n} more links, open the dashboard to view)`;
+
+/**
+ * Pack full verification links under the remaining UTF-8 body budget (F79).
+ * Never mid-truncates a URL; drops the tail and appends a +N note when needed.
+ */
+export function packPushLinkLines(
+  baseBody: string,
+  links: string[],
+  maxBytes = PUSH_MESSAGE_MAX_BYTES,
+): string[] {
+  if (links.length === 0) return [];
+  const candidates = boundPushLinkEntries(links);
+  let dropped = Math.max(0, links.length - candidates.length);
+  const kept: string[] = [];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const tryKept = [...kept, candidates[i]!];
+    const stillDrop = dropped + (candidates.length - tryKept.length);
+    const note = stillDrop > 0 ? `\n${MORE_LINKS_NOTE(stillDrop)}` : '';
+    const trial = `${baseBody}\nLinks:\n${tryKept.join('\n')}${note}`;
+    if (Buffer.byteLength(trial, 'utf8') <= maxBytes) {
+      kept.push(candidates[i]!);
+      continue;
+    }
+    dropped += candidates.length - kept.length;
+    break;
+  }
+
+  if (kept.length === 0) {
+    // Even one full link does not fit; prefer an honest note over a broken URL.
+    if (links.length > 0) {
+      const onlyNote = `${baseBody}\nLinks:\n${MORE_LINKS_NOTE(links.length)}`;
+      if (Buffer.byteLength(onlyNote, 'utf8') <= maxBytes) {
+        return [`Links:\n${MORE_LINKS_NOTE(links.length)}`];
+      }
+    }
+    return [];
+  }
+
+  const out = [`Links:\n${kept.join('\n')}`];
+  // dropped already includes candidates not kept + beyond PUSH_OTP_ITEM_MAX.
+  if (dropped > 0) out.push(MORE_LINKS_NOTE(dropped));
+  return out;
 }
 
 /**
@@ -148,14 +205,38 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 }
 
 /**
+ * Alphanumeric OTP shape for tier-2 *metadata only* (F77): 6–8 ASCII alnum
+ * with at least one letter and one digit. Bounds exclude adjacent alnum so
+ * CJK-glued `验证码是A1B2C3` still matches (same no-\p{L} idea as F75).
+ */
+const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{6,8})(?![A-Za-z0-9])/g;
+
+function isMixedAlnumOtp(form: string): boolean {
+  return /[A-Za-z]/.test(form) && /[0-9]/.test(form);
+}
+
+/**
+ * Collect alnum OTPs from from/subject when a strong cue is present (F77).
+ * Does not touch body extractCodes / extractOtp semantics.
+ */
+export function extractMetaAlnumCodes(metaText: string): string[] {
+  if (!metaText || !hasStrongOtpCue(metaText)) return [];
+  const codes: string[] = [];
+  const seen = new Set<string>();
+  for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {
+    const form = match[1]!;
+    if (!isMixedAlnumOtp(form) || seen.has(form)) continue;
+    seen.add(form);
+    codes.push(form);
+  }
+  return codes;
+}
+
+/**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Codes: scan continuous / delimited runs via shared
- * otpCodeRunRe (Unicode Nd + seps, F68–F75); replace when the run's
- * canonicalDigits form is in the code set (F69/F75 cross-form/script).
- *
- * Membership is O(text) Set lookups on canonical digits — no multi-branch
- * needle alternation. Extract still yields original spelling (extractCodes).
+ * (maskNormalizedHttpUrls). Digit codes: otpCodeRunRe + canonicalDigits
+ * (F69/F75). Alnum codes (F77): exact spelling replace with alnum bounds.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -165,16 +246,32 @@ export function maskSensitiveFragments(
   if (!text) return text;
   // URLs first so a full verify link is one unit before digit-code scans.
   let result = maskNormalizedHttpUrls(text, links);
-  const codeSet = new Set<string>();
+  const digitCanon = new Set<string>();
+  const exactAlnum: string[] = [];
   for (const code of codes) {
     if (!code) continue;
+    if (isMixedAlnumOtp(code)) {
+      exactAlnum.push(code);
+      continue;
+    }
     const canon = canonicalDigits(code);
-    if (canon) codeSet.add(canon);
+    if (canon) digitCanon.add(canon);
   }
-  if (codeSet.size === 0) return result;
-  return result.replace(otpCodeRunRe(), (run) =>
-    codeSet.has(canonicalDigits(run)) ? '•••' : run,
-  );
+  if (digitCanon.size > 0) {
+    result = result.replace(otpCodeRunRe(), (run) =>
+      digitCanon.has(canonicalDigits(run)) ? '•••' : run,
+    );
+  }
+  // Longest first so overlapping spellings prefer the full form.
+  exactAlnum.sort((a, b) => b.length - a.length);
+  for (const form of exactAlnum) {
+    const re = new RegExp(
+      `(?<![A-Za-z0-9])${form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9])`,
+      'g',
+    );
+    result = result.replace(re, '•••');
+  }
+  return result;
 }
 
 /**
@@ -206,6 +303,8 @@ export function maskTier2Metadata(
   const maskCodes = [
     ...metaOtp.codes,
     ...extras.codes.filter((code) => metaCanonRuns.has(canonicalDigits(code))),
+    // Strong-cue alnum OTPs in metadata only (F77) — not body extract.
+    ...extractMetaAlnumCodes(metaText),
   ];
   const maskLinks = [...extras.links, ...metaHttpLinks];
   from = maskSensitiveFragments(from, maskCodes, maskLinks);
@@ -246,9 +345,10 @@ export function buildMailArrivalMessage(
   if (tier >= 3) {
     if (extras.preview) lines.push(`Preview: ${extras.preview}`);
     const codes = boundPushOtpEntries(extras.codes);
-    const links = boundPushOtpEntries(extras.links);
     if (codes.length) lines.push(`Codes: ${codes.join(', ')}`);
-    if (links.length) lines.push(`Links:\n${links.join('\n')}`);
+    // Links: full URLs only; pack under total body budget (F79).
+    const baseForLinks = lines.join('\n');
+    lines.push(...packPushLinkLines(baseForLinks, extras.links));
   }
 
   return boundPushMessage(lines.join('\n'));

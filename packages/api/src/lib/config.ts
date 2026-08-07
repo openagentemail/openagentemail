@@ -42,6 +42,30 @@ function envUrl(fallback?: string) {
   return z.preprocess(emptyAsUndefined, httpUrl.optional());
 }
 
+/**
+ * Public dashboard origin for ntfy click actions (F80). Rejects userinfo so
+ * credentials never ride the notification channel. Internal ntfy URLs keep
+ * envUrl() (credentials may be required on private networks).
+ */
+function dashboardPublicUrlEnv() {
+  return z.preprocess(
+    emptyAsUndefined,
+    httpUrl
+      .refine(
+        (value) => {
+          try {
+            const url = new URL(value);
+            return url.username === '' && url.password === '';
+          } catch {
+            return false;
+          }
+        },
+        { message: 'DASHBOARD_PUBLIC_URL must not include credentials (userinfo)' },
+      )
+      .optional(),
+  );
+}
+
 const envSchema = z.object({
   // HTTP port for the API service.
   PORT: z.coerce.number().int().positive().default(3100),
@@ -78,7 +102,8 @@ const envSchema = z.object({
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
 
-  // Directory for the identity store JSON file.
+  // Directory for the identity store JSON file. Single-writer process only
+  // (Compose runs one API); multi-process shared DATA_DIR is unsupported.
   DATA_DIR: z.string().default('./data'),
 
   // Built-in, read-only human inbox. Disable to make every /ui route 404.
@@ -105,7 +130,8 @@ const envSchema = z.object({
   PUSH_POLICY: z.enum(['otp', 'all', 'none']).default('otp'),
   // Optional public origin of the human dashboard. When set, mail-arrival
   // ntfy pushes include a click action that opens this URL (no deep link).
-  DASHBOARD_PUBLIC_URL: envUrl(),
+  // Must not contain userinfo — credentials must not leave via ntfy (F80).
+  DASHBOARD_PUBLIC_URL: dashboardPublicUrlEnv(),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
