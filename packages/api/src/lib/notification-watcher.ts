@@ -205,14 +205,30 @@ export function boundPushMessage(body: string, maxBytes = PUSH_MESSAGE_MAX_BYTES
 }
 
 /**
- * Continuous alnum OTP for tier-2 *metadata only* (F77/F81): 4–8 ASCII alnum
- * with at least one letter and one digit. Bounds exclude adjacent alnum so
- * CJK-glued `验证码是A1B2C3` still matches.
+ * ASCII + fullwidth Latin letters/digits only (F86). Explicit FF ranges —
+ * never `\p{L}` / Alphabetic (would swallow CJK and break glue bounds).
  */
-const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])/g;
+const META_ALNUM_CHAR = 'A-Za-z0-9\\uFF10-\\uFF19\\uFF21-\\uFF3A\\uFF41-\\uFF5A';
+const META_ALNUM_BOUND_LEFT = `(?<![${META_ALNUM_CHAR}])`;
+const META_ALNUM_BOUND_RIGHT = `(?![${META_ALNUM_CHAR}])`;
+/** Letters only (ASCII + fullwidth) for classic space forms. */
+const META_ALNUM_LETTER = 'A-Za-z\\uFF21-\\uFF3A\\uFF41-\\uFF5A';
+/** Digits only (ASCII + fullwidth) for classic space forms / year checks. */
+const META_ALNUM_DIGIT = '0-9\\uFF10-\\uFF19';
 
 /**
- * Delimited mixed alnum OTP (F84/F85): 2–4 groups of 2–4 ASCII alnum.
+ * Continuous alnum OTP for tier-2 *metadata only* (F77/F81/F86): 4–8 alnum
+ * (ASCII and/or fullwidth) with ≥1 letter + ≥1 digit after NFKC. Bounds exclude
+ * adjacent alnum (incl. fullwidth) so CJK-glued forms still match.
+ */
+const META_ALNUM_OTP_RE = new RegExp(
+  `${META_ALNUM_BOUND_LEFT}([${META_ALNUM_CHAR}]{4,8})${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
+
+/**
+ * Delimited mixed alnum OTP (F84/F85/F86): 2–4 groups of 2–4 alnum
+ * (ASCII + fullwidth).
  *
  * Non-whitespace seps (hyphen/dash/dot/fullwidth) allow 2–4 groups with F74-style
  * mid-chain lead/tail guards.
@@ -225,7 +241,7 @@ const META_ALNUM_OTP_RE = /(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])/g;
  *
  * Pure-digit forms are left to the digit delimited path (≥1 letter + ≥1 digit).
  */
-const META_ALNUM_GROUP = '[A-Za-z0-9]{2,4}';
+const META_ALNUM_GROUP = `[${META_ALNUM_CHAR}]{2,4}`;
 /**
  * Split of otp.ts DELIMITED_OTP_SEP_CLASS: non-whitespace vs whitespace.
  */
@@ -234,38 +250,46 @@ const META_ALNUM_SEP_SPACE =
   '[\\t \\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF]';
 // 2–4 groups with tight seps; lead blocks mid-chain after alnum+tight-sep.
 const META_ALNUM_DELIMITED_TIGHT = new RegExp(
-  `(?<![A-Za-z0-9]${META_ALNUM_SEP_TIGHT})(?<![A-Za-z0-9])` +
+  `(?<![${META_ALNUM_CHAR}]${META_ALNUM_SEP_TIGHT})${META_ALNUM_BOUND_LEFT}` +
     `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_TIGHT}${META_ALNUM_GROUP}){1,3})` +
-    `(?!${META_ALNUM_SEP_TIGHT}[A-Za-z0-9])(?![A-Za-z0-9])`,
+    `(?!${META_ALNUM_SEP_TIGHT}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
 /**
- * 2–4 alnum chars that include a digit (lookahead fixes length; then consume).
+ * 2–4 alnum chars that include a digit after NFKC (lookahead fixes length).
  * Used for space runs so pure-letter English tokens are not groups.
  */
 const META_ALNUM_GROUP_WITH_DIGIT =
-  '(?=[A-Za-z0-9]{2,4}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{2,4}';
+  `(?=[${META_ALNUM_CHAR}]{2,4}(?![${META_ALNUM_CHAR}]))` +
+  `(?=[${META_ALNUM_CHAR}]*[${META_ALNUM_DIGIT}])` +
+  `[${META_ALNUM_CHAR}]{2,4}`;
 // Longest space-separated digit-bearing group run (F85).
 const META_ALNUM_DELIMITED_SPACE_DIGIT = new RegExp(
-  `(?<![A-Za-z0-9])` +
+  `${META_ALNUM_BOUND_LEFT}` +
     `(${META_ALNUM_GROUP_WITH_DIGIT}(?:${META_ALNUM_SEP_SPACE}${META_ALNUM_GROUP_WITH_DIGIT})+)` +
-    `(?![A-Za-z0-9])`,
+    `${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
-// Classic `ABC 123` (letter block 3–4 + digit block 2–4); year filter applied after.
+// Classic `ABC 123` / fullwidth (letter block 3–4 + digit block 2–4).
 const META_ALNUM_DELIMITED_SPACE_CLASSIC = new RegExp(
-  `(?<![A-Za-z0-9])` +
-    `([A-Za-z]{3,4}${META_ALNUM_SEP_SPACE}[0-9]{2,4})` +
-    `(?![A-Za-z0-9])`,
+  `${META_ALNUM_BOUND_LEFT}` +
+    `([${META_ALNUM_LETTER}]{3,4}${META_ALNUM_SEP_SPACE}[${META_ALNUM_DIGIT}]{2,4})` +
+    `${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
 
+/** NFKC then require ≥1 Latin letter and ≥1 digit (F86 fullwidth → ASCII). */
 function isMixedAlnumOtp(form: string): boolean {
-  return /[A-Za-z]/.test(form) && /[0-9]/.test(form);
+  const nfkc = form.normalize('NFKC');
+  return /[A-Za-z]/.test(nfkc) && /[0-9]/.test(nfkc);
 }
 
 function splitSpaceAlnumGroups(form: string): string[] {
   return form.split(new RegExp(META_ALNUM_SEP_SPACE)).filter(Boolean);
+}
+
+function nfkcGroup(g: string): string {
+  return g.normalize('NFKC');
 }
 
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
@@ -273,19 +297,23 @@ function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
   const parts = splitSpaceAlnumGroups(form);
   if (parts.length < 2 || parts.length > 4) return false;
-  // Every group already digit-bearing by construction; still reject years as a side.
-  return parts.every((g) => /[0-9]/.test(g) && !/^(19|20)\d{2}$/.test(g));
+  // Digit check after NFKC so fullwidth digits count; reject year-shaped groups.
+  return parts.every((g) => {
+    const n = nfkcGroup(g);
+    return /[0-9]/.test(n) && !/^(19|20)\d{2}$/.test(n);
+  });
 }
 
-/** Accept classic two-group letter-block + digit-block (`ABC 123`). */
+/** Accept classic two-group letter-block + digit-block (`ABC 123` / fullwidth). */
 function isPlausibleSpaceClassic(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
   const parts = splitSpaceAlnumGroups(form);
   if (parts.length !== 2) return false;
-  const [letters, digits] = parts;
-  if (!/^[A-Za-z]{3,4}$/.test(letters!)) return false;
-  if (!/^[0-9]{2,4}$/.test(digits!)) return false;
-  if (/^(19|20)\d{2}$/.test(digits!)) return false;
+  const letters = nfkcGroup(parts[0]!);
+  const digits = nfkcGroup(parts[1]!);
+  if (!/^[A-Za-z]{3,4}$/.test(letters)) return false;
+  if (!/^[0-9]{2,4}$/.test(digits)) return false;
+  if (/^(19|20)\d{2}$/.test(digits)) return false;
   return true;
 }
 
@@ -295,7 +323,7 @@ function escapeRegExpLiteral(s: string): string {
 
 /**
  * Collect alnum OTPs from from/subject when a strong cue is present
- * (F77/F81 continuous + F84 tight delimited + F85 space runs).
+ * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth).
  * Does not touch body extract semantics.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
@@ -345,9 +373,12 @@ export function buildAlnumMaskRe(forms: string[]): RegExp | null {
   }
   if (ordered.length === 0) return null;
   const alt = ordered.map(escapeRegExpLiteral).join('|');
-  // Bounds are ASCII-alnum only so forms containing hyphens/spaces still match
-  // when adjacent to punctuation or CJK (not glued to a longer alnum run).
-  return new RegExp(`(?<![A-Za-z0-9])(?:${alt})(?![A-Za-z0-9])`, 'g');
+  // Bounds include fullwidth alnum (F86) so we do not leave a half-run next to
+  // longer fullwidth tokens; hyphens/spaces/CJK still allow a match.
+  return new RegExp(
+    `${META_ALNUM_BOUND_LEFT}(?:${alt})${META_ALNUM_BOUND_RIGHT}`,
+    'g',
+  );
 }
 
 /**

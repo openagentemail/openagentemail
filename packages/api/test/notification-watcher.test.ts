@@ -1013,7 +1013,7 @@ describe('mail-arrival notification watcher', () => {
       links: [],
       preview: '',
     }).subject).toBe('Order AB12 shipped');
-    // CJK strong cue glued to alnum (bounds are ASCII-alnum only).
+    // CJK strong cue glued to alnum (bounds exclude CJK; fullwidth Latin is in-class).
     expect(maskTier2Metadata({
       from: 'auth@example.net',
       subject: '您的校验码是A1B2C3',
@@ -1088,6 +1088,52 @@ describe('mail-arrival notification watcher', () => {
       preview: '',
     }).subject).toBe('Your verification code is •••');
     expect(extractMetaAlnumCodes('Your verification code is 123-456')).toEqual([]);
+  });
+
+  test('tier 2 masks fullwidth alnum OTP under strong cue (F86)', () => {
+    // Fullwidth mixed continuous.
+    expect(extractMetaAlnumCodes('您的验证码是 Ａ１Ｂ２Ｃ３')).toEqual(['Ａ１Ｂ２Ｃ３']);
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '您的验证码是 Ａ１Ｂ２Ｃ３',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的验证码是 •••');
+    // Half/fullwidth mixed run (same char class).
+    expect(extractMetaAlnumCodes('您的验证码是 A1Ｂ2Ｃ3')).toEqual(['A1Ｂ2Ｃ3']);
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: '您的验证码是 A1Ｂ2Ｃ3',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的验证码是 •••');
+    // English cue + fullwidth.
+    expect(extractMetaAlnumCodes('Your verification code is ＡＢＣ１２３')).toEqual(['ＡＢＣ１２３']);
+    expect(maskTier2Metadata({
+      from: 'a@b.c',
+      subject: 'Your verification code is ＡＢＣ１２３',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    // No strong cue.
+    expect(extractMetaAlnumCodes('编号 Ａ１Ｂ２Ｃ３ 见附')).toEqual([]);
+    // Pure fullwidth digits stay on digit path (not alnum extract).
+    expect(extractMetaAlnumCodes('您的验证码是 １２３４５６')).toEqual([]);
+    expect(maskTier2Metadata({
+      from: 'a@b.c',
+      subject: '您的验证码是 １２３４５６',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('您的验证码是 •••');
+    // CJK red line: no alnum extract from pure Chinese.
+    expect(extractMetaAlnumCodes('验证码是您发的')).toEqual([]);
+    // Exact original spelling: fullwidth extract does not mask halfwidth form.
+    expect(maskSensitiveFragments('code A1B2C3', ['Ａ１Ｂ２Ｃ３'], [])).toBe('code A1B2C3');
+    expect(maskSensitiveFragments('code Ａ１Ｂ２Ｃ３', ['Ａ１Ｂ２Ｃ３'], [])).toBe('code •••');
   });
 
   test('space-separated alnum runs mask whole chain not halves (F85)', () => {
