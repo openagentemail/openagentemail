@@ -102,7 +102,12 @@ export type MailContentExtras = {
  * behavior. When an already-observed mailbox changes UIDVALIDITY, the
  * replacement INBOX may already hold mail delivered during the disconnect —
  * treat every current UID as pending so reconnects still catch offline
- * deliveries (watermark still anchors at the high-water mark afterwards).
+ * deliveries.
+ * F118: the replacement generation starts BELOW all pending UIDs (UIDs
+ * restart at 1) instead of at the high-water mark, so the watcher's
+ * per-message advancement only records mail that was actually processed — a
+ * transient publish failure retries the remainder on reconnect rather than
+ * losing it to a prematurely raised watermark.
  */
 export function unseenWatcherUids(
   uids: number[],
@@ -115,8 +120,12 @@ export function unseenWatcherUids(
     // First sight of this mailbox generation, or a recreated INBOX: re-anchor
     // instead of comparing against the previous generation's UIDs.
     watermark.uidValidity = uidValidity;
-    watermark.uid = currentHighWater;
-    return firstSight ? [] : uids.slice();
+    if (firstSight) {
+      watermark.uid = currentHighWater;
+      return [];
+    }
+    watermark.uid = 0;
+    return uids.slice();
   }
   if (watermark.uid === undefined) {
     watermark.uid = currentHighWater;
@@ -332,6 +341,31 @@ const META_ALNUM_DELIMITED_TIGHT_SINGLE = new RegExp(
   'g',
 );
 /**
+ * Colon-delimited codes (F117): `AB:12:CD`. Colon (ASCII + fullwidth) stays
+ * OUT of the tight class — there it would glue `x:ABC-123` into mid-chain
+ * blocks and URLs/versions into unrelated matchers. These two bounded forms
+ * mirror the tight pair: 2–4 groups of 2–4, and 4–8 single-char chains.
+ * Pure-digit joins (12:30) and letter-only joins drop at the push() predicate;
+ * http(s) URLs are link-masked before the alnum pass.
+ */
+const META_ALNUM_SEP_COLON = '[:：]';
+/** Lead: not immediately after `alnum:` (blocks mid-chain restarts). */
+const META_ALNUM_LEAD_COLON = `(?<![${META_ALNUM_CHAR}]${META_ALNUM_SEP_COLON})`;
+// 2–4 groups of 2–4 alnum joined by single colons.
+const META_ALNUM_DELIMITED_COLON = new RegExp(
+  `${META_ALNUM_LEAD_COLON}${META_ALNUM_BOUND_LEFT}` +
+    `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_COLON}${META_ALNUM_GROUP}){1,3})` +
+    `(?!${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
+// 4–8 groups of exactly 1 alnum joined by single colons (`A:1:B:2`).
+const META_ALNUM_DELIMITED_COLON_SINGLE = new RegExp(
+  `${META_ALNUM_LEAD_COLON}${META_ALNUM_BOUND_LEFT}` +
+    `([${META_ALNUM_CHAR}](?:${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}]){3,7})` +
+    `(?!${META_ALNUM_SEP_COLON}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+  'g',
+);
+/**
  * 2–4 alnum chars that include a digit after NFKC (lookahead fixes length).
  * Used for space runs so pure-letter English tokens are not groups.
  */
@@ -488,6 +522,18 @@ function isPlausibleSpaceSingleChain(form: string): boolean {
   return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
 }
 
+/**
+ * Accept a colon single-char chain (F117): NFKC, split on colon runs, 4–8
+ * groups of exactly 1 char. Same push() predicate split as F105.
+ */
+function isPlausibleColonSingleChain(form: string): boolean {
+  const parts = form
+    .normalize('NFKC')
+    .split(new RegExp(`${META_ALNUM_SEP_COLON}+`))
+    .filter(Boolean);
+  return parts.length >= 4 && parts.length <= 8 && parts.every((g) => g.length === 1);
+}
+
 /** Accept a digit-bearing space run: 2–4 groups only (5+ refused whole). */
 function isPlausibleSpaceDigitRun(form: string): boolean {
   if (!isMixedAlnumOtp(form)) return false;
@@ -599,6 +645,21 @@ function collectMetaAlnumForms(
     if (!isPlausibleSingleChain(form)) continue;
     emit(match);
   }
+  // F117: colon-delimited forms (`AB:12:CD`, `A:1:B:2`) — bounded matchers,
+  // colon never joins the tight class.
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_COLON)) {
+    const form = match[1]!;
+    const groups = form
+      .split(new RegExp(`${META_ALNUM_SEP_COLON}+`))
+      .filter(Boolean);
+    if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
+    emit(match);
+  }
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_COLON_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleColonSingleChain(form)) continue;
+    emit(match);
+  }
 }
 
 /**
@@ -606,8 +667,8 @@ function collectMetaAlnumForms(
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
  * F95 letter-only continuous + F97 letter-only delimited + F105 tight
  * single-char chains + F106 space single-char chains + F109 mixed-separator
- * single-char chains + F113 compatibility forms). Does not touch body
- * extract semantics.
+ * single-char chains + F113 compatibility forms + F117 colon-delimited
+ * forms). Does not touch body extract semantics.
  *
  * F113: compatibility characters beyond the fullwidth ranges (Ⓐ①Ⓑ②, 𝐀𝟏𝐁𝟐)
  * normalize to valid codes but never matched the classes above. When NFKC
@@ -733,9 +794,17 @@ export function maskTier2Metadata(
   // extractOtp over subject/from. Links in metadata: ALL http(s) URLs
   // (extractHttpLinks — no LINK_INTENT filter) so "Verify here: https://…"
   // still redacts; extras.links stay intent-filtered for policy/tier-3 only.
-  let from = extras.from;
-  let subject = extras.subject;
-  const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
+  //
+  // F120: cap metadata BEFORE extraction/masking. Only the capped prefixes are
+  // ever published (buildMailArrivalMessage re-caps at PUSH_META_FIELD_MAX_BYTES),
+  // so scanning untrusted full-length headers just lets a strong-cue subject
+  // with thousands of distinct tokens compile one enormous masking alternation
+  // and stall the single watcher. The window keeps 64 extra code points so any
+  // form starting inside the published prefix (max form ~30 chars) still ends
+  // inside the window and gets masked — no half-form leak at the cut.
+  let from = boundPreviewChars(extras.from, PUSH_META_FIELD_MAX_BYTES + 64);
+  let subject = boundPreviewChars(extras.subject, PUSH_META_FIELD_MAX_BYTES + 64);
+  const metaText = [from, subject].filter(Boolean).join('\n');
   const metaOtp = extractOtp(metaText);
   const metaHttpLinks = extractHttpLinks(metaText);
   // Body codes enter the mask list when their digit-only form appears as any
@@ -763,8 +832,8 @@ export function maskTier2Metadata(
   const maskCodes = [
     ...metaOtp.codes,
     ...extras.codes.filter((code) => metaCanonRuns.has(canonicalDigits(code))),
-    ...extractMetaAlnumCodes(extras.subject),
-    ...extractMetaAlnumCodes(extras.from),
+    ...extractMetaAlnumCodes(subject),
+    ...extractMetaAlnumCodes(from),
     ...(strongMetaCue ? metaDigitSurfaces : []),
   ];
   const maskLinks = [...extras.links, ...metaHttpLinks];
@@ -973,15 +1042,20 @@ export async function processWatchedMessage(
   // F110: classify on the subject too — a subject-only code or verify link
   // (`Subject: Your verification code is 123456` with a plain body) must still
   // pass the `otp` policy. The subject line itself shows at tier ≥2 (masked at
-  // tier 2). F116: also merge subject credentials into extras — tier 3 would
-  // otherwise truncate a long signed subject URL at the metadata cap and
-  // publish an unusable partial link. This branch runs only when the body had
-  // no codes/links, so the merge cannot duplicate body-sourced entries.
-  if (!hasOtpOrLink && extras.subject) {
+  // tier 2). F116/F119: ALWAYS merge subject credentials into extras (deduped)
+  // — tier 3 would otherwise truncate a long signed subject URL at the
+  // metadata cap and publish an unusable partial link, even when the body
+  // independently matched.
+  if (extras.subject) {
     const subjectOtp = extractOtp(extras.subject);
-    hasOtpOrLink = subjectOtp.codes.length > 0 || subjectOtp.links.length > 0;
-    if (subjectOtp.codes.length > 0) extras.codes.push(...subjectOtp.codes);
-    if (subjectOtp.links.length > 0) extras.links.push(...subjectOtp.links);
+    hasOtpOrLink =
+      hasOtpOrLink || subjectOtp.codes.length > 0 || subjectOtp.links.length > 0;
+    for (const code of subjectOtp.codes) {
+      if (!extras.codes.includes(code)) extras.codes.push(code);
+    }
+    for (const link of subjectOtp.links) {
+      if (!extras.links.includes(link)) extras.links.push(link);
+    }
   }
   if (policy === 'otp' && !hasOtpOrLink) return;
 

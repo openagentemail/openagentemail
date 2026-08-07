@@ -101,11 +101,14 @@ describe('mail-arrival notification watcher', () => {
     expect(unseenWatcherUids([10, 11, 12], watermark, 1000n)).toEqual([12]);
     // INBOX recreated (new UIDVALIDITY) on an already-observed mailbox: mail
     // may have landed during the disconnect, so every current UID is pending
-    // (F115); the watermark still re-anchors on the replacement generation.
+    // (F115); the new generation starts BELOW the pending UIDs and the watcher
+    // loop advances the watermark only after each message is processed (F118),
+    // so a transient failure retries the remainder instead of losing it.
     expect(unseenWatcherUids([1, 2, 3], watermark, 2000n)).toEqual([1, 2, 3]);
-    expect(watermark.uid).toBe(3);
+    expect(watermark.uid).toBe(0);
     expect(watermark.uidValidity).toBe(2000n);
-    // Mail delivered after the re-anchor flows again.
+    // Simulate the watcher loop's per-message advancement, then new mail flows.
+    watermark.uid = 3;
     expect(unseenWatcherUids([1, 2, 3, 4], watermark, 2000n)).toEqual([4]);
     // Legacy callers without uidValidity keep numeric-only behavior.
     const legacy: { uid?: number } = {};
@@ -243,6 +246,68 @@ describe('mail-arrival notification watcher', () => {
     );
     expect(codeCalls).toHaveLength(1);
     expect(codeCalls[0].message).toContain('Codes: 123456');
+  });
+
+  test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
+    // Body has its own code while the subject carries a long signed URL: both
+    // must reach the payload — the subject is truncated at the metadata cap,
+    // so a Links entry is the only usable form.
+    const subjectUrl = `https://example.com/verify?token=${'b'.repeat(500)}`;
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: also verify ${subjectUrl}\r\n\r\nYour verification code is 654321`,
+        `also verify ${subjectUrl}`,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Codes: 654321');
+    expect(body).toContain('Links:');
+    expect(body).toContain(subjectUrl);
+
+    // Duplicate subject/body credentials are not repeated in the payload.
+    const dupe = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Your verification code is 654321\r\n\r\nYour verification code is 654321',
+        'Your verification code is 654321',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(dupe).toHaveLength(1);
+    // Subject + Preview + Codes: the merged credential is not repeated on the
+    // Codes line even though subject and body extracted the same code.
+    expect(dupe[0].message.match(/654321/g)).toHaveLength(3);
+    expect(dupe[0].message.match(/Codes:/g)).toHaveLength(1);
+  });
+
+  test('tier 2 masking bounds metadata before compiling the alternation (F120)', () => {
+    // Strong cue + thousands of distinct tokens: extraction/masking runs on
+    // the publish-window prefix only, so output stays bounded (and fast —
+    // unfixed this compiled a ~5000-branch alternation per message).
+    const tokens = Array.from({ length: 5000 }, (_, i) => `tk${i.toString(36)}x`).join(' ');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: `Your verification code is 123456 ${tokens}`,
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('123456');
+    expect(masked.subject.length).toBeLessThanOrEqual(464);
   });
 
   test('default push content tier is interrupt-only when unset', async () => {
@@ -1542,6 +1607,32 @@ describe('mail-arrival notification watcher', () => {
     // Regression: hyphen/dot tight forms still extract.
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
     expect(extractMetaAlnumCodes('Your verification code is ABC.123')).toContain('ABC.123');
+  });
+
+  test('tier 2 masks colon-delimited alnum OTP under strong cue (F117)', () => {
+    // Colon-joined mixed groups: extract + mask.
+    expect(extractMetaAlnumCodes('Your verification code is AB:12:CD')).toContain('AB:12:CD');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is AB:12:CD',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('AB:12:CD');
+    // Fullwidth colon; colon single-char chain (4–8 groups).
+    expect(extractMetaAlnumCodes('您的验证码是 ＡＢ：１２')).toContain('ＡＢ：１２');
+    expect(extractMetaAlnumCodes('Your verification code is A:1:B:2')).toContain('A:1:B:2');
+    // Pure-digit colon forms (times) stay unextracted — no letter.
+    expect(extractMetaAlnumCodes('Your verification code is 12:30')).not.toContain('12:30');
+    // Letter-only lowercase colon words stay rejected.
+    expect(extractMetaAlnumCodes('Your verification code is ab:cd')).not.toContain('ab:cd');
+    // Regression: a tight form after a single `label:` still extracts
+    // (colon must not join the tight-class mid-chain guard).
+    expect(extractMetaAlnumCodes('code: ABC-123')).toContain('ABC-123');
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference AB:12:CD attached')).toEqual([]);
   });
 
   test('tier 2 masks compatibility-form alnum OTP beyond fullwidth (F113)', () => {
