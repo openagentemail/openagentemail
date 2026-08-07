@@ -812,7 +812,7 @@ describe('mail-arrival notification watcher', () => {
     expect(calls[0].message).not.toContain('Codes:');
   });
 
-  test('beforeSend aborts when tier is downgraded after build (F47)', async () => {
+  test('beforeSend downgrade rebuilds at lower tier and sends (F49)', async () => {
     const address = 'target@test.example';
     let reads = 0;
     const calls: any[] = [];
@@ -826,9 +826,9 @@ describe('mail-arrival notification watcher', () => {
       'otp',
       { publish: publishWithBeforeSend(calls) },
       {
+        // build: tier3 → beforeSend: tier1 (cancel) → retry build/beforeSend: tier1 (send)
         refreshIdentity: () => {
           reads += 1;
-          // First read: build tier-3 body; beforeSend re-read: privacy tightened to tier 1.
           if (reads === 1) {
             return { address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 as const };
           }
@@ -836,8 +836,115 @@ describe('mail-arrival notification watcher', () => {
         },
       },
     );
-    expect(reads).toBe(2);
+    // 1 build + 1 beforeSend + 1 rebuild + 1 beforeSend = 4 reads
+    expect(reads).toBe(4);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).not.toContain('Codes:');
+    expect(calls[0].message).not.toContain('Subject:');
+  });
+
+  test('beforeSend gives up after three cancelled attempts when tier keeps dropping', async () => {
+    const address = 'target@test.example';
+    let publishAttempts = 0;
+    let reads = 0;
+    const calls: any[] = [];
+    await processWatchedMessage(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Verify\r\n\r\nYour verification code is 482731\r\n',
+        'Verify',
+      ),
+      [{ address, createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 3 }],
+      'otp',
+      {
+        publish: async () => {
+          publishAttempts += 1;
+          // Always cancel (skip beforeSend) so retry path is exercised by re-read tier drops.
+          throw new NotifyError('notify_cancelled');
+        },
+      },
+      {
+        refreshIdentity: () => {
+          reads += 1;
+          // init build3 → cancel → re-read2 → build2 → cancel → re-read1 → build1 → cancel → re-read1 stop
+          const tier = reads === 1 ? 3 : reads === 2 ? 2 : 1;
+          return {
+            address,
+            createdAt: '2026-08-02T00:00:00.000Z',
+            pushContentTier: tier as 1 | 2 | 3,
+          };
+        },
+      },
+    );
+    expect(publishAttempts).toBe(3);
     expect(calls).toHaveLength(0);
+  });
+
+  test('tier-2 metadata mask is shared across recipients (F50)', async () => {
+    const a = {
+      address: 'a@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 2 as const,
+    };
+    const b = {
+      address: 'b@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 2 as const,
+    };
+    const calls: any[] = [];
+    await processWatchedMessage(
+      {
+        envelope: {
+          from: [{ name: 'auth', address: 'auth@example.net' }],
+          to: [{ address: a.address }, { address: b.address }],
+          subject: 'Code 482731',
+        },
+        headers: Buffer.from(
+          `Delivered-To: ${a.address}\r\nDelivered-To: ${b.address}\r\n`,
+        ),
+        source: Buffer.from(
+          'From: auth@example.net\r\nSubject: Code 482731\r\n\r\nYour verification code is 482731\r\n',
+        ),
+      } as any,
+      [a, b],
+      'otp',
+      { publish: publishWithBeforeSend(calls) },
+    );
+    expect(calls).toHaveLength(2);
+    const stripAddr = (body: string) => body.replace(/^.*received new email[^\n]*/m, 'ADDR');
+    expect(stripAddr(calls[0].message)).toBe(stripAddr(calls[1].message));
+    expect(calls[0].message).toContain('•••');
+  });
+
+  test('many tier-2 recipients with large subject stay under 1s (F50)', async () => {
+    const subject = `code 482731 ${'x'.repeat(500_000)}`;
+    const recipients = Array.from({ length: 50 }, (_, i) => ({
+      address: `r${i}@test.example`,
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 2 as const,
+    }));
+    const calls: any[] = [];
+    const started = performance.now();
+    await processWatchedMessage(
+      {
+        envelope: {
+          from: [{ name: 'auth', address: 'auth@example.net' }],
+          to: recipients.map((r) => ({ address: r.address })),
+          subject,
+        },
+        headers: Buffer.from(
+          recipients.map((r) => `Delivered-To: ${r.address}`).join('\r\n') + '\r\n',
+        ),
+        source: Buffer.from(
+          `From: auth@example.net\r\nSubject: ${subject.slice(0, 200)}\r\n\r\nYour verification code is 482731\r\n`,
+        ),
+      } as any,
+      recipients,
+      'otp',
+      { publish: publishWithBeforeSend(calls) },
+    );
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(calls).toHaveLength(50);
   });
 
   test('beforeSend keeps lower-tier body when tier is upgraded mid-flight', async () => {
@@ -893,7 +1000,8 @@ describe('mail-arrival notification watcher', () => {
         },
       },
     );
-    expect(reads).toBe(2);
+    // build read + beforeSend delete + catch re-read delete
+    expect(reads).toBe(3);
     expect(calls).toHaveLength(0);
   });
 

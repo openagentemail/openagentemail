@@ -163,12 +163,48 @@ export function maskSensitiveFragments(
   return result.replace(/\b\d{4,8}\b/g, (run) => (codeSet.has(run) ? '•••' : run));
 }
 
+/**
+ * Mask From/Subject for tier-2 pushes. Message-level only (depends on extras,
+ * not the recipient) so processWatchedMessage can memoize once per mail.
+ */
+export function maskTier2Metadata(
+  extras: MailContentExtras,
+): { from: string; subject: string } {
+  // Cap From/Subject independently so OTP/preview content still fits.
+  // Tier 2 must not leak OTP/link strings in metadata. Codes: body extras +
+  // extractOtp over subject/from. Links in metadata: ALL http(s) URLs
+  // (extractHttpLinks — no LINK_INTENT filter) so "Verify here: https://…"
+  // still redacts; extras.links stay intent-filtered for policy/tier-3 only.
+  let from = extras.from;
+  let subject = extras.subject;
+  const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
+  const metaOtp = extractOtp(metaText);
+  const metaHttpLinks = extractHttpLinks(metaText);
+  // Body codes only enter the mask list if they appear as a longest
+  // \b\d{4,8}\b run in metadata (same shape extractCodes would yield).
+  // Intersecting against meta digit runs is O(|meta|) instead of scanning
+  // every body code into per-needle replaces on short subject/from.
+  const metaDigitRuns = new Set<string>();
+  for (const match of metaText.matchAll(/\b\d{4,8}\b/g)) {
+    metaDigitRuns.add(match[0]!);
+  }
+  const maskCodes = [
+    ...metaOtp.codes,
+    ...extras.codes.filter((code) => metaDigitRuns.has(code)),
+  ];
+  const maskLinks = [...extras.links, ...metaHttpLinks];
+  from = maskSensitiveFragments(from, maskCodes, maskLinks);
+  subject = maskSensitiveFragments(subject, maskCodes, maskLinks);
+  return { from, subject };
+}
+
 /** Build the human-facing push body for one identity's content tier. */
 export function buildMailArrivalMessage(
   address: string,
   tier: PushContentTier,
   hasOtpOrLink: boolean,
   extras: MailContentExtras,
+  maskedTier2Meta?: { from: string; subject: string },
 ): string {
   const lines: string[] = [
     hasOtpOrLink
@@ -177,32 +213,12 @@ export function buildMailArrivalMessage(
   ];
 
   if (tier >= 2) {
-    // Cap From/Subject independently so OTP/preview content still fits.
-    // Tier 2 must not leak OTP/link strings in metadata. Codes: body extras +
-    // extractOtp over subject/from. Links in metadata: ALL http(s) URLs
-    // (extractHttpLinks — no LINK_INTENT filter) so "Verify here: https://…"
-    // still redacts; extras.links stay intent-filtered for policy/tier-3 only.
     let from = extras.from;
     let subject = extras.subject;
     if (tier < 3) {
-      const metaText = [extras.from, extras.subject].filter(Boolean).join('\n');
-      const metaOtp = extractOtp(metaText);
-      const metaHttpLinks = extractHttpLinks(metaText);
-      // Body codes only enter the mask list if they appear as a longest
-      // \b\d{4,8}\b run in metadata (same shape extractCodes would yield).
-      // Intersecting against meta digit runs is O(|meta|) instead of scanning
-      // every body code into per-needle replaces on short subject/from.
-      const metaDigitRuns = new Set<string>();
-      for (const match of metaText.matchAll(/\b\d{4,8}\b/g)) {
-        metaDigitRuns.add(match[0]!);
-      }
-      const maskCodes = [
-        ...metaOtp.codes,
-        ...extras.codes.filter((code) => metaDigitRuns.has(code)),
-      ];
-      const maskLinks = [...extras.links, ...metaHttpLinks];
-      from = maskSensitiveFragments(from, maskCodes, maskLinks);
-      subject = maskSensitiveFragments(subject, maskCodes, maskLinks);
+      const masked = maskedTier2Meta ?? maskTier2Metadata(extras);
+      from = masked.from;
+      subject = masked.subject;
     }
     if (from) {
       lines.push(`From: ${boundTextBytes(from, PUSH_META_FIELD_MAX_BYTES)}`);
@@ -271,6 +287,10 @@ export async function processWatchedMessage(
   if (policy === 'otp' && !hasOtpOrLink) return;
 
   const clickUrl = options.clickUrl;
+  // Tier-2 metadata mask is message-level; compute at most once per mail.
+  let tier2Meta: { from: string; subject: string } | undefined;
+  const maxAttempts = 3;
+
   for (const identity of matched) {
     // Re-read per identity after await simpleParser / previous publish so a
     // concurrent tier change or DELETE is visible before the next payload.
@@ -278,32 +298,51 @@ export async function processWatchedMessage(
     // findIdentity undefined = deleted (store corrupt throws). Do not fall back
     // to the pre-parse snapshot — that would still emit tier-3 OTP after DELETE.
     if (options.refreshIdentity && !refreshed) continue;
-    const current = refreshed ?? identity;
-    const tier = resolvePushContentTier(current);
-    const body = buildMailArrivalMessage(current.address, tier, hasOtpOrLink, extras);
-    const level = hasOtpOrLink ? 'urgent' : 'normal';
-    // Re-check at the publish fetch boundary (after publish's own awaits).
-    // Abort only when privacy tightened (delete or downgrade); upgrades keep
-    // the already-safe lower-tier body.
-    const beforeSend = options.refreshIdentity
-      ? (): boolean => {
-          const again = options.refreshIdentity!(identity.address);
-          return again !== undefined && resolvePushContentTier(again) >= tier;
+    let current = refreshed ?? identity;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const tier = resolvePushContentTier(current);
+      if (tier === 2 && !tier2Meta) tier2Meta = maskTier2Metadata(extras);
+      const body = buildMailArrivalMessage(
+        current.address,
+        tier,
+        hasOtpOrLink,
+        extras,
+        tier === 2 ? tier2Meta : undefined,
+      );
+      const level = hasOtpOrLink ? 'urgent' : 'normal';
+      // Re-check at the publish fetch boundary (after publish's own awaits).
+      // Abort only when privacy tightened (delete or downgrade); upgrades keep
+      // the already-safe lower-tier body. `tier` is closed over per attempt.
+      const beforeSend = options.refreshIdentity
+        ? (): boolean => {
+            const again = options.refreshIdentity!(identity.address);
+            return again !== undefined && resolvePushContentTier(again) >= tier;
+          }
+        : undefined;
+      try {
+        await dispatch.publish({
+          target: 'user',
+          title: 'openagent.email new mail',
+          message: body,
+          level,
+          tags: ['email'],
+          ...(clickUrl ? { click: clickUrl } : {}),
+          ...(beforeSend ? { beforeSend } : {}),
+        });
+        break; // sent
+      } catch (err) {
+        if (!(err instanceof NotifyError && err.code === 'notify_cancelled')) throw err;
+        if (!options.refreshIdentity) break;
+        // Downgrade: rebuild at the safer tier. Delete: silent skip.
+        const again = options.refreshIdentity(identity.address);
+        if (!again) break;
+        if (resolvePushContentTier(again) < tier) {
+          current = again;
+          continue;
         }
-      : undefined;
-    try {
-      await dispatch.publish({
-        target: 'user',
-        title: 'openagent.email new mail',
-        message: body,
-        level,
-        tags: ['email'],
-        ...(clickUrl ? { click: clickUrl } : {}),
-        ...(beforeSend ? { beforeSend } : {}),
-      });
-    } catch (err) {
-      if (err instanceof NotifyError && err.code === 'notify_cancelled') continue;
-      throw err;
+        break;
+      }
     }
   }
 }

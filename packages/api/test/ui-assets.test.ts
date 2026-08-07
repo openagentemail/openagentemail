@@ -511,6 +511,12 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('tierPending: {}');
     expect(handleTier).toContain('state.tierPending[address] = true;');
     expect(handleTier).toContain('delete state.tierPending[address];');
+    // F51: fuzzy PUT failure re-fetches authoritative tier; known failures restore.
+    expect(handleTier).toContain("apiJson('/ui/api/identities')");
+    expect(handleTier).toContain('selectEl.dataset.currentTier = String(authoritative)');
+    expect(handleTier).toContain("(refreshed).");
+    expect(handleTier).toContain("error.body.error === 'confirm_risk_required'");
+    expect(handleTier).toContain("error.message === 'session_expired'");
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderOverviewRows('),
       UI_JS.indexOf('function updateOverviewRefreshButton('),

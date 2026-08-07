@@ -1074,15 +1074,48 @@ export const UI_JS = `(function () {
           loadOverviewCycle({ refresh: false });
         }
       } catch (error) {
-        restore();
         if (
           error.status === 400 &&
           error.body &&
           error.body.error === 'confirm_risk_required'
         ) {
+          // Server rejected — no ambiguous state.
+          restore();
           announce('Tier 3 requires explicit risk confirmation.');
-        } else if (error.message !== 'session_expired') {
-          announce('Could not update push content tier. Try again.');
+        } else if (error.message === 'session_expired') {
+          restore();
+        } else {
+          // Fuzzy failure (network/parse/5xx): PUT may already have persisted.
+          // Re-fetch authoritative identities so UI matches server tier.
+          try {
+            var payload = await apiJson('/ui/api/identities');
+            state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+            var row = state.identities.find(function (identity) {
+              return identity.address === address;
+            });
+            if (!row) {
+              restore();
+              announce('Could not update push content tier. Try again.');
+            } else {
+              var authoritative =
+                row.pushContentTier === 2 || row.pushContentTier === 3
+                  ? row.pushContentTier
+                  : 1;
+              selectEl.value = String(authoritative);
+              selectEl.dataset.currentTier = String(authoritative);
+              announce(
+                'Push content tier is tier ' +
+                  authoritative +
+                  ' for ' +
+                  address +
+                  ' (refreshed).',
+              );
+              renderOverviewRows();
+            }
+          } catch (_refreshErr) {
+            restore();
+            announce('Could not update push content tier. Try again.');
+          }
         }
       } finally {
         delete state.tierPending[address];

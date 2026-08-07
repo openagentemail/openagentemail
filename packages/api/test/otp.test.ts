@@ -299,6 +299,33 @@ describe('extractLinks', () => {
       'https://x.example/a',
       'https://y.example/b',
     ]);
+
+    const bracketChain = '[https://x.example/a][https://y.example/b]';
+    expect([...bareUrlSpans(bracketChain)].map((s) => s.clean)).toEqual([
+      'https://x.example/a',
+      'https://y.example/b',
+    ]);
+  });
+
+  test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {
+    const text = 'Verify https://example.com/confirm)[token=secret';
+    const full = 'https://example.com/confirm)[token=secret';
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.clean).toBe(full);
+    expect(extractHttpLinks(text)).toEqual([full]);
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    expect(masked).toBe('Verify •••');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+
+    // Mixed: nested scheme after path junk still one span (scheme not after ]().
+    const mixed =
+      'See https://example.com/confirm)[token=secret?next=https://safe.example/';
+    const mixedFull =
+      'https://example.com/confirm)[token=secret?next=https://safe.example/';
+    expect([...bareUrlSpans(mixed)].map((s) => s.clean)).toEqual([mixedFull]);
+    expect(maskNormalizedHttpUrls(mixed, extractHttpLinks(mixed))).toBe('See •••');
   });
 
   test('space- or comma-separated adjacent URLs split without glue', () => {

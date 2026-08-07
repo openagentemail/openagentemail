@@ -239,13 +239,37 @@ export type BareUrlSpan = {
 };
 
 /**
+ * True when an unbalanced closer at `i` is proven Markdown-chain glue to the
+ * next scheme (O(1)): `)(scheme`, `](scheme`, `)[scheme`, `][scheme`, or
+ * `)[label](scheme` / `][label](scheme`. Bare `)[token=…` is a legal URL path
+ * and must not cut.
+ */
+function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undefined): boolean {
+  if (nextScheme === undefined) return false;
+  const next = text[i + 1];
+  if (next === '(' && nextScheme === i + 2) return true;
+  if (next === '[') {
+    if (nextScheme === i + 2) return true;
+    // )[label](https://…  — scheme is immediately after "]("
+    if (
+      nextScheme >= 2 &&
+      text[nextScheme - 2] === ']' &&
+      text[nextScheme - 1] === '('
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Single-pass bare URL tokenizer. O(n) over the full text:
  * pre-scan scheme positions, then for each start scan once with depth tracking;
- * an unbalanced closer is a hard cut only when immediately followed by `[` or
- * `(` (Markdown chain glue: `)[`, `)(`, `][`, `](`). Nested redirects like
- * `)token=…?next=https://` keep the closer inside the URL (WHATWG); the inner
- * scheme is skipped by the post-span scheme advance. Bounded tail peel removes
- * free trailers without re-matching the remainder.
+ * an unbalanced closer is a hard cut only when the next scheme is a proven
+ * Markdown chain (tight `)(`, `](`, `)[`, `][`, or `)[label](` / `][label](`).
+ * Nested redirects and path segments like `)[token=` stay inside the URL
+ * (WHATWG); inner schemes are skipped by the post-span scheme advance.
+ * Bounded tail peel removes free trailers without re-matching the remainder.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
@@ -277,10 +301,7 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           parenDepth -= 1;
           continue;
         }
-        // Unbalanced closer: hard-cut only for tightly adjacent Markdown chain
-        // openers. `?next=https://` after `)token=…` is not a chain — keep ) in URL.
-        const next = text[i + 1];
-        if (next === '[' || next === '(') {
+        if (isMarkdownChainGlue(text, i, schemePos[schemeIdx + 1])) {
           end = i;
           break;
         }
@@ -291,8 +312,7 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           bracketDepth -= 1;
           continue;
         }
-        const next = text[i + 1];
-        if (next === '[' || next === '(') {
+        if (isMarkdownChainGlue(text, i, schemePos[schemeIdx + 1])) {
           end = i;
           break;
         }
