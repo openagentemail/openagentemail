@@ -410,8 +410,11 @@ function findSchemePositions(text: string): number[] {
 }
 
 /**
- * Peel trailing prose from a bounded candidate [0, length): `.,;`, unbalanced
+ * Peel trailing prose from a bounded candidate [0, length): `.,;!?`, unbalanced
  * trailing `)`/`]`, and trailing `'`.
+ * - Terminal `!`/`?` peel like `.`/`,`/`;` so non-adjacent wrappers that leave
+ *   `)!` / `]!` / `'!` on the candidate can then expose the unbalanced closer
+ *   (F90). Mid-URL `!`/`?` are never trailing and stay put.
  * - openQuoted false: peel `'` only while the remaining apostrophe count is odd.
  * - openQuoted true (span started after prose `'`): peel exactly one closing
  *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
@@ -440,12 +443,12 @@ function peelTrailingProse(
     else if (ch === "'") apostrophes += 1;
   }
 
-  // openQuoted: authorize exactly one outer closer peel (after any .,;).
+  // openQuoted: authorize exactly one outer closer peel (after any .,;!?).
   let peelOpenQuote = openQuoted;
   let end = candidate.length;
   while (end > 0) {
     const ch = candidate[end - 1]!;
-    if (ch === '.' || ch === ',' || ch === ';') {
+    if (ch === '.' || ch === ',' || ch === ';' || ch === '!' || ch === '?') {
       end -= 1;
       continue;
     }

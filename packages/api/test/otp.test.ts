@@ -762,7 +762,7 @@ describe('extractLinks', () => {
     expect(extractHttpLinks('Visit [https://example.com/verify]: now')).toEqual([
       'https://example.com/verify',
     ]);
-    // Free-`]` cut (not only peel): `!` / glued tail are not trailer peel chars.
+    // Free-`]` cut (adjacent prose wrapper); trailing `!` also peels (F90).
     expect(extractHttpLinks('Visit [https://example.com/verify]!')).toEqual([
       'https://example.com/verify',
     ]);
@@ -781,6 +781,60 @@ describe('extractLinks', () => {
     expect(
       [...bareUrlSpans('https://a.com/x[1]')].map((s) => s.clean),
     ).toEqual(['https://a.com/x[1]']);
+  });
+
+  test('peels trailing !/? so non-adjacent prose closers clean up (F90)', () => {
+    // Non-adjacent paren wrapper: `(` not next to scheme → peel `!` then free `)`.
+    expect(extractHttpLinks('See this link (secure: https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('try (step 2: open https://example.com/s)! ok')).toEqual([
+      'https://example.com/s',
+    ]);
+    expect(
+      extractHttpLinks('(a: https://example.com/v)! and (b: https://example.com/w)!'),
+    ).toEqual(['https://example.com/v', 'https://example.com/w']);
+    // No wrapper at all — still peel `)!`.
+    expect(extractHttpLinks('open https://example.com/free)!')).toEqual([
+      'https://example.com/free',
+    ]);
+    // Bracket / quote twins.
+    expect(extractHttpLinks('docs [see: https://example.com/d]!')).toEqual([
+      'https://example.com/d',
+    ]);
+    expect(extractHttpLinks("note 'see https://example.com/v'!")).toEqual([
+      'https://example.com/v',
+    ]);
+    // Balanced path parens kept; only glued `!` peels.
+    expect(extractHttpLinks('see https://example.com/a_(b)! end')).toEqual([
+      'https://example.com/a_(b)',
+    ]);
+    // Trailing `?` (sentence interrogative, not query).
+    expect(extractHttpLinks('have you seen https://example.com/y?')).toEqual([
+      'https://example.com/y',
+    ]);
+    // Mid-URL `!` preserved.
+    expect(extractHttpLinks('go https://example.com/a!b now')).toEqual([
+      'https://example.com/a!b',
+    ]);
+    // Port + query intact (no trailing `:` peel).
+    expect(extractHttpLinks('see https://example.com:8080/x?q=1 ok')).toEqual([
+      'https://example.com:8080/x?q=1',
+    ]);
+    // F48 LOCK: glued path after `)!` / `)[` is not pure trailing peel.
+    expect(extractHttpLinks('visit https://example.com/confirm)[token=abc now')).toEqual([
+      'https://example.com/confirm)[token=abc',
+    ]);
+    expect(extractHttpLinks('https://example.com/confirm)!token=abc')).toEqual([
+      'https://example.com/confirm)!token=abc',
+    ]);
+    // Adjacent wrappers (F64) still clean.
+    expect(extractHttpLinks('See this link (https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify).')).toEqual([
+      'https://example.com/verify',
+    ]);
   });
 });
 
