@@ -874,6 +874,30 @@ describe('mail-arrival notification watcher', () => {
     expect(withClick).toBe('fox@example.com received new email');
   });
 
+  test('tier 3 repacks the preview when the click cannot survive the payload (F125)', () => {
+    // Head (address + capped From/Subject) alone exceeds the with-click
+    // budget, so publish() will drop the click regardless — the preview must
+    // be packed under the roomier no-click budget instead of being omitted.
+    const hugeClick = `https://dashboard.example.com/${'p'.repeat(3800)}`;
+    const body = buildMailArrivalMessage(
+      'fox@example.com',
+      3,
+      true,
+      {
+        subject: 'Your login code is 654321',
+        from: 'auth@example.com',
+        preview: 'Your verification code is 654321 — it expires in 10 minutes.',
+        codes: ['654321'],
+        links: [],
+      },
+      undefined,
+      { clickUrl: hugeClick },
+    );
+    expect(body).toContain('From: auth@example.com');
+    expect(body).toContain('Preview:');
+    expect(body).toContain('Codes: 654321');
+  });
+
   test('maskSensitiveFragments masks digit runs present in the code set only', () => {
     expect(maskSensitiveFragments('plain subject', [], [])).toBe('plain subject');
     expect(maskSensitiveFragments('code 112233 and 445566', ['112233', '445566'], [])).toBe(

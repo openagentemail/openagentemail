@@ -1088,6 +1088,11 @@ export const UI_JS = `(function () {
 
   function handlePushTierChange(address, selectEl) {
     if (!isAdmin()) return;
+    // F126: a tier PUT is already in flight for this address (an overview
+    // rerender can replace the selector while the tier-3 dialog waits) —
+    // reject the competing change so the persisted tier follows the user's
+    // choice, not request timing.
+    if (state.tierPending[address]) return;
     var previous = Number(selectEl.dataset.currentTier || '1');
     var next = Number(selectEl.value);
     if (next === previous) return;
@@ -1099,6 +1104,10 @@ export const UI_JS = `(function () {
     async function apply(tier, confirmRisk) {
       state.tierPending[address] = true;
       selectEl.disabled = true;
+      // F126: render the pending state immediately — the modal background is
+      // not inert, so a row recreated mid-flight must come back disabled, or
+      // keyboard users can start a competing PUT on the replacement select.
+      if (state.scope === 'overview') renderOverviewRows();
       try {
         await savePushContentTier(address, tier, confirmRisk);
         selectEl.dataset.currentTier = String(tier);

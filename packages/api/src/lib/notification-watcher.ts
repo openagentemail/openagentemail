@@ -987,20 +987,26 @@ export function buildMailArrivalMessage(
     );
     if (
       options.clickUrl &&
-      packedWith.droppedLinks > 0 &&
       maxNoClick > maxWithClick
     ) {
-      const packedNo = packTier3ArrivalBody(
-        head,
-        codesLine,
-        extras.preview,
-        extras.links,
-        maxNoClick,
-      );
-      // Prefer fewer link evictions; publish() click-drop (F76) delivers the
-      // larger body. Equal eviction → keep with-click packing (click survives).
-      if (packedNo.droppedLinks < packedWith.droppedLinks) {
-        return packedNo.body;
+      // F125: when the head alone is over the with-click budget the click
+      // cannot survive this payload at all — any with-click degradation
+      // (omitted/truncated preview) was for nothing, so also repack no-click.
+      const clickDoomed = jsonEscapedByteLength(packedWith.body) > maxWithClick;
+      if (clickDoomed || packedWith.droppedLinks > 0) {
+        const packedNo = packTier3ArrivalBody(
+          head,
+          codesLine,
+          extras.preview,
+          extras.links,
+          maxNoClick,
+        );
+        // Click doomed → roomier pack retains more preview, publish()'s
+        // click-drop (F76) delivers it minus the action. Otherwise prefer
+        // fewer link evictions; equal eviction → keep with-click packing.
+        if (clickDoomed || packedNo.droppedLinks < packedWith.droppedLinks) {
+          return packedNo.body;
+        }
       }
     }
     return packedWith.body;

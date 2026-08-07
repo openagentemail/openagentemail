@@ -543,6 +543,27 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("querySelector('.overview-row-nav')");
   });
 
+  // F126: an overview rerender during the tier-3 dialog must not allow a
+  // competing tier PUT on a replacement select.
+  test('handlePushTierChange locks a pending address and renders pending immediately (F126)', () => {
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    // Entry lock: after the isAdmin gate, before reading the previous tier.
+    expect(handleTier.indexOf('if (!isAdmin()) return;')).toBeLessThan(
+      handleTier.indexOf('if (state.tierPending[address]) return;'),
+    );
+    expect(handleTier.indexOf('if (state.tierPending[address]) return;')).toBeLessThan(
+      handleTier.indexOf('var previous ='),
+    );
+    // Pending renders immediately (disabled replacement select) before the PUT.
+    const pendingSet = handleTier.indexOf('state.tierPending[address] = true;');
+    const putStart = handleTier.indexOf('await savePushContentTier(', pendingSet);
+    const prologue = handleTier.slice(pendingSet, putStart);
+    expect(prologue).toContain('renderOverviewRows()');
+  });
+
   // F51: fuzzy push-tier PUT failure must re-fetch authoritative tier; known rejects restore.
   test('handlePushTierChange fuzzy failure re-fetches tier; known failures restore (F51)', () => {
     const handleTier = UI_JS.slice(
