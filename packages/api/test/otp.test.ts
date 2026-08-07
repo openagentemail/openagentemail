@@ -794,7 +794,7 @@ describe('extractLinks', () => {
     expect(
       extractHttpLinks('(a: https://example.com/v)! and (b: https://example.com/w)!'),
     ).toEqual(['https://example.com/v', 'https://example.com/w']);
-    // No wrapper at all — still peel `)!`.
+    // No wrapper at all — still peel `)!` (closer-glued bang).
     expect(extractHttpLinks('open https://example.com/free)!')).toEqual([
       'https://example.com/free',
     ]);
@@ -809,7 +809,7 @@ describe('extractLinks', () => {
     expect(extractHttpLinks('see https://example.com/a_(b)! end')).toEqual([
       'https://example.com/a_(b)',
     ]);
-    // Trailing `?` (sentence interrogative, not query).
+    // Trailing `?` (sentence interrogative, not query) — unconditional.
     expect(extractHttpLinks('have you seen https://example.com/y?')).toEqual([
       'https://example.com/y',
     ]);
@@ -833,6 +833,26 @@ describe('extractLinks', () => {
       'https://example.com/verify',
     ]);
     expect(extractHttpLinks('See (secure: https://example.com/verify).')).toEqual([
+      'https://example.com/verify',
+    ]);
+  });
+
+  test('keeps bare terminal ! on valid URLs; peels only closer-glued ! (F92)', () => {
+    // Legal URL-final bangs (no closer context) must stay.
+    expect(extractHttpLinks('go https://example.com/verify/token! now')).toEqual([
+      'https://example.com/verify/token!',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?token=abc! now')).toEqual([
+      'https://example.com/verify?token=abc!',
+    ]);
+    // Closer + punct run still peels (F90 preserved).
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!?')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify).!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!')).toEqual([
       'https://example.com/verify',
     ]);
   });

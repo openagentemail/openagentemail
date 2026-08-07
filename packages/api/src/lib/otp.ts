@@ -409,12 +409,32 @@ function findSchemePositions(text: string): number[] {
   return positions;
 }
 
+/** Prose terminal punctuation that may trail a URL (peel loop / F90–F92). */
+function isUrlTerminalPunct(ch: string): boolean {
+  return ch === '.' || ch === ',' || ch === ';' || ch === '!' || ch === '?';
+}
+
 /**
- * Peel trailing prose from a bounded candidate [0, length): `.,;!?`, unbalanced
- * trailing `)`/`]`, and trailing `'`.
- * - Terminal `!`/`?` peel like `.`/`,`/`;` so non-adjacent wrappers that leave
- *   `)!` / `]!` / `'!` on the candidate can then expose the unbalanced closer
- *   (F90). Mid-URL `!`/`?` are never trailing and stay put.
+ * Whether a trailing `!` at candidate[end-1] is prose punctuation glued to a
+ * closer `)`/`]`/`'` (possibly with other terminal punct in between), not a
+ * legal URL-final bang (F92). Look-back is O(length) over the suffix only.
+ */
+function bangHasCloserContext(candidate: string, end: number): boolean {
+  // Skip the `!` itself, then any run of terminal punct, then require a closer.
+  let i = end - 2;
+  while (i >= 0 && isUrlTerminalPunct(candidate[i]!)) i -= 1;
+  if (i < 0) return false;
+  const ch = candidate[i]!;
+  return ch === ')' || ch === ']' || ch === "'";
+}
+
+/**
+ * Peel trailing prose from a bounded candidate [0, length): `.,;?`, conditional
+ * trailing `!`, unbalanced trailing `)`/`]`, and trailing `'`.
+ * - Terminal `?` peels like `.`/`,`/`;` (empty query ≈ no query; sentence `?`
+ *   is common). Mid-URL `?query` is never trailing and stays put.
+ * - Terminal `!` peels only with closer context (`)!` / `]!` / `'!` / `).!`),
+ *   so bare `…/token!` keeps the bang (F90 + F92). Mid-URL `!` stays put.
  * - openQuoted false: peel `'` only while the remaining apostrophe count is odd.
  * - openQuoted true (span started after prose `'`): peel exactly one closing
  *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
@@ -448,9 +468,17 @@ function peelTrailingProse(
   let end = candidate.length;
   while (end > 0) {
     const ch = candidate[end - 1]!;
-    if (ch === '.' || ch === ',' || ch === ';' || ch === '!' || ch === '?') {
+    if (ch === '.' || ch === ',' || ch === ';' || ch === '?') {
       end -= 1;
       continue;
+    }
+    // F92: peel `!` only when glued to ) ] ' (skip other terminal punct in between).
+    if (ch === '!') {
+      if (bangHasCloserContext(candidate, end)) {
+        end -= 1;
+        continue;
+      }
+      break;
     }
     if (ch === ')' && closeParen > openParen) {
       closeParen -= 1;

@@ -431,8 +431,10 @@ export function buildAlnumMaskRe(forms: string[]): RegExp | null {
 /**
  * Mask already-extracted OTP codes/links in metadata text for tier-2 pushes.
  * Links: normalize via validatedHttpUrl then replace original spelling
- * (maskNormalizedHttpUrls). Digit codes: otpCodeRunRe + canonicalDigits
- * (F69/F75). Alnum codes (F77/F83): single alternation replace with alnum bounds.
+ * (maskNormalizedHttpUrls). Alnum codes (F77/F83/F91): exact-form alternation
+ * before digit runs so `ABC-1234` is not half-masked to `ABC-•••` when both
+ * `ABC-1234` and `1234` are in the code set. Digit codes: otpCodeRunRe +
+ * canonicalDigits (F69/F75) after alnum.
  */
 export function maskSensitiveFragments(
   text: string,
@@ -440,7 +442,7 @@ export function maskSensitiveFragments(
   links: string[],
 ): string {
   if (!text) return text;
-  // URLs first so a full verify link is one unit before digit-code scans.
+  // URLs first so a full verify link is one unit before code scans.
   let result = maskNormalizedHttpUrls(text, links);
   const digitCanon = new Set<string>();
   const exactAlnum: string[] = [];
@@ -453,14 +455,16 @@ export function maskSensitiveFragments(
     const canon = canonicalDigits(code);
     if (canon) digitCanon.add(canon);
   }
+  // F91: alnum spans before digit sub-runs — digit pass would otherwise rewrite
+  // `ABC-1234` → `ABC-•••` and leave a non-matching `ABC-` prefix leak.
+  const alnumRe = buildAlnumMaskRe(exactAlnum);
+  if (alnumRe) {
+    result = result.replace(alnumRe, '•••');
+  }
   if (digitCanon.size > 0) {
     result = result.replace(otpCodeRunRe(), (run) =>
       digitCanon.has(canonicalDigits(run)) ? '•••' : run,
     );
-  }
-  const alnumRe = buildAlnumMaskRe(exactAlnum);
-  if (alnumRe) {
-    result = result.replace(alnumRe, '•••');
   }
   return result;
 }

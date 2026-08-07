@@ -677,6 +677,28 @@ describe('mail-arrival notification watcher', () => {
     expect(maskSensitiveFragments('code 1234-5678', ['12345678'], [])).toBe('code •••');
   });
 
+  test('maskSensitiveFragments masks full alnum before digit sub-runs (F91)', () => {
+    // Both forms in the code set: alnum first so `ABC-` is not left after digit pass.
+    expect(
+      maskSensitiveFragments('Your verification code is ABC-1234', ['1234', 'ABC-1234'], []),
+    ).toBe('Your verification code is •••');
+    expect(
+      maskSensitiveFragments('Your verification code is ABC-1234', ['1234', 'ABC-1234'], []),
+    ).not.toContain('ABC');
+    // Numeric-only / alnum-only / mixed+separate digit still work.
+    expect(maskSensitiveFragments('Your code is 1234', ['1234'], [])).toBe('Your code is •••');
+    expect(maskSensitiveFragments('Your code is ABC-1234', ['ABC-1234'], [])).toBe(
+      'Your code is •••',
+    );
+    expect(maskSensitiveFragments('codes ABC-1234 and 5678', ['ABC-1234', '5678'], [])).toBe(
+      'codes ••• and •••',
+    );
+    // Digit-only in codes against mixed text still half-masks (by design).
+    expect(maskSensitiveFragments('Your code is ABC-1234', ['1234'], [])).toBe(
+      'Your code is ABC-•••',
+    );
+  });
+
   test('maskTier2Metadata redacts delimited OTP in subject (F68)', () => {
     const masked = maskTier2Metadata({
       from: 'auth@example.net',
@@ -1108,6 +1130,30 @@ describe('mail-arrival notification watcher', () => {
     // Prior tight/space paths still work.
     expect(extractMetaAlnumCodes('Your code is ABC-123')).toEqual(['ABC-123']);
     expect(extractMetaAlnumCodes('Your code is ABC 123')).toEqual(['ABC 123']);
+  });
+
+  test('tier 2 push redacts full ABC-1234 when body also has 1234 (F91)', async () => {
+    // Body continuous digits + subject mixed alnum: both enter mask list; alnum
+    // must win so the subject does not publish an `ABC-` prefix leak.
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Your verification code is ABC-1234\r\n\r\nYour code is 1234. Thanks.',
+        'Your verification code is ABC-1234',
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('ABC');
+    expect(body).not.toContain('1234');
   });
 
   test('tier 2 masks fullwidth alnum OTP under strong cue (F86)', () => {
