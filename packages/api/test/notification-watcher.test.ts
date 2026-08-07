@@ -24,7 +24,7 @@ const {
   PUSH_OTP_ENTRY_CHARS,
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
-const { NotifyError } = await import('../src/lib/notify.ts');
+const { NotifyError, jsonEscapedByteLength } = await import('../src/lib/notify.ts');
 
 /** Mock publish that honors beforeSend like NtfyNotificationService. */
 function publishWithBeforeSend(calls: any[]) {
@@ -1809,8 +1809,7 @@ describe('mail-arrival notification watcher', () => {
     }
 
     // Through publish(overflow=truncate): link still complete in ntfy JSON.
-    const { NtfyNotificationService, NTFY_REQUEST_MAX_BYTES, jsonEscapedByteLength } =
-      await import('../src/lib/notify.ts');
+    const { NtfyNotificationService, NTFY_REQUEST_MAX_BYTES } = await import('../src/lib/notify.ts');
     const { config } = await import('../src/lib/config.ts');
     const previousNtfy = { ...config.ntfy };
     Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
@@ -1849,6 +1848,90 @@ describe('mail-arrival notification watcher', () => {
       globalThis.fetch = originalFetch;
       Object.assign(config.ntfy, previousNtfy);
     }
+  });
+
+  test('tier 3 packs full link before preview remainder (F88 order)', () => {
+    // Coordinator repro: 2500-char verify link + 200 backslash subject + 500 preview
+    // under the 3500 escaped-byte local cap. Link must stay whole; preview shrinks.
+    const prefix = 'https://example.com/verify?token=';
+    const longLink = `${prefix}${'a'.repeat(2500 - prefix.length)}`;
+    expect(longLink.length).toBe(2500);
+    const slashSubject = '\\'.repeat(200);
+    const fullPreview = 'p'.repeat(500);
+
+    const body = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: slashSubject,
+      from: 'auth@example.com',
+      preview: fullPreview,
+      codes: [],
+      links: [longLink],
+    });
+
+    expect(body).toContain(longLink);
+    expect(body).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
+    expect(body).not.toMatch(/\(\+\d+ more links/);
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+
+    const previewLine = body.split('\n').find((line) => line.startsWith('Preview: '));
+    expect(previewLine).toBeDefined();
+    const previewText = previewLine!.slice('Preview: '.length);
+    expect(previewText.length).toBeGreaterThan(0);
+    expect(previewText.length).toBeLessThan(500);
+    // Assembly order: meta → Preview → Links
+    const previewIdx = body.indexOf('\nPreview: ');
+    const linksIdx = body.indexOf('\nLinks:\n');
+    expect(previewIdx).toBeGreaterThan(0);
+    expect(linksIdx).toBeGreaterThan(previewIdx);
+  });
+
+  test('tier 3 omits whole link with note when base alone leaves no room (F88)', () => {
+    // 2900-char link + 400-backslash subject: escaped subject (~800) + framing + link
+    // exceed the 3500 cap even without preview → honest +N note, no half URL.
+    const prefix = 'https://example.com/verify?token=';
+    const longLink = `${prefix}${'a'.repeat(2900 - prefix.length)}`;
+    expect(longLink.length).toBe(2900);
+    const slashSubject = '\\'.repeat(400);
+    const fullPreview = 'p'.repeat(200);
+
+    const body = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: slashSubject,
+      from: 'auth@example.com',
+      preview: fullPreview,
+      codes: [],
+      links: [longLink],
+    });
+
+    expect(body).not.toContain(longLink);
+    expect(body).not.toContain('https://example.com/verify?token=');
+    expect(body).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
+    expect(body).toMatch(/\(\+1 more links, open the dashboard to view\)/);
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    // Preview still fills remainder after the note-only Links block.
+    const previewLine = body.split('\n').find((line) => line.startsWith('Preview: '));
+    expect(previewLine).toBeDefined();
+    expect(previewLine!.slice('Preview: '.length).length).toBeGreaterThan(0);
+    expect(previewLine!.slice('Preview: '.length).length).toBeLessThanOrEqual(fullPreview.length);
+  });
+
+  test('tier 3 keeps small link preview and codes under budget (F88 regression)', () => {
+    const body = buildMailArrivalMessage('a@test.example', 3, true, {
+      subject: 'Your login code',
+      from: 'auth@example.com',
+      preview: 'Use the code below to finish signing in.',
+      codes: ['123456'],
+      links: ['https://example.com/verify?token=abc'],
+    });
+    expect(body).toContain('Codes: 123456');
+    expect(body).toContain('https://example.com/verify?token=abc');
+    expect(body).toContain('Preview: Use the code below to finish signing in.');
+    expect(body).toContain('Subject: Your login code');
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    const previewIdx = body.indexOf('\nPreview: ');
+    const codesIdx = body.indexOf('\nCodes: ');
+    const linksIdx = body.indexOf('\nLinks:\n');
+    expect(previewIdx).toBeGreaterThan(0);
+    expect(codesIdx).toBeGreaterThan(previewIdx);
+    expect(linksIdx).toBeGreaterThan(codesIdx);
   });
 
   test('tier 3 drops tail links with +N note under budget (F79)', () => {

@@ -572,47 +572,35 @@ export function buildMailArrivalMessage(
   if (tier >= 3) {
     const codes = boundPushOtpEntries(extras.codes);
     const codesLine = codes.length ? `Codes: ${codes.join(', ')}` : '';
-    // Prefer full links: pack links first with codes, shrink/drop Preview.
-    const baseCore = lines.join('\n') + (codesLine ? `\n${codesLine}` : '');
-    let previewLine = extras.preview ? `Preview: ${extras.preview}` : '';
+    // F88: pack full links against base WITHOUT preview first; preview eats the
+    // remainder. Putting a full Preview into the pack base first made the
+    // "shrink preview to keep links" path dead — body stayed under budget after
+    // packPushLinkLines dropped links for the oversized preview.
+    const head = lines.join('\n');
+    const baseNoPreview = head + (codesLine ? `\n${codesLine}` : '');
+    const linkLines = packPushLinkLines(baseNoPreview, extras.links, maxEscaped);
+    const withLinks =
+      linkLines.length > 0 ? `${baseNoPreview}\n${linkLines.join('\n')}` : baseNoPreview;
 
-    const tryWithPreview = (preview: string): string => {
-      const base =
-        preview.length > 0
-          ? `${lines.join('\n')}\n${preview}${codesLine ? `\n${codesLine}` : ''}`
-          : baseCore;
-      const linkLines = packPushLinkLines(base, extras.links, maxEscaped);
-      return linkLines.length ? `${base}\n${linkLines.join('\n')}` : base;
-    };
-
-    let body = tryWithPreview(previewLine);
-    if (jsonEscapedByteLength(body) > maxEscaped && extras.preview) {
-      // Shrink preview so links still fit whole.
-      const withoutPreview = tryWithPreview('');
+    let previewLine = '';
+    if (extras.preview) {
       const roomForPreview =
         maxEscaped -
-        jsonEscapedByteLength(withoutPreview) -
+        jsonEscapedByteLength(withLinks) -
         jsonEscapedByteLength('\nPreview: ');
       if (roomForPreview > 0) {
         const trimmed = boundPreviewByEscapedBytes(extras.preview, roomForPreview);
-        previewLine = trimmed ? `Preview: ${trimmed}` : '';
-        body = tryWithPreview(previewLine);
-      } else {
-        body = withoutPreview;
+        if (trimmed) previewLine = `Preview: ${trimmed}`;
       }
     }
-    // Drop preview entirely if still over (keep full links / note).
-    if (jsonEscapedByteLength(body) > maxEscaped && previewLine) {
-      body = tryWithPreview('');
-    }
-    // Last resort: omit links with honest note if core framing alone is huge.
-    if (jsonEscapedByteLength(body) > maxEscaped && extras.links.length > 0) {
-      const coreOnly = tryWithPreview('');
-      if (jsonEscapedByteLength(coreOnly) <= maxEscaped) return coreOnly;
-      const noteOnly = packPushLinkLines(baseCore, extras.links, maxEscaped);
-      body = noteOnly.length ? `${baseCore}\n${noteOnly.join('\n')}` : baseCore;
-    }
-    return body;
+
+    // Assembly order unchanged: title/From/Subject → Preview → Codes → Links.
+    // Escaped length is additive over segments, so reordering vs withLinks is safe.
+    const parts = [head];
+    if (previewLine) parts.push(previewLine);
+    if (codesLine) parts.push(codesLine);
+    if (linkLines.length > 0) parts.push(...linkLines);
+    return parts.join('\n');
   }
 
   // Tier 1–2: raw byte bound is fine (no long verify links).
