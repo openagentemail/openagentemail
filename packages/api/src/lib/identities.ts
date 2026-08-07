@@ -88,19 +88,26 @@ function isIdentityShape(value: unknown): value is Record<string, unknown> {
   );
 }
 
-/** Drop an invalid pushContentTier so resolvePushContentTier falls back to 1. */
+/**
+ * Coerce a structurally valid store record into an Identity for in-memory use.
+ *
+ * Spread the raw record so unknown per-identity fields (and future
+ * `pushContentTier` enum values written by a newer binary) survive store
+ * rewrites on this older binary (F94). Downgrade→upgrade must not permanently
+ * strip forward-compatible data.
+ *
+ * Read safety: `resolvePushContentTier` maps anything other than 2/3 to the
+ * default tier 1, and all consumers go through resolve or `=== 2` / `=== 3`
+ * checks — an old binary never discloses more than tier 1 for a future tier
+ * value. Explicit API tier updates still overwrite `pushContentTier` with a
+ * known 1|2|3 value.
+ */
 function coerceIdentity(raw: Record<string, unknown>): Identity {
-  const identity: Identity = {
+  return {
+    ...raw,
     address: raw.address as string,
     createdAt: raw.createdAt as string,
-    ...(typeof raw.name === 'string' ? { name: raw.name } : {}),
-    ...(raw.canNotifyUser === true ? { canNotifyUser: true } : {}),
-    ...(typeof raw.tokenHash === 'string' ? { tokenHash: raw.tokenHash } : {}),
-  };
-  if (isPushContentTier(raw.pushContentTier)) {
-    identity.pushContentTier = raw.pushContentTier;
-  }
-  return identity;
+  } as Identity;
 }
 
 /**

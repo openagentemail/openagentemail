@@ -36,6 +36,7 @@ const {
   setIdentityPushContentTier,
   PUSH_TIER3_WARNING,
 } = await import('../src/lib/identities.ts');
+type Identity = import('../src/lib/identities.ts').Identity;
 const { identitiesRoute } = await import('../src/routes/identities.ts');
 const { processWatchedMessage } = await import('../src/lib/notification-watcher.ts');
 
@@ -285,12 +286,43 @@ describe('push content tier store and REST', () => {
     bad!.pushContentTier = 99;
     writeFileSync(storeFile(), JSON.stringify(raw, null, 2));
 
-    // Store still loads; invalid enum is stripped to default tier 1.
+    // Store still loads; unknown enum resolves as tier 1 but is preserved on disk/object (F94).
     expect(listIdentities().some((i) => i.address === good.identity.address)).toBe(true);
     expect(resolvePushContentTier(findIdentity(other.identity.address)!)).toBe(1);
-    expect(findIdentity(other.identity.address)?.pushContentTier).toBeUndefined();
+    expect((findIdentity(other.identity.address) as { pushContentTier?: unknown })?.pushContentTier).toBe(
+      99,
+    );
     // Sibling entry keeps its valid tier.
     expect(findIdentity(good.identity.address)?.pushContentTier).toBe(2);
+  });
+
+  test('coerceIdentity preserves unknown fields and future tier across rewrite (F94)', () => {
+    const normal = createIdentity({ localpart: 'f94-normal' })!;
+    const future = createIdentity({ localpart: 'f94-future' })!;
+
+    const seeded = JSON.parse(readFileSync(storeFile(), 'utf8')) as Array<Record<string, unknown>>;
+    const futureRow = seeded.find((entry) => entry.address === future.identity.address)!;
+    futureRow.pushContentTier = 4;
+    futureRow.futureField = { nested: true, note: 'from-newer-binary' };
+    writeFileSync(storeFile(), JSON.stringify(seeded, null, 2));
+
+    // Load: future tier resolves as 1; raw value kept.
+    const loaded = findIdentity(future.identity.address) as Identity & {
+      futureField?: { nested: boolean; note: string };
+      pushContentTier?: number;
+    };
+    expect(resolvePushContentTier(loaded)).toBe(1);
+    expect(loaded.pushContentTier).toBe(4);
+    expect(loaded.futureField).toEqual({ nested: true, note: 'from-newer-binary' });
+
+    // Mutate a different identity and save — future row must not be stripped.
+    setIdentityPushContentTier(normal.identity.address, 2);
+    const after = JSON.parse(readFileSync(storeFile(), 'utf8')) as Array<Record<string, unknown>>;
+    const still = after.find((entry) => entry.address === future.identity.address)!;
+    expect(still.pushContentTier).toBe(4);
+    expect(still.futureField).toEqual({ nested: true, note: 'from-newer-binary' });
+    const normalRow = after.find((entry) => entry.address === normal.identity.address)!;
+    expect(normalRow.pushContentTier).toBe(2);
   });
 });
 

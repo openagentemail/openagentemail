@@ -24,7 +24,11 @@ const {
   PUSH_OTP_ENTRY_CHARS,
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
-const { NotifyError, jsonEscapedByteLength } = await import('../src/lib/notify.ts');
+const {
+  NotifyError,
+  jsonEscapedByteLength,
+  notifyAvailableMessageBytes,
+} = await import('../src/lib/notify.ts');
 
 /** Mock publish that honors beforeSend like NtfyNotificationService. */
 function publishWithBeforeSend(calls: any[]) {
@@ -1798,7 +1802,12 @@ describe('mail-arrival notification watcher', () => {
 
     expect(calls).toHaveLength(1);
     const body = calls[0].message as string;
-    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    const tier3Budget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(tier3Budget);
     // At most PUSH_OTP_ITEM_MAX codes appear after "Codes: ".
     const codesLine = body.split('\n').find((line) => line.startsWith('Codes: '));
     if (codesLine) {
@@ -1830,9 +1839,11 @@ describe('mail-arrival notification watcher', () => {
       codes: Array.from({ length: 40 }, (_, i) => `${'1'.repeat(300)}${i}`),
       links: Array.from({ length: 40 }, (_, i) => `https://example.com/${'x'.repeat(300)}/${i}`),
     });
-    expect(Buffer.byteLength(huge, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    expect(jsonEscapedByteLength(huge)).toBeLessThanOrEqual(tier3Budget);
     expect(
-      huge.endsWith('…') || Buffer.byteLength(huge, 'utf8') < PUSH_MESSAGE_MAX_BYTES || huge.includes('more links'),
+      huge.endsWith('…') ||
+        jsonEscapedByteLength(huge) < tier3Budget ||
+        huge.includes('more links'),
     ).toBe(true);
   });
 
@@ -1922,13 +1933,13 @@ describe('mail-arrival notification watcher', () => {
   });
 
   test('tier 3 packs full link before preview remainder (F88 order)', () => {
-    // Coordinator repro: 2500-char verify link + 200 backslash subject + 500 preview
-    // under the 3500 escaped-byte local cap. Link must stay whole; preview shrinks.
+    // Long verify link + backslash-heavy subject + large preview under the ntfy
+    // residual: link must stay whole; preview shrinks to the remainder.
     const prefix = 'https://example.com/verify?token=';
     const longLink = `${prefix}${'a'.repeat(2500 - prefix.length)}`;
     expect(longLink.length).toBe(2500);
     const slashSubject = '\\'.repeat(200);
-    const fullPreview = 'p'.repeat(500);
+    const fullPreview = 'p'.repeat(2000);
 
     const body = buildMailArrivalMessage('a@test.example', 3, true, {
       subject: slashSubject,
@@ -1941,13 +1952,18 @@ describe('mail-arrival notification watcher', () => {
     expect(body).toContain(longLink);
     expect(body).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
     expect(body).not.toMatch(/\(\+\d+ more links/);
-    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    const noClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(noClickBudget);
 
     const previewLine = body.split('\n').find((line) => line.startsWith('Preview: '));
     expect(previewLine).toBeDefined();
     const previewText = previewLine!.slice('Preview: '.length);
     expect(previewText.length).toBeGreaterThan(0);
-    expect(previewText.length).toBeLessThan(500);
+    expect(previewText.length).toBeLessThan(2000);
     // Assembly order: meta → Preview → Links
     const previewIdx = body.indexOf('\nPreview: ');
     const linksIdx = body.indexOf('\nLinks:\n');
@@ -1956,11 +1972,11 @@ describe('mail-arrival notification watcher', () => {
   });
 
   test('tier 3 omits whole link with note when base alone leaves no room (F88)', () => {
-    // 2900-char link + 400-backslash subject: escaped subject (~800) + framing + link
-    // exceed the 3500 cap even without preview → honest +N note, no half URL.
+    // Oversized link + backslash-heavy subject: even no-click residual cannot keep
+    // the full URL → honest +N note, no half URL. Preview may still fill remainder.
     const prefix = 'https://example.com/verify?token=';
-    const longLink = `${prefix}${'a'.repeat(2900 - prefix.length)}`;
-    expect(longLink.length).toBe(2900);
+    const longLink = `${prefix}${'a'.repeat(3700 - prefix.length)}`;
+    expect(longLink.length).toBe(3700);
     const slashSubject = '\\'.repeat(400);
     const fullPreview = 'p'.repeat(200);
 
@@ -1976,7 +1992,12 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('https://example.com/verify?token=');
     expect(body).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
     expect(body).toMatch(/\(\+1 more links, open the dashboard to view\)/);
-    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    const noClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(noClickBudget);
     // Preview still fills remainder after the note-only Links block.
     const previewLine = body.split('\n').find((line) => line.startsWith('Preview: '));
     expect(previewLine).toBeDefined();
@@ -2003,6 +2024,102 @@ describe('mail-arrival notification watcher', () => {
     expect(previewIdx).toBeGreaterThan(0);
     expect(codesIdx).toBeGreaterThan(previewIdx);
     expect(linksIdx).toBeGreaterThan(codesIdx);
+  });
+
+  test('tier 3 prefers no-click budget over link eviction (F93)', () => {
+    // Coordinator repro: long dashboard click + ~3483-byte verify link. With-click
+    // residual (~3400) evicts the link; no-click residual (~3846) keeps it whole.
+    const clickUrl = `https://dash.example/ui/${'c'.repeat(400)}`;
+    const prefix = 'https://example.com/verify?token=';
+    const longLink = `${prefix}${'a'.repeat(3483 - prefix.length)}`;
+    expect(longLink.length).toBe(3483);
+
+    const withClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+      click: clickUrl,
+    });
+    const noClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(withClickBudget).toBeLessThan(noClickBudget);
+    expect(withClickBudget).toBeLessThan(3483);
+
+    const body = buildMailArrivalMessage(
+      'a@test.example',
+      3,
+      true,
+      {
+        subject: '',
+        from: '',
+        preview: '',
+        codes: [],
+        links: [longLink],
+      },
+      undefined,
+      { clickUrl },
+    );
+    expect(body).toContain(longLink);
+    expect(body).not.toMatch(/\(\+\d+ more links/);
+    const escaped = jsonEscapedByteLength(body);
+    expect(escaped).toBeGreaterThan(withClickBudget);
+    expect(escaped).toBeLessThanOrEqual(noClickBudget);
+  });
+
+  test('tier 3 keeps with-click packing when short link fits (F93 regression)', () => {
+    const clickUrl = 'https://dash.example/ui';
+    const shortLink = 'https://example.com/verify?token=abc';
+    const body = buildMailArrivalMessage(
+      'a@test.example',
+      3,
+      true,
+      {
+        subject: 'Verify',
+        from: 'auth@example.com',
+        preview: 'hi',
+        codes: [],
+        links: [shortLink],
+      },
+      undefined,
+      { clickUrl },
+    );
+    expect(body).toContain(shortLink);
+    expect(body).not.toMatch(/\(\+\d+ more links/);
+    // Fits under with-click residual → no need for no-click packing.
+    const withClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+      click: clickUrl,
+    });
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(withClickBudget);
+  });
+
+  test('tier 3 keeps with-click packing when eviction is equal under both budgets (F93)', () => {
+    // Two enormous links: neither budget can keep either full URL → equal drops
+    // → prefer with-click packing path (honest note, no half URL).
+    const clickUrl = `https://dash.example/ui/${'c'.repeat(400)}`;
+    const huge = (i: number) =>
+      `https://example.com/verify?token=${'z'.repeat(3900)}&i=${i}`;
+    const body = buildMailArrivalMessage(
+      'a@test.example',
+      3,
+      true,
+      {
+        subject: '',
+        from: '',
+        preview: '',
+        codes: [],
+        links: [huge(0), huge(1)],
+      },
+      undefined,
+      { clickUrl },
+    );
+    expect(body).not.toContain('https://example.com/verify?token=');
+    expect(body).toMatch(/\(\+\d+ more links, open the dashboard to view\)/);
   });
 
   test('tier 3 drops tail links with +N note under budget (F79)', () => {
@@ -2065,7 +2182,12 @@ describe('mail-arrival notification watcher', () => {
       links: ['https://example.com/verify?token=abc'],
     });
 
-    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(PUSH_MESSAGE_MAX_BYTES);
+    const tier3Budget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(tier3Budget);
     expect(body).toContain('Codes: 112233');
     expect(body).toContain('https://example.com/verify?token=abc');
     expect(body).toContain('Subject:');

@@ -530,6 +530,59 @@ export type BuildMailArrivalOptions = {
   clickUrl?: string;
 };
 
+/** How many input links were omitted from a packPushLinkLines result. */
+function countDroppedPackedLinks(links: string[], linkLines: string[]): number {
+  if (links.length === 0) return 0;
+  let kept = 0;
+  for (const line of linkLines) {
+    if (!line.startsWith('Links:\n')) continue;
+    for (const part of line.slice('Links:\n'.length).split('\n')) {
+      // Note-only block is `Links:\n(+N more…)` — not a kept URL.
+      if (part && !part.startsWith('(+')) kept += 1;
+    }
+  }
+  return Math.max(0, links.length - kept);
+}
+
+/**
+ * Pack tier-3 body under one escaped-byte budget (F88 order: links first,
+ * preview eats remainder). Returns the body plus how many links were evicted.
+ */
+function packTier3ArrivalBody(
+  head: string,
+  codesLine: string,
+  previewSource: string,
+  links: string[],
+  maxEscaped: number,
+): { body: string; droppedLinks: number } {
+  const baseNoPreview = head + (codesLine ? `\n${codesLine}` : '');
+  const linkLines = packPushLinkLines(baseNoPreview, links, maxEscaped);
+  const withLinks =
+    linkLines.length > 0 ? `${baseNoPreview}\n${linkLines.join('\n')}` : baseNoPreview;
+
+  let previewLine = '';
+  if (previewSource) {
+    const roomForPreview =
+      maxEscaped -
+      jsonEscapedByteLength(withLinks) -
+      jsonEscapedByteLength('\nPreview: ');
+    if (roomForPreview > 0) {
+      const trimmed = boundPreviewByEscapedBytes(previewSource, roomForPreview);
+      if (trimmed) previewLine = `Preview: ${trimmed}`;
+    }
+  }
+
+  // Assembly: title/From/Subject → Preview → Codes → Links.
+  const parts = [head];
+  if (previewLine) parts.push(previewLine);
+  if (codesLine) parts.push(codesLine);
+  if (linkLines.length > 0) parts.push(...linkLines);
+  return {
+    body: parts.join('\n'),
+    droppedLinks: countDroppedPackedLinks(links, linkLines),
+  };
+}
+
 /** Build the human-facing push body for one identity's content tier. */
 export function buildMailArrivalMessage(
   address: string,
@@ -542,14 +595,24 @@ export function buildMailArrivalMessage(
   // Pack under the JSON-escaped message budget so full links survive publish()
   // serialization (F88). Conservative max topic length matches ntfy cap.
   const level = hasOtpOrLink ? 'urgent' : 'normal';
-  const availableEscaped = notifyAvailableMessageBytes({
+  const frameBase = {
     title: 'openagent.email new mail',
-    level,
+    level: level as 'urgent' | 'normal',
     tags: ['email'],
+  };
+  const availableWithClick = notifyAvailableMessageBytes({
+    ...frameBase,
     click: options.clickUrl,
   });
-  // Also respect local raw-byte headroom (historical PUSH_MESSAGE_MAX_BYTES).
-  const maxEscaped = Math.min(availableEscaped, PUSH_MESSAGE_MAX_BYTES);
+  const availableNoClick = notifyAvailableMessageBytes(frameBase);
+  // F93 dual budgets for tier-3 packing: ntfy residual with/without click.
+  // Both sides use the same residual source (notifyAvailableMessageBytes); we
+  // deliberately do **not** min with historical PUSH_MESSAGE_MAX_BYTES (3500)
+  // here — that undercut a larger no-click residual (~3846) and evicted links
+  // that publish()'s click-drop could still deliver. Tier 1–2 still use the
+  // historical raw-byte cap below.
+  const maxWithClick = availableWithClick;
+  const maxNoClick = availableNoClick;
 
   const lines: string[] = [
     hasOtpOrLink
@@ -576,39 +639,41 @@ export function buildMailArrivalMessage(
   if (tier >= 3) {
     const codes = boundPushOtpEntries(extras.codes);
     const codesLine = codes.length ? `Codes: ${codes.join(', ')}` : '';
-    // F88: pack full links against base WITHOUT preview first; preview eats the
-    // remainder. Putting a full Preview into the pack base first made the
-    // "shrink preview to keep links" path dead — body stayed under budget after
-    // packPushLinkLines dropped links for the oversized preview.
     const head = lines.join('\n');
-    const baseNoPreview = head + (codesLine ? `\n${codesLine}` : '');
-    const linkLines = packPushLinkLines(baseNoPreview, extras.links, maxEscaped);
-    const withLinks =
-      linkLines.length > 0 ? `${baseNoPreview}\n${linkLines.join('\n')}` : baseNoPreview;
-
-    let previewLine = '';
-    if (extras.preview) {
-      const roomForPreview =
-        maxEscaped -
-        jsonEscapedByteLength(withLinks) -
-        jsonEscapedByteLength('\nPreview: ');
-      if (roomForPreview > 0) {
-        const trimmed = boundPreviewByEscapedBytes(extras.preview, roomForPreview);
-        if (trimmed) previewLine = `Preview: ${trimmed}`;
+    // Prefer with-click packing so click survives when everything fits (F93).
+    const packedWith = packTier3ArrivalBody(
+      head,
+      codesLine,
+      extras.preview,
+      extras.links,
+      maxWithClick,
+    );
+    if (
+      options.clickUrl &&
+      packedWith.droppedLinks > 0 &&
+      maxNoClick > maxWithClick
+    ) {
+      const packedNo = packTier3ArrivalBody(
+        head,
+        codesLine,
+        extras.preview,
+        extras.links,
+        maxNoClick,
+      );
+      // Prefer fewer link evictions; publish() click-drop (F76) delivers the
+      // larger body. Equal eviction → keep with-click packing (click survives).
+      if (packedNo.droppedLinks < packedWith.droppedLinks) {
+        return packedNo.body;
       }
     }
-
-    // Assembly order unchanged: title/From/Subject → Preview → Codes → Links.
-    // Escaped length is additive over segments, so reordering vs withLinks is safe.
-    const parts = [head];
-    if (previewLine) parts.push(previewLine);
-    if (codesLine) parts.push(codesLine);
-    if (linkLines.length > 0) parts.push(...linkLines);
-    return parts.join('\n');
+    return packedWith.body;
   }
 
   // Tier 1–2: raw byte bound is fine (no long verify links).
-  return boundPushMessage(lines.join('\n'), Math.min(PUSH_MESSAGE_MAX_BYTES, maxEscaped));
+  return boundPushMessage(
+    lines.join('\n'),
+    Math.min(PUSH_MESSAGE_MAX_BYTES, maxWithClick),
+  );
 }
 
 /** Process one newly delivered message. Exported for policy/security tests. */

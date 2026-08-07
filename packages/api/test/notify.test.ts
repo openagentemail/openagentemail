@@ -25,6 +25,8 @@ const {
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
+  jsonEscapedByteLength,
+  notifyAvailableMessageBytes,
   NotifyError,
   NTFY_REQUEST_MAX_BYTES,
   NtfyNotificationService,
@@ -340,6 +342,43 @@ describe('ntfy publish payload budget', () => {
     // Message fits base payload after click drop — no ellipsis truncation.
     expect(parsed.message).toBe('m'.repeat(3_500));
     expect(String(parsed.message)).not.toMatch(/…$/);
+  }));
+
+  test('drops click to keep full long message between dual budgets (F93)', withPublishCapture(async (svc, captured) => {
+    // Body sized between with-click and no-click residuals → click dropped, message full.
+    const clickUrl = `https://dash.example/ui/${'c'.repeat(400)}`;
+    const withClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+      click: clickUrl,
+    });
+    const noClickBudget = notifyAvailableMessageBytes({
+      title: 'openagent.email new mail',
+      level: 'urgent',
+      tags: ['email'],
+    });
+    expect(withClickBudget).toBeLessThan(noClickBudget);
+    // Mid-band message: too big for with-click framing, fine after click-drop.
+    const mid = Math.floor((withClickBudget + noClickBudget) / 2);
+    const message = `https://example.com/verify?token=${'a'.repeat(Math.max(0, mid - 40))}`;
+    expect(jsonEscapedByteLength(message)).toBeGreaterThan(withClickBudget);
+    expect(jsonEscapedByteLength(message)).toBeLessThanOrEqual(noClickBudget);
+
+    await svc.publish({
+      target: 'user',
+      title: 'openagent.email new mail',
+      message,
+      level: 'urgent',
+      tags: ['email'],
+      click: clickUrl,
+      overflow: 'error',
+    });
+    expect(captured).toHaveLength(1);
+    expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    const parsed = JSON.parse(captured[0]!) as Record<string, unknown>;
+    expect(parsed.click).toBeUndefined();
+    expect(parsed.message).toBe(message);
   }));
 
   test('keeps click and full message when the serialized body fits', withPublishCapture(async (svc, captured) => {
