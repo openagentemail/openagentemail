@@ -398,6 +398,32 @@ describe('ntfy publish payload budget', () => {
     // Quote/backslash double under JSON escape.
     expect(boundJsonEscapedText('""', 3)).toBe('…'); // each " costs 2; cannot keep either + ellipsis
   });
+
+  test('boundJsonEscapedText costs lone surrogates as JSON \\uXXXX (6 bytes)', () => {
+    // JSON.stringify emits \\ud800 (6); Buffer.byteLength would undercount as 3.
+    const truncated = boundJsonEscapedText('\ud800'.repeat(10), 10);
+    expect(truncated).toBe('\ud800…');
+    expect(Buffer.byteLength(JSON.stringify(truncated), 'utf8') - 2).toBeLessThanOrEqual(10);
+  });
+
+  test('truncates lone-surrogate poison message under request budget', withPublishCapture(async (svc, captured) => {
+    const poison = '\ud800'.repeat(3_500);
+    await svc.publish({
+      target: 'user',
+      title: 'openagent.email new mail',
+      message: poison,
+      level: 'urgent',
+      tags: ['email'],
+      click: 'https://dash.example/ui',
+    });
+    expect(captured).toHaveLength(1);
+    const raw = captured[0]!;
+    expect(Buffer.byteLength(raw, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    expect(parsed.click).toBeUndefined();
+    expect(typeof parsed.message).toBe('string');
+    expect((parsed.message as string).endsWith('…')).toBe(true);
+  }));
 });
 
 describe('private ntfy topic mapping', () => {

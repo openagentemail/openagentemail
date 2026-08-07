@@ -489,13 +489,17 @@ const JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES = Buffer.byteLength(JSON_MESSAGE_ELLIP
 /**
  * Cost of one code point inside a JSON string (UTF-8 of the escaped form).
  * Matches JSON.stringify: quotes/backslash and the five single-letter escapes
- * cost 2; other C0 controls become \\u00XX (6); everything else is raw UTF-8.
+ * cost 2; other C0 controls become \\u00XX (6); lone surrogates (0xD800–0xDFFF)
+ * become \\uXXXX (6) — Buffer.byteLength would only count the U+FFFD replacement
+ * (3); paired surrogates form a >0xFFFF code point and take the UTF-8 branch.
+ * Everything else is raw UTF-8.
  */
 function jsonStringEscapeCost(point: string): number {
   const cp = point.codePointAt(0)!;
   if (point === '"' || point === '\\') return 2;
   if (cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d) return 2;
   if (cp < 0x20) return 6;
+  if (cp >= 0xd800 && cp <= 0xdfff) return 6;
   return Buffer.byteLength(point, 'utf8');
 }
 
