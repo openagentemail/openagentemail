@@ -236,6 +236,13 @@ export type BareUrlSpan = {
   /** Exclusive end index of `clean` in the full text. */
   end: number;
   clean: string;
+  /**
+   * When this span ended on a proven Markdown-chain cut, the glue between the
+   * unbalanced closer and the next scheme (e.g. `)[token=secret](`). Indices
+   * into the full text, half-open [start, end). Extractors ignore this; only
+   * maskNormalizedHttpUrls redacts it with the adjacent URLs.
+   */
+  glueAfter?: { start: number; end: number };
 };
 
 /**
@@ -284,6 +291,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     // First scheme strictly after the current closer; skips nested schemes that
     // fell inside this span (e.g. ?next=https:// before a Markdown )[label]().
     let probeIdx = schemeIdx + 1;
+    // Set when we hard-cut on Markdown chain glue (closer index + next scheme).
+    let glueCut: { closer: number; nextScheme: number } | undefined;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -305,8 +314,10 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           continue;
         }
         while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) probeIdx += 1;
-        if (isMarkdownChainGlue(text, i, schemePos[probeIdx])) {
+        const nextScheme = schemePos[probeIdx];
+        if (isMarkdownChainGlue(text, i, nextScheme)) {
           end = i;
+          glueCut = { closer: i, nextScheme: nextScheme! };
           break;
         }
         continue;
@@ -317,8 +328,10 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           continue;
         }
         while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) probeIdx += 1;
-        if (isMarkdownChainGlue(text, i, schemePos[probeIdx])) {
+        const nextScheme = schemePos[probeIdx];
+        if (isMarkdownChainGlue(text, i, nextScheme)) {
           end = i;
+          glueCut = { closer: i, nextScheme: nextScheme! };
           break;
         }
         continue;
@@ -332,7 +345,12 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
       continue;
     }
     const cleanEnd = start + clean.length;
-    yield { start, end: cleanEnd, clean };
+    const span: BareUrlSpan = { start, end: cleanEnd, clean };
+    // Glue is always [closer, nextScheme) even if peel shortened cleanEnd.
+    if (glueCut) {
+      span.glueAfter = { start: glueCut.closer, end: glueCut.nextScheme };
+    }
+    yield span;
 
     // Skip schemes that fell inside this span (e.g. nested ?next=https://…).
     while (schemeIdx < schemePos.length && schemePos[schemeIdx]! < cleanEnd) {
@@ -345,7 +363,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
  * Replace bare URLs in `text` whose validatedHttpUrl form is in `normalizedLinks`
  * with `placeholder`, keeping the original spelling span as the match (so
  * EXAMPLE.com:443 still redacts when the needle is https://example.com/...).
- * Each adjacent link is a separate span so Markdown chains mask fully.
+ * Markdown-chain glue (span.glueAfter) adjacent to a target URL on either side
+ * is redacted too so labels like `)[token=secret](` cannot leak between spans.
  */
 export function maskNormalizedHttpUrls(
   text: string,
@@ -355,13 +374,31 @@ export function maskNormalizedHttpUrls(
   if (!text || normalizedLinks.length === 0) return text;
   const targets = new Set(normalizedLinks.filter(Boolean));
   if (targets.size === 0) return text;
+  const spans = [...bareUrlSpans(text)];
   let out = '';
   let cursor = 0;
-  for (const span of bareUrlSpans(text)) {
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]!;
     out += text.slice(cursor, span.start);
     const validated = validatedHttpUrl(span.clean);
-    out += validated && targets.has(validated) ? placeholder : span.clean;
+    const maskThis = Boolean(validated && targets.has(validated));
+    out += maskThis ? placeholder : span.clean;
     cursor = span.end;
+
+    const glue = span.glueAfter;
+    if (!glue || glue.end <= glue.start) continue;
+    // Mask glue when either adjacent URL is a redaction target (label may hold secrets).
+    let maskNext = false;
+    const next = spans[i + 1];
+    if (next) {
+      const nextValidated = validatedHttpUrl(next.clean);
+      maskNext = Boolean(nextValidated && targets.has(nextValidated));
+    }
+    if (maskThis || maskNext) {
+      // Skip any peel gap before the closer, then redact [closer, nextScheme).
+      out += placeholder;
+      cursor = glue.end;
+    }
   }
   out += text.slice(cursor);
   return out;

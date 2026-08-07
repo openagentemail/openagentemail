@@ -257,10 +257,12 @@ describe('extractLinks', () => {
     // Monster merge must not appear as a single extracted URL.
     expect(extractHttpLinks(text).join(' ')).not.toContain(')[Confirm](');
     const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
-    expect(masked).toBe('[Verify](•••)[Confirm](•••)');
+    // Glue `)[Confirm](` is redacted with the URLs (F54) so labels cannot leak secrets.
+    expect(masked).toBe('[Verify](•••••••••)');
     expect(masked).not.toContain('a.example');
     expect(masked).not.toContain('b.example');
     expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('Confirm');
   });
 
   test('unbalanced ) without a glued next scheme stays inside the URL', () => {
@@ -292,13 +294,15 @@ describe('extractLinks', () => {
       'https://x.example/pay',
       'https://y.example/confirm',
     ]);
-    expect(maskNormalizedHttpUrls(md, extractHttpLinks(md))).toBe('[a](•••)[b](•••)');
+    expect(maskNormalizedHttpUrls(md, extractHttpLinks(md))).toBe('[a](•••••••••)');
 
     const tight = 'https://x.example/a)(https://y.example/b';
     expect([...bareUrlSpans(tight)].map((s) => s.clean)).toEqual([
       'https://x.example/a',
       'https://y.example/b',
     ]);
+    // glue is `)(` → three placeholders concatenated
+    expect(maskNormalizedHttpUrls(tight, extractHttpLinks(tight))).toBe('•••••••••');
 
     const bracketChain = '[https://x.example/a][https://y.example/b]';
     expect([...bareUrlSpans(bracketChain)].map((s) => s.clean)).toEqual([
@@ -318,9 +322,44 @@ describe('extractLinks', () => {
       'https://a.example/verify?next=https://x.example/',
       'https://b.example/confirm',
     ]);
-    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe(
-      '[Verify](•••)[Confirm](•••)',
-    );
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe('[Verify](•••••••••)');
+  });
+
+  test('Markdown chain glue between URLs is redacted with the links (F54)', () => {
+    const text =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    const links = extractHttpLinks(text);
+    expect(links).toEqual([
+      'https://example.com/confirm',
+      'https://safe.example/',
+    ]);
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(2);
+    expect(spans[0]!.glueAfter).toEqual({
+      start: text.indexOf(')[token=secret]('),
+      end: text.indexOf('https://safe.example/'),
+    });
+    const masked = maskNormalizedHttpUrls(text, links);
+    // Trailing Markdown `)` after the second URL stays; glue+URLs are placeholders.
+    expect(masked).toBe('Verify •••••••••)');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('example.com');
+  });
+
+  test('glue redacts when only one adjacent URL is a target (F54)', () => {
+    const text =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    const onlyFirst = maskNormalizedHttpUrls(text, ['https://example.com/confirm']);
+    expect(onlyFirst).not.toContain('token');
+    expect(onlyFirst).not.toContain('secret');
+    expect(onlyFirst).toContain('safe.example');
+
+    const onlySecond = maskNormalizedHttpUrls(text, ['https://safe.example/']);
+    expect(onlySecond).not.toContain('token');
+    expect(onlySecond).not.toContain('secret');
+    expect(onlySecond).toContain('example.com/confirm');
   });
 
   test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {

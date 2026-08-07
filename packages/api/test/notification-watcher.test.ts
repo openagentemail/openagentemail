@@ -574,8 +574,9 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain('a.example');
     expect(body).not.toContain('b.example');
     expect(body).not.toContain('https://');
-    // Markdown structure may remain between placeholders; URLs must not.
-    expect(body).toContain('[Verify](•••)[Confirm](•••)');
+    // F54: chain glue (including label) is redacted with the URLs.
+    expect(body).toContain('[Verify](•••••••••)');
+    expect(body).not.toContain('Confirm');
   });
 
   test('tier 2 masks a full URL that contains an unbalanced ) mid-path', async () => {
