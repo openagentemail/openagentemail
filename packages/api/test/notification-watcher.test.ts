@@ -1090,6 +1090,26 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is 123-456')).toEqual([]);
   });
 
+  test('mixed space+punctuation alnum seps mask under strong cue (F87)', () => {
+    expect(extractMetaAlnumCodes('Your verification code is ABC - 123')).toEqual(['ABC - 123']);
+    expect(extractMetaAlnumCodes('Your code is A1 - B2 - C3')).toEqual(['A1 - B2 - C3']);
+    expect(extractMetaAlnumCodes('Your code is ABC--123')).toEqual(['ABC--123']);
+    expect(extractMetaAlnumCodes('Your code is ABC－ 123')).toEqual(['ABC－ 123']);
+    expect(extractMetaAlnumCodes('Ref ABC - 123 attached')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your code is word - another')).toEqual([]);
+    expect(extractMetaAlnumCodes('Your verification code is Mar - 2026')).toEqual([]);
+    expect(maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is ABC - 123',
+      codes: [],
+      links: [],
+      preview: '',
+    }).subject).toBe('Your verification code is •••');
+    // Prior tight/space paths still work.
+    expect(extractMetaAlnumCodes('Your code is ABC-123')).toEqual(['ABC-123']);
+    expect(extractMetaAlnumCodes('Your code is ABC 123')).toEqual(['ABC 123']);
+  });
+
   test('tier 2 masks fullwidth alnum OTP under strong cue (F86)', () => {
     // Fullwidth mixed continuous.
     expect(extractMetaAlnumCodes('您的验证码是 Ａ１Ｂ２Ｃ３')).toEqual(['Ａ１Ｂ２Ｃ３']);
@@ -1759,6 +1779,76 @@ describe('mail-arrival notification watcher', () => {
     });
     expect(body).toContain(longLink);
     expect(body).not.toContain(`${longLink.slice(0, PUSH_OTP_ENTRY_CHARS)}…`);
+  });
+
+  test('JSON-escape packing keeps long signed links whole (F88)', async () => {
+    // Backslash-heavy subject expands under JSON.stringify; link must stay complete.
+    const longLink = `https://example.com/verify?token=${'a'.repeat(2800)}&sig=${'b'.repeat(80)}`;
+    const slashSubject = `${'\\'.repeat(400)}verify`;
+    const body = buildMailArrivalMessage(
+      'a@test.example',
+      3,
+      true,
+      {
+        subject: slashSubject,
+        from: 'auth@example.com',
+        preview: 'x'.repeat(500),
+        codes: [],
+        links: [longLink],
+      },
+      undefined,
+      { clickUrl: 'https://dash.example/ui' },
+    );
+    // Full link present or honest omit — never mid-truncated with ….
+    if (body.includes('https://example.com/verify')) {
+      expect(body).toContain(longLink);
+      expect(body).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
+    } else {
+      expect(body).toMatch(/\(\+\d+ more links, open the dashboard to view\)/);
+      expect(body).not.toContain('https://example.com/verify?token=');
+    }
+
+    // Through publish(overflow=truncate): link still complete in ntfy JSON.
+    const { NtfyNotificationService, NTFY_REQUEST_MAX_BYTES, jsonEscapedByteLength } =
+      await import('../src/lib/notify.ts');
+    const { config } = await import('../src/lib/config.ts');
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    const captured: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      captured.push(String(init?.body ?? ''));
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await new NtfyNotificationService().publish({
+        target: 'user',
+        title: 'openagent.email new mail',
+        message: body,
+        level: 'urgent',
+        tags: ['email'],
+        click: 'https://dash.example/ui',
+        overflow: 'truncate',
+      });
+      expect(captured).toHaveLength(1);
+      expect(Buffer.byteLength(captured[0]!, 'utf8')).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+      const parsed = JSON.parse(captured[0]!) as { message: string };
+      if (parsed.message.includes('https://example.com/verify')) {
+        expect(parsed.message).toContain(longLink);
+        expect(parsed.message).not.toMatch(/https:\/\/example\.com\/verify[^\n]*…/);
+      } else {
+        expect(parsed.message).toMatch(/more links/);
+      }
+      // Packed body already under escaped budget for typical framing.
+      expect(jsonEscapedByteLength(body)).toBeLessThanOrEqual(NTFY_REQUEST_MAX_BYTES);
+    } finally {
+      globalThis.fetch = originalFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 
   test('tier 3 drops tail links with +N note under budget (F79)', () => {

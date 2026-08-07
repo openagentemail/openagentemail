@@ -157,6 +157,17 @@ describe('UI static asset contract', () => {
     }
   });
 
+  test('confirm modal exposes dialog semantics for tier-3 risk (F89)', () => {
+    expect(UI_HTML).toMatch(
+      /id="confirm-modal"[\s\S]*?role="dialog"[\s\S]*?aria-modal="true"/,
+    );
+    expect(UI_HTML).toContain('aria-labelledby="confirm-modal-title"');
+    expect(UI_HTML).toContain('aria-describedby="confirm-modal-text confirm-modal-risk"');
+    expect(UI_HTML).toContain('id="confirm-modal-title"');
+    expect(UI_HTML).toContain('id="confirm-modal-text"');
+    expect(UI_HTML).toContain('id="confirm-modal-risk"');
+  });
+
   // A15：landmark 挂在包住两个面板的 inbox 容器上，移动 list 态才有可见 <main>
   test('exactly three mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');

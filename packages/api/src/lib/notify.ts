@@ -526,6 +526,48 @@ function jsonStringEscapeCost(point: string): number {
 }
 
 /**
+ * UTF-8 byte length of `text` after JSON string escaping (content only, no
+ * surrounding quotes). Used by the watcher to pack under the same budget that
+ * publish() enforces after serialization (F88).
+ */
+export function jsonEscapedByteLength(text: string): number {
+  let total = 0;
+  for (const point of text) total += jsonStringEscapeCost(point);
+  return total;
+}
+
+/**
+ * Available UTF-8 bytes for the ntfy JSON `message` field content after framing
+ * (topic/title/priority/tags/click). Mirrors publish() click-drop: if including
+ * click overflows the request cap, click is dropped before measuring (F76/F88).
+ * Conservative default topic is max ntfy length so watcher packing never exceeds
+ * the live physical topic overhead.
+ */
+export function notifyAvailableMessageBytes(options: {
+  title: string;
+  level: NotifyLevel;
+  tags?: string[];
+  click?: string;
+  topic?: string;
+}): number {
+  const topic = options.topic ?? 'x'.repeat(64);
+  const basePayload = {
+    topic,
+    title: options.title,
+    message: '',
+    priority: priority(options.level),
+    ...(options.tags?.length ? { tags: options.tags } : {}),
+  };
+  let framing = JSON.stringify(
+    options.click ? { ...basePayload, click: options.click } : basePayload,
+  );
+  if (options.click && Buffer.byteLength(framing, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+    framing = JSON.stringify(basePayload);
+  }
+  return Math.max(0, NTFY_REQUEST_MAX_BYTES - Buffer.byteLength(framing, 'utf8'));
+}
+
+/**
  * Truncate `text` so its JSON string-escape length is ≤ maxEscapedBytes.
  * Code-point aligned (same discipline as boundTextBytes); reserves room for `…`.
  * Used only for ntfy publish message bodies after field caps — a second line of

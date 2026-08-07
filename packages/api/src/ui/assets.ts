@@ -161,7 +161,13 @@ export const UI_HTML = `<!doctype html>
     </div>
 
     <div class="modal-overlay" id="confirm-modal" hidden>
-      <div class="modal-card">
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        aria-describedby="confirm-modal-text confirm-modal-risk"
+      >
         <h2 id="confirm-modal-title">Confirm</h2>
         <p id="confirm-modal-text"></p>
         <p id="confirm-modal-risk" class="modal-warn" hidden></p>

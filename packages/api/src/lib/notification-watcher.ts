@@ -19,7 +19,13 @@ import {
   type PushContentTier,
 } from './identities.ts';
 import { connectImap, messageRecipients } from './imap.ts';
-import { NotifyError, type NotifyService, notificationService } from './notify.ts';
+import {
+  jsonEscapedByteLength,
+  notifyAvailableMessageBytes,
+  NotifyError,
+  type NotifyService,
+  notificationService,
+} from './notify.ts';
 import {
   canonicalDigits,
   extractHttpLinks,
@@ -135,13 +141,15 @@ const MORE_LINKS_NOTE = (n: number) =>
   `(+${n} more links, open the dashboard to view)`;
 
 /**
- * Pack full verification links under the remaining UTF-8 body budget (F79).
- * Never mid-truncates a URL; drops the tail and appends a +N note when needed.
+ * Pack full verification links under the remaining **JSON-escaped** body budget
+ * (F79/F88). Never mid-truncates a URL; drops the tail and appends a +N note.
+ * Measure with jsonEscapedByteLength so packing matches ntfy publish framing.
  */
 export function packPushLinkLines(
   baseBody: string,
   links: string[],
-  maxBytes = PUSH_MESSAGE_MAX_BYTES,
+  maxEscapedBytes = PUSH_MESSAGE_MAX_BYTES,
+  measure: (text: string) => number = jsonEscapedByteLength,
 ): string[] {
   if (links.length === 0) return [];
   const candidates = boundPushLinkEntries(links);
@@ -153,7 +161,7 @@ export function packPushLinkLines(
     const stillDrop = dropped + (candidates.length - tryKept.length);
     const note = stillDrop > 0 ? `\n${MORE_LINKS_NOTE(stillDrop)}` : '';
     const trial = `${baseBody}\nLinks:\n${tryKept.join('\n')}${note}`;
-    if (Buffer.byteLength(trial, 'utf8') <= maxBytes) {
+    if (measure(trial) <= maxEscapedBytes) {
       kept.push(candidates[i]!);
       continue;
     }
@@ -165,7 +173,7 @@ export function packPushLinkLines(
     // Even one full link does not fit; prefer an honest note over a broken URL.
     if (links.length > 0) {
       const onlyNote = `${baseBody}\nLinks:\n${MORE_LINKS_NOTE(links.length)}`;
-      if (Buffer.byteLength(onlyNote, 'utf8') <= maxBytes) {
+      if (measure(onlyNote) <= maxEscapedBytes) {
         return [`Links:\n${MORE_LINKS_NOTE(links.length)}`];
       }
     }
@@ -176,6 +184,24 @@ export function packPushLinkLines(
   // dropped already includes candidates not kept + beyond PUSH_OTP_ITEM_MAX.
   if (dropped > 0) out.push(MORE_LINKS_NOTE(dropped));
   return out;
+}
+
+/**
+ * Truncate plain text so its JSON-escaped form is ≤ maxEscapedBytes (F88).
+ * Prefer whole code points; used for Preview when packing under ntfy budget.
+ */
+export function boundPreviewByEscapedBytes(text: string, maxEscapedBytes: number): string {
+  if (jsonEscapedByteLength(text) <= maxEscapedBytes) return text;
+  if (maxEscapedBytes <= 0) return '';
+  let used = 0;
+  let end = 0;
+  for (const point of text) {
+    const cost = jsonEscapedByteLength(point);
+    if (used + cost > maxEscapedBytes) break;
+    used += cost;
+    end += point.length;
+  }
+  return text.slice(0, end);
 }
 
 /**
@@ -244,15 +270,29 @@ const META_ALNUM_OTP_RE = new RegExp(
 const META_ALNUM_GROUP = `[${META_ALNUM_CHAR}]{2,4}`;
 /**
  * Split of otp.ts DELIMITED_OTP_SEP_CLASS: non-whitespace vs whitespace.
+ * F87: sep runs of 1–3 that include **at least one tight** sep so `ABC - 123`
+ * and `ABC--123` match, while pure-space chains stay on F85 paths and English
+ * `code is ABC-123` cannot glue via space-only gaps.
  */
 const META_ALNUM_SEP_TIGHT = '[-–—.\uFF0D\uFF0E]';
 const META_ALNUM_SEP_SPACE =
   '[\\t \\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF]';
-// 2–4 groups with tight seps; lead blocks mid-chain after alnum+tight-sep.
+const T = META_ALNUM_SEP_TIGHT;
+const S = META_ALNUM_SEP_SPACE;
+/** 1–3 seps with ≥1 tight char (enumerated; max length 3). */
+const META_ALNUM_SEP_RUN_WITH_TIGHT =
+  `(?:${T}|${T}${T}|${T}${T}${T}|${T}${S}|${S}${T}|${T}${S}${T}|${T}${T}${S}|${S}${T}${T}|${T}${S}${S}|${S}${T}${S}|${S}${S}${T})`;
+/**
+ * Mid-chain lead: alnum then a sep-run that ends in a tight sep
+ * (blocks `AB - CD` starting at CD; allows `is ABC-123` after a bare space).
+ */
+const META_ALNUM_LEAD_MID =
+  `(?<![${META_ALNUM_CHAR}](?:${S}|${T}){0,2}${T})`;
+// 2–4 groups with mixed sep runs that include a tight separator (F87).
 const META_ALNUM_DELIMITED_TIGHT = new RegExp(
-  `(?<![${META_ALNUM_CHAR}]${META_ALNUM_SEP_TIGHT})${META_ALNUM_BOUND_LEFT}` +
-    `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_TIGHT}${META_ALNUM_GROUP}){1,3})` +
-    `(?!${META_ALNUM_SEP_TIGHT}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
+  `${META_ALNUM_LEAD_MID}${META_ALNUM_BOUND_LEFT}` +
+    `(${META_ALNUM_GROUP}(?:${META_ALNUM_SEP_RUN_WITH_TIGHT}${META_ALNUM_GROUP}){1,3})` +
+    `(?!${META_ALNUM_SEP_RUN_WITH_TIGHT}[${META_ALNUM_CHAR}])${META_ALNUM_BOUND_RIGHT}`,
   'g',
 );
 /**
@@ -350,7 +390,14 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
     push(match[1]!);
   }
   for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT)) {
-    push(match[1]!);
+    const form = match[1]!;
+    // Year-shaped pure-digit groups (Mar - 2026) — privacy-safe to skip (F87 nit).
+    const groups = form
+      .split(new RegExp(`${META_ALNUM_SEP_RUN_WITH_TIGHT}`))
+      .map((g) => g.trim())
+      .filter(Boolean);
+    if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
+    push(form);
   }
   return codes;
 }
@@ -473,6 +520,12 @@ export function maskTier2Metadata(
   return { from, subject };
 }
 
+/** Options for packing under the live ntfy JSON message budget (F88). */
+export type BuildMailArrivalOptions = {
+  /** When set, framing budget accounts for ntfy click (with click-drop). */
+  clickUrl?: string;
+};
+
 /** Build the human-facing push body for one identity's content tier. */
 export function buildMailArrivalMessage(
   address: string,
@@ -480,7 +533,20 @@ export function buildMailArrivalMessage(
   hasOtpOrLink: boolean,
   extras: MailContentExtras,
   maskedTier2Meta?: { from: string; subject: string },
+  options: BuildMailArrivalOptions = {},
 ): string {
+  // Pack under the JSON-escaped message budget so full links survive publish()
+  // serialization (F88). Conservative max topic length matches ntfy cap.
+  const level = hasOtpOrLink ? 'urgent' : 'normal';
+  const availableEscaped = notifyAvailableMessageBytes({
+    title: 'openagent.email new mail',
+    level,
+    tags: ['email'],
+    click: options.clickUrl,
+  });
+  // Also respect local raw-byte headroom (historical PUSH_MESSAGE_MAX_BYTES).
+  const maxEscaped = Math.min(availableEscaped, PUSH_MESSAGE_MAX_BYTES);
+
   const lines: string[] = [
     hasOtpOrLink
       ? `${address} received new email (contains OTP or verification link)`
@@ -504,15 +570,53 @@ export function buildMailArrivalMessage(
   }
 
   if (tier >= 3) {
-    if (extras.preview) lines.push(`Preview: ${extras.preview}`);
     const codes = boundPushOtpEntries(extras.codes);
-    if (codes.length) lines.push(`Codes: ${codes.join(', ')}`);
-    // Links: full URLs only; pack under total body budget (F79).
-    const baseForLinks = lines.join('\n');
-    lines.push(...packPushLinkLines(baseForLinks, extras.links));
+    const codesLine = codes.length ? `Codes: ${codes.join(', ')}` : '';
+    // Prefer full links: pack links first with codes, shrink/drop Preview.
+    const baseCore = lines.join('\n') + (codesLine ? `\n${codesLine}` : '');
+    let previewLine = extras.preview ? `Preview: ${extras.preview}` : '';
+
+    const tryWithPreview = (preview: string): string => {
+      const base =
+        preview.length > 0
+          ? `${lines.join('\n')}\n${preview}${codesLine ? `\n${codesLine}` : ''}`
+          : baseCore;
+      const linkLines = packPushLinkLines(base, extras.links, maxEscaped);
+      return linkLines.length ? `${base}\n${linkLines.join('\n')}` : base;
+    };
+
+    let body = tryWithPreview(previewLine);
+    if (jsonEscapedByteLength(body) > maxEscaped && extras.preview) {
+      // Shrink preview so links still fit whole.
+      const withoutPreview = tryWithPreview('');
+      const roomForPreview =
+        maxEscaped -
+        jsonEscapedByteLength(withoutPreview) -
+        jsonEscapedByteLength('\nPreview: ');
+      if (roomForPreview > 0) {
+        const trimmed = boundPreviewByEscapedBytes(extras.preview, roomForPreview);
+        previewLine = trimmed ? `Preview: ${trimmed}` : '';
+        body = tryWithPreview(previewLine);
+      } else {
+        body = withoutPreview;
+      }
+    }
+    // Drop preview entirely if still over (keep full links / note).
+    if (jsonEscapedByteLength(body) > maxEscaped && previewLine) {
+      body = tryWithPreview('');
+    }
+    // Last resort: omit links with honest note if core framing alone is huge.
+    if (jsonEscapedByteLength(body) > maxEscaped && extras.links.length > 0) {
+      const coreOnly = tryWithPreview('');
+      if (jsonEscapedByteLength(coreOnly) <= maxEscaped) return coreOnly;
+      const noteOnly = packPushLinkLines(baseCore, extras.links, maxEscaped);
+      body = noteOnly.length ? `${baseCore}\n${noteOnly.join('\n')}` : baseCore;
+    }
+    return body;
   }
 
-  return boundPushMessage(lines.join('\n'));
+  // Tier 1–2: raw byte bound is fine (no long verify links).
+  return boundPushMessage(lines.join('\n'), Math.min(PUSH_MESSAGE_MAX_BYTES, maxEscaped));
 }
 
 /** Process one newly delivered message. Exported for policy/security tests. */
@@ -579,14 +683,15 @@ export async function processWatchedMessage(
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const tier = resolvePushContentTier(current);
       if (tier === 2 && !tier2Meta) tier2Meta = maskTier2Metadata(extras);
+      const level = hasOtpOrLink ? 'urgent' : 'normal';
       const body = buildMailArrivalMessage(
         current.address,
         tier,
         hasOtpOrLink,
         extras,
         tier === 2 ? tier2Meta : undefined,
+        { clickUrl: options.clickUrl },
       );
-      const level = hasOtpOrLink ? 'urgent' : 'normal';
       // Re-check at the publish fetch boundary (after publish's own awaits).
       // Abort only when privacy tightened (delete or downgrade); upgrades keep
       // the already-safe lower-tier body. `tier` is closed over per attempt.
