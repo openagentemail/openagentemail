@@ -592,6 +592,18 @@ describe('extractLinks', () => {
       clean: 'https://a.com/x',
       trail: "'",
     });
+    // Even trailing '' without openQuoted: leave both (parity even).
+    expect(splitBareUrlCandidate("https://a.com/x''")).toEqual({
+      clean: "https://a.com/x''",
+      trail: '',
+    });
+  });
+
+  test('openQuoted peels only one closing quote (F63)', () => {
+    // URL legitimately ends with ' + outer prose quote → keep URL-terminal '.
+    const text = "Use 'https://example.com/verify/token'' now";
+    expect(extractHttpLinks(text)).toEqual(["https://example.com/verify/token'"]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe("Use '•••' now");
   });
 });
 

@@ -167,9 +167,11 @@ function findSchemePositions(text: string): number[] {
 
 /**
  * Peel trailing prose from a bounded candidate [0, length): `.,;`, unbalanced
- * trailing `)`/`]`, and trailing `'` when the apostrophe count is odd — or when
- * the span opened after a prose `'` (outer quote; F61) so even counts still
- * drop one closing quote after an internal apostrophe (e.g. o'brien').
+ * trailing `)`/`]`, and trailing `'`.
+ * - openQuoted false: peel `'` only while the remaining apostrophe count is odd.
+ * - openQuoted true (span started after prose `'`): peel exactly one closing
+ *   `'` via a one-shot flag (F61/F63) — odd-parity must not fire as well, or a
+ *   legal URL-terminal `'` would be stripped after the outer closer (F63).
  * O(length).
  */
 function peelTrailingProse(
@@ -192,7 +194,7 @@ function peelTrailingProse(
     else if (ch === "'") apostrophes += 1;
   }
 
-  // At most one openQuoted peel, after any trailing .,; (not only original EOS).
+  // openQuoted: authorize exactly one outer closer peel (after any .,;).
   let peelOpenQuote = openQuoted;
   let end = candidate.length;
   while (end > 0) {
@@ -211,13 +213,20 @@ function peelTrailingProse(
       end -= 1;
       continue;
     }
-    if (ch === "'" && (apostrophes % 2 === 1 || peelOpenQuote)) {
-      // Odd count: classic prose closer. openQuoted: peel one outer closer even
-      // when an internal apostrophe made the total even (F61), including after .,;
-      apostrophes -= 1;
-      end -= 1;
-      peelOpenQuote = false;
-      continue;
+    if (ch === "'") {
+      if (openQuoted) {
+        // F63: only the one-shot flag; parity never stacks a second peel.
+        if (!peelOpenQuote) break;
+        peelOpenQuote = false;
+        apostrophes -= 1;
+        end -= 1;
+        continue;
+      }
+      if (apostrophes % 2 === 1) {
+        apostrophes -= 1;
+        end -= 1;
+        continue;
+      }
     }
     break;
   }
