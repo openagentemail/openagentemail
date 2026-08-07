@@ -8,7 +8,11 @@
  *   URL or anchor text matches verif|confirm|activate|reset|signin|login.
  */
 
-const CODE_KEYWORDS = [
+/**
+ * Keywords that unlock continuous 4–8 digit extraction (any nearby match).
+ * Exported so alignment tests can keep STRONG_OTP_CUES in sync (F71).
+ */
+export const CODE_KEYWORDS = [
   'code',
   'verification',
   'verify',
@@ -24,12 +28,59 @@ const CODE_KEYWORDS = [
   '校验码',
   '確認コード',
   '認証コード',
-];
+] as const;
+
+/**
+ * Strong cues for year-shaped continuous codes (F65) and delimited forms
+ * (F68/F71). Only terms that *themselves* mean "a code" / PIN / OTP.
+ *
+ * Not listed as array entries (weak / action / generic — still in
+ * CODE_KEYWORDS for continuous non-year extract): verification, verify,
+ * confirmation, one-time, one time. Those alone must not unlock year PIN or
+ * delimited OTP. The phrase "security code" is also kept out of this array
+ * as a whole, but bare `\bcode\b` still matches inside it — intentional so
+ * Microsoft/Discord-style "security code" mail keeps strong paths.
+ */
+export const STRONG_OTP_CUES = [
+  'code',
+  'otp',
+  'passcode',
+  'pin',
+  '验证码',
+  '动态码',
+  '校验码',
+  '確認コード',
+  '認証コード',
+] as const;
 
 const LINK_INTENT = /verif|confirm|activate|reset|signin|sign-in|login|log-in/i;
 
 /** How many characters around a digit run to scan for a keyword. */
 const KEYWORD_WINDOW = 80;
+
+/** Escape a literal for embedding in a RegExp source. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Built from STRONG_OTP_CUES so Latin tokens keep word boundaries and CJK/JP
+ * tokens match as substrings (same surface as the former hand-written re).
+ */
+function buildStrongOtpCueRe(cues: readonly string[]): RegExp {
+  const latin: string[] = [];
+  const other: string[] = [];
+  for (const cue of cues) {
+    if (/^[a-z]+(?:-[a-z]+)*$/i.test(cue)) latin.push(escapeRegExp(cue));
+    else other.push(escapeRegExp(cue));
+  }
+  const parts: string[] = [];
+  if (latin.length > 0) parts.push(`\\b(?:${latin.join('|')})\\b`);
+  parts.push(...other);
+  return new RegExp(parts.join('|'));
+}
+
+const STRONG_OTP_CUE = buildStrongOtpCueRe(STRONG_OTP_CUES);
 
 export function htmlToText(html: string): string {
   let s = html;
@@ -80,13 +131,6 @@ function decodeEntities(s: string): string {
 }
 
 /**
- * Strong OTP cues for year-shaped continuous codes (F65) and delimited forms
- * (F68). Broader CODE_KEYWORDS alone would false-positive on roadmap years and
- * phone-like `555-1234` near "call".
- */
-const STRONG_OTP_CUE = /\b(?:code|otp|passcode|pin)\b|验证码|动态码/;
-
-/**
  * Single separator class for delimited OTP (F68/F70): hyphen, en/em dash,
  * period, ASCII space/tab, and common Unicode spaces (NBSP, NNBSP, em space,
  * ideographic space, BOM as space, …).
@@ -98,13 +142,23 @@ const STRONG_OTP_CUE = /\b(?:code|otp|passcode|pin)\b|验证码|动态码/;
 export const DELIMITED_OTP_SEP_CLASS =
   '[-–—.\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
 
-/** Non-global: continuous run followed by sep + 3–4 digits (half of delimited). */
+/**
+ * One to three separator chars between digit halves (F72). Covers ` - `,
+ * double space, ` – `; four+ seps (e.g. `123    456`) intentionally miss —
+ * rare layout, prefer a bounded false-positive surface over open-ended sep runs.
+ */
+const DELIMITED_OTP_SEP_MAX = 3;
+const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_SEP_MAX}}`;
+/** Lookbehind for half-suppress: max half digits + max seps + small margin. */
+const HALF_OF_DELIMITED_BEFORE_CHARS = 4 + DELIMITED_OTP_SEP_MAX + 3;
+
+/** Non-global: continuous run followed by sep-run + 3–4 digits (half of delimited). */
 const HALF_OF_DELIMITED_AFTER = new RegExp(
-  `^${DELIMITED_OTP_SEP_CLASS}\\d{3,4}\\b`,
+  `^${DELIMITED_OTP_SEP_RUN}\\d{3,4}\\b`,
 );
-/** Non-global: 3–4 digits + sep immediately before a continuous run. */
+/** Non-global: 3–4 digits + sep-run immediately before a continuous run. */
 const HALF_OF_DELIMITED_BEFORE = new RegExp(
-  `\\b\\d{3,4}${DELIMITED_OTP_SEP_CLASS}$`,
+  `\\b\\d{3,4}${DELIMITED_OTP_SEP_RUN}$`,
 );
 
 /**
@@ -112,24 +166,25 @@ const HALF_OF_DELIMITED_BEFORE = new RegExp(
  * Callers must not share a single global instance across concurrent scans.
  */
 export function delimitedOtpCaptureRe(): RegExp {
-  return new RegExp(`\\b(\\d{3,4}${DELIMITED_OTP_SEP_CLASS}\\d{3,4})\\b`, 'g');
+  return new RegExp(`\\b(\\d{3,4}${DELIMITED_OTP_SEP_RUN}\\d{3,4})\\b`, 'g');
 }
 
 /**
  * Fresh global regex for continuous 4–8 digit runs and delimited OTP forms.
- * Delimited alternative is first so `1234-5678` / `1234\u00A05678` is one span.
- * Shared by extract half-suppression consumers and tier-2 mask scans (F70).
+ * Delimited alternative is first so `1234-5678` / `1234 - 5678` is one span.
+ * Shared by extractCodes output shapes and tier-2 mask/meta scans (F70/F72);
+ * half-suppress uses HALF_OF_DELIMITED_* built from the same SEP_RUN.
  */
 export function otpCodeRunRe(): RegExp {
   return new RegExp(
-    `\\b\\d{3,4}${DELIMITED_OTP_SEP_CLASS}\\d{3,4}\\b|\\b\\d{4,8}\\b`,
+    `\\b\\d{3,4}${DELIMITED_OTP_SEP_RUN}\\d{3,4}\\b|\\b\\d{4,8}\\b`,
     'g',
   );
 }
 
 /**
  * True when a continuous \d{4,8} run is one half of a delimited OTP shape
- * (`1234-5678` / `1234\u00A05678`). Only 3–4 digit sides participate (continuous
+ * (`1234-5678` / `1234 - 5678`). Only 3–4 digit sides participate (continuous
  * matches are ≥4, so length must be exactly 4); longer runs like
  * `123456-7890` stay continuous so they are not dropped without recovery.
  */
@@ -137,7 +192,7 @@ function isHalfOfDelimitedOtp(text: string, idx: number, digits: string): boolea
   if (digits.length < 3 || digits.length > 4) return false;
   const after = text.slice(idx + digits.length);
   if (HALF_OF_DELIMITED_AFTER.test(after)) return true;
-  const before = text.slice(Math.max(0, idx - 6), idx);
+  const before = text.slice(Math.max(0, idx - HALF_OF_DELIMITED_BEFORE_CHARS), idx);
   return HALF_OF_DELIMITED_BEFORE.test(before);
 }
 

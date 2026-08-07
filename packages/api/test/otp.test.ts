@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   BARE_URL_RE,
   bareUrlSpans,
+  CODE_KEYWORDS,
   extractCodes,
   extractHttpLinks,
   extractLinks,
@@ -9,6 +10,7 @@ import {
   htmlToText,
   maskNormalizedHttpUrls,
   splitBareUrlCandidate,
+  STRONG_OTP_CUES,
 } from '../src/lib/otp.ts';
 
 describe('htmlToText', () => {
@@ -121,6 +123,55 @@ describe('extractCodes', () => {
     // No strong cue: roadmap ranges and phone-like numbers stay out.
     expect(extractCodes('roadmap 2024-2025')).toEqual([]);
     expect(extractCodes('call 555-1234')).toEqual([]);
+  });
+
+  test('strong cues cover CJK/JP code words for delimited and years (F71)', () => {
+    expect(extractCodes('您的校验码是 123-456')).toEqual(['123-456']);
+    expect(extractCodes('確認コードは 123-456')).toEqual(['123-456']);
+    expect(extractCodes('認証コードは 123-456')).toEqual(['123-456']);
+    // Year path benefits from the same strong set.
+    expect(extractCodes('認証コード 2026')).toEqual(['2026']);
+    // Weak verification alone still does not unlock years.
+    expect(extractCodes('verification roadmap 2026')).toEqual([]);
+  });
+
+  test('STRONG_OTP_CUES stays aligned with CODE_KEYWORDS strong items (F71)', () => {
+    const strongSet = new Set<string>(STRONG_OTP_CUES);
+    const codeSet = new Set<string>(CODE_KEYWORDS);
+    const latinStrong = new Set(['code', 'otp', 'passcode', 'pin']);
+    for (const kw of CODE_KEYWORDS) {
+      const mustBeStrong = latinStrong.has(kw) || /码|コード/.test(kw);
+      if (mustBeStrong) {
+        expect(strongSet.has(kw)).toBe(true);
+      }
+    }
+    // No orphan strong cues outside the keyword list.
+    for (const cue of STRONG_OTP_CUES) {
+      expect(codeSet.has(cue)).toBe(true);
+    }
+    // Weak / action terms must remain outside the strong set.
+    for (const weak of [
+      'verification',
+      'verify',
+      'confirmation',
+      'one-time',
+      'one time',
+      'security code',
+    ] as const) {
+      expect(strongSet.has(weak)).toBe(false);
+      expect(codeSet.has(weak)).toBe(true);
+    }
+  });
+
+  test('multi-character separator runs extract delimited OTP (F72)', () => {
+    expect(extractCodes('Your code is 123 - 456')).toEqual(['123 - 456']);
+    expect(extractCodes('Your code is 123  456')).toEqual(['123  456']);
+    expect(extractCodes('Your code is 123 – 456')).toEqual(['123 – 456']);
+    expect(extractCodes('123 - 456')).toEqual([]);
+    // Half-suppression with multi-char seps.
+    expect(extractCodes('Your code is 1234 - 5678')).toEqual(['1234 - 5678']);
+    // Four+ seps intentionally miss (bounded false-positive surface).
+    expect(extractCodes('Your code is 123    456')).toEqual([]);
   });
 
   test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {

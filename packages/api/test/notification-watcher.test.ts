@@ -840,6 +840,34 @@ describe('mail-arrival notification watcher', () => {
     expect(body).not.toContain(`${nbsp}456`);
   });
 
+  test('maskSensitiveFragments masks multi-char sep form via canonical digits (F72)', () => {
+    expect(maskSensitiveFragments('code 123 - 456', ['123456'], [])).toBe('code •••');
+    expect(maskSensitiveFragments('code 123  456', ['123456'], [])).toBe('code •••');
+  });
+
+  test('tier 2 masks multi-char sep OTP in subject under policy=all (F72)', async () => {
+    const subject = 'Your code is 123 - 456';
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: ${subject}\r\n\r\nHello there, nothing sensitive.`,
+        subject,
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Subject:');
+    expect(body).toContain('•••');
+    expect(body).not.toContain('123 - 456');
+    expect(body).not.toContain('123');
+  });
+
   test('tier-2 build stays linear when body codes vastly outnumber meta digits', () => {
     const bodyCodes = Array.from({ length: 50_000 }, (_, i) => {
       // 6-digit distinct codes that do not appear in the short subject.
