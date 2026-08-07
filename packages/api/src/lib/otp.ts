@@ -308,13 +308,17 @@ function continuousOtpCaptureRe(): RegExp {
 
 /**
  * Keyword window around a match: slice the **original** text at original
- * offsets, then lowercase only the window (F99). Whole-string `toLowerCase()`
- * shifts later indices when case-fold expands (Turkish `İ` → `i`+combining
- * dot), so a pre-lowercased buffer must not be sliced with source indices.
+ * offsets, then NFKC + lowercase only the window (F99/F104). Whole-string
+ * `toLowerCase()` shifts later indices when case-fold expands (Turkish `İ` →
+ * `i`+combining dot), so a pre-lowercased buffer must not be sliced with
+ * source indices. NFKC lets compatibility-form keywords (fullwidth `ｃｏｄｅ`)
+ * match CODE_KEYWORDS / STRONG_OTP_CUE inside the window; the window feeds
+ * keyword search only, never extraction offsets, so NFKC length drift is safe.
  */
 function keywordWindow(text: string, idx: number, matchLen: number): string {
   return text
     .slice(Math.max(0, idx - KEYWORD_WINDOW), Math.min(text.length, idx + matchLen + KEYWORD_WINDOW))
+    .normalize('NFKC')
     .toLowerCase();
 }
 

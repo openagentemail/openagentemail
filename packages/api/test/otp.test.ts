@@ -142,6 +142,22 @@ describe('extractCodes', () => {
     expect(extractCodes(`${'ΐ'.repeat(50)}${labeled}`)).toEqual(['123456']);
   });
 
+  test('keyword window matches compatibility-form keywords (F104)', () => {
+    // Fullwidth keyword + fullwidth code: window NFKC lets `ｃｏｄｅ` hit `code`.
+    expect(extractCodes('ｃｏｄｅ １２３４５６')).toEqual(['１２３４５６']);
+    expect(extractCodes('Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ １２３４５６')).toEqual(['１２３４５６']);
+    // Fullwidth keyword + ASCII code.
+    expect(extractCodes('ｃｏｄｅ 123456')).toEqual(['123456']);
+    // ASCII keyword + fullwidth code (regression).
+    expect(extractCodes('code １２３４５６')).toEqual(['１２３４５６']);
+    // Delimited form under fullwidth strong cue.
+    expect(extractCodes('ｃｏｄｅ １２３-４５６')).toEqual(['１２３-４５６']);
+    // Year guard sees fullwidth strong cue inside the window.
+    expect(extractCodes('ｃｏｄｅ ２０２６')).toEqual(['２０２６']);
+    // No keyword at all: still rejected.
+    expect(extractCodes('ｈｅｌｌｏ １２３４５６')).toEqual([]);
+  });
+
   test('strong cues cover CJK/JP code words for delimited and years (F71)', () => {
     expect(extractCodes('您的校验码是 123-456')).toEqual(['123-456']);
     expect(extractCodes('確認コードは 123-456')).toEqual(['123-456']);
