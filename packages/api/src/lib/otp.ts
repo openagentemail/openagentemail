@@ -310,21 +310,21 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         end = i;
         // Quote/angle hard cut: glued non-ws tail may hold secrets (e.g. "token=).
         // Whitespace cuts never record a tail (balanced "url" / <url> keep delimiters).
+        // F58: resolve nextScheme *before* walking the tail so dense "https://a/N"x=
+        // fragments stay O(n) (walk is bounded by the next scheme, not the full suffix).
         if (
           (ch === '<' || ch === '>' || ch === '"') &&
           i + 1 < text.length &&
           !isJsWhitespace(text[i + 1]!)
         ) {
-          let tailEnd = i + 1;
-          while (tailEnd < text.length && !isJsWhitespace(text[tailEnd]!)) {
-            tailEnd += 1;
-          }
           while (probeIdx < schemePos.length && schemePos[probeIdx]! <= i) {
             probeIdx += 1;
           }
           const nextScheme = schemePos[probeIdx];
-          if (nextScheme !== undefined && nextScheme < tailEnd) {
-            tailEnd = nextScheme;
+          const scanLimit = nextScheme !== undefined ? nextScheme : text.length;
+          let tailEnd = i + 1;
+          while (tailEnd < scanLimit && !isJsWhitespace(text[tailEnd]!)) {
+            tailEnd += 1;
           }
           if (tailEnd > i) {
             tailCut = { start: i, end: tailEnd };
@@ -395,6 +395,14 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   }
 }
 
+/** Exclusive end of a span including any recorded glue/tail after the clean URL. */
+function spanExtentEnd(span: BareUrlSpan): number {
+  let end = span.end;
+  if (span.glueAfter && span.glueAfter.end > end) end = span.glueAfter.end;
+  if (span.tailAfter && span.tailAfter.end > end) end = span.tailAfter.end;
+  return end;
+}
+
 /**
  * Replace bare URLs in `text` whose validatedHttpUrl form is in `normalizedLinks`
  * with `placeholder`, keeping the original spelling span as the match (so
@@ -403,6 +411,9 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
  * is redacted too so labels like `)[token=secret](` cannot leak between spans.
  * Quote/angle tails (span.tailAfter) are redacted when this URL is a target so
  * `"token=secret` / `>token=secret` cannot leak after a hard cut (F55).
+ * After a glue/tail redaction lands on the next span start, invalid spans
+ * (validatedHttpUrl null) are swallowed into the redaction zone so nested
+ * `https://[token=…` cannot leak (F57). Valid spans always stop the chain.
  */
 export function maskNormalizedHttpUrls(
   text: string,
@@ -417,12 +428,21 @@ export function maskNormalizedHttpUrls(
   let cursor = 0;
   for (let i = 0; i < spans.length; i++) {
     const span = spans[i]!;
-    out += text.slice(cursor, span.start);
+    // Span already consumed while swallowing invalid neighbors after a prior cut.
+    if (cursor > span.start) {
+      cursor = Math.max(cursor, spanExtentEnd(span));
+      continue;
+    }
+    if (cursor < span.start) {
+      out += text.slice(cursor, span.start);
+    }
+
     const validated = validatedHttpUrl(span.clean);
     const maskThis = Boolean(validated && targets.has(validated));
     out += maskThis ? placeholder : span.clean;
     cursor = span.end;
 
+    let redactedAdjacent = false;
     const glue = span.glueAfter;
     if (glue && glue.end > glue.start) {
       // Mask glue when either adjacent URL is a redaction target (label may hold secrets).
@@ -436,6 +456,7 @@ export function maskNormalizedHttpUrls(
         // Skip any peel gap before the closer, then redact [closer, nextScheme).
         out += placeholder;
         cursor = glue.end;
+        redactedAdjacent = true;
       }
     }
 
@@ -444,6 +465,21 @@ export function maskNormalizedHttpUrls(
       // URL was redacted: redact glued " / < / > tail so secrets cannot stick.
       out += placeholder;
       cursor = tail.end;
+      redactedAdjacent = true;
+    }
+
+    // F57: glue/tail may stop at a nested scheme that is not a valid URL; swallow
+    // those invalid spans (and their own glue/tail) while they remain adjacent.
+    if (redactedAdjacent) {
+      let j = i + 1;
+      while (j < spans.length) {
+        const neighbor = spans[j]!;
+        if (neighbor.start !== cursor) break;
+        if (validatedHttpUrl(neighbor.clean) !== null) break;
+        cursor = spanExtentEnd(neighbor);
+        j += 1;
+      }
+      if (j > i + 1) i = j - 1;
     }
   }
   out += text.slice(cursor);

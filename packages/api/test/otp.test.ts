@@ -424,6 +424,65 @@ describe('extractLinks', () => {
     expect(maskNormalizedHttpUrls(glue, extractHttpLinks(glue))).not.toContain('token');
   });
 
+  test('invalid nested scheme after tail/glue is swallowed into redaction (F57)', () => {
+    // Codex: tail stops at nested scheme; nested span is invalid and must not leak.
+    const text = 'Verify https://example.com/confirm"x=https://[token=secret';
+    const links = extractHttpLinks(text);
+    expect(links).toEqual(['https://example.com/confirm']);
+    const masked = maskNormalizedHttpUrls(text, links);
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://[');
+    expect(masked.startsWith('Verify •••')).toBe(true);
+
+    // Chain of invalid nested schemes after quote tails.
+    const chain =
+      'See https://example.com/a"x=https://[bad"y=https://[worse';
+    const chainMasked = maskNormalizedHttpUrls(chain, extractHttpLinks(chain));
+    expect(chainMasked).not.toContain('bad');
+    expect(chainMasked).not.toContain('worse');
+    expect(chainMasked).not.toContain('https://[');
+    expect(chainMasked).not.toContain('token');
+
+    // Tail stops at a *valid* scheme that is not a mask target — leave it visible.
+    const keep =
+      'See https://a.example/x"https://b.example/visible';
+    const keepMasked = maskNormalizedHttpUrls(keep, ['https://a.example/x']);
+    expect(keepMasked).toContain('b.example/visible');
+    expect(keepMasked).not.toContain('a.example/x');
+
+    // Glue cut onto an invalid nested scheme — same swallow path.
+    const glueBad = 'See https://example.com/confirm)[x](https://[token=secret';
+    const glueMasked = maskNormalizedHttpUrls(glueBad, extractHttpLinks(glueBad));
+    expect(glueMasked).not.toContain('token');
+    expect(glueMasked).not.toContain('secret');
+    expect(glueMasked).not.toContain('https://[');
+  });
+
+  test('dense quote-tail fragments stay linear (F58)', () => {
+    // 4000 glued fragments: each "x= before the next https:// must not O(n²) scan.
+    const n = 4_000;
+    const dense = Array.from(
+      { length: n },
+      (_, i) => `https://a.example/${i}"x=`,
+    ).join('');
+    const started = performance.now();
+    const spans = [...bareUrlSpans(dense)];
+    const elapsed = performance.now() - started;
+    expect(spans).toHaveLength(n);
+    expect(spans[0]!.clean).toBe('https://a.example/0');
+    expect(spans[n - 1]!.clean).toBe(`https://a.example/${n - 1}`);
+    // Last fragment has no following scheme → tail may extend over "x=
+    expect(spans[0]!.tailAfter?.end).toBe(spans[1]!.start);
+    expect(elapsed).toBeLessThan(5_000);
+    // Masking must remain linear as well.
+    const maskStarted = performance.now();
+    const masked = maskNormalizedHttpUrls(dense, extractHttpLinks(dense));
+    expect(performance.now() - maskStarted).toBeLessThan(5_000);
+    expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('a.example');
+  });
+
   test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {
     const text = 'Verify https://example.com/confirm)[token=secret';
     const full = 'https://example.com/confirm)[token=secret';
