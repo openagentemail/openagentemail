@@ -12,6 +12,7 @@ import { simpleParser } from 'mailparser';
 import type { FetchMessageObject, ImapFlow } from 'imapflow';
 import { config } from './config.ts';
 import {
+  findIdentity,
   listIdentities,
   resolvePushContentTier,
   type Identity,
@@ -313,8 +314,8 @@ async function watchConnection(
             dispatch,
             {
               clickUrl: config.dashboardPublicUrl,
-              refreshIdentity: (address) =>
-                listIdentities().find((entry) => entry.address === address),
+              // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
+              refreshIdentity: (address) => findIdentity(address),
             },
           );
           watermark.uid = Math.max(watermark.uid ?? 0, message.uid);

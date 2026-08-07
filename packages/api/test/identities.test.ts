@@ -1,6 +1,6 @@
 // Identity-store tests. config.ts parses env at import time, so set the
 // required variables BEFORE importing anything that pulls it in.
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +27,7 @@ const {
   PUSH_TIER3_WARNING,
 } = await import('../src/lib/identities.ts');
 const { identitiesRoute } = await import('../src/routes/identities.ts');
+const { processWatchedMessage } = await import('../src/lib/notification-watcher.ts');
 
 /** Always use the process-wide config path (other files may race on DATA_DIR env). */
 const storeDir = () => config.dataDir;
@@ -280,5 +281,111 @@ describe('push content tier store and REST', () => {
     expect(findIdentity(other.identity.address)?.pushContentTier).toBeUndefined();
     // Sibling entry keeps its valid tier.
     expect(findIdentity(good.identity.address)?.pushContentTier).toBe(2);
+  });
+});
+
+describe('identity store mtime cache + address index (F41)', () => {
+  /** External rewrite that must miss the mtime cache even within the same ms. */
+  function writeStoreExternal(entries: Array<Record<string, unknown>>): void {
+    writeFileSync(storeFile(), JSON.stringify(entries, null, 2), { mode: 0o600 });
+    const bumped = Date.now() / 1000 + 2;
+    utimesSync(storeFile(), bumped, bumped);
+  }
+
+  test('findIdentity matches a full list scan (index correctness)', () => {
+    createIdentity({ localpart: 'idx-alpha' });
+    createIdentity({ localpart: 'idx-beta' });
+    setIdentityPushContentTier('idx-beta@test.example', 2);
+
+    const listed = listIdentities();
+    for (const row of listed) {
+      const found = findIdentity(row.address);
+      expect(found?.address).toBe(row.address);
+      expect(found?.pushContentTier).toBe(row.pushContentTier);
+      // Case-insensitive lookup.
+      expect(findIdentity(row.address.toUpperCase())?.address).toBe(row.address);
+    }
+    expect(findIdentity('missing-index@test.example')).toBeUndefined();
+  });
+
+  test('save invalidates cache so same-ms rewrites are visible without mtime help', () => {
+    const address = createIdentity({ localpart: 'same-ms-cache' })!.identity.address;
+    // Populate cache at current mtime.
+    expect(resolvePushContentTier(findIdentity(address)!)).toBe(1);
+
+    // In-process save path (explicit invalidate) must surface the new tier immediately.
+    setIdentityPushContentTier(address, 3);
+    expect(findIdentity(address)?.pushContentTier).toBe(3);
+    expect(resolvePushContentTier(findIdentity(address)!)).toBe(3);
+
+    // Second write in the same tick path: still visible after save.
+    setIdentityPushContentTier(address, 2);
+    expect(findIdentity(address)?.pushContentTier).toBe(2);
+  });
+
+  test('processWatchedMessage with findIdentity refresh stays under 1s on 5k store / 50 recipients', async () => {
+    const createdAt = '2026-08-02T00:00:00.000Z';
+    const bulk = Array.from({ length: 5_000 }, (_, i) => ({
+      address: `bulk${i}@test.example`,
+      createdAt,
+      // Mix tiers so refreshIdentity actually resolves something meaningful.
+      ...(i % 5 === 0 ? { pushContentTier: 2 as const } : {}),
+    }));
+    writeStoreExternal(bulk);
+
+    // Spot-check the indexed store loaded the bulk file.
+    expect(findIdentity('bulk0@test.example')?.address).toBe('bulk0@test.example');
+    expect(findIdentity('bulk4999@test.example')?.address).toBe('bulk4999@test.example');
+    expect(listIdentities()).toHaveLength(5_000);
+
+    // bulk0..bulk49: store has tier 2 when index % 5 === 0, else default tier 1.
+    // Snapshot pretends tier 3 so a working refreshIdentity is required for correctness.
+    const recipients = Array.from({ length: 50 }, (_, i) => ({
+      address: `bulk${i}@test.example`,
+      createdAt,
+      pushContentTier: 3 as const,
+    }));
+
+    const calls: unknown[] = [];
+    const started = performance.now();
+    await processWatchedMessage(
+      {
+        envelope: {
+          from: [{ name: 'auth', address: 'auth@example.net' }],
+          to: recipients.map((r) => ({ address: r.address })),
+          subject: 'Hello',
+        },
+        headers: Buffer.from(
+          recipients.map((r) => `Delivered-To: ${r.address}`).join('\r\n') + '\r\n',
+        ),
+        source: Buffer.from(
+          'From: auth@example.net\r\nSubject: Hello\r\n\r\nYour verification code is 482731\r\n',
+        ),
+      } as any,
+      recipients,
+      'otp',
+      {
+        publish: async (payload) => {
+          calls.push(payload);
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      {
+        // Production path after F41: O(1) indexed lookup + mtime/invalidate cache.
+        refreshIdentity: (address) => findIdentity(address),
+      },
+    );
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(calls).toHaveLength(50);
+
+    const bodies = calls.map((c) => (c as { message: string }).message);
+    // Store tier 2 (index % 5 === 0): subject/from, no Codes (not snapshot tier 3).
+    const tier2Body = bodies[0];
+    expect(tier2Body).toContain('Subject:');
+    expect(tier2Body).not.toContain('Codes:');
+    // Store default tier 1: interrupt only.
+    const tier1Body = bodies[1];
+    expect(tier1Body).not.toContain('Subject:');
+    expect(tier1Body).not.toContain('Codes:');
   });
 });

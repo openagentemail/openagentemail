@@ -12,7 +12,15 @@
  * v0.x; swap for sqlite if identity volume ever matters.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
@@ -95,16 +103,58 @@ function coerceIdentity(raw: Record<string, unknown>): Identity {
   return identity;
 }
 
+/**
+ * Parsed store cache keyed by mtimeMs. Cross-process writers rely on mtime
+ * changes (ms precision). In-process writers call invalidateStoreCache() so a
+ * same-tick rewrite is visible without waiting on mtime.
+ */
+type StoreCache = {
+  mtimeMs: number;
+  identities: Identity[];
+  byAddress: Map<string, Identity>;
+};
+
+let storeCache: StoreCache | undefined;
+
+function invalidateStoreCache(): void {
+  storeCache = undefined;
+}
+
+function buildAddressIndex(identities: Identity[]): Map<string, Identity> {
+  const byAddress = new Map<string, Identity>();
+  for (const identity of identities) {
+    byAddress.set(identity.address.toLowerCase(), identity);
+  }
+  return byAddress;
+}
+
 function load(): Identity[] {
   const path = storePath();
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) {
+    // Sentinel mtime so a later create is detected (file appears with real mtime).
+    if (storeCache?.mtimeMs === -1) return storeCache.identities;
+    storeCache = { mtimeMs: -1, identities: [], byAddress: new Map() };
+    return storeCache.identities;
+  }
   try {
+    const mtimeMs = statSync(path).mtimeMs;
+    if (storeCache && storeCache.mtimeMs === mtimeMs) {
+      return storeCache.identities;
+    }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!Array.isArray(parsed) || !parsed.every(isIdentityShape)) {
       throw new Error('invalid identity store shape');
     }
-    return parsed.map((entry) => coerceIdentity(entry as Record<string, unknown>));
-  } catch {
+    const identities = parsed.map((entry) => coerceIdentity(entry as Record<string, unknown>));
+    storeCache = {
+      mtimeMs,
+      identities,
+      byAddress: buildAddressIndex(identities),
+    };
+    return storeCache.identities;
+  } catch (err) {
+    invalidateStoreCache();
+    if ((err as Error).message === 'identity_store_corrupt') throw err;
     // Fail closed. Treating a damaged store as empty looks harmless until the
     // next create/rotate saves over it: every existing identity and token is
     // gone. The message carries no file content on purpose.
@@ -129,6 +179,8 @@ function save(identities: Identity[]): void {
   writeFileSync(tmp, JSON.stringify(identities, null, 2), { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
+  // Explicit invalidate: same-ms rewrites must be visible without mtime help.
+  invalidateStoreCache();
 }
 
 export function randomLocalpart(): string {
@@ -143,8 +195,8 @@ export function listIdentities(): Identity[] {
 }
 
 export function findIdentity(address: string): Identity | undefined {
-  const needle = address.toLowerCase();
-  return load().find((i) => i.address === needle);
+  load();
+  return storeCache?.byAddress.get(address.toLowerCase());
 }
 
 /** Generate a new scoped token. Plaintext is returned once; only its hash persists. */
