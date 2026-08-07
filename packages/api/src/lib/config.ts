@@ -46,6 +46,9 @@ function envUrl(fallback?: string) {
  * Public dashboard origin for ntfy click actions (F80). Rejects userinfo so
  * credentials never ride the notification channel. Internal ntfy URLs keep
  * envUrl() (credentials may be required on private networks).
+ * F114: query strings and fragments are rejected too — the value is attached
+ * verbatim as the ntfy click field on every mail-arrival push, so a copied
+ * authenticated URL (`…/ui?token=secret`) would leak the credential.
  */
 function dashboardPublicUrlEnv() {
   return z.preprocess(
@@ -55,12 +58,20 @@ function dashboardPublicUrlEnv() {
         (value) => {
           try {
             const url = new URL(value);
-            return url.username === '' && url.password === '';
+            return (
+              url.username === '' &&
+              url.password === '' &&
+              url.search === '' &&
+              url.hash === ''
+            );
           } catch {
             return false;
           }
         },
-        { message: 'DASHBOARD_PUBLIC_URL must not include credentials (userinfo)' },
+        {
+          message:
+            'DASHBOARD_PUBLIC_URL must not include credentials (userinfo, query, or fragment)',
+        },
       )
       .optional(),
   );
@@ -131,6 +142,8 @@ const envSchema = z.object({
   // Optional public origin of the human dashboard. When set, mail-arrival
   // ntfy pushes include a click action that opens this URL (no deep link).
   // Must not contain userinfo — credentials must not leave via ntfy (F80).
+  // Query/fragment are rejected too (F114): a copied authenticated URL would
+  // leak its token verbatim on every push.
   DASHBOARD_PUBLIC_URL: dashboardPublicUrlEnv(),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.

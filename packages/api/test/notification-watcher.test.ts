@@ -1502,6 +1502,32 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is ABC.123')).toContain('ABC.123');
   });
 
+  test('tier 2 masks compatibility-form alnum OTP beyond fullwidth (F113)', () => {
+    // Circled letters/digits NFKC-normalize to A1B2: extract original spelling + mask.
+    expect(extractMetaAlnumCodes('Your verification code is Ⓐ①Ⓑ②')).toContain('Ⓐ①Ⓑ②');
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is Ⓐ①Ⓑ②',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('Ⓐ①Ⓑ②');
+    // Lowercase circled + superscript digits (¹² NFKC → 12).
+    expect(extractMetaAlnumCodes('Your verification code is ⓐ¹ⓑ²')).toContain('ⓐ¹ⓑ²');
+    // Mathematical bold (surrogate-pair source) maps back to the right span.
+    expect(extractMetaAlnumCodes('Your verification code is 𝐀𝟏𝐁𝟐')).toContain('𝐀𝟏𝐁𝟐');
+    // Delimited compatibility form via the tight path.
+    expect(extractMetaAlnumCodes('Your verification code is Ⓐ①-Ⓑ②')).toContain('Ⓐ①-Ⓑ②');
+    // Multi-unit NFKC expansion (⑳ → 20) recovers the original span.
+    expect(extractMetaAlnumCodes('Your verification code is Ⓐ⑳Ⓑ')).toContain('Ⓐ⑳Ⓑ');
+    // Fullwidth fast path regression (same spelling, deduped across passes).
+    expect(extractMetaAlnumCodes('您的验证码是 Ａ１Ｂ２')).toEqual(['Ａ１Ｂ２']);
+    // No cue: rejected.
+    expect(extractMetaAlnumCodes('Reference Ⓐ①Ⓑ② attached')).toEqual([]);
+  });
+
   test('tier 2 masks delimited alnum OTP with strong cue (F84)', () => {
     expect(extractMetaAlnumCodes('Your verification code is ABC-123')).toContain('ABC-123');
     expect(extractMetaAlnumCodes('您的校验码是A1B-2C3')).toContain('A1B-2C3');

@@ -512,11 +512,102 @@ function escapeRegExpLiteral(s: string): string {
 }
 
 /**
+ * NFKC-normalize per code point, remembering for every normalized UTF-16 unit
+ * the source-unit offset it came from (F113). Per-code-point normalization is
+ * deliberate: the map only needs to be self-consistent for span recovery.
+ */
+function nfkcWithSourceMap(text: string): { normalized: string; map: number[] } {
+  const parts: string[] = [];
+  const map: number[] = [];
+  let unit = 0;
+  for (const ch of text) {
+    const norm = ch.normalize('NFKC');
+    parts.push(norm);
+    for (let k = 0; k < norm.length; k++) map.push(unit);
+    unit += ch.length;
+  }
+  return { normalized: parts.join(''), map };
+}
+
+/**
+ * Run every metadata alnum matcher on `text` and report each accepted form
+ * with its span in the scanned text. Every matcher wraps its single capture
+ * in zero-width lookarounds, so the match start is the form start.
+ */
+function collectMetaAlnumForms(
+  text: string,
+  report: (form: string, start: number, end: number) => void,
+): void {
+  const emit = (match: RegExpMatchArray) => {
+    const form = match[1]!;
+    const start = (match.index ?? 0) + match[0]!.indexOf(form);
+    report(form, start, start + form.length);
+  };
+  // Space digit-bearing runs first: whole-chain consume, then 2–4 accept / 5+ drop.
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_SPACE_DIGIT)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceDigitRun(form)) continue;
+    emit(match);
+  }
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_SPACE_CLASSIC)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceClassic(form)) continue;
+    emit(match);
+  }
+  // F97: space letter-only runs (`WX YZ`); 2–4 groups after full-run consume.
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_SPACE_LETTER)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceLetterRun(form)) continue;
+    emit(match);
+  }
+  for (const match of text.matchAll(META_ALNUM_OTP_RE)) {
+    emit(match);
+  }
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_TIGHT)) {
+    const form = match[1]!;
+    // Year-shaped pure-digit groups (Mar - 2026) — privacy-safe to skip (F87 nit).
+    const groups = form
+      .split(new RegExp(`${META_ALNUM_SEP_RUN_WITH_TIGHT}`))
+      .map((g) => g.trim())
+      .filter(Boolean);
+    if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
+    emit(match);
+  }
+  // F105: tight single-char chains (`A-1-B-2`); mixed passes push(), pure-digit
+  // and letter-only chains drop at the predicate.
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_TIGHT_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSingleChain(form)) continue;
+    emit(match);
+  }
+  // F106: space single-char chains (`A 1 B 2`); same predicate split as F105.
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_SPACE_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSpaceSingleChain(form)) continue;
+    emit(match);
+  }
+  // F109: mixed-separator single-char chains (`A 1-B 2`); same predicate as
+  // F105 — overlaps with the tight/space matchers dedupe in push().
+  for (const match of text.matchAll(META_ALNUM_DELIMITED_MIXED_SINGLE)) {
+    const form = match[1]!;
+    if (!isPlausibleSingleChain(form)) continue;
+    emit(match);
+  }
+}
+
+/**
  * Collect alnum OTPs from from/subject when a strong cue is present
  * (F77/F81 continuous + F84 tight delimited + F85 space runs + F86 fullwidth +
  * F95 letter-only continuous + F97 letter-only delimited + F105 tight
  * single-char chains + F106 space single-char chains + F109 mixed-separator
- * single-char chains). Does not touch body extract semantics.
+ * single-char chains + F113 compatibility forms). Does not touch body
+ * extract semantics.
+ *
+ * F113: compatibility characters beyond the fullwidth ranges (Ⓐ①Ⓑ②, 𝐀𝟏𝐁𝟐)
+ * normalize to valid codes but never matched the classes above. When NFKC
+ * changes the text, the same matchers run once more on the normalized string
+ * and each hit is mapped back to its original span so masking keeps the
+ * source spelling.
  */
 export function extractMetaAlnumCodes(metaText: string): string[] {
   if (!metaText || !hasStrongOtpCue(metaText)) return [];
@@ -527,55 +618,14 @@ export function extractMetaAlnumCodes(metaText: string): string[] {
     seen.add(form);
     codes.push(form);
   };
-  // Space digit-bearing runs first: whole-chain consume, then 2–4 accept / 5+ drop.
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_DIGIT)) {
-    const form = match[1]!;
-    if (!isPlausibleSpaceDigitRun(form)) continue;
-    push(form);
-  }
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_CLASSIC)) {
-    const form = match[1]!;
-    if (!isPlausibleSpaceClassic(form)) continue;
-    push(form);
-  }
-  // F97: space letter-only runs (`WX YZ`); 2–4 groups after full-run consume.
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_LETTER)) {
-    const form = match[1]!;
-    if (!isPlausibleSpaceLetterRun(form)) continue;
-    push(form);
-  }
-  for (const match of metaText.matchAll(META_ALNUM_OTP_RE)) {
-    push(match[1]!);
-  }
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT)) {
-    const form = match[1]!;
-    // Year-shaped pure-digit groups (Mar - 2026) — privacy-safe to skip (F87 nit).
-    const groups = form
-      .split(new RegExp(`${META_ALNUM_SEP_RUN_WITH_TIGHT}`))
-      .map((g) => g.trim())
-      .filter(Boolean);
-    if (groups.some((g) => /^(19|20)\d{2}$/.test(g.normalize('NFKC')))) continue;
-    push(form);
-  }
-  // F105: tight single-char chains (`A-1-B-2`); mixed passes push(), pure-digit
-  // and letter-only chains drop at the predicate.
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_TIGHT_SINGLE)) {
-    const form = match[1]!;
-    if (!isPlausibleSingleChain(form)) continue;
-    push(form);
-  }
-  // F106: space single-char chains (`A 1 B 2`); same predicate split as F105.
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_SPACE_SINGLE)) {
-    const form = match[1]!;
-    if (!isPlausibleSpaceSingleChain(form)) continue;
-    push(form);
-  }
-  // F109: mixed-separator single-char chains (`A 1-B 2`); same predicate as
-  // F105 — overlaps with the tight/space matchers dedupe in push().
-  for (const match of metaText.matchAll(META_ALNUM_DELIMITED_MIXED_SINGLE)) {
-    const form = match[1]!;
-    if (!isPlausibleSingleChain(form)) continue;
-    push(form);
+  collectMetaAlnumForms(metaText, (form) => push(form));
+  const { normalized, map } = nfkcWithSourceMap(metaText);
+  if (normalized !== metaText) {
+    collectMetaAlnumForms(normalized, (_form, start, end) => {
+      const sourceStart = map[start]!;
+      const sourceEnd = end < normalized.length ? map[end]! : metaText.length;
+      if (sourceEnd > sourceStart) push(metaText.slice(sourceStart, sourceEnd));
+    });
   }
   return codes;
 }

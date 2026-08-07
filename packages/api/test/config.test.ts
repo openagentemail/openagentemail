@@ -161,6 +161,28 @@ describe('notification URL configuration', () => {
     ).toMatch(/publisher:secret@ntfy\.internal/);
   });
 
+  test('DASHBOARD_PUBLIC_URL rejects query and fragment secrets (F114)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui?token=secret',
+      }),
+    ).toThrow(/credentials|userinfo|query|fragment/i);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui#session=abc',
+      }),
+    ).toThrow(/credentials|userinfo|query|fragment/i);
+    // Plain path (with or without trailing slash) still accepted.
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+  });
+
   test('normalizeUrl root path keeps userinfo credentials (F60)', () => {
     expect(normalizeUrl('https://publisher:secret@ntfy.example/')).toBe(
       'https://publisher:secret@ntfy.example',
@@ -174,18 +196,20 @@ describe('notification URL configuration', () => {
   });
 
   test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {
+    // Vehicle: NOTIFY_PUBLIC_URL — DASHBOARD_PUBLIC_URL rejects query/fragment
+    // outright (F114), so it can no longer carry this normalizeUrl contract.
     expect(
       parseConfig({
         ...requiredEnv,
-        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui?next=/',
-      }).dashboardPublicUrl,
-    ).toBe('https://mail.example.com/ui?next=/');
+        NOTIFY_PUBLIC_URL: 'https://ntfy.example.com/ui?next=/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com/ui?next=/');
     expect(
       parseConfig({
         ...requiredEnv,
-        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui#/',
-      }).dashboardPublicUrl,
-    ).toBe('https://mail.example.com/ui#/');
+        NOTIFY_PUBLIC_URL: 'https://ntfy.example.com/ui#/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com/ui#/');
     expect(
       parseConfig({
         ...requiredEnv,
