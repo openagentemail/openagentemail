@@ -99,9 +99,10 @@ describe('mail-arrival notification watcher', () => {
     expect(watermark.uidValidity).toBe(1000n);
     // Same generation: only strictly newer UIDs are unseen.
     expect(unseenWatcherUids([10, 11, 12], watermark, 1000n)).toEqual([12]);
-    // INBOX recreated (new UIDVALIDITY): UIDs restart below the old watermark;
-    // re-anchor on the replacement generation instead of rejecting all of it.
-    expect(unseenWatcherUids([1, 2, 3], watermark, 2000n)).toEqual([]);
+    // INBOX recreated (new UIDVALIDITY) on an already-observed mailbox: mail
+    // may have landed during the disconnect, so every current UID is pending
+    // (F115); the watermark still re-anchors on the replacement generation.
+    expect(unseenWatcherUids([1, 2, 3], watermark, 2000n)).toEqual([1, 2, 3]);
     expect(watermark.uid).toBe(3);
     expect(watermark.uidValidity).toBe(2000n);
     // Mail delivered after the re-anchor flows again.
@@ -201,6 +202,47 @@ describe('mail-arrival notification watcher', () => {
       'otp',
     );
     expect(none).toEqual([]);
+  });
+
+  test('tier 3 carries subject-only codes and links into the payload (F116)', async () => {
+    // The only credential is a long signed URL in the subject with a plain
+    // body: tier 3 must publish the full link, not a subject line truncated
+    // at the metadata cap.
+    const longUrl = `https://example.com/verify?token=${'a'.repeat(600)}`;
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        `From: auth@example.net\r\nSubject: verify ${longUrl}\r\n\r\nplain body, no credentials`,
+        `verify ${longUrl}`,
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(calls).toHaveLength(1);
+    const body = calls[0].message as string;
+    expect(body).toContain('Links:');
+    expect(body).toContain(longUrl);
+
+    // Subject-only code lands on the Codes line too.
+    const codeCalls = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Your verification code is 123456\r\n\r\nplain body',
+        'Your verification code is 123456',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(codeCalls).toHaveLength(1);
+    expect(codeCalls[0].message).toContain('Codes: 123456');
   });
 
   test('default push content tier is interrupt-only when unset', async () => {

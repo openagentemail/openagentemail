@@ -98,6 +98,11 @@ export type MailContentExtras = {
  * F111: a recreated mailbox (new UIDVALIDITY) restarts UIDs from scratch, so
  * the old numeric watermark would reject every replacement message until its
  * counter climbs back; re-anchor at the new generation's high-water mark.
+ * F115: only the FIRST sight of a generation keeps the no-replay startup
+ * behavior. When an already-observed mailbox changes UIDVALIDITY, the
+ * replacement INBOX may already hold mail delivered during the disconnect —
+ * treat every current UID as pending so reconnects still catch offline
+ * deliveries (watermark still anchors at the high-water mark afterwards).
  */
 export function unseenWatcherUids(
   uids: number[],
@@ -106,11 +111,12 @@ export function unseenWatcherUids(
 ): number[] {
   const currentHighWater = Math.max(0, ...uids);
   if (uidValidity !== undefined && watermark.uidValidity !== uidValidity) {
+    const firstSight = watermark.uidValidity === undefined;
     // First sight of this mailbox generation, or a recreated INBOX: re-anchor
     // instead of comparing against the previous generation's UIDs.
     watermark.uidValidity = uidValidity;
     watermark.uid = currentHighWater;
-    return [];
+    return firstSight ? [] : uids.slice();
   }
   if (watermark.uid === undefined) {
     watermark.uid = currentHighWater;
@@ -966,11 +972,16 @@ export async function processWatchedMessage(
   }
   // F110: classify on the subject too — a subject-only code or verify link
   // (`Subject: Your verification code is 123456` with a plain body) must still
-  // pass the `otp` policy. extras.codes/links stay body-sourced; the subject
-  // line itself shows at tier ≥2 (masked at tier 2), so no payload merge.
+  // pass the `otp` policy. The subject line itself shows at tier ≥2 (masked at
+  // tier 2). F116: also merge subject credentials into extras — tier 3 would
+  // otherwise truncate a long signed subject URL at the metadata cap and
+  // publish an unusable partial link. This branch runs only when the body had
+  // no codes/links, so the merge cannot duplicate body-sourced entries.
   if (!hasOtpOrLink && extras.subject) {
     const subjectOtp = extractOtp(extras.subject);
     hasOtpOrLink = subjectOtp.codes.length > 0 || subjectOtp.links.length > 0;
+    if (subjectOtp.codes.length > 0) extras.codes.push(...subjectOtp.codes);
+    if (subjectOtp.links.length > 0) extras.links.push(...subjectOtp.links);
   }
   if (policy === 'otp' && !hasOtpOrLink) return;
 
