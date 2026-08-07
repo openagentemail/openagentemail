@@ -243,10 +243,10 @@ const META_ALNUM_LETTER = 'A-Za-z\\uFF21-\\uFF3A\\uFF41-\\uFF5A';
 const META_ALNUM_DIGIT = '0-9\\uFF10-\\uFF19';
 
 /**
- * Continuous alnum OTP for tier-2 *metadata only* (F77/F81/F86/F95): 4–8 alnum
- * (ASCII and/or fullwidth). Accepted after match when mixed (letter+digit) or
- * letter-only all-caps (F95). Bounds exclude adjacent alnum (incl. fullwidth)
- * so CJK-glued forms still match.
+ * Continuous alnum OTP for tier-2 *metadata only* (F77/F81/F86/F95/F101): 4–8
+ * alnum (ASCII and/or fullwidth). Accepted after match when mixed (letter+digit)
+ * or letter-only continuous case-insensitive (F101). Bounds exclude adjacent
+ * alnum (incl. fullwidth) so CJK-glued forms still match.
  */
 const META_ALNUM_OTP_RE = new RegExp(
   `${META_ALNUM_BOUND_LEFT}([${META_ALNUM_CHAR}]{4,8})${META_ALNUM_BOUND_RIGHT}`,
@@ -345,23 +345,25 @@ function isMixedAlnumOtp(form: string): boolean {
 }
 
 /**
- * Letter-only continuous OTP for tier-2 metadata under a strong cue (F95).
- * NFKC then `/^[A-Z]{4,8}$/`: real letter-only codes are almost always
- * shouted (`WXYZ`); all-uppercase excludes prose (`pending`, `Ready`, `wxyz`).
- * Fullwidth uppercase (ＷＸＹＺ) NFKC-normalizes to ASCII and is covered.
+ * Letter-only continuous OTP for tier-2 metadata under a strong cue (F95/F101).
+ * NFKC then `/^[A-Za-z]{4,8}$/` — case-insensitive continuous tokens so
+ * lowercase/title-case codes (`abcd`, `Abcd`) mask like shouted `ABCD`.
+ * Fullwidth letters NFKC-normalize to ASCII and are covered.
  *
- * Tradeoff under the strong-cue gate: an all-caps non-code word of length 4–8
- * (e.g. `READY` in `Your verification code is READY NOW`) is masked — accepted
- * for the metadata privacy boundary; the rest of the subject stays readable.
+ * Scope is **continuous only**. Delimited letter-only (F97) stays all-caps:
+ * lowercase hyphens would over-mask English compounds (`sign-in`, `follow-up`).
+ *
+ * Tradeoff under the strong-cue gate: any 4–8 letter word (ready/here/valid/
+ * Pending) is masked — privacy over readability; the rest of the subject stays.
  */
 function isLetterOnlyOtp(form: string): boolean {
-  return /^[A-Z]{4,8}$/.test(form.normalize('NFKC'));
+  return /^[A-Za-z]{4,8}$/.test(form.normalize('NFKC'));
 }
 
 /**
  * Letter-only delimited OTP under a strong cue (F97): NFKC, split on tight or
- * space sep runs, require 2–4 groups each `/^[A-Z]{2,4}$/`. All-uppercase keeps
- * prose out (`Wx-Yz` rejected). Tradeoff: all-caps acronym chains under a
+ * space sep runs, require 2–4 groups each `/^[A-Z]{2,4}$/` (uppercase only —
+ * F101 does **not** relax this). Tradeoff: all-caps acronym chains under a
  * strong cue (`NASA HQ`, `GO NOW`) may mask — accepted for privacy.
  *
  * Tight path reuses META_ALNUM_DELIMITED_TIGHT; space path uses
@@ -580,15 +582,29 @@ export function maskTier2Metadata(
   // O(|meta|) collect + O(|codes|) filter — not a per-needle scan of meta.
   // otpCodeRunRe excludes newlines so from\nsubject cannot glue digits (F70).
   const metaCanonRuns = new Set<string>();
+  // Surface spellings of meta digit runs (continuous + delimited shapes).
+  const metaDigitSurfaces: string[] = [];
   for (const match of metaText.matchAll(otpCodeRunRe())) {
-    const canon = canonicalDigits(match[0]!);
-    if (canon) metaCanonRuns.add(canon);
+    const surface = match[0]!;
+    const canon = canonicalDigits(surface);
+    if (!canon) continue;
+    metaCanonRuns.add(canon);
+    metaDigitSurfaces.push(surface);
   }
+  // F102: under a strong cue on joined meta, every meta digit run joins
+  // maskCodes by surface form — no KEYWORD_WINDOW / body confirmation.
+  // Side effects: strong-cue subject can mask years/order ids and a digit run
+  // only in From when Subject carries the cue — privacy over readability.
+  const strongMetaCue = hasStrongOtpCue(metaText);
+  // Alnum meta extract is **per field** (each needs its own strong cue) so a
+  // cue on Subject does not treat From localparts like `auth`/`example` as
+  // letter-only OTPs under F101 case-insensitive continuous matching.
   const maskCodes = [
     ...metaOtp.codes,
     ...extras.codes.filter((code) => metaCanonRuns.has(canonicalDigits(code))),
-    // Strong-cue alnum OTPs in metadata only (F77) — not body extract.
-    ...extractMetaAlnumCodes(metaText),
+    ...extractMetaAlnumCodes(extras.subject),
+    ...extractMetaAlnumCodes(extras.from),
+    ...(strongMetaCue ? metaDigitSurfaces : []),
   ];
   const maskLinks = [...extras.links, ...metaHttpLinks];
   from = maskSensitiveFragments(from, maskCodes, maskLinks);
