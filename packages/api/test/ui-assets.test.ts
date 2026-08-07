@@ -517,6 +517,19 @@ describe('UI static asset contract', () => {
     );
     expect(renderRows).toContain('state.tierPending[model.identity.address]');
     expect(renderRows).toContain('tierSelect.disabled = true;');
+    // F66: tier <select> is not nested under the row nav role=button.
+    expect(renderRows).toContain("navNode.className = 'overview-row-nav'");
+    expect(renderRows).toContain("navNode.setAttribute('role', 'button')");
+    expect(renderRows).toContain("tierSelect.className = 'push-tier-select'");
+    expect(renderRows.indexOf("rowNode.append(navNode)")).toBeLessThan(
+      renderRows.indexOf('rowNode.append(tierCell)'),
+    );
+    expect(renderRows).toContain("'push tier ' + currentTier");
+    // Row container is neutral (no role=button on overview-row itself).
+    expect(renderRows).not.toContain("rowNode.setAttribute('role', 'button')");
+    expect(renderRows).not.toContain('rowNode.tabIndex = 0');
+    // Return-to-overview focus must land on the focusable nav, not the outer row.
+    expect(UI_JS).toContain("querySelector('.overview-row-nav')");
   });
 
   // F51: fuzzy push-tier PUT failure must re-fetch authoritative tier; known rejects restore.

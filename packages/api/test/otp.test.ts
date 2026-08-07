@@ -93,11 +93,14 @@ describe('extractCodes', () => {
     expect(extractCodes('Call us at 5551234 anytime.')).toEqual([]);
   });
 
-  test('years next to OTP keywords are extracted as codes (F62)', () => {
-    // "verification" + "pin" are CODE_KEYWORDS; year guard no longer drops 2026.
+  test('years need strong OTP cues, not mere verification (F62/F65)', () => {
+    // Strong cue \bpin\b — still extract (F62 Codex / F65 keep).
     expect(extractCodes('Your verification PIN is 2026')).toEqual(['2026']);
-    // "verification" alone also counts — update from prior "skip years" expectation.
-    expect(extractCodes('Our verification team, since 2024, sends regards.')).toEqual(['2024']);
+    // "verification" alone is not strong enough (F65 restores year guard).
+    expect(extractCodes('Our verification team, since 2024, sends regards.')).toEqual([]);
+    expect(extractCodes('Read our identity verification roadmap for 2026')).toEqual([]);
+    // Substring "pin" inside "shopping" must not count (\bpin\b).
+    expect(extractCodes('shopping 2026 deals')).toEqual([]);
   });
 
   test('years without any OTP keyword stay unextracted (F62)', () => {
@@ -604,6 +607,23 @@ describe('extractLinks', () => {
     const text = "Use 'https://example.com/verify/token'' now";
     expect(extractHttpLinks(text)).toEqual(["https://example.com/verify/token'"]);
     expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe("Use '•••' now");
+  });
+
+  test('prose wrappers cut before closing punctuation (F64)', () => {
+    expect(extractHttpLinks('Visit (https://example.com/verify): now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks("Use 'https://example.com/verify'!")).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(
+      [...bareUrlSpans('(https://a.com/f(1))')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f(1)']);
+    expect(extractHttpLinks("'https://a.com/x',")).toEqual(['https://a.com/x']);
+    // URL-terminal ' kept; outer closer cut on whitespace (F63 + F64).
+    expect(extractHttpLinks("See 'https://example.com/verify/token'' now")).toEqual([
+      "https://example.com/verify/token'",
+    ]);
   });
 });
 

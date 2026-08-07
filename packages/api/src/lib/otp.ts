@@ -92,10 +92,16 @@ export function extractCodes(text: string): string[] {
       Math.max(0, idx - KEYWORD_WINDOW),
       Math.min(lower.length, idx + digits.length + KEYWORD_WINDOW),
     );
-    // No separate year guard: 19xx/20xx next to any CODE_KEYWORDS token is
-    // treated as an OTP (prefer over-mask to leaking "verification PIN is 2026").
-    // Without a keyword in the window the run is skipped here.
     if (!CODE_KEYWORDS.some((kw) => window.includes(kw))) continue;
+    // Years need a strong OTP cue (not mere "verification"/"identity") so
+    // roadmap copy like "for 2026" does not fire false OTP alerts (F65).
+    // "verification PIN is 2026" still matches \bpin\b.
+    if (
+      /^(19|20)\d{2}$/.test(digits) &&
+      !/\b(?:code|otp|passcode|pin)\b|验证码|动态码/.test(window)
+    ) {
+      continue;
+    }
     if (!seen.has(digits)) {
       seen.add(digits);
       codes.push(digits);
@@ -177,6 +183,8 @@ function findSchemePositions(text: string): number[] {
 function peelTrailingProse(
   candidate: string,
   openQuoted = false,
+  /** When true, never peel `'` (outer closer already left outside the span; F64 cut). */
+  preserveApostrophes = false,
 ): { clean: string; trail: string } {
   if (!candidate) return { clean: '', trail: '' };
 
@@ -213,7 +221,7 @@ function peelTrailingProse(
       end -= 1;
       continue;
     }
-    if (ch === "'") {
+    if (ch === "'" && !preserveApostrophes) {
       if (openQuoted) {
         // F63: only the one-shot flag; parity never stacks a second peel.
         if (!peelOpenQuote) break;
@@ -303,11 +311,11 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
  * pre-scan scheme positions, then for each start scan once with depth tracking;
  * an unbalanced closer is a hard cut when (1) the next scheme is a proven
  * Markdown chain (tight `)(`, `](`, `)[`, `][`, or `)[label](` / `][label](`),
- * or (2) the span opened as Markdown `](https://…)` (first free `)` closes the
- * link even without a following scheme — F59). Bare URLs keep free `)` in-path
- * (e.g. F48 `confirm)[token=`). Nested redirects and path segments stay inside
- * the URL when neither cut applies; inner schemes are skipped by post-span
- * advance. Bounded tail peel removes free trailers without re-matching.
+ * or (2) the span opened after `](` / prose `(` (first free `)` closes the
+ * wrapper — F59/F64). Bare URLs keep free `)` in-path (e.g. F48 `confirm)[token=`).
+ * openQuoted spans also cut before a closing `'` when the next char is prose
+ * close context (F64). Nested redirects stay inside the URL when no cut applies.
+ * Bounded tail peel removes free trailers without re-matching.
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
@@ -326,13 +334,19 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     let glueCut: { closer: number; nextScheme: number } | undefined;
     // Set when we hard-cut on " < > with a glued non-whitespace tail (F55).
     let tailCut: { start: number; end: number } | undefined;
-    // F59: URL opened as Markdown `](https://…)` — first free `)` closes the link,
-    // even with no following scheme / whitespace (bare URLs keep free `)` in-path).
+    // F59: Markdown `](https://…)`. F64: prose `(https://…)` — not `](`.
     const markdownLinkOpen =
       start >= 2 && text[start - 1] === '(' && text[start - 2] === ']';
-    // F61: span opened after a prose apostrophe — peel one trailing ' even if
-    // internal apostrophes made the count even (e.g. '…o'brien').
+    const proseParenOpen =
+      start >= 1 &&
+      text[start - 1] === '(' &&
+      (start < 2 || text[start - 2] !== ']');
+    const cutOnFreeParen = markdownLinkOpen || proseParenOpen;
+    // F61/F63: span opened after a prose apostrophe.
     const openQuoted = start >= 1 && text[start - 1] === "'";
+    // True when F64 cut left the outer closer outside the raw span — peel must
+    // not also strip a legal URL-terminal ' (F63).
+    let openQuotedCut = false;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -382,8 +396,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
           glueCut = { closer: i, nextScheme: nextScheme! };
           break;
         }
-        // After glue check: MD link openers cut at the first free closer (no glue/tail meta).
-        if (markdownLinkOpen) {
+        // After glue: MD `](` or prose `(` openers cut at first free closer.
+        if (cutOnFreeParen) {
           end = i;
           break;
         }
@@ -403,10 +417,39 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         }
         continue;
       }
+      // F64: outer prose quote closes when ' is followed by close-context.
+      // Internal apostrophes (o'brien) and URL-terminal ' before another '
+      // (token'' + space → cut only the outer closer) stay in the URL.
+      if (ch === "'" && openQuoted) {
+        const next = i + 1 < text.length ? text[i + 1]! : '';
+        const closes =
+          next === '' ||
+          isJsWhitespace(next) ||
+          next === '!' ||
+          next === '.' ||
+          next === ',' ||
+          next === ';' ||
+          next === ':' ||
+          next === '?' ||
+          next === ')' ||
+          next === ']' ||
+          next === '}';
+        if (closes) {
+          end = i;
+          openQuotedCut = true;
+          break;
+        }
+        continue;
+      }
     }
 
     const raw = text.slice(start, end);
-    const { clean } = peelTrailingProse(raw, openQuoted);
+    // F64 cut left outer closer outside the span: keep any URL-terminal ' (F63).
+    const { clean } = peelTrailingProse(
+      raw,
+      openQuoted && !openQuotedCut,
+      openQuotedCut,
+    );
     if (clean.length === 0) {
       schemeIdx += 1;
       continue;

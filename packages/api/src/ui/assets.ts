@@ -490,8 +490,26 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   padding: 12px 10px;
   text-align: left;
 }
+/* Nav hit-target spans identity…created (cols 1–6); tier/actions stay siblings (F66). */
+.overview-row-nav {
+  grid-column: 1 / span 6;
+  display: grid;
+  grid-template-columns: subgrid;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
 .overview-row:hover, .overview-row[aria-current="true"] { background: var(--gold-dim); }
-.overview-row:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
+.overview-row-nav:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
 .overview-row .cell { display: block; overflow: hidden; text-overflow: ellipsis; }
 .overview-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
 .cell-value { font-variant-numeric: tabular-nums; }
@@ -686,6 +704,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     gap: 6px;
     grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 100px 58px;
   }
+  .overview-row-nav { gap: 6px; }
   .session-label { display: none; }
 }
 
@@ -716,6 +735,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .overview-heading { flex-wrap: wrap; }
   .overview-header { display: none; }
   .overview-row { display: block; min-height: 44px; }
+  .overview-row-nav {
+    display: block;
+    grid-column: auto;
+    grid-template-columns: none;
+  }
   .overview-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; }
   .overview-row .cell-label { display: inline; }
   .overview-row .cell-unit { display: none; }
@@ -1618,9 +1642,13 @@ export const UI_JS = `(function () {
       var rowNode = document.createElement('div');
       rowNode.className = 'overview-row';
       rowNode.dataset.address = model.identity.address;
-      rowNode.tabIndex = 0;
-      rowNode.setAttribute('role', 'button');
       rowNode.setAttribute('aria-current', 'false');
+
+      // F66: navigation is a sibling of tier/actions, not an ancestor of <select>.
+      var navNode = document.createElement('div');
+      navNode.className = 'overview-row-nav';
+      navNode.setAttribute('role', 'button');
+      navNode.tabIndex = 0;
 
       var identityCell = document.createElement('span');
       identityCell.className = 'cell';
@@ -1637,7 +1665,7 @@ export const UI_JS = `(function () {
         note.textContent = '(no mail in the current window)';
         identityCell.append(note);
       }
-      rowNode.append(identityCell);
+      navNode.append(identityCell);
 
       var tokenCell = document.createElement('span');
       tokenCell.className = 'cell token-cell';
@@ -1650,10 +1678,10 @@ export const UI_JS = `(function () {
       tokenDot.className = 'token-dot' + (model.identity.hasToken ? ' has-token' : '');
       tokenStatus.append(tokenDot, document.createTextNode(model.identity.hasToken ? 'Set' : 'None'));
       tokenCell.append(tokenLabel, tokenStatus);
-      rowNode.append(tokenCell);
+      navNode.append(tokenCell);
 
-      var countText = appendCell(rowNode, 'Messages', countParts(row, 'count'));
-      var unseenText = appendCell(rowNode, 'Unseen', countParts(row, 'unseen'));
+      var countText = appendCell(navNode, 'Messages', countParts(row, 'count'));
+      var unseenText = appendCell(navNode, 'Unseen', countParts(row, 'unseen'));
 
       var dot = null;
       if (isActiveRow(row)) {
@@ -1663,13 +1691,34 @@ export const UI_JS = `(function () {
       var lastParts = row && row.lastReceivedAt
         ? { text: formatAgo(row.lastReceivedAt) }
         : { text: row ? '—' : 'Unavailable', flat: true };
-      var lastText = appendCell(rowNode, 'Last', lastParts, dot);
-      var createdText = appendCell(rowNode, 'Created', { text: formatDay(model.identity.createdAt) });
+      var lastText = appendCell(navNode, 'Last', lastParts, dot);
+      var createdText = appendCell(navNode, 'Created', { text: formatDay(model.identity.createdAt) });
+
+      var currentTier = model.identity.pushContentTier === 2 || model.identity.pushContentTier === 3
+        ? model.identity.pushContentTier
+        : 1;
+      var ariaParts = [
+        model.identity.name || model.identity.address,
+        model.identity.address,
+        model.identity.hasToken ? 'token set' : 'no token',
+        countText,
+        unseenText,
+        'last ' + lastText,
+        'created ' + createdText,
+        'push tier ' + currentTier
+      ];
+      navNode.setAttribute('aria-label', ariaParts.join(', '));
+      navNode.addEventListener('click', function () {
+        openAddress(model.identity.address);
+      });
+      navNode.addEventListener('keydown', function (event) {
+        if (event.target !== navNode || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        openAddress(model.identity.address);
+      });
+      rowNode.append(navNode);
 
       if (isAdmin()) {
-        var currentTier = model.identity.pushContentTier === 2 || model.identity.pushContentTier === 3
-          ? model.identity.pushContentTier
-          : 1;
         var tierCell = document.createElement('span');
         tierCell.className = 'cell push-tier-cell';
         var tierLabelNode = document.createElement('span');
@@ -1735,26 +1784,6 @@ export const UI_JS = `(function () {
         rowNode.append(actionsCell);
       }
 
-      rowNode.setAttribute(
-        'aria-label',
-        [
-          model.identity.name || model.identity.address,
-          model.identity.address,
-          model.identity.hasToken ? 'token set' : 'no token',
-          countText,
-          unseenText,
-          'last ' + lastText,
-          'created ' + createdText
-        ].join(', ')
-      );
-      rowNode.addEventListener('click', function () {
-        openAddress(model.identity.address);
-      });
-      rowNode.addEventListener('keydown', function (event) {
-        if (event.target !== rowNode || (event.key !== 'Enter' && event.key !== ' ')) return;
-        event.preventDefault();
-        openAddress(model.identity.address);
-      });
       overviewRows.append(rowNode);
     });
   }
@@ -1785,9 +1814,12 @@ export const UI_JS = `(function () {
   }
 
   function rowButtonFor(address) {
-    var buttons = overviewRows.children;
-    for (var index = 0; index < buttons.length; index += 1) {
-      if (buttons[index].dataset.address === address) return buttons[index];
+    // Focus the row's nav hit-target (role=button), not the neutral outer row (F66).
+    var rows = overviewRows.children;
+    for (var index = 0; index < rows.length; index += 1) {
+      if (rows[index].dataset.address === address) {
+        return rows[index].querySelector('.overview-row-nav') || rows[index];
+      }
     }
     return null;
   }
