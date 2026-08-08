@@ -1163,7 +1163,9 @@ export async function processWatchedMessage(
       const html = typeof parsed.html === 'string' && parsed.html.length <= MAX_EMAIL_HTML_LENGTH
         ? parsed.html
         : undefined;
-      const text = (parsed.text ?? '').trim() || (html ? htmlToText(html) : '');
+      const parsedText = (parsed.text ?? '').trim();
+      const htmlText = html ? htmlToText(html) : '';
+      const text = parsedText || htmlText;
       const otp = extractOtp(text, html);
       hasOtpOrLink = otp.codes.length > 0 || otp.links.length > 0;
       extras.codes = otp.codes;
@@ -1172,11 +1174,16 @@ export async function processWatchedMessage(
       // subject path F134/F136 covered only metadata). Same code-shaped
       // filter. Bodies never publish at tier ≤2, so no masking path here.
       // F139: extraction runs on bounded cue windows, not the whole body.
-      for (const cueWindow of bodyAlnumCueWindows(text)) {
-        for (const code of extractMetaAlnumCodes(cueWindow)) {
-          if (!isDisplayableAlnumCode(code)) continue;
-          hasOtpOrLink = true;
-          if (!extras.codes.includes(code)) extras.codes.push(code);
+      // F140: scan the HTML alternative too — extractOtp already scans both
+      // parts, and a stub plain-text part (`open in an HTML client`) must
+      // not hide an HTML-only credential from the otp policy.
+      for (const scanText of new Set([text, htmlText].filter(Boolean))) {
+        for (const cueWindow of bodyAlnumCueWindows(scanText)) {
+          for (const code of extractMetaAlnumCodes(cueWindow)) {
+            if (!isDisplayableAlnumCode(code)) continue;
+            hasOtpOrLink = true;
+            if (!extras.codes.includes(code)) extras.codes.push(code);
+          }
         }
       }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);

@@ -419,6 +419,37 @@ describe('mail-arrival notification watcher', () => {
     expect(far).toEqual([]);
   });
 
+  test('otp policy scans the HTML alternative for alnum codes (F140)', async () => {
+    // Stub plain-text part, credential only in the HTML part: extractCodes
+    // (digits only) finds nothing, so only the alnum pass can classify.
+    const raw = [
+      'From: auth@example.net',
+      'Subject: Sign in',
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary="alt"',
+      '',
+      '--alt',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Open this message in an HTML-capable mail client.',
+      '',
+      '--alt',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<p>Your verification code is A1B2C3, use it soon.</p>',
+      '',
+      '--alt--',
+      '',
+    ].join('\r\n');
+    const calls = await dispatches(message('auth@example.net', raw), 'otp', [{
+      address: 'target@test.example',
+      createdAt: '2026-08-02T00:00:00.000Z',
+      pushContentTier: 3,
+    }]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toContain('Codes: A1B2C3');
+  });
+
   test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
     // Body has its own code while the subject carries a long signed URL: both
     // must reach the payload — the subject is truncated at the metadata cap,
