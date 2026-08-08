@@ -422,8 +422,8 @@ function isJsWhitespace(ch: string): boolean {
 
 /**
  * Prose close-context after a quote closer (F64/F122): end of text,
- * whitespace, or terminal punctuation — an internal apostrophe (`o'brien`)
- * or quote-joined URL content sees anything else.
+ * whitespace, or terminal punctuation (ASCII plus CJK, F131) — an internal
+ * apostrophe (`o'brien`) or quote-joined URL content sees anything else.
  */
 function isProseCloseContext(next: string): boolean {
   return (
@@ -437,7 +437,16 @@ function isProseCloseContext(next: string): boolean {
     next === '?' ||
     next === ')' ||
     next === ']' ||
-    next === '}'
+    next === '}' ||
+    // CJK terminal punctuation plays the same prose-closing role (F131).
+    next === '\u3001' ||
+    next === '\u3002' ||
+    next === '\uFF01' ||
+    next === '\uFF0C' ||
+    next === '\uFF1A' ||
+    next === '\uFF1B' ||
+    next === '\uFF1F' ||
+    next === '\uFF09'
   );
 }
 
@@ -723,6 +732,28 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
 }
 
 /**
+ * F122/F131: paired Unicode prose quotes that may wrap a bare URL. When a
+ * span opens right after one of these openers, the matching closer in prose
+ * close context ends the span — the closer is prose punctuation, not URL
+ * content (the WHATWG parser percent-encodes it into a different, unusable
+ * destination). Covers smart quotes, guillemets, German low-9 quotes, and
+ * the CJK bracket family.
+ */
+const PAIRED_URL_QUOTES: Record<string, string> = {
+  '\u201C': '\u201D', // curly double quotes
+  '\u2018': '\u2019', // curly single quotes
+  '\u201E': '\u201C', // German low-9 double quote
+  '\u201A': '\u2018', // German low-9 single quote
+  '\u00AB': '\u00BB', // guillemets
+  '\u2039': '\u203A', // single guillemets
+  '\u300C': '\u300D', // CJK corner brackets
+  '\u300E': '\u300F', // CJK double corner brackets
+  '\u3008': '\u3009', // CJK angle brackets
+  '\u300A': '\u300B', // CJK double angle brackets
+  '\u3010': '\u3011', // CJK lenticular brackets
+};
+
+/**
  * Single-pass bare URL tokenizer. O(n) over the full text:
  * pre-scan scheme positions, then for each start scan once with depth tracking;
  * an unbalanced closer is a hard cut when (1) the next scheme is a proven
@@ -733,8 +764,9 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
  * openQuoted spans also cut before a closing `'` when the next char is prose
  * close context (F64). Nested redirects stay inside the URL when no cut applies.
  * Bounded tail peel removes free trailers without re-matching.
- * Smart-quoted spans (“…”/‘…’) likewise cut before the matching closing
- * smart quote in close context (F122) so the quote is not percent-encoded
+ * Spans wrapped in paired Unicode prose quotes (smart quotes, guillemets,
+ * CJK brackets — PAIRED_URL_QUOTES) likewise cut before the matching closer
+ * in close context (F122/F131) so the quote is not percent-encoded
  * into the published destination. Markdown-wrapped spans (`` ` ``/`*`/`**`)
  * cut before the closing delimiter run in close context (F130).
  */
@@ -773,16 +805,11 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
     // True when F64 cut left the outer closer outside the raw span — peel must
     // not also strip a legal URL-terminal ' (F63).
     let openQuotedCut = false;
-    // F122: span opened after a smart-quote opener (“…”/‘…’) — the matching
-    // closing quote is prose context, not URL content (the WHATWG parser
+    // F122/F131: span opened after a paired-quote opener — the matching
+    // closer is prose context, not URL content (the WHATWG parser
     // percent-encodes it into a different, unusable destination).
-    const smartOpener = start >= 1 ? text[start - 1]! : '';
-    const openSmartQuote =
-      smartOpener === '\u201C'
-        ? '\u201D'
-        : smartOpener === '\u2018'
-          ? '\u2019'
-          : undefined;
+    const openSmartQuote: string | undefined =
+      start >= 1 ? PAIRED_URL_QUOTES[text[start - 1]!] : undefined;
     // F130: span opened after a Markdown inline-code/emphasis wrapper
     // (`` ` `` or `*`/`**`) — the closing delimiter is markup, not URL
     // content (`https://example.com/verify%60`, path trailing `**`).
@@ -877,8 +904,8 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         }
         continue;
       }
-      // F122: matching smart closer closes a smart-quoted span in close
-      // context; anything else keeps the quote as (rare, invalid) URL content.
+      // F122/F131: the matching paired-quote closer closes a quoted span
+      // in close context; anything else keeps it as (rare, invalid) content.
       if (openSmartQuote !== undefined && ch === openSmartQuote) {
         const next = i + 1 < text.length ? text[i + 1]! : '';
         if (isProseCloseContext(next)) {

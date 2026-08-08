@@ -833,6 +833,30 @@ describe('extractLinks', () => {
     expect(extractHttpLinks('*https://a.com/x*y')).toEqual(['https://a.com/x*y']);
   });
 
+  test('paired Unicode quotes do not extend verification URLs (F131)', () => {
+    // Guillemets / German quotes / CJK brackets around a link: the closing
+    // mark in prose context is not URL content (same percent-encoding
+    // argument as F122). CJK terminal punctuation is prose close context.
+    expect(extractHttpLinks('«https://example.com/verify»')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('‹https://example.com/verify›')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('„https://example.com/verify“')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('‚https://example.com/verify‘.')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('「https://example.com/verify」')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('『https://example.com/verify』,')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('【https://example.com/verify?token=abc】')).toEqual([
+      'https://example.com/verify?token=abc',
+    ]);
+    expect(extractHttpLinks('请看《https://example.com/verify?t=1》！')).toEqual([
+      'https://example.com/verify?t=1',
+    ]);
+    expect(extractHttpLinks('《https://example.com/verify》。')).toEqual(['https://example.com/verify']);
+    // Smart-quoted span before CJK terminal punctuation also closes.
+    expect(extractHttpLinks('“https://example.com/verify”。')).toEqual(['https://example.com/verify']);
+    // Closing mark without close-context stays (conservative, mirrors F122).
+    expect(extractHttpLinks('«https://a.com/x»y')).toEqual(['https://a.com/x%C2%BBy']);
+    expect(extractHttpLinks('《https://a.com/x》y')).toEqual(['https://a.com/x%E3%80%8By']);
+  });
+
   test('prose brackets cut before free closing ] (F67)', () => {
     expect(extractHttpLinks('Visit [https://example.com/verify]: now')).toEqual([
       'https://example.com/verify',
