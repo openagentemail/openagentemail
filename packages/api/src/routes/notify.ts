@@ -2,10 +2,11 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
-import { config } from '../lib/config.ts';
+import { config, normalizeUrl } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import {
   NotifyError,
+  NTFY_REQUEST_MAX_BYTES,
   createNotificationDevice,
   type NotificationDevice,
   type NotifyLevel,
@@ -53,6 +54,17 @@ function notificationError(c: Context, err: unknown) {
     return c.json({ error: err.code }, 503);
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  if (err.code === 'message_too_large') {
+    // 413: payload exceeds the ntfy request budget after framing (F76).
+    return c.json(
+      {
+        error: err.code,
+        maxRequestBytes: err.details?.maxRequestBytes ?? NTFY_REQUEST_MAX_BYTES,
+        availableMessageBytes: err.details?.availableMessageBytes ?? 0,
+      },
+      413,
+    );
+  }
   return c.json({ error: err.code }, 502);
 }
 
@@ -85,7 +97,8 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
   const service = options.service ?? notificationService();
   const find = options.findIdentity ?? findIdentity;
   const createDevice = options.createDevice ?? createNotificationDevice;
-  const activePublicUrl = options.publicUrl ?? config.ntfy.publicUrl;
+  // Same normalizer as config (pathname trailing slash, not string-end slash).
+  const activePublicUrl = normalizeUrl(options.publicUrl ?? config.ntfy.publicUrl);
 
   return new Hono()
     .post('/', async (c) => {
@@ -155,7 +168,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       if (requestedPublicUrl.protocol !== 'https:') {
         return c.json({ error: 'invalid_request: publicUrl must use https' }, 400);
       }
-      if (requestedPublicUrl.href.replace(/\/$/, '') !== activePublicUrl) {
+      if (normalizeUrl(parsed.data.publicUrl) !== activePublicUrl) {
         return c.json({ error: 'notify_public_url_mismatch: set NOTIFY_PUBLIC_URL and restart the stack first' }, 409);
       }
       try {

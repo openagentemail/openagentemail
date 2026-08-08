@@ -8,7 +8,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
 import { describe, expect, test } from 'bun:test';
-import { parseConfig } from '../src/lib/config.ts';
+import { normalizeUrl, parseConfig } from '../src/lib/config.ts';
 
 const requiredEnv: NodeJS.ProcessEnv = {
   DOMAIN: 'example.com',
@@ -70,5 +70,151 @@ describe('notification URL configuration', () => {
       NOTIFY_PUBLIC_URL: 'https://NTFY.EXAMPLE.COM/',
     });
     expect(config.ntfy.publicUrl).toBe('https://ntfy.example.com');
+  });
+
+  test('DASHBOARD_PUBLIC_URL is optional and normalized when present', () => {
+    expect(parseConfig(requiredEnv).dashboardPublicUrl).toBeUndefined();
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://MAIL.EXAMPLE.COM/ui/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+  });
+
+  test('empty or whitespace optional URL env values are treated as unset', () => {
+    // Compose ${DASHBOARD_PUBLIC_URL:-} injects "" when the var is absent.
+    expect(() =>
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '' }),
+    ).not.toThrow();
+    expect(
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '' }).dashboardPublicUrl,
+    ).toBeUndefined();
+    expect(
+      parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: '   ' }).dashboardPublicUrl,
+    ).toBeUndefined();
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://dash.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('https://dash.example.com/ui');
+    // Same empty-string safety for defaulted URL fields (fall through to default).
+    expect(
+      parseConfig({ ...requiredEnv, NOTIFY_PUBLIC_URL: '' }).ntfy.publicUrl,
+    ).toBe('http://127.0.0.1:2586');
+  });
+
+  test('envUrl rejects non-http(s) schemes', () => {
+    for (const bad of [
+      'ftp://example.com',
+      'file:///tmp/x',
+      'mailto:user@example.com',
+    ]) {
+      expect(() =>
+        parseConfig({ ...requiredEnv, DASHBOARD_PUBLIC_URL: bad }),
+      ).toThrow(/http or https/i);
+      expect(() =>
+        parseConfig({ ...requiredEnv, NOTIFY_PUBLIC_URL: bad }),
+      ).toThrow(/http or https/i);
+    }
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'http://dash.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('http://dash.example.com/ui');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://notify.example.com',
+      }).ntfy.publicUrl,
+    ).toBe('https://notify.example.com');
+  });
+
+  test('DASHBOARD_PUBLIC_URL rejects userinfo credentials (F80)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://admin:secret@mail.example/ui',
+      }),
+    ).toThrow(/credentials|userinfo/i);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://admin@mail.example/ui',
+      }),
+    ).toThrow(/credentials|userinfo/i);
+    // Plain public origin still accepted.
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+    // Internal ntfy URL may still carry credentials (private network auth).
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NTFY_INTERNAL_URL: 'http://publisher:secret@ntfy.internal',
+      }).ntfy.internalUrl,
+    ).toMatch(/publisher:secret@ntfy\.internal/);
+  });
+
+  test('DASHBOARD_PUBLIC_URL rejects query and fragment secrets (F114)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui?token=secret',
+      }),
+    ).toThrow(/credentials|userinfo|query|fragment/i);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui#session=abc',
+      }),
+    ).toThrow(/credentials|userinfo|query|fragment/i);
+    // Plain path (with or without trailing slash) still accepted.
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DASHBOARD_PUBLIC_URL: 'https://mail.example.com/ui/',
+      }).dashboardPublicUrl,
+    ).toBe('https://mail.example.com/ui');
+  });
+
+  test('normalizeUrl root path keeps userinfo credentials (F60)', () => {
+    expect(normalizeUrl('https://publisher:secret@ntfy.example/')).toBe(
+      'https://publisher:secret@ntfy.example',
+    );
+    expect(normalizeUrl('https://ntfy.example/')).toBe('https://ntfy.example');
+    expect(normalizeUrl('https://ntfy.example:8443/')).toBe('https://ntfy.example:8443');
+    // Non-root still keeps credentials (href branch).
+    expect(normalizeUrl('https://publisher:secret@ntfy.example/v1/path/')).toBe(
+      'https://publisher:secret@ntfy.example/v1/path',
+    );
+  });
+
+  test('normalizeUrl only strips pathname trailing slashes, not query or fragment', () => {
+    // Vehicle: NOTIFY_PUBLIC_URL — DASHBOARD_PUBLIC_URL rejects query/fragment
+    // outright (F114), so it can no longer carry this normalizeUrl contract.
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://ntfy.example.com/ui?next=/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com/ui?next=/');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://ntfy.example.com/ui#/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com/ui#/');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        NOTIFY_PUBLIC_URL: 'https://NTFY.EXAMPLE.COM/',
+      }).ntfy.publicUrl,
+    ).toBe('https://ntfy.example.com');
   });
 });

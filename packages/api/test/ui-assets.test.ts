@@ -157,6 +157,17 @@ describe('UI static asset contract', () => {
     }
   });
 
+  test('confirm modal exposes dialog semantics for tier-3 risk (F89)', () => {
+    expect(UI_HTML).toMatch(
+      /id="confirm-modal"[\s\S]*?role="dialog"[\s\S]*?aria-modal="true"/,
+    );
+    expect(UI_HTML).toContain('aria-labelledby="confirm-modal-title"');
+    expect(UI_HTML).toContain('aria-describedby="confirm-modal-text confirm-modal-risk"');
+    expect(UI_HTML).toContain('id="confirm-modal-title"');
+    expect(UI_HTML).toContain('id="confirm-modal-text"');
+    expect(UI_HTML).toContain('id="confirm-modal-risk"');
+  });
+
   // A15：landmark 挂在包住两个面板的 inbox 容器上，移动 list 态才有可见 <main>
   test('exactly three mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');
@@ -282,6 +293,14 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('      reconcileActiveAddress();');
     expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
     expect(UI_JS.split('reconcileActiveAddress();').length - 1).toBe(2);
+    // Inbox identity refresh shares overviewGen so a late response cannot
+    // clobber a push-tier save that bumped the epoch mid-flight.
+    const inboxRefresh = UI_JS.slice(
+      UI_JS.indexOf('function refreshInboxIdentities() {'),
+      UI_JS.indexOf('function loadOverviewCycle('),
+    );
+    expect(inboxRefresh).toContain('var generation = state.overviewGen;');
+    expect(inboxRefresh).toContain('if (generation !== state.overviewGen) return;');
   });
 
   // A18 / A19 / A20 / A21
@@ -339,8 +358,8 @@ describe('UI static asset contract', () => {
   // A22：断点值不动，其内规则按嵌套栅格适配
   test('both breakpoints survive and the nested inbox grid collapses on mobile', () => {
     const flat = UI_CSS.replace(/\s+/g, ' ');
-    expect(UI_CSS).toContain('@media (max-width: 900px)');
-    expect(UI_CSS).toContain('@media (max-width: 719px)');
+    expect(UI_CSS).toContain('@media (max-width: 1100px)');
+    expect(UI_CSS).toContain('@media (max-width: 820px)');
     expect(UI_CSS).toContain('[data-scope="overview"]');
     expect(UI_CSS).toContain('[data-mobile-view="overview"]');
     expect(flat).toContain('.inbox-layout { min-height: calc(100vh - 74px); display: grid; grid-template-columns: 240px minmax(0, 1fr); }');
@@ -474,9 +493,158 @@ describe('UI static asset contract', () => {
     expect(cycle).not.toContain('await ');
     expect(cycle).not.toContain('Promise.all');
     expect(cycle).toContain('var generation = ++state.overviewGen;');
+    expect(cycle).toContain('state.overviewCycleGen = generation;');
     expect(cycle.indexOf('identitiesPromise.then')).toBeLessThan(cycle.indexOf('overviewPromise.then'));
     expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(4);
     expect(cycle).toContain('renderOverview();');
+    // Stale overview responses clear stuck pending without writing data.
+    expect(cycle).toContain('state.overviewCycleGen !== state.overviewGen');
+    expect(cycle).toContain('state.overviewPending = false;');
+    // Tier save / delete must bump the epoch so a late /identities cannot clobber them.
+    expect(UI_JS).toContain('function bumpIdentityEpoch()');
+    const saveTier = UI_JS.slice(
+      UI_JS.indexOf('async function savePushContentTier('),
+      UI_JS.indexOf('function handlePushTierChange('),
+    );
+    expect(saveTier).toContain('bumpIdentityEpoch()');
+    // Tier save restarts the overview cycle so Refresh cannot stick on "Refreshing…".
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    expect(handleTier).toContain("loadOverviewCycle({ refresh: false })");
+    // Only restart while still on Overview (do not revive polling after openAddress).
+    expect(handleTier).toContain("state.scope === 'overview'");
+    // Tier-3 confirm disables Cancel while the PUT is in flight.
+    expect(handleTier).toContain('confirmModalCancel.disabled = true;');
+    expect(handleTier).toContain('confirmModalCancel.disabled = false;');
+    // Per-address pending lock survives re-render so a second select cannot race.
+    expect(UI_JS).toContain('tierPending: {}');
+    expect(handleTier).toContain('state.tierPending[address] = true;');
+    expect(handleTier).toContain('delete state.tierPending[address];');
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderOverviewRows('),
+      UI_JS.indexOf('function updateOverviewRefreshButton('),
+    );
+    expect(renderRows).toContain('state.tierPending[model.identity.address]');
+    expect(renderRows).toContain('tierSelect.disabled = true;');
+    // F66: tier <select> is not nested under the row nav role=button.
+    expect(renderRows).toContain("navNode.className = 'overview-row-nav'");
+    expect(renderRows).toContain("navNode.setAttribute('role', 'button')");
+    expect(renderRows).toContain("tierSelect.className = 'push-tier-select'");
+    expect(renderRows.indexOf("rowNode.append(navNode)")).toBeLessThan(
+      renderRows.indexOf('rowNode.append(tierCell)'),
+    );
+    expect(renderRows).toContain("'push tier ' + currentTier");
+    // Row container is neutral (no role=button on overview-row itself).
+    expect(renderRows).not.toContain("rowNode.setAttribute('role', 'button')");
+    expect(renderRows).not.toContain('rowNode.tabIndex = 0');
+    // Return-to-overview focus must land on the focusable nav, not the outer row.
+    expect(UI_JS).toContain("querySelector('.overview-row-nav')");
+  });
+
+  // F126: an overview rerender during the tier-3 dialog must not allow a
+  // competing tier PUT on a replacement select.
+  test('handlePushTierChange locks a pending address and renders pending immediately (F126)', () => {
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    // Entry lock: after the isAdmin gate, before reading the previous tier.
+    expect(handleTier.indexOf('if (!isAdmin()) return;')).toBeLessThan(
+      handleTier.indexOf('if (state.tierPending[address]) return;'),
+    );
+    expect(handleTier.indexOf('if (state.tierPending[address]) return;')).toBeLessThan(
+      handleTier.indexOf('var previous ='),
+    );
+    // Pending renders immediately (disabled replacement select) before the PUT.
+    const pendingSet = handleTier.indexOf('state.tierPending[address] = true;');
+    const putStart = handleTier.indexOf('await savePushContentTier(', pendingSet);
+    const prologue = handleTier.slice(pendingSet, putStart);
+    expect(prologue).toContain('renderOverviewRows()');
+    // F127: apply() rechecks the lock — a stale tier-3 dialog confirm bypasses
+    // the entry guard and must drop instead of starting a competing PUT.
+    const applyStart = handleTier.indexOf('async function apply(');
+    expect(handleTier.indexOf('if (state.tierPending[address]) {', applyStart)).toBeGreaterThan(
+      applyStart,
+    );
+    expect(handleTier.indexOf('if (state.tierPending[address]) {', applyStart)).toBeLessThan(
+      pendingSet,
+    );
+  });
+
+  // F51: fuzzy push-tier PUT failure must re-fetch authoritative tier; known rejects restore.
+  test('handlePushTierChange fuzzy failure re-fetches tier; known failures restore (F51)', () => {
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    const catchStart = handleTier.indexOf('} catch (error) {');
+    const finallyStart = handleTier.indexOf('} finally {', catchStart);
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    expect(finallyStart).toBeGreaterThan(catchStart);
+    const catchBody = handleTier.slice(catchStart, finallyStart);
+
+    // Fuzzy path: re-fetch list, write select + dataset from server tier, announce refresh.
+    expect(catchBody).toContain("apiJson('/ui/api/identities')");
+    expect(catchBody).toContain('selectEl.value = String(authoritative)');
+    expect(catchBody).toContain('selectEl.dataset.currentTier = String(authoritative)');
+    expect(catchBody).toContain("(refreshed).");
+    // F53: bump epoch before recovery re-fetch so stale overview identities cannot clobber.
+    const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
+    expect(fuzzyStart).toBeGreaterThanOrEqual(0);
+    const fuzzyBranch = catchBody.slice(fuzzyStart);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeGreaterThanOrEqual(0);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
+      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
+    );
+    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
+    expect(fuzzyBranch).toContain('if (recoveryGen !== state.overviewGen) return;');
+
+    // confirm_risk_required: restore before announce (server clearly rejected).
+    const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
+    expect(confirmIdx).toBeGreaterThanOrEqual(0);
+    const afterConfirm = catchBody.slice(confirmIdx);
+    expect(afterConfirm.indexOf('restore()')).toBeGreaterThanOrEqual(0);
+    expect(afterConfirm.indexOf('restore()')).toBeLessThan(
+      afterConfirm.indexOf("announce('Tier 3 requires explicit risk confirmation.')"),
+    );
+
+    // session_expired: restore only (session flow takes over).
+    const sessionIdx = catchBody.indexOf("error.message === 'session_expired'");
+    expect(sessionIdx).toBeGreaterThan(confirmIdx);
+    const sessionBranch = catchBody.slice(sessionIdx, catchBody.indexOf('} else {', sessionIdx));
+    expect(sessionBranch).toContain('restore()');
+    // Fuzzy re-fetch must not live inside the session_expired branch.
+    expect(sessionBranch).not.toContain("apiJson('/ui/api/identities')");
+  });
+
+  // F107: an indirect close (background action) must still restore the tier
+  // select; the confirmed success path must not restore.
+  test('tier-3 dialog restores on indirect close but not after confirm (F107)', () => {
+    const closeAll = UI_JS.slice(
+      UI_JS.indexOf('function closeAllModals()'),
+      UI_JS.indexOf('function showTokenModal('),
+    );
+    // Pending cancel side-effect is consumed exactly once on any close.
+    expect(closeAll).toContain('var onCancel = confirmModalOnCancel;');
+    expect(closeAll.indexOf('var onCancel = confirmModalOnCancel;')).toBeLessThan(
+      closeAll.indexOf('confirmModalOnCancel = null;'),
+    );
+    expect(closeAll.indexOf('confirmModalOnCancel = null;')).toBeLessThan(
+      closeAll.indexOf('if (onCancel) onCancel();'),
+    );
+    const handleTier = UI_JS.slice(
+      UI_JS.indexOf('function handlePushTierChange('),
+      UI_JS.indexOf('function formatDate('),
+    );
+    // Success path clears the restore hook before closing so a confirmed tier 3 sticks.
+    const applyIdx = handleTier.indexOf('await apply(3, true);');
+    const clearIdx = handleTier.indexOf('confirmModalOnCancel = null;');
+    const closeIdx = handleTier.indexOf('closeAllModals();', applyIdx);
+    expect(applyIdx).toBeGreaterThanOrEqual(0);
+    expect(clearIdx).toBeGreaterThan(applyIdx);
+    expect(closeIdx).toBeGreaterThan(clearIdx);
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

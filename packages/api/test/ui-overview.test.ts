@@ -185,6 +185,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
     getMessage: mock(async () => null),
     setMessageSeen: mock(async () => true),
     getMailboxScan: mock(async () => zeroSnapshotOutcome()),
+    setPushContentTier: mock(() => null),
     ...overrides,
   };
   const store = new UiSessionStore({
@@ -391,6 +392,7 @@ describe('Overview 端点契约', () => {
       'hasToken',
       'lastReceivedAt',
       'name',
+      'pushContentTier',
       'unseen',
     ]);
     expect(body.scan.scanBack).toBe(500);

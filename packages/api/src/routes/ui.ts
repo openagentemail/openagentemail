@@ -8,8 +8,12 @@ import {
   findIdentity,
   listIdentities,
   LOCALPART_RE,
+  PUSH_TIER3_WARNING,
+  resolvePushContentTier,
   rotateIdentityToken,
+  setIdentityPushContentTier,
   type Identity,
+  type PushContentTier,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import {
@@ -44,6 +48,8 @@ export type UiApiDependencies = {
     refresh: boolean;
     identityAddresses: string[];
   }) => Promise<ScanOutcome>;
+  /** Persist an identity's mail-arrival push content tier (admin UI). */
+  setPushContentTier: (address: string, tier: PushContentTier) => Identity | null;
 };
 
 /** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
@@ -58,6 +64,7 @@ const defaultDependencies: UiApiDependencies = {
   getMessage,
   setMessageSeen,
   getMailboxScan: (opts) => overviewCache.getOverview(opts),
+  setPushContentTier: setIdentityPushContentTier,
 };
 
 /** 「最近活跃」的窗口长度（小时）。 */
@@ -80,13 +87,23 @@ const seenBodySchema = z
   .strict();
 
 function identityProjection(identity: Identity) {
+  const pushContentTier = resolvePushContentTier(identity);
   return {
     address: identity.address,
     ...(identity.name ? { name: identity.name } : {}),
     createdAt: identity.createdAt,
     hasToken: Boolean(identity.tokenHash),
+    pushContentTier,
+    ...(pushContentTier === 3 ? { pushContentTierWarning: PUSH_TIER3_WARNING } : {}),
   };
 }
+
+const pushTierBodySchema = z
+  .object({
+    pushContentTier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    confirm_risk: z.boolean().optional(),
+  })
+  .strict();
 
 function requireUiAdmin(c: Context): Response | null {
   if (getAuth(c).kind !== 'admin') {
@@ -272,6 +289,39 @@ export function createUiApiRoutes(
     const token = rotateIdentityToken(c.req.param('address'));
     if (!token) return c.json({ error: 'not_found' }, 404);
     return c.json({ address: c.req.param('address').toLowerCase(), token });
+  });
+
+  routes.put('/identities/:address/push-tier', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    const parsed = pushTierBodySchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const { pushContentTier: tier, confirm_risk: confirmRisk } = parsed.data;
+    if (tier === 3 && confirmRisk !== true) {
+      return c.json(
+        {
+          error: 'confirm_risk_required',
+          message: PUSH_TIER3_WARNING,
+        },
+        400,
+      );
+    }
+    const updated = dependencies.setPushContentTier(c.req.param('address'), tier);
+    if (!updated) return c.json({ error: 'not_found' }, 404);
+    const resolved = resolvePushContentTier(updated);
+    return c.json({
+      address: updated.address,
+      pushContentTier: resolved,
+      ...(resolved === 3 ? { warning: PUSH_TIER3_WARNING } : {}),
+    });
   });
 
   routes.delete('/identities/:address', (c) => {

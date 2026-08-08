@@ -204,6 +204,12 @@ const dependencies = {
   getMessage: async (address: string, id: string) =>
     address === 'fox@preview.test' ? (details.get(id) ?? null) : null,
   getMailboxScan,
+  setPushContentTier: (address: string, tier: 1 | 2 | 3) => {
+    const identity = identities.find((entry) => entry.address === address.toLowerCase());
+    if (!identity) return null;
+    (identity as { pushContentTier?: 1 | 2 | 3 }).pushContentTier = tier;
+    return identity as typeof identity & { pushContentTier: 1 | 2 | 3 };
+  },
 };
 
 const app = new Hono();

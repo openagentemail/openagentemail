@@ -4,9 +4,15 @@ import { z } from 'zod';
 import {
   createIdentity,
   deleteIdentity,
+  findIdentity,
   listIdentities,
   rotateIdentityToken,
+  resolvePushContentTier,
+  setIdentityPushContentTier,
   LOCALPART_RE,
+  PUSH_TIER3_WARNING,
+  type Identity,
+  type PushContentTier,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import { getAuth } from '../lib/auth.ts';
@@ -19,6 +25,14 @@ const createSchema = z.object({
   canNotifyUser: z.boolean().optional(),
 });
 
+const pushTierSchema = z
+  .object({
+    pushContentTier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    // Tier 3 ships body/OTP off-box via ntfy; require an explicit ack.
+    confirm_risk: z.boolean().optional(),
+  })
+  .strict();
+
 // Identity management is admin-only: identity tokens may not mint, list or
 // delete identities (that would let a leaked token escalate sideways).
 function requireAdmin(c: Context) {
@@ -26,6 +40,26 @@ function requireAdmin(c: Context) {
     return c.json({ error: 'forbidden: admin key required' }, 403);
   }
   return null;
+}
+
+function pushTierResponse(address: string, tier: PushContentTier) {
+  return {
+    address,
+    pushContentTier: tier,
+    ...(tier === 3 ? { warning: PUSH_TIER3_WARNING } : {}),
+  };
+}
+
+function publicIdentity(identity: Identity) {
+  const tier = resolvePushContentTier(identity);
+  return {
+    address: identity.address,
+    ...(identity.name ? { name: identity.name } : {}),
+    createdAt: identity.createdAt,
+    ...(identity.canNotifyUser ? { canNotifyUser: true } : {}),
+    pushContentTier: tier,
+    ...(tier === 3 ? { pushContentTierWarning: PUSH_TIER3_WARNING } : {}),
+  };
 }
 
 export const identitiesRoute = new Hono()
@@ -64,6 +98,7 @@ export const identitiesRoute = new Hono()
           address: identity.address,
           ...(identity.name ? { name: identity.name } : {}),
           ...(identity.canNotifyUser ? { canNotifyUser: true } : {}),
+          pushContentTier: resolvePushContentTier(identity),
           // Shown exactly once — store it now. Only its hash persists.
           token,
         },
@@ -79,7 +114,47 @@ export const identitiesRoute = new Hono()
   .get('/', (c) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
-    return c.json({ identities: listIdentities() });
+    return c.json({
+      identities: listIdentities().map((identity) => publicIdentity(identity)),
+    });
+  })
+  .get('/:address/push-tier', (c) => {
+    const address = c.req.param('address').toLowerCase();
+    const auth = getAuth(c);
+    // Identity tokens may read their own tier; only admins may read others.
+    if (auth.kind === 'identity' && auth.address !== address) {
+      return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+    }
+    const identity = findIdentity(address);
+    if (!identity) return c.json({ error: 'not_found' }, 404);
+    return c.json(pushTierResponse(address, resolvePushContentTier(identity)));
+  })
+  .put('/:address/push-tier', async (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    const parsed = pushTierSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const { pushContentTier: tier, confirm_risk: confirmRisk } = parsed.data;
+    if (tier === 3 && confirmRisk !== true) {
+      return c.json(
+        {
+          error: 'confirm_risk_required',
+          message: PUSH_TIER3_WARNING,
+        },
+        400,
+      );
+    }
+    const updated = setIdentityPushContentTier(c.req.param('address'), tier);
+    if (!updated) return c.json({ error: 'not_found' }, 404);
+    return c.json(pushTierResponse(updated.address, resolvePushContentTier(updated)));
   })
   .post('/:address/token', (c) => {
     const denied = requireAdmin(c);

@@ -42,6 +42,7 @@ function dependencies(): UiApiDependencies {
       revalidating: false,
       refreshError: false,
     })),
+    setPushContentTier: mock(() => null),
   };
 }
 
@@ -72,11 +73,13 @@ describe('UI authorization boundaries', () => {
           name: 'Fox',
           createdAt: '2026-07-27T00:00:00.000Z',
           hasToken: true,
+          pushContentTier: 1,
         },
         {
           address: 'owl@test.example',
           createdAt: '2026-07-27T00:01:00.000Z',
           hasToken: false,
+          pushContentTier: 1,
         },
       ],
     });
@@ -103,6 +106,7 @@ describe('UI authorization boundaries', () => {
         name: 'Fox',
         createdAt: '2026-07-27T00:00:00.000Z',
         hasToken: true,
+        pushContentTier: 1,
       },
     ]);
 

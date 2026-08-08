@@ -113,6 +113,7 @@ export const UI_HTML = `<!doctype html>
           <span>Unseen</span>
           <span>Last</span>
           <span>Created</span>
+          <span>Push</span>
           <span>Actions</span>
         </div>
         <div id="overview-rows" class="overview-rows"></div>
@@ -160,12 +161,19 @@ export const UI_HTML = `<!doctype html>
     </div>
 
     <div class="modal-overlay" id="confirm-modal" hidden>
-      <div class="modal-card">
-        <h2>Delete Identity</h2>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        aria-describedby="confirm-modal-text confirm-modal-risk"
+      >
+        <h2 id="confirm-modal-title">Confirm</h2>
         <p id="confirm-modal-text"></p>
+        <p id="confirm-modal-risk" class="modal-warn" hidden></p>
         <div class="modal-actions">
           <button class="quiet" id="confirm-modal-cancel" type="button">Cancel</button>
-          <button class="primary" id="confirm-modal-confirm" type="button">Delete</button>
+          <button class="primary" id="confirm-modal-confirm" type="button">Confirm</button>
         </div>
       </div>
     </div>
@@ -465,7 +473,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .overview-header {
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px minmax(110px, 130px) 72px;
   padding: 8px 10px;
   color: var(--ink-dim);
   font-size: 11px;
@@ -479,7 +487,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   display: grid;
   align-items: baseline;
   gap: 10px;
-  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px 72px;
+  grid-template-columns: minmax(0,1fr) 80px 96px 80px 120px 96px minmax(110px, 130px) 72px;
   min-height: 56px;
   border: 0;
   border-bottom: 1px solid var(--line);
@@ -488,8 +496,26 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   padding: 12px 10px;
   text-align: left;
 }
+/* Nav hit-target spans identity…created (cols 1–6); tier/actions stay siblings (F66). */
+.overview-row-nav {
+  grid-column: 1 / span 6;
+  display: grid;
+  grid-template-columns: subgrid;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
 .overview-row:hover, .overview-row[aria-current="true"] { background: var(--gold-dim); }
-.overview-row:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
+.overview-row-nav:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
 .overview-row .cell { display: block; overflow: hidden; text-overflow: ellipsis; }
 .overview-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
 .cell-value { font-variant-numeric: tabular-nums; }
@@ -520,6 +546,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .row-actions { display: grid !important; gap: 4px; align-self: center; overflow: visible !important; }
 .row-action { min-height: 26px; padding: 2px 6px; font-size: 11px; }
 .delete-action { color: var(--red); }
+.push-tier-cell { display: grid !important; gap: 4px; align-self: center; overflow: visible !important; }
+.push-tier-select {
+  min-height: 28px;
+  width: 100%;
+  max-width: 118px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+.push-tier-hint { color: var(--ink-faint); font-size: 11px; line-height: 1.3; }
 .overview-panel.is-error .overview-rows, .overview-panel.is-error .overview-stats { opacity: .8; }
 .modal-overlay {
   position: fixed;
@@ -662,17 +698,23 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   border: 0;
 }
 
-@media (max-width: 900px) {
+/*
+ * Desktop overview fixed tracks+gaps ≈724px + 240 sidebar + panel pad ≈1044px → compact to 1100px.
+ * Compact fixed tracks+gaps+row pad ≈542px + 210 sidebar + panel pad ≈800px → stack below 820px
+ * so portrait tablets (720–800) do not collapse the identity track.
+ */
+@media (max-width: 1100px) {
   .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
   .overview-header, .overview-row {
     gap: 6px;
-    grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 58px;
+    grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 100px 58px;
   }
+  .overview-row-nav { gap: 6px; }
   .session-label { display: none; }
 }
 
-@media (max-width: 719px) {
+@media (max-width: 820px) {
   .topbar { height: 66px; padding: 0 14px; gap: 10px; }
   .topbar h1 { font-size: 18px; }
   /* 375 px 下品牌名让位给 scope 标题与 Sign out，logo 与按钮都不许换行溢出 */
@@ -699,6 +741,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .overview-heading { flex-wrap: wrap; }
   .overview-header { display: none; }
   .overview-row { display: block; min-height: 44px; }
+  .overview-row-nav {
+    display: block;
+    grid-column: auto;
+    grid-template-columns: none;
+  }
   .overview-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; }
   .overview-row .cell-label { display: inline; }
   .overview-row .cell-unit { display: none; }
@@ -742,11 +789,15 @@ export const UI_JS = `(function () {
     overviewFilter: '',
     overviewSort: { key: 'last', dir: 'desc' },
     overviewGen: 0,
+    /* Generation of the in-flight loadOverviewCycle (0 when none owns pending). */
+    overviewCycleGen: 0,
     overviewPolls: 0,
     overviewRetryAt: 0,
     overviewPending: false,
     overviewLoadingSince: 0,
-    returnAddress: ''
+    returnAddress: '',
+    /* address -> true while a push-tier PUT is in flight (survives re-render). */
+    tierPending: {}
   };
   var refreshTask = null;
   var refreshController = null;
@@ -800,9 +851,13 @@ export const UI_JS = `(function () {
   var tokenCopyButton = byId('token-copy-button');
   var tokenModalClose = byId('token-modal-close');
   var confirmModal = byId('confirm-modal');
+  var confirmModalTitle = byId('confirm-modal-title');
   var confirmModalText = byId('confirm-modal-text');
+  var confirmModalRisk = byId('confirm-modal-risk');
   var confirmModalCancel = byId('confirm-modal-cancel');
   var confirmModalConfirm = byId('confirm-modal-confirm');
+  var PUSH_TIER3_WARNING =
+    'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
   var createModal = byId('create-modal');
   var createName = byId('create-name');
   var createLocalpart = byId('create-localpart');
@@ -869,10 +924,20 @@ export const UI_JS = `(function () {
     if (!response.ok) {
       var failure = new Error('request_failed');
       failure.status = response.status;
+      failure.body = null;
+      try {
+        failure.body = await response.json();
+      } catch (_parseError) {
+        /* body optional */
+      }
       throw failure;
     }
     return response.json();
   }
+
+  /* Optional cancel side-effect (e.g. restore a select) — run once when the
+     dialog closes unconfirmed (Cancel button or indirect close; F107). */
+  var confirmModalOnCancel = null;
 
   function closeAllModals() {
     tokenModal.hidden = true;
@@ -881,8 +946,18 @@ export const UI_JS = `(function () {
     tokenValue.textContent = '';
     tokenModalTitle.textContent = 'Token';
     tokenCopyButton.classList.remove('copied');
+    confirmModalTitle.textContent = 'Confirm';
     confirmModalText.textContent = '';
+    confirmModalRisk.textContent = '';
+    confirmModalRisk.hidden = true;
+    confirmModalConfirm.textContent = 'Confirm';
     confirmModalConfirm.onclick = null;
+    // F107: an indirect close (background action opening another modal) must
+    // still run the pending cancel side-effect (restore tier select) — the
+    // callback is consumed exactly once either way.
+    var onCancel = confirmModalOnCancel;
+    confirmModalOnCancel = null;
+    if (onCancel) onCancel();
   }
 
   function showTokenModal(token, title) {
@@ -953,7 +1028,10 @@ export const UI_JS = `(function () {
   function handleDeleteIdentity(address) {
     if (!isAdmin()) return;
     closeAllModals();
+    confirmModalTitle.textContent = 'Delete Identity';
     confirmModalText.textContent = 'Delete ' + address + '? This cannot be undone.';
+    confirmModalRisk.hidden = true;
+    confirmModalConfirm.textContent = 'Delete';
     confirmModal.hidden = false;
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
@@ -961,6 +1039,7 @@ export const UI_JS = `(function () {
         await apiJson('/ui/api/identities/' + encodeURIComponent(address), {
           method: 'DELETE'
         });
+        bumpIdentityEpoch();
         state.identities = state.identities.filter(function (identity) {
           return identity.address !== address;
         });
@@ -974,6 +1053,167 @@ export const UI_JS = `(function () {
         }
       } finally {
         confirmModalConfirm.disabled = false;
+      }
+    };
+    confirmModalConfirm.focus();
+  }
+
+  /* Invalidate in-flight overview identity loads so a stale /identities
+     response cannot overwrite a local mutation (tier save, delete, …). */
+  function bumpIdentityEpoch() {
+    state.overviewGen += 1;
+  }
+
+  async function savePushContentTier(address, tier, confirmRisk) {
+    var body = { pushContentTier: tier };
+    if (confirmRisk) body.confirm_risk = true;
+    var payload = await apiJson(
+      '/ui/api/identities/' + encodeURIComponent(address) + '/push-tier',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      }
+    );
+    bumpIdentityEpoch();
+    state.identities = state.identities.map(function (identity) {
+      if (identity.address !== address) return identity;
+      return Object.assign({}, identity, {
+        pushContentTier: payload.pushContentTier,
+        pushContentTierWarning: payload.warning
+      });
+    });
+    return payload;
+  }
+
+  function handlePushTierChange(address, selectEl) {
+    if (!isAdmin()) return;
+    // F126: a tier PUT is already in flight for this address (an overview
+    // rerender can replace the selector while the tier-3 dialog waits) —
+    // reject the competing change so the persisted tier follows the user's
+    // choice, not request timing.
+    if (state.tierPending[address]) return;
+    var previous = Number(selectEl.dataset.currentTier || '1');
+    var next = Number(selectEl.value);
+    if (next === previous) return;
+
+    function restore() {
+      selectEl.value = String(previous);
+    }
+
+    async function apply(tier, confirmRisk) {
+      // F127: the tier-3 dialog can outlive an overview rerender — the user may
+      // have started a competing change on the replacement selector before this
+      // confirmation ran. apply() bypasses the handlePushTierChange entry lock,
+      // so recheck here: the in-flight change wins, this stale one is dropped.
+      if (state.tierPending[address]) {
+        announce('Another push content change is already in progress for ' + address + '.');
+        return;
+      }
+      state.tierPending[address] = true;
+      selectEl.disabled = true;
+      // F126: render the pending state immediately — the modal background is
+      // not inert, so a row recreated mid-flight must come back disabled, or
+      // keyboard users can start a competing PUT on the replacement select.
+      if (state.scope === 'overview') renderOverviewRows();
+      try {
+        await savePushContentTier(address, tier, confirmRisk);
+        selectEl.dataset.currentTier = String(tier);
+        announce('Push content set to tier ' + tier + ' for ' + address + '.');
+        renderOverviewRows();
+        // Restart overview only while still on Overview: unstick Refresh after
+        // bumpIdentityEpoch, but do not revive overview polling after openAddress.
+        if (state.scope === 'overview') {
+          loadOverviewCycle({ refresh: false });
+        }
+      } catch (error) {
+        if (
+          error.status === 400 &&
+          error.body &&
+          error.body.error === 'confirm_risk_required'
+        ) {
+          // Server rejected — no ambiguous state.
+          restore();
+          announce('Tier 3 requires explicit risk confirmation.');
+        } else if (error.message === 'session_expired') {
+          restore();
+        } else {
+          // Fuzzy failure (network/parse/5xx): PUT may already have persisted.
+          // Invalidate in-flight overview identity loads, then re-fetch.
+          bumpIdentityEpoch();
+          var recoveryGen = state.overviewGen;
+          try {
+            var payload = await apiJson('/ui/api/identities');
+            if (recoveryGen !== state.overviewGen) return;
+            state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+            var row = state.identities.find(function (identity) {
+              return identity.address === address;
+            });
+            if (!row) {
+              restore();
+              announce('Could not update push content tier. Try again.');
+            } else {
+              var authoritative =
+                row.pushContentTier === 2 || row.pushContentTier === 3
+                  ? row.pushContentTier
+                  : 1;
+              selectEl.value = String(authoritative);
+              selectEl.dataset.currentTier = String(authoritative);
+              announce(
+                'Push content tier is tier ' +
+                  authoritative +
+                  ' for ' +
+                  address +
+                  ' (refreshed).',
+              );
+              renderOverviewRows();
+            }
+          } catch (_refreshErr) {
+            if (recoveryGen !== state.overviewGen) return;
+            restore();
+            announce('Could not update push content tier. Try again.');
+          }
+        }
+      } finally {
+        delete state.tierPending[address];
+        selectEl.disabled = false;
+        // Re-render so a select recreated mid-flight drops disabled correctly.
+        if (state.scope === 'overview') renderOverviewRows();
+      }
+    }
+
+    if (next !== 3) {
+      apply(next, false);
+      return;
+    }
+
+    closeAllModals();
+    confirmModalTitle.textContent = 'Enable sensitive push content';
+    confirmModalText.textContent =
+      'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
+    confirmModalRisk.textContent = PUSH_TIER3_WARNING;
+    confirmModalRisk.hidden = false;
+    confirmModalConfirm.textContent = 'Enable tier 3';
+    confirmModal.hidden = false;
+    // Restore the previous tier if the dialog closes unconfirmed (Cancel or an
+    // indirect close runs it via closeAllModals); the success path clears it.
+    confirmModalOnCancel = function () {
+      restore();
+    };
+    confirmModalConfirm.onclick = async function () {
+      // Disable both actions for the in-flight PUT so Cancel cannot restore
+      // the select while a successful response still enables tier 3.
+      confirmModalConfirm.disabled = true;
+      confirmModalCancel.disabled = true;
+      try {
+        await apply(3, true);
+        // F107: confirmed — consume the pending restore before closeAllModals
+        // would run it and drop the select back to the old tier.
+        confirmModalOnCancel = null;
+        closeAllModals();
+      } finally {
+        confirmModalConfirm.disabled = false;
+        confirmModalCancel.disabled = false;
       }
     };
     confirmModalConfirm.focus();
@@ -1435,9 +1675,13 @@ export const UI_JS = `(function () {
       var rowNode = document.createElement('div');
       rowNode.className = 'overview-row';
       rowNode.dataset.address = model.identity.address;
-      rowNode.tabIndex = 0;
-      rowNode.setAttribute('role', 'button');
       rowNode.setAttribute('aria-current', 'false');
+
+      // F66: navigation is a sibling of tier/actions, not an ancestor of <select>.
+      var navNode = document.createElement('div');
+      navNode.className = 'overview-row-nav';
+      navNode.setAttribute('role', 'button');
+      navNode.tabIndex = 0;
 
       var identityCell = document.createElement('span');
       identityCell.className = 'cell';
@@ -1454,7 +1698,7 @@ export const UI_JS = `(function () {
         note.textContent = '(no mail in the current window)';
         identityCell.append(note);
       }
-      rowNode.append(identityCell);
+      navNode.append(identityCell);
 
       var tokenCell = document.createElement('span');
       tokenCell.className = 'cell token-cell';
@@ -1467,10 +1711,10 @@ export const UI_JS = `(function () {
       tokenDot.className = 'token-dot' + (model.identity.hasToken ? ' has-token' : '');
       tokenStatus.append(tokenDot, document.createTextNode(model.identity.hasToken ? 'Set' : 'None'));
       tokenCell.append(tokenLabel, tokenStatus);
-      rowNode.append(tokenCell);
+      navNode.append(tokenCell);
 
-      var countText = appendCell(rowNode, 'Messages', countParts(row, 'count'));
-      var unseenText = appendCell(rowNode, 'Unseen', countParts(row, 'unseen'));
+      var countText = appendCell(navNode, 'Messages', countParts(row, 'count'));
+      var unseenText = appendCell(navNode, 'Unseen', countParts(row, 'unseen'));
 
       var dot = null;
       if (isActiveRow(row)) {
@@ -1480,10 +1724,74 @@ export const UI_JS = `(function () {
       var lastParts = row && row.lastReceivedAt
         ? { text: formatAgo(row.lastReceivedAt) }
         : { text: row ? '—' : 'Unavailable', flat: true };
-      var lastText = appendCell(rowNode, 'Last', lastParts, dot);
-      var createdText = appendCell(rowNode, 'Created', { text: formatDay(model.identity.createdAt) });
+      var lastText = appendCell(navNode, 'Last', lastParts, dot);
+      var createdText = appendCell(navNode, 'Created', { text: formatDay(model.identity.createdAt) });
+
+      var currentTier = model.identity.pushContentTier === 2 || model.identity.pushContentTier === 3
+        ? model.identity.pushContentTier
+        : 1;
+      var ariaParts = [
+        model.identity.name || model.identity.address,
+        model.identity.address,
+        model.identity.hasToken ? 'token set' : 'no token',
+        countText,
+        unseenText,
+        'last ' + lastText,
+        'created ' + createdText,
+        'push tier ' + currentTier
+      ];
+      navNode.setAttribute('aria-label', ariaParts.join(', '));
+      navNode.addEventListener('click', function () {
+        openAddress(model.identity.address);
+      });
+      navNode.addEventListener('keydown', function (event) {
+        if (event.target !== navNode || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        openAddress(model.identity.address);
+      });
+      rowNode.append(navNode);
 
       if (isAdmin()) {
+        var tierCell = document.createElement('span');
+        tierCell.className = 'cell push-tier-cell';
+        var tierLabelNode = document.createElement('span');
+        tierLabelNode.className = 'cell-label';
+        tierLabelNode.textContent = 'Push content';
+        var tierSelect = document.createElement('select');
+        tierSelect.className = 'push-tier-select';
+        tierSelect.setAttribute('aria-label', 'Push content tier for ' + model.identity.address);
+        tierSelect.dataset.currentTier = String(currentTier);
+        if (state.tierPending[model.identity.address]) {
+          tierSelect.disabled = true;
+        }
+        [
+          { value: 1, label: '1 · interrupt only' },
+          { value: 2, label: '2 · + subject / from' },
+          { value: 3, label: '3 · + body / OTP (sensitive)' }
+        ].forEach(function (optionDef) {
+          var option = document.createElement('option');
+          option.value = String(optionDef.value);
+          option.textContent = optionDef.label;
+          if (optionDef.value === currentTier) option.selected = true;
+          tierSelect.append(option);
+        });
+        tierSelect.addEventListener('click', function (event) {
+          event.stopPropagation();
+        });
+        tierSelect.addEventListener('change', function (event) {
+          event.stopPropagation();
+          handlePushTierChange(model.identity.address, tierSelect);
+        });
+        tierCell.append(tierLabelNode, tierSelect);
+        if (currentTier === 3) {
+          var riskHint = document.createElement('span');
+          riskHint.className = 'push-tier-hint';
+          riskHint.textContent = 'Body/OTP leave server';
+          riskHint.title = model.identity.pushContentTierWarning || PUSH_TIER3_WARNING;
+          tierCell.append(riskHint);
+        }
+        rowNode.append(tierCell);
+
         var actionsCell = document.createElement('span');
         actionsCell.className = 'cell row-actions';
         var actionsLabel = document.createElement('span');
@@ -1509,26 +1817,6 @@ export const UI_JS = `(function () {
         rowNode.append(actionsCell);
       }
 
-      rowNode.setAttribute(
-        'aria-label',
-        [
-          model.identity.name || model.identity.address,
-          model.identity.address,
-          model.identity.hasToken ? 'token set' : 'no token',
-          countText,
-          unseenText,
-          'last ' + lastText,
-          'created ' + createdText
-        ].join(', ')
-      );
-      rowNode.addEventListener('click', function () {
-        openAddress(model.identity.address);
-      });
-      rowNode.addEventListener('keydown', function (event) {
-        if (event.target !== rowNode || (event.key !== 'Enter' && event.key !== ' ')) return;
-        event.preventDefault();
-        openAddress(model.identity.address);
-      });
       overviewRows.append(rowNode);
     });
   }
@@ -1559,9 +1847,12 @@ export const UI_JS = `(function () {
   }
 
   function rowButtonFor(address) {
-    var buttons = overviewRows.children;
-    for (var index = 0; index < buttons.length; index += 1) {
-      if (buttons[index].dataset.address === address) return buttons[index];
+    // Focus the row's nav hit-target (role=button), not the neutral outer row (F66).
+    var rows = overviewRows.children;
+    for (var index = 0; index < rows.length; index += 1) {
+      if (rows[index].dataset.address === address) {
+        return rows[index].querySelector('.overview-row-nav') || rows[index];
+      }
     }
     return null;
   }
@@ -1688,8 +1979,12 @@ export const UI_JS = `(function () {
   /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
      周期是停掉的（cancelOverview），所以这是"活动地址被删"能被发现的那一刻。 */
   function refreshInboxIdentities() {
+    // Same epoch as loadOverviewCycle: a tier save mid-flight must not be
+    // overwritten by a slower inbox identity refresh.
+    var generation = state.overviewGen;
     apiJson('/ui/api/identities').then(function (payload) {
       if (state.scope !== 'inbox') return;
+      if (generation !== state.overviewGen) return;
       state.identities = Array.isArray(payload.identities) ? payload.identities : [];
       renderIdentities();
       reconcileActiveAddress();
@@ -1708,6 +2003,7 @@ export const UI_JS = `(function () {
     overviewController = new AbortController();
     var signal = overviewController.signal;
     state.overviewPending = true;
+    state.overviewCycleGen = generation;
     updateOverviewRefreshButton();
 
     var identitiesPromise = apiJson('/ui/api/identities', { signal: signal });
@@ -1729,12 +2025,26 @@ export const UI_JS = `(function () {
     });
 
     overviewPromise.then(function (payload) {
-      if (generation !== state.overviewGen) return;
+      if (generation !== state.overviewGen) {
+        // Superseded by bumpIdentityEpoch or a newer cycle: never write data,
+        // but if no live cycle owns the current gen, clear a stuck Refresh.
+        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
+          state.overviewPending = false;
+          updateOverviewRefreshButton();
+        }
+        return;
+      }
       state.overviewPending = false;
       applyOverviewPayload(payload);
       renderOverview();
     }).catch(function (error) {
-      if (generation !== state.overviewGen) return;
+      if (generation !== state.overviewGen) {
+        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
+          state.overviewPending = false;
+          updateOverviewRefreshButton();
+        }
+        return;
+      }
       state.overviewPending = false;
       if (error.name === 'AbortError') return;
       applyOverviewError(error);
@@ -2233,7 +2543,10 @@ export const UI_JS = `(function () {
     copyValue(tokenValue.textContent, tokenValue, tokenCopyButton);
   });
   tokenModalClose.addEventListener('click', closeAllModals);
-  confirmModalCancel.addEventListener('click', closeAllModals);
+  confirmModalCancel.addEventListener('click', function () {
+    // closeAllModals consumes the pending cancel side-effect exactly once (F107).
+    closeAllModals();
+  });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
     enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });

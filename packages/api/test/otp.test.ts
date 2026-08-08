@@ -1,10 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  BARE_URL_RE,
+  bareUrlSpans,
+  CODE_KEYWORDS,
   extractCodes,
   extractHttpLinks,
   extractLinks,
   extractOtp,
   htmlToText,
+  maskNormalizedHttpUrls,
+  splitBareUrlCandidate,
+  STRONG_OTP_CUES,
 } from '../src/lib/otp.ts';
 
 describe('htmlToText', () => {
@@ -89,8 +95,205 @@ describe('extractCodes', () => {
     expect(extractCodes('Call us at 5551234 anytime.')).toEqual([]);
   });
 
-  test('ignores years without an explicit code keyword', () => {
+  test('years need strong OTP cues, not mere verification (F62/F65)', () => {
+    // Strong cue \bpin\b — still extract (F62 Codex / F65 keep).
+    expect(extractCodes('Your verification PIN is 2026')).toEqual(['2026']);
+    // "verification" alone is not strong enough (F65 restores year guard).
     expect(extractCodes('Our verification team, since 2024, sends regards.')).toEqual([]);
+    expect(extractCodes('Read our identity verification roadmap for 2026')).toEqual([]);
+    // Substring "pin" inside "shopping" must not count (\bpin\b).
+    expect(extractCodes('shopping 2026 deals')).toEqual([]);
+  });
+
+  test('years without any OTP keyword stay unextracted (F62)', () => {
+    expect(extractCodes('Born 1990, see link')).toEqual([]);
+    expect(extractCodes('This week in tech: 2024 trends.')).toEqual([]);
+  });
+
+  test('delimited OTP forms need strong cues (F68)', () => {
+    expect(extractCodes('Your verification code is 123-456')).toEqual(['123-456']);
+    // Full form only — continuous 4-digit halves of a delimited shape are suppressed.
+    expect(extractCodes('Your PIN is 1234-5678')).toEqual(['1234-5678']);
+    // Longer continuous runs are not delimited halves; keep continuous extract.
+    expect(extractCodes('Your code is 123456-7890')).toEqual(['123456', '7890']);
+    expect(extractCodes('code 1234-567890')).toEqual(['1234', '567890']);
+    // Other separators with strong cues.
+    expect(extractCodes('Your OTP is 123–456')).toEqual(['123–456']);
+    expect(extractCodes('验证码 123-456')).toEqual(['123-456']);
+    // F128: slash-delimited numeric OTPs (providers format codes as 123/456).
+    expect(extractCodes('Your verification code is 123/456')).toEqual(['123/456']);
+    expect(extractCodes('Your verification code is 1234/5678')).toEqual(['1234/5678']);
+    expect(extractCodes('验证码 １２３／４５６')).toEqual(['１２３／４５６']);
+    // F129: colon-delimited numeric OTPs (providers format codes as 123:456).
+    expect(extractCodes('Your verification code is 123:456')).toEqual(['123:456']);
+    expect(extractCodes('验证码 １２３：４５６')).toEqual(['１２３：４５６']);
+    // No strong cue: dates stay out (same as hyphen/dot forms).
+    expect(extractCodes('due 08/07/2026')).toEqual([]);
+    // No strong cue: times stay out (same as other delimited forms).
+    expect(extractCodes('meeting 12:30')).toEqual([]);
+    // No strong cue: roadmap ranges and phone-like numbers stay out.
+    expect(extractCodes('roadmap 2024-2025')).toEqual([]);
+    expect(extractCodes('call 555-1234')).toEqual([]);
+  });
+
+  test('single-digit chains need strong cues (F132)', () => {
+    // Providers render codes spaced for readability: `1 2 3 4 5 6`.
+    expect(extractCodes('Your verification code is 1 2 3 4 5 6')).toEqual(['1 2 3 4 5 6']);
+    expect(extractCodes('Your OTP is 1-2-3-4')).toEqual(['1-2-3-4']);
+    expect(extractCodes('验证码 １ ２ ３ ４')).toEqual(['１ ２ ３ ４']);
+    expect(extractCodes('code 1 2 3 4 5 6 7 8')).toEqual(['1 2 3 4 5 6 7 8']);
+    // 9+ digit chains refuse whole (full-run integrity, same as other forms).
+    expect(extractCodes('code 1 2 3 4 5 6 7 8 9')).toEqual([]);
+    // No strong cue: stay out.
+    expect(extractCodes('meet at 1 2 3 4 main street')).toEqual([]);
+  });
+
+  test('keyword window uses original offsets under expanding lowercasing (F99)', () => {
+    // Turkish İ (U+0130) lowercases to two code units; whole-string lower shifts
+    // later indices so a pre-lowercased window misses the cue (F99).
+    const labeled = 'Your verification code is 123456';
+    const prefixLong = 'İ'.repeat(100);
+    const prefixShort = 'İ'.repeat(10);
+    const asciiPrefix = 'A'.repeat(100);
+    expect(extractCodes(`${prefixLong}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${prefixShort}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${asciiPrefix}${labeled}`)).toEqual(['123456']);
+    // Delimited form with expanding prefix.
+    expect(extractCodes(`${prefixLong}Your verification code is 123-456`)).toEqual(['123-456']);
+    // Other expanders (ligature / Greek dialytika-tonos).
+    expect(extractCodes(`${'ﬀ'.repeat(50)}${labeled}`)).toEqual(['123456']);
+    expect(extractCodes(`${'ΐ'.repeat(50)}${labeled}`)).toEqual(['123456']);
+  });
+
+  test('keyword window matches compatibility-form keywords (F104)', () => {
+    // Fullwidth keyword + fullwidth code: window NFKC lets `ｃｏｄｅ` hit `code`.
+    expect(extractCodes('ｃｏｄｅ １２３４５６')).toEqual(['１２３４５６']);
+    expect(extractCodes('Ｙｏｕｒ ｖｅｒｉｆｉｃａｔｉｏｎ ｃｏｄｅ ｉｓ １２３４５６')).toEqual(['１２３４５６']);
+    // Fullwidth keyword + ASCII code.
+    expect(extractCodes('ｃｏｄｅ 123456')).toEqual(['123456']);
+    // ASCII keyword + fullwidth code (regression).
+    expect(extractCodes('code １２３４５６')).toEqual(['１２３４５６']);
+    // Delimited form under fullwidth strong cue.
+    expect(extractCodes('ｃｏｄｅ １２３-４５６')).toEqual(['１２３-４５６']);
+    // Year guard sees fullwidth strong cue inside the window.
+    expect(extractCodes('ｃｏｄｅ ２０２６')).toEqual(['２０２６']);
+    // No keyword at all: still rejected.
+    expect(extractCodes('ｈｅｌｌｏ １２３４５６')).toEqual([]);
+  });
+
+  test('strong cues cover CJK/JP code words for delimited and years (F71)', () => {
+    expect(extractCodes('您的校验码是 123-456')).toEqual(['123-456']);
+    expect(extractCodes('確認コードは 123-456')).toEqual(['123-456']);
+    expect(extractCodes('認証コードは 123-456')).toEqual(['123-456']);
+    // Year path benefits from the same strong set.
+    expect(extractCodes('認証コード 2026')).toEqual(['2026']);
+    // Weak verification alone still does not unlock years.
+    expect(extractCodes('verification roadmap 2026')).toEqual([]);
+  });
+
+  test('STRONG_OTP_CUES stays aligned with CODE_KEYWORDS strong items (F71)', () => {
+    const strongSet = new Set<string>(STRONG_OTP_CUES);
+    const codeSet = new Set<string>(CODE_KEYWORDS);
+    const latinStrong = new Set(['code', 'otp', 'passcode', 'pin']);
+    for (const kw of CODE_KEYWORDS) {
+      const mustBeStrong = latinStrong.has(kw) || /码|コード/.test(kw);
+      if (mustBeStrong) {
+        expect(strongSet.has(kw)).toBe(true);
+      }
+    }
+    // No orphan strong cues outside the keyword list.
+    for (const cue of STRONG_OTP_CUES) {
+      expect(codeSet.has(cue)).toBe(true);
+    }
+    // Weak / action terms must remain outside the strong set.
+    for (const weak of [
+      'verification',
+      'verify',
+      'confirmation',
+      'one-time',
+      'one time',
+      'security code',
+    ] as const) {
+      expect(strongSet.has(weak)).toBe(false);
+      expect(codeSet.has(weak)).toBe(true);
+    }
+  });
+
+  test('multi-character separator runs extract delimited OTP (F72)', () => {
+    expect(extractCodes('Your code is 123 - 456')).toEqual(['123 - 456']);
+    expect(extractCodes('Your code is 123  456')).toEqual(['123  456']);
+    expect(extractCodes('Your code is 123 – 456')).toEqual(['123 – 456']);
+    expect(extractCodes('123 - 456')).toEqual([]);
+    // Half-suppression with multi-char seps.
+    expect(extractCodes('Your code is 1234 - 5678')).toEqual(['1234 - 5678']);
+    // Four+ seps intentionally miss (bounded false-positive surface).
+    expect(extractCodes('Your code is 123    456')).toEqual([]);
+  });
+
+  test('three digit-group delimited OTP extracts with original spelling (F73)', () => {
+    expect(extractCodes('Your code is 12 34 56')).toEqual(['12 34 56']);
+    expect(extractCodes('Your PIN is 12-34-56')).toEqual(['12-34-56']);
+    // Two-group short halves still work (2+2).
+    expect(extractCodes('Your code is 12 34')).toEqual(['12 34']);
+    // Continuous left half suppressed when right group is only 2 digits.
+    expect(extractCodes('Your code is 1234 - 56')).toEqual(['1234 - 56']);
+    // F68 long continuous regression: not one delimited form.
+    expect(extractCodes('Your code is 123456-7890')).toEqual(['123456', '7890']);
+    // No strong cue / roadmap range.
+    expect(extractCodes('12 34 56')).toEqual([]);
+    expect(extractCodes('roadmap 2024-2025')).toEqual([]);
+    expect(extractCodes('call 555-12')).toEqual([]);
+  });
+
+  test('four digit-group form extracts whole; five+ groups rejected (F74)', () => {
+    expect(extractCodes('Your verification code is 12 34 56 78')).toEqual(['12 34 56 78']);
+    expect(extractCodes('Your PIN is 12-34-56-78')).toEqual(['12-34-56-78']);
+    // 5+ groups: no prefix/suffix partial matches.
+    expect(extractCodes('Your code is 12 34 56 78 90')).toEqual([]);
+    // F73/F68 regressions.
+    expect(extractCodes('Your code is 12 34 56')).toEqual(['12 34 56']);
+    expect(extractCodes('Your code is 123-456')).toEqual(['123-456']);
+    // Trailing incomplete group: full-run integrity rejects partial prefix.
+    // (Previously F73 could yield ['123-456'] from '123-456-7'.)
+    expect(extractCodes('Your code is 123-456-7')).toEqual([]);
+  });
+
+  test('Unicode decimal digits extract with original spelling (F75)', () => {
+    // Fullwidth continuous + CJK cue.
+    expect(extractCodes('您的验证码是 １２３４５６')).toEqual(['１２３４５６']);
+    // Fullwidth hyphen separator (U+FF0D).
+    expect(extractCodes('您的验证码是 １２３\uFF0D４５６')).toEqual(['１２３\uFF0D４５６']);
+    // Arabic-Indic (U+0660…) and Persian/Extended Arabic-Indic (U+06F0…).
+    expect(extractCodes('Your code is \u0661\u0662\u0663\u0664\u0665\u0666')).toEqual([
+      '\u0661\u0662\u0663\u0664\u0665\u0666',
+    ]);
+    expect(extractCodes('Your code is \u06F1\u06F2\u06F3\u06F4\u06F5\u06F6')).toEqual([
+      '\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6',
+    ]);
+    // Fullwidth parens are non-alnum → bounds hold.
+    expect(extractCodes('验证码（１２３４５６）')).toEqual(['１２３４５６']);
+    // CJK glued to ASCII digits still works (must not regress: no \\p{L} in bounds).
+    expect(extractCodes('您的验证码是123456')).toEqual(['123456']);
+    // Latin letter glued → reject (same as old \\b).
+    expect(extractCodes('code abc１２３４５６')).toEqual([]);
+    expect(extractCodes('code １２３４５６x')).toEqual([]);
+  });
+
+  test('Unicode-space delimited OTP extracts with original spelling (F70)', () => {
+    const nbsp = '\u00A0';
+    const nnbsp = '\u202F';
+    const emsp = '\u2003';
+    expect(extractCodes(`Your verification code is 123${nbsp}456`)).toEqual([`123${nbsp}456`]);
+    expect(extractCodes(`Your PIN is 123${nnbsp}456`)).toEqual([`123${nnbsp}456`]);
+    expect(extractCodes(`Your OTP is 123${emsp}456`)).toEqual([`123${emsp}456`]);
+    // Half-suppression still applies with Unicode separators.
+    expect(extractCodes(`Your code is 1234${nbsp}5678`)).toEqual([`1234${nbsp}5678`]);
+    // No strong cue → skip.
+    expect(extractCodes(`call 555${nbsp}1234`)).toEqual([]);
+    // Newlines must not act as separators (meta/text joins use \n).
+    expect(extractCodes('Your verification code is 123\n456')).toEqual([]);
+    expect(extractCodes('Your verification code is 1234\n5678')).toEqual(['1234', '5678']);
+    expect(extractCodes('Your verification code is 123\r456')).toEqual([]);
   });
 
   test('dedupes repeated codes', () => {
@@ -156,6 +359,734 @@ describe('extractLinks', () => {
 
   test('returns empty for unrelated links only', () => {
     expect(extractLinks('Docs at https://example.com/docs and https://example.com/about')).toEqual([]);
+  });
+
+  test('bareUrlSpans stays linear on free brackets and dense adjacent candidates', () => {
+    const freeBrackets = `https://${'['.repeat(10_000)}`;
+    const nestedParens = `https://x.com/${'('.repeat(5_000)}${')'.repeat(5_000)}`;
+    // 8000 tight Markdown-chain cuts `)(` (~200KB) must stay O(n).
+    const dense = Array.from(
+      { length: 8_000 },
+      (_, i) => `https://a${i}.example/verify`,
+    ).join(')(');
+    const started = performance.now();
+    freeBrackets.match(BARE_URL_RE);
+    [...bareUrlSpans(freeBrackets)];
+    [...bareUrlSpans(nestedParens)];
+    const denseSpans = [...bareUrlSpans(dense)];
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(denseSpans).toHaveLength(8_000);
+  });
+
+  test('splitBareUrlCandidate keeps nested balanced parens and peels free trailers', () => {
+    expect(splitBareUrlCandidate('https://example.com/confirm(foo(bar))?token=secret')).toEqual({
+      clean: 'https://example.com/confirm(foo(bar))?token=secret',
+      trail: '',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a)')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: ')',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a).')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: ').',
+    });
+    expect(splitBareUrlCandidate('https://example.com/verify?token=a.)')).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: '.)',
+    });
+    expect(splitBareUrlCandidate('https://[2001:db8::1]/confirm?token=secret')).toEqual({
+      clean: 'https://[2001:db8::1]/confirm?token=secret',
+      trail: '',
+    });
+    // Apostrophe is a legal URL char mid-URL; an odd trailing prose closer peels,
+    // and a trailing possessive/contraction `'s` peels as prose (F108).
+    expect(splitBareUrlCandidate("https://example.com/confirm?'token=secret")).toEqual({
+      clean: "https://example.com/confirm?'token=secret",
+      trail: '',
+    });
+    expect(splitBareUrlCandidate("https://x.com/it's")).toEqual({
+      clean: 'https://x.com/it',
+      trail: "'s",
+    });
+    expect(splitBareUrlCandidate("https://example.com/verify?token=a'")).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: "'",
+    });
+    expect(splitBareUrlCandidate("https://example.com/verify?token=a'.")).toEqual({
+      clean: 'https://example.com/verify?token=a',
+      trail: "'.",
+    });
+    // Mid-string free closer between adjacent Markdown links (glued next scheme).
+    expect(
+      splitBareUrlCandidate(
+        'https://a.example/verify)[Confirm](https://b.example/confirm',
+      ),
+    ).toEqual({
+      clean: 'https://a.example/verify',
+      trail: ')[Confirm](https://b.example/confirm',
+    });
+    // Unbalanced ) with no following scheme is URL content (WHATWG), not a cut.
+    expect(splitBareUrlCandidate('https://example.com/confirm)foo?token=secret')).toEqual({
+      clean: 'https://example.com/confirm)foo?token=secret',
+      trail: '',
+    });
+  });
+
+  test('HTML anchor hrefs keep a literal trailing ) that prose trim would peel', () => {
+    const html =
+      '<a href="https://example.com/confirm?token=abc)">Confirm your account</a>';
+    expect(extractLinks('Confirm your account', html)).toEqual([
+      'https://example.com/confirm?token=abc)',
+    ]);
+    // Prose path still peels free trailers.
+    expect(extractHttpLinks('(see https://x.com/a)')).toEqual(['https://x.com/a']);
+  });
+
+  test('adjacent Markdown links split into two bare spans and mask fully', () => {
+    const text = '[Verify](https://a.example/verify)[Confirm](https://b.example/confirm)';
+    const spans = [...bareUrlSpans(text)].map((s) => s.clean);
+    expect(spans).toEqual([
+      'https://a.example/verify',
+      'https://b.example/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual([
+      'https://a.example/verify',
+      'https://b.example/confirm',
+    ]);
+    // Monster merge must not appear as a single extracted URL.
+    expect(extractHttpLinks(text).join(' ')).not.toContain(')[Confirm](');
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    // Glue `)[Confirm](` is redacted with the URLs (F54) so labels cannot leak secrets.
+    expect(masked).toBe('[Verify](•••••••••)');
+    expect(masked).not.toContain('a.example');
+    expect(masked).not.toContain('b.example');
+    expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('Confirm');
+  });
+
+  test('unbalanced ) without a glued next scheme stays inside the URL', () => {
+    const url = 'https://example.com/confirm)foo?token=secret';
+    expect(extractHttpLinks(url)).toEqual([url]);
+    expect(maskNormalizedHttpUrls(`See ${url}`, [url])).toBe('See •••');
+  });
+
+  test('nested ?next=https:// after unbalanced ) stays one span (F45)', () => {
+    // Old glue (no-whitespace-to-next-scheme) hard-cut at ) and leaked token=.
+    const text =
+      'Verify https://example.com/confirm)token=secret?next=https://safe.example/';
+    const full =
+      'https://example.com/confirm)token=secret?next=https://safe.example/';
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.clean).toBe(full);
+    expect(extractHttpLinks(text)).toEqual([full]);
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    expect(masked).toBe('Verify •••');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://');
+  });
+
+  test('tight Markdown chain glue )[ and )( still splits adjacent URLs', () => {
+    const md = '[a](https://x.example/pay)[b](https://y.example/confirm)';
+    expect([...bareUrlSpans(md)].map((s) => s.clean)).toEqual([
+      'https://x.example/pay',
+      'https://y.example/confirm',
+    ]);
+    expect(maskNormalizedHttpUrls(md, extractHttpLinks(md))).toBe('[a](•••••••••)');
+
+    const tight = 'https://x.example/a)(https://y.example/b';
+    expect([...bareUrlSpans(tight)].map((s) => s.clean)).toEqual([
+      'https://x.example/a',
+      'https://y.example/b',
+    ]);
+    // glue is `)(` → three placeholders concatenated
+    expect(maskNormalizedHttpUrls(tight, extractHttpLinks(tight))).toBe('•••••••••');
+
+    const bracketChain = '[https://x.example/a][https://y.example/b]';
+    expect([...bareUrlSpans(bracketChain)].map((s) => s.clean)).toEqual([
+      'https://x.example/a',
+      'https://y.example/b',
+    ]);
+  });
+
+  test('nested ?next= scheme does not hide following Markdown chain (F52)', () => {
+    const text =
+      '[Verify](https://a.example/verify?next=https://x.example/)[Confirm](https://b.example/confirm)';
+    expect([...bareUrlSpans(text)].map((s) => s.clean)).toEqual([
+      'https://a.example/verify?next=https://x.example/',
+      'https://b.example/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual([
+      'https://a.example/verify?next=https://x.example/',
+      'https://b.example/confirm',
+    ]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe('[Verify](•••••••••)');
+  });
+
+  test('Markdown chain glue between URLs is redacted with the links (F54)', () => {
+    const text =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    const links = extractHttpLinks(text);
+    expect(links).toEqual([
+      'https://example.com/confirm',
+      'https://safe.example/',
+    ]);
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(2);
+    expect(spans[0]!.glueAfter).toEqual({
+      start: text.indexOf(')[token=secret]('),
+      end: text.indexOf('https://safe.example/'),
+    });
+    const masked = maskNormalizedHttpUrls(text, links);
+    // Trailing Markdown `)` after the second URL stays; glue+URLs are placeholders.
+    expect(masked).toBe('Verify •••••••••)');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('example.com');
+  });
+
+  test('glue redacts when only one adjacent URL is a target (F54)', () => {
+    const text =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    const onlyFirst = maskNormalizedHttpUrls(text, ['https://example.com/confirm']);
+    expect(onlyFirst).not.toContain('token');
+    expect(onlyFirst).not.toContain('secret');
+    expect(onlyFirst).toContain('safe.example');
+
+    const onlySecond = maskNormalizedHttpUrls(text, ['https://safe.example/']);
+    expect(onlySecond).not.toContain('token');
+    expect(onlySecond).not.toContain('secret');
+    expect(onlySecond).toContain('example.com/confirm');
+  });
+
+  test('quote/angle hard-cut tails are redacted with the URL (F55)', () => {
+    // Codex original: " after confirm hard-cuts; tail must not leak.
+    const q = 'Verify https://example.com/confirm"token=secret';
+    expect(extractHttpLinks(q)).toEqual(['https://example.com/confirm']);
+    const qSpans = [...bareUrlSpans(q)];
+    expect(qSpans).toHaveLength(1);
+    expect(qSpans[0]!.tailAfter).toEqual({
+      start: q.indexOf('"token=secret'),
+      end: q.length,
+    });
+    const qMasked = maskNormalizedHttpUrls(q, extractHttpLinks(q));
+    expect(qMasked).toBe('Verify ••••••');
+    expect(qMasked).not.toContain('token');
+    expect(qMasked).not.toContain('secret');
+
+    // > glued tail
+    const gt = 'Verify https://example.com/confirm>token=secret';
+    expect(maskNormalizedHttpUrls(gt, extractHttpLinks(gt))).toBe('Verify ••••••');
+    expect(maskNormalizedHttpUrls(gt, extractHttpLinks(gt))).not.toContain('token');
+
+    // <url>token=secret — closer > glued to tail
+    const lt = 'See <https://example.com/confirm>token=secret';
+    const ltMasked = maskNormalizedHttpUrls(lt, extractHttpLinks(lt));
+    expect(ltMasked).toBe('See <••••••');
+    expect(ltMasked).not.toContain('token');
+    expect(ltMasked).not.toContain('secret');
+
+    // Balanced quote: whitespace after closer → no tail; delimiters stay.
+    const bal = 'Say "https://example.com/confirm" end';
+    expect(maskNormalizedHttpUrls(bal, extractHttpLinks(bal))).toBe('Say "•••" end');
+
+    // Autolink with space after >
+    const auto = 'See <https://example.com/confirm> end';
+    expect(maskNormalizedHttpUrls(auto, extractHttpLinks(auto))).toBe('See <•••> end');
+
+    // Apostrophe stays inside URL (whole span masked).
+    const ap = "See https://example.com/confirm'token=secret";
+    expect(extractHttpLinks(ap)).toEqual(["https://example.com/confirm'token=secret"]);
+    expect(maskNormalizedHttpUrls(ap, extractHttpLinks(ap))).toBe('See •••');
+
+    // Tail contains a scheme: stop tail at that scheme; second URL independent.
+    const nested = 'Verify https://a.example/x"https://b.example/y';
+    const nestedSpans = [...bareUrlSpans(nested)];
+    expect(nestedSpans.map((s) => s.clean)).toEqual([
+      'https://a.example/x',
+      'https://b.example/y',
+    ]);
+    expect(nestedSpans[0]!.tailAfter).toEqual({
+      start: nested.indexOf('"https://'),
+      end: nested.indexOf('https://b.example/y'),
+    });
+    const nestedMasked = maskNormalizedHttpUrls(nested, extractHttpLinks(nested));
+    expect(nestedMasked).toBe('Verify •••••••••');
+    expect(nestedMasked).not.toContain('a.example');
+    expect(nestedMasked).not.toContain('b.example');
+
+    // F54 glue still works alongside F55 (no cross-regression).
+    const glue =
+      'Verify https://example.com/confirm)[token=secret](https://safe.example/)';
+    expect(maskNormalizedHttpUrls(glue, extractHttpLinks(glue))).not.toContain('token');
+  });
+
+  test('invalid nested scheme after tail/glue is swallowed into redaction (F57)', () => {
+    // Codex: tail stops at nested scheme; nested span is invalid and must not leak.
+    const text = 'Verify https://example.com/confirm"x=https://[token=secret';
+    const links = extractHttpLinks(text);
+    expect(links).toEqual(['https://example.com/confirm']);
+    const masked = maskNormalizedHttpUrls(text, links);
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+    expect(masked).not.toContain('https://[');
+    expect(masked.startsWith('Verify •••')).toBe(true);
+
+    // Chain of invalid nested schemes after quote tails.
+    const chain =
+      'See https://example.com/a"x=https://[bad"y=https://[worse';
+    const chainMasked = maskNormalizedHttpUrls(chain, extractHttpLinks(chain));
+    expect(chainMasked).not.toContain('bad');
+    expect(chainMasked).not.toContain('worse');
+    expect(chainMasked).not.toContain('https://[');
+    expect(chainMasked).not.toContain('token');
+
+    // Tail stops at a *valid* scheme that is not a mask target — leave it visible.
+    const keep =
+      'See https://a.example/x"https://b.example/visible';
+    const keepMasked = maskNormalizedHttpUrls(keep, ['https://a.example/x']);
+    expect(keepMasked).toContain('b.example/visible');
+    expect(keepMasked).not.toContain('a.example/x');
+
+    // Glue cut onto an invalid nested scheme — same swallow path.
+    const glueBad = 'See https://example.com/confirm)[x](https://[token=secret';
+    const glueMasked = maskNormalizedHttpUrls(glueBad, extractHttpLinks(glueBad));
+    expect(glueMasked).not.toContain('token');
+    expect(glueMasked).not.toContain('secret');
+    expect(glueMasked).not.toContain('https://[');
+  });
+
+  test('Markdown link closer cuts free ) before glued prose (F59)', () => {
+    const text = '[Verify](https://example.com/confirm)now';
+    expect([...bareUrlSpans(text)].map((s) => s.clean)).toEqual([
+      'https://example.com/confirm',
+    ]);
+    expect(extractHttpLinks(text)).toEqual(['https://example.com/confirm']);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe(
+      '[Verify](•••)now',
+    );
+
+    expect(
+      [...bareUrlSpans('[x](https://a.com/f(1))tail')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f(1)']);
+    expect(
+      [...bareUrlSpans('[x](https://a.com/p)foo)bar')].map((s) => s.clean),
+    ).toEqual(['https://a.com/p']);
+
+    // Space after MD closer — still clean URL (peel/cut both fine).
+    expect(
+      extractHttpLinks('[Verify](https://example.com/confirm) now'),
+    ).toEqual(['https://example.com/confirm']);
+    expect(extractHttpLinks('[Verify](https://example.com/confirm)')).toEqual([
+      'https://example.com/confirm',
+    ]);
+
+    // Bare URL free ) path must not use MD-link cutting (F48).
+    const bare = 'Verify https://example.com/confirm)[token=secret';
+    expect([...bareUrlSpans(bare)].map((s) => s.clean)).toEqual([
+      'https://example.com/confirm)[token=secret',
+    ]);
+  });
+
+  test('dense quote-tail fragments stay linear (F58)', () => {
+    // 4000 glued fragments: each "x= before the next https:// must not O(n²) scan.
+    const n = 4_000;
+    const dense = Array.from(
+      { length: n },
+      (_, i) => `https://a.example/${i}"x=`,
+    ).join('');
+    const started = performance.now();
+    const spans = [...bareUrlSpans(dense)];
+    const elapsed = performance.now() - started;
+    expect(spans).toHaveLength(n);
+    expect(spans[0]!.clean).toBe('https://a.example/0');
+    expect(spans[n - 1]!.clean).toBe(`https://a.example/${n - 1}`);
+    // Last fragment has no following scheme → tail may extend over "x=
+    expect(spans[0]!.tailAfter?.end).toBe(spans[1]!.start);
+    expect(elapsed).toBeLessThan(5_000);
+    // Masking must remain linear as well.
+    const maskStarted = performance.now();
+    const masked = maskNormalizedHttpUrls(dense, extractHttpLinks(dense));
+    expect(performance.now() - maskStarted).toBeLessThan(5_000);
+    expect(masked).not.toContain('https://');
+    expect(masked).not.toContain('a.example');
+  });
+
+  test('path segment )[token= is one WHATWG URL, not a Markdown cut (F48)', () => {
+    const text = 'Verify https://example.com/confirm)[token=secret';
+    const full = 'https://example.com/confirm)[token=secret';
+    const spans = [...bareUrlSpans(text)];
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.clean).toBe(full);
+    expect(extractHttpLinks(text)).toEqual([full]);
+    const masked = maskNormalizedHttpUrls(text, extractHttpLinks(text));
+    expect(masked).toBe('Verify •••');
+    expect(masked).not.toContain('token');
+    expect(masked).not.toContain('secret');
+
+    // Mixed: nested scheme after path junk still one span (scheme not after ]().
+    const mixed =
+      'See https://example.com/confirm)[token=secret?next=https://safe.example/';
+    const mixedFull =
+      'https://example.com/confirm)[token=secret?next=https://safe.example/';
+    expect([...bareUrlSpans(mixed)].map((s) => s.clean)).toEqual([mixedFull]);
+    expect(maskNormalizedHttpUrls(mixed, extractHttpLinks(mixed))).toBe('See •••');
+  });
+
+  test('space- or comma-separated adjacent URLs split without glue', () => {
+    expect(extractHttpLinks('https://a.example/v https://b.example/c')).toEqual([
+      'https://a.example/v',
+      'https://b.example/c',
+    ]);
+    expect(extractHttpLinks('https://a.example/v, https://b.example/c')).toEqual([
+      'https://a.example/v',
+      'https://b.example/c',
+    ]);
+  });
+
+  test('bareUrlSpans stays linear when many unbalanced closers precede whitespace', () => {
+    // Unbalanced ) with non-adjacent next scheme stays in-URL (O(n) depth walk + peel).
+    const adversarial =
+      `https://a.example/path${')'.repeat(40_000)} https://b.example/other`;
+    const started = performance.now();
+    const links = extractHttpLinks(adversarial);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    // Free trailing ) peel leaves path; second URL still found after whitespace.
+    expect(links).toEqual(['https://a.example/path', 'https://b.example/other']);
+  });
+
+  test('JS whitespace (NBSP, em space) ends a bare URL candidate', () => {
+    const nbsp = `https://example.com/verify?token=abc\u00A0NEXT`;
+    expect(extractHttpLinks(nbsp)).toEqual(['https://example.com/verify?token=abc']);
+    expect(extractHttpLinks(nbsp)[0]).not.toContain('%C2%A0');
+    const em = `https://example.com/verify?token=abc\u2003NEXT`;
+    expect(extractHttpLinks(em)).toEqual(['https://example.com/verify?token=abc']);
+  });
+
+  test('outer single quotes peel even with internal apostrophes (F61)', () => {
+    const text = "Use 'https://example.com/verify/o'brien' now";
+    expect(extractHttpLinks(text)).toEqual(["https://example.com/verify/o'brien"]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe("Use '•••' now");
+
+    // Trailing prose punctuation after outer closer still peels the quote (even count).
+    expect(extractHttpLinks("See 'https://example.com/verify/o'brien'.")).toEqual([
+      "https://example.com/verify/o'brien",
+    ]);
+
+    // Balanced outer quotes without internal apostrophe — still peel closer.
+    expect(extractHttpLinks("'https://a.com/x'")).toEqual(['https://a.com/x']);
+
+    // Bare URL with trailing ' and even/odd count: no openQuoted (start===0 path via split).
+    expect(splitBareUrlCandidate("https://a.com/x'")).toEqual({
+      clean: 'https://a.com/x',
+      trail: "'",
+    });
+    // Even trailing '' without openQuoted: leave both (parity even).
+    expect(splitBareUrlCandidate("https://a.com/x''")).toEqual({
+      clean: "https://a.com/x''",
+      trail: '',
+    });
+  });
+
+  test('openQuoted peels only one closing quote (F63)', () => {
+    // URL legitimately ends with ' + outer prose quote → keep URL-terminal '.
+    const text = "Use 'https://example.com/verify/token'' now";
+    expect(extractHttpLinks(text)).toEqual(["https://example.com/verify/token'"]);
+    expect(maskNormalizedHttpUrls(text, extractHttpLinks(text))).toBe("Use '•••' now");
+  });
+
+  test('prose wrappers cut before closing punctuation (F64)', () => {
+    expect(extractHttpLinks('Visit (https://example.com/verify): now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks("Use 'https://example.com/verify'!")).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(
+      [...bareUrlSpans('(https://a.com/f(1))')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f(1)']);
+    expect(extractHttpLinks("'https://a.com/x',")).toEqual(['https://a.com/x']);
+    // URL-terminal ' kept; outer closer cut on whitespace (F63 + F64).
+    expect(extractHttpLinks("See 'https://example.com/verify/token'' now")).toEqual([
+      "https://example.com/verify/token'",
+    ]);
+  });
+
+  test('smart quotes do not extend verification URLs (F122)', () => {
+    // Typographic double/single quotes around a link: the closing smart quote
+    // is prose context, not URL content (WHATWG would percent-encode it).
+    expect(extractHttpLinks('“https://example.com/verify”')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('‘https://example.com/verify’,')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('see “https://example.com/verify?token=abc123” now')).toEqual([
+      'https://example.com/verify?token=abc123',
+    ]);
+    // Closing quote without close-context stays (conservative, mirrors F64).
+    expect(extractHttpLinks('“https://a.com/x”y')).toEqual(['https://a.com/x%E2%80%9Dy']);
+  });
+
+  test('Markdown wrappers do not extend verification URLs (F130)', () => {
+    // Backtick/code-span and emphasis markers around a link: the closing
+    // marker in prose context is not URL content.
+    expect(extractHttpLinks('`https://example.com/verify`')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('**https://example.com/verify**')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('*https://example.com/verify*.')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('see `https://example.com/verify?token=abc` now')).toEqual([
+      'https://example.com/verify?token=abc',
+    ]);
+    // Closing marker without close-context stays (conservative, mirrors F64/F122).
+    expect(extractHttpLinks('`https://a.com/x`y')).toEqual(['https://a.com/x%60y']);
+    expect(extractHttpLinks('*https://a.com/x*y')).toEqual(['https://a.com/x*y']);
+  });
+
+  test('paired Unicode quotes do not extend verification URLs (F131)', () => {
+    // Guillemets / German quotes / CJK brackets around a link: the closing
+    // mark in prose context is not URL content (same percent-encoding
+    // argument as F122). CJK terminal punctuation is prose close context.
+    expect(extractHttpLinks('«https://example.com/verify»')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('‹https://example.com/verify›')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('„https://example.com/verify“')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('‚https://example.com/verify‘.')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('「https://example.com/verify」')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('『https://example.com/verify』,')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('【https://example.com/verify?token=abc】')).toEqual([
+      'https://example.com/verify?token=abc',
+    ]);
+    expect(extractHttpLinks('请看《https://example.com/verify?t=1》！')).toEqual([
+      'https://example.com/verify?t=1',
+    ]);
+    expect(extractHttpLinks('《https://example.com/verify》。')).toEqual(['https://example.com/verify']);
+    // Smart-quoted span before CJK terminal punctuation also closes.
+    expect(extractHttpLinks('“https://example.com/verify”。')).toEqual(['https://example.com/verify']);
+    // F133: compatibility-form (halfwidth/fullwidth) wrappers too.
+    expect(extractHttpLinks('（https://example.com/verify）')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('｢https://example.com/verify｣')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('＜https://example.com/verify＞')).toEqual(['https://example.com/verify']);
+    // Closing mark without close-context stays (conservative, mirrors F122).
+    expect(extractHttpLinks('«https://a.com/x»y')).toEqual(['https://a.com/x%C2%BBy']);
+    expect(extractHttpLinks('《https://a.com/x》y')).toEqual(['https://a.com/x%E3%80%8By']);
+    expect(extractHttpLinks('（https://a.com/x）y')).toEqual(['https://a.com/x%EF%BC%89y']);
+  });
+
+  test('prose brackets cut before free closing ] (F67)', () => {
+    expect(extractHttpLinks('Visit [https://example.com/verify]: now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Free-`]` cut (adjacent prose wrapper); trailing `!` also peels (F90).
+    expect(extractHttpLinks('Visit [https://example.com/verify]!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(
+      [...bareUrlSpans('[https://example.com/verify]token=secret')].map((s) => s.clean),
+    ).toEqual(['https://example.com/verify']);
+    // Balanced paren inside still peels outer brackets.
+    expect(extractHttpLinks('[https://a.com/f(1)]')).toEqual(['https://a.com/f(1)']);
+    // Nested brackets: inner [1] is balanced; free outer ] cuts.
+    expect(
+      [...bareUrlSpans('[https://a.com/f[1]]')].map((s) => s.clean),
+    ).toEqual(['https://a.com/f[1]']);
+    // IPv6 host balanced; free outer ] cuts after path.
+    expect(extractHttpLinks('[http://[::1]:8080/v]')).toEqual(['http://[::1]:8080/v']);
+    // No prose `[` opener: free `]` mid-path stays (not a wrapper cut).
+    expect(
+      [...bareUrlSpans('https://a.com/x[1]')].map((s) => s.clean),
+    ).toEqual(['https://a.com/x[1]']);
+  });
+
+  test('peels trailing !/? so non-adjacent prose closers clean up (F90)', () => {
+    // Non-adjacent paren wrapper: `(` not next to scheme → peel `!` then free `)`.
+    expect(extractHttpLinks('See this link (secure: https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('try (step 2: open https://example.com/s)! ok')).toEqual([
+      'https://example.com/s',
+    ]);
+    expect(
+      extractHttpLinks('(a: https://example.com/v)! and (b: https://example.com/w)!'),
+    ).toEqual(['https://example.com/v', 'https://example.com/w']);
+    // No wrapper at all — still peel `)!` (closer-glued bang).
+    expect(extractHttpLinks('open https://example.com/free)!')).toEqual([
+      'https://example.com/free',
+    ]);
+    // Bracket / quote twins.
+    expect(extractHttpLinks('docs [see: https://example.com/d]!')).toEqual([
+      'https://example.com/d',
+    ]);
+    expect(extractHttpLinks("note 'see https://example.com/v'!")).toEqual([
+      'https://example.com/v',
+    ]);
+    // Balanced path parens kept; only glued `!` peels.
+    expect(extractHttpLinks('see https://example.com/a_(b)! end')).toEqual([
+      'https://example.com/a_(b)',
+    ]);
+    // Trailing bare `?` kept as empty query (F100).
+    expect(extractHttpLinks('have you seen https://example.com/y?')).toEqual([
+      'https://example.com/y?',
+    ]);
+    // Mid-URL `!` preserved.
+    expect(extractHttpLinks('go https://example.com/a!b now')).toEqual([
+      'https://example.com/a!b',
+    ]);
+    // Port + query intact (no trailing `:` peel).
+    expect(extractHttpLinks('see https://example.com:8080/x?q=1 ok')).toEqual([
+      'https://example.com:8080/x?q=1',
+    ]);
+    // F48 LOCK: glued path after `)!` / `)[` is not pure trailing peel.
+    expect(extractHttpLinks('visit https://example.com/confirm)[token=abc now')).toEqual([
+      'https://example.com/confirm)[token=abc',
+    ]);
+    expect(extractHttpLinks('https://example.com/confirm)!token=abc')).toEqual([
+      'https://example.com/confirm)!token=abc',
+    ]);
+    // Adjacent wrappers (F64) still clean.
+    expect(extractHttpLinks('See this link (https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify).')).toEqual([
+      'https://example.com/verify',
+    ]);
+  });
+
+  test('keeps bare terminal ! on valid URLs; peels only closer-glued ! (F92)', () => {
+    // Legal URL-final bangs (no closer context) must stay.
+    expect(extractHttpLinks('go https://example.com/verify/token! now')).toEqual([
+      'https://example.com/verify/token!',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?token=abc! now')).toEqual([
+      'https://example.com/verify?token=abc!',
+    ]);
+    // Closer + punct run still peels (F90 preserved).
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!?')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify).!')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!')).toEqual([
+      'https://example.com/verify',
+    ]);
+  });
+
+  test('peel trailing punct stays linear on long colon runs (F98)', () => {
+    const base = 'go https://example.com/verify)';
+    const text = `${base}${':'.repeat(50_000)} end`;
+    const started = performance.now();
+    const links = extractHttpLinks(text);
+    const elapsed = performance.now() - started;
+    expect(links).toEqual(['https://example.com/verify']);
+    // Quadratic code took ~10s+ on 50k; linear must stay well under 1s.
+    expect(elapsed).toBeLessThan(1_000);
+    // Stacked mixed terminal punct still peels (verdict cache must not diverge).
+    expect(extractHttpLinks('See (secure: https://example.com/verify)!.:.?')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // F100: long trailing `?` run after a real query stays linear (peel extras).
+    const q = `go https://example.com/v?t=1${'?'.repeat(50_000)} end`;
+    const t0 = performance.now();
+    expect(extractHttpLinks(q)).toEqual(['https://example.com/v?t=1']);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+  });
+
+  test('preserves structural terminal ? empty query; peels prose ? (F100)', () => {
+    // Bare empty query kept (WHATWG-significant).
+    expect(extractHttpLinks('go https://example.com/verify? end')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?\nNEXT')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    // Second bare `?` after a real query is prose — peel.
+    expect(extractHttpLinks('go https://example.com/v?t=1? end')).toEqual([
+      'https://example.com/v?t=1',
+    ]);
+    // `??` keeps one structural empty-query `?`.
+    expect(extractHttpLinks('go https://example.com/verify?? end')).toEqual([
+      'https://example.com/verify?',
+    ]);
+    // Closer / punct after `?` peels the `?` too (sentence context).
+    expect(extractHttpLinks('See (secure: https://example.com/verify?) now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See (secure: https://example.com/verify?). now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('See [docs: https://example.com/verify?] next')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('go https://example.com/verify?. end')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Internal query regression.
+    expect(extractHttpLinks('Click https://example.com/verify?token=abc to continue')).toEqual([
+      'https://example.com/verify?token=abc',
+    ]);
+  });
+
+  test('peels colon after prose closers; keeps bare trailing colon (F96)', () => {
+    // Non-adjacent wrappers with closer-glued colon.
+    expect(extractHttpLinks('See this link (secure: https://example.com/verify): now')).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks('docs [see: https://example.com/d]: next')).toEqual([
+      'https://example.com/d',
+    ]);
+    expect(extractHttpLinks("note 'see https://example.com/v': end")).toEqual([
+      'https://example.com/v',
+    ]);
+    // Stacked punct after closer-colon.
+    expect(extractHttpLinks('See (secure: https://example.com/verify):.')).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Balanced path parens kept; colon peels.
+    expect(extractHttpLinks('see https://example.com/a_(b): end')).toEqual([
+      'https://example.com/a_(b)',
+    ]);
+    // Bare trailing colon kept (conservative; not closer-preceded).
+    expect(extractHttpLinks('see https://example.com/v: done')).toEqual([
+      'https://example.com/v:',
+    ]);
+    // Port and mid-URL colon unchanged.
+    expect(extractHttpLinks('see https://example.com:8080/x?q=1 ok')).toEqual([
+      'https://example.com:8080/x?q=1',
+    ]);
+    expect(extractHttpLinks('go https://example.com/a:b now')).toEqual([
+      'https://example.com/a:b',
+    ]);
+  });
+
+  test("peels English possessive 's from bare URL tails (F108)", () => {
+    // Possessive prose glued to the URL peels `'s`.
+    expect(extractHttpLinks("Check https://example.com/verify's status")).toEqual([
+      'https://example.com/verify',
+    ]);
+    expect(extractHttpLinks("Check https://example.com/verify's.")).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Internal apostrophes are never trailing and stay put.
+    expect(extractHttpLinks("see https://example.com/don't/verify now")).toEqual([
+      "https://example.com/don't/verify",
+    ]);
+    // Quoted span regression: outer quotes still peel around the URL.
+    expect(extractHttpLinks("go 'https://example.com/verify' now")).toEqual([
+      'https://example.com/verify',
+    ]);
+    // Uppercase 'S is not peeled (conservative).
+    expect(extractHttpLinks("Check https://example.com/verify'S end")).toEqual([
+      "https://example.com/verify'S",
+    ]);
+    // Bare trailing apostrophe still peels via the odd-parity rule (F61 regression).
+    expect(extractHttpLinks("see https://example.com/verify' end")).toEqual([
+      'https://example.com/verify',
+    ]);
   });
 });
 

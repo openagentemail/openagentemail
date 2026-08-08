@@ -32,8 +32,10 @@ bun run typecheck
 
 All `/v1/*` require `Authorization: Bearer <key>`.
 
-- `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?}` (409 if taken)
-- `GET /v1/identities` → `{identities:[{address,name?,createdAt}]}`
+- `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
+- `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,...}]}`
+- `GET /v1/identities/:address/push-tier` → `{address, pushContentTier, warning?}` (admin any; identity own only)
+- `PUT /v1/identities/:address/push-tier` `{pushContentTier:1|2|3, confirm_risk?}` → admin only; tier 3 requires `confirm_risk: true`
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 if the message is not addressed to `address`; reading never sets `\Seen` by itself — agents mark messages processed through here)

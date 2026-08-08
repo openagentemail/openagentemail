@@ -17,6 +17,15 @@ import { findIdentity, listIdentities, type Identity } from './identities.ts';
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
 export type NotifyTopic = 'self' | 'user-alerts' | 'user-low' | `agent:${string}`;
+/**
+ * When serialized ntfy JSON still exceeds NTFY_REQUEST_MAX_BYTES after optional
+ * click-drop (F76):
+ * - `truncate` — shorten message with ellipsis (mail-arrival watcher only; must
+ *   not throw or the UID watermark stalls).
+ * - `error` — throw message_too_large (default; manual /v1/notify must not
+ *   silently cut the body and return 200).
+ */
+export type NotifyOverflow = 'truncate' | 'error';
 
 export interface NotifyInput {
   target: NotifyTarget;
@@ -24,6 +33,15 @@ export interface NotifyInput {
   message: string;
   level: NotifyLevel;
   tags?: string[];
+  /** Optional ntfy click action URL (e.g. dashboard origin for mail-arrival pushes). */
+  click?: string;
+  /**
+   * Final privacy check after all internal awaits and body serialization,
+   * immediately before fetch(). Return false to abort without sending.
+   */
+  beforeSend?: () => boolean;
+  /** Default `error`. Watcher passes `truncate`. Click-drop runs before this. */
+  overflow?: NotifyOverflow;
 }
 
 export interface NotifyMessage {
@@ -58,8 +76,14 @@ export class NotifyError extends Error {
       | 'notifications_disabled'
       | 'notifications_unconfigured'
       | 'notify_unavailable'
+      | 'notify_cancelled'
       | 'verify_failed'
-      | 'unknown_agent',
+      | 'unknown_agent'
+      | 'message_too_large',
+    public readonly details?: {
+      maxRequestBytes: number;
+      availableMessageBytes: number;
+    },
   ) {
     super(code);
   }
@@ -473,6 +497,104 @@ function parseMessages(text: string): NotifyMessage[] {
   return messages;
 }
 
+/**
+ * ntfy rejects request bodies near ~4096 bytes. Cap serialized publish JSON
+ * under this so a poison message cannot make publish throw and stall the
+ * watcher UID watermark forever.
+ */
+export const NTFY_REQUEST_MAX_BYTES = 4_000;
+
+/** UTF-8 ellipsis appended when JSON-escaped message content is truncated. */
+const JSON_MESSAGE_ELLIPSIS = '…';
+const JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES = Buffer.byteLength(JSON_MESSAGE_ELLIPSIS, 'utf8');
+
+/**
+ * Cost of one code point inside a JSON string (UTF-8 of the escaped form).
+ * Matches JSON.stringify: quotes/backslash and the five single-letter escapes
+ * cost 2; other C0 controls become \\u00XX (6); lone surrogates (0xD800–0xDFFF)
+ * become \\uXXXX (6) — Buffer.byteLength would only count the U+FFFD replacement
+ * (3); paired surrogates form a >0xFFFF code point and take the UTF-8 branch.
+ * Everything else is raw UTF-8.
+ */
+function jsonStringEscapeCost(point: string): number {
+  const cp = point.codePointAt(0)!;
+  if (point === '"' || point === '\\') return 2;
+  if (cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d) return 2;
+  if (cp < 0x20) return 6;
+  if (cp >= 0xd800 && cp <= 0xdfff) return 6;
+  return Buffer.byteLength(point, 'utf8');
+}
+
+/**
+ * UTF-8 byte length of `text` after JSON string escaping (content only, no
+ * surrounding quotes). Used by the watcher to pack under the same budget that
+ * publish() enforces after serialization (F88).
+ */
+export function jsonEscapedByteLength(text: string): number {
+  let total = 0;
+  for (const point of text) total += jsonStringEscapeCost(point);
+  return total;
+}
+
+/**
+ * Available UTF-8 bytes for the ntfy JSON `message` field content after framing
+ * (topic/title/priority/tags/click). Mirrors publish() click-drop: if including
+ * click overflows the request cap, click is dropped before measuring (F76/F88).
+ * Conservative default topic is max ntfy length so watcher packing never exceeds
+ * the live physical topic overhead.
+ */
+export function notifyAvailableMessageBytes(options: {
+  title: string;
+  level: NotifyLevel;
+  tags?: string[];
+  click?: string;
+  topic?: string;
+}): number {
+  const topic = options.topic ?? 'x'.repeat(64);
+  const basePayload = {
+    topic,
+    title: options.title,
+    message: '',
+    priority: priority(options.level),
+    ...(options.tags?.length ? { tags: options.tags } : {}),
+  };
+  let framing = JSON.stringify(
+    options.click ? { ...basePayload, click: options.click } : basePayload,
+  );
+  if (options.click && Buffer.byteLength(framing, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+    framing = JSON.stringify(basePayload);
+  }
+  return Math.max(0, NTFY_REQUEST_MAX_BYTES - Buffer.byteLength(framing, 'utf8'));
+}
+
+/**
+ * Truncate `text` so its JSON string-escape length is ≤ maxEscapedBytes.
+ * Code-point aligned (same discipline as boundTextBytes); reserves room for `…`.
+ * Used only for ntfy publish message bodies after field caps — a second line of
+ * defense against JSON expansion of control characters.
+ */
+export function boundJsonEscapedText(text: string, maxEscapedBytes: number): string {
+  let total = 0;
+  for (const point of text) {
+    total += jsonStringEscapeCost(point);
+    if (total > maxEscapedBytes) break;
+  }
+  if (total <= maxEscapedBytes) return text;
+  if (maxEscapedBytes < JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES) return '';
+  const budget = maxEscapedBytes - JSON_MESSAGE_ELLIPSIS_ESCAPED_BYTES;
+  if (budget <= 0) return JSON_MESSAGE_ELLIPSIS;
+
+  let used = 0;
+  let end = 0;
+  for (const point of text) {
+    const cost = jsonStringEscapeCost(point);
+    if (used + cost > budget) break;
+    used += cost;
+    end += point.length;
+  }
+  return `${text.slice(0, end)}${JSON_MESSAGE_ELLIPSIS}`;
+}
+
 export class NtfyNotificationService implements NotifyService {
   private async assertEnabled(): Promise<NotifyState> {
     if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
@@ -483,16 +605,50 @@ export class NtfyNotificationService implements NotifyService {
   async publish(input: NotifyInput): Promise<{ target: NotifyTarget; title: string; level: NotifyLevel }> {
     const current = await this.assertEnabled();
     const topic = await physicalTopic(input.target, input.level);
+    // ntfy rejects bodies near ~4096 bytes. Prefer keeping click; if the
+    // serialized body is still over budget after dropping click, either
+    // truncate message (watcher) or error (manual). Click-drop always runs
+    // first so its budget relief still counts for both overflow modes (F76).
+    const overflow = input.overflow ?? 'error';
+    const basePayload = {
+      topic,
+      title: input.title,
+      message: input.message,
+      priority: priority(input.level),
+      ...(input.tags?.length ? { tags: input.tags } : {}),
+    };
+    let body = JSON.stringify(
+      input.click ? { ...basePayload, click: input.click } : basePayload,
+    );
+    if (input.click && Buffer.byteLength(body, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+      body = JSON.stringify(basePayload);
+    }
+    if (Buffer.byteLength(body, 'utf8') > NTFY_REQUEST_MAX_BYTES) {
+      // overhead = all keys/quotes/commas except the message *content* (empty
+      // string still contributes the surrounding "" which stays in the final body).
+      const overhead = Buffer.byteLength(
+        JSON.stringify({ ...basePayload, message: '' }),
+        'utf8',
+      );
+      const availableMessageBytes = Math.max(0, NTFY_REQUEST_MAX_BYTES - overhead);
+      if (overflow === 'error') {
+        throw new NotifyError('message_too_large', {
+          maxRequestBytes: NTFY_REQUEST_MAX_BYTES,
+          availableMessageBytes,
+        });
+      }
+      basePayload.message = boundJsonEscapedText(input.message, availableMessageBytes);
+      body = JSON.stringify(basePayload);
+    }
+    // After assertEnabled/physicalTopic awaits: last chance to drop a payload
+    // whose privacy floor moved mid-flight (tier downgrade or DELETE).
+    if (input.beforeSend && !input.beforeSend()) {
+      throw new NotifyError('notify_cancelled');
+    }
     const response = await fetch(providerUrl('/'), {
       method: 'POST',
       headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
-      body: JSON.stringify({
-        topic,
-        title: input.title,
-        message: input.message,
-        priority: priority(input.level),
-        ...(input.tags?.length ? { tags: input.tags } : {}),
-      }),
+      body,
     });
     if (!response.ok) throw new NotifyError('notify_unavailable');
     return { target: input.target, title: input.title, level: input.level };

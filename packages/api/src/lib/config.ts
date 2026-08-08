@@ -7,6 +7,76 @@
 import { join } from 'node:path';
 import { z } from 'zod';
 
+/**
+ * Compose `${VAR:-}` injects "" when the var is unset. Treat empty/whitespace
+ * as missing so optional fields stay optional and `.default()` can apply.
+ */
+function emptyAsUndefined(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  return value.trim() === '' ? undefined : value;
+}
+
+/** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
+const httpUrl = z
+  .string()
+  .url()
+  .refine(
+    (value) => {
+      try {
+        const protocol = new URL(value).protocol;
+        return protocol === 'http:' || protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'URL must use http or https' },
+  );
+
+/** URL env: empty string → undefined (optional or fall through to default). */
+function envUrl(): z.ZodType<string | undefined>;
+function envUrl(fallback: string): z.ZodType<string>;
+function envUrl(fallback?: string) {
+  if (fallback !== undefined) {
+    return z.preprocess(emptyAsUndefined, httpUrl.default(fallback));
+  }
+  return z.preprocess(emptyAsUndefined, httpUrl.optional());
+}
+
+/**
+ * Public dashboard origin for ntfy click actions (F80). Rejects userinfo so
+ * credentials never ride the notification channel. Internal ntfy URLs keep
+ * envUrl() (credentials may be required on private networks).
+ * F114: query strings and fragments are rejected too — the value is attached
+ * verbatim as the ntfy click field on every mail-arrival push, so a copied
+ * authenticated URL (`…/ui?token=secret`) would leak the credential.
+ */
+function dashboardPublicUrlEnv() {
+  return z.preprocess(
+    emptyAsUndefined,
+    httpUrl
+      .refine(
+        (value) => {
+          try {
+            const url = new URL(value);
+            return (
+              url.username === '' &&
+              url.password === '' &&
+              url.search === '' &&
+              url.hash === ''
+            );
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'DASHBOARD_PUBLIC_URL must not include credentials (userinfo, query, or fragment)',
+        },
+      )
+      .optional(),
+  );
+}
+
 const envSchema = z.object({
   // HTTP port for the API service.
   PORT: z.coerce.number().int().positive().default(3100),
@@ -43,7 +113,8 @@ const envSchema = z.object({
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
 
-  // Directory for the identity store JSON file.
+  // Directory for the identity store JSON file. Single-writer process only
+  // (Compose runs one API); multi-process shared DATA_DIR is unsupported.
   DATA_DIR: z.string().default('./data'),
 
   // Built-in, read-only human inbox. Disable to make every /ui route 404.
@@ -52,13 +123,13 @@ const envSchema = z.object({
   // Notification transport. Docker Compose enables ntfy by default; keeping
   // the bare-process default off preserves the lightweight API test/runtime.
   NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
-  NTFY_INTERNAL_URL: z.string().url().default('http://ntfy'),
+  NTFY_INTERNAL_URL: envUrl('http://ntfy'),
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
   NTFY_STORAGE_DIR: z.string().min(1).default('/var/lib/openagentemail/ntfy'),
   // This can stay on a private address for server-only notifications. Phone
   // delivery needs a deliberate public HTTPS reverse proxy and full restart.
-  NOTIFY_PUBLIC_URL: z.string().url().default('http://127.0.0.1:2586'),
+  NOTIFY_PUBLIC_URL: envUrl('http://127.0.0.1:2586'),
   // Forward unknown topics to ntfy.sh unless an operator explicitly disables
   // it with NTFY_UPSTREAM=false.
   NTFY_UPSTREAM: z.enum(['true', 'false']).default('true'),
@@ -68,6 +139,12 @@ const envSchema = z.object({
   // Only identities explicitly granted can_notify_user may spend this budget.
   NOTIFY_RATE_LIMIT: z.coerce.number().int().min(0).default(10),
   PUSH_POLICY: z.enum(['otp', 'all', 'none']).default('otp'),
+  // Optional public origin of the human dashboard. When set, mail-arrival
+  // ntfy pushes include a click action that opens this URL (no deep link).
+  // Must not contain userinfo — credentials must not leave via ntfy (F80).
+  // Query/fragment are rejected too (F114): a copied authenticated URL would
+  // leak its token verbatim on every push.
+  DASHBOARD_PUBLIC_URL: dashboardPublicUrlEnv(),
 
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
@@ -86,9 +163,24 @@ function splitCsv(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Canonical form keeps configured and request URLs comparable as origins. */
-function normalizeUrl(value: string): string {
-  return new URL(value).href.replace(/\/+$/, '');
+/**
+ * Canonical form keeps configured and request URLs comparable as origins.
+ * Only drops a redundant trailing slash on the pathname — never rewrites
+ * query values or fragments (e.g. `?next=/` and `#/` must survive).
+ * Exported so notify device pairing uses the same normalizer as config.
+ */
+export function normalizeUrl(value: string): string {
+  const url = new URL(value);
+  if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  }
+  // Root path serializes as "https://host/" (or with userinfo). Prefer href so
+  // publisher:secret@host credentials survive; origin alone drops userinfo.
+  // Only apply when search/hash are empty so those branches keep full href.
+  if (url.pathname === '/' && url.search === '' && url.hash === '') {
+    return url.href.replace(/\/+$/, '');
+  }
+  return url.href;
 }
 
 /** Parse an environment object so TLS defaults and validation stay testable. */
@@ -134,6 +226,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       pushPolicy: raw.PUSH_POLICY,
       notifyRateLimit: raw.NOTIFY_RATE_LIMIT,
     },
+    dashboardPublicUrl: raw.DASHBOARD_PUBLIC_URL
+      ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)
+      : undefined,
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,
