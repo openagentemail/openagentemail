@@ -348,6 +348,47 @@ describe('mail-arrival notification watcher', () => {
     expect(calls).toEqual([]);
   });
 
+  test('otp policy classifies strongly cued alphanumeric body codes (F137)', async () => {
+    // The only credential is an alnum code in the BODY (plain subject).
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Hello there\r\n\r\nYour verification code is A1B2C3, use it soon.',
+      ),
+      'otp',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].level).toBe('urgent');
+    // Tier 1 (default): the code does not enter the payload.
+    expect(JSON.stringify(calls[0])).not.toContain('A1B2C3');
+
+    // Tier 3 lists the body code on the Codes line.
+    const tier3 = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Hello\r\n\r\nYour verification code is A1B2C3, use it soon.',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(tier3).toHaveLength(1);
+    expect(tier3[0].message).toContain('Codes: A1B2C3');
+
+    // Shouted words without any strong cue do not classify.
+    const prose = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: NOTES\r\n\r\nMEETING at noon, bring NOTES.',
+      ),
+      'otp',
+    );
+    expect(prose).toEqual([]);
+  });
+
   test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
     // Body has its own code while the subject carries a long signed URL: both
     // must reach the payload — the subject is truncated at the metadata cap,

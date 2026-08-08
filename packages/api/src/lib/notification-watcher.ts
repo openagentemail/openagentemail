@@ -1095,6 +1095,17 @@ export async function processWatchedMessage(
       hasOtpOrLink = otp.codes.length > 0 || otp.links.length > 0;
       extras.codes = otp.codes;
       extras.links = otp.links;
+      // F137: strongly cued alphanumeric BODY codes classify too (the
+      // subject path F134/F136 covered only metadata). Same code-shaped
+      // filter; the global cue gate may over-classify prose that mentions
+      // a cue near a shouted word — a safe extra alert next to a missed
+      // credential. Bodies never publish at tier ≤2, so no masking path.
+      const bodyAlnum = extractMetaAlnumCodes(text);
+      if (bodyAlnum.some(isDisplayableAlnumCode)) hasOtpOrLink = true;
+      for (const code of bodyAlnum) {
+        if (!isDisplayableAlnumCode(code)) continue;
+        if (!extras.codes.includes(code)) extras.codes.push(code);
+      }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
     } catch {
       // A malformed message is never an OTP match. `all` policy still sends a
