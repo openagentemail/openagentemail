@@ -389,6 +389,36 @@ describe('mail-arrival notification watcher', () => {
     expect(prose).toEqual([]);
   });
 
+  test('tier 2 masks metadata repeats of body-derived alnum codes (F138)', async () => {
+    // The body-derived code repeats in a cue-less subject: no cue, no digit
+    // run, so the digit-canon filter alone published the subject unchanged.
+    const calls = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Reference A1B2\r\n\r\nYour verification code is A1B2.',
+        'Reference A1B2',
+      ),
+      'otp',
+      [{ address: 'target@test.example', createdAt: '2026-08-02T00:00:00.000Z', pushContentTier: 2 }],
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toContain('•••');
+    expect(calls[0].message).not.toContain('A1B2');
+  });
+
+  test('body codes beyond the cue window do not classify (F139)', async () => {
+    // One cue near the start of a huge body: extraction is bounded to cue
+    // windows, so a code-shaped token far past the window is not a signal.
+    const far = await dispatches(
+      message(
+        'stranger@example.net',
+        `From: stranger@example.net\r\nSubject: hi\r\n\r\nYour verification code expires soon. ${'x'.repeat(2000)} A1B2C3`,
+      ),
+      'otp',
+    );
+    expect(far).toEqual([]);
+  });
+
   test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
     // Body has its own code while the subject carries a long signed URL: both
     // must reach the payload — the subject is truncated at the metadata cap,

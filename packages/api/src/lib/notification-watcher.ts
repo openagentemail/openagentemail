@@ -34,6 +34,7 @@ import {
   htmlToText,
   maskNormalizedHttpUrls,
   otpCodeRunRe,
+  STRONG_OTP_CUES,
 } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
@@ -477,6 +478,11 @@ function isMixedAlnumOtp(form: string): boolean {
  * classification signal either.
  */
 function isDisplayableAlnumCode(form: string): boolean {
+  // A shouted cue word (`CODE`, `OTP`) labeling a real code is not itself
+  // a code — listing/waking on it is noise.
+  if ((STRONG_OTP_CUES as readonly string[]).includes(form.normalize('NFKC').toLowerCase())) {
+    return false;
+  }
   if (isMixedAlnumOtp(form)) return true;
   const core = form.normalize('NFKC').split(META_ALNUM_SEP_ANY_RUN).join('');
   return /^[A-Z]{4,8}$/.test(core);
@@ -880,7 +886,12 @@ export function maskTier2Metadata(
   // letter-only OTPs under F101 case-insensitive continuous matching.
   const maskCodes = [
     ...metaOtp.codes,
-    ...extras.codes.filter((code) => metaCanonRuns.has(canonicalDigits(code))),
+    // F138: code-shaped alnum extras enter by exact/normalized form too —
+    // `Reference A1B2` has no cue and no digit run, so the digit-canon
+    // filter alone published the repeated body code unchanged.
+    ...extras.codes.filter(
+      (code) => metaCanonRuns.has(canonicalDigits(code)) || isMetaAlnumOtpForm(code),
+    ),
     ...extractMetaAlnumCodes(subject),
     ...extractMetaAlnumCodes(from),
     ...(strongMetaCue ? metaDigitSurfaces : []),
@@ -1056,6 +1067,68 @@ export function buildMailArrivalMessage(
   return boundPushMessage(body, withClickCap);
 }
 
+/** ASCII lowercase letter → fullwidth twin for cue-window surfaces (F139). */
+function toFullwidthLatin(s: string): string {
+  return s.replace(/[a-z]/g, (ch) => String.fromCodePoint(0xff41 + ch.codePointAt(0)! - 0x61));
+}
+
+/**
+ * Body window around one strong cue for alnum extraction (F139): 160
+ * code points each side covers cue-before/code-after phrasing with margin.
+ */
+const ALNUM_BODY_CUE_WINDOW = 160;
+
+/**
+ * Cue alternation for locating body windows on the ORIGINAL text (F139).
+ * Latin cues case-insensitive with word bounds; CJK cues and fullwidth-
+ * Latin spellings as substrings (hasStrongOtpCue reaches fullwidth forms
+ * through NFKC, which window finding cannot run without index drift).
+ */
+const BODY_CUE_WINDOW_SOURCE = ((): string => {
+  const latin: string[] = [];
+  const other: string[] = [];
+  for (const cue of STRONG_OTP_CUES) {
+    if (/^[a-z]+(?:-[a-z]+)*$/.test(cue)) {
+      latin.push(escapeRegExpLiteral(cue));
+      other.push(escapeRegExpLiteral(toFullwidthLatin(cue)));
+    } else {
+      other.push(escapeRegExpLiteral(cue));
+    }
+  }
+  return `\\b(?:${latin.join('|')})\\b|${other.join('|')}`;
+})();
+
+/**
+ * Bounded body windows around strong OTP cues (F139): alnum extraction
+ * runs per window, never over the whole untrusted body — one cue inside a
+ * multi-MB message must not turn every full-string regex/NFKC pass into a
+ * seconds-long stall while the single watcher awaits each message, and a
+ * shouted word far from any cue is not an OTP signal. Overlapping windows
+ * merge; a fresh regex instance per call keeps scans concurrency-safe.
+ */
+function bodyAlnumCueWindows(text: string): string[] {
+  const windows: string[] = [];
+  const re = new RegExp(BODY_CUE_WINDOW_SOURCE, 'giu');
+  let start = -1;
+  let end = -1;
+  for (const m of text.matchAll(re)) {
+    const wStart = Math.max(0, (m.index ?? 0) - ALNUM_BODY_CUE_WINDOW);
+    const wEnd = Math.min(text.length, (m.index ?? 0) + m[0].length + ALNUM_BODY_CUE_WINDOW);
+    if (start === -1) {
+      start = wStart;
+      end = wEnd;
+    } else if (wStart <= end) {
+      end = Math.max(end, wEnd);
+    } else {
+      windows.push(text.slice(start, end));
+      start = wStart;
+      end = wEnd;
+    }
+  }
+  if (start !== -1) windows.push(text.slice(start, end));
+  return windows;
+}
+
 /** Process one newly delivered message. Exported for policy/security tests. */
 export async function processWatchedMessage(
   message: WatchedMessage,
@@ -1097,14 +1170,14 @@ export async function processWatchedMessage(
       extras.links = otp.links;
       // F137: strongly cued alphanumeric BODY codes classify too (the
       // subject path F134/F136 covered only metadata). Same code-shaped
-      // filter; the global cue gate may over-classify prose that mentions
-      // a cue near a shouted word — a safe extra alert next to a missed
-      // credential. Bodies never publish at tier ≤2, so no masking path.
-      const bodyAlnum = extractMetaAlnumCodes(text);
-      if (bodyAlnum.some(isDisplayableAlnumCode)) hasOtpOrLink = true;
-      for (const code of bodyAlnum) {
-        if (!isDisplayableAlnumCode(code)) continue;
-        if (!extras.codes.includes(code)) extras.codes.push(code);
+      // filter. Bodies never publish at tier ≤2, so no masking path here.
+      // F139: extraction runs on bounded cue windows, not the whole body.
+      for (const cueWindow of bodyAlnumCueWindows(text)) {
+        for (const code of extractMetaAlnumCodes(cueWindow)) {
+          if (!isDisplayableAlnumCode(code)) continue;
+          hasOtpOrLink = true;
+          if (!extras.codes.includes(code)) extras.codes.push(code);
+        }
       }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
     } catch {
