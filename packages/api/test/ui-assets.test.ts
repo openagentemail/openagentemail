@@ -562,6 +562,15 @@ describe('UI static asset contract', () => {
     const putStart = handleTier.indexOf('await savePushContentTier(', pendingSet);
     const prologue = handleTier.slice(pendingSet, putStart);
     expect(prologue).toContain('renderOverviewRows()');
+    // F127: apply() rechecks the lock — a stale tier-3 dialog confirm bypasses
+    // the entry guard and must drop instead of starting a competing PUT.
+    const applyStart = handleTier.indexOf('async function apply(');
+    expect(handleTier.indexOf('if (state.tierPending[address]) {', applyStart)).toBeGreaterThan(
+      applyStart,
+    );
+    expect(handleTier.indexOf('if (state.tierPending[address]) {', applyStart)).toBeLessThan(
+      pendingSet,
+    );
   });
 
   // F51: fuzzy push-tier PUT failure must re-fetch authoritative tier; known rejects restore.

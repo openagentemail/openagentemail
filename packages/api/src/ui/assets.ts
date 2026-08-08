@@ -1102,6 +1102,14 @@ export const UI_JS = `(function () {
     }
 
     async function apply(tier, confirmRisk) {
+      // F127: the tier-3 dialog can outlive an overview rerender — the user may
+      // have started a competing change on the replacement selector before this
+      // confirmation ran. apply() bypasses the handlePushTierChange entry lock,
+      // so recheck here: the in-flight change wins, this stale one is dropped.
+      if (state.tierPending[address]) {
+        announce('Another push content change is already in progress for ' + address + '.');
+        return;
+      }
       state.tierPending[address] = true;
       selectEl.disabled = true;
       // F126: render the pending state immediately — the modal background is
