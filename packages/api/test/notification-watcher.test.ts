@@ -313,6 +313,41 @@ describe('mail-arrival notification watcher', () => {
     expect(JSON.stringify(tier2[0])).not.toContain('1 2 3 4 5 6');
   });
 
+  test('tier 2 masks and otp policy classifies letter-only single-char chains (F135)', async () => {
+    // All-caps letter chain is the only credential (subject-only).
+    const masked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is A B C D',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(masked.subject).toContain('•••');
+    expect(masked.subject).not.toContain('A B C D');
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Your verification code is A-B-C-D\r\n\r\nplain body, no credentials',
+      ),
+      'otp',
+    );
+    expect(calls).toHaveLength(1);
+    expect(JSON.stringify(calls[0])).not.toContain('A-B-C-D');
+  });
+
+  test('otp policy ignores cue-word-only subjects (F136)', async () => {
+    // `Error`/`code`/`expired` over-extract for masking, but none is a
+    // code-shaped token: no classification, no misleading OTP alert.
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Error code has expired\r\n\r\nordinary body, nothing sensitive',
+      ),
+      'otp',
+    );
+    expect(calls).toEqual([]);
+  });
+
   test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
     // Body has its own code while the subject carries a long signed URL: both
     // must reach the payload — the subject is truncated at the metadata cap,
@@ -1610,8 +1645,10 @@ describe('mail-arrival notification watcher', () => {
     // Shape locks: 3-group chain too short; 9-group chain rejected whole.
     expect(extractMetaAlnumCodes('Your verification code is A-1-B')).not.toContain('A-1-B');
     expect(extractMetaAlnumCodes('Your verification code is A-1-B-2-C-3-D-4-E')).not.toContain('A-1-B-2-C-3-D-4-E');
-    // Letter-only single chains stay rejected (delimited letter-only = F97 groups of 2–4).
-    expect(extractMetaAlnumCodes('Your verification code is A-B-C-D')).not.toContain('A-B-C-D');
+    // F135: all-caps letter-only single chains extract (shouted letter codes).
+    expect(extractMetaAlnumCodes('Your verification code is A-B-C-D')).toContain('A-B-C-D');
+    // Lowercase letter-only chains stay rejected (prose protection, mirrors F97).
+    expect(extractMetaAlnumCodes('Your verification code is a-b-c-d')).not.toContain('a-b-c-d');
     // Pure-digit chain stays on the digit path (not alnum extract).
     expect(extractMetaAlnumCodes('Your verification code is 1-2-3-4')).not.toContain('1-2-3-4');
     // No cue: rejected.
@@ -1654,8 +1691,9 @@ describe('mail-arrival notification watcher', () => {
     // Shape locks: 3-group too short; 9-group rejected whole.
     expect(extractMetaAlnumCodes('Your verification code is A 1 B')).not.toContain('A 1 B');
     expect(extractMetaAlnumCodes('Your verification code is A 1 B 2 C 3 D 4 E')).not.toContain('A 1 B 2 C 3 D 4 E');
-    // Letter-only single chains stay rejected (F97 letter policy).
-    expect(extractMetaAlnumCodes('Your verification code is A B C D')).not.toContain('A B C D');
+    // F135: all-caps letter-only space chains extract; lowercase stays rejected.
+    expect(extractMetaAlnumCodes('Your verification code is A B C D')).toContain('A B C D');
+    expect(extractMetaAlnumCodes('Your verification code is a b c d')).not.toContain('a b c d');
     // Pure-digit chain stays on the digit path.
     expect(extractMetaAlnumCodes('Your verification code is 1 2 3 4')).not.toContain('1 2 3 4');
     // No cue: rejected.
@@ -1698,8 +1736,8 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is A 1-B 2 C-3 D 4 E-5')).not.toContain(
       'A 1-B 2 C-3 D 4 E-5',
     );
-    // Letter-only / pure-digit mixed chains stay rejected (F105/F106 policy).
-    expect(extractMetaAlnumCodes('Your verification code is A B-C D')).not.toContain('A B-C D');
+    // F135: all-caps letter-only mixed-sep chains extract; pure-digit stays rejected.
+    expect(extractMetaAlnumCodes('Your verification code is A B-C D')).toContain('A B-C D');
     expect(extractMetaAlnumCodes('Your verification code is 1 2-3 4')).not.toContain('1 2-3 4');
     // No cue: rejected.
     expect(extractMetaAlnumCodes('Reference A 1-B 2 attached')).toEqual([]);

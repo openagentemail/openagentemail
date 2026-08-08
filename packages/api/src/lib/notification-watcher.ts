@@ -470,13 +470,16 @@ function isMixedAlnumOtp(form: string): boolean {
 }
 
 /**
- * Code-shaped alnum form for the tier-3 `Codes:` line (F134): mixed
- * letter+digit, or shouted letter-only (`WXYZ`). Cue words the masking
- * path deliberately over-extracts (`Your`, `code`, title/lowercase words)
- * are not codes worth listing.
+ * Code-shaped alnum form (F134–F136): mixed letter+digit, or shouted
+ * letter-only with separators stripped (`WXYZ`, `A-B-C-D`). Cue words the
+ * masking path deliberately over-extracts (`Your`, `code`, title/lowercase
+ * words) are not codes — not listed at tier 3, and per F136 not an OTP
+ * classification signal either.
  */
 function isDisplayableAlnumCode(form: string): boolean {
-  return isMixedAlnumOtp(form) || /^[A-Z]{4,8}$/.test(form.normalize('NFKC'));
+  if (isMixedAlnumOtp(form)) return true;
+  const core = form.normalize('NFKC').split(META_ALNUM_SEP_ANY_RUN).join('');
+  return /^[A-Z]{4,8}$/.test(core);
 }
 
 /**
@@ -513,10 +516,27 @@ function isLetterOnlyDelimitedOtp(form: string): boolean {
   return parts.every((g) => /^[A-Z]{2,4}$/.test(g));
 }
 
-/** Mixed, continuous letter-only, or delimited letter-only form (F77/F95/F97). */
+/**
+ * Letter-only single-char chain OTP under a strong cue (F135): NFKC, split
+ * on any sep run, 4–8 groups of exactly 1 letter. All-caps only, mirroring
+ * the delimited letter-only scope (F97) — lowercase chains (`a b c d`) stay
+ * rejected so English prose is not over-masked.
+ */
+function isLetterOnlySingleChainOtp(form: string): boolean {
+  const parts = form
+    .normalize('NFKC')
+    .split(META_ALNUM_SEP_ANY_RUN)
+    .filter(Boolean);
+  return parts.length >= 4 && parts.length <= 8 && parts.every((g) => /^[A-Z]$/.test(g));
+}
+
+/** Mixed, letter-only continuous/delimited/single-chain form (F77/F95/F97/F135). */
 function isMetaAlnumOtpForm(form: string): boolean {
   return (
-    isMixedAlnumOtp(form) || isLetterOnlyOtp(form) || isLetterOnlyDelimitedOtp(form)
+    isMixedAlnumOtp(form) ||
+    isLetterOnlyOtp(form) ||
+    isLetterOnlyDelimitedOtp(form) ||
+    isLetterOnlySingleChainOtp(form)
   );
 }
 
@@ -536,7 +556,7 @@ function isPlausibleSpaceLetterRun(form: string): boolean {
 /**
  * Accept a tight single-char chain (F105): NFKC, split on any sep run, 4–8
  * groups of exactly 1 char. Mixed/letter acceptance happens in push() via
- * isMetaAlnumOtpForm — pure-digit and letter-only chains drop there.
+ * isMetaAlnumOtpForm — letter-only chains pass since F135; pure-digit drops.
  */
 function isPlausibleSingleChain(form: string): boolean {
   const parts = form
@@ -549,7 +569,7 @@ function isPlausibleSingleChain(form: string): boolean {
 /**
  * Accept a space single-char chain (F106): NFKC, split on space runs, 4–8
  * groups of exactly 1 char. Mixed/letter acceptance happens in push() via
- * isMetaAlnumOtpForm — pure-digit and letter-only chains drop there.
+ * isMetaAlnumOtpForm — letter-only chains pass since F135; pure-digit drops.
  */
 function isPlausibleSpaceSingleChain(form: string): boolean {
   const parts = form
@@ -1105,7 +1125,9 @@ export async function processWatchedMessage(
     // strongly cued form; `Codes:` display takes only code-shaped forms so
     // over-extracted cue words (`Your`, `code`) stay out of tier 3.
     const subjectAlnum = extractMetaAlnumCodes(extras.subject);
-    if (subjectAlnum.length > 0) hasOtpOrLink = true;
+    // F136: classify only on code-shaped candidates — `Error code has
+    // expired` over-extracts English words for masking but is not an OTP.
+    if (subjectAlnum.some(isDisplayableAlnumCode)) hasOtpOrLink = true;
     for (const code of subjectAlnum) {
       if (!isDisplayableAlnumCode(code)) continue;
       if (!extras.codes.includes(code)) extras.codes.push(code);
