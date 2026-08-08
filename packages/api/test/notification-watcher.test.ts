@@ -248,6 +248,71 @@ describe('mail-arrival notification watcher', () => {
     expect(codeCalls[0].message).toContain('Codes: 123456');
   });
 
+  test('otp policy classifies strongly cued alphanumeric subject codes (F134)', async () => {
+    // The only credential is an alnum code in the subject: numeric-only
+    // extraction missed it, and the default otp policy dropped the push.
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Your verification code is A1B2C3\r\n\r\nplain body, no credentials',
+      ),
+      'otp',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].level).toBe('urgent');
+    // Tier 1 (default): the code still does not enter the payload.
+    expect(JSON.stringify(calls[0])).not.toContain('A1B2C3');
+
+    // Tier 3 lists the code, but not over-extracted cue words (Your/code).
+    const tier3 = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Your verification code is A1B2C3\r\n\r\nplain body',
+        'Your verification code is A1B2C3',
+      ),
+      'otp',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 3,
+      }],
+    );
+    expect(tier3).toHaveLength(1);
+    expect(tier3[0].message).toContain('Codes: A1B2C3');
+    expect(tier3[0].message).not.toContain('Codes: Your');
+  });
+
+  test('otp policy classifies and tier 2 masks spaced single-digit subject chains (F132)', async () => {
+    // The only credential is a spaced-display code in the subject.
+    const calls = await dispatches(
+      message(
+        'stranger@example.net',
+        'From: stranger@example.net\r\nSubject: Your verification code is 1 2 3 4 5 6\r\n\r\nplain body, no credentials',
+      ),
+      'otp',
+    );
+    expect(calls).toHaveLength(1);
+    expect(JSON.stringify(calls[0])).not.toContain('1 2 3 4 5 6');
+
+    // Under `all` with tier 2, the spaced chain is masked, never published.
+    const tier2 = await dispatches(
+      message(
+        'auth@example.net',
+        'From: auth@example.net\r\nSubject: Your verification code is 1 2 3 4 5 6\r\n\r\nplain body',
+        'Your verification code is 1 2 3 4 5 6',
+      ),
+      'all',
+      [{
+        address: 'target@test.example',
+        createdAt: '2026-08-02T00:00:00.000Z',
+        pushContentTier: 2,
+      }],
+    );
+    expect(tier2).toHaveLength(1);
+    expect(tier2[0].message).toContain('•••');
+    expect(JSON.stringify(tier2[0])).not.toContain('1 2 3 4 5 6');
+  });
+
   test('tier 3 merges subject credentials even when the body also matches (F119)', async () => {
     // Body has its own code while the subject carries a long signed URL: both
     // must reach the payload — the subject is truncated at the metadata cap,

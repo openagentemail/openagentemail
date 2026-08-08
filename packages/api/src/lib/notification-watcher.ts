@@ -470,6 +470,16 @@ function isMixedAlnumOtp(form: string): boolean {
 }
 
 /**
+ * Code-shaped alnum form for the tier-3 `Codes:` line (F134): mixed
+ * letter+digit, or shouted letter-only (`WXYZ`). Cue words the masking
+ * path deliberately over-extracts (`Your`, `code`, title/lowercase words)
+ * are not codes worth listing.
+ */
+function isDisplayableAlnumCode(form: string): boolean {
+  return isMixedAlnumOtp(form) || /^[A-Z]{4,8}$/.test(form.normalize('NFKC'));
+}
+
+/**
  * Letter-only continuous OTP for tier-2 metadata under a strong cue (F95/F101).
  * NFKC then `/^[A-Za-z]{4,8}$/` — case-insensitive continuous tokens so
  * lowercase/title-case codes (`abcd`, `Abcd`) mask like shouted `ABCD`.
@@ -1087,6 +1097,18 @@ export async function processWatchedMessage(
     }
     for (const link of subjectOtp.links) {
       if (!extras.links.includes(link)) extras.links.push(link);
+    }
+    // F134: strongly cued alphanumeric subject codes classify too — the
+    // tier-2 mask path (extractMetaAlnumCodes) already recognizes `A1B2`,
+    // but numeric-only extractOtp misses it, and the default `otp` policy
+    // would silently drop the notification. Classification takes every
+    // strongly cued form; `Codes:` display takes only code-shaped forms so
+    // over-extracted cue words (`Your`, `code`) stay out of tier 3.
+    const subjectAlnum = extractMetaAlnumCodes(extras.subject);
+    if (subjectAlnum.length > 0) hasOtpOrLink = true;
+    for (const code of subjectAlnum) {
+      if (!isDisplayableAlnumCode(code)) continue;
+      if (!extras.codes.includes(code)) extras.codes.push(code);
     }
   }
   if (policy === 'otp' && !hasOtpOrLink) return;

@@ -136,6 +136,18 @@ describe('extractCodes', () => {
     expect(extractCodes('call 555-1234')).toEqual([]);
   });
 
+  test('single-digit chains need strong cues (F132)', () => {
+    // Providers render codes spaced for readability: `1 2 3 4 5 6`.
+    expect(extractCodes('Your verification code is 1 2 3 4 5 6')).toEqual(['1 2 3 4 5 6']);
+    expect(extractCodes('Your OTP is 1-2-3-4')).toEqual(['1-2-3-4']);
+    expect(extractCodes('验证码 １ ２ ３ ４')).toEqual(['１ ２ ３ ４']);
+    expect(extractCodes('code 1 2 3 4 5 6 7 8')).toEqual(['1 2 3 4 5 6 7 8']);
+    // 9+ digit chains refuse whole (full-run integrity, same as other forms).
+    expect(extractCodes('code 1 2 3 4 5 6 7 8 9')).toEqual([]);
+    // No strong cue: stay out.
+    expect(extractCodes('meet at 1 2 3 4 main street')).toEqual([]);
+  });
+
   test('keyword window uses original offsets under expanding lowercasing (F99)', () => {
     // Turkish İ (U+0130) lowercases to two code units; whole-string lower shifts
     // later indices so a pre-lowercased window misses the cue (F99).
@@ -852,9 +864,14 @@ describe('extractLinks', () => {
     expect(extractHttpLinks('《https://example.com/verify》。')).toEqual(['https://example.com/verify']);
     // Smart-quoted span before CJK terminal punctuation also closes.
     expect(extractHttpLinks('“https://example.com/verify”。')).toEqual(['https://example.com/verify']);
+    // F133: compatibility-form (halfwidth/fullwidth) wrappers too.
+    expect(extractHttpLinks('（https://example.com/verify）')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('｢https://example.com/verify｣')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('＜https://example.com/verify＞')).toEqual(['https://example.com/verify']);
     // Closing mark without close-context stays (conservative, mirrors F122).
     expect(extractHttpLinks('«https://a.com/x»y')).toEqual(['https://a.com/x%C2%BBy']);
     expect(extractHttpLinks('《https://a.com/x》y')).toEqual(['https://a.com/x%E3%80%8By']);
+    expect(extractHttpLinks('（https://a.com/x）y')).toEqual(['https://a.com/x%EF%BC%89y']);
   });
 
   test('prose brackets cut before free closing ] (F67)', () => {

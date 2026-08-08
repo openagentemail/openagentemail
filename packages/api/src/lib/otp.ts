@@ -185,7 +185,8 @@ const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_
 
 /**
  * One digit group of a delimited OTP (F73–F75): 2–4 Unicode decimal digits.
- * Full form is 2–4 such groups joined by SEP_RUN.
+ * Full form is 2–4 such groups joined by SEP_RUN — or, since F132, a
+ * single-digit chain of 4–8 one-digit groups (`1 2 3 4 5 6`).
  *
  * End guards (F74, shared by capture + run) reject 5+ group chains without
  * taking a 3–4 group prefix/suffix. Total digits may reach 4–16 (privacy-safe
@@ -193,7 +194,11 @@ const DELIMITED_OTP_SEP_RUN = `(?:${DELIMITED_OTP_SEP_CLASS}){1,${DELIMITED_OTP_
  * prefix — full-run integrity wins.
  */
 const DELIMITED_OTP_GROUP = `${ND}{2,4}`;
-const DELIMITED_OTP_FORM = `${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,3}`;
+// F132: single-digit chains (`1 2 3 4 5 6`) — providers render codes
+// spaced for readability. 4–8 one-digit groups across the same bounded
+// separators; the shared lead/tail guards refuse 9+ chains whole.
+const DELIMITED_OTP_SINGLE_FORM = `${ND}(?:${DELIMITED_OTP_SEP_RUN}${ND}){3,7}`;
+const DELIMITED_OTP_FORM = `(?:${DELIMITED_OTP_GROUP}(?:${DELIMITED_OTP_SEP_RUN}${DELIMITED_OTP_GROUP}){1,3}|${DELIMITED_OTP_SINGLE_FORM})`;
 /**
  * Leading guard: not immediately after digit+sep (blocks mid-chain starts).
  * Tradeoff: a valid form glued after e.g. `1 12 34 56` is also refused — rare in OTP mail.
@@ -751,6 +756,9 @@ const PAIRED_URL_QUOTES: Record<string, string> = {
   '\u3008': '\u3009', // CJK angle brackets
   '\u300A': '\u300B', // CJK double angle brackets
   '\u3010': '\u3011', // CJK lenticular brackets
+  '\uFF62': '\uFF63', // halfwidth CJK corner brackets (F133)
+  '\uFF08': '\uFF09', // fullwidth parentheses (F133)
+  '\uFF1C': '\uFF1E', // fullwidth angle brackets (F133)
 };
 
 /**
