@@ -124,8 +124,13 @@ describe('extractCodes', () => {
     expect(extractCodes('Your verification code is 123/456')).toEqual(['123/456']);
     expect(extractCodes('Your verification code is 1234/5678')).toEqual(['1234/5678']);
     expect(extractCodes('验证码 １２３／４５６')).toEqual(['１２３／４５６']);
+    // F129: colon-delimited numeric OTPs (providers format codes as 123:456).
+    expect(extractCodes('Your verification code is 123:456')).toEqual(['123:456']);
+    expect(extractCodes('验证码 １２３：４５６')).toEqual(['１２３：４５６']);
     // No strong cue: dates stay out (same as hyphen/dot forms).
     expect(extractCodes('due 08/07/2026')).toEqual([]);
+    // No strong cue: times stay out (same as other delimited forms).
+    expect(extractCodes('meeting 12:30')).toEqual([]);
     // No strong cue: roadmap ranges and phone-like numbers stay out.
     expect(extractCodes('roadmap 2024-2025')).toEqual([]);
     expect(extractCodes('call 555-1234')).toEqual([]);
@@ -812,6 +817,20 @@ describe('extractLinks', () => {
     ]);
     // Closing quote without close-context stays (conservative, mirrors F64).
     expect(extractHttpLinks('“https://a.com/x”y')).toEqual(['https://a.com/x%E2%80%9Dy']);
+  });
+
+  test('Markdown wrappers do not extend verification URLs (F130)', () => {
+    // Backtick/code-span and emphasis markers around a link: the closing
+    // marker in prose context is not URL content.
+    expect(extractHttpLinks('`https://example.com/verify`')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('**https://example.com/verify**')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('*https://example.com/verify*.')).toEqual(['https://example.com/verify']);
+    expect(extractHttpLinks('see `https://example.com/verify?token=abc` now')).toEqual([
+      'https://example.com/verify?token=abc',
+    ]);
+    // Closing marker without close-context stays (conservative, mirrors F64/F122).
+    expect(extractHttpLinks('`https://a.com/x`y')).toEqual(['https://a.com/x%60y']);
+    expect(extractHttpLinks('*https://a.com/x*y')).toEqual(['https://a.com/x*y']);
   });
 
   test('prose brackets cut before free closing ] (F67)', () => {

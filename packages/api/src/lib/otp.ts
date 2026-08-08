@@ -164,13 +164,16 @@ const OTP_BOUND_RIGHT = `(?![A-Za-z0-9_${ND}])`;
  * pure-digit groups, so this extractor is the only masking path. Dates
  * (`08/07/2026`) match exactly like the hyphen/dot forms already do — the
  * established privacy-over-readability tradeoff for cued digit runs.
+ * F129: colon (ASCII + fullwidth) joins for the same reason (`123:456`);
+ * clock forms (`12:30`) are the colon equivalent of the date tradeoff —
+ * delimited forms still require a strong cue outside metadata masking.
  *
  * Newlines (\n \r \u2028 \u2029) are intentionally excluded: maskTier2Metadata
  * joins from/subject with `\n`, and allowing line breaks would glue digits
  * across fields into a fake delimited form.
  */
 export const DELIMITED_OTP_SEP_CLASS =
-  '[-–—./\uFF0D\uFF0E\uFF0F\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
+  '[-–—./:：\uFF0D\uFF0E\uFF0F\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
 
 /**
  * One to three separator chars between digit groups (F72). Covers ` - `,
@@ -732,7 +735,8 @@ function isMarkdownChainGlue(text: string, i: number, nextScheme: number | undef
  * Bounded tail peel removes free trailers without re-matching.
  * Smart-quoted spans (“…”/‘…’) likewise cut before the matching closing
  * smart quote in close context (F122) so the quote is not percent-encoded
- * into the published destination.
+ * into the published destination. Markdown-wrapped spans (`` ` ``/`*`/`**`)
+ * cut before the closing delimiter run in close context (F130).
  */
 export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
   if (!text) return;
@@ -779,6 +783,13 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
         : smartOpener === '\u2018'
           ? '\u2019'
           : undefined;
+    // F130: span opened after a Markdown inline-code/emphasis wrapper
+    // (`` ` `` or `*`/`**`) — the closing delimiter is markup, not URL
+    // content (`https://example.com/verify%60`, path trailing `**`).
+    const mdWrapper =
+      start >= 1 && (text[start - 1] === '`' || text[start - 1] === '*')
+        ? (text[start - 1] as '`' | '*')
+        : undefined;
 
     for (let i = start; i < text.length; i++) {
       const ch = text[i]!;
@@ -870,6 +881,25 @@ export function* bareUrlSpans(text: string): Generator<BareUrlSpan> {
       // context; anything else keeps the quote as (rare, invalid) URL content.
       if (openSmartQuote !== undefined && ch === openSmartQuote) {
         const next = i + 1 < text.length ? text[i + 1]! : '';
+        if (isProseCloseContext(next)) {
+          end = i;
+          break;
+        }
+        continue;
+      }
+      // F130: matching Markdown wrapper closer in close context ends the span.
+      // `*` closes on a 1–2 char run so a `**` closer never leaves one behind.
+      if (mdWrapper === '`' && ch === '`') {
+        const next = i + 1 < text.length ? text[i + 1]! : '';
+        if (isProseCloseContext(next)) {
+          end = i;
+          break;
+        }
+        continue;
+      }
+      if (mdWrapper === '*' && ch === '*') {
+        const runEnd = text[i + 1] === '*' ? i + 2 : i + 1;
+        const next = runEnd < text.length ? text[runEnd]! : '';
         if (isProseCloseContext(next)) {
           end = i;
           break;
