@@ -54,6 +54,9 @@ curl -X POST http://localhost:3100/v1/identities \
 The API binds to `127.0.0.1` by default — reach it from other hosts over an
 SSH tunnel or a TLS proxy: [docs/security.md](https://openagent.email/docs/guides/security/).
 
+Paths are exact: call `/v1/notify`, not `/v1/notify/` — a trailing slash
+returns a plain 404 rather than the API error format.
+
 ## Using your own mail server
 
 Already have a mail provider for your domain? Run the API by itself with
