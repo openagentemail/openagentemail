@@ -1664,6 +1664,16 @@ describe('mail-arrival notification watcher', () => {
     expect(extractMetaAlnumCodes('Your verification code is 08/07')).not.toContain('08/07');
     // Letter-only lowercase slash words stay rejected.
     expect(extractMetaAlnumCodes('Your verification code is and/or')).not.toContain('and/or');
+    // F128: pure-digit slash forms mask via the numeric extractor path.
+    const digitMasked = maskTier2Metadata({
+      from: 'auth@example.net',
+      subject: 'Your verification code is 123/456',
+      codes: [],
+      links: [],
+      preview: '',
+    });
+    expect(digitMasked.subject).toContain('•••');
+    expect(digitMasked.subject).not.toContain('123/456');
     // No cue: rejected.
     expect(extractMetaAlnumCodes('Reference A1/B2 attached')).toEqual([]);
     // Regression: hyphen/dot tight forms still extract.

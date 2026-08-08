@@ -159,13 +159,18 @@ const OTP_BOUND_RIGHT = `(?![A-Za-z0-9_${ND}])`;
  * Single separator class for delimited OTP (F68/F70/F75): hyphen, en/em dash,
  * period, fullwidth hyphen/period, ASCII space/tab, and common Unicode spaces
  * (NBSP, NNBSP, em space, ideographic space, BOM as space, …).
+ * F128: slash (ASCII + fullwidth) joins — providers format numeric codes as
+ * `123/456`, and the metadata alnum slash matcher deliberately rejects
+ * pure-digit groups, so this extractor is the only masking path. Dates
+ * (`08/07/2026`) match exactly like the hyphen/dot forms already do — the
+ * established privacy-over-readability tradeoff for cued digit runs.
  *
  * Newlines (\n \r \u2028 \u2029) are intentionally excluded: maskTier2Metadata
  * joins from/subject with `\n`, and allowing line breaks would glue digits
  * across fields into a fake delimited form.
  */
 export const DELIMITED_OTP_SEP_CLASS =
-  '[-–—.\uFF0D\uFF0E\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
+  '[-–—./\uFF0D\uFF0E\uFF0F\t \u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]';
 
 /**
  * One to three separator chars between digit groups (F72). Covers ` - `,

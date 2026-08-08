@@ -120,6 +120,12 @@ describe('extractCodes', () => {
     // Other separators with strong cues.
     expect(extractCodes('Your OTP is 123–456')).toEqual(['123–456']);
     expect(extractCodes('验证码 123-456')).toEqual(['123-456']);
+    // F128: slash-delimited numeric OTPs (providers format codes as 123/456).
+    expect(extractCodes('Your verification code is 123/456')).toEqual(['123/456']);
+    expect(extractCodes('Your verification code is 1234/5678')).toEqual(['1234/5678']);
+    expect(extractCodes('验证码 １２３／４５６')).toEqual(['１２３／４５６']);
+    // No strong cue: dates stay out (same as hyphen/dot forms).
+    expect(extractCodes('due 08/07/2026')).toEqual([]);
     // No strong cue: roadmap ranges and phone-like numbers stay out.
     expect(extractCodes('roadmap 2024-2025')).toEqual([]);
     expect(extractCodes('call 555-1234')).toEqual([]);
