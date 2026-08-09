@@ -4,6 +4,8 @@
 // 这里把 SDK 换成假的，好把 registerTool() 的配置抓出来直接断言。
 import { expect, mock, test } from "bun:test";
 import { z } from "zod";
+// 用 API 真实返回类型约束夹具：形状漂移在编译期就红，杜绝手写自证。
+import type { MessageDetail, MessageSummary } from "../../api/src/lib/imap.ts";
 
 type SchemaMap = Record<string, { safeParse(value: unknown): { success: boolean; data?: unknown } }>;
 type ToolConfig = {
@@ -186,11 +188,11 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
 });
 
-// 输出 schema 与 API 对齐：list/detail 各用真实形状，互不污染。
+// 输出 schema 与 API 对齐：list/detail 各用真实类型夹具，互不污染。
 test("message summary/detail 输出 schema 按 API 真实形状校验并保留字段", () => {
   const listMessages = toolConfigs.get("mail_list_messages")!.outputSchema!.messages;
-  // API MessageSummary 真实形状（含 hasOtp；无 text/links/task*）。
-  const summary = {
+  // 显式标注 API MessageSummary——多/少字段都会在类型检查时报错。
+  const summary: MessageSummary = {
     id: "42",
     from: "Alice <alice@example.com>",
     to: "Bob <bob@example.com>, Carol <carol@example.com>",
@@ -199,28 +201,28 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
     seen: false,
     snippet: "body",
     hasOtp: true,
-    source: "external" as const,
+    source: "external",
   };
   const listParsed = listMessages.safeParse([summary]);
   expect(listParsed.success).toBe(true);
   if (listParsed.success) {
-    const rows = listParsed.data as typeof summary[];
+    const rows = listParsed.data as MessageSummary[];
     expect(rows[0]?.hasOtp).toBe(true);
+    expect(rows[0]?.seen).toBe(false);
+    expect(rows[0]?.snippet).toBe("body");
     expect(rows[0]?.from).toBe("Alice <alice@example.com>");
     expect(rows[0]?.to).toBe("Bob <bob@example.com>, Carol <carol@example.com>");
   }
 
   const readOut = toolConfigs.get("mail_read_message")!.outputSchema!;
-  // API MessageDetail 真实形状：无 hasOtp；有 text/otp/links，task* 可选。
-  const detail = {
+  // 显式标注 API MessageDetail——不得夹带 seen/snippet/hasOtp。
+  const detail: MessageDetail = {
     id: "42",
     from: "Alice <alice@example.com>",
     to: "Bob <bob@example.com>, Carol <carol@example.com>",
     subject: "hi",
     date: "2026-08-09T00:00:00.000Z",
-    seen: false,
-    snippet: "body",
-    source: "external" as const,
+    source: "external",
     text: "plain",
     html: "<p>plain</p>",
     otp: { codes: ["123456"], links: ["https://example.com/otp"] },
@@ -232,8 +234,10 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   const detailParsed = detailSchema.safeParse(detail);
   expect(detailParsed.success).toBe(true);
   if (detailParsed.success) {
-    // detail schema 不得声明 hasOtp，校验后也不能凭空出现。
+    // summary-only 字段不得出现在 detail schema / 校验结果里。
     expect("hasOtp" in detailParsed.data).toBe(false);
+    expect("seen" in detailParsed.data).toBe(false);
+    expect("snippet" in detailParsed.data).toBe(false);
     expect(detailParsed.data.links).toEqual([
       "https://example.com/a",
       "https://example.com/b",
@@ -241,10 +245,13 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
     expect(detailParsed.data.taskId).toBe("task-1");
     expect(detailParsed.data.taskState).toBe("submitted");
   }
-  // 可选 task* 缺省放行；detail outputSchema 不得声明 hasOtp。
+  // 可选 task* 缺省放行；detail outputSchema 不得声明 summary-only 字段。
   const { taskId: _tid, taskState: _ts, ...detailWithoutTask } = detail;
-  expect(detailSchema.safeParse(detailWithoutTask).success).toBe(true);
+  const detailWithoutTaskTyped: MessageDetail = detailWithoutTask;
+  expect(detailSchema.safeParse(detailWithoutTaskTyped).success).toBe(true);
   expect(readOut.hasOtp).toBeUndefined();
+  expect(readOut.seen).toBeUndefined();
+  expect(readOut.snippet).toBeUndefined();
 
   // 展开后的多收件人 To 可超 998：无界 string，不得再按物理行限拒。
   const longTo = Array.from({ length: 40 }, (_, i) => `User${i} <u${i}@example.com>`).join(", ");
