@@ -62,12 +62,12 @@ export function stampDate(now: Date = new Date()): Date {
 }
 
 /**
- * 正文摘要：CRLF→LF 再 trimEnd（对齐 mailparser 行尾与常加的尾 \\n），
- * html 缺省为空串（mailparser 无 html 时可能给出 false）。
+ * 正文摘要：text/html 均 CRLF→LF 再 trimEnd（mailparser 常在 html 末尾加 \\n；
+ * 与 text 同待遇，发读两侧对称）。html 缺省为空串（无 html 时可能是 false）。
  */
 export function hashMailBody(text: string, html?: string): string {
   const normalizedText = text.replace(/\r\n/g, '\n').trimEnd();
-  const normalizedHtml = (html ?? '').replace(/\r\n/g, '\n');
+  const normalizedHtml = (html ?? '').replace(/\r\n/g, '\n').trimEnd();
   return createHash('sha256')
     .update(`${MAIL_BODY_HASH_PREFIX}\n${normalizedText}\n${normalizedHtml}`)
     .digest('base64url');

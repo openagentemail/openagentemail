@@ -39,9 +39,11 @@ describe('mail-stamp 字段规约', () => {
     expect(d.toISOString()).toBe('2026-08-09T12:00:00.000Z');
   });
 
-  test('hashMailBody：CRLF→LF、trimEnd，缺 html 当空串', () => {
+  test('hashMailBody：CRLF→LF、trimEnd（text/html 对称），缺 html 当空串', () => {
     expect(hashMailBody('hi\n')).toBe(hashMailBody('hi'));
     expect(hashMailBody('a\r\nb')).toBe(hashMailBody('a\nb'));
+    // html 同样 trimEnd：mailparser 常在 html 末尾加 \\n。
+    expect(hashMailBody('hi', '<p>x</p>\n')).toBe(hashMailBody('hi', '<p>x</p>'));
     expect(hashMailBody('hi')).not.toBe(hashMailBody('hi', '<p>x</p>'));
   });
 });

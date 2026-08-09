@@ -8,6 +8,7 @@
 import nodemailer from 'nodemailer';
 import { config } from './config.ts';
 import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
+import { htmlToText } from './otp.ts';
 
 export interface SendInput {
   from: string;
@@ -17,6 +18,15 @@ export interface SendInput {
   html?: string;
   /** Server-stamped protocol metadata, for example X-OA-Task headers. */
   headers?: Record<string, string>;
+}
+
+/**
+ * HTML-only 发信：空 text + 非空 html 时用同一套 htmlToText 填 text。
+ * 否则 nodemailer 省略空 text 段，mailparser 又从 html 自推 text，bodyHash 对不上。
+ */
+export function coerceOutboundText(text: string, html?: string): string {
+  if (text.trim() || !html) return text;
+  return htmlToText(html);
 }
 
 export async function sendMail(input: SendInput): Promise<{ messageId: string }> {
@@ -34,15 +44,17 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
 
   // 显式 Date + 毫秒归零：发读两侧 stamp 载荷用同一 ISO 字符串。
   const date = stampDate();
+  const text = coerceOutboundText(input.text, input.html);
+  const outbound = { ...input, text };
   // 每封经 API 发出的信自动带内部 stamp（覆盖调用方同名头）。
-  const headers = buildOutboundStampHeaders(input, date, config.taskSigningSecret);
+  const headers = buildOutboundStampHeaders(outbound, date, config.taskSigningSecret);
 
   try {
     const info = await transporter.sendMail({
       from: input.from,
       to: input.to,
       subject: input.subject,
-      text: input.text,
+      text,
       date,
       ...(input.html ? { html: input.html } : {}),
       headers,

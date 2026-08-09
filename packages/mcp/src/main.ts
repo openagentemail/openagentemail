@@ -80,6 +80,21 @@ export function fenceUntrustedEmail(value: string): string {
 }
 
 /**
+ * 旧版 API 可能不带 source：归一成 external，满足 outputSchema 必填，
+ * 并与围栏 fail-closed 同口径（缺失 ≠ 可信）。
+ */
+export function normalizeMailSourceField<T extends Record<string, unknown>>(message: T): T {
+  return { ...message, source: message.source ?? "external" };
+}
+
+/**
+ * 读信工具共用：先补 source，再按非 internal 包围栏。
+ */
+export function prepareMailToolMessage<T extends Record<string, unknown>>(message: T): T {
+  return applyExternalBodyFence(normalizeMailSourceField(message));
+}
+
+/**
  * 仅当 source === 'internal' 时放行原文；其余（external / 缺字段 / 未知）一律围栏。
  * 对 text / html / snippet 使用同一套 UNTRUSTED fence（list 的 snippet 也包，防 140 字注入）。
  */
@@ -304,7 +319,7 @@ server.registerTool(
   ({ address, limit }) =>
     callApi(async () => ({
       messages: (await client.listMessages(address, limit)).map((message) =>
-        applyExternalBodyFence(message as unknown as Record<string, unknown>),
+        prepareMailToolMessage(message as unknown as Record<string, unknown>),
       ),
     })),
 );
@@ -322,7 +337,7 @@ server.registerTool(
   },
   ({ address, id }) =>
     callApi(async () =>
-      applyExternalBodyFence(
+      prepareMailToolMessage(
         (await client.readMessage(address, id)) as unknown as Record<string, unknown>,
       ),
     ),
@@ -383,7 +398,7 @@ server.registerTool(
   },
   ({ address, fromContains, subjectContains, timeoutSec }) =>
     callApi(async () =>
-      applyExternalBodyFence(
+      prepareMailToolMessage(
         (await client.waitFor(address, {
           fromContains,
           subjectContains,

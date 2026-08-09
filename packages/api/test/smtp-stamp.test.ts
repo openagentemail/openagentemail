@@ -137,4 +137,60 @@ describe('sendMail 自动 stamp（buildOutboundStampHeaders）', () => {
     );
     expect(source).toBe('internal');
   });
+
+  test('HTML-only：coerce htmlToText 后 nodemailer→mailparser 分类 internal', async () => {
+    // 与 smtp.coerceOutboundText / sendMail 同规约（smtp 整模常被 send.test mock，这里直调）。
+    const { htmlToText } = await import('../src/lib/otp.ts');
+    const coerceOutboundText = (text: string, html?: string) =>
+      text.trim() || !html ? text : htmlToText(html);
+
+    const html = '<p>Your code is <strong>482731</strong>.</p>';
+    const text = coerceOutboundText('', html);
+    expect(text).toBe(htmlToText(html));
+    expect(text.trim().length).toBeGreaterThan(0);
+
+    const date = stampDate(new Date('2026-08-09T17:00:00Z'));
+    const headers = buildOutboundStampHeaders(
+      { from: 'a@test.example', to: ['b@test.example'], subject: 'HTML OTP', text, html },
+      date,
+      KEY,
+    );
+
+    const nodemailer = (await import('nodemailer')).default;
+    const { simpleParser } = await import('mailparser');
+    const { classifyMailSource, hashMailBody: hashBody } = await import('../src/lib/mail-stamp.ts');
+    const transport = nodemailer.createTransport({
+      streamTransport: true,
+      buffer: true,
+      newline: 'unix',
+    });
+    const info = await transport.sendMail({
+      from: 'a@test.example',
+      to: ['b@test.example'],
+      subject: 'HTML OTP',
+      text,
+      html,
+      date,
+      headers,
+    });
+    const parsed = await simpleParser(info.message as Buffer);
+    const stampRaw = parsed.headers.get('x-oa-mail-stamp');
+    const parsedHtml = typeof parsed.html === 'string' ? parsed.html : undefined;
+    // 读侧与 imap.sourceFromParsed 同规约。
+    const source = classifyMailSource(
+      typeof stampRaw === 'string' ? stampRaw : undefined,
+      {
+        from: normalizeMailbox(parsed.from?.value?.[0]?.address ?? ''),
+        to: normalizeToList(
+          (parsed.to as { value?: { address?: string }[] })?.value?.map((v) => v.address ?? '') ??
+            [],
+        ),
+        subject: parsed.subject ?? '',
+        dateIso: (parsed.date ?? new Date(0)).toISOString(),
+        bodyHash: hashBody(parsed.text ?? '', parsedHtml),
+      },
+      KEY,
+    );
+    expect(source).toBe('internal');
+  });
 });
