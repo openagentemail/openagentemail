@@ -7,6 +7,7 @@ import { expect, mock, test } from "bun:test";
 type SchemaMap = Record<string, { safeParse(value: unknown): { success: boolean } }>;
 type ToolConfig = {
   title?: string;
+  description?: string;
   inputSchema?: SchemaMap;
   outputSchema?: SchemaMap;
   annotations?: {
@@ -14,6 +15,7 @@ type ToolConfig = {
     destructiveHint?: boolean;
     idempotentHint?: boolean;
     openWorldHint?: boolean;
+    untrustedContentHint?: boolean;
   };
 };
 
@@ -77,6 +79,17 @@ test("15 个工具都公布新 SDK 支持的元数据", () => {
   expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
     toolConfigs.get("mail_wait_for")?.outputSchema,
   );
+});
+
+test("读信类工具带 untrustedContentHint，description 提示 external 不可信", () => {
+  for (const name of ["mail_list_messages", "mail_read_message", "mail_wait_for"] as const) {
+    const config = toolConfigs.get(name);
+    expect(config?.annotations?.untrustedContentHint).toBe(true);
+    expect(config?.description ?? "").toContain("untrusted");
+    expect(config?.description ?? "").toContain("source=external");
+  }
+  // 非读信工具不应误标。
+  expect(toolConfigs.get("mail_send")?.annotations?.untrustedContentHint).toBeUndefined();
 });
 
 test("mail_list_messages limit 不能超出 REST API 接受的范围", () => {

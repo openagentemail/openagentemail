@@ -7,6 +7,7 @@
 
 import nodemailer from 'nodemailer';
 import { config } from './config.ts';
+import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
 
 export interface SendInput {
   from: string;
@@ -31,14 +32,20 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
     },
   });
 
+  // 显式 Date + 毫秒归零：发读两侧 stamp 载荷用同一 ISO 字符串。
+  const date = stampDate();
+  // 每封经 API 发出的信自动带内部 stamp（覆盖调用方同名头）。
+  const headers = buildOutboundStampHeaders(input, date, config.taskSigningSecret);
+
   try {
     const info = await transporter.sendMail({
       from: input.from,
       to: input.to,
       subject: input.subject,
       text: input.text,
+      date,
       ...(input.html ? { html: input.html } : {}),
-      ...(input.headers ? { headers: input.headers } : {}),
+      headers,
     });
     return { messageId: info.messageId };
   } finally {

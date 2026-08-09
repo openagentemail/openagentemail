@@ -13,9 +13,19 @@
 import { ImapFlow } from 'imapflow';
 import type { FetchMessageObject, MessageEnvelopeObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
+import type { AddressObject } from 'mailparser';
 import { config } from './config.ts';
+import {
+  classifyMailSource,
+  hashMailBody,
+  normalizeMailbox,
+  normalizeToList,
+  type MailSource,
+} from './mail-stamp.ts';
 import { extractHttpLinks, extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
+
+export type { MailSource };
 
 export interface MessageSummary {
   id: string;
@@ -26,6 +36,8 @@ export interface MessageSummary {
   seen: boolean;
   snippet: string;
   hasOtp: boolean;
+  /** HMAC 自签 stamp 判定：通过为 internal，否则一律 external（fail-closed）。 */
+  source: MailSource;
 }
 
 export interface MessageDetail {
@@ -38,6 +50,8 @@ export interface MessageDetail {
   html?: string;
   otp: OtpExtraction;
   links: string[];
+  /** HMAC 自签 stamp 判定：通过为 internal，否则一律 external（fail-closed）。 */
+  source: MailSource;
   /** Present only for server-stamped task mail. */
   taskId?: string;
   /** Present only for server-stamped task mail. */
@@ -443,6 +457,40 @@ async function parseSource(source: Buffer) {
   return simpleParser(source);
 }
 
+/** 从 mailparser 的 AddressObject（或数组）抽出邮箱列表，供 stamp 重算。 */
+function addressList(value: AddressObject | AddressObject[] | undefined): string[] {
+  if (!value) return [];
+  const objects = Array.isArray(value) ? value : [value];
+  const out: string[] = [];
+  for (const obj of objects) {
+    for (const entry of obj.value ?? []) {
+      if (entry.address) out.push(entry.address);
+    }
+  }
+  return out;
+}
+
+/**
+ * 按与 sendMail 相同的字段规约，从已解析邮件重算并比对 X-OA-Mail-Stamp。
+ * 任何不确定（无头 / 坏头 / 字段缺失 / 正文被换）→ external。
+ */
+function sourceFromParsed(parsed: Awaited<ReturnType<typeof parseSource>>): MailSource {
+  const stampRaw = parsed.headers.get('x-oa-mail-stamp');
+  const stamp = typeof stampRaw === 'string' ? stampRaw : undefined;
+  const fromAddrs = addressList(parsed.from);
+  const toAddrs = addressList(parsed.to);
+  const html = typeof parsed.html === 'string' ? parsed.html : undefined;
+  // 与 smtp.sendMail 一致：from/to 规约 + 正文摘要（防偷头换正文）。
+  const fields = {
+    from: fromAddrs[0] ? normalizeMailbox(fromAddrs[0]) : '',
+    to: normalizeToList(toAddrs),
+    subject: parsed.subject ?? '',
+    dateIso: (parsed.date ?? new Date(0)).toISOString(),
+    bodyHash: hashMailBody(parsed.text ?? '', html),
+  };
+  return classifyMailSource(stamp, fields, config.taskSigningSecret);
+}
+
 function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>): MessageDetail {
   const text = (parsed.text ?? '').trim() || (parsed.html ? htmlToText(parsed.html) : '');
   const html = typeof parsed.html === 'string' ? parsed.html : undefined;
@@ -451,6 +499,7 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
   const toText = Array.isArray(parsed.to)
     ? parsed.to.map((a) => a.text).join(', ')
     : (parsed.to?.text ?? '');
+  // OTP / links 在围栏之前提取（围栏只在 MCP 序列化层），此处不受影响。
   const otp = extractOtp(text, extractableHtml);
   const taskId = parsed.headers.get('x-oa-task');
   const taskState = parsed.headers.get('x-oa-task-state');
@@ -464,6 +513,7 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     ...(html ? { html } : {}),
     otp,
     links: extractHttpLinks(text, extractableHtml),
+    source: sourceFromParsed(parsed),
     ...(typeof taskId === 'string' ? { taskId } : {}),
     ...(typeof taskState === 'string' ? { taskState } : {}),
   };
@@ -500,6 +550,8 @@ async function listMessagesWith(
   for (const msg of page) {
     let snippet = '';
     let hasOtp = false;
+    // 无源码或解析失败时 fail-closed：按 external 处理。
+    let source: MailSource = 'external';
     const full = await client.fetchOne(msg.uid, { source: true }, { uid: true });
     if (full && full.source) {
       try {
@@ -510,6 +562,8 @@ async function listMessagesWith(
         snippet = makeSnippet(text);
         const otp = extractOtp(text, html);
         hasOtp = otp.codes.length > 0 || otp.links.length > 0;
+        // list 已对命中消息做全量 parse，source 判定零额外 IMAP 成本。
+        source = sourceFromParsed(parsed);
       } catch {
         // Unparseable message: summary still returns, just without snippet.
       }
@@ -524,6 +578,7 @@ async function listMessagesWith(
       seen: msg.flags?.has('\\Seen') ?? false,
       snippet,
       hasOtp,
+      source,
     });
   }
   return summaries;
