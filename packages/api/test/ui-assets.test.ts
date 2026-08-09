@@ -317,7 +317,18 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain(
       "var TASK_RESULT_MARKER = '<!-- openagent.email task result -->'",
     );
+    const stripBody = UI_JS.slice(
+      UI_JS.indexOf('function taskTimelineBody('),
+      UI_JS.indexOf('function renderTaskRows('),
+    );
+    expect(stripBody).toContain('text.lastIndexOf(TASK_RESULT_MARKER)');
+    expect(stripBody).toContain('String.fromCharCode(96, 96, 96)');
+    expect(stripBody).toContain('new RegExp(');
+    expect(stripBody).toContain('fence.test(after)');
+    expect(stripBody).not.toContain('text.indexOf(TASK_RESULT_MARKER)');
     expect(UI_JS).toContain('window.scrollTo(0, 0)');
+    expect(UI_JS).toContain("state.scope !== 'tasks' || !state.activeTaskId");
+    expect(UI_CSS).toContain('@media (max-width: 1360px) and (min-width: 821px)');
     // 前端不得直接打 Bearer 的 /v1/tasks
     expect(UI_JS).not.toContain('/v1/tasks');
   });

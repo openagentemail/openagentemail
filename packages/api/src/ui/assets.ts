@@ -515,8 +515,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   text-transform: uppercase;
   border-bottom: 1px solid var(--line);
 }
-/* 窄桌面：列表栏 ~280px 装不下五列，先藏 Updated/Msgs，保留双栏。 */
-@media (max-width: 1100px) and (min-width: 821px) {
+/*
+ * 窄桌面藏 Updated/Msgs：sidebar 240 + panel 左右 pad≤30×2 + list 轨 1.1/2.5。
+ * 五列头≈458px → 列表轨需 ≥458 → 视口 ≥1341；取 1360 留余量（1280 时轨≈431 仍裁）。
+ */
+@media (max-width: 1360px) and (min-width: 821px) {
   .tasks-header,
   .task-row {
     grid-template-columns: 100px minmax(0, 1.1fr) minmax(0, 1.4fr);
@@ -3012,12 +3015,20 @@ export const UI_JS = `(function () {
     return state.tasksFilter || '';
   }
 
-  /* 展示层剥离 result 块；marker 与 lib/tasks.ts RESULT_MARKER 逐字一致。 */
+  /*
+   * 展示层剥离 result 块：口径对齐 lib/tasks.ts readResult——
+   * lastIndexOf 找最后一处 marker，且其后须是尾部 fenced json 块直到结尾才剥（中途字面量不剥）。
+   * UI_JS 外层是模板字符串：fence 用 RegExp + fromCharCode(96) 拼反引号，避免打断 backtick。
+   */
   function taskTimelineBody(body) {
     var text = typeof body === 'string' ? body : '';
-    var markerAt = text.indexOf(TASK_RESULT_MARKER);
+    var markerAt = text.lastIndexOf(TASK_RESULT_MARKER);
     if (markerAt < 0) return text;
-    return text.slice(0, markerAt).replace(/\s+$/, '');
+    var after = text.slice(markerAt + TASK_RESULT_MARKER.length);
+    var ticks = String.fromCharCode(96, 96, 96);
+    var fence = new RegExp('^\\\\s*' + ticks + 'json\\\\s*\\\\n([\\\\s\\\\S]*?)\\\\n' + ticks + '\\\\s*$');
+    if (!fence.test(after)) return text;
+    return text.slice(0, markerAt).replace(/\\s+$/, '');
   }
 
   function renderTaskRows() {
@@ -3807,9 +3818,10 @@ export const UI_JS = `(function () {
     loadNotifyHistory();
   });
   tasksRefresh.addEventListener('click', function () {
-    /* 显式 Refresh：列表完成后若有选中单，连带重拉详情（enterTasks 短路径不动）。 */
+    /* 显式 Refresh：列表完成后若仍在 Tasks 且有选中单，连带重拉详情。 */
     loadTasks().then(function () {
-      if (state.activeTaskId) selectTask(state.activeTaskId);
+      if (state.scope !== 'tasks' || !state.activeTaskId) return;
+      selectTask(state.activeTaskId);
     });
   });
   tasksStateFilter.addEventListener('change', function () {
