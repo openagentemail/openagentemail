@@ -25,6 +25,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
         seen: false,
         snippet: 'newest',
         hasOtp: true,
+        source: 'external' as const,
       },
       {
         id: '1',
@@ -35,6 +36,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
         seen: true,
         snippet: 'older',
         hasOtp: false,
+        source: 'external' as const,
       },
     ]),
     setMessageSeen: mock(async () => true),
@@ -57,6 +59,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
       html: '<img src=x onerror=alert(1)><p>Code 123456</p>',
       otp: { codes: ['123456'], links: ['https://example.net/verify'] },
       links: ['https://example.net/news', 'https://example.net/verify'],
+      source: 'external' as const,
     })),
     setPushContentTier: mock(() => null),
     ...overrides,
@@ -128,6 +131,7 @@ describe('UI message JSON contract', () => {
         html: 'x'.repeat(512 * 1024 + 1),
         otp: { codes: [], links: [] },
         links: [],
+        source: 'external' as const,
       })),
     });
     const response = await app.request(

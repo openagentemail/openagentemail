@@ -7,6 +7,8 @@
 
 import nodemailer from 'nodemailer';
 import { config } from './config.ts';
+import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
+import { htmlToText } from './otp.ts';
 
 export interface SendInput {
   from: string;
@@ -16,6 +18,15 @@ export interface SendInput {
   html?: string;
   /** Server-stamped protocol metadata, for example X-OA-Task headers. */
   headers?: Record<string, string>;
+}
+
+/**
+ * HTML-only 发信：空 text + 非空 html 时用同一套 htmlToText 填 text。
+ * 否则 nodemailer 省略空 text 段，mailparser 又从 html 自推 text，bodyHash 对不上。
+ */
+export function coerceOutboundText(text: string, html?: string): string {
+  if (text.trim() || !html) return text;
+  return htmlToText(html);
 }
 
 export async function sendMail(input: SendInput): Promise<{ messageId: string }> {
@@ -31,14 +42,27 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
     },
   });
 
+  // 显式 Date + 毫秒归零：发读两侧 stamp 载荷用同一 ISO 字符串。
+  const date = stampDate();
+  const text = coerceOutboundText(input.text, input.html);
+  const outbound = { ...input, text };
+  // 仅当全部 To 均在本域时写 stamp（防 HMAC 预言机随外发信泄漏）。
+  const headers = buildOutboundStampHeaders(
+    outbound,
+    date,
+    config.taskSigningSecret,
+    config.domain,
+  );
+
   try {
     const info = await transporter.sendMail({
       from: input.from,
       to: input.to,
       subject: input.subject,
-      text: input.text,
+      text,
+      date,
       ...(input.html ? { html: input.html } : {}),
-      ...(input.headers ? { headers: input.headers } : {}),
+      headers,
     });
     return { messageId: info.messageId };
   } finally {

@@ -24,6 +24,7 @@ const detail: MessageDetail = {
   html: '<p>Hello</p><img src=x onerror=alert(1)><script>alert(2)</script>',
   otp: { codes: [], links: [] },
   links: [],
+  source: 'external',
 };
 
 function frameApp(
