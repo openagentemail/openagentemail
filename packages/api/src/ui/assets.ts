@@ -148,8 +148,7 @@ export const UI_HTML = `<!doctype html>
         <div id="notify-rows" class="notify-rows"></div>
       </main>
 
-      <!-- Tasks 面板：暂用 section 以兼容范围外 ui-assets 的四主区计数契约；后续可升为 landmark。 -->
-      <section id="tasks-panel" class="tasks-panel" tabindex="-1" aria-labelledby="tasks-title" hidden>
+      <main id="tasks-panel" class="tasks-panel" tabindex="-1" aria-labelledby="tasks-title" hidden>
         <div class="panel-heading overview-heading">
           <div>
             <h2 id="tasks-title">Tasks</h2>
@@ -196,7 +195,7 @@ export const UI_HTML = `<!doctype html>
             </div>
           </div>
         </div>
-      </section>
+      </main>
 
       <main id="main-content" class="inbox-main" tabindex="-1">
         <section id="message-panel" class="message-panel" aria-labelledby="messages-title">
@@ -1613,7 +1612,7 @@ export const UI_JS = `(function () {
     detailContent.append(placeholder);
   }
 
-  /* ---- scope 迁移：任一时刻恰好一个可见主面板（overview / notifications / tasks / inbox） ---- */
+  /* ---- scope 迁移：任一时刻恰好一个可见 <main>（overview / notifications / tasks / inbox） ---- */
   function applyScope(next, options) {
     var opts = options || {};
     var overviewActive = next === 'overview';
@@ -1668,7 +1667,6 @@ export const UI_JS = `(function () {
      scope 下必须走 openAddress（切 scope、播报、聚焦），否则会在不可见的 inbox
      里取消息、画面却停在当前面板。 */
   function activateAddress(address) {
-    /* 子串须保留 overview||notifications，以兼容 ui-assets 静态契约；tasks 同批并入。 */
     if (state.scope === 'overview' || state.scope === 'notifications' || state.scope === 'tasks') {
       openAddress(address);
       return;
