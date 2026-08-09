@@ -55,3 +55,23 @@ Maintainers and agents alike follow the same bar:
 
 Open an issue before large changes. Small fixes (typos, docs, bugs with a repro)
 can go straight to a PR.
+
+## External pull requests
+
+What to expect when you open a PR from a fork:
+
+- **First response within 48 hours.** We triage every external PR — real bug /
+  conflict with main / scope question — and leave a comment so you know someone
+  is on it.
+- **Same merge bar as maintainers**: green CI, CodeRabbit success, all review
+  threads resolved, and a maintainer's final review. CI on fork PRs runs only
+  after a maintainer approves it (a GitHub safeguard, not a judgment on you).
+- **Conflicts with main**: for a small, aging PR we may take it over — land the
+  fix on a maintainer branch with you credited via `Co-authored-by`, thank you
+  in your PR, and close it as superseded. Larger or directional changes are
+  better rebased by you (or discussed in an issue first).
+- **Stale PRs**: after a ping with no response for 14 days we may close the PR
+  (you can always reopen it).
+- **AI-authored PRs** are held to the same bar as human ones; our review chain
+  (bots + maintainer review) provides the independent review, so you do not
+  need to arrange your own.
