@@ -1,7 +1,9 @@
 // mail-stamp：HMAC 自签 / 校验 / fail-closed 规约单测。
 import { describe, expect, test } from 'bun:test';
 import {
+  MAIL_BODY_HASH_PREFIX,
   MAIL_STAMP_PREFIX,
+  allRecipientsOnDomain,
   classifyMailSource,
   createMailStamp,
   hashMailBody,
@@ -39,12 +41,23 @@ describe('mail-stamp 字段规约', () => {
     expect(d.toISOString()).toBe('2026-08-09T12:00:00.000Z');
   });
 
-  test('hashMailBody：CRLF→LF、trimEnd（text/html 对称），缺 html 当空串', () => {
+  test('hashMailBody v2：长度前缀消除边界歧义；trimEnd 对称', () => {
+    expect(MAIL_BODY_HASH_PREFIX).toBe('mail-body-v2');
     expect(hashMailBody('hi\n')).toBe(hashMailBody('hi'));
     expect(hashMailBody('a\r\nb')).toBe(hashMailBody('a\nb'));
-    // html 同样 trimEnd：mailparser 常在 html 末尾加 \\n。
     expect(hashMailBody('hi', '<p>x</p>\n')).toBe(hashMailBody('hi', '<p>x</p>'));
-    expect(hashMailBody('hi')).not.toBe(hashMailBody('hi', '<p>x</p>'));
+    // 裸 \\n 拼接时这两对会撞；长度前缀后必须不同。
+    expect(hashMailBody('safe\n<b>x</b>', 'tail')).not.toBe(
+      hashMailBody('safe', '<b>x</b>\ntail'),
+    );
+  });
+
+  test('allRecipientsOnDomain：全本域 / 混合 / 空', () => {
+    expect(allRecipientsOnDomain(['a@test.example', 'b@test.example'], 'test.example')).toBe(
+      true,
+    );
+    expect(allRecipientsOnDomain(['a@test.example', 'b@evil.com'], 'test.example')).toBe(false);
+    expect(allRecipientsOnDomain([], 'test.example')).toBe(false);
   });
 });
 

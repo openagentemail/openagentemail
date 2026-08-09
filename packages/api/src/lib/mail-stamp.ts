@@ -7,7 +7,10 @@
  * 重放安全性：stamp 绑定信封字段 + 正文摘要。攻击者复制合法 stamp 头但改正文
  * （或改 from/to/subject/date）都会使 HMAC 破碎。完整重放整封信只能重放
  * 本 API 写过的内容。密钥复用 config.taskSigningSecret，前缀 `mail-stamp-v1`
- * 做域分离；正文摘要另用 `mail-body-v1` 前缀。
+ * 做域分离；正文摘要用 `mail-body-v2` 长度前缀规约。
+ *
+ * HMAC 预言机：taskSigningSecret 可能 fallback 到 SMTP_PASS，stamp 头若发给
+ * 外部收件人即成已知明文爆破面——因此仅当全部 To 均在本域时才写出 stamp。
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
@@ -15,8 +18,8 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 /** 协议版本前缀，变更字段规约时递增。 */
 export const MAIL_STAMP_PREFIX = 'mail-stamp-v1';
 
-/** 正文摘要域分离前缀。 */
-export const MAIL_BODY_HASH_PREFIX = 'mail-body-v1';
+/** 正文摘要域分离前缀（v2：长度前缀，消除裸 \\n 拼接的边界歧义）。 */
+export const MAIL_BODY_HASH_PREFIX = 'mail-body-v2';
 
 /** 发信时写入的头名（mailparser 读回为小写键）。 */
 export const MAIL_STAMP_HEADER = 'X-OA-Mail-Stamp';
@@ -30,8 +33,8 @@ export type MailSource = 'internal' | 'external';
  * - subject：主题原文（不做 trim / 大小写变换）
  * - dateIso：显式 Date 的 toISOString()；发信前把毫秒置 0，
  *   因为 RFC 2822 Date 头不带毫秒，mailparser 回读后 ms 恒为 0
- * - bodyHash：base64url(SHA-256(mail-body-v1\\ntext.trimEnd()\\nhtml))，
- *   无 html 时第三行为空串；绑定正文防止「偷 stamp 头换正文」逃逸围栏
+ * - bodyHash：base64url(SHA-256(mail-body-v2\\nlen(text)\\ntext\\nlen(html)\\nhtml))，
+ *   长度按 UTF-8 字节；绑定正文防止「偷 stamp 头换正文」逃逸围栏
  */
 export interface MailStampFields {
   from: string;
@@ -62,14 +65,29 @@ export function stampDate(now: Date = new Date()): Date {
 }
 
 /**
- * 正文摘要：text/html 均 CRLF→LF 再 trimEnd（mailparser 常在 html 末尾加 \\n；
- * 与 text 同待遇，发读两侧对称）。html 缺省为空串（无 html 时可能是 false）。
+ * 全部收件人是否都在本域（小写比对）。空列表 / 无法解析 → false（fail-closed）。
+ */
+export function allRecipientsOnDomain(to: string[], domain: string): boolean {
+  const d = domain.toLowerCase();
+  const addrs = to.map(normalizeMailbox).filter(Boolean);
+  if (addrs.length === 0) return false;
+  const suffix = `@${d}`;
+  return addrs.every((address) => address.endsWith(suffix));
+}
+
+/**
+ * 正文摘要（mail-body-v2）：CRLF→LF + trimEnd 后，用 UTF-8 字节长度前缀拼接，
+ * 避免 "a\\nb","c" 与 "a","b\\nc" 哈希碰撞。
  */
 export function hashMailBody(text: string, html?: string): string {
   const normalizedText = text.replace(/\r\n/g, '\n').trimEnd();
   const normalizedHtml = (html ?? '').replace(/\r\n/g, '\n').trimEnd();
+  const textLen = Buffer.byteLength(normalizedText, 'utf8');
+  const htmlLen = Buffer.byteLength(normalizedHtml, 'utf8');
   return createHash('sha256')
-    .update(`${MAIL_BODY_HASH_PREFIX}\n${normalizedText}\n${normalizedHtml}`)
+    .update(
+      `${MAIL_BODY_HASH_PREFIX}\n${textLen}\n${normalizedText}\n${htmlLen}\n${normalizedHtml}`,
+    )
     .digest('base64url');
 }
 
@@ -121,8 +139,8 @@ function withoutStampHeaders(headers: Record<string, string>): Record<string, st
 }
 
 /**
- * 发信侧组装头：滤掉调用方异形同名 stamp 头后，强制写入唯一的 X-OA-Mail-Stamp。
- * from/to/正文按字段规约规范化后再签名。
+ * 发信侧组装头：滤掉调用方异形同名 stamp 头后，在「全部 To 均本域」时写入
+ * 唯一的 X-OA-Mail-Stamp；混合/外部收件人不写（防 HMAC 预言机外泄）。
  */
 export function buildOutboundStampHeaders(
   input: {
@@ -135,7 +153,12 @@ export function buildOutboundStampHeaders(
   },
   date: Date,
   key: string,
+  domain: string,
 ): Record<string, string> {
+  const base = withoutStampHeaders(input.headers ?? {});
+  // 任一外部收件人 → 不贴 stamp（本地那封读回会 external，可接受）。
+  if (!allRecipientsOnDomain(input.to, domain)) return base;
+
   const stamp = createMailStamp(
     {
       from: normalizeMailbox(input.from),
@@ -146,9 +169,7 @@ export function buildOutboundStampHeaders(
     },
     key,
   );
-  // 先去重再写入：否则 `{ 'x-oa-mail-stamp': …, 'X-OA-Mail-Stamp': … }` 会被
-  // nodemailer 打成双头，mailparser 读回数组 → 验签 fail-closed 误伤合法信。
-  return { ...withoutStampHeaders(input.headers ?? {}), [MAIL_STAMP_HEADER]: stamp };
+  return { ...base, [MAIL_STAMP_HEADER]: stamp };
 }
 
 function stampPayload(fields: MailStampFields): string {

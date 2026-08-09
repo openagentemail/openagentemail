@@ -46,8 +46,13 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   const date = stampDate();
   const text = coerceOutboundText(input.text, input.html);
   const outbound = { ...input, text };
-  // 每封经 API 发出的信自动带内部 stamp（覆盖调用方同名头）。
-  const headers = buildOutboundStampHeaders(outbound, date, config.taskSigningSecret);
+  // 仅当全部 To 均在本域时写 stamp（防 HMAC 预言机随外发信泄漏）。
+  const headers = buildOutboundStampHeaders(
+    outbound,
+    date,
+    config.taskSigningSecret,
+    config.domain,
+  );
 
   try {
     const info = await transporter.sendMail({
