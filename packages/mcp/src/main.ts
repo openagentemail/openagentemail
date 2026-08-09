@@ -76,12 +76,16 @@ const identitySchema = {
 
 const messageSummarySchema = {
   id: z.string(),
-  from: z.email(),
-  to: z.email(),
+  // from/to 是 RFC-5322 原文（可含显示名，如 `Name <addr>`），不是裸地址；
+  // z.email() 会让严格校验的客户端整封拒掉真实邮件。998 = RFC 5322 单行上限。
+  from: z.string().max(998),
+  to: z.string().max(998),
   subject: z.string(),
   date: z.string(),
   seen: z.boolean(),
   snippet: z.string(),
+  // API MessageSummary 恒返回；漏声明会被 MCP 输出校验剥掉。
+  hasOtp: z.boolean(),
   // HMAC 自签判定：internal = 本 API 发出；external = 未可信（fail-closed）。
   source: z.enum(["internal", "external"]),
 };
@@ -94,6 +98,10 @@ const messageOutputSchema = {
     codes: z.array(z.string()),
     links: z.array(z.string()),
   }),
+  // API MessageDetail 恒有；task 邮件才带 taskId / taskState。
+  links: z.array(z.string()),
+  taskId: z.string().optional(),
+  taskState: z.string().optional(),
 };
 
 const identityListOutputSchema = {
