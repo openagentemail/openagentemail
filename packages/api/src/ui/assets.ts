@@ -843,6 +843,8 @@ export const UI_JS = `(function () {
   var FRESH_MS = 15000;
   var POLL_LIMIT = 15;
   var POLL_WINDOW_MS = 20000;
+  /* 通知面板 DOM 行数上限：12h 窗口可能数千条，全量建节点会卡死页面。 */
+  var NOTIFY_RENDER_LIMIT = 500;
   var SORT_COLUMNS = [
     { key: 'address', label: 'Address' },
     { key: 'name', label: 'Name' },
@@ -982,9 +984,21 @@ export const UI_JS = `(function () {
     return safe;
   }
 
+  /* 401 / 登出共用：清掉通知缓存，避免换 token 后 15s 命中渲染上一主体内容。 */
+  function clearNotifyState() {
+    state.notifyMessages = [];
+    state.notifyStatus = 'idle';
+    state.notifyMessage = '';
+    state.notifyFilter = '';
+    state.notifyUpdatedAt = 0;
+    state.notifyFetchKey = '';
+    state.notifyPending = false;
+  }
+
   function showLogin(message) {
     cancelOverview();
     cancelNotifyLoad();
+    clearNotifyState();
     closeAllModals();
     inboxView.hidden = true;
     loginView.hidden = false;
@@ -2316,7 +2330,12 @@ export const UI_JS = `(function () {
   function renderNotifyRows() {
     notifyRows.replaceChildren();
     var rows = filteredNotifyMessages();
-    notifyShown.textContent = String(rows.length);
+    var total = rows.length;
+    var truncated = total > NOTIFY_RENDER_LIMIT;
+    var visible = truncated ? rows.slice(0, NOTIFY_RENDER_LIMIT) : rows;
+    notifyShown.textContent = truncated
+      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
+      : String(total);
     if (state.notifyStatus === 'loading' && state.notifyMessages.length === 0) {
       notifyStateNode.textContent = 'Loading…';
       return;
@@ -2331,8 +2350,10 @@ export const UI_JS = `(function () {
         : 'No notifications in the last 12 hours. Refresh after a push is sent.';
       return;
     }
-    notifyStateNode.textContent = '';
-    rows.forEach(function (row) {
+    notifyStateNode.textContent = truncated
+      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications.'
+      : '';
+    visible.forEach(function (row) {
       var tier = tierFromPriority(row.priority);
       var item = document.createElement('article');
       item.className = 'notify-row';
@@ -2961,18 +2982,12 @@ export const UI_JS = `(function () {
         credentials: 'same-origin'
       });
     } finally {
-      cancelNotifyLoad();
       state.me = null;
       state.identities = [];
       state.messages = [];
       state.overview = null;
       state.overviewStatus = 'idle';
-      state.notifyMessages = [];
-      state.notifyStatus = 'idle';
-      state.notifyMessage = '';
-      state.notifyFilter = '';
-      state.notifyUpdatedAt = 0;
-      state.notifyFetchKey = '';
+      /* showLogin → clearNotifyState：与 401 过期路径同一套清理。 */
       showLogin('');
     }
   });

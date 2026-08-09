@@ -282,6 +282,50 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('/v1/notify');
   });
 
+  // F1：401 → showLogin 必须清掉通知缓存，否则换 token 会渲染上一主体内容
+  test('showLogin clears notify cache so a new session cannot reuse prior history (F1)', () => {
+    expect(UI_JS).toContain('function clearNotifyState(');
+    const showLogin = UI_JS.slice(
+      UI_JS.indexOf('function showLogin(message)'),
+      UI_JS.indexOf('function showInbox('),
+    );
+    expect(showLogin).toContain('clearNotifyState()');
+    expect(showLogin.indexOf('cancelNotifyLoad()')).toBeLessThan(
+      showLogin.indexOf('clearNotifyState()'),
+    );
+    const clear = UI_JS.slice(
+      UI_JS.indexOf('function clearNotifyState('),
+      UI_JS.indexOf('function showLogin(message)'),
+    );
+    for (const field of [
+      'state.notifyMessages = []',
+      "state.notifyStatus = 'idle'",
+      "state.notifyMessage = ''",
+      "state.notifyFilter = ''",
+      'state.notifyUpdatedAt = 0',
+      "state.notifyFetchKey = ''",
+      'state.notifyPending = false',
+    ]) {
+      expect(clear).toContain(field);
+    }
+    // apiJson 401 走 showLogin（因而间接触发清理），不是只 abort
+    expect(UI_JS).toContain("showLogin('Your session expired. Sign in again.')");
+  });
+
+  // F2：渲染行数上限，避免 12h 嘈杂实例卡死页面
+  test('notify rows are capped at NOTIFY_RENDER_LIMIT with an honest truncation label (F2)', () => {
+    expect(UI_JS).toContain('var NOTIFY_RENDER_LIMIT = 500');
+    expect(UI_JS).toContain('rows.slice(0, NOTIFY_RENDER_LIMIT)');
+    expect(UI_JS).toContain("'Showing latest ' + NOTIFY_RENDER_LIMIT");
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderNotifyRows('),
+      UI_JS.indexOf('function renderNotifyMeta('),
+    );
+    expect(renderRows).toContain('var truncated = total > NOTIFY_RENDER_LIMIT');
+    expect(renderRows).toContain('visible.forEach');
+    expect(renderRows).not.toContain('rows.forEach');
+  });
+
   // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
   test('landing on the overview keeps the first screen while a return row still scrolls', () => {
     expect(UI_JS).toContain('overviewPanel.focus({ preventScroll: true });');

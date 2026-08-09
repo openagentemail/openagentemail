@@ -197,6 +197,66 @@ async function getMailboxScan(_opts: { refresh: boolean; identityAddresses: stri
   };
 }
 
+/** 通知记录假数据：覆盖 urgent/normal/low/unknown 四档 + user / agent 两路 topic。 */
+const previewNotifyByTopic: Record<
+  string,
+  Array<{
+    id: string;
+    time: number;
+    title: string;
+    message: string;
+    priority: number;
+    tags: string[];
+  }>
+> = {
+  'user-alerts': [
+    {
+      id: 'preview-n1',
+      time: 1_753_430_000,
+      title: 'Urgent: mailbox full',
+      message: 'fox@preview.test is near the retention ceiling.',
+      priority: 5,
+      tags: ['warning'],
+    },
+    {
+      id: 'preview-n2',
+      time: 1_753_429_700,
+      title: 'Normal: new signup',
+      message: 'An agent requested can_notify_user.',
+      priority: 3,
+      tags: [],
+    },
+  ],
+  'user-low': [
+    {
+      id: 'preview-n3',
+      time: 1_753_429_400,
+      title: 'Low: weekly digest',
+      message: '12 pushes delivered in the last 7 days.',
+      priority: 1,
+      tags: ['memo'],
+    },
+    {
+      id: 'preview-n4',
+      time: 1_753_429_100,
+      title: 'Odd priority sample',
+      message: 'priority=2 should render as unknown tier in the panel.',
+      priority: 2,
+      tags: [],
+    },
+  ],
+  'agent:fox': [
+    {
+      id: 'preview-n5',
+      time: 1_753_428_800,
+      title: 'openagent.email new mail',
+      message: 'fox@preview.test received new email',
+      priority: 3,
+      tags: ['email'],
+    },
+  ],
+};
+
 const dependencies = {
   listIdentities: () => identities,
   listMessages: async (address: string, limit: number) =>
@@ -210,6 +270,8 @@ const dependencies = {
     (identity as { pushContentTier?: 1 | 2 | 3 }).pushContentTier = tier;
     return identity as typeof identity & { pushContentTier: 1 | 2 | 3 };
   },
+  // 确定性假数据：预览不连 ntfy，避免 Notifications 面板永远 502/503。
+  notifyMessages: async (topic: string) => previewNotifyByTopic[topic] ?? [],
 };
 
 const app = new Hono();

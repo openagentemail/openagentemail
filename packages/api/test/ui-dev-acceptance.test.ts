@@ -168,4 +168,18 @@ describe('development browser acceptance harness', () => {
     }
     expect(previewSource).toContain('getMailboxScan');
   });
+
+  // F3：Notifications 预览必须注入 notifyMessages stub，否则面板永远打真实 ntfy
+  test('the preview fixture stubs notifyMessages across tiers and topics (F3)', () => {
+    expect(previewSource).toContain('notifyMessages:');
+    expect(previewSource).toContain('previewNotifyByTopic');
+    expect(previewSource).toContain("'user-alerts'");
+    expect(previewSource).toContain("'user-low'");
+    expect(previewSource).toContain("'agent:fox'");
+    // urgent / normal / low / unknown（priority 2）
+    expect(previewSource).toContain('priority: 5');
+    expect(previewSource).toContain('priority: 3');
+    expect(previewSource).toContain('priority: 1');
+    expect(previewSource).toContain('priority: 2');
+  });
 });
