@@ -33,6 +33,13 @@ import {
 } from '../lib/imap.ts';
 import { createOverviewCache, type ScanOutcome } from '../lib/overview-cache.ts';
 import {
+  TASK_STATES,
+  type Task,
+  type TaskService,
+  taskParticipants,
+  taskService,
+} from '../lib/tasks.ts';
+import {
   UiSessionStore,
   uiPrivateHeaders,
   uiSessionAuth,
@@ -83,6 +90,11 @@ export type UiApiDependencies = {
     identityAddress?: string,
     since?: string,
   ) => Promise<NotifyMessage[]>;
+  /**
+   * 任务工单：语义等同 GET /v1/tasks（ACL 在本路由强制）。
+   * 测试可注入；生产默认走 taskService。
+   */
+  taskService?: Pick<TaskService, 'list' | 'get'>;
 };
 
 /** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
@@ -100,7 +112,17 @@ const defaultDependencies: UiApiDependencies = {
   setPushContentTier: setIdentityPushContentTier,
   notifyMessages: (topic, identityAddress, since) =>
     notificationService().messages(topic, identityAddress, since),
+  taskService,
 };
+
+const taskListQuerySchema = z.object({ state: z.enum(TASK_STATES).optional() });
+const taskIdParamSchema = z.string().uuid();
+
+/** 与 routes/tasks.ts#canReadTask 保持同一口径（Dashboard cookie 入口的镜像）。 */
+function canReadUiTask(c: Context, task: Task): boolean {
+  const auth = getAuth(c);
+  return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
+}
 
 /** 将 NotifyError 折成与 /v1/notify 一致的 JSON 状态码（历史只读路径）。 */
 function notifyHistoryError(c: Context, err: unknown) {
@@ -462,6 +484,38 @@ export function createUiApiRoutes(
     const marked = await dependencies.setMessageSeen(address, id, parsed.data.seen);
     if (!marked) return c.json({ error: 'not_found' }, 404);
     return c.json({ id, seen: parsed.data.seen });
+  });
+
+  /**
+   * Dashboard 任务工单：cookie 会话入口，ACL 与 GET /v1/tasks 对齐
+   *（admin 全量；identity 仅参与者可见）。
+   */
+  routes.get('/tasks', async (c) => {
+    const parsed = taskListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const service = dependencies.taskService ?? taskService;
+    const tasks = await service.list(parsed.data.state);
+    const auth = getAuth(c);
+    return c.json({
+      tasks:
+        auth.kind === 'admin'
+          ? tasks
+          : tasks.filter((task) => taskParticipants(task).has(auth.address)),
+    });
+  });
+
+  routes.get('/tasks/:id', async (c) => {
+    const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    const service = dependencies.taskService ?? taskService;
+    const task = await service.get(parsed.data);
+    if (!task) return c.json({ error: 'not_found' }, 404);
+    if (!canReadUiTask(c, task)) {
+      return c.json({ error: 'forbidden: task participant required' }, 403);
+    }
+    return c.json(task);
   });
 
   /**
