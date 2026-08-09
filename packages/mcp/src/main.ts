@@ -74,31 +74,36 @@ const identitySchema = {
   canNotifyUser: z.boolean().optional(),
 };
 
-const messageSummarySchema = {
+// list / read 共享字段。from/to 是服务端可信数据的契约声明（非输入消毒）：
+// API 返回 RFC-5322 原文（可含显示名 / 多收件人展开拼接），故用无界 z.string()；
+// RFC 5322 的 998 管的是折叠前物理行，不适用于 mailparser 展开后的文本。
+const messageBaseSchema = {
   id: z.string(),
-  // from/to 是 RFC-5322 原文（可含显示名，如 `Name <addr>`），不是裸地址；
-  // z.email() 会让严格校验的客户端整封拒掉真实邮件。998 = RFC 5322 单行上限。
-  from: z.string().max(998),
-  to: z.string().max(998),
+  from: z.string(),
+  to: z.string(),
   subject: z.string(),
   date: z.string(),
   seen: z.boolean(),
   snippet: z.string(),
-  // API MessageSummary 恒返回；漏声明会被 MCP 输出校验剥掉。
-  hasOtp: z.boolean(),
   // HMAC 自签判定：internal = 本 API 发出；external = 未可信（fail-closed）。
   source: z.enum(["internal", "external"]),
 };
 
+// API MessageSummary：base + hasOtp（列表恒有；detail 没有，禁止再 spread 进读信）。
+const messageSummarySchema = {
+  ...messageBaseSchema,
+  hasOtp: z.boolean(),
+};
+
+// API MessageDetail：base + 正文/OTP/links/task*；不得含 hasOtp。
 const messageOutputSchema = {
-  ...messageSummarySchema,
+  ...messageBaseSchema,
   text: z.string(),
   html: z.string().optional(),
   otp: z.object({
     codes: z.array(z.string()),
     links: z.array(z.string()),
   }),
-  // API MessageDetail 恒有；task 邮件才带 taskId / taskState。
   links: z.array(z.string()),
   taskId: z.string().optional(),
   taskState: z.string().optional(),

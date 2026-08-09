@@ -186,9 +186,10 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
 });
 
-// 输出 schema 与 API 对齐：显示名 From/To 必须能过校验，且真返回字段不被剥掉。
-test("message 输出 schema 接受 RFC-5322 显示名 from/to，并保留 hasOtp/links/task 字段", () => {
+// 输出 schema 与 API 对齐：list/detail 各用真实形状，互不污染。
+test("message summary/detail 输出 schema 按 API 真实形状校验并保留字段", () => {
   const listMessages = toolConfigs.get("mail_list_messages")!.outputSchema!.messages;
+  // API MessageSummary 真实形状（含 hasOtp；无 text/links/task*）。
   const summary = {
     id: "42",
     from: "Alice <alice@example.com>",
@@ -198,21 +199,28 @@ test("message 输出 schema 接受 RFC-5322 显示名 from/to，并保留 hasOtp
     seen: false,
     snippet: "body",
     hasOtp: true,
-    source: "external",
+    source: "external" as const,
   };
   const listParsed = listMessages.safeParse([summary]);
   expect(listParsed.success).toBe(true);
   if (listParsed.success) {
     const rows = listParsed.data as typeof summary[];
-    // 校验后字段仍在，不能被 schema strip 掉。
     expect(rows[0]?.hasOtp).toBe(true);
     expect(rows[0]?.from).toBe("Alice <alice@example.com>");
     expect(rows[0]?.to).toBe("Bob <bob@example.com>, Carol <carol@example.com>");
   }
 
   const readOut = toolConfigs.get("mail_read_message")!.outputSchema!;
+  // API MessageDetail 真实形状：无 hasOtp；有 text/otp/links，task* 可选。
   const detail = {
-    ...summary,
+    id: "42",
+    from: "Alice <alice@example.com>",
+    to: "Bob <bob@example.com>, Carol <carol@example.com>",
+    subject: "hi",
+    date: "2026-08-09T00:00:00.000Z",
+    seen: false,
+    snippet: "body",
+    source: "external" as const,
     text: "plain",
     html: "<p>plain</p>",
     otp: { codes: ["123456"], links: ["https://example.com/otp"] },
@@ -220,11 +228,12 @@ test("message 输出 schema 接受 RFC-5322 显示名 from/to，并保留 hasOtp
     taskId: "task-1",
     taskState: "submitted",
   };
-  // 整对象过 outputSchema：显示名过，且 links/task* 校验后仍保留。
-  const detailParsed = z.object(readOut as z.ZodRawShape).safeParse(detail);
+  const detailSchema = z.object(readOut as z.ZodRawShape);
+  const detailParsed = detailSchema.safeParse(detail);
   expect(detailParsed.success).toBe(true);
   if (detailParsed.success) {
-    expect(detailParsed.data.hasOtp).toBe(true);
+    // detail schema 不得声明 hasOtp，校验后也不能凭空出现。
+    expect("hasOtp" in detailParsed.data).toBe(false);
     expect(detailParsed.data.links).toEqual([
       "https://example.com/a",
       "https://example.com/b",
@@ -232,15 +241,16 @@ test("message 输出 schema 接受 RFC-5322 显示名 from/to，并保留 hasOtp
     expect(detailParsed.data.taskId).toBe("task-1");
     expect(detailParsed.data.taskState).toBe("submitted");
   }
-  // 可选字段缺省也应放行。
+  // 可选 task* 缺省放行；带 hasOtp 的假 detail 不得要求该字段。
   const { taskId: _tid, taskState: _ts, ...detailWithoutTask } = detail;
-  expect(z.object(readOut as z.ZodRawShape).safeParse(detailWithoutTask).success).toBe(true);
+  expect(detailSchema.safeParse(detailWithoutTask).success).toBe(true);
+  expect(readOut.hasOtp).toBeUndefined();
 
-  // RFC 5322 单行上限 998：超长 from/to 必须拒绝。
-  expect(readOut.from!.safeParse("x".repeat(998)).success).toBe(true);
-  expect(readOut.from!.safeParse("x".repeat(999)).success).toBe(false);
-  expect(readOut.to!.safeParse("y".repeat(998)).success).toBe(true);
-  expect(readOut.to!.safeParse("y".repeat(999)).success).toBe(false);
+  // 展开后的多收件人 To 可超 998：无界 string，不得再按物理行限拒。
+  const longTo = Array.from({ length: 40 }, (_, i) => `User${i} <u${i}@example.com>`).join(", ");
+  expect(longTo.length).toBeGreaterThan(998);
+  expect(readOut.to!.safeParse(longTo).success).toBe(true);
+  expect(readOut.from!.safeParse("x".repeat(2000)).success).toBe(true);
 
   // task 参与者仍是裸地址校验——不要跟着 message 一起放宽。
   const taskCreate = toolSchemas.get("task_create")!;
