@@ -109,8 +109,19 @@ export function classifyMailSource(
   return verifyMailStamp(stamp, fields, key) ? 'internal' : 'external';
 }
 
+/** 大小写不敏感地去掉调用方已有的 stamp 头，避免与规范名并存成双头。 */
+function withoutStampHeaders(headers: Record<string, string>): Record<string, string> {
+  const stampKey = MAIL_STAMP_HEADER.toLowerCase();
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === stampKey) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
 /**
- * 发信侧组装头：在调用方 headers 之上强制写入 X-OA-Mail-Stamp（覆盖同名伪造值）。
+ * 发信侧组装头：滤掉调用方异形同名 stamp 头后，强制写入唯一的 X-OA-Mail-Stamp。
  * from/to/正文按字段规约规范化后再签名。
  */
 export function buildOutboundStampHeaders(
@@ -135,7 +146,9 @@ export function buildOutboundStampHeaders(
     },
     key,
   );
-  return { ...(input.headers ?? {}), [MAIL_STAMP_HEADER]: stamp };
+  // 先去重再写入：否则 `{ 'x-oa-mail-stamp': …, 'X-OA-Mail-Stamp': … }` 会被
+  // nodemailer 打成双头，mailparser 读回数组 → 验签 fail-closed 误伤合法信。
+  return { ...withoutStampHeaders(input.headers ?? {}), [MAIL_STAMP_HEADER]: stamp };
 }
 
 function stampPayload(fields: MailStampFields): string {
