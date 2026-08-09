@@ -148,6 +148,55 @@ export const UI_HTML = `<!doctype html>
         <div id="notify-rows" class="notify-rows"></div>
       </main>
 
+      <main id="tasks-panel" class="tasks-panel" tabindex="-1" aria-labelledby="tasks-title" hidden>
+        <div class="panel-heading overview-heading">
+          <div>
+            <h2 id="tasks-title">Tasks</h2>
+            <p id="tasks-subtitle" class="overview-subtitle">Task tickets rebuilt from X-OA-Task mail threads</p>
+            <p id="tasks-updated" class="overview-updated"></p>
+          </div>
+          <div class="overview-heading-actions">
+            <button id="tasks-refresh" class="quiet" type="button">Refresh</button>
+          </div>
+        </div>
+        <p id="tasks-notice" class="notice warning" hidden></p>
+        <div class="tasks-layout">
+          <div id="tasks-list-section" class="tasks-list-section" aria-label="Task list">
+            <div class="overview-controls notify-controls">
+              <label class="search-label" for="tasks-state-filter">Filter state</label>
+              <select id="tasks-state-filter" class="search-input notify-topic-filter">
+                <option value="">All states</option>
+                <option value="submitted">submitted</option>
+                <option value="working">working</option>
+                <option value="input-required">input-required</option>
+                <option value="completed">completed</option>
+                <option value="failed">failed</option>
+              </select>
+              <span id="tasks-shown" class="count"></span>
+            </div>
+            <p id="tasks-state" class="empty-state"></p>
+            <div class="tasks-header" aria-hidden="true">
+              <span>State</span>
+              <span>Participants</span>
+              <span>Subject</span>
+              <span>Updated</span>
+              <span>Msgs</span>
+            </div>
+            <div id="tasks-rows" class="tasks-rows"></div>
+          </div>
+          <div id="tasks-detail-section" class="tasks-detail-section" tabindex="-1" aria-label="Task detail">
+            <button id="tasks-mobile-back" class="quiet mobile-back" type="button">Back to tasks</button>
+            <div id="tasks-detail-content" class="tasks-detail-content">
+              <div class="detail-placeholder">
+                <p class="eyebrow">Task ticket</p>
+                <h2>Select a task</h2>
+                <p class="muted">Choose a ticket to inspect its state timeline and result.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
       <main id="main-content" class="inbox-main" tabindex="-1">
         <section id="message-panel" class="message-panel" aria-labelledby="messages-title">
           <div class="panel-heading message-heading">
@@ -432,15 +481,151 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
 }
-.identity-panel, .message-panel, .detail-panel, .overview-panel, .notify-panel { min-width: 0; }
+.identity-panel, .message-panel, .detail-panel, .overview-panel, .notify-panel, .tasks-panel { min-width: 0; }
 .identity-panel, .message-panel { border-right: 1px solid var(--line-strong); }
 .identity-panel { padding: 20px 14px; background: var(--bg); }
 .inbox-view[data-scope="overview"] .identity-panel,
-.inbox-view[data-scope="notifications"] .identity-panel { border-right-color: var(--line-strong); }
+.inbox-view[data-scope="notifications"] .identity-panel,
+.inbox-view[data-scope="tasks"] .identity-panel { border-right-color: var(--line-strong); }
 .message-panel { background: var(--bg-raise); }
 .detail-panel { background: var(--bg); }
-.overview-panel, .notify-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
+.overview-panel, .notify-panel, .tasks-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
 .notify-topic-filter { max-width: 280px; }
+.tasks-layout {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 1.1fr) minmax(0, 1.4fr);
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-raise);
+}
+.tasks-list-section { min-width: 0; border-right: 1px solid var(--line-strong); background: var(--bg-raise); padding: 14px 12px 24px; }
+.tasks-detail-section { min-width: 0; background: var(--bg); padding: 0; }
+.tasks-detail-content { padding: 22px 20px 40px; }
+.tasks-header {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 110px minmax(120px, 1.2fr) minmax(0, 1.6fr) 96px 48px;
+  padding: 8px 10px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--line);
+}
+.tasks-rows { border-top: 1px solid var(--line); }
+.task-row {
+  width: 100%;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 110px minmax(120px, 1.2fr) minmax(0, 1.6fr) 96px 48px;
+  align-items: start;
+  padding: 12px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  min-height: 44px;
+}
+.task-row:hover, .task-row[aria-current="true"] { background: var(--gold-dim); }
+.task-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
+.task-participants { min-width: 0; font-size: 12px; color: var(--ink-dim); }
+.task-participants > span:last-child {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/*
+ * 窄桌面藏 Updated/Msgs：须写在基础 .task-row/.tasks-header 之后，否则同特异性后者覆盖三列模板。
+ * 算术：sidebar 240 + pad≤60 + list×1.1/2.5；五列头≈458 → 视口≥~1341；取 1360。
+ */
+@media (max-width: 1360px) and (min-width: 821px) {
+  .tasks-header,
+  .task-row {
+    grid-template-columns: 100px minmax(0, 1.1fr) minmax(0, 1.4fr);
+  }
+  .tasks-header > :nth-child(4),
+  .tasks-header > :nth-child(5),
+  .task-row .task-updated,
+  .task-row .task-msgs { display: none; }
+}
+.task-subject { margin: 0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-updated { color: var(--ink-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.task-msgs { color: var(--ink-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.task-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.task-badge[data-state="submitted"] { border-color: rgba(96, 165, 250, 0.45); color: #93c5fd; }
+.task-badge[data-state="working"] { border-color: rgba(251, 191, 36, 0.45); color: var(--gold); }
+.task-badge[data-state="input-required"] { border-color: rgba(251, 146, 60, 0.5); color: #fdba74; }
+.task-badge[data-state="completed"] { border-color: rgba(52, 211, 153, 0.45); color: var(--green); }
+.task-badge[data-state="failed"] { border-color: rgba(248, 113, 113, 0.45); color: var(--red); }
+.task-detail-head { display: grid; gap: 8px; margin-bottom: 18px; }
+.task-detail-head h3 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+.task-detail-meta { margin: 0; color: var(--ink-dim); font-size: 13px; }
+.task-timeline { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.task-timeline-item {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.task-timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.task-timeline-from { font-size: 13px; font-weight: 700; }
+.task-timeline-time { color: var(--ink-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+.task-timeline-body {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.task-result {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  padding: 10px 12px;
+}
+.task-result summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.task-result pre {
+  margin: 10px 0 0;
+  overflow: auto;
+  max-height: 320px;
+  font: 12px/1.45 var(--mono);
+  color: var(--gold-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .notify-header {
   display: grid;
   gap: 10px;
@@ -796,7 +981,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .inbox-layout { min-height: calc(100vh - 66px); display: block; }
   .inbox-main { display: block; }
   .identity-panel { display: none; }
-  .message-panel, .detail-panel, .overview-panel, .notify-panel { min-height: calc(100vh - 66px); border: 0; }
+  .message-panel, .detail-panel, .overview-panel, .notify-panel, .tasks-panel { min-height: calc(100vh - 66px); border: 0; }
   .mobile-identity { display: grid; gap: 5px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
   .mobile-back { display: inline-block; margin: 14px 16px 0; }
   .inbox-view[data-mobile-view="list"] .detail-panel { display: none; }
@@ -806,6 +991,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .notify-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; margin-bottom: 4px; }
   .notify-row .cell-label { display: inline; }
   .notify-row .notify-content { display: block; }
+  .tasks-layout { display: block; border: 0; border-radius: 0; background: transparent; }
+  .tasks-list-section { border: 0; padding: 0; background: transparent; }
+  .tasks-detail-section { padding: 0; }
+  .tasks-detail-content { padding: 22px 16px 40px; }
+  .inbox-view[data-mobile-view="tasks-list"] .tasks-detail-section { display: none; }
+  .inbox-view[data-mobile-view="tasks-detail"] .tasks-list-section { display: none; }
+  .tasks-header { display: none; }
+  .task-row { display: block; }
+  .task-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; margin-bottom: 4px; }
+  .task-row .cell-label { display: inline; }
+  .task-row .task-subject { white-space: normal; }
   .inbox-view[data-mobile-view="overview"] .overview-stats { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .inbox-view[data-mobile-view="overview"] .stat-card {
     display: flex;
@@ -845,6 +1041,12 @@ export const UI_JS = `(function () {
   var POLL_WINDOW_MS = 20000;
   /* 通知面板 DOM 行数上限：12h 窗口可能数千条，全量建节点会卡死页面。 */
   var NOTIFY_RENDER_LIMIT = 500;
+  /* 任务工单行数上限：与 notify 同口径，避免大邮箱卡死页面。 */
+  var TASKS_RENDER_LIMIT = 500;
+  /* 单工单时间线条目上限：长历史不全量建节点。 */
+  var TASK_TIMELINE_RENDER_LIMIT = 200;
+  /* 与 lib/tasks.ts RESULT_MARKER 逐字一致；时间线正文剥离用。 */
+  var TASK_RESULT_MARKER = '<!-- openagent.email task result -->';
   var SORT_COLUMNS = [
     { key: 'address', label: 'Address' },
     { key: 'name', label: 'Name' },
@@ -886,7 +1088,20 @@ export const UI_JS = `(function () {
     notifyUpdatedAt: 0,
     notifyPending: false,
     /* 上次成功拉取对应的 topic 集合指纹，避免 All 误用单路缓存。 */
-    notifyFetchKey: ''
+    notifyFetchKey: '',
+    /* 任务工单：列表 + 详情缓存 */
+    tasks: [],
+    tasksStatus: 'idle',
+    tasksMessage: '',
+    tasksFilter: '',
+    tasksUpdatedAt: 0,
+    tasksPending: false,
+    /* 上次成功拉取对应的 state 过滤指纹，避免切过滤误用旧缓存行。 */
+    tasksFetchKey: '',
+    activeTaskId: '',
+    taskDetail: null,
+    taskDetailStatus: 'idle',
+    taskDetailMessage: ''
   };
   var refreshTask = null;
   var refreshController = null;
@@ -894,6 +1109,8 @@ export const UI_JS = `(function () {
   var overviewController = null;
   var overviewTimer = null;
   var notifyController = null;
+  var tasksController = null;
+  var taskDetailController = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -943,6 +1160,17 @@ export const UI_JS = `(function () {
   var notifyShown = byId('notify-shown');
   var notifyRefresh = byId('notify-refresh');
   var notifyTopicFilter = byId('notify-topic-filter');
+  var tasksPanel = byId('tasks-panel');
+  var tasksRows = byId('tasks-rows');
+  var tasksStateNode = byId('tasks-state');
+  var tasksNotice = byId('tasks-notice');
+  var tasksUpdated = byId('tasks-updated');
+  var tasksShown = byId('tasks-shown');
+  var tasksRefresh = byId('tasks-refresh');
+  var tasksStateFilter = byId('tasks-state-filter');
+  var tasksDetailSection = byId('tasks-detail-section');
+  var tasksDetailContent = byId('tasks-detail-content');
+  var tasksMobileBack = byId('tasks-mobile-back');
   var tokenModal = byId('token-modal');
   var tokenModalTitle = byId('token-modal-title');
   var tokenValue = byId('token-value');
@@ -995,10 +1223,27 @@ export const UI_JS = `(function () {
     state.notifyPending = false;
   }
 
+  /* 401 / 登出共用：清掉工单缓存，避免换主体后渲染上一会话任务。 */
+  function clearTasksState() {
+    state.tasks = [];
+    state.tasksStatus = 'idle';
+    state.tasksMessage = '';
+    state.tasksFilter = '';
+    state.tasksUpdatedAt = 0;
+    state.tasksPending = false;
+    state.tasksFetchKey = '';
+    state.activeTaskId = '';
+    state.taskDetail = null;
+    state.taskDetailStatus = 'idle';
+    state.taskDetailMessage = '';
+  }
+
   function showLogin(message) {
     cancelOverview();
     cancelNotifyLoad();
+    cancelTasksLoad();
     clearNotifyState();
+    clearTasksState();
     closeAllModals();
     inboxView.hidden = true;
     loginView.hidden = false;
@@ -1390,43 +1635,62 @@ export const UI_JS = `(function () {
     detailContent.append(placeholder);
   }
 
-  /* ---- scope 迁移：任一时刻恰好一个可见 <main>（overview / notifications / inbox） ---- */
+  /* ---- scope 迁移：任一时刻恰好一个可见 <main>（overview / notifications / tasks / inbox） ---- */
   function applyScope(next, options) {
     var opts = options || {};
     var overviewActive = next === 'overview';
     var notifyActive = next === 'notifications';
+    var tasksActive = next === 'tasks';
     var inboxActive = next === 'inbox';
     state.scope = next;
     inboxView.dataset.scope = next;
     overviewPanel.hidden = !overviewActive;
     notifyPanel.hidden = !notifyActive;
+    tasksPanel.hidden = !tasksActive;
     mainContent.hidden = !inboxActive;
-    viewTitle.textContent = overviewActive ? 'Overview' : notifyActive ? 'Notifications' : 'Inbox';
+    viewTitle.textContent = overviewActive
+      ? 'Overview'
+      : notifyActive
+        ? 'Notifications'
+        : tasksActive
+          ? 'Tasks'
+          : 'Inbox';
     document.title = overviewActive
       ? 'OpenAgent Overview'
       : notifyActive
         ? 'OpenAgent Notifications'
-        : 'OpenAgent Inbox';
+        : tasksActive
+          ? 'OpenAgent Tasks'
+          : 'OpenAgent Inbox';
     skipLink.textContent = overviewActive
       ? 'Skip to overview'
       : notifyActive
         ? 'Skip to notifications'
-        : 'Skip to inbox';
+        : tasksActive
+          ? 'Skip to tasks'
+          : 'Skip to inbox';
     skipLink.setAttribute(
       'href',
-      overviewActive ? '#overview-panel' : notifyActive ? '#notify-panel' : '#main-content'
+      overviewActive
+        ? '#overview-panel'
+        : notifyActive
+          ? '#notify-panel'
+          : tasksActive
+            ? '#tasks-panel'
+            : '#main-content'
     );
     if (overviewActive) inboxView.dataset.mobileView = 'overview';
     else if (notifyActive) inboxView.dataset.mobileView = 'notifications';
+    else if (tasksActive) inboxView.dataset.mobileView = 'tasks-list';
     renderIdentities();
     if (opts.announce) announce(opts.announce);
   }
 
-  /* 侧栏地址项与移动 <select> 是 Overview / Notifications 之外的入口：在非 inbox
+  /* 侧栏地址项与移动 <select> 是 Overview / Notifications / Tasks 之外的入口：在非 inbox
      scope 下必须走 openAddress（切 scope、播报、聚焦），否则会在不可见的 inbox
      里取消息、画面却停在当前面板。 */
   function activateAddress(address) {
-    if (state.scope === 'overview' || state.scope === 'notifications') {
+    if (state.scope === 'overview' || state.scope === 'notifications' || state.scope === 'tasks') {
       openAddress(address);
       return;
     }
@@ -1456,12 +1720,18 @@ export const UI_JS = `(function () {
       mobileIdentity.append(overviewOption);
     }
 
-    /* 通知面板哨兵：合法地址不会以双下划线开头。 */
+    /* 通知/工单面板哨兵：合法地址不会以双下划线开头。 */
     var notifyOption = document.createElement('option');
     notifyOption.value = '__notifications__';
     notifyOption.textContent = 'Notifications — push history';
     notifyOption.selected = state.scope === 'notifications';
     mobileIdentity.append(notifyOption);
+
+    var tasksOption = document.createElement('option');
+    tasksOption.value = '__tasks__';
+    tasksOption.textContent = 'Tasks — ticket board';
+    tasksOption.selected = state.scope === 'tasks';
+    mobileIdentity.append(tasksOption);
 
     state.identities.forEach(function (identity) {
       var option = document.createElement('option');
@@ -1504,6 +1774,22 @@ export const UI_JS = `(function () {
     });
     notifyItem.append(notifyButton);
     identityList.append(notifyItem);
+
+    var tasksItem = document.createElement('li');
+    var tasksButton = document.createElement('button');
+    tasksButton.type = 'button';
+    tasksButton.className = 'identity-button overview-nav';
+    tasksButton.setAttribute('aria-current', state.scope === 'tasks' ? 'true' : 'false');
+    var tasksName = document.createElement('strong');
+    tasksName.textContent = 'Tasks';
+    var tasksHint = document.createElement('span');
+    tasksHint.textContent = 'Ticket board';
+    tasksButton.append(tasksName, tasksHint);
+    tasksButton.addEventListener('click', function () {
+      enterTasks({ announce: 'Opened tasks' });
+    });
+    tasksItem.append(tasksButton);
+    identityList.append(tasksItem);
 
     filteredIdentities().forEach(function (identity) {
       var item = document.createElement('li');
@@ -2213,6 +2499,7 @@ export const UI_JS = `(function () {
     var opts = options || {};
     cancelOverviewPoll();
     cancelNotifyLoad();
+    cancelTasksLoad();
     applyScope('overview', { announce: opts.announce });
     renderOverview();
     /* 两条聚焦路径分开处理：从 inbox 返回时焦点回到原来那一行，那一行可能在长表格深处，
@@ -2232,6 +2519,7 @@ export const UI_JS = `(function () {
     state.returnAddress = address;
     cancelOverview();
     cancelNotifyLoad();
+    cancelTasksLoad();
     applyScope('inbox');
     inboxView.dataset.mobileView = 'list';
     announce('Opened ' + address);
@@ -2639,6 +2927,7 @@ export const UI_JS = `(function () {
   function enterNotifications(options) {
     var opts = options || {};
     cancelOverview();
+    cancelTasksLoad();
     applyScope('notifications', { announce: opts.announce });
     renderNotify();
     focusNotifyPanel();
@@ -2650,6 +2939,437 @@ export const UI_JS = `(function () {
       state.notifyFetchKey === notifyFetchKey()
     ) return;
     loadNotifyHistory();
+  }
+
+  /* ---- 任务工单面板（与 Notifications 并列；列表走 /ui/api/tasks，详情走 /:id） ---- */
+  function focusTasksPanel() {
+    tasksPanel.focus({ preventScroll: true });
+  }
+
+  function cancelTasksListLoad() {
+    if (tasksController) {
+      tasksController.abort();
+      tasksController = null;
+    }
+    state.tasksPending = false;
+  }
+
+  function cancelTaskDetailLoad() {
+    if (taskDetailController) {
+      taskDetailController.abort();
+      taskDetailController = null;
+    }
+    /* 离开 scope / 换单时 abort：勿把 loading 粘住，否则 FRESH_MS 内重进会假刷新。 */
+    if (state.taskDetailStatus === 'loading') {
+      state.taskDetailStatus = state.taskDetail ? 'ready' : 'idle';
+    }
+  }
+
+  function cancelTasksLoad() {
+    cancelTasksListLoad();
+    cancelTaskDetailLoad();
+  }
+
+  function clearTaskDetail() {
+    cancelTaskDetailLoad();
+    state.activeTaskId = '';
+    state.taskDetail = null;
+    state.taskDetailStatus = 'idle';
+    state.taskDetailMessage = '';
+    tasksDetailContent.replaceChildren();
+    var placeholder = document.createElement('div');
+    placeholder.className = 'detail-placeholder';
+    var label = document.createElement('p');
+    label.className = 'eyebrow';
+    label.textContent = 'Task ticket';
+    var title = document.createElement('h2');
+    title.textContent = 'Select a task';
+    var copy = document.createElement('p');
+    copy.className = 'muted';
+    copy.textContent = 'Choose a ticket to inspect its state timeline and result.';
+    placeholder.append(label, title, copy);
+    tasksDetailContent.append(placeholder);
+  }
+
+  function renderTasksMeta() {
+    if (state.tasksUpdatedAt) {
+      tasksUpdated.textContent = 'Updated ' + formatClock(new Date(state.tasksUpdatedAt).toISOString(), true);
+    } else {
+      tasksUpdated.textContent = '';
+    }
+    /* 详情错误优先；列表刷新失败且仍有缓存时也用 notice（空列表错误走 empty-state）。 */
+    if (state.taskDetailStatus === 'error' && state.taskDetailMessage) {
+      tasksNotice.hidden = false;
+      tasksNotice.textContent = state.taskDetailMessage;
+    } else if (state.tasksStatus === 'error' && state.tasksMessage && state.tasks.length > 0) {
+      tasksNotice.hidden = false;
+      tasksNotice.textContent = state.tasksMessage;
+    } else {
+      tasksNotice.hidden = true;
+      tasksNotice.textContent = '';
+    }
+    tasksRefresh.disabled = state.tasksPending;
+    tasksRefresh.textContent = state.tasksPending ? 'Refreshing…' : 'Refresh';
+    tasksStateFilter.value = state.tasksFilter;
+  }
+
+  function tasksFetchKey() {
+    return state.tasksFilter || '';
+  }
+
+  /*
+   * 展示层剥离 result 块：口径对齐 lib/tasks.ts readResult——
+   * lastIndexOf + 尾部 fenced json + JSON.parse 成功才剥（malformed 当普通正文；中途字面量不剥）。
+   * UI_JS 外层是模板字符串：fence 用 RegExp + fromCharCode(96) 拼反引号，避免打断 backtick。
+   */
+  function taskTimelineBody(body) {
+    var text = typeof body === 'string' ? body : '';
+    var markerAt = text.lastIndexOf(TASK_RESULT_MARKER);
+    if (markerAt < 0) return text;
+    var after = text.slice(markerAt + TASK_RESULT_MARKER.length);
+    var ticks = String.fromCharCode(96, 96, 96);
+    var fence = new RegExp('^\\\\s*' + ticks + 'json\\\\s*\\\\n([\\\\s\\\\S]*?)\\\\n' + ticks + '\\\\s*$');
+    var match = after.match(fence);
+    if (!match) return text;
+    try {
+      JSON.parse(match[1]);
+    } catch (_err) {
+      return text;
+    }
+    return text.slice(0, markerAt).replace(/\\s+$/, '');
+  }
+
+  function renderTaskRows() {
+    tasksRows.replaceChildren();
+    /* fetchKey 不匹配时旧缓存不可见，避免切 state 过滤闪错位行。 */
+    var keyMatches = state.tasksFetchKey === tasksFetchKey();
+    var rows = keyMatches ? state.tasks : [];
+    var total = rows.length;
+    var truncated = total > TASKS_RENDER_LIMIT;
+    var visible = truncated ? rows.slice(0, TASKS_RENDER_LIMIT) : rows;
+    /* 只要 fetchKey 对不上，就当加载中——含 enterTasks 首帧尚未 pending 的窗口。 */
+    var awaiting = state.tasksStatus === 'loading' || !keyMatches;
+    tasksShown.textContent = awaiting
+      ? ''
+      : truncated
+        ? 'Showing latest ' + TASKS_RENDER_LIMIT + ' of ' + total
+        : String(total);
+    if (awaiting) {
+      tasksStateNode.textContent = 'Loading…';
+      return;
+    }
+    if (state.tasksStatus === 'error' && state.tasks.length === 0) {
+      tasksStateNode.textContent = state.tasksMessage || 'Tasks could not be loaded. Try Refresh.';
+      return;
+    }
+    if (rows.length === 0) {
+      tasksStateNode.textContent = state.tasksFilter
+        ? 'No tasks in state "' + state.tasksFilter + '".'
+        : 'No tasks yet. Refresh after a task mail arrives.';
+      return;
+    }
+    tasksStateNode.textContent = truncated
+      ? 'Showing latest ' + TASKS_RENDER_LIMIT + ' of ' + total + ' tasks.'
+      : '';
+    visible.forEach(function (task) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'task-row';
+      button.setAttribute('aria-current', task.id === state.activeTaskId ? 'true' : 'false');
+
+      var stateCell = document.createElement('div');
+      stateCell.className = 'cell';
+      var stateLabel = document.createElement('span');
+      stateLabel.className = 'cell-label';
+      stateLabel.textContent = 'State';
+      var badge = document.createElement('span');
+      badge.className = 'task-badge';
+      badge.setAttribute('data-state', task.state || '');
+      badge.textContent = task.state || '—';
+      stateCell.append(stateLabel, badge);
+
+      var peopleCell = document.createElement('div');
+      peopleCell.className = 'cell task-participants';
+      var peopleLabel = document.createElement('span');
+      peopleLabel.className = 'cell-label';
+      peopleLabel.textContent = 'Participants';
+      var peopleValue = document.createElement('span');
+      peopleValue.textContent = (task.from || '—') + ' → ' + (task.to || '—');
+      peopleCell.append(peopleLabel, peopleValue);
+
+      var subjectCell = document.createElement('div');
+      subjectCell.className = 'cell';
+      var subjectLabel = document.createElement('span');
+      subjectLabel.className = 'cell-label';
+      subjectLabel.textContent = 'Subject';
+      var subjectValue = document.createElement('p');
+      subjectValue.className = 'task-subject';
+      subjectValue.textContent = task.subject || '(no subject)';
+      subjectCell.append(subjectLabel, subjectValue);
+
+      var updatedCell = document.createElement('div');
+      updatedCell.className = 'cell task-updated';
+      var updatedLabel = document.createElement('span');
+      updatedLabel.className = 'cell-label';
+      updatedLabel.textContent = 'Updated';
+      var updatedValue = document.createElement('time');
+      updatedValue.dateTime = task.updatedAt || '';
+      updatedValue.textContent = formatAgo(task.updatedAt);
+      updatedCell.append(updatedLabel, updatedValue);
+
+      var msgsCell = document.createElement('div');
+      msgsCell.className = 'cell task-msgs';
+      var msgsLabel = document.createElement('span');
+      msgsLabel.className = 'cell-label';
+      msgsLabel.textContent = 'Msgs';
+      var msgsValue = document.createElement('span');
+      msgsValue.textContent = String(Array.isArray(task.messages) ? task.messages.length : 0);
+      msgsCell.append(msgsLabel, msgsValue);
+
+      button.append(stateCell, peopleCell, subjectCell, updatedCell, msgsCell);
+      button.addEventListener('click', function () {
+        selectTask(task.id);
+      });
+      tasksRows.append(button);
+    });
+  }
+
+  function renderTaskDetail() {
+    if (!state.activeTaskId) {
+      clearTaskDetail();
+      return;
+    }
+    /* 错误态绝不回落成「成功详情」：列表缓存也不能冒充 GET /:id 成功。 */
+    if (state.taskDetailStatus === 'error') {
+      tasksDetailContent.replaceChildren();
+      var err = document.createElement('p');
+      err.className = 'empty-state';
+      err.textContent = state.taskDetailMessage || 'Task could not be loaded.';
+      tasksDetailContent.append(err);
+      return;
+    }
+    if (state.taskDetailStatus === 'loading' && !state.taskDetail) {
+      tasksDetailContent.replaceChildren();
+      var loading = document.createElement('p');
+      loading.className = 'empty-state';
+      loading.textContent = 'Loading task…';
+      tasksDetailContent.append(loading);
+      return;
+    }
+    var task = state.taskDetail;
+    if (!task) {
+      clearTaskDetail();
+      return;
+    }
+    tasksDetailContent.replaceChildren();
+
+    var head = document.createElement('div');
+    head.className = 'task-detail-head';
+    var badge = document.createElement('span');
+    badge.className = 'task-badge';
+    badge.setAttribute('data-state', task.state || '');
+    badge.textContent = task.state || '—';
+    var title = document.createElement('h3');
+    title.textContent = task.subject || '(no subject)';
+    var meta = document.createElement('p');
+    meta.className = 'task-detail-meta';
+    meta.textContent =
+      (task.from || '—') +
+      ' → ' +
+      (task.to || '—') +
+      ' · updated ' +
+      formatAgo(task.updatedAt) +
+      ' · ' +
+      (Array.isArray(task.messages) ? task.messages.length : 0) +
+      ' messages';
+    head.append(badge, title, meta);
+    if (state.taskDetailStatus === 'loading') {
+      var pending = document.createElement('p');
+      pending.className = 'task-detail-meta';
+      pending.textContent = 'Refreshing ticket detail…';
+      head.append(pending);
+    }
+    tasksDetailContent.append(head);
+
+    var messages = Array.isArray(task.messages) ? task.messages : [];
+    var timelineTotal = messages.length;
+    var timelineTruncated = timelineTotal > TASK_TIMELINE_RENDER_LIMIT;
+    var visibleMessages = timelineTruncated
+      ? messages.slice(timelineTotal - TASK_TIMELINE_RENDER_LIMIT)
+      : messages;
+    if (timelineTruncated) {
+      var timelineNote = document.createElement('p');
+      timelineNote.className = 'task-detail-meta';
+      timelineNote.textContent =
+        'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT + ' of ' + timelineTotal + ' timeline events.';
+      tasksDetailContent.append(timelineNote);
+    }
+    var timeline = document.createElement('ol');
+    timeline.className = 'task-timeline';
+    visibleMessages.forEach(function (message) {
+      var item = document.createElement('li');
+      item.className = 'task-timeline-item';
+      var metaRow = document.createElement('div');
+      metaRow.className = 'task-timeline-meta';
+      var msgBadge = document.createElement('span');
+      msgBadge.className = 'task-badge';
+      msgBadge.setAttribute('data-state', message.state || '');
+      msgBadge.textContent = message.state || '—';
+      var from = document.createElement('span');
+      from.className = 'task-timeline-from';
+      from.textContent = message.from || '—';
+      var when = document.createElement('time');
+      when.className = 'task-timeline-time';
+      when.dateTime = message.date || '';
+      when.textContent = message.date ? formatDate(message.date) : '—';
+      metaRow.append(msgBadge, from, when);
+      var body = document.createElement('p');
+      body.className = 'task-timeline-body';
+      body.textContent = taskTimelineBody(message.body);
+      item.append(metaRow, body);
+      timeline.append(item);
+    });
+    tasksDetailContent.append(timeline);
+
+    if (task.result !== undefined) {
+      var resultBlock = document.createElement('details');
+      resultBlock.className = 'task-result';
+      resultBlock.open = true;
+      var summary = document.createElement('summary');
+      summary.textContent = 'Result';
+      var pre = document.createElement('pre');
+      try {
+        pre.textContent = JSON.stringify(task.result, null, 2);
+      } catch (_error) {
+        pre.textContent = String(task.result);
+      }
+      resultBlock.append(summary, pre);
+      tasksDetailContent.append(resultBlock);
+    }
+  }
+
+  function renderTasks() {
+    renderTasksMeta();
+    renderTaskRows();
+    renderTaskDetail();
+  }
+
+  async function loadTasks() {
+    /* 刷新列表不打断详情请求，避免 activeTask 卡在 loading。 */
+    cancelTasksListLoad();
+    var controller = new AbortController();
+    tasksController = controller;
+    state.tasksPending = true;
+    state.tasksMessage = '';
+    /* F1：filter 一变 fetchKey 就变——立刻 loading，别等网络返回才撤掉假空态。 */
+    if (state.tasksFetchKey !== tasksFetchKey()) {
+      state.tasks = [];
+      state.tasksStatus = 'loading';
+    } else if (state.tasks.length === 0) {
+      state.tasksStatus = 'loading';
+    }
+    renderTasks();
+    try {
+      var path = '/ui/api/tasks';
+      if (state.tasksFilter) {
+        path += '?state=' + encodeURIComponent(state.tasksFilter);
+      }
+      var payload = await apiJson(path, { signal: controller.signal });
+      if (tasksController !== controller) return;
+      state.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+      state.tasksUpdatedAt = Date.now();
+      state.tasksFetchKey = tasksFetchKey();
+      state.tasksStatus = 'ready';
+      state.tasksMessage = '';
+      renderTasks();
+      announce(state.tasks.length + ' tasks loaded');
+      if (state.activeTaskId) {
+        var stillThere = state.tasks.some(function (task) {
+          return task.id === state.activeTaskId;
+        });
+        if (!stillThere) clearTaskDetail();
+      }
+    } catch (error) {
+      if (error.name === 'AbortError' || error.message === 'session_expired') return;
+      if (state.tasks.length === 0) {
+        state.tasksStatus = 'error';
+        state.tasksMessage = 'Tasks could not be loaded. Try Refresh.';
+        /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
+        state.tasksFetchKey = tasksFetchKey();
+      } else {
+        state.tasksStatus = 'error';
+        state.tasksMessage = 'Refresh failed. Showing previous tasks.';
+      }
+      renderTasks();
+    } finally {
+      if (tasksController === controller) {
+        tasksController = null;
+        state.tasksPending = false;
+        renderTasksMeta();
+      }
+    }
+  }
+
+  async function selectTask(id) {
+    if (!id) return;
+    cancelTaskDetailLoad();
+    state.activeTaskId = id;
+    state.taskDetailStatus = 'loading';
+    state.taskDetailMessage = '';
+    /* 列表摘要可先展示，但失败时必须清空，不能冒充详情成功。 */
+    var cached = state.tasks.find(function (task) {
+      return task.id === id;
+    });
+    state.taskDetail = cached || null;
+    inboxView.dataset.mobileView = 'tasks-detail';
+    renderTasks();
+    tasksDetailSection.focus({ preventScroll: true });
+    /* 移动端进详情时滚到顶，避免 preventScroll 保留列表滚动位。 */
+    window.scrollTo(0, 0);
+    var controller = new AbortController();
+    taskDetailController = controller;
+    try {
+      var detail = await apiJson('/ui/api/tasks/' + encodeURIComponent(id), {
+        signal: controller.signal
+      });
+      if (taskDetailController !== controller || state.activeTaskId !== id) return;
+      state.taskDetail = detail;
+      state.taskDetailStatus = 'ready';
+      state.taskDetailMessage = '';
+      renderTasks();
+      announce('Opened task ' + (detail.subject || id));
+    } catch (error) {
+      if (error.name === 'AbortError' || error.message === 'session_expired') return;
+      if (state.activeTaskId !== id) return;
+      state.taskDetail = null;
+      state.taskDetailStatus = 'error';
+      state.taskDetailMessage =
+        error.status === 403
+          ? 'You are not a participant on this task.'
+          : error.status === 404
+            ? 'Task not found.'
+            : 'Task could not be loaded.';
+      renderTasks();
+      announce(state.taskDetailMessage);
+    } finally {
+      if (taskDetailController === controller) taskDetailController = null;
+    }
+  }
+
+  function enterTasks(options) {
+    var opts = options || {};
+    cancelOverview();
+    cancelNotifyLoad();
+    applyScope('tasks', { announce: opts.announce });
+    renderTasks();
+    focusTasksPanel();
+    var age = state.tasksUpdatedAt ? Math.max(0, Date.now() - state.tasksUpdatedAt) : Infinity;
+    if (
+      state.tasksStatus === 'ready' &&
+      age < FRESH_MS &&
+      state.tasksFetchKey === tasksFetchKey()
+    ) return;
+    loadTasks();
   }
 
   async function waitForPreviousRefresh() {
@@ -3094,6 +3814,10 @@ export const UI_JS = `(function () {
       enterNotifications({ announce: 'Opened notifications' });
       return;
     }
+    if (mobileIdentity.value === '__tasks__') {
+      enterTasks({ announce: 'Opened tasks' });
+      return;
+    }
     activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
@@ -3113,6 +3837,27 @@ export const UI_JS = `(function () {
     state.notifyFilter = notifyTopicFilter.value;
     /* 过滤切换会改变要请求的 topic 集合（All 扇出 vs 单路），重新拉取。 */
     loadNotifyHistory();
+  });
+  tasksRefresh.addEventListener('click', function () {
+    /* 显式 Refresh：列表完成后，仅在详情视图（或桌面双栏）重拉详情，避免移动 Back 后被劫持。 */
+    loadTasks().then(function () {
+      if (state.scope !== 'tasks' || !state.activeTaskId) return;
+      var onDetail = inboxView.dataset.mobileView === 'tasks-detail';
+      var desktop = window.innerWidth > 820;
+      if (!onDetail && !desktop) return;
+      selectTask(state.activeTaskId);
+    });
+  });
+  tasksStateFilter.addEventListener('change', function () {
+    state.tasksFilter = tasksStateFilter.value;
+    clearTaskDetail();
+    loadTasks();
+  });
+  tasksMobileBack.addEventListener('click', function () {
+    inboxView.dataset.mobileView = 'tasks-list';
+    var active = tasksRows.querySelector('[aria-current="true"]');
+    if (active) active.focus();
+    else focusTasksPanel();
   });
   createIdentityButton.addEventListener('click', showCreateModal);
   createModalSubmit.addEventListener('click', handleCreateSubmit);

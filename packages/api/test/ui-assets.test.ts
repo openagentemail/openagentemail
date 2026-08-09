@@ -161,6 +161,16 @@ describe('UI static asset contract', () => {
       'notify-notice',
       'notify-updated',
       'notify-shown',
+      'tasks-panel',
+      'tasks-title',
+      'tasks-rows',
+      'tasks-state',
+      'tasks-refresh',
+      'tasks-state-filter',
+      'tasks-notice',
+      'tasks-updated',
+      'tasks-shown',
+      'tasks-detail-content',
     ]) {
       expect(UI_HTML).toContain(`id="${id}"`);
     }
@@ -177,12 +187,14 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).toContain('id="confirm-modal-risk"');
   });
 
-  // A15：landmark 挂在 inbox 容器上；scope 在 overview / notifications / inbox 三个 <main> 间切换
-  test('exactly four mains exist and #main-content wraps the message and detail panels', () => {
+  // A15：landmark 挂在 inbox 容器上；scope 在 overview / notifications / tasks / inbox 四个 <main> 间切换
+  test('exactly five mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');
     expect(UI_HTML).toMatch(/<main id="overview-panel"[^>]*\shidden>/);
     expect(UI_HTML).toContain('<main id="notify-panel" class="notify-panel" tabindex="-1"');
     expect(UI_HTML).toMatch(/<main id="notify-panel"[^>]*\shidden>/);
+    expect(UI_HTML).toContain('<main id="tasks-panel" class="tasks-panel" tabindex="-1"');
+    expect(UI_HTML).toMatch(/<main id="tasks-panel"[^>]*\shidden>/);
     expect(UI_HTML).toContain('<main id="main-content" class="inbox-main" tabindex="-1">');
     expect(UI_HTML).toContain('<section id="detail-panel" class="detail-panel" tabindex="-1">');
 
@@ -192,11 +204,11 @@ describe('UI static asset contract', () => {
     expect(container).toBeGreaterThan(-1);
     expect(container).toBeLessThan(list);
     expect(list).toBeLessThan(detail);
-    // #message-panel / #detail-panel 自身不带 hidden：scope 只切三个内容 <main>
+    // #message-panel / #detail-panel 自身不带 hidden：scope 只切四个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    // login + overview + notify + inbox-main
-    expect(UI_HTML.split('<main').length - 1).toBe(4);
+    // login + overview + notify + tasks + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(5);
   });
 
   // A16 / A17
@@ -208,10 +220,13 @@ describe('UI static asset contract', () => {
     );
     expect(applyScope).toContain('overviewPanel.hidden = !overviewActive;');
     expect(applyScope).toContain('notifyPanel.hidden = !notifyActive;');
+    expect(applyScope).toContain('tasksPanel.hidden = !tasksActive;');
     expect(applyScope).toContain('mainContent.hidden = !inboxActive;');
     expect(applyScope).toContain("skipLink.textContent = overviewActive");
     expect(applyScope).toContain("'Skip to notifications'");
+    expect(applyScope).toContain("'Skip to tasks'");
     expect(applyScope).toContain("'#notify-panel'");
+    expect(applyScope).toContain("'#tasks-panel'");
     // landmark 与断点无关，所以不需要 matchMedia
     expect(UI_JS).not.toContain('matchMedia');
     expect(UI_JS).not.toMatch(/\.id\s*=\s*['"]main-content['"]/);
@@ -224,18 +239,20 @@ describe('UI static asset contract', () => {
     expect(selectMessage).not.toContain('mainContent.focus()');
   });
 
-  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview / Notifications 之外的入口
+  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview / Notifications / Tasks 之外的入口
   test('the sidebar address and the mobile selector both reach the inbox from the overview', () => {
     // 唯一的移动 selector 必须挂在内容 <main> 之外，否则 scope 切换会把它一起藏掉
     const layout = UI_HTML.indexOf('<div class="inbox-layout">');
     const selector = UI_HTML.indexOf('id="mobile-identity-select"');
     const overviewMain = UI_HTML.indexOf('<main id="overview-panel"');
     const notifyMain = UI_HTML.indexOf('<main id="notify-panel"');
+    const tasksMain = UI_HTML.indexOf('<main id="tasks-panel"');
     const inboxMain = UI_HTML.indexOf('<main id="main-content"');
     expect(UI_HTML.split('id="mobile-identity-select"').length - 1).toBe(1);
     expect(selector).toBeGreaterThan(layout);
     expect(selector).toBeLessThan(overviewMain);
     expect(selector).toBeLessThan(notifyMain);
+    expect(selector).toBeLessThan(tasksMain);
     expect(selector).toBeLessThan(inboxMain);
     expect(UI_HTML).toContain('<label for="mobile-identity-select">Address</label>');
     // 移动端只有 .inbox-layout 展开成 block，所以这层包装在各 scope 都可见
@@ -248,12 +265,14 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function activateAddress(address) {'),
       UI_JS.indexOf('function filteredIdentities('),
     );
-    expect(activate).toContain("state.scope === 'overview' || state.scope === 'notifications'");
+    expect(activate).toContain(
+      "state.scope === 'overview' || state.scope === 'notifications' || state.scope === 'tasks'",
+    );
     expect(activate).toContain('openAddress(address);');
     expect(activate).toContain('selectIdentity(address);');
     expect(UI_JS).toContain('activateAddress(identity.address);');
     expect(UI_JS).toContain('activateAddress(mobileIdentity.value);');
-    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview/Notifications）
+    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview/Notifications/Tasks）
     expect(UI_JS).not.toContain('selectIdentity(identity.address);');
     expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
   });
@@ -280,6 +299,101 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("return 'unknown'");
     // 前端不得直接打 Bearer 的 /v1/notify
     expect(UI_JS).not.toContain('/v1/notify');
+  });
+
+  // 任务工单：入口、API 与 landmark 与 Notifications 同级钉在静态契约里
+  test('tasks panel loads tickets via /ui/api/tasks with session-scoped ACL', () => {
+    expect(UI_JS).toContain('function enterTasks(');
+    expect(UI_JS).toContain('function loadTasks(');
+    expect(UI_JS).toContain('function selectTask(');
+    expect(UI_JS).toContain("'/ui/api/tasks'");
+    expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
+    expect(UI_JS).toContain("value = '__tasks__'");
+    expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
+    expect(UI_JS).toContain('function clearTasksState(');
+    expect(UI_JS).toContain('function cancelTasksLoad(');
+    expect(UI_JS).toContain('function taskTimelineBody(');
+    expect(UI_JS).toContain("taskTimelineBody(message.body)");
+    expect(UI_JS).toContain(
+      "var TASK_RESULT_MARKER = '<!-- openagent.email task result -->'",
+    );
+    const stripBody = UI_JS.slice(
+      UI_JS.indexOf('function taskTimelineBody('),
+      UI_JS.indexOf('function renderTaskRows('),
+    );
+    expect(stripBody).toContain('text.lastIndexOf(TASK_RESULT_MARKER)');
+    expect(stripBody).toContain('String.fromCharCode(96, 96, 96)');
+    expect(stripBody).toContain('new RegExp(');
+    expect(stripBody).toContain('after.match(fence)');
+    expect(stripBody).toContain('JSON.parse(match[1])');
+    expect(stripBody).not.toContain('text.indexOf(TASK_RESULT_MARKER)');
+    expect(UI_JS).toContain('window.scrollTo(0, 0)');
+    expect(UI_JS).toContain("state.scope !== 'tasks' || !state.activeTaskId");
+    expect(UI_JS).toContain("inboxView.dataset.mobileView === 'tasks-detail'");
+    expect(UI_JS).toContain('window.innerWidth > 820');
+    expect(UI_CSS).toContain('@media (max-width: 1360px) and (min-width: 821px)');
+    // F12：紧凑列查询必须在基础 .task-row 五列声明之后，否则被覆盖
+    const headerBase = UI_CSS.indexOf(
+      '.tasks-header {\n  display: grid;\n  gap: 10px;\n  grid-template-columns: 110px',
+    );
+    const rowBase = UI_CSS.indexOf(
+      '.task-row {\n  width: 100%;\n  display: grid;\n  gap: 10px;\n  grid-template-columns: 110px',
+    );
+    const compactMq = UI_CSS.indexOf(
+      '@media (max-width: 1360px) and (min-width: 821px)',
+    );
+    expect(headerBase).toBeGreaterThan(-1);
+    expect(rowBase).toBeGreaterThan(-1);
+    expect(compactMq).toBeGreaterThan(rowBase);
+    // 前端不得直接打 Bearer 的 /v1/tasks
+    expect(UI_JS).not.toContain('/v1/tasks');
+  });
+
+  // 任务行数上限：与 notify F2 同级
+  test('task rows are capped at TASKS_RENDER_LIMIT with an honest truncation label', () => {
+    expect(UI_JS).toContain('var TASKS_RENDER_LIMIT = 500');
+    expect(UI_JS).toContain('rows.slice(0, TASKS_RENDER_LIMIT)');
+    expect(UI_JS).toContain("'Showing latest ' + TASKS_RENDER_LIMIT");
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskRows('),
+      UI_JS.indexOf('function renderTaskDetail('),
+    );
+    expect(renderRows).toContain('var truncated = total > TASKS_RENDER_LIMIT');
+    expect(renderRows).toContain('visible.forEach');
+    expect(renderRows).not.toContain('state.tasks.forEach');
+  });
+
+  // 时间线条目上限：长工单不全量建节点
+  test('task timeline is capped at TASK_TIMELINE_RENDER_LIMIT with an honest truncation label', () => {
+    expect(UI_JS).toContain('var TASK_TIMELINE_RENDER_LIMIT = 200');
+    expect(UI_JS).toContain('messages.slice(timelineTotal - TASK_TIMELINE_RENDER_LIMIT)');
+    expect(UI_JS).toContain("'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT");
+    const detail = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskDetail('),
+      UI_JS.indexOf('function renderTasks('),
+    );
+    expect(detail).toContain('timelineTotal > TASK_TIMELINE_RENDER_LIMIT');
+    expect(detail).toContain('visibleMessages.forEach');
+    expect(detail).not.toContain('task.messages : []).forEach');
+  });
+
+  // 切 state 过滤时 fetchKey 变化必须进 loading，禁止立刻渲染假空态/旧缓存
+  test('task state filter changes enter loading instead of a false empty or stale list', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadTasks('),
+      UI_JS.indexOf('async function selectTask('),
+    );
+    expect(load).toContain('state.tasksFetchKey !== tasksFetchKey()');
+    expect(load).toContain("state.tasksStatus = 'loading'");
+    expect(load).toContain('state.tasks = []');
+    expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskRows('),
+      UI_JS.indexOf('function renderTaskDetail('),
+    );
+    expect(renderRows).toContain('state.tasksFetchKey === tasksFetchKey()');
+    expect(renderRows).toContain("state.tasksStatus === 'loading' || !keyMatches");
+    expect(renderRows).toContain("'Loading…'");
   });
 
   // F1：401 → showLogin 必须清掉通知缓存，否则换 token 会渲染上一主体内容
@@ -312,6 +426,39 @@ describe('UI static asset contract', () => {
     }
     // apiJson 401 走 showLogin（因而间接触发清理），不是只 abort
     expect(UI_JS).toContain("showLogin('Your session expired. Sign in again.')");
+  });
+
+  // F1（tasks）：401 → showLogin 必须清掉工单缓存，否则换 token 会渲染上一主体任务
+  test('showLogin clears tasks cache so a new session cannot reuse prior tickets (F1)', () => {
+    expect(UI_JS).toContain('function clearTasksState(');
+    const showLogin = UI_JS.slice(
+      UI_JS.indexOf('function showLogin(message)'),
+      UI_JS.indexOf('function showInbox('),
+    );
+    expect(showLogin).toContain('clearTasksState()');
+    expect(showLogin).toContain('cancelTasksLoad()');
+    expect(showLogin.indexOf('cancelTasksLoad()')).toBeLessThan(
+      showLogin.indexOf('clearTasksState()'),
+    );
+    const clear = UI_JS.slice(
+      UI_JS.indexOf('function clearTasksState('),
+      UI_JS.indexOf('function showLogin(message)'),
+    );
+    for (const field of [
+      'state.tasks = []',
+      "state.tasksStatus = 'idle'",
+      "state.tasksMessage = ''",
+      "state.tasksFilter = ''",
+      'state.tasksUpdatedAt = 0',
+      'state.tasksPending = false',
+      "state.tasksFetchKey = ''",
+      "state.activeTaskId = ''",
+      'state.taskDetail = null',
+      "state.taskDetailStatus = 'idle'",
+      "state.taskDetailMessage = ''",
+    ]) {
+      expect(clear).toContain(field);
+    }
   });
 
   // F2：渲染行数上限，避免 12h 嘈杂实例卡死页面
