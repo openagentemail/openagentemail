@@ -41,6 +41,7 @@ const deviceSchema = z.object({
   publicUrl: z.string().url(),
 }).strict();
 
+/** 与 routes/ui.ts#toNotifyTopic 必须保持同一口径（Bearer 入口）；改则两边同步。 */
 function toTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
   if (!value.startsWith('agent:')) return null;

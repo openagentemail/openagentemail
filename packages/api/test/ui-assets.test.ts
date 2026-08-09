@@ -152,6 +152,15 @@ describe('UI static asset contract', () => {
       'overview-refresh',
       'back-to-overview',
       'skip-link',
+      'notify-panel',
+      'notify-title',
+      'notify-rows',
+      'notify-state',
+      'notify-refresh',
+      'notify-topic-filter',
+      'notify-notice',
+      'notify-updated',
+      'notify-shown',
     ]) {
       expect(UI_HTML).toContain(`id="${id}"`);
     }
@@ -168,10 +177,12 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).toContain('id="confirm-modal-risk"');
   });
 
-  // A15：landmark 挂在包住两个面板的 inbox 容器上，移动 list 态才有可见 <main>
-  test('exactly three mains exist and #main-content wraps the message and detail panels', () => {
+  // A15：landmark 挂在 inbox 容器上；scope 在 overview / notifications / inbox 三个 <main> 间切换
+  test('exactly four mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');
     expect(UI_HTML).toMatch(/<main id="overview-panel"[^>]*\shidden>/);
+    expect(UI_HTML).toContain('<main id="notify-panel" class="notify-panel" tabindex="-1"');
+    expect(UI_HTML).toMatch(/<main id="notify-panel"[^>]*\shidden>/);
     expect(UI_HTML).toContain('<main id="main-content" class="inbox-main" tabindex="-1">');
     expect(UI_HTML).toContain('<section id="detail-panel" class="detail-panel" tabindex="-1">');
 
@@ -181,10 +192,11 @@ describe('UI static asset contract', () => {
     expect(container).toBeGreaterThan(-1);
     expect(container).toBeLessThan(list);
     expect(list).toBeLessThan(detail);
-    // #message-panel / #detail-panel 自身不带 hidden：scope 只切两个 <main>
+    // #message-panel / #detail-panel 自身不带 hidden：scope 只切三个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    expect(UI_HTML.split('<main').length - 1).toBe(3);
+    // login + overview + notify + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(4);
   });
 
   // A16 / A17
@@ -195,9 +207,11 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function filteredIdentities('),
     );
     expect(applyScope).toContain('overviewPanel.hidden = !overviewActive;');
-    expect(applyScope).toContain('mainContent.hidden = overviewActive;');
-    expect(applyScope).toContain("skipLink.textContent = overviewActive ? 'Skip to overview' : 'Skip to inbox';");
-    expect(applyScope).toContain("skipLink.setAttribute('href', overviewActive ? '#overview-panel' : '#main-content');");
+    expect(applyScope).toContain('notifyPanel.hidden = !notifyActive;');
+    expect(applyScope).toContain('mainContent.hidden = !inboxActive;');
+    expect(applyScope).toContain("skipLink.textContent = overviewActive");
+    expect(applyScope).toContain("'Skip to notifications'");
+    expect(applyScope).toContain("'#notify-panel'");
     // landmark 与断点无关，所以不需要 matchMedia
     expect(UI_JS).not.toContain('matchMedia');
     expect(UI_JS).not.toMatch(/\.id\s*=\s*['"]main-content['"]/);
@@ -210,36 +224,62 @@ describe('UI static asset contract', () => {
     expect(selectMessage).not.toContain('mainContent.focus()');
   });
 
-  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview 之外的两条入口
+  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview / Notifications 之外的入口
   test('the sidebar address and the mobile selector both reach the inbox from the overview', () => {
-    // 唯一的移动 selector 必须挂在两个 <main> 之外，否则 scope=overview 会把它一起藏掉
+    // 唯一的移动 selector 必须挂在内容 <main> 之外，否则 scope 切换会把它一起藏掉
     const layout = UI_HTML.indexOf('<div class="inbox-layout">');
     const selector = UI_HTML.indexOf('id="mobile-identity-select"');
     const overviewMain = UI_HTML.indexOf('<main id="overview-panel"');
+    const notifyMain = UI_HTML.indexOf('<main id="notify-panel"');
     const inboxMain = UI_HTML.indexOf('<main id="main-content"');
     expect(UI_HTML.split('id="mobile-identity-select"').length - 1).toBe(1);
     expect(selector).toBeGreaterThan(layout);
     expect(selector).toBeLessThan(overviewMain);
+    expect(selector).toBeLessThan(notifyMain);
     expect(selector).toBeLessThan(inboxMain);
     expect(UI_HTML).toContain('<label for="mobile-identity-select">Address</label>');
-    // 移动端只有 .inbox-layout 展开成 block，所以这层包装在两个 scope 都可见
+    // 移动端只有 .inbox-layout 展开成 block，所以这层包装在各 scope 都可见
     expect(UI_CSS).toContain('.mobile-back, .mobile-identity { display: none; }');
     expect(UI_CSS).toContain('.mobile-identity { display: grid;');
 
-    // 两条入口在 overview scope 下都走 openAddress（它才会切 scope、播报、聚焦）
+    // 非 inbox scope 下都走 openAddress（它才会切 scope、播报、聚焦）
     expect(UI_JS).toContain('function activateAddress(address) {');
     const activate = UI_JS.slice(
       UI_JS.indexOf('function activateAddress(address) {'),
       UI_JS.indexOf('function filteredIdentities('),
     );
-    expect(activate).toContain("if (state.scope === 'overview') {");
+    expect(activate).toContain("state.scope === 'overview' || state.scope === 'notifications'");
     expect(activate).toContain('openAddress(address);');
     expect(activate).toContain('selectIdentity(address);');
     expect(UI_JS).toContain('activateAddress(identity.address);');
     expect(UI_JS).toContain('activateAddress(mobileIdentity.value);');
-    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview）
+    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview/Notifications）
     expect(UI_JS).not.toContain('selectIdentity(identity.address);');
     expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
+  });
+
+  // 通知记录：入口、API、字段渲染与权限口径钉在静态契约里
+  test('notifications panel loads history via /ui/api/notify/messages with session-scoped topics', () => {
+    expect(UI_JS).toContain('function enterNotifications(');
+    expect(UI_JS).toContain('function loadNotifyHistory(');
+    expect(UI_JS).toContain('function mapPool(');
+    expect(UI_JS).toContain('function fetchNotifyTopic(');
+    expect(UI_JS).toContain("'/ui/api/notify/messages?topic='");
+    expect(UI_JS).toContain('&since=12h');
+    expect(UI_JS).toContain('mapPool(topics, 6,');
+    expect(UI_JS).toContain('error.status === 404');
+    expect(UI_JS).toContain("return ['self']");
+    expect(UI_JS).toContain("'user-alerts'");
+    expect(UI_JS).toContain("'user-low'");
+    expect(UI_JS).toContain("'agent:' + localpart");
+    expect(UI_JS).toContain("value = '__notifications__'");
+    expect(UI_JS).toContain('notifyPanel.focus({ preventScroll: true })');
+    expect(UI_JS).toContain('tierFromPriority');
+    expect(UI_JS).toContain("priority === 5");
+    expect(UI_JS).toContain("priority === 1");
+    expect(UI_JS).toContain("return 'unknown'");
+    // 前端不得直接打 Bearer 的 /v1/notify
+    expect(UI_JS).not.toContain('/v1/notify');
   });
 
   // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
