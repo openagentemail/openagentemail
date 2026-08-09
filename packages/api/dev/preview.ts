@@ -197,65 +197,104 @@ async function getMailboxScan(_opts: { refresh: boolean; identityAddresses: stri
   };
 }
 
-/** 通知记录假数据：覆盖 urgent/normal/low/unknown 四档 + user / agent 两路 topic。 */
-const previewNotifyByTopic: Record<
-  string,
-  Array<{
-    id: string;
-    time: number;
-    title: string;
-    message: string;
-    priority: number;
-    tags: string[];
-  }>
-> = {
-  'user-alerts': [
-    {
-      id: 'preview-n1',
-      time: 1_753_430_000,
-      title: 'Urgent: mailbox full',
-      message: 'fox@preview.test is near the retention ceiling.',
-      priority: 5,
-      tags: ['warning'],
-    },
-    {
-      id: 'preview-n2',
-      time: 1_753_429_700,
-      title: 'Normal: new signup',
-      message: 'An agent requested can_notify_user.',
-      priority: 3,
-      tags: [],
-    },
-  ],
-  'user-low': [
-    {
-      id: 'preview-n3',
-      time: 1_753_429_400,
-      title: 'Low: weekly digest',
-      message: '12 pushes delivered in the last 7 days.',
-      priority: 1,
-      tags: ['memo'],
-    },
-    {
-      id: 'preview-n4',
-      time: 1_753_429_100,
-      title: 'Odd priority sample',
-      message: 'priority=2 should render as unknown tier in the panel.',
-      priority: 2,
-      tags: [],
-    },
-  ],
-  'agent:fox': [
-    {
-      id: 'preview-n5',
-      time: 1_753_428_800,
-      title: 'openagent.email new mail',
-      message: 'fox@preview.test received new email',
-      priority: 3,
-      tags: ['email'],
-    },
-  ],
+type PreviewNotifyMessage = {
+  id: string;
+  time: number;
+  title: string;
+  message: string;
+  priority: number;
+  tags: string[];
 };
+
+/** 把 ntfy since（如 12h / 10m / unix 秒）折成 unix 截止秒；无法解析则不过滤。 */
+function previewSinceCutoff(since?: string): number | null {
+  if (!since) return null;
+  const relative = /^(\d+)([smhd])$/i.exec(since.trim());
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2]!.toLowerCase();
+    const ms =
+      unit === 's'
+        ? amount * 1000
+        : unit === 'm'
+          ? amount * 60_000
+          : unit === 'h'
+            ? amount * 3_600_000
+            : amount * 86_400_000;
+    return Math.floor((Date.now() - ms) / 1000);
+  }
+  const asUnix = Number(since);
+  if (Number.isFinite(asUnix) && asUnix > 0) return Math.floor(asUnix);
+  return null;
+}
+
+/**
+ * 通知记录假数据：覆盖 urgent/normal/low/unknown 四档 + user / agent 两路 topic。
+ * 时间相对 Date.now()；附带一条 >12h 的旧消息，供 since=12h 过滤验收。
+ */
+function buildPreviewNotifyMessages(topic: string, since?: string): PreviewNotifyMessage[] {
+  const now = Math.floor(Date.now() / 1000);
+  const catalog: Record<string, PreviewNotifyMessage[]> = {
+    'user-alerts': [
+      {
+        id: 'preview-n1',
+        time: now - 60,
+        title: 'Urgent: mailbox full',
+        message: 'fox@preview.test is near the retention ceiling.',
+        priority: 5,
+        tags: ['warning'],
+      },
+      {
+        id: 'preview-n2',
+        time: now - 300,
+        title: 'Normal: new signup',
+        message: 'An agent requested can_notify_user.',
+        priority: 3,
+        tags: [],
+      },
+      {
+        id: 'preview-n-old-alerts',
+        time: now - 48 * 3600,
+        title: 'Stale alert outside 12h',
+        message: 'Should be filtered out when since=12h.',
+        priority: 3,
+        tags: [],
+      },
+    ],
+    'user-low': [
+      {
+        id: 'preview-n3',
+        time: now - 600,
+        title: 'Low: weekly digest',
+        message: '12 pushes delivered in the last 7 days.',
+        priority: 1,
+        tags: ['memo'],
+      },
+      {
+        id: 'preview-n4',
+        time: now - 900,
+        title: 'Odd priority sample',
+        message: 'priority=2 should render as unknown tier in the panel.',
+        priority: 2,
+        tags: [],
+      },
+    ],
+    'agent:fox': [
+      {
+        id: 'preview-n5',
+        time: now - 120,
+        title: 'openagent.email new mail',
+        message: 'fox@preview.test received new email',
+        priority: 3,
+        tags: ['email'],
+      },
+    ],
+  };
+  const list = catalog[topic] ?? [];
+  const cutoff = previewSinceCutoff(since);
+  if (cutoff == null) return list;
+  return list.filter((entry) => entry.time >= cutoff);
+}
 
 const dependencies = {
   listIdentities: () => identities,
@@ -270,8 +309,9 @@ const dependencies = {
     (identity as { pushContentTier?: 1 | 2 | 3 }).pushContentTier = tier;
     return identity as typeof identity & { pushContentTier: 1 | 2 | 3 };
   },
-  // 确定性假数据：预览不连 ntfy，避免 Notifications 面板永远 502/503。
-  notifyMessages: async (topic: string) => previewNotifyByTopic[topic] ?? [],
+  // 确定性假数据：预览不连 ntfy；相对时间 + since 过滤，面板演示不会像「坏了」。
+  notifyMessages: async (topic: string, _identityAddress?: string, since?: string) =>
+    buildPreviewNotifyMessages(topic, since),
 };
 
 const app = new Hono();

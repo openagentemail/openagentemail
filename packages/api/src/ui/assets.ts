@@ -2329,14 +2329,20 @@ export const UI_JS = `(function () {
 
   function renderNotifyRows() {
     notifyRows.replaceChildren();
-    var rows = filteredNotifyMessages();
+    /* fetchKey 不匹配时旧缓存不可见，避免切频道闪「该频道无通知」。 */
+    var keyMatches = state.notifyFetchKey === notifyFetchKey();
+    var rows = keyMatches ? filteredNotifyMessages() : [];
     var total = rows.length;
     var truncated = total > NOTIFY_RENDER_LIMIT;
     var visible = truncated ? rows.slice(0, NOTIFY_RENDER_LIMIT) : rows;
-    notifyShown.textContent = truncated
-      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
-      : String(total);
-    if (state.notifyStatus === 'loading' && state.notifyMessages.length === 0) {
+    /* 只要 fetchKey 对不上，就当加载中——含 enterNotifications 首帧尚未 pending 的窗口。 */
+    var awaiting = state.notifyStatus === 'loading' || !keyMatches;
+    notifyShown.textContent = awaiting
+      ? ''
+      : truncated
+        ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
+        : String(total);
+    if (awaiting) {
       notifyStateNode.textContent = 'Loading…';
       return;
     }
@@ -2445,6 +2451,9 @@ export const UI_JS = `(function () {
   }
 
   async function fetchNotifyTopic(topic, signal) {
+    if (signal.aborted) {
+      return { ok: true, skipped: true, topic: topic, messages: [] };
+    }
     try {
       var payload = await apiJson(
         '/ui/api/notify/messages?topic=' + encodeURIComponent(topic) + '&since=12h',
@@ -2456,10 +2465,25 @@ export const UI_JS = `(function () {
         messages: Array.isArray(payload.messages) ? payload.messages : []
       };
     } catch (error) {
-      if (error.name === 'AbortError' || error.message === 'session_expired') throw error;
+      if (error.message === 'session_expired') throw error;
+      /* 扇出短路 abort：当作跳过，不计入失败。 */
+      if (error.name === 'AbortError') {
+        return { ok: true, skipped: true, topic: topic, messages: [] };
+      }
       /* unknown_agent / 未开通频道 → 空列表，不报「加载失败」（诚实空态）。 */
       if (error.status === 404) {
         return { ok: true, topic: topic, messages: [] };
+      }
+      /* ntfy 未启用/未配置：标记 disabled，由上层短路剩余 topic。 */
+      if (error.status === 503) {
+        var code = error.body && error.body.error;
+        return {
+          ok: false,
+          disabled: true,
+          disabledCode: typeof code === 'string' ? code : '',
+          topic: topic,
+          messages: []
+        };
       }
       return { ok: false, topic: topic, messages: [] };
     }
@@ -2470,12 +2494,20 @@ export const UI_JS = `(function () {
     var controller = new AbortController();
     notifyController = controller;
     state.notifyPending = true;
-    state.notifyStatus = state.notifyMessages.length ? state.notifyStatus : 'loading';
     state.notifyMessage = '';
+    /* F4：filter 一变 fetchKey 就变——立刻 loading，别等网络返回才撤掉假空态。 */
+    if (state.notifyFetchKey !== notifyFetchKey()) {
+      state.notifyMessages = [];
+      state.notifyStatus = 'loading';
+    } else if (state.notifyMessages.length === 0) {
+      state.notifyStatus = 'loading';
+    }
     renderNotify();
 
     var merged = [];
     var failures = 0;
+    /* 503 全局短路文案；一旦置位则不再发起新的 topic 请求。 */
+    var disabledMessage = '';
     try {
       /* admin 若尚未跑过 Overview，先补 identities，才能派生 agent:* topic。 */
       if (isAdmin() && state.identities.length === 0) {
@@ -2485,16 +2517,53 @@ export const UI_JS = `(function () {
           ? identityPayload.identities
           : [];
         renderIdentities();
+        /* identities 到位后 topic 集合可能变宽，再次对齐 loading。 */
+        if (state.notifyFetchKey !== notifyFetchKey()) {
+          state.notifyMessages = [];
+          state.notifyStatus = 'loading';
+          renderNotify();
+        }
       }
       /* 选了具体频道时只拉一路；All 才扇出，并用有限并发。 */
       var topics = notifyTopicsToFetch();
       var fetchKey = topics.join('|');
+
       var batches = await mapPool(topics, 6, function (topic) {
-        return fetchNotifyTopic(topic, controller.signal);
+        if (disabledMessage) {
+          return Promise.resolve({
+            ok: true,
+            skipped: true,
+            topic: topic,
+            messages: []
+          });
+        }
+        return fetchNotifyTopic(topic, controller.signal).then(function (result) {
+          if (result && result.disabled && !disabledMessage) {
+            disabledMessage = result.disabledCode === 'notifications_disabled'
+              ? 'Notifications are disabled on this server.'
+              : 'Notifications are not configured on this server.';
+            try {
+              controller.abort();
+            } catch (_abortError) {
+              /* ignore */
+            }
+          }
+          return result;
+        });
       });
-      if (controller.signal.aborted || notifyController !== controller) return;
+      if (notifyController !== controller) return;
+      if (disabledMessage) {
+        state.notifyMessages = [];
+        state.notifyUpdatedAt = Date.now();
+        state.notifyFetchKey = fetchKey;
+        state.notifyStatus = 'error';
+        state.notifyMessage = disabledMessage;
+        renderNotify();
+        announce(disabledMessage);
+        return;
+      }
       batches.forEach(function (batch) {
-        if (!batch) return;
+        if (!batch || batch.skipped) return;
         if (!batch.ok) {
           failures += 1;
           return;
@@ -2538,6 +2607,8 @@ export const UI_JS = `(function () {
       if (state.notifyMessages.length === 0) {
         state.notifyStatus = 'error';
         state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
+        state.notifyFetchKey = notifyFetchKey();
       } else {
         state.notifyStatus = 'error';
         state.notifyMessage = 'Refresh failed. Showing previous notifications.';

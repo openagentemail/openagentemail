@@ -290,6 +290,8 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function showInbox('),
     );
     expect(showLogin).toContain('clearNotifyState()');
+    // F5：先钉存在性，避免 indexOf 得到 -1 让顺序断言空转
+    expect(showLogin).toContain('cancelNotifyLoad()');
     expect(showLogin.indexOf('cancelNotifyLoad()')).toBeLessThan(
       showLogin.indexOf('clearNotifyState()'),
     );
@@ -324,6 +326,38 @@ describe('UI static asset contract', () => {
     expect(renderRows).toContain('var truncated = total > NOTIFY_RENDER_LIMIT');
     expect(renderRows).toContain('visible.forEach');
     expect(renderRows).not.toContain('rows.forEach');
+  });
+
+  // F4：切频道时 fetchKey 变化必须进 loading，禁止立刻渲染假空态
+  test('channel filter changes enter loading instead of a false empty state (F4)', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotifyHistory('),
+      UI_JS.indexOf('function enterNotifications('),
+    );
+    expect(load).toContain('state.notifyFetchKey !== notifyFetchKey()');
+    expect(load).toContain("state.notifyStatus = 'loading'");
+    expect(load).toContain('state.notifyMessages = []');
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderNotifyRows('),
+      UI_JS.indexOf('function renderNotifyMeta('),
+    );
+    expect(renderRows).toContain('state.notifyFetchKey === notifyFetchKey()');
+    expect(renderRows).toContain("state.notifyStatus === 'loading' || !keyMatches");
+    expect(renderRows).toContain("'Loading…'");
+  });
+
+  // F7：任一路 503 短路扇出，不再打剩余 topic
+  test('a 503 from notify history short-circuits the remaining topic fan-out (F7)', () => {
+    expect(UI_JS).toContain('error.status === 503');
+    expect(UI_JS).toContain('disabled: true');
+    expect(UI_JS).toContain("'Notifications are not configured on this server.'");
+    expect(UI_JS).toContain("'Notifications are disabled on this server.'");
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotifyHistory('),
+      UI_JS.indexOf('function enterNotifications('),
+    );
+    expect(load).toContain('if (disabledMessage)');
+    expect(load).toContain('controller.abort()');
   });
 
   // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
