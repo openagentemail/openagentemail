@@ -360,6 +360,29 @@ describe('UI static asset contract', () => {
     expect(load).toContain('controller.abort()');
   });
 
+  // F8：同频道全败刷新不清缓存，诚实保留上一版数据
+  test('a total refresh failure keeps previous notify cache for the same fetchKey (F8)', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotifyHistory('),
+      UI_JS.indexOf('function enterNotifications('),
+    );
+    expect(load).toContain('failures &&');
+    expect(load).toContain('merged.length === 0');
+    expect(load).toContain('state.notifyMessages.length > 0');
+    expect(load).toContain('state.notifyFetchKey === fetchKey');
+    expect(load).toContain("'Refresh failed. Showing previous notifications.'");
+    // 保留文案必须出现在「写回 merged」之前；else 侧才允许赋值
+    const keepMsgIdx = load.indexOf("'Refresh failed. Showing previous notifications.'");
+    const assignIdx = load.indexOf('state.notifyMessages = merged;');
+    expect(keepMsgIdx).toBeGreaterThan(-1);
+    expect(assignIdx).toBeGreaterThan(keepMsgIdx);
+    const beforeAssign = load.slice(0, assignIdx);
+    expect(beforeAssign).toContain("'Refresh failed. Showing previous notifications.'");
+    expect(beforeAssign).toContain('state.notifyMessages.length > 0');
+    // else 侧仍写 merged（部分失败 / 首载全败 / 成功）
+    expect(load.slice(assignIdx)).toContain('Some channels could not be loaded');
+  });
+
   // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
   test('landing on the overview keeps the first screen while a return row still scrolls', () => {
     expect(UI_JS).toContain('overviewPanel.focus({ preventScroll: true });');

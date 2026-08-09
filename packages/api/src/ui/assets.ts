@@ -2587,21 +2587,34 @@ export const UI_JS = `(function () {
       merged.sort(function (left, right) {
         return (right.time || 0) - (left.time || 0);
       });
-      state.notifyMessages = merged;
-      state.notifyUpdatedAt = Date.now();
-      state.notifyFetchKey = fetchKey;
-      if (failures && merged.length === 0) {
+      /* F8：同频道全败刷新保留旧缓存；外层 catch 走不到这条路（每路已折成 ok:false）。 */
+      if (
+        failures &&
+        merged.length === 0 &&
+        state.notifyMessages.length > 0 &&
+        state.notifyFetchKey === fetchKey
+      ) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
-      } else if (failures) {
-        state.notifyStatus = 'error';
-        state.notifyMessage = 'Some channels could not be loaded. Showing what succeeded.';
+        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        renderNotify();
+        announce(state.notifyMessage);
       } else {
-        state.notifyStatus = 'ready';
-        state.notifyMessage = '';
+        state.notifyMessages = merged;
+        state.notifyUpdatedAt = Date.now();
+        state.notifyFetchKey = fetchKey;
+        if (failures && merged.length === 0) {
+          state.notifyStatus = 'error';
+          state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        } else if (failures) {
+          state.notifyStatus = 'error';
+          state.notifyMessage = 'Some channels could not be loaded. Showing what succeeded.';
+        } else {
+          state.notifyStatus = 'ready';
+          state.notifyMessage = '';
+        }
+        renderNotify();
+        announce(merged.length + ' notifications loaded');
       }
-      renderNotify();
-      announce(merged.length + ' notifications loaded');
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyMessages.length === 0) {
