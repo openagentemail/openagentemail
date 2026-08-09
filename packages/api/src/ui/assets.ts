@@ -515,6 +515,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   text-transform: uppercase;
   border-bottom: 1px solid var(--line);
 }
+/* 窄桌面：列表栏 ~280px 装不下五列，先藏 Updated/Msgs，保留双栏。 */
+@media (max-width: 1100px) and (min-width: 821px) {
+  .tasks-header,
+  .task-row {
+    grid-template-columns: 100px minmax(0, 1.1fr) minmax(0, 1.4fr);
+  }
+  .tasks-header > :nth-child(4),
+  .tasks-header > :nth-child(5),
+  .task-row .task-updated,
+  .task-row .task-msgs { display: none; }
+}
 .tasks-rows { border-top: 1px solid var(--line); }
 .task-row {
   width: 100%;
@@ -1027,6 +1038,10 @@ export const UI_JS = `(function () {
   var POLL_WINDOW_MS = 20000;
   /* 通知面板 DOM 行数上限：12h 窗口可能数千条，全量建节点会卡死页面。 */
   var NOTIFY_RENDER_LIMIT = 500;
+  /* 任务工单行数上限：与 notify 同口径，避免大邮箱卡死页面。 */
+  var TASKS_RENDER_LIMIT = 500;
+  /* 与 lib/tasks.ts RESULT_MARKER 逐字一致；时间线正文剥离用。 */
+  var TASK_RESULT_MARKER = '<!-- openagent.email task result -->';
   var SORT_COLUMNS = [
     { key: 'address', label: 'Address' },
     { key: 'name', label: 'Name' },
@@ -1076,6 +1091,8 @@ export const UI_JS = `(function () {
     tasksFilter: '',
     tasksUpdatedAt: 0,
     tasksPending: false,
+    /* 上次成功拉取对应的 state 过滤指纹，避免切过滤误用旧缓存行。 */
+    tasksFetchKey: '',
     activeTaskId: '',
     taskDetail: null,
     taskDetailStatus: 'idle',
@@ -1209,6 +1226,7 @@ export const UI_JS = `(function () {
     state.tasksFilter = '';
     state.tasksUpdatedAt = 0;
     state.tasksPending = false;
+    state.tasksFetchKey = '';
     state.activeTaskId = '';
     state.taskDetail = null;
     state.taskDetailStatus = 'idle';
@@ -2990,10 +3008,33 @@ export const UI_JS = `(function () {
     tasksStateFilter.value = state.tasksFilter;
   }
 
+  function tasksFetchKey() {
+    return state.tasksFilter || '';
+  }
+
+  /* 展示层剥离 result 块；marker 与 lib/tasks.ts RESULT_MARKER 逐字一致。 */
+  function taskTimelineBody(body) {
+    var text = typeof body === 'string' ? body : '';
+    var markerAt = text.indexOf(TASK_RESULT_MARKER);
+    if (markerAt < 0) return text;
+    return text.slice(0, markerAt).replace(/\s+$/, '');
+  }
+
   function renderTaskRows() {
     tasksRows.replaceChildren();
-    var awaiting = state.tasksStatus === 'loading';
-    tasksShown.textContent = awaiting ? '' : String(state.tasks.length);
+    /* fetchKey 不匹配时旧缓存不可见，避免切 state 过滤闪错位行。 */
+    var keyMatches = state.tasksFetchKey === tasksFetchKey();
+    var rows = keyMatches ? state.tasks : [];
+    var total = rows.length;
+    var truncated = total > TASKS_RENDER_LIMIT;
+    var visible = truncated ? rows.slice(0, TASKS_RENDER_LIMIT) : rows;
+    /* 只要 fetchKey 对不上，就当加载中——含 enterTasks 首帧尚未 pending 的窗口。 */
+    var awaiting = state.tasksStatus === 'loading' || !keyMatches;
+    tasksShown.textContent = awaiting
+      ? ''
+      : truncated
+        ? 'Showing latest ' + TASKS_RENDER_LIMIT + ' of ' + total
+        : String(total);
     if (awaiting) {
       tasksStateNode.textContent = 'Loading…';
       return;
@@ -3002,14 +3043,16 @@ export const UI_JS = `(function () {
       tasksStateNode.textContent = state.tasksMessage || 'Tasks could not be loaded. Try Refresh.';
       return;
     }
-    if (state.tasks.length === 0) {
+    if (rows.length === 0) {
       tasksStateNode.textContent = state.tasksFilter
         ? 'No tasks in state "' + state.tasksFilter + '".'
         : 'No tasks yet. Refresh after a task mail arrives.';
       return;
     }
-    tasksStateNode.textContent = '';
-    state.tasks.forEach(function (task) {
+    tasksStateNode.textContent = truncated
+      ? 'Showing latest ' + TASKS_RENDER_LIMIT + ' of ' + total + ' tasks.'
+      : '';
+    visible.forEach(function (task) {
       var button = document.createElement('button');
       button.type = 'button';
       button.className = 'task-row';
@@ -3150,7 +3193,7 @@ export const UI_JS = `(function () {
       metaRow.append(msgBadge, from, when);
       var body = document.createElement('p');
       body.className = 'task-timeline-body';
-      body.textContent = message.body || '';
+      body.textContent = taskTimelineBody(message.body);
       item.append(metaRow, body);
       timeline.append(item);
     });
@@ -3186,7 +3229,13 @@ export const UI_JS = `(function () {
     tasksController = controller;
     state.tasksPending = true;
     state.tasksMessage = '';
-    if (state.tasks.length === 0) state.tasksStatus = 'loading';
+    /* F1：filter 一变 fetchKey 就变——立刻 loading，别等网络返回才撤掉假空态。 */
+    if (state.tasksFetchKey !== tasksFetchKey()) {
+      state.tasks = [];
+      state.tasksStatus = 'loading';
+    } else if (state.tasks.length === 0) {
+      state.tasksStatus = 'loading';
+    }
     renderTasks();
     try {
       var path = '/ui/api/tasks';
@@ -3197,6 +3246,7 @@ export const UI_JS = `(function () {
       if (tasksController !== controller) return;
       state.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
       state.tasksUpdatedAt = Date.now();
+      state.tasksFetchKey = tasksFetchKey();
       state.tasksStatus = 'ready';
       state.tasksMessage = '';
       renderTasks();
@@ -3212,6 +3262,8 @@ export const UI_JS = `(function () {
       if (state.tasks.length === 0) {
         state.tasksStatus = 'error';
         state.tasksMessage = 'Tasks could not be loaded. Try Refresh.';
+        /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
+        state.tasksFetchKey = tasksFetchKey();
       } else {
         state.tasksStatus = 'error';
         state.tasksMessage = 'Refresh failed. Showing previous tasks.';
@@ -3240,6 +3292,8 @@ export const UI_JS = `(function () {
     inboxView.dataset.mobileView = 'tasks-detail';
     renderTasks();
     tasksDetailSection.focus({ preventScroll: true });
+    /* 移动端进详情时滚到顶，避免 preventScroll 保留列表滚动位。 */
+    window.scrollTo(0, 0);
     var controller = new AbortController();
     taskDetailController = controller;
     try {
@@ -3278,7 +3332,11 @@ export const UI_JS = `(function () {
     renderTasks();
     focusTasksPanel();
     var age = state.tasksUpdatedAt ? Math.max(0, Date.now() - state.tasksUpdatedAt) : Infinity;
-    if (state.tasksStatus === 'ready' && age < FRESH_MS) return;
+    if (
+      state.tasksStatus === 'ready' &&
+      age < FRESH_MS &&
+      state.tasksFetchKey === tasksFetchKey()
+    ) return;
     loadTasks();
   }
 
@@ -3749,7 +3807,10 @@ export const UI_JS = `(function () {
     loadNotifyHistory();
   });
   tasksRefresh.addEventListener('click', function () {
-    loadTasks();
+    /* 显式 Refresh：列表完成后若有选中单，连带重拉详情（enterTasks 短路径不动）。 */
+    loadTasks().then(function () {
+      if (state.activeTaskId) selectTask(state.activeTaskId);
+    });
   });
   tasksStateFilter.addEventListener('change', function () {
     state.tasksFilter = tasksStateFilter.value;

@@ -121,7 +121,8 @@ const taskIdParamSchema = z.string().uuid();
 /** 与 routes/tasks.ts#canReadTask 保持同一口径（Dashboard cookie 入口的镜像）。 */
 function canReadUiTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
-  return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
+  // 参与者集合按小写存；identity 会话地址比较前归一化，避免大小写漂移。
+  return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
 }
 
 /** 将 NotifyError 折成与 /v1/notify 一致的 JSON 状态码（历史只读路径）。 */
@@ -502,7 +503,9 @@ export function createUiApiRoutes(
       tasks:
         auth.kind === 'admin'
           ? tasks
-          : tasks.filter((task) => taskParticipants(task).has(auth.address)),
+          : tasks.filter((task) =>
+              taskParticipants(task).has(auth.address.toLowerCase()),
+            ),
     });
   });
 

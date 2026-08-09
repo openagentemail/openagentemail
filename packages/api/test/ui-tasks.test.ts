@@ -193,11 +193,29 @@ describe('UI tasks ACL and contract', () => {
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ tasks: [] });
 
+    // 有意口径：任务存在但非参与者 → 403；不存在 → 404（见 missing task）。
+    // 存在性侧信道已记档 issue #13，本路由不得擅自改成统一 404。
     const peer = await app.request(`/ui/api/tasks/${TASK_A.id}`, {
       headers: { cookie },
     });
     expect(peer.status).toBe(403);
     expect(await peer.json()).toEqual({ error: 'forbidden: task participant required' });
+  });
+
+  test('mixed-case identity address still matches lowercase task participants', async () => {
+    const { app, cookie } = makeApp({
+      kind: 'identity',
+      address: 'Fox@test.example',
+    });
+    const listed = await app.request('/ui/api/tasks', { headers: { cookie } });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ tasks: [TASK_A] });
+
+    const detail = await app.request(`/ui/api/tasks/${TASK_A.id}`, {
+      headers: { cookie },
+    });
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toEqual(TASK_A);
   });
 
   test('invalid task id is rejected with 400', async () => {
@@ -211,6 +229,7 @@ describe('UI tasks ACL and contract', () => {
   });
 
   test('missing task returns 404', async () => {
+    // 有意口径：不存在 → 404（对照非参与者 403）；存在性侧信道见 issue #13。
     const { app, cookie } = makeApp({ kind: 'admin' });
     const response = await app.request(
       '/ui/api/tasks/33333333-3333-4333-8333-333333333333',

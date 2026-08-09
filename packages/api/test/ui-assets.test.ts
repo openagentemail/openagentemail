@@ -312,8 +312,47 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('function clearTasksState(');
     expect(UI_JS).toContain('function cancelTasksLoad(');
+    expect(UI_JS).toContain('function taskTimelineBody(');
+    expect(UI_JS).toContain("taskTimelineBody(message.body)");
+    expect(UI_JS).toContain(
+      "var TASK_RESULT_MARKER = '<!-- openagent.email task result -->'",
+    );
+    expect(UI_JS).toContain('window.scrollTo(0, 0)');
     // 前端不得直接打 Bearer 的 /v1/tasks
     expect(UI_JS).not.toContain('/v1/tasks');
+  });
+
+  // 任务行数上限：与 notify F2 同级
+  test('task rows are capped at TASKS_RENDER_LIMIT with an honest truncation label', () => {
+    expect(UI_JS).toContain('var TASKS_RENDER_LIMIT = 500');
+    expect(UI_JS).toContain('rows.slice(0, TASKS_RENDER_LIMIT)');
+    expect(UI_JS).toContain("'Showing latest ' + TASKS_RENDER_LIMIT");
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskRows('),
+      UI_JS.indexOf('function renderTaskDetail('),
+    );
+    expect(renderRows).toContain('var truncated = total > TASKS_RENDER_LIMIT');
+    expect(renderRows).toContain('visible.forEach');
+    expect(renderRows).not.toContain('state.tasks.forEach');
+  });
+
+  // 切 state 过滤时 fetchKey 变化必须进 loading，禁止立刻渲染假空态/旧缓存
+  test('task state filter changes enter loading instead of a false empty or stale list', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadTasks('),
+      UI_JS.indexOf('async function selectTask('),
+    );
+    expect(load).toContain('state.tasksFetchKey !== tasksFetchKey()');
+    expect(load).toContain("state.tasksStatus = 'loading'");
+    expect(load).toContain('state.tasks = []');
+    expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
+    const renderRows = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskRows('),
+      UI_JS.indexOf('function renderTaskDetail('),
+    );
+    expect(renderRows).toContain('state.tasksFetchKey === tasksFetchKey()');
+    expect(renderRows).toContain("state.tasksStatus === 'loading' || !keyMatches");
+    expect(renderRows).toContain("'Loading…'");
   });
 
   // F1：401 → showLogin 必须清掉通知缓存，否则换 token 会渲染上一主体内容
@@ -371,6 +410,7 @@ describe('UI static asset contract', () => {
       "state.tasksFilter = ''",
       'state.tasksUpdatedAt = 0',
       'state.tasksPending = false',
+      "state.tasksFetchKey = ''",
       "state.activeTaskId = ''",
       'state.taskDetail = null',
       "state.taskDetailStatus = 'idle'",
