@@ -119,6 +119,35 @@ export const UI_HTML = `<!doctype html>
         <div id="overview-rows" class="overview-rows"></div>
       </main>
 
+      <main id="notify-panel" class="notify-panel" tabindex="-1" aria-labelledby="notify-title" hidden>
+        <div class="panel-heading overview-heading">
+          <div>
+            <h2 id="notify-title">Notifications</h2>
+            <p id="notify-subtitle" class="overview-subtitle">Push history from ntfy cache (last 12 hours)</p>
+            <p id="notify-updated" class="overview-updated"></p>
+          </div>
+          <div class="overview-heading-actions">
+            <button id="notify-refresh" class="quiet" type="button">Refresh</button>
+          </div>
+        </div>
+        <p id="notify-notice" class="notice warning" hidden></p>
+        <div class="overview-controls notify-controls">
+          <label class="search-label" for="notify-topic-filter">Filter channel</label>
+          <select id="notify-topic-filter" class="search-input notify-topic-filter" hidden>
+            <option value="">All channels</option>
+          </select>
+          <span id="notify-shown" class="count"></span>
+        </div>
+        <p id="notify-state" class="empty-state"></p>
+        <div class="notify-header" aria-hidden="true">
+          <span>When</span>
+          <span>Channel</span>
+          <span>Tier</span>
+          <span>Content</span>
+        </div>
+        <div id="notify-rows" class="notify-rows"></div>
+      </main>
+
       <main id="main-content" class="inbox-main" tabindex="-1">
         <section id="message-panel" class="message-panel" aria-labelledby="messages-title">
           <div class="panel-heading message-heading">
@@ -403,13 +432,57 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
 }
-.identity-panel, .message-panel, .detail-panel, .overview-panel { min-width: 0; }
+.identity-panel, .message-panel, .detail-panel, .overview-panel, .notify-panel { min-width: 0; }
 .identity-panel, .message-panel { border-right: 1px solid var(--line-strong); }
 .identity-panel { padding: 20px 14px; background: var(--bg); }
-.inbox-view[data-scope="overview"] .identity-panel { border-right-color: var(--line-strong); }
+.inbox-view[data-scope="overview"] .identity-panel,
+.inbox-view[data-scope="notifications"] .identity-panel { border-right-color: var(--line-strong); }
 .message-panel { background: var(--bg-raise); }
 .detail-panel { background: var(--bg); }
-.overview-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
+.overview-panel, .notify-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
+.notify-topic-filter { max-width: 280px; }
+.notify-header {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 160px 140px 88px minmax(0, 1fr);
+  padding: 8px 10px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--line);
+}
+.notify-rows { border-top: 1px solid var(--line); }
+.notify-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 160px 140px 88px minmax(0, 1fr);
+  align-items: start;
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--line);
+  min-height: 44px;
+}
+.notify-row:hover { background: var(--gold-dim); }
+.notify-row .cell-label { display: none; color: var(--ink-dim); font-size: 12px; }
+.notify-when { color: var(--ink-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.notify-channel { font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+.notify-tier {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--ink-dim);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.notify-tier[data-tier="urgent"] { border-color: rgba(248, 113, 113, 0.45); color: var(--red); }
+.notify-tier[data-tier="normal"] { border-color: rgba(251, 191, 36, 0.4); color: var(--gold); }
+.notify-tier[data-tier="low"], .notify-tier[data-tier="unknown"] { color: var(--ink-dim); }
+.notify-title-text { margin: 0; font-size: 14px; font-weight: 700; }
+.notify-body-text { margin: 4px 0 0; color: var(--ink-dim); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
 .panel-heading {
   display: flex;
   align-items: center;
@@ -723,11 +796,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .inbox-layout { min-height: calc(100vh - 66px); display: block; }
   .inbox-main { display: block; }
   .identity-panel { display: none; }
-  .message-panel, .detail-panel, .overview-panel { min-height: calc(100vh - 66px); border: 0; }
+  .message-panel, .detail-panel, .overview-panel, .notify-panel { min-height: calc(100vh - 66px); border: 0; }
   .mobile-identity { display: grid; gap: 5px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
   .mobile-back { display: inline-block; margin: 14px 16px 0; }
   .inbox-view[data-mobile-view="list"] .detail-panel { display: none; }
   .inbox-view[data-mobile-view="detail"] .message-panel { display: none; }
+  .notify-header { display: none; }
+  .notify-row { display: block; }
+  .notify-row .cell { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 24px; margin-bottom: 4px; }
+  .notify-row .cell-label { display: inline; }
+  .notify-row .notify-content { display: block; }
   .inbox-view[data-mobile-view="overview"] .overview-stats { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .inbox-view[data-mobile-view="overview"] .stat-card {
     display: flex;
@@ -765,6 +843,8 @@ export const UI_JS = `(function () {
   var FRESH_MS = 15000;
   var POLL_LIMIT = 15;
   var POLL_WINDOW_MS = 20000;
+  /* 通知面板 DOM 行数上限：12h 窗口可能数千条，全量建节点会卡死页面。 */
+  var NOTIFY_RENDER_LIMIT = 500;
   var SORT_COLUMNS = [
     { key: 'address', label: 'Address' },
     { key: 'name', label: 'Name' },
@@ -797,13 +877,23 @@ export const UI_JS = `(function () {
     overviewLoadingSince: 0,
     returnAddress: '',
     /* address -> true while a push-tier PUT is in flight (survives re-render). */
-    tierPending: {}
+    tierPending: {},
+    /* 通知记录：合并后的行（含逻辑 topic），以及加载态 */
+    notifyMessages: [],
+    notifyStatus: 'idle',
+    notifyMessage: '',
+    notifyFilter: '',
+    notifyUpdatedAt: 0,
+    notifyPending: false,
+    /* 上次成功拉取对应的 topic 集合指纹，避免 All 误用单路缓存。 */
+    notifyFetchKey: ''
   };
   var refreshTask = null;
   var refreshController = null;
   var detailController = null;
   var overviewController = null;
   var overviewTimer = null;
+  var notifyController = null;
 
   function byId(id) {
     return document.getElementById(id);
@@ -845,6 +935,14 @@ export const UI_JS = `(function () {
   var skipLink = byId('skip-link');
   var viewTitle = byId('view-title');
   var statusRegion = byId('status');
+  var notifyPanel = byId('notify-panel');
+  var notifyRows = byId('notify-rows');
+  var notifyStateNode = byId('notify-state');
+  var notifyNotice = byId('notify-notice');
+  var notifyUpdated = byId('notify-updated');
+  var notifyShown = byId('notify-shown');
+  var notifyRefresh = byId('notify-refresh');
+  var notifyTopicFilter = byId('notify-topic-filter');
   var tokenModal = byId('token-modal');
   var tokenModalTitle = byId('token-modal-title');
   var tokenValue = byId('token-value');
@@ -886,8 +984,21 @@ export const UI_JS = `(function () {
     return safe;
   }
 
+  /* 401 / 登出共用：清掉通知缓存，避免换 token 后 15s 命中渲染上一主体内容。 */
+  function clearNotifyState() {
+    state.notifyMessages = [];
+    state.notifyStatus = 'idle';
+    state.notifyMessage = '';
+    state.notifyFilter = '';
+    state.notifyUpdatedAt = 0;
+    state.notifyFetchKey = '';
+    state.notifyPending = false;
+  }
+
   function showLogin(message) {
     cancelOverview();
+    cancelNotifyLoad();
+    clearNotifyState();
     closeAllModals();
     inboxView.hidden = true;
     loginView.hidden = false;
@@ -1279,28 +1390,43 @@ export const UI_JS = `(function () {
     detailContent.append(placeholder);
   }
 
-  /* ---- scope 迁移：任一时刻恰好一个可见 <main> ---- */
+  /* ---- scope 迁移：任一时刻恰好一个可见 <main>（overview / notifications / inbox） ---- */
   function applyScope(next, options) {
     var opts = options || {};
     var overviewActive = next === 'overview';
+    var notifyActive = next === 'notifications';
+    var inboxActive = next === 'inbox';
     state.scope = next;
     inboxView.dataset.scope = next;
     overviewPanel.hidden = !overviewActive;
-    mainContent.hidden = overviewActive;
-    viewTitle.textContent = overviewActive ? 'Overview' : 'Inbox';
-    document.title = overviewActive ? 'OpenAgent Overview' : 'OpenAgent Inbox';
-    skipLink.textContent = overviewActive ? 'Skip to overview' : 'Skip to inbox';
-    skipLink.setAttribute('href', overviewActive ? '#overview-panel' : '#main-content');
+    notifyPanel.hidden = !notifyActive;
+    mainContent.hidden = !inboxActive;
+    viewTitle.textContent = overviewActive ? 'Overview' : notifyActive ? 'Notifications' : 'Inbox';
+    document.title = overviewActive
+      ? 'OpenAgent Overview'
+      : notifyActive
+        ? 'OpenAgent Notifications'
+        : 'OpenAgent Inbox';
+    skipLink.textContent = overviewActive
+      ? 'Skip to overview'
+      : notifyActive
+        ? 'Skip to notifications'
+        : 'Skip to inbox';
+    skipLink.setAttribute(
+      'href',
+      overviewActive ? '#overview-panel' : notifyActive ? '#notify-panel' : '#main-content'
+    );
     if (overviewActive) inboxView.dataset.mobileView = 'overview';
+    else if (notifyActive) inboxView.dataset.mobileView = 'notifications';
     renderIdentities();
     if (opts.announce) announce(opts.announce);
   }
 
-  /* 侧栏地址项与移动 <select> 是 Overview 之外的两条入口：在 overview scope 下
-     它们必须和表格行走同一条路（openAddress 会切 scope、播报、聚焦），否则会在
-     不可见的 inbox 里取消息、画面却停在 Overview。 */
+  /* 侧栏地址项与移动 <select> 是 Overview / Notifications 之外的入口：在非 inbox
+     scope 下必须走 openAddress（切 scope、播报、聚焦），否则会在不可见的 inbox
+     里取消息、画面却停在当前面板。 */
   function activateAddress(address) {
-    if (state.scope === 'overview') {
+    if (state.scope === 'overview' || state.scope === 'notifications') {
       openAddress(address);
       return;
     }
@@ -1330,6 +1456,13 @@ export const UI_JS = `(function () {
       mobileIdentity.append(overviewOption);
     }
 
+    /* 通知面板哨兵：合法地址不会以双下划线开头。 */
+    var notifyOption = document.createElement('option');
+    notifyOption.value = '__notifications__';
+    notifyOption.textContent = 'Notifications — push history';
+    notifyOption.selected = state.scope === 'notifications';
+    mobileIdentity.append(notifyOption);
+
     state.identities.forEach(function (identity) {
       var option = document.createElement('option');
       option.value = identity.address;
@@ -1355,6 +1488,22 @@ export const UI_JS = `(function () {
       item.append(button);
       identityList.append(item);
     }
+
+    var notifyItem = document.createElement('li');
+    var notifyButton = document.createElement('button');
+    notifyButton.type = 'button';
+    notifyButton.className = 'identity-button overview-nav';
+    notifyButton.setAttribute('aria-current', state.scope === 'notifications' ? 'true' : 'false');
+    var notifyName = document.createElement('strong');
+    notifyName.textContent = 'Notifications';
+    var notifyHint = document.createElement('span');
+    notifyHint.textContent = 'Push history';
+    notifyButton.append(notifyName, notifyHint);
+    notifyButton.addEventListener('click', function () {
+      enterNotifications({ announce: 'Opened notifications' });
+    });
+    notifyItem.append(notifyButton);
+    identityList.append(notifyItem);
 
     filteredIdentities().forEach(function (identity) {
       var item = document.createElement('li');
@@ -2063,6 +2212,7 @@ export const UI_JS = `(function () {
   function enterOverview(options) {
     var opts = options || {};
     cancelOverviewPoll();
+    cancelNotifyLoad();
     applyScope('overview', { announce: opts.announce });
     renderOverview();
     /* 两条聚焦路径分开处理：从 inbox 返回时焦点回到原来那一行，那一行可能在长表格深处，
@@ -2081,11 +2231,425 @@ export const UI_JS = `(function () {
   function openAddress(address) {
     state.returnAddress = address;
     cancelOverview();
+    cancelNotifyLoad();
     applyScope('inbox');
     inboxView.dataset.mobileView = 'list';
     announce('Opened ' + address);
     messagesTitle.focus();
     selectIdentity(address);
+  }
+
+  /* ---- 通知记录面板（放在 overview cycle 切片之后，避免污染其 await 断言） ---- */
+  function focusNotifyPanel() {
+    notifyPanel.focus({ preventScroll: true });
+  }
+
+  /* priority → 档位文案（与 lib/notify.ts priority() 互逆；未知值不强行标 normal）。 */
+  function tierFromPriority(priority) {
+    if (priority === 5) return 'urgent';
+    if (priority === 1) return 'low';
+    if (priority === 3) return 'normal';
+    return 'unknown';
+  }
+
+  function formatNotifyChannel(topic) {
+    if (topic === 'user-alerts') return 'User alerts';
+    if (topic === 'user-low') return 'User low';
+    return topic;
+  }
+
+  /* 本会话允许查询的逻辑 topic：identity 只打 self；admin 用 identities 派生，不另开列表 API。 */
+  function notifyTopicsForSession() {
+    if (!isAdmin()) return ['self'];
+    var topics = ['user-alerts', 'user-low'];
+    state.identities.forEach(function (identity) {
+      var localpart = identity.address.split('@')[0];
+      if (localpart) topics.push('agent:' + localpart);
+    });
+    return topics;
+  }
+
+  function notifyTopicsToFetch() {
+    return state.notifyFilter ? [state.notifyFilter] : notifyTopicsForSession();
+  }
+
+  function notifyFetchKey() {
+    return notifyTopicsToFetch().join('|');
+  }
+
+  function cancelNotifyLoad() {
+    if (notifyController) {
+      notifyController.abort();
+      notifyController = null;
+    }
+    state.notifyPending = false;
+  }
+
+  function filteredNotifyMessages() {
+    if (!state.notifyFilter) return state.notifyMessages;
+    return state.notifyMessages.filter(function (row) {
+      return row.topic === state.notifyFilter;
+    });
+  }
+
+  function populateNotifyTopicFilter() {
+    var previous = state.notifyFilter;
+    notifyTopicFilter.replaceChildren();
+    var all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'All channels';
+    notifyTopicFilter.append(all);
+    if (!isAdmin()) {
+      notifyTopicFilter.hidden = true;
+      state.notifyFilter = '';
+      return;
+    }
+    notifyTopicFilter.hidden = false;
+    ['user-alerts', 'user-low'].forEach(function (topic) {
+      var option = document.createElement('option');
+      option.value = topic;
+      option.textContent = formatNotifyChannel(topic);
+      notifyTopicFilter.append(option);
+    });
+    state.identities.forEach(function (identity) {
+      var localpart = identity.address.split('@')[0];
+      if (!localpart) return;
+      var topic = 'agent:' + localpart;
+      var option = document.createElement('option');
+      option.value = topic;
+      option.textContent = topic;
+      notifyTopicFilter.append(option);
+    });
+    var stillValid = previous === '' || Array.prototype.some.call(notifyTopicFilter.options, function (opt) {
+      return opt.value === previous;
+    });
+    state.notifyFilter = stillValid ? previous : '';
+    notifyTopicFilter.value = state.notifyFilter;
+  }
+
+  function renderNotifyRows() {
+    notifyRows.replaceChildren();
+    /* fetchKey 不匹配时旧缓存不可见，避免切频道闪「该频道无通知」。 */
+    var keyMatches = state.notifyFetchKey === notifyFetchKey();
+    var rows = keyMatches ? filteredNotifyMessages() : [];
+    var total = rows.length;
+    var truncated = total > NOTIFY_RENDER_LIMIT;
+    var visible = truncated ? rows.slice(0, NOTIFY_RENDER_LIMIT) : rows;
+    /* 只要 fetchKey 对不上，就当加载中——含 enterNotifications 首帧尚未 pending 的窗口。 */
+    var awaiting = state.notifyStatus === 'loading' || !keyMatches;
+    notifyShown.textContent = awaiting
+      ? ''
+      : truncated
+        ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
+        : String(total);
+    if (awaiting) {
+      notifyStateNode.textContent = 'Loading…';
+      return;
+    }
+    if (state.notifyStatus === 'error' && state.notifyMessages.length === 0) {
+      notifyStateNode.textContent = state.notifyMessage || 'Notifications could not be loaded. Try Refresh.';
+      return;
+    }
+    if (rows.length === 0) {
+      notifyStateNode.textContent = state.notifyFilter
+        ? 'No notifications on this channel in the last 12 hours.'
+        : 'No notifications in the last 12 hours. Refresh after a push is sent.';
+      return;
+    }
+    notifyStateNode.textContent = truncated
+      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications.'
+      : '';
+    visible.forEach(function (row) {
+      var tier = tierFromPriority(row.priority);
+      var item = document.createElement('article');
+      item.className = 'notify-row';
+
+      var whenCell = document.createElement('div');
+      whenCell.className = 'cell notify-when';
+      var whenLabel = document.createElement('span');
+      whenLabel.className = 'cell-label';
+      whenLabel.textContent = 'When';
+      var whenValue = document.createElement('time');
+      whenValue.dateTime = row.time ? new Date(row.time * 1000).toISOString() : '';
+      whenValue.textContent = row.time
+        ? formatDate(new Date(row.time * 1000).toISOString())
+        : '—';
+      whenCell.append(whenLabel, whenValue);
+
+      var channelCell = document.createElement('div');
+      channelCell.className = 'cell notify-channel';
+      var channelLabel = document.createElement('span');
+      channelLabel.className = 'cell-label';
+      channelLabel.textContent = 'Channel';
+      var channelValue = document.createElement('span');
+      channelValue.textContent = formatNotifyChannel(row.topic);
+      channelCell.append(channelLabel, channelValue);
+
+      var tierCell = document.createElement('div');
+      tierCell.className = 'cell';
+      var tierLabel = document.createElement('span');
+      tierLabel.className = 'cell-label';
+      tierLabel.textContent = 'Tier';
+      var tierValue = document.createElement('span');
+      tierValue.className = 'notify-tier';
+      tierValue.setAttribute('data-tier', tier);
+      tierValue.textContent = tier;
+      tierCell.append(tierLabel, tierValue);
+
+      var contentCell = document.createElement('div');
+      contentCell.className = 'cell notify-content';
+      var contentLabel = document.createElement('span');
+      contentLabel.className = 'cell-label';
+      contentLabel.textContent = 'Content';
+      var title = document.createElement('p');
+      title.className = 'notify-title-text';
+      title.textContent = row.title || '(no title)';
+      var body = document.createElement('p');
+      body.className = 'notify-body-text';
+      body.textContent = row.message || '';
+      contentCell.append(contentLabel, title, body);
+
+      item.append(whenCell, channelCell, tierCell, contentCell);
+      notifyRows.append(item);
+    });
+  }
+
+  function renderNotifyMeta() {
+    if (state.notifyUpdatedAt) {
+      notifyUpdated.textContent = 'Updated ' + formatClock(new Date(state.notifyUpdatedAt).toISOString(), true);
+    } else {
+      notifyUpdated.textContent = '';
+    }
+    notifyNotice.hidden = !state.notifyMessage || state.notifyStatus !== 'error' || state.notifyMessages.length === 0;
+    notifyNotice.textContent = notifyNotice.hidden ? '' : state.notifyMessage;
+    notifyRefresh.disabled = state.notifyPending;
+    notifyRefresh.textContent = state.notifyPending ? 'Refreshing…' : 'Refresh';
+  }
+
+  function renderNotify() {
+    populateNotifyTopicFilter();
+    renderNotifyMeta();
+    renderNotifyRows();
+  }
+
+  /* 有限并发拉取各 topic，避免 admin 身份很多时 Refresh 串行卡死。 */
+  async function mapPool(items, concurrency, worker) {
+    var results = new Array(items.length);
+    var cursor = 0;
+    async function run() {
+      while (cursor < items.length) {
+        var index = cursor;
+        cursor += 1;
+        results[index] = await worker(items[index], index);
+      }
+    }
+    var runners = [];
+    var width = Math.max(1, Math.min(concurrency, items.length || 1));
+    for (var i = 0; i < width; i++) runners.push(run());
+    await Promise.all(runners);
+    return results;
+  }
+
+  async function fetchNotifyTopic(topic, signal) {
+    if (signal.aborted) {
+      return { ok: true, skipped: true, topic: topic, messages: [] };
+    }
+    try {
+      var payload = await apiJson(
+        '/ui/api/notify/messages?topic=' + encodeURIComponent(topic) + '&since=12h',
+        { signal: signal }
+      );
+      return {
+        ok: true,
+        topic: topic,
+        messages: Array.isArray(payload.messages) ? payload.messages : []
+      };
+    } catch (error) {
+      if (error.message === 'session_expired') throw error;
+      /* 扇出短路 abort：当作跳过，不计入失败。 */
+      if (error.name === 'AbortError') {
+        return { ok: true, skipped: true, topic: topic, messages: [] };
+      }
+      /* unknown_agent / 未开通频道 → 空列表，不报「加载失败」（诚实空态）。 */
+      if (error.status === 404) {
+        return { ok: true, topic: topic, messages: [] };
+      }
+      /* ntfy 未启用/未配置：标记 disabled，由上层短路剩余 topic。 */
+      if (error.status === 503) {
+        var code = error.body && error.body.error;
+        return {
+          ok: false,
+          disabled: true,
+          disabledCode: typeof code === 'string' ? code : '',
+          topic: topic,
+          messages: []
+        };
+      }
+      return { ok: false, topic: topic, messages: [] };
+    }
+  }
+
+  async function loadNotifyHistory() {
+    cancelNotifyLoad();
+    var controller = new AbortController();
+    notifyController = controller;
+    state.notifyPending = true;
+    state.notifyMessage = '';
+    /* F4：filter 一变 fetchKey 就变——立刻 loading，别等网络返回才撤掉假空态。 */
+    if (state.notifyFetchKey !== notifyFetchKey()) {
+      state.notifyMessages = [];
+      state.notifyStatus = 'loading';
+    } else if (state.notifyMessages.length === 0) {
+      state.notifyStatus = 'loading';
+    }
+    renderNotify();
+
+    var merged = [];
+    var failures = 0;
+    /* 503 全局短路文案；一旦置位则不再发起新的 topic 请求。 */
+    var disabledMessage = '';
+    try {
+      /* admin 若尚未跑过 Overview，先补 identities，才能派生 agent:* topic。 */
+      if (isAdmin() && state.identities.length === 0) {
+        var identityPayload = await apiJson('/ui/api/identities', { signal: controller.signal });
+        if (controller.signal.aborted || notifyController !== controller) return;
+        state.identities = Array.isArray(identityPayload.identities)
+          ? identityPayload.identities
+          : [];
+        renderIdentities();
+        /* identities 到位后 topic 集合可能变宽，再次对齐 loading。 */
+        if (state.notifyFetchKey !== notifyFetchKey()) {
+          state.notifyMessages = [];
+          state.notifyStatus = 'loading';
+          renderNotify();
+        }
+      }
+      /* 选了具体频道时只拉一路；All 才扇出，并用有限并发。 */
+      var topics = notifyTopicsToFetch();
+      var fetchKey = topics.join('|');
+
+      var batches = await mapPool(topics, 6, function (topic) {
+        if (disabledMessage) {
+          return Promise.resolve({
+            ok: true,
+            skipped: true,
+            topic: topic,
+            messages: []
+          });
+        }
+        return fetchNotifyTopic(topic, controller.signal).then(function (result) {
+          if (result && result.disabled && !disabledMessage) {
+            disabledMessage = result.disabledCode === 'notifications_disabled'
+              ? 'Notifications are disabled on this server.'
+              : 'Notifications are not configured on this server.';
+            try {
+              controller.abort();
+            } catch (_abortError) {
+              /* ignore */
+            }
+          }
+          return result;
+        });
+      });
+      if (notifyController !== controller) return;
+      if (disabledMessage) {
+        state.notifyMessages = [];
+        state.notifyUpdatedAt = Date.now();
+        state.notifyFetchKey = fetchKey;
+        state.notifyStatus = 'error';
+        state.notifyMessage = disabledMessage;
+        renderNotify();
+        announce(disabledMessage);
+        return;
+      }
+      batches.forEach(function (batch) {
+        if (!batch || batch.skipped) return;
+        if (!batch.ok) {
+          failures += 1;
+          return;
+        }
+        /* identity 的 self 在 UI 上标成 agent:<localpart>，不暴露 self 别名。 */
+        var displayTopic = batch.topic === 'self' && state.me && state.me.address
+          ? 'agent:' + state.me.address.split('@')[0]
+          : batch.topic;
+        batch.messages.forEach(function (message) {
+          merged.push({
+            id: message.id,
+            time: typeof message.time === 'number' ? message.time : 0,
+            title: message.title || '',
+            message: message.message || '',
+            priority: typeof message.priority === 'number' ? message.priority : 0,
+            tags: Array.isArray(message.tags) ? message.tags : [],
+            topic: displayTopic
+          });
+        });
+      });
+      merged.sort(function (left, right) {
+        return (right.time || 0) - (left.time || 0);
+      });
+      /* F8：同频道全败刷新保留旧缓存；外层 catch 走不到这条路（每路已折成 ok:false）。 */
+      if (
+        failures &&
+        merged.length === 0 &&
+        state.notifyMessages.length > 0 &&
+        state.notifyFetchKey === fetchKey
+      ) {
+        state.notifyStatus = 'error';
+        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        renderNotify();
+        announce(state.notifyMessage);
+      } else {
+        state.notifyMessages = merged;
+        state.notifyUpdatedAt = Date.now();
+        state.notifyFetchKey = fetchKey;
+        if (failures && merged.length === 0) {
+          state.notifyStatus = 'error';
+          state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        } else if (failures) {
+          state.notifyStatus = 'error';
+          state.notifyMessage = 'Some channels could not be loaded. Showing what succeeded.';
+        } else {
+          state.notifyStatus = 'ready';
+          state.notifyMessage = '';
+        }
+        renderNotify();
+        announce(merged.length + ' notifications loaded');
+      }
+    } catch (error) {
+      if (error.name === 'AbortError' || error.message === 'session_expired') return;
+      if (state.notifyMessages.length === 0) {
+        state.notifyStatus = 'error';
+        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
+        state.notifyFetchKey = notifyFetchKey();
+      } else {
+        state.notifyStatus = 'error';
+        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+      }
+      renderNotify();
+    } finally {
+      if (notifyController === controller) {
+        notifyController = null;
+        state.notifyPending = false;
+        renderNotifyMeta();
+      }
+    }
+  }
+
+  function enterNotifications(options) {
+    var opts = options || {};
+    cancelOverview();
+    applyScope('notifications', { announce: opts.announce });
+    renderNotify();
+    focusNotifyPanel();
+    /* 15s 内有成功缓存且 topic 集合未变则只重绘，避免 All 误用单路缓存。 */
+    var age = state.notifyUpdatedAt ? Math.max(0, Date.now() - state.notifyUpdatedAt) : Infinity;
+    if (
+      state.notifyStatus === 'ready' &&
+      age < FRESH_MS &&
+      state.notifyFetchKey === notifyFetchKey()
+    ) return;
+    loadNotifyHistory();
   }
 
   async function waitForPreviousRefresh() {
@@ -2507,6 +3071,7 @@ export const UI_JS = `(function () {
       state.messages = [];
       state.overview = null;
       state.overviewStatus = 'idle';
+      /* showLogin → clearNotifyState：与 401 过期路径同一套清理。 */
       showLogin('');
     }
   });
@@ -2525,6 +3090,10 @@ export const UI_JS = `(function () {
       enterOverview({ announce: 'Back to overview' });
       return;
     }
+    if (mobileIdentity.value === '__notifications__') {
+      enterNotifications({ announce: 'Opened notifications' });
+      return;
+    }
     activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
@@ -2536,6 +3105,14 @@ export const UI_JS = `(function () {
     state.overviewPolls = 0;
     state.overviewLoadingSince = 0;
     loadOverviewCycle({ refresh: true });
+  });
+  notifyRefresh.addEventListener('click', function () {
+    loadNotifyHistory();
+  });
+  notifyTopicFilter.addEventListener('change', function () {
+    state.notifyFilter = notifyTopicFilter.value;
+    /* 过滤切换会改变要请求的 topic 集合（All 扇出 vs 单路），重新拉取。 */
+    loadNotifyHistory();
   });
   createIdentityButton.addEventListener('click', showCreateModal);
   createModalSubmit.addEventListener('click', handleCreateSubmit);

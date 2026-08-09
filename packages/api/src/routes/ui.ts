@@ -15,7 +15,13 @@ import {
   type Identity,
   type PushContentTier,
 } from '../lib/identities.ts';
-import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
+import {
+  NotifyError,
+  notificationService,
+  provisionIdentityNotifications,
+  type NotifyMessage,
+  type NotifyTopic,
+} from '../lib/notify.ts';
 import {
   SCAN_BACK,
   getMessage,
@@ -32,6 +38,24 @@ import {
   uiSessionAuth,
 } from '../lib/ui-session.ts';
 import { MAX_EMAIL_HTML_LENGTH } from '../lib/sanitize-email-html.ts';
+
+/**
+ * 与 routes/notify.ts#toTopic 必须保持同一口径（Dashboard cookie 入口的镜像校验）。
+ * 若改一侧，另一侧同步；抽出共享 helper 前先靠注释钉死。
+ */
+const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+const notifyHistoryQuerySchema = z.object({
+  topic: z.string().min(1).max(80),
+  since: z.string().min(1).max(64).optional(),
+});
+
+function toNotifyTopic(value: string): NotifyTopic | null {
+  if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
+  if (!value.startsWith('agent:')) return null;
+  const agent = value.slice('agent:'.length);
+  return AGENT_NAME_RE.test(agent) ? `agent:${agent}` : null;
+}
 
 export type UiApiDependencies = {
   listIdentities: () => Identity[];
@@ -50,6 +74,15 @@ export type UiApiDependencies = {
   }) => Promise<ScanOutcome>;
   /** Persist an identity's mail-arrival push content tier (admin UI). */
   setPushContentTier: (address: string, tier: PushContentTier) => Identity | null;
+  /**
+   * 通知历史：语义等同 GET /v1/notify/messages（ACL 在本路由强制，不信任客户端 topic）。
+   * 测试可注入；生产默认走 notificationService().messages。
+   */
+  notifyMessages?: (
+    topic: NotifyTopic,
+    identityAddress?: string,
+    since?: string,
+  ) => Promise<NotifyMessage[]>;
 };
 
 /** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
@@ -65,7 +98,19 @@ const defaultDependencies: UiApiDependencies = {
   setMessageSeen,
   getMailboxScan: (opts) => overviewCache.getOverview(opts),
   setPushContentTier: setIdentityPushContentTier,
+  notifyMessages: (topic, identityAddress, since) =>
+    notificationService().messages(topic, identityAddress, since),
 };
+
+/** 将 NotifyError 折成与 /v1/notify 一致的 JSON 状态码（历史只读路径）。 */
+function notifyHistoryError(c: Context, err: unknown) {
+  if (!(err instanceof NotifyError)) throw err;
+  if (err.code === 'notifications_disabled' || err.code === 'notifications_unconfigured') {
+    return c.json({ error: err.code }, 503);
+  }
+  if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  return c.json({ error: err.code }, 502);
+}
 
 /** 「最近活跃」的窗口长度（小时）。 */
 const RECENT_HOURS = 24;
@@ -417,6 +462,44 @@ export function createUiApiRoutes(
     const marked = await dependencies.setMessageSeen(address, id, parsed.data.seen);
     if (!marked) return c.json({ error: 'not_found' }, 404);
     return c.json({ id, seen: parsed.data.seen });
+  });
+
+  /**
+   * Dashboard 通知记录：cookie 会话入口，ACL 与 GET /v1/notify/messages 对齐
+   *（identity 只能读自己的 agent topic；admin 必须显式选 topic，禁止 self）。
+   */
+  routes.get('/notify/messages', async (c) => {
+    const parsed = notifyHistoryQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    let topic = toNotifyTopic(parsed.data.topic);
+    if (!topic) return c.json({ error: 'invalid_request' }, 400);
+
+    const auth = getAuth(c);
+    let identityAddress: string | undefined;
+    if (auth.kind === 'identity') {
+      const localpart = auth.address.split('@')[0];
+      const own = localpart ? (`agent:${localpart}` as NotifyTopic) : null;
+      if (!own) return c.json({ error: 'forbidden' }, 403);
+      // 授权边界：identity 不可用历史窥探 user 频道或其他 agent。
+      if (topic === 'self') topic = own;
+      if (topic !== own) {
+        return c.json({ error: 'forbidden: token is scoped to another notification topic' }, 403);
+      }
+      identityAddress = auth.address;
+    } else if (topic === 'self') {
+      return c.json({ error: 'invalid_request: admin must choose a topic' }, 400);
+    }
+
+    const read =
+      dependencies.notifyMessages ??
+      ((t, addr, since) => notificationService().messages(t, addr, since));
+    try {
+      return c.json({ messages: await read(topic, identityAddress, parsed.data.since) });
+    } catch (err) {
+      return notifyHistoryError(c, err);
+    }
   });
 
   return routes;

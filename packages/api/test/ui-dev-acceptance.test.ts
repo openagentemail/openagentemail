@@ -168,4 +168,30 @@ describe('development browser acceptance harness', () => {
     }
     expect(previewSource).toContain('getMailboxScan');
   });
+
+  // F3：Notifications 预览必须注入 notifyMessages stub，否则面板永远打真实 ntfy
+  test('the preview fixture stubs notifyMessages across tiers and topics (F3)', () => {
+    expect(previewSource).toContain('notifyMessages:');
+    expect(previewSource).toContain('buildPreviewNotifyMessages');
+    expect(previewSource).toContain("'user-alerts'");
+    expect(previewSource).toContain("'user-low'");
+    expect(previewSource).toContain("'agent:fox'");
+    // urgent / normal / low / unknown（priority 2）
+    expect(previewSource).toContain('priority: 5');
+    expect(previewSource).toContain('priority: 3');
+    expect(previewSource).toContain('priority: 1');
+    expect(previewSource).toContain('priority: 2');
+  });
+
+  // F6：preview stub 用相对时间，并按 since 过滤；12h 查询不含窗口外旧消息
+  test('preview notify stubs use relative timestamps and honor since=12h (F6)', () => {
+    expect(previewSource).toContain('function previewSinceCutoff(');
+    expect(previewSource).toContain('Math.floor(Date.now() / 1000)');
+    expect(previewSource).toContain('now - 60');
+    expect(previewSource).toContain('now - 48 * 3600');
+    expect(previewSource).toContain('entry.time >= cutoff');
+    expect(previewSource).toContain('buildPreviewNotifyMessages(topic, since)');
+    // 契约：当前 12h 查询只返回窗口内消息（旧消息时间戳在窗口外）
+    expect(previewSource).toContain("Should be filtered out when since=12h.");
+  });
 });
