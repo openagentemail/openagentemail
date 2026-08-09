@@ -74,26 +74,39 @@ const identitySchema = {
   canNotifyUser: z.boolean().optional(),
 };
 
-const messageSummarySchema = {
+// list / read 真交集。from/to 是服务端可信数据的契约声明（非输入消毒）：
+// API 返回 RFC-5322 原文（可含显示名 / 多收件人展开拼接），故用无界 z.string()；
+// RFC 5322 的 998 管的是折叠前物理行，不适用于 mailparser 展开后的文本。
+const messageBaseSchema = {
   id: z.string(),
-  from: z.email(),
-  to: z.email(),
+  from: z.string(),
+  to: z.string(),
   subject: z.string(),
   date: z.string(),
-  seen: z.boolean(),
-  snippet: z.string(),
   // HMAC 自签判定：internal = 本 API 发出；external = 未可信（fail-closed）。
   source: z.enum(["internal", "external"]),
 };
 
+// API MessageSummary：seen/snippet/hasOtp 仅列表有，不得进 detail。
+const messageSummarySchema = {
+  ...messageBaseSchema,
+  seen: z.boolean(),
+  snippet: z.string(),
+  hasOtp: z.boolean(),
+};
+
+// API MessageDetail：base + 正文/OTP/links/task*；不得含 seen/snippet/hasOtp。
 const messageOutputSchema = {
-  ...messageSummarySchema,
+  ...messageBaseSchema,
   text: z.string(),
   html: z.string().optional(),
   otp: z.object({
     codes: z.array(z.string()),
     links: z.array(z.string()),
   }),
+  links: z.array(z.string()),
+  taskId: z.string().optional(),
+  taskState: z.string().optional(),
 };
 
 const identityListOutputSchema = {
