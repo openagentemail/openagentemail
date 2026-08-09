@@ -515,20 +515,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   text-transform: uppercase;
   border-bottom: 1px solid var(--line);
 }
-/*
- * 窄桌面藏 Updated/Msgs：sidebar 240 + panel 左右 pad≤30×2 + list 轨 1.1/2.5。
- * 五列头≈458px → 列表轨需 ≥458 → 视口 ≥1341；取 1360 留余量（1280 时轨≈431 仍裁）。
- */
-@media (max-width: 1360px) and (min-width: 821px) {
-  .tasks-header,
-  .task-row {
-    grid-template-columns: 100px minmax(0, 1.1fr) minmax(0, 1.4fr);
-  }
-  .tasks-header > :nth-child(4),
-  .tasks-header > :nth-child(5),
-  .task-row .task-updated,
-  .task-row .task-msgs { display: none; }
-}
 .tasks-rows { border-top: 1px solid var(--line); }
 .task-row {
   width: 100%;
@@ -556,6 +542,20 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/*
+ * 窄桌面藏 Updated/Msgs：须写在基础 .task-row/.tasks-header 之后，否则同特异性后者覆盖三列模板。
+ * 算术：sidebar 240 + pad≤60 + list×1.1/2.5；五列头≈458 → 视口≥~1341；取 1360。
+ */
+@media (max-width: 1360px) and (min-width: 821px) {
+  .tasks-header,
+  .task-row {
+    grid-template-columns: 100px minmax(0, 1.1fr) minmax(0, 1.4fr);
+  }
+  .tasks-header > :nth-child(4),
+  .tasks-header > :nth-child(5),
+  .task-row .task-updated,
+  .task-row .task-msgs { display: none; }
 }
 .task-subject { margin: 0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-updated { color: var(--ink-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -1043,6 +1043,8 @@ export const UI_JS = `(function () {
   var NOTIFY_RENDER_LIMIT = 500;
   /* 任务工单行数上限：与 notify 同口径，避免大邮箱卡死页面。 */
   var TASKS_RENDER_LIMIT = 500;
+  /* 单工单时间线条目上限：长历史不全量建节点。 */
+  var TASK_TIMELINE_RENDER_LIMIT = 200;
   /* 与 lib/tasks.ts RESULT_MARKER 逐字一致；时间线正文剥离用。 */
   var TASK_RESULT_MARKER = '<!-- openagent.email task result -->';
   var SORT_COLUMNS = [
@@ -3017,7 +3019,7 @@ export const UI_JS = `(function () {
 
   /*
    * 展示层剥离 result 块：口径对齐 lib/tasks.ts readResult——
-   * lastIndexOf 找最后一处 marker，且其后须是尾部 fenced json 块直到结尾才剥（中途字面量不剥）。
+   * lastIndexOf + 尾部 fenced json + JSON.parse 成功才剥（malformed 当普通正文；中途字面量不剥）。
    * UI_JS 外层是模板字符串：fence 用 RegExp + fromCharCode(96) 拼反引号，避免打断 backtick。
    */
   function taskTimelineBody(body) {
@@ -3027,7 +3029,13 @@ export const UI_JS = `(function () {
     var after = text.slice(markerAt + TASK_RESULT_MARKER.length);
     var ticks = String.fromCharCode(96, 96, 96);
     var fence = new RegExp('^\\\\s*' + ticks + 'json\\\\s*\\\\n([\\\\s\\\\S]*?)\\\\n' + ticks + '\\\\s*$');
-    if (!fence.test(after)) return text;
+    var match = after.match(fence);
+    if (!match) return text;
+    try {
+      JSON.parse(match[1]);
+    } catch (_err) {
+      return text;
+    }
     return text.slice(0, markerAt).replace(/\\s+$/, '');
   }
 
@@ -3183,9 +3191,22 @@ export const UI_JS = `(function () {
     }
     tasksDetailContent.append(head);
 
+    var messages = Array.isArray(task.messages) ? task.messages : [];
+    var timelineTotal = messages.length;
+    var timelineTruncated = timelineTotal > TASK_TIMELINE_RENDER_LIMIT;
+    var visibleMessages = timelineTruncated
+      ? messages.slice(timelineTotal - TASK_TIMELINE_RENDER_LIMIT)
+      : messages;
+    if (timelineTruncated) {
+      var timelineNote = document.createElement('p');
+      timelineNote.className = 'task-detail-meta';
+      timelineNote.textContent =
+        'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT + ' of ' + timelineTotal + ' timeline events.';
+      tasksDetailContent.append(timelineNote);
+    }
     var timeline = document.createElement('ol');
     timeline.className = 'task-timeline';
-    (Array.isArray(task.messages) ? task.messages : []).forEach(function (message) {
+    visibleMessages.forEach(function (message) {
       var item = document.createElement('li');
       item.className = 'task-timeline-item';
       var metaRow = document.createElement('div');
@@ -3818,9 +3839,12 @@ export const UI_JS = `(function () {
     loadNotifyHistory();
   });
   tasksRefresh.addEventListener('click', function () {
-    /* 显式 Refresh：列表完成后若仍在 Tasks 且有选中单，连带重拉详情。 */
+    /* 显式 Refresh：列表完成后，仅在详情视图（或桌面双栏）重拉详情，避免移动 Back 后被劫持。 */
     loadTasks().then(function () {
       if (state.scope !== 'tasks' || !state.activeTaskId) return;
+      var onDetail = inboxView.dataset.mobileView === 'tasks-detail';
+      var desktop = window.innerWidth > 820;
+      if (!onDetail && !desktop) return;
       selectTask(state.activeTaskId);
     });
   });

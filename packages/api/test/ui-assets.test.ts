@@ -324,11 +324,27 @@ describe('UI static asset contract', () => {
     expect(stripBody).toContain('text.lastIndexOf(TASK_RESULT_MARKER)');
     expect(stripBody).toContain('String.fromCharCode(96, 96, 96)');
     expect(stripBody).toContain('new RegExp(');
-    expect(stripBody).toContain('fence.test(after)');
+    expect(stripBody).toContain('after.match(fence)');
+    expect(stripBody).toContain('JSON.parse(match[1])');
     expect(stripBody).not.toContain('text.indexOf(TASK_RESULT_MARKER)');
     expect(UI_JS).toContain('window.scrollTo(0, 0)');
     expect(UI_JS).toContain("state.scope !== 'tasks' || !state.activeTaskId");
+    expect(UI_JS).toContain("inboxView.dataset.mobileView === 'tasks-detail'");
+    expect(UI_JS).toContain('window.innerWidth > 820');
     expect(UI_CSS).toContain('@media (max-width: 1360px) and (min-width: 821px)');
+    // F12：紧凑列查询必须在基础 .task-row 五列声明之后，否则被覆盖
+    const headerBase = UI_CSS.indexOf(
+      '.tasks-header {\n  display: grid;\n  gap: 10px;\n  grid-template-columns: 110px',
+    );
+    const rowBase = UI_CSS.indexOf(
+      '.task-row {\n  width: 100%;\n  display: grid;\n  gap: 10px;\n  grid-template-columns: 110px',
+    );
+    const compactMq = UI_CSS.indexOf(
+      '@media (max-width: 1360px) and (min-width: 821px)',
+    );
+    expect(headerBase).toBeGreaterThan(-1);
+    expect(rowBase).toBeGreaterThan(-1);
+    expect(compactMq).toBeGreaterThan(rowBase);
     // 前端不得直接打 Bearer 的 /v1/tasks
     expect(UI_JS).not.toContain('/v1/tasks');
   });
@@ -345,6 +361,20 @@ describe('UI static asset contract', () => {
     expect(renderRows).toContain('var truncated = total > TASKS_RENDER_LIMIT');
     expect(renderRows).toContain('visible.forEach');
     expect(renderRows).not.toContain('state.tasks.forEach');
+  });
+
+  // 时间线条目上限：长工单不全量建节点
+  test('task timeline is capped at TASK_TIMELINE_RENDER_LIMIT with an honest truncation label', () => {
+    expect(UI_JS).toContain('var TASK_TIMELINE_RENDER_LIMIT = 200');
+    expect(UI_JS).toContain('messages.slice(timelineTotal - TASK_TIMELINE_RENDER_LIMIT)');
+    expect(UI_JS).toContain("'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT");
+    const detail = UI_JS.slice(
+      UI_JS.indexOf('function renderTaskDetail('),
+      UI_JS.indexOf('function renderTasks('),
+    );
+    expect(detail).toContain('timelineTotal > TASK_TIMELINE_RENDER_LIMIT');
+    expect(detail).toContain('visibleMessages.forEach');
+    expect(detail).not.toContain('task.messages : []).forEach');
   });
 
   // 切 state 过滤时 fetchKey 变化必须进 loading，禁止立刻渲染假空态/旧缓存
