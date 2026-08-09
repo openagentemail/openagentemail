@@ -241,7 +241,7 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
     expect(detailParsed.data.taskId).toBe("task-1");
     expect(detailParsed.data.taskState).toBe("submitted");
   }
-  // 可选 task* 缺省放行；带 hasOtp 的假 detail 不得要求该字段。
+  // 可选 task* 缺省放行；detail outputSchema 不得声明 hasOtp。
   const { taskId: _tid, taskState: _ts, ...detailWithoutTask } = detail;
   expect(detailSchema.safeParse(detailWithoutTask).success).toBe(true);
   expect(readOut.hasOtp).toBeUndefined();
