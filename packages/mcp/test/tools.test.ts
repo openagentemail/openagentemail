@@ -188,6 +188,23 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
 });
 
+test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
+  const createOut = toolConfigs.get("mail_new_identity")!.outputSchema!;
+  expect(createOut.pushContentTier).toBeDefined();
+  expect(createOut.token).toBeDefined();
+  expect(createOut.pushContentTier!.safeParse(2).success).toBe(true);
+  expect(createOut.pushContentTier!.safeParse(4).success).toBe(false);
+  expect(createOut.token!.safeParse("oa_abc").success).toBe(true);
+
+  const listOut = toolConfigs.get("mail_list_identities")!.outputSchema!.identities;
+  const row = {
+    address: "fox@test.example",
+    createdAt: "2026-08-10T00:00:00.000Z",
+    pushContentTier: 1 as const,
+  };
+  expect(listOut!.safeParse([row]).success).toBe(true);
+});
+
 // 输出 schema 与 API 对齐：list/detail 各用真实类型夹具，互不污染。
 test("message summary/detail 输出 schema 按 API 真实形状校验并保留字段", () => {
   const listMessages = toolConfigs.get("mail_list_messages")!.outputSchema!.messages;

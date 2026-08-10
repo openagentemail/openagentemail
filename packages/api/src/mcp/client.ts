@@ -1,7 +1,7 @@
 /**
- * Minimal REST client for the openagent.email API.
+ * openagent.email REST 最小客户端（stdio MCP 与 HTTP /mcp 共用）。
  *
- * API contract (shared):
+ * API 契约：
  *   POST /v1/identities            {name?, localpart?, canNotifyUser?} -> 201 {address, name?, token}
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt}]}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
@@ -14,6 +14,15 @@
  *   GET  /v1/tasks/:id             -> task
  *   POST /v1/tasks/:id/state       {state,body?,result?} -> task
  */
+
+/**
+ * 可注入的 fetch（HTTP 传输用 app.fetch 做进程内回环）。
+ * 返回类型对齐 Hono `app.fetch`：允许同步 Response。
+ */
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Response | Promise<Response>;
 
 export class ApiError extends Error {
   constructor(
@@ -30,6 +39,9 @@ export interface Identity {
   name?: string;
   createdAt?: string;
   canNotifyUser?: boolean;
+  /** REST publicIdentity 始终带 1|2|3 */
+  pushContentTier?: 1 | 2 | 3;
+  pushContentTierWarning?: string;
 }
 
 export interface MessageSummary {
@@ -145,11 +157,16 @@ function networkErrorCode(err: unknown): string | undefined {
 }
 
 export class OpenAgentEmailClient {
+  private readonly fetchImpl: FetchLike;
+
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
+    /** 默认全局 fetch；API 进程内可注入 app.fetch 避免 TCP loopback。 */
+    fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.fetchImpl = fetchImpl;
   }
 
   private async request<T>(
@@ -159,7 +176,7 @@ export class OpenAgentEmailClient {
   ): Promise<T> {
     let res: Response;
     try {
-      res = await fetch(`${this.baseUrl}${path}`, {
+      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
@@ -225,7 +242,14 @@ export class OpenAgentEmailClient {
     return data as T;
   }
 
-  createIdentity(opts: { name?: string; localpart?: string; canNotifyUser?: boolean }): Promise<{ address: string; name?: string; canNotifyUser?: boolean }> {
+  createIdentity(opts: { name?: string; localpart?: string; canNotifyUser?: boolean }): Promise<{
+    address: string;
+    name?: string;
+    canNotifyUser?: boolean;
+    pushContentTier?: 1 | 2 | 3;
+    /** 仅创建/轮换响应出现一次 */
+    token?: string;
+  }> {
     const body: Record<string, string | boolean> = {};
     if (opts.name) body.name = opts.name;
     if (opts.localpart) body.localpart = opts.localpart;

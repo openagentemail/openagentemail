@@ -2,12 +2,14 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { bearerAuth, resolveToken, type Auth } from './lib/auth.ts';
 import { config } from './lib/config.ts';
+import { JSON_BODY_LIMIT_BYTES } from './lib/limits.ts';
 import {
   UiSessionStore,
   createUiSessionRoutes,
   requireUiOrigin,
   uiSessionBodyLimit,
 } from './lib/ui-session.ts';
+import { registerMcpHttpRoutes } from './mcp/http.ts';
 import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
@@ -27,13 +29,38 @@ export function createApp(options: AppOptions = {}): Hono {
   const app = new Hono();
 
   app.get('/healthz', (c) => c.json({ ok: true }));
+  // PRM 必须在 agentCard 子应用之前注册，避免 /.well-known 前缀吞掉该路径。
+  registerMcpHttpRoutes(app, {
+    // OpenAgentEmailClient 固定 base `http://mcp.internal`；此处只取 pathname+search
+    // 回环进本进程。host 必须是 mcp.internal，否则视为契约破坏（显式断言）。
+    apiFetch: (input, init) => {
+      if (typeof input !== 'string' && !(input instanceof URL) && init === undefined) {
+        const host = new URL(input.url).hostname;
+        if (host !== 'mcp.internal') {
+          throw new Error(`mcp apiFetch: unexpected host ${host}; expected mcp.internal`);
+        }
+        return app.fetch(input);
+      }
+      const href =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      const url = new URL(href);
+      if (url.hostname !== 'mcp.internal') {
+        throw new Error(`mcp apiFetch: unexpected host ${url.hostname}; expected mcp.internal`);
+      }
+      return app.request(url.pathname + url.search, init);
+    },
+  });
   app.route('/.well-known', agentCardRoute);
 
   // Bound allocation before auth or JSON parsing.
   app.use(
     '/v1/*',
     bodyLimit({
-      maxSize: 16 * 1024 * 1024,
+      maxSize: JSON_BODY_LIMIT_BYTES,
       onError: (c) => c.json({ error: 'request_too_large' }, 413),
     }),
   );

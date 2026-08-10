@@ -11,6 +11,8 @@
  *   GET  /v1/messages/:id?address=             (admin, or the identity itself)
  *   POST /v1/messages/wait                     (admin, or the identity itself)
  *   POST /v1/send                              (admin, or the identity itself)
+ *   POST /mcp                                  (stateless MCP; Bearer admin or oa_)
+ *   GET  /.well-known/oauth-protected-resource (RFC 9728)
  * Auth: `Authorization: Bearer <key>` — admin keys from API_KEYS env, or a
  * per-identity scoped token issued at identity creation.
  */

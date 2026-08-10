@@ -32,6 +32,8 @@ bun run typecheck
 
 All `/v1/*` require `Authorization: Bearer <key>`.
 
+- `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin 或 `oa_`）；无/坏 token → 401 + `WWW-Authenticate`
+- `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开、无鉴权**。可选 env `MCP_PUBLIC_URL` 覆盖元数据里的对外 origin
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
 - `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,...}]}`
 - `GET /v1/identities/:address/push-tier` → `{address, pushContentTier, warning?}` (admin any; identity own only)

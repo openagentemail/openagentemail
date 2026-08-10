@@ -1,7 +1,7 @@
 // 诊断信息不能把配置里的凭据带出去 —— 它会进 agent 的上下文和客户端日志。
 // 但也不能把故障原因抹干净，否则"连不上"这类最常见的问题没法排查。
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "../src/lib/client.ts";
+import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "../../api/src/mcp/client.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
