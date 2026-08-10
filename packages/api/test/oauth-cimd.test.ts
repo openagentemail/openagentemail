@@ -19,6 +19,7 @@ const {
   assertClientIdHostSafe,
   clearCimdCacheForTests,
   fetchClientMetadata,
+  isAllowedRedirectUri,
   isBlockedSsrfIp,
   isSsrfBlockedResolvedIp,
   matchRedirectUri,
@@ -91,6 +92,65 @@ describe('validateClientIdUrl', () => {
   });
 });
 
+describe('redirect_uri scheme 白名单', () => {
+  test('https 一律放行；http loopback 放行', () => {
+    expect(isAllowedRedirectUri('https://app.example/cb')).toBe(true);
+    expect(isAllowedRedirectUri('http://127.0.0.1:54321/callback')).toBe(true);
+    expect(isAllowedRedirectUri('http://localhost/callback')).toBe(true);
+    expect(isAllowedRedirectUri('http://[::1]/callback')).toBe(true);
+  });
+
+  test('javascript:/data:/file: 与 http 非 loopback 拒', () => {
+    expect(isAllowedRedirectUri('javascript:alert(1)')).toBe(false);
+    expect(isAllowedRedirectUri('data:text/html,hi')).toBe(false);
+    expect(isAllowedRedirectUri('file:///etc/passwd')).toBe(false);
+    expect(isAllowedRedirectUri('myapp://callback')).toBe(false);
+    // http 仅 loopback：公网与 RFC1918 一律拒（私有 scheme 日后再开）
+    expect(isAllowedRedirectUri('http://example.com/callback')).toBe(false);
+    expect(isAllowedRedirectUri('http://10.0.0.1/callback')).toBe(false);
+  });
+
+  test('CIMD 文档含 javascript: redirect → 拒', async () => {
+    const clientId = 'http://127.0.0.1:9/cimd.json';
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_id: clientId,
+            client_name: 'Evil',
+            redirect_uris: ['javascript:alert(document.domain)'],
+            token_endpoint_auth_method: 'none',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('redirect_uri_scheme_forbidden');
+  });
+
+  test('CIMD https redirect 正常；http loopback 正常', async () => {
+    const clientId = 'http://127.0.0.1:9/cimd-ok.json';
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_id: clientId,
+            client_name: 'Ok',
+            redirect_uris: [
+              'https://app.example/oauth/cb',
+              'http://127.0.0.1:9999/callback',
+            ],
+            token_endpoint_auth_method: 'none',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(true);
+  });
+});
+
 describe('matchRedirectUri RFC8252 端口放宽', () => {
   test('http + IP 字面量不同端口放行', () => {
     expect(
@@ -110,6 +170,12 @@ describe('matchRedirectUri RFC8252 端口放宽', () => {
   test('非 loopback 端口必须精确', () => {
     expect(
       matchRedirectUri('https://app.example:443/cb', ['https://app.example:8443/cb']),
+    ).toBe(false);
+  });
+
+  test('javascript: 即使两侧相同也不匹配', () => {
+    expect(
+      matchRedirectUri('javascript:alert(1)', ['javascript:alert(1)']),
     ).toBe(false);
   });
 });

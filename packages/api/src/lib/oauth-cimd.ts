@@ -156,10 +156,35 @@ export async function assertClientIdHostSafe(
 }
 
 /**
+ * redirect_uri scheme 白名单（CIMD 文档与匹配共用）。
+ * - https：一律放行
+ * - http：仅 loopback（IP 字面量 127/::1 或 localhost 主机名）
+ * - 其余（javascript:/data:/file:/自定义私有 scheme）一律拒
+ */
+export function isAllowedRedirectUri(uri: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  if (url.protocol === 'http:') {
+    const host = url.hostname.replace(/^\[(.+)\]$/, '$1');
+    return isLoopbackHostname(host);
+  }
+  return false;
+}
+
+/**
  * RFC 8252 §7.3：仅 http + IP 字面量（127.0.0.1 / [::1]）比较时忽略端口。
  * localhost 主机名与 https 仍精确匹配端口。
  */
 export function redirectUrisMatch(requested: string, registered: string): boolean {
+  // 两侧都必须过 scheme 白名单（防存量脏数据 / 精确匹配绕过）
+  if (!isAllowedRedirectUri(requested) || !isAllowedRedirectUri(registered)) {
+    return false;
+  }
   let a: URL;
   let b: URL;
   try {
@@ -251,6 +276,10 @@ function validateDocument(
   }
   if (!doc.redirect_uris.every((u) => typeof u === 'string' && u.length > 0)) {
     return { ok: false, reason: 'invalid_redirect_uris' };
+  }
+  // scheme 白名单：禁 javascript:/data: 等（过渡页可点链接/meta refresh 的 XSS 面）
+  if (!doc.redirect_uris.every((u) => typeof u === 'string' && isAllowedRedirectUri(u))) {
+    return { ok: false, reason: 'redirect_uri_scheme_forbidden' };
   }
 
   // 禁一切 client_secret*
@@ -346,8 +375,8 @@ export async function pinnedCimdFetcher(
         path: `${url.pathname}${url.search}`,
         method: (init.method as string) || 'GET',
         headers,
-        // https：显式 SNI = 原始 hostname（即使 dial 到解析 IP）
-        servername: isHttps ? literal : undefined,
+        // https：非 IP 字面量时显式 SNI；直连 IP 不设 servername（交系统默认）
+        servername: isHttps && !isIP(literal) ? literal : undefined,
         // 连接时解析并对每个结果跑 SSRF（钉死，消灭校验/fetch 间 TOCTOU）
         lookup: ((hostname, options, callback) => {
           const fail = (err: NodeJS.ErrnoException) => {
