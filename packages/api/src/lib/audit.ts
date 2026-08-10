@@ -5,8 +5,11 @@
  * JSON 整文件 tmp+rename 不同，故不抽第三份通用存储工具；纪律仍对齐：
  * 单写者进程、目录 0700、文件 0600、绝不记录参数值/正文/token 片段）。
  *
+ * 外部可控字符串（clientId/grantId/address/tool/event）写入前剥控制字符与换行，
+ * 防 JSONL log 注入（\r\n 伪造行）。
+ *
  * 增长策略：单文件超过 AUDIT_ROTATE_BYTES（10MB）时 rename 为 audit.jsonl.1
- *（只留一份备份），再开新 audit.jsonl。注释与 docs/security.md 同步。
+ *（只留一份备份），再开新 audit.jsonl。读端合并 .1 + 当前（新的在前）。
  */
 
 import {
@@ -52,6 +55,15 @@ function auditRotatedPath(): string {
   return join(config.dataDir, 'audit.jsonl.1');
 }
 
+/**
+ * 清洗外部可控字段：去掉 C0 控制字符与 DEL（含 \r\n\t），再截断。
+ * JSON.stringify 本身会转义换行，但落盘前仍剥除，避免伪造「下一行」观感/下游误解析。
+ */
+export function scrubAuditField(value: string, maxLen = 256): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, maxLen);
+}
+
 /** 确保 DATA_DIR 0700；单写者约定与 identities 相同。 */
 function ensureDataDir(): void {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
@@ -90,13 +102,23 @@ export function recordAuditEvent(
 ): void {
   const row: AuditEvent = {
     ts: partial.ts ?? new Date().toISOString(),
-    event: partial.event,
+    event: scrubAuditField(partial.event, 128),
     outcome: partial.outcome,
-    ...(partial.clientId !== undefined ? { clientId: partial.clientId } : {}),
-    ...(partial.grantId !== undefined ? { grantId: partial.grantId } : {}),
-    ...(partial.address !== undefined ? { address: partial.address } : {}),
-    ...(partial.tool !== undefined ? { tool: partial.tool } : {}),
-    ...(partial.tier !== undefined ? { tier: partial.tier } : {}),
+    ...(partial.clientId !== undefined
+      ? { clientId: scrubAuditField(partial.clientId) }
+      : {}),
+    ...(partial.grantId !== undefined
+      ? { grantId: scrubAuditField(partial.grantId) }
+      : {}),
+    ...(partial.address !== undefined
+      ? { address: scrubAuditField(partial.address) }
+      : {}),
+    ...(partial.tool !== undefined
+      ? { tool: scrubAuditField(partial.tool, 128) }
+      : {}),
+    ...(partial.tier !== undefined
+      ? { tier: scrubAuditField(partial.tier, 32) }
+      : {}),
     ...(partial.durationMs !== undefined ? { durationMs: partial.durationMs } : {}),
   };
 
@@ -133,29 +155,12 @@ export type ReadAuditOptions = {
   event?: string;
 };
 
-/**
- * 读端：从文件尾部取最近 N 条（可选 event 过滤）。只读，无删除 API。
- */
-export function readAuditEvents(options: ReadAuditOptions = {}): AuditEvent[] {
-  const limit = Math.min(Math.max(options.limit ?? 100, 0), 1000);
-  if (limit === 0) return [];
-  const path = auditPath();
-  if (!existsSync(path)) return [];
-
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return [];
-  }
-
+function parseAuditLines(text: string): AuditEvent[] {
   const lines = text.split('\n').filter((l) => l.trim().length > 0);
   const out: AuditEvent[] = [];
-  // 从尾部往前扫，凑够 limit
-  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+  for (const line of lines) {
     try {
-      const parsed = JSON.parse(lines[i]!) as AuditEvent;
-      if (options.event && parsed.event !== options.event) continue;
+      const parsed = JSON.parse(line) as AuditEvent;
       if (typeof parsed.ts !== 'string' || typeof parsed.event !== 'string') continue;
       if (typeof parsed.outcome !== 'string') continue;
       out.push(parsed);
@@ -163,20 +168,50 @@ export function readAuditEvents(options: ReadAuditOptions = {}): AuditEvent[] {
       // 跳过坏行
     }
   }
-  // 时间正序返回（旧→新）
-  out.reverse();
   return out;
 }
 
-/** 测试辅助：清空审计文件（不删 rotate 备份，测试一般用新 DATA_DIR）。 */
-export function resetAuditForTests(): void {
-  const path = auditPath();
-  if (existsSync(path)) {
-    writeFileSync(path, '', { mode: 0o600 });
+/**
+ * 读端：合并 audit.jsonl.1（旧）+ audit.jsonl（新），**新的在前**，尊重 limit。
+ * 可选 event 精确过滤。只读，无删除 API。
+ */
+export function readAuditEvents(options: ReadAuditOptions = {}): AuditEvent[] {
+  const limit = Math.min(Math.max(options.limit ?? 100, 0), 1000);
+  if (limit === 0) return [];
+
+  // 时间序：旧文件在前、当前在后；再从尾部取 → 新的优先
+  const chunks: AuditEvent[] = [];
+  for (const path of [auditRotatedPath(), auditPath()]) {
+    if (!existsSync(path)) continue;
     try {
-      chmodSync(path, 0o600);
+      chunks.push(...parseAuditLines(readFileSync(path, 'utf8')));
     } catch {
-      // ignore
+      // 跳过不可读文件
+    }
+  }
+
+  const filtered = options.event
+    ? chunks.filter((e) => e.event === options.event)
+    : chunks;
+
+  // 新的在前：从末尾往回取 limit 条，保持新→旧顺序
+  const newestFirst: AuditEvent[] = [];
+  for (let i = filtered.length - 1; i >= 0 && newestFirst.length < limit; i--) {
+    newestFirst.push(filtered[i]!);
+  }
+  return newestFirst;
+}
+
+/** 测试辅助：清空当前审计文件与 rotate 备份。 */
+export function resetAuditForTests(): void {
+  for (const path of [auditPath(), auditRotatedPath()]) {
+    if (existsSync(path)) {
+      writeFileSync(path, '', { mode: 0o600 });
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // ignore
+      }
     }
   }
 }

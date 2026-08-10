@@ -36,8 +36,15 @@ retention window before reusing one.
 
 - 落盘：`DATA_DIR/audit.jsonl`（JSONL 追加；单写者；文件 0600 / 目录 0700）。
 - 行字段白名单：`{ts, event, clientId?, grantId?, address?, tool?, tier?, outcome, durationMs?}`——**严禁**参数值、邮件正文、token 任何片段、subject。
-- 事件：`oauth.authorize.approve|deny`、`oauth.token.code|refresh`、`oauth.revoke`、`oauth.grant.revoke`、`mcp.tools.call`（仅 tier ≥ minimal）。
-- 读端点：`GET /v1/audit/events?limit=&event=`（**admin only**；默认 limit 100，上限 1000；只读无删除）。
+- 外部可控字段（clientId 等）写入前剥控制字符/换行并截断，防 JSONL log 注入。
+- 事件名（与实现一致）：
+  - `oauth.authorize.approve` / `oauth.authorize.deny`
+  - `oauth.token.code` / `oauth.token.refresh`
+  - `oauth.revoke`（**仅真删 token 时**落盘；未知票 200 且零审计写）
+  - `oauth.grant.revoke`
+  - `mcp.tools.call`（成功路径仅 tier ≥ minimal；`rate_limited` / `denied` 读写下均记）
+  - `mcp.batch_rejected`（JSON-RPC batch 拒收；计写桶）
+- 读端点：`GET /v1/audit/events?limit=&event=`（**admin only**；默认 limit 100，上限 1000；合并 `audit.jsonl.1` + 当前，**新的在前**；只读无删除）。
 - 增长：单文件 >10MB 时 rotate 为 `audit.jsonl.1`（只留一份备份），再开新文件。
 
 ### 写调用 attribution

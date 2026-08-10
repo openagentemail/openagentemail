@@ -35,7 +35,7 @@ bun run typecheck
 
 All `/v1/*` require `Authorization: Bearer <key>`.
 
-- `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin / `oa_` / OAuth access）；无/坏 token → 401 + `WWW-Authenticate`；OAuth aud 不符 → 403；critical 工具对 OAuth 票 403；超限 429 + `Retry-After`（见 `MCP_RATE_*`）
+- `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin / `oa_` / OAuth access）；无/坏 token → 401 + `WWW-Authenticate`；OAuth aud 不符 → 403；critical 工具对 OAuth 票 403；超限 429 + `Retry-After`（见 `MCP_RATE_*`）；JSON-RPC **batch 数组** → `400 {error:"batch_not_supported"}`（计写桶并审计 `mcp.batch_rejected`）
 - `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开**；`authorization_servers` = AS issuer。可选 env `MCP_PUBLIC_URL` 覆盖对外 origin
 - `GET /.well-known/oauth-authorization-server` — RFC 8414（PKCE S256、CIMD、iss 响应）；**公开**
 - `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；管理页 `/ui/oauth/grants`

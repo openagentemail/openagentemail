@@ -1,7 +1,13 @@
 /**
  * P3.5：scrubbed 审计、attribution、工具分层、MCP 限量。
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,6 +26,7 @@ const {
   recordAuditEvent,
   readAuditEvents,
   resetAuditForTests,
+  scrubAuditField,
 } = await import('../src/lib/audit.ts');
 const { resolveAccessToken } = await import('../src/lib/auth.ts');
 const { config } = await import('../src/lib/config.ts');
@@ -27,6 +34,7 @@ const { createIdentity } = await import('../src/lib/identities.ts');
 const {
   putAccessTokenForTests,
   resetOAuthStoreCacheForTests,
+  revokeToken,
 } = await import('../src/lib/oauth-store.ts');
 const {
   checkMcpRateLimit,
@@ -37,10 +45,17 @@ const {
   resetRateLimits,
 } = await import('../src/lib/ratelimit.ts');
 const {
+  assertAllSpecTiersDeclared,
+  assertToolTierDeclared,
   declareToolTier,
   getToolTier,
+  isToolTierDeclared,
+  resetToolTiersForTests,
   TOOL_TIER_SPEC,
 } = await import('../src/lib/tool-tiers.ts');
+const { registerOpenAgentEmailTools } = await import('../src/mcp/tools.ts');
+const { McpServer } = await import('@modelcontextprotocol/server');
+const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
 
 const adminKey = [...config.apiKeys][0]!;
 const RESOURCE = 'http://localhost/mcp';
@@ -55,6 +70,7 @@ beforeEach(() => {
   resetAuditForTests();
   resetMcpRateLimits();
   resetOAuthStoreCacheForTests();
+  resetToolTiersForTests();
 });
 
 function mcpCall(
@@ -231,9 +247,29 @@ describe('attribution：三种 caller 落三种行', () => {
 describe('工具分层', () => {
   test('规格表 15 工具均有 tier；注册冲突会 throw', () => {
     expect(Object.keys(TOOL_TIER_SPEC).length).toBe(15);
+    // SPEC 回落：即使 declared 空也能预检
+    resetToolTiersForTests();
+    expect(isToolTierDeclared('mail_new_identity')).toBe(false);
     expect(getToolTier('mail_new_identity')).toBe('critical');
-    expect(getToolTier('mail_list_messages')).toBe('read');
+    declareToolTier('mail_send', 'contained');
     expect(() => declareToolTier('mail_send', 'read')).toThrow(/conflict/);
+  });
+
+  test('注册完整性：未 declare 则 assert 炸；全量注册后规格表覆盖', () => {
+    resetToolTiersForTests();
+    expect(() => assertToolTierDeclared('mail_send')).toThrow(/not declared/);
+    expect(() => assertAllSpecTiersDeclared()).toThrow(/not declared/);
+    declareToolTier('mail_send', 'contained');
+    expect(() => assertAllSpecTiersDeclared()).toThrow(/not declared/);
+
+    resetToolTiersForTests();
+    const server = new McpServer({ name: 'tier-test', version: '0.0.0' });
+    const client = new OpenAgentEmailClient('http://localhost', 't', fetch);
+    registerOpenAgentEmailTools(server, client);
+    for (const name of Object.keys(TOOL_TIER_SPEC)) {
+      expect(isToolTierDeclared(name)).toBe(true);
+    }
+    expect(() => assertAllSpecTiersDeclared()).not.toThrow();
   });
 
   test('critical 被 OAuth 票调 → 403；oa_ 进 REST scope；admin 通预检', async () => {
@@ -284,7 +320,7 @@ describe('工具分层', () => {
     expect(res.status).toBe(403);
   });
 
-  test('JSON-RPC batch 数组拒 400（防绕过 tier/限量/审计）', async () => {
+  test('JSON-RPC batch 拒 400：落 mcp.batch_rejected 并计入写桶', async () => {
     const { identity } = createIdentity({ localpart: 'batch-deny' })!;
     const grantId = 'grant-batch-1';
     const oauthTok = 'oauth-access-batch-test';
@@ -299,6 +335,14 @@ describe('工具分层', () => {
         clientName: 'Batch',
       },
     });
+    const batchBody = JSON.stringify([
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'mail_new_identity', arguments: { localpart: 'x' } },
+      },
+    ]);
     const res = await app.request('/mcp', {
       method: 'POST',
       headers: {
@@ -306,18 +350,35 @@ describe('工具分层', () => {
         'content-type': 'application/json',
         accept: MCP_ACCEPT,
       },
-      body: JSON.stringify([
-        {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: { name: 'mail_new_identity', arguments: { localpart: 'x' } },
-        },
-      ]),
+      body: batchBody,
     });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('batch_not_supported');
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'batch_not_supported',
+    );
+    const rejected = readAuditEvents({ event: 'mcp.batch_rejected', limit: 5 });
+    expect(rejected.length).toBeGreaterThanOrEqual(1);
+    expect(rejected[0]!.outcome).toBe('denied');
+    expect(rejected[0]!.grantId).toBe(grantId);
+
+    // 再灌满写桶后 batch → 429 + rate_limited 审计（无成本洪峰不能白送）
+    resetMcpRateLimits();
+    const writeLimit = config.mcpRateWritePerMin;
+    for (let i = 0; i < writeLimit; i++) {
+      expect(checkMcpRateLimit(grantId, 'write', writeLimit).allowed).toBe(true);
+    }
+    const limited = await app.request('/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${oauthTok}`,
+        'content-type': 'application/json',
+        accept: MCP_ACCEPT,
+      },
+      body: batchBody,
+    });
+    expect(limited.status).toBe(429);
+    const rlRows = readAuditEvents({ event: 'mcp.batch_rejected', limit: 10 });
+    expect(rlRows.some((e) => e.outcome === 'rate_limited')).toBe(true);
   });
 });
 
@@ -378,5 +439,95 @@ describe('MCP per-token 限量', () => {
     expect(checkSendLimit('a@x.com', 1, 60_000, now).allowed).toBe(false);
     expect(checkNotifyUserLimit('a@x.com', 1, 60_000, now).allowed).toBe(true);
     expect(checkNotifyUserLimit('a@x.com', 1, 60_000, now).allowed).toBe(false);
+  });
+
+  test('读桶超限也落 rate_limited 审计', async () => {
+    const { token, identity } = createIdentity({ localpart: 'rate-read' })!;
+    const readLimit = config.mcpRateReadPerMin;
+    const key = identity.address.toLowerCase();
+    for (let i = 0; i < readLimit; i++) {
+      expect(checkMcpRateLimit(key, 'read', readLimit).allowed).toBe(true);
+    }
+    const blocked = await mcpCall(token, 'mail_list_identities');
+    expect(blocked.status).toBe(429);
+    const rows = readAuditEvents({ event: 'mcp.tools.call', limit: 5 });
+    expect(
+      rows.some(
+        (e) =>
+          e.outcome === 'rate_limited' &&
+          e.tier === 'read' &&
+          e.tool === 'mail_list_identities',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('审计清洗 / 合并读 / revoke 零写', () => {
+  test('带换行的 clientId 不落原始形态', () => {
+    const dirty = 'evil\r\n{"event":"forged"}\nhttp://x';
+    recordAuditEvent({
+      event: 'oauth.revoke',
+      clientId: dirty,
+      outcome: 'ok',
+    });
+    const text = auditFileText();
+    expect(text).not.toContain('\r');
+    expect(text).not.toContain('\n{"event":"forged"}');
+    expect(scrubAuditField(dirty)).toBe('evil{"event":"forged"}http://x');
+    const rows = readAuditEvents({ event: 'oauth.revoke', limit: 1 });
+    expect(rows[0]!.clientId).toBe('evil{"event":"forged"}http://x');
+  });
+
+  test('合并 audit.jsonl.1 + 当前；新的在前', () => {
+    const rotated = join(config.dataDir, 'audit.jsonl.1');
+    const current = join(config.dataDir, 'audit.jsonl');
+    writeFileSync(
+      rotated,
+      `${JSON.stringify({ ts: '2020-01-01T00:00:00.000Z', event: 'old.event', outcome: 'ok' })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      current,
+      `${JSON.stringify({ ts: '2026-01-01T00:00:00.000Z', event: 'new.event', outcome: 'ok' })}\n`,
+      { mode: 0o600 },
+    );
+    const rows = readAuditEvents({ limit: 10 });
+    expect(rows[0]!.event).toBe('new.event');
+    expect(rows.some((e) => e.event === 'old.event')).toBe(true);
+    const limited = readAuditEvents({ limit: 1 });
+    expect(limited).toHaveLength(1);
+    expect(limited[0]!.event).toBe('new.event');
+  });
+
+  test('未知 token revoke：200 且零磁盘写（oauth.json + audit）', async () => {
+    const oauthPath = join(config.dataDir, 'oauth.json');
+    // 确保有一份 oauth 文件可测 mtime
+    putAccessTokenForTests({
+      token: 'seed-for-mtime',
+      grantId: 'g-seed',
+      address: 'seed@test.example',
+      aud: RESOURCE,
+      expiresAt: Date.now() + 60_000,
+      ensureGrant: { clientId: 'http://c', clientName: 'S' },
+    });
+    createIdentity({ localpart: 'seed' });
+    const beforeOauth = statSync(oauthPath);
+    const beforeAuditLen = auditFileText().length;
+
+    expect(revokeToken('totally-unknown-token-xyz', 'http://c')).toBe(false);
+    const rev = await app.request('/oauth/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token: 'totally-unknown-token-xyz',
+        client_id: 'http://c',
+      }),
+    });
+    expect(rev.status).toBe(200);
+
+    const afterOauth = statSync(oauthPath);
+    expect(afterOauth.mtimeMs).toBe(beforeOauth.mtimeMs);
+    expect(afterOauth.size).toBe(beforeOauth.size);
+    expect(auditFileText().length).toBe(beforeAuditLen);
   });
 });

@@ -202,7 +202,11 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
   return changed;
 }
 
-function load(): OAuthStoreFile {
+/**
+ * @param persistPrune 冷读发现过期行时是否写回磁盘。
+ * 公开 /oauth/revoke 用 false：未知 token 路径必须零磁盘写（防未鉴权写放大）。
+ */
+function load(persistPrune = true): OAuthStoreFile {
   const path = storePath();
   if (!existsSync(path)) {
     if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
@@ -223,10 +227,13 @@ function load(): OAuthStoreFile {
       throw new Error('invalid oauth store shape');
     }
     if (pruneExpired(parsed)) {
-      // 读时发现过期行：就地写回，避免 save→load 递归
-      const written = writeStoreFile(parsed);
-      storeCache = { version: written, data: parsed };
-      return storeCache.data;
+      if (persistPrune) {
+        // 读时发现过期行：就地写回，避免 save→load 递归
+        const written = writeStoreFile(parsed);
+        storeCache = { version: written, data: parsed };
+        return storeCache.data;
+      }
+      // revoke 热路径：只内存 prune，不写盘
     }
     storeCache = { version, data: parsed };
     return storeCache.data;
@@ -583,11 +590,13 @@ export function rotateRefreshToken(
 /**
  * RFC 7009：吊销 access 或 refresh（未知令牌亦 200 成功语义，由路由保证）。
  * 必须带与 grant 绑定的 clientId；缺失或不匹配时**不删**（灭第三方持票 DoS）。
+ * 未知/不匹配路径：**零磁盘写**（load 不 persist prune；不 save）——公开端点防写放大。
  * @returns true 表示确有删除；false 表示未删（未知票 / 无 client / 不匹配）
  */
 export function revokeToken(token: string, clientId?: string): boolean {
   if (!clientId) return false;
-  const data = load();
+  // persistPrune=false：未命中时不得因过期清理写 oauth.json
+  const data = load(false);
   const hash = hashSecret(token);
   const access = data.access[hash];
   const refresh = data.refresh[hash];
@@ -604,6 +613,7 @@ export function revokeToken(token: string, clientId?: string): boolean {
     delete data.refresh[hash];
     changed = true;
   }
+  // 只有真删行才写盘
   if (changed) save(data);
   return changed;
 }

@@ -241,10 +241,36 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
     try {
       const parsed: unknown = JSON.parse(bodyText);
       // WriteGuard 安全带只认单对象 tools/call；JSON-RPC batch 数组会绕过
-      // tier/限量/审计——此处显式拒绝（stdio 不受影响）。
+      // tier/限量/审计——显式拒绝，并计入写桶 + 落 mcp.batch_rejected（防垃圾洪峰白送）。
       if (Array.isArray(parsed)) {
+        const fields = attributionFields(attribution);
+        const rlKey = rateLimitKey(attribution);
+        if (rlKey !== null) {
+          const rl = checkMcpRateLimit(
+            rlKey,
+            "write",
+            config.mcpRateWritePerMin,
+          );
+          if (!rl.allowed) {
+            recordAuditEvent({
+              event: "mcp.batch_rejected",
+              ...fields,
+              outcome: "rate_limited",
+            });
+            c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
+            return c.json({ error: "rate_limited", bucket: "write" }, 429);
+          }
+        }
+        recordAuditEvent({
+          event: "mcp.batch_rejected",
+          ...fields,
+          outcome: "denied",
+        });
         return c.json(
-          { error: "batch_not_supported", error_description: "JSON-RPC batch is not allowed on /mcp" },
+          {
+            error: "batch_not_supported",
+            error_description: "JSON-RPC batch is not allowed on /mcp",
+          },
           400,
         );
       }
@@ -252,7 +278,7 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
         rpc = parsed as JsonRpcCall;
       }
     } catch {
-      // 畸形体交给 SDK 处理
+      // 畸形体交给 SDK 处理（刻意：precheck 只优化合法 JSON；正式拒绝方是 SDK）
     }
 
     if (rpc?.method === "tools/call") {
@@ -313,16 +339,15 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
           bucket === "read" ? config.mcpRateReadPerMin : config.mcpRateWritePerMin;
         const rl = checkMcpRateLimit(rlKey, bucket, limit);
         if (!rl.allowed) {
-          if (isWriteTier(tier)) {
-            recordAuditEvent({
-              event: "mcp.tools.call",
-              ...fields,
-              tool: toolForAudit,
-              tier,
-              outcome: "rate_limited",
-              durationMs: Date.now() - started,
-            });
-          }
+          // 读/写桶超限均落审计（runaway 读取也要可观测；不再按 isWriteTier 过滤）
+          recordAuditEvent({
+            event: "mcp.tools.call",
+            ...fields,
+            tool: toolForAudit,
+            tier,
+            outcome: "rate_limited",
+            durationMs: Date.now() - started,
+          });
           c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
           return c.json({ error: "rate_limited", bucket }, 429);
         }

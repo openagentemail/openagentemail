@@ -8,8 +8,9 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
+  assertAllSpecTiersDeclared,
+  assertToolTierDeclared,
   declareToolTier,
-  requireToolTier,
   TOOL_TIER_SPEC,
   type ToolTier,
 } from "../lib/tool-tiers.ts";
@@ -23,12 +24,16 @@ export function registerOpenAgentEmailTools(
   server: McpServer,
   client: OpenAgentEmailClient,
 ): void {
-  /** 注册处声明级别：须与 TOOL_TIER_SPEC 一致，否则立即 throw。 */
+  /**
+   * 注册处声明级别。主力护栏是收尾 assertAllSpecTiersDeclared()——
+   * 漏调本函数则 declared 缺项、收尾必炸（declared 不预填 SPEC）。
+   */
   function tier(name: keyof typeof TOOL_TIER_SPEC, level: ToolTier): void {
     if (TOOL_TIER_SPEC[name] !== level) {
       throw new Error(`tool ${name}: tier ${level} ≠ spec ${TOOL_TIER_SPEC[name]}`);
     }
     declareToolTier(name, level);
+    assertToolTierDeclared(name);
   }
 
   const readOnlyAnnotations = {
@@ -544,8 +549,6 @@ export function registerOpenAgentEmailTools(
     ({ id, state, body, result }) => callApi(() => client.updateTask(id, state, body, result)),
   );
 
-  // 收尾：规格表 15 工具均须已在注册处声明
-  for (const name of Object.keys(TOOL_TIER_SPEC) as (keyof typeof TOOL_TIER_SPEC)[]) {
-    requireToolTier(name);
-  }
+  // 收尾：规格表 15 工具均须已在本次注册中 declare（declared 不预填，漏 tier() 即炸）
+  assertAllSpecTiersDeclared();
 }

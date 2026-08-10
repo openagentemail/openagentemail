@@ -190,15 +190,17 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
     }
     const token = body.token;
     const clientId = body.client_id;
-    // RFC 7009：一律 200；无/错 client_id 不删（灭持票第三方 DoS）
-    // 审计只记 clientId / 是否删掉——绝不写 token 任何片段
+    // RFC 7009：一律 200；无/错 client_id 不删（灭第三方持票 DoS）
+    // 未知 token：revokeToken 零磁盘写；审计也只在真删时落盘（公开端点防写放大）
     let revoked = false;
     if (token) revoked = revokeToken(token, clientId);
-    recordAuditEvent({
-      event: 'oauth.revoke',
-      ...(clientId ? { clientId } : {}),
-      outcome: revoked ? 'ok' : 'denied',
-    });
+    if (revoked) {
+      recordAuditEvent({
+        event: 'oauth.revoke',
+        ...(clientId ? { clientId } : {}),
+        outcome: 'ok',
+      });
+    }
     return c.body(null, 200);
   });
 }
