@@ -499,6 +499,57 @@ describe('审计清洗 / 合并读 / revoke 零写', () => {
     expect(limited[0]!.event).toBe('new.event');
   });
 
+  test('未知 code 换票失败：不落审计（防未鉴权写放大）', async () => {
+    const before = auditFileText().length;
+    const res = await app.request('/oauth/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code: 'totally-unknown-code-zzzz',
+        redirect_uri: 'http://127.0.0.1:54321/callback',
+        client_id: 'http://127.0.0.1:9/cimd.json',
+        code_verifier: 'a'.repeat(64),
+        resource: RESOURCE,
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(auditFileText().length).toBe(before);
+  });
+
+  test('critical 403 前先限量：写桶满则 429 而非白写 denied', async () => {
+    const { identity } = createIdentity({ localpart: 'crit-rl' })!;
+    const grantId = 'GrantCaseSensitive_AbC123';
+    const oauthTok = 'oauth-access-crit-rl';
+    putAccessTokenForTests({
+      token: oauthTok,
+      grantId,
+      address: identity.address,
+      aud: RESOURCE,
+      expiresAt: Date.now() + 3_600_000,
+      ensureGrant: {
+        clientId: 'http://127.0.0.1:9/cimd.json',
+        clientName: 'CritRl',
+      },
+    });
+    const writeLimit = config.mcpRateWritePerMin;
+    // 键必须原样（含大小写）
+    for (let i = 0; i < writeLimit; i++) {
+      expect(checkMcpRateLimit(grantId, 'write', writeLimit).allowed).toBe(true);
+    }
+    const res = await mcpCall(oauthTok, 'mail_new_identity', {
+      localpart: 'should-429',
+    });
+    expect(res.status).toBe(429);
+    const rows = readAuditEvents({ event: 'mcp.tools.call', limit: 5 });
+    expect(rows.some((e) => e.outcome === 'rate_limited' && e.tool === 'mail_new_identity')).toBe(
+      true,
+    );
+    expect(rows.some((e) => e.outcome === 'denied' && e.tool === 'mail_new_identity')).toBe(
+      false,
+    );
+  });
+
   test('未知 token revoke：200 且零磁盘写（oauth.json + audit）', async () => {
     const oauthPath = join(config.dataDir, 'oauth.json');
     // 确保有一份 oauth 文件可测 mtime

@@ -99,6 +99,15 @@ describe('checkMcpRateLimit 读写分桶', () => {
     expect(checkMcpRateLimit('g1', 'write', 1, 60_000, now).allowed).toBe(false);
     expect(checkMcpRateLimit('g1', 'read', 1, 60_000, now).allowed).toBe(true);
   });
+
+  test('grantId 键大小写敏感（不做 toLowerCase）', () => {
+    resetMcpRateLimits();
+    const now = 3_000;
+    expect(checkMcpRateLimit('AbC_grant', 'write', 1, 60_000, now).allowed).toBe(true);
+    // 不同大小写 = 不同桶，不得互相占额/错配
+    expect(checkMcpRateLimit('abc_grant', 'write', 1, 60_000, now).allowed).toBe(true);
+    expect(checkMcpRateLimit('AbC_grant', 'write', 1, 60_000, now).allowed).toBe(false);
+  });
 });
 
 // 每个 POST /v1/messages/wait 都会占住一条 IMAP 长连接，最长 600 秒。

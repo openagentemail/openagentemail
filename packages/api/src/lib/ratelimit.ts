@@ -127,6 +127,9 @@ export type McpRateBucket = 'read' | 'write';
  * MCP per-token 限量：OAuth 用 grantId、oa_ 用 address 作 key；
  * admin 由调用方豁免（不进此函数）。读写两桶独立。
  * 默认窗口 60s（env 单位是 per-minute）。
+ *
+ * **键原样使用**——不 toLowerCase。grantId 是 base64url 大小写敏感随机串，
+ * 小写化会造成碰撞/错配；address 由调用方先 `.toLowerCase()` 再传入。
  */
 export function checkMcpRateLimit(
   key: string,
@@ -136,7 +139,7 @@ export function checkMcpRateLimit(
   now = Date.now(),
 ): RateLimitResult {
   const map = bucket === 'read' ? mcpReadBuckets : mcpWriteBuckets;
-  return slidingWindowCheck(map, key.toLowerCase(), limit, windowMs, now);
+  return slidingWindowCheck(map, key, limit, windowMs, now);
 }
 
 /** 测试辅助：清空 MCP 读写桶。 */

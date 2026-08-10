@@ -237,15 +237,19 @@ function handleAuthorizationCode(
   // 先 peek：不删 code，校验失败时合法客户端仍可重试
   const peeked = peekAuthorizationCode(code);
   if (!peeked.ok) {
-    recordAuditEvent({
-      event: 'oauth.token.code',
-      ...(clientId ? { clientId } : {}),
-      outcome: 'denied',
-    });
+    // 取舍①：仅哈希命中已知行才落失败审计（expired=可归因）。
+    // not_found（含已消费后的 replay）不写盘——公网随机灌码不得撑爆 audit.jsonl。
+    if (peeked.reason === 'expired') {
+      recordAuditEvent({
+        event: 'oauth.token.code',
+        clientId,
+        outcome: 'denied',
+      });
+    }
     return oauthErrorJson(c, 'invalid_grant', peeked.reason, 400);
   }
 
-  // 全部用存储字段比对（调用方 client_id 必须与存储一致）
+  // 全部用存储字段比对（调用方 client_id 必须与存储一致）——可归因，全量审计
   if (peeked.clientId !== clientId) {
     recordAuditEvent({
       event: 'oauth.token.code',
@@ -290,9 +294,12 @@ function handleAuthorizationCode(
   // 校验通过后原子消费（拦截者无 verifier 只能拒一次可用性）
   const consumed = consumeAuthorizationCode(code);
   if (!consumed.ok) {
+    // peek 已命中后的消费失败（竞态/replay）——可归因
     recordAuditEvent({
       event: 'oauth.token.code',
       clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
       outcome: 'denied',
     });
     return oauthErrorJson(c, 'invalid_grant', consumed.reason, 400);
@@ -351,11 +358,14 @@ function handleRefresh(
     clientId,
   });
   if (!rotated.ok) {
-    recordAuditEvent({
-      event: 'oauth.token.refresh',
-      clientId,
-      outcome: 'denied',
-    });
+    // 取舍①：not_found 不落盘；expired / grant_missing / aud|client_mismatch 可归因仍记
+    if (rotated.reason !== 'not_found') {
+      recordAuditEvent({
+        event: 'oauth.token.refresh',
+        clientId,
+        outcome: 'denied',
+      });
+    }
     return oauthErrorJson(c, 'invalid_grant', REFRESH_INVALID_DESC, 400);
   }
 

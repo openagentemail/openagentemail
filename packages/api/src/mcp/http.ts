@@ -150,11 +150,14 @@ function attributionFields(attr: TokenAttribution): {
   };
 }
 
-/** 限量键：OAuth→grantId；oa_→address。admin 不进限量。 */
+/**
+ * 限量键：OAuth→grantId（base64url **原样**，大小写敏感）；
+ * oa_→address（小写化）；admin 不进限量。
+ */
 function rateLimitKey(attr: TokenAttribution): string | null {
   if (attr.kind === "admin") return null;
   if (attr.kind === "oauth") return attr.grantId;
-  return attr.address;
+  return attr.address.toLowerCase();
 }
 
 type JsonRpcCall = {
@@ -292,6 +295,25 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       const fields = attributionFields(attribution);
 
       if (!toolName) {
+        // 无名调用：先计写桶再拒绝（灭免费审计写）
+        const rlKeyMissing = rateLimitKey(attribution);
+        if (rlKeyMissing !== null) {
+          const rl = checkMcpRateLimit(
+            rlKeyMissing,
+            "write",
+            config.mcpRateWritePerMin,
+          );
+          if (!rl.allowed) {
+            recordAuditEvent({
+              event: "mcp.tools.call",
+              ...fields,
+              outcome: "rate_limited",
+              durationMs: Date.now() - started,
+            });
+            c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
+            return c.json({ error: "rate_limited", bucket: "write" }, 429);
+          }
+        }
         recordAuditEvent({
           event: "mcp.tools.call",
           ...fields,
@@ -302,6 +324,30 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       }
 
       const tier: ToolTier | undefined = getToolTier(toolName);
+
+      // per-token 限量**先于**策略拒绝审计：critical/未知工具 403 也耗配额，
+      // 避免非 admin 反复打拒绝路径白写 audit 且永不计桶。
+      const rlKey = rateLimitKey(attribution);
+      if (rlKey !== null) {
+        // 未知工具按写桶计（探测）；已知则按 read/write 分桶
+        const bucket = tier === "read" ? "read" : "write";
+        const limit =
+          bucket === "read" ? config.mcpRateReadPerMin : config.mcpRateWritePerMin;
+        const rl = checkMcpRateLimit(rlKey, bucket, limit);
+        if (!rl.allowed) {
+          recordAuditEvent({
+            event: "mcp.tools.call",
+            ...fields,
+            tool: toolForAudit,
+            ...(tier ? { tier } : {}),
+            outcome: "rate_limited",
+            durationMs: Date.now() - started,
+          });
+          c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
+          return c.json({ error: "rate_limited", bucket }, 429);
+        }
+      }
+
       // 未声明 tier → default deny（与注册即报错互补）
       if (!tier) {
         recordAuditEvent({
@@ -329,28 +375,6 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
           { error: "forbidden_tier", tool: toolForAudit, tier: "critical" },
           403,
         );
-      }
-
-      // per-token 限量：tools/call 才计费；admin 豁免
-      const rlKey = rateLimitKey(attribution);
-      if (rlKey !== null) {
-        const bucket = tier === "read" ? "read" : "write";
-        const limit =
-          bucket === "read" ? config.mcpRateReadPerMin : config.mcpRateWritePerMin;
-        const rl = checkMcpRateLimit(rlKey, bucket, limit);
-        if (!rl.allowed) {
-          // 读/写桶超限均落审计（runaway 读取也要可观测；不再按 isWriteTier 过滤）
-          recordAuditEvent({
-            event: "mcp.tools.call",
-            ...fields,
-            tool: toolForAudit,
-            tier,
-            outcome: "rate_limited",
-            durationMs: Date.now() - started,
-          });
-          c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
-          return c.json({ error: "rate_limited", bucket }, 429);
-        }
       }
 
       const sdkRequest = new Request(c.req.raw.url, {

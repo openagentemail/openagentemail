@@ -39,7 +39,7 @@ retention window before reusing one.
 - 外部可控字段（clientId 等）写入前剥控制字符/换行并截断，防 JSONL log 注入。
 - 事件名（与实现一致）：
   - `oauth.authorize.approve` / `oauth.authorize.deny`
-  - `oauth.token.code` / `oauth.token.refresh`
+  - `oauth.token.code` / `oauth.token.refresh`（失败审计取舍①：仅凭证哈希命中已知行才落——含过期/错配/PKCE；`not_found` 含已消费 replay 不写盘，防公网灌爆）
   - `oauth.revoke`（**仅真删 token 时**落盘；未知票 200 且零审计写）
   - `oauth.grant.revoke`
   - `mcp.tools.call`（成功路径仅 tier ≥ minimal；`rate_limited` / `denied` 读写下均记）
