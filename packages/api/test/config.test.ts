@@ -82,6 +82,19 @@ describe('notification URL configuration', () => {
     ).toBe('https://mail.example.com/ui');
   });
 
+  test('MCP_PUBLIC_URL is optional, http(s) only, and normalized', () => {
+    expect(parseConfig(requiredEnv).mcpPublicUrl).toBeUndefined();
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        MCP_PUBLIC_URL: 'https://API.EXAMPLE.COM/',
+      }).mcpPublicUrl,
+    ).toBe('https://api.example.com');
+    expect(() =>
+      parseConfig({ ...requiredEnv, MCP_PUBLIC_URL: 'ftp://example.com' }),
+    ).toThrow(/http or https/i);
+  });
+
   test('empty or whitespace optional URL env values are treated as unset', () => {
     // Compose ${DASHBOARD_PUBLIC_URL:-} injects "" when the var is absent.
     expect(() =>

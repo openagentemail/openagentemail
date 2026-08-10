@@ -32,10 +32,14 @@ const httpUrl = z
     { message: 'URL must use http or https' },
   );
 
-/** URL env: empty string → undefined (optional or fall through to default). */
-function envUrl(): z.ZodType<string | undefined>;
-function envUrl(fallback: string): z.ZodType<string>;
-function envUrl(fallback?: string) {
+/**
+ * URL env: empty string → undefined（可选或落到 default）。
+ * zod v4 的 preprocess 输入是 unknown，重载输出须写 ZodType<Out, unknown>
+ * 才与实现签名兼容（v3 的 ZodType<Out> 单参写法不再够用）。
+ */
+function envUrl(): z.ZodType<string | undefined, unknown>;
+function envUrl(fallback: string): z.ZodType<string, unknown>;
+function envUrl(fallback?: string): z.ZodType<string | undefined, unknown> {
   if (fallback !== undefined) {
     return z.preprocess(emptyAsUndefined, httpUrl.default(fallback));
   }
@@ -146,6 +150,10 @@ const envSchema = z.object({
   // leak its token verbatim on every push.
   DASHBOARD_PUBLIC_URL: dashboardPublicUrlEnv(),
 
+  // 可选：MCP RFC 9728 元数据里的对外绝对 origin（优先于请求 Host）。
+  // 反向代理 / 公网暴露时应设为 https://…，避免盲信 Host 头。
+  MCP_PUBLIC_URL: envUrl(),
+
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
@@ -229,6 +237,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     dashboardPublicUrl: raw.DASHBOARD_PUBLIC_URL
       ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)
       : undefined,
+    mcpPublicUrl: raw.MCP_PUBLIC_URL ? normalizeUrl(raw.MCP_PUBLIC_URL) : undefined,
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,

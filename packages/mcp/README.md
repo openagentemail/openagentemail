@@ -1,6 +1,9 @@
 # @openagentemail/mcp
 
-MCP server (stdio transport) for [openagent.email](https://openagent.email) — gives your AI agent unlimited mailboxes on your own domain: create identities, read/wait for mail, extract OTP codes & verification links, and send email. It wraps the openagent.email REST API over MCP so any MCP-capable client can use it.
+MCP server (**stdio** transport) for [openagent.email](https://openagent.email) — gives your AI agent unlimited mailboxes on your own domain: create identities, read/wait for mail, extract OTP codes & verification links, and send email. It wraps the openagent.email REST API over MCP so any MCP-capable client can use it.
+
+工具注册与 REST 客户端实现与 API 进程共享（`packages/api/src/mcp/`）。若客户端支持
+远程 MCP，也可直接 `type: http` 连接 API 的 `POST /mcp`（见仓库 `docs/mcp-clients.md`），无需本包。
 
 ## Configuration
 

@@ -1,4 +1,4 @@
-// MCP 围栏纯函数单测：只 import lib/fence.ts，绝不 import main.ts（避免 FakeMcpServer 污染）。
+// MCP 围栏纯函数单测：只 import 共享 fence 模块，绝不 import main.ts（避免 FakeMcpServer 污染）。
 import { describe, expect, test } from "bun:test";
 import {
   UNTRUSTED_EMAIL_FENCE_END_BODY,
@@ -11,7 +11,7 @@ import {
   neutralizeFenceMarkers,
   normalizeMailSourceField,
   prepareMailToolMessage,
-} from "../src/lib/fence.ts";
+} from "../../api/src/mcp/fence.ts";
 
 /** 从围栏块抽出 START/END 的 8 位 hex nonce。 */
 function extractNonces(fenced: string): { start?: string; end?: string } {

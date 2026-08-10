@@ -33,6 +33,8 @@ services:
       TASK_SIGNING_SECRET: ${TASK_SIGNING_SECRET:?Set TASK_SIGNING_SECRET in .env (openssl rand -hex 32)}
       # Optional dashboard origin for ntfy click actions on mail-arrival pushes.
       DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-}
+      # Optional public origin for MCP RFC 9728 metadata (overrides request Host).
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):
