@@ -3,13 +3,17 @@ import {
   MAX_WAITS_PER_ADDRESS,
   MAX_WAITS_TOTAL,
   acquireWaitSlot,
+  checkMcpRateLimit,
   checkNotifyUserLimit,
   checkSendLimit,
   releaseNotifyUserLimit,
   releaseWaitSlot,
+  resetMcpRateLimits,
   resetNotifyUserLimits,
   resetRateLimits,
   resetWaitSlots,
+  slidingWindowCheck,
+  slidingWindowRelease,
 } from '../src/lib/ratelimit.ts';
 
 describe('checkSendLimit', () => {
@@ -71,6 +75,38 @@ describe('checkNotifyUserLimit', () => {
     expect(checkNotifyUserLimit('agent@test.example', 1, 60_000, 10_000).allowed).toBe(false);
     releaseNotifyUserLimit('agent@test.example', granted.reservation);
     expect(checkNotifyUserLimit('agent@test.example', 1, 60_000, 10_000).allowed).toBe(true);
+  });
+});
+
+describe('slidingWindow helper（send/notify/MCP 共用）', () => {
+  test('check + release 不复制第三份窗口逻辑', () => {
+    const map = new Map<string, number[]>();
+    const now = 5_000;
+    const a = slidingWindowCheck(map, 'k', 2, 60_000, now);
+    expect(a.allowed).toBe(true);
+    expect(slidingWindowCheck(map, 'k', 2, 60_000, now).allowed).toBe(true);
+    expect(slidingWindowCheck(map, 'k', 2, 60_000, now).allowed).toBe(false);
+    slidingWindowRelease(map, 'k', a.reservation);
+    expect(slidingWindowCheck(map, 'k', 2, 60_000, now).allowed).toBe(true);
+  });
+});
+
+describe('checkMcpRateLimit 读写分桶', () => {
+  test('read/write 互不占额', () => {
+    resetMcpRateLimits();
+    const now = 2_000;
+    expect(checkMcpRateLimit('g1', 'write', 1, 60_000, now).allowed).toBe(true);
+    expect(checkMcpRateLimit('g1', 'write', 1, 60_000, now).allowed).toBe(false);
+    expect(checkMcpRateLimit('g1', 'read', 1, 60_000, now).allowed).toBe(true);
+  });
+
+  test('grantId 键大小写敏感（不做 toLowerCase）', () => {
+    resetMcpRateLimits();
+    const now = 3_000;
+    expect(checkMcpRateLimit('AbC_grant', 'write', 1, 60_000, now).allowed).toBe(true);
+    // 不同大小写 = 不同桶，不得互相占额/错配
+    expect(checkMcpRateLimit('abc_grant', 'write', 1, 60_000, now).allowed).toBe(true);
+    expect(checkMcpRateLimit('AbC_grant', 'write', 1, 60_000, now).allowed).toBe(false);
   });
 });
 

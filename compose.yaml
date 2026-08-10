@@ -196,6 +196,9 @@ services:
       DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-}
       # Optional public origin for MCP RFC 9728 metadata (overrides request Host).
       MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+      # MCP tools/call per-token rate limits (per minute; 0 = off). Admin exempt.
+      MCP_RATE_READ_PER_MIN: ${MCP_RATE_READ_PER_MIN:-60}
+      MCP_RATE_WRITE_PER_MIN: ${MCP_RATE_WRITE_PER_MIN:-20}
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):

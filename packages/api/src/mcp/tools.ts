@@ -1,9 +1,19 @@
 /**
  * 15 个 MCP 工具的注册逻辑（stdio 与 HTTP /mcp 共用唯一实现）。
+ * 每个工具在注册处声明 WriteGuard tier（见 lib/tool-tiers.ts）；
+ * 未声明 → HTTP default deny；注册与规格表不一致 → throw。
+ * stdio 不执行 tier 策略（operator 本地；REST ACL 兜底）。
  */
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import {
+  assertAllSpecTiersDeclared,
+  assertToolTierDeclared,
+  declareToolTier,
+  TOOL_TIER_SPEC,
+  type ToolTier,
+} from "../lib/tool-tiers.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
 
@@ -14,6 +24,18 @@ export function registerOpenAgentEmailTools(
   server: McpServer,
   client: OpenAgentEmailClient,
 ): void {
+  /**
+   * 注册处声明级别。主力护栏是收尾 assertAllSpecTiersDeclared()——
+   * 漏调本函数则 declared 缺项、收尾必炸（declared 不预填 SPEC）。
+   */
+  function tier(name: keyof typeof TOOL_TIER_SPEC, level: ToolTier): void {
+    if (TOOL_TIER_SPEC[name] !== level) {
+      throw new Error(`tool ${name}: tier ${level} ≠ spec ${TOOL_TIER_SPEC[name]}`);
+    }
+    declareToolTier(name, level);
+    assertToolTierDeclared(name);
+  }
+
   const readOnlyAnnotations = {
     readOnlyHint: true,
     destructiveHint: false,
@@ -198,6 +220,7 @@ export function registerOpenAgentEmailTools(
     }
   }
 
+  tier("mail_new_identity", "critical");
   server.registerTool(
     "mail_new_identity",
     {
@@ -233,6 +256,7 @@ export function registerOpenAgentEmailTools(
     ({ name, localpart, canNotifyUser }) => callApi(() => client.createIdentity({ name, localpart, canNotifyUser })),
   );
 
+  tier("mail_list_identities", "read");
   server.registerTool(
     "mail_list_identities",
     {
@@ -244,6 +268,7 @@ export function registerOpenAgentEmailTools(
     () => callApi(async () => ({ identities: await client.listIdentities() })),
   );
 
+  tier("mail_list_messages", "read");
   server.registerTool(
     "mail_list_messages",
     {
@@ -275,6 +300,7 @@ export function registerOpenAgentEmailTools(
       })),
   );
 
+  tier("mail_read_message", "read");
   server.registerTool(
     "mail_read_message",
     {
@@ -294,6 +320,7 @@ export function registerOpenAgentEmailTools(
       ),
   );
 
+  tier("mail_mark_seen", "minimal");
   server.registerTool(
     "mail_mark_seen",
     {
@@ -317,6 +344,7 @@ export function registerOpenAgentEmailTools(
       callApi(() => client.markSeen(address, id, seen ?? true)),
   );
 
+  tier("mail_wait_for", "read");
   server.registerTool(
     "mail_wait_for",
     {
@@ -359,6 +387,7 @@ export function registerOpenAgentEmailTools(
       ),
   );
 
+  tier("mail_send", "contained");
   server.registerTool(
     "mail_send",
     {
@@ -386,6 +415,7 @@ export function registerOpenAgentEmailTools(
     tags: z.array(z.string().min(1).max(64)).max(5).optional().describe("Optional ntfy tags"),
   };
 
+  tier("notify_user", "contained");
   server.registerTool(
     "notify_user",
     {
@@ -400,6 +430,7 @@ export function registerOpenAgentEmailTools(
       callApi(() => client.notifyUser(title, message, level ?? "normal", tags)),
   );
 
+  tier("notify_agent", "contained");
   server.registerTool(
     "notify_agent",
     {
@@ -420,6 +451,7 @@ export function registerOpenAgentEmailTools(
       callApi(() => client.notifyAgent(name, title, message, level ?? "normal", tags)),
   );
 
+  tier("notify_check", "read");
   server.registerTool(
     "notify_check",
     {
@@ -435,6 +467,7 @@ export function registerOpenAgentEmailTools(
     ({ since }) => callApi(async () => ({ messages: await client.notificationCheck(since) })),
   );
 
+  tier("notify_verify", "critical");
   server.registerTool(
     "notify_verify",
     {
@@ -447,6 +480,7 @@ export function registerOpenAgentEmailTools(
     () => callApi(() => client.verifyNotifications()),
   );
 
+  tier("task_create", "minimal");
   server.registerTool(
     "task_create",
     {
@@ -465,6 +499,7 @@ export function registerOpenAgentEmailTools(
     ({ to, subject, body, wait }) => callApi(() => client.createTask(to, subject, body, wait ?? false)),
   );
 
+  tier("task_list", "read");
   server.registerTool(
     "task_list",
     {
@@ -479,6 +514,7 @@ export function registerOpenAgentEmailTools(
     ({ state }) => callApi(async () => ({ tasks: await client.listTasks(state) })),
   );
 
+  tier("task_get", "read");
   server.registerTool(
     "task_get",
     {
@@ -494,6 +530,7 @@ export function registerOpenAgentEmailTools(
     ({ id, wait }) => callApi(() => client.getTask(id, wait ?? false)),
   );
 
+  tier("task_update", "contained");
   server.registerTool(
     "task_update",
     {
@@ -512,4 +549,6 @@ export function registerOpenAgentEmailTools(
     ({ id, state, body, result }) => callApi(() => client.updateTask(id, state, body, result)),
   );
 
+  // 收尾：规格表 15 工具均须已在本次注册中 declare（declared 不预填，漏 tier() 即炸）
+  assertAllSpecTiersDeclared();
 }

@@ -1,11 +1,12 @@
 /**
- * Per-address send rate limiting. In-memory sliding window — resets on
+ * Per-address / per-grant rate limiting. In-memory sliding window — resets on
  * process restart, which is acceptable for a guard whose job is to stop a
  * runaway agent or a leaked token from turning the box into a spam cannon,
  * not to enforce billing-grade quotas.
  *
  * Identities each get their own window, so one misbehaving agent can't
- * starve the others.
+ * starve the others. MCP 读写分桶与 send/notifyUser 共用下方 slidingWindow*
+ * helper——禁止再复制第三份窗口逻辑。
  */
 
 export interface RateLimitResult {
@@ -14,27 +15,28 @@ export interface RateLimitResult {
   retryAfterSec: number;
   /** Messages sent within the current window (after counting this one). */
   count: number;
-  /** Handle for releaseSendLimit(), set only when the send was allowed. */
+  /** Handle for release*Limit(), set only when the send was allowed. */
   reservation?: number;
 }
 
-const buckets = new Map<string, number[]>();
-const notifyUserBuckets = new Map<string, number[]>();
-
-export function checkSendLimit(
-  address: string,
+/**
+ * 共享滑动窗口：从 buckets[key] 滤掉过期戳，超限则拒绝并回写；
+ * 否则 push(now) 并返回 reservation。
+ */
+export function slidingWindowCheck(
+  buckets: Map<string, number[]>,
+  key: string,
   limit: number,
-  windowMs = 3_600_000,
-  now = Date.now(),
+  windowMs: number,
+  now: number,
 ): RateLimitResult {
   if (limit <= 0) return { allowed: true, retryAfterSec: 0, count: 0 };
 
-  const key = address.toLowerCase();
   const cutoff = now - windowMs;
   const stamps = (buckets.get(key) ?? []).filter((t) => t > cutoff);
 
   if (stamps.length >= limit) {
-    const retryAfterSec = Math.ceil((stamps[0] + windowMs - now) / 1000);
+    const retryAfterSec = Math.ceil((stamps[0]! + windowMs - now) / 1000);
     buckets.set(key, stamps);
     return { allowed: false, retryAfterSec, count: stamps.length };
   }
@@ -44,20 +46,44 @@ export function checkSendLimit(
   return { allowed: true, retryAfterSec: 0, count: stamps.length, reservation: now };
 }
 
-/**
- * Hand a slot back. Only for failures that never reached the mail server —
- * see isLocalSendFailure(); refunding rejected deliveries would let a caller
- * retry forever without ever spending quota.
- */
-export function releaseSendLimit(address: string, reservation: number | undefined): void {
+/** 退还一次 reservation（仅本地失败、请求未达下游时）。 */
+export function slidingWindowRelease(
+  buckets: Map<string, number[]>,
+  key: string,
+  reservation: number | undefined,
+): void {
   if (reservation === undefined) return;
-  const key = address.toLowerCase();
   const stamps = buckets.get(key);
   if (!stamps) return;
   const index = stamps.lastIndexOf(reservation);
   if (index < 0) return;
   stamps.splice(index, 1);
   if (stamps.length === 0) buckets.delete(key);
+}
+
+const buckets = new Map<string, number[]>();
+const notifyUserBuckets = new Map<string, number[]>();
+/** MCP 读桶（read 级 tools/call）。 */
+const mcpReadBuckets = new Map<string, number[]>();
+/** MCP 写桶（minimal+ 级 tools/call）。 */
+const mcpWriteBuckets = new Map<string, number[]>();
+
+export function checkSendLimit(
+  address: string,
+  limit: number,
+  windowMs = 3_600_000,
+  now = Date.now(),
+): RateLimitResult {
+  return slidingWindowCheck(buckets, address.toLowerCase(), limit, windowMs, now);
+}
+
+/**
+ * Hand a slot back. Only for failures that never reached the mail server —
+ * see isLocalSendFailure(); refunding rejected deliveries would let a caller
+ * retry forever without ever spending quota.
+ */
+export function releaseSendLimit(address: string, reservation: number | undefined): void {
+  slidingWindowRelease(buckets, address.toLowerCase(), reservation);
 }
 
 /** Test helper: wipe all windows. */
@@ -76,37 +102,50 @@ export function checkNotifyUserLimit(
   windowMs = 3_600_000,
   now = Date.now(),
 ): RateLimitResult {
-  if (limit <= 0) return { allowed: true, retryAfterSec: 0, count: 0 };
-
-  const key = address.toLowerCase();
-  const cutoff = now - windowMs;
-  const stamps = (notifyUserBuckets.get(key) ?? []).filter((t) => t > cutoff);
-  if (stamps.length >= limit) {
-    const retryAfterSec = Math.ceil((stamps[0] + windowMs - now) / 1000);
-    notifyUserBuckets.set(key, stamps);
-    return { allowed: false, retryAfterSec, count: stamps.length };
-  }
-
-  stamps.push(now);
-  notifyUserBuckets.set(key, stamps);
-  return { allowed: true, retryAfterSec: 0, count: stamps.length, reservation: now };
+  return slidingWindowCheck(
+    notifyUserBuckets,
+    address.toLowerCase(),
+    limit,
+    windowMs,
+    now,
+  );
 }
 
 /** Return a user-notification slot when no request reached ntfy. */
 export function releaseNotifyUserLimit(address: string, reservation: number | undefined): void {
-  if (reservation === undefined) return;
-  const key = address.toLowerCase();
-  const stamps = notifyUserBuckets.get(key);
-  if (!stamps) return;
-  const index = stamps.lastIndexOf(reservation);
-  if (index < 0) return;
-  stamps.splice(index, 1);
-  if (stamps.length === 0) notifyUserBuckets.delete(key);
+  slidingWindowRelease(notifyUserBuckets, address.toLowerCase(), reservation);
 }
 
 /** Test helper: wipe the independent human-notification budget. */
 export function resetNotifyUserLimits(): void {
   notifyUserBuckets.clear();
+}
+
+export type McpRateBucket = 'read' | 'write';
+
+/**
+ * MCP per-token 限量：OAuth 用 grantId、oa_ 用 address 作 key；
+ * admin 由调用方豁免（不进此函数）。读写两桶独立。
+ * 默认窗口 60s（env 单位是 per-minute）。
+ *
+ * **键原样使用**——不 toLowerCase。grantId 是 base64url 大小写敏感随机串，
+ * 小写化会造成碰撞/错配；address 由调用方先 `.toLowerCase()` 再传入。
+ */
+export function checkMcpRateLimit(
+  key: string,
+  bucket: McpRateBucket,
+  limit: number,
+  windowMs = 60_000,
+  now = Date.now(),
+): RateLimitResult {
+  const map = bucket === 'read' ? mcpReadBuckets : mcpWriteBuckets;
+  return slidingWindowCheck(map, key, limit, windowMs, now);
+}
+
+/** 测试辅助：清空 MCP 读写桶。 */
+export function resetMcpRateLimits(): void {
+  mcpReadBuckets.clear();
+  mcpWriteBuckets.clear();
 }
 
 /**

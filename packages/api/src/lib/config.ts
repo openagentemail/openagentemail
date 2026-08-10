@@ -154,6 +154,12 @@ const envSchema = z.object({
   // 反向代理 / 公网暴露时应设为 https://…，避免盲信 Host 头。
   MCP_PUBLIC_URL: envUrl(),
 
+  // MCP tools/call 分桶限量（每分钟；0 = 关闭该桶）。admin 豁免。
+  // 默认：读 60 / 写 20——写更严；对照 Joe 事故下午 ~3000 次合法调用，
+  // 20 写/min 仍够正常 agent，却能挡住失控循环。
+  MCP_RATE_READ_PER_MIN: z.coerce.number().int().min(0).default(60),
+  MCP_RATE_WRITE_PER_MIN: z.coerce.number().int().min(0).default(20),
+
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
@@ -238,6 +244,8 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)
       : undefined,
     mcpPublicUrl: raw.MCP_PUBLIC_URL ? normalizeUrl(raw.MCP_PUBLIC_URL) : undefined,
+    mcpRateReadPerMin: raw.MCP_RATE_READ_PER_MIN,
+    mcpRateWritePerMin: raw.MCP_RATE_WRITE_PER_MIN,
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,

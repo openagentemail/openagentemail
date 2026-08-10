@@ -11,6 +11,7 @@ import {
 } from './lib/ui-session.ts';
 import { getMcpLoopbackBase } from './lib/mcp-loopback.ts';
 import { registerMcpHttpRoutes } from './mcp/http.ts';
+import { auditRoute } from './routes/audit.ts';
 import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
@@ -88,6 +89,7 @@ export function createApp(options: AppOptions = {}): Hono {
   app.route('/v1/send', sendRoute);
   app.route('/v1/notify', notifyRoute);
   app.route('/v1/tasks', tasksRoute);
+  app.route('/v1/audit', auditRoute);
 
   if (options.uiEnabled ?? config.uiEnabled) {
     const uiSessions = new UiSessionStore({

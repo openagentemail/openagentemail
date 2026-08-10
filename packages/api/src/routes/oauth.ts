@@ -11,6 +11,7 @@ import {
   type CimdDocument,
 } from '../lib/oauth-cimd.ts';
 import { verifyS256CodeChallenge } from '../lib/oauth-pkce.ts';
+import { recordAuditEvent } from '../lib/audit.ts';
 import {
   consumeAuthorizationCode,
   issueTokenPair,
@@ -189,8 +190,17 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
     }
     const token = body.token;
     const clientId = body.client_id;
-    // RFC 7009：一律 200；无/错 client_id 不删（灭持票第三方 DoS）
-    if (token) revokeToken(token, clientId);
+    // RFC 7009：一律 200；无/错 client_id 不删（灭第三方持票 DoS）
+    // 未知 token：revokeToken 零磁盘写；审计也只在真删时落盘（公开端点防写放大）
+    let revoked = false;
+    if (token) revoked = revokeToken(token, clientId);
+    if (revoked) {
+      recordAuditEvent({
+        event: 'oauth.revoke',
+        ...(clientId ? { clientId } : {}),
+        outcome: 'ok',
+      });
+    }
     return c.body(null, 200);
   });
 }
@@ -227,26 +237,71 @@ function handleAuthorizationCode(
   // 先 peek：不删 code，校验失败时合法客户端仍可重试
   const peeked = peekAuthorizationCode(code);
   if (!peeked.ok) {
+    // 取舍①：仅哈希命中已知行才落失败审计（expired=可归因）。
+    // not_found（含已消费后的 replay）不写盘——公网随机灌码不得撑爆 audit.jsonl。
+    if (peeked.reason === 'expired') {
+      recordAuditEvent({
+        event: 'oauth.token.code',
+        clientId,
+        outcome: 'denied',
+      });
+    }
     return oauthErrorJson(c, 'invalid_grant', peeked.reason, 400);
   }
 
-  // 全部用存储字段比对（调用方 client_id 必须与存储一致）
+  // 全部用存储字段比对（调用方 client_id 必须与存储一致）——可归因，全量审计
   if (peeked.clientId !== clientId) {
+    recordAuditEvent({
+      event: 'oauth.token.code',
+      clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
+      outcome: 'denied',
+    });
     return oauthErrorJson(c, 'invalid_grant', 'client_id mismatch');
   }
   if (!matchRedirectUri(redirectUri, [peeked.redirectUri])) {
+    recordAuditEvent({
+      event: 'oauth.token.code',
+      clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
+      outcome: 'denied',
+    });
     return oauthErrorJson(c, 'invalid_grant', 'redirect_uri mismatch');
   }
   if (peeked.resource !== resource) {
+    recordAuditEvent({
+      event: 'oauth.token.code',
+      clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
+      outcome: 'denied',
+    });
     return oauthErrorJson(c, 'invalid_grant', 'resource mismatch');
   }
   if (!verifyS256CodeChallenge(codeVerifier, peeked.codeChallenge)) {
+    recordAuditEvent({
+      event: 'oauth.token.code',
+      clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
+      outcome: 'denied',
+    });
     return oauthErrorJson(c, 'invalid_grant', 'pkce verification failed');
   }
 
   // 校验通过后原子消费（拦截者无 verifier 只能拒一次可用性）
   const consumed = consumeAuthorizationCode(code);
   if (!consumed.ok) {
+    // peek 已命中后的消费失败（竞态/replay）——可归因
+    recordAuditEvent({
+      event: 'oauth.token.code',
+      clientId,
+      grantId: peeked.grantId,
+      address: peeked.address,
+      outcome: 'denied',
+    });
     return oauthErrorJson(c, 'invalid_grant', consumed.reason, 400);
   }
 
@@ -254,6 +309,15 @@ function handleAuthorizationCode(
     grantId: consumed.grantId,
     address: consumed.address,
     aud: expectedResource,
+  });
+
+  // scrubbed：只记身份标识，不写 access/refresh 明文
+  recordAuditEvent({
+    event: 'oauth.token.code',
+    clientId: consumed.clientId,
+    grantId: consumed.grantId,
+    address: consumed.address,
+    outcome: 'ok',
   });
 
   return tokenSuccessJson(c, {
@@ -294,8 +358,24 @@ function handleRefresh(
     clientId,
   });
   if (!rotated.ok) {
+    // 取舍①：not_found 不落盘；expired / grant_missing / aud|client_mismatch 可归因仍记
+    if (rotated.reason !== 'not_found') {
+      recordAuditEvent({
+        event: 'oauth.token.refresh',
+        clientId,
+        outcome: 'denied',
+      });
+    }
     return oauthErrorJson(c, 'invalid_grant', REFRESH_INVALID_DESC, 400);
   }
+
+  recordAuditEvent({
+    event: 'oauth.token.refresh',
+    clientId,
+    grantId: rotated.grantId,
+    address: rotated.address,
+    outcome: 'ok',
+  });
 
   return tokenSuccessJson(c, {
     access_token: rotated.accessToken,
