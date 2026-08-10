@@ -39,6 +39,7 @@ import {
   taskParticipants,
   taskService,
 } from '../lib/tasks.ts';
+import { consumeOAuthReturnCookie } from '../lib/oauth-return.ts';
 import {
   UiSessionStore,
   uiPrivateHeaders,
@@ -295,7 +296,12 @@ export function createUiApiRoutes(
   routes.use('*', uiPrivateHeaders);
   routes.use('*', uiSessionAuth(store));
 
-  routes.get('/me', (c) => c.json(getAuth(c)));
+  routes.get('/me', (c) => {
+    const auth = getAuth(c);
+    // 已登录用户打开 /ui 时若仍挂着 OAuth return cookie，一并交给前端回跳。
+    const returnTo = consumeOAuthReturnCookie(c);
+    return c.json(returnTo ? { ...auth, returnTo } : auth);
+  });
 
   routes.get('/identities', (c) => {
     const auth = getAuth(c);

@@ -6,6 +6,7 @@ import { createMiddleware } from 'hono/factory';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Auth } from './auth.ts';
+import { consumeOAuthReturnCookie } from './oauth-return.ts';
 
 const COOKIE_NAME = 'oae_ui';
 const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
@@ -317,7 +318,9 @@ export function createUiSessionRoutes(store: UiSessionStore): Hono {
       }
 
       setSessionCookie(c, result.sid, remember);
-      return c.json(result.auth);
+      // OAuth 同意页登录回跳（若有）；一次性消费，不进会话长期状态。
+      const returnTo = consumeOAuthReturnCookie(c);
+      return c.json(returnTo ? { ...result.auth, returnTo } : result.auth);
     } catch {
       // Keep credentials out of the global error logger even if parsing or the
       // backing token resolver fails with an error containing request data.

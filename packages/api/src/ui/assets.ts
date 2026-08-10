@@ -1258,6 +1258,17 @@ export const UI_JS = `(function () {
     loginError.textContent = '';
   }
 
+  /* OAuth 同意页回跳：路径由服务端会话接口 JSON 下发（cookie），不读地址栏查询串。 */
+  function consumeReturnTo(payload) {
+    var path = payload && typeof payload.returnTo === 'string' ? payload.returnTo : '';
+    /* 拒绝协议相对路径（两段斜杠开头）；字面量拆开以免触碰资产契约对 // 的禁令。 */
+    if (!path || path.charAt(0) !== '/') return false;
+    if (path.length >= 2 && path.charAt(1) === '/') return false;
+    if (path.indexOf('/ui/') !== 0 && path !== '/ui') return false;
+    window.location.replace(path);
+    return true;
+  }
+
   function isAdmin() {
     return Boolean(state.me) && state.me.kind === 'admin';
   }
@@ -3769,7 +3780,10 @@ export const UI_JS = `(function () {
           : 'Sign-in is temporarily unavailable. Try again.';
         return;
       }
-      state.me = await response.json();
+      var loginPayload = await response.json();
+      state.me = loginPayload;
+      /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
+      if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
     } catch {
@@ -3887,7 +3901,9 @@ export const UI_JS = `(function () {
       var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
       if (response.status === 401) { showLogin(''); return; }
       if (!response.ok) throw new Error('request_failed');
-      state.me = await response.json();
+      var mePayload = await response.json();
+      state.me = mePayload;
+      if (consumeReturnTo(mePayload)) return;
       showInbox();
       await startSession();
     } catch {

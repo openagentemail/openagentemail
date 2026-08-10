@@ -129,7 +129,7 @@ describe('MCP 元数据 origin / insecure issuer', () => {
     );
   });
 
-  test('loopback / 私网 http 放行 insecure issuer', () => {
+  test('loopback / 私网 http 放行 insecure issuer（与 lib/net 同源）', () => {
     expect(allowInsecureIssuerUrl('http://127.0.0.1:3100')).toBe(true);
     expect(allowInsecureIssuerUrl('http://localhost:3100')).toBe(true);
     expect(allowInsecureIssuerUrl('http://10.1.2.3')).toBe(true);
@@ -138,7 +138,12 @@ describe('MCP 元数据 origin / insecure issuer', () => {
     expect(allowInsecureIssuerUrl('http://100.64.1.2')).toBe(true);
     expect(allowInsecureIssuerUrl('http://[::1]/')).toBe(true);
     expect(allowInsecureIssuerUrl('http://[fd12:3456::1]')).toBe(true);
+    // 语义统一：fe80 链路本地现与 CIMD 一致，算可放行私网
+    expect(allowInsecureIssuerUrl('http://[fe80::1]/')).toBe(true);
     expect(allowInsecureIssuerUrl('https://127.0.0.1')).toBe(false);
+    // 永拒段不算私网：绝不开 insecure issuer
+    expect(allowInsecureIssuerUrl('http://169.254.169.254')).toBe(false);
+    expect(allowInsecureIssuerUrl('http://0.0.0.0')).toBe(false);
   });
 
   test('MCP_PUBLIC_URL / publicBaseUrl 覆盖请求 origin', () => {

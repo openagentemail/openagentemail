@@ -12,8 +12,12 @@ API 进程暴露无状态 MCP 端点 `POST /mcp`（MCP 2026-07-28 / SDK v2）。
 | 项 | 值 |
 | --- | --- |
 | URL | `https://<your-api-host>/mcp`（或 tailnet / 内网 `http://…:3100/mcp`） |
-| Auth | `Authorization: Bearer <oa_… 或 admin API_KEYS>` |
-| 发现 | `GET /.well-known/oauth-protected-resource`（RFC 9728；完整 OAuth AS 为后续工作） |
+| Auth | `Authorization: Bearer <oa_… / admin API_KEYS / OAuth access>` |
+| 发现 | `GET /.well-known/oauth-protected-resource`（RFC 9728）→ `authorization_servers` 指向本机 AS issuer |
+| AS | `GET /.well-known/oauth-authorization-server`（RFC 8414；CIMD，无 DCR） |
+| 授权 | 浏览器打开 `/authorize`（同意页在 Dashboard 会话内）；业主选已有身份或当场新建 |
+
+网页 Agent（ChatGPT / Claude 等）走标准 OAuth 授权码 + PKCE（仅 S256）+ CIMD。OAuth access token 仅为 **identity** 级（永非 admin），绑定 MCP resource（`…/mcp`）。管理已授权客户端：Dashboard `/ui/oauth/grants`。
 
 ### Cursor / 通用 MCP `type: http` 示例
 

@@ -32,8 +32,11 @@ bun run typecheck
 
 All `/v1/*` require `Authorization: Bearer <key>`.
 
-- `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin 或 `oa_`）；无/坏 token → 401 + `WWW-Authenticate`
-- `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开、无鉴权**。可选 env `MCP_PUBLIC_URL` 覆盖元数据里的对外 origin
+- `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin / `oa_` / OAuth access）；无/坏 token → 401 + `WWW-Authenticate`；OAuth aud 不符 → 403
+- `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开**；`authorization_servers` = AS issuer。可选 env `MCP_PUBLIC_URL` 覆盖对外 origin
+- `GET /.well-known/oauth-authorization-server` — RFC 8414（PKCE S256、CIMD、iss 响应）；**公开**
+- `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；管理页 `/ui/oauth/grants`
+- OAuth 存储：`DATA_DIR/oauth.json`（只存哈希；与 identities.json 同模式）
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
 - `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,...}]}`
 - `GET /v1/identities/:address/push-tier` → `{address, pushContentTier, warning?}` (admin any; identity own only)

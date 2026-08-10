@@ -1,0 +1,197 @@
+/**
+ * CIMD 校验器 + SSRF IP 判定单测（注入 fetcher，不起真 HTTP）。
+ */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'x';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'x';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-oauth-cimd-'));
+process.env.UI_ENABLED = 'false';
+
+const { describe, expect, test, beforeEach } = await import('bun:test');
+const {
+  assertClientIdHostSafe,
+  clearCimdCacheForTests,
+  fetchClientMetadata,
+  isBlockedSsrfIp,
+  isSsrfBlockedResolvedIp,
+  matchRedirectUri,
+  validateClientIdUrl,
+} = await import('../src/lib/oauth-cimd.ts');
+
+beforeEach(() => {
+  clearCimdCacheForTests();
+});
+
+describe('isBlockedSsrfIp / 私网放行对照', () => {
+  test('169.254.0.0/16 与 0.0.0.0/8 永拒', () => {
+    expect(isBlockedSsrfIp('169.254.169.254')).toBe(true);
+    expect(isBlockedSsrfIp('169.254.0.1')).toBe(true);
+    expect(isBlockedSsrfIp('0.0.0.0')).toBe(true);
+    expect(isBlockedSsrfIp('0.1.2.3')).toBe(true);
+  });
+
+  test('RFC1918 / CGNAT / loopback 不在永拒清单（部署例外放行）', () => {
+    expect(isBlockedSsrfIp('10.0.0.1')).toBe(false);
+    expect(isBlockedSsrfIp('192.168.1.1')).toBe(false);
+    expect(isBlockedSsrfIp('172.16.0.1')).toBe(false);
+    expect(isBlockedSsrfIp('100.64.1.2')).toBe(false);
+    expect(isBlockedSsrfIp('127.0.0.1')).toBe(false);
+  });
+
+  test('isSsrfBlockedResolvedIp：永拒仍 blocked；私网放行', () => {
+    expect(isSsrfBlockedResolvedIp('169.254.169.254')).toBe(true);
+    expect(isSsrfBlockedResolvedIp('0.0.0.0')).toBe(true);
+    expect(isSsrfBlockedResolvedIp('10.1.2.3')).toBe(false);
+    expect(isSsrfBlockedResolvedIp('127.0.0.1')).toBe(false);
+    expect(isSsrfBlockedResolvedIp('8.8.8.8')).toBe(false);
+  });
+});
+
+describe('validateClientIdUrl', () => {
+  test('https + path 合法', () => {
+    const r = validateClientIdUrl('https://client.example/oauth/client.json');
+    expect(r.ok).toBe(true);
+  });
+
+  test('缺 path / 含 fragment / userinfo / query / 点段 拒', () => {
+    expect(validateClientIdUrl('https://client.example/').ok).toBe(false);
+    expect(validateClientIdUrl('https://client.example/a#x').ok).toBe(false);
+    expect(validateClientIdUrl('https://u:p@client.example/a').ok).toBe(false);
+    expect(validateClientIdUrl('https://client.example/a?x=1').ok).toBe(false);
+    expect(validateClientIdUrl('https://client.example/./a').ok).toBe(false);
+    expect(validateClientIdUrl('https://client.example/a/../b').ok).toBe(false);
+  });
+
+  test('loopback http 因部署例外放行', () => {
+    expect(validateClientIdUrl('http://127.0.0.1:9/cimd.json').ok).toBe(true);
+    expect(validateClientIdUrl('http://10.0.0.2/cimd.json').ok).toBe(true);
+    expect(validateClientIdUrl('http://example.com/cimd.json').ok).toBe(false);
+  });
+});
+
+describe('matchRedirectUri loopback 端口放宽', () => {
+  test('127.0.0.1 不同端口放行', () => {
+    expect(
+      matchRedirectUri('http://127.0.0.1:54321/callback', ['http://127.0.0.1/callback']),
+    ).toBe(true);
+    expect(
+      matchRedirectUri('http://localhost:9999/callback', ['http://localhost/callback']),
+    ).toBe(true);
+  });
+
+  test('非 loopback 端口必须精确', () => {
+    expect(
+      matchRedirectUri('https://app.example:443/cb', ['https://app.example:8443/cb']),
+    ).toBe(false);
+  });
+});
+
+describe('fetchClientMetadata（注入 fetcher）', () => {
+  const clientId = 'http://127.0.0.1:9/cimd.json';
+
+  test('200 + 合法文档', async () => {
+    const doc = {
+      client_id: clientId,
+      client_name: 'Test Client',
+      redirect_uris: ['http://127.0.0.1/callback'],
+      token_endpoint_auth_method: 'none',
+    };
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(JSON.stringify(doc), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'cache-control': 'max-age=120' },
+        }),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.doc.client_name).toBe('Test Client');
+  });
+
+  test('重定向拒', async () => {
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(null, { status: 302, headers: { location: 'http://evil/' } }),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('redirect_forbidden');
+  });
+
+  test('client_id 逐字符不符拒', async () => {
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_id: 'http://127.0.0.1:9/OTHER.json',
+            client_name: 'X',
+            redirect_uris: ['http://127.0.0.1/callback'],
+          }),
+          { status: 200 },
+        ),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('client_id_mismatch');
+  });
+
+  test('缺必填字段拒', async () => {
+    const r = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(JSON.stringify({ client_id: clientId, client_name: 'X' }), {
+          status: 200,
+        }),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('missing_redirect_uris');
+  });
+
+  test('声明 client_secret* / private_key_jwt 拒', async () => {
+    const secret = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_id: clientId,
+            client_name: 'X',
+            redirect_uris: ['http://127.0.0.1/callback'],
+            client_secret: 'nope',
+          }),
+          { status: 200 },
+        ),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(secret.ok).toBe(false);
+
+    const jwt = await fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_id: clientId,
+            client_name: 'X',
+            redirect_uris: ['http://127.0.0.1/callback'],
+            token_endpoint_auth_method: 'private_key_jwt',
+          }),
+          { status: 200 },
+        ),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    expect(jwt.ok).toBe(false);
+    if (!jwt.ok) expect(jwt.reason).toBe('auth_method_unsupported');
+  });
+
+  test('解析到 169.254 拒', async () => {
+    const r = await assertClientIdHostSafe('metadata.local', async () => [
+      { address: '169.254.169.254', family: 4 },
+    ]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('ssrf_blocked_ip');
+  });
+});
