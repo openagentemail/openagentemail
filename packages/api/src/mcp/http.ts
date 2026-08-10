@@ -16,11 +16,20 @@ import {
   type AuthMetadataOptions,
   type OAuthMetadata,
 } from "@modelcontextprotocol/server";
-import { resolveToken } from "../lib/auth.ts";
-import { config } from "../lib/config.ts";
+import { resolveAccessToken } from "../lib/auth.ts";
 import { JSON_BODY_LIMIT_BYTES } from "../lib/limits.ts";
+import { getMcpLoopbackBase, runWithMcpLoopbackBase } from "../lib/mcp-loopback.ts";
+import { isPrivateOrLoopbackHost, isPrivateOrLoopbackHostname } from "../lib/net.ts";
+import {
+  buildAuthorizationServerMetadata,
+  resolvePublicBase,
+  resolveResourceUri,
+} from "../lib/oauth-url.ts";
 import { OpenAgentEmailClient, type FetchLike } from "./client.ts";
 import { registerOpenAgentEmailTools } from "./tools.ts";
+
+/** 兼容旧导出名：实现已迁至 lib/net.ts（唯一共享）。 */
+export { isPrivateOrLoopbackHost };
 
 /** MCP 服务实现标识（HTTP 面；stdio 包用自己的 package.json version）。 */
 const MCP_SERVER_INFO = { name: "openagentemail", version: "0.5.0" } as const;
@@ -50,42 +59,15 @@ export function bearerToken(authorization: string | undefined): string | undefin
 }
 
 /**
- * 判断 hostname 是否为 loopback / RFC1918 / CGNAT / ULA。
- * 用于限制 dangerouslyAllowInsecureIssuerUrl，公网 http 一律不放行。
+ * http + 可放行私网/loopback 才允许 insecure issuer。
+ * 永拒段（169.254 / 0.0.0.0，含 v4-mapped）不算私网——与 CIMD SSRF 同一套 lib/net。
  */
-export function isPrivateOrLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[(.+)\]$/, "$1").toLowerCase();
-  if (host === "localhost" || host === "::1") return true;
-
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4) {
-    const a = Number(v4[1]);
-    const b = Number(v4[2]);
-    const c = Number(v4[3]);
-    const d = Number(v4[4]);
-    if ([a, b, c, d].some((n) => n > 255)) return false;
-    if (a === 127) return true; // 127.0.0.0/8
-    if (a === 10) return true; // 10.0.0.0/8
-    if (a === 192 && b === 168) return true; // 192.168.0.0/16
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
-    return false;
-  }
-
-  // IPv6 ULA fd00::/8（首 hextet 以 fd 开头）
-  if (host.includes(":")) {
-    const first = host.split(":").find((p) => p.length > 0) ?? "";
-    return first.startsWith("fd");
-  }
-  return false;
-}
-
-/** http + 私网/loopback 才允许 insecure issuer；公网 http / https 都不开危险开关。 */
 export function allowInsecureIssuerUrl(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== "http:") return false;
-    return isPrivateOrLoopbackHost(url.hostname);
+    // isPrivateOrLoopbackHostname 已排除 169.254/0.0.0.0（含 v4-mapped）
+    return isPrivateOrLoopbackHostname(url.hostname);
   } catch {
     return false;
   }
@@ -93,20 +75,22 @@ export function allowInsecureIssuerUrl(baseUrl: string): boolean {
 
 /**
  * 拼 RFC 9728 Protected Resource Metadata 选项。
- * - base：优先 MCP_PUBLIC_URL / publicBaseUrl，否则回落请求 origin
- * - oauthMetadata 仅含 issuer（authorization_servers 由此派生）；authorize/token 等 AS
- *   端点属 P3，现在广告出去是撒谎，故不放进元数据
+ * - base：优先 MCP_PUBLIC_URL / publicBaseUrl，否则回落请求 origin（与 oauth-url 同源）
+ * - oauthMetadata 填真 AS 元数据（P3）；PRM.authorization_servers 由 issuer 派生
  */
 export function mcpAuthMetadataOptions(
   requestOrigin: string,
   publicBaseUrl?: string,
 ): AuthMetadataOptions {
-  const base = (publicBaseUrl ?? requestOrigin).replace(/\/+$/, "");
-  // SDK 校验 OAuthMetadata 时 issuer 即可；其余 AS 字段等 P3 真 AS 落地再填。
-  const oauthMetadata = { issuer: base } as OAuthMetadata;
+  // 单一来源：override(publicBaseUrl) ?? MCP_PUBLIC_URL ?? requestOrigin
+  const base = resolvePublicBase(requestOrigin, publicBaseUrl);
+  const oauthMetadata = buildAuthorizationServerMetadata(
+    requestOrigin,
+    publicBaseUrl,
+  ) as OAuthMetadata;
   return {
     oauthMetadata,
-    resourceServerUrl: new URL(`${base}/mcp`),
+    resourceServerUrl: new URL(resolveResourceUri(requestOrigin, publicBaseUrl)),
     resourceName: "openagentemail",
     scopesSupported: ["mcp"],
     dangerouslyAllowInsecureIssuerUrl: allowInsecureIssuerUrl(base),
@@ -123,8 +107,8 @@ function protectedResourceMetadata(
   requestOrigin: string,
   options: McpHttpOptions,
 ): ReturnType<typeof buildOAuthProtectedResourceMetadata> {
-  const publicBase = options.publicBaseUrl ?? config.mcpPublicUrl;
-  const base = mcpAuthMetadataOptions(requestOrigin, publicBase);
+  // publicBaseUrl 仅测试注入；生产走 config.mcpPublicUrl（在 resolvePublicBase 内）
+  const base = mcpAuthMetadataOptions(requestOrigin, options.publicBaseUrl);
   const metaOpts: AuthMetadataOptions = options.resourceServerUrl
     ? { ...base, resourceServerUrl: options.resourceServerUrl }
     : base;
@@ -152,17 +136,19 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
   );
 
   // 无状态：每请求新 McpServer；token 经 authInfo 传入工厂。
+  // baseUrl 取自 ALS 中的公共 origin（外部请求 / MCP_PUBLIC_URL），禁止 mcp.internal。
   const mcpHandler = createMcpHandler(
     (ctx) => {
       const token = ctx.authInfo?.token;
       if (!token) {
         throw new Error("mcp factory invoked without authInfo.token");
       }
-      const client = new OpenAgentEmailClient(
-        "http://mcp.internal",
-        token,
-        options.apiFetch,
-      );
+      // 工厂在 runWithMcpLoopbackBase 内调用；构造时读 ALS 公共 base
+      const publicBase = getMcpLoopbackBase();
+      if (!publicBase) {
+        throw new Error("mcp factory: missing loopback public base");
+      }
+      const client = new OpenAgentEmailClient(publicBase, token, options.apiFetch);
       const server = new McpServer(MCP_SERVER_INFO);
       registerOpenAgentEmailTools(server, client);
       return server;
@@ -185,21 +171,30 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
         challengeOpts,
       );
     }
-    const auth = resolveToken(token);
-    if (!auth) {
+    const resource = resolveResourceUri(origin, options.publicBaseUrl);
+    const publicBase = resolvePublicBase(origin, options.publicBaseUrl);
+    const resolved = resolveAccessToken(token, { resource });
+    if (resolved.status === "forbidden_audience") {
+      // aud 不符 → 403（任务书负例）；其余无效/过期仍 401 + 挑战
+      return c.json({ error: "invalid_audience" }, 403);
+    }
+    if (resolved.status !== "ok") {
       return bearerAuthChallengeResponse(
         new OAuthError(OAuthErrorCode.InvalidToken, "invalid token"),
         challengeOpts,
       );
     }
-    // createMcpHandler 不校验 expiresAt；此处只传透 token 给工具工厂。
-    return mcpHandler.fetch(c.req.raw, {
-      authInfo: {
-        token,
-        clientId: auth.kind === "admin" ? "admin" : auth.address,
-        scopes: ["mcp"],
-      },
-    });
+    const auth = resolved.auth;
+    // 整段工具调度包在公共 base ALS 内，使 /v1 的 c.req.url.origin ≡ aud 推导源
+    return runWithMcpLoopbackBase(publicBase, () =>
+      mcpHandler.fetch(c.req.raw, {
+        authInfo: {
+          token,
+          clientId: auth.kind === "admin" ? "admin" : auth.address,
+          scopes: ["mcp"],
+        },
+      }),
+    );
   });
   app.all("/mcp", (c) => {
     c.header("Allow", "POST");

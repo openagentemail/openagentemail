@@ -20,6 +20,14 @@ retention window before reusing one.
 <!-- Canonical copy lives in the website repo (src/content/docs/docs/); mirror
      this note there when publishing. -->
 
+## OAuth access tokens（P3 AS）
+
+- OAuth 票**永远是 identity 级**，不能经授权流获得 admin。
+- access / refresh / code 只存 SHA-256 哈希（`DATA_DIR/oauth.json`，0600）；access 默认 1h，refresh 30d 且轮换即作废旧票。
+- 令牌绑定 RFC 8707 `resource`（本机 `{base}/mcp`）；aud 不符 → 403。
+- CIMD SSRF：当前部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU（P4 公网须进一步收紧私网放行）。
+- 授权响应（含错误）一律带 `iss`（RFC 9207）。Dashboard `/ui/oauth/grants` 可整串吊销。
+
 ## Prompt-injection 防护
 
 Agent 通过 REST / MCP 读外部来信时，正文会进入 LLM 上下文。本项目的主防线是
