@@ -1,8 +1,13 @@
 /**
  * 远程无状态 MCP HTTP 传输：POST /mcp + RFC 9728 Protected Resource Metadata。
  *
- * 鉴权走 resolveToken（支持 admin / oa_ identity）；SDK 的 verifyBearerToken
+ * 鉴权走 resolveAccessToken（支持 admin / oa_ identity / OAuth）；SDK 的 verifyBearerToken
  * 因要求 expiresAt，与永久 oa_ 令牌不兼容，故仅复用挑战响应 / 元数据 helpers。
+ *
+ * P3.5 安全带（仅本 HTTP 路径；stdio 不拦——operator 本地上下文，REST ACL 兜底）：
+ * 1) tools/call 进 SDK 前按 tool→tier 策略（critical 对 OAuth deny-by-default）
+ * 2) per-token 读写分桶限量（admin 豁免；tools/list 免费）
+ * 3) tier≥minimal 落 scrubbed 审计（含 attribution）
  */
 import type { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -16,7 +21,12 @@ import {
   type AuthMetadataOptions,
   type OAuthMetadata,
 } from "@modelcontextprotocol/server";
-import { resolveAccessToken } from "../lib/auth.ts";
+import { recordAuditEvent, type AuditOutcome } from "../lib/audit.ts";
+import {
+  resolveAccessToken,
+  type TokenAttribution,
+} from "../lib/auth.ts";
+import { config } from "../lib/config.ts";
 import { JSON_BODY_LIMIT_BYTES } from "../lib/limits.ts";
 import { getMcpLoopbackBase, runWithMcpLoopbackBase } from "../lib/mcp-loopback.ts";
 import { isPrivateOrLoopbackHost, isPrivateOrLoopbackHostname } from "../lib/net.ts";
@@ -25,6 +35,12 @@ import {
   resolvePublicBase,
   resolveResourceUri,
 } from "../lib/oauth-url.ts";
+import { checkMcpRateLimit } from "../lib/ratelimit.ts";
+import {
+  getToolTier,
+  isWriteTier,
+  type ToolTier,
+} from "../lib/tool-tiers.ts";
 import { OpenAgentEmailClient, type FetchLike } from "./client.ts";
 import { registerOpenAgentEmailTools } from "./tools.ts";
 
@@ -115,6 +131,38 @@ function protectedResourceMetadata(
   return buildOAuthProtectedResourceMetadata(metaOpts);
 }
 
+/** 从 attribution 拼审计行可选字段（scrubbed：无 token）。 */
+function attributionFields(attr: TokenAttribution): {
+  clientId?: string;
+  grantId?: string;
+  address?: string;
+} {
+  if (attr.kind === "admin") {
+    return { address: "admin" };
+  }
+  if (attr.kind === "identity") {
+    return { address: attr.address };
+  }
+  return {
+    clientId: attr.clientId,
+    grantId: attr.grantId,
+    address: attr.address,
+  };
+}
+
+/** 限量键：OAuth→grantId；oa_→address。admin 不进限量。 */
+function rateLimitKey(attr: TokenAttribution): string | null {
+  if (attr.kind === "admin") return null;
+  if (attr.kind === "oauth") return attr.grantId;
+  return attr.address;
+}
+
+type JsonRpcCall = {
+  method?: string;
+  params?: { name?: string; arguments?: unknown };
+  id?: unknown;
+};
+
 /**
  * 在主 Hono app 上注册 MCP 相关路由（直接挂在父 app，避免与
  * `app.route('/.well-known', agentCardRoute)` 前缀抢路由）。
@@ -185,9 +233,144 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       );
     }
     const auth = resolved.auth;
+    const attribution = resolved.attribution;
+
+    // 读体一次再建 Request，供 tier/限量预检（body 只能消费一次）
+    const bodyText = await c.req.raw.text();
+    let rpc: JsonRpcCall | undefined;
+    try {
+      const parsed: unknown = JSON.parse(bodyText);
+      // WriteGuard 安全带只认单对象 tools/call；JSON-RPC batch 数组会绕过
+      // tier/限量/审计——此处显式拒绝（stdio 不受影响）。
+      if (Array.isArray(parsed)) {
+        return c.json(
+          { error: "batch_not_supported", error_description: "JSON-RPC batch is not allowed on /mcp" },
+          400,
+        );
+      }
+      if (parsed && typeof parsed === "object") {
+        rpc = parsed as JsonRpcCall;
+      }
+    } catch {
+      // 畸形体交给 SDK 处理
+    }
+
+    if (rpc?.method === "tools/call") {
+      // 审计只存截断后的工具名（防客户端塞超长串）；查找仍用原文
+      const rawToolName =
+        typeof rpc.params?.name === "string" ? rpc.params.name : undefined;
+      const toolName = rawToolName;
+      const toolForAudit =
+        rawToolName !== undefined ? rawToolName.slice(0, 128) : undefined;
+      const started = Date.now();
+      const fields = attributionFields(attribution);
+
+      if (!toolName) {
+        recordAuditEvent({
+          event: "mcp.tools.call",
+          ...fields,
+          outcome: "denied",
+          durationMs: Date.now() - started,
+        });
+        return c.json({ error: "tool_required" }, 400);
+      }
+
+      const tier: ToolTier | undefined = getToolTier(toolName);
+      // 未声明 tier → default deny（与注册即报错互补）
+      if (!tier) {
+        recordAuditEvent({
+          event: "mcp.tools.call",
+          ...fields,
+          tool: toolForAudit,
+          outcome: "denied",
+          durationMs: Date.now() - started,
+        });
+        return c.json({ error: "forbidden_tier", tool: toolForAudit }, 403);
+      }
+
+      // critical：OAuth 票 deny-by-default（网页 Agent 永不许建身份/发验证）
+      // oa_ 继续进 SDK→REST scope（already admin-only 的自然 403）；admin 全通
+      if (tier === "critical" && attribution.kind === "oauth") {
+        recordAuditEvent({
+          event: "mcp.tools.call",
+          ...fields,
+          tool: toolForAudit,
+          tier,
+          outcome: "denied",
+          durationMs: Date.now() - started,
+        });
+        return c.json(
+          { error: "forbidden_tier", tool: toolForAudit, tier: "critical" },
+          403,
+        );
+      }
+
+      // per-token 限量：tools/call 才计费；admin 豁免
+      const rlKey = rateLimitKey(attribution);
+      if (rlKey !== null) {
+        const bucket = tier === "read" ? "read" : "write";
+        const limit =
+          bucket === "read" ? config.mcpRateReadPerMin : config.mcpRateWritePerMin;
+        const rl = checkMcpRateLimit(rlKey, bucket, limit);
+        if (!rl.allowed) {
+          if (isWriteTier(tier)) {
+            recordAuditEvent({
+              event: "mcp.tools.call",
+              ...fields,
+              tool: toolForAudit,
+              tier,
+              outcome: "rate_limited",
+              durationMs: Date.now() - started,
+            });
+          }
+          c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
+          return c.json({ error: "rate_limited", bucket }, 429);
+        }
+      }
+
+      const sdkRequest = new Request(c.req.raw.url, {
+        method: "POST",
+        headers: c.req.raw.headers,
+        body: bodyText,
+      });
+
+      const response = await runWithMcpLoopbackBase(publicBase, () =>
+        mcpHandler.fetch(sdkRequest, {
+          authInfo: {
+            token,
+            clientId: auth.kind === "admin" ? "admin" : auth.address,
+            scopes: ["mcp"],
+          },
+        }),
+      );
+
+      // 仅写调用落审计（tier ≥ minimal）；绝不记录 params
+      // outcome：HTTP≥400 → error；200 含 JSON-RPC isError 仍记 ok（归因/量级用途，非业务成功语义）
+      if (isWriteTier(tier)) {
+        const outcome: AuditOutcome =
+          response.status >= 400 ? "error" : "ok";
+        recordAuditEvent({
+          event: "mcp.tools.call",
+          ...fields,
+          tool: toolForAudit,
+          tier,
+          outcome,
+          durationMs: Date.now() - started,
+        });
+      }
+
+      return response;
+    }
+
+    // tools/list 及其他方法：免费，不审计写调用
+    const sdkRequest = new Request(c.req.raw.url, {
+      method: "POST",
+      headers: c.req.raw.headers,
+      body: bodyText,
+    });
     // 整段工具调度包在公共 base ALS 内，使 /v1 的 c.req.url.origin ≡ aud 推导源
     return runWithMcpLoopbackBase(publicBase, () =>
-      mcpHandler.fetch(c.req.raw, {
+      mcpHandler.fetch(sdkRequest, {
         authInfo: {
           token,
           clientId: auth.kind === "admin" ? "admin" : auth.address,

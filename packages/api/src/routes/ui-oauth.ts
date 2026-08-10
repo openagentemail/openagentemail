@@ -6,6 +6,7 @@
 import { getCookie } from 'hono/cookie';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { recordAuditEvent } from '../lib/audit.ts';
 import { getAuth } from '../lib/auth.ts';
 import {
   createIdentity,
@@ -365,6 +366,12 @@ export function createUiOAuthPageRoutes(
     }
 
     if (form.decision === 'deny') {
+      // scrubbed：只记 clientId，不写 code/token
+      recordAuditEvent({
+        event: 'oauth.authorize.deny',
+        clientId: pre.clientId,
+        outcome: 'denied',
+      });
       return authorizeHandoffResponse(
         c,
         buildAuthorizeRedirect(
@@ -466,13 +473,21 @@ export function createUiOAuthPageRoutes(
       }
     }
 
-    const { code } = createGrantAndCode({
+    const { grantId, code } = createGrantAndCode({
       clientId: pre.clientId,
       clientName: pre.doc.client_name,
       address,
       redirectUri: pre.redirectUri,
       codeChallenge: pre.codeChallenge,
       resource: pre.resource,
+    });
+
+    recordAuditEvent({
+      event: 'oauth.authorize.approve',
+      clientId: pre.clientId,
+      grantId,
+      address,
+      outcome: 'ok',
     });
 
     return authorizeHandoffResponse(
@@ -523,6 +538,13 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
       return c.json({ error: 'forbidden' }, 403);
     }
     revokeGrant(id);
+    recordAuditEvent({
+      event: 'oauth.grant.revoke',
+      clientId: grant.clientId,
+      grantId: grant.id,
+      address: grant.address,
+      outcome: 'ok',
+    });
     return c.body(null, 204);
   });
 
@@ -536,6 +558,13 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
       return c.json({ error: 'forbidden' }, 403);
     }
     revokeGrant(id);
+    recordAuditEvent({
+      event: 'oauth.grant.revoke',
+      clientId: grant.clientId,
+      grantId: grant.id,
+      address: grant.address,
+      outcome: 'ok',
+    });
     return c.redirect('/ui/oauth/grants', 302);
   });
 

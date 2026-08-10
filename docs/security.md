@@ -28,6 +28,41 @@ retention window before reusing one.
 - CIMD SSRF：当前部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU（P4 公网须进一步收紧私网放行）。
 - 授权响应（含错误）一律带 `iss`（RFC 9207）。Dashboard `/ui/oauth/grants` 可整串吊销。
 
+## P3.5 审计 / 工具分层 / MCP 限量（应用层安全带）
+
+对照 Cloudflare WriteGuard：防线在服务器侧，不靠客户端确认框。全部长在应用层——自托管与托管部署人人有份；**stdio MCP 不拦**（operator 本地；REST ACL 兜底），`/v1` 既有行为不变。
+
+### Scrubbed 审计事件
+
+- 落盘：`DATA_DIR/audit.jsonl`（JSONL 追加；单写者；文件 0600 / 目录 0700）。
+- 行字段白名单：`{ts, event, clientId?, grantId?, address?, tool?, tier?, outcome, durationMs?}`——**严禁**参数值、邮件正文、token 任何片段、subject。
+- 事件：`oauth.authorize.approve|deny`、`oauth.token.code|refresh`、`oauth.revoke`、`oauth.grant.revoke`、`mcp.tools.call`（仅 tier ≥ minimal）。
+- 读端点：`GET /v1/audit/events?limit=&event=`（**admin only**；默认 limit 100，上限 1000；只读无删除）。
+- 增长：单文件 >10MB 时 rotate 为 `audit.jsonl.1`（只留一份备份），再开新文件。
+
+### 写调用 attribution
+
+`/mcp` 审计行按 caller 分清：OAuth → `clientId`+`grantId`+`address`；`oa_` → `address`；admin → `address: "admin"`（仅 attribution；REST 侧 actor 行为另案，不在此改）。
+
+### 十五工具四级分层
+
+| 级别 | 工具 | 策略要点 |
+| --- | --- | --- |
+| read | mail_list_messages, mail_read_message, mail_wait_for, mail_list_identities, notify_check, task_list, task_get | 观测 |
+| minimal | mail_mark_seen, task_create | 轻状态变更 |
+| contained | mail_send, task_update, notify_agent, notify_user | 外发 / 唤醒 |
+| critical | mail_new_identity, notify_verify | **OAuth 票 deny-by-default（403）**；`oa_` 走 REST scope；admin 全通 |
+
+新工具须在注册处声明 tier；未声明 → 注册即报错，HTTP 对未知工具名 403（default deny）。
+分层 / 限量 / 写审计**仅强制于 `POST /mcp`**（含拒绝 JSON-RPC batch）；stdio 不拦；`/v1` 既有 REST ACL 不变（OAuth 直打 REST 仍受 identity scope 约束，但不走本表 critical 预检）。
+
+### per-token MCP 限量
+
+- 键：OAuth=`grantId`，`oa_`=`address`，**admin 豁免**（运维面；agent 应用 scoped 票）。
+- 分桶：读（read）/ 写（minimal+）独立；写更严。
+- env：`MCP_RATE_READ_PER_MIN`（默认 60）、`MCP_RATE_WRITE_PER_MIN`（默认 20）。参照 Joe 事故一下午 ~3000 次合法调用——量防线是唯一真底线；20 写/min 挡失控仍够正常 agent。
+- 仅 `tools/call` 计费；`tools/list` 免费。超限 → `429` + `Retry-After`（进 SDK 前拦）。
+
 ## Prompt-injection 防护
 
 Agent 通过 REST / MCP 读外部来信时，正文会进入 LLM 上下文。本项目的主防线是

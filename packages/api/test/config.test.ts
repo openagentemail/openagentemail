@@ -95,6 +95,19 @@ describe('notification URL configuration', () => {
     ).toThrow(/http or https/i);
   });
 
+  test('MCP_RATE_* 默认 60/20，可覆盖，0 合法', () => {
+    const defaults = parseConfig(requiredEnv);
+    expect(defaults.mcpRateReadPerMin).toBe(60);
+    expect(defaults.mcpRateWritePerMin).toBe(20);
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        MCP_RATE_READ_PER_MIN: '10',
+        MCP_RATE_WRITE_PER_MIN: '0',
+      }).mcpRateWritePerMin,
+    ).toBe(0);
+  });
+
   test('empty or whitespace optional URL env values are treated as unset', () => {
     // Compose ${DASHBOARD_PUBLIC_URL:-} injects "" when the var is absent.
     expect(() =>

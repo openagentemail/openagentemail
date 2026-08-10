@@ -797,10 +797,13 @@ describe('resolveToken / OAuth 永为 identity', () => {
       ensureGrant: { clientId: CLIENT_ID, clientName: 'X' },
     });
     const r = resolveAccessToken(tok, { resource: RESOURCE });
-    expect(r).toEqual({
-      status: 'ok',
-      auth: { kind: 'identity', address: 'admin@test.example' },
-    });
+    expect(r.status).toBe('ok');
+    if (r.status === 'ok') {
+      // /v1 仍见 identity；attribution 标明 oauth（永不升格 admin）
+      expect(r.auth).toEqual({ kind: 'identity', address: 'admin@test.example' });
+      expect(r.attribution.kind).toBe('oauth');
+      expect(r.attribution.kind === 'oauth' && r.attribution.grantId).toBe('g-adm');
+    }
     expect(config.apiKeys.has(tok)).toBe(false);
   });
 });

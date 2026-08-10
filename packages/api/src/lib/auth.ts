@@ -17,12 +17,23 @@ import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { config } from './config.ts';
 import { findIdentity, findIdentityByToken } from './identities.ts';
-import { lookupAccessToken } from './oauth-store.ts';
+import { getGrant, lookupAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
 
 export type Auth =
   | { kind: 'admin' }
   | { kind: 'identity'; address: string };
+
+/**
+ * /mcp 审计与限量用的窄路身份（与 Auth 解耦：/v1 仍只读 auth，行为不变）。
+ * - admin → 标 admin（attribution 记录；REST actor 债另案）
+ * - oa_ identity → address
+ * - OAuth access → clientId + grantId + address
+ */
+export type TokenAttribution =
+  | { kind: 'admin' }
+  | { kind: 'identity'; address: string }
+  | { kind: 'oauth'; address: string; grantId: string; clientId: string };
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -41,25 +52,34 @@ export type ResolveTokenOptions = {
 };
 
 export type ResolveAccessResult =
-  | { status: 'ok'; auth: Auth }
+  | { status: 'ok'; auth: Auth; attribution: TokenAttribution }
   | { status: 'unauthorized' }
   | { status: 'forbidden_audience' };
 
 /**
  * 解析凭证到授权范围（含 OAuth aud/过期细分）。
  * /v1 与 /mcp 应走此入口，避免分叉。
+ * attribution 仅供 /mcp 审计/分层；/v1 继续只用 auth。
  */
 export function resolveAccessToken(
   token: string,
   options: ResolveTokenOptions = {},
 ): ResolveAccessResult {
   if (config.apiKeys.has(token)) {
-    return { status: 'ok', auth: { kind: 'admin' } };
+    return {
+      status: 'ok',
+      auth: { kind: 'admin' },
+      attribution: { kind: 'admin' },
+    };
   }
 
   const identity = findIdentityByToken(token);
   if (identity) {
-    return { status: 'ok', auth: { kind: 'identity', address: identity.address } };
+    return {
+      status: 'ok',
+      auth: { kind: 'identity', address: identity.address },
+      attribution: { kind: 'identity', address: identity.address },
+    };
   }
 
   const oauth = lookupAccessToken(token, options.now);
@@ -90,9 +110,20 @@ export function resolveAccessToken(
     return { status: 'unauthorized' };
   }
 
+  const grant = getGrant(oauth.grantId);
+  // grant 缺失时 lookupAccessToken 已当 missing；此处防御性回落
+  const clientId = grant?.clientId ?? 'unknown';
+
   return {
     status: 'ok',
+    // /v1 行为：仍是 identity scope，不含 grant 字段
     auth: { kind: 'identity', address: oauth.address },
+    attribution: {
+      kind: 'oauth',
+      address: oauth.address,
+      grantId: oauth.grantId,
+      clientId,
+    },
   };
 }
 
