@@ -127,8 +127,10 @@ async function defaultDnsLookup(
 }
 
 /**
- * DNS 解析并对每个地址做 SSRF 检查（测试/字面量预检用）。
- * 生产 CIMD 默认传输在连接 lookup 内再钉一次，避免 TOCTOU。
+ * DNS 解析并对每个地址做 SSRF 检查。
+ *
+ * **警示：仅供预检/测试。** 生产必须走 `pinnedCimdFetcher` 的连接期钉死 lookup，
+ * 禁止「校验后直接 fetch」——二者之间存在 DNS-rebinding TOCTOU 窗口。
  */
 export async function assertClientIdHostSafe(
   hostname: string,
@@ -473,13 +475,14 @@ export async function fetchClientMetadata(
   } = {},
 ): Promise<CimdFetchResult> {
   const now = options.now ?? Date.now();
-  const cached = cache.get(clientId);
+  const urlCheck = validateClientIdUrl(clientId);
+  if (!urlCheck.ok) return urlCheck;
+  // 缓存键用规范化后的 href（避免大小写/尾斜杠等变体分裂缓存）
+  const cacheKey = urlCheck.url.href;
+  const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return { ok: true, doc: cached.doc };
   }
-
-  const urlCheck = validateClientIdUrl(clientId);
-  if (!urlCheck.ok) return urlCheck;
 
   // 字面量 IP：连接前预检。主机名 SSRF 留给连接 lookup（钉死，无二次解析窗口）。
   const host = urlCheck.url.hostname.replace(/^\[(.+)\]$/, '$1');
@@ -552,7 +555,7 @@ export async function fetchClientMetadata(
 
   const ttl = cacheTtlSeconds(res);
   if (ttl > 0) {
-    cache.set(clientId, { doc: validated.doc, expiresAt: now + ttl * 1000 });
+    cache.set(cacheKey, { doc: validated.doc, expiresAt: now + ttl * 1000 });
   }
   return validated;
 }

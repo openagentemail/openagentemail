@@ -14,7 +14,7 @@ import {
   LOCALPART_RE,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
-import { redirectUriIsLoopback } from '../lib/oauth-cimd.ts';
+import { isAllowedRedirectUri, redirectUriIsLoopback } from '../lib/oauth-cimd.ts';
 import {
   createGrantAndCode,
   getGrant,
@@ -113,6 +113,10 @@ function htmlResponse(c: Context, html: string, status: 200 | 400 | 401 | 403 = 
  * Chrome 会因 CSP form-action 'self' 拦 302 外跳，故不用 302；本页 CSP 不含 form-action。
  */
 function authorizeHandoffResponse(c: Context, redirectUrl: string): Response {
+  // 契约硬化：必须过返工 3 scheme 白名单（https / http-loopback）
+  if (!isAllowedRedirectUri(redirectUrl)) {
+    throw new Error('authorize_handoff_forbidden_redirect');
+  }
   const safe = escapeHtml(redirectUrl);
   // meta refresh 的 URL 用属性转义；可见链接同
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">

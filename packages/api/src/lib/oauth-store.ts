@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { config } from './config.ts';
 
 export const CODE_TTL_MS = 10 * 60 * 1000;
@@ -262,12 +262,6 @@ function save(data: OAuthStoreFile): void {
 
 export function hashSecret(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function hashEquals(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
 /** 生成不透明令牌明文（32 字节）及其哈希。 */
@@ -586,20 +580,32 @@ export function rotateRefreshToken(
   };
 }
 
-/** RFC 7009：吊销 access 或 refresh（未知令牌亦视为成功）。 */
-export function revokeToken(token: string): void {
+/**
+ * RFC 7009：吊销 access 或 refresh（未知令牌亦 200 成功语义，由路由保证）。
+ * 必须带与 grant 绑定的 clientId；缺失或不匹配时**不删**（灭第三方持票 DoS）。
+ * @returns true 表示确有删除；false 表示未删（未知票 / 无 client / 不匹配）
+ */
+export function revokeToken(token: string, clientId?: string): boolean {
+  if (!clientId) return false;
   const data = load();
   const hash = hashSecret(token);
+  const access = data.access[hash];
+  const refresh = data.refresh[hash];
+  if (!access && !refresh) return false;
+  const grantId = access?.grantId ?? refresh!.grantId;
+  const grant = data.grants[grantId];
+  if (!grant || grant.clientId !== clientId) return false;
   let changed = false;
-  if (data.access[hash]) {
+  if (access) {
     delete data.access[hash];
     changed = true;
   }
-  if (data.refresh[hash]) {
+  if (refresh) {
     delete data.refresh[hash];
     changed = true;
   }
   if (changed) save(data);
+  return changed;
 }
 
 export type LookupAccessResult =
@@ -613,13 +619,8 @@ export function lookupAccessToken(
 ): LookupAccessResult {
   const data = load();
   const hash = hashSecret(token);
-  // 线性扫描以支持常量时间比较（条目少；哈希作键时先直查）
   const row = data.access[hash];
-  if (!row) {
-    // 防枚举：对不匹配键做一次哑比较
-    hashEquals(hash, hash);
-    return { status: 'missing' };
-  }
+  if (!row) return { status: 'missing' };
   if (row.expiresAt <= now) return { status: 'expired', aud: row.aud };
   // grant 已吊销则 access 立即失效
   if (!data.grants[row.grantId]) return { status: 'missing' };

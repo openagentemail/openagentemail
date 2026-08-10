@@ -320,11 +320,51 @@ describe('完整授权流', () => {
     const oldBody = (await oldReplay.json()) as { error_description?: string };
     expect(oldBody.error_description).toBe('refresh token invalid or expired');
 
-    // revoke → 立即 401
-    const rev = await app.request('http://localhost/oauth/revoke', {
+    // revoke：无 client_id / 错 client_id 不删仍 200；对的才删
+    const noClient = await app.request('http://localhost/oauth/revoke', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ token: next.access_token }),
+    });
+    expect(noClient.status).toBe(200);
+    const stillLive = await app.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${next.access_token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    });
+    expect(stillLive.status).toBe(200);
+
+    const wrongClient = await app.request('http://localhost/oauth/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        token: next.access_token,
+        client_id: 'http://127.0.0.1:9/other-client.json',
+      }),
+    });
+    expect(wrongClient.status).toBe(200);
+    const stillLive2 = await app.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${next.access_token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }),
+    });
+    expect(stillLive2.status).toBe(200);
+
+    const rev = await app.request('http://localhost/oauth/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        token: next.access_token,
+        client_id: CLIENT_ID,
+      }),
     });
     expect(rev.status).toBe(200);
     const after = await app.request('http://localhost/mcp', {
@@ -334,7 +374,7 @@ describe('完整授权流', () => {
         'content-type': 'application/json',
         accept: 'application/json, text/event-stream',
       },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }),
     });
     expect(after.status).toBe(401);
   });

@@ -188,8 +188,9 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
       return c.json({ error: 'invalid_request' }, 400);
     }
     const token = body.token;
-    // RFC 7009：未知令牌也返回 200
-    if (token) revokeToken(token);
+    const clientId = body.client_id;
+    // RFC 7009：一律 200；无/错 client_id 不删（灭持票第三方 DoS）
+    if (token) revokeToken(token, clientId);
     return c.body(null, 200);
   });
 }
