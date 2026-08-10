@@ -24,6 +24,7 @@ import {
 import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
+import { revokeGrantsForAddress } from './oauth-store.ts';
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -302,6 +303,11 @@ export function createIdentity(input: {
   name?: string;
   localpart?: string;
   canNotifyUser?: boolean;
+  /**
+   * 默认 true。同意页新建身份传 false：不发 oa_ 票，避免幽灵 token 落库。
+   * 此时返回的 token 为空串。
+   */
+  issueToken?: boolean;
 }): { identity: Identity; token: string } | null {
   const identities = load();
   let localpart = input.localpart?.toLowerCase();
@@ -324,13 +330,20 @@ export function createIdentity(input: {
   const address = `${localpart}@${config.domain}`;
   if (identities.some((i) => i.address === address)) return null;
 
-  const { token, tokenHash } = generateToken();
+  const issueToken = input.issueToken !== false;
+  let token = '';
+  let tokenHash: string | undefined;
+  if (issueToken) {
+    const generated = generateToken();
+    token = generated.token;
+    tokenHash = generated.tokenHash;
+  }
   const identity: Identity = {
     address,
     ...(input.name ? { name: input.name } : {}),
     ...(input.canNotifyUser ? { canNotifyUser: true } : {}),
     createdAt: new Date().toISOString(),
-    tokenHash,
+    ...(tokenHash ? { tokenHash } : {}),
   };
   identities.push(identity);
   save(identities);
@@ -355,6 +368,7 @@ export function rotateIdentityToken(address: string): string | null {
 /**
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
+ * 同步级联吊销该身份下全部 OAuth grant + access/refresh。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
@@ -362,6 +376,7 @@ export function deleteIdentity(address: string): boolean {
   const kept = identities.filter((i) => i.address !== needle);
   if (kept.length === identities.length) return false;
   save(kept);
+  revokeGrantsForAddress(needle);
   return true;
 }
 

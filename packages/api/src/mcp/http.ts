@@ -17,8 +17,8 @@ import {
   type OAuthMetadata,
 } from "@modelcontextprotocol/server";
 import { resolveAccessToken } from "../lib/auth.ts";
-import { config } from "../lib/config.ts";
 import { JSON_BODY_LIMIT_BYTES } from "../lib/limits.ts";
+import { getMcpLoopbackBase, runWithMcpLoopbackBase } from "../lib/mcp-loopback.ts";
 import { isPrivateOrLoopbackHost, isPrivateOrLoopbackHostname } from "../lib/net.ts";
 import {
   buildAuthorizationServerMetadata,
@@ -136,17 +136,19 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
   );
 
   // 无状态：每请求新 McpServer；token 经 authInfo 传入工厂。
+  // baseUrl 取自 ALS 中的公共 origin（外部请求 / MCP_PUBLIC_URL），禁止 mcp.internal。
   const mcpHandler = createMcpHandler(
     (ctx) => {
       const token = ctx.authInfo?.token;
       if (!token) {
         throw new Error("mcp factory invoked without authInfo.token");
       }
-      const client = new OpenAgentEmailClient(
-        "http://mcp.internal",
-        token,
-        options.apiFetch,
-      );
+      // 工厂在 runWithMcpLoopbackBase 内调用；构造时读 ALS 公共 base
+      const publicBase = getMcpLoopbackBase();
+      if (!publicBase) {
+        throw new Error("mcp factory: missing loopback public base");
+      }
+      const client = new OpenAgentEmailClient(publicBase, token, options.apiFetch);
       const server = new McpServer(MCP_SERVER_INFO);
       registerOpenAgentEmailTools(server, client);
       return server;
@@ -170,6 +172,7 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       );
     }
     const resource = resolveResourceUri(origin, options.publicBaseUrl);
+    const publicBase = resolvePublicBase(origin, options.publicBaseUrl);
     const resolved = resolveAccessToken(token, { resource });
     if (resolved.status === "forbidden_audience") {
       // aud 不符 → 403（任务书负例）；其余无效/过期仍 401 + 挑战
@@ -182,14 +185,16 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       );
     }
     const auth = resolved.auth;
-    // createMcpHandler 不校验 expiresAt；OAuth 票的过期已在 resolveAccessToken 强制。
-    return mcpHandler.fetch(c.req.raw, {
-      authInfo: {
-        token,
-        clientId: auth.kind === "admin" ? "admin" : auth.address,
-        scopes: ["mcp"],
-      },
-    });
+    // 整段工具调度包在公共 base ALS 内，使 /v1 的 c.req.url.origin ≡ aud 推导源
+    return runWithMcpLoopbackBase(publicBase, () =>
+      mcpHandler.fetch(c.req.raw, {
+        authInfo: {
+          token,
+          clientId: auth.kind === "admin" ? "admin" : auth.address,
+          scopes: ["mcp"],
+        },
+      }),
+    );
   });
   app.all("/mcp", (c) => {
     c.header("Allow", "POST");

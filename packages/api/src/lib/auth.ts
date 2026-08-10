@@ -16,7 +16,7 @@
 import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { config } from './config.ts';
-import { findIdentityByToken } from './identities.ts';
+import { findIdentity, findIdentityByToken } from './identities.ts';
 import { lookupAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
 
@@ -83,6 +83,11 @@ export function resolveAccessToken(
   }
   if (oauth.aud !== expectedResource) {
     return { status: 'forbidden_audience' };
+  }
+
+  // 身份已删：票作废（与级联吊销互补；防竞态/旧库残留）
+  if (!findIdentity(oauth.address)) {
+    return { status: 'unauthorized' };
   }
 
   return {

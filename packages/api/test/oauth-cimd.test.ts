@@ -37,6 +37,21 @@ describe('isBlockedSsrfIp / 私网放行对照', () => {
     expect(isBlockedSsrfIp('0.1.2.3')).toBe(true);
   });
 
+  test('IPv4-mapped 十六进制形与 fe80 / fd00:ec2 永拒', async () => {
+    const { ipv4MappedFromV6, isFe80LinkLocalIpv6, isAwsImdsIpv6 } = await import(
+      '../src/lib/net.ts'
+    );
+    expect(ipv4MappedFromV6('::ffff:a9fe:a9fe')).toBe('169.254.169.254');
+    expect(isBlockedSsrfIp('::ffff:a9fe:a9fe')).toBe(true);
+    expect(isBlockedSsrfIp('::ffff:169.254.169.254')).toBe(true);
+    expect(isFe80LinkLocalIpv6('fe80::1')).toBe(true);
+    expect(isFe80LinkLocalIpv6('febf::1')).toBe(true);
+    expect(isFe80LinkLocalIpv6('fec0::1')).toBe(false);
+    expect(isBlockedSsrfIp('fe80::1')).toBe(true);
+    expect(isAwsImdsIpv6('fd00:ec2::254')).toBe(true);
+    expect(isBlockedSsrfIp('fd00:ec2::254')).toBe(true);
+  });
+
   test('RFC1918 / CGNAT / loopback 不在永拒清单（部署例外放行）', () => {
     expect(isBlockedSsrfIp('10.0.0.1')).toBe(false);
     expect(isBlockedSsrfIp('192.168.1.1')).toBe(false);
@@ -76,14 +91,20 @@ describe('validateClientIdUrl', () => {
   });
 });
 
-describe('matchRedirectUri loopback 端口放宽', () => {
-  test('127.0.0.1 不同端口放行', () => {
+describe('matchRedirectUri RFC8252 端口放宽', () => {
+  test('http + IP 字面量不同端口放行', () => {
     expect(
       matchRedirectUri('http://127.0.0.1:54321/callback', ['http://127.0.0.1/callback']),
     ).toBe(true);
+  });
+
+  test('localhost 主机名与 https 仍精确匹配端口', () => {
     expect(
       matchRedirectUri('http://localhost:9999/callback', ['http://localhost/callback']),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      matchRedirectUri('https://127.0.0.1:54321/callback', ['https://127.0.0.1/callback']),
+    ).toBe(false);
   });
 
   test('非 loopback 端口必须精确', () => {

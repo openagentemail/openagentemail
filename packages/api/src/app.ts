@@ -9,6 +9,7 @@ import {
   requireUiOrigin,
   uiSessionBodyLimit,
 } from './lib/ui-session.ts';
+import { getMcpLoopbackBase } from './lib/mcp-loopback.ts';
 import { registerMcpHttpRoutes } from './mcp/http.ts';
 import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
@@ -38,27 +39,36 @@ export function createApp(options: AppOptions = {}): Hono {
   app.get('/healthz', (c) => c.json({ ok: true }));
   // PRM / 8414 必须在 agentCard 子应用之前注册，避免 /.well-known 前缀吞掉路径。
   registerMcpHttpRoutes(app, {
-    // OpenAgentEmailClient 固定 base `http://mcp.internal`；此处只取 pathname+search
-    // 回环进本进程。host 必须是 mcp.internal，否则视为契约破坏（显式断言）。
+    // 工具回环：base 为外部 origin / MCP_PUBLIC_URL（见 mcp-loopback ALS）。
+    // 必须用完整绝对 URL 的 Request 走 app.fetch，使 /v1 的 c.req.url.origin
+    // 与 OAuth aud 同源——禁止额外 header 传信任（/v1 对外可达）。
     apiFetch: (input, init) => {
+      const expectedBase = getMcpLoopbackBase();
+      if (!expectedBase) {
+        throw new Error('mcp apiFetch: missing loopback public base context');
+      }
+      const expectedOrigin = new URL(expectedBase).origin;
+
+      let request: Request;
       if (typeof input !== 'string' && !(input instanceof URL) && init === undefined) {
-        const host = new URL(input.url).hostname;
-        if (host !== 'mcp.internal') {
-          throw new Error(`mcp apiFetch: unexpected host ${host}; expected mcp.internal`);
-        }
-        return app.fetch(input);
+        request = input;
+      } else {
+        const href =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        request = new Request(href, init);
       }
-      const href =
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-            ? input.href
-            : input.url;
-      const url = new URL(href);
-      if (url.hostname !== 'mcp.internal') {
-        throw new Error(`mcp apiFetch: unexpected host ${url.hostname}; expected mcp.internal`);
+      const url = new URL(request.url);
+      if (url.origin !== expectedOrigin) {
+        throw new Error(
+          `mcp apiFetch: unexpected origin ${url.origin}; expected ${expectedOrigin}`,
+        );
       }
-      return app.request(url.pathname + url.search, init);
+      // 保留绝对 URL，供 bearerAuth 用同一 origin 推导 resource
+      return app.fetch(request);
     },
   });
   registerOAuthRoutes(app, options.oauth ?? {});

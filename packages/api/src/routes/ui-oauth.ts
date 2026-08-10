@@ -9,9 +9,11 @@ import type { Context } from 'hono';
 import { getAuth } from '../lib/auth.ts';
 import {
   createIdentity,
+  deleteIdentity,
   listIdentities,
   LOCALPART_RE,
 } from '../lib/identities.ts';
+import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import { redirectUriIsLoopback } from '../lib/oauth-cimd.ts';
 import {
   createGrantAndCode,
@@ -104,6 +106,48 @@ function htmlResponse(c: Context, html: string, status: 200 | 400 | 401 | 403 = 
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   );
   return c.body(html, status);
+}
+
+/**
+ * 批准/拒绝后的过渡页：200 + meta refresh + 可见链接。
+ * Chrome 会因 CSP form-action 'self' 拦 302 外跳，故不用 302；本页 CSP 不含 form-action。
+ */
+function authorizeHandoffResponse(c: Context, redirectUrl: string): Response {
+  const safe = escapeHtml(redirectUrl);
+  // meta refresh 的 URL 用属性转义；可见链接同
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="0;url=${safe}">
+<title>已授权 · OpenAgent.email</title>
+<style>${PAGE_CSS}</style></head><body><main>
+<section class="card">
+  <h1>已授权，正在跳回客户端</h1>
+  <p class="muted">若未自动跳转，请点击下方链接继续。</p>
+  <p><a class="btn primary" href="${safe}">返回客户端</a></p>
+</section>
+</main></body></html>`;
+  c.header('Content-Type', 'text/html; charset=utf-8');
+  c.header('Cache-Control', 'no-store');
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('Referrer-Policy', 'no-referrer');
+  // 故意不含 form-action：允许用户点击外链回到客户端
+  c.header(
+    'Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  );
+  return c.body(html, 200);
+}
+
+/** 解析同意表单：值必须是 string，File → 400（禁止 cast 出 TypeError 500）。 */
+function parseConsentForm(
+  raw: Record<string, string | File>,
+): { ok: true; form: Record<string, string> } | { ok: false } {
+  const form: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v !== 'string') return { ok: false };
+    form[k] = v;
+  }
+  return { ok: true, form };
 }
 
 /** 未登录：把同意页路径写入 return cookie，再跳 Dashboard 登录。 */
@@ -263,7 +307,8 @@ export function createUiOAuthPageRoutes(
     );
   });
 
-  routes.post('/authorize', requireUiOrigin, async (c) => {
+  // 与其他 /ui/api 一致限体，防超大 multipart
+  routes.post('/authorize', uiSessionBodyLimit, requireUiOrigin, async (c) => {
     const sid = getCookie(c, 'oae_ui');
     const session = sid ? store.authenticate(sid) : null;
     if (!session) {
@@ -273,7 +318,25 @@ export function createUiOAuthPageRoutes(
       return htmlResponse(c, adminOnlyForbiddenPage(), 403);
     }
 
-    const form = (await c.req.parseBody()) as Record<string, string>;
+    let rawBody: Record<string, string | File>;
+    try {
+      rawBody = (await c.req.parseBody()) as Record<string, string | File>;
+    } catch {
+      return htmlResponse(
+        c,
+        shell('Authorization error', `<p class="error">Malformed body.</p>`),
+        400,
+      );
+    }
+    const parsed = parseConsentForm(rawBody);
+    if (!parsed.ok) {
+      return htmlResponse(
+        c,
+        shell('Authorization error', `<p class="error">Invalid form field types.</p>`),
+        400,
+      );
+    }
+    const form = parsed.form;
     const origin = new URL(c.req.url).origin;
     const pre = await preflightAuthorizeRequest(
       {
@@ -289,7 +352,7 @@ export function createUiOAuthPageRoutes(
       options,
     );
     if (!pre.ok) {
-      if (pre.kind === 'redirect') return c.redirect(pre.location, 302);
+      if (pre.kind === 'redirect') return authorizeHandoffResponse(c, pre.location);
       return htmlResponse(
         c,
         shell('Authorization error', `<p class="error">${escapeHtml(pre.message)}</p>`),
@@ -298,7 +361,8 @@ export function createUiOAuthPageRoutes(
     }
 
     if (form.decision === 'deny') {
-      return c.redirect(
+      return authorizeHandoffResponse(
+        c,
         buildAuthorizeRedirect(
           pre.redirectUri,
           {
@@ -308,7 +372,6 @@ export function createUiOAuthPageRoutes(
           },
           pre.issuer,
         ),
-        302,
       );
     }
 
@@ -333,7 +396,8 @@ export function createUiOAuthPageRoutes(
           400,
         );
       }
-      const created = createIdentity({ localpart });
+      // 同意页新建：不发 oa_ 幽灵票；失败时回滚身份
+      const created = createIdentity({ localpart, issueToken: false });
       if (!created) {
         return htmlResponse(
           c,
@@ -347,6 +411,30 @@ export function createUiOAuthPageRoutes(
             loopbackWarning: pre.loopbackWarning,
             identities: listIdentities(),
             error: 'That address is already taken.',
+          }),
+          400,
+        );
+      }
+      try {
+        await provisionIdentityNotifications(created.identity);
+      } catch (err) {
+        deleteIdentity(created.identity.address);
+        const msg =
+          err instanceof NotifyError
+            ? 'Notification provisioning failed; identity was not created.'
+            : 'Failed to provision identity.';
+        return htmlResponse(
+          c,
+          consentFormHtml({
+            clientName: pre.doc.client_name,
+            clientId: pre.clientId,
+            redirectUri: pre.redirectUri,
+            codeChallenge: pre.codeChallenge,
+            state: pre.state,
+            resource: pre.resource,
+            loopbackWarning: pre.loopbackWarning,
+            identities: listIdentities(),
+            error: msg,
           }),
           400,
         );
@@ -383,7 +471,8 @@ export function createUiOAuthPageRoutes(
       resource: pre.resource,
     });
 
-    return c.redirect(
+    return authorizeHandoffResponse(
+      c,
       buildAuthorizeRedirect(
         pre.redirectUri,
         {
@@ -392,7 +481,6 @@ export function createUiOAuthPageRoutes(
         },
         pre.issuer,
       ),
-      302,
     );
   });
 

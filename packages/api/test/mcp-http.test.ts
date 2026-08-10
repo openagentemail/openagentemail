@@ -138,8 +138,8 @@ describe('MCP 元数据 origin / insecure issuer', () => {
     expect(allowInsecureIssuerUrl('http://100.64.1.2')).toBe(true);
     expect(allowInsecureIssuerUrl('http://[::1]/')).toBe(true);
     expect(allowInsecureIssuerUrl('http://[fd12:3456::1]')).toBe(true);
-    // 语义统一：fe80 链路本地现与 CIMD 一致，算可放行私网
-    expect(allowInsecureIssuerUrl('http://[fe80::1]/')).toBe(true);
+    // fe80::/10 永拒（与 IPv4 链路本地对齐），不算可放行私网
+    expect(allowInsecureIssuerUrl('http://[fe80::1]/')).toBe(false);
     expect(allowInsecureIssuerUrl('https://127.0.0.1')).toBe(false);
     // 永拒段不算私网：绝不开 insecure issuer
     expect(allowInsecureIssuerUrl('http://169.254.169.254')).toBe(false);

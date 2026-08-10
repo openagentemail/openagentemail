@@ -16,5 +16,6 @@ The website docs are canonical — edit them in the [website repo](https://githu
 | POST | `/oauth/revoke` | RFC 7009 |
 | GET | `/ui/oauth/grants` | 已授权客户端管理页 |
 | GET/DELETE | `/ui/api/oauth/grants[/:id]` | 列表 / 吊销 |
+| POST | `/ui/api/oauth/grants/:id/revoke` | 管理页表单吊销（同 origin + session；成功 302 回列表） |
 
 不做：DCR（`/oauth/register`）、OIDC discovery、admin 级 OAuth 票、公网暴露（P4）。

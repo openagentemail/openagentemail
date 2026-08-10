@@ -14,6 +14,7 @@ import { verifyS256CodeChallenge } from '../lib/oauth-pkce.ts';
 import {
   consumeAuthorizationCode,
   issueTokenPair,
+  peekAuthorizationCode,
   rotateRefreshToken,
   revokeToken,
 } from '../lib/oauth-store.ts';
@@ -24,6 +25,9 @@ import {
 } from '../lib/oauth-url.ts';
 
 const TOKEN_BODY_LIMIT = 8 * 1024;
+
+/** refresh 失败对外统一描述（灭 oracle）。 */
+const REFRESH_INVALID_DESC = 'refresh token invalid or expired';
 
 export type OAuthRouteOptions = {
   /** 测试可注入 CIMD fetcher。 */
@@ -63,6 +67,19 @@ function oauthErrorJson(
   );
 }
 
+/** RFC 6749 §5.1：成功 token 响应禁缓存。 */
+function tokenSuccessJson(
+  c: {
+    header: (n: string, v: string) => void;
+    json: (body: unknown, status?: 200) => Response;
+  },
+  body: Record<string, unknown>,
+) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Pragma', 'no-cache');
+  return c.json(body);
+}
+
 async function parseTokenBody(
   c: { req: { header: (n: string) => string | undefined; parseBody: () => Promise<unknown>; json: () => Promise<unknown> } },
 ): Promise<Record<string, string>> {
@@ -85,8 +102,33 @@ async function parseTokenBody(
 }
 
 /**
+ * 浏览器面 revoke：仅当带 Cookie 或 Sec-Fetch-Site 时要求 Origin 同站或
+ * Sec-Fetch-Site: none；纯机器客户端（无这些头）不受影响。
+ */
+function browserRevokeOriginOk(c: {
+  req: { header: (n: string) => string | undefined; url: string };
+}): boolean {
+  const cookie = c.req.header('cookie');
+  const secFetchSite = c.req.header('sec-fetch-site');
+  const hasBrowserSignal =
+    (cookie !== undefined && cookie.length > 0) ||
+    (secFetchSite !== undefined && secFetchSite.length > 0);
+  if (!hasBrowserSignal) return true;
+
+  if (secFetchSite?.toLowerCase() === 'none') return true;
+
+  const origin = c.req.header('origin');
+  if (!origin) return false;
+  try {
+    return new URL(origin).origin === new URL(c.req.url).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 注册公开 OAuth 路由（无 UI session）。
- * /authorize 仅作入口 302 → /ui/oauth/authorize（因 cookie path=/ui）。
+ * /authorize 仅作入口 302 → 相对 Location /ui/oauth/authorize（反代 https 不降级）。
  */
 export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}): void {
   app.get('/.well-known/oauth-authorization-server', (c) => {
@@ -96,9 +138,8 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
 
   app.get('/authorize', (c) => {
     const url = new URL(c.req.url);
-    const target = new URL('/ui/oauth/authorize', url.origin);
-    target.search = url.search;
-    return c.redirect(target.href, 302);
+    // 相对 Location：经 TLS 反代时不把 scheme 降成请求里的 http
+    return c.redirect(`/ui/oauth/authorize${url.search}`, 302);
   });
 
   app.use(
@@ -128,7 +169,7 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
 
     const grantType = body.grant_type;
     if (grantType === 'authorization_code') {
-      return handleAuthorizationCode(c, body, expectedResource, options);
+      return handleAuthorizationCode(c, body, expectedResource);
     }
     if (grantType === 'refresh_token') {
       return handleRefresh(c, body, expectedResource);
@@ -137,6 +178,9 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
   });
 
   app.post('/oauth/revoke', async (c) => {
+    if (!browserRevokeOriginOk(c)) {
+      return c.json({ error: 'invalid_request', error_description: 'origin required' }, 400);
+    }
     let body: Record<string, string>;
     try {
       body = await parseTokenBody(c);
@@ -150,11 +194,18 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
   });
 }
 
-async function handleAuthorizationCode(
-  c: { json: (body: unknown, status?: 200 | 400 | 401) => Response },
+/**
+ * code 交换：用**存储的** client_id/redirect_uri/resource 校验，
+ * 不为调用方 client_id 发起 CIMD fetch（消灭预授权 SSRF 面）。
+ * 顺序：peek → 全量校验 → 原子消费 → 签发。
+ */
+function handleAuthorizationCode(
+  c: {
+    header: (n: string, v: string) => void;
+    json: (body: unknown, status?: 200 | 400 | 401) => Response;
+  },
   body: Record<string, string>,
   expectedResource: string,
-  options: OAuthRouteOptions,
 ) {
   const code = body.code;
   const redirectUri = body.redirect_uri;
@@ -172,32 +223,30 @@ async function handleAuthorizationCode(
     return oauthErrorJson(c, 'invalid_target', 'resource mismatch');
   }
 
-  // 再验 CIMD + redirect（防 code 被挪到别的 redirect）
-  const cimd = await fetchClientMetadata(clientId, {
-    fetcher: options.cimdFetcher,
-  });
-  if (!cimd.ok) {
-    return oauthErrorJson(c, 'invalid_client', cimd.reason);
-  }
-  if (!matchRedirectUri(redirectUri, cimd.doc.redirect_uris)) {
-    return oauthErrorJson(c, 'invalid_request', 'redirect_uri mismatch');
+  // 先 peek：不删 code，校验失败时合法客户端仍可重试
+  const peeked = peekAuthorizationCode(code);
+  if (!peeked.ok) {
+    return oauthErrorJson(c, 'invalid_grant', peeked.reason, 400);
   }
 
+  // 全部用存储字段比对（调用方 client_id 必须与存储一致）
+  if (peeked.clientId !== clientId) {
+    return oauthErrorJson(c, 'invalid_grant', 'client_id mismatch');
+  }
+  if (!matchRedirectUri(redirectUri, [peeked.redirectUri])) {
+    return oauthErrorJson(c, 'invalid_grant', 'redirect_uri mismatch');
+  }
+  if (peeked.resource !== resource) {
+    return oauthErrorJson(c, 'invalid_grant', 'resource mismatch');
+  }
+  if (!verifyS256CodeChallenge(codeVerifier, peeked.codeChallenge)) {
+    return oauthErrorJson(c, 'invalid_grant', 'pkce verification failed');
+  }
+
+  // 校验通过后原子消费（拦截者无 verifier 只能拒一次可用性）
   const consumed = consumeAuthorizationCode(code);
   if (!consumed.ok) {
     return oauthErrorJson(c, 'invalid_grant', consumed.reason, 400);
-  }
-  if (consumed.clientId !== clientId) {
-    return oauthErrorJson(c, 'invalid_grant', 'client_id mismatch');
-  }
-  if (!matchRedirectUri(redirectUri, [consumed.redirectUri])) {
-    return oauthErrorJson(c, 'invalid_grant', 'redirect_uri mismatch');
-  }
-  if (consumed.resource !== resource) {
-    return oauthErrorJson(c, 'invalid_grant', 'resource mismatch');
-  }
-  if (!verifyS256CodeChallenge(codeVerifier, consumed.codeChallenge)) {
-    return oauthErrorJson(c, 'invalid_grant', 'pkce verification failed');
   }
 
   const tokens = issueTokenPair({
@@ -206,7 +255,7 @@ async function handleAuthorizationCode(
     aud: expectedResource,
   });
 
-  return c.json({
+  return tokenSuccessJson(c, {
     access_token: tokens.accessToken,
     token_type: 'Bearer',
     expires_in: tokens.expiresIn,
@@ -215,14 +264,22 @@ async function handleAuthorizationCode(
 }
 
 function handleRefresh(
-  c: { json: (body: unknown, status?: 200 | 400 | 401) => Response },
+  c: {
+    header: (n: string, v: string) => void;
+    json: (body: unknown, status?: 200 | 400 | 401) => Response;
+  },
   body: Record<string, string>,
   expectedResource: string,
 ) {
   const refreshToken = body.refresh_token;
   const resource = body.resource;
+  const clientId = body.client_id;
   if (!refreshToken) {
     return oauthErrorJson(c, 'invalid_request', 'refresh_token required');
+  }
+  if (!clientId) {
+    // RFC 6749 §6 public client：必须带 client_id
+    return oauthErrorJson(c, 'invalid_request', 'client_id required');
   }
   if (!resource) {
     return oauthErrorJson(c, 'invalid_target', 'resource required');
@@ -231,15 +288,15 @@ function handleRefresh(
     return oauthErrorJson(c, 'invalid_target', 'resource mismatch');
   }
 
-  const rotated = rotateRefreshToken(refreshToken);
+  const rotated = rotateRefreshToken(refreshToken, {
+    expectedAud: expectedResource,
+    clientId,
+  });
   if (!rotated.ok) {
-    return oauthErrorJson(c, 'invalid_grant', rotated.reason, 400);
-  }
-  if (rotated.aud !== expectedResource) {
-    return oauthErrorJson(c, 'invalid_grant', 'resource mismatch');
+    return oauthErrorJson(c, 'invalid_grant', REFRESH_INVALID_DESC, 400);
   }
 
-  return c.json({
+  return tokenSuccessJson(c, {
     access_token: rotated.accessToken,
     token_type: 'Bearer',
     expires_in: rotated.expiresIn,

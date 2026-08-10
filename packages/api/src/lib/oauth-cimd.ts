@@ -4,15 +4,17 @@
  *
  * SSRF 部署例外（写进注释与 PR）：本 AS 跑在 loopback/tailnet 私网，验收模拟
  * 客户端 CIMD 也开在私网 → 放行 RFC1918 / CGNAT / loopback；
- * **169.254.0.0/16（云 metadata）与 0.0.0.0/8 永远拒绝**。P4 公网部署须收紧。
+ * **永拒**：169.254.0.0/16、0.0.0.0/8、fe80::/10、fd00:ec2::/16。P4 公网部署须收紧。
+ *
+ * DNS-rebinding：不在校验后再另开一次 DNS；连接时用自定义 lookup 钉死，
+ * 对连接实际使用的每个解析结果跑 SSRF；https 保留 SNI/Host。
  */
 
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
-import {
-  isPrivateOrLoopbackHostname,
-  isSsrfBlockedResolvedIp,
-} from './net.ts';
+import { lookup as dnsLookupAll } from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
+import { isPrivateOrLoopbackHostname, isSsrfBlockedResolvedIp } from './net.ts';
 
 // 再导出：既有测试从本模块导入 SSRF 助手；实现唯一在 lib/net.ts。
 export {
@@ -115,7 +117,7 @@ function rawUrlPath(clientId: string): string {
 async function defaultDnsLookup(
   hostname: string,
 ): Promise<Array<{ address: string; family: number }>> {
-  const results = await lookup(hostname, { all: true, verbatim: true });
+  const results = await dnsLookupAll(hostname, { all: true, verbatim: true });
   const list = Array.isArray(results) ? results : [results];
   return list.map((r) =>
     typeof r === 'string'
@@ -124,7 +126,10 @@ async function defaultDnsLookup(
   );
 }
 
-/** DNS 解析并对每个地址做 SSRF 检查。 */
+/**
+ * DNS 解析并对每个地址做 SSRF 检查（测试/字面量预检用）。
+ * 生产 CIMD 默认传输在连接 lookup 内再钉一次，避免 TOCTOU。
+ */
 export async function assertClientIdHostSafe(
   hostname: string,
   dnsLookup: DnsLookup = defaultDnsLookup,
@@ -150,7 +155,10 @@ export async function assertClientIdHostSafe(
   }
 }
 
-/** RFC 8252：loopback redirect 比较时忽略端口。 */
+/**
+ * RFC 8252 §7.3：仅 http + IP 字面量（127.0.0.1 / [::1]）比较时忽略端口。
+ * localhost 主机名与 https 仍精确匹配端口。
+ */
 export function redirectUrisMatch(requested: string, registered: string): boolean {
   let a: URL;
   let b: URL;
@@ -170,11 +178,22 @@ export function redirectUrisMatch(requested: string, registered: string): boolea
   const bHost = b.hostname.replace(/^\[(.+)\]$/, '$1').toLowerCase();
   if (aHost !== bHost) return false;
 
-  if (isLoopbackHostname(aHost)) {
-    // 忽略端口
+  // 仅 http + IP 字面量忽端口（RFC 8252 精确口径）
+  if (a.protocol === 'http:' && isIpLiteralLoopback(aHost)) {
     return true;
   }
   return a.port === b.port;
+}
+
+/** 127.0.0.0/8 或 ::1 字面量（不含 localhost 主机名）。 */
+function isIpLiteralLoopback(host: string): boolean {
+  const h = host.toLowerCase();
+  if (h === '::1') return true;
+  if (isIP(h) === 4) {
+    const [a] = h.split('.').map(Number);
+    return a === 127;
+  }
+  return false;
 }
 
 function isLoopbackHostname(host: string): boolean {
@@ -261,9 +280,160 @@ function validateDocument(
   };
 }
 
+/** 流式读取响应体，超过 CIMD_MAX_BYTES 截断失败（不整缓冲 arrayBuffer）。 */
+async function readBodyCapped(
+  stream: NodeJS.ReadableStream,
+  maxBytes: number,
+): Promise<{ ok: true; buf: Buffer } | { ok: false; reason: 'response_too_large' }> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.byteLength;
+    if (total > maxBytes) {
+      // 尽早停读，避免大响应占内存
+      const maybeDestroy = (stream as unknown as { destroy?: () => void }).destroy;
+      if (typeof maybeDestroy === 'function') maybeDestroy.call(stream);
+      return { ok: false, reason: 'response_too_large' };
+    }
+    chunks.push(buf);
+  }
+  return { ok: true, buf: Buffer.concat(chunks) };
+}
+
+/**
+ * 默认 CIMD 传输：node:http(s) + 连接时 lookup 钉死 SSRF。
+ * Host / SNI 仍用原始 hostname；实际 TCP 目标由 lookup 结果决定。
+ */
+export async function pinnedCimdFetcher(
+  urlStr: string,
+  init: RequestInit = {},
+  dnsLookup: DnsLookup = defaultDnsLookup,
+): Promise<Response> {
+  const url = new URL(urlStr);
+  const isHttps = url.protocol === 'https:';
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('unsupported_protocol');
+  }
+
+  // IP 字面量：连接前即判黑名单（无 DNS TOCTOU）
+  const literal = url.hostname.replace(/^\[(.+)\]$/, '$1');
+  if (isIP(literal) && isSsrfBlockedResolvedIp(literal)) {
+    throw new Error('ssrf_blocked_ip');
+  }
+
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    host: url.host,
+  };
+  if (init.headers) {
+    const h = new Headers(init.headers);
+    h.forEach((v, k) => {
+      if (k.toLowerCase() === 'host') return;
+      headers[k] = v;
+    });
+  }
+
+  const lib = isHttps ? https : http;
+  const timeoutMs = CIMD_FETCH_TIMEOUT_MS;
+
+  return new Promise<Response>((resolve, reject) => {
+    const req = lib.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        method: (init.method as string) || 'GET',
+        headers,
+        // https：显式 SNI = 原始 hostname（即使 dial 到解析 IP）
+        servername: isHttps ? literal : undefined,
+        // 连接时解析并对每个结果跑 SSRF（钉死，消灭校验/fetch 间 TOCTOU）
+        lookup: ((hostname, options, callback) => {
+          const fail = (err: NodeJS.ErrnoException) => {
+            // LookupFunction 要求 (err, address, family) 三参
+            callback(err, '', 4);
+          };
+          void (async () => {
+            try {
+              const list = await dnsLookup(hostname.replace(/^\[(.+)\]$/, '$1'));
+              if (list.length === 0) {
+                fail(Object.assign(new Error('dns_empty'), { code: 'ENOTFOUND' }));
+                return;
+              }
+              for (const r of list) {
+                if (isSsrfBlockedResolvedIp(r.address)) {
+                  fail(Object.assign(new Error('ssrf_blocked_ip'), { code: 'EACCES' }));
+                  return;
+                }
+              }
+              const mapped = list.map((r) => ({
+                address: r.address,
+                family: (r.family === 6 ? 6 : 4) as 4 | 6,
+              }));
+              const opts = options as { all?: boolean } | number | undefined;
+              const wantAll =
+                typeof opts === 'object' && opts !== null && Boolean(opts.all);
+              if (wantAll) {
+                (callback as (err: Error | null, addresses: typeof mapped) => void)(
+                  null,
+                  mapped,
+                );
+              } else {
+                const first = mapped[0]!;
+                callback(null, first.address, first.family);
+              }
+            } catch (err) {
+              fail(err as NodeJS.ErrnoException);
+            }
+          })();
+        }) as LookupFunction,
+      },
+      (res) => {
+        void (async () => {
+          try {
+            const capped = await readBodyCapped(res, CIMD_MAX_BYTES);
+            if (!capped.ok) {
+              res.resume();
+              reject(new Error(capped.reason));
+              return;
+            }
+            const headerInit: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (typeof v === 'string') headerInit[k] = v;
+              else if (Array.isArray(v)) headerInit[k] = v.join(', ');
+            }
+            resolve(
+              new Response(capped.buf, {
+                status: res.statusCode ?? 0,
+                headers: headerInit,
+              }),
+            );
+          } catch (err) {
+            reject(err);
+          }
+        })();
+      },
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('timeout'));
+    });
+    req.on('error', reject);
+
+    // MUST NOT 跟随重定向：node http 默认不跟随；3xx 原样交上层
+    if (init.signal) {
+      const onAbort = () => req.destroy(new Error('aborted'));
+      if (init.signal.aborted) onAbort();
+      else init.signal.addEventListener('abort', onAbort, { once: true });
+    }
+    req.end();
+  });
+}
+
 /**
  * 拉取并校验 CIMD。可注入 fetcher（测试不启真 HTTP）。
- * MUST NOT 跟随重定向；MUST 200；响应限 5KB。
+ * MUST NOT 跟随重定向；MUST 200；响应边读边限 5KB。
  */
 export async function fetchClientMetadata(
   clientId: string,
@@ -282,13 +452,17 @@ export async function fetchClientMetadata(
   const urlCheck = validateClientIdUrl(clientId);
   if (!urlCheck.ok) return urlCheck;
 
-  const hostSafe = await assertClientIdHostSafe(
-    urlCheck.url.hostname,
-    options.dnsLookup,
-  );
-  if (!hostSafe.ok) return hostSafe;
+  // 字面量 IP：连接前预检。主机名 SSRF 留给连接 lookup（钉死，无二次解析窗口）。
+  const host = urlCheck.url.hostname.replace(/^\[(.+)\]$/, '$1');
+  if (isIP(host)) {
+    const hostSafe = await assertClientIdHostSafe(host, options.dnsLookup);
+    if (!hostSafe.ok) return hostSafe;
+  }
 
-  const fetcher = options.fetcher ?? defaultFetcher;
+  const fetcher =
+    options.fetcher ??
+    ((url, init) => pinnedCimdFetcher(url, init, options.dnsLookup));
+
   let res: Response;
   try {
     res = await fetcher(clientId, {
@@ -297,7 +471,14 @@ export async function fetchClientMetadata(
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(CIMD_FETCH_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'ssrf_blocked_ip' || msg.includes('ssrf_blocked')) {
+      return { ok: false, reason: 'ssrf_blocked_ip' };
+    }
+    if (msg === 'response_too_large') {
+      return { ok: false, reason: 'response_too_large' };
+    }
     return { ok: false, reason: 'fetch_failed' };
   }
 
@@ -309,9 +490,25 @@ export async function fetchClientMetadata(
     return { ok: false, reason: 'http_not_200' };
   }
 
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.byteLength > CIMD_MAX_BYTES) {
-    return { ok: false, reason: 'response_too_large' };
+  // 注入 fetcher 可能仍整包返回；统一再限一次体积
+  let buf: Buffer;
+  try {
+    if (res.body) {
+      const capped = await readBodyCapped(
+        res.body as unknown as NodeJS.ReadableStream,
+        CIMD_MAX_BYTES,
+      );
+      if (!capped.ok) return capped;
+      buf = capped.buf;
+    } else {
+      const ab = Buffer.from(await res.arrayBuffer());
+      if (ab.byteLength > CIMD_MAX_BYTES) {
+        return { ok: false, reason: 'response_too_large' };
+      }
+      buf = ab;
+    }
+  } catch {
+    return { ok: false, reason: 'fetch_failed' };
   }
 
   let json: unknown;
@@ -331,11 +528,7 @@ export async function fetchClientMetadata(
   return validated;
 }
 
-async function defaultFetcher(url: string, init: RequestInit): Promise<Response> {
-  return fetch(url, init);
-}
-
-/** 授权请求的 redirect_uri 是否在文档列表中（含 loopback 端口放宽）。 */
+/** 授权请求的 redirect_uri 是否在文档列表中（含 RFC8252 端口放宽）。 */
 export function matchRedirectUri(
   requested: string,
   registered: string[],

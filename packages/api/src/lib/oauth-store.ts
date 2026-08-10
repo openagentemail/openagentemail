@@ -178,6 +178,30 @@ function isStoreShape(value: unknown): value is OAuthStoreFile {
   );
 }
 
+/** 清掉 codes/access/refresh 过期行（load/save 时调用）。 */
+function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
+  let changed = false;
+  for (const [hash, row] of Object.entries(data.codes)) {
+    if (row.expiresAt <= now) {
+      delete data.codes[hash];
+      changed = true;
+    }
+  }
+  for (const [hash, row] of Object.entries(data.access)) {
+    if (row.expiresAt <= now) {
+      delete data.access[hash];
+      changed = true;
+    }
+  }
+  for (const [hash, row] of Object.entries(data.refresh)) {
+    if (row.expiresAt <= now) {
+      delete data.refresh[hash];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function load(): OAuthStoreFile {
   const path = storePath();
   if (!existsSync(path)) {
@@ -190,11 +214,19 @@ function load(): OAuthStoreFile {
   try {
     const version = fileVersionFromStat(statSync(path));
     if (storeCache && storeVersionsEqual(storeCache.version, version)) {
+      // 缓存命中也做内存 prune（不强制写盘，避免热路径 IO）
+      pruneExpired(storeCache.data);
       return storeCache.data;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isStoreShape(parsed)) {
       throw new Error('invalid oauth store shape');
+    }
+    if (pruneExpired(parsed)) {
+      // 读时发现过期行：就地写回，避免 save→load 递归
+      const written = writeStoreFile(parsed);
+      storeCache = { version: written, data: parsed };
+      return storeCache.data;
     }
     storeCache = { version, data: parsed };
     return storeCache.data;
@@ -206,8 +238,7 @@ function load(): OAuthStoreFile {
   }
 }
 
-function save(data: OAuthStoreFile): void {
-  invalidateStoreCache();
+function writeStoreFile(data: OAuthStoreFile): StoreFileVersion {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(config.dataDir, 0o700);
@@ -219,6 +250,14 @@ function save(data: OAuthStoreFile): void {
   writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
+  return fileVersionFromStat(statSync(path));
+}
+
+function save(data: OAuthStoreFile): void {
+  pruneExpired(data);
+  invalidateStoreCache();
+  const version = writeStoreFile(data);
+  storeCache = { version, data };
 }
 
 export function hashSecret(value: string): string {
@@ -255,10 +294,37 @@ export function listGrantsForAuth(auth: {
   if (auth.kind === 'admin') {
     return all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
-  const address = auth.address!.toLowerCase();
+  if (typeof auth.address !== 'string' || !auth.address) {
+    return [];
+  }
+  const address = auth.address.toLowerCase();
   return all
     .filter((g) => g.address.toLowerCase() === address)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** 身份删除时级联吊销：该地址下全部 grant + 挂接 token。 */
+export function revokeGrantsForAddress(address: string): number {
+  const data = load();
+  const needle = address.toLowerCase();
+  const grantIds = Object.keys(data.grants).filter(
+    (id) => data.grants[id]!.address.toLowerCase() === needle,
+  );
+  if (grantIds.length === 0) return 0;
+  for (const grantId of grantIds) {
+    delete data.grants[grantId];
+    for (const [hash, row] of Object.entries(data.codes)) {
+      if (row.grantId === grantId) delete data.codes[hash];
+    }
+    for (const [hash, row] of Object.entries(data.access)) {
+      if (row.grantId === grantId) delete data.access[hash];
+    }
+    for (const [hash, row] of Object.entries(data.refresh)) {
+      if (row.grantId === grantId) delete data.refresh[hash];
+    }
+  }
+  save(data);
+  return grantIds.length;
 }
 
 export function getGrant(grantId: string): OAuthGrant | undefined {
@@ -333,7 +399,42 @@ export type ConsumeCodeResult =
     }
   | { ok: false; reason: 'not_found' | 'expired' };
 
-/** 一次性消费授权码（先删再返回，防重放）。 */
+export type CodeRowView = {
+  grantId: string;
+  address: string;
+  resource: string;
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  expiresAt: number;
+};
+
+/** 只读查看授权码（不删除）；供全量校验后再原子消费。 */
+export function peekAuthorizationCode(
+  code: string,
+  now = Date.now(),
+): ConsumeCodeResult {
+  const data = load();
+  const hash = hashSecret(code);
+  const row = data.codes[hash];
+  if (!row) return { ok: false, reason: 'not_found' };
+  if (row.expiresAt <= now) return { ok: false, reason: 'expired' };
+  return {
+    ok: true,
+    grantId: row.grantId,
+    address: row.address,
+    resource: row.resource,
+    clientId: row.clientId,
+    redirectUri: row.redirectUri,
+    codeChallenge: row.codeChallenge,
+  };
+}
+
+/**
+ * 原子消费授权码：仍存在则删除并返回行。
+ * 调用方应先 peek + 全量校验（client/redirect/resource/PKCE），再调用本函数签发。
+ * 拦截者无 verifier 时只能制造一次「合法交换不可用」，不能靠抢删骗过 PKCE。
+ */
 export function consumeAuthorizationCode(
   code: string,
   now = Date.now(),
@@ -342,9 +443,13 @@ export function consumeAuthorizationCode(
   const hash = hashSecret(code);
   const row = data.codes[hash];
   if (!row) return { ok: false, reason: 'not_found' };
+  if (row.expiresAt <= now) {
+    delete data.codes[hash];
+    save(data);
+    return { ok: false, reason: 'expired' };
+  }
   delete data.codes[hash];
   save(data);
-  if (row.expiresAt <= now) return { ok: false, reason: 'expired' };
   return {
     ok: true,
     grantId: row.grantId,
@@ -400,26 +505,60 @@ export type RotateRefreshResult =
       aud: string;
       grantId: string;
     }
-  | { ok: false; reason: 'not_found' | 'expired' | 'grant_missing' };
+  | {
+      ok: false;
+      reason:
+        | 'not_found'
+        | 'expired'
+        | 'grant_missing'
+        | 'aud_mismatch'
+        | 'client_mismatch';
+    };
 
-/** refresh 轮换：旧 refresh 立即作废，签发新 access+refresh。 */
+export type RotateRefreshOptions = {
+  now?: number;
+  /** 期望 aud；不匹配时**不**吞旧票写新行。 */
+  expectedAud?: string;
+  /** RFC 6749 §6：public client 必须带 client_id 且与 grant 绑定。 */
+  clientId?: string;
+};
+
+/**
+ * refresh 轮换：先验 aud/client/过期/grant，全部通过后再删旧票写新行。
+ */
 export function rotateRefreshToken(
   refreshToken: string,
-  now = Date.now(),
+  nowOrOpts: number | RotateRefreshOptions = Date.now(),
 ): RotateRefreshResult {
+  const opts: RotateRefreshOptions =
+    typeof nowOrOpts === 'number' ? { now: nowOrOpts } : nowOrOpts;
+  const now = opts.now ?? Date.now();
   const data = load();
   const hash = hashSecret(refreshToken);
   const row = data.refresh[hash];
   if (!row) return { ok: false, reason: 'not_found' };
-  delete data.refresh[hash];
   if (row.expiresAt <= now) {
+    // 过期行可清掉；不算「轮换成功」
+    delete data.refresh[hash];
     save(data);
     return { ok: false, reason: 'expired' };
   }
   if (!data.grants[row.grantId]) {
-    save(data);
     return { ok: false, reason: 'grant_missing' };
   }
+  if (opts.expectedAud !== undefined && row.aud !== opts.expectedAud) {
+    // aud 不符：保留旧 refresh，禁止先写库再拒
+    return { ok: false, reason: 'aud_mismatch' };
+  }
+  if (opts.clientId !== undefined) {
+    const grant = data.grants[row.grantId]!;
+    if (grant.clientId !== opts.clientId) {
+      return { ok: false, reason: 'client_mismatch' };
+    }
+  }
+
+  // 校验全过：原子删除旧 refresh 并签发
+  delete data.refresh[hash];
   data.grants[row.grantId].lastUsedAt = new Date(now).toISOString();
   const access = generateOpaqueToken();
   const refresh = generateOpaqueToken();

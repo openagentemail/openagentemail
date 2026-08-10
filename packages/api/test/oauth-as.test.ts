@@ -95,6 +95,15 @@ function authQuery(extra: Record<string, string> = {}) {
   return { q, verifier: v };
 }
 
+/** 同意批准后为 200 过渡页；从可见链接解析回跳 URL。 */
+function redirectFromHandoffHtml(html: string): URL {
+  expect(html).toContain('已授权，正在跳回客户端');
+  const m = /href="([^"]+)"/.exec(html);
+  expect(m).toBeTruthy();
+  const href = m![1]!.replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+  return new URL(href);
+}
+
 beforeEach(() => {
   clearCimdCacheForTests();
   resetOAuthStoreCacheForTests();
@@ -140,28 +149,30 @@ describe('RFC 8414 + PRM issuer 一致', () => {
 });
 
 describe('完整授权流', () => {
-  test('authorize→code→token→/mcp tools/list；refresh 轮换；revoke', async () => {
+  test('authorize→code→token→/mcp tools/list + mail_list_messages；refresh 轮换；revoke', async () => {
     const app = makeApp();
     const { identity } = createIdentity({ localpart: 'oauth-flow' })!;
     const cookie = await loginCookie(app);
     const { q, verifier: v } = authQuery();
 
-    // GET /authorize → 同意页
+    // GET /authorize → 相对 Location 同意页
     const gate = await app.request(`http://localhost/authorize?${q}`, {
       headers: { cookie },
       redirect: 'manual',
     });
     expect(gate.status).toBe(302);
     const consentUrl = gate.headers.get('location')!;
-    expect(consentUrl).toContain('/ui/oauth/authorize?');
+    expect(consentUrl.startsWith('/ui/oauth/authorize?')).toBe(true);
 
-    const consent = await app.request(consentUrl, { headers: { cookie } });
+    const consent = await app.request(`http://localhost${consentUrl}`, {
+      headers: { cookie },
+    });
     expect(consent.status).toBe(200);
     const html = await consent.text();
     expect(html).toContain('Sim Client');
     expect(html).toContain('127.0.0.1');
 
-    // POST 批准
+    // POST 批准 → 200 过渡页（非 302）
     const body = new URLSearchParams({
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT,
@@ -182,8 +193,11 @@ describe('完整授权流', () => {
       body,
       redirect: 'manual',
     });
-    expect(approved.status).toBe(302);
-    const loc = new URL(approved.headers.get('location')!);
+    expect(approved.status).toBe(200);
+    expect(approved.headers.get('content-security-policy') ?? '').not.toContain(
+      'form-action',
+    );
+    const loc = redirectFromHandoffHtml(await approved.text());
     expect(loc.origin + loc.pathname).toBe('http://127.0.0.1:54321/callback');
     expect(loc.searchParams.get('iss')).toBe('http://localhost');
     expect(loc.searchParams.get('state')).toBe('st1');
@@ -204,6 +218,8 @@ describe('完整授权流', () => {
       }),
     });
     expect(tokenRes.status).toBe(200);
+    expect(tokenRes.headers.get('cache-control')).toBe('no-store');
+    expect(tokenRes.headers.get('pragma')).toBe('no-cache');
     const tokens = (await tokenRes.json()) as {
       access_token: string;
       refresh_token: string;
@@ -223,6 +239,38 @@ describe('完整授权流', () => {
     });
     expect(mcp.status).toBe(200);
 
+    // 真打 /v1：OAuth 票读自己邮件（证明 aud/origin 对齐；禁再出现 403 invalid_audience）
+    const v1 = await app.request(
+      `http://localhost/v1/messages?address=${encodeURIComponent(identity.address)}&limit=1`,
+      { headers: { authorization: `Bearer ${tokens.access_token}` } },
+    );
+    expect(v1.status).not.toBe(403);
+    // IMAP 在单测环境常不可达 → 500 可接受；关键是过了 bearerAuth
+    expect([200, 500, 503]).toContain(v1.status);
+
+    // 经 MCP 工具回环再打一次（同源断言）
+    const toolCall = await app.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokens.access_token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: {
+          name: 'mail_list_messages',
+          arguments: { address: identity.address, limit: 1 },
+        },
+      }),
+    });
+    expect(toolCall.status).not.toBe(403);
+    expect(toolCall.status).toBe(200);
+    const toolText = await toolCall.text();
+    expect(toolText).not.toContain('invalid_audience');
+
     // code 重放拒
     const replay = await app.request('http://localhost/oauth/token', {
       method: 'POST',
@@ -238,17 +286,19 @@ describe('完整授权流', () => {
     });
     expect(replay.status).toBe(400);
 
-    // refresh 轮换
+    // refresh 轮换（须带 client_id）
     const refreshed = await app.request('http://localhost/oauth/token', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: tokens.refresh_token,
+        client_id: CLIENT_ID,
         resource: RESOURCE,
       }),
     });
     expect(refreshed.status).toBe(200);
+    expect(refreshed.headers.get('cache-control')).toBe('no-store');
     const next = (await refreshed.json()) as {
       access_token: string;
       refresh_token: string;
@@ -262,10 +312,13 @@ describe('完整授权流', () => {
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: tokens.refresh_token,
+        client_id: CLIENT_ID,
         resource: RESOURCE,
       }),
     });
     expect(oldReplay.status).toBe(400);
+    const oldBody = (await oldReplay.json()) as { error_description?: string };
+    expect(oldBody.error_description).toBe('refresh token invalid or expired');
 
     // revoke → 立即 401
     const rev = await app.request('http://localhost/oauth/revoke', {
@@ -284,6 +337,84 @@ describe('完整授权流', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
     });
     expect(after.status).toBe(401);
+  });
+
+  test('删身份后旧 access 401、旧 refresh invalid_grant', async () => {
+    const app = makeApp();
+    const { identity } = createIdentity({ localpart: 'oauth-del' })!;
+    const cookie = await loginCookie(app);
+    const { q, verifier: v } = authQuery();
+    const approved = await app.request('http://localhost/ui/oauth/authorize', {
+      method: 'POST',
+      headers: {
+        cookie,
+        origin: 'http://localhost',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        redirect_uri: REDIRECT,
+        code_challenge: q.get('code_challenge')!,
+        resource: RESOURCE,
+        identity_mode: 'existing',
+        address: identity.address,
+        decision: 'approve',
+      }),
+    });
+    const code = redirectFromHandoffHtml(await approved.text()).searchParams.get(
+      'code',
+    )!;
+    const tokenRes = await app.request('http://localhost/oauth/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT,
+        client_id: CLIENT_ID,
+        code_verifier: v,
+        resource: RESOURCE,
+      }),
+    });
+    const tokens = (await tokenRes.json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
+
+    const del = await app.request(
+      `http://localhost/v1/identities/${encodeURIComponent(identity.address)}`,
+      {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${adminKey}` },
+      },
+    );
+    expect(del.status).toBe(200);
+
+    const mcp = await app.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokens.access_token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(mcp.status).toBe(401);
+
+    const refresh = await app.request('http://localhost/oauth/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: CLIENT_ID,
+        resource: RESOURCE,
+      }),
+    });
+    expect(refresh.status).toBe(400);
+    const rb = (await refresh.json()) as { error: string; error_description?: string };
+    expect(rb.error).toBe('invalid_grant');
+    expect(rb.error_description).toBe('refresh token invalid or expired');
   });
 });
 
@@ -436,7 +567,10 @@ describe('授权负例', () => {
       }),
       redirect: 'manual',
     });
-    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    expect(approved.status).toBe(200);
+    const code = redirectFromHandoffHtml(await approved.text()).searchParams.get(
+      'code',
+    )!;
 
     const noVerifier = await app.request('http://localhost/oauth/token', {
       method: 'POST',
@@ -470,7 +604,9 @@ describe('授权负例', () => {
       }),
       redirect: 'manual',
     });
-    const code2 = new URL(approved2.headers.get('location')!).searchParams.get('code')!;
+    const code2 = redirectFromHandoffHtml(await approved2.text()).searchParams.get(
+      'code',
+    )!;
     const badRes = await app.request('http://localhost/oauth/token', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -526,9 +662,10 @@ describe('授权负例', () => {
   });
 
   test('code 过期拒', async () => {
-    const { consumeAuthorizationCode, createGrantAndCode } = await import(
-      '../src/lib/oauth-store.ts'
-    );
+    const { CODE_TTL_MS, consumeAuthorizationCode, createGrantAndCode } =
+      await import('../src/lib/oauth-store.ts');
+    // 用未来时钟消费：避免 save 时 prune 掉「创建即过期」行
+    const issuedAt = Date.now();
     const { code } = createGrantAndCode({
       clientId: CLIENT_ID,
       clientName: 'X',
@@ -536,9 +673,9 @@ describe('授权负例', () => {
       redirectUri: REDIRECT,
       codeChallenge: s256Challenge(verifier()),
       resource: RESOURCE,
-      now: Date.now() - 11 * 60 * 1000,
+      now: issuedAt,
     });
-    const consumed = consumeAuthorizationCode(code);
+    const consumed = consumeAuthorizationCode(code, issuedAt + CODE_TTL_MS + 1);
     expect(consumed.ok).toBe(false);
     if (!consumed.ok) expect(consumed.reason).toBe('expired');
   });
@@ -546,6 +683,7 @@ describe('授权负例', () => {
 
 describe('resolveToken / OAuth 永为 identity', () => {
   test('OAuth 票 → identity；过期 → null；aud 错 → forbidden；无 resource 上下文拒', () => {
+    createIdentity({ localpart: 'res' });
     const tok = 'resolve-token-test-opaque-value1';
     putAccessTokenForTests({
       token: tok,
@@ -582,6 +720,7 @@ describe('resolveToken / OAuth 永为 identity', () => {
 
   test('OAuth 票换 /ui/api/session → 401', async () => {
     const app = makeApp();
+    createIdentity({ localpart: 'ui' });
     const tok = 'ui-session-must-reject-oauth!!!!';
     putAccessTokenForTests({
       token: tok,
@@ -606,6 +745,7 @@ describe('resolveToken / OAuth 永为 identity', () => {
   });
 
   test('admin 不可经 OAuth 获得：构造路径断言', () => {
+    createIdentity({ localpart: 'admin' });
     // 即使 address 碰巧像 admin，kind 仍必须是 identity
     const tok = 'never-admin-oauth-token-value!!';
     putAccessTokenForTests({
@@ -632,14 +772,6 @@ describe('Dashboard 授权管理吊销', () => {
     const cookie = await loginCookie(app);
     const v = verifier();
     const challenge = s256Challenge(v);
-    const q = new URLSearchParams({
-      response_type: 'code',
-      client_id: CLIENT_ID,
-      redirect_uri: REDIRECT,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-      resource: RESOURCE,
-    });
     const body = new URLSearchParams({
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT,
@@ -659,7 +791,9 @@ describe('Dashboard 授权管理吊销', () => {
       body,
       redirect: 'manual',
     });
-    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    const code = redirectFromHandoffHtml(await approved.text()).searchParams.get(
+      'code',
+    )!;
     const tokenRes = await app.request('http://localhost/oauth/token', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -707,6 +841,5 @@ describe('Dashboard 授权管理吊销', () => {
     });
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('Authorized clients');
-    expect(q.get('client_id')).toBe(CLIENT_ID);
   });
 });
