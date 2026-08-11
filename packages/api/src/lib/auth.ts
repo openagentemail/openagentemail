@@ -13,12 +13,24 @@
  * All /v1/* routes sit behind this.
  */
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { config } from './config.ts';
-import { findIdentity, findIdentityByToken } from './identities.ts';
+import { findIdentity, findIdentityByToken, findIdentityByTokenHash } from './identities.ts';
 import { getGrant, lookupAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** 常量时间比较两个 hex/字符串哈希（长度不同直接 false）。 */
+function hashEquals(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
 
 export type Auth =
   | { kind: 'admin' }
@@ -150,6 +162,18 @@ export function resolveToken(
 export function resolveUiSessionToken(token: string): Auth | null {
   if (config.apiKeys.has(token)) return { kind: 'admin' };
   const identity = findIdentityByToken(token);
+  return identity ? { kind: 'identity', address: identity.address } : null;
+}
+
+/**
+ * UI session 持久化路径：仅凭 tokenHash 反解 principal（与 resolveUiSessionToken 同范围）。
+ * 重启后内存里不再有明文 token，authenticate 走此入口。
+ */
+export function resolveUiSessionTokenByHash(tokenHash: string): Auth | null {
+  for (const key of config.apiKeys) {
+    if (hashEquals(sha256Hex(key), tokenHash)) return { kind: 'admin' };
+  }
+  const identity = findIdentityByTokenHash(tokenHash);
   return identity ? { kind: 'identity', address: identity.address } : null;
 }
 
