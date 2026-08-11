@@ -370,7 +370,10 @@ export function registerOpenAgentEmailTools(
           .min(1)
           .max(600)
           .optional()
-          .describe("Seconds to wait (default 120, max 600)"),
+          // schema max 保持 600（历史客户端）；服务端按 MCP_MAX_WAIT_SECONDS 静默钳制
+          .describe(
+            "Seconds to wait (default 120, schema max 600; server clamps to MCP_MAX_WAIT_SECONDS)",
+          ),
       },
       outputSchema: messageOutputSchema,
       annotations: { ...mailReadAnnotations, idempotentHint: false },
@@ -486,12 +489,18 @@ export function registerOpenAgentEmailTools(
     {
       title: "Create Email Task",
       description:
-        "Assign a task to another managed identity. The server creates a stamped email thread and wakes that identity's agent route. With wait=true it waits up to 10 minutes for completed or failed; call task_get again for longer work.",
+        "Assign a task to another managed identity. The server creates a stamped email thread and wakes that identity's agent route. With wait=true it waits up to MCP_MAX_WAIT_SECONDS for completed or failed; call task_get again for longer work.",
       inputSchema: {
         to: z.email().describe("Managed recipient identity address"),
         subject: z.string().min(1).max(998).describe("Task subject"),
         body: z.string().max(1_000_000).describe("Task instructions in plain text"),
-        wait: z.boolean().optional().describe("Wait up to 600 seconds for completed or failed (default false)"),
+        wait: z
+          .boolean()
+          .optional()
+          // schema 仍写 600；实际封顶 MCP_MAX_WAIT_SECONDS
+          .describe(
+            "Wait up to MCP_MAX_WAIT_SECONDS for completed or failed (default false; schema legacy max 600)",
+          ),
       },
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
@@ -522,7 +531,12 @@ export function registerOpenAgentEmailTools(
       description: "Read one task thread and its server-stamped state history.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID from task_create or task_list"),
-        wait: z.boolean().optional().describe("Wait up to 600 seconds for completed or failed before returning"),
+        wait: z
+          .boolean()
+          .optional()
+          .describe(
+            "Wait up to MCP_MAX_WAIT_SECONDS for completed or failed before returning (schema legacy max 600)",
+          ),
       },
       outputSchema: taskOutputSchema,
       annotations: readOnlyAnnotations,

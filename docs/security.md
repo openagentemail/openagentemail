@@ -25,8 +25,38 @@ retention window before reusing one.
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。
 - access / refresh / code 只存 SHA-256 哈希（`DATA_DIR/oauth.json`，0600）；access 默认 1h，refresh 30d 且轮换即作废旧票。
 - 令牌绑定 RFC 8707 `resource`（本机 `{base}/mcp`）；aud 不符 → 403。
-- CIMD SSRF：当前部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU（P4 公网须进一步收紧私网放行）。
+- CIMD SSRF：默认（`OAE_PUBLIC_EDGE=false`）部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback/ULA；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU。公网部署设 `OAE_PUBLIC_EDGE=true` 关闭私网放行（见下节）。
 - 授权响应（含错误）一律带 `iss`（RFC 9207）。Dashboard `/ui/oauth/grants` 可整串吊销。
+
+## 公网开门姿态（P4-code 通用能力；零厂商绑定）
+
+应用层自带四件套，不依赖任何特定 CDN/边缘产品。代码只认标准反代语义（`X-Forwarded-For`），**不读**厂商专用客户端 IP 头。
+
+### `TRUST_PROXY_HEADERS`（默认 `false`）
+
+- `false`（默认）：限流键 / UI 登录失败桶 / OAuth 审计 `ip` 一律用**连接远端地址**。请求里的 `X-Forwarded-For` **被忽略**——防伪造红线。
+- `true`：取 `X-Forwarded-For` **首跳**作为客户端 IP；首跳须为合法 IP 字面量（`isIP !== 0`），否则回落连接地址——挡 append 式反代下客户端自供的垃圾串蒸发限流桶。
+- **硬性前置条件（`true` 时必须满足）**：前面的受信反代**必须覆写或剥离**客户端自供的 `X-Forwarded-For`，只写入自己看到的连接对端（或等价可信链）。append 式「把客户端头拼在左侧」**不满足**此条件——即使首跳过了 `isIP` 校验，攻击者仍可轮换合法 IP 字面量蒸发 per-IP 桶。应用层 IP 限量只防**同键**暴力，**不防**分布式/轮换伪造；前置条件不满足时，开 `true` 等于把限流键交给客户端。
+- **威胁模型**：把 API **直连**暴露到公网并开 `true`，等于任何人可伪造 XFF、自选限流键——等于自杀。反代后若保持 `false`，所有人共享反代出口 IP 的额度——要开公网就得开 XFF 信任，且**仅在**上述硬性前置条件已满足时开。
+
+### `OAE_PUBLIC_EDGE`（默认 `false`）
+
+- `false`：CIMD 保留私网/loopback 部署例外（tailnet dogfood 不受影响）。
+- `true`：关闭该例外——RFC1918 / CGNAT / loopback / ULA 全拒；永拒清单不变。公网 AS 应开。
+
+### 阻塞等待与预鉴权 IP 限量
+
+- `MCP_MAX_WAIT_SECONDS`（默认 60，可配 1..600）：`mail_wait_for` / `POST /v1/messages/wait` 的 `timeoutSec` 与 `task_*` wait 服务端封顶**静默钳制**到该值（schema 仍广告 max 600，不 400）。有效值见响应头 `X-OAE-Wait-Timeout-Sec` 与 408 体 `timeoutSec`。
+- `OAUTH_RATE_PER_MIN`（默认 30）：`/authorize`、`/oauth/token`、`/oauth/revoke` 每 IP 每分钟。
+- `MCP_PREAUTH_RATE_PER_MIN`（默认 120）：`POST /mcp` 无/坏 token 的 401 挑战路径每 IP 每分钟。OAuth 引导握手故意无 token 探 401 拿挑战是规范动作；共享出口 IP 下默认须留余量。超限 `429` + `Retry-After`。
+
+### 推荐公网部署姿态
+
+1. TLS 反代终止 → API；设 `MCP_PUBLIC_URL=https://…`（PRM / 401 `resource_metadata` / AS issuer 同源）。
+2. `TRUST_PROXY_HEADERS=true`——**仅当**反代已满足上节硬性前置（覆写/剥离客户端 XFF）；否则保持 `false`。
+3. `OAE_PUBLIC_EDGE=true`。
+4. 保持 `MCP_MAX_WAIT_SECONDS≤60`（多数边缘读超时 ~100s）。
+5. 内网-only agent：**不要**开公网；两开关保持默认关即可。
 
 ## P3.5 审计 / 工具分层 / MCP 限量（应用层安全带）
 
@@ -35,7 +65,7 @@ retention window before reusing one.
 ### Scrubbed 审计事件
 
 - 落盘：`DATA_DIR/audit.jsonl`（JSONL 追加；单写者；文件 0600 / 目录 0700）。
-- 行字段白名单：`{ts, event, clientId?, grantId?, address?, tool?, tier?, outcome, durationMs?}`——**严禁**参数值、邮件正文、token 任何片段、subject。
+- 行字段白名单：`{ts, event, clientId?, grantId?, address?, tool?, tier?, outcome, durationMs?, ip?}`——**严禁**参数值、邮件正文、token 任何片段、subject。`ip` 为可选客户端地址（非秘密；OAuth 端点事件带上）。
 - 外部可控字段（clientId 等）写入前剥控制字符/换行并截断，防 JSONL log 注入。
 - 事件名（与实现一致）：
   - `oauth.authorize.approve` / `oauth.authorize.deny`

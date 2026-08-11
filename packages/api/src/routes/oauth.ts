@@ -3,7 +3,7 @@
  * 同意页本身在 /ui/oauth/authorize（cookie path=/ui）。
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import {
   fetchClientMetadata,
@@ -12,6 +12,8 @@ import {
 } from '../lib/oauth-cimd.ts';
 import { verifyS256CodeChallenge } from '../lib/oauth-pkce.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
+import { config } from '../lib/config.ts';
+import { clientIp } from '../lib/net.ts';
 import {
   consumeAuthorizationCode,
   issueTokenPair,
@@ -24,11 +26,33 @@ import {
   resolveIssuer,
   resolveResourceUri,
 } from '../lib/oauth-url.ts';
+import { checkOauthIpRateLimit } from '../lib/ratelimit.ts';
 
 const TOKEN_BODY_LIMIT = 8 * 1024;
 
 /** refresh 失败对外统一描述（灭 oracle）。 */
 const REFRESH_INVALID_DESC = 'refresh token invalid or expired';
+
+/**
+ * OAuth 公开端点预鉴权 IP 限量。超限 → 429 + Retry-After。
+ * 限量 0 = 关闭。键 = clientIp（与 TRUST_PROXY_HEADERS 联动）。
+ */
+function rejectIfOauthRateLimited(c: Context): Response | null {
+  const limit = config.oauthRatePerMin;
+  if (limit <= 0) return null;
+  const rl = checkOauthIpRateLimit(clientIp(c), limit);
+  if (rl.allowed) return null;
+  c.header('Retry-After', String(Math.max(1, rl.retryAfterSec)));
+  return c.json({ error: 'rate_limited' }, 429);
+}
+
+/** scrubbed 审计 + 可选客户端 IP（非秘密）。 */
+function oauthAudit(
+  c: Context,
+  partial: Omit<Parameters<typeof recordAuditEvent>[0], 'ip'>,
+): void {
+  recordAuditEvent({ ...partial, ip: clientIp(c) });
+}
 
 export type OAuthRouteOptions = {
   /** 测试可注入 CIMD fetcher。 */
@@ -138,6 +162,8 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
   });
 
   app.get('/authorize', (c) => {
+    const limited = rejectIfOauthRateLimited(c);
+    if (limited) return limited;
     const url = new URL(c.req.url);
     // 相对 Location：经 TLS 反代时不把 scheme 降成请求里的 http
     return c.redirect(`/ui/oauth/authorize${url.search}`, 302);
@@ -159,6 +185,8 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
   );
 
   app.post('/oauth/token', async (c) => {
+    const limited = rejectIfOauthRateLimited(c);
+    if (limited) return limited;
     const origin = new URL(c.req.url).origin;
     const expectedResource = resolveResourceUri(origin);
     let body: Record<string, string>;
@@ -179,6 +207,8 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
   });
 
   app.post('/oauth/revoke', async (c) => {
+    const limited = rejectIfOauthRateLimited(c);
+    if (limited) return limited;
     if (!browserRevokeOriginOk(c)) {
       return c.json({ error: 'invalid_request', error_description: 'origin required' }, 400);
     }
@@ -195,7 +225,7 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
     let revoked = false;
     if (token) revoked = revokeToken(token, clientId);
     if (revoked) {
-      recordAuditEvent({
+      oauthAudit(c, {
         event: 'oauth.revoke',
         ...(clientId ? { clientId } : {}),
         outcome: 'ok',
@@ -211,10 +241,7 @@ export function registerOAuthRoutes(app: Hono, options: OAuthRouteOptions = {}):
  * 顺序：peek → 全量校验 → 原子消费 → 签发。
  */
 function handleAuthorizationCode(
-  c: {
-    header: (n: string, v: string) => void;
-    json: (body: unknown, status?: 200 | 400 | 401) => Response;
-  },
+  c: Context,
   body: Record<string, string>,
   expectedResource: string,
 ) {
@@ -240,7 +267,7 @@ function handleAuthorizationCode(
     // 取舍①：仅哈希命中已知行才落失败审计（expired=可归因）。
     // not_found（含已消费后的 replay）不写盘——公网随机灌码不得撑爆 audit.jsonl。
     if (peeked.reason === 'expired') {
-      recordAuditEvent({
+      oauthAudit(c, {
         event: 'oauth.token.code',
         clientId,
         outcome: 'denied',
@@ -251,7 +278,7 @@ function handleAuthorizationCode(
 
   // 全部用存储字段比对（调用方 client_id 必须与存储一致）——可归因，全量审计
   if (peeked.clientId !== clientId) {
-    recordAuditEvent({
+    oauthAudit(c, {
       event: 'oauth.token.code',
       clientId,
       grantId: peeked.grantId,
@@ -261,7 +288,7 @@ function handleAuthorizationCode(
     return oauthErrorJson(c, 'invalid_grant', 'client_id mismatch');
   }
   if (!matchRedirectUri(redirectUri, [peeked.redirectUri])) {
-    recordAuditEvent({
+    oauthAudit(c, {
       event: 'oauth.token.code',
       clientId,
       grantId: peeked.grantId,
@@ -271,7 +298,7 @@ function handleAuthorizationCode(
     return oauthErrorJson(c, 'invalid_grant', 'redirect_uri mismatch');
   }
   if (peeked.resource !== resource) {
-    recordAuditEvent({
+    oauthAudit(c, {
       event: 'oauth.token.code',
       clientId,
       grantId: peeked.grantId,
@@ -281,7 +308,7 @@ function handleAuthorizationCode(
     return oauthErrorJson(c, 'invalid_grant', 'resource mismatch');
   }
   if (!verifyS256CodeChallenge(codeVerifier, peeked.codeChallenge)) {
-    recordAuditEvent({
+    oauthAudit(c, {
       event: 'oauth.token.code',
       clientId,
       grantId: peeked.grantId,
@@ -295,7 +322,7 @@ function handleAuthorizationCode(
   const consumed = consumeAuthorizationCode(code);
   if (!consumed.ok) {
     // peek 已命中后的消费失败（竞态/replay）——可归因
-    recordAuditEvent({
+    oauthAudit(c, {
       event: 'oauth.token.code',
       clientId,
       grantId: peeked.grantId,
@@ -312,7 +339,7 @@ function handleAuthorizationCode(
   });
 
   // scrubbed：只记身份标识，不写 access/refresh 明文
-  recordAuditEvent({
+  oauthAudit(c, {
     event: 'oauth.token.code',
     clientId: consumed.clientId,
     grantId: consumed.grantId,
@@ -329,10 +356,7 @@ function handleAuthorizationCode(
 }
 
 function handleRefresh(
-  c: {
-    header: (n: string, v: string) => void;
-    json: (body: unknown, status?: 200 | 400 | 401) => Response;
-  },
+  c: Context,
   body: Record<string, string>,
   expectedResource: string,
 ) {
@@ -360,7 +384,7 @@ function handleRefresh(
   if (!rotated.ok) {
     // 取舍①：not_found 不落盘；expired / grant_missing / aud|client_mismatch 可归因仍记
     if (rotated.reason !== 'not_found') {
-      recordAuditEvent({
+      oauthAudit(c, {
         event: 'oauth.token.refresh',
         clientId,
         outcome: 'denied',
@@ -369,7 +393,7 @@ function handleRefresh(
     return oauthErrorJson(c, 'invalid_grant', REFRESH_INVALID_DESC, 400);
   }
 
-  recordAuditEvent({
+  oauthAudit(c, {
     event: 'oauth.token.refresh',
     clientId,
     grantId: rotated.grantId,

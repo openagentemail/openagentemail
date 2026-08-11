@@ -14,18 +14,25 @@ import { lookup as dnsLookupAll } from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
-import { isPrivateOrLoopbackHostname, isSsrfBlockedResolvedIp } from './net.ts';
+import {
+  allowsPrivateCimdException,
+  isPrivateOrLoopbackHostname,
+  isSsrfBlockedResolvedIp,
+  type SsrfPolicyOptions,
+} from './net.ts';
 
 // 再导出：既有测试从本模块导入 SSRF 助手；实现唯一在 lib/net.ts。
 export {
+  allowsPrivateCimdException,
   isBlockedSsrfIp,
   isPrivateOrLoopbackHostname,
   isSsrfBlockedResolvedIp,
 } from './net.ts';
+export type { SsrfPolicyOptions } from './net.ts';
 
 export const CIMD_FETCH_TIMEOUT_MS = 10_000;
 export const CIMD_MAX_BYTES = 5 * 1024;
-/** 缓存下限 60s、上限 7 天（对齐 Cloudflare 封顶惯例）。 */
+/** 缓存下限 60s、上限 7 天（常见 CDN 缓存封顶惯例）。 */
 export const CIMD_CACHE_MIN_S = 60;
 export const CIMD_CACHE_MAX_S = 7 * 24 * 60 * 60;
 
@@ -66,7 +73,10 @@ export function clearCimdCacheForTests(): void {
  * client_id URL 合法性（CIMD MUST）。
  * https + 含 path；禁 `.`/`..` 段、fragment、userinfo；本实现拒 query（规范 SHOULD NOT）。
  */
-export function validateClientIdUrl(clientId: string): { ok: true; url: URL } | { ok: false; reason: string } {
+export function validateClientIdUrl(
+  clientId: string,
+  opts?: SsrfPolicyOptions,
+): { ok: true; url: URL } | { ok: false; reason: string } {
   // 点段 / fragment / query 检查兼顾原始串：`new URL` 会规范化 `/./a` → `/a`。
   let url: URL;
   try {
@@ -75,8 +85,13 @@ export function validateClientIdUrl(clientId: string): { ok: true; url: URL } | 
     return { ok: false, reason: 'client_id_not_url' };
   }
   if (url.protocol !== 'https:') {
-    // 私网 dogfood：允许 http 仅当 host 为 loopback/私网（与 AS 同部署例外一致）
-    if (url.protocol !== 'http:' || !isPrivateOrLoopbackHostname(url.hostname)) {
+    // 私网 dogfood：允许 http 仅当 host 为 loopback/私网（与 AS 同部署例外一致）；
+    // OAE_PUBLIC_EDGE / opts.publicEdge=true 时关闭该例外（-01 MUST：非 https 一律拒）。
+    if (
+      url.protocol !== 'http:' ||
+      !isPrivateOrLoopbackHostname(url.hostname) ||
+      !allowsPrivateCimdException(opts)
+    ) {
       return { ok: false, reason: 'client_id_not_https' };
     }
   }
@@ -135,10 +150,11 @@ async function defaultDnsLookup(
 export async function assertClientIdHostSafe(
   hostname: string,
   dnsLookup: DnsLookup = defaultDnsLookup,
+  opts?: SsrfPolicyOptions,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const host = hostname.replace(/^\[(.+)\]$/, '$1');
   if (isIP(host)) {
-    if (isSsrfBlockedResolvedIp(host)) {
+    if (isSsrfBlockedResolvedIp(host, opts)) {
       return { ok: false, reason: 'ssrf_blocked_ip' };
     }
     return { ok: true };
@@ -147,7 +163,7 @@ export async function assertClientIdHostSafe(
     const list = await dnsLookup(host);
     if (list.length === 0) return { ok: false, reason: 'dns_empty' };
     for (const r of list) {
-      if (isSsrfBlockedResolvedIp(r.address)) {
+      if (isSsrfBlockedResolvedIp(r.address, opts)) {
         return { ok: false, reason: 'ssrf_blocked_ip' };
       }
     }

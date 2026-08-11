@@ -8,8 +8,12 @@ import {
   checkSendLimit,
   releaseNotifyUserLimit,
   releaseWaitSlot,
+  checkMcpPreauthIpRateLimit,
+  checkOauthIpRateLimit,
+  resetMcpPreauthIpRateLimits,
   resetMcpRateLimits,
   resetNotifyUserLimits,
+  resetOauthIpRateLimits,
   resetRateLimits,
   resetWaitSlots,
   slidingWindowCheck,
@@ -107,6 +111,18 @@ describe('checkMcpRateLimit 读写分桶', () => {
     // 不同大小写 = 不同桶，不得互相占额/错配
     expect(checkMcpRateLimit('abc_grant', 'write', 1, 60_000, now).allowed).toBe(true);
     expect(checkMcpRateLimit('AbC_grant', 'write', 1, 60_000, now).allowed).toBe(false);
+  });
+});
+
+describe('预鉴权 IP 限量（oauth / mcp-preauth，复用 slidingWindow）', () => {
+  test('两桶独立且走同一 helper', () => {
+    resetOauthIpRateLimits();
+    resetMcpPreauthIpRateLimits();
+    const now = 9_000;
+    expect(checkOauthIpRateLimit('1.2.3.4', 1, 60_000, now).allowed).toBe(true);
+    expect(checkOauthIpRateLimit('1.2.3.4', 1, 60_000, now).allowed).toBe(false);
+    // MCP 预鉴权桶不共享 OAuth 计数
+    expect(checkMcpPreauthIpRateLimit('1.2.3.4', 1, 60_000, now).allowed).toBe(true);
   });
 });
 

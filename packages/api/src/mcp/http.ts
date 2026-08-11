@@ -9,7 +9,7 @@
  * 2) per-token 读写分桶限量（admin 豁免；tools/list 免费）
  * 3) tier≥minimal 落 scrubbed 审计（含 attribution）
  */
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
   McpServer,
@@ -29,13 +29,20 @@ import {
 import { config } from "../lib/config.ts";
 import { JSON_BODY_LIMIT_BYTES } from "../lib/limits.ts";
 import { getMcpLoopbackBase, runWithMcpLoopbackBase } from "../lib/mcp-loopback.ts";
-import { isPrivateOrLoopbackHost, isPrivateOrLoopbackHostname } from "../lib/net.ts";
+import {
+  clientIp,
+  isPrivateOrLoopbackHost,
+  isPrivateOrLoopbackHostname,
+} from "../lib/net.ts";
 import {
   buildAuthorizationServerMetadata,
   resolvePublicBase,
   resolveResourceUri,
 } from "../lib/oauth-url.ts";
-import { checkMcpRateLimit } from "../lib/ratelimit.ts";
+import {
+  checkMcpPreauthIpRateLimit,
+  checkMcpRateLimit,
+} from "../lib/ratelimit.ts";
 import {
   getToolTier,
   isWriteTier,
@@ -113,9 +120,26 @@ export function mcpAuthMetadataOptions(
   };
 }
 
-/** 401 挑战里的 resource_metadata：派单硬性路径（根 PRM，非 /mcp 后缀）。 */
-function resourceMetadataUrl(origin: string): string {
-  return `${origin.replace(/\/+$/, "")}/.well-known/oauth-protected-resource`;
+/**
+ * 401 挑战里的 resource_metadata：派单硬性路径（根 PRM，非 /mcp 后缀）。
+ * 与 PRM/AS 同源：override ?? MCP_PUBLIC_URL ?? request origin（#27 技术债②）。
+ */
+function resourceMetadataUrl(requestOrigin: string, publicBaseUrl?: string): string {
+  const base = resolvePublicBase(requestOrigin, publicBaseUrl);
+  return `${base}/.well-known/oauth-protected-resource`;
+}
+
+/**
+ * /mcp 预鉴权 IP 限量（仅无/坏 token → 401 挑战路径）。
+ * 已鉴权请求不进此桶。超限 429 + Retry-After。
+ */
+function rejectIfMcpPreauthRateLimited(c: Context): Response | null {
+  const limit = config.mcpPreauthRatePerMin;
+  if (limit <= 0) return null;
+  const rl = checkMcpPreauthIpRateLimit(clientIp(c), limit);
+  if (rl.allowed) return null;
+  c.header("Retry-After", String(Math.max(1, rl.retryAfterSec)));
+  return c.json({ error: "rate_limited" }, 429);
 }
 
 /** 共用：拼 PRM JSON 响应体。 */
@@ -214,9 +238,13 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
   // 仅 POST 进入 MCP；其他方法 405（无 WWW-Authenticate 挑战）。
   app.post("/mcp", async (c) => {
     const origin = new URL(c.req.url).origin;
-    const challengeOpts = { resourceMetadataUrl: resourceMetadataUrl(origin) };
+    const challengeOpts = {
+      resourceMetadataUrl: resourceMetadataUrl(origin, options.publicBaseUrl),
+    };
     const token = bearerToken(c.req.header("authorization"));
     if (!token) {
+      const limited = rejectIfMcpPreauthRateLimited(c);
+      if (limited) return limited;
       return bearerAuthChallengeResponse(
         new OAuthError(OAuthErrorCode.InvalidToken, "missing bearer token"),
         challengeOpts,
@@ -230,6 +258,8 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       return c.json({ error: "invalid_audience" }, 403);
     }
     if (resolved.status !== "ok") {
+      const limited = rejectIfMcpPreauthRateLimited(c);
+      if (limited) return limited;
       return bearerAuthChallengeResponse(
         new OAuthError(OAuthErrorCode.InvalidToken, "invalid token"),
         challengeOpts,

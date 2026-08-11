@@ -18,4 +18,6 @@ The website docs are canonical — edit them in the [website repo](https://githu
 | GET/DELETE | `/ui/api/oauth/grants[/:id]` | 列表 / 吊销 |
 | POST | `/ui/api/oauth/grants/:id/revoke` | 管理页表单吊销（同 origin + session；成功 302 回列表） |
 
-不做：DCR（`/oauth/register`）、OIDC discovery、admin 级 OAuth 票、公网暴露（P4）。
+预鉴权 IP 限量（应用层）：`OAUTH_RATE_PER_MIN` 覆盖上表 `/authorize`、`/oauth/token`、`/oauth/revoke`；`MCP_PREAUTH_RATE_PER_MIN` 覆盖 `POST /mcp` 无/坏 token 的 401 挑战。超限 `429` + `Retry-After`。键见 `TRUST_PROXY_HEADERS` / docs/security.md。
+
+不做：DCR（`/oauth/register`）、OIDC discovery、admin 级 OAuth 票。

@@ -4,10 +4,56 @@
  *
  * 部署例外：本服务跑在 loopback/tailnet 时放行 RFC1918 / CGNAT / loopback / ULA(fd)；
  * **永拒**：169.254.0.0/16、0.0.0.0/8、fe80::/10（与 IPv4 链路本地对齐）、
- * fd00:ec2::/16（AWS IMDS IPv6）。含 IPv4-mapped。P4 公网须收紧。
+ * fd00:ec2::/16（AWS IMDS IPv6）。含 IPv4-mapped。
+ * OAE_PUBLIC_EDGE=true 时关闭私网放行（回到 -01 MUST）。
+ *
+ * 客户端 IP：clientIp(c) 是唯一实现——TRUST_PROXY_HEADERS 控制是否读 XFF。
  */
 
 import { isIP } from 'node:net';
+import type { Context } from 'hono';
+import { getConnInfo } from 'hono/bun';
+import { config } from './config.ts';
+
+/** SSRF 策略选项：publicEdge 关闭私网部署例外。 */
+export type SsrfPolicyOptions = {
+  /** true = 公网边缘，私网/loopback/CGNAT/ULA 一律拒。默认读 config.oaePublicEdge。 */
+  publicEdge?: boolean;
+};
+
+function resolvePublicEdge(opts?: SsrfPolicyOptions): boolean {
+  return opts?.publicEdge ?? config.oaePublicEdge;
+}
+
+/**
+ * 真实客户端 IP（预鉴权限流 / UI 登录桶 / 审计用）。
+ * TRUST_PROXY_HEADERS=true → X-Forwarded-For 首跳（须为合法 IP 字面量）；
+ * 否则 / 首跳非法 → 连接远端地址。
+ * 测试客户端无 conninfo 时回落 `unknown`（永不盲信 XFF，除非开关打开）。
+ *
+ * 首跳必须 `isIP !== 0`：append 式反代会保留客户端自供的左侧值，
+ * 若不校验，伪造/轮换垃圾串可蒸发 IP 限流桶。
+ */
+export function clientIp(
+  c: Context,
+  opts?: { trustProxy?: boolean },
+): string {
+  const trust = opts?.trustProxy ?? config.trustProxyHeaders;
+  if (trust) {
+    const xff = c.req.header('x-forwarded-for');
+    if (xff) {
+      // 标准反代语义：左侧为原始客户端，逗号分隔后续跳
+      const first = xff.split(',')[0]?.trim();
+      // 仅采纳合法 IPv4/IPv6 字面量；垃圾串回落连接 IP
+      if (first && isIP(first) !== 0) return first;
+    }
+  }
+  try {
+    return getConnInfo(c).remote.address ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 function normalizeHost(hostname: string): string {
   return hostname.replace(/^\[(.+)\]$/, '$1').toLowerCase();
@@ -173,21 +219,34 @@ export const isPrivateOrLoopbackHost = isPrivateOrLoopbackHostname;
 
 /**
  * 解析后的每个 A/AAAA 必须通过 SSRF 策略。
- * 永拒名单见 isBlockedSsrfIp；RFC1918/CGNAT/loopback/ULA(fd) 因部署例外放行。
+ * 永拒名单见 isBlockedSsrfIp；RFC1918/CGNAT/loopback/ULA(fd) 默认因部署例外放行，
+ * OAE_PUBLIC_EDGE / opts.publicEdge=true 时关闭该例外。
  */
-export function isSsrfBlockedResolvedIp(ip: string): boolean {
+export function isSsrfBlockedResolvedIp(
+  ip: string,
+  opts?: SsrfPolicyOptions,
+): boolean {
   if (isBlockedSsrfIp(ip)) return true;
+  const publicEdge = resolvePublicEdge(opts);
   const host = normalizeHost(ip);
   const v = isIP(host);
   if (v === 0) return true;
   if (v === 4) {
-    if (isAllowedPrivateIpv4(host)) return false;
+    if (isAllowedPrivateIpv4(host)) return publicEdge;
     if (isSpecialUseIpv4BeyondAllowlist(host)) return true;
     return false;
   }
-  if (host === '::1' || isUlaIpv6(host)) return false;
+  if (host === '::1' || isUlaIpv6(host)) return publicEdge;
   if (host === '::' || host.startsWith('ff')) return true;
   return false;
+}
+
+/**
+ * 私网部署例外是否生效（http client_id / 文档口径）。
+ * publicEdge 时返回 false——调用方应拒绝非 https 私网 client_id。
+ */
+export function allowsPrivateCimdException(opts?: SsrfPolicyOptions): boolean {
+  return !resolvePublicEdge(opts);
 }
 
 function isSpecialUseIpv4BeyondAllowlist(ip: string): boolean {
