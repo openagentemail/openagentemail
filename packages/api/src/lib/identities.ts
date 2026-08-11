@@ -295,7 +295,15 @@ function hashEquals(a: string, b: string): boolean {
 /** Resolve an identity by its plaintext API token; undefined if no match. */
 export function findIdentityByToken(token: string): Identity | undefined {
   const hash = hashToken(token);
-  return load().find((i) => i.tokenHash && hashEquals(i.tokenHash, hash));
+  return findIdentityByTokenHash(hash);
+}
+
+/**
+ * 按已计算的 SHA-256 hex 反查身份。
+ * 供 UI session 持久化后 authenticate：落盘只存 tokenHash，不再持有明文。
+ */
+export function findIdentityByTokenHash(tokenHash: string): Identity | undefined {
+  return load().find((i) => i.tokenHash && hashEquals(i.tokenHash, tokenHash));
 }
 
 /** Returns the created identity plus its one-time plaintext token, or null if taken. */

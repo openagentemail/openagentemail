@@ -1,6 +1,12 @@
+import { join } from 'node:path';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { bearerAuth, resolveUiSessionToken, type Auth } from './lib/auth.ts';
+import {
+  bearerAuth,
+  resolveUiSessionToken,
+  resolveUiSessionTokenByHash,
+  type Auth,
+} from './lib/auth.ts';
 import { config } from './lib/config.ts';
 import { JSON_BODY_LIMIT_BYTES } from './lib/limits.ts';
 import {
@@ -30,6 +36,8 @@ import {
 type AppOptions = {
   uiEnabled?: boolean;
   tokenResolver?: (token: string) => Auth | null;
+  /** 测试可注入：按 tokenHash 反解（与 tokenResolver 配套；默认走生产实现）。 */
+  tokenHashResolver?: (tokenHash: string) => Auth | null;
   /** 测试可注入 CIMD fetcher。 */
   oauth?: OAuthRouteOptions;
   /** 测试可注入 MCP 对外 base（等同 MCP_PUBLIC_URL；含 401 resource_metadata）。 */
@@ -98,6 +106,10 @@ export function createApp(options: AppOptions = {}): Hono {
     const uiSessions = new UiSessionStore({
       // UI 会话默认拒 OAuth access；测试可经 tokenResolver 注入覆盖。
       resolveToken: options.tokenResolver ?? resolveUiSessionToken,
+      // 重启后落盘会话无明文 token，按 hash 反解（与 resolveUiSessionToken 同范围）。
+      resolveTokenHash: options.tokenHashResolver ?? resolveUiSessionTokenByHash,
+      // Trust-30d 必须活过 api 容器重建：落盘 DATA_DIR/ui-sessions.json
+      persistPath: join(config.dataDir, 'ui-sessions.json'),
     });
     registerUiAssets(app);
     app.use('/ui/api/session', uiSessionBodyLimit);

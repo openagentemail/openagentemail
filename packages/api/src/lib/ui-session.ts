@@ -1,4 +1,14 @@
 import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname } from 'node:path';
 import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
@@ -17,14 +27,27 @@ const IP_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const GLOBAL_FAILURE_WINDOW_MS = 60 * 1000;
 const MAX_IP_FAILURES = 10;
 const MAX_GLOBAL_FAILURES = 60;
+/** authenticate 更新 lastSeenAt 的落盘节流：默认 5 分钟内不重复写盘。 */
+export const LAST_SEEN_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
 
 type Session = {
-  token: string;
+  /** 仅进程内持有；落盘绝不写明文 token。重启后靠 tokenHash 反解。 */
+  token?: string;
   tokenHash: string;
   createdAt: number;
   lastSeenAt: number;
   remembered: boolean;
 };
+
+/** 落盘条目：仅 sidHash → 哈希与时间戳，无 sid/token 原文。 */
+type PersistedSession = {
+  tokenHash: string;
+  createdAt: number;
+  lastSeenAt: number;
+  remembered: boolean;
+};
+
+type PersistedStore = Record<string, PersistedSession>;
 
 type CreateResult =
   | { ok: true; sid: string; auth: Auth; reason?: undefined }
@@ -37,15 +60,27 @@ type CreateResult =
 
 type SessionStoreOptions = {
   resolveToken: (token: string) => Auth | null;
+  /**
+   * 按 tokenHash 反解 principal（持久化会话 authenticate 必用）。
+   * 未提供时：仅进程内带明文 token 的会话可 authenticate（测试常用）。
+   */
+  resolveTokenHash?: (tokenHash: string) => Auth | null;
   maxSessions?: number;
   maxSessionsPerToken?: number;
+  /**
+   * 持久化文件路径。生产由 app.ts 传入 DATA_DIR/ui-sessions.json；
+   * 省略则纯内存（避免测试文件共享 DATA_DIR 时互相污染）。
+   */
+  persistPath?: string;
+  /** lastSeenAt 落盘节流间隔；默认 LAST_SEEN_PERSIST_INTERVAL_MS。 */
+  lastSeenPersistIntervalMs?: number;
 };
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function isExpired(session: Session, now: number): boolean {
+function isExpired(session: Pick<Session, 'lastSeenAt' | 'createdAt' | 'remembered'>, now: number): boolean {
   // Remembered sessions ("trust this device") use a single 30-day sliding
   // idle window. There is no extra absolute cap server-side: the persistent
   // cookie's own 30-day Max-Age bounds the lifetime at the browser.
@@ -58,22 +93,48 @@ function isExpired(session: Session, now: number): boolean {
   );
 }
 
+function isPersistedSession(value: unknown): value is PersistedSession {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.tokenHash === 'string' &&
+    typeof row.createdAt === 'number' &&
+    typeof row.lastSeenAt === 'number' &&
+    typeof row.remembered === 'boolean'
+  );
+}
+
+function isPersistedStore(value: unknown): value is PersistedStore {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as object).every(isPersistedSession);
+}
+
 export class UiSessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly ipFailures = new Map<string, number[]>();
   private globalFailures: number[] = [];
   private readonly resolve: (token: string) => Auth | null;
+  private readonly resolveHash: ((tokenHash: string) => Auth | null) | null;
   private readonly maxSessions: number;
   private readonly maxSessionsPerToken: number;
+  private readonly persistPath: string | null;
+  private readonly lastSeenPersistIntervalMs: number;
+  /** 上次因 lastSeenAt 滑动而落盘的时间（按墙钟；节流用）。 */
+  private lastSeenPersistedAt = 0;
 
   constructor(options: SessionStoreOptions) {
     this.resolve = options.resolveToken;
+    this.resolveHash = options.resolveTokenHash ?? null;
     this.maxSessions = options.maxSessions ?? 200;
     this.maxSessionsPerToken = options.maxSessionsPerToken ?? 5;
+    this.persistPath = options.persistPath ?? null;
+    this.lastSeenPersistIntervalMs =
+      options.lastSeenPersistIntervalMs ?? LAST_SEEN_PERSIST_INTERVAL_MS;
+    if (this.persistPath) this.loadFromDisk(Date.now());
   }
 
   create(token: string, ip: string, now = Date.now(), remember = false): CreateResult {
-    this.cleanup(now);
+    const removed = this.cleanup(now);
     token = token.trim();
 
     const ipFailures = this.recentIpFailures(ip, now);
@@ -81,6 +142,7 @@ export class UiSessionStore {
       ipFailures.length >= MAX_IP_FAILURES ||
       this.globalFailures.length >= MAX_GLOBAL_FAILURES
     ) {
+      if (removed) this.persist();
       return { ok: false, reason: 'rate_limited' };
     }
 
@@ -89,6 +151,7 @@ export class UiSessionStore {
       ipFailures.push(now);
       this.ipFailures.set(ip, ipFailures);
       this.globalFailures.push(now);
+      if (removed) this.persist();
       return { ok: false, reason: 'invalid_token' };
     }
 
@@ -104,12 +167,17 @@ export class UiSessionStore {
         oldestPrincipalHash = sidHash;
       }
     }
+    let evicted = false;
     if (principalSessions >= this.maxSessionsPerToken) {
       // The caller just proved they hold this token, so rather than locking
       // them out for hours, drop their own least-recently-used session.
-      if (oldestPrincipalHash) this.sessions.delete(oldestPrincipalHash);
+      if (oldestPrincipalHash) {
+        this.sessions.delete(oldestPrincipalHash);
+        evicted = true;
+      }
     }
     if (this.sessions.size >= this.maxSessions) {
+      if (removed || evicted) this.persist();
       return { ok: false, reason: 'capacity' };
     }
 
@@ -121,6 +189,9 @@ export class UiSessionStore {
       lastSeenAt: now,
       remembered: remember,
     });
+    // create / 驱逐 / 过期清理 → 必落盘；同时重置节流时钟避免紧随的 authenticate 再写一次
+    this.persist();
+    this.lastSeenPersistedAt = now;
     return { ok: true, sid, auth };
   }
 
@@ -131,26 +202,52 @@ export class UiSessionStore {
 
     if (isExpired(session, now)) {
       this.sessions.delete(sidHash);
+      this.persist();
       return null;
     }
 
-    const auth = this.resolve(session.token);
+    const auth = this.resolveSession(session);
     if (!auth) {
       this.sessions.delete(sidHash);
+      this.persist();
       return null;
     }
 
     session.lastSeenAt = now;
+    // 节流：lastSeenAt 滑动不每请求写盘；间隔到了才落盘。
+    if (now - this.lastSeenPersistedAt >= this.lastSeenPersistIntervalMs) {
+      this.persist();
+      this.lastSeenPersistedAt = now;
+    }
     return { auth };
   }
 
   destroy(sid: string): void {
-    this.sessions.delete(sha256(sid));
+    const sidHash = sha256(sid);
+    if (!this.sessions.has(sidHash)) return;
+    this.sessions.delete(sidHash);
+    this.persist();
   }
 
-  private cleanup(now: number): void {
+  /** 测试辅助：当前内存会话数。 */
+  sizeForTests(): number {
+    return this.sessions.size;
+  }
+
+  private resolveSession(session: Session): Auth | null {
+    if (session.token !== undefined) return this.resolve(session.token);
+    if (this.resolveHash) return this.resolveHash(session.tokenHash);
+    return null;
+  }
+
+  /** @returns 是否删除了过期会话（调用方据此决定是否落盘）。 */
+  private cleanup(now: number): boolean {
+    let removed = false;
     for (const [sidHash, session] of this.sessions) {
-      if (isExpired(session, now)) this.sessions.delete(sidHash);
+      if (isExpired(session, now)) {
+        this.sessions.delete(sidHash);
+        removed = true;
+      }
     }
 
     this.globalFailures = this.globalFailures.filter(
@@ -163,6 +260,7 @@ export class UiSessionStore {
       if (recent.length === 0) this.ipFailures.delete(ip);
       else this.ipFailures.set(ip, recent);
     }
+    return removed;
   }
 
   private recentIpFailures(ip: string, now: number): number[] {
@@ -172,6 +270,73 @@ export class UiSessionStore {
     if (recent.length === 0) this.ipFailures.delete(ip);
     else this.ipFailures.set(ip, recent);
     return recent;
+  }
+
+  private loadFromDisk(now: number): void {
+    const path = this.persistPath;
+    if (!path || !existsSync(path)) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf8'));
+    } catch {
+      throw new Error('ui_session_store_corrupt');
+    }
+    if (!isPersistedStore(parsed)) {
+      throw new Error('ui_session_store_corrupt');
+    }
+
+    let pruned = false;
+    for (const [sidHash, row] of Object.entries(parsed)) {
+      if (isExpired(row, now)) {
+        pruned = true;
+        continue;
+      }
+      // 重启后无明文 token；authenticate 走 resolveTokenHash
+      this.sessions.set(sidHash, {
+        tokenHash: row.tokenHash,
+        createdAt: row.createdAt,
+        lastSeenAt: row.lastSeenAt,
+        remembered: row.remembered,
+      });
+    }
+    if (pruned) this.persist();
+    // 启动加载后的首批 authenticate 不必立刻再写盘
+    this.lastSeenPersistedAt = now;
+  }
+
+  private persist(): void {
+    const path = this.persistPath;
+    if (!path) return;
+
+    const data: PersistedStore = {};
+    for (const [sidHash, session] of this.sessions) {
+      data[sidHash] = {
+        tokenHash: session.tokenHash,
+        createdAt: session.createdAt,
+        lastSeenAt: session.lastSeenAt,
+        remembered: session.remembered,
+      };
+    }
+
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // bind mount 可能属主不同；文件 mode 仍会设置
+    }
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+    try {
+      // rename 后目标文件 mode 可能继承旧 inode；再钉一次 0600
+      if (existsSync(path) && (statSync(path).mode & 0o777) !== 0o600) {
+        chmodSync(path, 0o600);
+      }
+    } catch {
+      // best effort
+    }
   }
 }
 
