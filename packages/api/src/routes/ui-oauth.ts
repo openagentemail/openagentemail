@@ -14,6 +14,7 @@ import {
   listIdentities,
   LOCALPART_RE,
 } from '../lib/identities.ts';
+import { clientIp } from '../lib/net.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import { isAllowedRedirectUri, redirectUriIsLoopback } from '../lib/oauth-cimd.ts';
 import {
@@ -371,6 +372,7 @@ export function createUiOAuthPageRoutes(
         event: 'oauth.authorize.deny',
         clientId: pre.clientId,
         outcome: 'denied',
+        ip: clientIp(c),
       });
       return authorizeHandoffResponse(
         c,
@@ -488,6 +490,7 @@ export function createUiOAuthPageRoutes(
       grantId,
       address,
       outcome: 'ok',
+      ip: clientIp(c),
     });
 
     return authorizeHandoffResponse(
@@ -544,6 +547,7 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
       grantId: grant.id,
       address: grant.address,
       outcome: 'ok',
+      ip: clientIp(c),
     });
     return c.body(null, 204);
   });
@@ -564,6 +568,7 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
       grantId: grant.id,
       address: grant.address,
       outcome: 'ok',
+      ip: clientIp(c),
     });
     return c.redirect('/ui/oauth/grants', 302);
   });

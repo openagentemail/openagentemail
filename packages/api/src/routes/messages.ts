@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getMessage, listMessages, setMessageSeen, waitForMessage } from '../lib/imap.ts';
 import { forbidUnlessAddress } from '../lib/auth.ts';
+import { clampWaitSeconds } from '../lib/config.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 
 const listQuerySchema = z.object({
@@ -88,15 +89,23 @@ export const messagesRoute = new Hono()
     const { address, fromContains, subjectContains, timeoutSec } = parsed.data;
     const denied = forbidUnlessAddress(c, address);
     if (denied) return denied;
-    // Each wait pins an IMAP connection for up to 10 minutes; cap how many
-    // can be in flight so one caller can't starve the whole mailbox.
+    // schema 仍允许 ≤600（历史客户端）；服务端静默钳到 MCP_MAX_WAIT_SECONDS
+    const effectiveTimeout = clampWaitSeconds(timeoutSec);
+    c.header('X-OAE-Wait-Timeout-Sec', String(effectiveTimeout));
+    // Each wait pins an IMAP connection for up to the configured ceiling; cap
+    // how many can be in flight so one caller can't starve the whole mailbox.
     if (!acquireWaitSlot(address)) {
       return c.json({ error: 'too_many_waits', retryAfterSec: 5 }, 429);
     }
     try {
-      const message = await waitForMessage(address, { fromContains, subjectContains }, timeoutSec);
+      const message = await waitForMessage(
+        address,
+        { fromContains, subjectContains },
+        effectiveTimeout,
+      );
       if (!message) {
-        return c.json({ error: 'timeout' }, 408);
+        // 暴露有效钳制值，便于客户端对齐轮询节奏（不 400 超参）
+        return c.json({ error: 'timeout', timeoutSec: effectiveTimeout }, 408);
       }
       return c.json(message);
     } finally {

@@ -45,6 +45,8 @@ export type AuditEvent = {
   tier?: string;
   outcome: AuditOutcome;
   durationMs?: number;
+  /** 客户端 IP（非秘密；OAuth 端点事件可选带上）。 */
+  ip?: string;
 };
 
 function auditPath(): string {
@@ -120,6 +122,8 @@ export function recordAuditEvent(
       ? { tier: scrubAuditField(partial.tier, 32) }
       : {}),
     ...(partial.durationMs !== undefined ? { durationMs: partial.durationMs } : {}),
+    // IP 非秘密；仍剥控制字符并截断（IPv6 字面量 + zone id 足够 64）
+    ...(partial.ip !== undefined ? { ip: scrubAuditField(partial.ip, 64) } : {}),
   };
 
   try {

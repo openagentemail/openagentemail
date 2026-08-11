@@ -63,11 +63,14 @@ async function waitWithSlot(
 ): Promise<Task | null | Response> {
   // Task waits hold the same kind of long-lived IMAP IDLE connection as
   // mail_wait_for. They must share its per-address/global ceiling.
+  // 封顶与 mail_wait_for 同源：MCP_MAX_WAIT_SECONDS（静默钳制）。
+  const waitSec = config.mcpMaxWaitSeconds;
+  c.header('X-OAE-Wait-Timeout-Sec', String(waitSec));
   if (!acquireWaitSlot(address)) {
     return c.json({ error: 'too_many_waits', retryAfterSec: 5 }, 429);
   }
   try {
-    return await service.waitForTerminal(task.id, address);
+    return await service.waitForTerminal(task.id, address, waitSec);
   } finally {
     releaseWaitSlot(address);
   }

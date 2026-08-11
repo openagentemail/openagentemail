@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { getConnInfo } from 'hono/bun';
 import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Auth } from './auth.ts';
+import { clientIp } from './net.ts';
 import { consumeOAuthReturnCookie } from './oauth-return.ts';
 
 const COOKIE_NAME = 'oae_ui';
@@ -219,14 +219,12 @@ function expireSessionCookie(c: Parameters<typeof deleteCookie>[0]): void {
   });
 }
 
-function connectionIp(c: Parameters<typeof getConnInfo>[0]): string {
-  try {
-    return getConnInfo(c).remote.address ?? 'unknown';
-  } catch {
-    // Hono's in-process test client has no Bun server. Do not substitute
-    // forwarding headers here: deployments must not let callers choose a key.
-    return 'unknown';
-  }
+/**
+ * UI 登录失败桶键：走共享 clientIp（TRUST_PROXY_HEADERS 控制 XFF）。
+ * 默认关 XFF——测试客户端无 conninfo 时为 `unknown`，与旧行为一致。
+ */
+function connectionIp(c: Parameters<typeof clientIp>[0]): string {
+  return clientIp(c);
 }
 
 export const uiSessionBodyLimit = bodyLimit({

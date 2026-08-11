@@ -1,16 +1,32 @@
-import { describe, expect, test } from 'bun:test';
-import { Hono } from 'hono';
-import type { Auth } from '../src/lib/auth.ts';
-import {
+// config.ts 在 import 时解析 env；裸 env 单跑会 ZodError/TDZ。套件标准前奏。
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'x';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'x';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-ui-login-limit-'));
+
+const { describe, expect, test } = await import('bun:test');
+const { Hono } = await import('hono');
+type Auth = import('../src/lib/auth.ts').Auth;
+// 动态 import 的绑定是值；类型注解用 import() 类型查询，避免 TS2749
+type HonoApp = import('hono').Hono;
+type UiSessionStoreT = import('../src/lib/ui-session.ts').UiSessionStore;
+const {
   UiSessionStore,
   createUiSessionRoutes,
   requireUiOrigin,
   uiSessionBodyLimit,
-} from '../src/lib/ui-session.ts';
+} = await import('../src/lib/ui-session.ts');
 
 const anyToken = (_token: string): Auth => ({ kind: 'admin' });
 
-function makeApp(store: UiSessionStore) {
+function makeApp(store: UiSessionStoreT) {
   const app = new Hono();
   app.use('/ui/api/session', uiSessionBodyLimit);
   app.use('/ui/api/session', requireUiOrigin);
@@ -18,7 +34,7 @@ function makeApp(store: UiSessionStore) {
   return app;
 }
 
-function login(app: Hono, token: string, extra: Record<string, unknown> = {}) {
+function login(app: HonoApp, token: string, extra: Record<string, unknown> = {}) {
   return app.request('http://localhost/ui/api/session', {
     method: 'POST',
     headers: {

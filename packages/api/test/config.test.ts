@@ -108,6 +108,31 @@ describe('notification URL configuration', () => {
     ).toBe(0);
   });
 
+  test('P4-code 新 env 默认与边界', () => {
+    const defaults = parseConfig(requiredEnv);
+    expect(defaults.mcpMaxWaitSeconds).toBe(60);
+    expect(defaults.trustProxyHeaders).toBe(false);
+    expect(defaults.oaePublicEdge).toBe(false);
+    expect(defaults.oauthRatePerMin).toBe(30);
+    expect(defaults.mcpPreauthRatePerMin).toBe(120);
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        MCP_MAX_WAIT_SECONDS: '45',
+        TRUST_PROXY_HEADERS: 'true',
+        OAE_PUBLIC_EDGE: 'true',
+        OAUTH_RATE_PER_MIN: '0',
+        MCP_PREAUTH_RATE_PER_MIN: '10',
+      }),
+    ).toMatchObject({
+      mcpMaxWaitSeconds: 45,
+      trustProxyHeaders: true,
+      oaePublicEdge: true,
+      oauthRatePerMin: 0,
+      mcpPreauthRatePerMin: 10,
+    });
+  });
+
   test('empty or whitespace optional URL env values are treated as unset', () => {
     // Compose ${DASHBOARD_PUBLIC_URL:-} injects "" when the var is absent.
     expect(() =>

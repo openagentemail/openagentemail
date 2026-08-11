@@ -199,6 +199,15 @@ services:
       # MCP tools/call per-token rate limits (per minute; 0 = off). Admin exempt.
       MCP_RATE_READ_PER_MIN: ${MCP_RATE_READ_PER_MIN:-60}
       MCP_RATE_WRITE_PER_MIN: ${MCP_RATE_WRITE_PER_MIN:-20}
+      # 阻塞等待上限（秒）；mail_wait_for / task wait 静默钳到此值（默认 60，上限 600）
+      MCP_MAX_WAIT_SECONDS: ${MCP_MAX_WAIT_SECONDS:-60}
+      # 信任 X-Forwarded-For 首跳（默认 false；仅确有受信反代时开）
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      # 公网边缘：关闭 CIMD 私网 SSRF 例外（默认 false）
+      OAE_PUBLIC_EDGE: ${OAE_PUBLIC_EDGE:-false}
+      # 预鉴权 IP 限量（每分钟；0 = 关）
+      OAUTH_RATE_PER_MIN: ${OAUTH_RATE_PER_MIN:-30}
+      MCP_PREAUTH_RATE_PER_MIN: ${MCP_PREAUTH_RATE_PER_MIN:-120}
       # Identity store (json) survives container recreation:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):

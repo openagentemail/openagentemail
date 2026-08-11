@@ -160,6 +160,25 @@ const envSchema = z.object({
   MCP_RATE_READ_PER_MIN: z.coerce.number().int().min(0).default(60),
   MCP_RATE_WRITE_PER_MIN: z.coerce.number().int().min(0).default(20),
 
+  // 阻塞等待上限（秒）：钳 mail_wait_for / POST /v1/messages/wait 的 timeoutSec
+  // 与 task_* wait 的服务端封顶。schema 仍广告 max 600（历史客户端兼容），
+  // 超参静默钳到本值（不 400）。默认 60——对任意反代读超时都更安全。
+  MCP_MAX_WAIT_SECONDS: z.coerce.number().int().min(1).max(600).default(60),
+
+  // 是否信任 X-Forwarded-For 首跳作为客户端 IP。默认 false（直连部署开=自杀）。
+  // 仅在确有受信反代剥离/覆写 XFF 时设 true。
+  TRUST_PROXY_HEADERS: z.enum(['true', 'false']).default('false'),
+
+  // 公网边缘姿态：true 时关闭 CIMD SSRF 私网放行（RFC1918/loopback/CGNAT/ULA 全拒）。
+  // 默认 false——tailnet/loopback 部署不受影响。永拒清单始终生效。
+  OAE_PUBLIC_EDGE: z.enum(['true', 'false']).default('false'),
+
+  // 预鉴权 IP 限量（每分钟；0 = 关闭）。键 = clientIp()。
+  OAUTH_RATE_PER_MIN: z.coerce.number().int().min(0).default(30),
+  // 默认 120：OAuth 引导握手故意无 token 探 401 拿挑战是规范动作；
+  // 共享出口 IP 下 60 偏紧，易把合法客户端打成 429。
+  MCP_PREAUTH_RATE_PER_MIN: z.coerce.number().int().min(0).default(120),
+
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
@@ -246,6 +265,11 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     mcpPublicUrl: raw.MCP_PUBLIC_URL ? normalizeUrl(raw.MCP_PUBLIC_URL) : undefined,
     mcpRateReadPerMin: raw.MCP_RATE_READ_PER_MIN,
     mcpRateWritePerMin: raw.MCP_RATE_WRITE_PER_MIN,
+    mcpMaxWaitSeconds: raw.MCP_MAX_WAIT_SECONDS,
+    trustProxyHeaders: raw.TRUST_PROXY_HEADERS === 'true',
+    oaePublicEdge: raw.OAE_PUBLIC_EDGE === 'true',
+    oauthRatePerMin: raw.OAUTH_RATE_PER_MIN,
+    mcpPreauthRatePerMin: raw.MCP_PREAUTH_RATE_PER_MIN,
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,
@@ -253,3 +277,13 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
 }
 
 export const config = parseConfig(process.env);
+
+/**
+ * 将请求的等待秒数静默钳到 MCP_MAX_WAIT_SECONDS（1..上限）。
+ * 不抛 400——历史客户端按文档传 600 仍须可用。
+ * @param cap 可选覆盖（测试用）；默认读进程 config
+ */
+export function clampWaitSeconds(requested: number, cap = config.mcpMaxWaitSeconds): number {
+  if (!Number.isFinite(requested)) return cap;
+  return Math.min(Math.max(1, Math.trunc(requested)), cap);
+}

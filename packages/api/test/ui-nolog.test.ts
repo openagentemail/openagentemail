@@ -1,12 +1,25 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
-import { Hono } from 'hono';
-import type { Auth } from '../src/lib/auth.ts';
-import {
+// config.ts 在 import 时解析 env；裸 env 单跑会 ZodError/TDZ。套件标准前奏。
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'x';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'x';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-ui-nolog-'));
+
+const { afterEach, expect, spyOn, test } = await import('bun:test');
+const { Hono } = await import('hono');
+type Auth = import('../src/lib/auth.ts').Auth;
+const {
   UiSessionStore,
   createUiSessionRoutes,
   requireUiOrigin,
   uiSessionBodyLimit,
-} from '../src/lib/ui-session.ts';
+} = await import('../src/lib/ui-session.ts');
 
 afterEach(() => {
   (console.log as typeof console.log & { mockRestore?: () => void }).mockRestore?.();

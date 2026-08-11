@@ -32,6 +32,8 @@ type AppOptions = {
   tokenResolver?: (token: string) => Auth | null;
   /** 测试可注入 CIMD fetcher。 */
   oauth?: OAuthRouteOptions;
+  /** 测试可注入 MCP 对外 base（等同 MCP_PUBLIC_URL；含 401 resource_metadata）。 */
+  mcpPublicBaseUrl?: string;
 };
 
 export function createApp(options: AppOptions = {}): Hono {
@@ -71,6 +73,7 @@ export function createApp(options: AppOptions = {}): Hono {
       // 保留绝对 URL，供 bearerAuth 用同一 origin 推导 resource
       return app.fetch(request);
     },
+    publicBaseUrl: options.mcpPublicBaseUrl,
   });
   registerOAuthRoutes(app, options.oauth ?? {});
   app.route('/.well-known', agentCardRoute);

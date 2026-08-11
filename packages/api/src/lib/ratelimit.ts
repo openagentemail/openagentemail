@@ -67,6 +67,10 @@ const notifyUserBuckets = new Map<string, number[]>();
 const mcpReadBuckets = new Map<string, number[]>();
 /** MCP 写桶（minimal+ 级 tools/call）。 */
 const mcpWriteBuckets = new Map<string, number[]>();
+/** OAuth 预鉴权 IP 桶（/authorize、/oauth/token、/oauth/revoke）。 */
+const oauthIpBuckets = new Map<string, number[]>();
+/** MCP 预鉴权 IP 桶（无/坏 token 的 401 挑战路径）。 */
+const mcpPreauthIpBuckets = new Map<string, number[]>();
 
 export function checkSendLimit(
   address: string,
@@ -146,6 +150,42 @@ export function checkMcpRateLimit(
 export function resetMcpRateLimits(): void {
   mcpReadBuckets.clear();
   mcpWriteBuckets.clear();
+}
+
+/**
+ * OAuth 公开端点预鉴权 IP 限量。键 = clientIp()（原样，不 toLowerCase）。
+ * 复用唯一 slidingWindowCheck——禁止另写窗口。
+ */
+export function checkOauthIpRateLimit(
+  ip: string,
+  limit: number,
+  windowMs = 60_000,
+  now = Date.now(),
+): RateLimitResult {
+  return slidingWindowCheck(oauthIpBuckets, ip, limit, windowMs, now);
+}
+
+/** 测试辅助：清空 OAuth IP 桶。 */
+export function resetOauthIpRateLimits(): void {
+  oauthIpBuckets.clear();
+}
+
+/**
+ * /mcp 预鉴权（401 挑战）IP 限量。键 = clientIp()。
+ * 仅无/坏 token 路径计费；已鉴权请求不进此桶。
+ */
+export function checkMcpPreauthIpRateLimit(
+  ip: string,
+  limit: number,
+  windowMs = 60_000,
+  now = Date.now(),
+): RateLimitResult {
+  return slidingWindowCheck(mcpPreauthIpBuckets, ip, limit, windowMs, now);
+}
+
+/** 测试辅助：清空 MCP 预鉴权 IP 桶。 */
+export function resetMcpPreauthIpRateLimits(): void {
+  mcpPreauthIpBuckets.clear();
 }
 
 /**

@@ -25,6 +25,11 @@ bun run typecheck
 | `MCP_PUBLIC_URL` | — | optional public origin for PRM / AS issuer / MCP loopback aud（`http(s)://…`，去尾斜杠）；反代后与浏览器所见 origin 不一致时必填 |
 | `MCP_RATE_READ_PER_MIN` | `60` | `/mcp` tools/call 读桶（read 级）每分钟上限；`0` 关闭；OAuth 按 grantId、`oa_` 按 address；admin 豁免 |
 | `MCP_RATE_WRITE_PER_MIN` | `20` | `/mcp` tools/call 写桶（minimal+）每分钟上限；写更严；超限 `429` + `Retry-After` |
+| `MCP_MAX_WAIT_SECONDS` | `60` | 阻塞等待上限（1..600）；`timeoutSec` / task wait 静默钳到此值；见响应头 `X-OAE-Wait-Timeout-Sec` |
+| `TRUST_PROXY_HEADERS` | `false` | `true` 时 `clientIp` 取 `X-Forwarded-For` 首跳；直连公网开=可伪造，见 docs/security.md |
+| `OAE_PUBLIC_EDGE` | `false` | `true` 时关闭 CIMD 私网 SSRF 例外（公网 AS 应开） |
+| `OAUTH_RATE_PER_MIN` | `30` | `/authorize`+`/oauth/token`+`/oauth/revoke` 预鉴权 IP 限量/分钟；`0` 关 |
+| `MCP_PREAUTH_RATE_PER_MIN` | `120` | `/mcp` 无/坏 token 401 路径 IP 限量/分钟；`0` 关（引导握手探 401 余量） |
 | `IMAP_HOST/PORT/USER/PASS` | `127.0.0.1:993` | catch-all mailbox login |
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
@@ -48,7 +53,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 if the message is not addressed to `address`; reading never sets `\Seen` by itself — agents mark messages processed through here)
-- `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout"}` (IMAP IDLE + 3 s polling hybrid). Each wait holds an IMAP connection, so they are capped: 3 concurrent per address, 8 in total → `429 {error:"too_many_waits"}`
+- `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout", timeoutSec}` (IMAP IDLE + 3 s polling hybrid). Schema max 仍 600；服务端按 `MCP_MAX_WAIT_SECONDS` 静默钳制（头 `X-OAE-Wait-Timeout-Sec`）。并发：3/地址、8 全局 → `429 {error:"too_many_waits"}`
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
 - `GET /healthz` → `{ok:true}`
 
