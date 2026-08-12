@@ -274,10 +274,10 @@ Plan & Usage 在没有真实 control-plane contract 前只显示 deployment mode
 
 ## 附录：基线与实现依据
 
-设计基线：
+设计基线（随本 ADR 一并入库）：
 
-- `/home/ops/design-26/research-2026-08-12-agentmail-console.md`，尤其 §一、§三、§五。
-- `/home/ops/design-26/design-26-panels.md`，Tasks / Notifications / Push & Devices 详细逻辑与 2026-08-12 业主拍板项。
+- [`design/baselines/research-2026-08-12-agentmail-console.md`](baselines/research-2026-08-12-agentmail-console.md)，尤其 §一、§三、§五。
+- [`design/baselines/design-26-panels.md`](baselines/design-26-panels.md)，Tasks / Notifications / Push & Devices 详细逻辑与 2026-08-12 业主拍板项。
 
 实现核对（基于分支起点 `5836d5f`）：
 
