@@ -72,6 +72,65 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).not.toMatch(/\sstyle\s*=/i);
   });
 
+  // 防回归闸：模块拼接产物必须是合法 JS。缺 async / 括号错位等会让浏览器拒执行整份 /ui/app.js。
+  // 注意：这里用 new Function 只做语法解析，不得把该 API 写进 UI_JS 本体（见下方 sink 断言）。
+  test('assembled /ui/app.js is syntactically valid', () => {
+    expect(() => {
+      // 中文：仅校验语法，不执行；解析失败即视为拼装回归
+      new Function(UI_JS);
+    }).not.toThrow();
+  });
+
+  // 拆分后易丢 async：钉死 main 时代关键带 await 的加载器声明
+  test('critical UI loaders remain async after modular split', () => {
+    const requiredAsync = [
+      'apiJson',
+      'loadTasks',
+      'selectTask',
+      'loadNotifyHistory',
+      'loadInbox',
+      'startSession',
+      'selectIdentity',
+      'selectMessage',
+      'refreshMessages',
+      'handleCreateSubmit',
+      'handleRotateToken',
+      'savePushContentTier',
+      'fetchNotifyTopic',
+      'waitForPreviousRefresh',
+      'copyValue',
+      'toggleSeen',
+      'apply',
+      'mapPool',
+      'run',
+      'start',
+    ];
+    for (const name of requiredAsync) {
+      expect(UI_JS).toContain(`async function ${name}(`);
+    }
+  });
+
+  // OAuth grant DELETE 返回 204：apiJson 不得无条件 response.json()，否则吊销成功也进 error handler
+  test('apiJson treats 204/empty success bodies as null so grant revoke can succeed', () => {
+    const apiJson = UI_JS.slice(
+      UI_JS.indexOf('async function apiJson('),
+      UI_JS.indexOf('var confirmModalOnCancel'),
+    );
+    expect(apiJson).toContain('response.status === 204');
+    expect(apiJson).toContain('response.status === 205');
+    expect(apiJson).toContain('await response.text()');
+    expect(apiJson).toContain('JSON.parse(raw)');
+    // 成功路径不得再无条件 json()；失败路径 try 里解析 error body 仍可保留
+    const successTail = apiJson.slice(apiJson.indexOf('throw failure;'));
+    expect(successTail).not.toContain('return response.json()');
+    expect(UI_JS).toContain(
+      "await apiJson('/ui/api/oauth/grants/' + encodeURIComponent(grant.id), { method: 'DELETE' })",
+    );
+    expect(UI_JS).toContain("announce('Client revoked.')");
+    expect(UI_JS).toContain('loadConfigureClients()');
+    expect(UI_JS).toContain("'Could not revoke that client.'");
+  });
+
   test('front-end code contains no HTML parser sinks or URL-token reader', () => {
     expect(UI_JS).not.toMatch(
       /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b/,
@@ -120,13 +179,123 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('return selection.toString() === sourceNode.textContent');
   });
 
+  test('shell deep-links register after api/oauth/frame and do not swallow them', async () => {
+    const full = createApp({ uiEnabled: true });
+    const paths = full.routes.map((route) => `${route.method} ${route.path}`);
+    const shellIdx = paths.indexOf('GET /ui/inbox');
+    const apiIdx = paths.indexOf('GET /ui/api/me');
+    const frameIdx = paths.findIndex((p) => p.includes('/ui/frame'));
+    const oauthIdx = paths.findIndex((p) => p.includes('/ui/oauth'));
+    expect(shellIdx).toBeGreaterThan(-1);
+    expect(apiIdx).toBeGreaterThan(-1);
+    expect(frameIdx).toBeGreaterThan(-1);
+    expect(oauthIdx).toBeGreaterThan(-1);
+    // ADR：shell 必须在专用路由之后
+    expect(shellIdx).toBeGreaterThan(apiIdx);
+    expect(shellIdx).toBeGreaterThan(frameIdx);
+    expect(shellIdx).toBeGreaterThan(oauthIdx);
+
+    // 专用路由仍可达，不被 shell 抢走
+    expect((await full.request('/ui/api/me')).status).not.toBe(200); // 未登录 → 401
+    expect((await full.request('/ui/api/me')).status).toBe(401);
+    expect((await full.request('/ui/oauth/grants')).status).toBe(302);
+    expect((await full.request('/ui/inbox')).status).toBe(200);
+  });
+
+  // 路由表层级：真发通配形态请求，断言 api/oauth/frame 不被 shell HTML 吞掉（纵深防御，不只看 routes 顺序）
+  test('wildcard-shaped reserved paths are not swallowed by the dashboard shell', async () => {
+    const { FRAME_CSP } = await import('../src/routes/ui-frame.ts');
+    const full = createApp({ uiEnabled: true });
+
+    async function hit(path: string) {
+      const res = await full.request(path);
+      const body = await res.text();
+      return { res, body };
+    }
+
+    function isDashboardShell(hit: { res: { status: number; headers: Headers }; body: string }) {
+      return (
+        hit.res.headers.get('content-type') === 'text/html; charset=utf-8' &&
+        hit.res.headers.get('content-security-policy') === OUTER_CSP &&
+        hit.body.includes('id="app-nav"')
+      );
+    }
+
+    // 对照：合法 shell 深链仍是 dashboard HTML
+    const inbox = await hit('/ui/inbox');
+    expect(inbox.res.status).toBe(200);
+    expect(isDashboardShell(inbox)).toBe(true);
+    const taskDeep = await hit('/ui/tasks/demo-id');
+    expect(isDashboardShell(taskDeep)).toBe(true);
+
+    // /ui/api/* 必须是 JSON API，绝不能落到 shell
+    const apiMe = await hit('/ui/api/me');
+    expect(apiMe.res.status).toBe(401);
+    expect(apiMe.res.headers.get('content-type')).toContain('application/json');
+    expect(isDashboardShell(apiMe)).toBe(false);
+    expect(apiMe.body).not.toContain('id="app-nav"');
+
+    const apiOverview = await hit('/ui/api/overview');
+    expect(isDashboardShell(apiOverview)).toBe(false);
+    expect(apiOverview.body).not.toContain('id="app-nav"');
+
+    const apiSession = await hit('/ui/api/session');
+    expect(isDashboardShell(apiSession)).toBe(false);
+
+    // /ui/oauth/* 是 OAuth 面，不是 dashboard shell
+    const oauthGrants = await hit('/ui/oauth/grants');
+    expect(oauthGrants.res.status).toBe(302);
+    expect(isDashboardShell(oauthGrants)).toBe(false);
+
+    const oauthAuthorize = await hit('/ui/oauth/authorize');
+    expect(isDashboardShell(oauthAuthorize)).toBe(false);
+    expect(oauthAuthorize.body).not.toContain('id="app-nav"');
+
+    // /ui/frame/* 用 FRAME_CSP，不是 OUTER_CSP dashboard
+    const frame = await hit('/ui/frame/1?address=fox%40test.example');
+    expect(isDashboardShell(frame)).toBe(false);
+    expect(frame.res.headers.get('content-security-policy')).toBe(FRAME_CSP);
+    expect(frame.res.headers.get('content-security-policy')).not.toBe(OUTER_CSP);
+    expect(frame.body).not.toContain('id="app-nav"');
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
+
+    // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404（含尾斜杠变体）
+    const { UI_SHELL_EXACT_PATHS, UI_SHELL_PREFIX_PATHS } = await import(
+      '../src/ui/shell-routes.ts'
+    );
+    for (const path of [
+      '/ui/inbox',
+      '/ui/overview',
+      '/ui/tasks',
+      '/ui/tasks/demo-id',
+      '/ui/notifications',
+      '/ui/configure/identities',
+      '/ui/configure/push',
+      '/ui/configure/clients',
+      '/ui/configure/domains',
+      '/ui/plan',
+      '/ui/inbox/agent%40test.example/inbox',
+      ...UI_SHELL_EXACT_PATHS.map((p) => `${p}/`),
+      ...UI_SHELL_PREFIX_PATHS.map((p) => `${p}/`),
+    ]) {
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    }
+
+    // 旧 OAuth grants 书签 302 → Configure · Authorized Clients
+    const grants = await app.request('/ui/oauth/grants');
+    expect(grants.status).toBe(302);
+    expect(grants.headers.get('location')).toBe('/ui/configure/clients');
 
     const disabled = createApp({ uiEnabled: false });
     for (const path of [
       '/ui',
       '/ui/',
+      '/ui/inbox',
       '/ui/app.js',
       '/ui/styles.css',
       '/ui/favicon.svg',
@@ -137,6 +306,157 @@ describe('UI static asset contract', () => {
     ]) {
       expect((await disabled.request(path)).status).toBe(404);
     }
+  });
+
+  // 客户端 pathForScope / parse 字面量与 shell-routes 单一事实源对齐，防刷新 404
+  test('client shell paths stay aligned with UI_SHELL_* single source of truth', async () => {
+    const { UI_SHELL_EXACT_PATHS, UI_SHELL_PREFIX_PATHS, uiShellRegisterPaths } =
+      await import('../src/ui/shell-routes.ts');
+    for (const path of UI_SHELL_EXACT_PATHS) {
+      expect(UI_JS).toContain(`return '${path}'`);
+      expect(UI_JS).toContain(`path === '${path}'`);
+    }
+    for (const prefix of UI_SHELL_PREFIX_PATHS) {
+      expect(UI_JS).toContain(`'${prefix}/'`);
+      expect(UI_JS).toContain(`path === '${prefix}'`);
+    }
+    // 服务端注册表必须覆盖精确路径的尾斜杠，且仍含动态前缀 /*
+    const registered = uiShellRegisterPaths();
+    for (const path of UI_SHELL_EXACT_PATHS) {
+      expect(registered).toContain(path);
+      expect(registered).toContain(`${path}/`);
+    }
+    for (const prefix of UI_SHELL_PREFIX_PATHS) {
+      expect(registered).toContain(prefix);
+      expect(registered).toContain(`${prefix}/*`);
+    }
+  });
+
+  // 畸形百分号编码不得让 parseLocationRoute 同步抛 URIError（深链启动白屏）
+  test('parseLocationRoute tolerates malformed percent-encoding without throwing', async () => {
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    expect(ROUTER_JS).toContain('function safeDecodeURIComponent(');
+    expect(ROUTER_JS).toContain('catch (_err)');
+    const start = ROUTER_JS.indexOf('function safeDecodeURIComponent(');
+    const end = ROUTER_JS.indexOf('function pathForScope(');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const parseOnly = ROUTER_JS.slice(start, end);
+    // 中文：仅抽出纯函数，闭包注入假 window.location，断言畸形深链不抛
+    const makeParser = new Function(`
+      return function (pathname) {
+        var window = { location: { pathname: pathname } };
+        ${parseOnly}
+        return parseLocationRoute();
+      };
+    `);
+    const wrap = makeParser() as (pathname: string) => {
+      scope: string;
+      taskId: string;
+      address: string;
+      folder: string;
+      unknown?: boolean;
+    };
+    expect(() => wrap('/ui/tasks/%E4%B8')).not.toThrow();
+    expect(wrap('/ui/tasks/%E4%B8')).toEqual({
+      scope: 'inbox',
+      taskId: '',
+      address: '',
+      folder: '',
+      unknown: true,
+    });
+    expect(() => wrap('/ui/inbox/%E4%B8/inbox')).not.toThrow();
+    expect(wrap('/ui/inbox/%E4%B8/inbox').unknown).toBe(true);
+    expect(() => wrap('/ui/inbox/agent%40test.example/%ZZ')).not.toThrow();
+    expect(wrap('/ui/inbox/agent%40test.example/%ZZ').unknown).toBe(true);
+    // 合法编码仍可用
+    const ok = wrap('/ui/tasks/%E4%B8%AD');
+    expect(ok.scope).toBe('tasks');
+    expect(ok.taskId).toBe('中');
+    expect(ok.unknown).toBeUndefined();
+  });
+
+  // popstate / 客户端路由：api、oauth、frame 不得被解析成 dashboard scope（与服务端后挂 shell 对偶）
+  test('parseLocationRoute does not claim api/oauth/frame reserved prefixes', async () => {
+    expect(UI_JS).toContain("window.addEventListener('popstate'");
+    expect(UI_JS).toContain('applyRoute(parseLocationRoute()');
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const start = ROUTER_JS.indexOf('function safeDecodeURIComponent(');
+    const end = ROUTER_JS.indexOf('function pathForScope(');
+    const parseOnly = ROUTER_JS.slice(start, end);
+    const makeParser = new Function(`
+      return function (pathname) {
+        var window = { location: { pathname: pathname } };
+        ${parseOnly}
+        return parseLocationRoute();
+      };
+    `);
+    const wrap = makeParser() as (pathname: string) => {
+      scope: string;
+      unknown?: boolean;
+    };
+    for (const path of [
+      '/ui/api/me',
+      '/ui/api/overview',
+      '/ui/api/session',
+      '/ui/oauth/grants',
+      '/ui/oauth/authorize',
+      '/ui/frame/1',
+    ]) {
+      const route = wrap(path);
+      expect(route.unknown).toBe(true);
+      expect(route.scope).toBe('inbox');
+    }
+    // 合法 dashboard 深链仍有明确 scope
+    expect(wrap('/ui/overview').scope).toBe('overview');
+    expect(wrap('/ui/overview').unknown).toBeUndefined();
+    expect(wrap('/ui/inbox').unknown).toBeUndefined();
+  });
+
+  // Codex P2：identity 看不到 Overview 全局导航；admin 看得到
+  test('Overview global nav is visible for admin sessions and hidden for identity sessions', () => {
+    expect(UI_HTML).toContain('id="nav-overview-item"');
+    expect(UI_HTML).toMatch(
+      /<li id="nav-overview-item" hidden><a class="app-nav-link" data-nav="overview"/,
+    );
+    expect(UI_JS).toContain('navOverviewItem.hidden = !isAdmin()');
+    expect(UI_CSS).toContain(
+      '.inbox-view[data-session="identity"] #nav-overview-item { display: none; }',
+    );
+
+    const start = UI_JS.indexOf('function isAdmin()');
+    const end = UI_JS.indexOf('async function apiJson(');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const snippet = UI_JS.slice(start, end);
+    const run = new Function(`
+      return function (kind) {
+        var inboxView = { dataset: {} };
+        var backToOverview = { hidden: false };
+        var createIdentityButton = { hidden: true };
+        var configureIdentitiesCreate = { hidden: true };
+        var navOverviewItem = { hidden: true };
+        var state = { me: { kind: kind } };
+        ${snippet}
+        configureSession();
+        return {
+          session: inboxView.dataset.session,
+          overviewNavHidden: navOverviewItem.hidden,
+          inboxNavUnaffected: true
+        };
+      };
+    `)() as (kind: string) => {
+      session: string;
+      overviewNavHidden: boolean;
+    };
+
+    const identity = run('identity');
+    expect(identity.session).toBe('identity');
+    expect(identity.overviewNavHidden).toBe(true);
+
+    const admin = run('admin');
+    expect(admin.session).toBe('admin');
+    expect(admin.overviewNavHidden).toBe(false);
   });
 
   // A14
@@ -207,8 +527,10 @@ describe('UI static asset contract', () => {
     // #message-panel / #detail-panel 自身不带 hidden：scope 只切四个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    // login + overview + notify + tasks + inbox-main
-    expect(UI_HTML.split('<main').length - 1).toBe(5);
+    // login + overview + notify + tasks + configure×4 + plan + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(10);
+    expect(UI_HTML).toContain('id="app-nav"');
+    expect(UI_HTML).toContain('id="nav-toggle"');
   });
 
   // A16 / A17
@@ -304,8 +626,8 @@ describe('UI static asset contract', () => {
   // 任务工单：入口、API 与 landmark 与 Notifications 同级钉在静态契约里
   test('tasks panel loads tickets via /ui/api/tasks with session-scoped ACL', () => {
     expect(UI_JS).toContain('function enterTasks(');
-    expect(UI_JS).toContain('function loadTasks(');
-    expect(UI_JS).toContain('function selectTask(');
+    expect(UI_JS).toContain('async function loadTasks(');
+    expect(UI_JS).toContain('async function selectTask(');
     expect(UI_JS).toContain("'/ui/api/tasks'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).toContain("value = '__tasks__'");
@@ -323,7 +645,13 @@ describe('UI static asset contract', () => {
     );
     expect(stripBody).toContain('text.lastIndexOf(TASK_RESULT_MARKER)');
     expect(stripBody).toContain('String.fromCharCode(96, 96, 96)');
-    expect(stripBody).toContain('new RegExp(');
+    // 与拆分前 main 一致：RegExp 字符串字面量里是 \\s（源码两反斜杠 → 运行时 \s）。
+    // 禁止 JSON 二次转义成 \\\\s（四反斜杠），否则会匹配字面量反斜杠而非空白。
+    expect(stripBody).toContain(
+      "new RegExp('^\\\\s*' + ticks + 'json\\\\s*\\\\n([\\\\s\\\\S]*?)\\\\n' + ticks + '\\\\s*$')",
+    );
+    expect(stripBody).toContain(".replace(/\\s+$/, '')");
+    expect(stripBody).not.toContain('^\\\\\\\\s*');
     expect(stripBody).toContain('after.match(fence)');
     expect(stripBody).toContain('JSON.parse(match[1])');
     expect(stripBody).not.toContain('text.indexOf(TASK_RESULT_MARKER)');
@@ -547,12 +875,17 @@ describe('UI static asset contract', () => {
     expect(enter).toContain('else focusOverviewPanel();');
     expect(enter).not.toContain('preventScroll');
 
-    // admin 登录落地也走同一个不滚动的入口
+    // ADR #26：所有 session（含 admin）默认落地 Inbox；深链由 applyRoute 恢复
     const startSession = UI_JS.slice(
       UI_JS.indexOf('async function startSession('),
       UI_JS.indexOf("loginForm.addEventListener('submit'"),
     );
-    expect(startSession).toContain('focusOverviewPanel();');
+    expect(startSession).toContain('await loadInbox()');
+    expect(startSession).toContain('await applyRoute(parseLocationRoute()');
+    expect(startSession).not.toContain('focusOverviewPanel();');
+    expect(UI_JS).toContain('function applyRoute(');
+    expect(UI_JS).toContain('function parseLocationRoute(');
+    expect(UI_JS).toContain('function renderAppNav(');
   });
 
   // F5 / §6 行 11：一封信投给多个地址时计数会重叠，页面上必须解释

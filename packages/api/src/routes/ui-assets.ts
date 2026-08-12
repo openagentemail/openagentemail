@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
+import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
 
 // Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
 const UI_FONTS: Record<string, Uint8Array> = {
@@ -10,6 +11,9 @@ const UI_FONTS: Record<string, Uint8Array> = {
   'Satoshi-Bold.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Bold.woff2', import.meta.url)),
   'Satoshi-Black.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Black.woff2', import.meta.url)),
 };
+
+/** ADR #26：app shell 覆盖的真实 /ui/* 子路径（须在 API/assets/frame/OAuth 之后注册）。 */
+const UI_SHELL_PATHS = uiShellRegisterPaths();
 
 function commonHeaders(c: Context): void {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -31,9 +35,8 @@ function shell(c: Context) {
   return c.body(UI_HTML);
 }
 
+/** 静态资产：js/css/fonts/favicon。不含 shell 深链（防注册顺序吞路由）。 */
 export function registerUiAssets(app: Hono): void {
-  app.get('/ui', shell);
-  app.get('/ui/', shell);
   app.get('/ui/app.js', (c) => {
     commonHeaders(c);
     c.header('Content-Type', 'text/javascript; charset=utf-8');
@@ -66,4 +69,14 @@ export function registerUiAssets(app: Hono): void {
     commonHeaders(c);
     return c.body(null, 204);
   });
+}
+
+/**
+ * Dashboard shell 深链：必须在 /ui/api、/ui/frame、/ui/oauth 之后注册（ADR #26）。
+ * 路径与 API 前缀无交集，但后挂才能保证后续加宽匹配时不吞专用路由。
+ */
+export function registerUiShell(app: Hono): void {
+  for (const path of UI_SHELL_PATHS) {
+    app.get(path, shell);
+  }
 }

@@ -43,7 +43,8 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin / `oa_` / OAuth access）；无/坏 token → 401 + `WWW-Authenticate`；OAuth aud 不符 → 403；critical 工具对 OAuth 票 403；超限 429 + `Retry-After`（见 `MCP_RATE_*`）；JSON-RPC **batch 数组** → `400 {error:"batch_not_supported"}`（计写桶并审计 `mcp.batch_rejected`）
 - `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开**；`authorization_servers` = AS issuer。可选 env `MCP_PUBLIC_URL` 覆盖对外 origin
 - `GET /.well-known/oauth-authorization-server` — RFC 8414（PKCE S256、CIMD、iss 响应）；**公开**
-- `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；管理页 `/ui/oauth/grants`
+- `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；旧管理页 `/ui/oauth/grants` 302 → `/ui/configure/clients`
+- Dashboard（ADR #26 PR1）：`/ui` 与 `/ui/*` shell 子路径（Inbox 默认落地），静态资源仍为 `/ui/styles.css` + `/ui/app.js` 单资源、零 bundler；`bun test` 对拼装后的 `UI_JS` 做 `new Function` 语法闸 + 关键 `async` 加载器钉死。Overview 全局导航仅 admin session 可见；shell 深链注册在 `/ui/api`、`/ui/oauth`、`/ui/frame` 之后，测试按真实请求断言不被通配吞掉。
 - OAuth 存储：`DATA_DIR/oauth.json`（只存哈希；与 identities.json 同模式）
 - `GET /v1/audit/events?limit=&event=` → `{events:[…]}`（**admin only**；scrubbed JSONL `DATA_DIR/audit.jsonl`；见 docs/security.md）
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)

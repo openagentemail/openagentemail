@@ -882,7 +882,12 @@ describe('Dashboard 授权管理吊销', () => {
     const page = await app.request(`http://localhost/ui/oauth/grants`, {
       headers: { cookie },
     });
-    expect(page.status).toBe(200);
-    expect(await page.text()).toContain('Authorized clients');
+    expect(page.status).toBe(302);
+    expect(page.headers.get('location')).toBe('/ui/configure/clients');
+    const clients = await app.request(`http://localhost/ui/configure/clients`, {
+      headers: { cookie },
+    });
+    expect(clients.status).toBe(200);
+    expect(await clients.text()).toContain('Authorized Clients');
   });
 });

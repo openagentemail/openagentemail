@@ -400,7 +400,7 @@ try {
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
   }).catch(() => {});
 
-  /* ============ A51 / A56 / A57 / A58 / A65 / A66 / A70：admin 落地 Overview ============ */
+  /* ============ A51 / A52：admin 落地 Inbox（ADR #26）；随后进入 Overview 跑面板用例 ============ */
   // 登录屏是 .fine-print 唯一出现的地方，A70① 的三个点名选择器要在这里各测一次。
   await send('Page.navigate', { url: `${base}/ui` });
   await waitFor(
@@ -412,43 +412,50 @@ try {
 
   await login('preview-token');
   await waitFor(
+    "!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox'",
+    'inbox after login',
+  );
+  await injectProbes();
+
+  // A51：落地就是 Inbox（含 admin）
+  check(await evaluate("__oae.visible('#main-content')"), 'A51 inbox main is visible');
+  check(
+    !(await evaluate("__oae.visible('#overview-panel')")),
+    'A51 overview panel is hidden on landing',
+  );
+  check(
+    (await evaluate("document.querySelector('#inbox-view').dataset.scope")) === 'inbox',
+    'A51 data-scope is inbox',
+  );
+  check(
+    (await evaluate('__oae.visibleMains().length')) === 1 &&
+      (await evaluate('__oae.visibleMains()[0].id')) === 'main-content',
+    'A51 session lands on the inbox panel',
+  );
+
+  // A52：带 cookie 重新加载（/me 续期）同样落地 Inbox
+  await resume();
+  await waitFor(
+    "document.querySelector('#login-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox'",
+    'inbox after session renewal',
+  );
+  await injectProbes();
+  check(
+    (await evaluate('__oae.visibleMains().length')) === 1 &&
+      (await evaluate('__oae.visibleMains()[0].id')) === 'main-content',
+    'A52 session renewal lands on the inbox panel',
+  );
+
+  // 进入 Overview，后续 A56+ 面板用例复用原路径
+  await evaluate("document.querySelector('[data-nav=\"overview\"]').click()");
+  await waitFor(
     "!document.querySelector('#inbox-view').hidden && document.querySelectorAll('.overview-row').length > 0",
     'overview rows',
   );
   await injectProbes();
 
-  // A51：落地就是 Overview，收件箱 main 与其内两个面板都不可见，且没有取过邮件列表
-  check(await evaluate("__oae.visible('#overview-panel')"), 'A51 overview panel is visible');
-  check(
-    !(await evaluate("__oae.visible('#main-content')")),
-    'A51 inbox main is hidden on landing',
-  );
-  check(
-    !(await evaluate("__oae.visible('#message-panel') || __oae.visible('#detail-panel')")),
-    'A51 message and detail panels are hidden on landing',
-  );
-  check(messageRequests.length === 0, 'A51 landing issues no /ui/api/messages request');
-  check(
-    (await evaluate("document.querySelector('#inbox-view').dataset.scope")) === 'overview',
-    'A51 data-scope is overview',
-  );
-
   // 真实 ready 载荷留作后面几个 fixture 的底稿（此刻还没装拦截桩）。
   const readyBody = await evaluate("fetch('/ui/api/overview').then((response) => response.json())");
-
-  // A52：带 cookie 重新加载（/me 续期）同样落地 Overview
-  await resume();
-  await waitFor(
-    "document.querySelector('#login-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'overview'",
-    'overview after session renewal',
-  );
-  await waitFor("document.querySelectorAll('.overview-row').length > 0", 'rows after renewal');
-  await injectProbes();
-  check(
-    (await evaluate('__oae.visibleMains().length')) === 1 &&
-      (await evaluate('__oae.visibleMains()[0].id')) === 'overview-panel',
-    'A52 session renewal lands on the overview panel',
-  );
 
   // A56①②：桌面 overview 恰好一个可见 main
   check(
@@ -965,18 +972,22 @@ try {
   );
   const identityProbe = await evaluate(`(() => {
     const back = document.querySelector('#back-to-overview');
-    const nav = document.querySelector('.overview-nav');
+    const nav = document.querySelector('[data-nav="overview"]');
+    const navItem = document.querySelector('#nav-overview-item');
     const order = __oae.tabOrder();
     return {
       backRects: back.getClientRects().length,
       backTabbable: order.includes(back),
-      navPresent: !!nav,
+      navHidden: !navItem || navItem.hidden || navItem.getClientRects().length === 0,
       navTabbable: nav ? order.includes(nav) : false,
+      session: document.querySelector('#inbox-view').dataset.session,
       mains: __oae.visibleMains().map((main) => main.id)
     };
   })()`);
   check(identityProbe.backRects === 0, 'A53 ← Overview is invisible for identity sessions');
   check(!identityProbe.backTabbable, 'A53 ← Overview is out of the tab order');
+  check(identityProbe.session === 'identity', 'A53 identity session dataset is identity');
+  check(identityProbe.navHidden, 'A53 Overview global nav is hidden for identity sessions');
   check(!identityProbe.navTabbable, 'A53 the Overview nav item is out of the tab order');
   check(
     identityProbe.mains.length === 1 && identityProbe.mains[0] === 'main-content',
