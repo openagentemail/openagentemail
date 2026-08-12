@@ -317,6 +317,7 @@
 3. 测试钉死：sidecar 为目录导致 EISDIR 时 query/append 均失败且主日志字节不变；用 taskSigningSecret 重签的旧游标 `invalid_cursor`；派生密钥与 task 密钥不相等。
 4. `bun test`（packages/api）：**705 pass / 0 fail**；`bun run build` 全绿。
 5. ZCode「append 前全量解析」性能观察本期不扩 scope，记债（见回执）。
+6. 独立自审 agent `38b16cb4-9d8c-432e-a989-5295d32b0359`：可合并；No findings；Codex P1 与 ZCode P1-1 均关闭。
 
 ### 我们遇到了哪些错误？
 

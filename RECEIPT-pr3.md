@@ -58,3 +58,18 @@ ZCode 已裁可以合并（P0/P1=0，P2×3 记债），本轮未另动。
 - 新 subagent agent id：`8543835d-3784-411a-bc6d-6b3159493479`
 - 审 `git diff b2226e5..2471cc0`
 - verdict：**mergeable**；No findings；Codex P1/P2 均 **closed**
+
+## 返工第3轮（head `ea1a28e`）
+
+1. **Codex P1：** sidecar（`.partial`）未持久成功则中止 repair 并抛错，主日志一字不动，绝不丢掉尾行。测试：sidecar 为目录（EISDIR）时 query/append 失败且主文件字节不变。
+2. **ZCode P1-1：** config 派生 `notifyCursorSecret = HMAC-SHA256(taskSigningSecret, 'notify-cursor-v1')`，不新增 env。通知游标与 task/mail 游标不同钥；旧 notify 游标 `invalid_cursor`（上线不足一天，无存量）。
+3. **记债（本期不扩 scope）：** ZCode 观察 append 前全量解析 JSONL 的性能；不在本轮改存储形态或增量索引。
+
+`bun test`（packages/api）：**705 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审（禁止自审自）
+
+- 新 subagent agent id：`38b16cb4-9d8c-432e-a989-5295d32b0359`
+- 审 `git diff 6a79afc..ea1a28e`
+- verdict：**mergeable**；No findings；Codex P1 与 ZCode P1-1 均 **closed**
+
