@@ -348,6 +348,27 @@
 
 1. `utc := asUtc - offsetAt(utc)` 迭代至不动点，再用 Intl 墙钟校验。不对则按 `asUtc - gotAsUtc` 重算；仍非 00:00 但已在目标日则接受（跳过的午夜）。
 
+---
+
+## #26 PR 3 返工第5轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. ZCode P1-1：`GET /ui/api/notifications` 的 `limit` 在 schema 层用 `z.union` 字面量 `'20'|'50'|'100'`（缺省 `'20'`），非法直接 400。不再 `z.coerce.number()` 后再白名单兜底。
+2. 测试钉死 `limit=20.5` / `999` / `abc` 全 400；`limit=50` 仍 200。
+3. ZCode P1-2（sensitive 服务端全量返回）按 ADR 既定设计不动，回执引用 ADR 原句分流。
+4. `bun test`（packages/api）：**707 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `0b8c9a88-d76d-4337-9f77-b6197232c4a7`：可合并；No findings；ZCode P1-1 关闭。
+
+### 我们遇到了哪些错误？
+
+1. `z.coerce.number().int()` 让任意整数进入后续比较；越界/非字面量合法域没卡死在 schema。
+
+### 我们是如何解决这些错误的？
+
+1. 查询串按字符串白名单解析再 `transform` 成 `NotificationLogLimit`；路由去掉第二道 `isNotificationLogLimit` 兜底。
+
+
 
 
 

@@ -85,4 +85,18 @@ ZCode 已裁可以合并（P0/P1=0，P2×3 记债），本轮未另动。
 - 审 `git diff 2da142c..7eaddae`
 - verdict：**mergeable**；No findings；Codex P1 **closed**
 
+## 返工第5轮（head `ed05f62`，收尾）
+
+1. **ZCode P1-1：** `GET /ui/api/notifications` 的 `limit` 在 schema 层限定为字面量 `'20'|'50'|'100'`（缺省 `'20'`），非法直接 400。测试钉死 `limit=20.5` / `999` / `abc` 全 400。
+2. **ZCode P1-2 分流（不动）：** sensitive 服务端全量返回、遮蔽靠客户端。ADR #26 原文：「响应包含 `sensitive`，但服务端仍返回授权可读内容供显式展开。」属既定设计。
+
+`bun test`（packages/api）：**707 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审（禁止自审自）
+
+- 新 subagent agent id：`0b8c9a88-d76d-4337-9f77-b6197232c4a7`
+- 审 `git diff 47ccf37..ed05f62`
+- verdict：**mergeable**；No findings；ZCode P1-1 **closed**
+
+
 
