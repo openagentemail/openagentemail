@@ -475,8 +475,8 @@
 2. **P1：** `boardUpdatedAt` 对 terminal 工单只认 terminal 事件之前的 reminder（顺序 + 时间）；重放旧 stamped reminder 不再顶到最前或续 30 天窗。
 3. **P2：** `listTaskBoard` 在缓存快照上合并同一套 overlay 再过滤，列表与详情口径一致。
 4. 测试：滞后双 reply 只一封 working；close 后再 reply 不发 working；closed 单不被后置 reminder 顶进 30d；listBoard.state === getTask.state。
-5. `bun test`：**736 pass / 0 fail**；`bun run build` 全绿。
-6. 独立自审：见回执追加（新 subagent，禁止自审自）。
+5. `bun test`：**737 pass / 0 fail**；`bun run build` 全绿。
+6. 独立自审：初审 `6d037e96-e824-44cd-9ab3-ebc314e142fc` 对 `736236e` **block**（overlay 退役）；`af10d5a` 修补后再审 `7e0f8a8f-7a36-4474-adbc-a2e78ab18946`：`25c98cf..af10d5a` → **mergeable**；①②③④ **closed**。残留 P2（listCache 未合并快照 vs overlay 退役时序）记债，不挡合并。
 
 ### 我们遇到了哪些错误？
 

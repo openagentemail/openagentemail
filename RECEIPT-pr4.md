@@ -88,3 +88,22 @@ Codex 对 `028cd45` 再抓 P1：`remindTask` 在 SMTP 已接受、Dovecot 未索
 | Codex P1（IMAP 滞后 reminder） | **closed** — 仅当 `reminderIsIndexed` 才回 IMAP；否则 synthetic + `getTask` overlay；同 key 不二发，换 key 仍 15s 冷却 |
 
 stampede 等 P2 继续记债，本轮未扩。overlay 为进程内 60s TTL；超时后若 IMAP 仍未索引，同 key 可能再发（与多实例尽力语义一致，不挡合并）。
+
+---
+
+## 返工第4轮（2026-08-12，收尾）
+
+Codex 对 `25c98cf` 三条，同源 IMAP 索引滞后：reply/close overlay、terminal 后 reminder 续窗、列表未合并 overlay。
+
+| 项 | 值 |
+|---|---|
+| 功能 commit | `736236e` overlay 推广 + terminal reminder 窗 + 列表合并；`af10d5a` overlay 退役 |
+| 测试 | `packages/api` `bun test` **737 pass / 0 fail**；`bun run build` 全绿 |
+| 独立自审（新 agent，禁止自审自） | 初审 `6d037e96-e824-44cd-9ab3-ebc314e142fc`：**block**；再审 `7e0f8a8f-7a36-4474-adbc-a2e78ab18946`：**mergeable** |
+| 审查 diff | `25c98cf..af10d5a` |
+| ① 状态 overlay | **closed** — 滞后双 reply / close 后再 reply 冲突被拒；并发不得在 failed 之后发 working |
+| ② terminal reminder 窗 | **closed** — `boardUpdatedAt` 忽略 terminal 之后（顺序+时间）的 reminder；31d closed 单不被顶进 30d |
+| ③ 列表合并 overlay | **closed** — `loadAllTasksCached` 与 `getTask` 同一 `mergeQueuedEvents` |
+| ④ overlay 退役 | **closed** — IMAP 已含 working+新 input-required 时不再盖成 working |
+
+残留记债（不挡合并）：list 30s 未合并快照 vs overlay 退役时序；`listTasks`（REST/MCP）仍不合并 overlay；stampede。未改 Trust-30d / cookie Path / Origin / 全局 4KiB body-limit。
