@@ -6,7 +6,7 @@
 // 的邮件（含验证码）。
 //
 // config.ts 在 import 时解析环境变量，所以必须先设好再动态 import。
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -65,7 +65,8 @@ const {
   receivedAtMs,
   MAX_EMAIL_SOURCE_LENGTH,
 } = await import('../src/lib/imap.ts');
-const { recordSentMessageId, resetSentRegistryForTests } = await import('../src/lib/sent-registry.ts');
+const { recordSentMessageId, resetSentRegistryForTests, reloadSentRegistryFromDiskForTests } =
+  await import('../src/lib/sent-registry.ts');
 const { InvalidMailCursorError, encodeMailCursor } = await import('../src/lib/mail-cursor.ts');
 const { config } = await import('../src/lib/config.ts');
 
@@ -496,6 +497,34 @@ describe('伪造 From 不得进 Sent，非收件人四入口不可见', () => {
     expect(await setMessageSeen('fox@test.example', '100', true)).toBe(false);
     const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
     expect(sent.messages).toEqual([]);
+    fakeMessages = [];
+  });
+});
+
+describe('损坏 sent-registry 不得炸掉读路径', () => {
+  test('损坏文件存在时列表/详情正常返回，Sent 判定为空集', async () => {
+    writeFileSync(join(config.dataDir, 'sent-registry.json'), '{not-json', { mode: 0o600 });
+    reloadSentRegistryFromDiskForTests();
+    const inboxMail = folderMessage({
+      uid: 1,
+      from: 'ext@example.net',
+      to: 'fox@test.example',
+      at: '2026-08-01T10:00:00Z',
+    });
+    const fromSelf = folderMessage({
+      uid: 2,
+      from: 'fox@test.example',
+      to: 'ext@example.net',
+      at: '2026-08-01T11:00:00Z',
+    });
+    fakeMessages = [inboxMail, fromSelf];
+    const inbox = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
+    expect(inbox.messages.map((m) => m.id)).toEqual(['1']);
+    expect(await getMessage('fox@test.example', '1')).not.toBeNull();
+    const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    expect(sent.messages).toEqual([]);
+    expect(await getMessage('fox@test.example', '2')).toBeNull();
+    expect(messageIsTrustedSent(fromSelf, 'fox@test.example')).toBe(false);
     fakeMessages = [];
   });
 });

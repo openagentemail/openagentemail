@@ -227,3 +227,20 @@
 
 1. 不选「投递前先登记再补偿撤销」——失败发送会短暂出现在 Sent，且撤销窗口更复杂。选降级：投递成功已是事实，Sent 漏记可接受。
 2. 读路径删除 persist；TTL 过期不改内存，等下次 record 再 prune 落盘。
+
+---
+
+## 返工第4轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. ZCode P1：`loadFromDisk` 遇到损坏/半行 JSON 时告警、隔离为 `sent-registry.json.corrupt`、回退空表；读路径零异常。Inbox/详情照常，Sent 判定为空集。
+2. 测试钉死损坏文件存在时 `listMessagesPage`/`getMessage` 正常返回、Sent 为空；`hasSentMessageId` 不抛。
+
+### 我们遇到了哪些错误？
+
+1. 损坏 registry 抛 `sent_registry_corrupt` 会击穿全部邮箱读路径（盘满/半行损坏 → Inbox 500）。fail-closed 被做成了炸掉读路径。
+
+### 我们是如何解决这些错误的？
+
+1. fail-closed = 判不可信（空 registry），不是抛错。隔离备份损坏文件，避免每次启动重复解析毒药。不在读路径 persist 空表。

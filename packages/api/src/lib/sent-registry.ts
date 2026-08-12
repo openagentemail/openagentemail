@@ -6,9 +6,9 @@
  * 就不进任何人的 Sent，也不能凭 From 跨身份读详情 / Source / Seen。
  *
  * 落盘照抄 ui-sessions.json：DATA_DIR/sent-registry.json、tmp+rename、0600、
- * 目录 0700、单写者。损坏 fail-closed（读路径抛错，不装空库冒充成功）。
- * 写盘失败：只告警，不抛给 SMTP 成功路径（宁可 Sent 漏记，不可 502 重发）。
- * 读路径（hasSentMessageId）零写盘；prune/persist 只在 record 写入路径。
+ * 目录 0700、单写者。损坏 fail-closed：**判不可信（空表）**，不抛给读路径
+ *（否则 Inbox 整页 500）。写盘失败：只告警，不抛给 SMTP 成功路径。
+ * 读路径（hasSentMessageId）零异常、不 persist；prune/persist 只在 record 写入路径。
  */
 
 import {
@@ -18,6 +18,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -117,33 +118,56 @@ function prune(now: number): boolean {
   return entries.length !== before;
 }
 
+function quarantineCorrupt(path: string): void {
+  try {
+    const dest = `${path}.corrupt`;
+    if (existsSync(dest)) {
+      try {
+        unlinkSync(dest);
+      } catch {
+        // 旧样本删不掉也不挡隔离
+      }
+    }
+    renameSync(path, dest);
+  } catch {
+    // 隔离失败也不抛：读路径必须继续
+  }
+}
+
+function adoptEmptyRegistry(): void {
+  entries = [];
+  pairSet.clear();
+  loaded = true;
+}
+
 function loadFromDisk(): void {
   if (loaded) return;
   const path = storePath();
   if (!existsSync(path)) {
-    entries = [];
-    pairSet.clear();
-    loaded = true;
+    adoptEmptyRegistry();
     return;
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    throw new Error('sent_registry_corrupt');
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isPersistedStore(parsed)) throw new Error('invalid_shape');
+    entries = parsed.entries.map((row) => ({
+      id: row.id,
+      from: row.from,
+      recordedAt: row.recordedAt,
+    }));
+    rebuildIndex();
+    loaded = true;
+    // 启动只修剪内存，不在读路径写盘（过期条目等下次 record 再落盘）。
+    prune(Date.now());
+  } catch (err) {
+    // 判不可信：空 registry。抛错会击穿 Inbox/详情整条读路径。
+    console.warn(
+      '[sent-registry] corrupt, treating as empty:',
+      err instanceof Error ? err.message : String(err),
+    );
+    quarantineCorrupt(path);
+    adoptEmptyRegistry();
   }
-  if (!isPersistedStore(parsed)) {
-    throw new Error('sent_registry_corrupt');
-  }
-  entries = parsed.entries.map((row) => ({
-    id: row.id,
-    from: row.from,
-    recordedAt: row.recordedAt,
-  }));
-  rebuildIndex();
-  loaded = true;
-  // 启动只修剪内存，不在读路径写盘（过期条目等下次 record 再落盘）。
-  prune(Date.now());
 }
 
 function persist(): void {

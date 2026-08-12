@@ -119,12 +119,12 @@ describe('sent registry 持久化', () => {
     setSentRegistryPersistHookForTests(null);
   });
 
-  test('损坏文件 fail-closed 抛错', () => {
+  test('损坏文件回退为空表，读路径不抛', () => {
     resetSentRegistryForTests();
     writeFileSync(registryPath(), '{not-json', { mode: 0o600 });
     reloadSentRegistryFromDiskForTests();
-    expect(() => hasSentMessageId('x@test.example', 'fox@test.example')).toThrow(
-      'sent_registry_corrupt',
-    );
+    expect(() => hasSentMessageId('x@test.example', 'fox@test.example')).not.toThrow();
+    expect(hasSentMessageId('x@test.example', 'fox@test.example')).toBe(false);
+    expect(sentRegistrySizeForTests()).toBe(0);
   });
 });
