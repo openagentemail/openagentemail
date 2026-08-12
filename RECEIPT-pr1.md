@@ -100,3 +100,13 @@
 | ZCode P1-1 裁定 | **已关闭**：`safeDecodeURIComponent` + unknown fallback；畸形深链测试不抛 |
 | ZCode P1-2 裁定 | **已关闭**：`shell-routes.ts` 单一事实源；exact 尾斜杠 + inbox/tasks `/*`；不吞 api/oauth/frame |
 | P0/P1/P2 | **无** |
+
+---
+
+## 返工第4轮（Codex P2 · Overview nav + ZCode P1 · 路由表纵深防御）
+
+- **时间**：2026-08-12
+- **触发**：终审剩两条。① Codex P2：identity session 能看见 admin 专属 Overview 全局导航，点了靠 fallback。② ZCode P1：shell 深链注册顺序只有静态 `routes` 下标测试，缺通配请求不吞 api/oauth/frame 的回归闸。
+- **修复**：`#nav-overview-item` 默认 hidden + `configureSession`/`data-session` 双保险；请求级断言保留前缀不是 dashboard shell；`parseLocationRoute` 将 api/oauth/frame 标 unknown。
+- **测试**：`packages/api` `bun test` → **635 pass / 0 fail**
+- **独立自审（新 agent，禁止自审自）**：待本轮功能 commit 后启动。

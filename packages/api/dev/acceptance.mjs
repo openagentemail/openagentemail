@@ -972,18 +972,22 @@ try {
   );
   const identityProbe = await evaluate(`(() => {
     const back = document.querySelector('#back-to-overview');
-    const nav = document.querySelector('.overview-nav');
+    const nav = document.querySelector('[data-nav="overview"]');
+    const navItem = document.querySelector('#nav-overview-item');
     const order = __oae.tabOrder();
     return {
       backRects: back.getClientRects().length,
       backTabbable: order.includes(back),
-      navPresent: !!nav,
+      navHidden: !navItem || navItem.hidden || navItem.getClientRects().length === 0,
       navTabbable: nav ? order.includes(nav) : false,
+      session: document.querySelector('#inbox-view').dataset.session,
       mains: __oae.visibleMains().map((main) => main.id)
     };
   })()`);
   check(identityProbe.backRects === 0, 'A53 ← Overview is invisible for identity sessions');
   check(!identityProbe.backTabbable, 'A53 ← Overview is out of the tab order');
+  check(identityProbe.session === 'identity', 'A53 identity session dataset is identity');
+  check(identityProbe.navHidden, 'A53 Overview global nav is hidden for identity sessions');
   check(!identityProbe.navTabbable, 'A53 the Overview nav item is out of the tab order');
   check(
     identityProbe.mains.length === 1 && identityProbe.mains[0] === 'main-content',

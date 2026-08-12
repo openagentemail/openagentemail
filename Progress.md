@@ -99,3 +99,25 @@
 
 1. decode 包 try/catch，失败当未知路径。
 2. `uiShellRegisterPaths()` 对 exact 路径 `flatMap` 出 `path` + `path/`；测试钉死三方枚举一致。
+
+---
+
+## 返工第4轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Overview 全局导航按会话角色渲染：`#nav-overview-item` 默认 `hidden`；`configureSession()` 仅 admin 打开；identity 会话 CSS `[data-session="identity"]` 再藏一层。侧栏 Overview 哨兵原本就 `isAdmin()` 门控，未改。
+2. 契约测试运行 `isAdmin`+`configureSession`：identity 隐藏 Overview nav，admin 显示。A53 浏览器探针改为钉 `[data-nav="overview"]` / `#nav-overview-item`。
+3. 路由表层级回归：对 `/ui/api/*`、`/ui/oauth/*`、`/ui/frame/*` 发真实请求，断言响应不是 dashboard shell（无 `id="app-nav"`、CSP 不是 `OUTER_CSP`）。客户端 `parseLocationRoute` 把这些保留前缀标 `unknown`（popstate 同源解析）。
+4. `bun test`：**635 pass / 0 fail**（原 632 + 3 新闸）。
+5. 独立自审：待本轮 commit 后启动新 agent。
+
+### 我们遇到了哪些错误？
+
+1. Codex P2：identity session 能看到 admin 专属 Overview 全局 nav，点了靠 `applyRoute` fallback 兜底，违反 ADR 权限原则。
+2. ZCode P1：shell 深链注册顺序此前只有 `app.routes` 静态下标比较，缺少「通配形态请求不吞 api/oauth/frame」的路由表级请求断言。
+
+### 我们是如何解决这些错误的？
+
+1. 与 `backToOverview` / `createIdentityButton` 同一套 `configureSession` 显隐；HTML 默认 hidden 失败关闭；CSS 按 `data-session` 双保险。
+2. 新增请求级测试对比合法 shell 深链（`/ui/inbox`、`/ui/tasks/:id` 仍是 dashboard HTML）与保留前缀；复用 `parseLocationRoute` harness 钉 popstate 解析。

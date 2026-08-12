@@ -202,6 +202,63 @@ describe('UI static asset contract', () => {
     expect((await full.request('/ui/inbox')).status).toBe(200);
   });
 
+  // 路由表层级：真发通配形态请求，断言 api/oauth/frame 不被 shell HTML 吞掉（纵深防御，不只看 routes 顺序）
+  test('wildcard-shaped reserved paths are not swallowed by the dashboard shell', async () => {
+    const { FRAME_CSP } = await import('../src/routes/ui-frame.ts');
+    const full = createApp({ uiEnabled: true });
+
+    async function hit(path: string) {
+      const res = await full.request(path);
+      const body = await res.text();
+      return { res, body };
+    }
+
+    function isDashboardShell(hit: { res: { status: number; headers: Headers }; body: string }) {
+      return (
+        hit.res.headers.get('content-type') === 'text/html; charset=utf-8' &&
+        hit.res.headers.get('content-security-policy') === OUTER_CSP &&
+        hit.body.includes('id="app-nav"')
+      );
+    }
+
+    // 对照：合法 shell 深链仍是 dashboard HTML
+    const inbox = await hit('/ui/inbox');
+    expect(inbox.res.status).toBe(200);
+    expect(isDashboardShell(inbox)).toBe(true);
+    const taskDeep = await hit('/ui/tasks/demo-id');
+    expect(isDashboardShell(taskDeep)).toBe(true);
+
+    // /ui/api/* 必须是 JSON API，绝不能落到 shell
+    const apiMe = await hit('/ui/api/me');
+    expect(apiMe.res.status).toBe(401);
+    expect(apiMe.res.headers.get('content-type')).toContain('application/json');
+    expect(isDashboardShell(apiMe)).toBe(false);
+    expect(apiMe.body).not.toContain('id="app-nav"');
+
+    const apiOverview = await hit('/ui/api/overview');
+    expect(isDashboardShell(apiOverview)).toBe(false);
+    expect(apiOverview.body).not.toContain('id="app-nav"');
+
+    const apiSession = await hit('/ui/api/session');
+    expect(isDashboardShell(apiSession)).toBe(false);
+
+    // /ui/oauth/* 是 OAuth 面，不是 dashboard shell
+    const oauthGrants = await hit('/ui/oauth/grants');
+    expect(oauthGrants.res.status).toBe(302);
+    expect(isDashboardShell(oauthGrants)).toBe(false);
+
+    const oauthAuthorize = await hit('/ui/oauth/authorize');
+    expect(isDashboardShell(oauthAuthorize)).toBe(false);
+    expect(oauthAuthorize.body).not.toContain('id="app-nav"');
+
+    // /ui/frame/* 用 FRAME_CSP，不是 OUTER_CSP dashboard
+    const frame = await hit('/ui/frame/1?address=fox%40test.example');
+    expect(isDashboardShell(frame)).toBe(false);
+    expect(frame.res.headers.get('content-security-policy')).toBe(FRAME_CSP);
+    expect(frame.res.headers.get('content-security-policy')).not.toBe(OUTER_CSP);
+    expect(frame.body).not.toContain('id="app-nav"');
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 
@@ -317,6 +374,89 @@ describe('UI static asset contract', () => {
     expect(ok.scope).toBe('tasks');
     expect(ok.taskId).toBe('中');
     expect(ok.unknown).toBeUndefined();
+  });
+
+  // popstate / 客户端路由：api、oauth、frame 不得被解析成 dashboard scope（与服务端后挂 shell 对偶）
+  test('parseLocationRoute does not claim api/oauth/frame reserved prefixes', async () => {
+    expect(UI_JS).toContain("window.addEventListener('popstate'");
+    expect(UI_JS).toContain('applyRoute(parseLocationRoute()');
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const start = ROUTER_JS.indexOf('function safeDecodeURIComponent(');
+    const end = ROUTER_JS.indexOf('function pathForScope(');
+    const parseOnly = ROUTER_JS.slice(start, end);
+    const makeParser = new Function(`
+      return function (pathname) {
+        var window = { location: { pathname: pathname } };
+        ${parseOnly}
+        return parseLocationRoute();
+      };
+    `);
+    const wrap = makeParser() as (pathname: string) => {
+      scope: string;
+      unknown?: boolean;
+    };
+    for (const path of [
+      '/ui/api/me',
+      '/ui/api/overview',
+      '/ui/api/session',
+      '/ui/oauth/grants',
+      '/ui/oauth/authorize',
+      '/ui/frame/1',
+    ]) {
+      const route = wrap(path);
+      expect(route.unknown).toBe(true);
+      expect(route.scope).toBe('inbox');
+    }
+    // 合法 dashboard 深链仍有明确 scope
+    expect(wrap('/ui/overview').scope).toBe('overview');
+    expect(wrap('/ui/overview').unknown).toBeUndefined();
+    expect(wrap('/ui/inbox').unknown).toBeUndefined();
+  });
+
+  // Codex P2：identity 看不到 Overview 全局导航；admin 看得到
+  test('Overview global nav is visible for admin sessions and hidden for identity sessions', () => {
+    expect(UI_HTML).toContain('id="nav-overview-item"');
+    expect(UI_HTML).toMatch(
+      /<li id="nav-overview-item" hidden><a class="app-nav-link" data-nav="overview"/,
+    );
+    expect(UI_JS).toContain('navOverviewItem.hidden = !isAdmin()');
+    expect(UI_CSS).toContain(
+      '.inbox-view[data-session="identity"] #nav-overview-item { display: none; }',
+    );
+
+    const start = UI_JS.indexOf('function isAdmin()');
+    const end = UI_JS.indexOf('async function apiJson(');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const snippet = UI_JS.slice(start, end);
+    const run = new Function(`
+      return function (kind) {
+        var inboxView = { dataset: {} };
+        var backToOverview = { hidden: false };
+        var createIdentityButton = { hidden: true };
+        var configureIdentitiesCreate = { hidden: true };
+        var navOverviewItem = { hidden: true };
+        var state = { me: { kind: kind } };
+        ${snippet}
+        configureSession();
+        return {
+          session: inboxView.dataset.session,
+          overviewNavHidden: navOverviewItem.hidden,
+          inboxNavUnaffected: true
+        };
+      };
+    `)() as (kind: string) => {
+      session: string;
+      overviewNavHidden: boolean;
+    };
+
+    const identity = run('identity');
+    expect(identity.session).toBe('identity');
+    expect(identity.overviewNavHidden).toBe(true);
+
+    const admin = run('admin');
+    expect(admin.session).toBe('admin');
+    expect(admin.overviewNavHidden).toBe(false);
   });
 
   // A14

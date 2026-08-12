@@ -74,6 +74,9 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('preview-identity-token');
     expect(source).toContain('A53 an identity session never requests /ui/api/overview');
     expect(source).toContain('A53 ← Overview is out of the tab order');
+    expect(source).toContain('A53 Overview global nav is hidden for identity sessions');
+    expect(source).toContain('[data-nav="overview"]');
+    expect(source).toContain('#nav-overview-item');
     expect(previewSource).toContain('preview-identity-token');
     expect(previewSource).toContain("kind: 'identity'");
   });
