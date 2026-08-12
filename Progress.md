@@ -329,5 +329,25 @@
 1. sidecar write+fsync 成功后才告警并重写主日志；失败则 `partial_isolate_failed` 后原样抛出。
 2. 派生域分离子密钥，encode/decode 改走 `config.notifyCursorSecret`。
 
+---
+
+## #26 PR 3 返工第4轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：`zonedDayBounds` 改为迭代求解当地午夜 UTC，并验证墙钟落在目标日 00:00；偏移在 guess 与午夜之间切换则按墙钟差重算。当地 00:00 被弹簧向前跳过时，取该日第一个可表示瞬间。
+2. 测试钉死：Australia/Lord_Howe 2026-04-05（不再算出 00:30）与 2026-10-04（不再算出前一天 23:30）；America/Santiago 2026-04-05 / 2026-09-06 整小时转换日；Asia/Shanghai 与 UTC 不回归。
+3. `bun test`（packages/api）：**706 pass / 0 fail**；`bun run build` 全绿。
+4. 独立自审 agent `509117a0-ce70-4661-8726-cb7ef72e9379`：可合并；No findings；Codex P1（DST 午夜偏移）关闭。
+
+### 我们遇到了哪些错误？
+
+1. 一次性 `start = guess - offsetAt(guess)` 在本地午夜与 guess 之间发生 DST 切换时用错一侧 offset。Lord_Howe 半小时 DST：4 月 5 日算出当地 00:30，10 月 4 日算出前一天 23:30，summary 漏算/多算半小时。
+
+### 我们是如何解决这些错误的？
+
+1. `utc := asUtc - offsetAt(utc)` 迭代至不动点，再用 Intl 墙钟校验。不对则按 `asUtc - gotAsUtc` 重算；仍非 00:00 但已在目标日则接受（跳过的午夜）。
+
+
 
 

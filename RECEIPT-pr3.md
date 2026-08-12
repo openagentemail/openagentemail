@@ -73,3 +73,16 @@ ZCode 已裁可以合并（P0/P1=0，P2×3 记债），本轮未另动。
 - 审 `git diff 6a79afc..ea1a28e`
 - verdict：**mergeable**；No findings；Codex P1 与 ZCode P1-1 均 **closed**
 
+## 返工第4轮（head `7eaddae`）
+
+**Codex P1：** `zonedDayBounds` 迭代求解当地午夜并验证墙钟。Lord_Howe 2026-04-05 为 `2026-04-04T13:00:00.000Z`（当地 00:00，不再是 00:30）；2026-10-04 为 `2026-10-03T13:30:00.000Z`（不再是前一天 23:30）。America/Santiago 整小时转换日（4-05 回拨、9-06 弹簧向前跳过 00:00）与 Asia/Shanghai / UTC 不回归。
+
+`bun test`（packages/api）：**706 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审（禁止自审自）
+
+- 新 subagent agent id：`509117a0-ce70-4661-8726-cb7ef72e9379`
+- 审 `git diff 2da142c..7eaddae`
+- verdict：**mergeable**；No findings；Codex P1 **closed**
+
+
