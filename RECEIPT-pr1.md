@@ -2,8 +2,8 @@
 
 - **时间**：2026-08-12
 - **分支**：`tizerluo/worker-34-pr1`（未动 `main`）
-- **HEAD commit**：`62d9925`（`chore: drop accidental mimosa hook-state from PR1 branch`）
-- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序修复
+- **HEAD commit**：`1d78f0d`（返工第1轮：`a6d0e1a` 修复 + `1d78f0d` docs）
+- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序修复；`a6d0e1a` taskTimelineBody 转义 + UI_JS 语法闸
 - **PR**：[#25](https://github.com/openagentemail/openagentemail/pull/25) — `feat(api): modularize dashboard shell and real /ui routes (#26 PR 1)`
 - **Repo**：`openagentemail/openagentemail`
 
@@ -52,4 +52,13 @@
 - **核实**：对照 main 拆分前实现 + `new Function(UI_JS)`；`async function selectTask(` 已存在，该 P0 为对 JSON 一行模块的误报。另发现真回归：`taskTimelineBody` fence/`replace` 反斜杠被 JSON 二次转义，已与 main 金标对齐。
 - **闸**：`assembled /ui/app.js is syntactically valid`（`new Function`）+ `critical UI loaders remain async…` + tasks fence 字面量钉死。
 - **测试**：`packages/api` `bun test` → **629 pass / 0 fail**
-- **独立自审（新 agent，禁止自审自）**：见下方追加（subagent 跑完后填入）。
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `2963a9a1-5fbc-4664-be2e-4fd5320b5f70` |
+| HEAD 审查时 | `1d78f0d` |
+| 结论 | **可合并** — `UI_JS` 语法合法；`selectTask` 已是 `async`；fence 与 main 金标一致；语法/async/fence 闸可拦住本轮关注回归 |
+| Codex P0 裁定 | **否定（误报）**：聚合产物为 `async function selectTask(`；`new Function(UI_JS)` 通过；全量 `await apiJson` 无非 async 真阳性 |
+| 语法闸评估 | 足以防缺 async/语法错误；过转义另靠 tasks fence 字面量钉死 |
+| P0/P1/P2 | **无** |
