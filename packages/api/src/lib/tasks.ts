@@ -341,9 +341,12 @@ async function findTaskMessages(id: string): Promise<RawTaskMessage[]> {
 
 export async function getTask(id: string): Promise<Task | null> {
   if (!isTaskId(id)) return null;
-  // 单测注入内存目录，避免并发 reply 回归打真 IMAP。
-  if (getTaskForTests) return getTaskForTests(id);
-  return taskFromMessages(id, await findTaskMessages(id));
+  // 单测注入内存目录，避免并发 reply / IMAP 滞后 reminder 回归打真 IMAP。
+  const raw = getTaskForTests
+    ? await getTaskForTests(id)
+    : taskFromMessages(id, await findTaskMessages(id));
+  // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic reminder 并进读路径。
+  return raw ? mergeQueuedReminders(raw) : null;
 }
 
 export async function listTasks(state?: TaskState): Promise<Task[]> {
@@ -409,6 +412,14 @@ let listCache: { at: number; tasks: Task[] } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
+/** IMAP 索引滞后窗口内的已发 reminder，供幂等/冷却读路径合并。 */
+const queuedReminders = new Map<string, QueuedReminder[]>();
+const QUEUED_REMINDER_TTL_MS = 60 * 1000;
+
+type QueuedReminder = {
+  message: TaskMessage;
+  sentAt: number;
+};
 
 export function setTaskNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
@@ -427,6 +438,55 @@ export function setTaskSendMailForTests(
   fn: ((input: SendInput) => Promise<{ messageId: string }>) | null,
 ): void {
   sendMailForTests = fn;
+}
+
+export function clearQueuedRemindersForTests(): void {
+  queuedReminders.clear();
+}
+
+/** 已索引（或同幂等 key）的 reminder 不再需要 synthetic 补丁。 */
+function reminderIsIndexed(task: Task, queued: QueuedReminder): boolean {
+  return task.messages.some((message) => {
+    if (message.kind !== 'reminder') return false;
+    if (queued.message.idempotencyKey) {
+      return message.idempotencyKey === queued.message.idempotencyKey;
+    }
+    const at = Date.parse(message.date);
+    return (
+      message.from === queued.message.from
+      && message.body === queued.message.body
+      && Number.isFinite(at)
+      && at >= queued.sentAt - 1000
+    );
+  });
+}
+
+function mergeQueuedReminders(task: Task): Task {
+  const pending = queuedReminders.get(task.id);
+  if (!pending || pending.length === 0) return task;
+  const now = nowMs();
+  const stillLagging = pending.filter((row) => {
+    if (now - row.sentAt > QUEUED_REMINDER_TTL_MS) return false;
+    return !reminderIsIndexed(task, row);
+  });
+  if (stillLagging.length === 0) {
+    queuedReminders.delete(task.id);
+    return task;
+  }
+  queuedReminders.set(task.id, stillLagging);
+  const extra = stillLagging.map((row) => row.message);
+  const latest = extra[extra.length - 1]!;
+  return {
+    ...task,
+    updatedAt: latest.date,
+    messages: [...task.messages, ...extra],
+  };
+}
+
+function queueReminderUntilIndexed(taskId: string, message: TaskMessage): void {
+  const list = queuedReminders.get(taskId) ?? [];
+  list.push({ message, sentAt: Date.parse(message.date) || nowMs() });
+  queuedReminders.set(taskId, list);
 }
 
 /** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */
@@ -696,26 +756,27 @@ export async function remindTask(input: {
     });
     void notifyTrustedAgentDelivery(to);
     invalidateTaskListCache();
+    const reminderMessage: TaskMessage = {
+      id: `queued-reminder-${nowMs()}`,
+      from: input.from,
+      to,
+      subject: existing.subject,
+      date: new Date(nowMs()).toISOString(),
+      state: existing.state,
+      body: text,
+      kind: 'reminder',
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    };
+    const queued = { message: reminderMessage, sentAt: Date.parse(reminderMessage.date) || nowMs() };
     const persisted = await getTask(existing.id);
-    if (persisted) return persisted;
-    const now = new Date(nowMs()).toISOString();
+    // 仅当 IMAP 已能看到刚发的这条 reminder 才当真持久化；否则回 synthetic，
+    // 并把它并进读路径，避免同 key 重试/15s 冷却窗口读到催办前的旧 task。
+    if (persisted && reminderIsIndexed(persisted, queued)) return persisted;
+    queueReminderUntilIndexed(existing.id, reminderMessage);
     return {
       ...existing,
-      updatedAt: now,
-      messages: [
-        ...existing.messages,
-        {
-          id: 'queued-reminder',
-          from: input.from,
-          to,
-          subject: existing.subject,
-          date: now,
-          state: existing.state,
-          body: text,
-          kind: 'reminder',
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-        },
-      ],
+      updatedAt: reminderMessage.date,
+      messages: [...existing.messages, reminderMessage],
     };
   });
 }

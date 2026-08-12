@@ -444,6 +444,27 @@
 1. 持锁读 → 断言 `input-required` → `updateTaskUnlocked` 写 working；发信走 `deliverMail` 可注入缝，单测用内存目录钉死竞态。
 2. GET/mutation 共用 `toUiTaskView` 白名单字段，identity 对非参与者仍 403 且 body 不含线程内容。
 
+---
+
+## #26 PR 4 返工第3轮（Codex P1：IMAP 滞后 reminder 幂等）
+
+### 我们实现了哪些功能？
+
+1. `remindTask` 发信后只有 IMAP 已能看到刚发的那条 reminder 才把 `getTask()` 当真持久化；否则回 synthetic，并写入进程内 queued overlay。
+2. `getTask` 在索引滞后窗口（60s TTL）把 synthetic reminder 并进读路径，同幂等 key 重试命中 replay、15s 冷却仍按 last reminder 计算。
+3. 测试：SMTP 接受但不写入 IMAP 目录时，同 key 第二次 `remindTask` 不发信；换 key 仍 `task_remind_cooldown`。
+4. `bun test`：**732 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审：见回执追加（新 subagent，禁止自审自）。stampede 等 P2 继续记债不扩。
+
+### 我们遇到了哪些错误？
+
+1. `if (persisted) return persisted` 把催办前的旧 task 当真：SMTP 已接受、Dovecot 未索引时返回体没有 reminder；同 key 重试再读到同样陈旧 task，重复发信并绕过冷却。
+
+### 我们是如何解决这些错误的？
+
+1. 用 `reminderIsIndexed`（幂等 key，或无 key 时 from+body+时间）判断 IMAP 是否已看到刚发的那条。
+2. 未索引则 `queueReminderUntilIndexed`，后续 `getTask` 合并 overlay；IMAP 追上或 TTL 到期后丢掉补丁。
+
 
 
 

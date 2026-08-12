@@ -19,9 +19,12 @@ const { afterEach, beforeEach, describe, expect, test } = await import('bun:test
 const {
   TASK_BOARD_LIMITS,
   TASK_BOARD_PERIODS,
+  TASK_REMIND_COOLDOWN_MS,
+  clearQueuedRemindersForTests,
   currentTaskMessage,
   isClosedByAdmin,
   listTaskBoard,
+  remindTask,
   replyTask,
   setTaskGetForTests,
   setTaskListAllForTests,
@@ -98,6 +101,7 @@ afterEach(() => {
   setTaskListAllForTests(null);
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
+  clearQueuedRemindersForTests();
 });
 
 describe('task overdue clock', () => {
@@ -502,5 +506,65 @@ describe('concurrent reply under per-task lock', () => {
     });
     expect(sent.filter((row) => row.state === 'working')).toHaveLength(1);
     expect(store.get(task.id)?.messages.filter((message) => message.state === 'working')).toHaveLength(1);
+  });
+});
+
+describe('reminder IMAP lag idempotency and cooldown', () => {
+  function installLaggingMailbox(task: Task) {
+    const store = new Map<string, Task>([[task.id, structuredClone(task)]]);
+    const sent: Array<{ event?: string; key?: string; body: string }> = [];
+    setTaskGetForTests(async (id) => {
+      const current = store.get(id);
+      return current ? structuredClone(current) : null;
+    });
+    // SMTP 接受但不写入 store：模拟 Dovecot 尚未索引。
+    setTaskSendMailForTests(async (input) => {
+      sent.push({
+        event: input.headers?.['X-OA-Task-Event'],
+        key: input.headers?.['X-OA-Task-Idempotency-Key'],
+        body: input.text,
+      });
+      return { messageId: `<remind-${sent.length}@test.example>` };
+    });
+    return { store, sent };
+  }
+
+  test('IMAP lag: same idempotency key retry does not send twice; cooldown still holds', async () => {
+    const task = makeTask({
+      id: padId(10),
+      state: 'working',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const { store, sent } = installLaggingMailbox(task);
+
+    const first = await remindTask({
+      id: task.id,
+      from: 'fox@test.example',
+      body: 'ping',
+      idempotencyKey: 'click-1',
+    });
+    expect(sent).toHaveLength(1);
+    expect(first.messages.some((message) => message.kind === 'reminder' && message.idempotencyKey === 'click-1')).toBe(true);
+    expect(store.get(task.id)?.messages.some((message) => message.kind === 'reminder')).toBe(false);
+
+    const replay = await remindTask({
+      id: task.id,
+      from: 'fox@test.example',
+      body: 'ping',
+      idempotencyKey: 'click-1',
+    });
+    expect(sent).toHaveLength(1);
+    expect(replay.messages.filter((message) => message.kind === 'reminder')).toHaveLength(1);
+
+    await expect(
+      remindTask({
+        id: task.id,
+        from: 'fox@test.example',
+        body: 'again',
+        idempotencyKey: 'click-2',
+      }),
+    ).rejects.toMatchObject({ message: 'task_remind_cooldown' });
+    expect(sent).toHaveLength(1);
+    expect(TASK_REMIND_COOLDOWN_MS).toBe(15_000);
   });
 });
