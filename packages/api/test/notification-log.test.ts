@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,6 +128,31 @@ describe('notification-log store', () => {
     expect(partial).toContain('"id":"partial');
   });
 
+  test('sidecar isolate failure leaves the main log byte-for-byte unchanged', async () => {
+    mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+    const torn = `${JSON.stringify({
+      schemaVersion: 1,
+      id: 'ffffffffffff',
+      publishedAt: new Date().toISOString(),
+      source: 'manual',
+      logicalTarget: 'user',
+      logicalChannel: 'user-alerts',
+      level: 'normal',
+      title: 'ok',
+      message: 'ok',
+      tags: [],
+      sensitive: false,
+      delivery: 'sent',
+    })}\n{"schemaVersion":1,"id":"keep-me`;
+    writeFileSync(logPath(), torn, { mode: 0o600 });
+    // sidecar 不可写（路径是目录）：隔离失败时不得截断主日志丢掉尾行。
+    mkdirSync(join(config.dataDir, 'notification-log.jsonl.partial'), { mode: 0o700 });
+    await expect(queryNotificationLog({ limit: 20 })).rejects.toThrow();
+    expect(readFileSync(logPath(), 'utf8')).toBe(torn);
+    await expect(seed({ title: 'must-not-glue' })).rejects.toThrow();
+    expect(readFileSync(logPath(), 'utf8')).toBe(torn);
+  });
+
   test('middle corrupt line fail-closes queries instead of skipping', async () => {
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     const good = {
@@ -169,6 +195,35 @@ describe('notification-log store', () => {
     await expect(
       queryNotificationLog({ limit: 20, level: 'urgent', cursor: pageA.nextCursor! }),
     ).rejects.toMatchObject({ code: 'invalid_cursor' });
+  });
+
+  test('notify cursor HMAC is not the task signing secret; old task-keyed cursors fail closed', async () => {
+    const base = Date.parse('2026-08-12T16:00:00.000Z');
+    for (let i = 0; i < 21; i++) {
+      setNotificationLogNowForTests(() => base + i * 1000);
+      await seed({ title: `c${i}`, level: 'normal' });
+    }
+    const pageA = await queryNotificationLog({ limit: 20, level: 'normal' });
+    expect(pageA.nextCursor).toBeTruthy();
+    const parts = pageA.nextCursor!.split('.');
+    const parsed = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as {
+      ch: string;
+      lv: string;
+      from: string;
+      to: string;
+      t: number;
+      id: string;
+    };
+    const taskMac = createHmac('sha256', config.taskSigningSecret)
+      .update(`notify-cursor-v1\n${parsed.ch}\n${parsed.lv}\n${parsed.from}\n${parsed.to}\n${parsed.t}\n${parsed.id}`)
+      .digest('base64url');
+    expect(taskMac).not.toBe(parts[2]);
+    const oldCursor = `${parts[0]}.${parts[1]}.${taskMac}`;
+    await expect(
+      queryNotificationLog({ limit: 20, level: 'normal', cursor: oldCursor }),
+    ).rejects.toMatchObject({ code: 'invalid_cursor' });
+    const pageB = await queryNotificationLog({ limit: 20, level: 'normal', cursor: pageA.nextCursor! });
+    expect(pageB.items).toHaveLength(1);
   });
 
   test('append failure surfaces to the caller so publish can alarm without forging success rows', async () => {

@@ -20,7 +20,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  unlinkSync,
+  rmSync,
   writeSync,
 } from 'node:fs';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -347,7 +347,7 @@ function appendMissingFinalNewlineSync(): void {
 }
 
 /**
- * 启动/查询/append 前：末尾半行隔离；完整末行缺换行则先补换行；中间损坏 fail-closed。
+ * 启动/查询/append 前：末尾半行隔离（sidecar 失败则中止、原文件不动）；完整末行缺换行则先补换行；中间损坏 fail-closed。
  * 不在 fail-closed 时重写文件（避免把中间坏行「跳过」装成完整审计）。
  */
 function inspectAndRepairSync(): NotificationLogRecord[] {
@@ -360,10 +360,6 @@ function inspectAndRepairSync(): NotificationLogRecord[] {
   }
   failClosed = false;
   if (parsed.trailingPartial !== null) {
-    notificationLogHealthAlert('trailing_partial_isolated', {
-      path: LOG_NAME,
-      bytes: parsed.trailingPartial.length,
-    });
     try {
       ensureDataDir();
       const fragment = parsed.trailingPartial.endsWith('\n')
@@ -379,13 +375,19 @@ function inspectAndRepairSync(): NotificationLogRecord[] {
       try {
         chmodSync(partialPath(), 0o600);
       } catch {
-        // best effort
+        // best effort：权限失败不否决已 fsync 的隔离
       }
     } catch (err) {
       notificationLogHealthAlert('partial_isolate_failed', {
         error: (err as Error).message,
       });
+      // sidecar 未持久成功：中止 repair，原文件一字不动，绝不丢掉尾行。
+      throw err;
     }
+    notificationLogHealthAlert('trailing_partial_isolated', {
+      path: LOG_NAME,
+      bytes: parsed.trailingPartial.length,
+    });
     const kept = parsed.records.map((row) => `${JSON.stringify(row)}\n`).join('');
     writeAtomicSync(kept);
   } else if (raw.length > 0 && !raw.endsWith('\n')) {
@@ -400,7 +402,7 @@ function loadRecordsOrThrow(): NotificationLogRecord[] {
   return inspectAndRepairSync();
 }
 
-function cursorMac(payload: CursorPayload, key: string): string {
+function cursorMac(payload: CursorPayload, key: string | Buffer): string {
   return createHmac('sha256', key)
     .update(
       `${CURSOR_PREFIX}\n${payload.ch}\n${payload.lv}\n${payload.from}\n${payload.to}\n${payload.t}\n${payload.id}`,
@@ -419,7 +421,7 @@ function encodeCursor(payload: CursorPayload): string {
       id: payload.id,
     }),
   ).toString('base64url');
-  return `${CURSOR_PREFIX}.${body}.${cursorMac(payload, config.taskSigningSecret)}`;
+  return `${CURSOR_PREFIX}.${body}.${cursorMac(payload, config.notifyCursorSecret)}`;
 }
 
 function decodeCursor(token: string): CursorPayload {
@@ -447,7 +449,7 @@ function decodeCursor(token: string): CursorPayload {
     t: raw.t,
     id: raw.id,
   };
-  const expected = cursorMac(payload, config.taskSigningSecret);
+  const expected = cursorMac(payload, config.notifyCursorSecret);
   try {
     const a = Buffer.from(parts[2]);
     const b = Buffer.from(expected);
@@ -766,7 +768,7 @@ export function resetNotificationLogForTests(): void {
   writeChain = Promise.resolve();
   for (const path of [logPath(), tmpPath(), partialPath()]) {
     try {
-      if (existsSync(path)) unlinkSync(path);
+      if (existsSync(path)) rmSync(path, { recursive: true, force: true });
     } catch {
       // ignore
     }

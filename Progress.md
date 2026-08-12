@@ -306,4 +306,27 @@
 1. `inspectAndRepairSync`：无 trailingPartial 且 raw 非空不以 `\\n` 结尾时，`appendMissingFinalNewlineSync` 只补换行（不走 persistHook）。半行路径仍隔离 + 原子重写。
 2. 解析出年/月/日后用 UTC 日历回读校验，对不上则 `RangeError('invalid_date')`；路由已映射为 400。
 
+---
+
+## #26 PR 3 返工第3轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：sidecar（`.partial`）未持久写成功时中止 repair 并抛错，主日志一字不动，绝不丢掉尾行。
+2. ZCode P1-1：config 层用 `createHmac('sha256', taskSigningSecret).update('notify-cursor-v1').digest()` 派生 `notifyCursorSecret`，不新增 env。通知游标与 task/mail 游标不同钥；旧 notify 游标失效可接受。
+3. 测试钉死：sidecar 为目录导致 EISDIR 时 query/append 均失败且主日志字节不变；用 taskSigningSecret 重签的旧游标 `invalid_cursor`；派生密钥与 task 密钥不相等。
+4. `bun test`（packages/api）：**705 pass / 0 fail**；`bun run build` 全绿。
+5. ZCode「append 前全量解析」性能观察本期不扩 scope，记债（见回执）。
+
+### 我们遇到了哪些错误？
+
+1. 隔离尾行到 `.partial` 失败时 catch 只记日志，仍 `writeAtomicSync` 截断主日志，隔离机制要保的数据被丢掉。
+2. 通知游标 HMAC 直接复用 `taskSigningSecret`（可能 fallback `SMTP_PASS`），跨用途泄漏放大。
+
+### 我们是如何解决这些错误的？
+
+1. sidecar write+fsync 成功后才告警并重写主日志；失败则 `partial_isolate_failed` 后原样抛出。
+2. 派生域分离子密钥，encode/decode 改走 `config.notifyCursorSecret`。
+
+
 
