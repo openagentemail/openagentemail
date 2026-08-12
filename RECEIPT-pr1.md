@@ -81,3 +81,13 @@
 | 结论 | **可合并** — 204/空 body 成功路径已修；吊销成功链完整；赋值调用点无回归；630 pass |
 | Codex P1 裁定 | **已关闭**：`apiJson` 对 204/205/`text` 空串返回 `null`；revoke 仍 announce + `loadConfigureClients`；identity DELETE 仍为 JSON |
 | P0/P1/P2 | **无** |
+
+---
+
+## 返工第3轮（ZCode P1-1/P1-2 · decode + shell 路径对齐）
+
+- **时间**：2026-08-12
+- **触发**：① `parseLocationRoute` 中 `decodeURIComponent` 未捕获 → 畸形百分号深链 URIError 白屏；② 客户端深链与服务端 `UI_SHELL_PATHS` 不完全对齐（精确路径缺尾斜杠）→ 刷新 404，碰 ADR 核心契约。
+- **修复**：`safeDecodeURIComponent` + inbox/`unknown` fallback；`shell-routes.ts` 单一事实源 + exact 路径尾斜杠注册；契约测试钉死。
+- **测试**：`packages/api` `bun test` → **632 pass / 0 fail**
+- **独立自审（新 agent，禁止自审自）**：见下方追加（subagent 跑完后填入）。

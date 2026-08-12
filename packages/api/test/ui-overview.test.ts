@@ -523,7 +523,9 @@ describe('Overview 端点契约', () => {
       .filter((route) => route.path.includes('overview'))
       .map((route) => `${route.method} ${route.path}`)
       .sort();
-    expect(overviewRoutes).toEqual(['GET /ui/api/overview', 'GET /ui/overview'].sort());
+    expect(overviewRoutes).toEqual(
+      ['GET /ui/api/overview', 'GET /ui/overview', 'GET /ui/overview/'].sort(),
+    );
     expect(full.routes.some((route) => route.path.startsWith('/v1') && route.path.includes('overview'))).toBe(
       false,
     );

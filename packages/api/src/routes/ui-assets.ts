@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
+import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
 
 // Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
 const UI_FONTS: Record<string, Uint8Array> = {
@@ -12,21 +13,7 @@ const UI_FONTS: Record<string, Uint8Array> = {
 };
 
 /** ADR #26：app shell 覆盖的真实 /ui/* 子路径（须在 API/assets/frame/OAuth 之后注册）。 */
-const UI_SHELL_PATHS = [
-  '/ui',
-  '/ui/',
-  '/ui/inbox',
-  '/ui/inbox/*',
-  '/ui/overview',
-  '/ui/tasks',
-  '/ui/tasks/*',
-  '/ui/notifications',
-  '/ui/configure/identities',
-  '/ui/configure/push',
-  '/ui/configure/clients',
-  '/ui/configure/domains',
-  '/ui/plan',
-] as const;
+const UI_SHELL_PATHS = uiShellRegisterPaths();
 
 function commonHeaders(c: Context): void {
   c.header('X-Content-Type-Options', 'nosniff');

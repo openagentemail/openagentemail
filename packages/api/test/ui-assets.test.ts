@@ -205,7 +205,10 @@ describe('UI static asset contract', () => {
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 
-    // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404
+    // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404（含尾斜杠变体）
+    const { UI_SHELL_EXACT_PATHS, UI_SHELL_PREFIX_PATHS } = await import(
+      '../src/ui/shell-routes.ts'
+    );
     for (const path of [
       '/ui/inbox',
       '/ui/overview',
@@ -218,6 +221,8 @@ describe('UI static asset contract', () => {
       '/ui/configure/domains',
       '/ui/plan',
       '/ui/inbox/agent%40test.example/inbox',
+      ...UI_SHELL_EXACT_PATHS.map((p) => `${p}/`),
+      ...UI_SHELL_PREFIX_PATHS.map((p) => `${p}/`),
     ]) {
       const res = await app.request(path);
       expect(res.status).toBe(200);
@@ -244,6 +249,74 @@ describe('UI static asset contract', () => {
     ]) {
       expect((await disabled.request(path)).status).toBe(404);
     }
+  });
+
+  // 客户端 pathForScope / parse 字面量与 shell-routes 单一事实源对齐，防刷新 404
+  test('client shell paths stay aligned with UI_SHELL_* single source of truth', async () => {
+    const { UI_SHELL_EXACT_PATHS, UI_SHELL_PREFIX_PATHS, uiShellRegisterPaths } =
+      await import('../src/ui/shell-routes.ts');
+    for (const path of UI_SHELL_EXACT_PATHS) {
+      expect(UI_JS).toContain(`return '${path}'`);
+      expect(UI_JS).toContain(`path === '${path}'`);
+    }
+    for (const prefix of UI_SHELL_PREFIX_PATHS) {
+      expect(UI_JS).toContain(`'${prefix}/'`);
+      expect(UI_JS).toContain(`path === '${prefix}'`);
+    }
+    // 服务端注册表必须覆盖精确路径的尾斜杠，且仍含动态前缀 /*
+    const registered = uiShellRegisterPaths();
+    for (const path of UI_SHELL_EXACT_PATHS) {
+      expect(registered).toContain(path);
+      expect(registered).toContain(`${path}/`);
+    }
+    for (const prefix of UI_SHELL_PREFIX_PATHS) {
+      expect(registered).toContain(prefix);
+      expect(registered).toContain(`${prefix}/*`);
+    }
+  });
+
+  // 畸形百分号编码不得让 parseLocationRoute 同步抛 URIError（深链启动白屏）
+  test('parseLocationRoute tolerates malformed percent-encoding without throwing', async () => {
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    expect(ROUTER_JS).toContain('function safeDecodeURIComponent(');
+    expect(ROUTER_JS).toContain('catch (_err)');
+    const start = ROUTER_JS.indexOf('function safeDecodeURIComponent(');
+    const end = ROUTER_JS.indexOf('function pathForScope(');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const parseOnly = ROUTER_JS.slice(start, end);
+    // 中文：仅抽出纯函数，闭包注入假 window.location，断言畸形深链不抛
+    const makeParser = new Function(`
+      return function (pathname) {
+        var window = { location: { pathname: pathname } };
+        ${parseOnly}
+        return parseLocationRoute();
+      };
+    `);
+    const wrap = makeParser() as (pathname: string) => {
+      scope: string;
+      taskId: string;
+      address: string;
+      folder: string;
+      unknown?: boolean;
+    };
+    expect(() => wrap('/ui/tasks/%E4%B8')).not.toThrow();
+    expect(wrap('/ui/tasks/%E4%B8')).toEqual({
+      scope: 'inbox',
+      taskId: '',
+      address: '',
+      folder: '',
+      unknown: true,
+    });
+    expect(() => wrap('/ui/inbox/%E4%B8/inbox')).not.toThrow();
+    expect(wrap('/ui/inbox/%E4%B8/inbox').unknown).toBe(true);
+    expect(() => wrap('/ui/inbox/agent%40test.example/%ZZ')).not.toThrow();
+    expect(wrap('/ui/inbox/agent%40test.example/%ZZ').unknown).toBe(true);
+    // 合法编码仍可用
+    const ok = wrap('/ui/tasks/%E4%B8%AD');
+    expect(ok.scope).toBe('tasks');
+    expect(ok.taskId).toBe('中');
+    expect(ok.unknown).toBeUndefined();
   });
 
   // A14

@@ -77,3 +77,24 @@
 
 1. 在 `client/api.ts` 的 `apiJson` 成功分支显式处理无 body；保留失败分支 try/`response.json()` 解析 error body。
 2. 用静态契约覆盖，防止再次退回 `return response.json()`。
+
+---
+
+## 返工第3轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. `parseLocationRoute`：新增 `safeDecodeURIComponent`，畸形百分号编码回退 `{ unknown: true }` 的 inbox fallback，避免 URIError 白屏。
+2. 抽出 `packages/api/src/ui/shell-routes.ts` 作为 shell 路径单一事实源；精确路径显式注册尾斜杠变体，修复 `/ui/overview/` 等刷新 404。
+3. 契约测试：畸形深链 runtime 不抛；客户端字面量 ↔ `UI_SHELL_*` ↔ 注册表三方对齐；尾斜杠刷新 200。
+4. `bun test`：**632 pass / 0 fail**。
+
+### 我们遇到了哪些错误？
+
+1. ZCode P1-1 / Codex P2：`decodeURIComponent` 未捕获 → `/ui/tasks/%E4%B8` 等服务端 200 后客户端同步崩。
+2. ZCode P1-2：服务端精确路径无尾斜杠变体，与客户端去尾斜杠解析不对齐 → 刷新 404。
+
+### 我们是如何解决这些错误的？
+
+1. decode 包 try/catch，失败当未知路径。
+2. `uiShellRegisterPaths()` 对 exact 路径 `flatMap` 出 `path` + `path/`；测试钉死三方枚举一致。
