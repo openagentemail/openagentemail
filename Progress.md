@@ -67,6 +67,7 @@
 2. 核调用点：身份 DELETE 仍返回 `{deleted:true}` JSON；仅 grant 吊销为 204；赋值方均期望对象，`null` 仅落在 fire-and-forget 的 revoke `await`。
 3. 契约测试钉死 204 处理与 revoke → `Client revoked.` / `loadConfigureClients()` 成功路径。
 4. `bun test`：**630 pass / 0 fail**。
+5. 独立自审 agent `93825551-6f2f-4c46-9320-da672a3c20b0`：可合并；Codex P1 已关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
