@@ -506,15 +506,8 @@ export function createUiOAuthPageRoutes(
     );
   });
 
-  routes.get('/grants', async (c) => {
-    const sid = getCookie(c, 'oae_ui');
-    const session = sid ? store.authenticate(sid) : null;
-    if (!session) {
-      return redirectToLogin(c);
-    }
-    const grants = listGrantsForAuth(session.auth);
-    return htmlResponse(c, grantsPageHtml(grants));
-  });
+  // ADR #26：旧书签 /ui/oauth/grants → Configure · Authorized Clients（至少保留两个 minor）。
+  routes.get('/grants', (c) => c.redirect('/ui/configure/clients', 302));
 
   return routes;
 }
@@ -557,7 +550,7 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
     const auth = getAuth(c);
     const id = c.req.param('id');
     const grant = getGrant(id);
-    if (!grant) return c.redirect('/ui/oauth/grants', 302);
+    if (!grant) return c.redirect('/ui/configure/clients', 302);
     if (auth.kind === 'identity' && grant.address.toLowerCase() !== auth.address.toLowerCase()) {
       return c.json({ error: 'forbidden' }, 403);
     }
@@ -570,7 +563,7 @@ export function createUiOAuthApiRoutes(store: UiSessionStore): Hono {
       outcome: 'ok',
       ip: clientIp(c),
     });
-    return c.redirect('/ui/oauth/grants', 302);
+    return c.redirect('/ui/configure/clients', 302);
   });
 
   return routes;

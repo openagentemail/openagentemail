@@ -54,11 +54,13 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('ratio >= 3');
   });
 
-  // A51 / A52 / A54 / A55 / A58：落地、钻入、返回、skip link
+  // A51 / A52 / A54 / A55 / A58：落地 Inbox，再进 Overview 钻入/返回/skip link
   test('overview landing, drill-in, back, and skip-link probes are present', () => {
-    expect(source).toContain('A51 overview panel is visible');
-    expect(source).toContain('A51 landing issues no /ui/api/messages request');
-    expect(source).toContain('A52 session renewal lands on the overview panel');
+    expect(source).toContain('A51 inbox main is visible');
+    expect(source).toContain('A51 overview panel is hidden on landing');
+    expect(source).toContain('A51 data-scope is inbox');
+    expect(source).toContain('A51 session lands on the inbox panel');
+    expect(source).toContain('A52 session renewal lands on the inbox panel');
     expect(source).toContain('A54 active address follows the row');
     expect(source).toContain('A55 focus returns to the row button');
     expect(source).toContain('A55 a fresh snapshot (<15 s) is not refetched when going back');

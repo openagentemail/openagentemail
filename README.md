@@ -179,10 +179,10 @@ Deliberate limits, so nothing here is a surprise later:
   agent (or the human in the dashboard) mark a message handled, so the unseen
   count means "still needs attention". Reading a message never changes the flag
   by itself.
-- **Web dashboard for humans** — inspect identities and messages at `/ui`, with
-  an admin overview across all identities, token status and rotation, identity
-  creation with custom addresses, responsive layouts, and doubly isolated HTML
-  previews.
+- **Web dashboard for humans** — inspect identities and messages at `/ui` (Inbox
+  is the default landing for every session). Real `/ui/*` History routes cover
+  Overview, Tasks, Notifications, and Configure; the shell stays a zero-bundler
+  `/ui/styles.css` + `/ui/app.js` pair with doubly isolated HTML previews.
 - **Safety rails built in** — per-identity send rate limits (20/hour default),
   automatic mail retention (30 days default), localhost-only API binding.
 - **Bring your own relay** — send directly from the VPS, or route outbound through

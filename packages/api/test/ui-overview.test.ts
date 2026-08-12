@@ -514,15 +514,16 @@ describe('Overview 端点契约', () => {
     expect(second.headers.get('retry-after')).toBe('3');
   });
 
-  // A12：/v1/* 路由表零新增
+  // A12：/v1/* 路由表零新增；ADR #26 允许 /ui/overview shell
   test('Overview 只存在于 /ui/api 下，/v1 没有新增路由', async () => {
     const { createApp } = await import('../src/app.ts');
     const full = createApp({ uiEnabled: true });
     // 直接查路由表，避免依赖测试进程里 API_KEYS 的加载顺序
     const overviewRoutes = full.routes
       .filter((route) => route.path.includes('overview'))
-      .map((route) => `${route.method} ${route.path}`);
-    expect(overviewRoutes).toEqual(['GET /ui/api/overview']);
+      .map((route) => `${route.method} ${route.path}`)
+      .sort();
+    expect(overviewRoutes).toEqual(['GET /ui/api/overview', 'GET /ui/overview'].sort());
     expect(full.routes.some((route) => route.path.startsWith('/v1') && route.path.includes('overview'))).toBe(
       false,
     );

@@ -123,10 +123,35 @@ describe('UI static asset contract', () => {
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 
+    // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404
+    for (const path of [
+      '/ui/inbox',
+      '/ui/overview',
+      '/ui/tasks',
+      '/ui/tasks/demo-id',
+      '/ui/notifications',
+      '/ui/configure/identities',
+      '/ui/configure/push',
+      '/ui/configure/clients',
+      '/ui/configure/domains',
+      '/ui/plan',
+      '/ui/inbox/agent%40test.example/inbox',
+    ]) {
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    }
+
+    // 旧 OAuth grants 书签 302 → Configure · Authorized Clients
+    const grants = await app.request('/ui/oauth/grants');
+    expect(grants.status).toBe(302);
+    expect(grants.headers.get('location')).toBe('/ui/configure/clients');
+
     const disabled = createApp({ uiEnabled: false });
     for (const path of [
       '/ui',
       '/ui/',
+      '/ui/inbox',
       '/ui/app.js',
       '/ui/styles.css',
       '/ui/favicon.svg',
@@ -207,8 +232,10 @@ describe('UI static asset contract', () => {
     // #message-panel / #detail-panel 自身不带 hidden：scope 只切四个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    // login + overview + notify + tasks + inbox-main
-    expect(UI_HTML.split('<main').length - 1).toBe(5);
+    // login + overview + notify + tasks + configure×4 + plan + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(10);
+    expect(UI_HTML).toContain('id="app-nav"');
+    expect(UI_HTML).toContain('id="nav-toggle"');
   });
 
   // A16 / A17
@@ -547,12 +574,17 @@ describe('UI static asset contract', () => {
     expect(enter).toContain('else focusOverviewPanel();');
     expect(enter).not.toContain('preventScroll');
 
-    // admin 登录落地也走同一个不滚动的入口
+    // ADR #26：所有 session（含 admin）默认落地 Inbox；深链由 applyRoute 恢复
     const startSession = UI_JS.slice(
       UI_JS.indexOf('async function startSession('),
       UI_JS.indexOf("loginForm.addEventListener('submit'"),
     );
-    expect(startSession).toContain('focusOverviewPanel();');
+    expect(startSession).toContain('await loadInbox()');
+    expect(startSession).toContain('await applyRoute(parseLocationRoute()');
+    expect(startSession).not.toContain('focusOverviewPanel();');
+    expect(UI_JS).toContain('function applyRoute(');
+    expect(UI_JS).toContain('function parseLocationRoute(');
+    expect(UI_JS).toContain('function renderAppNav(');
   });
 
   // F5 / §6 行 11：一封信投给多个地址时计数会重叠，页面上必须解释

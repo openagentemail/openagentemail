@@ -11,6 +11,23 @@ const UI_FONTS: Record<string, Uint8Array> = {
   'Satoshi-Black.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Black.woff2', import.meta.url)),
 };
 
+/** ADR #26：app shell 覆盖的真实 /ui/* 子路径（API/assets/frame/OAuth 之后注册）。 */
+const UI_SHELL_PATHS = [
+  '/ui',
+  '/ui/',
+  '/ui/inbox',
+  '/ui/inbox/*',
+  '/ui/overview',
+  '/ui/tasks',
+  '/ui/tasks/*',
+  '/ui/notifications',
+  '/ui/configure/identities',
+  '/ui/configure/push',
+  '/ui/configure/clients',
+  '/ui/configure/domains',
+  '/ui/plan',
+] as const;
+
 function commonHeaders(c: Context): void {
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'no-referrer');
@@ -32,8 +49,6 @@ function shell(c: Context) {
 }
 
 export function registerUiAssets(app: Hono): void {
-  app.get('/ui', shell);
-  app.get('/ui/', shell);
   app.get('/ui/app.js', (c) => {
     commonHeaders(c);
     c.header('Content-Type', 'text/javascript; charset=utf-8');
@@ -66,4 +81,9 @@ export function registerUiAssets(app: Hono): void {
     commonHeaders(c);
     return c.body(null, 204);
   });
+
+  // Shell 路由放在静态资源之后注册；/ui/api、/ui/frame、/ui/oauth 由 app.ts 另行挂载且优先匹配。
+  for (const path of UI_SHELL_PATHS) {
+    app.get(path, shell);
+  }
 }
