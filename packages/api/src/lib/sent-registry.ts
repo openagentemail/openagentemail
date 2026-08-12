@@ -6,7 +6,9 @@
  * 就不进任何人的 Sent，也不能凭 From 跨身份读详情 / Source / Seen。
  *
  * 落盘照抄 ui-sessions.json：DATA_DIR/sent-registry.json、tmp+rename、0600、
- * 目录 0700、单写者。损坏 fail-closed（抛错，不装空库冒充成功）。
+ * 目录 0700、单写者。损坏 fail-closed（读路径抛错，不装空库冒充成功）。
+ * 写盘失败：只告警，不抛给 SMTP 成功路径（宁可 Sent 漏记，不可 502 重发）。
+ * 读路径（hasSentMessageId）零写盘；prune/persist 只在 record 写入路径。
  */
 
 import {
@@ -41,6 +43,8 @@ let entries: SentRegistryEntry[] = [];
 const pairSet = new Set<string>();
 let testMaxEntries: number | undefined;
 let testTtlMs: number | undefined;
+/** 测试可注入：在真正写盘前调用；抛错模拟盘满。 */
+let persistHookForTests: (() => void) | null = null;
 
 function storePath(): string {
   return join(config.dataDir, 'sent-registry.json');
@@ -138,29 +142,36 @@ function loadFromDisk(): void {
   }));
   rebuildIndex();
   loaded = true;
-  if (prune(Date.now())) persist();
+  // 启动只修剪内存，不在读路径写盘（过期条目等下次 record 再落盘）。
+  prune(Date.now());
 }
 
 function persist(): void {
-  const path = storePath();
-  const data: PersistedStore = { version: 1, entries };
-  const dir = dirname(path);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // bind mount 可能属主不同；文件 mode 仍会设置
-  }
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
-  try {
-    if (existsSync(path) && (statSync(path).mode & 0o777) !== 0o600) {
-      chmodSync(path, 0o600);
+    if (persistHookForTests) persistHookForTests();
+    const path = storePath();
+    const data: PersistedStore = { version: 1, entries };
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // bind mount 可能属主不同；文件 mode 仍会设置
     }
-  } catch {
-    // best effort
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+    try {
+      if (existsSync(path) && (statSync(path).mode & 0o777) !== 0o600) {
+        chmodSync(path, 0o600);
+      }
+    } catch {
+      // best effort
+    }
+  } catch (err) {
+    // 写盘失败不得抛给 sendMail：SMTP 已接受时抛错会 502 → 调用方重试 → 重复外发。
+    console.warn('[sent-registry] persist failed:', err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -182,6 +193,18 @@ export function recordSentMessageId(rawId: string, from: string, now = Date.now(
   persist();
 }
 
+/**
+ * SMTP 已接受后登记。登记失败（盘满、损坏、抛错）只打日志，绝不抛给调用方——
+ * 宁可 Sent 少记一封，不可把已完成投递变成 502 让客户端重发。
+ */
+export function recordSentMessageIdAfterSend(rawId: string, from: string): void {
+  try {
+    recordSentMessageId(rawId, from);
+  } catch (err) {
+    console.warn('[sent-registry] record after send failed:', err instanceof Error ? err.message : String(err));
+  }
+}
+
 export function hasSentMessageId(
   rawId: string | undefined | null,
   from: string | undefined | null,
@@ -196,11 +219,8 @@ export function hasSentMessageId(
   if (ttl === null) return true;
   const row = entries.find((item) => item.id === id && item.from === addr);
   if (!row) return false;
-  if (Date.now() - row.recordedAt > ttl) {
-    prune(Date.now());
-    persist();
-    return false;
-  }
+  // 读路径零写盘：过期只返回 false，prune/persist 留给写入路径。
+  if (Date.now() - row.recordedAt > ttl) return false;
   return true;
 }
 
@@ -212,8 +232,14 @@ export function resetSentRegistryForTests(opts?: {
   loaded = true;
   entries = [];
   pairSet.clear();
+  persistHookForTests = null;
   testMaxEntries = opts?.maxEntries;
   testTtlMs = opts?.ttlMs;
+}
+
+/** 测试：在 persist 真正写盘前注入（抛错 = 模拟盘满）。 */
+export function setSentRegistryPersistHookForTests(hook: (() => void) | null): void {
+  persistHookForTests = hook;
 }
 
 /** 测试辅助：丢掉内存，下次 has/record 从盘重载。 */

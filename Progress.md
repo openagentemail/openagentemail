@@ -205,3 +205,24 @@
 2. `truncateUtf8Bytes` 从切点回退到 leading byte，不完整则丢弃该字符。
 3. FIFO 用例改用 `Date.now()` 时间戳。
 4. 条目改为 `(id, from)`；`hasSentMessageId(id, from)`；补测「owl 的真实 ID + From=fox」四入口仍不可见。
+
+---
+
+## 返工第3轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：SMTP 已接受后登记失败不再否决投递。取舍是「登记失败降级为告警 + 成功返回」（宁可 Sent 少记，不可 502 重发）。`recordSentMessageIdAfterSend` 吞掉一切登记错误；`persist` 写盘失败只 `console.warn`。
+2. ZCode P1：`hasSentMessageId` 读路径零写盘；过期只返回 false。`loadFromDisk` 只修剪内存。prune/persist 仅在 `recordSentMessageId` 写入路径。
+3. 测试钉死：registry persist 抛 ENOSPC 时 `/v1/send` 仍 200 且 `sendMail` 只调用一次；读路径 persist hook 计数为 0。
+4. `docs/security.md` 写明该取舍。
+
+### 我们遇到了哪些错误？
+
+1. Codex（smtp.ts:69，置信 0.98）：SMTP 已接受后 `recordSentMessageId` 失败会让 sendMail reject → `/v1/send` 502 → 调用方重试 → 重复外发。
+2. ZCode：`hasSentMessageId` 热路径同步 prune+persist，读放大写盘（并发/性能/DoS）。
+
+### 我们是如何解决这些错误的？
+
+1. 不选「投递前先登记再补偿撤销」——失败发送会短暂出现在 Sent，且撤销窗口更复杂。选降级：投递成功已是事实，Sent 漏记可接受。
+2. 读路径删除 persist；TTL 过期不改内存，等下次 record 再 prune 落盘。

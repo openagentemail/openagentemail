@@ -15,8 +15,10 @@ const {
   hasSentMessageId,
   normalizeMessageId,
   recordSentMessageId,
+  recordSentMessageIdAfterSend,
   resetSentRegistryForTests,
   reloadSentRegistryFromDiskForTests,
+  setSentRegistryPersistHookForTests,
   sentRegistrySizeForTests,
 } = await import('../src/lib/sent-registry.ts');
 const { config } = await import('../src/lib/config.ts');
@@ -85,6 +87,36 @@ describe('sent registry 持久化', () => {
     resetSentRegistryForTests({ ttlMs: 10 });
     recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 50);
     expect(hasSentMessageId('old@test.example', 'fox@test.example')).toBe(false);
+    // 读路径不 prune：条数仍在，等下次写入再淘汰
+    expect(sentRegistrySizeForTests()).toBe(1);
+    recordSentMessageId('<new@test.example>', 'fox@test.example');
+    expect(sentRegistrySizeForTests()).toBe(1);
+    expect(hasSentMessageId('old@test.example', 'fox@test.example')).toBe(false);
+    expect(hasSentMessageId('new@test.example', 'fox@test.example')).toBe(true);
+  });
+
+  test('读路径不写盘（过期查询也不 persist）', () => {
+    resetSentRegistryForTests({ ttlMs: 10 });
+    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 50);
+    let persistCalls = 0;
+    setSentRegistryPersistHookForTests(() => {
+      persistCalls += 1;
+    });
+    expect(hasSentMessageId('old@test.example', 'fox@test.example')).toBe(false);
+    expect(hasSentMessageId('missing@test.example', 'fox@test.example')).toBe(false);
+    expect(persistCalls).toBe(0);
+    setSentRegistryPersistHookForTests(null);
+  });
+
+  test('persist 抛错时 record 不向外抛', () => {
+    resetSentRegistryForTests();
+    setSentRegistryPersistHookForTests(() => {
+      throw new Error('ENOSPC');
+    });
+    expect(() =>
+      recordSentMessageIdAfterSend('<diskfull@test.example>', 'fox@test.example'),
+    ).not.toThrow();
+    setSentRegistryPersistHookForTests(null);
   });
 
   test('损坏文件 fail-closed 抛错', () => {

@@ -28,7 +28,7 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - **详情 / 已读标记 / Source：** 与列表同一条可信规则（TO ∨ 可信 Sent），不是「任意 FROM」。伪造 From 的信对非收件人在列表/详情/Source/Seen 四个入口均不可见（404）；identity 读他人 address 仍 403。
 - **伪造信：** 照常落收件人 Inbox（它本质就是一封信），但绝不进任何人的 Sent。
 - **Sent 源码：** identity 可读自身**可信** Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。
-- **sent-registry.json：** 条目为 `(Message-ID, From)`，0600、tmp+rename 原子写、重启持久；FIFO 上限 20_000 条，并按 `RETENTION_DAYS` 时间淘汰（与邮件保留窗口对齐）。抄别人的真实 Message-ID 不能让另一个 From 变成可信 Sent。
+- **sent-registry.json：** 条目为 `(Message-ID, From)`，0600、tmp+rename 原子写、重启持久；FIFO 上限 20_000 条，并按 `RETENTION_DAYS` 时间淘汰（与邮件保留窗口对齐）。抄别人的真实 Message-ID 不能让另一个 From 变成可信 Sent。SMTP 已接受后登记失败只告警、仍返回成功（宁可 Sent 少记，不可 502 导致重发）。读路径不写盘。
 
 ## OAuth access tokens（P3 AS）
 
