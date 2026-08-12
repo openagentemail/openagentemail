@@ -43,6 +43,7 @@
 2. 修复 `tasks.ts` 中 `taskTimelineBody` 的 JSON 二次转义：fence/`replace` 反斜杠数与 main 对齐（`^\\s*` 而非 `^\\\\s*`），避免结果块剥离正则行为错误。
 3. 防回归闸：`ui-assets.test.ts` 用 `new Function(UI_JS)` 校验拼装产物语法；钉死 main 时代关键 `async function <name>(`；tasks 契约改为显式 `async function selectTask/loadTasks`，并钉死 fence/`\\s` 转义。
 4. `bun test`：**629 pass / 0 fail**（原 627 + 2 新闸）。
+5. 独立自审 agent `2963a9a1-5fbc-4664-be2e-4fd5320b5f70`：可合并；Codex P0 否定为误报；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
