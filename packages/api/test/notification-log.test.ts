@@ -198,6 +198,46 @@ describe('notification-log store', () => {
     expect(summary.byLevel).toEqual({ urgent: 1, normal: 1, low: 0 });
   });
 
+  test('append after a complete last record missing final newline stays readable', async () => {
+    mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+    const good = {
+      schemaVersion: 1,
+      id: 'eeeeeeeeeeee',
+      publishedAt: new Date().toISOString(),
+      source: 'manual',
+      logicalTarget: 'user',
+      logicalChannel: 'user-alerts',
+      level: 'normal',
+      title: 'ok',
+      message: 'ok',
+      tags: [],
+      sensitive: false,
+      delivery: 'sent',
+    };
+    // 完好 JSON 行但故意不写末尾换行——这是可恢复态，不得和下一次 append 粘成中间损坏。
+    writeFileSync(logPath(), JSON.stringify(good), { mode: 0o600 });
+    await seed({ title: 'after-missing-nl' });
+    const page = await queryNotificationLog({ limit: 20 });
+    expect(page.items.map((row) => row.title).sort()).toEqual(['after-missing-nl', 'ok']);
+    const text = readFileSync(logPath(), 'utf8');
+    expect(text.endsWith('\n')).toBe(true);
+    const lines = text.replace(/\n$/, '').split('\n');
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+  });
+
+  test('zonedDayBounds rejects non-existent calendar days instead of rolling them', () => {
+    expect(() => zonedDayBounds('2026-02-30', 'UTC')).toThrow(RangeError);
+    expect(() => zonedDayBounds('2026-04-31', 'UTC')).toThrow(RangeError);
+    expect(() => zonedDayBounds('2026-02-29', 'UTC')).toThrow(RangeError);
+    const leap = zonedDayBounds('2024-02-29', 'UTC');
+    expect(leap.date).toBe('2024-02-29');
+    expect(leap.from).toBe('2024-02-29T00:00:00.000Z');
+    expect(leap.to).toBe('2024-03-01T00:00:00.000Z');
+  });
+
   test('append after a trailing half-line isolates the fragment then writes a clean new row', async () => {
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     writeFileSync(

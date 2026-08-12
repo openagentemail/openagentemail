@@ -326,7 +326,28 @@ function appendLineSync(line: string): void {
 }
 
 /**
- * 启动/查询前：末尾半行隔离；中间损坏置 fail-closed。
+ * 非空且不以换行结尾时，只补一个 \\n（不走 persistHook，避免把「记录写盘失败」测成修复失败）。
+ * 完整末行缺换行若不先补上，下一次 append 会把新 JSON 粘在同一行，变成中间损坏。
+ */
+function appendMissingFinalNewlineSync(): void {
+  const path = logPath();
+  if (!existsSync(path)) return;
+  const fd = openSync(path, 'a', 0o600);
+  try {
+    writeSync(fd, '\n');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * 启动/查询/append 前：末尾半行隔离；完整末行缺换行则先补换行；中间损坏 fail-closed。
  * 不在 fail-closed 时重写文件（避免把中间坏行「跳过」装成完整审计）。
  */
 function inspectAndRepairSync(): NotificationLogRecord[] {
@@ -367,6 +388,9 @@ function inspectAndRepairSync(): NotificationLogRecord[] {
     }
     const kept = parsed.records.map((row) => `${JSON.stringify(row)}\n`).join('');
     writeAtomicSync(kept);
+  } else if (raw.length > 0 && !raw.endsWith('\n')) {
+    // 末尾是完整合法行但缺换行：先补换行，再让后续 append 写新行。
+    appendMissingFinalNewlineSync();
   }
   return parsed.records;
 }
@@ -498,7 +522,7 @@ export type AppendNotificationInput = {
  */
 export function appendNotificationLog(input: AppendNotificationInput): Promise<NotificationLogRecord> {
   return enqueue(() => {
-    // 先隔离末尾半行，避免下一次成功 append 把半行粘成「中间损坏」。
+    // 先规范化：半行隔离，或给缺末尾换行的完整行补换行，避免粘成中间损坏。
     inspectAndRepairSync();
     const record: NotificationLogRecord = {
       schemaVersion: NOTIFICATION_LOG_SCHEMA_VERSION,
@@ -600,6 +624,15 @@ export function zonedDayBounds(
   };
 
   const [year, month, dayNum] = day.split('-').map(Number) as [number, number, number];
+  // JS Date 会把 2 月 30 日滚成 3 月 2 日；非法日历日必须 400，区间回显不得被归一化改掉。
+  const calendar = new Date(Date.UTC(year, month - 1, dayNum));
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== dayNum
+  ) {
+    throw new RangeError('invalid_date');
+  }
   const guess = Date.UTC(year, month - 1, dayNum, 0, 0, 0);
   const start = guess - offsetAt(guess);
   const nextGuess = Date.UTC(year, month - 1, dayNum + 1, 0, 0, 0);

@@ -194,6 +194,19 @@ describe('UI 30-day notification log APIs', () => {
     expect(listed.items).toHaveLength(summary.total);
   });
 
+  test('summary rejects non-existent calendar dates with 400 and does not echo a rolled day', async () => {
+    const { app, cookie } = makeApp({ kind: 'admin' });
+    const res = await app.request('/ui/api/notify/summary?date=2026-02-30&tz=UTC', {
+      headers: { cookie },
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error?: string; date?: string; from?: string };
+    expect(body.error).toBe('invalid_request: date or tz');
+    expect(JSON.stringify(body)).not.toContain('2026-03');
+    expect(body.date).toBeUndefined();
+    expect(body.from).toBeUndefined();
+  });
+
   test('diagnostics never returns physical topic or secret and is honest when ntfy is off', async () => {
     const { app, cookie } = makeApp({ kind: 'admin' });
     const res = await app.request('/ui/api/notify/diagnostics', { headers: { cookie } });

@@ -284,3 +284,25 @@
 2. 更新 ui-assets 契约为 6 次 generation 比较，并钉死 Notifications today / Urgent today 与 `/ui/api/notify/summary`。
 3. 用 21 条 + limit 20 覆盖翻页与跨筛选 cursor 拒绝。
 
+---
+
+## #26 PR 3 返工第2轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：append 前若文件非空且不以换行结尾——完整合法末行先补 `\\n`，半行仍先隔离再写。避免「缺末尾换行的完好记录」与下一次 append 粘成中间损坏，导致 30 天日志 fail-closed。
+2. Codex P2：`zonedDayBounds` 拒绝不存在的日历日（如 2 月 30 日、非闰年 2 月 29 日）。JS Date 不再把非法日滚到另一天；summary 回显区间不变，非法日期走既有 400。
+3. 测试钉死：缺末尾换行的完好文件 append 后两行均可 `JSON.parse`、查询可读；`2026-02-30` 的 zonedDayBounds 抛 RangeError，UI summary 400 且不回显滚后的 3 月。
+4. `bun test`（packages/api）：**702 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. 上轮只在 append 前调用 `inspectAndRepairSync`。`parseFileText` 把「完整 JSON 但缺最终换行」当完整行收下，却不重写文件；随后 `appendLineSync` 把新 JSON 直接粘在旧 JSON 后面，下一轮解析变成中间损坏。
+2. `date=2026-02-30` 过 `YYYY-MM-DD` 正则后被 `Date.UTC` 归一成 3 月 2 日，摘要区间误导。
+
+### 我们是如何解决这些错误的？
+
+1. `inspectAndRepairSync`：无 trailingPartial 且 raw 非空不以 `\\n` 结尾时，`appendMissingFinalNewlineSync` 只补换行（不走 persistHook）。半行路径仍隔离 + 原子重写。
+2. 解析出年/月/日后用 UTC 日历回读校验，对不上则 `RangeError('invalid_date')`；路由已映射为 400。
+
+
