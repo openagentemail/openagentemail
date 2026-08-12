@@ -111,3 +111,25 @@ IMAP query（`imap.ts`、`mail-cursor.ts`）、`routes/ui.ts`、frame 复用、I
 
 本轮未改 UI CSS/JS。桌面三栏与移动 folders→list→detail 结论同返工第2轮，无回归。
 
+---
+
+## 返工第4轮（2026-08-12）
+
+- **HEAD（审查时）**：`3eae74f` `fix(api): treat a corrupt sent-registry as empty, not a 500`
+- **测试**：`packages/api` `bun test` → **676 pass / 0 fail**
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10` |
+| HEAD 审查时 | `3eae74f` |
+| 结论 | **可合并** |
+| ZCode P1 | **关闭**：损坏 JSON / 非法 shape 回退空表 + warn + 隔离 `.corrupt`；Inbox/详情正常，Sent 为空集；读路径零异常 |
+| P0/P1/P2 | **无** |
+
+残余风险（非 blocker）：隔离 rename 失败时毒药文件仍在，本进程 `loaded=true` 后不再解析；损坏即丢历史 Sent，属 fail-closed。
+
+### 布局自测（桌面 / 移动；本轮不拍屏）
+
+本轮未改 UI CSS/JS。桌面三栏与移动逐层结论同第2轮，无回归。
+

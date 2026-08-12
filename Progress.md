@@ -244,3 +244,5 @@
 ### 我们是如何解决这些错误的？
 
 1. fail-closed = 判不可信（空 registry），不是抛错。隔离备份损坏文件，避免每次启动重复解析毒药。不在读路径 persist 空表。
+2. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
+3. `bun test`：**676 pass / 0 fail**。
