@@ -298,12 +298,17 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
 | | **openagent.email** | AgentMail.to | MailSlurp |
 |---|---|---|---|
 | Open source | ✅ Apache-2.0 | ❌ | ❌ |
-| Self-hosted | ✅ | ❌ | ❌ |
+| Deployment | ✅ Any VPS (true self-host) | SaaS, or enterprise BYOC (Outposts on AWS) | SaaS only |
 | Price | Flat VPS cost | Per-inbox subscription | Usage-based subscription |
 | Unlimited inboxes | ✅ (catch-all) | Paid tiers | Paid tiers |
 | MCP-native | ✅ | ✅ | ❌ (REST/SDKs) |
 | OTP/link extraction | ✅ | ✅ | ✅ |
-| Data leaves your infra | Never | Always | Always |
+| Mail data residency | Your box* | SaaS: theirs; Outposts: your AWS† | Always theirs |
+| Vendor control plane | None | Yes (incl. Outposts) | Yes |
+| You run a server | Yes — that's the point | No (BYOC still vendor-operated) | No |
+
+\* Push tiers 2/3 may relay subject/from or body/OTP via ntfy (off by default).
+† [AgentMail Outposts](https://www.agentmail.to/blog/agentmail-outposts-byoc): email content stays in your AWS account; AgentMail still runs dashboard, auth, billing, and upgrades. BYOC ≠ open-source self-host on any VPS.
 
 ## Roadmap
 
