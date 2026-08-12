@@ -20,10 +20,12 @@ const {
   TASK_BOARD_LIMITS,
   TASK_BOARD_PERIODS,
   TASK_REMIND_COOLDOWN_MS,
-  clearQueuedRemindersForTests,
+  clearQueuedEventsForTests,
   currentTaskMessage,
+  getTask,
   isClosedByAdmin,
   listTaskBoard,
+  closeTask,
   remindTask,
   replyTask,
   setTaskGetForTests,
@@ -101,7 +103,7 @@ afterEach(() => {
   setTaskListAllForTests(null);
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
-  clearQueuedRemindersForTests();
+  clearQueuedEventsForTests();
 });
 
 describe('task overdue clock', () => {
@@ -399,6 +401,51 @@ describe('task event reconstruction', () => {
     expect(task?.updatedAt).toBe(terminalAt);
   });
 
+  test('a post-terminal reminder replay does not refresh updatedAt or the 30d window', async () => {
+    const terminalAt = iso(NOW - 31 * DAY);
+    const reminderAt = iso(NOW);
+    const raw: RawTaskMessage[] = [
+      {
+        uid: 1,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: iso(NOW - 32 * DAY),
+        state: 'submitted',
+        body: 'please start',
+      },
+      {
+        uid: 2,
+        from: 'owl@test.example',
+        to: 'fox@test.example',
+        subject: 'Ticket',
+        date: terminalAt,
+        state: 'failed',
+        body: 'closed',
+        result: { closed_by_admin: true, reason: 'done' },
+      },
+      {
+        uid: 3,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: reminderAt,
+        state: 'failed',
+        body: 'old ping',
+        kind: 'reminder',
+      },
+    ];
+    const task = taskFromMessages(padId(1), raw);
+    expect(task?.state).toBe('failed');
+    expect(task?.updatedAt).toBe(terminalAt);
+    setTaskListAllForTests(async () => [task!]);
+    const page = await listTaskBoard(
+      { status: 'failed', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(page.tasks.map((row) => row.id)).toEqual([]);
+  });
+
   test('closed_by_admin is a structured failed result, not a new state', () => {
     const closed = makeTask({
       state: 'failed',
@@ -566,5 +613,101 @@ describe('reminder IMAP lag idempotency and cooldown', () => {
     ).rejects.toMatchObject({ message: 'task_remind_cooldown' });
     expect(sent).toHaveLength(1);
     expect(TASK_REMIND_COOLDOWN_MS).toBe(15_000);
+  });
+});
+
+describe('IMAP lag overlay for state transitions and list', () => {
+  function installLaggingMailbox(task: Task) {
+    const store = new Map<string, Task>([[task.id, structuredClone(task)]]);
+    const sent: Array<{ state?: string; event?: string }> = [];
+    setTaskGetForTests(async (id) => {
+      const current = store.get(id);
+      return current ? structuredClone(current) : null;
+    });
+    setTaskListAllForTests(async () => [...store.values()].map((row) => structuredClone(row)));
+    setTaskSendMailForTests(async (input) => {
+      sent.push({
+        state: input.headers?.['X-OA-Task-State'],
+        event: input.headers?.['X-OA-Task-Event'],
+      });
+      return { messageId: `<lag-${sent.length}@test.example>` };
+    });
+    return { store, sent };
+  }
+
+  test('lag window: second reply and reply-after-close are rejected without a second send', async () => {
+    const waiting = makeTask({
+      id: padId(11),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const { store, sent } = installLaggingMailbox(waiting);
+
+    const [first, second] = await Promise.allSettled([
+      replyTask({ id: waiting.id, from: 'fox@test.example', body: 'first' }),
+      replyTask({ id: waiting.id, from: 'fox@test.example', body: 'second' }),
+    ]);
+    const ok = [first, second].filter((row) => row.status === 'fulfilled');
+    const failed = [first, second].filter((row) => row.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect((failed[0] as PromiseRejectedResult).reason).toMatchObject({
+      message: 'task_not_input_required',
+    });
+    expect(sent.filter((row) => row.state === 'working' && row.event !== 'reminder')).toHaveLength(1);
+    expect(store.get(waiting.id)?.state).toBe('input-required');
+
+    const closed = makeTask({
+      id: padId(12),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const closeBox = installLaggingMailbox(closed);
+    await closeTask({ id: closed.id, from: 'fox@test.example', reason: 'duplicate' });
+    await expect(
+      replyTask({ id: closed.id, from: 'fox@test.example', body: 'too late' }),
+    ).rejects.toMatchObject({ message: 'task_not_input_required' });
+    expect(closeBox.sent.filter((row) => row.state === 'failed')).toHaveLength(1);
+    expect(closeBox.sent.filter((row) => row.state === 'working')).toHaveLength(0);
+  });
+
+  test('lag window: concurrent reply vs close never sends working after failed', async () => {
+    const waiting = makeTask({
+      id: padId(14),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const { sent } = installLaggingMailbox(waiting);
+    await Promise.allSettled([
+      replyTask({ id: waiting.id, from: 'fox@test.example', body: 'reply' }),
+      closeTask({ id: waiting.id, from: 'fox@test.example', reason: 'stop' }),
+    ]);
+    const workingIdx = sent.findIndex((row) => row.state === 'working' && row.event !== 'reminder');
+    const failedIdx = sent.findIndex((row) => row.state === 'failed');
+    expect(sent.filter((row) => row.state === 'working' && row.event !== 'reminder').length).toBeLessThanOrEqual(1);
+    expect(sent.filter((row) => row.state === 'failed').length).toBeLessThanOrEqual(1);
+    expect(workingIdx >= 0 || failedIdx >= 0).toBe(true);
+    if (workingIdx >= 0 && failedIdx >= 0) {
+      expect(workingIdx).toBeLessThan(failedIdx);
+    }
+  });
+
+  test('lag window: listBoard matches getTask after a reply the mailbox has not indexed', async () => {
+    const waiting = makeTask({
+      id: padId(13),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    installLaggingMailbox(waiting);
+    await replyTask({ id: waiting.id, from: 'fox@test.example', body: 'here' });
+    const detail = await getTask(waiting.id);
+    expect(detail?.state).toBe('working');
+    const page = await listTaskBoard(
+      { status: 'all', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(page.tasks).toHaveLength(1);
+    expect(page.tasks[0]?.state).toBe(detail?.state);
+    expect(page.tasks[0]?.updatedAt).toBe(detail?.updatedAt);
   });
 });

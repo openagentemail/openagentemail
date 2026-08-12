@@ -293,17 +293,31 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   };
 }
 
-/** 列表 updatedAt：权威状态事件与 reminder 的较新者，忽略 terminal 后的状态重放。 */
-function boardUpdatedAt<T extends { date: string; kind?: TaskEventKind }>(
+/** 列表 updatedAt：权威状态事件与 reminder 的较新者。
+ * terminal 之后的 reminder（含重放的旧 stamped 催办）不得刷新 30 天可见窗。 */
+function boardUpdatedAt<T extends { date: string; state: TaskState; kind?: TaskEventKind }>(
   ordered: T[],
   current: T,
 ): string {
   let latest = current.date;
   let latestMs = Date.parse(current.date);
+  const terminal = TERMINAL_TASK_STATES.includes(current.state);
+  const terminalMs = Date.parse(current.date);
+  let passedTerminal = false;
   for (const message of ordered) {
+    const isTerminalEvent =
+      message.kind !== 'reminder' && TERMINAL_TASK_STATES.includes(message.state);
+    if (isTerminalEvent) {
+      passedTerminal = true;
+      continue;
+    }
     if (message.kind !== 'reminder') continue;
+    // eligible reminder 只认 terminal 事件之前的（顺序 + 时间）。
+    if (terminal && passedTerminal) continue;
     const ms = Date.parse(message.date);
-    if (Number.isFinite(ms) && ms >= latestMs) {
+    if (!Number.isFinite(ms)) continue;
+    if (terminal && ms > terminalMs) continue;
+    if (ms >= latestMs) {
       latestMs = ms;
       latest = message.date;
     }
@@ -345,8 +359,8 @@ export async function getTask(id: string): Promise<Task | null> {
   const raw = getTaskForTests
     ? await getTaskForTests(id)
     : taskFromMessages(id, await findTaskMessages(id));
-  // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic reminder 并进读路径。
-  return raw ? mergeQueuedReminders(raw) : null;
+  // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic 事件并进读路径。
+  return raw ? mergeQueuedEvents(raw) : null;
 }
 
 export async function listTasks(state?: TaskState): Promise<Task[]> {
@@ -412,11 +426,11 @@ let listCache: { at: number; tasks: Task[] } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
-/** IMAP 索引滞后窗口内的已发 reminder，供幂等/冷却读路径合并。 */
-const queuedReminders = new Map<string, QueuedReminder[]>();
-const QUEUED_REMINDER_TTL_MS = 60 * 1000;
+/** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder），供后续读合并。 */
+const queuedEvents = new Map<string, QueuedEvent[]>();
+const QUEUED_EVENT_TTL_MS = 60 * 1000;
 
-type QueuedReminder = {
+type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
 };
@@ -440,53 +454,70 @@ export function setTaskSendMailForTests(
   sendMailForTests = fn;
 }
 
-export function clearQueuedRemindersForTests(): void {
-  queuedReminders.clear();
+export function clearQueuedEventsForTests(): void {
+  queuedEvents.clear();
 }
 
-/** 已索引（或同幂等 key）的 reminder 不再需要 synthetic 补丁。 */
-function reminderIsIndexed(task: Task, queued: QueuedReminder): boolean {
-  return task.messages.some((message) => {
-    if (message.kind !== 'reminder') return false;
-    if (queued.message.idempotencyKey) {
-      return message.idempotencyKey === queued.message.idempotencyKey;
-    }
-    const at = Date.parse(message.date);
-    return (
-      message.from === queued.message.from
-      && message.body === queued.message.body
-      && Number.isFinite(at)
-      && at >= queued.sentAt - 1000
-    );
-  });
+/** 已索引的事件不再需要 synthetic 补丁。 */
+function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
+  if (queued.message.kind === 'reminder') {
+    return task.messages.some((message) => {
+      if (message.kind !== 'reminder') return false;
+      if (queued.message.idempotencyKey) {
+        return message.idempotencyKey === queued.message.idempotencyKey;
+      }
+      const at = Date.parse(message.date);
+      return (
+        message.from === queued.message.from
+        && message.body === queued.message.body
+        && Number.isFinite(at)
+        && at >= queued.sentAt - 1000
+      );
+    });
+  }
+  return (
+    task.state === queued.message.state
+    && task.messages.some(
+      (message) => message.kind !== 'reminder' && message.state === queued.message.state,
+    )
+  );
 }
 
-function mergeQueuedReminders(task: Task): Task {
-  const pending = queuedReminders.get(task.id);
+function applyOverlayMessages(task: Task, extra: TaskMessage[]): Task {
+  const messages = [...task.messages, ...extra];
+  const ordered = messages.map((message, index) => ({ ...message, uid: index + 1 }));
+  const current = currentTaskMessage(ordered);
+  const next: Task = {
+    ...task,
+    state: current.state,
+    updatedAt: boardUpdatedAt(ordered, current),
+    messages,
+  };
+  if (current.result !== undefined) next.result = current.result;
+  else delete next.result;
+  return next;
+}
+
+function mergeQueuedEvents(task: Task): Task {
+  const pending = queuedEvents.get(task.id);
   if (!pending || pending.length === 0) return task;
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
-    if (now - row.sentAt > QUEUED_REMINDER_TTL_MS) return false;
-    return !reminderIsIndexed(task, row);
+    if (now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
+    return !eventIsIndexed(task, row);
   });
   if (stillLagging.length === 0) {
-    queuedReminders.delete(task.id);
+    queuedEvents.delete(task.id);
     return task;
   }
-  queuedReminders.set(task.id, stillLagging);
-  const extra = stillLagging.map((row) => row.message);
-  const latest = extra[extra.length - 1]!;
-  return {
-    ...task,
-    updatedAt: latest.date,
-    messages: [...task.messages, ...extra],
-  };
+  queuedEvents.set(task.id, stillLagging);
+  return applyOverlayMessages(task, stillLagging.map((row) => row.message));
 }
 
-function queueReminderUntilIndexed(taskId: string, message: TaskMessage): void {
-  const list = queuedReminders.get(taskId) ?? [];
+function queueEventUntilIndexed(taskId: string, message: TaskMessage): void {
+  const list = queuedEvents.get(taskId) ?? [];
   list.push({ message, sentAt: Date.parse(message.date) || nowMs() });
-  queuedReminders.set(taskId, list);
+  queuedEvents.set(taskId, list);
 }
 
 /** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */
@@ -538,26 +569,27 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
   void notifyTrustedAgentDelivery(to);
   invalidateTaskListCache();
 
-  // Local delivery is normally immediate. If Dovecot has not indexed it
-  // yet, return the accepted transition rather than pretending it vanished;
-  // the next GET rebuilds the authoritative IMAP view.
+  const now = new Date(nowMs()).toISOString();
+  const eventMessage: TaskMessage = {
+    id: messageId,
+    from: input.from,
+    to,
+    subject: current.subject,
+    date: now,
+    state: input.state,
+    body: text,
+    ...(input.result !== undefined ? { result: input.result } : {}),
+  };
+  const queued = { message: eventMessage, sentAt: Date.parse(now) || nowMs() };
   const persisted = await getTask(current.id);
-  if (persisted?.state === input.state) return persisted;
-  const now = new Date().toISOString();
+  // IMAP 未索引时不得把旧 state 当真；把 synthetic 转移排进 overlay，后续读才能拒冲突。
+  if (persisted && eventIsIndexed(persisted, queued)) return persisted;
+  queueEventUntilIndexed(current.id, eventMessage);
   return {
     ...current,
     state: input.state,
     updatedAt: now,
-    messages: [...current.messages, {
-      id: messageId,
-      from: input.from,
-      to,
-      subject: current.subject,
-      date: now,
-      state: input.state,
-      body: text,
-      ...(input.result !== undefined ? { result: input.result } : {}),
-    }],
+    messages: [...current.messages, eventMessage],
     ...(input.result !== undefined ? { result: input.result } : {}),
   };
 }
@@ -640,6 +672,12 @@ function olderThanCursor(task: Task, cursor: { t: number; id: string }): boolean
 }
 
 async function loadAllTasksCached(): Promise<Task[]> {
+  const snapshot = await loadImapTaskSnapshot();
+  // 列表与详情同一套 overlay：IMAP 滞后窗口内扫描也要看到刚接受的转移/催办。
+  return snapshot.map(mergeQueuedEvents);
+}
+
+async function loadImapTaskSnapshot(): Promise<Task[]> {
   if (listAllForTests) return listAllForTests();
   const now = nowMs();
   if (listCache && now - listCache.at < TASK_LIST_CACHE_MS) return listCache.tasks;
@@ -771,8 +809,8 @@ export async function remindTask(input: {
     const persisted = await getTask(existing.id);
     // 仅当 IMAP 已能看到刚发的这条 reminder 才当真持久化；否则回 synthetic，
     // 并把它并进读路径，避免同 key 重试/15s 冷却窗口读到催办前的旧 task。
-    if (persisted && reminderIsIndexed(persisted, queued)) return persisted;
-    queueReminderUntilIndexed(existing.id, reminderMessage);
+    if (persisted && eventIsIndexed(persisted, queued)) return persisted;
+    queueEventUntilIndexed(existing.id, reminderMessage);
     return {
       ...existing,
       updatedAt: reminderMessage.date,

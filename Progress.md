@@ -465,6 +465,31 @@
 1. 用 `reminderIsIndexed`（幂等 key，或无 key 时 from+body+时间）判断 IMAP 是否已看到刚发的那条。
 2. 未索引则 `queueReminderUntilIndexed`，后续 `getTask` 合并 overlay；IMAP 追上或 TTL 到期后丢掉补丁。
 
+---
+
+## #26 PR 4 返工第4轮（收尾：状态 overlay + terminal reminder 窗 + 列表合并）
+
+### 我们实现了哪些功能？
+
+1. **P1：** 把 reminder overlay 推广到全部状态转移。`updateTaskUnlocked` 在 IMAP 未看到刚发事件时 `queueEventUntilIndexed`；后续 `getTask` 合并 overlay，滞后窗口内双 reply / close 后再 reply 被拒。
+2. **P1：** `boardUpdatedAt` 对 terminal 工单只认 terminal 事件之前的 reminder（顺序 + 时间）；重放旧 stamped reminder 不再顶到最前或续 30 天窗。
+3. **P2：** `listTaskBoard` 在缓存快照上合并同一套 overlay 再过滤，列表与详情口径一致。
+4. 测试：滞后双 reply 只一封 working；close 后再 reply 不发 working；closed 单不被后置 reminder 顶进 30d；listBoard.state === getTask.state。
+5. `bun test`：**736 pass / 0 fail**；`bun run build` 全绿。
+6. 独立自审：见回执追加（新 subagent，禁止自审自）。
+
+### 我们遇到了哪些错误？
+
+1. reply/close 的 synthetic 只回给当前请求，锁释放后下一请求从 IMAP 读到旧 input-required/非终态，可再发冲突转移。
+2. terminal 后的 reminder（含重放）被算进 `updatedAt`，已关闭单被顶到最前并续命 30 天。
+3. overlay 只在 `getTask` 合并，列表仍展示 IMAP 旧 state。
+
+### 我们是如何解决这些错误的？
+
+1. 统一 `queuedEvents`：reminder 与 working/failed 都进 overlay，`applyOverlayMessages` 按 `currentTaskMessage` + `boardUpdatedAt` 重建。
+2. terminal 之后（mailbox 顺序或时间）的 reminder 不刷新 `updatedAt`。
+3. `loadAllTasksCached` 对 IMAP/测试快照 `map(mergeQueuedEvents)` 再过滤切页。
+
 
 
 
