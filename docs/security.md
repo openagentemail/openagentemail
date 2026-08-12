@@ -20,6 +20,14 @@ retention window before reusing one.
 <!-- Canonical copy lives in the website repo (src/content/docs/docs/); mirror
      this note there when publishing. -->
 
+## Inbox identity ACL（#26 PR 2）
+
+Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁止子串）。
+
+- **列表：** Inbox = 收件人（TO/Cc/Bcc/Delivered-To）；Sent = 发件人（信封 From）；All Mail = 二者并集。Bearer `GET /v1/messages` 仍只列出 Inbox（TO），以免改 agent 列表契约。
+- **详情 / 已读标记 / Source：** 可读集合是 TO∨FROM。因此 `setMessageSeen` / `mail_mark_seen` 可以标记自己发出的信，不再限于「只 flag 发给自己的邮件」——这是 Sent 文件夹点开并标已读所需。
+- **Sent 源码：** identity 可读自身 Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。
+
 ## OAuth access tokens（P3 AS）
 
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。

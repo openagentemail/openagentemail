@@ -154,3 +154,26 @@
 2. 用 Python `json.dumps` 补丁脚本改 shell/store/dom/router/app/inbox/css，避免手改 JSON 转义。
 3. `selectFolder` 放在 `refreshMessages` 之后；`selectIdentity` 仍紧挨 `refreshMessages`。
 4. 快路径在 `folders → list` 时 `syncUrlFromScope(false)`；folders 层 URL 不含 address，避免落地就把 list 路径 replace 掉。
+
+---
+
+## 返工第1轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：`loadMessageSource` 请求时捕获 `requestedSourceAddress`，await 后校验 address + UID + AbortController 世代；`sourceCache` 键含 `address`；`selectIdentity` / `selectMessage` abort 在途 Source。静态闸钉死跨身份同 UID 场景。
+2. ZCode P1-2：同步 `docs/security.md`、根 `README.md`、`packages/api/README.md`——`setMessageSeen` ACL 为 TO∨FROM（Sent 点开并标已读所需），不再写「只能 flag 发给自己的邮件」。
+3. ZCode P1-1：不改 Source 实现；`docs/security.md` 记录 identity 可读自身 Sent 源码（含 Received 链），属 #26 PR 2 设计决策。
+4. `bun test`：**654 pass / 0 fail**（原 653 + 1 新闸）。
+
+### 我们遇到了哪些错误？
+
+1. Codex P1（置信 0.96，真 bug）：admin 在身份 A 开 Source、切到 B、选中同 IMAP UID 的邮件，A 的迟到响应只比 UID 就写入 `state.sourceCache`，B 的 Source 页会显示 A 的原始源码（隐私）。
+2. ZCode P1-2：实现已放宽 `setMessageSeen` 为 TO∨FROM，文档仍写 identity 只能 flag 发给自己的邮件。
+3. ZCode P1-1：Source 对 Sent 可见含 Received 链——任务卡批准的设计取舍，实现不改，文档此前未明示。
+
+### 我们是如何解决这些错误的？
+
+1. 捕获请求时 address 一并校验；身份/换信 abort 在途 source；缓存 `{id, address, …}`；`ui-assets.test.ts` 切片断言 URL 用捕获地址、命中缓存比 address、`selectIdentity` 在 `waitForPreviousRefresh` 之前 abort `sourceController`。
+2. 在 `docs/security.md` 新增「Inbox identity ACL（#26 PR 2）」节；API README 的 seen 404 条件改为 TO or FROM；根 README Read/unread 写明可 flag 收到或发出的信。
+3. 同一 ACL 节加一句：identity 可读自身 Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。

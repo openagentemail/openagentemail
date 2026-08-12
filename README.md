@@ -181,8 +181,9 @@ Deliberate limits, so nothing here is a surprise later:
   Built for automated signups.
 - **Read/unread state** — `mail_mark_seen` / `POST /v1/messages/:id/seen` lets an
   agent (or the human in the dashboard) mark a message handled, so the unseen
-  count means "still needs attention". Reading a message never changes the flag
-  by itself.
+  count means "still needs attention". An identity may flag mail it received
+  **or sent** (TO∨FROM), matching the Sent folder (#26 PR 2); it cannot flag
+  another identity's mail. Reading a message never changes the flag by itself.
 - **Web dashboard for humans** — inspect identities and messages at `/ui` (Inbox
   is the default landing for every session). Inbox is a three-pane mail client
   (identity/folder, list, detail) with Rendered / Plain text / Source; HTML

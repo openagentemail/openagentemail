@@ -93,6 +93,7 @@ describe('UI static asset contract', () => {
       'selectIdentity',
       'selectMessage',
       'refreshMessages',
+      'loadMessageSource',
       'handleCreateSubmit',
       'handleRotateToken',
       'savePushContentTier',
@@ -194,6 +195,31 @@ describe('UI static asset contract', () => {
     );
     expect(selectIdentity.indexOf('detailController.abort()')).toBeGreaterThan(-1);
     expect(selectIdentity.indexOf('detailController.abort()')).toBeLessThan(
+      selectIdentity.indexOf('await waitForPreviousRefresh()'),
+    );
+  });
+
+  test('source loader ignores a late response after switching identity with the same UID', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadMessageSource'),
+      UI_JS.indexOf('function fillMetadata'),
+    );
+    expect(load).toContain('var requestedSourceAddress = state.activeAddress;');
+    expect(load).toContain('state.activeAddress !== requestedSourceAddress');
+    expect(load).toContain('state.activeMessageId !== detail.id');
+    expect(load).toContain('sourceCache.address === requestedSourceAddress');
+    expect(load).toContain('address: requestedSourceAddress');
+    expect(load).toContain('encodeURIComponent(requestedSourceAddress)');
+    expect(load).not.toContain("encodeURIComponent(state.activeAddress)");
+    expect(load).toContain('signal: controller.signal');
+
+    const selectIdentity = UI_JS.slice(
+      UI_JS.indexOf('async function selectIdentity'),
+      UI_JS.indexOf('async function refreshMessages'),
+    );
+    expect(selectIdentity).toContain('sourceController.abort()');
+    expect(selectIdentity.indexOf('sourceController.abort()')).toBeGreaterThan(-1);
+    expect(selectIdentity.indexOf('sourceController.abort()')).toBeLessThan(
       selectIdentity.indexOf('await waitForPreviousRefresh()'),
     );
   });
