@@ -431,7 +431,7 @@
 2. **ZCode P1-2：** 抽出 `toUiTaskView`（Task 公开字段 + overdue）。`GET /ui/api/tasks/:id` 与 `reply/remind/close` 成功体都走 `presentUiTask`（ACL + 同一投影），不扩权限、只收口服务层附加键。
 3. 测试：并发双 `replyTask` 只有一条 working 事件、另一个 `task_not_input_required`；identity mutation 返回体与 GET `:id` 同键、不含 `adminInternal`/`peerMailbox`/对端线程。
 4. `bun test`（packages/api）：**731 pass / 0 fail**；`bun run build` 全绿。
-5. 独立自审：见回执追加（新 subagent，禁止自审自）。
+5. 独立自审 agent `00afac4e-7313-42e7-bab9-0f344609621c`：`2ce2e1b..028cd45` → **mergeable**；①② **closed**；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 

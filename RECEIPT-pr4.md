@@ -53,3 +53,21 @@ ADR：短缓存只减重复解析，不能让首次 scan 变成 O(page)。本基
 ## 未卡住项
 
 无。指挥合入前请看 CI 是否已吃到 P1/P2 修补提交。
+
+---
+
+## 返工第2轮（2026-08-12）
+
+指挥合流：Codex P1 + ZCode P1-1（`tasks.ts` reply 锁外 TOCTOU）与 ZCode P1-2（mutation 回显全量 Task）。
+
+| 项 | 值 |
+|---|---|
+| 功能 commit | `028cd45` `fix(api): serialize task replies and project mutation responses` |
+| 测试 | `packages/api` `bun test` **731 pass / 0 fail**；`bun run build` 全绿 |
+| 独立自审（新 agent，禁止自审自） | `00afac4e-7313-42e7-bab9-0f344609621c` |
+| 审查 diff | `2ce2e1b..028cd45` |
+| 结论 | **mergeable**；P0/P1/P2 **无** |
+| ① Codex P1 / ZCode P1-1 | **closed** — `replyTask` 在同一把真实 `withTaskLock` 内重读并断言 `input-required` 再走 `updateTaskUnlocked`；未嵌套加锁；并发测试 1 条 working + 1 条 `task_not_input_required` |
+| ② ZCode P1-2 | **closed** — GET `:id` 与 reply/remind/close 成功体共用 `presentUiTask` → `toUiTaskView`；identity 对非参与者 403 且 body 不含对端线程；附加键被裁掉 |
+
+未改 Trust-30d / cookie Path / Origin / 全局 4KiB body-limit。未扩修 Codex 其它 P2（reminder IMAP 滞后幂等、list 缓存 stampede）。
