@@ -263,7 +263,14 @@
 5. 新 UI API：`GET /ui/api/notifications`（channel/level/日期/cursor/limit 20|50|100）、`GET /ui/api/notify/summary?date=today&tz=`（回显区间）、`GET /ui/api/notify/diagnostics`、`POST /ui/api/notify/verify`（镜像 Bearer 权限+限流）。identity 强制自身 agent channel；admin 全实例。
 6. Notifications 页：筛选/分页、sensitive 默认 `•••` 逐条展开不持久化、顶部今日小结；Overview 两张通知数字卡与小结同一 summary 源；旧 12h ntfy history 保留为 transport cache fallback。不回填 12h 到 30 天日志。
 7. `docs/security.md` 与 `packages/api/README.md` 同步 DATA_DIR 运维说明。
-8. `bun test`：**698 pass / 0 fail**；`bun run build` 全绿。
+8. `bun test`：**699 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审后的修补（同一 PR）
+
+1. JSONL 首测改为按行 `JSON.parse`，并 `beforeEach` reset，避免与 `main.ts` 维护循环/其它文件共享进程单例时把整文件当一个 JSON。
+2. `appendNotificationLog` 写盘前先 `inspectAndRepairSync()`，末尾半行先隔离再追加，避免粘成中间损坏。
+3. 12h transport cache fallback 无可靠 `sensitive` 标记，默认走 `•••` 遮蔽。
+4. 补 UI cursor 翻页与目录 0700 测试。
 
 ### 我们遇到了哪些错误？
 

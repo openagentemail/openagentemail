@@ -114,6 +114,33 @@ describe('UI 30-day notification log APIs', () => {
     expect(first.status).toBe(200);
     const page = await first.json() as { items: Array<{ title: string }>; nextCursor: string | null };
     expect(page.items.map((row) => row.title)).toEqual(['row-2', 'row-1', 'row-0']);
+    expect(page.nextCursor).toBeNull();
+
+    resetNotificationLogForTests();
+    const base2 = Date.parse('2026-08-12T16:00:00.000Z');
+    for (let i = 0; i < 21; i++) {
+      setNotificationLogNowForTests(() => base2 + i * 1000);
+      await appendNotificationLog({
+        source: 'manual',
+        logicalTarget: 'user',
+        logicalChannel: 'user-alerts',
+        level: 'normal',
+        title: `page-${i}`,
+        message: 'm',
+      });
+    }
+    const pageA = await app.request('/ui/api/notifications?limit=20', { headers: { cookie } });
+    const a = await pageA.json() as { items: Array<{ title: string }>; nextCursor: string | null };
+    expect(a.items).toHaveLength(20);
+    expect(a.nextCursor).toBeTruthy();
+    const pageB = await app.request(
+      `/ui/api/notifications?limit=20&cursor=${encodeURIComponent(a.nextCursor!)}`,
+      { headers: { cookie } },
+    );
+    expect(pageB.status).toBe(200);
+    const b = await pageB.json() as { items: Array<{ title: string }> };
+    expect(b.items).toHaveLength(1);
+    expect(b.items[0]?.title).toBe('page-0');
 
     const filtered = await app.request('/ui/api/notifications?channel=user-alerts&level=normal&limit=20', {
       headers: { cookie },

@@ -498,6 +498,8 @@ export type AppendNotificationInput = {
  */
 export function appendNotificationLog(input: AppendNotificationInput): Promise<NotificationLogRecord> {
   return enqueue(() => {
+    // 先隔离末尾半行，避免下一次成功 append 把半行粘成「中间损坏」。
+    inspectAndRepairSync();
     const record: NotificationLogRecord = {
       schemaVersion: NOTIFICATION_LOG_SCHEMA_VERSION,
       id: randomBytes(12).toString('hex'),

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-nlog-'));
 process.env.TASK_SIGNING_SECRET = 'notify-log-test-secret';
 
-const { afterEach, describe, expect, test } = await import('bun:test');
+const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const {
   NOTIFICATION_LOG_RETENTION_MS,
   appendNotificationLog,
@@ -57,6 +57,10 @@ afterEach(() => {
   resetNotificationLogForTests();
 });
 
+beforeEach(() => {
+  resetNotificationLogForTests();
+});
+
 describe('notification-log store', () => {
   test('successful append writes one schema row and never stores physical topic or secret', async () => {
     const row = await seed({ source: 'watcher', sensitive: true, identityAddress: 'fox@test.example' });
@@ -68,7 +72,8 @@ describe('notification-log store', () => {
     expect(text).not.toContain('user-alerts-');
     expect(text).not.toContain('reader-');
     expect(text).not.toContain('ntfy-admin');
-    expect(JSON.parse(text.trim()).logicalChannel).toBe('user-alerts');
+    const firstLine = text.split('\n').find((line) => line.trim()) ?? '';
+    expect(JSON.parse(firstLine).logicalChannel).toBe('user-alerts');
   });
 
   test('query hard-clamps to 30 days even if an older row is still on disk', async () => {
@@ -193,10 +198,37 @@ describe('notification-log store', () => {
     expect(summary.byLevel).toEqual({ urgent: 1, normal: 1, low: 0 });
   });
 
-  test('log file is created 0600', async () => {
+  test('append after a trailing half-line isolates the fragment then writes a clean new row', async () => {
+    mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      logPath(),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: 'dddddddddddd',
+        publishedAt: new Date().toISOString(),
+        source: 'manual',
+        logicalTarget: 'user',
+        logicalChannel: 'user-alerts',
+        level: 'normal',
+        title: 'ok',
+        message: 'ok',
+        tags: [],
+        sensitive: false,
+        delivery: 'sent',
+      })}\n{"schemaVersion":1,"id":"torn`,
+      { mode: 0o600 },
+    );
+    await seed({ title: 'after-tear' });
+    const page = await queryNotificationLog({ limit: 20 });
+    expect(page.items.map((row) => row.title).sort()).toEqual(['after-tear', 'ok']);
+    const text = readFileSync(logPath(), 'utf8');
+    expect(text).not.toContain('"id":"torn');
+    expect(readFileSync(join(config.dataDir, 'notification-log.jsonl.partial'), 'utf8')).toContain('"id":"torn');
+  });
+
+  test('log file is created 0600 and DATA_DIR is 0700', async () => {
     await seed({});
-    const mode = (await import('node:fs')).statSync(logPath()).mode & 0o777;
-    expect(mode).toBe(0o600);
-    chmodSync(logPath(), 0o600);
+    expect(statSync(logPath()).mode & 0o777).toBe(0o600);
+    expect(statSync(config.dataDir).mode & 0o777).toBe(0o700);
   });
 });
