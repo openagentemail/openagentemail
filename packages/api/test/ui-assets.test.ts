@@ -72,6 +72,44 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).not.toMatch(/\sstyle\s*=/i);
   });
 
+  // 防回归闸：模块拼接产物必须是合法 JS。缺 async / 括号错位等会让浏览器拒执行整份 /ui/app.js。
+  // 注意：这里用 new Function 只做语法解析，不得把该 API 写进 UI_JS 本体（见下方 sink 断言）。
+  test('assembled /ui/app.js is syntactically valid', () => {
+    expect(() => {
+      // 中文：仅校验语法，不执行；解析失败即视为拼装回归
+      new Function(UI_JS);
+    }).not.toThrow();
+  });
+
+  // 拆分后易丢 async：钉死 main 时代关键带 await 的加载器声明
+  test('critical UI loaders remain async after modular split', () => {
+    const requiredAsync = [
+      'apiJson',
+      'loadTasks',
+      'selectTask',
+      'loadNotifyHistory',
+      'loadInbox',
+      'startSession',
+      'selectIdentity',
+      'selectMessage',
+      'refreshMessages',
+      'handleCreateSubmit',
+      'handleRotateToken',
+      'savePushContentTier',
+      'fetchNotifyTopic',
+      'waitForPreviousRefresh',
+      'copyValue',
+      'toggleSeen',
+      'apply',
+      'mapPool',
+      'run',
+      'start',
+    ];
+    for (const name of requiredAsync) {
+      expect(UI_JS).toContain(`async function ${name}(`);
+    }
+  });
+
   test('front-end code contains no HTML parser sinks or URL-token reader', () => {
     expect(UI_JS).not.toMatch(
       /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b/,
@@ -354,8 +392,8 @@ describe('UI static asset contract', () => {
   // 任务工单：入口、API 与 landmark 与 Notifications 同级钉在静态契约里
   test('tasks panel loads tickets via /ui/api/tasks with session-scoped ACL', () => {
     expect(UI_JS).toContain('function enterTasks(');
-    expect(UI_JS).toContain('function loadTasks(');
-    expect(UI_JS).toContain('function selectTask(');
+    expect(UI_JS).toContain('async function loadTasks(');
+    expect(UI_JS).toContain('async function selectTask(');
     expect(UI_JS).toContain("'/ui/api/tasks'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).toContain("value = '__tasks__'");
@@ -373,7 +411,13 @@ describe('UI static asset contract', () => {
     );
     expect(stripBody).toContain('text.lastIndexOf(TASK_RESULT_MARKER)');
     expect(stripBody).toContain('String.fromCharCode(96, 96, 96)');
-    expect(stripBody).toContain('new RegExp(');
+    // 与拆分前 main 一致：RegExp 字符串字面量里是 \\s（源码两反斜杠 → 运行时 \s）。
+    // 禁止 JSON 二次转义成 \\\\s（四反斜杠），否则会匹配字面量反斜杠而非空白。
+    expect(stripBody).toContain(
+      "new RegExp('^\\\\s*' + ticks + 'json\\\\s*\\\\n([\\\\s\\\\S]*?)\\\\n' + ticks + '\\\\s*$')",
+    );
+    expect(stripBody).toContain(".replace(/\\s+$/, '')");
+    expect(stripBody).not.toContain('^\\\\\\\\s*');
     expect(stripBody).toContain('after.match(fence)');
     expect(stripBody).toContain('JSON.parse(match[1])');
     expect(stripBody).not.toContain('text.indexOf(TASK_RESULT_MARKER)');

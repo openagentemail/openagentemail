@@ -32,3 +32,26 @@
 4. 更新 `oauth-as` 与 `ui-assets` 测试为 302 → `/ui/configure/clients`。
 5. 改写 `dev/acceptance.mjs`：登录/续期断言 Inbox，再经 nav 进入 Overview 跑后续面板用例；同步 `ui-dev-acceptance` 契约字符串。
 6. 拆出 `registerUiShell()`，在 app.ts 挂完 api/oauth/frame 之后再注册；删除死代码 `grantsPageHtml`；补注册顺序回归测试。
+
+---
+
+## 返工第1轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. 对照 main 拆分前 `UI_JS` 审计全部 `async function`：`selectTask` 等带 `await apiJson` 的加载器在 HEAD 上本就为 `async`（Codex 报「缺 async」为对 JSON 一行模块的误报）；全量 `await apiJson` 扫描无「非 async 外层」真阳性。
+2. 修复 `tasks.ts` 中 `taskTimelineBody` 的 JSON 二次转义：fence/`replace` 反斜杠数与 main 对齐（`^\\s*` 而非 `^\\\\s*`），避免结果块剥离正则行为错误。
+3. 防回归闸：`ui-assets.test.ts` 用 `new Function(UI_JS)` 校验拼装产物语法；钉死 main 时代关键 `async function <name>(`；tasks 契约改为显式 `async function selectTask/loadTasks`，并钉死 fence/`\\s` 转义。
+4. `bun test`：**629 pass / 0 fail**（原 627 + 2 新闸）。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local Review P0 称 `selectTask` 缺 `async` 导致整脚本 SyntaxError；实测 `new Function(UI_JS)` 通过，函数声明已是 `async`。
+2. 曾尝试把模块改成模板字符串，Bun/TS 会把 `\\s` 吃成 `s`，`replace` 一度变成 `/s+$/`。
+3. 测试断言曾按「源码一个反斜杠」去匹配 fence，与真实 UI_JS（RegExp 字符串字面量需两反斜杠）不一致导致误红。
+
+### 我们是如何解决这些错误的？
+
+1. 以 main `assets.ts` 导出的 `UI_JS` 为金标逐行比对 fence/replace；用 `json.dumps` 稳定写回 `TASKS_PAGE_JS`，避免模板吞转义。
+2. 保留 JSON 字符串模块形态；语法闸 + async 白名单 + fence 字面量钉死，覆盖「缺 async」与「过转义」两类回归。
+3. 修正测试 needle 的反斜杠层数，与金标一致后再跑全量测试。
