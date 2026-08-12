@@ -454,7 +454,7 @@
 2. `getTask` 在索引滞后窗口（60s TTL）把 synthetic reminder 并进读路径，同幂等 key 重试命中 replay、15s 冷却仍按 last reminder 计算。
 3. 测试：SMTP 接受但不写入 IMAP 目录时，同 key 第二次 `remindTask` 不发信；换 key 仍 `task_remind_cooldown`。
 4. `bun test`：**732 pass / 0 fail**；`bun run build` 全绿。
-5. 独立自审：见回执追加（新 subagent，禁止自审自）。stampede 等 P2 继续记债不扩。
+5. 独立自审 agent `54b3e18b-4817-4cdf-a29c-053ea6182bcd`：`df3078c..046a395` → **mergeable**；本轮 P1 **closed**；无新 P0/P1/P2。stampede 等 P2 继续记债不扩。
 
 ### 我们遇到了哪些错误？
 

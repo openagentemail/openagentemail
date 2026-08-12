@@ -71,3 +71,20 @@ ADR：短缓存只减重复解析，不能让首次 scan 变成 O(page)。本基
 | ② ZCode P1-2 | **closed** — GET `:id` 与 reply/remind/close 成功体共用 `presentUiTask` → `toUiTaskView`；identity 对非参与者 403 且 body 不含对端线程；附加键被裁掉 |
 
 未改 Trust-30d / cookie Path / Origin / 全局 4KiB body-limit。未扩修 Codex 其它 P2（reminder IMAP 滞后幂等、list 缓存 stampede）。
+
+---
+
+## 返工第3轮（2026-08-12）
+
+Codex 对 `028cd45` 再抓 P1：`remindTask` 在 SMTP 已接受、Dovecot 未索引时把催办前的旧 `getTask()` 当真持久化，同幂等 key 重试会重复发信并绕过 15s 冷却。
+
+| 项 | 值 |
+|---|---|
+| 功能 commit | `046a395` `fix(api): keep reminder idempotency across IMAP index lag` |
+| 测试 | `packages/api` `bun test` **732 pass / 0 fail**；`bun run build` 全绿 |
+| 独立自审（新 agent，禁止自审自） | `54b3e18b-4817-4cdf-a29c-053ea6182bcd` |
+| 审查 diff | `df3078c..046a395` |
+| 结论 | **mergeable**；P0/P1/P2 **无** |
+| Codex P1（IMAP 滞后 reminder） | **closed** — 仅当 `reminderIsIndexed` 才回 IMAP；否则 synthetic + `getTask` overlay；同 key 不二发，换 key 仍 15s 冷却 |
+
+stampede 等 P2 继续记债，本轮未扩。overlay 为进程内 60s TTL；超时后若 IMAP 仍未索引，同 key 可能再发（与多实例尽力语义一致，不挡合并）。
