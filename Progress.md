@@ -165,6 +165,7 @@
 2. ZCode P1-2：同步 `docs/security.md`、根 `README.md`、`packages/api/README.md`——`setMessageSeen` ACL 为 TO∨FROM（Sent 点开并标已读所需），不再写「只能 flag 发给自己的邮件」。
 3. ZCode P1-1：不改 Source 实现；`docs/security.md` 记录 identity 可读自身 Sent 源码（含 Received 链），属 #26 PR 2 设计决策。
 4. `bun test`：**654 pass / 0 fail**（原 653 + 1 新闸）。
+5. 独立自审 agent `d6d1fd6a-b643-47cb-97ef-633ec89cdd4d`：可合并；三条门禁均关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 

@@ -35,3 +35,23 @@ PR 1 ZCode P2×3：本期未接
 ## 改动面
 
 IMAP query（`imap.ts`、`mail-cursor.ts`）、`routes/ui.ts`、frame 复用、Inbox modules/tests、`dev/preview.ts`、`dev/acceptance.mjs`、README / Progress.md。
+
+---
+
+## 返工第1轮（2026-08-12）
+
+- **HEAD（审查时）**：`0e97e19` `fix(api): pin source cache to identity and document Sent ACL`
+- **测试**：`packages/api` `bun test` → **654 pass / 0 fail**（原 653 + 1 新闸）
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `d6d1fd6a-b643-47cb-97ef-633ec89cdd4d` |
+| HEAD 审查时 | `0e97e19` |
+| 结论 | **可合并** — Source 跨身份竞态已关；seen 文档与 TO∨FROM 对齐；Sent Source/Received 仅落文档、未改实现 |
+| Codex P1 | **关闭**：捕获 `requestedSourceAddress`；await 后校验 address+UID+controller 世代；缓存键含 address；`selectIdentity` 在 `waitForPreviousRefresh` 前 abort `sourceController` |
+| ZCode P1-2 | **关闭**：`docs/security.md` / 根 README / `packages/api/README.md` 写明 TO∨FROM 与 Sent 理由；未改 `setMessageSeen` |
+| ZCode P1-1 | **关闭**：`docs/security.md` 记录 identity 可读自身 Sent 源码（含 Received 链），属 #26 PR 2 设计决策 |
+| P0/P1/P2 | **无** |
+
+残余风险（非 blocker）：跨身份闸是静态切片契约，未模拟微任务时序；`selectMessage` 的 abort 未单独断言；`docs/security.md` 网站仓库仍为 canonical。
