@@ -88,6 +88,7 @@
 2. 抽出 `packages/api/src/ui/shell-routes.ts` 作为 shell 路径单一事实源；精确路径显式注册尾斜杠变体，修复 `/ui/overview/` 等刷新 404。
 3. 契约测试：畸形深链 runtime 不抛；客户端字面量 ↔ `UI_SHELL_*` ↔ 注册表三方对齐；尾斜杠刷新 200。
 4. `bun test`：**632 pass / 0 fail**。
+5. 独立自审 agent `3fc1377e-4fbb-4f59-9482-236a41257dcf`：可合并；P1-1/P1-2 已关闭；无新发现。
 
 ### 我们遇到了哪些错误？
 

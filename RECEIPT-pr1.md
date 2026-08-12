@@ -90,4 +90,13 @@
 - **触发**：① `parseLocationRoute` 中 `decodeURIComponent` 未捕获 → 畸形百分号深链 URIError 白屏；② 客户端深链与服务端 `UI_SHELL_PATHS` 不完全对齐（精确路径缺尾斜杠）→ 刷新 404，碰 ADR 核心契约。
 - **修复**：`safeDecodeURIComponent` + inbox/`unknown` fallback；`shell-routes.ts` 单一事实源 + exact 路径尾斜杠注册；契约测试钉死。
 - **测试**：`packages/api` `bun test` → **632 pass / 0 fail**
-- **独立自审（新 agent，禁止自审自）**：见下方追加（subagent 跑完后填入）。
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `3fc1377e-4fbb-4f59-9482-236a41257dcf` |
+| HEAD 审查时 | `6ec3a5e` |
+| 结论 | **可合并** — decode 白屏与 exact 尾斜杠刷新 404 均已修；632 pass |
+| ZCode P1-1 裁定 | **已关闭**：`safeDecodeURIComponent` + unknown fallback；畸形深链测试不抛 |
+| ZCode P1-2 裁定 | **已关闭**：`shell-routes.ts` 单一事实源；exact 尾斜杠 + inbox/tasks `/*`；不吞 api/oauth/frame |
+| P0/P1/P2 | **无** |
