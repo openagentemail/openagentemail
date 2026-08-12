@@ -72,4 +72,12 @@
 - **修复**：`packages/api/src/ui/client/api.ts` 的 `apiJson` 对 204/205/空 body 返回 `null`；契约测试钉死成功路径与 revoke 文案。
 - **调用点核**：identity DELETE 仍为 JSON `{deleted:true}`；logout 本就走 raw `fetch`；其余 `apiJson` 赋值方不受 `null` 影响。
 - **测试**：`packages/api` `bun test` → **630 pass / 0 fail**
-- **独立自审（新 agent，禁止自审自）**：见下方追加（subagent 跑完后填入）。
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `93825551-6f2f-4c46-9320-da672a3c20b0` |
+| HEAD 审查时 | `757b23c` |
+| 结论 | **可合并** — 204/空 body 成功路径已修；吊销成功链完整；赋值调用点无回归；630 pass |
+| Codex P1 裁定 | **已关闭**：`apiJson` 对 204/205/`text` 空串返回 `null`；revoke 仍 announce + `loadConfigureClients`；identity DELETE 仍为 JSON |
+| P0/P1/P2 | **无** |
