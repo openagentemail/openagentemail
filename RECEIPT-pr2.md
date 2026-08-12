@@ -87,3 +87,27 @@ IMAP query（`imap.ts`、`mail-cursor.ts`）、`routes/ui.ts`、frame 复用、I
 - **桌面（>820px，典型 1280）**：`app-shell` 220px 全局 nav + `inbox-layout` 240px identity/folder + `inbox-main` 360px list | detail，三栏同时可见。≤1100px 时 identity 210 / list 320，元数据抽屉隐藏、Headers tab 出现。folder 按钮 `min-height: 44px`。**结论：桌面三栏完整，Inbox/Sent/All Mail 入口在左栏，list/detail 并排；未见叠栏或假入口。**
 - **移动（≤820px，含 375）**：`inbox-layout`/`inbox-main` 改为单列；`data-mobile-view=folders|list|detail` 每次只露一层；list 藏 detail、detail 藏 list；folders 只露 identity。应用 Back / `list-mobile-back` 均为 44px；375 下 wordmark 隐藏以免挤掉 Sign out。**结论：移动为 folders→list→detail 逐层，Back 可达，无三栏并排泄漏。**
 
+---
+
+## 返工第3轮（2026-08-12）
+
+- **HEAD（审查时）**：`3c69352` `fix(api): keep send success when sent-registry persist fails`
+- **测试**：`packages/api` `bun test` → **675 pass / 0 fail**
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `178f27cc-0c38-4bf6-ab17-9810c8ed06dd` |
+| HEAD 审查时 | `3c69352` |
+| 结论 | **可合并** |
+| Codex P1 | **关闭**：SMTP 已接受后 persist/登记失败只告警；`/v1/send` 仍 200 且 `sendMail` 一次（不 502 重发） |
+| ZCode P1 | **关闭**：`hasSentMessageId` / `loadFromDisk` 零写盘；prune/persist 仅写入路径 |
+| 取舍 | 登记失败降级，不选「投递前先登记再撤销」 |
+| P0/P1/P2 | **无** |
+
+残余风险（非 blocker）：persist 失败时内存有、盘上可能没有，重启后该封可能从 Sent 消失（与取舍一致）；`/v1/send` 测试 mock 了 `sendMail`，smtp 真路径靠 AfterSend 双层兜底。
+
+### 布局自测（桌面 / 移动；本轮不拍屏）
+
+本轮未改 UI CSS/JS。桌面三栏与移动 folders→list→detail 结论同返工第2轮，无回归。
+

@@ -216,6 +216,7 @@
 2. ZCode P1：`hasSentMessageId` 读路径零写盘；过期只返回 false。`loadFromDisk` 只修剪内存。prune/persist 仅在 `recordSentMessageId` 写入路径。
 3. 测试钉死：registry persist 抛 ENOSPC 时 `/v1/send` 仍 200 且 `sendMail` 只调用一次；读路径 persist hook 计数为 0。
 4. `docs/security.md` 写明该取舍。
+5. 独立自审 agent `178f27cc-0c38-4bf6-ab17-9810c8ed06dd`：可合并；两条 P1 均关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
