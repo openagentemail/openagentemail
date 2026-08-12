@@ -39,9 +39,8 @@ ADR：短缓存只减重复解析，不能让首次 scan 变成 O(page)。本基
 ## 独立自审
 
 - **禁止自审自。** 新 subagent agent id：`256c0f59-1127-4c31-a542-073ec593a728`
-- 初审 verdict：**block**
-  - **P1：** `updatedAt=last IMAP` 会让 terminal 后的旧状态重放刷新 30 天可见窗。已改为权威状态事件与 reminder 的较新者。
-  - **P2：** reply zod 1MB vs UI 4KiB body-limit。已把 UI mutation 文本钳到 3000，不改全局 limit。
+- 初审 verdict：**block**（P1 `updatedAt` 重放；P2 1MB vs 4KiB）
+- 修补后再审同一 agent：`git diff af2c857..d0f952e` → verdict：**mergeable**；P1/P2 **closed**；无新 P0/P1
 - ZCode `zcode_pr_review` 本轮 MCP 超时，未出报告。
 
 ## 桌面 / 移动布局自测（不拍屏）

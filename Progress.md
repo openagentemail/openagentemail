@@ -409,7 +409,7 @@
 1. **P1：** `updatedAt` 改为权威状态事件与 reminder 的较新者，terminal 之后重放的 submitted/working 不再刷新 30 天可见窗。
 2. **P2：** reply/remind/close 文本上限改为 3000，对齐 `/ui/api/*` 4KiB body-limit；前端 textarea/input `maxLength=3000`。
 3. 测试：terminal 重放不改 `updatedAt`；超长 reply 400。
-4. 独立自审 agent `256c0f59-1127-4c31-a542-073ec593a728`（初审 block → 本轮修补）。
+4. 独立自审 agent `256c0f59-1127-4c31-a542-073ec593a728`：初审 block；修补后再审 **mergeable**，P1/P2 closed。
 
 ### 我们遇到了哪些错误？
 
