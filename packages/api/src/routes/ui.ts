@@ -63,7 +63,6 @@ import {
   InvalidNotifyCursorError,
   NotificationLogCorruptError,
   isLogicalChannel,
-  isNotificationLogLimit,
   lastSuccessfulAt,
   queryNotificationLog,
   summarizeNotificationLog,
@@ -194,7 +193,12 @@ const notificationsQuerySchema = z.object({
   from: z.string().min(1).max(64).optional(),
   to: z.string().min(1).max(64).optional(),
   cursor: z.string().min(1).max(1024).optional(),
-  limit: z.coerce.number().int().default(20),
+  // 查询串是字符串；只接受 20|50|100 字面量，禁止 coerce 后再兜底。
+  limit: z
+    .union([z.literal('20'), z.literal('50'), z.literal('100')])
+    .optional()
+    .default('20')
+    .transform((value): NotificationLogLimit => Number(value) as NotificationLogLimit),
 });
 
 const notifySummaryQuerySchema = z.object({
@@ -722,9 +726,6 @@ export function createUiApiRoutes(
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
-    if (!isNotificationLogLimit(parsed.data.limit)) {
-      return c.json({ error: 'invalid_request: limit must be 20, 50, or 100' }, 400);
-    }
     if (parsed.data.from && !Number.isFinite(Date.parse(parsed.data.from))) {
       return c.json({ error: 'invalid_request: from' }, 400);
     }
@@ -741,7 +742,7 @@ export function createUiApiRoutes(
         from: parsed.data.from,
         to: parsed.data.to,
         cursor: parsed.data.cursor,
-        limit: parsed.data.limit as NotificationLogLimit,
+        limit: parsed.data.limit,
       });
       return c.json(page);
     } catch (err) {

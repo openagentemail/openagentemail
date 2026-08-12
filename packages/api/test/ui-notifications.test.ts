@@ -148,6 +148,18 @@ describe('UI 30-day notification log APIs', () => {
     expect(filtered.status).toBe(200);
   });
 
+  test('notifications limit is only 20|50|100 at the schema; 20.5/999/abc are 400', async () => {
+    const { app, cookie } = makeApp({ kind: 'admin' });
+    for (const limit of ['20.5', '999', 'abc']) {
+      const res = await app.request(`/ui/api/notifications?limit=${limit}`, {
+        headers: { cookie },
+      });
+      expect(res.status).toBe(400);
+    }
+    const ok = await app.request('/ui/api/notifications?limit=50', { headers: { cookie } });
+    expect(ok.status).toBe(200);
+  });
+
   test('summary echoes the day/tz window and matches list totals for that window', async () => {
     resetNotificationLogForTests();
     setNotificationLogNowForTests(() => Date.parse('2026-08-12T08:00:00.000Z'));
