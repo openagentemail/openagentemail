@@ -171,7 +171,7 @@ describe('出站登记 sent registry', () => {
     sendMail.mockImplementation(async () => ({ messageId: '<outbound-reg@test.example>' }));
     const response = await post('sent-reg@test.example');
     expect(response.status).toBe(200);
-    expect(hasSentMessageId('outbound-reg@test.example')).toBe(true);
+    expect(hasSentMessageId('outbound-reg@test.example', 'sent-reg@test.example')).toBe(true);
     sendMail.mockImplementation(async () => {
       throw smtpFailure;
     });

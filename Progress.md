@@ -189,7 +189,7 @@
 2. 纵深防御：`messageBelongsToFolder` / `messageAccessibleToAddress` / `getMessage` / `getMessageSource` / `setMessageSeen` 共用「TO ∨ (FROM∧registry)」；伪造 From 对非收件人四入口不可见，但仍落收件人 Inbox。
 3. ZCode P1-1：`getMessageSource` 按 UTF-8 字符边界截断，避免多字节序列中间产生 U+FFFD。
 4. 文档同步 `docs/security.md`、根 README、`packages/api/README.md`。PR 2 其余已修部分未动。
-5. `bun test`：**670 pass / 0 fail**；`bun run build` 成功。
+5. `bun test`：**672 pass / 0 fail**；`bun run build` 成功。
 
 ### 我们遇到了哪些错误？
 
@@ -199,6 +199,6 @@
 
 ### 我们是如何解决这些错误的？
 
-1. 出站成功才登记；Sent/详情/Source/Seen 走同一 `messageIsTrustedSent`；测试钉死伪造 From 的列表/详情/Source/Seen 对 fox 全空/null/false，owl Inbox 仍可见。
+1. 出站成功才登记 **(Message-ID, From)**；Sent/详情/Source/Seen 走同一 `messageIsTrustedSent`；测试钉死伪造 From 的四入口对 fox 全空，以及抄真实 ID 也不能让另一个 From 进 Sent；owl Inbox 仍可见。
 2. `truncateUtf8Bytes` 从切点回退到 leading byte，不完整则丢弃该字符。
 3. FIFO 用例改用 `Date.now()` 时间戳。

@@ -467,7 +467,7 @@ export function messageIsTrustedSent(msg: FetchMessageObject, address: string): 
   const addr = address.toLowerCase();
   if (!messageSenders(msg).has(addr)) return false;
   const id = messageEnvelopeId(msg);
-  return id !== null && hasSentMessageId(id);
+  return id !== null && hasSentMessageId(id, addr);
 }
 
 /** 该身份是否可读这封信：Inbox（TO）或可信 Sent（FROM∧registry）。 */

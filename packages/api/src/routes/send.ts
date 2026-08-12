@@ -59,7 +59,7 @@ export const sendRoute = new Hono().post('/', async (c) => {
       ...(html ? { html } : {}),
     });
     // /v1/send 出站登记：sendMail 已写入 registry；此处再记一次以覆盖测试里 mock 掉 smtp 的路径（已存在则 no-op）。
-    recordSentMessageId(messageId);
+    recordSentMessageId(messageId, from);
     // This is the only path that wakes an agent topic: it is a successful,
     // authenticated server-side send to another managed address. Inbound mail
     // never gets this capability because any sender header can be forged.

@@ -41,48 +41,58 @@ describe('normalizeMessageId', () => {
 describe('sent registry 持久化', () => {
   test('登记后可查，重启再 load 仍在', () => {
     resetSentRegistryForTests();
-    recordSentMessageId('<first@test.example>');
-    expect(hasSentMessageId('first@test.example')).toBe(true);
-    expect(hasSentMessageId('<FIRST@test.example>')).toBe(true);
+    recordSentMessageId('<first@test.example>', 'fox@test.example');
+    expect(hasSentMessageId('first@test.example', 'fox@test.example')).toBe(true);
+    expect(hasSentMessageId('<FIRST@test.example>', 'FOX@test.example')).toBe(true);
     const raw = JSON.parse(readFileSync(registryPath(), 'utf8'));
     expect(raw.version).toBe(1);
     expect(raw.entries[0].id).toBe('first@test.example');
+    expect(raw.entries[0].from).toBe('fox@test.example');
     const mode = statSync(registryPath()).mode & 0o777;
     expect(mode).toBe(0o600);
     reloadSentRegistryFromDiskForTests();
-    expect(hasSentMessageId('first@test.example')).toBe(true);
+    expect(hasSentMessageId('first@test.example', 'fox@test.example')).toBe(true);
+  });
+
+  test('同一 Message-ID 不能被另一个 From 冒用', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<shared@test.example>', 'owl@test.example');
+    expect(hasSentMessageId('shared@test.example', 'owl@test.example')).toBe(true);
+    expect(hasSentMessageId('shared@test.example', 'fox@test.example')).toBe(false);
   });
 
   test('重复登记不刷新、不增条', () => {
     resetSentRegistryForTests();
     const t = Date.now();
-    recordSentMessageId('<dup@test.example>', t);
-    recordSentMessageId('<dup@test.example>', t + 9_000);
+    recordSentMessageId('<dup@test.example>', 'fox@test.example', t);
+    recordSentMessageId('<dup@test.example>', 'fox@test.example', t + 9_000);
     expect(sentRegistrySizeForTests()).toBe(1);
   });
 
   test('FIFO 淘汰最旧', () => {
     resetSentRegistryForTests({ maxEntries: 2 });
     const t = Date.now();
-    recordSentMessageId('<a@test.example>', t);
-    recordSentMessageId('<b@test.example>', t + 1);
-    recordSentMessageId('<c@test.example>', t + 2);
-    expect(hasSentMessageId('a@test.example')).toBe(false);
-    expect(hasSentMessageId('b@test.example')).toBe(true);
-    expect(hasSentMessageId('c@test.example')).toBe(true);
+    recordSentMessageId('<a@test.example>', 'fox@test.example', t);
+    recordSentMessageId('<b@test.example>', 'fox@test.example', t + 1);
+    recordSentMessageId('<c@test.example>', 'fox@test.example', t + 2);
+    expect(hasSentMessageId('a@test.example', 'fox@test.example')).toBe(false);
+    expect(hasSentMessageId('b@test.example', 'fox@test.example')).toBe(true);
+    expect(hasSentMessageId('c@test.example', 'fox@test.example')).toBe(true);
     expect(sentRegistrySizeForTests()).toBe(2);
   });
 
   test('过期按 TTL 淘汰', () => {
     resetSentRegistryForTests({ ttlMs: 10 });
-    recordSentMessageId('<old@test.example>', Date.now() - 50);
-    expect(hasSentMessageId('old@test.example')).toBe(false);
+    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 50);
+    expect(hasSentMessageId('old@test.example', 'fox@test.example')).toBe(false);
   });
 
   test('损坏文件 fail-closed 抛错', () => {
     resetSentRegistryForTests();
     writeFileSync(registryPath(), '{not-json', { mode: 0o600 });
     reloadSentRegistryFromDiskForTests();
-    expect(() => hasSentMessageId('x@test.example')).toThrow('sent_registry_corrupt');
+    expect(() => hasSentMessageId('x@test.example', 'fox@test.example')).toThrow(
+      'sent_registry_corrupt',
+    );
   });
 });

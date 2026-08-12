@@ -66,7 +66,7 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
       headers,
     });
     // 服务端真正出站成功才登记：Sent = From∧message-id∈registry。
-    recordSentMessageId(info.messageId);
+    recordSentMessageId(info.messageId, input.from);
     return { messageId: info.messageId };
   } finally {
     transporter.close();

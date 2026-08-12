@@ -1,9 +1,9 @@
 /**
  * 服务端可信出站登记（Sent 判定用）。
  *
- * 只有本进程真正发出的信（sendMail 成功）才写入。伪造 From 的入站信
- * 即使抄了 Message-ID，也不在本表，因而进不了任何人的 Sent，也不能
- * 凭 From 跨身份读详情 / Source / Seen。
+ * 条目是 (Message-ID, From)：只有本进程真正发出的那对才算数。
+ * 伪造信即使抄了真实出站 Message-ID，只要信封 From 对不上登记的 from，
+ * 就不进任何人的 Sent，也不能凭 From 跨身份读详情 / Source / Seen。
  *
  * 落盘照抄 ui-sessions.json：DATA_DIR/sent-registry.json、tmp+rename、0600、
  * 目录 0700、单写者。损坏 fail-closed（抛错，不装空库冒充成功）。
@@ -26,6 +26,8 @@ export const SENT_REGISTRY_MAX_ENTRIES = 20_000;
 
 export type SentRegistryEntry = {
   id: string;
+  /** 出站时的 From（小写邮箱），Sent 判定必须与信封 From 同时命中。 */
+  from: string;
   recordedAt: number;
 };
 
@@ -36,7 +38,7 @@ type PersistedStore = {
 
 let loaded = false;
 let entries: SentRegistryEntry[] = [];
-const idSet = new Set<string>();
+const pairSet = new Set<string>();
 let testMaxEntries: number | undefined;
 let testTtlMs: number | undefined;
 
@@ -64,10 +66,26 @@ export function normalizeMessageId(raw: string | undefined | null): string | nul
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function pairKey(id: string, from: string): string {
+  return `${id}\n${from}`;
+}
+
+function normalizeFrom(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const addr = raw.trim().toLowerCase();
+  return addr.includes('@') ? addr : null;
+}
+
 function isEntry(value: unknown): value is SentRegistryEntry {
   if (!value || typeof value !== 'object') return false;
   const row = value as Record<string, unknown>;
-  return typeof row.id === 'string' && row.id.length > 0 && typeof row.recordedAt === 'number';
+  return (
+    typeof row.id === 'string' &&
+    row.id.length > 0 &&
+    typeof row.from === 'string' &&
+    row.from.length > 0 &&
+    typeof row.recordedAt === 'number'
+  );
 }
 
 function isPersistedStore(value: unknown): value is PersistedStore {
@@ -77,8 +95,8 @@ function isPersistedStore(value: unknown): value is PersistedStore {
 }
 
 function rebuildIndex(): void {
-  idSet.clear();
-  for (const row of entries) idSet.add(row.id);
+  pairSet.clear();
+  for (const row of entries) pairSet.add(pairKey(row.id, row.from));
 }
 
 function prune(now: number): boolean {
@@ -100,7 +118,7 @@ function loadFromDisk(): void {
   const path = storePath();
   if (!existsSync(path)) {
     entries = [];
-    idSet.clear();
+    pairSet.clear();
     loaded = true;
     return;
   }
@@ -113,7 +131,11 @@ function loadFromDisk(): void {
   if (!isPersistedStore(parsed)) {
     throw new Error('sent_registry_corrupt');
   }
-  entries = parsed.entries.map((row) => ({ id: row.id, recordedAt: row.recordedAt }));
+  entries = parsed.entries.map((row) => ({
+    id: row.id,
+    from: row.from,
+    recordedAt: row.recordedAt,
+  }));
   rebuildIndex();
   loaded = true;
   if (prune(Date.now())) persist();
@@ -142,30 +164,37 @@ function persist(): void {
   }
 }
 
-/** 出站成功后登记。重复 id 忽略（不刷新时间，避免伪造信续命）。 */
-export function recordSentMessageId(rawId: string, now = Date.now()): void {
+/** 出站成功后登记 (message-id, from)。同一对重复忽略（不刷新时间）。 */
+export function recordSentMessageId(rawId: string, from: string, now = Date.now()): void {
   const id = normalizeMessageId(rawId);
-  if (!id) return;
+  const addr = normalizeFrom(from);
+  if (!id || !addr) return;
   loadFromDisk();
-  if (idSet.has(id)) return;
+  const key = pairKey(id, addr);
+  if (pairSet.has(key)) return;
   prune(now);
-  entries.push({ id, recordedAt: now });
-  idSet.add(id);
+  entries.push({ id, from: addr, recordedAt: now });
+  pairSet.add(key);
   if (entries.length > maxEntries()) {
     const evicted = entries.shift();
-    if (evicted) idSet.delete(evicted.id);
+    if (evicted) pairSet.delete(pairKey(evicted.id, evicted.from));
   }
   persist();
 }
 
-export function hasSentMessageId(rawId: string | undefined | null): boolean {
+export function hasSentMessageId(
+  rawId: string | undefined | null,
+  from: string | undefined | null,
+): boolean {
   const id = normalizeMessageId(rawId);
-  if (!id) return false;
+  const addr = normalizeFrom(from);
+  if (!id || !addr) return false;
   loadFromDisk();
-  if (!idSet.has(id)) return false;
+  const key = pairKey(id, addr);
+  if (!pairSet.has(key)) return false;
   const ttl = ttlMs();
   if (ttl === null) return true;
-  const row = entries.find((item) => item.id === id);
+  const row = entries.find((item) => item.id === id && item.from === addr);
   if (!row) return false;
   if (Date.now() - row.recordedAt > ttl) {
     prune(Date.now());
@@ -182,7 +211,7 @@ export function resetSentRegistryForTests(opts?: {
 }): void {
   loaded = true;
   entries = [];
-  idSet.clear();
+  pairSet.clear();
   testMaxEntries = opts?.maxEntries;
   testTtlMs = opts?.ttlMs;
 }
@@ -191,7 +220,7 @@ export function resetSentRegistryForTests(opts?: {
 export function reloadSentRegistryFromDiskForTests(): void {
   loaded = false;
   entries = [];
-  idSet.clear();
+  pairSet.clear();
 }
 
 /** 测试辅助：当前条数。 */

@@ -400,8 +400,8 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
 
   test('三 folder 集合正确且 Sent 不含纯收件', () => {
     resetSentRegistryForTests();
-    recordSentMessageId('<m2@test.example>');
-    recordSentMessageId('<m3@test.example>');
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    recordSentMessageId('<m3@test.example>', 'fox@test.example');
     expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'inbox')).toBe(true);
     expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'sent')).toBe(false);
     expect(messageBelongsToFolder(sentOnly, 'fox@test.example', 'inbox')).toBe(false);
@@ -412,7 +412,7 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
 
   test('详情 ACL：可信 Sent 的 FROM 匹配可读，外人不可读', () => {
     resetSentRegistryForTests();
-    recordSentMessageId('<m2@test.example>');
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
     expect(messageAccessibleToAddress(sentOnly, 'fox@test.example')).toBe(true);
     expect(messageAccessibleToAddress(sentOnly, 'owl@test.example')).toBe(false);
     expect(messageAccessibleToAddress(inboxOnly, 'fox@test.example')).toBe(true);
@@ -420,8 +420,8 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
 
   test('listMessagesPage 三 folder 去重且 Sent 不含纯收件', async () => {
     resetSentRegistryForTests();
-    recordSentMessageId('<m2@test.example>');
-    recordSentMessageId('<m3@test.example>');
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    recordSentMessageId('<m3@test.example>', 'fox@test.example');
     fakeMessages = [inboxOnly, sentOnly, both, other];
     const inbox = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
     const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
@@ -435,7 +435,7 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
 
   test('getMessage 对可信 Sent（FROM∧registry）可读', async () => {
     resetSentRegistryForTests();
-    recordSentMessageId('<m2@test.example>');
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
     fakeMessages = [sentOnly];
     const detail = await getMessage('fox@test.example', '2');
     expect(detail?.id).toBe('2');
@@ -476,6 +476,26 @@ describe('伪造 From 不得进 Sent，非收件人四入口不可见', () => {
     expect(await setMessageSeen('fox@test.example', '99', true)).toBe(false);
     const owlInbox = await listMessagesPage('owl@test.example', { folder: 'inbox', limit: 50 });
     expect(owlInbox.messages.map((m) => m.id)).toEqual(['99']);
+    fakeMessages = [];
+  });
+
+  test('抄真实出站 Message-ID 也不能让另一个 From 进 Sent', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<real-outbound@test.example>', 'owl@test.example');
+    const spoof = folderMessage({
+      uid: 100,
+      from: 'fox@test.example',
+      to: 'owl@test.example',
+      at: '2026-08-01T15:00:00Z',
+      messageId: '<real-outbound@test.example>',
+    });
+    fakeMessages = [spoof];
+    expect(messageIsTrustedSent(spoof, 'fox@test.example')).toBe(false);
+    expect(await getMessage('fox@test.example', '100')).toBeNull();
+    expect(await getMessageSource('fox@test.example', '100')).toBeNull();
+    expect(await setMessageSeen('fox@test.example', '100', true)).toBe(false);
+    const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    expect(sent.messages).toEqual([]);
     fakeMessages = [];
   });
 });
