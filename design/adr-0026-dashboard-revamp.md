@@ -127,7 +127,7 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 
 理由：本项目现有 `identities.json`、`notifications.json`、`ui-sessions.json` 已采用小型私有文件、临时文件+rename、0600；部署假设是单 API 写者。通知保留仅 30 天，主要访问模式是时间倒序和低复杂度筛选，先做按日内存索引足够。SQLite 会新增运行依赖、镜像和 migration/backup 语义，超出 Dashboard 阶段的必要风险。若 30 天日志达到配置上限（建议 100k 行或 64 MiB）并导致查询 p95 超过 200ms，再以独立 ADR 迁 SQLite。
 
-`notification-log.jsonl` 每行含 schemaVersion、id、publishedAt、source（watcher/manual/task）、logicalTarget、logicalChannel、level、title、message、tags、sensitive、identityAddress（可选）、delivery=`sent`。只有 ntfy 返回成功后记录；失败不冒充历史，另由 scrubbed audit/metrics 观测。写入由进程内 promise queue 串行化，启动时验证每行，末尾半行可隔离并报警，中间损坏 fail closed。每日 UTC 维护以及每次启动清理 `publishedAt < now-30d`，在同目录写 `.tmp`、fsync 后 atomic rename；查询同时硬性加 30 天下界，因此即使定时清理延迟也不会泄漏过期行。日志和临时文件均 0600、目录 0700，不写物理 ntfy topic 或 reader secret。
+`notification-log.jsonl` 每行含 schemaVersion、id、publishedAt、source（watcher/manual/task/verify）、logicalTarget、logicalChannel、level、title、message、tags、sensitive、identityAddress（可选）、delivery=`sent`。埋点位于具体 publish 实现内部，在 ntfy 成功响应后、publish 返回前记录；失败不冒充历史，另由 scrubbed audit/metrics 观测。所有发布调用（包括 `verify()` 内部的 `this.publish(...)` 自调用）因此都经过同一成功路径。写入由进程内 promise queue 串行化，启动时验证每行，末尾半行可隔离并报警，中间损坏 fail closed。每日 UTC 维护以及每次启动清理 `publishedAt < now-30d`，在同目录写 `.tmp`、fsync 后 atomic rename；查询同时硬性加 30 天下界，因此即使定时清理延迟也不会泄漏过期行。日志和临时文件均 0600、目录 0700，不写物理 ntfy topic 或 reader secret。
 
 `notification-devices.json` 是小型 atomic JSON 表，保存 id、displayName、ntfyUsername、topic labels、pairedAt、lastSeenAt（当前拿不到则为 null）、revokedAt。password/token 永不保存；吊销依赖保存的 ntfy username。创建与本地登记是一个受控流程：ntfy user 建成后登记失败则 best-effort 删除该 user并返回 502，避免不可管理的幽灵设备。吊销 ntfy user 成功后才写 revokedAt；网络失败保持 active 并允许重试。所有 mutate 仍服从单写者队列。
 
@@ -163,7 +163,7 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 | `/ui/api/notify/diagnostics?channel=` GET | “为什么我没收到”自查 | **新增**；返回 enabled/configured、该逻辑频道最近成功时间、可执行 verify 权限；不返回物理 topic/secret。 |
 | `/ui/api/notify/verify` POST | 主动测试 human push | **新增 UI 镜像，复用** Bearer `/v1/notify/verify` 的 service、权限与 rate limit 语义；仅 admin 或现有可通知授权主体。 |
 
-日志捕获点不是只改 watcher：必须包在 `NotifyService.publish()` 成功返回之后的统一 decorator，覆盖 watcher、manual `/v1/notify`、task trusted delivery 和 verify；输入额外携带 `source/logicalChannel/sensitive` 元数据但不进入 ntfy payload。这样 N2 不会漏掉非邮件到达推送，也不会因重试先写出未成功记录。
+日志捕获点不是只改 watcher，也不放在外部 `NotifyService.publish()` decorator：必须落在具体 publish 实现的成功路径内，即 ntfy 成功响应后、方法返回前；输入额外携带 `source/logicalChannel/sensitive` 元数据但不进入 ntfy payload。watcher、manual `/v1/notify`、task trusted delivery 和 `verify()` 内部的 `this.publish(...)` 自调用都经过该埋点。这样 N2 不会漏掉非邮件到达推送，也不会因重试先写出未成功记录。
 
 ### Tasks（T1/T2 与 input-required）
 
@@ -209,7 +209,7 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 
 ### PR 3：30 天 Notifications 完整闭环
 
-范围：notification log store/decorator、30 天清理、查询/摘要/诊断/verify UI API；Notifications 筛选、遮蔽、小结；Overview 两张通知数字卡。部署后从零开始积累日志，不回填 ntfy 12h（避免无法证明来源/敏感标记的伪审计）。旧 history 保留。
+范围：notification log store、具体 publish 实现成功路径内的统一埋点、30 天清理、查询/摘要/诊断/verify UI API；Notifications 筛选、遮蔽、小结；Overview 两张通知数字卡。埋点须覆盖 `verify()` 的 `this.publish(...)` 自调用。部署后从零开始积累日志，不回填 ntfy 12h（避免无法证明来源/敏感标记的伪审计）。旧 history 保留。
 
 验收：各 publish 来源成功才恰好写一行；失败/取消不写；重启保留、31 天清理、损坏处理、权限隔离；Overview 与 Notifications 对同一日/时区数字一致；tier 3 默认遮蔽；未启用 ntfy 给诚实诊断。改动面：新 log store、notify service/watcher/tasks、UI routes/pages/tests、DATA_DIR 运维文档。
 
