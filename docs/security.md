@@ -30,6 +30,19 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - **Sent 源码：** identity 可读自身**可信** Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。
 - **sent-registry.json：** 条目为 `(Message-ID, From)`，0600、tmp+rename 原子写、重启持久；FIFO 上限 20_000 条，并按 `RETENTION_DAYS` 时间淘汰（与邮件保留窗口对齐）。抄别人的真实 Message-ID 不能让另一个 From 变成可信 Sent。SMTP 已接受后登记失败只告警、仍返回成功（宁可 Sent 少记，不可 502 导致重发）。读路径不写盘。文件损坏时回退为空表并告警（Sent 全空，Inbox/详情仍可用），不抛 500。
 
+## Notification log（#26 PR 3）
+
+`DATA_DIR/notification-log.jsonl` 是 Dashboard 30 天通知送达日志（不是 ntfy 12h 传输缓存）。
+
+- **写入：** 只在具体 ntfy `publish()` 成功响应后、方法返回前追加一行。watcher / manual `/v1/notify` / task trusted delivery / `verify()` 自调用走同一埋点。失败或 `beforeSend` 取消不写。不得先记后发。
+- **送达优先：** append 失败打 `[notification-log] HIGH:` 健康告警，不把已成功的投递改成 API 失败，也不把失败冒充成功。
+- **字段：** schemaVersion、id、publishedAt、source（`watcher|manual|task|verify`）、logicalTarget、logicalChannel、level、title、message、tags、sensitive、identityAddress?、delivery=`sent`。不写物理 ntfy topic / reader secret。
+- **权限：** 文件与临时文件 0600，目录 0700；单写者 promise 队列。内容可能含 OTP/正文，不进普通 console / scrubbed audit。
+- **维护：** 启动时以及每个 UTC 午夜清理 `publishedAt < now-30d`（同目录 `.tmp` + fsync + atomic rename）。查询硬加 30 天下界。
+- **损坏：** 末尾半行隔离到 `notification-log.jsonl.partial` 并报警；中间损坏 fail-closed（查询/摘要 500 `notification_log_corrupt`，不把残缺审计当成功）。
+- **不回填：** 不把 ntfy 12h history 写入本日志（缺少可靠 source/sensitive 元数据，回填是伪审计）。
+- **ACL：** identity session 只能看自身 agent channel；admin 可看本实例全部逻辑 channel。tier 3 内容服务端仍返回，UI 默认 `•••` 遮蔽。
+
 ## OAuth access tokens（P3 AS）
 
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。

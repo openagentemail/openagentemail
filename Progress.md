@@ -236,6 +236,8 @@
 
 1. ZCode P1：`loadFromDisk` 遇到损坏/半行 JSON 时告警、隔离为 `sent-registry.json.corrupt`、回退空表；读路径零异常。Inbox/详情照常，Sent 判定为空集。
 2. 测试钉死损坏文件存在时 `listMessagesPage`/`getMessage` 正常返回、Sent 为空；`hasSentMessageId` 不抛。
+3. `bun test`：**676 pass / 0 fail**。
+4. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
@@ -244,5 +246,34 @@
 ### 我们是如何解决这些错误的？
 
 1. fail-closed = 判不可信（空 registry），不是抛错。隔离备份损坏文件，避免每次启动重复解析毒药。不在读路径 persist 空表。
-2. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
-3. `bun test`：**676 pass / 0 fail**。
+
+---
+
+## #26 PR 3（2026-08-12）
+
+分支：`tizerluo/worker-34-pr3`  
+范围：ADR §PR 3（30 天 Notifications 完整闭环）
+
+### 我们实现了哪些功能？
+
+1. 新建 `DATA_DIR/notification-log.jsonl`：schemaVersion/id/publishedAt/source/logicalTarget/logicalChannel/level/title/message/tags/sensitive/identityAddress?/delivery=sent；0600、目录 0700、单写者 promise 队列；不写物理 ntfy topic/secret。
+2. 埋点落在 `NtfyNotificationService.publish()` 成功路径内（ntfy 成功响应后、返回前）。watcher / manual `/v1/notify` / task trusted delivery / `verify()` 的 `this.publish` 自调用四来源同一埋点；失败与 `beforeSend` 取消不写。
+3. 送达优先：append 失败打 `[notification-log] HIGH:` 告警，publish 仍成功；不得先记后发、不得把失败冒充成功。
+4. 启动 + 每日 UTC 午夜清理 `publishedAt < now-30d`（`.tmp` + fsync + atomic rename）；查询硬加 30 天下界。末尾半行隔离到 `.partial` 并报警；中间损坏 fail-closed。
+5. 新 UI API：`GET /ui/api/notifications`（channel/level/日期/cursor/limit 20|50|100）、`GET /ui/api/notify/summary?date=today&tz=`（回显区间）、`GET /ui/api/notify/diagnostics`、`POST /ui/api/notify/verify`（镜像 Bearer 权限+限流）。identity 强制自身 agent channel；admin 全实例。
+6. Notifications 页：筛选/分页、sensitive 默认 `•••` 逐条展开不持久化、顶部今日小结；Overview 两张通知数字卡与小结同一 summary 源；旧 12h ntfy history 保留为 transport cache fallback。不回填 12h 到 30 天日志。
+7. `docs/security.md` 与 `packages/api/README.md` 同步 DATA_DIR 运维说明。
+8. `bun test`：**698 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. `/v1/notify` 给 mock service 传入 `identityAddress: undefined` 导致既有精确相等断言失败。
+2. Overview cycle 增加 summary 请求后，generation 守卫出现次数从 4 变成 6，静态契约未同步。
+3. 游标测试在 `nextCursor=null` 时仍查询，被当成首页重放。
+
+### 我们是如何解决这些错误的？
+
+1. 仅在 agent target 时附带 `identityAddress`；断言补上 source/logicalChannel/sensitive。
+2. 更新 ui-assets 契约为 6 次 generation 比较，并钉死 Notifications today / Urgent today 与 `/ui/api/notify/summary`。
+3. 用 21 条 + limit 20 覆盖翻页与跨筛选 cursor 拒绝。
+

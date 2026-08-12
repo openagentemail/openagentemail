@@ -1271,6 +1271,11 @@ export async function processWatchedMessage(
           // Truncate rather than throw: publish errors before UID advance stall
           // the watcher (F76). Manual /v1/notify keeps the default overflow=error.
           overflow: 'truncate',
+          source: 'watcher',
+          logicalChannel: 'user-alerts',
+          // tier 3 才把正文/OTP 送出服务器；与 level 正交，供 UI 默认遮蔽。
+          sensitive: tier === 3,
+          identityAddress: current.address,
           ...(clickUrl ? { click: clickUrl } : {}),
           ...(beforeSend ? { beforeSend } : {}),
         });

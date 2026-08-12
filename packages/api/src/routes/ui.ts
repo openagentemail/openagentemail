@@ -54,6 +54,22 @@ import {
   uiSessionAuth,
 } from '../lib/ui-session.ts';
 import { MAX_EMAIL_HTML_LENGTH } from '../lib/sanitize-email-html.ts';
+import { config } from '../lib/config.ts';
+import {
+  checkNotifyUserLimit,
+  releaseNotifyUserLimit,
+} from '../lib/ratelimit.ts';
+import {
+  InvalidNotifyCursorError,
+  NotificationLogCorruptError,
+  isLogicalChannel,
+  isNotificationLogLimit,
+  lastSuccessfulAt,
+  queryNotificationLog,
+  summarizeNotificationLog,
+  type NotificationLogicalChannel,
+  type NotificationLogLimit,
+} from '../lib/notification-log.ts';
 
 /**
  * 与 routes/notify.ts#toTopic 必须保持同一口径（Dashboard cookie 入口的镜像校验）。
@@ -109,6 +125,8 @@ export type UiApiDependencies = {
     identityAddress?: string,
     since?: string,
   ) => Promise<NotifyMessage[]>;
+  /** UI verify 测试缝；生产默认走 notificationService().verify。 */
+  notifyVerify?: () => Promise<{ ok: true }>;
   /**
    * 任务工单：语义等同 GET /v1/tasks（ACL 在本路由强制）。
    * 测试可注入；生产默认走 taskService。
@@ -158,6 +176,75 @@ function notifyHistoryError(c: Context, err: unknown) {
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
   return c.json({ error: err.code }, 502);
+}
+
+function notificationLogError(c: Context, err: unknown) {
+  if (err instanceof InvalidNotifyCursorError) {
+    return c.json({ error: 'invalid_cursor' }, 400);
+  }
+  if (err instanceof NotificationLogCorruptError) {
+    return c.json({ error: 'notification_log_corrupt' }, 500);
+  }
+  throw err;
+}
+
+const notificationsQuerySchema = z.object({
+  channel: z.string().min(1).max(80).optional(),
+  level: z.enum(['urgent', 'normal', 'low']).optional(),
+  from: z.string().min(1).max(64).optional(),
+  to: z.string().min(1).max(64).optional(),
+  cursor: z.string().min(1).max(1024).optional(),
+  limit: z.coerce.number().int().default(20),
+});
+
+const notifySummaryQuerySchema = z.object({
+  date: z.string().min(1).max(32).default('today'),
+  tz: z.string().min(1).max(80),
+});
+
+const notifyDiagnosticsQuerySchema = z.object({
+  channel: z.string().min(1).max(80).optional(),
+});
+
+function ownAgentChannel(c: Context): NotificationLogicalChannel | null {
+  const auth = getAuth(c);
+  if (auth.kind !== 'identity') return null;
+  const localpart = auth.address.split('@')[0];
+  return localpart && AGENT_NAME_RE.test(localpart) ? `agent:${localpart}` : null;
+}
+
+/**
+ * identity：强制自身 agent channel，越权 channel → 403。
+ * admin：省略 = 全实例；给出的 channel 必须是合法逻辑频道。
+ */
+function scopeNotificationChannel(
+  c: Context,
+  requested: string | undefined,
+): NotificationLogicalChannel | undefined | Response {
+  const auth = getAuth(c);
+  if (auth.kind === 'identity') {
+    const own = ownAgentChannel(c);
+    if (!own) return c.json({ error: 'forbidden' }, 403);
+    if (requested && requested !== own && requested !== 'self') {
+      return c.json({ error: 'forbidden: token is scoped to another notification channel' }, 403);
+    }
+    return own;
+  }
+  if (!requested) return undefined;
+  if (!isLogicalChannel(requested)) {
+    return c.json({ error: 'invalid_request: unknown channel' }, 400);
+  }
+  return requested;
+}
+
+/** 与 Bearer /v1/notify/verify 同一授权：admin 或 canNotifyUser。 */
+function requireUiUserNotifyPermission(c: Context): Response | { actor: string } {
+  const auth = getAuth(c);
+  if (auth.kind === 'admin') return { actor: 'admin' };
+  if (!findIdentity(auth.address)?.canNotifyUser) {
+    return c.json({ error: 'forbidden: can_notify_user required' }, 403);
+  }
+  return { actor: auth.address };
 }
 
 /** 「最近活跃」的窗口长度（小时）。 */
@@ -622,6 +709,116 @@ export function createUiApiRoutes(
     try {
       return c.json({ messages: await read(topic, identityAddress, parsed.data.since) });
     } catch (err) {
+      return notifyHistoryError(c, err);
+    }
+  });
+
+  /**
+   * 30 天通知日志：cookie 会话入口。identity 强制自身 agent channel；
+   * admin 可查本实例全部逻辑 channel。不回填 ntfy 12h。
+   */
+  routes.get('/notifications', async (c) => {
+    const parsed = notificationsQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    if (!isNotificationLogLimit(parsed.data.limit)) {
+      return c.json({ error: 'invalid_request: limit must be 20, 50, or 100' }, 400);
+    }
+    if (parsed.data.from && !Number.isFinite(Date.parse(parsed.data.from))) {
+      return c.json({ error: 'invalid_request: from' }, 400);
+    }
+    if (parsed.data.to && !Number.isFinite(Date.parse(parsed.data.to))) {
+      return c.json({ error: 'invalid_request: to' }, 400);
+    }
+    const scoped = scopeNotificationChannel(c, parsed.data.channel);
+    if (scoped instanceof Response) return scoped;
+
+    try {
+      const page = await queryNotificationLog({
+        channel: scoped,
+        level: parsed.data.level,
+        from: parsed.data.from,
+        to: parsed.data.to,
+        cursor: parsed.data.cursor,
+        limit: parsed.data.limit as NotificationLogLimit,
+      });
+      return c.json(page);
+    } catch (err) {
+      return notificationLogError(c, err);
+    }
+  });
+
+  /** Overview 卡与 Notifications 今日小结同一数据源。 */
+  routes.get('/notify/summary', async (c) => {
+    const parsed = notifySummaryQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const scoped = scopeNotificationChannel(c, undefined);
+    if (scoped instanceof Response) return scoped;
+    try {
+      const summary = await summarizeNotificationLog({
+        date: parsed.data.date,
+        tz: parsed.data.tz,
+        channel: scoped,
+      });
+      return c.json(summary);
+    } catch (err) {
+      if (err instanceof RangeError) {
+        return c.json({ error: 'invalid_request: date or tz' }, 400);
+      }
+      return notificationLogError(c, err);
+    }
+  });
+
+  /**
+   * 「为什么我没收到」自查。不返回物理 topic / secret。
+   * identity 强制看自身 agent channel；admin 可指定逻辑 channel。
+   */
+  routes.get('/notify/diagnostics', async (c) => {
+    const parsed = notifyDiagnosticsQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const scoped = scopeNotificationChannel(c, parsed.data.channel);
+    if (scoped instanceof Response) return scoped;
+    const auth = getAuth(c);
+    const canVerify =
+      auth.kind === 'admin' || Boolean(findIdentity(auth.address)?.canNotifyUser);
+    try {
+      const last = await lastSuccessfulAt(scoped);
+      return c.json({
+        enabled: config.ntfy.enabled,
+        configured: Boolean(config.ntfy.enabled && config.ntfy.adminPassword),
+        channel: scoped ?? null,
+        lastSuccessfulAt: last,
+        canVerify,
+      });
+    } catch (err) {
+      return notificationLogError(c, err);
+    }
+  });
+
+  /** UI 镜像 Bearer POST /v1/notify/verify：同一 service、权限与 rate limit。 */
+  routes.post('/notify/verify', async (c) => {
+    const allowed = requireUiUserNotifyPermission(c);
+    if (allowed instanceof Response) return allowed;
+    const limit = checkNotifyUserLimit(allowed.actor, config.ntfy.notifyRateLimit);
+    if (!limit.allowed) {
+      return c.json(
+        {
+          error: 'notify_rate_limited',
+          limit: config.ntfy.notifyRateLimit,
+          retryAfterSec: limit.retryAfterSec,
+        },
+        429,
+      );
+    }
+    try {
+      return c.json(await (dependencies.notifyVerify ?? (() => notificationService().verify()))());
+    } catch (err) {
+      releaseNotifyUserLimit(allowed.actor, limit.reservation);
       return notifyHistoryError(c, err);
     }
   });

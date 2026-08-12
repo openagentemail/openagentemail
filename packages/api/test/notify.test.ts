@@ -33,6 +33,12 @@ const {
   physicalAgentTopic,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
+const {
+  queryNotificationLog,
+  resetNotificationLogForTests,
+  setNotificationLogPersistHookForTests,
+} = await import('../src/lib/notification-log.ts');
+const { existsSync, readFileSync } = await import('node:fs');
 type NotifyService = import('../src/lib/notify.ts').NotifyService;
 
 const published: unknown[] = [];
@@ -100,7 +106,13 @@ describe('human-alert ACL', () => {
 
     expect(response.status).toBe(200);
     expect(published).toEqual([{
-      target: 'user', title: 'wake', message: 'please look', level: 'urgent',
+      target: 'user',
+      title: 'wake',
+      message: 'please look',
+      level: 'urgent',
+      source: 'manual',
+      logicalChannel: 'user-alerts',
+      sensitive: false,
     }]);
   });
 
@@ -667,5 +679,133 @@ describe('live ntfy reader provisioning', () => {
       'POST http://ntfy/v1/users/access',
       'DELETE http://ntfy/v1/users',
     ]);
+  });
+});
+
+describe('publish success path writes the 30-day notification log', () => {
+  function logText(): string {
+    const path = join(process.env.DATA_DIR!, 'notification-log.jsonl');
+    return existsSync(path) ? readFileSync(path, 'utf8') : '';
+  }
+
+  beforeEach(() => {
+    resetNotificationLogForTests();
+  });
+
+  async function withLivePublish<T>(
+    fetchImpl: typeof fetch,
+    run: (svc: NtfyNotificationService) => Promise<T>,
+  ): Promise<T> {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      return await run(new NtfyNotificationService());
+    } finally {
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+      resetNotificationLogForTests();
+    }
+  }
+
+  test('a successful ntfy response writes exactly one log row after send, not before', async () => {
+    const order: string[] = [];
+    await withLivePublish(async (_input, init) => {
+      order.push('ntfy');
+      expect(String(init?.body ?? '')).not.toContain('"source"');
+      expect(String(init?.body ?? '')).not.toContain('"sensitive"');
+      expect(String(init?.body ?? '')).not.toContain('logicalChannel');
+      return new Response('{}', { status: 200 });
+    }, async (svc) => {
+      await svc.publish({
+        target: 'user',
+        title: 'hello',
+        message: 'world',
+        level: 'urgent',
+        source: 'watcher',
+        sensitive: true,
+        identityAddress: 'fox@test.example',
+      });
+      order.push('returned');
+      const page = await queryNotificationLog({ limit: 20 });
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]?.source).toBe('watcher');
+      expect(page.items[0]?.sensitive).toBe(true);
+    });
+    expect(order).toEqual(['ntfy', 'returned']);
+  });
+
+  test('failed ntfy response and cancelled beforeSend do not write a log row', async () => {
+    await withLivePublish(async () => new Response('nope', { status: 503 }), async (svc) => {
+      await expect(svc.publish({
+        target: 'user',
+        title: 'hello',
+        message: 'world',
+        level: 'normal',
+        source: 'manual',
+      })).rejects.toThrow('notify_unavailable');
+    });
+    expect(logText()).toBe('');
+
+    await withLivePublish(async () => new Response('{}', { status: 200 }), async (svc) => {
+      await expect(svc.publish({
+        target: 'user',
+        title: 'hello',
+        message: 'world',
+        level: 'normal',
+        source: 'watcher',
+        beforeSend: () => false,
+      })).rejects.toThrow('notify_cancelled');
+    });
+    expect(logText()).toBe('');
+  });
+
+  test('verify() self-call records source=verify on the same success path', async () => {
+    let posted = '';
+    await withLivePublish(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'POST' && !url.includes('/json')) {
+        posted = String(init?.body ?? '');
+        return new Response('{}', { status: 200 });
+      }
+      const payload = JSON.parse(posted) as { message: string; title: string };
+      return new Response(
+        `${JSON.stringify({
+          event: 'message',
+          id: 'evt-verify',
+          time: 1,
+          title: payload.title,
+          message: payload.message,
+          priority: 3,
+        })}\n`,
+        { status: 200 },
+      );
+    }, async (svc) => {
+      await svc.verify();
+      const page = await queryNotificationLog({ limit: 20 });
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]?.source).toBe('verify');
+      expect(page.items[0]?.logicalChannel).toBe('user-alerts');
+    });
+  });
+
+  test('append failure after ntfy success still returns ok and does not throw', async () => {
+    setNotificationLogPersistHookForTests(() => {
+      throw new Error('ENOSPC');
+    });
+    await withLivePublish(async () => new Response('{}', { status: 200 }), async (svc) => {
+      await expect(svc.publish({
+        target: 'user',
+        title: 'hello',
+        message: 'world',
+        level: 'normal',
+        source: 'task',
+      })).resolves.toMatchObject({ title: 'hello' });
+    });
   });
 });

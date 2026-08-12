@@ -533,6 +533,15 @@ describe('UI static asset contract', () => {
       'notify-notice',
       'notify-updated',
       'notify-shown',
+      'notify-summary',
+      'notify-diagnostics',
+      'notify-verify',
+      'notify-level-filter',
+      'notify-from',
+      'notify-to',
+      'notify-limit',
+      'notify-load-more',
+      'notify-subtitle',
       'tasks-panel',
       'tasks-title',
       'tasks-rows',
@@ -651,9 +660,14 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
   });
 
-  // 通知记录：入口、API、字段渲染与权限口径钉在静态契约里
+  // 通知记录：30 天日志为主数据源；12h ntfy 仅作 transport cache fallback
   test('notifications panel loads history via /ui/api/notify/messages with session-scoped topics', () => {
     expect(UI_JS).toContain('function enterNotifications(');
+    expect(UI_JS).toContain('function loadNotificationLog(');
+    expect(UI_JS).toContain("'/ui/api/notifications?'");
+    expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
+    expect(UI_JS).toContain("'/ui/api/notify/diagnostics'");
+    expect(UI_JS).toContain("'/ui/api/notify/verify'");
     expect(UI_JS).toContain('function loadNotifyHistory(');
     expect(UI_JS).toContain('function mapPool(');
     expect(UI_JS).toContain('function fetchNotifyTopic(');
@@ -671,6 +685,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("priority === 5");
     expect(UI_JS).toContain("priority === 1");
     expect(UI_JS).toContain("return 'unknown'");
+    expect(UI_JS).toContain('Transport cache (ntfy 12h');
+    expect(UI_JS).toContain('renderSensitiveText');
+    expect(UI_JS).toContain("'•••'");
     // 前端不得直接打 Bearer 的 /v1/notify
     expect(UI_JS).not.toContain('/v1/notify');
   });
@@ -801,6 +818,11 @@ describe('UI static asset contract', () => {
       'state.notifyUpdatedAt = 0',
       "state.notifyFetchKey = ''",
       'state.notifyPending = false',
+      'state.notifyLogItems = []',
+      "state.notifyLogFetchKey = ''",
+      "state.notifyNextCursor = ''",
+      'state.notifySummary = null',
+      'state.notifyRevealed = {}',
     ]) {
       expect(clear).toContain(field);
     }
@@ -926,6 +948,10 @@ describe('UI static asset contract', () => {
     expect(enter).toContain('if (returnRow) returnRow.focus();');
     expect(enter).toContain('else focusOverviewPanel();');
     expect(enter).not.toContain('preventScroll');
+
+    expect(UI_JS).toContain("'Notifications today'");
+    expect(UI_JS).toContain("'Urgent today'");
+    expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
 
     // ADR #26：所有 session（含 admin）默认落地 Inbox；深链由 applyRoute 恢复
     const startSession = UI_JS.slice(
@@ -1168,7 +1194,7 @@ describe('UI static asset contract', () => {
     expect(cycle).toContain('var generation = ++state.overviewGen;');
     expect(cycle).toContain('state.overviewCycleGen = generation;');
     expect(cycle.indexOf('identitiesPromise.then')).toBeLessThan(cycle.indexOf('overviewPromise.then'));
-    expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(4);
+    expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(6);
     expect(cycle).toContain('renderOverview();');
     // Stale overview responses clear stuck pending without writing data.
     expect(cycle).toContain('state.overviewCycleGen !== state.overviewGen');

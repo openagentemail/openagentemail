@@ -23,12 +23,14 @@
 import { config } from './lib/config.ts';
 import { initializeNotifications } from './lib/notify.ts';
 import { startNotificationWatcher } from './lib/notification-watcher.ts';
+import { startNotificationLogMaintenance } from './lib/notification-log.ts';
 import { startRetentionLoop } from './lib/retention.ts';
 import { createApp } from './app.ts';
 
 const app = createApp();
 
 startRetentionLoop();
+startNotificationLogMaintenance();
 if (config.ntfy.enabled) {
   await initializeNotifications();
   startNotificationWatcher();

@@ -34,7 +34,7 @@ bun run typecheck
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
-| `DATA_DIR` | `./data` | identity store (`identities.json`); sent registry (`sent-registry.json`) |
+| `DATA_DIR` | `./data` | identity store (`identities.json`); sent registry (`sent-registry.json`); notification log (`notification-log.jsonl`, 30-day delivery audit, 0600, single writer) |
 
 ## Endpoints
 
@@ -76,3 +76,8 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   **`GET /healthz` does not read the store and keeps returning `{ok:true}`, so
   the container healthcheck stays green** — watch the API log for
   `identity_store_corrupt` and restore the file from backup.
+- **Notification log.** `DATA_DIR/notification-log.jsonl` records successful
+  ntfy publishes for 30 days (0600, single-writer queue, UTC daily compact).
+  Do not backfill ntfy 12h cache into it. Trailing half-lines are isolated to
+  `notification-log.jsonl.partial`; a corrupt line in the middle fail-closes
+  queries (`500 notification_log_corrupt`). See `docs/security.md`.
