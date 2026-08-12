@@ -527,4 +527,15 @@ describe('UI task reply / remind / close', () => {
     expect(response.status).toBe(400);
     expect(closeCalls).toEqual([]);
   });
+
+  test('reply body over the UI envelope is 400, not a silent 413 schema miss', async () => {
+    const { app, cookie, replyCalls } = makeApp({ kind: 'admin' });
+    const response = await app.request(`/ui/api/tasks/${TASK_INPUT.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'x'.repeat(3001), from: 'fox@test.example' }),
+    });
+    expect(response.status).toBe(400);
+    expect(replyCalls).toEqual([]);
+  });
 });

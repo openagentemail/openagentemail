@@ -400,6 +400,27 @@
 4. 测试改为从 `task-cursor.ts` 导入 `InvalidTaskCursorError`。
 5. 静态断言改为 `'/ui/api/tasks?' + params.join('&')`。
 
+---
+
+## #26 PR 4 返工第1轮（独立自审 P1/P2）
+
+### 我们实现了哪些功能？
+
+1. **P1：** `updatedAt` 改为权威状态事件与 reminder 的较新者，terminal 之后重放的 submitted/working 不再刷新 30 天可见窗。
+2. **P2：** reply/remind/close 文本上限改为 3000，对齐 `/ui/api/*` 4KiB body-limit；前端 textarea/input `maxLength=3000`。
+3. 测试：terminal 重放不改 `updatedAt`；超长 reply 400。
+4. 独立自审 agent `256c0f59-1127-4c31-a542-073ec593a728`（初审 block → 本轮修补）。
+
+### 我们遇到了哪些错误？
+
+1. 催办为把工单顶到列表前，曾把 `updatedAt` 设成 IMAP 最后一封（含 terminal 后的旧状态重放）。
+2. zod 允许 1MB reply body，但 UI Origin 入口仍是 4KiB，超限会先 413。
+
+### 我们是如何解决这些错误的？
+
+1. `boardUpdatedAt()` 只看 current 状态事件与 `kind=reminder`。
+2. 不改全局 body-limit；把 UI 任务 mutation 字段钳到 3000。
+
 
 
 

@@ -175,22 +175,24 @@ const taskBoardQuerySchema = z.object({
   cursor: z.string().min(1).max(1024).optional(),
 });
 const taskIdParamSchema = z.string().uuid();
+/** UI cookie 入口 body-limit 仍是 4KiB；字段上限必须能放进该信封。 */
+const UI_TASK_TEXT_MAX = 3000;
 const taskReplySchema = z
   .object({
-    body: z.string().min(1).max(1_000_000),
+    body: z.string().min(1).max(UI_TASK_TEXT_MAX),
     from: z.string().email().optional(),
   })
   .strict();
 const taskRemindSchema = z
   .object({
-    body: z.string().max(4000).optional(),
+    body: z.string().max(UI_TASK_TEXT_MAX).optional(),
     from: z.string().email().optional(),
     idempotencyKey: z.string().min(1).max(128).optional(),
   })
   .strict();
 const taskCloseSchema = z
   .object({
-    reason: z.string().min(1).max(4000),
+    reason: z.string().min(1).max(UI_TASK_TEXT_MAX),
     from: z.string().email().optional(),
   })
   .strict();

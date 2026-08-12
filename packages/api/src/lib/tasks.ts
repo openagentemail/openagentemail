@@ -278,7 +278,6 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // it cannot reopen the completed/failed task. Before that point normal
   // concurrent writes retain mailbox-order last-writer-wins semantics.
   const current = currentTaskMessage(ordered);
-  const last = ordered[ordered.length - 1]!;
   const messages = ordered.map(({ uid, ...message }) => ({ id: String(uid), ...message }));
   return {
     id,
@@ -287,10 +286,29 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     subject: first.subject,
     state: current.state,
     createdAt: first.date,
-    updatedAt: last.date,
+    // 催办可把工单顶到列表前；terminal 之后重放的旧状态信不得刷新可见窗。
+    updatedAt: boardUpdatedAt(ordered, current),
     messages,
     ...(current.result !== undefined ? { result: current.result } : {}),
   };
+}
+
+/** 列表 updatedAt：权威状态事件与 reminder 的较新者，忽略 terminal 后的状态重放。 */
+function boardUpdatedAt<T extends { date: string; kind?: TaskEventKind }>(
+  ordered: T[],
+  current: T,
+): string {
+  let latest = current.date;
+  let latestMs = Date.parse(current.date);
+  for (const message of ordered) {
+    if (message.kind !== 'reminder') continue;
+    const ms = Date.parse(message.date);
+    if (Number.isFinite(ms) && ms >= latestMs) {
+      latestMs = ms;
+      latest = message.date;
+    }
+  }
+  return latest;
 }
 
 /** Select the authoritative event from mailbox-ordered task messages. */

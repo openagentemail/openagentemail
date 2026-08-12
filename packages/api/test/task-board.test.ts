@@ -352,6 +352,44 @@ describe('task event reconstruction', () => {
     expect(task?.updatedAt).toBe(iso(NOW));
   });
 
+  test('a post-terminal submitted replay does not refresh updatedAt or reopen the ticket', () => {
+    const terminalAt = iso(NOW - HOUR);
+    const replayAt = iso(NOW);
+    const raw: RawTaskMessage[] = [
+      {
+        uid: 1,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: iso(NOW - 2 * HOUR),
+        state: 'submitted',
+        body: 'please start',
+      },
+      {
+        uid: 2,
+        from: 'owl@test.example',
+        to: 'fox@test.example',
+        subject: 'Ticket',
+        date: terminalAt,
+        state: 'completed',
+        body: 'done',
+        result: { ok: true },
+      },
+      {
+        uid: 3,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: replayAt,
+        state: 'submitted',
+        body: 'please start',
+      },
+    ];
+    const task = taskFromMessages(padId(1), raw);
+    expect(task?.state).toBe('completed');
+    expect(task?.updatedAt).toBe(terminalAt);
+  });
+
   test('closed_by_admin is a structured failed result, not a new state', () => {
     const closed = makeTask({
       state: 'failed',
