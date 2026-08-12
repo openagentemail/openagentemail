@@ -236,39 +236,6 @@ function adminOnlyForbiddenPage(): string {
   );
 }
 
-function grantsPageHtml(grants: ReturnType<typeof listGrantsForAuth>): string {
-  const rows =
-    grants.length === 0
-      ? `<p class="empty">No authorized clients yet.</p>`
-      : `<table><thead><tr><th>Client</th><th>Identity</th><th>Authorized</th><th>Last used</th><th></th></tr></thead><tbody>
-        ${grants
-          .map(
-            (g) => `<tr>
-            <td>${escapeHtml(g.clientName)}<br><span class="muted" style="font-size:0.8rem">${escapeHtml(clientHostname(g.clientId))}</span></td>
-            <td>${escapeHtml(g.address)}</td>
-            <td>${escapeHtml(g.createdAt)}</td>
-            <td>${escapeHtml(g.lastUsedAt)}</td>
-            <td>
-              <form method="post" action="/ui/api/oauth/grants/${escapeHtml(g.id)}/revoke">
-                <button class="danger" type="submit">Revoke</button>
-              </form>
-            </td>
-          </tr>`,
-          )
-          .join('')}
-        </tbody></table>`;
-
-  return shell(
-    'Authorized clients',
-    `<section class="card">
-      <h1>Authorized clients</h1>
-      <p class="muted">OAuth grants for MCP clients. Revoking deletes the grant and invalidates all its tokens immediately.</p>
-      <p><a class="btn quiet" href="/ui">← Back to inbox</a></p>
-      ${rows}
-    </section>`,
-  );
-}
-
 export function createUiOAuthPageRoutes(
   store: UiSessionStore,
   options: OAuthRouteOptions = {},

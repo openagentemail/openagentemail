@@ -120,6 +120,29 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('return selection.toString() === sourceNode.textContent');
   });
 
+  test('shell deep-links register after api/oauth/frame and do not swallow them', async () => {
+    const full = createApp({ uiEnabled: true });
+    const paths = full.routes.map((route) => `${route.method} ${route.path}`);
+    const shellIdx = paths.indexOf('GET /ui/inbox');
+    const apiIdx = paths.indexOf('GET /ui/api/me');
+    const frameIdx = paths.findIndex((p) => p.includes('/ui/frame'));
+    const oauthIdx = paths.findIndex((p) => p.includes('/ui/oauth'));
+    expect(shellIdx).toBeGreaterThan(-1);
+    expect(apiIdx).toBeGreaterThan(-1);
+    expect(frameIdx).toBeGreaterThan(-1);
+    expect(oauthIdx).toBeGreaterThan(-1);
+    // ADR：shell 必须在专用路由之后
+    expect(shellIdx).toBeGreaterThan(apiIdx);
+    expect(shellIdx).toBeGreaterThan(frameIdx);
+    expect(shellIdx).toBeGreaterThan(oauthIdx);
+
+    // 专用路由仍可达，不被 shell 抢走
+    expect((await full.request('/ui/api/me')).status).not.toBe(200); // 未登录 → 401
+    expect((await full.request('/ui/api/me')).status).toBe(401);
+    expect((await full.request('/ui/oauth/grants')).status).toBe(302);
+    expect((await full.request('/ui/inbox')).status).toBe(200);
+  });
+
   test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
 

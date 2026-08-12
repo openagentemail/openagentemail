@@ -22,6 +22,7 @@
 3. 新增 `GET /ui/overview` shell 后，Overview 路由表契约测试只允许 `/ui/api/overview`。
 4. OAuth grants 页面测试仍期望 200 HTML，与 ADR 302 冲突。
 5. 验收脚本 A51/A52 仍假设 admin 落地 Overview。
+6. 独立自审指出 shell 深链在 `registerUiAssets` 内先于 `/ui/api|/ui/oauth|/ui/frame` 注册，违反 ADR「必须后挂」硬约束。
 
 ## 我们是如何解决这些错误的？
 
@@ -30,3 +31,4 @@
 3. 更新路由表断言，允许 shell `GET /ui/overview`，并继续禁止 `/v1` overview。
 4. 更新 `oauth-as` 与 `ui-assets` 测试为 302 → `/ui/configure/clients`。
 5. 改写 `dev/acceptance.mjs`：登录/续期断言 Inbox，再经 nav 进入 Overview 跑后续面板用例；同步 `ui-dev-acceptance` 契约字符串。
+6. 拆出 `registerUiShell()`，在 app.ts 挂完 api/oauth/frame 之后再注册；删除死代码 `grantsPageHtml`；补注册顺序回归测试。

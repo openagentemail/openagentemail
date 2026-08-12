@@ -26,7 +26,7 @@ import { tasksRoute } from './routes/tasks.ts';
 import { agentCardRoute } from './routes/agent-card.ts';
 import { registerOAuthRoutes, type OAuthRouteOptions } from './routes/oauth.ts';
 import { createUiApiRoutes } from './routes/ui.ts';
-import { registerUiAssets } from './routes/ui-assets.ts';
+import { registerUiAssets, registerUiShell } from './routes/ui-assets.ts';
 import { createUiFrameRoutes } from './routes/ui-frame.ts';
 import {
   createUiOAuthApiRoutes,
@@ -123,6 +123,8 @@ export function createApp(options: AppOptions = {}): Hono {
     app.route('/ui/api', createUiApiRoutes(uiSessions));
     app.route('/ui/oauth', createUiOAuthPageRoutes(uiSessions, options.oauth ?? {}));
     app.route('/ui/frame', createUiFrameRoutes(uiSessions));
+    // ADR #26：shell 深链必须在 API / OAuth / frame 之后，防止吞专用路由。
+    registerUiShell(app);
   }
 
   app.onError((err, c) => {

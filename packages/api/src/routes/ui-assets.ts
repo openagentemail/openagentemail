@@ -11,7 +11,7 @@ const UI_FONTS: Record<string, Uint8Array> = {
   'Satoshi-Black.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Black.woff2', import.meta.url)),
 };
 
-/** ADR #26：app shell 覆盖的真实 /ui/* 子路径（API/assets/frame/OAuth 之后注册）。 */
+/** ADR #26：app shell 覆盖的真实 /ui/* 子路径（须在 API/assets/frame/OAuth 之后注册）。 */
 const UI_SHELL_PATHS = [
   '/ui',
   '/ui/',
@@ -48,6 +48,7 @@ function shell(c: Context) {
   return c.body(UI_HTML);
 }
 
+/** 静态资产：js/css/fonts/favicon。不含 shell 深链（防注册顺序吞路由）。 */
 export function registerUiAssets(app: Hono): void {
   app.get('/ui/app.js', (c) => {
     commonHeaders(c);
@@ -81,8 +82,13 @@ export function registerUiAssets(app: Hono): void {
     commonHeaders(c);
     return c.body(null, 204);
   });
+}
 
-  // Shell 路由放在静态资源之后注册；/ui/api、/ui/frame、/ui/oauth 由 app.ts 另行挂载且优先匹配。
+/**
+ * Dashboard shell 深链：必须在 /ui/api、/ui/frame、/ui/oauth 之后注册（ADR #26）。
+ * 路径与 API 前缀无交集，但后挂才能保证后续加宽匹配时不吞专用路由。
+ */
+export function registerUiShell(app: Hono): void {
   for (const path of UI_SHELL_PATHS) {
     app.get(path, shell);
   }
