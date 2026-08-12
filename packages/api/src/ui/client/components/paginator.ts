@@ -1,2 +1,2 @@
-/** 翻页组件预留。 */
-export const PAGINATOR_JS = "  /* paginator\uff1aPR1 \u65e0\u72ec\u7acb\u7ffb\u9875\u63a7\u4ef6\uff1b\u540e\u7eed Tasks/Notifications \u6e38\u6807\u63a5\u5165\u3002 */\n";
+/** Inbox 游标「Load more」；Tasks/Notifications 后续接入。 */
+export const PAGINATOR_JS = "  function renderLoadMore(button, hasMore, onLoad) {\n    if (!button) return;\n    button.hidden = !hasMore;\n    button.disabled = !hasMore;\n    button.onclick = hasMore ? onLoad : null;\n  }\n\n";

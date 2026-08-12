@@ -121,3 +121,36 @@
 
 1. 与 `backToOverview` / `createIdentityButton` 同一套 `configureSession` 显隐；HTML 默认 hidden 失败关闭；CSS 按 `data-session` 双保险。
 2. 新增请求级测试对比合法 shell 深链（`/ui/inbox`、`/ui/tasks/:id` 仍是 dashboard HTML）与保留前缀；复用 `parseLocationRoute` harness 钉 popstate 解析。
+
+---
+
+# Progress — #26 Dashboard 大改版 · PR 2
+
+日期：2026-08-12  
+分支：`tizerluo/worker-34-pr2`  
+范围：ADR §PR 2（Inbox 邮箱客户端闭环）
+
+## 我们实现了哪些功能？
+
+1. IMAP：`listMessagesPage` 支持 `folder=inbox|sent|all` 与 HMAC 游标（`mail-cursor-v1`，绑定 folder+address+(t,uid)，newest-first 含 uid 平局）；`listMessages` / Bearer `/v1/messages` 仍为 Inbox（TO 匹配）。
+2. 详情 ACL：`getMessage` / `setMessageSeen` / 新 `getMessageSource` 按 TO∨FROM 可读，Sent 点开不再 404。
+3. `GET /ui/api/messages` 扩展 `folder` + `nextCursor`；未知 folder 与坏游标 400；identity 读他人 403 且不碰 IMAP。
+4. 新增 `GET /ui/api/messages/:id/source`：同 message ACL、256KiB 截断 + `truncated`/`byteLength`、`Cache-Control: no-store`；列表永不预取。
+5. Inbox UI：左栏 identity + 仅 Inbox/Sent/All Mail（无 Scheduled/Trash）；桌面三栏；详情 Rendered/Plain/Source；OTP/links 置顶；宽屏元数据抽屉、≤1100px 折成 Headers tab；定制空态带可执行下一步。
+6. 移动端层级：folders → list → detail；应用 Back 与浏览器 Back 都走 `history.back()`；History state 只放 scope/mobileView/folder/messageId，不含正文。
+7. HTML 仍只进 sandbox iframe（`/ui/frame`）；Source 用 `createTextNode`。
+8. `bun test`：**653 pass / 0 fail**；`bun run build` 成功。PR 1 ZCode P2 债本期不接。
+
+## 我们遇到了哪些错误？
+
+1. `waitForMessage` 仍调用已删除的 `listMessagesWith`，typecheck 在 `imap.ts` 报错。
+2. PR1 经验：UI 模块若改成模板字符串会吞正则反斜杠，因此本期继续用 `json.dumps` 写回字符串模块。
+3. `selectIdentity` 与 `refreshMessages` 必须相邻，否则 `ui-assets` 切片断言会把中间新函数算进去。
+4. 独立自审 P1：已选身份快路径只改 `mobileView` 不 `pushState`，移动端 Back 会跳过 list。
+
+## 我们是如何解决这些错误的？
+
+1. `findMatchWith` 改为 `listMessagesPageWith(..., folder: 'inbox')`，wait 仍只等收件。
+2. 用 Python `json.dumps` 补丁脚本改 shell/store/dom/router/app/inbox/css，避免手改 JSON 转义。
+3. `selectFolder` 放在 `refreshMessages` 之后；`selectIdentity` 仍紧挨 `refreshMessages`。
+4. 快路径在 `folders → list` 时 `syncUrlFromScope(false)`；folders 层 URL 不含 address，避免落地就把 list 路径 replace 掉。

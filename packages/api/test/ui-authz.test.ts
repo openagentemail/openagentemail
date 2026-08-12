@@ -117,6 +117,12 @@ describe('UI authorization boundaries', () => {
     expect(denied.status).toBe(403);
     expect(deps.listMessages).not.toHaveBeenCalled();
 
+    const deniedSource = await app.request(
+      '/ui/api/messages/2/source?address=owl%40test.example',
+      { headers: { cookie } },
+    );
+    expect(deniedSource.status).toBe(403);
+
     const deniedSeen = await app.request('/ui/api/messages/2/seen', {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
@@ -146,7 +152,10 @@ describe('UI authorization boundaries', () => {
         { headers: { cookie } },
       );
       expect(response.status).toBe(200);
-      expect(deps.listMessages).toHaveBeenCalledWith('fox@test.example', 50);
+      expect(deps.listMessages).toHaveBeenCalledWith('fox@test.example', 50, {
+        folder: 'inbox',
+        cursor: undefined,
+      });
     }
   });
 

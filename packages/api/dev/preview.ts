@@ -298,10 +298,22 @@ function buildPreviewNotifyMessages(topic: string, since?: string): PreviewNotif
 
 const dependencies = {
   listIdentities: () => identities,
-  listMessages: async (address: string, limit: number) =>
-    address === 'fox@preview.test' ? messages.slice(0, limit) : [],
+  listMessages: async (address: string, limit: number, query?: { folder?: string }) => {
+    const folder = query?.folder ?? 'inbox';
+    if (address !== 'fox@preview.test') return { messages: [], nextCursor: null };
+    if (folder === 'sent') return { messages: [], nextCursor: null };
+    return { messages: messages.slice(0, limit), nextCursor: null };
+  },
   getMessage: async (address: string, id: string) =>
     address === 'fox@preview.test' ? (details.get(id) ?? null) : null,
+  getMessageSource: async (address: string, id: string) => {
+    if (address !== 'fox@preview.test' || !details.has(id)) return null;
+    const detail = details.get(id)!;
+    const source =
+      `From: ${detail.from}\r\nTo: ${detail.to}\r\nSubject: ${detail.subject}\r\n\r\n` +
+      (detail.text ?? '');
+    return { id, source, truncated: false, byteLength: Buffer.byteLength(source) };
+  },
   getMailboxScan,
   setPushContentTier: (address: string, tier: 1 | 2 | 3) => {
     const identity = identities.find((entry) => entry.address === address.toLowerCase());
