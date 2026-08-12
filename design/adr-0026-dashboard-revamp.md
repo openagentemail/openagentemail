@@ -31,7 +31,7 @@
 
 基线细节同时定稿如下：Tasks 顶部为 Active（submitted+working）、Input required、Completed、Failed、All tabs，默认 Active；submitted 超过 4 小时未出现后继事件、working 超过 24 小时未出现后继事件标红，服务端返回 `overdueReason/overdueAt`，避免各浏览器时钟口径漂移；详情保留时间线和可折叠任务原文，RESULT 的 object 渲染为键值表，非 object 采用安全的格式化值；仅 `input-required` 显示回复框，提交后写 `working` 状态事件。
 
-Notifications 支持 channel、level 和日期区间筛选；level 3 的邮件到达内容（正文/OTP）在服务端标记 `sensitive=true`，前端默认显示 `•••`，用户逐条展开且不持久化展开状态；保留“为什么我没收到”入口，显示筛选频道最近一次成功投递时间、通知配置状态和 verify 操作。Push tier 使用三张人话卡片，tier 3 继续要求 `confirm_risk=true`，不允许仅靠前端确认。
+Notifications 支持 channel、level 和日期区间筛选；push tier 3（推送内容档）的邮件到达内容（正文/OTP）在服务端标记 `sensitive=true`，且 sensitive 与投递 level 正交，无论 `urgent`、`normal` 或 `low` 都默认遮蔽。前端默认显示 `•••`，用户逐条展开且不持久化展开状态；保留“为什么我没收到”入口，显示筛选频道最近一次成功投递时间、通知配置状态和 verify 操作。Push tier 使用三张人话卡片，tier 3 继续要求 `confirm_risk=true`，不允许仅靠前端确认。
 
 ## 新信息架构定稿
 
