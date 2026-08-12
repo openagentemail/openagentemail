@@ -368,6 +368,38 @@
 
 1. 查询串按字符串白名单解析再 `transform` 成 `NotificationLogLimit`；路由去掉第二道 `isNotificationLogLimit` 兜底。
 
+---
+
+## #26 PR 4（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Tasks 工单板服务端化：`GET /ui/api/tasks?status=&period=&limit=&cursor=` 返回 `{tasks,nextCursor,totalApprox,queryNow}`。默认 `status=active`（submitted+working）。period=`24h|7d|14d|30d`，limit=`20|50|100`。opaque HMAC cursor 绑定 `(updatedAt,id,status|period|viewer)`，跨筛选串页 `invalid_cursor`。terminal 仅 `updatedAt>=now-30d` 可见，不删 IMAP。IMAP 全扫后过滤切页 + 30s 短缓存；`queryNow` 服务端一次取值。
+2. 超时标红：submitted 以最后 submitted 事件/createdAt+4h，working 以最后 working 事件+24h；input-required 不按这两条标红。服务端返回 `overdueReason/overdueAt`。
+3. 详情：状态时间线 + 可折叠任务原文；RESULT object 渲染键值表，非 object 安全格式化。admin 关闭显示 Closed。
+4. `POST /ui/api/tasks/:id/reply`：仅 input-required 写 working。identity=自身；admin 必须显式选任务中的本方 from。
+5. admin 催办 `POST /:id/remind`：新 event kind `reminder`（独立 HMAC，不伪装 working），幂等 key + 15s 冷却，不改 task.state；已 terminal 409。
+6. admin 关闭 `POST /:id/close` `{reason}`：terminal failed + `{closed_by_admin,reason}`；已 terminal 409；前端二次确认。
+7. 顶部 tabs：Active / Input required / Completed / Failed / All，默认 Active；period×limit + Load more。
+8. Bearer `/v1/tasks?state=` 保持 MCP 兼容。Trust-30d / cookie Path / Origin / body-limit 未改。不迁移权威存储。
+9. `bun test`（packages/api）：**727 pass / 0 fail**；`bun run build` 全绿。1k/10k 内存 filter+sort+page 基准：1k 15ms/10 页，10k 3274ms/100 页（全量翻完；短缓存只减重复 IMAP 解析）。
+
+### 我们遇到了哪些错误？
+
+1. 旧 UI 契约钉死客户端 `TASKS_RENDER_LIMIT=500` 与 `?state=`；默认列表精确等于 `{tasks:[TASK_A,TASK_B]}`，而 TASK 日期在 2024，会被 30d/active 滤掉。
+2. `TaskService` 新增方法后，Bearer 路由测试的 in-memory mock 缺 `listBoard/reply/remind/close` 无法通过类型/运行。
+3. `export { encodeTaskBoardCursor }` 仅再导出时，本文件调用处出现 `ReferenceError: encodeTaskBoardCursor is not defined`（Bun 对 import+re-export 同名绑定的作用域）。
+4. `expect().rejects.toBeInstanceOf(InvalidTaskCursorError)` 曾因从 `tasks.ts` 取到 `undefined`（未 re-export）失败。
+5. 静态测试 `UI_JS` 含 `'/ui/api/tasks'` 字面量，改成 `'/ui/api/tasks?' + params` 后引号边界对不上。
+
+### 我们是如何解决这些错误的？
+
+1. 工单板改走 `listBoard`；fixture 改到 2026-08；UI 改为 tabs + 服务端分页；更新 `ui-assets` / `ui-tasks` 契约。
+2. Bearer mock 补齐新方法，行为仍走原 `list/get/update`。
+3. 本文件改 `import * as taskBoardCursor` 再调用；对外仍从 `task-cursor.ts` re-export。
+4. 测试改为从 `task-cursor.ts` 导入 `InvalidTaskCursorError`。
+5. 静态断言改为 `'/ui/api/tasks?' + params.join('&')`。
+
 
 
 

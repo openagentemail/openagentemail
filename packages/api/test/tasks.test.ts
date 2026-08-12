@@ -58,6 +58,22 @@ const service: TaskService = {
     calls.push({ operation: 'list', input: state });
     return state && current.state !== state ? [] : [current, task({ id: '61d1105a-4fbd-4e19-b682-754c3ef0f1bc', from: C, to: B })];
   },
+  async listBoard() {
+    calls.push({ operation: 'listBoard' });
+    return { tasks: [], nextCursor: null, totalApprox: 0, queryNow: '2026-08-12T00:00:00.000Z' };
+  },
+  async reply(input) {
+    calls.push({ operation: 'reply', input });
+    return current;
+  },
+  async remind(input) {
+    calls.push({ operation: 'remind', input });
+    return current;
+  },
+  async close(input) {
+    calls.push({ operation: 'close', input });
+    return current;
+  },
   async get(id) {
     calls.push({ operation: 'get', input: id });
     return id === current.id ? current : null;

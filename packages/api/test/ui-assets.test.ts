@@ -547,7 +547,10 @@ describe('UI static asset contract', () => {
       'tasks-rows',
       'tasks-state',
       'tasks-refresh',
-      'tasks-state-filter',
+      'tasks-status-tabs',
+      'tasks-period',
+      'tasks-limit',
+      'tasks-load-more',
       'tasks-notice',
       'tasks-updated',
       'tasks-shown',
@@ -697,7 +700,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('function enterTasks(');
     expect(UI_JS).toContain('async function loadTasks(');
     expect(UI_JS).toContain('async function selectTask(');
-    expect(UI_JS).toContain("'/ui/api/tasks'");
+    expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).toContain("value = '__tasks__'");
     expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
@@ -746,18 +749,29 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('/v1/tasks');
   });
 
-  // 任务行数上限：与 notify F2 同级
-  test('task rows are capped at TASKS_RENDER_LIMIT with an honest truncation label', () => {
-    expect(UI_JS).toContain('var TASKS_RENDER_LIMIT = 500');
-    expect(UI_JS).toContain('rows.slice(0, TASKS_RENDER_LIMIT)');
-    expect(UI_JS).toContain("'Showing latest ' + TASKS_RENDER_LIMIT");
+  // 任务列表改为服务端 20/50/100 + Load more，不再客户端截 500
+  test('task board uses server status/period/limit pagination instead of a client 500 cap', () => {
+    expect(UI_JS).not.toContain('var TASKS_RENDER_LIMIT = 500');
+    expect(UI_JS).toContain("state.tasksFilter || 'active'");
+    expect(UI_JS).toContain("state.tasksPeriod || '30d'");
+    expect(UI_JS).toContain("String(state.tasksLimit || 20)");
+    expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
+    expect(UI_JS).toContain("params.push('cursor=' + encodeURIComponent(state.tasksNextCursor))");
+    expect(UI_HTML).toContain('id="tasks-load-more"');
+    expect(UI_HTML).toContain('data-status="active"');
+    expect(UI_HTML).toContain('data-status="input-required"');
+    expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/reply'");
+    expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/remind'");
+    expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/close'");
+    expect(UI_JS).toContain("return 'Closed'");
+    expect(UI_JS).toContain('task-result-table');
+    expect(UI_JS).toContain('Original request');
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderTaskRows('),
-      UI_JS.indexOf('function renderTaskDetail('),
+      UI_JS.indexOf('function fillTaskFromSelect('),
     );
-    expect(renderRows).toContain('var truncated = total > TASKS_RENDER_LIMIT');
-    expect(renderRows).toContain('visible.forEach');
-    expect(renderRows).not.toContain('state.tasks.forEach');
+    expect(renderRows).toContain('rows.forEach');
+    expect(renderRows).not.toContain('rows.slice(0, TASKS_RENDER_LIMIT)');
   });
 
   // 时间线条目上限：长工单不全量建节点
@@ -850,7 +864,10 @@ describe('UI static asset contract', () => {
       'state.tasks = []',
       "state.tasksStatus = 'idle'",
       "state.tasksMessage = ''",
-      "state.tasksFilter = ''",
+      "state.tasksFilter = 'active'",
+      "state.tasksPeriod = '30d'",
+      'state.tasksLimit = 20',
+      "state.tasksNextCursor = ''",
       'state.tasksUpdatedAt = 0',
       'state.tasksPending = false',
       "state.tasksFetchKey = ''",

@@ -1,0 +1,406 @@
+/**
+ * 工单板：status/period/limit/cursor、4h/24h 超时、terminal 30 天窗、
+ * reminder 不改 state、IMAP 重建。权威存储仍是 stamped 邮件线程。
+ */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { RawTaskMessage, Task, TaskState } from '../src/lib/tasks.ts';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'imap-secret';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'smtp-secret';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-board-'));
+
+const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
+const {
+  TASK_BOARD_LIMITS,
+  TASK_BOARD_PERIODS,
+  currentTaskMessage,
+  isClosedByAdmin,
+  listTaskBoard,
+  setTaskListAllForTests,
+  setTaskNowForTests,
+  taskFromMessages,
+  taskOverdue,
+} = await import('../src/lib/tasks.ts');
+const { encodeTaskBoardCursor, InvalidTaskCursorError } = await import('../src/lib/task-cursor.ts');
+
+const NOW = Date.parse('2026-08-12T12:00:00.000Z');
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+
+function iso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
+function padId(n: number): string {
+  const hex = n.toString(16).padStart(12, '0');
+  return `11111111-1111-4111-8111-${hex}`;
+}
+
+function makeTask(overrides: Partial<Task> & { state: TaskState; updatedAt: string }): Task {
+  const id = overrides.id ?? padId(1);
+  const createdAt = overrides.createdAt ?? overrides.updatedAt;
+  const from = overrides.from ?? 'fox@test.example';
+  const to = overrides.to ?? 'owl@test.example';
+  const subject = overrides.subject ?? 'Ticket';
+  const messages = overrides.messages ?? [
+    {
+      id: '1',
+      from,
+      to,
+      subject,
+      date: createdAt,
+      state: 'submitted' as const,
+      body: 'please start',
+    },
+    ...(overrides.state === 'submitted'
+      ? []
+      : [
+          {
+            id: '2',
+            from: to,
+            to: from,
+            subject,
+            date: overrides.updatedAt,
+            state: overrides.state,
+            body: 'update',
+            ...(overrides.result !== undefined ? { result: overrides.result } : {}),
+          },
+        ]),
+  ];
+  return {
+    id,
+    from,
+    to,
+    subject,
+    state: overrides.state,
+    createdAt,
+    updatedAt: overrides.updatedAt,
+    messages,
+    ...(overrides.result !== undefined ? { result: overrides.result } : {}),
+  };
+}
+
+beforeEach(() => {
+  setTaskNowForTests(() => NOW);
+});
+
+afterEach(() => {
+  setTaskNowForTests(null);
+  setTaskListAllForTests(null);
+});
+
+describe('task overdue clock', () => {
+  test('submitted is overdue at createdAt/last submitted + 4h inclusive', () => {
+    const fresh = makeTask({
+      state: 'submitted',
+      createdAt: iso(NOW - 4 * HOUR + 1),
+      updatedAt: iso(NOW - 4 * HOUR + 1),
+    });
+    expect(taskOverdue(fresh, NOW)).toEqual({ overdueReason: null, overdueAt: null });
+
+    const due = makeTask({
+      state: 'submitted',
+      createdAt: iso(NOW - 4 * HOUR),
+      updatedAt: iso(NOW - 4 * HOUR),
+    });
+    expect(taskOverdue(due, NOW)).toEqual({
+      overdueReason: 'submitted',
+      overdueAt: iso(NOW),
+    });
+  });
+
+  test('working is overdue at last working event + 24h; submitted clock does not apply', () => {
+    const workingAt = NOW - 24 * HOUR;
+    const due = makeTask({
+      state: 'working',
+      createdAt: iso(NOW - 48 * HOUR),
+      updatedAt: iso(workingAt),
+      messages: [
+        {
+          id: '1',
+          from: 'fox@test.example',
+          to: 'owl@test.example',
+          subject: 'Ticket',
+          date: iso(NOW - 48 * HOUR),
+          state: 'submitted',
+          body: 'go',
+        },
+        {
+          id: '2',
+          from: 'owl@test.example',
+          to: 'fox@test.example',
+          subject: 'Ticket',
+          date: iso(workingAt),
+          state: 'working',
+          body: 'on it',
+        },
+      ],
+    });
+    expect(taskOverdue(due, NOW)).toEqual({
+      overdueReason: 'working',
+      overdueAt: iso(NOW),
+    });
+    expect(taskOverdue(due, NOW - 1)).toEqual({ overdueReason: null, overdueAt: null });
+  });
+
+  test('input-required is never flagged by the 4h/24h rules', () => {
+    const stuck = makeTask({
+      state: 'input-required',
+      createdAt: iso(NOW - 10 * DAY),
+      updatedAt: iso(NOW - 9 * DAY),
+    });
+    expect(taskOverdue(stuck, NOW)).toEqual({ overdueReason: null, overdueAt: null });
+  });
+
+  test('terminal tasks are not overdue', () => {
+    const done = makeTask({
+      state: 'completed',
+      createdAt: iso(NOW - 10 * DAY),
+      updatedAt: iso(NOW - 9 * DAY),
+    });
+    expect(taskOverdue(done, NOW)).toEqual({ overdueReason: null, overdueAt: null });
+  });
+});
+
+describe('task board list filters and cursor', () => {
+  test('active is submitted+working; input-required is its own tab', async () => {
+    const submitted = makeTask({ id: padId(1), state: 'submitted', updatedAt: iso(NOW - HOUR) });
+    const working = makeTask({ id: padId(2), state: 'working', updatedAt: iso(NOW - 2 * HOUR) });
+    const waiting = makeTask({
+      id: padId(3),
+      state: 'input-required',
+      updatedAt: iso(NOW - 3 * HOUR),
+    });
+    const done = makeTask({ id: padId(4), state: 'completed', updatedAt: iso(NOW - 4 * HOUR) });
+    setTaskListAllForTests(async () => [submitted, working, waiting, done]);
+
+    const active = await listTaskBoard(
+      { status: 'active', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(active.tasks.map((task) => task.id)).toEqual([submitted.id, working.id]);
+    expect(active.queryNow).toBe(iso(NOW));
+
+    const waitingPage = await listTaskBoard(
+      { status: 'input-required', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(waitingPage.tasks.map((task) => task.id)).toEqual([waiting.id]);
+  });
+
+  test('terminal tasks older than 30 days are hidden; period is a query window', async () => {
+    const recentFail = makeTask({
+      id: padId(1),
+      state: 'failed',
+      updatedAt: iso(NOW - 30 * DAY),
+    });
+    const oldFail = makeTask({
+      id: padId(2),
+      state: 'failed',
+      updatedAt: iso(NOW - 30 * DAY - 1),
+    });
+    const oldWorking = makeTask({
+      id: padId(3),
+      state: 'working',
+      updatedAt: iso(NOW - 40 * DAY),
+    });
+    setTaskListAllForTests(async () => [recentFail, oldFail, oldWorking]);
+
+    const failed = await listTaskBoard(
+      { status: 'failed', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(failed.tasks.map((task) => task.id)).toEqual([recentFail.id]);
+
+    const day = await listTaskBoard(
+      { status: 'failed', period: '24h', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(day.tasks).toEqual([]);
+
+    const allActive = await listTaskBoard(
+      { status: 'active', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(allActive.tasks).toEqual([]);
+  });
+
+  test('identity ACL hides peer tickets before paging', async () => {
+    const mine = makeTask({
+      id: padId(1),
+      state: 'working',
+      updatedAt: iso(NOW),
+      from: 'fox@test.example',
+      to: 'owl@test.example',
+    });
+    const peer = makeTask({
+      id: padId(2),
+      state: 'working',
+      updatedAt: iso(NOW - 1),
+      from: 'cat@test.example',
+      to: 'dog@test.example',
+    });
+    setTaskListAllForTests(async () => [mine, peer]);
+    const page = await listTaskBoard(
+      { status: 'active', period: '30d', limit: 20 },
+      { kind: 'identity', address: 'Fox@test.example' },
+    );
+    expect(page.tasks.map((task) => task.id)).toEqual([mine.id]);
+    expect(page.totalApprox).toBe(1);
+  });
+
+  test('every period × limit combination pages without crossing filters', async () => {
+    const tasks = Array.from({ length: 120 }, (_, index) =>
+      makeTask({
+        id: padId(index + 1),
+        state: index % 2 === 0 ? 'working' : 'completed',
+        updatedAt: iso(NOW - index * 60_000),
+      }),
+    );
+    setTaskListAllForTests(async () => tasks);
+
+    for (const period of TASK_BOARD_PERIODS) {
+      for (const limit of TASK_BOARD_LIMITS) {
+        const first = await listTaskBoard(
+          { status: 'all', period, limit },
+          { kind: 'admin' },
+        );
+        expect(first.tasks.length).toBeGreaterThan(0);
+        expect(first.tasks.length).toBeLessThanOrEqual(limit);
+        if (!first.nextCursor) continue;
+        const second = await listTaskBoard(
+          { status: 'all', period, limit, cursor: first.nextCursor },
+          { kind: 'admin' },
+        );
+        const overlap = first.tasks.filter((task) =>
+          second.tasks.some((other) => other.id === task.id),
+        );
+        expect(overlap).toEqual([]);
+
+        await expect(
+          listTaskBoard(
+            { status: 'active', period, limit, cursor: first.nextCursor },
+            { kind: 'admin' },
+          ),
+        ).rejects.toBeInstanceOf(InvalidTaskCursorError);
+
+        const otherPeriod = period === '24h' ? '7d' : '24h';
+        await expect(
+          listTaskBoard(
+            { status: 'all', period: otherPeriod, limit, cursor: first.nextCursor },
+            { kind: 'admin' },
+          ),
+        ).rejects.toBeInstanceOf(InvalidTaskCursorError);
+      }
+    }
+  });
+
+  test('cursor with a foreign fingerprint is rejected', async () => {
+    setTaskListAllForTests(async () => [
+      makeTask({ id: padId(1), state: 'working', updatedAt: iso(NOW) }),
+    ]);
+    const forged = encodeTaskBoardCursor({
+      fp: 'completed|30d|admin',
+      t: NOW,
+      id: padId(1),
+    });
+    await expect(
+      listTaskBoard(
+        { status: 'active', period: '30d', limit: 20, cursor: forged },
+        { kind: 'admin' },
+      ),
+    ).rejects.toBeInstanceOf(InvalidTaskCursorError);
+  });
+});
+
+describe('task event reconstruction', () => {
+  test('reminder events do not change task.state', () => {
+    const raw: RawTaskMessage[] = [
+      {
+        uid: 1,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: iso(NOW - HOUR),
+        state: 'submitted',
+        body: 'please start',
+      },
+      {
+        uid: 2,
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Ticket',
+        date: iso(NOW),
+        state: 'working',
+        body: 'please hurry',
+        kind: 'reminder',
+        idempotencyKey: 'click-1',
+      },
+    ];
+    const current = currentTaskMessage(raw);
+    expect(current.state).toBe('submitted');
+    expect(current.kind).toBeUndefined();
+    const task = taskFromMessages(padId(1), raw);
+    expect(task?.state).toBe('submitted');
+    expect(task?.messages[1]?.kind).toBe('reminder');
+    expect(task?.updatedAt).toBe(iso(NOW));
+  });
+
+  test('closed_by_admin is a structured failed result, not a new state', () => {
+    const closed = makeTask({
+      state: 'failed',
+      updatedAt: iso(NOW),
+      result: { closed_by_admin: true, reason: 'duplicate' },
+    });
+    expect(isClosedByAdmin(closed)).toBe(true);
+    expect(isClosedByAdmin(makeTask({ state: 'failed', updatedAt: iso(NOW), result: { ok: false } }))).toBe(
+      false,
+    );
+  });
+});
+
+describe('task board in-memory baseline', () => {
+  test('filter+sort+page 1k and 10k task messages', async () => {
+    const sizes = [1_000, 10_000] as const;
+    const results: Record<string, { ms: number; pages: number; totalApprox: number }> = {};
+    for (const size of sizes) {
+      const catalog = Array.from({ length: size }, (_, index) =>
+        makeTask({
+          id: padId(index + 1),
+          state: index % 5 === 0 ? 'completed' : index % 3 === 0 ? 'submitted' : 'working',
+          updatedAt: iso(NOW - (index % 400) * 60_000),
+        }),
+      );
+      setTaskListAllForTests(async () => catalog);
+      const started = performance.now();
+      let pages = 0;
+      let cursor: string | undefined;
+      let totalApprox = 0;
+      do {
+        const page = await listTaskBoard(
+          { status: 'all', period: '30d', limit: 100, cursor },
+          { kind: 'admin' },
+        );
+        totalApprox = page.totalApprox;
+        pages += 1;
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor);
+      results[String(size)] = {
+        ms: Math.round(performance.now() - started),
+        pages,
+        totalApprox,
+      };
+    }
+    console.log('[task-board baseline]', JSON.stringify(results));
+    expect(results['1000']!.totalApprox).toBeGreaterThan(0);
+    expect(results['10000']!.pages).toBeGreaterThan(results['1000']!.pages);
+    // 短缓存只减重复 IMAP 解析；本基准是纯内存 filter/sort/page。
+    expect(results['10000']!.ms).toBeLessThan(30_000);
+  });
+});
