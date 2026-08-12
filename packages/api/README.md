@@ -44,7 +44,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开**；`authorization_servers` = AS issuer。可选 env `MCP_PUBLIC_URL` 覆盖对外 origin
 - `GET /.well-known/oauth-authorization-server` — RFC 8414（PKCE S256、CIMD、iss 响应）；**公开**
 - `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；旧管理页 `/ui/oauth/grants` 302 → `/ui/configure/clients`
-- Dashboard（ADR #26 PR1）：`/ui` 与 `/ui/*` shell 子路径（Inbox 默认落地），静态资源仍为 `/ui/styles.css` + `/ui/app.js` 单资源、零 bundler
+- Dashboard（ADR #26 PR1）：`/ui` 与 `/ui/*` shell 子路径（Inbox 默认落地），静态资源仍为 `/ui/styles.css` + `/ui/app.js` 单资源、零 bundler；`bun test` 对拼装后的 `UI_JS` 做 `new Function` 语法闸 + 关键 `async` 加载器钉死
 - OAuth 存储：`DATA_DIR/oauth.json`（只存哈希；与 identities.json 同模式）
 - `GET /v1/audit/events?limit=&event=` → `{events:[…]}`（**admin only**；scrubbed JSONL `DATA_DIR/audit.jsonl`；见 docs/security.md）
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
