@@ -2,8 +2,8 @@
 
 - **时间**：2026-08-12
 - **分支**：`tizerluo/worker-34-pr1`（未动 `main`）
-- **HEAD commit**：`757b23c`（返工第2轮：`apiJson` 204；此前返工第1轮 tip 见上轮记录）
-- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序修复；`a6d0e1a` taskTimelineBody 转义 + UI_JS 语法闸
+- **HEAD commit**：`6ec3a5e`（返工第3轮：decode 安全 + shell-routes 对齐）
+- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序；`a6d0e1a` taskTimelineBody；`757b23c` apiJson 204；`6ec3a5e` deep-link decode/shell paths
 - **PR**：[#25](https://github.com/openagentemail/openagentemail/pull/25) — `feat(api): modularize dashboard shell and real /ui routes (#26 PR 1)`
 - **Repo**：`openagentemail/openagentemail`
 
