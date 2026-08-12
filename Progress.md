@@ -489,6 +489,7 @@
 1. 统一 `queuedEvents`：reminder 与 working/failed 都进 overlay，`applyOverlayMessages` 按 `currentTaskMessage` + `boardUpdatedAt` 重建。
 2. terminal 之后（mailbox 顺序或时间）的 reminder 不刷新 `updatedAt`。
 3. `loadAllTasksCached` 对 IMAP/测试快照 `map(mergeQueuedEvents)` 再过滤切页。
+4. overlay 退役：IMAP 已有同 state 事件、已 terminal、或已有更晚状态信时丢掉补丁，避免盖住权威的新 input-required；丢掉时 `invalidateTaskListCache`。
 
 
 

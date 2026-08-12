@@ -710,4 +710,51 @@ describe('IMAP lag overlay for state transitions and list', () => {
     expect(page.tasks[0]?.state).toBe(detail?.state);
     expect(page.tasks[0]?.updatedAt).toBe(detail?.updatedAt);
   });
+
+  test('overlay retires once IMAP has moved past the queued working event', async () => {
+    const waiting = makeTask({
+      id: padId(15),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const { store } = installLaggingMailbox(waiting);
+    await replyTask({ id: waiting.id, from: 'fox@test.example', body: 'here' });
+    expect((await getTask(waiting.id))?.state).toBe('working');
+
+    const advanced: Task = {
+      ...waiting,
+      state: 'input-required',
+      updatedAt: iso(NOW),
+      messages: [
+        ...waiting.messages,
+        {
+          id: 'w',
+          from: 'fox@test.example',
+          to: 'owl@test.example',
+          subject: waiting.subject,
+          date: iso(NOW),
+          state: 'working',
+          body: 'here',
+        },
+        {
+          id: 'i',
+          from: 'owl@test.example',
+          to: 'fox@test.example',
+          subject: waiting.subject,
+          date: iso(NOW),
+          state: 'input-required',
+          body: 'need more',
+        },
+      ],
+    };
+    store.set(waiting.id, advanced);
+    const detail = await getTask(waiting.id);
+    expect(detail?.state).toBe('input-required');
+    expect(detail?.messages.filter((message) => message.state === 'working')).toHaveLength(1);
+    const page = await listTaskBoard(
+      { status: 'all', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(page.tasks[0]?.state).toBe('input-required');
+  });
 });

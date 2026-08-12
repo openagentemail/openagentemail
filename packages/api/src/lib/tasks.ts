@@ -476,10 +476,18 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     });
   }
   return (
-    task.state === queued.message.state
-    && task.messages.some(
-      (message) => message.kind !== 'reminder' && message.state === queued.message.state,
-    )
+    task.messages.some((message) => {
+      if (message.kind === 'reminder' || message.state !== queued.message.state) return false;
+      const at = Date.parse(message.date);
+      return Number.isFinite(at) && at >= queued.sentAt - 1000;
+    })
+    // 权威视图已越过该事件：已 terminal，或已有更晚的状态信。
+    || TERMINAL_TASK_STATES.includes(task.state)
+    || task.messages.some((message) => {
+      if (message.kind === 'reminder') return false;
+      const at = Date.parse(message.date);
+      return Number.isFinite(at) && at > queued.sentAt;
+    })
   );
 }
 
@@ -507,9 +515,11 @@ function mergeQueuedEvents(task: Task): Task {
     return !eventIsIndexed(task, row);
   });
   if (stillLagging.length === 0) {
+    if (pending.length > 0) invalidateTaskListCache();
     queuedEvents.delete(task.id);
     return task;
   }
+  if (stillLagging.length !== pending.length) invalidateTaskListCache();
   queuedEvents.set(task.id, stillLagging);
   return applyOverlayMessages(task, stillLagging.map((row) => row.message));
 }
