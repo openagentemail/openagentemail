@@ -607,7 +607,8 @@ export function zonedDayBounds(
   const day = date === 'today' ? dayFmt.format(new Date(now)) : date;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RangeError('invalid_date');
 
-  const offsetAt = (utcMs: number): number => {
+  /** 把 utc 瞬间读成该时区墙钟。hour=24 视为次日 00:00。 */
+  const localWallAt = (utcMs: number) => {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone,
       hour12: false,
@@ -619,10 +620,72 @@ export function zonedDayBounds(
       second: '2-digit',
     }).formatToParts(new Date(utcMs));
     const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    let year = get('year');
+    let month = get('month');
+    let dayNum = get('day');
     let hour = get('hour');
-    if (hour === 24) hour = 0;
-    const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), hour, get('minute'), get('second'));
+    if (hour === 24) {
+      hour = 0;
+      const rolled = new Date(Date.UTC(year, month - 1, dayNum + 1));
+      year = rolled.getUTCFullYear();
+      month = rolled.getUTCMonth() + 1;
+      dayNum = rolled.getUTCDate();
+    }
+    return { year, month, day: dayNum, hour, minute: get('minute'), second: get('second') };
+  };
+
+  const offsetAt = (utcMs: number): number => {
+    const wall = localWallAt(utcMs);
+    const asUtc = Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute, wall.second);
     return asUtc - utcMs;
+  };
+
+  /**
+   * 目标日历日当地 00:00 对应的 UTC。
+   * 一次性 guess-offset 会在午夜两侧 DST 切换时用错偏移（Lord_Howe 半小时、Santiago 整小时）。
+   * 迭代收敛后必须验证墙钟；00:00 被跳过则取该日第一个可表示瞬间。
+   */
+  const zonedLocalMidnightUtc = (year: number, month: number, dayNum: number): number => {
+    const asUtc = Date.UTC(year, month - 1, dayNum, 0, 0, 0);
+    let utc = asUtc;
+    for (let i = 0; i < 8; i++) {
+      const next = asUtc - offsetAt(utc);
+      if (next === utc) break;
+      utc = next;
+    }
+
+    const onDate = (ms: number) => {
+      const wall = localWallAt(ms);
+      return wall.year === year && wall.month === month && wall.day === dayNum;
+    };
+    const atMidnight = (ms: number) => {
+      const wall = localWallAt(ms);
+      return onDate(ms) && wall.hour === 0 && wall.minute === 0 && wall.second === 0;
+    };
+
+    if (atMidnight(utc)) return utc;
+
+    // 偏移在 guess 与目标午夜之间切过：按墙钟差重算。
+    for (let i = 0; i < 4; i++) {
+      const wall = localWallAt(utc);
+      const gotAsUtc = Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute, wall.second);
+      const adjusted = utc + (asUtc - gotAsUtc);
+      if (adjusted === utc) break;
+      utc = adjusted;
+      if (atMidnight(utc)) return utc;
+    }
+    if (onDate(utc)) return utc;
+
+    const step = 30 * 60 * 1000;
+    const wall = localWallAt(utc);
+    const dir = asUtc >= Date.UTC(wall.year, wall.month - 1, wall.day, 0, 0, 0) ? 1 : -1;
+    for (let i = 0; i < 48; i++) {
+      utc += dir * step;
+      if (!onDate(utc)) continue;
+      while (onDate(utc - 1000)) utc -= 1000;
+      return utc;
+    }
+    throw new RangeError('invalid_date');
   };
 
   const [year, month, dayNum] = day.split('-').map(Number) as [number, number, number];
@@ -635,10 +698,9 @@ export function zonedDayBounds(
   ) {
     throw new RangeError('invalid_date');
   }
-  const guess = Date.UTC(year, month - 1, dayNum, 0, 0, 0);
-  const start = guess - offsetAt(guess);
-  const nextGuess = Date.UTC(year, month - 1, dayNum + 1, 0, 0, 0);
-  const end = nextGuess - offsetAt(nextGuess);
+  const start = zonedLocalMidnightUtc(year, month, dayNum);
+  const next = new Date(Date.UTC(year, month - 1, dayNum + 1));
+  const end = zonedLocalMidnightUtc(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate());
   return {
     date: day,
     from: new Date(start).toISOString(),

@@ -240,6 +240,53 @@ describe('notification-log store', () => {
     expect(bounds.to).toBe('2026-08-13T00:00:00.000Z');
   });
 
+  test('zonedDayBounds iterates DST offsets so Lord_Howe and Santiago midnights stay on the target day', () => {
+    const wall = (iso: string, tz: string) => {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).formatToParts(new Date(iso));
+      const get = (type: string) => parts.find((part) => part.type === type)?.value;
+      return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+    };
+
+    const lhEnd = zonedDayBounds('2026-04-05', 'Australia/Lord_Howe');
+    expect(lhEnd.from).toBe('2026-04-04T13:00:00.000Z');
+    expect(lhEnd.to).toBe('2026-04-05T13:30:00.000Z');
+    expect(wall(lhEnd.from, 'Australia/Lord_Howe')).toBe('2026-04-05 00:00:00');
+    expect(wall(lhEnd.to, 'Australia/Lord_Howe')).toBe('2026-04-06 00:00:00');
+
+    const lhStart = zonedDayBounds('2026-10-04', 'Australia/Lord_Howe');
+    expect(lhStart.from).toBe('2026-10-03T13:30:00.000Z');
+    expect(lhStart.to).toBe('2026-10-04T13:00:00.000Z');
+    expect(wall(lhStart.from, 'Australia/Lord_Howe')).toBe('2026-10-04 00:00:00');
+    expect(wall(lhStart.to, 'Australia/Lord_Howe')).toBe('2026-10-05 00:00:00');
+
+    const sclBack = zonedDayBounds('2026-04-05', 'America/Santiago');
+    expect(sclBack.from).toBe('2026-04-05T04:00:00.000Z');
+    expect(sclBack.to).toBe('2026-04-06T04:00:00.000Z');
+    expect(wall(sclBack.from, 'America/Santiago')).toBe('2026-04-05 00:00:00');
+    expect(wall(sclBack.to, 'America/Santiago')).toBe('2026-04-06 00:00:00');
+
+    // 弹簧向前：当地 00:00 不存在，区间从该日第一个可表示瞬间起。
+    const sclFwd = zonedDayBounds('2026-09-06', 'America/Santiago');
+    expect(sclFwd.from).toBe('2026-09-06T04:00:00.000Z');
+    expect(sclFwd.to).toBe('2026-09-07T03:00:00.000Z');
+    expect(wall(sclFwd.from, 'America/Santiago')).toBe('2026-09-06 01:00:00');
+    expect(wall(sclFwd.to, 'America/Santiago')).toBe('2026-09-07 00:00:00');
+
+    const shanghai = zonedDayBounds('2026-08-12', 'Asia/Shanghai');
+    expect(shanghai.from).toBe('2026-08-11T16:00:00.000Z');
+    expect(shanghai.to).toBe('2026-08-12T16:00:00.000Z');
+    expect(wall(shanghai.from, 'Asia/Shanghai')).toBe('2026-08-12 00:00:00');
+  });
+
   test('summary counts urgent as ringCount for the echoed day/tz window', async () => {
     const now = Date.parse('2026-08-12T08:00:00.000Z');
     setNotificationLogNowForTests(() => now);
