@@ -190,15 +190,18 @@
 3. ZCode P1-1：`getMessageSource` 按 UTF-8 字符边界截断，避免多字节序列中间产生 U+FFFD。
 4. 文档同步 `docs/security.md`、根 README、`packages/api/README.md`。PR 2 其余已修部分未动。
 5. `bun test`：**672 pass / 0 fail**；`bun run build` 成功。
+6. 独立自审 agent `04c2b34e-4b11-4b90-8a5d-0e9535435efb`：初审有条件（P1 registry 未绑 From）；`ab558e3` 已关。
 
 ### 我们遇到了哪些错误？
 
 1. 总指挥拍板：Sent 不能只认信封 From——伪造 From 的信会进被冒充身份的 Sent，且详情/Source/Seen 若只修列表入口仍可跨身份读改。
 2. ZCode P1-1：字节截断可能切开 UTF-8 多字节序列。
 3. FIFO 单测曾用 1970 时间戳，`hasSentMessageId` 按墙钟 TTL 把记录当过期（测试假阳性）。
+4. 独立自审 P1：registry 只存 Message-ID、不绑定 From，抄真实出站 ID 即可让另一个 From 变成可信 Sent。
 
 ### 我们是如何解决这些错误的？
 
 1. 出站成功才登记 **(Message-ID, From)**；Sent/详情/Source/Seen 走同一 `messageIsTrustedSent`；测试钉死伪造 From 的四入口对 fox 全空，以及抄真实 ID 也不能让另一个 From 进 Sent；owl Inbox 仍可见。
 2. `truncateUtf8Bytes` 从切点回退到 leading byte，不完整则丢弃该字符。
 3. FIFO 用例改用 `Date.now()` 时间戳。
+4. 条目改为 `(id, from)`；`hasSentMessageId(id, from)`；补测「owl 的真实 ID + From=fox」四入口仍不可见。

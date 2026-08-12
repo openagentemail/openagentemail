@@ -55,3 +55,35 @@ IMAP query（`imap.ts`、`mail-cursor.ts`）、`routes/ui.ts`、frame 复用、I
 | P0/P1/P2 | **无** |
 
 残余风险（非 blocker）：跨身份闸是静态切片契约，未模拟微任务时序；`selectMessage` 的 abort 未单独断言；`docs/security.md` 网站仓库仍为 canonical。
+
+---
+
+## 返工第2轮（2026-08-12）
+
+- **功能 commit**：`a0437a2` `fix(api): treat Sent as server-trusted outbound only`
+- **跟进 commit**：`ab558e3` `fix(api): bind sent registry entries to From`（关闭自审 P1）
+- **测试**：`packages/api` `bun test` → **672 pass / 0 fail**；`bun run build` 成功
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `04c2b34e-4b11-4b90-8a5d-0e9535435efb` |
+| HEAD 审查时 | `a0437a2` |
+| 初审结论 | **有条件合并** — 拍板①–⑤主路径关闭；P1：registry 不绑定 From |
+| 跟进后 | `ab558e3` 条目改为 `(Message-ID, From)`；抄真实 ID + 另一个 From 的四入口测试已钉死 |
+| ① 出站登记 | **关闭**：`sendMail` / `/v1/send` 成功写入 registry |
+| ② 四入口同规则 | **关闭**：list/detail/source/seen 均走 `messageIsTrustedSent`；伪造 From 对非收件人不可见 |
+| ③ 伪造信 Inbox | **关闭**：收件人 Inbox 可见，任何人 Sent 不可见 |
+| ④ UTF-8 截断 | **关闭**：`truncateUtf8Bytes` 按字符边界回退，无 U+FFFD |
+| ⑤ 其余不动 | **关闭**：未改 Trust-30d / cookie / 第1轮 Source 竞态 |
+| P0/P1/P2（跟进后） | 初审 P1 已关；无新 P0 |
+
+残余风险（非 blocker）：同一 From 重放已登记 Message-ID 换正文仍可能进 Sent；MTA 改写 Message-ID 会 fail-closed 不进 Sent；SMTP 成功后落盘失败会 502 但信已发出；FIFO 20_000 可能早于保留窗淘汰真出站。
+
+### 布局自测（桌面 / 移动；本轮不拍屏）
+
+对照 `layout.ts` / `pages.ts` 与 `ui-assets` 契约，**未改 UI CSS/JS**（本轮只动服务端 Sent ACL 与截断）。
+
+- **桌面（>820px，典型 1280）**：`app-shell` 220px 全局 nav + `inbox-layout` 240px identity/folder + `inbox-main` 360px list | detail，三栏同时可见。≤1100px 时 identity 210 / list 320，元数据抽屉隐藏、Headers tab 出现。folder 按钮 `min-height: 44px`。**结论：桌面三栏完整，Inbox/Sent/All Mail 入口在左栏，list/detail 并排；未见叠栏或假入口。**
+- **移动（≤820px，含 375）**：`inbox-layout`/`inbox-main` 改为单列；`data-mobile-view=folders|list|detail` 每次只露一层；list 藏 detail、detail 藏 list；folders 只露 identity。应用 Back / `list-mobile-back` 均为 44px；375 下 wordmark 隐藏以免挤掉 Sign out。**结论：移动为 folders→list→detail 逐层，Back 可达，无三栏并排泄漏。**
+
