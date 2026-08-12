@@ -26,7 +26,7 @@
 | T2 | 完成单留近 30 天；周期×条数+翻页 | 列表新增 period=`24h|7d|14d|30d`、limit=`20|50|100`、cursor、status group。默认 active（submitted/working/input-required）优先；terminal 只返回 `updatedAt >= now-30d`。周期是查询窗口，不授权删除 IMAP 线程；“留近 30 天”在 UI 可见性层落实，物理清理由既有邮件 retention 另行决策。 |
 | N1 | 通知日志落库 30 天 | 新建 `DATA_DIR/notification-log.jsonl`，在通知真正 publish 成功后写入逻辑 target/topic、level、内容、时间和来源。单进程串行写队列、append-only、0600；每日及启动时清理，采用同目录临时文件+atomic rename 重写最近 30 天。ntfy 仍只是传输/短缓存层。详见“存储选型”。 |
 | N2 | 每日推送摘要双处 | `/ui/api/notify/summary?date=today` 同一数据源返回 total、ringCount 及各 level/channel 计数。Overview 数字卡与 Notifications 顶部小结条复用，不分别计算；“今日”按显式 `tz` IANA 时区解释，响应回显区间。响铃定义为 `level=urgent`。 |
-| P1 | 设备列表、吊销、添加引导 | 扩展本地设备登记表，创建时保存不可逆/非秘密元数据（device id/name、ntfy username、topics、pairedAt、revokedAt）；password 仍仅创建响应展示一次。新增列表和按 id 吊销，吊销先删除 ntfy user，成功后标记 revoked；UI 通过 `/ui/api/notify/devices` 镜像。 |
+| P1 | 设备列表、吊销、添加引导 | 扩展本地设备登记表，创建时保存不可逆/非秘密元数据（device id/name、ntfy username、topics、pairedAt、revokeStatus、revokedAt）；password 仍仅创建响应展示一次。新增列表和按 id 吊销；吊销协议见“存储选型”：先落盘 pending、再删 ntfy user（404/not_found 视为成功）、再写 revokedAt；启动/重试对账保证幂等可恢复。UI 通过 `/ui/api/notify/devices` 镜像。 |
 | P2 | 自托管/托管权限边界 | 自托管仅 instance admin 管理全部 identity tier 与 human devices；identity session 只读自身 tier，不得列设备。托管版仍以实例内 admin 为主管，平台运营方无跨实例读取/修改 tier、通知内容或设备的后门。未来 control plane 只接收配额/健康聚合，不接收实例内明细。 |
 
 基线细节同时定稿如下：Tasks 顶部为 Active（submitted+working）、Input required、Completed、Failed、All tabs，默认 Active；submitted 超过 4 小时未出现后继事件、working 超过 24 小时未出现后继事件标红，服务端返回 `overdueReason/overdueAt`，避免各浏览器时钟口径漂移；详情保留时间线和可折叠任务原文，RESULT 的 object 渲染为键值表，非 object 采用安全的格式化值；仅 `input-required` 显示回复框，提交后写 `working` 状态事件。
@@ -129,7 +129,17 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 
 `notification-log.jsonl` 每行含 schemaVersion、id、publishedAt、source（watcher/manual/task/verify）、logicalTarget、logicalChannel、level、title、message、tags、sensitive、identityAddress（可选）、delivery=`sent`。埋点位于具体 publish 实现内部，在 ntfy 成功响应后、publish 返回前记录；失败不冒充历史，另由 scrubbed audit/metrics 观测。所有发布调用（包括 `verify()` 内部的 `this.publish(...)` 自调用）因此都经过同一成功路径。写入由进程内 promise queue 串行化，启动时验证每行，末尾半行可隔离并报警，中间损坏 fail closed。每日 UTC 维护以及每次启动清理 `publishedAt < now-30d`，在同目录写 `.tmp`、fsync 后 atomic rename；查询同时硬性加 30 天下界，因此即使定时清理延迟也不会泄漏过期行。日志和临时文件均 0600、目录 0700，不写物理 ntfy topic 或 reader secret。
 
-`notification-devices.json` 是小型 atomic JSON 表，保存 id、displayName、ntfyUsername、topic labels、pairedAt、lastSeenAt（当前拿不到则为 null）、revokedAt。password/token 永不保存；吊销依赖保存的 ntfy username。创建与本地登记是一个受控流程：ntfy user 建成后登记失败则 best-effort 删除该 user并返回 502，避免不可管理的幽灵设备。吊销 ntfy user 成功后才写 revokedAt；网络失败保持 active 并允许重试。所有 mutate 仍服从单写者队列。
+`notification-devices.json` 是小型 atomic JSON 表，保存 id、displayName、ntfyUsername、topic labels、pairedAt、lastSeenAt（当前拿不到则为 null）、`revokeStatus`=`active|pending_revoke|revoked`、`revokedAt`（仅 revoked 时非 null）。password/token 永不保存；吊销依赖保存的 ntfy username。创建与本地登记是一个受控流程：ntfy user 建成后登记失败则 best-effort 删除该 user并返回 502，避免不可管理的幽灵设备。
+
+吊销是跨 ntfy 与本地 registry 的非原子双写，必须可恢复、幂等，不能因“远端已删、本地未落盘”永久 stale。协议（均在单写者队列内）：
+
+1. **先落盘中间态**：把目标设备从 `active` 写成 `pending_revoke`（atomic rename）。若此时磁盘满/只读导致落盘失败，不得调用 ntfy 删除，保持 `active`，返回可重试错误并打健康告警。
+2. **再删 ntfy user**：对 `pending_revoke` 设备调用删除。**HTTP 404 / provider `not_found`（user 已不存在）视为删除成功**，与首次删除成功同等处理；仅网络/5xx/超时等暂时失败保持 `pending_revoke` 并允许重试。
+3. **再写终态**：远端删除成功（含 not_found）后写 `revokeStatus=revoked` 与 `revokedAt`。若落盘失败（磁盘满/只读/崩溃），设备可仍显示 `pending_revoke`，但凭据已失效；重试与启动对账必须再次走步骤 2–3，因 not_found 已定义为成功，故不会因“远端 user 已不存在”卡死，最终收敛到 `revoked`。
+4. **启动/列表对账**：启动时以及 admin 列表/吊销入口，扫描所有 `pending_revoke` 设备并执行步骤 2–3，直到本地为 `revoked`。已是 `revoked` 的重复 DELETE 直接幂等 204，不再打 ntfy。因步骤 1 先于远端删除，正常路径不会出现“仍标 `active` 但远端 user 已删”；若运维手工删了 ntfy user，实现可选择在对账中把“active 且 provider not_found”一并收敛为 `revoked`，但不得把暂时网络错误当成 not_found。
+5. **对外可见性**：列表默认可不展示 `revoked`；`pending_revoke` 对 admin 可见为“吊销中”，不得再当可推送 active 设备。客户端不得假设单次 DELETE 的本地落盘与远端删除同一事务提交。
+
+网络失败且尚未证明远端已删时，保持 `active` 或已写入的 `pending_revoke`（取决于是否已过步骤 1）并允许重试。所有 mutate 仍服从单写者队列。
 
 ## UI 数据接口清单
 
@@ -186,7 +196,7 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 | `/v1/notify/devices` POST | 生成 human device username/password | **现有但需兼容扩展**：请求加入 `displayName`，成功登记 device id；仍要求 publicUrl 精确匹配和 HTTPS，密码只显示一次。旧请求保持可用，可生成默认名称。 |
 | `/ui/api/notify/devices` GET | 已配对设备列表 | **新增**，admin-only；仅返回非秘密登记元数据。 |
 | `/ui/api/notify/devices` POST | Dashboard 添加设备/一次性凭据 | **新增 UI 镜像，复用扩展后的 create service**；admin-only，响应包含一次性 password 与 QR 所需最小 payload，并 `Cache-Control: no-store`。 |
-| `/ui/api/notify/devices/:id` DELETE | 吊销 | **新增**，admin-only；删除 ntfy user 后标记 revoked，重复吊销幂等 204。 |
+| `/ui/api/notify/devices/:id` DELETE | 吊销 | **新增**，admin-only；按存储选型吊销协议执行（pending → 删 ntfy，404/not_found 算成功 → revoked）；已 revoked 重复吊销幂等 204；pending 重试可恢复。 |
 | `/v1/notify/devices` GET；`/v1/notify/devices/:id` DELETE | CLI/外部管理 | **新增 Bearer 等价接口**，admin-only；与 UI 共用同一 device service，避免两套权限/事务实现。 |
 
 接口复用结论：现有 session、identity CRUD/token rotate/push tier、OAuth grants、Overview、邮件读/seen/frame、task detail 共 14 个 method-level 能力直接复用；旧通知历史 1 个兼容保留；扩展 3 个现有接口族（messages list、tasks list、device create）；新增 13 个 method-level 能力，集中在 30 天日志/摘要/诊断、task 人工动作、device 生命周期和 source view。新增不是重写既有 `/ui/api`，而是补齐当前数据模型不存在的能力。
@@ -229,7 +239,7 @@ OAuth server-rendered consent page继续独立，因为它承担外部 OAuth han
 
 范围：device registry/service、create 补登记、list/revoke 的 UI/Bearer API、Push & Devices 面板与添加引导/一次性 QR payload。
 
-验收：创建凭据只展示一次且磁盘无 password/token；列表有名称/频道语义/配对时间；吊销后 ntfy user 立即失效；登记失败不留幽灵 user；identity 和平台运营主体不能访问；旧 POST client 兼容。改动面：notify lib/routes、UI pages、DATA_DIR migration/tests、ntfy integration tests。
+验收：创建凭据只展示一次且磁盘无 password/token；列表有名称/频道语义/配对时间；吊销后 ntfy user 立即失效；**远端已删而本地落盘失败时重试/启动对账须因 not_found 收敛到 revoked，不得永久 active/stale**；登记失败不留幽灵 user；identity 和平台运营主体不能访问；旧 POST client 兼容。改动面：notify lib/routes、UI pages、DATA_DIR migration/tests、ntfy integration tests（含磁盘满/只读与 404 幂等用例）。
 
 排序理由：先解除 4k 单文件的施工冲突，再交付核心 Inbox；日志必须尽早开始积累，所以在视觉 Configure 之前；Tasks 和 Configure 各自使用现有后端可独立上线；设备涉及 ntfy 跨存储事务，最后单独隔离风险。若业务要求优先设备，可交换 PR 5/6，不影响独立验收。
 
@@ -250,6 +260,10 @@ IMAP 全扫描是分页最大的性能风险。服务端短缓存和先过滤切
 ### 通知一致性
 
 成功 publish 与本地 append 无跨系统原子事务：ntfy 成功而落盘失败会产生少量漏记。选择“先发送、后记录”，因为通知送达优先且日志不能声称失败推送成功；具体 publish 实现必须以 try/catch 隔离 append 异常，触发高优先级本地健康告警/指标后仍按成功返回，日志失败不得改变 publish 的成功返回语义，调用方不得因此重试推送。不得先记后发。日志 id 使用本地 UUID，并可保存 provider response id（若未来提供），仅用于日志侧写入/恢复去重，不表示或触发 publish 重试。
+
+### 设备吊销一致性
+
+设备吊销与 publish 日志相反：安全目标是“凭据失效优先”，但不能接受 registry 永久谎报 active。因 password 故意不落盘，远端删除后无法重建同凭据，故必须用 `pending_revoke` 中间态 + 对账，并把 ntfy user 已不存在（404/not_found）定义为幂等成功，使磁盘满/只读/崩溃窗口最终收敛到 `revoked`。测试必须覆盖：步骤 1 落盘失败不触达 ntfy；步骤 2 后步骤 3 落盘失败再重试；启动扫描 `pending_revoke`；重复 DELETE 对已 revoked 返回 204。
 
 ### URL、用户习惯与渐进发布
 
