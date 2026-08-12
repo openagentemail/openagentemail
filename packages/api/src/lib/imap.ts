@@ -16,6 +16,12 @@ import { simpleParser } from 'mailparser';
 import type { AddressObject } from 'mailparser';
 import { config } from './config.ts';
 import {
+  decodeMailCursor,
+  encodeMailCursor,
+  InvalidMailCursorError,
+  type MailFolder,
+} from './mail-cursor.ts';
+import {
   classifyMailSource,
   hashMailBody,
   normalizeMailbox,
@@ -24,6 +30,11 @@ import {
 } from './mail-stamp.ts';
 import { extractHttpLinks, extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
+import { hasSentMessageId, normalizeMessageId } from './sent-registry.ts';
+import { truncateUtf8Bytes } from './utf8-truncate.ts';
+
+export type { MailFolder };
+export { InvalidMailCursorError } from './mail-cursor.ts';
 
 export type { MailSource };
 
@@ -89,6 +100,23 @@ export interface MailboxScanResult {
   incompleteFor: Set<string>;
   /** 扫描时刻的身份集，用于判定"扫描后才建的身份是否可信" */
   identityAddressesAtScan: string[];
+}
+
+/** Source 视图字节上限：超过则截断并标 truncated（永不把整封原始信交给列表预取）。 */
+export const MAX_EMAIL_SOURCE_LENGTH = 256 * 1024;
+
+/** 游标分页列表页。nextCursor 为 null 表示没有下一页。 */
+export interface MessageListPage {
+  messages: MessageSummary[];
+  nextCursor: string | null;
+}
+
+/** 受控 Source 载荷：UTF-8 文本 + 是否截断 + 原始字节长度。 */
+export interface MessageSourcePayload {
+  id: string;
+  source: string;
+  truncated: boolean;
+  byteLength: number;
 }
 
 /** How far back listMessages scans for address matches. */
@@ -411,6 +439,71 @@ export function messageMatchesAddress(msg: FetchMessageObject, address: string):
 }
 
 /**
+ * 信封 From 的精确邮箱集合（不含显示名）。无 envelope 一律空（fail-closed）。
+ * Sent 文件夹与详情 ACL 都走这里，禁止子串匹配。
+ */
+export function messageSenders(msg: FetchMessageObject): Set<string> {
+  const out = new Set<string>();
+  const env = msg.envelope;
+  if (!env) return out;
+  for (const a of env.from ?? []) {
+    const addr = (a.address ?? '').toLowerCase();
+    if (addr) out.add(addr);
+  }
+  return out;
+}
+
+/** 信封 Message-ID（IMAP ENVELOPE）；缺失则 fail-closed 不当 Sent。 */
+export function messageEnvelopeId(msg: FetchMessageObject): string | null {
+  const raw = msg.envelope?.messageId;
+  return normalizeMessageId(typeof raw === 'string' ? raw : undefined);
+}
+
+/**
+ * 可信 Sent：信封 From 匹配 **且** Message-ID 在服务端出站登记表。
+ * 伪造 From 的入站信永不进 Sent。
+ */
+export function messageIsTrustedSent(msg: FetchMessageObject, address: string): boolean {
+  const addr = address.toLowerCase();
+  if (!messageSenders(msg).has(addr)) return false;
+  const id = messageEnvelopeId(msg);
+  return id !== null && hasSentMessageId(id, addr);
+}
+
+/** 该身份是否可读这封信：Inbox（TO）或可信 Sent（FROM∧registry）。 */
+export function messageAccessibleToAddress(msg: FetchMessageObject, address: string): boolean {
+  const addr = address.toLowerCase();
+  return messageRecipients(msg).has(addr) || messageIsTrustedSent(msg, addr);
+}
+
+/** 这封信是否属于指定 folder 集合。 */
+export function messageBelongsToFolder(
+  msg: FetchMessageObject,
+  address: string,
+  folder: MailFolder,
+): boolean {
+  const addr = address.toLowerCase();
+  if (folder === 'inbox') return messageRecipients(msg).has(addr);
+  if (folder === 'sent') return messageIsTrustedSent(msg, addr);
+  return messageAccessibleToAddress(msg, addr);
+}
+
+/** newest-first：(receivedAtMs desc, uid desc)，避免同毫秒跳页/重复。 */
+function compareNewestFirst(a: FetchMessageObject, b: FetchMessageObject): number {
+  const dt = receivedAtMs(b) - receivedAtMs(a);
+  if (dt !== 0) return dt;
+  return b.uid - a.uid;
+}
+
+/** 严格小于游标键，保证下一页不重复、不跳过同毫秒条目。 */
+function isAfterCursor(msg: FetchMessageObject, t: number, uid: number): boolean {
+  const received = receivedAtMs(msg);
+  if (received < t) return true;
+  if (received > t) return false;
+  return msg.uid < uid;
+}
+
+/**
  * 这条消息按可信收件人头都投给了谁。无 envelope 一律空集合（保留 fail-closed）。
  *
  * 这里**没有任何上限或域名过滤** —— 它是授权与统计共用的唯一原语，一旦在此
@@ -520,18 +613,32 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
 }
 
 /**
- * List newest-first message summaries for `address`, up to `limit`.
+ * List newest-first message summaries for `address` in `folder`, up to `limit`.
  * Two passes: envelopes+Delivered-To for the last SCAN_BACK messages to
  * find matches cheaply, then full source for the (≤ limit) matches to
- * build snippets.
+ * build snippets. Cursor is HMAC-bound to folder+address+(t,uid).
  */
-async function listMessagesWith(
+async function listMessagesPageWith(
   client: ImapFlow,
   address: string,
-  limit: number,
-): Promise<MessageSummary[]> {
+  opts: { limit: number; folder: MailFolder; cursor?: string },
+): Promise<MessageListPage> {
+  const folder = opts.folder;
+  const limit = opts.limit;
+  const normalized = address.toLowerCase();
+  let cursorT: number | undefined;
+  let cursorUid: number | undefined;
+  if (opts.cursor) {
+    const cursor = decodeMailCursor(opts.cursor, config.taskSigningSecret);
+    if (cursor.folder !== folder || cursor.address !== normalized) {
+      throw new InvalidMailCursorError();
+    }
+    cursorT = cursor.t;
+    cursorUid = cursor.uid;
+  }
+
   const uids = await client.search({ all: true }, { uid: true });
-  if (!uids || uids.length === 0) return [];
+  if (!uids || uids.length === 0) return { messages: [], nextCursor: null };
 
   const recent = uids.slice(-SCAN_BACK);
   const matched: FetchMessageObject[] = [];
@@ -540,11 +647,16 @@ async function listMessagesWith(
     { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
     { uid: true },
   )) {
-    if (messageMatchesAddress(msg, address)) matched.push(msg);
+    if (messageBelongsToFolder(msg, normalized, folder)) matched.push(msg);
   }
 
-  matched.sort((a, b) => receivedAtMs(b) - receivedAtMs(a));
-  const page = matched.slice(0, limit);
+  matched.sort(compareNewestFirst);
+  const afterCursor =
+    cursorT === undefined || cursorUid === undefined
+      ? matched
+      : matched.filter((msg) => isAfterCursor(msg, cursorT, cursorUid));
+  const page = afterCursor.slice(0, limit);
+  const hasMore = afterCursor.length > limit;
 
   const summaries: MessageSummary[] = [];
   for (const msg of page) {
@@ -581,11 +693,40 @@ async function listMessagesWith(
       source,
     });
   }
-  return summaries;
+
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeMailCursor(
+          {
+            folder,
+            address: normalized,
+            t: receivedAtMs(last),
+            uid: last.uid,
+          },
+          config.taskSigningSecret,
+        )
+      : null;
+  return { messages: summaries, nextCursor };
 }
 
+export async function listMessagesPage(
+  address: string,
+  opts: { limit?: number; folder?: MailFolder; cursor?: string } = {},
+): Promise<MessageListPage> {
+  return withInbox((client) =>
+    listMessagesPageWith(client, address, {
+      limit: opts.limit ?? 50,
+      folder: opts.folder ?? 'inbox',
+      cursor: opts.cursor,
+    }),
+  );
+}
+
+/** v1/MCP 契约：Inbox（TO 匹配）最近 N 条，不含游标。 */
 export async function listMessages(address: string, limit = 50): Promise<MessageSummary[]> {
-  return withInbox((client) => listMessagesWith(client, address, limit));
+  const page = await listMessagesPage(address, { limit, folder: 'inbox' });
+  return page.messages;
 }
 
 /**
@@ -620,7 +761,7 @@ export async function deleteMessagesBefore(cutoff: Date): Promise<number> {
   });
 }
 
-/** Fetch one message by UID; null if missing or not addressed to `address`. */
+/** Fetch one message by UID; null if missing or not readable by `address`. */
 async function getMessageWith(
   client: ImapFlow,
   address: string,
@@ -629,7 +770,7 @@ async function getMessageWith(
   const uid = Number(id);
   if (!Number.isInteger(uid) || uid <= 0) return null;
   const msg = await client.fetchOne(uid, { source: true, envelope: true, headers: ['delivered-to'] }, { uid: true });
-  if (!msg || !msg.source || !messageMatchesAddress(msg, address)) return null;
+  if (!msg || !msg.source || !messageAccessibleToAddress(msg, address)) return null;
   const parsed = await parseSource(msg.source);
   return toDetail(msg.uid, parsed);
 }
@@ -639,10 +780,44 @@ export async function getMessage(address: string, id: string): Promise<MessageDe
 }
 
 /**
+ * 受控 Source：同详情 ACL，按字节上限截断。列表路径不得调用本函数。
+ */
+async function getMessageSourceWith(
+  client: ImapFlow,
+  address: string,
+  id: string,
+): Promise<MessageSourcePayload | null> {
+  const uid = Number(id);
+  if (!Number.isInteger(uid) || uid <= 0) return null;
+  const msg = await client.fetchOne(
+    uid,
+    { source: true, envelope: true, headers: ['delivered-to'] },
+    { uid: true },
+  );
+  if (!msg || !msg.source || !messageAccessibleToAddress(msg, address)) return null;
+  const buf = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+  const truncated = buf.length > MAX_EMAIL_SOURCE_LENGTH;
+  const slice = truncated ? truncateUtf8Bytes(buf, MAX_EMAIL_SOURCE_LENGTH) : buf;
+  return {
+    id: String(msg.uid),
+    source: slice.toString('utf8'),
+    truncated,
+    byteLength: buf.length,
+  };
+}
+
+export async function getMessageSource(
+  address: string,
+  id: string,
+): Promise<MessageSourcePayload | null> {
+  return withInbox((client) => getMessageSourceWith(client, address, id));
+}
+
+/**
  * Set or clear the \Seen flag on one message. The same address-matching rule
- * as reads applies first, so an identity token can only flag mail addressed
- * to itself. Returns false when the message does not exist or is not
- * addressed to `address` (routes map that to 404, same as reads).
+ * as reads applies first, so an identity token can only flag mail it can read
+ * (TO，或 FROM∧出站登记)。Returns false when the message does not exist or is not
+ * accessible to `address` (routes map that to 404, same as reads).
  */
 export async function setMessageSeen(
   address: string,
@@ -657,7 +832,7 @@ export async function setMessageSeen(
       { envelope: true, headers: ['delivered-to'] },
       { uid: true },
     );
-    if (!msg || !messageMatchesAddress(msg, address)) return false;
+    if (!msg || !messageAccessibleToAddress(msg, address)) return false;
     if (seen) await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
     else await client.messageFlagsRemove(uid, ['\\Seen'], { uid: true });
     return true;
@@ -702,8 +877,11 @@ async function findMatchWith(
     }
     return null;
   }
-  const summaries = await listMessagesWith(client, address, 20);
-  for (const summary of summaries) {
+  const page = await listMessagesPageWith(client, address, {
+    limit: 20,
+    folder: 'inbox',
+  });
+  for (const summary of page.messages) {
     if (!summaryPassesFilters(summary, filters)) continue;
     const detail = await getMessageWith(client, address, summary.id);
     if (detail && detailPassesFilters(detail, filters)) return detail;

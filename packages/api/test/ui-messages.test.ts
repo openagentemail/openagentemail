@@ -84,12 +84,14 @@ describe('UI message JSON contract', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       messages: Array<{ id: string; hasOtp: boolean }>;
+      nextCursor: string | null;
     };
     expect(body.messages.map((message: { id: string }) => message.id)).toEqual(['2', '1']);
     expect(body.messages.map((message: { hasOtp: boolean }) => message.hasOtp)).toEqual([
       true,
       false,
     ]);
+    expect(body.nextCursor).toBeNull();
   });
 
   test('detail omits raw html but preserves OTP and validated body links', async () => {
@@ -154,7 +156,10 @@ describe('UI message JSON contract', () => {
         })
       ).status,
     ).toBe(200);
-    expect(deps.listMessages).toHaveBeenLastCalledWith('fox@test.example', 200);
+    expect(deps.listMessages).toHaveBeenLastCalledWith('fox@test.example', 200, {
+      folder: 'inbox',
+      cursor: undefined,
+    });
 
     for (const limit of ['0', '201', '1.5', 'nope']) {
       const response = await app.request(
@@ -230,5 +235,103 @@ describe('UI mark-seen endpoint', () => {
       expect((await postSeen(app, cookie, '2', body)).status).toBe(400);
     }
     expect(deps.setMessageSeen).not.toHaveBeenCalled();
+  });
+});
+
+describe('UI message folders and source', () => {
+  test('unknown folder is 400 and does not touch IMAP', async () => {
+    const { app, deps, cookie } = makeApp();
+    for (const folder of ['trash', 'scheduled', 'INBOX', 'foo']) {
+      const response = await app.request(
+        `/ui/api/messages?address=fox%40test.example&folder=${folder}`,
+        { headers: { cookie } },
+      );
+      expect(response.status).toBe(400);
+    }
+    expect(deps.listMessages).not.toHaveBeenCalled();
+  });
+
+  test('folder=sent|all is forwarded and nextCursor is echoed', async () => {
+    const listMessages = mock(async () => ({
+      messages: [
+        {
+          id: '9',
+          from: 'fox@test.example',
+          to: 'ext@example.net',
+          subject: 'Sent',
+          date: '2026-08-01T00:00:00.000Z',
+          seen: true,
+          snippet: 'out',
+          hasOtp: false,
+          source: 'internal' as const,
+        },
+      ],
+      nextCursor: 'mail-cursor-v1.abc.def',
+    }));
+    const { app, cookie } = makeApp({ listMessages });
+    const response = await app.request(
+      '/ui/api/messages?address=fox%40test.example&folder=sent&limit=20',
+      { headers: { cookie } },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      messages: [
+        {
+          id: '9',
+          from: 'fox@test.example',
+          to: 'ext@example.net',
+          subject: 'Sent',
+          date: '2026-08-01T00:00:00.000Z',
+          seen: true,
+          snippet: 'out',
+          hasOtp: false,
+          source: 'internal',
+        },
+      ],
+      nextCursor: 'mail-cursor-v1.abc.def',
+    });
+    expect(listMessages).toHaveBeenLastCalledWith('fox@test.example', 20, {
+      folder: 'sent',
+      cursor: undefined,
+    });
+  });
+
+  test('source is ACL-gated, truncated, and Cache-Control no-store', async () => {
+    const getMessageSource = mock(async () => ({
+      id: '2',
+      source: 'From: a\r\n\r\nhello',
+      truncated: true,
+      byteLength: 300000,
+    }));
+    const { app, cookie } = makeApp({ getMessageSource });
+    const response = await app.request(
+      '/ui/api/messages/2/source?address=fox%40test.example',
+      { headers: { cookie } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      id: '2',
+      source: 'From: a\r\n\r\nhello',
+      truncated: true,
+      byteLength: 300000,
+    });
+    expect(getMessageSource).toHaveBeenLastCalledWith('fox@test.example', '2');
+  });
+
+  test('source 404 when IMAP says not found; malformed id never touches IMAP', async () => {
+    const getMessageSource = mock(async () => null);
+    const { app, cookie } = makeApp({ getMessageSource });
+    const missing = await app.request(
+      '/ui/api/messages/2/source?address=fox%40test.example',
+      { headers: { cookie } },
+    );
+    expect(missing.status).toBe(404);
+    const bad = await app.request(
+      '/ui/api/messages/1e3/source?address=fox%40test.example',
+      { headers: { cookie } },
+    );
+    expect(bad.status).toBe(400);
+    expect(getMessageSource).toHaveBeenCalledTimes(1);
   });
 });

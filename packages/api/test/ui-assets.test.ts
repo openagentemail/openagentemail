@@ -93,6 +93,7 @@ describe('UI static asset contract', () => {
       'selectIdentity',
       'selectMessage',
       'refreshMessages',
+      'loadMessageSource',
       'handleCreateSubmit',
       'handleRotateToken',
       'savePushContentTier',
@@ -158,6 +159,32 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('too large to preview');
   });
 
+  test('PR2 inbox folders, source view, and layered mobile back', () => {
+    expect(UI_HTML).toContain('id="folder-list"');
+    expect(UI_JS).toContain("id: 'inbox', label: 'Inbox'");
+    expect(UI_JS).toContain("id: 'sent', label: 'Sent'");
+    expect(UI_JS).toContain("id: 'all', label: 'All Mail'");
+    expect(UI_HTML).not.toContain('Scheduled');
+    expect(UI_HTML).not.toContain('Trash');
+    expect(UI_JS).not.toContain('Scheduled');
+    expect(UI_JS).not.toContain("'trash'");
+    expect(UI_JS).toContain("textContent = 'Rendered'");
+    expect(UI_JS).toContain("textContent = 'Source'");
+    expect(UI_JS).toContain('createTextNode(payload.source');
+    expect(UI_JS).toContain('/source?address=');
+    expect(UI_JS).toContain("setAttribute('sandbox', '')");
+    expect(UI_JS).toContain('/ui/frame/');
+    expect(UI_JS).toContain('history.back()');
+    expect(UI_JS).toContain("mobileView: 'detail'");
+    expect(UI_JS).toContain("mobileView: 'folders'");
+    expect(UI_CSS).toContain('.inbox-view[data-scope="inbox"][data-mobile-view="folders"] .identity-panel');
+    expect(UI_JS).toContain('&folder=');
+    expect(UI_JS).toContain('&cursor=');
+    expect(UI_JS).toContain('renderEmptyState(');
+    expect(UI_JS).toContain('fromFolders && nextView === \'list\'');
+    expect(UI_JS).toContain('inboxOnFolders');
+  });
+
   test('detail requests cannot cross an identity switch or overwrite newer state', () => {
     expect(UI_JS).toContain('var requestedDetailAddress = state.activeAddress;');
     expect(UI_JS).toContain('state.activeAddress !== requestedDetailAddress');
@@ -168,6 +195,31 @@ describe('UI static asset contract', () => {
     );
     expect(selectIdentity.indexOf('detailController.abort()')).toBeGreaterThan(-1);
     expect(selectIdentity.indexOf('detailController.abort()')).toBeLessThan(
+      selectIdentity.indexOf('await waitForPreviousRefresh()'),
+    );
+  });
+
+  test('source loader ignores a late response after switching identity with the same UID', () => {
+    const load = UI_JS.slice(
+      UI_JS.indexOf('async function loadMessageSource'),
+      UI_JS.indexOf('function fillMetadata'),
+    );
+    expect(load).toContain('var requestedSourceAddress = state.activeAddress;');
+    expect(load).toContain('state.activeAddress !== requestedSourceAddress');
+    expect(load).toContain('state.activeMessageId !== detail.id');
+    expect(load).toContain('sourceCache.address === requestedSourceAddress');
+    expect(load).toContain('address: requestedSourceAddress');
+    expect(load).toContain('encodeURIComponent(requestedSourceAddress)');
+    expect(load).not.toContain("encodeURIComponent(state.activeAddress)");
+    expect(load).toContain('signal: controller.signal');
+
+    const selectIdentity = UI_JS.slice(
+      UI_JS.indexOf('async function selectIdentity'),
+      UI_JS.indexOf('async function refreshMessages'),
+    );
+    expect(selectIdentity).toContain('sourceController.abort()');
+    expect(selectIdentity.indexOf('sourceController.abort()')).toBeGreaterThan(-1);
+    expect(selectIdentity.indexOf('sourceController.abort()')).toBeLessThan(
       selectIdentity.indexOf('await waitForPreviousRefresh()'),
     );
   });

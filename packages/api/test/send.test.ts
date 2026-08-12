@@ -28,6 +28,8 @@ const { describeFailure, redactSecrets } = await import('../src/lib/redact.ts');
 const { isLocalSendFailure } = await import('../src/lib/sendfailure.ts');
 const { checkSendLimit, resetRateLimits } = await import('../src/lib/ratelimit.ts');
 const { config } = await import('../src/lib/config.ts');
+const { hasSentMessageId, resetSentRegistryForTests, setSentRegistryPersistHookForTests } =
+  await import('../src/lib/sent-registry.ts');
 
 const app = new Hono();
 app.use('*', async (c, next) => {
@@ -159,5 +161,42 @@ describe('发信失败后的配额处理', () => {
     expect((await post('quota-local@test.example')).status).toBe(502);
     // 桶应该是空的：limit=1 的探测仍然放行。
     expect(checkSendLimit('quota-local@test.example', 1).allowed).toBe(true);
+  });
+});
+
+describe('出站登记 sent registry', () => {
+  test('/v1/send 成功后把 message-id 写入 registry', async () => {
+    resetSentRegistryForTests();
+    resetRateLimits();
+    createIdentity({ localpart: 'sent-reg' });
+    sendMail.mockImplementation(async () => ({ messageId: '<outbound-reg@test.example>' }));
+    const response = await post('sent-reg@test.example');
+    expect(response.status).toBe(200);
+    expect(hasSentMessageId('outbound-reg@test.example', 'sent-reg@test.example')).toBe(true);
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
+  });
+
+  test('registry 写失败时 /v1/send 仍 200 且不重复投递', async () => {
+    resetSentRegistryForTests();
+    resetRateLimits();
+    createIdentity({ localpart: 'sent-nospace' });
+    sendMail.mockClear();
+    sendMail.mockImplementation(async () => ({ messageId: '<diskfull-reg@test.example>' }));
+    setSentRegistryPersistHookForTests(() => {
+      throw new Error('ENOSPC');
+    });
+    const response = await post('sent-nospace@test.example');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      queued: true,
+      messageId: '<diskfull-reg@test.example>',
+    });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    setSentRegistryPersistHookForTests(null);
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
   });
 });

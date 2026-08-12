@@ -121,3 +121,128 @@
 
 1. 与 `backToOverview` / `createIdentityButton` 同一套 `configureSession` 显隐；HTML 默认 hidden 失败关闭；CSS 按 `data-session` 双保险。
 2. 新增请求级测试对比合法 shell 深链（`/ui/inbox`、`/ui/tasks/:id` 仍是 dashboard HTML）与保留前缀；复用 `parseLocationRoute` harness 钉 popstate 解析。
+
+---
+
+# Progress — #26 Dashboard 大改版 · PR 2
+
+日期：2026-08-12  
+分支：`tizerluo/worker-34-pr2`  
+范围：ADR §PR 2（Inbox 邮箱客户端闭环）
+
+## 我们实现了哪些功能？
+
+1. IMAP：`listMessagesPage` 支持 `folder=inbox|sent|all` 与 HMAC 游标（`mail-cursor-v1`，绑定 folder+address+(t,uid)，newest-first 含 uid 平局）；`listMessages` / Bearer `/v1/messages` 仍为 Inbox（TO 匹配）。
+2. 详情 ACL：`getMessage` / `setMessageSeen` / 新 `getMessageSource` 按 TO∨FROM 可读，Sent 点开不再 404。
+3. `GET /ui/api/messages` 扩展 `folder` + `nextCursor`；未知 folder 与坏游标 400；identity 读他人 403 且不碰 IMAP。
+4. 新增 `GET /ui/api/messages/:id/source`：同 message ACL、256KiB 截断 + `truncated`/`byteLength`、`Cache-Control: no-store`；列表永不预取。
+5. Inbox UI：左栏 identity + 仅 Inbox/Sent/All Mail（无 Scheduled/Trash）；桌面三栏；详情 Rendered/Plain/Source；OTP/links 置顶；宽屏元数据抽屉、≤1100px 折成 Headers tab；定制空态带可执行下一步。
+6. 移动端层级：folders → list → detail；应用 Back 与浏览器 Back 都走 `history.back()`；History state 只放 scope/mobileView/folder/messageId，不含正文。
+7. HTML 仍只进 sandbox iframe（`/ui/frame`）；Source 用 `createTextNode`。
+8. `bun test`：**653 pass / 0 fail**；`bun run build` 成功。PR 1 ZCode P2 债本期不接。
+
+## 我们遇到了哪些错误？
+
+1. `waitForMessage` 仍调用已删除的 `listMessagesWith`，typecheck 在 `imap.ts` 报错。
+2. PR1 经验：UI 模块若改成模板字符串会吞正则反斜杠，因此本期继续用 `json.dumps` 写回字符串模块。
+3. `selectIdentity` 与 `refreshMessages` 必须相邻，否则 `ui-assets` 切片断言会把中间新函数算进去。
+4. 独立自审 P1：已选身份快路径只改 `mobileView` 不 `pushState`，移动端 Back 会跳过 list。
+
+## 我们是如何解决这些错误的？
+
+1. `findMatchWith` 改为 `listMessagesPageWith(..., folder: 'inbox')`，wait 仍只等收件。
+2. 用 Python `json.dumps` 补丁脚本改 shell/store/dom/router/app/inbox/css，避免手改 JSON 转义。
+3. `selectFolder` 放在 `refreshMessages` 之后；`selectIdentity` 仍紧挨 `refreshMessages`。
+4. 快路径在 `folders → list` 时 `syncUrlFromScope(false)`；folders 层 URL 不含 address，避免落地就把 list 路径 replace 掉。
+
+---
+
+## 返工第1轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：`loadMessageSource` 请求时捕获 `requestedSourceAddress`，await 后校验 address + UID + AbortController 世代；`sourceCache` 键含 `address`；`selectIdentity` / `selectMessage` abort 在途 Source。静态闸钉死跨身份同 UID 场景。
+2. ZCode P1-2：同步 `docs/security.md`、根 `README.md`、`packages/api/README.md`——`setMessageSeen` ACL 为 TO∨FROM（Sent 点开并标已读所需），不再写「只能 flag 发给自己的邮件」。
+3. ZCode P1-1：不改 Source 实现；`docs/security.md` 记录 identity 可读自身 Sent 源码（含 Received 链），属 #26 PR 2 设计决策。
+4. `bun test`：**654 pass / 0 fail**（原 653 + 1 新闸）。
+5. 独立自审 agent `d6d1fd6a-b643-47cb-97ef-633ec89cdd4d`：可合并；三条门禁均关闭；无新 P0/P1/P2。
+
+### 我们遇到了哪些错误？
+
+1. Codex P1（置信 0.96，真 bug）：admin 在身份 A 开 Source、切到 B、选中同 IMAP UID 的邮件，A 的迟到响应只比 UID 就写入 `state.sourceCache`，B 的 Source 页会显示 A 的原始源码（隐私）。
+2. ZCode P1-2：实现已放宽 `setMessageSeen` 为 TO∨FROM，文档仍写 identity 只能 flag 发给自己的邮件。
+3. ZCode P1-1：Source 对 Sent 可见含 Received 链——任务卡批准的设计取舍，实现不改，文档此前未明示。
+
+### 我们是如何解决这些错误的？
+
+1. 捕获请求时 address 一并校验；身份/换信 abort 在途 source；缓存 `{id, address, …}`；`ui-assets.test.ts` 切片断言 URL 用捕获地址、命中缓存比 address、`selectIdentity` 在 `waitForPreviousRefresh` 之前 abort `sourceController`。
+2. 在 `docs/security.md` 新增「Inbox identity ACL（#26 PR 2）」节；API README 的 seen 404 条件改为 TO or FROM；根 README Read/unread 写明可 flag 收到或发出的信。
+3. 同一 ACL 节加一句：identity 可读自身 Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。
+
+---
+
+## 返工第2轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Sent 收窄为服务端可信出站：`sendMail` / `/v1/send` 成功后把 Message-ID 写入 `DATA_DIR/sent-registry.json`（0600、tmp+rename、重启持久；FIFO 20_000 + `RETENTION_DAYS` 淘汰）。
+2. 纵深防御：`messageBelongsToFolder` / `messageAccessibleToAddress` / `getMessage` / `getMessageSource` / `setMessageSeen` 共用「TO ∨ (FROM∧registry)」；伪造 From 对非收件人四入口不可见，但仍落收件人 Inbox。
+3. ZCode P1-1：`getMessageSource` 按 UTF-8 字符边界截断，避免多字节序列中间产生 U+FFFD。
+4. 文档同步 `docs/security.md`、根 README、`packages/api/README.md`。PR 2 其余已修部分未动。
+5. `bun test`：**672 pass / 0 fail**；`bun run build` 成功。
+6. 独立自审 agent `04c2b34e-4b11-4b90-8a5d-0e9535435efb`：初审有条件（P1 registry 未绑 From）；`ab558e3` 已关。
+
+### 我们遇到了哪些错误？
+
+1. 总指挥拍板：Sent 不能只认信封 From——伪造 From 的信会进被冒充身份的 Sent，且详情/Source/Seen 若只修列表入口仍可跨身份读改。
+2. ZCode P1-1：字节截断可能切开 UTF-8 多字节序列。
+3. FIFO 单测曾用 1970 时间戳，`hasSentMessageId` 按墙钟 TTL 把记录当过期（测试假阳性）。
+4. 独立自审 P1：registry 只存 Message-ID、不绑定 From，抄真实出站 ID 即可让另一个 From 变成可信 Sent。
+
+### 我们是如何解决这些错误的？
+
+1. 出站成功才登记 **(Message-ID, From)**；Sent/详情/Source/Seen 走同一 `messageIsTrustedSent`；测试钉死伪造 From 的四入口对 fox 全空，以及抄真实 ID 也不能让另一个 From 进 Sent；owl Inbox 仍可见。
+2. `truncateUtf8Bytes` 从切点回退到 leading byte，不完整则丢弃该字符。
+3. FIFO 用例改用 `Date.now()` 时间戳。
+4. 条目改为 `(id, from)`；`hasSentMessageId(id, from)`；补测「owl 的真实 ID + From=fox」四入口仍不可见。
+
+---
+
+## 返工第3轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：SMTP 已接受后登记失败不再否决投递。取舍是「登记失败降级为告警 + 成功返回」（宁可 Sent 少记，不可 502 重发）。`recordSentMessageIdAfterSend` 吞掉一切登记错误；`persist` 写盘失败只 `console.warn`。
+2. ZCode P1：`hasSentMessageId` 读路径零写盘；过期只返回 false。`loadFromDisk` 只修剪内存。prune/persist 仅在 `recordSentMessageId` 写入路径。
+3. 测试钉死：registry persist 抛 ENOSPC 时 `/v1/send` 仍 200 且 `sendMail` 只调用一次；读路径 persist hook 计数为 0。
+4. `docs/security.md` 写明该取舍。
+5. 独立自审 agent `178f27cc-0c38-4bf6-ab17-9810c8ed06dd`：可合并；两条 P1 均关闭；无新 P0/P1/P2。
+
+### 我们遇到了哪些错误？
+
+1. Codex（smtp.ts:69，置信 0.98）：SMTP 已接受后 `recordSentMessageId` 失败会让 sendMail reject → `/v1/send` 502 → 调用方重试 → 重复外发。
+2. ZCode：`hasSentMessageId` 热路径同步 prune+persist，读放大写盘（并发/性能/DoS）。
+
+### 我们是如何解决这些错误的？
+
+1. 不选「投递前先登记再补偿撤销」——失败发送会短暂出现在 Sent，且撤销窗口更复杂。选降级：投递成功已是事实，Sent 漏记可接受。
+2. 读路径删除 persist；TTL 过期不改内存，等下次 record 再 prune 落盘。
+
+---
+
+## 返工第4轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. ZCode P1：`loadFromDisk` 遇到损坏/半行 JSON 时告警、隔离为 `sent-registry.json.corrupt`、回退空表；读路径零异常。Inbox/详情照常，Sent 判定为空集。
+2. 测试钉死损坏文件存在时 `listMessagesPage`/`getMessage` 正常返回、Sent 为空；`hasSentMessageId` 不抛。
+
+### 我们遇到了哪些错误？
+
+1. 损坏 registry 抛 `sent_registry_corrupt` 会击穿全部邮箱读路径（盘满/半行损坏 → Inbox 500）。fail-closed 被做成了炸掉读路径。
+
+### 我们是如何解决这些错误的？
+
+1. fail-closed = 判不可信（空 registry），不是抛错。隔离备份损坏文件，避免每次启动重复解析毒药。不在读路径 persist 空表。
+2. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
+3. `bun test`：**676 pass / 0 fail**。

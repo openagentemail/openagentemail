@@ -25,12 +25,20 @@ import {
 import {
   SCAN_BACK,
   getMessage,
-  listMessages,
+  getMessageSource,
+  listMessagesPage,
   scanMailboxWindow,
   setMessageSeen,
   type MessageDetail,
+  type MessageListPage,
+  type MessageSourcePayload,
   type MessageSummary,
 } from '../lib/imap.ts';
+import {
+  InvalidMailCursorError,
+  MAIL_FOLDERS,
+  type MailFolder,
+} from '../lib/mail-cursor.ts';
 import { createOverviewCache, type ScanOutcome } from '../lib/overview-cache.ts';
 import {
   TASK_STATES,
@@ -67,8 +75,18 @@ function toNotifyTopic(value: string): NotifyTopic | null {
 
 export type UiApiDependencies = {
   listIdentities: () => Identity[];
-  listMessages: (address: string, limit: number) => Promise<MessageSummary[]>;
+  /**
+   * Inbox 列表。第三参为 folder/cursor；可返回数组（旧 mock）或带 nextCursor 的页。
+   * 未知 folder 由路由 zod 拦成 400，不进本函数。
+   */
+  listMessages: (
+    address: string,
+    limit: number,
+    query?: { folder?: MailFolder; cursor?: string },
+  ) => Promise<MessageSummary[] | MessageListPage>;
   getMessage: (address: string, id: string) => Promise<MessageDetail | null>;
+  /** 受控 Source；缺省走 imap.getMessageSource。 */
+  getMessageSource?: (address: string, id: string) => Promise<MessageSourcePayload | null>;
   /** 标记/清除 \Seen；消息不存在或不属于该地址时返回 false（路由折成 404）。 */
   setMessageSeen: (address: string, id: string, seen: boolean) => Promise<boolean>;
   /**
@@ -106,8 +124,14 @@ const overviewCache = createOverviewCache({
 const defaultDependencies: UiApiDependencies = {
   listIdentities: () =>
     listIdentities().map((identity) => findIdentity(identity.address) ?? identity),
-  listMessages,
+  listMessages: (address, limit, query) =>
+    listMessagesPage(address, {
+      limit,
+      folder: query?.folder ?? 'inbox',
+      cursor: query?.cursor,
+    }),
   getMessage,
+  getMessageSource,
   setMessageSeen,
   getMailboxScan: (opts) => overviewCache.getOverview(opts),
   setPushContentTier: setIdentityPushContentTier,
@@ -141,8 +165,16 @@ const RECENT_HOURS = 24;
 
 const listQuerySchema = z.object({
   address: z.string().email(),
+  folder: z.enum(MAIL_FOLDERS).default('inbox'),
+  cursor: z.string().min(1).max(512).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
+
+/** 兼容测试 mock 仍返回数组。 */
+function asMessagePage(raw: MessageSummary[] | MessageListPage): MessageListPage {
+  if (Array.isArray(raw)) return { messages: raw, nextCursor: null };
+  return { messages: raw.messages, nextCursor: raw.nextCursor ?? null };
+}
 
 const detailQuerySchema = z.object({
   address: z.string().email(),
@@ -446,8 +478,37 @@ export function createUiApiRoutes(
     const address = parsed.data.address.toLowerCase();
     const denied = forbidUnlessAddress(c, address);
     if (denied) return denied;
-    const messages = await dependencies.listMessages(address, parsed.data.limit);
-    return c.json({ messages });
+    try {
+      const raw = await dependencies.listMessages(address, parsed.data.limit, {
+        folder: parsed.data.folder,
+        cursor: parsed.data.cursor,
+      });
+      const page = asMessagePage(raw);
+      return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+    } catch (err) {
+      if (err instanceof InvalidMailCursorError) {
+        return c.json({ error: 'invalid_request' }, 400);
+      }
+      throw err;
+    }
+  });
+
+  /** Source 必须先于 /messages/:id 注册，避免被 :id 吞掉。 */
+  routes.get('/messages/:id/source', async (c) => {
+    const parsed = detailQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+
+    const address = parsed.data.address.toLowerCase();
+    const denied = forbidUnlessAddress(c, address);
+    if (denied) return denied;
+    const id = c.req.param('id');
+    if (!isValidMessageUid(id)) return c.json({ error: 'invalid_request' }, 400);
+
+    c.header('Cache-Control', 'no-store');
+    const getter = dependencies.getMessageSource ?? getMessageSource;
+    const payload = await getter(address, id);
+    if (!payload) return c.json({ error: 'not_found' }, 404);
+    return c.json(payload);
   });
 
   routes.get('/messages/:id', async (c) => {

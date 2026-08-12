@@ -34,7 +34,7 @@ bun run typecheck
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
-| `DATA_DIR` | `./data` | identity store (`identities.json`) |
+| `DATA_DIR` | `./data` | identity store (`identities.json`); sent registry (`sent-registry.json`) |
 
 ## Endpoints
 
@@ -44,7 +44,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `GET /.well-known/oauth-protected-resource`（及 `/mcp` path-aware 变体）— RFC 9728 PRM；**公开**；`authorization_servers` = AS issuer。可选 env `MCP_PUBLIC_URL` 覆盖对外 origin
 - `GET /.well-known/oauth-authorization-server` — RFC 8414（PKCE S256、CIMD、iss 响应）；**公开**
 - `GET /authorize` → `/ui/oauth/authorize` — OAuth 同意页（Dashboard 会话）；`POST /oauth/token` / `POST /oauth/revoke`；旧管理页 `/ui/oauth/grants` 302 → `/ui/configure/clients`
-- Dashboard（ADR #26 PR1）：`/ui` 与 `/ui/*` shell 子路径（Inbox 默认落地），静态资源仍为 `/ui/styles.css` + `/ui/app.js` 单资源、零 bundler；`bun test` 对拼装后的 `UI_JS` 做 `new Function` 语法闸 + 关键 `async` 加载器钉死。Overview 全局导航仅 admin session 可见；shell 深链注册在 `/ui/api`、`/ui/oauth`、`/ui/frame` 之后，测试按真实请求断言不被通配吞掉。
+- Dashboard（ADR #26 PR1+PR2）：`/ui` 与 `/ui/*` shell 子路径（Inbox 默认落地），静态资源仍为 `/ui/styles.css` + `/ui/app.js` 单资源、零 bundler。Inbox 桌面三栏（identity/folder、list、detail）；`GET /ui/api/messages?address=&folder=inbox|sent|all&cursor=&limit=` 返回 `{messages,nextCursor}`，未知 folder 为 400；`GET /ui/api/messages/:id/source?address=` 受控 Source（同 ACL、256KiB 截断、`no-store`）。HTML 仍只进 `/ui/frame` sandbox。Bearer `/v1/messages` 仍为 Inbox（TO 匹配）、无 folder。Overview 全局导航仅 admin session 可见；shell 深链注册在 `/ui/api`、`/ui/oauth`、`/ui/frame` 之后。
 - OAuth 存储：`DATA_DIR/oauth.json`（只存哈希；与 identities.json 同模式）
 - `GET /v1/audit/events?limit=&event=` → `{events:[…]}`（**admin only**；scrubbed JSONL `DATA_DIR/audit.jsonl`；见 docs/security.md）
 - `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
@@ -53,7 +53,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `PUT /v1/identities/:address/push-tier` `{pushContentTier:1|2|3, confirm_risk?}` → admin only; tier 3 requires `confirm_risk: true`
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
-- `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 if the message is not addressed to `address`; reading never sets `\Seen` by itself — agents mark messages processed through here)
+- `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO `address` **or** a server-trusted Sent item (From match **and** Message-ID in the outbound registry) — #26 PR 2 / 返工第2轮；reading never sets `\Seen` by itself — agents mark messages processed through here)
 - `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout", timeoutSec}` (IMAP IDLE + 3 s polling hybrid). Schema max 仍 600；服务端按 `MCP_MAX_WAIT_SECONDS` 静默钳制（头 `X-OAE-Wait-Timeout-Sec`）。并发：3/地址、8 全局 → `429 {error:"too_many_waits"}`
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
 - `GET /healthz` → `{ok:true}`

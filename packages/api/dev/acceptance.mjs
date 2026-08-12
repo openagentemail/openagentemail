@@ -780,7 +780,7 @@ try {
   /* ============ 既有邮件隔离探针（A13 / A69 的"零变化"） ============ */
   await evaluate(`(() => {
     const tab = Array.from(document.querySelectorAll('.tab')).find(
-      (candidate) => candidate.textContent === 'HTML preview'
+      (candidate) => candidate.textContent === 'Rendered'
     );
     tab.click();
     return true;

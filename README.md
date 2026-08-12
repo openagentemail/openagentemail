@@ -69,8 +69,12 @@ and TLS certificate verification.
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
 or identity API token. The built-in dashboard lists the addresses the token
-may access, shows messages, extracts verification codes and links, offers
-plain-text or isolated HTML previews, and can mark messages read or unread.
+may access, shows Inbox / Sent / All Mail with cursor paging, extracts
+verification codes and links at the top of a message, offers Rendered
+(isolated HTML iframe), Plain text, or Source views, and can mark messages
+read or unread. Source is fetched on demand from a size-capped `no-store`
+endpoint and never injected as HTML. Scheduled and Trash are omitted until
+the backend can serve them.
 Admin sessions can also create identities (with custom address prefixes),
 rotate tokens, and delete identities directly from the overview table.
 
@@ -177,12 +181,17 @@ Deliberate limits, so nothing here is a surprise later:
   Built for automated signups.
 - **Read/unread state** — `mail_mark_seen` / `POST /v1/messages/:id/seen` lets an
   agent (or the human in the dashboard) mark a message handled, so the unseen
-  count means "still needs attention". Reading a message never changes the flag
-  by itself.
+  count means "still needs attention". An identity may flag mail it received
+  **or that this server actually sent** (TO ∨ trusted Sent: From match and
+  Message-ID in the outbound registry), matching the Sent folder (#26 PR 2);
+  a forged From does not count. It cannot flag another identity's mail. Reading
+  a message never changes the flag by itself.
 - **Web dashboard for humans** — inspect identities and messages at `/ui` (Inbox
-  is the default landing for every session). Real `/ui/*` History routes cover
-  Overview, Tasks, Notifications, and Configure; the shell stays a zero-bundler
-  `/ui/styles.css` + `/ui/app.js` pair with doubly isolated HTML previews.
+  is the default landing for every session). Inbox is a three-pane mail client
+  (identity/folder, list, detail) with Rendered / Plain text / Source; HTML
+  stays in a sandboxed iframe. Real `/ui/*` History routes cover Overview,
+  Tasks, Notifications, and Configure; the shell stays a zero-bundler
+  `/ui/styles.css` + `/ui/app.js` pair.
 - **Safety rails built in** — per-identity send rate limits (20/hour default),
   automatic mail retention (30 days default), localhost-only API binding.
 - **Bring your own relay** — send directly from the VPS, or route outbound through

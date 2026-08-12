@@ -6,7 +6,7 @@
 // 的邮件（含验证码）。
 //
 // config.ts 在 import 时解析环境变量，所以必须先设好再动态 import。
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,18 +39,36 @@ class FakeImapFlow {
     if (!message) return false;
     return {
       ...message,
-      source: Buffer.from('From: sender@example.net\r\nSubject: hi\r\n\r\nbody'),
+      source: message.source ?? Buffer.from('From: sender@example.net\r\nSubject: hi\r\n\r\nbody'),
     };
   }
+  async messageFlagsAdd() {}
+  async messageFlagsRemove() {}
   async logout() {}
   close() {}
 }
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
-const { listMessages, messageMatchesAddress, messageRecipients, receivedAtMs } = await import(
-  '../src/lib/imap.ts'
-);
+const {
+  listMessages,
+  listMessagesPage,
+  getMessage,
+  getMessageSource,
+  setMessageSeen,
+  messageMatchesAddress,
+  messageRecipients,
+  messageSenders,
+  messageBelongsToFolder,
+  messageAccessibleToAddress,
+  messageIsTrustedSent,
+  receivedAtMs,
+  MAX_EMAIL_SOURCE_LENGTH,
+} = await import('../src/lib/imap.ts');
+const { recordSentMessageId, resetSentRegistryForTests, reloadSentRegistryFromDiskForTests } =
+  await import('../src/lib/sent-registry.ts');
+const { InvalidMailCursorError, encodeMailCursor } = await import('../src/lib/mail-cursor.ts');
+const { config } = await import('../src/lib/config.ts');
 
 /** 造一个只带必要字段的 IMAP 抓取结果（envelope + 收件头）。 */
 function fakeMessage(opts: {
@@ -322,5 +340,324 @@ describe('receivedAtMs — 按服务器收信时间排序', () => {
     const spoofed = dated('2026-07-01T10:00:00Z', '2999-01-01T00:00:00Z');
     const real = dated('2026-07-01T10:05:00Z', '2026-07-01T10:05:00Z');
     expect([spoofed, real].sort((a, b) => receivedAtMs(b) - receivedAtMs(a))[0]).toBe(real);
+  });
+});
+
+function folderMessage(opts: {
+  uid: number;
+  from: string;
+  to: string;
+  at: string;
+  source?: Buffer;
+  messageId?: string;
+}): any {
+  return {
+    uid: opts.uid,
+    envelope: {
+      from: [{ address: opts.from }],
+      to: [{ address: opts.to }],
+      subject: `m${opts.uid}`,
+      date: new Date(opts.at),
+      messageId: opts.messageId ?? `<m${opts.uid}@test.example>`,
+    },
+    internalDate: new Date(opts.at),
+    flags: new Set<string>(),
+    headers: Buffer.from(`Delivered-To: ${opts.to}\r\n`, 'utf8'),
+    ...(opts.source ? { source: opts.source } : {}),
+  };
+}
+
+describe('folder matching — Inbox / Sent / All Mail', () => {
+  const inboxOnly = folderMessage({
+    uid: 1,
+    from: 'ext@example.net',
+    to: 'fox@test.example',
+    at: '2026-08-01T10:00:00Z',
+  });
+  const sentOnly = folderMessage({
+    uid: 2,
+    from: 'fox@test.example',
+    to: 'ext@example.net',
+    at: '2026-08-01T11:00:00Z',
+  });
+  const both = folderMessage({
+    uid: 3,
+    from: 'fox@test.example',
+    to: 'fox@test.example',
+    at: '2026-08-01T12:00:00Z',
+  });
+  const other = folderMessage({
+    uid: 4,
+    from: 'owl@test.example',
+    to: 'owl@test.example',
+    at: '2026-08-01T13:00:00Z',
+  });
+
+  test('messageSenders 只认信封 From 精确邮箱', () => {
+    expect([...messageSenders(sentOnly)]).toEqual(['fox@test.example']);
+    expect(messageSenders(inboxOnly).has('fox@test.example')).toBe(false);
+    expect(messageSenders({ uid: 9 } as any).size).toBe(0);
+  });
+
+  test('三 folder 集合正确且 Sent 不含纯收件', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    recordSentMessageId('<m3@test.example>', 'fox@test.example');
+    expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'inbox')).toBe(true);
+    expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'sent')).toBe(false);
+    expect(messageBelongsToFolder(sentOnly, 'fox@test.example', 'inbox')).toBe(false);
+    expect(messageBelongsToFolder(sentOnly, 'fox@test.example', 'sent')).toBe(true);
+    expect(messageBelongsToFolder(both, 'fox@test.example', 'all')).toBe(true);
+    expect(messageBelongsToFolder(other, 'fox@test.example', 'all')).toBe(false);
+  });
+
+  test('详情 ACL：可信 Sent 的 FROM 匹配可读，外人不可读', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    expect(messageAccessibleToAddress(sentOnly, 'fox@test.example')).toBe(true);
+    expect(messageAccessibleToAddress(sentOnly, 'owl@test.example')).toBe(false);
+    expect(messageAccessibleToAddress(inboxOnly, 'fox@test.example')).toBe(true);
+  });
+
+  test('listMessagesPage 三 folder 去重且 Sent 不含纯收件', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    recordSentMessageId('<m3@test.example>', 'fox@test.example');
+    fakeMessages = [inboxOnly, sentOnly, both, other];
+    const inbox = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
+    const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    const all = await listMessagesPage('fox@test.example', { folder: 'all', limit: 50 });
+    expect(inbox.messages.map((m) => m.id).sort()).toEqual(['1', '3']);
+    expect(sent.messages.map((m) => m.id).sort()).toEqual(['2', '3']);
+    expect(all.messages.map((m) => m.id).sort()).toEqual(['1', '2', '3']);
+    expect(all.messages.map((m) => m.id)).toEqual([...new Set(all.messages.map((m) => m.id))]);
+    fakeMessages = [];
+  });
+
+  test('getMessage 对可信 Sent（FROM∧registry）可读', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>', 'fox@test.example');
+    fakeMessages = [sentOnly];
+    const detail = await getMessage('fox@test.example', '2');
+    expect(detail?.id).toBe('2');
+    expect(await getMessage('owl@test.example', '2')).toBeNull();
+    fakeMessages = [];
+  });
+});
+
+describe('伪造 From 不得进 Sent，非收件人四入口不可见', () => {
+  const forged = folderMessage({
+    uid: 99,
+    from: 'fox@test.example',
+    to: 'owl@test.example',
+    at: '2026-08-01T14:00:00Z',
+    messageId: '<forged-not-outbound@evil.example>',
+  });
+
+  test('伪造信落收件人 Inbox，但不进任何人的 Sent', () => {
+    resetSentRegistryForTests();
+    expect(messageBelongsToFolder(forged, 'owl@test.example', 'inbox')).toBe(true);
+    expect(messageBelongsToFolder(forged, 'owl@test.example', 'sent')).toBe(false);
+    expect(messageBelongsToFolder(forged, 'fox@test.example', 'inbox')).toBe(false);
+    expect(messageBelongsToFolder(forged, 'fox@test.example', 'sent')).toBe(false);
+    expect(messageIsTrustedSent(forged, 'fox@test.example')).toBe(false);
+  });
+
+  test('列表/详情/Source/Seen 对非收件人全不可见', async () => {
+    resetSentRegistryForTests();
+    fakeMessages = [forged];
+    const sentList = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    const allList = await listMessagesPage('fox@test.example', { folder: 'all', limit: 50 });
+    const inboxList = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
+    expect(sentList.messages).toEqual([]);
+    expect(allList.messages).toEqual([]);
+    expect(inboxList.messages).toEqual([]);
+    expect(await getMessage('fox@test.example', '99')).toBeNull();
+    expect(await getMessageSource('fox@test.example', '99')).toBeNull();
+    expect(await setMessageSeen('fox@test.example', '99', true)).toBe(false);
+    const owlInbox = await listMessagesPage('owl@test.example', { folder: 'inbox', limit: 50 });
+    expect(owlInbox.messages.map((m) => m.id)).toEqual(['99']);
+    fakeMessages = [];
+  });
+
+  test('抄真实出站 Message-ID 也不能让另一个 From 进 Sent', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<real-outbound@test.example>', 'owl@test.example');
+    const spoof = folderMessage({
+      uid: 100,
+      from: 'fox@test.example',
+      to: 'owl@test.example',
+      at: '2026-08-01T15:00:00Z',
+      messageId: '<real-outbound@test.example>',
+    });
+    fakeMessages = [spoof];
+    expect(messageIsTrustedSent(spoof, 'fox@test.example')).toBe(false);
+    expect(await getMessage('fox@test.example', '100')).toBeNull();
+    expect(await getMessageSource('fox@test.example', '100')).toBeNull();
+    expect(await setMessageSeen('fox@test.example', '100', true)).toBe(false);
+    const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    expect(sent.messages).toEqual([]);
+    fakeMessages = [];
+  });
+});
+
+describe('损坏 sent-registry 不得炸掉读路径', () => {
+  test('损坏文件存在时列表/详情正常返回，Sent 判定为空集', async () => {
+    writeFileSync(join(config.dataDir, 'sent-registry.json'), '{not-json', { mode: 0o600 });
+    reloadSentRegistryFromDiskForTests();
+    const inboxMail = folderMessage({
+      uid: 1,
+      from: 'ext@example.net',
+      to: 'fox@test.example',
+      at: '2026-08-01T10:00:00Z',
+    });
+    const fromSelf = folderMessage({
+      uid: 2,
+      from: 'fox@test.example',
+      to: 'ext@example.net',
+      at: '2026-08-01T11:00:00Z',
+    });
+    fakeMessages = [inboxMail, fromSelf];
+    const inbox = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
+    expect(inbox.messages.map((m) => m.id)).toEqual(['1']);
+    expect(await getMessage('fox@test.example', '1')).not.toBeNull();
+    const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    expect(sent.messages).toEqual([]);
+    expect(await getMessage('fox@test.example', '2')).toBeNull();
+    expect(messageIsTrustedSent(fromSelf, 'fox@test.example')).toBe(false);
+    fakeMessages = [];
+  });
+});
+
+describe('listMessagesPage cursor — 无重复无跳页', () => {
+  test('limit=2 两页拼接等于全量且无交集', async () => {
+    const msgs = [];
+    for (let i = 1; i <= 5; i += 1) {
+      msgs.push(
+        folderMessage({
+          uid: i,
+          from: 'ext@example.net',
+          to: 'fox@test.example',
+          at: `2026-08-01T10:0${i}:00Z`,
+        }),
+      );
+    }
+    fakeMessages = msgs;
+    const page1 = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 2 });
+    expect(page1.messages.map((m) => m.id)).toEqual(['5', '4']);
+    expect(page1.nextCursor).toBeTruthy();
+    const page2 = await listMessagesPage('fox@test.example', {
+      folder: 'inbox',
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+    expect(page2.messages.map((m) => m.id)).toEqual(['3', '2']);
+    const overlap = page1.messages.filter((a) => page2.messages.some((b) => b.id === a.id));
+    expect(overlap).toEqual([]);
+    const page3 = await listMessagesPage('fox@test.example', {
+      folder: 'inbox',
+      limit: 2,
+      cursor: page2.nextCursor!,
+    });
+    expect(page3.messages.map((m) => m.id)).toEqual(['1']);
+    expect(page3.nextCursor).toBeNull();
+    fakeMessages = [];
+  });
+
+  test('同毫秒用 uid 打破平局，不跳页', async () => {
+    const at = '2026-08-01T10:00:00Z';
+    fakeMessages = [
+      folderMessage({ uid: 10, from: 'ext@example.net', to: 'fox@test.example', at }),
+      folderMessage({ uid: 11, from: 'ext@example.net', to: 'fox@test.example', at }),
+      folderMessage({ uid: 12, from: 'ext@example.net', to: 'fox@test.example', at }),
+    ];
+    const page1 = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 2 });
+    expect(page1.messages.map((m) => m.id)).toEqual(['12', '11']);
+    const page2 = await listMessagesPage('fox@test.example', {
+      folder: 'inbox',
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+    expect(page2.messages.map((m) => m.id)).toEqual(['10']);
+    fakeMessages = [];
+  });
+
+  test('坏游标 / 跨 folder 游标抛 InvalidMailCursorError', async () => {
+    fakeMessages = [
+      folderMessage({
+        uid: 1,
+        from: 'ext@example.net',
+        to: 'fox@test.example',
+        at: '2026-08-01T10:00:00Z',
+      }),
+    ];
+    await expect(
+      listMessagesPage('fox@test.example', { folder: 'inbox', cursor: 'not-a-cursor' }),
+    ).rejects.toBeInstanceOf(InvalidMailCursorError);
+    const foreign = encodeMailCursor(
+      { folder: 'sent', address: 'fox@test.example', t: Date.now(), uid: 1 },
+      config.taskSigningSecret,
+    );
+    await expect(
+      listMessagesPage('fox@test.example', { folder: 'inbox', cursor: foreign }),
+    ).rejects.toBeInstanceOf(InvalidMailCursorError);
+    fakeMessages = [];
+  });
+});
+
+describe('getMessageSource — ACL 与截断', () => {
+  test('外人读不到 Source', async () => {
+    fakeMessages = [
+      folderMessage({
+        uid: 7,
+        from: 'ext@example.net',
+        to: 'fox@test.example',
+        at: '2026-08-01T10:00:00Z',
+      }),
+    ];
+    expect(await getMessageSource('owl@test.example', '7')).toBeNull();
+    const own = await getMessageSource('fox@test.example', '7');
+    expect(own?.id).toBe('7');
+    expect(own?.truncated).toBe(false);
+    fakeMessages = [];
+  });
+
+  test('超过上限截断并标记 truncated，byteLength 为原文长度', async () => {
+    const raw = Buffer.alloc(MAX_EMAIL_SOURCE_LENGTH + 40, 0x41);
+    fakeMessages = [
+      folderMessage({
+        uid: 8,
+        from: 'ext@example.net',
+        to: 'fox@test.example',
+        at: '2026-08-01T10:00:00Z',
+        source: raw,
+      }),
+    ];
+    const payload = await getMessageSource('fox@test.example', '8');
+    expect(payload?.truncated).toBe(true);
+    expect(payload?.byteLength).toBe(raw.length);
+    expect(Buffer.byteLength(payload!.source, 'utf8')).toBe(MAX_EMAIL_SOURCE_LENGTH);
+    fakeMessages = [];
+  });
+
+  test('截断落在多字节序列中间时回退到字符边界，不产生替换字符', async () => {
+    const euro = Buffer.from('€', 'utf8'); // e2 82 ac
+    const prefix = Buffer.alloc(MAX_EMAIL_SOURCE_LENGTH - 1, 0x41);
+    const raw = Buffer.concat([prefix, euro, Buffer.from('TAIL')]);
+    fakeMessages = [
+      folderMessage({
+        uid: 9,
+        from: 'ext@example.net',
+        to: 'fox@test.example',
+        at: '2026-08-01T10:00:00Z',
+        source: raw,
+      }),
+    ];
+    const payload = await getMessageSource('fox@test.example', '9');
+    expect(payload?.truncated).toBe(true);
+    expect(payload?.byteLength).toBe(raw.length);
+    expect(payload!.source.includes('\uFFFD')).toBe(false);
+    expect(Buffer.byteLength(payload!.source, 'utf8')).toBe(MAX_EMAIL_SOURCE_LENGTH - 1);
+    fakeMessages = [];
   });
 });
