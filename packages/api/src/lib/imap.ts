@@ -30,6 +30,8 @@ import {
 } from './mail-stamp.ts';
 import { extractHttpLinks, extractOtp, htmlToText, type OtpExtraction } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
+import { hasSentMessageId, normalizeMessageId } from './sent-registry.ts';
+import { truncateUtf8Bytes } from './utf8-truncate.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -451,10 +453,27 @@ export function messageSenders(msg: FetchMessageObject): Set<string> {
   return out;
 }
 
-/** 该身份是否可读这封信：Inbox（TO）或 Sent（FROM）。 */
+/** 信封 Message-ID（IMAP ENVELOPE）；缺失则 fail-closed 不当 Sent。 */
+export function messageEnvelopeId(msg: FetchMessageObject): string | null {
+  const raw = msg.envelope?.messageId;
+  return normalizeMessageId(typeof raw === 'string' ? raw : undefined);
+}
+
+/**
+ * 可信 Sent：信封 From 匹配 **且** Message-ID 在服务端出站登记表。
+ * 伪造 From 的入站信永不进 Sent。
+ */
+export function messageIsTrustedSent(msg: FetchMessageObject, address: string): boolean {
+  const addr = address.toLowerCase();
+  if (!messageSenders(msg).has(addr)) return false;
+  const id = messageEnvelopeId(msg);
+  return id !== null && hasSentMessageId(id);
+}
+
+/** 该身份是否可读这封信：Inbox（TO）或可信 Sent（FROM∧registry）。 */
 export function messageAccessibleToAddress(msg: FetchMessageObject, address: string): boolean {
   const addr = address.toLowerCase();
-  return messageRecipients(msg).has(addr) || messageSenders(msg).has(addr);
+  return messageRecipients(msg).has(addr) || messageIsTrustedSent(msg, addr);
 }
 
 /** 这封信是否属于指定 folder 集合。 */
@@ -465,7 +484,7 @@ export function messageBelongsToFolder(
 ): boolean {
   const addr = address.toLowerCase();
   if (folder === 'inbox') return messageRecipients(msg).has(addr);
-  if (folder === 'sent') return messageSenders(msg).has(addr);
+  if (folder === 'sent') return messageIsTrustedSent(msg, addr);
   return messageAccessibleToAddress(msg, addr);
 }
 
@@ -778,7 +797,7 @@ async function getMessageSourceWith(
   if (!msg || !msg.source || !messageAccessibleToAddress(msg, address)) return null;
   const buf = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
   const truncated = buf.length > MAX_EMAIL_SOURCE_LENGTH;
-  const slice = truncated ? buf.subarray(0, MAX_EMAIL_SOURCE_LENGTH) : buf;
+  const slice = truncated ? truncateUtf8Bytes(buf, MAX_EMAIL_SOURCE_LENGTH) : buf;
   return {
     id: String(msg.uid),
     source: slice.toString('utf8'),
@@ -797,7 +816,7 @@ export async function getMessageSource(
 /**
  * Set or clear the \Seen flag on one message. The same address-matching rule
  * as reads applies first, so an identity token can only flag mail it can read
- * (TO 或 FROM). Returns false when the message does not exist or is not
+ * (TO，或 FROM∧出站登记)。Returns false when the message does not exist or is not
  * accessible to `address` (routes map that to 404, same as reads).
  */
 export async function setMessageSeen(

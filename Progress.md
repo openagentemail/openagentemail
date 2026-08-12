@@ -178,3 +178,27 @@
 1. 捕获请求时 address 一并校验；身份/换信 abort 在途 source；缓存 `{id, address, …}`；`ui-assets.test.ts` 切片断言 URL 用捕获地址、命中缓存比 address、`selectIdentity` 在 `waitForPreviousRefresh` 之前 abort `sourceController`。
 2. 在 `docs/security.md` 新增「Inbox identity ACL（#26 PR 2）」节；API README 的 seen 404 条件改为 TO or FROM；根 README Read/unread 写明可 flag 收到或发出的信。
 3. 同一 ACL 节加一句：identity 可读自身 Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。
+
+---
+
+## 返工第2轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Sent 收窄为服务端可信出站：`sendMail` / `/v1/send` 成功后把 Message-ID 写入 `DATA_DIR/sent-registry.json`（0600、tmp+rename、重启持久；FIFO 20_000 + `RETENTION_DAYS` 淘汰）。
+2. 纵深防御：`messageBelongsToFolder` / `messageAccessibleToAddress` / `getMessage` / `getMessageSource` / `setMessageSeen` 共用「TO ∨ (FROM∧registry)」；伪造 From 对非收件人四入口不可见，但仍落收件人 Inbox。
+3. ZCode P1-1：`getMessageSource` 按 UTF-8 字符边界截断，避免多字节序列中间产生 U+FFFD。
+4. 文档同步 `docs/security.md`、根 README、`packages/api/README.md`。PR 2 其余已修部分未动。
+5. `bun test`：**670 pass / 0 fail**；`bun run build` 成功。
+
+### 我们遇到了哪些错误？
+
+1. 总指挥拍板：Sent 不能只认信封 From——伪造 From 的信会进被冒充身份的 Sent，且详情/Source/Seen 若只修列表入口仍可跨身份读改。
+2. ZCode P1-1：字节截断可能切开 UTF-8 多字节序列。
+3. FIFO 单测曾用 1970 时间戳，`hasSentMessageId` 按墙钟 TTL 把记录当过期（测试假阳性）。
+
+### 我们是如何解决这些错误的？
+
+1. 出站成功才登记；Sent/详情/Source/Seen 走同一 `messageIsTrustedSent`；测试钉死伪造 From 的列表/详情/Source/Seen 对 fox 全空/null/false，owl Inbox 仍可见。
+2. `truncateUtf8Bytes` 从切点回退到 leading byte，不完整则丢弃该字符。
+3. FIFO 用例改用 `Date.now()` 时间戳。

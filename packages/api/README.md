@@ -34,7 +34,7 @@ bun run typecheck
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
-| `DATA_DIR` | `./data` | identity store (`identities.json`) |
+| `DATA_DIR` | `./data` | identity store (`identities.json`); sent registry (`sent-registry.json`) |
 
 ## Endpoints
 
@@ -53,7 +53,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `PUT /v1/identities/:address/push-tier` `{pushContentTier:1|2|3, confirm_risk?}` → admin only; tier 3 requires `confirm_risk: true`
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
-- `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO **or FROM** `address` — #26 PR 2 放宽以便 Sent 文件夹可标已读；reading never sets `\Seen` by itself — agents mark messages processed through here)
+- `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO `address` **or** a server-trusted Sent item (From match **and** Message-ID in the outbound registry) — #26 PR 2 / 返工第2轮；reading never sets `\Seen` by itself — agents mark messages processed through here)
 - `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout", timeoutSec}` (IMAP IDLE + 3 s polling hybrid). Schema max 仍 600；服务端按 `MCP_MAX_WAIT_SECONDS` 静默钳制（头 `X-OAE-Wait-Timeout-Sec`）。并发：3/地址、8 全局 → `429 {error:"too_many_waits"}`
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
 - `GET /healthz` → `{ok:true}`

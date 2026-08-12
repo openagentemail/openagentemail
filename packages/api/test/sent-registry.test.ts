@@ -1,0 +1,88 @@
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'x';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'x';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-sent-reg-'));
+
+const { describe, expect, test } = await import('bun:test');
+const {
+  hasSentMessageId,
+  normalizeMessageId,
+  recordSentMessageId,
+  resetSentRegistryForTests,
+  reloadSentRegistryFromDiskForTests,
+  sentRegistrySizeForTests,
+} = await import('../src/lib/sent-registry.ts');
+const { config } = await import('../src/lib/config.ts');
+
+function registryPath(): string {
+  return join(config.dataDir, 'sent-registry.json');
+}
+
+describe('normalizeMessageId', () => {
+  test('剥尖括号并小写', () => {
+    expect(normalizeMessageId('<ABC@Host.Example>')).toBe('abc@host.example');
+    expect(normalizeMessageId(' abc@host.example ')).toBe('abc@host.example');
+  });
+
+  test('空串缺失 fail-closed', () => {
+    expect(normalizeMessageId('')).toBeNull();
+    expect(normalizeMessageId('   ')).toBeNull();
+    expect(normalizeMessageId(undefined)).toBeNull();
+  });
+});
+
+describe('sent registry 持久化', () => {
+  test('登记后可查，重启再 load 仍在', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<first@test.example>');
+    expect(hasSentMessageId('first@test.example')).toBe(true);
+    expect(hasSentMessageId('<FIRST@test.example>')).toBe(true);
+    const raw = JSON.parse(readFileSync(registryPath(), 'utf8'));
+    expect(raw.version).toBe(1);
+    expect(raw.entries[0].id).toBe('first@test.example');
+    const mode = statSync(registryPath()).mode & 0o777;
+    expect(mode).toBe(0o600);
+    reloadSentRegistryFromDiskForTests();
+    expect(hasSentMessageId('first@test.example')).toBe(true);
+  });
+
+  test('重复登记不刷新、不增条', () => {
+    resetSentRegistryForTests();
+    const t = Date.now();
+    recordSentMessageId('<dup@test.example>', t);
+    recordSentMessageId('<dup@test.example>', t + 9_000);
+    expect(sentRegistrySizeForTests()).toBe(1);
+  });
+
+  test('FIFO 淘汰最旧', () => {
+    resetSentRegistryForTests({ maxEntries: 2 });
+    const t = Date.now();
+    recordSentMessageId('<a@test.example>', t);
+    recordSentMessageId('<b@test.example>', t + 1);
+    recordSentMessageId('<c@test.example>', t + 2);
+    expect(hasSentMessageId('a@test.example')).toBe(false);
+    expect(hasSentMessageId('b@test.example')).toBe(true);
+    expect(hasSentMessageId('c@test.example')).toBe(true);
+    expect(sentRegistrySizeForTests()).toBe(2);
+  });
+
+  test('过期按 TTL 淘汰', () => {
+    resetSentRegistryForTests({ ttlMs: 10 });
+    recordSentMessageId('<old@test.example>', Date.now() - 50);
+    expect(hasSentMessageId('old@test.example')).toBe(false);
+  });
+
+  test('损坏文件 fail-closed 抛错', () => {
+    resetSentRegistryForTests();
+    writeFileSync(registryPath(), '{not-json', { mode: 0o600 });
+    reloadSentRegistryFromDiskForTests();
+    expect(() => hasSentMessageId('x@test.example')).toThrow('sent_registry_corrupt');
+  });
+});

@@ -8,6 +8,7 @@ import { forbidUnlessAddress } from '../lib/auth.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
 import { isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
+import { recordSentMessageId } from '../lib/sent-registry.ts';
 
 const sendSchema = z.object({
   from: z.string().email(),
@@ -57,6 +58,8 @@ export const sendRoute = new Hono().post('/', async (c) => {
       text,
       ...(html ? { html } : {}),
     });
+    // /v1/send 出站登记：sendMail 已写入 registry；此处再记一次以覆盖测试里 mock 掉 smtp 的路径（已存在则 no-op）。
+    recordSentMessageId(messageId);
     // This is the only path that wakes an agent topic: it is a successful,
     // authenticated server-side send to another managed address. Inbound mail
     // never gets this capability because any sender header can be forged.

@@ -42,6 +42,8 @@ class FakeImapFlow {
       source: message.source ?? Buffer.from('From: sender@example.net\r\nSubject: hi\r\n\r\nbody'),
     };
   }
+  async messageFlagsAdd() {}
+  async messageFlagsRemove() {}
   async logout() {}
   close() {}
 }
@@ -53,14 +55,17 @@ const {
   listMessagesPage,
   getMessage,
   getMessageSource,
+  setMessageSeen,
   messageMatchesAddress,
   messageRecipients,
   messageSenders,
   messageBelongsToFolder,
   messageAccessibleToAddress,
+  messageIsTrustedSent,
   receivedAtMs,
   MAX_EMAIL_SOURCE_LENGTH,
 } = await import('../src/lib/imap.ts');
+const { recordSentMessageId, resetSentRegistryForTests } = await import('../src/lib/sent-registry.ts');
 const { InvalidMailCursorError, encodeMailCursor } = await import('../src/lib/mail-cursor.ts');
 const { config } = await import('../src/lib/config.ts');
 
@@ -343,6 +348,7 @@ function folderMessage(opts: {
   to: string;
   at: string;
   source?: Buffer;
+  messageId?: string;
 }): any {
   return {
     uid: opts.uid,
@@ -351,6 +357,7 @@ function folderMessage(opts: {
       to: [{ address: opts.to }],
       subject: `m${opts.uid}`,
       date: new Date(opts.at),
+      messageId: opts.messageId ?? `<m${opts.uid}@test.example>`,
     },
     internalDate: new Date(opts.at),
     flags: new Set<string>(),
@@ -392,6 +399,9 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
   });
 
   test('三 folder 集合正确且 Sent 不含纯收件', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>');
+    recordSentMessageId('<m3@test.example>');
     expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'inbox')).toBe(true);
     expect(messageBelongsToFolder(inboxOnly, 'fox@test.example', 'sent')).toBe(false);
     expect(messageBelongsToFolder(sentOnly, 'fox@test.example', 'inbox')).toBe(false);
@@ -400,13 +410,18 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
     expect(messageBelongsToFolder(other, 'fox@test.example', 'all')).toBe(false);
   });
 
-  test('详情 ACL：Sent 的 FROM 匹配可读，外人不可读', () => {
+  test('详情 ACL：可信 Sent 的 FROM 匹配可读，外人不可读', () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>');
     expect(messageAccessibleToAddress(sentOnly, 'fox@test.example')).toBe(true);
     expect(messageAccessibleToAddress(sentOnly, 'owl@test.example')).toBe(false);
     expect(messageAccessibleToAddress(inboxOnly, 'fox@test.example')).toBe(true);
   });
 
   test('listMessagesPage 三 folder 去重且 Sent 不含纯收件', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>');
+    recordSentMessageId('<m3@test.example>');
     fakeMessages = [inboxOnly, sentOnly, both, other];
     const inbox = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
     const sent = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
@@ -418,11 +433,49 @@ describe('folder matching — Inbox / Sent / All Mail', () => {
     fakeMessages = [];
   });
 
-  test('getMessage 对 Sent（FROM）可读', async () => {
+  test('getMessage 对可信 Sent（FROM∧registry）可读', async () => {
+    resetSentRegistryForTests();
+    recordSentMessageId('<m2@test.example>');
     fakeMessages = [sentOnly];
     const detail = await getMessage('fox@test.example', '2');
     expect(detail?.id).toBe('2');
     expect(await getMessage('owl@test.example', '2')).toBeNull();
+    fakeMessages = [];
+  });
+});
+
+describe('伪造 From 不得进 Sent，非收件人四入口不可见', () => {
+  const forged = folderMessage({
+    uid: 99,
+    from: 'fox@test.example',
+    to: 'owl@test.example',
+    at: '2026-08-01T14:00:00Z',
+    messageId: '<forged-not-outbound@evil.example>',
+  });
+
+  test('伪造信落收件人 Inbox，但不进任何人的 Sent', () => {
+    resetSentRegistryForTests();
+    expect(messageBelongsToFolder(forged, 'owl@test.example', 'inbox')).toBe(true);
+    expect(messageBelongsToFolder(forged, 'owl@test.example', 'sent')).toBe(false);
+    expect(messageBelongsToFolder(forged, 'fox@test.example', 'inbox')).toBe(false);
+    expect(messageBelongsToFolder(forged, 'fox@test.example', 'sent')).toBe(false);
+    expect(messageIsTrustedSent(forged, 'fox@test.example')).toBe(false);
+  });
+
+  test('列表/详情/Source/Seen 对非收件人全不可见', async () => {
+    resetSentRegistryForTests();
+    fakeMessages = [forged];
+    const sentList = await listMessagesPage('fox@test.example', { folder: 'sent', limit: 50 });
+    const allList = await listMessagesPage('fox@test.example', { folder: 'all', limit: 50 });
+    const inboxList = await listMessagesPage('fox@test.example', { folder: 'inbox', limit: 50 });
+    expect(sentList.messages).toEqual([]);
+    expect(allList.messages).toEqual([]);
+    expect(inboxList.messages).toEqual([]);
+    expect(await getMessage('fox@test.example', '99')).toBeNull();
+    expect(await getMessageSource('fox@test.example', '99')).toBeNull();
+    expect(await setMessageSeen('fox@test.example', '99', true)).toBe(false);
+    const owlInbox = await listMessagesPage('owl@test.example', { folder: 'inbox', limit: 50 });
+    expect(owlInbox.messages.map((m) => m.id)).toEqual(['99']);
     fakeMessages = [];
   });
 });
@@ -535,6 +588,27 @@ describe('getMessageSource — ACL 与截断', () => {
     expect(payload?.truncated).toBe(true);
     expect(payload?.byteLength).toBe(raw.length);
     expect(Buffer.byteLength(payload!.source, 'utf8')).toBe(MAX_EMAIL_SOURCE_LENGTH);
+    fakeMessages = [];
+  });
+
+  test('截断落在多字节序列中间时回退到字符边界，不产生替换字符', async () => {
+    const euro = Buffer.from('€', 'utf8'); // e2 82 ac
+    const prefix = Buffer.alloc(MAX_EMAIL_SOURCE_LENGTH - 1, 0x41);
+    const raw = Buffer.concat([prefix, euro, Buffer.from('TAIL')]);
+    fakeMessages = [
+      folderMessage({
+        uid: 9,
+        from: 'ext@example.net',
+        to: 'fox@test.example',
+        at: '2026-08-01T10:00:00Z',
+        source: raw,
+      }),
+    ];
+    const payload = await getMessageSource('fox@test.example', '9');
+    expect(payload?.truncated).toBe(true);
+    expect(payload?.byteLength).toBe(raw.length);
+    expect(payload!.source.includes('\uFFFD')).toBe(false);
+    expect(Buffer.byteLength(payload!.source, 'utf8')).toBe(MAX_EMAIL_SOURCE_LENGTH - 1);
     fakeMessages = [];
   });
 });

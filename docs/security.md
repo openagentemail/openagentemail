@@ -24,9 +24,11 @@ retention window before reusing one.
 
 Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁止子串）。
 
-- **列表：** Inbox = 收件人（TO/Cc/Bcc/Delivered-To）；Sent = 发件人（信封 From）；All Mail = 二者并集。Bearer `GET /v1/messages` 仍只列出 Inbox（TO），以免改 agent 列表契约。
-- **详情 / 已读标记 / Source：** 可读集合是 TO∨FROM。因此 `setMessageSeen` / `mail_mark_seen` 可以标记自己发出的信，不再限于「只 flag 发给自己的邮件」——这是 Sent 文件夹点开并标已读所需。
-- **Sent 源码：** identity 可读自身 Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。
+- **列表：** Inbox = 收件人（TO/Cc/Bcc/Delivered-To）；Sent = 信封 From 匹配 **且** Message-ID 在服务端出站登记表（`/v1/send` / `sendMail` 成功写入 `DATA_DIR/sent-registry.json`）；All Mail = 二者并集。Bearer `GET /v1/messages` 仍只列出 Inbox（TO），以免改 agent 列表契约。
+- **详情 / 已读标记 / Source：** 与列表同一条可信规则（TO ∨ 可信 Sent），不是「任意 FROM」。伪造 From 的信对非收件人在列表/详情/Source/Seen 四个入口均不可见（404）；identity 读他人 address 仍 403。
+- **伪造信：** 照常落收件人 Inbox（它本质就是一封信），但绝不进任何人的 Sent。
+- **Sent 源码：** identity 可读自身**可信** Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。
+- **sent-registry.json：** 0600、tmp+rename 原子写、重启持久；FIFO 上限 20_000 条，并按 `RETENTION_DAYS` 时间淘汰（与邮件保留窗口对齐）。
 
 ## OAuth access tokens（P3 AS）
 

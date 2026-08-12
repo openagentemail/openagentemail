@@ -9,6 +9,7 @@ import nodemailer from 'nodemailer';
 import { config } from './config.ts';
 import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
 import { htmlToText } from './otp.ts';
+import { recordSentMessageId } from './sent-registry.ts';
 
 export interface SendInput {
   from: string;
@@ -64,6 +65,8 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
       ...(input.html ? { html: input.html } : {}),
       headers,
     });
+    // 服务端真正出站成功才登记：Sent = From∧message-id∈registry。
+    recordSentMessageId(info.messageId);
     return { messageId: info.messageId };
   } finally {
     transporter.close();

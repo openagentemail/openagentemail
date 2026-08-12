@@ -28,6 +28,7 @@ const { describeFailure, redactSecrets } = await import('../src/lib/redact.ts');
 const { isLocalSendFailure } = await import('../src/lib/sendfailure.ts');
 const { checkSendLimit, resetRateLimits } = await import('../src/lib/ratelimit.ts');
 const { config } = await import('../src/lib/config.ts');
+const { hasSentMessageId, resetSentRegistryForTests } = await import('../src/lib/sent-registry.ts');
 
 const app = new Hono();
 app.use('*', async (c, next) => {
@@ -159,5 +160,20 @@ describe('发信失败后的配额处理', () => {
     expect((await post('quota-local@test.example')).status).toBe(502);
     // 桶应该是空的：limit=1 的探测仍然放行。
     expect(checkSendLimit('quota-local@test.example', 1).allowed).toBe(true);
+  });
+});
+
+describe('出站登记 sent registry', () => {
+  test('/v1/send 成功后把 message-id 写入 registry', async () => {
+    resetSentRegistryForTests();
+    resetRateLimits();
+    createIdentity({ localpart: 'sent-reg' });
+    sendMail.mockImplementation(async () => ({ messageId: '<outbound-reg@test.example>' }));
+    const response = await post('sent-reg@test.example');
+    expect(response.status).toBe(200);
+    expect(hasSentMessageId('outbound-reg@test.example')).toBe(true);
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
   });
 });
