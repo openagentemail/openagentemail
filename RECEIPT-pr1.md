@@ -2,8 +2,8 @@
 
 - **时间**：2026-08-12
 - **分支**：`tizerluo/worker-34-pr1`（未动 `main`）
-- **HEAD commit**：`6ec3a5e`（返工第3轮：decode 安全 + shell-routes 对齐）
-- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序；`a6d0e1a` taskTimelineBody；`757b23c` apiJson 204；`6ec3a5e` deep-link decode/shell paths
+- **HEAD commit**：`9faa1dd`（返工第4轮：Overview nav 权限 + 保留前缀请求闸）
+- **功能 commit**：`8113994` modularize shell；`6de5219` shell 注册顺序；`a6d0e1a` taskTimelineBody；`757b23c` apiJson 204；`6ec3a5e` deep-link decode/shell paths；`9faa1dd` Overview nav / reserved routes
 - **PR**：[#25](https://github.com/openagentemail/openagentemail/pull/25) — `feat(api): modularize dashboard shell and real /ui routes (#26 PR 1)`
 - **Repo**：`openagentemail/openagentemail`
 
@@ -109,4 +109,13 @@
 - **触发**：终审剩两条。① Codex P2：identity session 能看见 admin 专属 Overview 全局导航，点了靠 fallback。② ZCode P1：shell 深链注册顺序只有静态 `routes` 下标测试，缺通配请求不吞 api/oauth/frame 的回归闸。
 - **修复**：`#nav-overview-item` 默认 hidden + `configureSession`/`data-session` 双保险；请求级断言保留前缀不是 dashboard shell；`parseLocationRoute` 将 api/oauth/frame 标 unknown。
 - **测试**：`packages/api` `bun test` → **635 pass / 0 fail**
-- **独立自审（新 agent，禁止自审自）**：待本轮功能 commit 后启动。
+- **独立自审（新 agent，禁止自审自）**：
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `a2c21089-d533-4991-8e0d-abd971ead041` |
+| HEAD 审查时 | `9faa1dd` |
+| 结论 | **可合并** — Overview nav 按角色隐藏；请求级断言保留前缀不被 shell 吞；635 pass |
+| Codex P2 裁定 | **已关闭**：`#nav-overview-item` 默认 hidden + `configureSession`/`data-session` 双保险；runtime 钉 identity 隐藏 / admin 显示 |
+| ZCode P1 裁定 | **已关闭**：真实请求断言 `/ui/api` `/ui/oauth` `/ui/frame` 不是 dashboard shell；`parseLocationRoute` 将保留前缀标 unknown |
+| P0/P1/P2 | **无**（残余：未覆盖 `/ui/api/not-a-real-route` 在未来 `/ui/*` catch-all 下的回落；不挡合并） |

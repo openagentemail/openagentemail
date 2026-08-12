@@ -110,7 +110,7 @@
 2. 契约测试运行 `isAdmin`+`configureSession`：identity 隐藏 Overview nav，admin 显示。A53 浏览器探针改为钉 `[data-nav="overview"]` / `#nav-overview-item`。
 3. 路由表层级回归：对 `/ui/api/*`、`/ui/oauth/*`、`/ui/frame/*` 发真实请求，断言响应不是 dashboard shell（无 `id="app-nav"`、CSP 不是 `OUTER_CSP`）。客户端 `parseLocationRoute` 把这些保留前缀标 `unknown`（popstate 同源解析）。
 4. `bun test`：**635 pass / 0 fail**（原 632 + 3 新闸）。
-5. 独立自审：待本轮 commit 后启动新 agent。
+5. 独立自审 agent `a2c21089-d533-4991-8e0d-abd971ead041`：可合并；Codex P2 / ZCode P1 已关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
