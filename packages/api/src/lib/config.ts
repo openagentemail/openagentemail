@@ -4,6 +4,7 @@
  * that is intentional: fail fast at boot, not on first request.
  */
 
+import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -219,6 +220,7 @@ export function normalizeUrl(value: string): string {
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
+  const taskSigningSecret = raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS;
 
   return {
     port: raw.PORT,
@@ -242,7 +244,11 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     // The fallback supports an upgrade where the new variable has not reached
     // a bare-process config yet. Both Compose variants require the dedicated
     // secret, which is the supported v0.4 deployment path.
-    taskSigningSecret: raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS,
+    taskSigningSecret,
+    // 通知游标与 task/mail 游标域分离；不新增 env。旧 notify 游标失效可接受。
+    notifyCursorSecret: createHmac('sha256', taskSigningSecret)
+      .update('notify-cursor-v1')
+      .digest(),
     allowedSendDomains: raw.ALLOWED_SEND_DOMAINS
       ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
       : [raw.DOMAIN.toLowerCase()],

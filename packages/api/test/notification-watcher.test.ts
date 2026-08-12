@@ -133,6 +133,8 @@ describe('mail-arrival notification watcher', () => {
     expect(calls[0].level).toBe('urgent');
     // Watcher must truncate on ntfy budget overflow, never throw (F76 UID safety).
     expect(calls[0].overflow).toBe('truncate');
+    expect(calls[0].source).toBe('watcher');
+    expect(calls[0].sensitive).toBe(false);
     // Tier 1 (default): no subject, sender, or code content in the payload.
     expect(JSON.stringify(calls[0])).not.toContain(subject);
     expect(JSON.stringify(calls[0])).not.toContain('stranger@example.net');
@@ -2673,6 +2675,8 @@ describe('mail-arrival notification watcher', () => {
     const previewLine = body.split('\n').find((line) => line.startsWith('Preview: '))!;
     expect(previewLine.slice('Preview: '.length).length).toBeLessThanOrEqual(PUSH_BODY_PREVIEW_CHARS);
     expect(calls[0].level).toBe('urgent');
+    expect(calls[0].source).toBe('watcher');
+    expect(calls[0].sensitive).toBe(true);
   });
 
   test('tier 3 push keeps clean URL from non-adjacent prose wrapper (F90)', async () => {

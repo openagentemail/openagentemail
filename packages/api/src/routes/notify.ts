@@ -141,7 +141,24 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       }
 
       try {
-        return c.json(await service.publish(input), 200);
+        const agent = input.target.startsWith('agent:')
+          ? input.target.slice('agent:'.length)
+          : undefined;
+        return c.json(
+          await service.publish({
+            ...input,
+            source: 'manual',
+            logicalChannel:
+              input.target === 'user'
+                ? input.level === 'low'
+                  ? 'user-low'
+                  : 'user-alerts'
+                : (`agent:${agent}` as const),
+            sensitive: false,
+            ...(agent ? { identityAddress: `${agent}@${config.domain}` } : {}),
+          }),
+          200,
+        );
       } catch (err) {
         // A local transport failure must not let a caller burn the alert budget.
         if (actor) releaseNotifyUserLimit(actor, reservation);

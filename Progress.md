@@ -236,6 +236,8 @@
 
 1. ZCode P1：`loadFromDisk` 遇到损坏/半行 JSON 时告警、隔离为 `sent-registry.json.corrupt`、回退空表；读路径零异常。Inbox/详情照常，Sent 判定为空集。
 2. 测试钉死损坏文件存在时 `listMessagesPage`/`getMessage` 正常返回、Sent 为空；`hasSentMessageId` 不抛。
+3. `bun test`：**676 pass / 0 fail**。
+4. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
 
 ### 我们遇到了哪些错误？
 
@@ -244,5 +246,129 @@
 ### 我们是如何解决这些错误的？
 
 1. fail-closed = 判不可信（空 registry），不是抛错。隔离备份损坏文件，避免每次启动重复解析毒药。不在读路径 persist 空表。
-2. 独立自审 agent `8f0e8b0e-8da8-4151-a890-5cdaadd8ab10`：可合并；本轮 P1 关闭；无新 P0/P1/P2。
-3. `bun test`：**676 pass / 0 fail**。
+
+---
+
+## #26 PR 3（2026-08-12）
+
+分支：`tizerluo/worker-34-pr3`  
+范围：ADR §PR 3（30 天 Notifications 完整闭环）
+
+### 我们实现了哪些功能？
+
+1. 新建 `DATA_DIR/notification-log.jsonl`：schemaVersion/id/publishedAt/source/logicalTarget/logicalChannel/level/title/message/tags/sensitive/identityAddress?/delivery=sent；0600、目录 0700、单写者 promise 队列；不写物理 ntfy topic/secret。
+2. 埋点落在 `NtfyNotificationService.publish()` 成功路径内（ntfy 成功响应后、返回前）。watcher / manual `/v1/notify` / task trusted delivery / `verify()` 的 `this.publish` 自调用四来源同一埋点；失败与 `beforeSend` 取消不写。
+3. 送达优先：append 失败打 `[notification-log] HIGH:` 告警，publish 仍成功；不得先记后发、不得把失败冒充成功。
+4. 启动 + 每日 UTC 午夜清理 `publishedAt < now-30d`（`.tmp` + fsync + atomic rename）；查询硬加 30 天下界。末尾半行隔离到 `.partial` 并报警；中间损坏 fail-closed。
+5. 新 UI API：`GET /ui/api/notifications`（channel/level/日期/cursor/limit 20|50|100）、`GET /ui/api/notify/summary?date=today&tz=`（回显区间）、`GET /ui/api/notify/diagnostics`、`POST /ui/api/notify/verify`（镜像 Bearer 权限+限流）。identity 强制自身 agent channel；admin 全实例。
+6. Notifications 页：筛选/分页、sensitive 默认 `•••` 逐条展开不持久化、顶部今日小结；Overview 两张通知数字卡与小结同一 summary 源；旧 12h ntfy history 保留为 transport cache fallback。不回填 12h 到 30 天日志。
+7. `docs/security.md` 与 `packages/api/README.md` 同步 DATA_DIR 运维说明。
+8. `bun test`：**699 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审后的修补（同一 PR）
+
+1. JSONL 首测改为按行 `JSON.parse`，并 `beforeEach` reset，避免与 `main.ts` 维护循环/其它文件共享进程单例时把整文件当一个 JSON。
+2. `appendNotificationLog` 写盘前先 `inspectAndRepairSync()`，末尾半行先隔离再追加，避免粘成中间损坏。
+3. 12h transport cache fallback 无可靠 `sensitive` 标记，默认走 `•••` 遮蔽。
+4. 补 UI cursor 翻页与目录 0700 测试。
+
+### 我们遇到了哪些错误？
+
+1. `/v1/notify` 给 mock service 传入 `identityAddress: undefined` 导致既有精确相等断言失败。
+2. Overview cycle 增加 summary 请求后，generation 守卫出现次数从 4 变成 6，静态契约未同步。
+3. 游标测试在 `nextCursor=null` 时仍查询，被当成首页重放。
+
+### 我们是如何解决这些错误的？
+
+1. 仅在 agent target 时附带 `identityAddress`；断言补上 source/logicalChannel/sensitive。
+2. 更新 ui-assets 契约为 6 次 generation 比较，并钉死 Notifications today / Urgent today 与 `/ui/api/notify/summary`。
+3. 用 21 条 + limit 20 覆盖翻页与跨筛选 cursor 拒绝。
+
+---
+
+## #26 PR 3 返工第2轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：append 前若文件非空且不以换行结尾——完整合法末行先补 `\\n`，半行仍先隔离再写。避免「缺末尾换行的完好记录」与下一次 append 粘成中间损坏，导致 30 天日志 fail-closed。
+2. Codex P2：`zonedDayBounds` 拒绝不存在的日历日（如 2 月 30 日、非闰年 2 月 29 日）。JS Date 不再把非法日滚到另一天；summary 回显区间不变，非法日期走既有 400。
+3. 测试钉死：缺末尾换行的完好文件 append 后两行均可 `JSON.parse`、查询可读；`2026-02-30` 的 zonedDayBounds 抛 RangeError，UI summary 400 且不回显滚后的 3 月。
+4. `bun test`（packages/api）：**702 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `8543835d-3784-411a-bc6d-6b3159493479`：可合并；No findings；Codex P1（缺末尾换行粘连）与 P2（非法日历日）均关闭。
+
+### 我们遇到了哪些错误？
+
+1. 上轮只在 append 前调用 `inspectAndRepairSync`。`parseFileText` 把「完整 JSON 但缺最终换行」当完整行收下，却不重写文件；随后 `appendLineSync` 把新 JSON 直接粘在旧 JSON 后面，下一轮解析变成中间损坏。
+2. `date=2026-02-30` 过 `YYYY-MM-DD` 正则后被 `Date.UTC` 归一成 3 月 2 日，摘要区间误导。
+
+### 我们是如何解决这些错误的？
+
+1. `inspectAndRepairSync`：无 trailingPartial 且 raw 非空不以 `\\n` 结尾时，`appendMissingFinalNewlineSync` 只补换行（不走 persistHook）。半行路径仍隔离 + 原子重写。
+2. 解析出年/月/日后用 UTC 日历回读校验，对不上则 `RangeError('invalid_date')`；路由已映射为 400。
+
+---
+
+## #26 PR 3 返工第3轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：sidecar（`.partial`）未持久写成功时中止 repair 并抛错，主日志一字不动，绝不丢掉尾行。
+2. ZCode P1-1：config 层用 `createHmac('sha256', taskSigningSecret).update('notify-cursor-v1').digest()` 派生 `notifyCursorSecret`，不新增 env。通知游标与 task/mail 游标不同钥；旧 notify 游标失效可接受。
+3. 测试钉死：sidecar 为目录导致 EISDIR 时 query/append 均失败且主日志字节不变；用 taskSigningSecret 重签的旧游标 `invalid_cursor`；派生密钥与 task 密钥不相等。
+4. `bun test`（packages/api）：**705 pass / 0 fail**；`bun run build` 全绿。
+5. ZCode「append 前全量解析」性能观察本期不扩 scope，记债（见回执）。
+6. 独立自审 agent `38b16cb4-9d8c-432e-a989-5295d32b0359`：可合并；No findings；Codex P1 与 ZCode P1-1 均关闭。
+
+### 我们遇到了哪些错误？
+
+1. 隔离尾行到 `.partial` 失败时 catch 只记日志，仍 `writeAtomicSync` 截断主日志，隔离机制要保的数据被丢掉。
+2. 通知游标 HMAC 直接复用 `taskSigningSecret`（可能 fallback `SMTP_PASS`），跨用途泄漏放大。
+
+### 我们是如何解决这些错误的？
+
+1. sidecar write+fsync 成功后才告警并重写主日志；失败则 `partial_isolate_failed` 后原样抛出。
+2. 派生域分离子密钥，encode/decode 改走 `config.notifyCursorSecret`。
+
+---
+
+## #26 PR 3 返工第4轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Codex P1：`zonedDayBounds` 改为迭代求解当地午夜 UTC，并验证墙钟落在目标日 00:00；偏移在 guess 与午夜之间切换则按墙钟差重算。当地 00:00 被弹簧向前跳过时，取该日第一个可表示瞬间。
+2. 测试钉死：Australia/Lord_Howe 2026-04-05（不再算出 00:30）与 2026-10-04（不再算出前一天 23:30）；America/Santiago 2026-04-05 / 2026-09-06 整小时转换日；Asia/Shanghai 与 UTC 不回归。
+3. `bun test`（packages/api）：**706 pass / 0 fail**；`bun run build` 全绿。
+4. 独立自审 agent `509117a0-ce70-4661-8726-cb7ef72e9379`：可合并；No findings；Codex P1（DST 午夜偏移）关闭。
+
+### 我们遇到了哪些错误？
+
+1. 一次性 `start = guess - offsetAt(guess)` 在本地午夜与 guess 之间发生 DST 切换时用错一侧 offset。Lord_Howe 半小时 DST：4 月 5 日算出当地 00:30，10 月 4 日算出前一天 23:30，summary 漏算/多算半小时。
+
+### 我们是如何解决这些错误的？
+
+1. `utc := asUtc - offsetAt(utc)` 迭代至不动点，再用 Intl 墙钟校验。不对则按 `asUtc - gotAsUtc` 重算；仍非 00:00 但已在目标日则接受（跳过的午夜）。
+
+---
+
+## #26 PR 3 返工第5轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. ZCode P1-1：`GET /ui/api/notifications` 的 `limit` 在 schema 层用 `z.union` 字面量 `'20'|'50'|'100'`（缺省 `'20'`），非法直接 400。不再 `z.coerce.number()` 后再白名单兜底。
+2. 测试钉死 `limit=20.5` / `999` / `abc` 全 400；`limit=50` 仍 200。
+3. ZCode P1-2（sensitive 服务端全量返回）按 ADR 既定设计不动，回执引用 ADR 原句分流。
+4. `bun test`（packages/api）：**707 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `0b8c9a88-d76d-4337-9f77-b6197232c4a7`：可合并；No findings；ZCode P1-1 关闭。
+
+### 我们遇到了哪些错误？
+
+1. `z.coerce.number().int()` 让任意整数进入后续比较；越界/非字面量合法域没卡死在 schema。
+
+### 我们是如何解决这些错误的？
+
+1. 查询串按字符串白名单解析再 `transform` 成 `NotificationLogLimit`；路由去掉第二道 `isNotificationLogLimit` 兜底。
+
+
+
+
+

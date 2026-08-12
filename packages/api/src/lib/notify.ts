@@ -13,6 +13,14 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname, join } from 'node:path';
 import { config } from './config.ts';
 import { findIdentity, listIdentities, type Identity } from './identities.ts';
+import {
+  appendNotificationLog,
+  logicalChannelFor,
+  notificationLogHealthAlert,
+  type NotificationLogicalChannel,
+  type NotificationLogicalTarget,
+  type NotificationSource,
+} from './notification-log.ts';
 
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
@@ -42,6 +50,14 @@ export interface NotifyInput {
   beforeSend?: () => boolean;
   /** Default `error`. Watcher passes `truncate`. Click-drop runs before this. */
   overflow?: NotifyOverflow;
+  /**
+   * 审计元数据：不进入 ntfy JSON。落在具体 publish 成功路径内写入 30 天日志。
+   * 缺省 source 按 manual 记，避免漏埋点；四来源调用方应显式传入。
+   */
+  source?: NotificationSource;
+  logicalChannel?: NotificationLogicalChannel;
+  sensitive?: boolean;
+  identityAddress?: string;
 }
 
 export interface NotifyMessage {
@@ -651,6 +667,29 @@ export class NtfyNotificationService implements NotifyService {
       body,
     });
     if (!response.ok) throw new NotifyError('notify_unavailable');
+    // 送达优先：ntfy 成功后、返回前写日志。append 失败只告警，不把投递改成失败。
+    const logicalTarget = input.target as NotificationLogicalTarget;
+    const logicalChannel =
+      input.logicalChannel ?? logicalChannelFor(logicalTarget, input.level);
+    try {
+      await appendNotificationLog({
+        source: input.source ?? 'manual',
+        logicalTarget,
+        logicalChannel,
+        level: input.level,
+        title: input.title,
+        message: basePayload.message,
+        tags: input.tags,
+        sensitive: Boolean(input.sensitive),
+        identityAddress: input.identityAddress,
+      });
+    } catch (err) {
+      notificationLogHealthAlert('append_failed_after_delivery', {
+        source: input.source ?? 'manual',
+        logicalChannel,
+        error: (err as Error).message,
+      });
+    }
     return { target: input.target, title: input.title, level: input.level };
   }
 
@@ -676,6 +715,9 @@ export class NtfyNotificationService implements NotifyService {
       message: `openagent.email notification check ${nonce}`,
       level: 'normal',
       tags: ['white_check_mark'],
+      source: 'verify',
+      logicalChannel: 'user-alerts',
+      sensitive: false,
     });
 
     const deadline = Date.now() + 5_000;
@@ -760,6 +802,10 @@ export async function notifyTrustedAgentDelivery(address: string): Promise<void>
       message: `${identity.address} received new email`,
       level: 'normal',
       tags: ['email'],
+      source: 'task',
+      logicalChannel: `agent:${localpart}`,
+      sensitive: false,
+      identityAddress: identity.address,
     });
   } catch (err) {
     // Mail already made it to SMTP; notification delivery must not turn a

@@ -7,6 +7,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
+import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import { normalizeUrl, parseConfig } from '../src/lib/config.ts';
 
@@ -60,6 +61,20 @@ describe('task signing configuration', () => {
 
   test('keeps a fallback only for pre-v0.4 bare-process upgrades', () => {
     expect(parseConfig(requiredEnv).taskSigningSecret).toBe('smtp-secret');
+  });
+
+  test('derives a domain-separated notify cursor secret without a new env', () => {
+    const parsed = parseConfig({
+      ...requiredEnv,
+      TASK_SIGNING_SECRET: 'stable-task-signing-secret-2026',
+    });
+    const expected = createHmac('sha256', 'stable-task-signing-secret-2026')
+      .update('notify-cursor-v1')
+      .digest();
+    expect(Buffer.from(parsed.notifyCursorSecret).equals(expected)).toBe(true);
+    expect(Buffer.from(parsed.notifyCursorSecret).equals(Buffer.from(parsed.taskSigningSecret))).toBe(
+      false,
+    );
   });
 });
 
