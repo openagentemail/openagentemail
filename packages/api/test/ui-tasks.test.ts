@@ -16,6 +16,7 @@ const {
   listTaskBoard,
   setTaskListAllForTests,
   setTaskNowForTests,
+  toUiTaskView,
 } = await import('../src/lib/tasks.ts');
 
 afterEach(() => {
@@ -160,7 +161,13 @@ function makeApp(
         const task = catalog.find((row) => row.id === input.id);
         if (!task) throw new Error('not_found');
         if (task.state !== 'input-required') throw new Error('task_not_input_required');
-        return { ...task, state: 'working' as const };
+        // 附加键模拟服务层回显放大；路由必须裁掉，identity 不得看到越权字段。
+        return {
+          ...task,
+          state: 'working' as const,
+          adminInternal: 'should-not-leak',
+          peerMailbox: TASK_B,
+        };
       }),
       remind: mock(async (input) => {
         remindCalls.push(input);
@@ -169,7 +176,7 @@ function makeApp(
         if (task.state === 'completed' || task.state === 'failed') {
           throw new Error('task_already_terminal');
         }
-        return task;
+        return { ...task, adminInternal: 'should-not-leak', peerMailbox: TASK_B };
       }),
       close: mock(async (input) => {
         closeCalls.push(input);
@@ -182,6 +189,8 @@ function makeApp(
           ...task,
           state: 'failed' as const,
           result: { closed_by_admin: true, reason: input.reason },
+          adminInternal: 'should-not-leak',
+          peerMailbox: TASK_B,
         };
       }),
     },
@@ -385,9 +394,37 @@ describe('UI task reply / remind / close', () => {
       body: JSON.stringify({ body: 'here is the spec' }),
     });
     expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual(toUiTaskView({ ...TASK_INPUT, state: 'working' }));
+    expect(body.adminInternal).toBeUndefined();
+    expect(body.peerMailbox).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('cat@test.example');
     expect(replyCalls).toEqual([
       { id: TASK_INPUT.id, from: 'fox@test.example', body: 'here is the spec' },
     ]);
+
+    const detail = await app.request(`/ui/api/tasks/${TASK_INPUT.id}`, { headers: { cookie } });
+    expect(detail.status).toBe(200);
+    const detailBody = await detail.json();
+    expect(Object.keys(body).sort()).toEqual(Object.keys(detailBody).sort());
+  });
+
+  test('identity reply on a peer task is 403 and does not leak the thread', async () => {
+    const { app, cookie, replyCalls } = makeApp({
+      kind: 'identity',
+      address: 'fox@test.example',
+    });
+    const response = await app.request(`/ui/api/tasks/${TASK_B.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'should not see this' }),
+    });
+    expect(response.status).toBe(403);
+    const body = await response.json();
+    expect(body).toEqual({ error: 'forbidden: task participant required' });
+    expect(JSON.stringify(body)).not.toContain('cat@test.example');
+    expect(JSON.stringify(body)).not.toContain('go');
+    expect(replyCalls).toEqual([]);
   });
 
   test('identity cannot spoof from on reply', async () => {
@@ -473,7 +510,7 @@ describe('UI task reply / remind / close', () => {
       body: JSON.stringify({ from: 'fox@test.example', body: 'ping', idempotencyKey: 'k1' }),
     });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toMatchObject({ id: TASK_A.id, state: 'working' });
+    expect(await ok.json()).toEqual(toUiTaskView(TASK_A));
     expect(remindCalls).toEqual([
       {
         id: TASK_A.id,
@@ -500,10 +537,13 @@ describe('UI task reply / remind / close', () => {
       body: JSON.stringify({ reason: 'duplicate work', from: 'fox@test.example' }),
     });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toMatchObject({
-      state: 'failed',
-      result: { closed_by_admin: true, reason: 'duplicate work' },
-    });
+    expect(await ok.json()).toEqual(
+      toUiTaskView({
+        ...TASK_A,
+        state: 'failed',
+        result: { closed_by_admin: true, reason: 'duplicate work' },
+      }),
+    );
     expect(closeCalls).toEqual([
       { id: TASK_A.id, from: 'fox@test.example', reason: 'duplicate work' },
     ]);

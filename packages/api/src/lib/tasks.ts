@@ -10,7 +10,7 @@ import type { FetchMessageObject } from 'imapflow';
 import { config } from './config.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
-import { sendMail } from './smtp.ts';
+import { sendMail, type SendInput } from './smtp.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 
 export {
@@ -341,6 +341,8 @@ async function findTaskMessages(id: string): Promise<RawTaskMessage[]> {
 
 export async function getTask(id: string): Promise<Task | null> {
   if (!isTaskId(id)) return null;
+  // 单测注入内存目录，避免并发 reply 回归打真 IMAP。
+  if (getTaskForTests) return getTaskForTests(id);
   return taskFromMessages(id, await findTaskMessages(id));
 }
 
@@ -405,6 +407,8 @@ const taskLocks = new Map<string, Promise<void>>();
 let nowFn: () => number = () => Date.now();
 let listCache: { at: number; tasks: Task[] } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
+let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
+let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
 
 export function setTaskNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
@@ -413,6 +417,21 @@ export function setTaskNowForTests(fn: (() => number) | null): void {
 export function setTaskListAllForTests(fn: (() => Promise<Task[]>) | null): void {
   listAllForTests = fn;
   listCache = null;
+}
+
+export function setTaskGetForTests(fn: ((id: string) => Promise<Task | null>) | null): void {
+  getTaskForTests = fn;
+}
+
+export function setTaskSendMailForTests(
+  fn: ((input: SendInput) => Promise<{ messageId: string }>) | null,
+): void {
+  sendMailForTests = fn;
+}
+
+/** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */
+async function deliverMail(input: SendInput): Promise<{ messageId: string }> {
+  return (sendMailForTests ?? sendMail)(input);
 }
 
 export function invalidateTaskListCache(): void {
@@ -437,48 +456,54 @@ async function withTaskLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
-  return withTaskLock(input.id, async () => {
-    const existing = await getTask(input.id);
-    if (!existing) return null;
-    if (!taskParticipants(existing).has(input.from)) throw new Error('task_participant_required');
-    if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
+/**
+ * 已持 per-task 锁时的状态写入。reply/close 必须走这条，禁止再套 withTaskLock
+ *（同 id 会自死锁）。调用方负责在锁内完成前置状态断言。
+ */
+async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Promise<Task | null> {
+  const current = existing ?? await getTask(input.id);
+  if (!current) return null;
+  if (!taskParticipants(current).has(input.from)) throw new Error('task_participant_required');
+  if (!canAdvanceTask(current.state)) throw new Error('task_already_terminal');
 
-    const to = input.from === existing.from ? existing.to : existing.from;
-    const text = taskBody(input.body ?? '', input.result);
-    const { messageId } = await sendMail({
-      from: input.from,
-      to: [to],
-      subject: existing.subject,
-      text,
-      headers: taskHeaders(existing.id, input.state, input.from, to),
-    });
-    void notifyTrustedAgentDelivery(to);
-    invalidateTaskListCache();
-
-    // Local delivery is normally immediate. If Dovecot has not indexed it
-    // yet, return the accepted transition rather than pretending it vanished;
-    // the next GET rebuilds the authoritative IMAP view.
-    const persisted = await getTask(existing.id);
-    if (persisted?.state === input.state) return persisted;
-    const now = new Date().toISOString();
-    return {
-      ...existing,
-      state: input.state,
-      updatedAt: now,
-      messages: [...existing.messages, {
-        id: messageId,
-        from: input.from,
-        to,
-        subject: existing.subject,
-        date: now,
-        state: input.state,
-        body: text,
-        ...(input.result !== undefined ? { result: input.result } : {}),
-      }],
-      ...(input.result !== undefined ? { result: input.result } : {}),
-    };
+  const to = input.from === current.from ? current.to : current.from;
+  const text = taskBody(input.body ?? '', input.result);
+  const { messageId } = await deliverMail({
+    from: input.from,
+    to: [to],
+    subject: current.subject,
+    text,
+    headers: taskHeaders(current.id, input.state, input.from, to),
   });
+  void notifyTrustedAgentDelivery(to);
+  invalidateTaskListCache();
+
+  // Local delivery is normally immediate. If Dovecot has not indexed it
+  // yet, return the accepted transition rather than pretending it vanished;
+  // the next GET rebuilds the authoritative IMAP view.
+  const persisted = await getTask(current.id);
+  if (persisted?.state === input.state) return persisted;
+  const now = new Date().toISOString();
+  return {
+    ...current,
+    state: input.state,
+    updatedAt: now,
+    messages: [...current.messages, {
+      id: messageId,
+      from: input.from,
+      to,
+      subject: current.subject,
+      date: now,
+      state: input.state,
+      body: text,
+      ...(input.result !== undefined ? { result: input.result } : {}),
+    }],
+    ...(input.result !== undefined ? { result: input.result } : {}),
+  };
+}
+
+export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
+  return withTaskLock(input.id, async () => updateTaskUnlocked(input));
 }
 
 export function taskParticipants(task: Task): Set<string> {
@@ -510,6 +535,25 @@ export function taskOverdue(task: Task, now = nowMs()): TaskOverdue {
     }
   }
   return { overdueReason: null, overdueAt: null };
+}
+
+/**
+ * UI 列表 / GET :id / mutation 成功体共用投影：只回 Task 公开字段 + overdue。
+ * 不扩权限，只收口服务层可能带上的附加键。
+ */
+export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
+  return {
+    id: task.id,
+    from: task.from,
+    to: task.to,
+    subject: task.subject,
+    state: task.state,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    messages: task.messages,
+    ...(task.result !== undefined ? { result: task.result } : {}),
+    ...taskOverdue(task, now),
+  };
 }
 
 export function isClosedByAdmin(task: Task): boolean {
@@ -585,7 +629,7 @@ export async function listTaskBoard(
   const last = slice[slice.length - 1];
   const hasMore = start + slice.length < filtered.length;
   return {
-    tasks: slice.map((task) => ({ ...task, ...taskOverdue(task, now) })),
+    tasks: slice.map((task) => toUiTaskView(task, now)),
     nextCursor:
       hasMore && last
         ? taskBoardCursor.encodeTaskBoardCursor({ fp, t: Date.parse(last.updatedAt), id: last.id })
@@ -596,17 +640,21 @@ export async function listTaskBoard(
 }
 
 export async function replyTask(input: { id: string; from: string; body: string }): Promise<Task> {
-  const existing = await getTask(input.id);
-  if (!existing) throw new Error('not_found');
-  if (existing.state !== 'input-required') throw new Error('task_not_input_required');
-  const updated = await updateTask({
-    id: input.id,
-    from: input.from,
-    state: 'working',
-    body: input.body,
+  // 状态检查与 working 写入必须在同一把 per-task 锁内，否则并发双 reply
+  // 都能过锁外 input-required 检，随后 updateTask 只拦 terminal，会写出第二条 working。
+  return withTaskLock(input.id, async () => {
+    const existing = await getTask(input.id);
+    if (!existing) throw new Error('not_found');
+    if (existing.state !== 'input-required') throw new Error('task_not_input_required');
+    const updated = await updateTaskUnlocked({
+      id: input.id,
+      from: input.from,
+      state: 'working',
+      body: input.body,
+    }, existing);
+    if (!updated) throw new Error('not_found');
+    return updated;
   });
-  if (!updated) throw new Error('not_found');
-  return updated;
 }
 
 export async function remindTask(input: {
@@ -639,7 +687,7 @@ export async function remindTask(input: {
       'X-OA-Task-Stamp': reminderStamp(existing.id, existing.state, input.from, to),
     };
     if (input.idempotencyKey) headers['X-OA-Task-Idempotency-Key'] = input.idempotencyKey;
-    await sendMail({
+    await deliverMail({
       from: input.from,
       to: [to],
       subject: existing.subject,
@@ -673,18 +721,21 @@ export async function remindTask(input: {
 }
 
 export async function closeTask(input: { id: string; from: string; reason: string }): Promise<Task> {
-  const existing = await getTask(input.id);
-  if (!existing) throw new Error('not_found');
-  if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
-  const updated = await updateTask({
-    id: input.id,
-    from: input.from,
-    state: 'failed',
-    body: input.reason,
-    result: { closed_by_admin: true, reason: input.reason },
+  // terminal 预检与 failed 写入同一把锁，避免与并发 reply 交叉各写一封。
+  return withTaskLock(input.id, async () => {
+    const existing = await getTask(input.id);
+    if (!existing) throw new Error('not_found');
+    if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
+    const updated = await updateTaskUnlocked({
+      id: input.id,
+      from: input.from,
+      state: 'failed',
+      body: input.reason,
+      result: { closed_by_admin: true, reason: input.reason },
+    }, existing);
+    if (!updated) throw new Error('not_found');
+    return updated;
   });
-  if (!updated) throw new Error('not_found');
-  return updated;
 }
 
 export type TaskWaitDependencies = {

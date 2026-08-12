@@ -46,9 +46,9 @@ import {
   type Task,
   type TaskBoardLimit,
   type TaskService,
-  taskOverdue,
   taskParticipants,
   taskService,
+  toUiTaskView,
 } from '../lib/tasks.ts';
 import { InvalidTaskCursorError } from '../lib/task-cursor.ts';
 import { consumeOAuthReturnCookie } from '../lib/oauth-return.ts';
@@ -202,6 +202,14 @@ function canReadUiTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   // 参与者集合按小写存；identity 会话地址比较前归一化，避免大小写漂移。
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
+}
+
+/** GET :id 与 reply/remind/close 成功体同一套 viewer 投影，不扩权限。 */
+function presentUiTask(c: Context, task: Task) {
+  if (!canReadUiTask(c, task)) {
+    return c.json({ error: 'forbidden: task participant required' }, 403);
+  }
+  return c.json(toUiTaskView(task));
 }
 
 /** identity 用自身；admin 必须显式选择任务中的本方 from。 */
@@ -756,11 +764,8 @@ export function createUiApiRoutes(
     const service = dependencies.taskService ?? taskService;
     const task = await service.get(parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
-    if (!canReadUiTask(c, task)) {
-      return c.json({ error: 'forbidden: task participant required' }, 403);
-    }
     // overdue 由服务端按 queryNow 同类时钟计算，避免各浏览器口径漂移。
-    return c.json({ ...task, ...taskOverdue(task) });
+    return presentUiTask(c, task);
   });
 
   /** 人在 input-required 时补料；写 working 事件。identity=自身，admin 必须显式选本方 from。 */
@@ -786,7 +791,7 @@ export function createUiApiRoutes(
     const from = taskActionFrom(c, task, body.data.from);
     if (from instanceof Response) return from;
     try {
-      return c.json(await service.reply({ id: parsed.data, from, body: body.data.body }));
+      return presentUiTask(c, await service.reply({ id: parsed.data, from, body: body.data.body }));
     } catch (err) {
       return taskMutationError(c, err);
     }
@@ -814,7 +819,8 @@ export function createUiApiRoutes(
     const from = taskActionFrom(c, task, body.data.from);
     if (from instanceof Response) return from;
     try {
-      return c.json(
+      return presentUiTask(
+        c,
         await service.remind({
           id: parsed.data,
           from,
@@ -849,7 +855,7 @@ export function createUiApiRoutes(
     const from = taskActionFrom(c, task, body.data.from);
     if (from instanceof Response) return from;
     try {
-      return c.json(await service.close({ id: parsed.data, from, reason: body.data.reason }));
+      return presentUiTask(c, await service.close({ id: parsed.data, from, reason: body.data.reason }));
     } catch (err) {
       return taskMutationError(c, err);
     }

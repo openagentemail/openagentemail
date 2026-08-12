@@ -421,6 +421,29 @@
 1. `boardUpdatedAt()` 只看 current 状态事件与 `kind=reminder`。
 2. 不改全局 body-limit；把 UI 任务 mutation 字段钳到 3000。
 
+---
+
+## #26 PR 4 返工第2轮（Codex P1 + ZCode P1-1/P1-2）
+
+### 我们实现了哪些功能？
+
+1. **Codex P1 / ZCode P1-1：** `replyTask` 的 `input-required` 检查与 working 写入改到同一把 per-task 锁内。抽出 `updateTaskUnlocked`（禁止再套 `withTaskLock`，避免同 id 死锁）；`updateTask` 仍加锁后走内部路径。`closeTask` 的 terminal 预检一并收进同一把锁。
+2. **ZCode P1-2：** 抽出 `toUiTaskView`（Task 公开字段 + overdue）。`GET /ui/api/tasks/:id` 与 `reply/remind/close` 成功体都走 `presentUiTask`（ACL + 同一投影），不扩权限、只收口服务层附加键。
+3. 测试：并发双 `replyTask` 只有一条 working 事件、另一个 `task_not_input_required`；identity mutation 返回体与 GET `:id` 同键、不含 `adminInternal`/`peerMailbox`/对端线程。
+4. `bun test`（packages/api）：**731 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审：见回执追加（新 subagent，禁止自审自）。
+
+### 我们遇到了哪些错误？
+
+1. 锁外 `getTask` + `state !== 'input-required'` 后调 `updateTask`：并发两个 reply 都过检，锁内只拦 terminal，会写出第二条 working。
+2. 若在 `replyTask` 外再包一层 `withTaskLock` 再调 `updateTask`，同 id 锁会死锁（CodeRabbit 已警告）。
+3. mutation 直接 `c.json(service.*)` 回显全量 Task（含服务层附加键），与 GET `:id` 的 viewer 投影不一致。
+
+### 我们是如何解决这些错误的？
+
+1. 持锁读 → 断言 `input-required` → `updateTaskUnlocked` 写 working；发信走 `deliverMail` 可注入缝，单测用内存目录钉死竞态。
+2. GET/mutation 共用 `toUiTaskView` 白名单字段，identity 对非参与者仍 403 且 body 不含线程内容。
+
 
 
 

@@ -22,8 +22,11 @@ const {
   currentTaskMessage,
   isClosedByAdmin,
   listTaskBoard,
+  replyTask,
+  setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
+  setTaskSendMailForTests,
   taskFromMessages,
   taskOverdue,
 } = await import('../src/lib/tasks.ts');
@@ -93,6 +96,8 @@ beforeEach(() => {
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
+  setTaskGetForTests(null);
+  setTaskSendMailForTests(null);
 });
 
 describe('task overdue clock', () => {
@@ -440,5 +445,62 @@ describe('task board in-memory baseline', () => {
     expect(results['10000']!.pages).toBeGreaterThan(results['1000']!.pages);
     // 短缓存只减重复 IMAP 解析；本基准是纯内存 filter/sort/page。
     expect(results['10000']!.ms).toBeLessThan(30_000);
+  });
+});
+
+describe('concurrent reply under per-task lock', () => {
+  test('two concurrent replies write one working event; the other is 409', async () => {
+    const task = makeTask({
+      id: padId(9),
+      state: 'input-required',
+      updatedAt: iso(NOW - HOUR),
+    });
+    const store = new Map<string, Task>([[task.id, structuredClone(task)]]);
+    const sent: Array<{ state?: string }> = [];
+
+    setTaskGetForTests(async (id) => {
+      const current = store.get(id);
+      return current ? structuredClone(current) : null;
+    });
+    setTaskSendMailForTests(async (input) => {
+      const state = input.headers?.['X-OA-Task-State'] as TaskState | undefined;
+      sent.push({ state });
+      const current = store.get(task.id);
+      if (!current || !state) throw new Error('missing in-memory task');
+      const now = iso(NOW);
+      store.set(task.id, {
+        ...current,
+        state,
+        updatedAt: now,
+        messages: [
+          ...current.messages,
+          {
+            id: String(current.messages.length + 1),
+            from: input.from,
+            to: input.to[0]!,
+            subject: current.subject,
+            date: now,
+            state,
+            body: input.text,
+          },
+        ],
+      });
+      return { messageId: `<reply-${sent.length}@test.example>` };
+    });
+
+    const [first, second] = await Promise.allSettled([
+      replyTask({ id: task.id, from: 'fox@test.example', body: 'first' }),
+      replyTask({ id: task.id, from: 'fox@test.example', body: 'second' }),
+    ]);
+    const outcomes = [first, second];
+    const ok = outcomes.filter((row) => row.status === 'fulfilled');
+    const failed = outcomes.filter((row) => row.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect((failed[0] as PromiseRejectedResult).reason).toMatchObject({
+      message: 'task_not_input_required',
+    });
+    expect(sent.filter((row) => row.state === 'working')).toHaveLength(1);
+    expect(store.get(task.id)?.messages.filter((message) => message.state === 'working')).toHaveLength(1);
   });
 });
