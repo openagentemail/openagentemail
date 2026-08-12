@@ -41,3 +41,20 @@ HEAD：见仓库；PR：https://github.com/openagentemail/openagentemail/pull/27
 ## 未卡住项
 
 无。指挥合入前请看 CI 是否已吃到修补提交。
+
+## 返工第2轮（head `2471cc0`）
+
+Codex 对 `b2226e5` 仍抓两条，已按语义修补并推上 `2471cc0`：
+
+1. **P1：** append 前若文件非空且不以换行结尾——完整合法末行先补换行，半行仍先隔离再写。测试钉死缺末尾换行的完好文件 append 后不产生中间损坏、两行均可解析、日志持续可读。
+2. **P2：** `zonedDayBounds` 拒绝不存在的日历日（2 月 30 日等）；`GET /ui/api/notify/summary` 非法日 400，区间回显不变（不滚成另一天）。
+
+ZCode 已裁可以合并（P0/P1=0，P2×3 记债），本轮未另动。
+
+`bun test`（packages/api）：**702 pass / 0 fail**；`bun run build` 全绿。
+
+### 独立自审（禁止自审自）
+
+- 新 subagent agent id：`8543835d-3784-411a-bc6d-6b3159493479`
+- 审 `git diff b2226e5..2471cc0`
+- verdict：**mergeable**；No findings；Codex P1/P2 均 **closed**

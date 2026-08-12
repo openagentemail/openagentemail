@@ -294,6 +294,7 @@
 2. Codex P2：`zonedDayBounds` 拒绝不存在的日历日（如 2 月 30 日、非闰年 2 月 29 日）。JS Date 不再把非法日滚到另一天；summary 回显区间不变，非法日期走既有 400。
 3. 测试钉死：缺末尾换行的完好文件 append 后两行均可 `JSON.parse`、查询可读；`2026-02-30` 的 zonedDayBounds 抛 RangeError，UI summary 400 且不回显滚后的 3 月。
 4. `bun test`（packages/api）：**702 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `8543835d-3784-411a-bc6d-6b3159493479`：可合并；No findings；Codex P1（缺末尾换行粘连）与 P2（非法日历日）均关闭。
 
 ### 我们遇到了哪些错误？
 
