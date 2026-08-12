@@ -110,6 +110,27 @@ describe('UI static asset contract', () => {
     }
   });
 
+  // OAuth grant DELETE 返回 204：apiJson 不得无条件 response.json()，否则吊销成功也进 error handler
+  test('apiJson treats 204/empty success bodies as null so grant revoke can succeed', () => {
+    const apiJson = UI_JS.slice(
+      UI_JS.indexOf('async function apiJson('),
+      UI_JS.indexOf('var confirmModalOnCancel'),
+    );
+    expect(apiJson).toContain('response.status === 204');
+    expect(apiJson).toContain('response.status === 205');
+    expect(apiJson).toContain('await response.text()');
+    expect(apiJson).toContain('JSON.parse(raw)');
+    // 成功路径不得再无条件 json()；失败路径 try 里解析 error body 仍可保留
+    const successTail = apiJson.slice(apiJson.indexOf('throw failure;'));
+    expect(successTail).not.toContain('return response.json()');
+    expect(UI_JS).toContain(
+      "await apiJson('/ui/api/oauth/grants/' + encodeURIComponent(grant.id), { method: 'DELETE' })",
+    );
+    expect(UI_JS).toContain("announce('Client revoked.')");
+    expect(UI_JS).toContain('loadConfigureClients()');
+    expect(UI_JS).toContain("'Could not revoke that client.'");
+  });
+
   test('front-end code contains no HTML parser sinks or URL-token reader', () => {
     expect(UI_JS).not.toMatch(
       /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b/,

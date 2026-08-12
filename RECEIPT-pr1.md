@@ -62,3 +62,14 @@
 | Codex P0 裁定 | **否定（误报）**：聚合产物为 `async function selectTask(`；`new Function(UI_JS)` 通过；全量 `await apiJson` 无非 async 真阳性 |
 | 语法闸评估 | 足以防缺 async/语法错误；过转义另靠 tasks fence 字面量钉死 |
 | P0/P1/P2 | **无** |
+
+---
+
+## 返工第2轮（Codex P1 · apiJson 204）
+
+- **时间**：2026-08-12
+- **触发**：Codex Local 对 `09244af` 报 P1（置信 0.99）：grant 吊销 DELETE 204，`apiJson` 无条件 `response.json()` → 假失败「Could not revoke that client」、列表不刷新。
+- **修复**：`packages/api/src/ui/client/api.ts` 的 `apiJson` 对 204/205/空 body 返回 `null`；契约测试钉死成功路径与 revoke 文案。
+- **调用点核**：identity DELETE 仍为 JSON `{deleted:true}`；logout 本就走 raw `fetch`；其余 `apiJson` 赋值方不受 `null` 影响。
+- **测试**：`packages/api` `bun test` → **630 pass / 0 fail**
+- **独立自审（新 agent，禁止自审自）**：见下方追加（subagent 跑完后填入）。

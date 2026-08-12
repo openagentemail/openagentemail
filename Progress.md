@@ -56,3 +56,23 @@
 1. 以 main `assets.ts` 导出的 `UI_JS` 为金标逐行比对 fence/replace；用 `json.dumps` 稳定写回 `TASKS_PAGE_JS`，避免模板吞转义。
 2. 保留 JSON 字符串模块形态；语法闸 + async 白名单 + fence 字面量钉死，覆盖「缺 async」与「过转义」两类回归。
 3. 修正测试 needle 的反斜杠层数，与金标一致后再跑全量测试。
+
+---
+
+## 返工第2轮（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. 修复共享 `apiJson()`：成功路径对 204/205 与空 body 返回 `null`（`text()` + `JSON.parse`），避免 OAuth grant DELETE 吊销成功仍进 error handler。
+2. 核调用点：身份 DELETE 仍返回 `{deleted:true}` JSON；仅 grant 吊销为 204；赋值方均期望对象，`null` 仅落在 fire-and-forget 的 revoke `await`。
+3. 契约测试钉死 204 处理与 revoke → `Client revoked.` / `loadConfigureClients()` 成功路径。
+4. `bun test`：**630 pass / 0 fail**。
+
+### 我们遇到了哪些错误？
+
+1. Codex P1：`authorized-clients` 吊销 DELETE 204，旧 `apiJson` 无条件 `response.json()` → 假失败文案与列表不刷新。
+
+### 我们是如何解决这些错误的？
+
+1. 在 `client/api.ts` 的 `apiJson` 成功分支显式处理无 body；保留失败分支 try/`response.json()` 解析 error body。
+2. 用静态契约覆盖，防止再次退回 `return response.json()`。
