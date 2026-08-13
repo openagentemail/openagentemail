@@ -507,6 +507,7 @@
 4. **Domains / Plan：** `renderEmptyState` 明确 roadmap / 自托管实例说明 + 文档路径（无 `https://` 远程 href，无配额/升级按钮）。
 5. **PR1 债项：** `/ui/oauth/grants` 未登录先 session 检查再 302 `/ui`；`applyScope` 收成 `SCOPE_META` map；`app-nav` / `modal` 空桩迁入真实现。
 6. 测试：`ui-configure.test.ts` 钉 UI tier3 400、identity 越权 403、grant 吊销即时 204、grants 重定向分流；`ui-assets` 补 Configure 静态契约。`bun test` **746 pass / 0 fail**；`bun run build` 全绿。
+7. 独立自审 agent `8a6cc590-1218-460f-9781-c5feaa5ddb22`：`676fa3c..a0f1059` → **mergeable**；P0/P1 无；P2（Configure 档位模糊失败未回拉权威）记债不挡合并。ZCode PR review MCP 超时。
 
 ### 我们遇到了哪些错误？
 
