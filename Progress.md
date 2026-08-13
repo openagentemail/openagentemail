@@ -507,7 +507,7 @@
 4. **Domains / Plan：** `renderEmptyState` 明确 roadmap / 自托管实例说明 + 文档路径（无 `https://` 远程 href，无配额/升级按钮）。
 5. **PR1 债项：** `/ui/oauth/grants` 未登录先 session 检查再 302 `/ui`；`applyScope` 收成 `SCOPE_META` map；`app-nav` / `modal` 空桩迁入真实现。
 6. 测试：`ui-configure.test.ts` 钉 UI tier3 400、identity 越权 403、grant 吊销即时 204、grants 重定向分流；`ui-assets` 补 Configure 静态契约。`bun test` **746 pass / 0 fail**；`bun run build` 全绿。
-7. 独立自审 agent `8a6cc590-1218-460f-9781-c5feaa5ddb22`：`676fa3c..a0f1059` → **mergeable**；P0/P1 无；P2（Configure 档位模糊失败未回拉权威）记债不挡合并。ZCode PR review MCP 超时。
+7. 独立自审 agent `8a6cc590-1218-460f-9781-c5feaa5ddb22`：`676fa3c..a0f1059` 当时标 mergeable / 无 P1；指挥随后把 Configure 模糊失败升为 Codex P1，该结论作废，见下方 R1。
 
 ### 我们遇到了哪些错误？
 
@@ -520,6 +520,41 @@
 1. Plan 空态用无 scheme 的 `openagent.email/docs/reference/api/` 纯文本指针；不把远程 URL 当 href。
 2. 删除成功时若当前 scope 是 configure/plan 则留在本页并 `refreshConfigureSurfaces()`，否则仍回 Overview。
 3. GET `/ui/oauth/grants` 无会话走 `redirectToLogin`（302 `/ui`）；有会话再 302 `/ui/configure/clients`。
+
+---
+
+## #26 PR 5 返工 R1（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A Codex P1（3771597658）：** `handleConfigurePushTier` 模糊失败（网络/解析/5xx）对齐 Overview F51：先 `bumpIdentityEpoch()`，再 GET `/ui/api/identities` 拉权威 tier，用 `recoveryGen` 丢弃过期响应，announce `(refreshed).` 后再渲染。`confirm_risk_required` / `session_expired` 仍走明确失败、不回拉。
+2. **B Codex P2（3771655230）：** pending 锁 `finally` 清除后若 `state.scope === 'overview'` 调用 `renderOverviewRows()`，避免 Overview 行卡在 disabled + 旧档。
+3. **C Codex P2 + CodeRabbit Minor（3771655235 / 3771617547）：** Push 卡改为 `radiogroup` + `role=radio` + `aria-checked`；identity 会话只读卡 `aria-disabled`、去掉非法 `aria-pressed`；sr-only「Current push content:」标明当前档。
+4. **D CodeRabbit Major（3771617543 之一）：** `applyRoute()` 在关 nav drawer 之后调用 `closeAllModals()`（消费 `confirmModalOnCancel`），Back/导航不残留 token/确认/创建 modal。
+5. **E CodeRabbit Minor（3771617540）：** `closeNavDrawer` 仅在抽屉曾打开时把焦点还给 `navToggle`；Escape（无 modal 时）走同一 `closeNavDrawer()`；backdrop/toggle 共用。
+6. **F CodeRabbit Minor（3771617543 之二）：** `beginModal()` 记录 opener；`closeAllModals` 恢复焦点并清除记录；Cancel/Close/Escape 统一走 `closeAllModals`。
+7. **G CodeRabbit Minor + ZCode（3771617545）：** Plan 用 `docsHref`/`docsLabel` 真链接；`allowedDocsHref` 只放行 `http:`/`https:` 或单个 `/` 相对路径，拒绝 `//` 与 `javascript:`。资产仍用 `'https:' + '/' + '/' + …` 拼接，不把 `https://` 硬编码进 UI_JS。补 `new Function(EMPTY_STATE_JS)` 白名单测试。
+8. **I ZCode P2-2：** `isConfigureScope()` 显式枚举 configure-identities/push/clients/domains 与 plan；去掉 `indexOf('configure-')`。
+9. `packages/api`：`bun test` **751 pass / 0 fail**；`bun run build` 全绿。
+10. 独立自审 agent `0b86e174-dd2b-4c4d-a3b2-5202e8010943`：A–I 均 fixed；P0/P1 无；初审 F 两条 P2（Create→Token opener / Cancel 卸节点）已在同轮关掉；结论 **mergeable**。未自己 merge。
+
+### 我们遇到了哪些错误？
+
+1. 初版回执把 Configure 模糊失败未回拉权威写成「无 P1 / mergeable」，指挥升为 Codex P1 后原结论作废。
+2. Plan 若把 `https://` 字面量写进 UI_JS 会撞三资产契约闸。
+3. `applyRoute` 每次都调 `closeNavDrawer`：若无 `wasOpen` 守卫，已关闭时仍 `navToggle.focus()` 会抢焦点。
+4. identity 只读档位卡用 `div` + `aria-pressed` 对屏幕阅读器是非法语义。
+
+### 我们是如何解决这些错误的？
+
+1. 本轮按 F51 把权威 GET 接到 Configure catch 的模糊分支，并在 RECEIPT R1 更正原 mergeable/无 P1 结论。
+2. Plan href 用字符串拼接构造 scheme；测试文件里才写完整 `https://` 去跑 `allowedDocsHref`。
+3. `closeNavDrawer` 先读 `data-nav-open === 'true'`，仅曾打开才恢复 `navToggle` 焦点。
+4. 统一 radiogroup/radio/`aria-checked`，并加 sr-only 当前档文案。
 
 
 

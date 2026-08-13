@@ -1340,7 +1340,7 @@ describe('UI static asset contract', () => {
   // select; the confirmed success path must not restore.
   test('tier-3 dialog restores on indirect close but not after confirm (F107)', () => {
     const closeAll = UI_JS.slice(
-      UI_JS.indexOf('function closeAllModals()'),
+      UI_JS.indexOf('function closeAllModals('),
       UI_JS.indexOf('function showTokenModal('),
     );
     // Pending cancel side-effect is consumed exactly once on any close.
@@ -1379,7 +1379,8 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('showTokenModal(payload.token');
     expect(UI_JS).toContain("showTokenModal(payload.token, 'Rotated Token')");
     expect(UI_HTML).toContain('Copy this token now. It will not be shown again.');
-    expect(UI_JS).toContain("state.scope.indexOf('configure-') === 0");
+    expect(UI_JS).toContain('isConfigureScope(state.scope)');
+    expect(UI_JS).not.toContain("indexOf('configure-')");
   });
 
   test('Configure push renders three human-language tier cards and server-enforced tier 3 confirm', () => {
@@ -1394,9 +1395,44 @@ describe('UI static asset contract', () => {
     );
     expect(configurePush).toContain('await apply(3, true)');
     expect(configurePush).toContain('confirm_risk_required');
+    expect(configurePush).toContain("apiJson('/ui/api/identities')");
+    expect(configurePush).toContain('bumpIdentityEpoch()');
+    expect(configurePush).toContain('(refreshed).');
+    expect(configurePush).toContain("if (state.scope === 'overview') renderOverviewRows()");
+    const catchStart = configurePush.indexOf('} catch (error) {');
+    const finallyStart = configurePush.indexOf('} finally {', catchStart);
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    expect(finallyStart).toBeGreaterThan(catchStart);
+    const catchBody = configurePush.slice(catchStart, finallyStart);
+    const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
+    expect(fuzzyStart).toBeGreaterThanOrEqual(0);
+    const fuzzyBranch = catchBody.slice(fuzzyStart);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
+      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
+    );
+    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
+    const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
+    const sessionIdx = catchBody.indexOf("error.message === 'session_expired'");
+    expect(confirmIdx).toBeGreaterThanOrEqual(0);
+    expect(sessionIdx).toBeGreaterThan(confirmIdx);
+    expect(catchBody.slice(confirmIdx, sessionIdx)).not.toContain("apiJson('/ui/api/identities')");
+    expect(catchBody.slice(sessionIdx, fuzzyStart)).not.toContain("apiJson('/ui/api/identities')");
+    const finallyBody = configurePush.slice(finallyStart);
+    expect(finallyBody).toContain("delete state.tierPending[address]");
+    expect(finallyBody).toContain("if (state.scope === 'overview') renderOverviewRows()");
     expect(UI_HTML).toContain('id="configure-push-cards"');
     expect(UI_HTML).toContain('id="configure-push-devices"');
     expect(UI_JS).toContain("'Device pairing is not in this release'");
+    const renderPush = UI_JS.slice(
+      UI_JS.indexOf('function renderConfigurePush('),
+      UI_JS.indexOf('function enterConfigurePush('),
+    );
+    expect(renderPush).toContain("role', 'radiogroup'");
+    expect(renderPush).toContain("role', 'radio'");
+    expect(renderPush).toContain('aria-checked');
+    expect(renderPush).not.toContain('aria-pressed');
+    expect(renderPush).toContain('Current push content:');
+    expect(renderPush).toContain("aria-disabled', 'true'");
   });
 
   test('Plan & Domains are honest empty states with no fake upgrade or quota controls', () => {
@@ -1404,9 +1440,12 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain("'Upgrade'");
     expect(UI_JS).not.toContain('Upgrade plan');
     expect(UI_JS).toContain("'Self-hosted instance'");
+    expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
+    expect(UI_JS).toContain("'https:' + '/' + '/' + 'openagent.email/docs/reference/api/'");
     expect(UI_JS).toContain('openagent.email/docs/reference/api/');
     expect(UI_JS).toContain("'Custom domains are on the roadmap'");
     expect(UI_JS).toContain('this page has no controls to click.');
+    expect(UI_CSS).toContain('.empty-state-docs');
   });
 
   test('PR1 P2 stubs are filled: app-nav and modal live in their component modules', async () => {
@@ -1422,6 +1461,95 @@ describe('UI static asset contract', () => {
     const { API_JS } = await import('../src/ui/client/api.ts');
     expect(ROUTER_JS).not.toContain('function closeNavDrawer(');
     expect(API_JS).not.toContain('function closeAllModals(');
+  });
+
+  test('applyRoute closes modals so Back cannot leave a token ceremony on the next page', async () => {
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const applyRoute = ROUTER_JS.slice(
+      ROUTER_JS.indexOf('async function applyRoute('),
+      ROUTER_JS.indexOf('function navigateTo('),
+    );
+    expect(applyRoute.indexOf('closeNavDrawer();')).toBeGreaterThanOrEqual(0);
+    expect(applyRoute.indexOf('closeAllModals();')).toBeGreaterThan(
+      applyRoute.indexOf('closeNavDrawer();'),
+    );
+  });
+
+  test('nav drawer restore focus to the toggle and Escape uses closeNavDrawer', async () => {
+    const { APP_NAV_JS } = await import('../src/ui/client/components/app-nav.ts');
+    expect(APP_NAV_JS).toContain("var wasOpen = inboxView.getAttribute('data-nav-open') === 'true'");
+    expect(APP_NAV_JS).toContain('if (wasOpen) navToggle.focus()');
+    expect(APP_NAV_JS).toContain("event.key !== 'Escape'");
+    expect(APP_NAV_JS).toContain('closeNavDrawer()');
+  });
+
+  test('modals record the opener and restore it through closeAllModals', async () => {
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(MODAL_JS).toContain('var modalOpener = null');
+    expect(MODAL_JS).toContain('function beginModal(');
+    const closeAll = MODAL_JS.slice(
+      MODAL_JS.indexOf('function closeAllModals('),
+      MODAL_JS.indexOf('function beginModal('),
+    );
+    expect(closeAll).toContain('var opener = modalOpener');
+    expect(closeAll).toContain('opener.isConnected');
+    expect(closeAll).toContain('opener.focus()');
+    expect(closeAll).toContain('opts.skipFocus');
+    expect(MODAL_JS).toContain('function elementInsideModal(');
+    expect(MODAL_JS).toContain("node.closest('#create-modal')");
+    expect(MODAL_JS).toContain('closeAllModals({ skipFocus: true })');
+    expect(MODAL_JS).toContain('modalOpener = previous');
+    expect(MODAL_JS).toContain('lostFocus && previous');
+    expect(MODAL_JS.indexOf('function showTokenModal(')).toBeGreaterThan(
+      MODAL_JS.indexOf('function beginModal('),
+    );
+    const showToken = MODAL_JS.slice(
+      MODAL_JS.indexOf('function showTokenModal('),
+      MODAL_JS.indexOf('function showCreateModal('),
+    );
+    expect(showToken).toContain('beginModal();');
+    expect(showToken).not.toContain('closeAllModals();');
+    const showCreate = MODAL_JS.slice(
+      MODAL_JS.indexOf('function showCreateModal('),
+    );
+    expect(showCreate).toContain('beginModal();');
+    expect(MODAL_JS).toContain("event.key !== 'Escape'");
+    expect(MODAL_JS).toContain('closeAllModals();');
+    expect(UI_JS).toContain('tokenModalClose.addEventListener(\'click\', closeAllModals)');
+    expect(UI_JS).toContain('createModalCancel.addEventListener(\'click\', closeAllModals)');
+  });
+
+  test('allowedDocsHref permits http(s) and slash-relative hrefs and rejects the rest', async () => {
+    const { EMPTY_STATE_JS } = await import('../src/ui/client/components/empty-state.ts');
+    expect(EMPTY_STATE_JS).toContain('function allowedDocsHref(');
+    expect(EMPTY_STATE_JS).not.toMatch(/\bhttps?:\/\//);
+    const allowed = new Function(`
+      ${EMPTY_STATE_JS}
+      return allowedDocsHref;
+    `)() as (href: string) => string;
+    expect(allowed('https://openagent.email/docs/reference/api/')).toBe(
+      'https://openagent.email/docs/reference/api/',
+    );
+    expect(allowed('http://example.com/docs')).toBe('http://example.com/docs');
+    expect(allowed('/docs/local')).toBe('/docs/local');
+    expect(allowed('//evil.example/phish')).toBe('');
+    expect(allowed('javascript:alert(1)')).toBe('');
+    expect(allowed('data:text/html,hi')).toBe('');
+    expect(allowed('')).toBe('');
+  });
+
+  test('delete-identity stay-on-configure uses an explicit scope enum', async () => {
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { IDENTITIES_PAGE_JS } = await import('../src/ui/client/pages/identities.ts');
+    expect(IDENTITIES_PAGE_JS).toContain('function isConfigureScope(');
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-identities'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-push'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-clients'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-domains'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'plan'");
+    expect(API_JS).toContain('isConfigureScope(state.scope)');
+    expect(API_JS).not.toContain("indexOf('configure-')");
+    expect(UI_JS).not.toContain("indexOf('configure-')");
   });
 
   test('identity session CSS hides admin-only create controls', () => {
