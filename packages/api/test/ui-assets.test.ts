@@ -115,7 +115,7 @@ describe('UI static asset contract', () => {
   test('apiJson treats 204/empty success bodies as null so grant revoke can succeed', () => {
     const apiJson = UI_JS.slice(
       UI_JS.indexOf('async function apiJson('),
-      UI_JS.indexOf('var confirmModalOnCancel'),
+      UI_JS.indexOf('async function handleCreateSubmit('),
     );
     expect(apiJson).toContain('response.status === 204');
     expect(apiJson).toContain('response.status === 205');
@@ -1309,21 +1309,15 @@ describe('UI static asset contract', () => {
     expect(finallyStart).toBeGreaterThan(catchStart);
     const catchBody = handleTier.slice(catchStart, finallyStart);
 
-    // Fuzzy path: re-fetch list, write select + dataset from server tier, announce refresh.
-    expect(catchBody).toContain("apiJson('/ui/api/identities')");
-    expect(catchBody).toContain('selectEl.value = String(authoritative)');
-    expect(catchBody).toContain('selectEl.dataset.currentTier = String(authoritative)');
-    expect(catchBody).toContain("(refreshed).");
-    // F53: bump epoch before recovery re-fetch so stale overview identities cannot clobber.
+    // Fuzzy path: shared recoverPushTier, then write select + dataset from server tier.
+    expect(catchBody).toContain('await recoverPushTier(address)');
+    expect(catchBody).toContain('selectEl.value = String(recovered.authoritative)');
+    expect(catchBody).toContain('selectEl.dataset.currentTier = String(recovered.authoritative)');
     const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
     expect(fuzzyStart).toBeGreaterThanOrEqual(0);
     const fuzzyBranch = catchBody.slice(fuzzyStart);
-    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeGreaterThanOrEqual(0);
-    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
-      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
-    );
-    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
-    expect(fuzzyBranch).toContain('if (recoveryGen !== state.overviewGen) return;');
+    expect(fuzzyBranch).toContain("if (recovered.status === 'stale') return");
+    expect(fuzzyBranch).not.toContain("apiJson('/ui/api/identities')");
 
     // confirm_risk_required: restore before announce (server clearly rejected).
     const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
@@ -1402,9 +1396,7 @@ describe('UI static asset contract', () => {
     );
     expect(configurePush).toContain('await apply(3, true, openedGen)');
     expect(configurePush).toContain('confirm_risk_required');
-    expect(configurePush).toContain("apiJson('/ui/api/identities')");
-    expect(configurePush).toContain('bumpIdentityEpoch()');
-    expect(configurePush).toContain('(refreshed).');
+    expect(configurePush).toContain('await recoverPushTier(address)');
     expect(configurePush).toContain("if (state.scope === 'overview') renderOverviewRows()");
     const catchStart = configurePush.indexOf('} catch (error) {');
     const finallyStart = configurePush.indexOf('} finally {', catchStart);
@@ -1414,16 +1406,15 @@ describe('UI static asset contract', () => {
     const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
     expect(fuzzyStart).toBeGreaterThanOrEqual(0);
     const fuzzyBranch = catchBody.slice(fuzzyStart);
-    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
-      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
-    );
-    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
+    expect(fuzzyBranch).toContain('await recoverPushTier(address)');
+    expect(fuzzyBranch).toContain("if (recovered.status === 'stale') return");
+    expect(fuzzyBranch).not.toContain("apiJson('/ui/api/identities')");
     const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
     const sessionIdx = catchBody.indexOf("error.message === 'session_expired'");
     expect(confirmIdx).toBeGreaterThanOrEqual(0);
     expect(sessionIdx).toBeGreaterThan(confirmIdx);
-    expect(catchBody.slice(confirmIdx, sessionIdx)).not.toContain("apiJson('/ui/api/identities')");
-    expect(catchBody.slice(sessionIdx, fuzzyStart)).not.toContain("apiJson('/ui/api/identities')");
+    expect(catchBody.slice(confirmIdx, sessionIdx)).not.toContain('recoverPushTier');
+    expect(catchBody.slice(sessionIdx, fuzzyStart)).not.toContain('recoverPushTier');
     const finallyBody = configurePush.slice(finallyStart);
     expect(finallyBody).toContain("delete state.tierPending[address]");
     expect(finallyBody).toContain("if (state.scope === 'overview') renderOverviewRows()");
@@ -1483,6 +1474,7 @@ describe('UI static asset contract', () => {
     const { API_JS } = await import('../src/ui/client/api.ts');
     expect(ROUTER_JS).not.toContain('function closeNavDrawer(');
     expect(API_JS).not.toContain('function closeAllModals(');
+    expect(API_JS).not.toContain('var confirmModalOnCancel');
   });
 
   test('applyRoute closes modals so Back cannot leave a token ceremony on the next page', async () => {
@@ -1508,6 +1500,7 @@ describe('UI static asset contract', () => {
   test('modals record the opener and restore it through closeAllModals', async () => {
     const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
     expect(MODAL_JS).toContain('var modalOpener = null');
+    expect(MODAL_JS).toContain('var confirmModalOnCancel = null');
     expect(MODAL_JS).toContain('function beginModal(');
     const closeAll = MODAL_JS.slice(
       MODAL_JS.indexOf('function closeAllModals('),
@@ -1556,6 +1549,7 @@ describe('UI static asset contract', () => {
     expect(EMPTY_STATE_JS).toContain('parsedRel.origin !== window.location.origin');
     expect(EMPTY_STATE_JS).toContain('rel.charAt(1) === \'/\'');
     expect(EMPTY_STATE_JS).toContain("lowered.indexOf('vbscript:') === 0");
+    expect(EMPTY_STATE_JS).toContain("lowered.indexOf('data' + ':') === 0");
     expect(EMPTY_STATE_JS).not.toMatch(/\bhttps?:\/\//);
     const allowed = new Function(`
       var window = { location: { href: 'http://localhost/ui/plan', origin: 'http://localhost' } };
@@ -1574,6 +1568,8 @@ describe('UI static asset contract', () => {
     expect(allowed('javascript:alert(1)')).toBe('');
     expect(allowed('vbscript:alert(1)')).toBe('');
     expect(allowed('data:text/html,hi')).toBe('');
+    expect(allowed('data:text/html,<script>alert(1)</script>')).toBe('');
+    expect(allowed('DATA:text/html,hi')).toBe('');
     expect(allowed('')).toBe('');
   });
 
@@ -1675,5 +1671,82 @@ describe('UI static asset contract', () => {
     expect(PUSH_DEVICES_PAGE_JS).toContain(
       'ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);',
     );
+  });
+
+  test('recoverPushTier is the shared fuzzy-failure helper for Overview and Configure', async () => {
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const helper = API_JS.slice(
+      API_JS.indexOf('async function recoverPushTier('),
+      API_JS.indexOf('async function savePushContentTier('),
+    );
+    expect(helper.indexOf('bumpIdentityEpoch()')).toBeGreaterThanOrEqual(0);
+    expect(helper.indexOf('bumpIdentityEpoch()')).toBeLessThan(
+      helper.indexOf("apiJson('/ui/api/identities')"),
+    );
+    expect(helper).toContain('var recoveryGen = state.overviewGen;');
+    expect(helper).toContain("if (recoveryGen !== state.overviewGen) return { status: 'stale' }");
+    expect(helper).toContain("(refreshed).");
+    expect(UI_JS.indexOf('function handlePushTierChange(')).toBeGreaterThan(
+      UI_JS.indexOf('async function recoverPushTier('),
+    );
+    expect(UI_JS.indexOf('function handleConfigurePushTier(')).toBeGreaterThan(
+      UI_JS.indexOf('async function recoverPushTier('),
+    );
+  });
+
+  test('revoke transient failure immediately reloads paired devices', async () => {
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    const revoke = PUSH_DEVICES_PAGE_JS.slice(
+      PUSH_DEVICES_PAGE_JS.indexOf('function handleRevokeDevice('),
+      PUSH_DEVICES_PAGE_JS.indexOf('function renderPairedDevices('),
+    );
+    const catchStart = revoke.indexOf('} catch (error) {');
+    const finallyStart = revoke.indexOf('} finally {', catchStart);
+    const catchBody = revoke.slice(catchStart, finallyStart);
+    expect(catchBody).toContain('loadPairedDevices()');
+    expect(catchBody.indexOf("error.message === 'session_expired'")).toBeLessThan(
+      catchBody.indexOf('loadPairedDevices()'),
+    );
+  });
+
+  test('loadPairedDevices guards writes with deviceLoadGen and logout bumps it', async () => {
+    const { STORE_JS } = await import('../src/ui/client/store.ts');
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    expect(STORE_JS).toContain('deviceLoadGen: 0');
+    const clear = API_JS.slice(
+      API_JS.indexOf('function clearNotifyState('),
+      API_JS.indexOf('function clearTasksState('),
+    );
+    expect(clear).toContain('state.devices = []');
+    expect(clear.indexOf('state.devices = []')).toBeLessThan(clear.indexOf('state.deviceLoadGen += 1'));
+    const load = PUSH_DEVICES_PAGE_JS.slice(
+      PUSH_DEVICES_PAGE_JS.indexOf('async function loadPairedDevices('),
+      PUSH_DEVICES_PAGE_JS.indexOf('function enterConfigurePush('),
+    );
+    expect(load).toContain('var generation = ++state.deviceLoadGen');
+    expect(load.split('generation !== state.deviceLoadGen').length - 1).toBe(3);
+    const tryIdx = load.indexOf('var payload = await apiJson');
+    expect(load.indexOf('if (generation !== state.deviceLoadGen) return;', tryIdx)).toBeGreaterThan(tryIdx);
+    expect(load.indexOf('if (generation !== state.deviceLoadGen) return;', tryIdx)).toBeLessThan(
+      load.indexOf('state.devices = Array.isArray(payload.devices)', tryIdx),
+    );
+  });
+
+  test('1280 detail subject wraps as a row, not per-character vertical CJK', () => {
+    expect(UI_CSS).toContain('@media (max-width: 1440px)');
+    expect(UI_CSS).toContain('@media (max-width: 1100px)');
+    expect(UI_CSS).toContain('minmax(12em, 1fr) minmax(0, 240px)');
+    expect(UI_CSS).toContain('.detail-header h2 { margin: 5px 0 18px; font-size: clamp(24px, 4vw, 34px); line-height: 1.18; overflow-wrap: break-word; word-break: normal; min-width: 0; }');
+    expect(UI_CSS).toContain('.meta { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 5px 14px; margin: 0 0 22px; }');
+    expect(UI_CSS).toContain('.folder-nav-title');
+    expect(UI_CSS).toContain('color: var(--ink-dim);');
+    expect(UI_CSS).toContain('.identity-panel > nav[aria-label="Inbox addresses"]');
+  });
+
+  test('task RESULT prefers a key-value table for plain objects', () => {
+    expect(UI_JS).toContain('function renderTaskResultNode(');
+    expect(UI_JS).toContain("table.className = 'task-result-table'");
+    expect(UI_JS).toContain('RESULT 形态：普通对象走键值表');
   });
 });

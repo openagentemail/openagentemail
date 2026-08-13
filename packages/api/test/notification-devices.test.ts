@@ -161,6 +161,21 @@ describe('notification device registry', () => {
     await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
   });
 
+  test('top-level token sibling on an otherwise valid registry is refuse-closed', async () => {
+    const path = deviceRegistryPathForTests();
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        token: 'leaked-top-level',
+        devices: [],
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(readFileSync(path, 'utf8')).toContain('leaked-top-level');
+  });
+
   test('old clients without displayName get the default Phone name', async () => {
     const record = await registerPairedDevice(seedInput());
     expect(record.displayName).toBe('Phone');

@@ -251,6 +251,8 @@ function parseFile(raw: string): RegistryFile {
   }
   if (!parsed || typeof parsed !== 'object') throw new DeviceRegistryCorruptError();
   const body = parsed as Record<string, unknown>;
+  // 顶层/sibling 键也禁 password/token，不只查 device 行（投毒 {"token":...,"devices":[]} 必须 fail-closed）。
+  if (registryHasForbiddenSecretKey(body)) throw new DeviceRegistryCorruptError();
   if (body.schemaVersion !== DEVICE_REGISTRY_SCHEMA_VERSION) throw new DeviceRegistryCorruptError();
   if (!Array.isArray(body.devices)) throw new DeviceRegistryCorruptError();
   const devices: DeviceRecord[] = [];

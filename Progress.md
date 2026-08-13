@@ -922,4 +922,82 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 1. 回滚 `try` 之后无条件再 fsync；再失败 `markRegistryFailClosed` + throw corrupt，不把「可能没持久化的回滚」当成功服务。
 2. 现有用例改为只失败第一次 fsync（①）；新增两次失败用例（②）。
 
+---
+
+## #26 阶段2 收官单（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（从 `origin/main` @ `ef880a9` 开出；禁动 main；禁止自 merge）
+
+### 我们实现了哪些功能？
+
+1. **A1 台账 #8：** `allowedDocsHref` 前置黑名单补 data 协议（`'data' + ':'`，避免资产闸命中连续 `data:`）；测试钉 `allowed('data:text/html,…')===''`。
+2. **A2 台账 #13：** `parseFile` 对整个 body 跑 `registryHasForbiddenSecretKey`；顶层 `token` 投毒 fail-closed。
+3. **A3 台账 #11：** `recoverPushTier` 抽到 `api.ts`，Overview / Configure 两处调用；F51 与 Configure 模糊失败闸仍绿。
+4. **A4 台账 #12：** `var confirmModalOnCancel` 迁入 `modal.ts`；未改 IIFE 拼接顺序。
+5. **B1 台账 #1：** 详情主题列 ≤1440 收抽屉 + `min-width: 12em` + `break-word`；撤回误加在 `.meta` 上的 12em。
+6. **B2 台账 #2：** Folders 钉身份栏底 + 标题 `--ink-dim`。
+7. **B3 台账 #3：** RESULT 维持键值表（对象）/ `<pre>`（数组标量）。
+8. **B4 台账 #14：** revoke catch 立刻 `loadPairedDevices()`。
+9. **B5：** 属 UI 的 ZCode P2 即 A3/A4/B4；其余 registry/工具链记债。
+10. `bun test` **810 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. 开工 `git checkout main` 失败：`main` 被另一 worktree `/home/ops/openagentemail` 占用。改 `git fetch origin main && git checkout -b tizerluo/worker-34-wrapup origin/main`，HEAD `ef880a9`。
+2. 三资产闸禁止 UI_JS 出现连续 `data:`；直接写 `indexOf('data:')` 会红。
+3. 独立自审 P2：`.meta` 改成 `minmax(12em, 1fr)` 会在 821–1100 Headers tab 横向溢出。那不是主题列修复所需要的。
+
+### 我们是如何解决这些错误的？
+
+1. 不占用 main worktree，从 `origin/main` 开收官分支。
+2. 运行时拼接 `'data' + ':'`；注释写「data 协议」而不写连续 `data:`。
+3. `.meta` 恢复 `58px minmax(0, 1fr)`；主题列只动 `h2` / `.detail-main-col` / 1440 抽屉。
+
+---
+
+## #26 收官返工 R1（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（就地修；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/31
+
+### 我们实现了哪些功能？
+
+1. **设备列表代际：** `state.deviceLoadGen`；`loadPairedDevices` 每次发起 `++` 并捕获，响应/错误落地前校验代际才写 state/渲染。
+2. **登出作废飞行请求：** `clearNotifyState`（`showLogin` 走这里）bump `deviceLoadGen`，旧响应不得重填上一会话设备。
+3. 行为测试两条：乱序不得盖 `pending_revoke`；登出后旧响应不得重填。静态闸钉三处守卫。
+4. `bun test` **813 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. CodeRabbit Major：B4 立刻 `loadPairedDevices()` 后，无代际防护——乱序会把 Revoking 打回 Revoke；登出后飞行响应会污染下一会话。
+
+### 我们是如何解决这些错误的？
+
+1. 对齐 `overviewGen`：新请求占新代际；清会话 bump 代际。try/catch/`!isAdmin` 写路径都先比代际。
+2. 用 `new Function` 抽出真实 `loadPairedDevices`/`clearNotifyState`，可控 Promise 模拟乱序与登出。
+
+---
+
+## #26 收官终审拍板补断言（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（就地修；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/31
+
+### 我们实现了哪些功能？
+
+1. C2 呈现层：`ui-tasks.test.ts` 抽出真实 `renderTaskRows`，直造 `overdueReason` fixture 跑假 DOM。
+2. 钉死：`overdueReason` 非空行带 `is-overdue` + `Overdue` 文字；`null` 行两者皆无。CSS 闸钉 inset 红条与 `.task-overdue-flag` 红色。
+3. 未改生产代码。指挥授权本轮不另起 subagent 自审。
+
+### 我们遇到了哪些错误？
+
+1. 无。对照 `tasks.ts` / `pages.ts` 后，渲染输出已是红条 + Overdue 文字，与 PR4 回执口径一致，未停工上报。
+
+### 我们是如何解决这些错误的？
+
+1. 无需修生产码。对齐 `ui-device-load` 的 `new Function` 假 DOM 模式，把呈现钉在可执行断言上，而不是只 `toContain` 源码字符串。
+
 
