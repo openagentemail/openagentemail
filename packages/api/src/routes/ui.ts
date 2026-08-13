@@ -17,8 +17,11 @@ import {
 } from '../lib/identities.ts';
 import {
   NotifyError,
+  createNotificationDevice,
+  listNotificationDevices,
   notificationService,
   provisionIdentityNotifications,
+  revokeNotificationDevice,
   type NotifyMessage,
   type NotifyTopic,
 } from '../lib/notify.ts';
@@ -73,6 +76,12 @@ import {
   type NotificationLogicalChannel,
   type NotificationLogLimit,
 } from '../lib/notification-log.ts';
+import {
+  DeviceNotFoundError,
+  DeviceRegistryCorruptError,
+  DeviceRegistryPersistError,
+  DeviceRevokeTransientError,
+} from '../lib/notification-devices.ts';
 
 /**
  * 与 routes/notify.ts#toTopic 必须保持同一口径（Dashboard cookie 入口的镜像校验）。
@@ -257,6 +266,14 @@ function notifyHistoryError(c: Context, err: unknown) {
   return c.json({ error: err.code }, 502);
 }
 
+function deviceUiError(c: Context, err: unknown) {
+  if (err instanceof DeviceNotFoundError) return c.json({ error: err.code }, 404);
+  if (err instanceof DeviceRegistryCorruptError) return c.json({ error: err.code }, 500);
+  if (err instanceof DeviceRegistryPersistError) return c.json({ error: err.code }, 502);
+  if (err instanceof DeviceRevokeTransientError) return c.json({ error: err.code }, 502);
+  return notifyHistoryError(c, err);
+}
+
 function notificationLogError(c: Context, err: unknown) {
   if (err instanceof InvalidNotifyCursorError) {
     return c.json({ error: 'invalid_cursor' }, 400);
@@ -378,6 +395,8 @@ const pushTierBodySchema = z
   .strict();
 
 function requireUiAdmin(c: Context): Response | null {
+  // 设备 / 身份写操作仅实例 admin。现网 Auth 只有 admin | identity：
+  // identity 会话与任何非 admin（含未来平台运营主体）一律 403，不得解释为 admin。
   if (getAuth(c).kind !== 'admin') {
     return c.json({ error: 'forbidden: admin session required' }, 403);
   }
@@ -1003,6 +1022,60 @@ export function createUiApiRoutes(
     } catch (err) {
       releaseNotifyUserLimit(allowed.actor, limit.reservation);
       return notifyHistoryError(c, err);
+    }
+  });
+
+  const uiDeviceNameSchema = z
+    .object({
+      displayName: z.string().max(80).optional(),
+    })
+    .strict();
+
+  /** admin-only 设备列表；identity 与非 admin 一律 403。列表前对账 pending_revoke。 */
+  routes.get('/notify/devices', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    try {
+      return c.json({ devices: await listNotificationDevices() });
+    } catch (err) {
+      return deviceUiError(c, err);
+    }
+  });
+
+  /** Dashboard 添加设备：复用 create service；凭据 no-store，只展示一次。 */
+  routes.post('/notify/devices', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    let raw: unknown = {};
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = {};
+    }
+    const parsed = uiDeviceNameSchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    try {
+      const created = await createNotificationDevice({ displayName: parsed.data.displayName });
+      c.header('Cache-Control', 'no-store');
+      return c.json(created, 201);
+    } catch (err) {
+      return deviceUiError(c, err);
+    }
+  });
+
+  /** 吊销：pending → 删 ntfy（404 算成功）→ revoked；已 revoked 幂等 204。 */
+  routes.delete('/notify/devices/:id', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    const id = c.req.param('id');
+    if (!id || !id.startsWith('dev_') || id.length > 64) {
+      return c.json({ error: 'invalid_request' }, 400);
+    }
+    try {
+      await revokeNotificationDevice(id);
+      return c.body(null, 204);
+    } catch (err) {
+      return deviceUiError(c, err);
     }
   });
 

@@ -645,6 +645,39 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 1. 两个开关同时落地：finally 代际守卫 + beginModal 统一复位。成功路径 bump 后 finally 跳过，下次 beginModal 拉回可点；stale 代际不符跳过，不碰新窗已 disable 的钮。
 2. T1 用挂起的 `apiJson`/`apply` 模拟 stale 完成；T2 抽出真实 `beginModal`，成功 leftover disabled 后再开窗断言可点。
 
+---
+
+## #26 PR 6：设备管理完整闭环（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（从 `origin/main` @ `608cbb2` 检出；禁动 main，禁止自 merge）
+
+### 我们实现了哪些功能？
+
+1. **device registry：** `DATA_DIR/notification-devices.json`（schemaVersion 1），0600 / 目录 0700，进程内 serial queue，同目录 `.tmp` + fsync + rename 原子写。崩溃 tmp 丢弃并告警；corrupt JSON fail-closed；磁盘满/只读走 `DeviceRegistryPersistError` + HIGH 健康告警。password/token 键拒绝落盘。
+2. **create 补 displayName：** 现有 ntfy user 创建路径在 ACL 成功后 `registerPairedDevice`；缺省名 `Phone`。登记失败 best-effort 删 ntfy user，不留幽灵。
+3. **list/revoke API：** Bearer `/v1/notify/devices` 与 UI `/ui/api/notify/devices`；仅 `kind === 'admin'`。identity 与非 admin（现网无独立平台运营主体 kind，故不能被解释为 admin）一律 403。
+4. **Push & Devices UI：** 设备列表（名称 / User alerts·User low / 配对时间）+ Add device 引导 + 一次性 password modal（同 token 仪式）+ 服务端 QR 模块图（canvas 绘制，零新依赖）。tier 三卡逻辑未改。
+5. **吊销一致性：** `active → pending_revoke`（先落盘，失败不碰 ntfy）→ 删 ntfy（404/not_found = 成功）→ `revoked`。步骤 3 落盘失败保持 pending；启动/列表对账因 not_found 收敛。已 revoked 重复 DELETE 204。
+6. **一次性凭据：** 创建响应 `Cache-Control: no-store`；关窗清 password/QR DOM；磁盘零明文（含日志不写 password）。
+7. **旧 POST 兼容：** `{ publicUrl }` 无 displayName 仍 201。
+
+### 我们遇到了哪些错误？
+
+1. UI 模块是 JSON 字符串导出，直接模板替换会吞转义；shell 插入 modal 时 StrReplace 对不上转义片段。
+2. `beginModal` 增加 `deviceAddSubmit.disabled = false` 后，既有 `ui-modal-buttons` 沙箱没有该变量，T2 会 ReferenceError。
+3. T1 插入 device-revoke 用例时漏了数组 `];`，测试文件语法失败。
+4. 一次性密码文案在 HTML 不在 JS，资产测试若断言 `UI_JS` 会找不到。
+5. 独立自审 P1：现网 ntfy 删缺失 user 返回 HTTP 400 / code 40031，不是 404；只认 404 会让步骤 3 落盘失败后的对账永远停在 `pending_revoke`。
+
+### 我们是如何解决这些错误的？
+
+1. 用 Python `json.loads` / `json.dumps(..., ensure_ascii=False)` 改 shell 与 client 模块。
+2. T2 / create-submit 沙箱补 `var deviceAddSubmit = box.submit`。
+3. 补回 `];`。
+4. 密码只展示一次的文案改断言 `UI_HTML`；关窗清密文仍断言 `UI_JS`。
+5. `classifyNtfyUserDeleteResponse` 把 40031 / "user does not exist" 定为 `not_found`；通用 400（如 40024 非法 JSON）与 5xx 仍是 `transient`。补分类单测 + Bearer DELETE 用 40031 体。
+
 
 
 

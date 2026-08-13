@@ -22,17 +22,26 @@ const { resetNotifyUserLimits } = await import('../src/lib/ratelimit.ts');
 const { createNotifyRoutes } = await import('../src/routes/notify.ts');
 const {
   boundJsonEscapedText,
+  classifyNtfyUserDeleteResponse,
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
   jsonEscapedByteLength,
+  listNotificationDevices,
   notifyAvailableMessageBytes,
   NotifyError,
   NTFY_REQUEST_MAX_BYTES,
   NtfyNotificationService,
   physicalAgentTopic,
+  revokeNotificationDevice,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
+const {
+  deviceRegistryPathForTests,
+  registerPairedDevice,
+  resetDeviceRegistryForTests,
+  setDeviceRegistryPersistHookForTests,
+} = await import('../src/lib/notification-devices.ts');
 const {
   queryNotificationLog,
   resetNotificationLogForTests,
@@ -64,7 +73,12 @@ const ordinary = createIdentity({ localpart: 'ordinary' })!.identity;
 
 function appFor(
   auth: { kind: 'admin' } | { kind: 'identity'; address: string },
-  createDevice?: () => Promise<{ username: string; password: string; serverUrl: string; topics: { userAlerts: string; userLow: string } }>,
+  createDevice?: (options?: { displayName?: string }) => Promise<{
+    username: string;
+    password: string;
+    serverUrl: string;
+    topics: { userAlerts: string; userLow: string };
+  }>,
 ) {
   const app = new Hono();
   app.use('*', async (c, next) => {
@@ -83,6 +97,8 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  resetDeviceRegistryForTests();
+  resetNotificationLogForTests();
 });
 
 describe('human-alert ACL', () => {
@@ -266,6 +282,42 @@ describe('phone device ACL', () => {
     expect(qCalls).toBe(1);
   });
 
+  test('old POST without displayName still 201 and identity cannot list or revoke', async () => {
+    const created = await appFor({ kind: 'admin' }, async () => device).request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.test' }),
+    });
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as { username: string; password: string };
+    expect(body.username).toBe(device.username);
+    expect(body.password).toBe(device.password);
+
+    const listed = await appFor({ kind: 'identity', address: allowed.address }).request(
+      '/v1/notify/devices',
+    );
+    expect(listed.status).toBe(403);
+    const revoked = await appFor({ kind: 'identity', address: allowed.address }).request(
+      '/v1/notify/devices/dev_nope',
+      { method: 'DELETE' },
+    );
+    expect(revoked.status).toBe(403);
+  });
+
+  test('displayName is accepted on create without breaking the publicUrl gate', async () => {
+    let seen: { displayName?: string } | undefined;
+    const response = await appFor({ kind: 'admin' }, async (options) => {
+      seen = options;
+      return { ...device, id: 'dev_test', displayName: options?.displayName ?? 'Phone' };
+    }).request('/v1/notify/devices', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://notify.test', displayName: 'Kitchen' }),
+    });
+    expect(response.status).toBe(201);
+    expect(seen).toEqual({ displayName: 'Kitchen' });
+  });
+
   test('removes a phone account if granting the second human topic fails', async () => {
     const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
     const previousNtfy = { ...config.ntfy };
@@ -303,6 +355,94 @@ describe('phone device ACL', () => {
         expect.objectContaining({ topic: expect.stringMatching(/^user-low-/), permission: 'read-only' }),
       ]);
       expect(calls[3]?.body).toEqual({ username: expect.stringMatching(/^phone-/) });
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('registry persist failure after ntfy create deletes the ghost user and returns 502', async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-registry-fail', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? 'GET' });
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    setDeviceRegistryPersistHookForTests(() => {
+      throw new Error('ENOSPC');
+    });
+    try {
+      await expect(createNotificationDevice({ displayName: 'Ghost' })).rejects.toMatchObject({
+        code: 'device_registry_unavailable',
+      });
+      expect(calls.some((call) => call.method === 'DELETE' && call.url.includes('/v1/users'))).toBe(
+        true,
+      );
+      const disk = deviceRegistryPathForTests();
+      const { existsSync } = await import('node:fs');
+      if (existsSync(disk)) {
+        expect(readFileSync(disk, 'utf8')).not.toMatch(/"password"\s*:/);
+      }
+    } finally {
+      setDeviceRegistryPersistHookForTests(null);
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('successful create never writes password to DATA_DIR', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-ok', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    let password = '';
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'POST' && String(_input).endsWith('/v1/users') && init.body) {
+        const body = JSON.parse(String(init.body)) as { password?: string };
+        if (body.password) password = body.password;
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const created = await createNotificationDevice({ displayName: 'Desk' });
+      expect(created.displayName).toBe('Desk');
+      expect(created.password.length).toBeGreaterThan(8);
+      expect(created.qrPayload.password).toBe(created.password);
+      expect(created.qr?.size).toBeGreaterThanOrEqual(21);
+      expect(created.qr?.modules).toMatch(/^[01]+$/);
+      expect(created.qr?.modules.length).toBe((created.qr?.size ?? 0) ** 2);
+      password = created.password;
+      const dataDir = process.env.DATA_DIR!;
+      const { readdirSync } = await import('node:fs');
+      const walk = (dir: string): string[] => {
+        const out: string[] = [];
+        for (const name of readdirSync(dir, { withFileTypes: true })) {
+          const next = join(dir, name.name);
+          if (name.isDirectory()) out.push(...walk(next));
+          else out.push(readFileSync(next, 'utf8'));
+        }
+        return out;
+      };
+      const blobs = walk(dataDir).join('\n');
+      expect(blobs).not.toContain(password);
+      expect(blobs).not.toMatch(/"password"\s*:/);
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }
@@ -807,5 +947,90 @@ describe('publish success path writes the 30-day notification log', () => {
         source: 'task',
       })).resolves.toMatchObject({ title: 'hello' });
     });
+  });
+});
+
+describe('ntfy user delete classification (revoke reconcile)', () => {
+  test('live ntfy missing user is HTTP 400 / code 40031, not 404', () => {
+    expect(
+      classifyNtfyUserDeleteResponse(
+        400,
+        JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
+      ),
+    ).toBe('not_found');
+    expect(classifyNtfyUserDeleteResponse(404, '{"code":40401,"error":"page not found"}')).toBe(
+      'not_found',
+    );
+    expect(classifyNtfyUserDeleteResponse(200, '{}')).toBe('deleted');
+    expect(classifyNtfyUserDeleteResponse(503, 'unavailable')).toBe('transient');
+    expect(
+      classifyNtfyUserDeleteResponse(
+        400,
+        JSON.stringify({ code: 40024, http: 400, error: 'invalid request: request body must be valid JSON' }),
+      ),
+    ).toBe('transient');
+  });
+});
+
+describe('device list and revoke (Bearer)', () => {
+  test('identity cannot GET or DELETE devices; admin revoke is 204 including repeats and ntfy 40031', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    const deletes: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (init?.method === 'DELETE') {
+        deletes.push(String(input));
+        return new Response(
+          JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
+          { status: 400 },
+        );
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Curl-phone',
+        ntfyUsername: 'phone-curltest',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      const identGet = await appFor({ kind: 'identity', address: allowed.address }).request(
+        '/v1/notify/devices',
+      );
+      expect(identGet.status).toBe(403);
+      const identDel = await appFor({ kind: 'identity', address: allowed.address }).request(
+        `/v1/notify/devices/${record.id}`,
+        { method: 'DELETE' },
+      );
+      expect(identDel.status).toBe(403);
+
+      const listed = await appFor({ kind: 'admin' }).request('/v1/notify/devices');
+      expect(listed.status).toBe(200);
+      const page = (await listed.json()) as {
+        devices: { displayName: string; pairedAt: string; topicLabels?: { userAlerts: string } }[];
+      };
+      expect(page.devices[0]?.displayName).toBe('Curl-phone');
+      expect(page.devices[0]?.pairedAt).toBeTruthy();
+      expect(page.devices[0]?.topicLabels?.userAlerts).toBe('User alerts');
+      expect(JSON.stringify(page)).not.toMatch(/"password"\s*:/);
+      expect(JSON.stringify(page)).not.toMatch(/"qr"\s*:/);
+
+      const revoked = await appFor({ kind: 'admin' }).request(`/v1/notify/devices/${record.id}`, {
+        method: 'DELETE',
+      });
+      expect(revoked.status).toBe(204);
+      expect(deletes.some((url) => url.includes('/v1/users'))).toBe(true);
+
+      const again = await appFor({ kind: 'admin' }).request(`/v1/notify/devices/${record.id}`, {
+        method: 'DELETE',
+      });
+      expect(again.status).toBe(204);
+      expect(deletes).toHaveLength(1);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 });

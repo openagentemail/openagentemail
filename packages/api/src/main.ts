@@ -22,6 +22,7 @@
 
 import { config } from './lib/config.ts';
 import { initializeNotifications } from './lib/notify.ts';
+import { inspectDeviceRegistry } from './lib/notification-devices.ts';
 import { startNotificationWatcher } from './lib/notification-watcher.ts';
 import { startNotificationLogMaintenance } from './lib/notification-log.ts';
 import { startRetentionLoop } from './lib/retention.ts';
@@ -31,6 +32,7 @@ const app = createApp();
 
 startRetentionLoop();
 startNotificationLogMaintenance();
+await inspectDeviceRegistry();
 if (config.ntfy.enabled) {
   await initializeNotifications();
   startNotificationWatcher();

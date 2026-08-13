@@ -46,6 +46,7 @@ function extractCreateSubmit(): string {
 
 const ONCLICK_STUBS = `
         var address = 'agent@test.example';
+        var device = { id: 'dev_1', displayName: 'Kitchen' };
         var grant = { id: 'grant-1' };
         var task = { id: 'task-1' };
         var text = 'done';
@@ -70,6 +71,7 @@ const ONCLICK_STUBS = `
         function renderMessages() {}
         function renderIdentities() {}
         function loadConfigureClients() {}
+        function loadPairedDevices() {}
         async function selectTask() {}
         function loadTasks() {}
 `;
@@ -79,6 +81,12 @@ describe('shared modal buttons: generation-gated finally + beginModal reset', ()
     const races: { name: string; src: string; after: string; pair: boolean }[] = [
       { name: 'delete', src: API_JS, after: 'function handleDeleteIdentity(', pair: false },
       { name: 'overview-tier3', src: API_JS, after: 'function handlePushTierChange(', pair: true },
+      {
+        name: 'device-revoke',
+        src: PUSH_DEVICES_PAGE_JS,
+        after: 'function handleRevokeDevice(',
+        pair: true,
+      },
     ];
     for (const race of races) {
       const onclick = extractConfirmOnclick(race.src, race.after);
@@ -163,6 +171,12 @@ describe('shared modal buttons: generation-gated finally + beginModal reset', ()
         after: 'function renderConfigureClients(',
         pair: false,
       },
+      {
+        name: 'device-revoke',
+        src: PUSH_DEVICES_PAGE_JS,
+        after: 'function handleRevokeDevice(',
+        pair: true,
+      },
       { name: 'task-close', src: TASKS_PAGE_JS, after: 'confirmModalConfirm.onclick', pair: false },
     ];
     for (const flow of flows) {
@@ -179,6 +193,7 @@ describe('shared modal buttons: generation-gated finally + beginModal reset', ()
             var confirmModalConfirm = box.confirm;
             var confirmModalCancel = box.cancel;
             var createModalSubmit = box.submit;
+            var deviceAddSubmit = box.submit;
             var modalOpener = null;
             var document = { body: { id: 'body' }, activeElement: null };
             function elementInsideModal() { return false; }
@@ -240,6 +255,7 @@ describe('shared modal buttons: generation-gated finally + beginModal reset', ()
         return (async function () {
           var modalGeneration = 1;
           var createModalSubmit = box.submit;
+          var deviceAddSubmit = box.submit;
           var confirmModalConfirm = box.confirm;
           var confirmModalCancel = box.cancel;
           var modalOpener = null;

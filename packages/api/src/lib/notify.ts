@@ -21,6 +21,16 @@ import {
   type NotificationLogicalTarget,
   type NotificationSource,
 } from './notification-log.ts';
+import {
+  DeviceRegistryPersistError,
+  listPairedDevices,
+  reconcilePendingRevokes,
+  registerPairedDevice,
+  revokePairedDevice,
+  type DeviceListItem,
+  type NtfyUserDeleteResult,
+} from './notification-devices.ts';
+import { encodeQrModules } from './qr-byte.ts';
 
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
@@ -75,14 +85,30 @@ export interface NotifyService {
   verify(): Promise<{ ok: true }>;
 }
 
-/** One-time credentials for a human phone, never persisted by this API. */
+/** One-time credentials for a human phone. password 只出现在本响应，永不落盘。 */
 export type NotificationDevice = {
+  id: string;
+  displayName: string;
   username: string;
   password: string;
   serverUrl: string;
   topics: {
     userAlerts: string;
     userLow: string;
+  };
+  qrPayload: {
+    serverUrl: string;
+    username: string;
+    password: string;
+    topics: {
+      userAlerts: string;
+      userLow: string;
+    };
+  };
+  /** 一次性 QR 模块图；列表接口永不返回。编码失败则省略，copy 字段仍可用。 */
+  qr?: {
+    size: number;
+    modules: string;
   };
 };
 
@@ -95,7 +121,8 @@ export class NotifyError extends Error {
       | 'notify_cancelled'
       | 'verify_failed'
       | 'unknown_agent'
-      | 'message_too_large',
+      | 'message_too_large'
+      | 'device_registry_unavailable',
     public readonly details?: {
       maxRequestBytes: number;
       availableMessageBytes: number;
@@ -448,11 +475,63 @@ async function deleteNtfyUser(username: string): Promise<void> {
 }
 
 /**
+ * 吊销路径：远端 user 已不存在视为删除成功。
+ * 现网 ntfy `handleUsersDelete` 对缺失 user 返回 HTTP 400 / code 40031 /
+ * "user does not exist"（不是 HTTP 404）。网络错误与 5xx 是 transient，
+ * 不得当成 not_found。
+ */
+export function classifyNtfyUserDeleteResponse(
+  status: number,
+  body: string,
+): NtfyUserDeleteResult {
+  if (status >= 200 && status < 300) return 'deleted';
+  if (status === 404) return 'not_found';
+  const trimmed = body.trim();
+  let code: number | undefined;
+  let error = '';
+  try {
+    const parsed = JSON.parse(trimmed) as { code?: unknown; error?: unknown };
+    if (typeof parsed.code === 'number') code = parsed.code;
+    if (typeof parsed.error === 'string') error = parsed.error;
+  } catch {
+    error = trimmed;
+  }
+  const haystack = `${error} ${trimmed}`.toLowerCase();
+  if (code === 40031 || haystack.includes('user does not exist')) return 'not_found';
+  if (code === 40401 || haystack.includes('not_found')) return 'not_found';
+  return 'transient';
+}
+
+export async function deleteNtfyUserResult(username: string): Promise<NtfyUserDeleteResult> {
+  try {
+    const response = await fetch(providerUrl('/v1/users'), {
+      method: 'DELETE',
+      headers: {
+        ...basic('admin', config.ntfy.adminPassword!),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ username }),
+    });
+    let body = '';
+    try {
+      body = await response.text();
+    } catch {
+      body = '';
+    }
+    return classifyNtfyUserDeleteResponse(response.status, body);
+  } catch {
+    return 'transient';
+  }
+}
+
+/**
  * Create one human-facing reader account for the two user alert channels.
  * Agent routes are deliberately absent: a phone is for the owner, not an
  * alternate credential for an agent's private wake-up topic.
  */
-export async function createNotificationDevice(): Promise<NotificationDevice> {
+export async function createNotificationDevice(
+  options: { displayName?: string } = {},
+): Promise<NotificationDevice> {
   if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
   if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
   const current = await state();
@@ -476,19 +555,63 @@ export async function createNotificationDevice(): Promise<NotificationDevice> {
         });
         if (!access.ok) throw new NotifyError('notify_unavailable');
       }
+      const topicMap = { userAlerts: current.userAlerts.topic, userLow: current.userLow.topic };
+      let record;
+      try {
+        record = await registerPairedDevice({
+          displayName: options.displayName,
+          ntfyUsername: username,
+          topics: topicMap,
+        });
+      } catch (err) {
+        await deleteNtfyUser(username);
+        if (err instanceof DeviceRegistryPersistError) throw err;
+        throw new DeviceRegistryPersistError(err);
+      }
+      const qrPayload = {
+        serverUrl: config.ntfy.publicUrl,
+        username,
+        password,
+        topics: topicMap,
+      };
+      let qr: { size: number; modules: string } | undefined;
+      try {
+        qr = encodeQrModules(JSON.stringify(qrPayload));
+      } catch {
+        // 配对 copy 字段仍可用；QR 失败不得阻断发凭据。
+      }
       return {
+        id: record.id,
+        displayName: record.displayName,
         username,
         password,
         serverUrl: config.ntfy.publicUrl,
-        topics: { userAlerts: current.userAlerts.topic, userLow: current.userLow.topic },
+        topics: topicMap,
+        qrPayload,
+        ...(qr ? { qr } : {}),
       };
     } catch (err) {
-      if (created) await deleteNtfyUser(username);
-      if (err instanceof NotifyError) throw err;
+      if (created && !(err instanceof DeviceRegistryPersistError)) await deleteNtfyUser(username);
+      if (err instanceof NotifyError || err instanceof DeviceRegistryPersistError) throw err;
       throw new NotifyError('notify_unavailable');
     }
   }
   throw new NotifyError('notify_unavailable');
+}
+
+export async function reconcileNotificationDevices(): Promise<void> {
+  if (!config.ntfy.enabled || !config.ntfy.adminPassword) return;
+  await reconcilePendingRevokes(deleteNtfyUserResult);
+}
+
+export async function listNotificationDevices(): Promise<DeviceListItem[]> {
+  await reconcileNotificationDevices();
+  return listPairedDevices();
+}
+
+export async function revokeNotificationDevice(id: string): Promise<'revoked' | 'already_revoked'> {
+  await reconcileNotificationDevices();
+  return revokePairedDevice(id, deleteNtfyUserResult);
 }
 
 function parseMessages(text: string): NotifyMessage[] {
@@ -829,4 +952,5 @@ export async function initializeNotifications(): Promise<void> {
   }
   if (changed) saveState(current);
   await writeServerConfig(current);
+  await reconcileNotificationDevices();
 }

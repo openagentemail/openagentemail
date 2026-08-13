@@ -1429,7 +1429,20 @@ describe('UI static asset contract', () => {
     expect(finallyBody).toContain("if (state.scope === 'overview') renderOverviewRows()");
     expect(UI_HTML).toContain('id="configure-push-cards"');
     expect(UI_HTML).toContain('id="configure-push-devices"');
-    expect(UI_JS).toContain("'Device pairing is not in this release'");
+    expect(UI_HTML).toContain('id="configure-push-add"');
+    expect(UI_HTML).toContain('id="device-add-modal"');
+    expect(UI_HTML).toContain('id="device-pair-modal"');
+    expect(UI_JS).not.toContain("'Device pairing is not in this release'");
+    expect(UI_JS).toContain("apiJson('/ui/api/notify/devices'");
+    expect(UI_JS).toContain('function renderPairedDevices(');
+    expect(UI_JS).toContain('function showDevicePairModal(');
+    expect(UI_JS).toContain('function handleRevokeDevice(');
+    expect(UI_JS).toContain('topicSemantics');
+    expect(UI_JS).toContain('User alerts');
+    expect(UI_JS).toContain('Paired ');
+    expect(UI_HTML).toContain('Copy this password now. It will not be shown again.');
+    expect(UI_JS).toContain('devicePairPassword.textContent = ');
+    expect(UI_JS).toContain("devicePairPassword.textContent = ''");
     const renderPush = UI_JS.slice(
       UI_JS.indexOf('function renderConfigurePush('),
       UI_JS.indexOf('function enterConfigurePush('),
@@ -1510,6 +1523,8 @@ describe('UI static asset contract', () => {
     expect(MODAL_JS).toContain('confirmModalConfirm.disabled = false');
     expect(MODAL_JS).toContain('confirmModalCancel.disabled = false');
     expect(MODAL_JS).toContain('createModalSubmit.disabled = false');
+    expect(MODAL_JS).toContain('deviceAddSubmit.disabled = false');
+    expect(MODAL_JS).toContain("node.closest('#device-pair-modal')");
     expect(MODAL_JS).toContain('return modalGeneration');
     expect(MODAL_JS).toContain('modalOpener = previous');
     expect(MODAL_JS).toContain('lostFocus && previous');
@@ -1629,12 +1644,14 @@ describe('UI static asset contract', () => {
     expect(beginModal).toContain('confirmModalConfirm.disabled = false');
     expect(beginModal).toContain('confirmModalCancel.disabled = false');
     expect(beginModal).toContain('createModalSubmit.disabled = false');
+    expect(beginModal).toContain('deviceAddSubmit.disabled = false');
   });
 
   test('identity session CSS hides admin-only create controls', () => {
     expect(UI_CSS).toContain(
       '.inbox-view[data-session="identity"] #configure-identities-create',
     );
+    expect(UI_CSS).toContain('#configure-push-add { display: none; }');
     expect(UI_JS).toContain('configureIdentitiesCreate.hidden = !isAdmin()');
   });
 
