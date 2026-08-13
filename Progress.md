@@ -761,4 +761,29 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 3. 初审指出 finder reserve 过占位后收窄条件并补回归格。
 4. 404 看 body；disabled/unconfigured 走本地 `deleted` 回调。
 
+---
+
+## #26 PR 6 返工 R4（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **QR alignment 覆盖 timing（纠正 R3）：** finder + timing 先铺；坐标组合循环对 finder 三角 `(6,6)/(6,size-7)/(size-7,6)` 直接 `continue`；其余一律 `addAlignment`（绘制 + `isFunc` 占位），覆盖 timing 上的中心（v7 `(6,22)`、v10 `(6,28)/(28,6)` 等）。删除 `reserveAlignment`。
+2. **测试反转：** 去掉 R3 的 `version 7+ omits alignment on timing tracks and keeps timing intact`。新测 `alignment bullseye overwrites timing except the three finder corners`：完整 5×5 bullseye、finder 三角无 alignment、未被覆盖的 timing 仍交替、finder 旁数据格非 isFunc。v2 `[6,18]` / v7 / v10 / v14 功能格 + 配对 JSON 全编码。
+3. **R1 回归：** `ISO de-interleave plus RS remainder recovers pairing payload` 仍绿。
+4. `bun test` **793 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `9d3aafec-7c86-4190-a1cb-f8735220f48e`：**mergeable**，P0/P1/P2=0（先独立求证 ISO Annex E/G 再裁）。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（置信 0.99，指挥亲验属实）：R3 对 timing 上的 alignment 只 reserve 不画。R3 把 Codex R2「本应省略」理解反了——R2 的错是绘制顺序（alignment 先、timing 后切坏中心），正解是 alignment 后画覆盖 timing，不是省略。
+2. 全量 `bun test` 第一次 F50 watcher「many tier-2 recipients… stay under 1s」抖到 ~1189ms 失败。隔离重跑 615ms 通过；再跑全量 793 全绿。与 QR diff 无关。
+
+### 我们是如何解决这些错误的？
+
+1. 循环改为 finder 三角 skip、其余 `addAlignment`；删 `reserveAlignment`。v2 `(6,18)` 按 ISO 仍是 finder 角不画；v7/v10 的 timing 中心画完整 bullseye。测试用 `isAlignAt` 钉死外框/白环/中心，防止再退化成 reserve-blank。
+2. 不改 F50 阈值；隔离确认后重跑全量通过。
+
 

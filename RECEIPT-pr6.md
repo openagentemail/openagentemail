@@ -187,6 +187,42 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 - `bun run build` → Bundled 568 modules，全绿
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
+---
+
+## 返工 R4（2026-08-13 · Codex Local P1 · alignment 覆盖 timing）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+R3 把 Codex R2「本应省略」理解反了：R2 的错是 **alignment 先画、timing 后画切坏 bullseye**；正解是 **alignment 后画覆盖 timing**，不是省略 timing 上的 alignment。本轮纠正。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `qr-byte.ts` `placeFunctionPatterns`（置信 0.99，指挥亲验 R3 head `12cbf5a` 属实） | R3：`if (!isFunc[y][x]) addAlignment else if (!finderCorner) reserveAlignment`。中心落在 timing 上的组合（isFunc 已被 timing 先占）只 reserve 5×5、不画 bullseye。ISO 相反：如配对 v10 的 `(6,28)/(28,6)` **必须绘制**，alignment 覆盖 timing；扫描器预期完整同心圆。只有三个 finder 重叠角 `(6,6)/(6,size-7)/(size-7,6)` 省略（不画也不 reserve）。 | **已修。** 坐标组合循环：finder 三角 `continue`；其余一律 `addAlignment`（绘制 + `isFunc` 占位一体，覆盖 timing）。删除 `reserveAlignment`。isFunc 集合与 R3 相同（timing 段仍是功能模块；alignment 覆盖处仍是功能模块）。数据放置/掩码流不变。 | `alignment bullseye overwrites timing except the three finder corners`（v2 坐标 `[6,18]`；v7/v10/v14 功能格；配对 JSON 全编码 mask 不碰功能模块）。回归：`ISO de-interleave plus RS remainder recovers pairing payload (version near 9)` |
+
+**v2 `(6,18)` 说明（按 ISO，不是按 R3 错误测试名）：** v2 size=25，`size-7=18`，故 `(6,18)/(18,6)` **就是 finder 三角**，省略不画。timing 轨道（列/行 8…16）上没有 alignment。用户举例里的 timing 上必须画 bullseye 的点是 v7 `(6,22)/(22,6)` 与 v10 `(6,28)/(28,6)`——独立自审对照 Annex E/G 与 Nayuki 后确认。
+
+### 独立自审（R4 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `9d3aafec-7c86-4190-a1cb-f8735220f48e` |
+| 审查对象 | 未提交工作区相对 `12cbf5a` 的 R4 diff（`qr-byte.ts` / `qr-byte.test.ts` / README） |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| ISO 独立求证 | 对照 ISO/IEC 18004:2015 §6.3.6、Annex E Table E.1、Annex G；Thonky Table E.1；Nayuki `draw_function_patterns`。v2 `(6,18)` = finder omit；v7 `(6,22)` / v10 `(6,28)/(28,6)` **必须画** 并覆盖 timing。Annex G v7 Segment C = 6×25=150（9 对减 3 finder）；若省略 timing 上两点会变成 100，与标准矛盾。 |
+| A 裁定 | **过** — finder 三角 continue；其余 `addAlignment`；`reserveAlignment` 已删；R3 `if (!isFunc)` 省略与 Annex E/G 相反。 |
+| 测试闸 | `isAlignAt` 要求完整 5×5（中心 dark + 外框 dark + 内白环）。只 reserve 不画、或 timing 十字切坏中心，v7/v10 断言失败。finder 角仍 `false`。`(size-9,7)` / `(7,size-9)` 仍 `isFunc===false`。 |
+| R1 回归 | `ISO de-interleave plus RS remainder recovers pairing payload` 未改、未削弱。 |
+| 过程 | 先独立求证 ISO/Nayuki/Thonky，再裁 diff；未改文件、未委托。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **793 pass / 0 fail**（F50 watcher 时限测曾在全量跑里抖到 ~1.2s，隔离重跑 615ms 通过；再跑全量 793 全绿，非本 diff 回归）
+- `bun run build` → Bundled 568 modules，全绿
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 
 未开真浏览器拍屏。依据 shell + CSS：

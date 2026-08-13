@@ -191,7 +191,7 @@ describe('qr-byte', () => {
     expect(decodeByteMode(recovered, ver)).toBe(PAIRING_JSON);
   });
 
-  test('version 7+ omits alignment on timing tracks and keeps timing intact', () => {
+  test('alignment bullseye overwrites timing except the three finder corners', () => {
     const ALIGN = [
       [1, 1, 1, 1, 1],
       [1, 0, 0, 0, 1],
@@ -209,52 +209,48 @@ describe('qr-byte', () => {
       }
       return true;
     };
+    const isFinderCorner = (x: number, y: number, size: number): boolean =>
+      (x === 6 && y === 6) || (x === 6 && y === size - 7) || (x === size - 7 && y === 6);
+
     const assertLayout = (ver: number, grid: { size: number; modules: string; isFunc?: boolean[][] }) => {
       const size = grid.size;
       expect(size).toBe(ver * 4 + 17);
       const positions = qrAlignmentPositions(ver);
-      expect(positions).toContain(6);
-      expect(positions.length).toBeGreaterThan(2);
+      expect(positions[0]).toBe(6);
+      expect(positions[positions.length - 1]).toBe(size - 7);
+
+      for (const y of positions) {
+        for (const x of positions) {
+          if (isFinderCorner(x, y, size)) expect(isAlignAt(grid, x, y)).toBe(false);
+          else expect(isAlignAt(grid, x, y)).toBe(true);
+        }
+      }
+
       for (let i = 8; i < size - 8; i += 1) {
-        expect(cell(grid, i, 6)).toBe(i % 2 === 0 ? '1' : '0');
-        expect(cell(grid, 6, i)).toBe(i % 2 === 0 ? '1' : '0');
+        const rowCovered = positions.some(
+          (p) => !isFinderCorner(p, 6, size) && Math.abs(i - p) <= 2,
+        );
+        const colCovered = positions.some(
+          (p) => !isFinderCorner(6, p, size) && Math.abs(i - p) <= 2,
+        );
+        if (!rowCovered) expect(cell(grid, i, 6)).toBe(i % 2 === 0 ? '1' : '0');
+        if (!colCovered) expect(cell(grid, 6, i)).toBe(i % 2 === 0 ? '1' : '0');
         if (grid.isFunc) {
           expect(grid.isFunc[6]![i]).toBe(true);
           expect(grid.isFunc[i]![6]).toBe(true);
         }
       }
-      const centers: Array<{ x: number; y: number }> = [];
-      for (let y = 2; y < size - 2; y += 1) {
-        for (let x = 2; x < size - 2; x += 1) {
-          if (isAlignAt(grid, x, y)) centers.push({ x, y });
-        }
-      }
-      for (const { x, y } of centers) {
-        expect(x).not.toBe(6);
-        expect(y).not.toBe(6);
-        expect(Math.min(Math.abs(x - 6), Math.abs(y - 6))).toBeGreaterThan(1);
-      }
-      for (const y of positions) {
-        for (const x of positions) {
-          if (x === 6 || y === 6) expect(isAlignAt(grid, x, y)).toBe(false);
-          else expect(isAlignAt(grid, x, y)).toBe(true);
-        }
-      }
+
       if (grid.isFunc) {
-        // finder 角旁的数据格不得被 reserveAlignment 吃掉（独立自审 P1）。
         expect(grid.isFunc[size - 9]![7]).toBe(false);
         expect(grid.isFunc[7]![size - 9]).toBe(false);
-        for (const { x, y } of centers) {
-          for (let dy = -2; dy <= 2; dy += 1) {
-            for (let dx = -2; dx <= 2; dx += 1) {
-              expect(grid.isFunc[y + dy]![x + dx]).toBe(true);
-              expect(x + dx === 6 || y + dy === 6).toBe(false);
-            }
-          }
-        }
       }
     };
 
+    assertLayout(2, encodeQrFunctionGrid(2));
+    expect(qrAlignmentPositions(2)).toEqual([6, 18]);
+    expect(qrAlignmentPositions(7)).toContain(22);
+    expect(qrAlignmentPositions(10)).toContain(28);
     for (const ver of [7, 10, 14]) {
       assertLayout(ver, encodeQrFunctionGrid(ver));
     }

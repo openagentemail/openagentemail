@@ -97,6 +97,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   body text**) → `revoked`. If ntfy is disabled or unconfigured, revoke is
   local-only (mark revoked, no outbound call). Pairing QR is ISO/IEC 18004
   byte-mode ECC-M: data codewords are column-interleaved across RS blocks
-  (short blocks skip the extra data column), then ECC columns follow; version
-  7+ omits alignment patterns whose center sits on finder/timing. Startup
+  (short blocks skip the extra data column), then ECC columns follow. Alignment
+  patterns are drawn after timing and overwrite it except the three finder
+  corners. Startup
   inspect fail-closes a corrupt registry without blocking the rest of the API.

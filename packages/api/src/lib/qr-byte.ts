@@ -124,18 +124,6 @@ function addAlignment(modules: number[][], isFunc: boolean[][], ox: number, oy: 
   }
 }
 
-/** 中心已被占用时省略图案，但仍占位，避免数据比特走进 ISO 扣掉的模块。 */
-function reserveAlignment(modules: number[][], isFunc: boolean[][], ox: number, oy: number): void {
-  for (let dy = -2; dy <= 2; dy += 1) {
-    for (let dx = -2; dx <= 2; dx += 1) {
-      const x = ox + dx;
-      const y = oy + dy;
-      if (x < 0 || y < 0 || x >= modules.length || y >= modules.length) continue;
-      isFunc[y]![x] = true;
-    }
-  }
-}
-
 function addTiming(modules: number[][], isFunc: boolean[][]): void {
   const size = modules.length;
   for (let i = 8; i < size - 8; i += 1) {
@@ -147,8 +135,8 @@ function addTiming(modules: number[][], isFunc: boolean[][]): void {
 }
 
 /**
- * finder / 分隔 / timing 先占位，alignment 仅当中心空闲才绘制。
- * version 7+ 坐标含 6 时不得在 timing 轨道上画出 5×5。
+ * ISO/IEC 18004：finder + timing 先铺，alignment 后画并覆盖 timing。
+ * 只省略三个 finder 重叠角；(6,y)/(x,6) 的其余组合必须画出完整 bullseye。
  */
 function placeFunctionPatterns(modules: number[][], isFunc: boolean[][], ver: number): void {
   const size = modules.length;
@@ -158,15 +146,8 @@ function placeFunctionPatterns(modules: number[][], isFunc: boolean[][], ver: nu
   addTiming(modules, isFunc);
   for (const y of getAlignmentPositions(ver)) {
     for (const x of getAlignmentPositions(ver)) {
-      if (!isFunc[y]![x]) {
-        addAlignment(modules, isFunc, x, y);
-        continue;
-      }
-      // 仅 timing 轨道上省略的 alignment 需要占位（ISO 容量仍扣这些格）。
-      // finder 三角本就不放 alignment，周围是分隔/数据，不得 reserve 5×5。
-      const finderCorner =
-        (x === 6 && y === 6) || (x === 6 && y === size - 7) || (x === size - 7 && y === 6);
-      if (!finderCorner) reserveAlignment(modules, isFunc, x, y);
+      if ((x === 6 && y === 6) || (x === 6 && y === size - 7) || (x === size - 7 && y === 6)) continue;
+      addAlignment(modules, isFunc, x, y);
     }
   }
 }
