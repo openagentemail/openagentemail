@@ -113,3 +113,38 @@ push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。
 `cd packages/api && bun test` **752 pass / 0 fail**；`bun run build` 全绿。
 
 push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。
+
+---
+
+## R3 返工（2026-08-13）
+
+同一分支 `tizerluo/worker-34-pr5` 就地修复，未新开分支，未动 main，未自行 merge。R2 head `54b6559` 复审：CI/CodeRabbit pass；Codex Local 与 ZCode 同报 1 个 P1（R2 引入真回归）+ ZCode P2×4。
+
+### 逐条对账
+
+| 项 | 处置 | 证据 / 测试 |
+|---|---|---|
+| A P1 modal 代际守卫自败（Codex Local 08:03 + ZCode P1-1） | **fixed** | 修法取 ZCode 建议①：`finally` 无条件复位本 dialog 控件；代际只拦关窗/写状态/`showTokenModal`。五条：create `createModalSubmit`；delete Confirm；revoke Confirm；Overview tier-3 Confirm+Cancel；Configure tier-3 Confirm+Cancel。同类关单 tasks 顺手修。行为测试：`packages/api/test/ui-modal-buttons.test.ts`（无 jsdom；`new Function` 抽出真实 handler + 假按钮，确认→成功 bump 代际→`disabled === false`）。静态：`stale modal responses…` 断言源码无 `if (openedGen === modalGeneration)`，try 内 `openedGen !== modalGeneration` 仍在关窗前。 |
+| B ZCode P2-1 Plan URL 拼接绕过闸 | **fixed** | `plan.ts` 直写 `https://openagent.email/docs/reference/api/`。三资产闸 `UI_REMOTE_HREF_ALLOWLIST = 'https://openagent.email/docs'`，`withoutAllowedDocsHrefs` 后再禁 `\bhttps?:\/\/`。测试：`the three assets stay free…` + Plan 契约字面量。 |
+| C ZCode P2-2 脂弱中文注释断言 | **fixed** | 删除 `toContain('redirectToLogin 恒 302 /ui')` 与 `无开放重定向`。保留 `anonymous.headers.get('location') === '/ui'`。 |
+| D ZCode P2-3 `/grants` 不判 kind | **fixed**（仅注释） | 设计口径=identity 可见自己的 grants；API ACL 兜底。不改行为。 |
+| E ZCode P2-4 mimosa 扫过期 checkout | **debt / 不改** | zcode-review-gate 工具链债，指挥另案；与本 PR 代码无关。 |
+| 指挥终审偶发 bun test 1 fail | **debt / 观察** | 本轮 `bun test` **758 pass / 0 fail**（一次跑完，未复现）；未捕获测试名，继续观察，未掩盖。 |
+
+### 修法微调说明（A）
+
+未改「关窗不 bump」（会破坏 R2 的 stale-close 防护）。只把控件复位从代际比较里拆出。delete/revoke/tasks 本来就不 disable Cancel，故只复位 Confirm；tier-3 两处 Confirm+Cancel 双钮都复位。
+
+### R3 独立自审
+
+- **禁止自审自。** 新 subagent agent id：`1c05ad79-e953-4478-8d87-612cc8602dff`
+- 范围：未提交 R3 diff（解码 JSON 模块）对照 A–E
+- 结论：**mergeable**
+- P0/P1：**无**
+- 过程：解码 `api.ts` / `push-devices.ts` / `authorized-clients.ts` / `tasks.ts` / `plan.ts` 后核对五条流 + Cancel 面；抽测 `ui-modal-buttons` / `ui-configure` / `ui-assets` → 74 pass。代际守卫仍在 try 关窗/`showTokenModal` 之前。
+
+### R3 测试 / build
+
+`cd packages/api && bun test` **758 pass / 0 fail**；`bun run build` 全绿。
+
+push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。

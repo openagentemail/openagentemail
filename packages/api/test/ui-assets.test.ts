@@ -1021,12 +1021,19 @@ describe('UI static asset contract', () => {
   });
 
   // A18 / A19 / A20 / A21
+  // 远程 URL 闸：仅允许 openagent.email/docs 前缀（Plan 自托管文档），其余仍禁 https://。
+  const UI_REMOTE_HREF_ALLOWLIST = 'https://openagent.email/docs';
+  function withoutAllowedDocsHrefs(asset: string) {
+    return asset.split(UI_REMOTE_HREF_ALLOWLIST).join('');
+  }
+
   test('the three assets stay free of parser sinks and remote references', () => {
+    expect(UI_JS).toContain('https://openagent.email/docs/reference/api/');
     for (const asset of [UI_HTML, UI_CSS, UI_JS]) {
       expect(asset).not.toMatch(
         /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b|createElementNS/,
       );
-      expect(asset).not.toMatch(/\bhttps?:\/\//);
+      expect(withoutAllowedDocsHrefs(asset)).not.toMatch(/\bhttps?:\/\//);
       expect(asset).not.toMatch(/["'(=]\s*\/\//);
       expect(asset).not.toContain('@import');
       expect(asset).not.toContain('data:');
@@ -1441,8 +1448,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toContain('Upgrade plan');
     expect(UI_JS).toContain("'Self-hosted instance'");
     expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
-    expect(UI_JS).toContain("'https:' + '/' + '/' + 'openagent.email/docs/reference/api/'");
-    expect(UI_JS).toContain('openagent.email/docs/reference/api/');
+    expect(UI_JS).toContain("docsHref: 'https://openagent.email/docs/reference/api/'");
     expect(UI_JS).toContain("'Custom domains are on the roadmap'");
     expect(UI_JS).toContain('this page has no controls to click.');
     expect(UI_CSS).toContain('.empty-state-docs');
@@ -1608,6 +1614,10 @@ describe('UI static asset contract', () => {
     const renderIdx = configurePush.indexOf('renderConfigurePush();', closeIdx);
     expect(renderIdx).toBeGreaterThan(closeIdx);
     expect(configurePush).toContain("querySelector('.push-tier-card.is-selected')");
+    // P1 R3：finally 复位控件不得再套代际守卫（成功 closeAllModals 会 bump）。
+    for (const src of [API_JS, AUTHORIZED_CLIENTS_PAGE_JS, TASKS_PAGE_JS, PUSH_DEVICES_PAGE_JS]) {
+      expect(src).not.toContain('if (openedGen === modalGeneration)');
+    }
   });
 
   test('identity session CSS hides admin-only create controls', () => {

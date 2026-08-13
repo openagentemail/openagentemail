@@ -591,6 +591,35 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 4. `modalGeneration` + `openedGen` 守卫；路由关闭不带 `keepGeneration`。
 5. 删除成功路径同步清 `activeAddress` / messages / detail。
 
+---
+
+## #26 PR 5 返工 R3（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A P1（Codex Local 08:03 + ZCode P1-1）：** 五条确认流（create `createModalSubmit`、delete、revoke、Overview/Configure tier-3 的 Confirm+Cancel）的 `finally` 无条件复位本 dialog 控件 `disabled`。代际守卫只拦关窗 / 写状态 / `showTokenModal`。同类关单（tasks）一并修。行为测试 `ui-modal-buttons.test.ts`：抽出真实 onclick/submit，`new Function` + 假按钮，确认 → 请求成功（fake `closeAllModals`/`showTokenModal` bump 代际）→ 断言按钮可再点。仓库无 jsdom，对齐既有切片基建。
+2. **B ZCode P2-1：** `plan.ts` 直写 `https://openagent.email/docs/reference/api/`；三资产闸加 `https://openagent.email/docs` 前缀 allowlist，删掉拼接 trick。
+3. **C ZCode P2-2：** 删除 `ui-configure.test.ts` 两条中文注释断言；保留 Location `/ui`。
+4. **D ZCode P2-3：** `/grants` 加 identity 可见自己 grants 的设计注释，不改行为。
+5. **E ZCode P2-4：** mimosa 过期 checkout 记债不改代码。
+6. `bun test` **758 pass / 0 fail**（752+6 行为测试）；`bun run build` 全绿。本轮未复现指挥记的偶发 1 fail。独立自审 agent `1c05ad79-e953-4478-8d87-612cc8602dff`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. R2 把「恢复控件」也套进 `openedGen === modalGeneration`。成功路径 try 内 `closeAllModals()`/`showTokenModal()` 会 bump 代际，finally 比较失败，共享按钮永远 disabled，只能整页刷新。752 条源码字符串测试测不出此行为。
+2. Plan 曾用 `'https:'+'/'+'/'+…` 拼接绕过三资产禁远程 URL 闸。
+3. `/grants` 测试曾断言源码中文注释，无防护价值且脆弱。
+
+### 我们是如何解决这些错误的？
+
+1. finally 无条件 `disabled = false`；try 里代际守卫保留在关窗/`showTokenModal` 之前。补 DOM 行为级测试（`new Function` 假按钮，无 jsdom）。静态闸：源码不得再出现 `if (openedGen === modalGeneration)`。
+2. 直写完整 https 字面量；闸对 allowlist 前缀 split 后再禁 `\bhttps?:\/\/`。
+3. 删注释断言，只留 302 Location `/ui`。
+
 
 
 
