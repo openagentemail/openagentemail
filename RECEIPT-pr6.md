@@ -223,6 +223,40 @@ R3 把 Codex R2「本应省略」理解反了：R2 的错是 **alignment 先画�
 - `bun run build` → Bundled 568 modules，全绿
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
+---
+
+## 返工 R5（2026-08-13 · Codex Local P1×2 + 云端 P2×2）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `main.ts:37`（置信 0.99） | R3 E4 只修了 `inspectDeviceRegistryAtBoot` 吞 corrupt；ntfy enabled 时紧接着 `initializeNotifications` → `reconcileNotificationDevices` 再读同一 corrupt 文件 throw，awaited 启动链仍炸，API 起不来。 | **已修。** `initializeNotifications` 对 reconcile 的 `DeviceRegistryCorruptError` fail-closed（吞+已有读盘告警）；设备 API 仍 500 `device_registry_corrupt`；`/healthz` 与其余路由正常。 | `corrupt registry with ntfy enabled does not block startup and fail-closes devices`（inspect + `initializeNotifications` + `/healthz` 200 + GET devices 500；告警无 `leaked-secret-value` / password） |
+| B | Codex Local P1 · `notification-devices.ts` 覆盖写目录 fsync（置信 0.96） | 覆盖写 rename 已替换 dest；目录 fsync 失败 → persist 报失败 → 创建 502 并删新建 ntfy user，但磁盘已是含新设备的 registry——报告与磁盘矛盾。 | **已修。** 覆盖写 dest→`.bak` 再 tmp→dest；目录 fsync 失败用 `.bak`（内存快照兜底）换回旧文件；成功再删 `.bak`。首次创建撤回 dest 不变。读盘恢复：dest 缺且 `.bak` 在则换回；dest 在则丢掉残留 `.bak`。 | `directory fsync failure on overwrite restores the previous registry`；`overwrite directory fsync failure keeps old registry and deletes the new ntfy user`（502 + 旧设备仍在 + DELETE 只打新 username） |
+| C | Codex 云端行内 P2 · QR quiet zone | 扫码要求四周 ≥4 模块留白。canvas 原先模块顶边绘制；`.device-qr` padding 12px 在 canvas 被拉到 240px 时不够 4 模块。 | **已修。** `paintDeviceQr` 把 `quiet = 4` 画进位图：`canvas` 边长 `(size+8)*scale`，模块从 `(x+4,y+4)` 起笔，白底延伸。CSS 12px 白垫仍在，作额外边。 | `pairing QR canvas paints a 4-module quiet zone` |
+| D | Codex 云端行内 P2 · tmp 短写 | 自管 `writeSync(fd, serialized)` 一次、不看返回值。POSIX write 可短写；`writeFileSync` 才会写全量。 | **已修（存在短写风险，不是「不存在」）。** `writeAllSync` 循环 `writeSync(buf, offset, remaining)` 直到整段 UTF-8 落盘，再 `fsync` + rename。 | 实现：`writeAllSync`；独立自审确认循环在 fsync 之前 |
+
+### 独立自审（R5 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `2cf614a2-7cf8-47fb-b85b-892bda53760a` |
+| 审查对象 | 未提交工作区相对 `3e13c51` 的 R5 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — `main.ts` 全路：inspect 吞 corrupt → initialize 吞 reconcile 的同一错误；设备 500；healthz 独立。新测不是只跑 inspect。 |
+| B 裁定 | **过** — 覆盖写 fsync 失败 dest 回到旧字节；`.bak` 不是 live store；首次创建仍无 dest；create 删的是新 ntfy user。dest 缺+bak 在下次读盘恢复；dest 在则丢 bak。 |
+| C / D | quiet=4 进位图；`writeAllSync` 循环短写。 |
+| 过程 | 先独立追 `main.ts` awaited 链与 `writeAtomicSync` 覆盖写/崩溃窗，再裁；未改文件、未委托。残余观察（不当作 finding）：dest→bak 与 tmp→dest 不在 fsync restore 包里（下次 `readRegistrySync` 会恢复）；未另加 dest-missing+.bak / 真短写测。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **797 pass / 0 fail**
+- `bun run build` → Bundled 568 modules，全绿
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 
 未开真浏览器拍屏。依据 shell + CSS：

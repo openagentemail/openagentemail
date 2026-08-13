@@ -5,6 +5,7 @@
  * labels / pairedAt / lastSeenAt / revokeStatus / revokedAt。
  * password/token 永不落盘。单写者 promise 队列、目录 0700、文件 0600、
  * 同目录 .tmp + fsync 文件 + atomic rename + fsync 目录。
+ * 覆盖写先把旧文件改名为 .bak，目录 fsync 失败则换回，成功再删 .bak。
  *
  * 吊销：active → pending_revoke（先落盘）→ 删 ntfy user（404/not_found 算成功）
  * → revoked。步骤 1 失败不得触达 ntfy；步骤 3 失败保持 pending，启动/列表对账
@@ -22,8 +23,10 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from 'node:fs';
+import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { config } from './config.ts';
@@ -119,6 +122,24 @@ function storePath(): string {
 
 function tmpPath(): string {
   return `${storePath()}.tmp`;
+}
+
+function bakPath(): string {
+  return `${storePath()}.bak`;
+}
+
+/**
+ * POSIX write(2) 允许短写。writeFileSync 会写全量，但这里自管 fd，
+ * 必须循环直到整段 UTF-8 落盘，再 fsync，避免 rename 进半截 JSON。
+ */
+function writeAllSync(fd: number, text: string): void {
+  const buf = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < buf.length) {
+    const n = writeSync(fd, buf, offset, buf.length - offset);
+    if (n <= 0) throw new Error('short_write');
+    offset += n;
+  }
 }
 
 function enqueue<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -242,8 +263,55 @@ function recoverCrashTmpSync(): void {
   }
 }
 
+/** 覆盖写留下的 .bak：dest 缺失则恢复旧表；dest 已在则丢掉残留备份。 */
+function recoverBackupSync(): void {
+  const bak = bakPath();
+  const dest = storePath();
+  if (!existsSync(bak)) return;
+  if (!existsSync(dest)) {
+    try {
+      renameSync(bak, dest);
+      deviceRegistryHealthAlert('crash_bak_restored', { path: DEVICE_REGISTRY_FILE });
+    } catch (err) {
+      deviceRegistryHealthAlert('crash_bak_restore_failed', {
+        path: DEVICE_REGISTRY_FILE,
+        error: err instanceof Error ? err.message : 'unknown',
+      });
+    }
+    return;
+  }
+  try {
+    rmSync(bak, { force: true });
+    deviceRegistryHealthAlert('crash_bak_discarded', { path: DEVICE_REGISTRY_FILE });
+  } catch (err) {
+    deviceRegistryHealthAlert('crash_bak_cleanup_failed', {
+      path: DEVICE_REGISTRY_FILE,
+      error: err instanceof Error ? err.message : 'unknown',
+    });
+  }
+}
+
+/** 目录 fsync 失败时把覆盖写滚回旧 registry（.bak 优先，内存快照兜底）。 */
+function restoreOverwrittenRegistry(dest: string, bak: string, previous: Buffer | null): void {
+  try {
+    if (existsSync(bak)) {
+      renameSync(bak, dest);
+      return;
+    }
+  } catch {
+    // 下面用内存快照再写一次
+  }
+  if (!previous) return;
+  try {
+    writeFileSync(dest, previous, { mode: 0o600 });
+  } catch {
+    // 恢复失败仍抛原 fsync 错；调用方看到 persist 失败
+  }
+}
+
 function readRegistrySync(): RegistryFile {
   recoverCrashTmpSync();
+  recoverBackupSync();
   const path = storePath();
   if (!existsSync(path)) {
     failClosed = false;
@@ -311,10 +379,13 @@ function writeAtomicSync(file: RegistryFile): void {
   const serialized = `${JSON.stringify(file, null, 2)}\n`;
   const tmp = tmpPath();
   const dest = storePath();
+  const bak = bakPath();
   const replacing = existsSync(dest);
+  // 覆盖写：先把旧文件挪到 .bak，fsync 失败时再换回来，保证 502 与磁盘一致。
+  const previous = replacing ? readFileSync(dest) : null;
   const fd = openSync(tmp, 'w', 0o600);
   try {
-    writeSync(fd, serialized);
+    writeAllSync(fd, serialized);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -324,6 +395,7 @@ function writeAtomicSync(file: RegistryFile): void {
   } catch {
     // best effort
   }
+  if (replacing) renameSync(dest, bak);
   renameSync(tmp, dest);
   try {
     chmodSync(dest, 0o600);
@@ -334,15 +406,24 @@ function writeAtomicSync(file: RegistryFile): void {
     fsyncDirectorySync(config.dataDir);
   } catch (err) {
     // 首次创建：撤回刚 rename 的文件，避免接口失败但磁盘已有设备。
-    // 覆盖写：旧内容已被 rename 替换，无法无损回滚；仍抛失败，调用方重试（吊销幂等）。
+    // 覆盖写：把 .bak（或内存快照）换回 dest，磁盘回到旧态，与 persist 失败一致。
     if (!replacing) {
       try {
         rmSync(dest, { force: true });
       } catch {
         // ignore
       }
+    } else {
+      restoreOverwrittenRegistry(dest, bak, previous);
     }
     throw err;
+  }
+  if (replacing) {
+    try {
+      rmSync(bak, { force: true });
+    } catch {
+      // 残留 .bak 下次读盘会丢掉
+    }
   }
 }
 
@@ -493,7 +574,7 @@ export function resetDeviceRegistryForTests(): void {
   dirFsyncHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
-  for (const path of [storePath(), tmpPath()]) {
+  for (const path of [storePath(), tmpPath(), bakPath()]) {
     try {
       if (existsSync(path)) rmSync(path, { force: true });
     } catch {

@@ -318,6 +318,25 @@ describe('notification device registry', () => {
     expect(existsSync(`${path}.tmp`)).toBe(false);
   });
 
+  test('directory fsync failure on overwrite restores the previous registry', async () => {
+    const kept = await registerPairedDevice(seedInput('Keep'));
+    const path = deviceRegistryPathForTests();
+    const before = readFileSync(path, 'utf8');
+    setDeviceRegistryDirFsyncHookForTests(() => {
+      const err = new Error('EIO: dir fsync');
+      (err as NodeJS.ErrnoException).code = 'EIO';
+      throw err;
+    });
+    await expect(registerPairedDevice(seedInput('New'))).rejects.toBeInstanceOf(DeviceRegistryPersistError);
+    expect(existsSync(`${path}.bak`)).toBe(false);
+    expect(existsSync(`${path}.tmp`)).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    const listed = await listPairedDevices();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(kept.id);
+    expect(listed[0]?.displayName).toBe('Keep');
+  });
+
   test('corrupt registry at boot fail-closes devices but does not throw', async () => {
     await registerPairedDevice(seedInput('Real'));
     writeFileSync(deviceRegistryPathForTests(), '{not-json', { mode: 0o600 });

@@ -26,6 +26,7 @@ const {
   commitNotificationState,
   createNotificationDevice,
   createRuntimeReader,
+  initializeNotifications,
   jsonEscapedByteLength,
   listNotificationDevices,
   notifyAvailableMessageBytes,
@@ -37,11 +38,15 @@ const {
   userRouteKey,
 } = await import('../src/lib/notify.ts');
 const {
+  DeviceRegistryCorruptError,
+  DeviceRegistryPersistError,
   deviceRegistryPathForTests,
+  inspectDeviceRegistryAtBoot,
   listPairedDevices,
   registerPairedDevice,
   resetDeviceRegistryForTests,
   revokePairedDevice,
+  setDeviceRegistryDirFsyncHookForTests,
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 const {
@@ -49,7 +54,7 @@ const {
   resetNotificationLogForTests,
   setNotificationLogPersistHookForTests,
 } = await import('../src/lib/notification-log.ts');
-const { existsSync, readFileSync } = await import('node:fs');
+const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
 type NotifyService = import('../src/lib/notify.ts').NotifyService;
 
 const published: unknown[] = [];
@@ -397,6 +402,111 @@ describe('phone device ACL', () => {
       }
     } finally {
       setDeviceRegistryPersistHookForTests(null);
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('corrupt registry with ntfy enabled does not block startup and fail-closes devices', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-corrupt-boot', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    writeFileSync(
+      deviceRegistryPathForTests(),
+      '{"password":"leaked-secret-value","not":json',
+      { mode: 0o600 },
+    );
+    const alerts: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      alerts.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
+    };
+    try {
+      await expect(inspectDeviceRegistryAtBoot()).resolves.toBeUndefined();
+      await expect(initializeNotifications()).resolves.toBeUndefined();
+      const { createApp } = await import('../src/app.ts');
+      const app = createApp({ uiEnabled: false });
+      const health = await app.request('/healthz');
+      expect(health.status).toBe(200);
+      expect(await health.json()).toEqual({ ok: true });
+      const devices = await app.request('/v1/notify/devices', {
+        headers: { authorization: 'Bearer admin-key' },
+      });
+      expect(devices.status).toBe(500);
+      expect(await devices.json()).toEqual({ error: 'device_registry_corrupt' });
+      await expect(listNotificationDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+      const blob = alerts.join('\n');
+      expect(blob).toContain('corrupt');
+      expect(blob).not.toContain('leaked-secret-value');
+      expect(blob.toLowerCase()).not.toContain('password');
+    } finally {
+      console.error = originalError;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('overwrite directory fsync failure keeps old registry and deletes the new ntfy user', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-overwrite-fsync', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    const created: string[] = [];
+    const deleted: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      let username = '';
+      if (typeof init?.body === 'string') {
+        try {
+          username = String((JSON.parse(init.body) as { username?: string }).username ?? '');
+        } catch {
+          username = '';
+        }
+      }
+      if (method === 'POST' && url.endsWith('/v1/users') && username) created.push(username);
+      if (method === 'DELETE' && username) deleted.push(username);
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const kept = await createNotificationDevice({ displayName: 'Keep' });
+      setDeviceRegistryDirFsyncHookForTests(() => {
+        const err = new Error('EIO: dir fsync');
+        (err as NodeJS.ErrnoException).code = 'EIO';
+        throw err;
+      });
+      await expect(createNotificationDevice({ displayName: 'New' })).rejects.toBeInstanceOf(
+        DeviceRegistryPersistError,
+      );
+      const disk = JSON.parse(readFileSync(deviceRegistryPathForTests(), 'utf8')) as {
+        devices: Array<{ id: string; displayName: string; ntfyUsername: string }>;
+      };
+      expect(disk.devices).toHaveLength(1);
+      expect(disk.devices[0]?.id).toBe(kept.id);
+      expect(disk.devices[0]?.displayName).toBe('Keep');
+      expect(existsSync(`${deviceRegistryPathForTests()}.bak`)).toBe(false);
+      const newUser = created.find((name) => name !== kept.username);
+      expect(newUser).toBeTruthy();
+      expect(deleted).toContain(newUser);
+      expect(deleted).not.toContain(kept.username);
+      expect(JSON.stringify(disk)).not.toMatch(/"password"\s*:/);
+    } finally {
+      setDeviceRegistryDirFsyncHookForTests(null);
       Object.assign(config.ntfy, previousNtfy);
     }
   });

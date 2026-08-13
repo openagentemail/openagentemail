@@ -786,4 +786,34 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 1. 循环改为 finder 三角 skip、其余 `addAlignment`；删 `reserveAlignment`。v2 `(6,18)` 按 ISO 仍是 finder 角不画；v7/v10 的 timing 中心画完整 bullseye。测试用 `isAlignAt` 钉死外框/白环/中心，防止再退化成 reserve-blank。
 2. 不改 F50 阈值；隔离确认后重跑全量通过。
 
+---
+
+## #26 PR 6 返工 R5（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **启动链 corrupt fail-closed：** `initializeNotifications` 的 reconcile 吞 `DeviceRegistryCorruptError`（读盘路径已告警）。ntfy enabled + corrupt 文件时 API 仍可提供 `/healthz`；设备 API 500 `device_registry_corrupt`。
+2. **覆盖写与 502 一致：** dest→`.bak` → tmp→dest；目录 fsync 失败换回旧 registry（内存快照兜底）；成功删 `.bak`。首次创建撤回不变。
+3. **QR quiet zone：** canvas 内边距 4 模块白底，模块从 `(x+4,y+4)` 绘制。
+4. **tmp 短写：** `writeAllSync` 循环写全量再 fsync+rename。
+5. `bun test` **797 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `2cf614a2-7cf8-47fb-b85b-892bda53760a`：**mergeable**，P0/P1/P2=0（重点攻启动链全路与报告-磁盘一致性）。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（0.99）：R3 E4 只修 inspect，initialize 的 reconcile 仍 throw，ntfy 开时 API 起不来。
+2. Codex Local P1（0.96）：覆盖写目录 fsync 失败后 502+删新 ntfy user，磁盘却已是含新设备的 registry。
+3. Codex 云端 P2：QR canvas 无 4 模块 quiet zone（CSS 12px 拉到 240px 不够）。
+4. Codex 云端 P2：自管 `writeSync` 一次可能短写。
+
+### 我们是如何解决这些错误的？
+
+1. 只在 `initializeNotifications` 吞 corrupt；运行时 list/create 仍 fail-closed。测试走 inspect + initialize + healthz 200 + devices 500，告警不含文件里的 password 文本。
+2. 覆盖写保留 `.bak`/内存快照，fsync 失败恢复旧字节；create 仍删新 user，磁盘只留旧设备。
+3. 把 quiet zone 画进 canvas 位图，不依赖 CSS padding。
+4. `writeAllSync` 按 offset 循环直到写完。
+
 

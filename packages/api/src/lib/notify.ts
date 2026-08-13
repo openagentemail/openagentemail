@@ -22,6 +22,7 @@ import {
   type NotificationSource,
 } from './notification-log.ts';
 import {
+  DeviceRegistryCorruptError,
   DeviceRegistryPersistError,
   listPairedDevices,
   reconcilePendingRevokes,
@@ -997,5 +998,11 @@ export async function initializeNotifications(): Promise<void> {
   }
   if (changed) saveState(current);
   await writeServerConfig(current);
-  await reconcileNotificationDevices();
+  try {
+    await reconcileNotificationDevices();
+  } catch (err) {
+    // inspect 已 fail-closed+告警；启动对账再读同一 corrupt 文件不得炸 API。
+    if (err instanceof DeviceRegistryCorruptError) return;
+    throw err;
+  }
 }

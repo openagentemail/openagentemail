@@ -100,4 +100,8 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   (short blocks skip the extra data column), then ECC columns follow. Alignment
   patterns are drawn after timing and overwrite it except the three finder
   corners. Startup
-  inspect fail-closes a corrupt registry without blocking the rest of the API.
+  inspect fail-closes a corrupt registry without blocking the rest of the API
+  (startup `initializeNotifications` reconcile swallows the same corrupt error).
+  Overwrite persist keeps the previous registry as `.bak` and restores it if
+  directory fsync fails, so a 502 matches the on-disk devices. Pairing QR canvas
+  includes a 4-module quiet zone.

@@ -1663,4 +1663,14 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('}, 1200);');
     expect(UI_CSS).toContain('.copied { border-color: var(--green); color: var(--green); }');
   });
+
+  test('pairing QR canvas paints a 4-module quiet zone', async () => {
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    expect(PUSH_DEVICES_PAGE_JS).toContain('var quiet = 4;');
+    expect(PUSH_DEVICES_PAGE_JS).toContain('canvas.width = (size + quiet * 2) * scale;');
+    expect(PUSH_DEVICES_PAGE_JS).toContain('canvas.height = (size + quiet * 2) * scale;');
+    expect(PUSH_DEVICES_PAGE_JS).toContain(
+      'ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);',
+    );
+  });
 });
