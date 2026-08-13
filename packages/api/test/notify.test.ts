@@ -35,6 +35,7 @@ const {
   NtfyNotificationService,
   physicalAgentTopic,
   revokeNotificationDevice,
+  setNotifyPasswordHashForTests,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
 const {
@@ -429,6 +430,14 @@ describe('phone device ACL', () => {
     console.error = (...args: unknown[]) => {
       alerts.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
     };
+    // CI 根因：initializeNotifications → writeServerConfig 做 bcrypt cost=10
+    //（admin+publisher+每个 reader）。本机 ~1.1s，CI 套件 105s vs 本机 15s，
+    // 哈希把单测拖过 bun 默认 5s。不是 ntfyFetch 8s（本路径不 fetch）。
+    setNotifyPasswordHashForTests(async () => '$2b$10$testhashforcorruptboot.............');
+    const fetchDuringBoot = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error('corrupt-boot test must not wait on ntfy');
+    }) as typeof fetch;
     try {
       await expect(inspectDeviceRegistryAtBoot()).resolves.toBeUndefined();
       await expect(initializeNotifications()).resolves.toBeUndefined();
@@ -449,6 +458,8 @@ describe('phone device ACL', () => {
       expect(blob.toLowerCase()).not.toContain('password');
     } finally {
       console.error = originalError;
+      setNotifyPasswordHashForTests(null);
+      globalThis.fetch = fetchDuringBoot;
       Object.assign(config.ntfy, previousNtfy);
     }
   });

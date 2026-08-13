@@ -816,4 +816,34 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 3. 把 quiet zone 画进 canvas 位图，不依赖 CSS padding。
 4. `writeAllSync` 按 offset 循环直到写完。
 
+---
+
+## #26 PR 6 返工 R6（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **CI 超时对症：** 启动链测注入廉价 password hash，fetch 立即失败；不调大 5s 时限。根因是 `writeServerConfig` bcrypt cost=10，不是 ntfyFetch 8s。
+2. **drawFormat `[y][x]`：** ISO (x,y) 写入 `modules[y][x]`。坐标测钉两份 15 位 + 暗模块 + isFunc。
+3. **.bak 恢复失败 fail-closed：** throw + 拒绝空表落盘。
+4. **真扫码：** OpenCV 解码配对 PNG，载荷全等。脚本 `packages/api/scripts/verify-pairing-qr.ts`。
+5. `bun test` **800 pass / 0 fail**；`bun run build` 全绿。独立自审 `94288c31-b372-4110-b2ed-68bac9a6a878`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. CI：corrupt-boot 测 5000ms timeout。本机 1.1s 绿。时间线显示超时后 bcrypt 还跑了约 90s。
+2. format 信息转置，扫码器拿不到 mask。
+3. bak 恢复失败当空表会丢掉历史设备。
+4. PNG 编码器把 filter byte 填成 255，OpenCV `libpng error: bad adaptive filter value`——修 `row[0]=0` 后解码成功。
+
+### 我们是如何解决这些错误的？
+
+1. 查 CI log 排除 8s fetch（该路径不 fetch）；注入 `setNotifyPasswordHashForTests`。
+2. `put(x,y)` → `modules[y][x]`；坐标级断言。
+3. 恢复失败 failClosed；persist 见 unrestored bak 拒写。
+4. 真扫码脚本 + bun skipIf 无 cv2。解码输出进回执。
+
 

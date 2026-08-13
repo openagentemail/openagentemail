@@ -257,6 +257,55 @@ R3 把 Codex R2「本应省略」理解反了：R2 的错是 **alignment 先画�
 - `bun run build` → Bundled 568 modules，全绿
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
+---
+
+## 返工 R6（2026-08-13 · CI 红 + Codex 云端 P1 format + P2 bak 恢复）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | CI 红 · 硬闸 | `corrupt registry with ntfy enabled does not block startup and fail-closes devices` 在 CI 超时 5000ms（本机绿，~1.1s）。run `31712040043`：14:49:18 开跑，14:49:23 报 `timed out after 5000ms`，下一条用例 14:50:56 才开始（超时后 bcrypt 仍跑了 ~90s）。 | **根因：不是 ntfyFetch 8s。** 该路径 `initializeNotifications` → `writeServerConfig` 对 admin+publisher+每个 reader 做 bcrypt cost=10，**不调用** `ntfyFetch`（corrupt 在 reconcile 读盘即 throw）。本机套件 ~15s、CI ~105s（~7×）；哈希把单测拖过 bun 默认 5s。修法：测试内注入廉价 `setNotifyPasswordHashForTests`，并把 `fetch` mock 成立即抛错（证明不等 8s）。**未调大测试时限。** | `corrupt registry with ntfy enabled does not block startup and fail-closes devices`（注入短哈希后本机 ~0.8s；仍走 inspect + initialize + healthz 200 + devices 500） |
+| B | Codex 云端 P1 · `drawFormat` | `modules` 按 `[y][x]`，format 用 ISO `(x,y)` 直接赋到 `[x][y]`，两份 format 转置；`drawData` 写进真 format 格，扫码器拿不到 mask。 | **已修。** `put(x,y,bit)` → `modules[y][x]`。第一份 `(8,0..5)/(8,7)/(8,8)/(7,8)/(5..0,8)`；第二份右上水平 + 左下垂直；暗模块 `(8,size-8)`。 | `format bits occupy ISO (x,y) copies and data does not overwrite them`（v1/2/7/10 功能格 + 配对全编码两份 15 位一致、`isFunc[y][x]`） |
+| C | Codex 云端 P2 · `.bak` 恢复 | dest 缺、`.bak` 在时 rename 失败只 log，随后当空表；新注册落盘丢掉 `.bak`，历史配对变孤儿。 | **已修。** 恢复失败 `failClosed` + throw；`writeAtomicSync` 在 dest 缺且 `.bak` 仍在时拒绝落盘。 | `bak restore rename failure fail-closes and does not write an empty registry`（5xx + `.bak` 保留 Keep + dest 不出现） |
+| D | 指挥加注 · 真扫码 | 前三轮测试自证不真扫。 | **已加。** `qr-png.ts` 渲 PNG（quiet=4, scale=8）+ `scripts/decode-pairing-qr.py`（OpenCV `QRCodeDetector`）+ `scripts/verify-pairing-qr.ts`。bun 测 `skipIf` 无 cv2（CI 不装 opencv）。本机 venv 解码成功，抓到 B：format 转置时扫码器无法得 mask；修后载荷全等。 | `OpenCV QRCodeDetector recovers pairing payload from PNG`；脚本输出见下 |
+
+### 真扫码解码留证（本机 2026-08-13）
+
+```
+png=/tmp/oae-qr-bZ4lV9/pairing.png
+size=57 bytes=8638
+decoder=/tmp/oae-qr-venv/bin/python exit=0
+stderr=# points=(1, 4, 2)
+decoded={"serverUrl":"https://notify.test.example","username":"phone-abcdefgh","password":"abcdefghijklmnopqrstuvwx","topics":{"userAlerts":"user-alerts-xyzxyzxyz","userLow":"user-low-xyzxyzxyz"}}
+OK pairing payload round-trip
+```
+
+解码器：python venv + `opencv-python-headless` 5.0.0 `cv2.QRCodeDetector`。CI 无 cv2 时该测 skip，format 坐标测仍跑。
+
+### 独立自审（R6 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `94288c31-b372-4110-b2ed-68bac9a6a878` |
+| 审查对象 | 未提交工作区相对 `8059c09` 的 R6 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0**（P3 README 句被截断，已在 push 前修好） |
+| A 裁定 | **过** — 根因是 bcrypt 不是 8s fetch；注入哈希而非调大 timeout。 |
+| B 裁定 | **过** — `put` 写 `[y][x]`；坐标测能抓住转置（`isFunc[y][x]`）。 |
+| C 裁定 | **过** — 恢复失败先 throw，persist 拒写 unrestored bak。 |
+| D 裁定 | **过** — 有 cv2 时 stdout === PAIRING_JSON。 |
+| 过程 | 对照 CI log 时间线、Nayuki `setFunctionModule(x,y)`、read/persist 空表路径；未改文件、未委托。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **800 pass / 0 fail**（本机含 OpenCV；CI 无 cv2 时该条 skip）
+- `bun run build` → Bundled 568 modules，全绿
+- **CI 转绿**（push 后盯 run）
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 
 未开真浏览器拍屏。依据 shell + CSS：

@@ -113,6 +113,7 @@ const FORBIDDEN_SECRET_KEYS = new Set(['password', 'token']);
 let writeChain: Promise<unknown> = Promise.resolve();
 let persistHookForTests: (() => void) | null = null;
 let dirFsyncHookForTests: (() => void) | null = null;
+let bakRestoreHookForTests: (() => void) | null = null;
 let nowFn: () => number = () => Date.now();
 let failClosed = false;
 
@@ -270,13 +271,16 @@ function recoverBackupSync(): void {
   if (!existsSync(bak)) return;
   if (!existsSync(dest)) {
     try {
+      bakRestoreHookForTests?.();
       renameSync(bak, dest);
       deviceRegistryHealthAlert('crash_bak_restored', { path: DEVICE_REGISTRY_FILE });
     } catch (err) {
+      failClosed = true;
       deviceRegistryHealthAlert('crash_bak_restore_failed', {
         path: DEVICE_REGISTRY_FILE,
         error: err instanceof Error ? err.message : 'unknown',
       });
+      throw new DeviceRegistryCorruptError();
     }
     return;
   }
@@ -370,6 +374,12 @@ function fsyncDirectorySync(dir: string): void {
 
 function writeAtomicSync(file: RegistryFile): void {
   if (failClosed) throw new DeviceRegistryCorruptError();
+  // dest 缺而 .bak 还在：禁止当空表落盘，否则会丢掉历史配对。
+  if (existsSync(bakPath()) && !existsSync(storePath())) {
+    failClosed = true;
+    deviceRegistryHealthAlert('crash_bak_unrestored', { path: DEVICE_REGISTRY_FILE });
+    throw new DeviceRegistryCorruptError();
+  }
   ensureDataDir();
   persistHookForTests?.();
   // 结构化键检查：不扫序列化文本，避免 displayName 含 `"password":` 被误拒。
@@ -564,6 +574,10 @@ export function setDeviceRegistryDirFsyncHookForTests(hook: (() => void) | null)
   dirFsyncHookForTests = hook;
 }
 
+export function setDeviceRegistryBakRestoreHookForTests(hook: (() => void) | null): void {
+  bakRestoreHookForTests = hook;
+}
+
 export function setDeviceRegistryNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
 }
@@ -572,6 +586,7 @@ export function resetDeviceRegistryForTests(): void {
   failClosed = false;
   persistHookForTests = null;
   dirFsyncHookForTests = null;
+  bakRestoreHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
   for (const path of [storePath(), tmpPath(), bakPath()]) {

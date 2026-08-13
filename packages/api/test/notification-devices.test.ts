@@ -1,7 +1,7 @@
 /**
  * ADR #26 PR 6：设备登记表与吊销协议。
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ const {
   resetDeviceRegistryForTests,
   revokePairedDevice,
   setDeviceRegistryDirFsyncHookForTests,
+  setDeviceRegistryBakRestoreHookForTests,
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 
@@ -342,5 +343,26 @@ describe('notification device registry', () => {
     writeFileSync(deviceRegistryPathForTests(), '{not-json', { mode: 0o600 });
     await expect(inspectDeviceRegistryAtBoot()).resolves.toBeUndefined();
     await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+  });
+
+  test('bak restore rename failure fail-closes and does not write an empty registry', async () => {
+    const kept = await registerPairedDevice(seedInput('Keep'));
+    const dest = deviceRegistryPathForTests();
+    const bak = `${dest}.bak`;
+    renameSync(dest, bak);
+    setDeviceRegistryBakRestoreHookForTests(() => {
+      const err = new Error('EACCES: bak restore');
+      (err as NodeJS.ErrnoException).code = 'EACCES';
+      throw err;
+    });
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(existsSync(bak)).toBe(true);
+    expect(existsSync(dest)).toBe(false);
+    await expect(registerPairedDevice(seedInput('New'))).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(existsSync(dest)).toBe(false);
+    expect(existsSync(bak)).toBe(true);
+    expect(readFileSync(bak, 'utf8')).toContain('Keep');
+    expect(readFileSync(bak, 'utf8')).toContain(kept.id);
+    expect(readFileSync(bak, 'utf8')).not.toContain('New');
   });
 });

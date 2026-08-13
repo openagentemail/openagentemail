@@ -6,6 +6,9 @@
  * 对照，再用独立 de-interleave + RS remainder 证明可解。
  */
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   addEccAndInterleave,
   encodeQrCodewords,
@@ -15,6 +18,7 @@ import {
   qrRsPlan,
   qrRsRemainder,
 } from '../src/lib/qr-byte.ts';
+import { qrModulesToPng } from '../src/lib/qr-png.ts';
 
 function cell(encoded: { size: number; modules: string }, x: number, y: number): string {
   return encoded.modules.charAt(y * encoded.size + x);
@@ -258,5 +262,60 @@ describe('qr-byte', () => {
     const pairingVer = (pairing.size - 17) / 4;
     expect(pairingVer).toBeGreaterThanOrEqual(7);
     assertLayout(pairingVer, pairing);
+  });
+
+  test('format bits occupy ISO (x,y) copies and data does not overwrite them', () => {
+    const formatCopies = (size: number) => {
+      const first: Array<[number, number]> = [];
+      for (let i = 0; i <= 5; i += 1) first.push([8, i]);
+      first.push([8, 7], [8, 8], [7, 8]);
+      for (let x = 5; x >= 0; x -= 1) first.push([x, 8]);
+      const second: Array<[number, number]> = [];
+      for (let i = 0; i < 8; i += 1) second.push([size - 1 - i, 8]);
+      for (let i = 8; i < 15; i += 1) second.push([8, size - 15 + i]);
+      return { first, second };
+    };
+    const bitsAt = (grid: { size: number; modules: string }, coords: Array<[number, number]>) =>
+      coords.map(([x, y]) => grid.modules.charAt(y * grid.size + x)).join('');
+
+    for (const ver of [1, 2, 7, 10]) {
+      const grid = encodeQrFunctionGrid(ver);
+      const { first, second } = formatCopies(grid.size);
+      expect(first).toHaveLength(15);
+      expect(second).toHaveLength(15);
+      expect(bitsAt(grid, first)).toBe(bitsAt(grid, second));
+      expect(bitsAt(grid, first)).toMatch(/^[01]{15}$/);
+      expect(cell(grid, 8, grid.size - 8)).toBe('1');
+      expect(grid.isFunc[grid.size - 8]![8]).toBe(true);
+      for (const [x, y] of [...first, ...second, [8, grid.size - 8] as [number, number]]) {
+        expect(grid.isFunc[y]![x]).toBe(true);
+      }
+    }
+
+    const pairing = encodeQrModules(PAIRING_JSON);
+    const { first, second } = formatCopies(pairing.size);
+    expect(bitsAt(pairing, first)).toBe(bitsAt(pairing, second));
+    expect(cell(pairing, 8, pairing.size - 8)).toBe('1');
+  });
+
+  const qrDecodePython =
+    process.env.QR_DECODE_PYTHON ||
+    (Bun.spawnSync(['/tmp/oae-qr-venv/bin/python', '-c', 'import cv2; cv2.QRCodeDetector()'], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    }).exitCode === 0
+      ? '/tmp/oae-qr-venv/bin/python'
+      : '');
+
+  test.skipIf(!qrDecodePython)('OpenCV QRCodeDetector recovers pairing payload from PNG', () => {
+    const encoded = encodeQrModules(PAIRING_JSON);
+    const png = qrModulesToPng(encoded.size, encoded.modules, { scale: 8, quiet: 4 });
+    const dir = mkdtempSync(join(tmpdir(), 'oae-qr-test-'));
+    const pngPath = join(dir, 'pairing.png');
+    writeFileSync(pngPath, png);
+    const script = join(import.meta.dir, '../scripts/decode-pairing-qr.py');
+    const result = Bun.spawnSync([qrDecodePython, script, pngPath], { stdout: 'pipe', stderr: 'pipe' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString().trim()).toBe(PAIRING_JSON);
   });
 });

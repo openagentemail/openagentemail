@@ -305,8 +305,16 @@ function quoted(value: string): string {
   return JSON.stringify(value);
 }
 
+let passwordHashForTests: ((password: string) => Promise<string>) | null = null;
+
 async function passwordHash(password: string): Promise<string> {
+  if (passwordHashForTests) return passwordHashForTests(password);
   return Bun.password.hash(password, { algorithm: 'bcrypt', cost: 10 });
+}
+
+/** 测试缝：跳过 bcrypt，避免 CI 上 cost=10 把 5s 用例拖死。 */
+export function setNotifyPasswordHashForTests(fn: ((password: string) => Promise<string>) | null): void {
+  passwordHashForTests = fn;
 }
 
 async function writeServerConfig(state: NotifyState): Promise<void> {

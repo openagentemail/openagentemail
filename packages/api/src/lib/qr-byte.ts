@@ -174,37 +174,29 @@ function maskBit(mask: number, x: number, y: number): boolean {
 }
 
 function drawFormat(modules: number[][], isFunc: boolean[][], mask: number): void {
-  // ECC-M = 00b；格式信息 BCH(15,5)
+  // ECC-M formatBits=0；BCH(15,5)。modules 按 [y][x] 存，ISO 坐标是 (x,y)。
   let data = (0 << 3) | mask;
   let rem = data;
   for (let i = 0; i < 10; i += 1) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
   const bits = ((data << 10) | rem) ^ 0x5412;
   const size = modules.length;
+  const put = (x: number, y: number, bit: number): void => {
+    modules[y]![x] = bit;
+    isFunc[y]![x] = true;
+  };
   for (let i = 0; i <= 14; i += 1) {
     const bit = (bits >>> i) & 1;
-    if (i < 6) {
-      modules[8]![i] = bit;
-      isFunc[8]![i] = true;
-    } else if (i < 8) {
-      modules[8]![i + 1] = bit;
-      isFunc[8]![i + 1] = true;
-    } else if (i < 9) {
-      modules[7]![8] = bit;
-      isFunc[7]![8] = true;
-    } else {
-      modules[14 - i]![8] = bit;
-      isFunc[14 - i]![8] = true;
-    }
-    if (i < 8) {
-      modules[size - 1 - i]![8] = bit;
-      isFunc[size - 1 - i]![8] = true;
-    } else {
-      modules[8]![size - 15 + i] = bit;
-      isFunc[8]![size - 15 + i] = true;
-    }
+    // 第一份：绕左上 finder — (8,0..5)/(8,7)/(8,8)/(7,8)/(5..0,8)
+    if (i < 6) put(8, i, bit);
+    else if (i < 8) put(8, i + 1, bit);
+    else if (i < 9) put(7, 8, bit);
+    else put(14 - i, 8, bit);
+    // 第二份：右上水平 + 左下垂直
+    if (i < 8) put(size - 1 - i, 8, bit);
+    else put(8, size - 15 + i, bit);
   }
-  modules[size - 8]![8] = 1;
-  isFunc[size - 8]![8] = true;
+  // 始终为暗的模块：(x,y)=(8, size-8)
+  put(8, size - 8, 1);
 }
 
 function drawVersion(modules: number[][], isFunc: boolean[][], ver: number): void {

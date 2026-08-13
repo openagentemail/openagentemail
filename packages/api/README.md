@@ -99,9 +99,11 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   byte-mode ECC-M: data codewords are column-interleaved across RS blocks
   (short blocks skip the extra data column), then ECC columns follow. Alignment
   patterns are drawn after timing and overwrite it except the three finder
-  corners. Startup
+  corners. Format information is stored at ISO (x,y) into `modules[y][x]`.
+  Pairing QR canvas includes a 4-module quiet zone. Startup
   inspect fail-closes a corrupt registry without blocking the rest of the API
   (startup `initializeNotifications` reconcile swallows the same corrupt error).
   Overwrite persist keeps the previous registry as `.bak` and restores it if
-  directory fsync fails, so a 502 matches the on-disk devices. Pairing QR canvas
-  includes a 4-module quiet zone.
+  directory fsync fails, so a 502 matches the on-disk devices. If dest is
+  missing and `.bak` cannot be renamed back, the registry fail-closes instead
+  of treating the store as empty.
