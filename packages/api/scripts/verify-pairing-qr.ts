@@ -18,11 +18,15 @@ const PAIRING_JSON = JSON.stringify({
 function decoderPython(): string | null {
   if (process.env.QR_DECODE_PYTHON) return process.env.QR_DECODE_PYTHON;
   for (const candidate of ['/tmp/oae-qr-venv/bin/python', 'python3']) {
-    const probe = Bun.spawnSync([candidate, '-c', 'import cv2; cv2.QRCodeDetector()'], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    });
-    if (probe.exitCode === 0) return candidate;
+    try {
+      const probe = Bun.spawnSync([candidate, '-c', 'import cv2; cv2.QRCodeDetector()'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+      if (probe.exitCode === 0) return candidate;
+    } catch {
+      // 二进制不存在时 posix_spawn 抛 ENOENT
+    }
   }
   return null;
 }

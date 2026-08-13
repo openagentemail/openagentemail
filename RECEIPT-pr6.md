@@ -293,7 +293,7 @@ OK pairing payload round-trip
 | 审查对象 | 未提交工作区相对 `8059c09` 的 R6 diff |
 | 结论 | **mergeable** |
 | P0 / P1 / P2 | **0 / 0 / 0**（P3 README 句被截断，已在 push 前修好） |
-| A 裁定 | **过** — 根因是 bcrypt 不是 8s fetch；注入哈希而非调大 timeout。 |
+| A 裁定 | **过** — 根因是 bcrypt 不是 8s fetch；注入哈希而非调大 timeout。CI run `31716054044` 该测 **191ms pass**。二次红是 `spawnSync('/tmp/oae-qr-venv/bin/python')` 在 CI 上 ENOENT 炸整个 `qr-byte.test.ts`（先 `existsSync` 再 probe）。 |
 | B 裁定 | **过** — `put` 写 `[y][x]`；坐标测能抓住转置（`isFunc[y][x]`）。 |
 | C 裁定 | **过** — 恢复失败先 throw，persist 拒写 unrestored bak。 |
 | D 裁定 | **过** — 有 cv2 时 stdout === PAIRING_JSON。 |

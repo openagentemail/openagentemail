@@ -6,7 +6,7 @@
  * 对照，再用独立 de-interleave + RS remainder 证明可解。
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -298,14 +298,21 @@ describe('qr-byte', () => {
     expect(cell(pairing, 8, pairing.size - 8)).toBe('1');
   });
 
-  const qrDecodePython =
-    process.env.QR_DECODE_PYTHON ||
-    (Bun.spawnSync(['/tmp/oae-qr-venv/bin/python', '-c', 'import cv2; cv2.QRCodeDetector()'], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    }).exitCode === 0
-      ? '/tmp/oae-qr-venv/bin/python'
-      : '');
+  const qrDecodePython = (() => {
+    const fromEnv = process.env.QR_DECODE_PYTHON;
+    if (fromEnv) return fromEnv;
+    const candidate = '/tmp/oae-qr-venv/bin/python';
+    if (!existsSync(candidate)) return '';
+    try {
+      const probe = Bun.spawnSync([candidate, '-c', 'import cv2; cv2.QRCodeDetector()'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+      return probe.exitCode === 0 ? candidate : '';
+    } catch {
+      return '';
+    }
+  })();
 
   test.skipIf(!qrDecodePython)('OpenCV QRCodeDetector recovers pairing payload from PNG', () => {
     const encoded = encodeQrModules(PAIRING_JSON);
