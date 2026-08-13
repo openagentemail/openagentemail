@@ -1,7 +1,7 @@
 /**
  * ADR #26 PR 6：设备登记表与吊销协议。
  */
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,14 +25,29 @@ const {
   deviceRegistryPathForTests,
   inspectDeviceRegistry,
   listPairedDevices,
+  persistRegistryForTests,
   reconcilePendingRevokes,
   registerPairedDevice,
+  registryHasForbiddenSecretKey,
   resetDeviceRegistryForTests,
   revokePairedDevice,
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 
 const topics = { userAlerts: 'user-alerts-abc', userLow: 'user-low-abc' };
+
+function collectKeys(value: unknown, keys: string[] = []): string[] {
+  if (value === null || typeof value !== 'object') return keys;
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeys(item, keys);
+    return keys;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    keys.push(key.toLowerCase());
+    collectKeys(child, keys);
+  }
+  return keys;
+}
 
 function seedInput(name?: string) {
   return {
@@ -63,6 +78,70 @@ describe('notification device registry', () => {
     expect(text).toContain('Kitchen phone');
     const { statSync } = await import('node:fs');
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  test('displayName may contain password/token text without writing those keys', async () => {
+    const name = 'My "password": vault "token": phone';
+    const record = await registerPairedDevice(seedInput(name));
+    expect(record.displayName).toBe(name);
+    const listed = await listPairedDevices();
+    expect(listed[0]?.displayName).toBe(name);
+    const parsed = JSON.parse(readFileSync(deviceRegistryPathForTests(), 'utf8')) as unknown;
+    expect(collectKeys(parsed).some((key) => key === 'password' || key === 'token')).toBe(false);
+    expect((parsed as { devices: Array<{ displayName: string }> }).devices[0]?.displayName).toBe(name);
+  });
+
+  test('payload with password or token keys is still refused', async () => {
+    expect(registryHasForbiddenSecretKey({ displayName: '"password":', nested: { note: '"token":' } })).toBe(
+      false,
+    );
+    expect(registryHasForbiddenSecretKey({ password: 'secret' })).toBe(true);
+    expect(registryHasForbiddenSecretKey({ TOKEN: 'secret' })).toBe(true);
+    expect(registryHasForbiddenSecretKey({ topics: { token: 'secret' } })).toBe(true);
+
+    const poisoned = {
+      schemaVersion: 1,
+      devices: [
+        {
+          id: 'dev_aaaaaaaaaaaaaaaaaaaaaaaa',
+          displayName: 'X',
+          ntfyUsername: 'phone-abcabcab',
+          topics: { userAlerts: 'user-alerts-abc', userLow: 'user-low-abc' },
+          pairedAt: '2026-08-13T00:00:00.000Z',
+          lastSeenAt: null,
+          revokeStatus: 'active',
+          revokedAt: null,
+          password: 'should-not-land',
+        },
+      ],
+    };
+    expect(() => persistRegistryForTests(poisoned)).toThrow(DeviceRegistryPersistError);
+    const path = deviceRegistryPathForTests();
+    if (existsSync(path)) {
+      expect(readFileSync(path, 'utf8')).not.toContain('should-not-land');
+    }
+
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'dev_bbbbbbbbbbbbbbbbbbbbbbbb',
+            displayName: 'Y',
+            ntfyUsername: 'phone-defdefde',
+            topics: { userAlerts: 'user-alerts-abc', userLow: 'user-low-abc' },
+            pairedAt: '2026-08-13T00:00:00.000Z',
+            lastSeenAt: null,
+            revokeStatus: 'active',
+            revokedAt: null,
+            token: 'leaked',
+          },
+        ],
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
   });
 
   test('old clients without displayName get the default Phone name', async () => {

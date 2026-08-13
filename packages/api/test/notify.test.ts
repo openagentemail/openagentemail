@@ -41,6 +41,7 @@ const {
   listPairedDevices,
   registerPairedDevice,
   resetDeviceRegistryForTests,
+  revokePairedDevice,
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 const {
@@ -445,6 +446,91 @@ describe('phone device ACL', () => {
       expect(blobs).not.toContain(password);
       expect(blobs).not.toMatch(/"password"\s*:/);
     } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('create succeeds when displayName contains password/token key-like text', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-name-ok', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    const deletes: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      if (init?.method === 'DELETE') deletes.push(String(input));
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    const name = 'My "password": vault "token": phone';
+    try {
+      const created = await createNotificationDevice({ displayName: name });
+      expect(created.displayName).toBe(name);
+      expect(deletes).toEqual([]);
+      const listed = await listPairedDevices();
+      expect(listed[0]?.displayName).toBe(name);
+      const disk = JSON.parse(readFileSync(deviceRegistryPathForTests(), 'utf8')) as {
+        devices: Array<Record<string, unknown>>;
+      };
+      const keys: string[] = [];
+      const walkKeys = (value: unknown) => {
+        if (!value || typeof value !== 'object') return;
+        if (Array.isArray(value)) {
+          for (const item of value) walkKeys(item);
+          return;
+        }
+        for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+          keys.push(key.toLowerCase());
+          walkKeys(child);
+        }
+      };
+      walkKeys(disk);
+      expect(keys.filter((key) => key === 'password' || key === 'token')).toEqual([]);
+      expect(disk.devices[0]?.displayName).toBe(name);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('ghost user cleanup warns when delete fails and still returns 502', async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as {
+      enabled: boolean;
+      adminPassword?: string;
+      configPath: string;
+      publicUrl: string;
+    }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath: join(process.env.DATA_DIR!, 'phone-ghost-warn', 'server.yml'),
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'DELETE') throw new Error('ECONNRESET');
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    setDeviceRegistryPersistHookForTests(() => {
+      throw new Error('ENOSPC');
+    });
+    try {
+      await expect(createNotificationDevice({ displayName: 'Ghost' })).rejects.toMatchObject({
+        code: 'device_registry_unavailable',
+      });
+      expect(warnings.some((line) => line.includes('ghost ntfy user cleanup failed'))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      setDeviceRegistryPersistHookForTests(null);
       Object.assign(config.ntfy, previousNtfy);
     }
   });
@@ -1024,6 +1110,45 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
       const listed = await listPairedDevices();
       expect(listed[0]?.id).toBe(record.id);
       expect(listed[0]?.revokeStatus).toBe('pending_revoke');
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('concurrent listNotificationDevices share one in-flight reconcile', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let deletes = 0;
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        await gate;
+        return new Response('unavailable', { status: 503 });
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Coalesce',
+        ntfyUsername: 'phone-coalesce',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      await expect(revokePairedDevice(record.id, async () => 'transient')).rejects.toMatchObject({
+        code: 'device_revoke_retry',
+      });
+      const a = listNotificationDevices();
+      const b = listNotificationDevices();
+      release();
+      await Promise.all([a, b]);
+      expect(deletes).toBe(1);
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }

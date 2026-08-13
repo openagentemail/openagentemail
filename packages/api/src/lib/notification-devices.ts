@@ -104,6 +104,8 @@ type RegistryFile = {
 const STATUSES = new Set<DeviceRevokeStatus>(['active', 'pending_revoke', 'revoked']);
 const DISPLAY_NAME_MAX = 80;
 const DEFAULT_DISPLAY_NAME = 'Phone';
+/** 禁止落盘的键名（大小写不敏感）；只看 key，不扫字符串值。 */
+const FORBIDDEN_SECRET_KEYS = new Set(['password', 'token']);
 
 let writeChain: Promise<unknown> = Promise.resolve();
 let persistHookForTests: (() => void) | null = null;
@@ -151,6 +153,20 @@ export function normalizeDisplayName(value: string | undefined): string {
   return trimmed.slice(0, DISPLAY_NAME_MAX);
 }
 
+/**
+ * 递归检查对象键名是否出现 password/token。
+ * displayName 等字符串值里的 `"password":` 文本不得误拦。
+ */
+export function registryHasForbiddenSecretKey(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((item) => registryHasForbiddenSecretKey(item));
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (FORBIDDEN_SECRET_KEYS.has(key.toLowerCase())) return true;
+    if (registryHasForbiddenSecretKey(child)) return true;
+  }
+  return false;
+}
+
 function parseRecord(raw: unknown): DeviceRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const row = raw as Record<string, unknown>;
@@ -169,7 +185,7 @@ function parseRecord(raw: unknown): DeviceRecord | null {
   } else if (row.revokedAt !== null) {
     return null;
   }
-  if (/"password"\s*:|"token"\s*:/i.test(JSON.stringify(row))) return null;
+  if (registryHasForbiddenSecretKey(row)) return null;
   return {
     id: row.id,
     displayName: row.displayName,
@@ -271,10 +287,11 @@ function writeAtomicSync(file: RegistryFile): void {
   if (failClosed) throw new DeviceRegistryCorruptError();
   ensureDataDir();
   persistHookForTests?.();
-  const serialized = `${JSON.stringify(file, null, 2)}\n`;
-  if (/"password"\s*:|"token"\s*:/i.test(serialized)) {
+  // 结构化键检查：不扫序列化文本，避免 displayName 含 `"password":` 被误拒。
+  if (registryHasForbiddenSecretKey(file)) {
     throw new DeviceRegistryPersistError('refusing to persist password/token');
   }
+  const serialized = `${JSON.stringify(file, null, 2)}\n`;
   const tmp = tmpPath();
   const fd = openSync(tmp, 'w', 0o600);
   try {
@@ -300,7 +317,7 @@ function persist(file: RegistryFile): void {
   try {
     writeAtomicSync(file);
   } catch (err) {
-    if (err instanceof DeviceRegistryCorruptError) throw err;
+    if (err instanceof DeviceRegistryCorruptError || err instanceof DeviceRegistryPersistError) throw err;
     deviceRegistryHealthAlert('persist_failed', {
       path: DEVICE_REGISTRY_FILE,
       error: err instanceof Error ? err.message : 'unknown',
@@ -439,6 +456,11 @@ export function resetDeviceRegistryForTests(): void {
 
 export function deviceRegistryPathForTests(): string {
   return storePath();
+}
+
+/** 测试缝：走与生产相同的落盘闸（含 secret-key 结构化拒绝）。 */
+export function persistRegistryForTests(file: unknown): void {
+  persist(file as RegistryFile);
 }
 
 export function deviceRegistryFailClosedForTests(): boolean {

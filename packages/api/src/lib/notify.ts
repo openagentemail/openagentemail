@@ -460,7 +460,7 @@ async function deleteRuntimeReader(entry: Route): Promise<void> {
 
 async function deleteNtfyUser(username: string): Promise<void> {
   try {
-    await fetch(providerUrl('/v1/users'), {
+    const response = await fetch(providerUrl('/v1/users'), {
       method: 'DELETE',
       headers: {
         ...basic('admin', config.ntfy.adminPassword!),
@@ -468,9 +468,22 @@ async function deleteNtfyUser(username: string): Promise<void> {
       },
       body: JSON.stringify({ username }),
     });
-  } catch {
-    // The retry uses a unique reader username. A failed best-effort cleanup
-    // cannot expose a route because its token was never persisted.
+    let body = '';
+    try {
+      body = await response.text();
+    } catch {
+      body = '';
+    }
+    // 幽灵清理仍是 best-effort（无重试队列：凭据从未落盘，无法对账）。
+    // 失败只记 warn，不把登记失败改成别的错误码。
+    if (classifyNtfyUserDeleteResponse(response.status, body) === 'transient') {
+      console.warn('[notify] ghost ntfy user cleanup failed', { username, status: response.status });
+    }
+  } catch (err) {
+    console.warn('[notify] ghost ntfy user cleanup failed', {
+      username,
+      error: err instanceof Error ? err.message : 'unknown',
+    });
   }
 }
 
@@ -602,9 +615,18 @@ export async function createNotificationDevice(
   throw new NotifyError('notify_unavailable');
 }
 
+let reconcileInFlight: Promise<void> | null = null;
+
 export async function reconcileNotificationDevices(): Promise<void> {
   if (!config.ntfy.enabled || !config.ntfy.adminPassword) return;
-  await reconcilePendingRevokes(deleteNtfyUserResult);
+  // 并发入口共用一次 in-flight（同一 tick 的 list/revoke 不放大 ntfy）。
+  // 不做跨请求 TTL：列表必须能收敛刚写入的 pending_revoke。
+  if (reconcileInFlight) return reconcileInFlight;
+  const run = reconcilePendingRevokes(deleteNtfyUserResult).finally(() => {
+    if (reconcileInFlight === run) reconcileInFlight = null;
+  });
+  reconcileInFlight = run;
+  return run;
 }
 
 export async function listNotificationDevices(): Promise<DeviceListItem[]> {

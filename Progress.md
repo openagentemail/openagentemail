@@ -704,4 +704,30 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 1. 按 ISO/IEC 18004 8.6 拆成 data 列、ECC 列两阶段；测试用负例对照旧算法，并用独立 de-interleave+RS 证明可解——形状测抓不到「拼块再整列」，负例在 v9 index 180 钉死该错位。
 2. 分类器把 `status>=500` 提到解析 body 之前；400 只认 40031 / "user does not exist"。集成测试用 503 + 40031 JSON，断言 `device_revoke_retry` 且列表仍 `pending_revoke`。
 
+---
+
+## #26 PR 6 返工 R2（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **结构化 secret-key 闸：** `registryHasForbiddenSecretKey` 递归检查对象键（password/token，大小写不敏感）。persist 与 parse 都走它；不再用正则扫序列化 JSON。displayName 含 `"password":` / `"token":` 可以创建；真含这些键的 payload 仍拒。
+2. **测试：** displayName 含 key-like 文本创建成功且无同名 key、不幽灵 DELETE；`{ password }` / `{ TOKEN }` / 嵌套 `token` 仍拒；落盘带 token 键 fail-close；0600/零明文保持绿。
+3. **B① in-flight 合并：** 并发 list/revoke 共用一次 reconcile；不做跨请求 TTL（记债：顺序入口仍全量对账，保证刚写入的 pending_revoke 能收敛）。
+4. **B② 幽灵清理 warn：** 失败 `console.warn`（username + status/error）；不建重试队列（凭据未落盘无法对账）。
+5. `bun test` **787 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `09117a6e-8372-4f94-9327-8c62aa89d6f6`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：secret-key guard 扫序列化文本，displayName 含 `"password":` 会被当成密钥拒绝并删 ntfy user。
+2. ZCode P2×2：list/revoke 每次全量 reconcile 放大；幽灵清理失败无告警。
+
+### 我们是如何解决这些错误的？
+
+1. 改成递归键检查。独立自审指出：旧正则对 `JSON.stringify` 转义后的 displayName **并不命中**（`\"password\":`）；仍按任务做结构化检查，不把转义当安全属性。
+2. 并发 in-flight 合并 + 清理失败 warn；TTL 与重试队列明确记债（收敛语义 / 未落盘无法对账）。
+
 

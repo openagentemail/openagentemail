@@ -87,7 +87,9 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - **Paired devices.** `DATA_DIR/notification-devices.json` is the instance device
   registry (0600, directory 0700, single-writer queue, same-dir `.tmp` + fsync +
   rename). It stores id / displayName / ntfyUsername / topic labels / pairedAt /
-  lastSeenAt / revokeStatus / revokedAt — **never password or token**. Revoke is
+  lastSeenAt / revokeStatus / revokedAt — **never password or token keys**
+  (the persist guard walks object keys, so a displayName like
+  `My "password": vault` is allowed). Revoke is
   `active → pending_revoke` (persist first; failure must not call ntfy) → delete
   ntfy user (live ntfy missing user is HTTP 400 / code 40031 / "user does not
   exist"; HTTP 404 also counts as success; **all 5xx are transient regardless of

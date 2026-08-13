@@ -35,7 +35,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 | 登记失败无幽灵 user | **过** | `registry persist failure after ntfy create deletes the ghost user and returns 502`：ENOSPC hook 后断言存在 `DELETE /v1/users` |
 | identity / 平台运营主体 → 403 | **过** | Bearer：`old POST… identity cannot list or revoke` + `identity cannot GET or DELETE devices…`；UI：`identity session cannot list, create, or revoke devices`。平台运营主体：现网无独立 operator kind，非 admin 即 403（见上口径） |
 | 旧 POST 兼容 | **过** | `old POST without displayName still 201…`；registry `old clients without displayName get the default Phone name` |
-| `cd packages/api && bun test` + `bun run build` | **过** | R1 后 **782 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
+| `cd packages/api && bun test` + `bun run build` | **过** | R2 后 **787 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
 
 ### 吊销测试名（notification-devices.test.ts）
 
@@ -114,6 +114,38 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 ### 完成标准
 
 - `cd packages/api && bun test` → **782 pass / 0 fail**
+- `bun run build` → Bundled 568 modules，全绿
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
+---
+
+## 返工 R2（2026-08-13 · Codex P1 + ZCode P2×2）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `notification-devices.ts` persist 闸（置信 0.98） | secret-key guard 用正则扫序列化 JSON；displayName 含 `"password":` / `"token":` 会被误拒并删刚建的 ntfy user。 | **已修。** `registryHasForbiddenSecretKey` 递归看对象键（password/token，大小写不敏感）；persist 与 parse 都走键检查，不再扫 `JSON.stringify` 文本。字符串值里的同名文本不拦。 | `displayName may contain password/token text without writing those keys`；`create succeeds when displayName contains password/token key-like text`（且无幽灵 DELETE）；`payload with password or token keys is still refused`；`register writes 0600 JSON with no password or token keys`；`successful create never writes password to DATA_DIR` |
+| B① | ZCode P2 · 列表/吊销每次全量 reconcile | 每次 list/revoke 入口对全部 `pending_revoke` 打 ntfy，轮询放大。 | **低成本改进 + 记债。** `reconcileNotificationDevices` 合并并发 in-flight（同一 tick 的两次 list 只跑一轮）。**不做跨请求 TTL**：列表必须收敛刚写入的 pending_revoke；pending 是稀有态，ADR 要求入口对账。顺序请求仍全量 reconcile 是收敛语义，不是漏修。 | `concurrent listNotificationDevices share one in-flight reconcile`（两次并发 list → 1 次 ntfy DELETE） |
+| B② | ZCode P2 · 幽灵 user 清理 best-effort | 清理失败无重试/无告警。 | **低成本改进 + 记债。** `deleteNtfyUser` 在 transient/网络错误时 `console.warn`（只打 username + status/error，不打 body/password）。**不建重试队列**：凭据从未落盘，无法对账；下次创建用新 username，残留幽灵对不上新设备。登记失败仍返回 `device_registry_unavailable`。 | `ghost user cleanup warns when delete fails and still returns 502` |
+
+### 独立自审（R2 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `09117a6e-8372-4f94-9327-8c62aa89d6f6` |
+| 审查对象 | 未提交工作区相对 `2c1238b` 的 R2 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — persist/parse 均为键检查；displayName 含 key-like 文本可创建；真 secret 键（含嵌套/大小写）仍拒；0600/零明文仍绿。注：Codex「stringify 转义后仍命中正则」用本正则实测为 false（值里的引号变成 `\"password\":`）；结构化检查仍按任务落地，不把转义当安全属性。 |
+| B 裁定 | **过** — in-flight 无 TTL，刚写入的 pending 不会被跳过；warn 不泄露 password；无假装重试队列。 |
+| 过程 | 独立读 `notification-devices.ts` / `notify.ts` / 两份测试 / README；自推键检查与 coalesce；跑相关 55 pass。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **787 pass / 0 fail**
 - `bun run build` → Bundled 568 modules，全绿
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
