@@ -41,12 +41,16 @@ import {
 } from '../lib/mail-cursor.ts';
 import { createOverviewCache, type ScanOutcome } from '../lib/overview-cache.ts';
 import {
-  TASK_STATES,
+  TASK_BOARD_PERIODS,
+  TASK_BOARD_STATUSES,
   type Task,
+  type TaskBoardLimit,
   type TaskService,
   taskParticipants,
   taskService,
+  toUiTaskView,
 } from '../lib/tasks.ts';
+import { InvalidTaskCursorError } from '../lib/task-cursor.ts';
 import { consumeOAuthReturnCookie } from '../lib/oauth-return.ts';
 import {
   UiSessionStore,
@@ -130,7 +134,10 @@ export type UiApiDependencies = {
    * 任务工单：语义等同 GET /v1/tasks（ACL 在本路由强制）。
    * 测试可注入；生产默认走 taskService。
    */
-  taskService?: Pick<TaskService, 'list' | 'get'>;
+  taskService?: Pick<
+    TaskService,
+    'list' | 'listBoard' | 'get' | 'reply' | 'remind' | 'close'
+  >;
 };
 
 /** 进程内单例：快照与会话一样活在进程里，重启后第一次 Overview 是冷启动。 */
@@ -157,14 +164,87 @@ const defaultDependencies: UiApiDependencies = {
   taskService,
 };
 
-const taskListQuerySchema = z.object({ state: z.enum(TASK_STATES).optional() });
+const taskBoardQuerySchema = z.object({
+  status: z.enum(TASK_BOARD_STATUSES).optional().default('active'),
+  period: z.enum(TASK_BOARD_PERIODS).optional().default('30d'),
+  limit: z
+    .union([z.literal('20'), z.literal('50'), z.literal('100')])
+    .optional()
+    .default('20')
+    .transform((value): TaskBoardLimit => Number(value) as TaskBoardLimit),
+  cursor: z.string().min(1).max(1024).optional(),
+});
 const taskIdParamSchema = z.string().uuid();
+/** UI cookie 入口 body-limit 仍是 4KiB；字段上限必须能放进该信封。 */
+const UI_TASK_TEXT_MAX = 3000;
+const taskReplySchema = z
+  .object({
+    body: z.string().min(1).max(UI_TASK_TEXT_MAX),
+    from: z.string().email().optional(),
+  })
+  .strict();
+const taskRemindSchema = z
+  .object({
+    body: z.string().max(UI_TASK_TEXT_MAX).optional(),
+    from: z.string().email().optional(),
+    idempotencyKey: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+const taskCloseSchema = z
+  .object({
+    reason: z.string().min(1).max(UI_TASK_TEXT_MAX),
+    from: z.string().email().optional(),
+  })
+  .strict();
 
 /** 与 routes/tasks.ts#canReadTask 保持同一口径（Dashboard cookie 入口的镜像）。 */
 function canReadUiTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   // 参与者集合按小写存；identity 会话地址比较前归一化，避免大小写漂移。
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
+}
+
+/** GET :id 与 reply/remind/close 成功体同一套 viewer 投影，不扩权限。 */
+function presentUiTask(c: Context, task: Task) {
+  if (!canReadUiTask(c, task)) {
+    return c.json({ error: 'forbidden: task participant required' }, 403);
+  }
+  return c.json(toUiTaskView(task));
+}
+
+/** identity 用自身；admin 必须显式选择任务中的本方 from。 */
+function taskActionFrom(c: Context, task: Task, supplied: string | undefined): string | Response {
+  const auth = getAuth(c);
+  if (auth.kind === 'identity') {
+    if (supplied && supplied.toLowerCase() !== auth.address.toLowerCase()) {
+      return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+    }
+    const from = auth.address.toLowerCase();
+    if (!taskParticipants(task).has(from)) {
+      return c.json({ error: 'forbidden: task participant required' }, 403);
+    }
+    return from;
+  }
+  if (!supplied) return c.json({ error: 'from is required for an admin key' }, 400);
+  const from = supplied.toLowerCase();
+  if (!taskParticipants(task).has(from)) {
+    return c.json({ error: 'invalid_request: from must be a task participant' }, 400);
+  }
+  return from;
+}
+
+function taskMutationError(c: Context, err: unknown): Response {
+  const code = (err as Error).message;
+  if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
+  if (code === 'task_already_terminal') return c.json({ error: 'task_already_terminal' }, 409);
+  if (code === 'task_not_input_required') return c.json({ error: 'task_not_input_required' }, 409);
+  if (code === 'task_remind_cooldown') return c.json({ error: 'task_remind_cooldown' }, 429);
+  if (code === 'task_participant_required') {
+    return c.json({ error: 'forbidden: task participant required' }, 403);
+  }
+  if (err instanceof InvalidTaskCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+  console.warn('[task] ui mutation failed:', (err as Error).message);
+  return c.json({ error: 'smtp_error' }, 502);
 }
 
 /** 将 NotifyError 折成与 /v1/notify 一致的 JSON 状态码（历史只读路径）。 */
@@ -646,25 +726,36 @@ export function createUiApiRoutes(
   });
 
   /**
-   * Dashboard 任务工单：cookie 会话入口，ACL 与 GET /v1/tasks 对齐
-   *（admin 全量；identity 仅参与者可见）。
+   * Dashboard 任务工单板：status/period/limit/cursor + overdue。
+   * identity 仅参与者可见；admin 全量。terminal 超 30 天不可见。
    */
   routes.get('/tasks', async (c) => {
-    const parsed = taskListQuerySchema.safeParse(c.req.query());
+    const parsed = taskBoardQuerySchema.safeParse(c.req.query());
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const tasks = await service.list(parsed.data.state);
     const auth = getAuth(c);
-    return c.json({
-      tasks:
-        auth.kind === 'admin'
-          ? tasks
-          : tasks.filter((task) =>
-              taskParticipants(task).has(auth.address.toLowerCase()),
-            ),
-    });
+    const viewer =
+      auth.kind === 'admin'
+        ? ({ kind: 'admin' } as const)
+        : ({ kind: 'identity', address: auth.address } as const);
+    try {
+      return c.json(
+        await service.listBoard(
+          {
+            status: parsed.data.status,
+            period: parsed.data.period,
+            limit: parsed.data.limit,
+            cursor: parsed.data.cursor,
+          },
+          viewer,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof InvalidTaskCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+      throw err;
+    }
   });
 
   routes.get('/tasks/:id', async (c) => {
@@ -673,10 +764,101 @@ export function createUiApiRoutes(
     const service = dependencies.taskService ?? taskService;
     const task = await service.get(parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
+    // overdue 由服务端按 queryNow 同类时钟计算，避免各浏览器口径漂移。
+    return presentUiTask(c, task);
+  });
+
+  /** 人在 input-required 时补料；写 working 事件。identity=自身，admin 必须显式选本方 from。 */
+  routes.post('/tasks/:id/reply', async (c) => {
+    const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = null;
+    }
+    const body = taskReplySchema.safeParse(raw);
+    if (!body.success) {
+      return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
+    }
+    const service = dependencies.taskService ?? taskService;
+    const task = await service.get(parsed.data);
+    if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) {
       return c.json({ error: 'forbidden: task participant required' }, 403);
     }
-    return c.json(task);
+    const from = taskActionFrom(c, task, body.data.from);
+    if (from instanceof Response) return from;
+    try {
+      return presentUiTask(c, await service.reply({ id: parsed.data, from, body: body.data.body }));
+    } catch (err) {
+      return taskMutationError(c, err);
+    }
+  });
+
+  /** admin 催办：新 reminder event，不改变 task.state；已 terminal → 409。 */
+  routes.post('/tasks/:id/remind', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = {};
+    }
+    const body = taskRemindSchema.safeParse(raw);
+    if (!body.success) {
+      return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
+    }
+    const service = dependencies.taskService ?? taskService;
+    const task = await service.get(parsed.data);
+    if (!task) return c.json({ error: 'not_found' }, 404);
+    const from = taskActionFrom(c, task, body.data.from);
+    if (from instanceof Response) return from;
+    try {
+      return presentUiTask(
+        c,
+        await service.remind({
+          id: parsed.data,
+          from,
+          body: body.data.body,
+          idempotencyKey: body.data.idempotencyKey,
+        }),
+      );
+    } catch (err) {
+      return taskMutationError(c, err);
+    }
+  });
+
+  /** admin 关闭：terminal failed + closed_by_admin；已 terminal → 409。 */
+  routes.post('/tasks/:id/close', async (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = null;
+    }
+    const body = taskCloseSchema.safeParse(raw);
+    if (!body.success) {
+      return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
+    }
+    const service = dependencies.taskService ?? taskService;
+    const task = await service.get(parsed.data);
+    if (!task) return c.json({ error: 'not_found' }, 404);
+    const from = taskActionFrom(c, task, body.data.from);
+    if (from instanceof Response) return from;
+    try {
+      return presentUiTask(c, await service.close({ id: parsed.data, from, reason: body.data.reason }));
+    } catch (err) {
+      return taskMutationError(c, err);
+    }
   });
 
   /**

@@ -43,6 +43,15 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - **不回填：** 不把 ntfy 12h history 写入本日志（缺少可靠 source/sensitive 元数据，回填是伪审计）。
 - **ACL：** identity session 只能看自身 agent channel；admin 可看本实例全部逻辑 channel。tier 3 内容服务端仍返回，UI 默认 `•••` 遮蔽。
 
+## Tasks 工单板（#26 PR 4）
+
+权威存储仍是 catch-all 邮箱里带 HMAC stamp 的任务线程；Dashboard 不另建 JSON index。
+
+- **列表：** `/ui/api/tasks` 在一次 IMAP 扫描（30s 短缓存）后按 `queryNow` 过滤/排序/切页。cursor 绑定 `(updatedAt,id,status|period|viewer)` HMAC，跨筛选串页为 `invalid_cursor`。terminal 工单只在 UI 可见窗 `updatedAt >= now-30d` 返回，不删邮件。
+- **催办：** admin-only。新 event kind `reminder`（头 `X-OA-Task-Event: reminder` + 独立 HMAC `reminder\\nid\\nstate\\nfrom\\nto`），**不得**伪装成 `working` 状态转移；不改变 `task.state`。幂等 key 命中已有 reminder 则原样返回；最短冷却防双击刷信。已 terminal → 409。
+- **关闭：** admin-only。写 terminal `failed` + `{closed_by_admin:true, reason}`；UI 显示 Closed。已 terminal → 409。
+- **回复：** 仅 `input-required` 可 POST `/ui/api/tasks/:id/reply` 写 `working`。identity 只能用自身地址；admin 必须显式选择任务中的本方 `from`。
+
 ## OAuth access tokens（P3 AS）
 
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。

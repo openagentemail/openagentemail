@@ -368,6 +368,129 @@
 
 1. 查询串按字符串白名单解析再 `transform` 成 `NotificationLogLimit`；路由去掉第二道 `isNotificationLogLimit` 兜底。
 
+---
+
+## #26 PR 4（2026-08-12）
+
+### 我们实现了哪些功能？
+
+1. Tasks 工单板服务端化：`GET /ui/api/tasks?status=&period=&limit=&cursor=` 返回 `{tasks,nextCursor,totalApprox,queryNow}`。默认 `status=active`（submitted+working）。period=`24h|7d|14d|30d`，limit=`20|50|100`。opaque HMAC cursor 绑定 `(updatedAt,id,status|period|viewer)`，跨筛选串页 `invalid_cursor`。terminal 仅 `updatedAt>=now-30d` 可见，不删 IMAP。IMAP 全扫后过滤切页 + 30s 短缓存；`queryNow` 服务端一次取值。
+2. 超时标红：submitted 以最后 submitted 事件/createdAt+4h，working 以最后 working 事件+24h；input-required 不按这两条标红。服务端返回 `overdueReason/overdueAt`。
+3. 详情：状态时间线 + 可折叠任务原文；RESULT object 渲染键值表，非 object 安全格式化。admin 关闭显示 Closed。
+4. `POST /ui/api/tasks/:id/reply`：仅 input-required 写 working。identity=自身；admin 必须显式选任务中的本方 from。
+5. admin 催办 `POST /:id/remind`：新 event kind `reminder`（独立 HMAC，不伪装 working），幂等 key + 15s 冷却，不改 task.state；已 terminal 409。
+6. admin 关闭 `POST /:id/close` `{reason}`：terminal failed + `{closed_by_admin,reason}`；已 terminal 409；前端二次确认。
+7. 顶部 tabs：Active / Input required / Completed / Failed / All，默认 Active；period×limit + Load more。
+8. Bearer `/v1/tasks?state=` 保持 MCP 兼容。Trust-30d / cookie Path / Origin / body-limit 未改。不迁移权威存储。
+9. `bun test`（packages/api）：**727 pass / 0 fail**；`bun run build` 全绿。1k/10k 内存 filter+sort+page 基准：1k 15ms/10 页，10k 3274ms/100 页（全量翻完；短缓存只减重复 IMAP 解析）。
+
+### 我们遇到了哪些错误？
+
+1. 旧 UI 契约钉死客户端 `TASKS_RENDER_LIMIT=500` 与 `?state=`；默认列表精确等于 `{tasks:[TASK_A,TASK_B]}`，而 TASK 日期在 2024，会被 30d/active 滤掉。
+2. `TaskService` 新增方法后，Bearer 路由测试的 in-memory mock 缺 `listBoard/reply/remind/close` 无法通过类型/运行。
+3. `export { encodeTaskBoardCursor }` 仅再导出时，本文件调用处出现 `ReferenceError: encodeTaskBoardCursor is not defined`（Bun 对 import+re-export 同名绑定的作用域）。
+4. `expect().rejects.toBeInstanceOf(InvalidTaskCursorError)` 曾因从 `tasks.ts` 取到 `undefined`（未 re-export）失败。
+5. 静态测试 `UI_JS` 含 `'/ui/api/tasks'` 字面量，改成 `'/ui/api/tasks?' + params` 后引号边界对不上。
+
+### 我们是如何解决这些错误的？
+
+1. 工单板改走 `listBoard`；fixture 改到 2026-08；UI 改为 tabs + 服务端分页；更新 `ui-assets` / `ui-tasks` 契约。
+2. Bearer mock 补齐新方法，行为仍走原 `list/get/update`。
+3. 本文件改 `import * as taskBoardCursor` 再调用；对外仍从 `task-cursor.ts` re-export。
+4. 测试改为从 `task-cursor.ts` 导入 `InvalidTaskCursorError`。
+5. 静态断言改为 `'/ui/api/tasks?' + params.join('&')`。
+
+---
+
+## #26 PR 4 返工第1轮（独立自审 P1/P2）
+
+### 我们实现了哪些功能？
+
+1. **P1：** `updatedAt` 改为权威状态事件与 reminder 的较新者，terminal 之后重放的 submitted/working 不再刷新 30 天可见窗。
+2. **P2：** reply/remind/close 文本上限改为 3000，对齐 `/ui/api/*` 4KiB body-limit；前端 textarea/input `maxLength=3000`。
+3. 测试：terminal 重放不改 `updatedAt`；超长 reply 400。
+4. 独立自审 agent `256c0f59-1127-4c31-a542-073ec593a728`：初审 block；修补后再审 **mergeable**，P1/P2 closed。
+
+### 我们遇到了哪些错误？
+
+1. 催办为把工单顶到列表前，曾把 `updatedAt` 设成 IMAP 最后一封（含 terminal 后的旧状态重放）。
+2. zod 允许 1MB reply body，但 UI Origin 入口仍是 4KiB，超限会先 413。
+
+### 我们是如何解决这些错误的？
+
+1. `boardUpdatedAt()` 只看 current 状态事件与 `kind=reminder`。
+2. 不改全局 body-limit；把 UI 任务 mutation 字段钳到 3000。
+
+---
+
+## #26 PR 4 返工第2轮（Codex P1 + ZCode P1-1/P1-2）
+
+### 我们实现了哪些功能？
+
+1. **Codex P1 / ZCode P1-1：** `replyTask` 的 `input-required` 检查与 working 写入改到同一把 per-task 锁内。抽出 `updateTaskUnlocked`（禁止再套 `withTaskLock`，避免同 id 死锁）；`updateTask` 仍加锁后走内部路径。`closeTask` 的 terminal 预检一并收进同一把锁。
+2. **ZCode P1-2：** 抽出 `toUiTaskView`（Task 公开字段 + overdue）。`GET /ui/api/tasks/:id` 与 `reply/remind/close` 成功体都走 `presentUiTask`（ACL + 同一投影），不扩权限、只收口服务层附加键。
+3. 测试：并发双 `replyTask` 只有一条 working 事件、另一个 `task_not_input_required`；identity mutation 返回体与 GET `:id` 同键、不含 `adminInternal`/`peerMailbox`/对端线程。
+4. `bun test`（packages/api）：**731 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `00afac4e-7313-42e7-bab9-0f344609621c`：`2ce2e1b..028cd45` → **mergeable**；①② **closed**；无新 P0/P1/P2。
+
+### 我们遇到了哪些错误？
+
+1. 锁外 `getTask` + `state !== 'input-required'` 后调 `updateTask`：并发两个 reply 都过检，锁内只拦 terminal，会写出第二条 working。
+2. 若在 `replyTask` 外再包一层 `withTaskLock` 再调 `updateTask`，同 id 锁会死锁（CodeRabbit 已警告）。
+3. mutation 直接 `c.json(service.*)` 回显全量 Task（含服务层附加键），与 GET `:id` 的 viewer 投影不一致。
+
+### 我们是如何解决这些错误的？
+
+1. 持锁读 → 断言 `input-required` → `updateTaskUnlocked` 写 working；发信走 `deliverMail` 可注入缝，单测用内存目录钉死竞态。
+2. GET/mutation 共用 `toUiTaskView` 白名单字段，identity 对非参与者仍 403 且 body 不含线程内容。
+
+---
+
+## #26 PR 4 返工第3轮（Codex P1：IMAP 滞后 reminder 幂等）
+
+### 我们实现了哪些功能？
+
+1. `remindTask` 发信后只有 IMAP 已能看到刚发的那条 reminder 才把 `getTask()` 当真持久化；否则回 synthetic，并写入进程内 queued overlay。
+2. `getTask` 在索引滞后窗口（60s TTL）把 synthetic reminder 并进读路径，同幂等 key 重试命中 replay、15s 冷却仍按 last reminder 计算。
+3. 测试：SMTP 接受但不写入 IMAP 目录时，同 key 第二次 `remindTask` 不发信；换 key 仍 `task_remind_cooldown`。
+4. `bun test`：**732 pass / 0 fail**；`bun run build` 全绿。
+5. 独立自审 agent `54b3e18b-4817-4cdf-a29c-053ea6182bcd`：`df3078c..046a395` → **mergeable**；本轮 P1 **closed**；无新 P0/P1/P2。stampede 等 P2 继续记债不扩。
+
+### 我们遇到了哪些错误？
+
+1. `if (persisted) return persisted` 把催办前的旧 task 当真：SMTP 已接受、Dovecot 未索引时返回体没有 reminder；同 key 重试再读到同样陈旧 task，重复发信并绕过冷却。
+
+### 我们是如何解决这些错误的？
+
+1. 用 `reminderIsIndexed`（幂等 key，或无 key 时 from+body+时间）判断 IMAP 是否已看到刚发的那条。
+2. 未索引则 `queueReminderUntilIndexed`，后续 `getTask` 合并 overlay；IMAP 追上或 TTL 到期后丢掉补丁。
+
+---
+
+## #26 PR 4 返工第4轮（收尾：状态 overlay + terminal reminder 窗 + 列表合并）
+
+### 我们实现了哪些功能？
+
+1. **P1：** 把 reminder overlay 推广到全部状态转移。`updateTaskUnlocked` 在 IMAP 未看到刚发事件时 `queueEventUntilIndexed`；后续 `getTask` 合并 overlay，滞后窗口内双 reply / close 后再 reply 被拒。
+2. **P1：** `boardUpdatedAt` 对 terminal 工单只认 terminal 事件之前的 reminder（顺序 + 时间）；重放旧 stamped reminder 不再顶到最前或续 30 天窗。
+3. **P2：** `listTaskBoard` 在缓存快照上合并同一套 overlay 再过滤，列表与详情口径一致。
+4. 测试：滞后双 reply 只一封 working；close 后再 reply 不发 working；closed 单不被后置 reminder 顶进 30d；listBoard.state === getTask.state。
+5. `bun test`：**737 pass / 0 fail**；`bun run build` 全绿。
+6. 独立自审：初审 `6d037e96-e824-44cd-9ab3-ebc314e142fc` 对 `736236e` **block**（overlay 退役）；`af10d5a` 修补后再审 `7e0f8a8f-7a36-4474-adbc-a2e78ab18946`：`25c98cf..af10d5a` → **mergeable**；①②③④ **closed**。残留 P2（listCache 未合并快照 vs overlay 退役时序）记债，不挡合并。
+
+### 我们遇到了哪些错误？
+
+1. reply/close 的 synthetic 只回给当前请求，锁释放后下一请求从 IMAP 读到旧 input-required/非终态，可再发冲突转移。
+2. terminal 后的 reminder（含重放）被算进 `updatedAt`，已关闭单被顶到最前并续命 30 天。
+3. overlay 只在 `getTask` 合并，列表仍展示 IMAP 旧 state。
+
+### 我们是如何解决这些错误的？
+
+1. 统一 `queuedEvents`：reminder 与 working/failed 都进 overlay，`applyOverlayMessages` 按 `currentTaskMessage` + `boardUpdatedAt` 重建。
+2. terminal 之后（mailbox 顺序或时间）的 reminder 不刷新 `updatedAt`。
+3. `loadAllTasksCached` 对 IMAP/测试快照 `map(mergeQueuedEvents)` 再过滤切页。
+4. overlay 退役：IMAP 已有同 state 事件、已 terminal、或已有更晚状态信时丢掉补丁，避免盖住权威的新 input-required；丢掉时 `invalidateTaskListCache`。
+
 
 
 
