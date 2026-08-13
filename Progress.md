@@ -899,4 +899,27 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 2. 已 revoked + ntfy 全关：直接 `already_revoked`，回归不外呼。
 3. ZCode 条目写入回执记债表，本轮零改码。
 
+---
+
+## #26 PR 6 返工 R9（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **回滚后再 fsync 目录：** 首次创建 unlink dest、覆盖写 restore `.bak` 之后都再 `fsyncDirectorySync`。成功则仍 502 且磁盘=报告。
+2. **二次 fsync 失败 fail-closed：** 复用 `failClosed`，并写 `.failclosed` 标记（502 后崩溃仍闸住读盘）；保留 dest/.bak 现场；告警无敏感内容。
+3. `bun test` **805 pass / 0 fail**；`bun run build` 全绿。独立自审 `daeab04f-8dd1-473e-8389-52a2b44e29c2`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：回滚完成不 fsync 目录，崩溃可能 replay 已失败的 rename，被拒的新 registry 复活而 ntfy user 已删。
+
+### 我们是如何解决这些错误的？
+
+1. 回滚 `try` 之后无条件再 fsync；再失败 `markRegistryFailClosed` + throw corrupt，不把「可能没持久化的回滚」当成功服务。
+2. 现有用例改为只失败第一次 fsync（①）；新增两次失败用例（②）。
+
 

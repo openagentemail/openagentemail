@@ -496,7 +496,10 @@ describe('phone device ACL', () => {
     }) as typeof fetch;
     try {
       const kept = await createNotificationDevice({ displayName: 'Keep' });
+      let dirFsyncs = 0;
       setDeviceRegistryDirFsyncHookForTests(() => {
+        dirFsyncs += 1;
+        if (dirFsyncs > 1) return;
         const err = new Error('EIO: dir fsync');
         (err as NodeJS.ErrnoException).code = 'EIO';
         throw err;

@@ -388,6 +388,36 @@ OK pairing payload round-trip
 - **CI 转绿**（push 后盯 run）
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
+---
+
+## 返工 R9（2026-08-13 · Codex Local P1 回滚后未 fsync 目录）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。相对 R8 head `f34489c`。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `notification-devices.ts:450`（置信 0.92） | 目录 fsync 失败后回滚（删 dest / 恢复 `.bak`）完成，但没有再 fsync 目录。502 之后崩溃 + 内核 replay 已失败的 rename → 被拒的新 registry 留盘，对应 ntfy user 已被删，复活孤儿 active。 | **已修。** 回滚后（首次 unlink 或覆盖写 restore）再 `fsyncDirectorySync(DATA_DIR)`。这次再失败：复用 `failClosed` + 落盘 `.failclosed` 标记，保留全部现场文件，throw `DeviceRegistryCorruptError`，设备 API 5xx；告警只有 path/error。成功则仍抛原 fsync 错 → 502，磁盘与报告一致。 | ① `directory fsync failure on create rolls back and leaves no half state`、`directory fsync failure on overwrite restores the previous registry`（只失败第一次 fsync，回滚后再成功 → PersistError 502）；`overwrite directory fsync failure keeps old registry and deletes the new ntfy user`。② `rollback directory fsync failure fail-closes and keeps evidence`（两次 EIO → corrupt + `.failclosed` + Keep 证据仍在；后续 list/register 不丢） |
+
+### 独立自审（R9 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `daeab04f-8dd1-473e-8389-52a2b44e29c2` |
+| 审查对象 | 未提交工作区相对 `f34489c` 的 R9 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — 回滚后二次目录 fsync；再失败 `markRegistryFailClosed`；① 仍 502；② corrupt + 证据保留。 |
+| 过程 | 对照 `git diff f34489c`、`writeAtomicSync` 回滚与标记、相关测试；未改文件、未委托。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **805 pass / 0 fail**（本机含 OpenCV；CI 无 cv2 时该条 skip）
+- `bun run build` → Bundled 568 modules，全绿
+- **CI 转绿**（push 后盯 run）
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 
 未开真浏览器拍屏。依据 shell + CSS：

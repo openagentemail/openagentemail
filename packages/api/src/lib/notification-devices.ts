@@ -135,6 +135,21 @@ function unrestoredPath(): string {
   return `${storePath()}.unrestored`;
 }
 
+/** 回滚后目录 fsync 再失败的持久闸；与内存 failClosed 同一语义。 */
+function failClosedPath(): string {
+  return `${storePath()}.failclosed`;
+}
+
+function markRegistryFailClosed(kind: string, extra: Record<string, unknown> = {}): void {
+  failClosed = true;
+  try {
+    writeFileSync(failClosedPath(), `${kind}\n`, { mode: 0o600 });
+  } catch {
+    // 内存闸仍拦住本进程
+  }
+  deviceRegistryHealthAlert(kind, { path: DEVICE_REGISTRY_FILE, ...extra });
+}
+
 /**
  * POSIX write(2) 允许短写。writeFileSync 会写全量，但这里自管 fd，
  * 必须循环直到整段 UTF-8 落盘，再 fsync，避免 rename 进半截 JSON。
@@ -343,7 +358,10 @@ function restoreOverwrittenRegistry(dest: string, bak: string, previous: Buffer 
 }
 
 function readRegistrySync(): RegistryFile {
-  if (failClosed) throw new DeviceRegistryCorruptError();
+  if (failClosed || existsSync(failClosedPath())) {
+    failClosed = true;
+    throw new DeviceRegistryCorruptError();
+  }
   recoverCrashTmpSync();
   recoverBackupSync();
   const path = storePath();
@@ -403,7 +421,10 @@ function fsyncDirectorySync(dir: string): void {
 }
 
 function writeAtomicSync(file: RegistryFile): void {
-  if (failClosed) throw new DeviceRegistryCorruptError();
+  if (failClosed || existsSync(failClosedPath())) {
+    failClosed = true;
+    throw new DeviceRegistryCorruptError();
+  }
   // dest 缺而 .bak 还在：禁止当空表落盘，否则会丢掉历史配对。
   if (existsSync(bakPath()) && !existsSync(storePath())) {
     failClosed = true;
@@ -447,15 +468,30 @@ function writeAtomicSync(file: RegistryFile): void {
   } catch (err) {
     // 首次创建：撤回刚 rename 的文件，避免接口失败但磁盘已有设备。
     // 覆盖写：把 .bak（或内存快照）换回 dest，磁盘回到旧态，与 persist 失败一致。
-    if (!replacing) {
-      try {
-        rmSync(dest, { force: true });
-      } catch {
-        // ignore
+    let rollbackErr: unknown = null;
+    try {
+      if (!replacing) {
+        try {
+          rmSync(dest, { force: true });
+        } catch {
+          // ignore
+        }
+      } else {
+        restoreOverwrittenRegistry(dest, bak, previous);
       }
-    } else {
-      restoreOverwrittenRegistry(dest, bak, previous);
+    } catch (inner) {
+      rollbackErr = inner;
     }
+    // 回滚后必须再 fsync 目录，否则 502 之后崩溃可能 replay 已失败的 rename。
+    try {
+      fsyncDirectorySync(config.dataDir);
+    } catch (fsyncErr) {
+      markRegistryFailClosed('crash_rollback_fsync_failed', {
+        error: fsyncErr instanceof Error ? fsyncErr.message : 'unknown',
+      });
+      throw new DeviceRegistryCorruptError();
+    }
+    if (rollbackErr) throw rollbackErr;
     throw err;
   }
   if (replacing) {
@@ -634,7 +670,7 @@ export function resetDeviceRegistryForTests(): void {
   snapshotRestoreHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
-  for (const path of [storePath(), tmpPath(), bakPath(), unrestoredPath()]) {
+  for (const path of [storePath(), tmpPath(), bakPath(), unrestoredPath(), failClosedPath()]) {
     try {
       if (existsSync(path)) rmSync(path, { force: true });
     } catch {

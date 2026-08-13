@@ -111,6 +111,8 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   Overwrite persist keeps the previous registry as `.bak` and restores it if
   directory fsync fails, so a 502 matches the on-disk devices. If dest is
   missing and `.bak` cannot be renamed back, the registry fail-closes instead
-  of treating the store as empty. If directory fsync, `.bak` rename, and the
+  of treating the store as empty. After a rollback (unlink dest or restore
+  `.bak`), the directory is fsynced again; a second fsync failure fail-closes
+  the registry (`.failclosed` marker, all evidence files kept). If directory fsync, `.bak` rename, and the
   in-memory snapshot write all fail, the new dest is isolated as `.unrestored`
   and the API fail-closes; `.bak` is kept and must not be discarded.

@@ -41,6 +41,18 @@ const {
 
 const topics = { userAlerts: 'user-alerts-abc', userLow: 'user-low-abc' };
 
+function failDirFsyncTimes(times: number): void {
+  let n = 0;
+  setDeviceRegistryDirFsyncHookForTests(() => {
+    n += 1;
+    if (n <= times) {
+      const err = new Error('EIO: dir fsync');
+      (err as NodeJS.ErrnoException).code = 'EIO';
+      throw err;
+    }
+  });
+}
+
 function collectKeys(value: unknown, keys: string[] = []): string[] {
   if (value === null || typeof value !== 'object') return keys;
   if (Array.isArray(value)) {
@@ -310,11 +322,7 @@ describe('notification device registry', () => {
   });
 
   test('directory fsync failure on create rolls back and leaves no half state', async () => {
-    setDeviceRegistryDirFsyncHookForTests(() => {
-      const err = new Error('EIO: dir fsync');
-      (err as NodeJS.ErrnoException).code = 'EIO';
-      throw err;
-    });
+    failDirFsyncTimes(1);
     await expect(registerPairedDevice(seedInput('Nope'))).rejects.toBeInstanceOf(DeviceRegistryPersistError);
     const path = deviceRegistryPathForTests();
     expect(existsSync(path)).toBe(false);
@@ -325,11 +333,7 @@ describe('notification device registry', () => {
     const kept = await registerPairedDevice(seedInput('Keep'));
     const path = deviceRegistryPathForTests();
     const before = readFileSync(path, 'utf8');
-    setDeviceRegistryDirFsyncHookForTests(() => {
-      const err = new Error('EIO: dir fsync');
-      (err as NodeJS.ErrnoException).code = 'EIO';
-      throw err;
-    });
+    failDirFsyncTimes(1);
     await expect(registerPairedDevice(seedInput('New'))).rejects.toBeInstanceOf(DeviceRegistryPersistError);
     expect(existsSync(`${path}.bak`)).toBe(false);
     expect(existsSync(`${path}.tmp`)).toBe(false);
@@ -338,6 +342,32 @@ describe('notification device registry', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]?.id).toBe(kept.id);
     expect(listed[0]?.displayName).toBe('Keep');
+  });
+
+  test('rollback directory fsync failure fail-closes and keeps evidence', async () => {
+    const kept = await registerPairedDevice(seedInput('Keep'));
+    const dest = deviceRegistryPathForTests();
+    const bak = `${dest}.bak`;
+    const marker = `${dest}.failclosed`;
+    failDirFsyncTimes(2);
+    await expect(registerPairedDevice(seedInput('New'))).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(deviceRegistryFailClosedForTests()).toBe(true);
+    expect(existsSync(marker)).toBe(true);
+    const evidence = [dest, bak]
+      .filter((path) => existsSync(path))
+      .map((path) => readFileSync(path, 'utf8'))
+      .join('\n');
+    expect(evidence).toContain('Keep');
+    expect(evidence).toContain(kept.id);
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(existsSync(marker)).toBe(true);
+    const after = [dest, bak]
+      .filter((path) => existsSync(path))
+      .map((path) => readFileSync(path, 'utf8'))
+      .join('\n');
+    expect(after).toContain('Keep');
+    expect(after).toContain(kept.id);
+    await expect(registerPairedDevice(seedInput('After'))).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
   });
 
   test('corrupt registry at boot fail-closes devices but does not throw', async () => {
