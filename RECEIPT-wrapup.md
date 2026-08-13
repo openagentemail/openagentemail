@@ -74,3 +74,25 @@
 4. **Revoking…：** mock DELETE 改 503 后点 Revoke，**不必再手动刷新**，列表应立刻出现 pending 行。
 
 造 pending 样例、磁盘零明文 grep，仍按 PR6 第 3–4 节。
+
+---
+
+## 返工 R1（2026-08-13 · CodeRabbit Major · 设备列表代际）
+
+同一分支 `tizerluo/worker-34-wrapup` 就地修。禁动 main，禁止自 merge。
+
+### 对账
+
+| 项 | 处置 | 证据 / 测试名 |
+|---|---|---|
+| CodeRabbit Major：乱序响应盖掉 `pending_revoke` | **fixed** | `loadPairedDevices` 每次 `++state.deviceLoadGen` 并捕获；成功/失败写 `state.devices` 前 `generation !== state.deviceLoadGen` 则 return。测试：`stale load must not overwrite a newer pending_revoke row` |
+| CodeRabbit Major：登出后旧响应重填设备列表 | **fixed** | `clearNotifyState`（`showLogin` 唯一调用）在清空 `state.devices` 后 `state.deviceLoadGen += 1`。401/`showLogin` 间接触发。测试：`logout bumps deviceLoadGen so a late response cannot refill devices` |
+| 静态闸 | **fixed** | `loadPairedDevices guards writes with deviceLoadGen and logout bumps it`：store 初值、clear 先清空再 bump、load 三处代际守卫（非 admin / try / catch） |
+
+`cd packages/api && bun test`：**813 pass / 0 fail**；`bun run build`：Bundled 568 modules，全绿。
+
+### 独立自审
+
+| 轮 | agent id | 结论 | 过程 |
+|---|---|---|---|
+| R1 | `11937d98-11b3-4e6a-8bf9-fa1a60883373` | **mergeable**；P0/P1/P2 = 0；无 findings | 解码 `store.ts` / `api.ts` / `push-devices.ts` 相对 `3e764fa` 的语义 diff；核对 `showLogin`→`clearNotifyState` bump、try/catch/`!isAdmin` 三处代际守卫；跑 `bun test test/ui-device-load.test.ts test/ui-assets.test.ts`（72 pass）。确认两条行为测试是 `new Function` 真跑 harness，不是 `toContain`。未改文件、未 commit。 |

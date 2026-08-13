@@ -954,4 +954,28 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 2. 运行时拼接 `'data' + ':'`；注释写「data 协议」而不写连续 `data:`。
 3. `.meta` 恢复 `58px minmax(0, 1fr)`；主题列只动 `h2` / `.detail-main-col` / 1440 抽屉。
 
+---
+
+## #26 收官返工 R1（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（就地修；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/31
+
+### 我们实现了哪些功能？
+
+1. **设备列表代际：** `state.deviceLoadGen`；`loadPairedDevices` 每次发起 `++` 并捕获，响应/错误落地前校验代际才写 state/渲染。
+2. **登出作废飞行请求：** `clearNotifyState`（`showLogin` 走这里）bump `deviceLoadGen`，旧响应不得重填上一会话设备。
+3. 行为测试两条：乱序不得盖 `pending_revoke`；登出后旧响应不得重填。静态闸钉三处守卫。
+4. `bun test` **813 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. CodeRabbit Major：B4 立刻 `loadPairedDevices()` 后，无代际防护——乱序会把 Revoking 打回 Revoke；登出后飞行响应会污染下一会话。
+
+### 我们是如何解决这些错误的？
+
+1. 对齐 `overviewGen`：新请求占新代际；清会话 bump 代际。try/catch/`!isAdmin` 写路径都先比代际。
+2. 用 `new Function` 抽出真实 `loadPairedDevices`/`clearNotifyState`，可控 Promise 模拟乱序与登出。
+
 

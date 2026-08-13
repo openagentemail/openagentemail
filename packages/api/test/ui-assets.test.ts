@@ -1709,6 +1709,30 @@ describe('UI static asset contract', () => {
     );
   });
 
+  test('loadPairedDevices guards writes with deviceLoadGen and logout bumps it', async () => {
+    const { STORE_JS } = await import('../src/ui/client/store.ts');
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    expect(STORE_JS).toContain('deviceLoadGen: 0');
+    const clear = API_JS.slice(
+      API_JS.indexOf('function clearNotifyState('),
+      API_JS.indexOf('function clearTasksState('),
+    );
+    expect(clear).toContain('state.devices = []');
+    expect(clear.indexOf('state.devices = []')).toBeLessThan(clear.indexOf('state.deviceLoadGen += 1'));
+    const load = PUSH_DEVICES_PAGE_JS.slice(
+      PUSH_DEVICES_PAGE_JS.indexOf('async function loadPairedDevices('),
+      PUSH_DEVICES_PAGE_JS.indexOf('function enterConfigurePush('),
+    );
+    expect(load).toContain('var generation = ++state.deviceLoadGen');
+    expect(load.split('generation !== state.deviceLoadGen').length - 1).toBe(3);
+    const tryIdx = load.indexOf('var payload = await apiJson');
+    expect(load.indexOf('if (generation !== state.deviceLoadGen) return;', tryIdx)).toBeGreaterThan(tryIdx);
+    expect(load.indexOf('if (generation !== state.deviceLoadGen) return;', tryIdx)).toBeLessThan(
+      load.indexOf('state.devices = Array.isArray(payload.devices)', tryIdx),
+    );
+  });
+
   test('1280 detail subject wraps as a row, not per-character vertical CJK', () => {
     expect(UI_CSS).toContain('@media (max-width: 1440px)');
     expect(UI_CSS).toContain('@media (max-width: 1100px)');
