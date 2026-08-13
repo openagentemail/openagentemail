@@ -226,4 +226,15 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     });
     expect(revoked.status).toBe(403);
   });
+
+  test('invalid JSON on UI device create is 400 not a silent Phone', async () => {
+    const { app, cookie } = authenticatedApp({ kind: 'admin' });
+    const created = await app.request('http://localhost/ui/api/notify/devices', {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: '{not-json',
+    });
+    expect(created.status).toBe(400);
+    expect(await created.json()).toMatchObject({ error: 'invalid_json' });
+  });
 });

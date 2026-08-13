@@ -1036,6 +1036,7 @@ export function createUiApiRoutes(
     const denied = requireUiAdmin(c);
     if (denied) return denied;
     try {
+      c.header('Cache-Control', 'no-store');
       return c.json({ devices: await listNotificationDevices() });
     } catch (err) {
       return deviceUiError(c, err);
@@ -1046,11 +1047,11 @@ export function createUiApiRoutes(
   routes.post('/notify/devices', async (c) => {
     const denied = requireUiAdmin(c);
     if (denied) return denied;
-    let raw: unknown = {};
+    let raw: unknown;
     try {
       raw = await c.req.json();
     } catch {
-      raw = {};
+      return c.json({ error: 'invalid_json' }, 400);
     }
     const parsed = uiDeviceNameSchema.safeParse(raw);
     if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);

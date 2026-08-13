@@ -35,7 +35,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 | 登记失败无幽灵 user | **过** | `registry persist failure after ntfy create deletes the ghost user and returns 502`：ENOSPC hook 后断言存在 `DELETE /v1/users` |
 | identity / 平台运营主体 → 403 | **过** | Bearer：`old POST… identity cannot list or revoke` + `identity cannot GET or DELETE devices…`；UI：`identity session cannot list, create, or revoke devices`。平台运营主体：现网无独立 operator kind，非 admin 即 403（见上口径） |
 | 旧 POST 兼容 | **过** | `old POST without displayName still 201…`；registry `old clients without displayName get the default Phone name` |
-| `cd packages/api && bun test` + `bun run build` | **过** | R2 后 **787 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
+| `cd packages/api && bun test` + `bun run build` | **过** | R3 后 **793 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
 
 ### 吊销测试名（notification-devices.test.ts）
 
@@ -146,6 +146,44 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 ### 完成标准
 
 - `cd packages/api && bun test` → **787 pass / 0 fail**
+- `bun run build` → Bundled 568 modules，全绿
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
+---
+
+## 返工 R3（2026-08-13 · Codex P1×2 + ZCode P2）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `qr-byte.ts` alignment（置信 0.99） | v7+ 坐标含 6，只跳三个 finder 角会在 timing 上画 5×5，随后 timing 切中心行/列，功能模块损坏。 | **已修。** finder+timing 先占位；alignment 仅中心空闲才绘制；timing 上省略的 alignment `reserveAlignment` 占位以免数据走进 ISO 扣格。finder 三角只 skip 不 reserve（初版对三角也 reserve，独立自审 P1，已收）。 | `version 7+ omits alignment on timing tracks and keeps timing intact`（含 finder 旁 `isFunc===false`）；R1 `ISO de-interleave plus RS remainder recovers pairing payload` 仍绿 |
+| B | Codex Local P1 · rename 后未 fsync 目录（置信 0.93） | 断电后目录项可能未持久化，已返回成功的创建/吊销可能丢。 | **已修。** rename 后 `open(DATA_DIR)` + `fsync`。EINVAL/ENOTSUP/ENOSYS 视为成功（注释写明，避免 NFS/FUSE 整站无法落盘）。EIO 等真失败：首次创建撤回刚 rename 的文件；覆盖写不删 registry。 | `directory fsync failure on create rolls back and leaves no half state` |
+| C | ZCode P2-1 | 裸 HTTP 404 无条件 not_found → 网关 404 假吊销。 | **已修。** 404 须 body 含 40031 / "user does not exist" / not_found 才收敛；裸 404 与 40401 page not found 为 transient。 | `bare 404 without missing-user body stays transient and does not converge` |
+| D | ZCode P2-3 | ntfy disabled/unconfigured 时 DELETE 仍落盘+外呼。 | **已修（选本地收敛）。** 无远端可对账，`revokePairedDevice(..., () => 'deleted')` 标 revoked 不 fetch，避免 pending 永远卡住。 | `revoke with ntfy disabled converges locally without calling fetch`（含 unconfigured） |
+| E2 | ZCode P2-2 | fetch 无超时致 registry 队列独占。 | **已修。** 管理面 ntfy fetch `AbortSignal.timeout(8s)`。publish/json 长轮询仍走 watcher 既有 abort（记债：不把 8s 套到消息流）。 | 实现：`ntfyFetch` |
+| E4 | ZCode P2-4 | corrupt registry 启动炸全进程。 | **已修。** `inspectDeviceRegistryAtBoot` 吞 corrupt（已 fail-closed+告警），邮件 API 仍监听。 | `corrupt registry at boot fail-closes devices but does not throw` |
+| E5 | ZCode P2-5 | UI invalid JSON 静默当 `{}` 创建。 | **已修。** 与 Bearer 一样 400 `invalid_json`。UI 客户端本就 POST `{}` 合法 JSON。 | `invalid JSON on UI device create is 400 not a silent Phone` |
+| E6 | ZCode P2-6 | Bearer GET 缺 Cache-Control。 | **已修。** GET `/v1/notify/devices` 与 UI GET 均 `no-store`。 | Bearer 列表测试断言 `cache-control: no-store` |
+
+### 独立自审（R3 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| 初审 Subagent | `63b8c0dd-5093-4a41-a4e4-3ced2869ddd2` |
+| 初审结论 | **not mergeable**（P1：finder 角 `reserveAlignment` 多占数据格） |
+| 复审 Subagent | `bb8406c4-2c9f-4690-9abf-df1d626fb382` |
+| 复审结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — timing 先于 alignment；timing 省略仍占位；finder 三角不 reserve；测试钉 `isFunc[size-9][7]` |
+| B 裁定 | **过** — 目录 fsync；首次创建 EIO 撤回；覆盖写不删盘 |
+| 过程 | 初审自推 `isFunc` vs ISO 容量发现 finder 过占位；修复后再起新 agent 核关闭。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **793 pass / 0 fail**
 - `bun run build` → Bundled 568 modules，全绿
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 

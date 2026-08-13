@@ -4,7 +4,7 @@
  * DATA_DIR/notification-devices.json：id / displayName / ntfyUsername / topic
  * labels / pairedAt / lastSeenAt / revokeStatus / revokedAt。
  * password/token 永不落盘。单写者 promise 队列、目录 0700、文件 0600、
- * 同目录 .tmp + fsync + atomic rename。
+ * 同目录 .tmp + fsync 文件 + atomic rename + fsync 目录。
  *
  * 吊销：active → pending_revoke（先落盘）→ 删 ntfy user（404/not_found 算成功）
  * → revoked。步骤 1 失败不得触达 ntfy；步骤 3 失败保持 pending，启动/列表对账
@@ -109,6 +109,7 @@ const FORBIDDEN_SECRET_KEYS = new Set(['password', 'token']);
 
 let writeChain: Promise<unknown> = Promise.resolve();
 let persistHookForTests: (() => void) | null = null;
+let dirFsyncHookForTests: (() => void) | null = null;
 let nowFn: () => number = () => Date.now();
 let failClosed = false;
 
@@ -283,6 +284,22 @@ function readRegistrySync(): RegistryFile {
   }
 }
 
+function fsyncDirectorySync(dir: string): void {
+  dirFsyncHookForTests?.();
+  const fd = openSync(dir, 'r');
+  try {
+    fsyncSync(fd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // 个别 fs（部分 NFS/FUSE、部分 Windows）不允许对目录 fsync：rename 已完成，
+    // 视为成功以免整站无法落盘。EIO 等真失败仍按持久化失败上抛。
+    if (code === 'EINVAL' || code === 'ENOTSUP' || code === 'ENOSYS') return;
+    throw err;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function writeAtomicSync(file: RegistryFile): void {
   if (failClosed) throw new DeviceRegistryCorruptError();
   ensureDataDir();
@@ -293,6 +310,8 @@ function writeAtomicSync(file: RegistryFile): void {
   }
   const serialized = `${JSON.stringify(file, null, 2)}\n`;
   const tmp = tmpPath();
+  const dest = storePath();
+  const replacing = existsSync(dest);
   const fd = openSync(tmp, 'w', 0o600);
   try {
     writeSync(fd, serialized);
@@ -305,11 +324,25 @@ function writeAtomicSync(file: RegistryFile): void {
   } catch {
     // best effort
   }
-  renameSync(tmp, storePath());
+  renameSync(tmp, dest);
   try {
-    chmodSync(storePath(), 0o600);
+    chmodSync(dest, 0o600);
   } catch {
     // best effort
+  }
+  try {
+    fsyncDirectorySync(config.dataDir);
+  } catch (err) {
+    // 首次创建：撤回刚 rename 的文件，避免接口失败但磁盘已有设备。
+    // 覆盖写：旧内容已被 rename 替换，无法无损回滚；仍抛失败，调用方重试（吊销幂等）。
+    if (!replacing) {
+      try {
+        rmSync(dest, { force: true });
+      } catch {
+        // ignore
+      }
+    }
+    throw err;
   }
 }
 
@@ -432,8 +465,22 @@ export function inspectDeviceRegistry(): Promise<void> {
   });
 }
 
+/** 启动入口：corrupt 已 fail-closed 并告警，不阻断邮件 API 监听。 */
+export async function inspectDeviceRegistryAtBoot(): Promise<void> {
+  try {
+    await inspectDeviceRegistry();
+  } catch (err) {
+    if (err instanceof DeviceRegistryCorruptError) return;
+    throw err;
+  }
+}
+
 export function setDeviceRegistryPersistHookForTests(hook: (() => void) | null): void {
   persistHookForTests = hook;
+}
+
+export function setDeviceRegistryDirFsyncHookForTests(hook: (() => void) | null): void {
+  dirFsyncHookForTests = hook;
 }
 
 export function setDeviceRegistryNowForTests(fn: (() => number) | null): void {
@@ -443,6 +490,7 @@ export function setDeviceRegistryNowForTests(fn: (() => number) | null): void {
 export function resetDeviceRegistryForTests(): void {
   failClosed = false;
   persistHookForTests = null;
+  dirFsyncHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
   for (const path of [storePath(), tmpPath()]) {

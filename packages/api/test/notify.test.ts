@@ -1045,11 +1045,11 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
         JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
       ),
     ).toBe('not_found');
-    expect(classifyNtfyUserDeleteResponse(404, '{"code":40401,"error":"page not found"}')).toBe(
-      'not_found',
-    );
     expect(classifyNtfyUserDeleteResponse(200, '{}')).toBe('deleted');
     expect(classifyNtfyUserDeleteResponse(503, 'unavailable')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(404, '{"code":40401,"error":"page not found"}')).toBe(
+      'transient',
+    );
     expect(
       classifyNtfyUserDeleteResponse(
         400,
@@ -1080,6 +1080,73 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
       ),
     ).toBe('not_found');
     expect(classifyNtfyUserDeleteResponse(404, 'not_found')).toBe('not_found');
+  });
+
+  test('bare 404 without missing-user body stays transient and does not converge', async () => {
+    expect(classifyNtfyUserDeleteResponse(404, '')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(404, '{}')).toBe('transient');
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'DELETE') return new Response('', { status: 404 });
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Gateway-404',
+        ntfyUsername: 'phone-gw404',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      await expect(revokeNotificationDevice(record.id)).rejects.toMatchObject({
+        code: 'device_revoke_retry',
+      });
+      const listed = await listPairedDevices();
+      expect(listed[0]?.revokeStatus).toBe('pending_revoke');
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('revoke with ntfy disabled converges locally without calling fetch', async () => {
+    const previousNtfy = { ...config.ntfy };
+    const record = await registerPairedDevice({
+      displayName: 'Local-only',
+      ntfyUsername: 'phone-localonly',
+      topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+    });
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+      enabled: false,
+      adminPassword: undefined,
+    });
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      expect(await revokeNotificationDevice(record.id)).toBe('revoked');
+      expect(fetches).toBe(0);
+      const all = await listPairedDevices({ includeRevoked: true });
+      expect(all[0]?.revokeStatus).toBe('revoked');
+
+      const second = await registerPairedDevice({
+        displayName: 'Unconfigured',
+        ntfyUsername: 'phone-unconf',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+        enabled: true,
+        adminPassword: undefined,
+      });
+      expect(await revokeNotificationDevice(second.id)).toBe('revoked');
+      expect(fetches).toBe(0);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 
   test('5xx with user-does-not-exist body does not converge pending_revoke to revoked', async () => {
@@ -1198,6 +1265,7 @@ describe('device list and revoke (Bearer)', () => {
       expect(page.devices[0]?.displayName).toBe('Curl-phone');
       expect(page.devices[0]?.pairedAt).toBeTruthy();
       expect(page.devices[0]?.topicLabels?.userAlerts).toBe('User alerts');
+      expect(listed.headers.get('cache-control')).toBe('no-store');
       expect(JSON.stringify(page)).not.toMatch(/"password"\s*:/);
       expect(JSON.stringify(page)).not.toMatch(/"qr"\s*:/);
 

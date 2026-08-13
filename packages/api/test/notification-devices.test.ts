@@ -24,6 +24,7 @@ const {
   DeviceRevokeTransientError,
   deviceRegistryPathForTests,
   inspectDeviceRegistry,
+  inspectDeviceRegistryAtBoot,
   listPairedDevices,
   persistRegistryForTests,
   reconcilePendingRevokes,
@@ -31,6 +32,7 @@ const {
   registryHasForbiddenSecretKey,
   resetDeviceRegistryForTests,
   revokePairedDevice,
+  setDeviceRegistryDirFsyncHookForTests,
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 
@@ -302,5 +304,24 @@ describe('notification device registry', () => {
     await registerPairedDevice(seedInput('Mode'));
     const { statSync } = await import('node:fs');
     expect(statSync(config.dataDir).mode & 0o777).toBe(0o700);
+  });
+
+  test('directory fsync failure on create rolls back and leaves no half state', async () => {
+    setDeviceRegistryDirFsyncHookForTests(() => {
+      const err = new Error('EIO: dir fsync');
+      (err as NodeJS.ErrnoException).code = 'EIO';
+      throw err;
+    });
+    await expect(registerPairedDevice(seedInput('Nope'))).rejects.toBeInstanceOf(DeviceRegistryPersistError);
+    const path = deviceRegistryPathForTests();
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(`${path}.tmp`)).toBe(false);
+  });
+
+  test('corrupt registry at boot fail-closes devices but does not throw', async () => {
+    await registerPairedDevice(seedInput('Real'));
+    writeFileSync(deviceRegistryPathForTests(), '{not-json', { mode: 0o600 });
+    await expect(inspectDeviceRegistryAtBoot()).resolves.toBeUndefined();
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
   });
 });

@@ -730,4 +730,35 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 1. 改成递归键检查。独立自审指出：旧正则对 `JSON.stringify` 转义后的 displayName **并不命中**（`\"password\":`）；仍按任务做结构化检查，不把转义当安全属性。
 2. 并发 in-flight 合并 + 清理失败 warn；TTL 与重试队列明确记债（收敛语义 / 未落盘无法对账）。
 
+---
+
+## #26 PR 6 返工 R3（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **QR v7+ 功能模块：** finder/timing 先占位；alignment 仅中心空闲才画 5×5；timing 轨道省略的 alignment 占位 `isFunc`（不画图案）；finder 三角只 skip。
+2. **目录 fsync：** rename 后 fsync `DATA_DIR`；首次创建失败撤回新文件；EINVAL/ENOTSUP/ENOSYS 视为成功。
+3. **404：** 须 missing-user body 才 not_found；裸 404 不收敛。
+4. **ntfy 关/未配置：** 吊销纯本地 revoked，不外呼。
+5. **顺手：** 管理面 fetch 8s 超时；corrupt 启动不阻断 API；UI 坏 JSON 400；GET devices `no-store`。
+6. `bun test` **793 pass / 0 fail**；`bun run build` 全绿。复审 agent `bb8406c4-2c9f-4690-9abf-df1d626fb382`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. Codex P1：v7+ alignment 画在 timing 上再被切一条。
+2. Codex P1：rename 后未 fsync 目录。
+3. 独立自审 P1：对 finder 角也 `reserveAlignment`，多占数据格、zigzag 错位。
+4. ZCode P2-1/3：裸 404 假吊销；disabled 时 DELETE 仍外呼。
+
+### 我们是如何解决这些错误的？
+
+1. 绘制顺序改为 finder→timing→alignment；中心占用则省略图案；仅 timing 非 finder 省略才 reserve。测试钉 timing 完整、无近轨 5×5、finder 旁数据格非 isFunc。
+2. rename 后 open 目录 fsync；EIO 首次创建 rm 新文件。
+3. 初审指出 finder reserve 过占位后收窄条件并补回归格。
+4. 404 看 body；disabled/unconfigured 走本地 `deleted` 回调。
+
 

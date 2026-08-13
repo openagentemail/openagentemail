@@ -29,6 +29,11 @@ function getNumRawDataModules(ver: number): number {
   return result;
 }
 
+/** 测试缝：ISO 原始数据模块数（非功能格）。 */
+export function qrNumRawDataModules(ver: number): number {
+  return getNumRawDataModules(ver);
+}
+
 function getNumDataCodewords(ver: number): number {
   return Math.floor(getNumRawDataModules(ver) / 8) - ECC_PER_BLOCK[ver]! * ECC_BLOCKS[ver]!;
 }
@@ -80,6 +85,11 @@ function getAlignmentPositions(ver: number): number[] {
   return result;
 }
 
+/** 测试缝：ISO 表 alignment 中心坐标（含 6）。 */
+export function qrAlignmentPositions(ver: number): number[] {
+  return getAlignmentPositions(ver);
+}
+
 class BitBuffer {
   bits: number[] = [];
   append(val: number, len: number): void {
@@ -110,6 +120,53 @@ function addAlignment(modules: number[][], isFunc: boolean[][], ox: number, oy: 
       const y = oy + dy;
       isFunc[y]![x] = true;
       modules[y]![x] = dx === -2 || dx === 2 || dy === -2 || dy === 2 || (dx === 0 && dy === 0) ? 1 : 0;
+    }
+  }
+}
+
+/** 中心已被占用时省略图案，但仍占位，避免数据比特走进 ISO 扣掉的模块。 */
+function reserveAlignment(modules: number[][], isFunc: boolean[][], ox: number, oy: number): void {
+  for (let dy = -2; dy <= 2; dy += 1) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      const x = ox + dx;
+      const y = oy + dy;
+      if (x < 0 || y < 0 || x >= modules.length || y >= modules.length) continue;
+      isFunc[y]![x] = true;
+    }
+  }
+}
+
+function addTiming(modules: number[][], isFunc: boolean[][]): void {
+  const size = modules.length;
+  for (let i = 8; i < size - 8; i += 1) {
+    modules[6]![i] = i % 2 === 0 ? 1 : 0;
+    modules[i]![6] = i % 2 === 0 ? 1 : 0;
+    isFunc[6]![i] = true;
+    isFunc[i]![6] = true;
+  }
+}
+
+/**
+ * finder / 分隔 / timing 先占位，alignment 仅当中心空闲才绘制。
+ * version 7+ 坐标含 6 时不得在 timing 轨道上画出 5×5。
+ */
+function placeFunctionPatterns(modules: number[][], isFunc: boolean[][], ver: number): void {
+  const size = modules.length;
+  addFinder(modules, isFunc, 0, 0);
+  addFinder(modules, isFunc, size - 7, 0);
+  addFinder(modules, isFunc, 0, size - 7);
+  addTiming(modules, isFunc);
+  for (const y of getAlignmentPositions(ver)) {
+    for (const x of getAlignmentPositions(ver)) {
+      if (!isFunc[y]![x]) {
+        addAlignment(modules, isFunc, x, y);
+        continue;
+      }
+      // 仅 timing 轨道上省略的 alignment 需要占位（ISO 容量仍扣这些格）。
+      // finder 三角本就不放 alignment，周围是分隔/数据，不得 reserve 5×5。
+      const finderCorner =
+        (x === 6 && y === 6) || (x === 6 && y === size - 7) || (x === size - 7 && y === 6);
+      if (!finderCorner) reserveAlignment(modules, isFunc, x, y);
     }
   }
 }
@@ -392,22 +449,7 @@ function buildModules(ver: number, codewords: number[]): number[][] {
   const size = ver * 4 + 17;
   const modules = Array.from({ length: size }, () => new Array<number>(size).fill(0));
   const isFunc = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
-  addFinder(modules, isFunc, 0, 0);
-  addFinder(modules, isFunc, size - 7, 0);
-  addFinder(modules, isFunc, 0, size - 7);
-  const align = getAlignmentPositions(ver);
-  for (const y of align) {
-    for (const x of align) {
-      if ((x === 6 && y === 6) || (x === 6 && y === size - 7) || (x === size - 7 && y === 6)) continue;
-      addAlignment(modules, isFunc, x, y);
-    }
-  }
-  for (let i = 8; i < size - 8; i += 1) {
-    modules[6]![i] = i % 2 === 0 ? 1 : 0;
-    modules[i]![6] = i % 2 === 0 ? 1 : 0;
-    isFunc[6]![i] = true;
-    isFunc[i]![6] = true;
-  }
+  placeFunctionPatterns(modules, isFunc, ver);
   drawFormat(modules, isFunc, 0);
   drawVersion(modules, isFunc, ver);
   drawData(modules, isFunc, codewords);
@@ -429,6 +471,25 @@ function buildModules(ver: number, codewords: number[]): number[][] {
   applyMask(modules, isFunc, bestMask);
   drawFormat(modules, isFunc, bestMask);
   return modules;
+}
+
+/** 测试缝：只铺功能模块（无 data/mask），供 v7+ 位图断言。 */
+export function encodeQrFunctionGrid(ver: number): {
+  size: number;
+  modules: string;
+  isFunc: boolean[][];
+} {
+  const size = ver * 4 + 17;
+  const modules = Array.from({ length: size }, () => new Array<number>(size).fill(0));
+  const isFunc = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  placeFunctionPatterns(modules, isFunc, ver);
+  drawFormat(modules, isFunc, 0);
+  drawVersion(modules, isFunc, ver);
+  return {
+    size,
+    modules: modules.map((row) => row.join('')).join(''),
+    isFunc,
+  };
 }
 
 /** 把 UTF-8 文本编成 QR 模块图（ECC M）。 */

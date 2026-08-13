@@ -9,7 +9,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   addEccAndInterleave,
   encodeQrCodewords,
+  encodeQrFunctionGrid,
   encodeQrModules,
+  qrAlignmentPositions,
   qrRsPlan,
   qrRsRemainder,
 } from '../src/lib/qr-byte.ts';
@@ -187,5 +189,78 @@ describe('qr-byte', () => {
 
     const recovered = dataBlocks.flat();
     expect(decodeByteMode(recovered, ver)).toBe(PAIRING_JSON);
+  });
+
+  test('version 7+ omits alignment on timing tracks and keeps timing intact', () => {
+    const ALIGN = [
+      [1, 1, 1, 1, 1],
+      [1, 0, 0, 0, 1],
+      [1, 0, 1, 0, 1],
+      [1, 0, 0, 0, 1],
+      [1, 1, 1, 1, 1],
+    ];
+    const isAlignAt = (grid: { size: number; modules: string }, cx: number, cy: number): boolean => {
+      if (cx < 2 || cy < 2 || cx > grid.size - 3 || cy > grid.size - 3) return false;
+      for (let dy = -2; dy <= 2; dy += 1) {
+        for (let dx = -2; dx <= 2; dx += 1) {
+          const got = grid.modules.charAt((cy + dy) * grid.size + (cx + dx));
+          if (got !== String(ALIGN[dy + 2]![dx + 2])) return false;
+        }
+      }
+      return true;
+    };
+    const assertLayout = (ver: number, grid: { size: number; modules: string; isFunc?: boolean[][] }) => {
+      const size = grid.size;
+      expect(size).toBe(ver * 4 + 17);
+      const positions = qrAlignmentPositions(ver);
+      expect(positions).toContain(6);
+      expect(positions.length).toBeGreaterThan(2);
+      for (let i = 8; i < size - 8; i += 1) {
+        expect(cell(grid, i, 6)).toBe(i % 2 === 0 ? '1' : '0');
+        expect(cell(grid, 6, i)).toBe(i % 2 === 0 ? '1' : '0');
+        if (grid.isFunc) {
+          expect(grid.isFunc[6]![i]).toBe(true);
+          expect(grid.isFunc[i]![6]).toBe(true);
+        }
+      }
+      const centers: Array<{ x: number; y: number }> = [];
+      for (let y = 2; y < size - 2; y += 1) {
+        for (let x = 2; x < size - 2; x += 1) {
+          if (isAlignAt(grid, x, y)) centers.push({ x, y });
+        }
+      }
+      for (const { x, y } of centers) {
+        expect(x).not.toBe(6);
+        expect(y).not.toBe(6);
+        expect(Math.min(Math.abs(x - 6), Math.abs(y - 6))).toBeGreaterThan(1);
+      }
+      for (const y of positions) {
+        for (const x of positions) {
+          if (x === 6 || y === 6) expect(isAlignAt(grid, x, y)).toBe(false);
+          else expect(isAlignAt(grid, x, y)).toBe(true);
+        }
+      }
+      if (grid.isFunc) {
+        // finder 角旁的数据格不得被 reserveAlignment 吃掉（独立自审 P1）。
+        expect(grid.isFunc[size - 9]![7]).toBe(false);
+        expect(grid.isFunc[7]![size - 9]).toBe(false);
+        for (const { x, y } of centers) {
+          for (let dy = -2; dy <= 2; dy += 1) {
+            for (let dx = -2; dx <= 2; dx += 1) {
+              expect(grid.isFunc[y + dy]![x + dx]).toBe(true);
+              expect(x + dx === 6 || y + dy === 6).toBe(false);
+            }
+          }
+        }
+      }
+    };
+
+    for (const ver of [7, 10, 14]) {
+      assertLayout(ver, encodeQrFunctionGrid(ver));
+    }
+    const pairing = encodeQrModules(PAIRING_JSON);
+    const pairingVer = (pairing.size - 17) / 4;
+    expect(pairingVer).toBeGreaterThanOrEqual(7);
+    assertLayout(pairingVer, pairing);
   });
 });

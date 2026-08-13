@@ -216,6 +216,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
         return c.json({ error: 'forbidden: admin key required' }, 403);
       }
       try {
+        c.header('Cache-Control', 'no-store');
         return c.json({ devices: await listNotificationDevices() });
       } catch (err) {
         return notificationError(c, err);

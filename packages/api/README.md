@@ -85,18 +85,18 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   `notification-log.jsonl.partial`; a corrupt line in the middle fail-closes
   queries (`500 notification_log_corrupt`). See `docs/security.md`.
 - **Paired devices.** `DATA_DIR/notification-devices.json` is the instance device
-  registry (0600, directory 0700, single-writer queue, same-dir `.tmp` + fsync +
-  rename). It stores id / displayName / ntfyUsername / topic labels / pairedAt /
+  registry (0600, directory 0700, single-writer queue, same-dir `.tmp` + fsync
+  file + rename + fsync directory). It stores id / displayName / ntfyUsername / topic labels / pairedAt /
   lastSeenAt / revokeStatus / revokedAt — **never password or token keys**
   (the persist guard walks object keys, so a displayName like
   `My "password": vault` is allowed). Revoke is
   `active → pending_revoke` (persist first; failure must not call ntfy) → delete
   ntfy user (live ntfy missing user is HTTP 400 / code 40031 / "user does not
-  exist"; HTTP 404 also counts as success; **all 5xx are transient regardless of
-  body text**, so a gateway error cannot converge the local row to `revoked`) →
-  `revoked`. Pairing QR is ISO/IEC 18004 byte-mode ECC-M: data codewords are
-  column-interleaved across RS blocks (short blocks skip the extra data column),
-  then ECC columns follow — never concat-then-column. Startup and
-  admin list/revoke scan `pending_revoke` until local state converges. A corrupt
-  file fail-closes (500); `GET /healthz` does not read it. Do not run multiple
-  API writers against a shared `DATA_DIR`.
+  exist"; HTTP 404 counts as success **only** with that missing-user body —
+  a bare gateway 404 is transient; **all 5xx are transient regardless of
+  body text**) → `revoked`. If ntfy is disabled or unconfigured, revoke is
+  local-only (mark revoked, no outbound call). Pairing QR is ISO/IEC 18004
+  byte-mode ECC-M: data codewords are column-interleaved across RS blocks
+  (short blocks skip the extra data column), then ECC columns follow; version
+  7+ omits alignment patterns whose center sits on finder/timing. Startup
+  inspect fail-closes a corrupt registry without blocking the rest of the API.

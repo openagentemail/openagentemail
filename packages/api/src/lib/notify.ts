@@ -400,8 +400,18 @@ function basic(user: string, password: string): Record<string, string> {
   return { Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
 }
 
+/** 管理面 ntfy fetch 超时，避免 delete 挂死设备 registry 队列。 */
+const NTFY_ADMIN_FETCH_TIMEOUT_MS = 8_000;
+
+async function ntfyFetch(path: string, init: RequestInit): Promise<Response> {
+  return fetch(providerUrl(path), {
+    ...init,
+    signal: AbortSignal.timeout(NTFY_ADMIN_FETCH_TIMEOUT_MS),
+  });
+}
+
 async function ntfyAdminJson(path: string, body: unknown): Promise<Response> {
-  const response = await fetch(providerUrl(path), {
+  return ntfyFetch(path, {
     method: 'POST',
     headers: {
       ...basic('admin', config.ntfy.adminPassword!),
@@ -409,7 +419,6 @@ async function ntfyAdminJson(path: string, body: unknown): Promise<Response> {
     },
     body: JSON.stringify(body),
   });
-  return response;
 }
 
 /**
@@ -436,7 +445,7 @@ export async function createRuntimeReader(entry: Route): Promise<void> {
     });
     if (!access.ok) throw new NotifyError('notify_unavailable');
 
-    const tokenResponse = await fetch(providerUrl('/v1/account/token'), {
+    const tokenResponse = await ntfyFetch('/v1/account/token', {
       method: 'POST',
       headers: { ...basic(entry.reader.username, password), 'content-type': 'application/json' },
       body: JSON.stringify({ label: 'openagentemail-device-reader' }),
@@ -460,7 +469,7 @@ async function deleteRuntimeReader(entry: Route): Promise<void> {
 
 async function deleteNtfyUser(username: string): Promise<void> {
   try {
-    const response = await fetch(providerUrl('/v1/users'), {
+    const response = await ntfyFetch('/v1/users', {
       method: 'DELETE',
       headers: {
         ...basic('admin', config.ntfy.adminPassword!),
@@ -487,23 +496,9 @@ async function deleteNtfyUser(username: string): Promise<void> {
   }
 }
 
-/**
- * 吊销路径：远端 user 已不存在视为删除成功。
- * 现网 ntfy `handleUsersDelete` 对缺失 user 返回 HTTP 400 / code 40031 /
- * "user does not exist"（不是 HTTP 404）。网络错误与 5xx 是 transient，
- * 不得当成 not_found。
- */
-export function classifyNtfyUserDeleteResponse(
-  status: number,
-  body: string,
-): NtfyUserDeleteResult {
-  if (status >= 200 && status < 300) return 'deleted';
-  // 一切 5xx 不看 body：远端 user 可能仍在，不得收敛 revoked。
-  if (status >= 500) return 'transient';
-  if (status === 404) return 'not_found';
-  // 文本 / 错误码的 not_found 判定仅对预期客户端错误生效。
-  if (status !== 400) return 'transient';
+function ntfyDeleteBodyMeansMissingUser(body: string, allowNotFoundToken: boolean): boolean {
   const trimmed = body.trim();
+  if (!trimmed) return false;
   let code: number | undefined;
   let error = '';
   try {
@@ -514,13 +509,34 @@ export function classifyNtfyUserDeleteResponse(
     error = trimmed;
   }
   const haystack = `${error} ${trimmed}`.toLowerCase();
-  if (code === 40031 || haystack.includes('user does not exist')) return 'not_found';
-  return 'transient';
+  if (code === 40031 || haystack.includes('user does not exist')) return true;
+  if (allowNotFoundToken && haystack.includes('not_found')) return true;
+  return false;
+}
+
+/**
+ * 吊销路径：远端 user 已不存在视为删除成功。
+ * 现网 ntfy `handleUsersDelete` 对缺失 user 返回 HTTP 400 / code 40031 /
+ * "user does not exist"（不是裸 HTTP 404）。网络错误与 5xx 是 transient。
+ * 反代/网关裸 404 不得收敛 revoked。
+ */
+export function classifyNtfyUserDeleteResponse(
+  status: number,
+  body: string,
+): NtfyUserDeleteResult {
+  if (status >= 200 && status < 300) return 'deleted';
+  // 一切 5xx 不看 body：远端 user 可能仍在，不得收敛 revoked。
+  if (status >= 500) return 'transient';
+  if (status === 404) {
+    return ntfyDeleteBodyMeansMissingUser(body, true) ? 'not_found' : 'transient';
+  }
+  if (status !== 400) return 'transient';
+  return ntfyDeleteBodyMeansMissingUser(body, false) ? 'not_found' : 'transient';
 }
 
 export async function deleteNtfyUserResult(username: string): Promise<NtfyUserDeleteResult> {
   try {
-    const response = await fetch(providerUrl('/v1/users'), {
+    const response = await ntfyFetch('/v1/users', {
       method: 'DELETE',
       headers: {
         ...basic('admin', config.ntfy.adminPassword!),
@@ -635,6 +651,10 @@ export async function listNotificationDevices(): Promise<DeviceListItem[]> {
 }
 
 export async function revokeNotificationDevice(id: string): Promise<'revoked' | 'already_revoked'> {
+  // ntfy 未启用/未配置：无远端可对账，纯本地标 revoked，避免 pending 永远卡住、也不外呼。
+  if (!config.ntfy.enabled || !config.ntfy.adminPassword) {
+    return revokePairedDevice(id, async () => 'deleted');
+  }
   await reconcileNotificationDevices();
   return revokePairedDevice(id, deleteNtfyUserResult);
 }
