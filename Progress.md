@@ -620,6 +620,31 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 2. 直写完整 https 字面量；闸对 allowlist 前缀 split 后再禁 `\bhttps?:\/\/`。
 3. 删注释断言，只留 302 Location `/ui`。
 
+---
+
+## #26 PR 5 返工 R4（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A P1（Codex Local 08:33）：** 双管齐下收口 R2↔R3 振荡。① `finally` 仅 `openedGen === modalGeneration` 才复位本 dialog 控件（stale 不得复活新窗共享钮）。② `beginModal` 在 bump 代际后无条件复位 `confirmModalConfirm` / `confirmModalCancel` / `createModalSubmit`（成功关窗 finally 跳过后，下次开窗必然可点）。五条流 + tasks 关单均核对 Confirm+Cancel。
+2. **行为测试：** `ui-modal-buttons.test.ts` — **T1** `stale request must not re-enable a newer dialog Confirm`；**T2** `beginModal re-enables buttons after a successful generation bump`。
+3. **B ZCode P2-1：** `handleConfigurePushTier` 与 `handlePushTierChange` 模糊失败恢复重复，记债不修（后续抽 `recoverPushTier`）。
+4. `bun test` **754 pass / 0 fail**（R3 六条行为测例收成 T1/T2 两条）；`bun run build` 全绿。独立自审 agent `fab53156-3103-407e-9a4e-2182c03f6b71`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. R3 无条件 finally 复位：delete pending → Escape bump → 新开 revoke 并点击（disabled=true）→ 旧 delete 返回 finally 把共享 Confirm 拉回可点 → 可重复提交。
+2. 若只恢复 R2 的代际守卫、不在 beginModal 复位，成功关窗 bump 后按钮再次永死。
+
+### 我们是如何解决这些错误的？
+
+1. 两个开关同时落地：finally 代际守卫 + beginModal 统一复位。成功路径 bump 后 finally 跳过，下次 beginModal 拉回可点；stale 代际不符跳过，不碰新窗已 disable 的钮。
+2. T1 用挂起的 `apiJson`/`apply` 模拟 stale 完成；T2 抽出真实 `beginModal`，成功 leftover disabled 后再开窗断言可点。
+
 
 
 

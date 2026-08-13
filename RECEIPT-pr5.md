@@ -148,3 +148,36 @@ push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。
 `cd packages/api && bun test` **758 pass / 0 fail**；`bun run build` 全绿。
 
 push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。
+
+---
+
+## R4 返工（2026-08-13）
+
+同一分支 `tizerluo/worker-34-pr5` 就地修复，未新开分支，未动 main，未自行 merge。R3 head `67ab6be` 复审：CI/CodeRabbit pass；ZCode「可以合并」（P0/P1=0）；Codex Local 报 1 个 P1（R3 无条件 finally 引入的镜像竞态）。本轮双管齐下，收口 R2↔R3 振荡。
+
+### 逐条对账
+
+| 项 | 处置 | 证据 / 测试 |
+|---|---|---|
+| A P1 stale 复活新 dialog 按钮（Codex Local 08:33） | **fixed** | ① `finally` 仅 `openedGen === modalGeneration` 才复位；② `beginModal` bump 后无条件 `confirmModalConfirm/Cancel`、`createModalSubmit` `disabled=false`。五条：create / delete / revoke / Overview tier-3 Confirm+Cancel / Configure tier-3 Confirm+Cancel；tasks 关单同类。 |
+| A T1 | **fixed** | `packages/api/test/ui-modal-buttons.test.ts` → **`T1 stale request must not re-enable a newer dialog Confirm`**：delete（及 Overview Confirm+Cancel）pending → Escape bump → 新窗点击 disabled=true → 旧请求返回 → Confirm（+Cancel）保持 disabled。 |
+| A T2 | **fixed** | 同文件 → **`T2 beginModal re-enables buttons after a successful generation bump`**：成功路径 `closeAllModals` bump 后 leftover disabled，抽出真实 `beginModal` 重开 → Confirm/Cancel/createSubmit 可点。覆盖 delete / overview-tier3 / configure-tier3 / revoke / task-close / create。 |
+| B ZCode P2-1 模糊失败恢复重复 | **debt / 不修** | `handleConfigurePushTier` 与 `handlePushTierChange` 各约 40 行重复。ZCode 自判非本 PR 必需。后续提取共享 helper `recoverPushTier`。 |
+
+### 修法说明（A 双管）
+
+成功路径自己 `closeAllModals` bump 后 finally 跳过复位（不碰已关窗的钮），但下次任何 `beginModal` 都会复位（R2「成功后按钮死」闭环）。stale 请求代际不符跳过复位（R3「复活新窗按钮」闭环）。`beginModal` 顺序：`closeAllModals({keepGeneration:true})` → `modalGeneration += 1` → 三钮复位（bump 与复位之间无 await）。
+
+### R4 独立自审
+
+- **禁止自审自。** 新 subagent agent id：`fab53156-3103-407e-9a4e-2182c03f6b71`
+- 范围：未提交 R4 diff（解码 JSON 模块）对照 A 两条时序 + B 记债
+- 结论：**mergeable**
+- P0/P1：**无**
+- 过程：解码 `modal.ts`/`api.ts`/`push-devices.ts`/`authorized-clients.ts`/`tasks.ts`；亲自跑 T1/T2 均 pass。核对 beginModal 先 bump 再复位、stale finally 在用户已点新 Confirm 后无法写回 false、create 经 `showTokenModal`→`beginModal` 覆盖 submit。
+
+### R4 测试 / build
+
+`cd packages/api && bun test` **754 pass / 0 fail**；`bun run build` 全绿。
+
+push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。

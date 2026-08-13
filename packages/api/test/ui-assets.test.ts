@@ -1507,6 +1507,9 @@ describe('UI static asset contract', () => {
     expect(MODAL_JS).toContain('var modalGeneration = 0');
     expect(MODAL_JS).toContain('if (!opts.keepGeneration) modalGeneration += 1');
     expect(MODAL_JS).toContain('modalGeneration += 1');
+    expect(MODAL_JS).toContain('confirmModalConfirm.disabled = false');
+    expect(MODAL_JS).toContain('confirmModalCancel.disabled = false');
+    expect(MODAL_JS).toContain('createModalSubmit.disabled = false');
     expect(MODAL_JS).toContain('return modalGeneration');
     expect(MODAL_JS).toContain('modalOpener = previous');
     expect(MODAL_JS).toContain('lostFocus && previous');
@@ -1614,10 +1617,18 @@ describe('UI static asset contract', () => {
     const renderIdx = configurePush.indexOf('renderConfigurePush();', closeIdx);
     expect(renderIdx).toBeGreaterThan(closeIdx);
     expect(configurePush).toContain("querySelector('.push-tier-card.is-selected')");
-    // P1 R3：finally 复位控件不得再套代际守卫（成功 closeAllModals 会 bump）。
+    // P1 R4：finally 仅当前代际才复位；新窗由 beginModal 统一拉回可点。
     for (const src of [API_JS, AUTHORIZED_CLIENTS_PAGE_JS, TASKS_PAGE_JS, PUSH_DEVICES_PAGE_JS]) {
-      expect(src).not.toContain('if (openedGen === modalGeneration)');
+      expect(src).toContain('if (openedGen === modalGeneration)');
     }
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    const beginModal = MODAL_JS.slice(
+      MODAL_JS.indexOf('function beginModal('),
+      MODAL_JS.indexOf('function showTokenModal('),
+    );
+    expect(beginModal).toContain('confirmModalConfirm.disabled = false');
+    expect(beginModal).toContain('confirmModalCancel.disabled = false');
+    expect(beginModal).toContain('createModalSubmit.disabled = false');
   });
 
   test('identity session CSS hides admin-only create controls', () => {
