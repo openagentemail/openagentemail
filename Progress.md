@@ -556,6 +556,41 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 3. `closeNavDrawer` 先读 `data-nav-open === 'true'`，仅曾打开才恢复 `navToggle` 焦点。
 4. 统一 radiogroup/radio/`aria-checked`，并加 sr-only 当前档文案。
 
+---
+
+## #26 PR 5 返工 R2（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A 3773347575：** `allowedDocsHref` 相对路径经 `new URL(value, window.location.href)` 解析，必须 `origin` 相同；序列化结果若以 `//` 开头也拒绝（堵住 `/\evil.example` 与 `/foo/../\evil.example`）。
+2. **B 3773323957：** Configure tier 3 成功先 `closeAllModals({ skipFocus: true })` 再 `renderConfigurePush()`，并聚焦新的选中卡。
+3. **C 3773323961 / 3773347580：** `modalGeneration`；`beginModal` 递增；异步成功仅当代际仍当前才关窗/恢复控件/`showTokenModal`；`applyRoute` 的 `closeAllModals` 作废 pending。覆盖 create/rotate/delete、Overview/Configure tier 确认、revoke、关单。
+4. **D 3773323965：** 删除成功若命中 `activeAddress`，立刻清空地址/messages/detail，不靠 Overview 对账。
+5. **E：** 拒绝 `vbscript:` 并补测试。
+6. **F：** `/ui/oauth/grants` 无会话 `redirectToLogin` 注释写明恒 302 `/ui`、无开放重定向。
+7. **G：** `confirmModalOnCancel` 与 `modalOpener` 跨模块耦合记债不修。
+8. `bun test` **752 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `4dae6c68-7509-415b-b775-9213a7876b24`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. `/\evil.example` 被当成同源相对路径，WHATWG 把 `\` 当 `/` 后变成协议相对主机。
+2. origin 通过后返回 pathname，`/foo/../\evil.example` 会序列化成 `//evil.example`，赋给 `<a href>` 仍是开放跳转。
+3. tier 3 成功先 `renderConfigurePush` 再关窗，opener 节点被卸下，键盘丢焦点。
+4. 异步确认返回时若用户已路由到新确认框，旧成功路径会 `closeAllModals` 误关。
+5. 删除当前 inbox 身份后只靠 `loadOverviewCycle` 对账，进 Inbox 会 `cancelOverview` 中止对账。
+
+### 我们是如何解决这些错误的？
+
+1. 相对路径用当前 origin 解析；测试注入 `window.location`，不把 `https://` 写进 UI_JS。
+2. 序列化结果必须是单个 `/` 开头（`rel.charAt(1) !== '/'`），并补 `/foo/../\evil.example` 用例。
+3. 关窗 skipFocus 后再重绘，聚焦 `.push-tier-card.is-selected`。
+4. `modalGeneration` + `openedGen` 守卫；路由关闭不带 `keepGeneration`。
+5. 删除成功路径同步清 `activeAddress` / messages / detail。
+
 
 
 

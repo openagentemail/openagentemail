@@ -1393,7 +1393,7 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function handleConfigurePushTier('),
       UI_JS.indexOf('function renderConfigurePush('),
     );
-    expect(configurePush).toContain('await apply(3, true)');
+    expect(configurePush).toContain('await apply(3, true, openedGen)');
     expect(configurePush).toContain('confirm_risk_required');
     expect(configurePush).toContain("apiJson('/ui/api/identities')");
     expect(configurePush).toContain('bumpIdentityEpoch()');
@@ -1497,7 +1497,11 @@ describe('UI static asset contract', () => {
     expect(closeAll).toContain('opts.skipFocus');
     expect(MODAL_JS).toContain('function elementInsideModal(');
     expect(MODAL_JS).toContain("node.closest('#create-modal')");
-    expect(MODAL_JS).toContain('closeAllModals({ skipFocus: true })');
+    expect(MODAL_JS).toContain('closeAllModals({ skipFocus: true, keepGeneration: true })');
+    expect(MODAL_JS).toContain('var modalGeneration = 0');
+    expect(MODAL_JS).toContain('if (!opts.keepGeneration) modalGeneration += 1');
+    expect(MODAL_JS).toContain('modalGeneration += 1');
+    expect(MODAL_JS).toContain('return modalGeneration');
     expect(MODAL_JS).toContain('modalOpener = previous');
     expect(MODAL_JS).toContain('lostFocus && previous');
     expect(MODAL_JS.indexOf('function showTokenModal(')).toBeGreaterThan(
@@ -1522,8 +1526,12 @@ describe('UI static asset contract', () => {
   test('allowedDocsHref permits http(s) and slash-relative hrefs and rejects the rest', async () => {
     const { EMPTY_STATE_JS } = await import('../src/ui/client/components/empty-state.ts');
     expect(EMPTY_STATE_JS).toContain('function allowedDocsHref(');
+    expect(EMPTY_STATE_JS).toContain('parsedRel.origin !== window.location.origin');
+    expect(EMPTY_STATE_JS).toContain('rel.charAt(1) === \'/\'');
+    expect(EMPTY_STATE_JS).toContain("lowered.indexOf('vbscript:') === 0");
     expect(EMPTY_STATE_JS).not.toMatch(/\bhttps?:\/\//);
     const allowed = new Function(`
+      var window = { location: { href: 'http://localhost/ui/plan', origin: 'http://localhost' } };
       ${EMPTY_STATE_JS}
       return allowedDocsHref;
     `)() as (href: string) => string;
@@ -1533,7 +1541,11 @@ describe('UI static asset contract', () => {
     expect(allowed('http://example.com/docs')).toBe('http://example.com/docs');
     expect(allowed('/docs/local')).toBe('/docs/local');
     expect(allowed('//evil.example/phish')).toBe('');
+    expect(allowed('/\\evil.example')).toBe('');
+    expect(allowed('/\\\\evil.example')).toBe('');
+    expect(allowed('/foo/../\\evil.example')).toBe('');
     expect(allowed('javascript:alert(1)')).toBe('');
+    expect(allowed('vbscript:alert(1)')).toBe('');
     expect(allowed('data:text/html,hi')).toBe('');
     expect(allowed('')).toBe('');
   });
@@ -1550,6 +1562,52 @@ describe('UI static asset contract', () => {
     expect(API_JS).toContain('isConfigureScope(state.scope)');
     expect(API_JS).not.toContain("indexOf('configure-')");
     expect(UI_JS).not.toContain("indexOf('configure-')");
+  });
+
+  test('stale modal responses do not close a newer dialog', async () => {
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { AUTHORIZED_CLIENTS_PAGE_JS } = await import(
+      '../src/ui/client/pages/authorized-clients.ts'
+    );
+    const { TASKS_PAGE_JS } = await import('../src/ui/client/pages/tasks.ts');
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    for (const src of [API_JS, AUTHORIZED_CLIENTS_PAGE_JS, TASKS_PAGE_JS, PUSH_DEVICES_PAGE_JS]) {
+      expect(src).toContain('var openedGen =');
+      expect(src).toContain('openedGen !== modalGeneration');
+    }
+    const del = API_JS.slice(
+      API_JS.indexOf('function handleDeleteIdentity('),
+      API_JS.indexOf('function bumpIdentityEpoch('),
+    );
+    expect(del.indexOf('openedGen !== modalGeneration')).toBeLessThan(del.indexOf('closeAllModals();'));
+    expect(del).toContain('state.activeAddress === address');
+    expect(del).toContain("state.activeAddress = ''");
+    expect(del).toContain('clearDetail()');
+    expect(del).toContain('renderMessages()');
+    const create = API_JS.slice(
+      API_JS.indexOf('async function handleCreateSubmit('),
+      API_JS.indexOf('async function handleRotateToken('),
+    );
+    expect(create.indexOf('openedGen !== modalGeneration')).toBeLessThan(
+      create.indexOf('showTokenModal(payload.token)'),
+    );
+    const rotate = API_JS.slice(
+      API_JS.indexOf('async function handleRotateToken('),
+      API_JS.indexOf('function handleDeleteIdentity('),
+    );
+    expect(rotate.indexOf('openedGen !== modalGeneration')).toBeLessThan(
+      rotate.indexOf("showTokenModal(payload.token, 'Rotated Token')"),
+    );
+    const configurePush = PUSH_DEVICES_PAGE_JS.slice(
+      PUSH_DEVICES_PAGE_JS.indexOf('function handleConfigurePushTier('),
+      PUSH_DEVICES_PAGE_JS.indexOf('function renderConfigurePush('),
+    );
+    expect(configurePush).toContain('await apply(3, true, openedGen)');
+    expect(configurePush).toContain('closeAllModals({ skipFocus: true })');
+    const closeIdx = configurePush.indexOf('closeAllModals({ skipFocus: true })');
+    const renderIdx = configurePush.indexOf('renderConfigurePush();', closeIdx);
+    expect(renderIdx).toBeGreaterThan(closeIdx);
+    expect(configurePush).toContain("querySelector('.push-tier-card.is-selected')");
   });
 
   test('identity session CSS hides admin-only create controls', () => {

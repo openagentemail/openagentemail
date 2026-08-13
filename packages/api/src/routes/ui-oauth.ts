@@ -479,6 +479,7 @@ export function createUiOAuthPageRoutes(
     const sid = getCookie(c, 'oae_ui');
     const session = sid ? store.authenticate(sid) : null;
     if (!session) {
+      // redirectToLogin 恒 302 /ui，目标不受查询参数或 Referer 影响（无开放重定向）。
       return redirectToLogin(c);
     }
     return c.redirect('/ui/configure/clients', 302);

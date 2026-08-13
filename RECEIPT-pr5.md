@@ -22,7 +22,7 @@ Configure 分区完整闭环已推上 PR #29。后端业务能力基本复用（
 | 自托管无虚假套餐/升级 | **过** — Plan 仅实例说明 + `docsHref`/`docsLabel` 真链接（白名单 http(s) 或 `/` 相对路径）；HTML/JS 无 Upgrade 按钮 |
 | Domains 诚实 roadmap 空态 | **过** — `renderEmptyState`，无可点击无效控件 |
 | 旧 `/ui/oauth/grants` 兼容 fallback | **过** — 有会话 302 `/ui/configure/clients`；无会话先登录 |
-| API 测试 + build | `packages/api` `bun test` **751 pass / 0 fail**；`bun run build` 全绿 |
+| API 测试 + build | `packages/api` `bun test` **752 pass / 0 fail**；`bun run build` 全绿 |
 
 ## PR1 债项 ZCode P2×3（逐条）
 
@@ -79,5 +79,37 @@ Configure 分区完整闭环已推上 PR #29。后端业务能力基本复用（
 ### R1 测试 / build
 
 `cd packages/api && bun test` **751 pass / 0 fail**；`bun run build` 全绿。
+
+push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。
+
+---
+
+## R2 返工（2026-08-13）
+
+同一分支 `tizerluo/worker-34-pr5` 就地修复，未新开分支，未动 main，未自行 merge。R1 后四闸复审 CI/CodeRabbit/Codex Local 全 pass、ZCode 正文「可以合并」；新 head 上 Codex 云端 + CodeRabbit 又出实质意见，本轮逐条修。
+
+### 逐条对账
+
+| 评论 id | 项 | 处置 | 证据 / 测试 |
+|---|---|---|---|
+| 3773347575 | A `allowedDocsHref` `\` 同源绕过 | **fixed** | 相对路径 `new URL(value, window.location.href)` + `origin` 相同；序列化结果若 `rel.charAt(1)==='/'` 再拒（堵住 `/\evil.example` 与 `/foo/../\evil.example`）。测试：`allowedDocsHref permits…`（注入 `window.location`，UI_JS 无 `https://` 字面量） |
+| 3773323957 | B tier-3 先关窗再重绘 | **fixed** | `apply(3,true,openedGen)` 成功：`closeAllModals({ skipFocus: true })` 后 `renderConfigurePush()`，再聚焦 `.push-tier-card.is-selected`。测试：`stale modal responses…` 切片顺序 |
+| 3773323961 + 3773347580 | C modal 代际 | **fixed** | `modalGeneration`；`beginModal` 递增并返回；create/rotate/delete、Overview/Configure tier 确认、revoke、关单捕获 `openedGen`，仅当前代际才 `closeAllModals` / 恢复控件 / `showTokenModal`。`applyRoute`→`closeAllModals()` 不带 `keepGeneration`，作废 pending。测试：同上 + F107 仍消费 `confirmModalOnCancel` |
+| 3773323965 | D 删除 active 身份 | **fixed** | 成功路径在代际判断前：若 `state.activeAddress === address` 立刻清 address/messages/cursor/`returnAddress`，`clearDetail()`+`renderMessages()`，不靠 `loadOverviewCycle`/`cancelOverview`。测试：`handleDeleteIdentity` 切片 |
+| ZCode P2-2 | E `vbscript:` | **fixed** | `lowered.indexOf('vbscript:')===0` 返回 `''`；测试含 `vbscript:alert(1)` |
+| ZCode P2-1 | F `/grants` 无开放重定向注释 | **fixed** | `ui-oauth.ts` `/grants`：`redirectToLogin` 恒 302 `/ui`。测试：`ui-configure.test.ts` 断言注释 + Location `/ui` |
+| ZCode P2-3 | G 跨模块 modal 状态 | **debt / 不修** | `confirmModalOnCancel` 仍在 `api.ts`，`modalOpener`/`beginModal`/`closeAllModals`/`modalGeneration` 在 `modal.ts`。既有 IIFE 拼接架构延续；未来重构应把确认副作用收到同一模块。ZCode 自判本次无需动 |
+
+### R2 独立自审
+
+- **禁止自审自。** 新 subagent agent id：`4dae6c68-7509-415b-b775-9213a7876b24`
+- 范围：未提交 R2 diff（解码 JSON 模块）对照评论 A–G
+- 结论：**mergeable**
+- P0/P1：**无**
+- 过程：初审 A 标 partial（`/foo/../\evil.example` 序列化成 `//evil.example` 仍可协议相对跳出）。同轮已关：序列化结果禁止 `//` 前缀。复审：**A fixed，P2 closed，仍 mergeable**。G 按指令记债。
+
+### R2 测试 / build
+
+`cd packages/api && bun test` **752 pass / 0 fail**；`bun run build` 全绿。
 
 push 后停在 `tizerluo/worker-34-pr5` 等指挥终审，禁止自行 merge。

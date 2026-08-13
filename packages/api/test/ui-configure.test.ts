@@ -207,5 +207,8 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     });
     expect(authed.status).toBe(302);
     expect(authed.headers.get('location')).toBe('/ui/configure/clients');
+    const oauthSrc = await Bun.file(new URL('../src/routes/ui-oauth.ts', import.meta.url)).text();
+    expect(oauthSrc).toContain('redirectToLogin 恒 302 /ui');
+    expect(oauthSrc).toContain('无开放重定向');
   });
 });
