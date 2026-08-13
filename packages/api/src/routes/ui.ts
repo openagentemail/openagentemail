@@ -260,7 +260,10 @@ function taskMutationError(c: Context, err: unknown): Response {
 function notifyHistoryError(c: Context, err: unknown) {
   if (!(err instanceof NotifyError)) throw err;
   if (err.code === 'notifications_disabled' || err.code === 'notifications_unconfigured') {
-    return c.json({ error: err.code }, 503);
+    return c.json(
+      err.details?.message ? { error: err.code, message: err.details.message } : { error: err.code },
+      503,
+    );
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
   return c.json({ error: err.code }, 502);

@@ -65,7 +65,10 @@ function notificationError(c: Context, err: unknown) {
   if (err instanceof DeviceRevokeTransientError) return c.json({ error: err.code }, 502);
   if (!(err instanceof NotifyError)) throw err;
   if (err.code === 'notifications_disabled' || err.code === 'notifications_unconfigured') {
-    return c.json({ error: err.code }, 503);
+    return c.json(
+      err.details?.message ? { error: err.code, message: err.details.message } : { error: err.code },
+      503,
+    );
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
   if (err.code === 'device_registry_unavailable') return c.json({ error: err.code }, 502);

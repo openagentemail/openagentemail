@@ -22,9 +22,11 @@ import {
   type NotificationSource,
 } from './notification-log.ts';
 import {
+  DeviceNotFoundError,
   DeviceRegistryCorruptError,
   DeviceRegistryPersistError,
   listPairedDevices,
+  peekPairedDevice,
   reconcilePendingRevokes,
   registerPairedDevice,
   revokePairedDevice,
@@ -125,8 +127,10 @@ export class NotifyError extends Error {
       | 'message_too_large'
       | 'device_registry_unavailable',
     public readonly details?: {
-      maxRequestBytes: number;
-      availableMessageBytes: number;
+      maxRequestBytes?: number;
+      availableMessageBytes?: number;
+      /** 给人看的原因；API 可原样返回。 */
+      message?: string;
     },
   ) {
     super(code);
@@ -662,8 +666,20 @@ export async function listNotificationDevices(): Promise<DeviceListItem[]> {
 }
 
 export async function revokeNotificationDevice(id: string): Promise<'revoked' | 'already_revoked'> {
-  // ntfy 未启用/未配置：无远端可对账，纯本地标 revoked，避免 pending 永远卡住、也不外呼。
-  if (!config.ntfy.enabled || !config.ntfy.adminPassword) {
+  const ntfyReady = Boolean(config.ntfy.enabled && config.ntfy.adminPassword);
+  if (!ntfyReady) {
+    const device = await peekPairedDevice(id);
+    if (!device) throw new DeviceNotFoundError();
+    if (device.revokeStatus === 'revoked') return 'already_revoked';
+    // ② 记录含远端 user：临时关 ntfy / 缺 admin 密码时不得本地假吊销（凭据可能仍活着）。
+    if (device.ntfyUsername) {
+      const code = config.ntfy.enabled ? 'notifications_unconfigured' : 'notifications_disabled';
+      throw new NotifyError(code, {
+        message:
+          'Restore ntfy admin access before revoking this device. The phone credential may still receive notifications.',
+      });
+    }
+    // ① 从未配过远端（无 ntfyUsername）：无对账对象，允许本地收敛。
     return revokePairedDevice(id, async () => 'deleted');
   }
   // 对账其它 pending，但跳过本目标：revoke 自己走单次 DELETE。

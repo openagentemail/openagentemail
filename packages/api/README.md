@@ -58,7 +58,7 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
 - `POST /v1/notify/devices` `{publicUrl, displayName?}` → `201` 一次性 ntfy 凭据（password / `qrPayload` / `qr` 只此一次；`Cache-Control: no-store`）。旧 client 只传 `publicUrl` 仍可用，缺省 displayName=`Phone`。**admin only**
 - `GET /v1/notify/devices` → `{devices:[{id,displayName,topicLabels,pairedAt,revokeStatus,…}]}`（默认隐藏 `revoked`；不含 password/token）。**admin only**
-- `DELETE /v1/notify/devices/:id` → `204`（`pending_revoke` 中间态；ntfy 缺失 user = HTTP 400/code 40031 或 404，视为成功；已 revoked 幂等 204）。**admin only**
+- `DELETE /v1/notify/devices/:id` → `204`（`pending_revoke` 中间态；ntfy 缺失 user = HTTP 400/code 40031 或 404+缺失正文，视为成功；已 revoked 幂等 204）。ntfy 临时关闭且行含 `ntfyUsername` 时 `503`，不标 revoked。**admin only**
 - `GET /healthz` → `{ok:true}`
 
 ## Operating notes
@@ -96,8 +96,11 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   a bare `not_found` substring such as `{"error":"route_not_found"}` is
   transient; **all 5xx are transient regardless of body text**) → `revoked`.
   Revoke reconciles other pending rows but skips the target so one call
-  issues a single DELETE. If ntfy is disabled or unconfigured, revoke is
-  local-only (mark revoked, no outbound call). Pairing QR is ISO/IEC 18004
+  issues a single DELETE. If ntfy is temporarily disabled or the admin
+  password is missing **and** the registry row has an `ntfyUsername`, revoke
+  is refused (503) so a still-valid phone credential is not marked revoked.
+  Already-revoked rows stay idempotent 204 with no outbound call. Local
+  converge is only for rows with no remote username (ntfy never provisioned). Pairing QR is ISO/IEC 18004
   byte-mode ECC-M: data codewords are column-interleaved across RS blocks
   (short blocks skip the extra data column), then ECC columns follow. Alignment
   patterns are drawn after timing and overwrite it except the three finder

@@ -1437,6 +1437,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('function renderPairedDevices(');
     expect(UI_JS).toContain('function showDevicePairModal(');
     expect(UI_JS).toContain('function handleRevokeDevice(');
+    expect(UI_JS).toContain(
+      "'Restore ntfy admin access before revoking. The phone may still receive notifications.'",
+    );
     expect(UI_JS).toContain('topicSemantics');
     expect(UI_JS).toContain('User alerts');
     expect(UI_JS).toContain('Paired ');

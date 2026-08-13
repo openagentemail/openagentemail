@@ -1237,11 +1237,11 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
     }
   });
 
-  test('revoke with ntfy disabled converges locally without calling fetch', async () => {
+  test('revoke with ntfy disabled does not mark a remote username revoked', async () => {
     const previousNtfy = { ...config.ntfy };
     const record = await registerPairedDevice({
-      displayName: 'Local-only',
-      ntfyUsername: 'phone-localonly',
+      displayName: 'Still-live',
+      ntfyUsername: 'phone-stilllive',
       topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
     });
     Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
@@ -1254,10 +1254,13 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
       return new Response('', { status: 200 });
     }) as typeof fetch;
     try {
-      expect(await revokeNotificationDevice(record.id)).toBe('revoked');
+      await expect(revokeNotificationDevice(record.id)).rejects.toMatchObject({
+        code: 'notifications_disabled',
+      });
       expect(fetches).toBe(0);
-      const all = await listPairedDevices({ includeRevoked: true });
-      expect(all[0]?.revokeStatus).toBe('revoked');
+      const listed = await listPairedDevices();
+      expect(listed[0]?.id).toBe(record.id);
+      expect(listed[0]?.revokeStatus).toBe('active');
 
       const second = await registerPairedDevice({
         displayName: 'Unconfigured',
@@ -1268,8 +1271,52 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
         enabled: true,
         adminPassword: undefined,
       });
-      expect(await revokeNotificationDevice(second.id)).toBe('revoked');
+      await expect(revokeNotificationDevice(second.id)).rejects.toMatchObject({
+        code: 'notifications_unconfigured',
+      });
       expect(fetches).toBe(0);
+      expect((await listPairedDevices()).some((row) => row.id === second.id && row.revokeStatus === 'active')).toBe(
+        true,
+      );
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('already revoked stays idempotent when ntfy is fully unconfigured', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    let fetches = 0;
+    globalThis.fetch = (async (_input, init) => {
+      fetches += 1;
+      if (init?.method === 'DELETE') {
+        return new Response(
+          JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
+          { status: 400 },
+        );
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Was-revoked',
+        ntfyUsername: 'phone-wasrevoked',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      expect(await revokeNotificationDevice(record.id)).toBe('revoked');
+      const deletesBefore = fetches;
+      Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+        enabled: false,
+        adminPassword: undefined,
+      });
+      expect(await revokeNotificationDevice(record.id)).toBe('already_revoked');
+      expect(fetches).toBe(deletesBefore);
+      const all = await listPairedDevices({ includeRevoked: true });
+      expect(all[0]?.revokeStatus).toBe('revoked');
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }
@@ -1442,6 +1489,32 @@ describe('device list and revoke (Bearer)', () => {
       });
       expect(again.status).toBe(204);
       expect(deletes).toHaveLength(1);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('admin revoke is 503 when ntfy is disabled and the row has a remote username', async () => {
+    const previousNtfy = { ...config.ntfy };
+    const record = await registerPairedDevice({
+      displayName: 'Keep-alive',
+      ntfyUsername: 'phone-keepalive',
+      topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+    });
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+      enabled: false,
+      adminPassword: undefined,
+    });
+    try {
+      const response = await appFor({ kind: 'admin' }).request(`/v1/notify/devices/${record.id}`, {
+        method: 'DELETE',
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        error: 'notifications_disabled',
+        message: expect.stringContaining('Restore ntfy admin access'),
+      });
+      expect((await listPairedDevices())[0]?.revokeStatus).toBe('active');
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }

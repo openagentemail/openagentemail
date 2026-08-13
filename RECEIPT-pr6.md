@@ -162,7 +162,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 | A | Codex Local P1 · `qr-byte.ts` alignment（置信 0.99） | v7+ 坐标含 6，只跳三个 finder 角会在 timing 上画 5×5，随后 timing 切中心行/列，功能模块损坏。 | **已修。** finder+timing 先占位；alignment 仅中心空闲才绘制；timing 上省略的 alignment `reserveAlignment` 占位以免数据走进 ISO 扣格。finder 三角只 skip 不 reserve（初版对三角也 reserve，独立自审 P1，已收）。 | `version 7+ omits alignment on timing tracks and keeps timing intact`（含 finder 旁 `isFunc===false`）；R1 `ISO de-interleave plus RS remainder recovers pairing payload` 仍绿 |
 | B | Codex Local P1 · rename 后未 fsync 目录（置信 0.93） | 断电后目录项可能未持久化，已返回成功的创建/吊销可能丢。 | **已修。** rename 后 `open(DATA_DIR)` + `fsync`。EINVAL/ENOTSUP/ENOSYS 视为成功（注释写明，避免 NFS/FUSE 整站无法落盘）。EIO 等真失败：首次创建撤回刚 rename 的文件；覆盖写不删 registry。 | `directory fsync failure on create rolls back and leaves no half state` |
 | C | ZCode P2-1 | 裸 HTTP 404 无条件 not_found → 网关 404 假吊销。 | **R3 方向对；R7 收口。** R3 仍留裸 `not_found` 子串，`{"error":"route_not_found"}` 会误收敛。R7 404 只认 40031 / "user does not exist"。 | R7：`gateway 404 route_not_found body stays transient and does not converge` |
-| D | ZCode P2-3 | ntfy disabled/unconfigured 时 DELETE 仍落盘+外呼。 | **已修（选本地收敛）。** 无远端可对账，`revokePairedDevice(..., () => 'deleted')` 标 revoked 不 fetch，避免 pending 永远卡住。 | `revoke with ntfy disabled converges locally without calling fetch`（含 unconfigured） |
+| D | ZCode P2-3 | ntfy disabled/unconfigured 时 DELETE 仍落盘+外呼。 | **R3 混为一谈；R8 拆开。** 有 `ntfyUsername` 时拒绝 503（凭据可能仍活）；已 revoked 仍幂等 204 不外呼。 | R8：`revoke with ntfy disabled does not mark a remote username revoked`；`already revoked stays idempotent when ntfy is fully unconfigured` |
 | E2 | ZCode P2-2 | fetch 无超时致 registry 队列独占。 | **已修。** 管理面 ntfy fetch `AbortSignal.timeout(8s)`。publish/json 长轮询仍走 watcher 既有 abort（记债：不把 8s 套到消息流）。 | 实现：`ntfyFetch` |
 | E4 | ZCode P2-4 | corrupt registry 启动炸全进程。 | **已修。** `inspectDeviceRegistryAtBoot` 吞 corrupt（已 fail-closed+告警），邮件 API 仍监听。 | `corrupt registry at boot fail-closes devices but does not throw` |
 | E5 | ZCode P2-5 | UI invalid JSON 静默当 `{}` 创建。 | **已修。** 与 Bearer 一样 400 `invalid_json`。UI 客户端本就 POST `{}` 合法 JSON。 | `invalid JSON on UI device create is 400 not a silent Phone` |
@@ -337,6 +337,53 @@ OK pairing payload round-trip
 ### 完成标准
 
 - `cd packages/api && bun test` → **802 pass / 0 fail**（本机含 OpenCV；CI 无 cv2 时该条 skip）
+- `bun run build` → Bundled 568 modules，全绿
+- **CI 转绿**（push 后盯 run）
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
+---
+
+## 返工 R8（2026-08-13 · Codex Local P1 临时 disabled 假吊销 + ZCode 记债）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。相对 R7 head `e292b3d`。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `notify.ts:666`（置信 0.97） | R3 D 把两种 ntfy 未就绪混为一谈：临时 `NTFY_ENABLED=false` 或缺 admin 密码时，不删远端 user 就标永久 `revoked`。手机继续收信；ntfy 恢复后 revoked 行被对账跳过，永远无法收敛。报成功=说谎。 | **已修（选拒绝 503，不挂 pending）。** ① 无远端身份（行无 `ntfyUsername`）→ 仍允许本地收敛。② 行含 `ntfyUsername`（曾配对，凭据可能存活）→ 抛 `notifications_disabled` / `notifications_unconfigured`，HTTP **503** + `message` 人话，**不改** `revokeStatus`。已 revoked 仍幂等、不外呼。理由：凭据存活期间 UI 不该显示「已吊销」；挂 `pending_revoke` 会显示「Revoking…」同样像正在吊销。503 让 admin 先恢复 ntfy 管理面，再走 ADR 五步。 | `revoke with ntfy disabled does not mark a remote username revoked`（disabled / unconfigured 均拒绝，status 仍 active，fetches=0）；`already revoked stays idempotent when ntfy is fully unconfigured`（先 40031 收敛再关 ntfy，二次 revoke=`already_revoked`、fetch 不增加）；`admin revoke is 503 when ntfy is disabled and the row has a remote username`（Bearer 503 + message） |
+
+**与 ADR 吊销一致性：** 不冲突。ADR 是 `pending_revoke` → 删 ntfy user → `revoked`，未证明远端删除不得标 revoked。503 在步骤 1 之前拒绝，行保持 `active`。比 R3 本地假 `revoked` 更贴 ADR。
+
+### ZCode 记债（自判不阻断；本轮不改码）
+
+| # | 条目 | 理由（为何记债不改） |
+|---|---|---|
+| P1-1 | 步骤③ persist 失败靠下次 reconcile 遇 not_found 收敛 | ADR 接受语义：步骤 3 失败保持 pending；启动/列表对账用缺失信号收敛。不是静默丢吊销。 |
+| P1-2 | QR 内嵌 `publicUrl` + password 明文 | 运维配置的 pairing URL；password 明文是一次性配对设计（只展示一次、永不落盘）。改协议会破坏现有扫码。 |
+| P2-1 | dest 隔离 rename+rm 都失败时，重启见 dest+.bak 可能丢 bak | R7 同目录 rename 已成功过的路径上隔离几乎总能完成；未演示双失败。加固可加 `.failclosed` 标记。 |
+| P2-2 | 并发 list+revoke 仍可能对同一 pending 双 DELETE | R7 skip 不得加入 list in-flight（否则会等 list 先 DELETE 再 revoke 再 DELETE）。单次 revoke 调用已是一次 DELETE。 |
+| P2-3 | 幽灵 user 清理仍 best-effort、无重试队列 | R2 B②：凭据从未落盘，无法对账；下次创建用新 username。 |
+| P2-4 | 顺序请求仍全量 reconcile pending（无跨请求 TTL） | R2 B①：列表必须收敛刚写入的 pending；pending 稀有。并发 in-flight 已合并。 |
+| P2-5 | 首次写 `.tmp` 已 fsync 但 rename 前崩溃会丢唯一副本 | 早期 Codex P2；首次创建无 dest，不完整 tmp 故意丢弃以免半截 JSON。与覆盖写 `.bak` 路径不同。 |
+
+指挥转述 ZCode「可以合并」（P0=0，P1×2 建议跟进=记债，P2×5 不阻断）。上表 P2-1…P2-5 为对照本仓仍开放的加固项，不扩本轮 scope。
+
+### 独立自审（R8 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `e3cb234e-76ca-412d-858e-7e1920d25e55` |
+| 审查对象 | 未提交工作区相对 `e292b3d` 的 R8 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — 有 `ntfyUsername` 时 503、status 仍 active、无 fetch；已 revoked 幂等。 |
+| ADR | **不冲突** — 503 在步骤 1 前拒绝，比本地假 revoked 更贴五步。 |
+| 过程 | 对照 diff、`revokeNotificationDevice` / `peekPairedDevice` / ADR、Bearer/UI 503、测试；未改文件、未委托。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **804 pass / 0 fail**（本机含 OpenCV；CI 无 cv2 时该条 skip）
 - `bun run build` → Bundled 568 modules，全绿
 - **CI 转绿**（push 后盯 run）
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。

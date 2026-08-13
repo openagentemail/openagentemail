@@ -873,4 +873,30 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 2. `restoreOverwrittenRegistry` 两路失败则 failClosed + 隔离 dest + throw；`recoverBackupSync` 见 unrestored+.bak 不得丢 bak。测试缝 `snapshotRestoreHookForTests`。
 3. revoke 调用 `reconcileNotificationDevices(id)` 跳过本目标；skip 不写 `reconcileInFlight`。
 
+---
+
+## #26 PR 6 返工 R8（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **拆开 ntfy 未就绪的两种吊销语义：** 行含 `ntfyUsername` 时临时 disabled / 缺 admin 密码 → **拒绝 503**（人话 message），不标 revoked、不外呼。已 revoked 仍幂等。无远端 username 才允许本地收敛。
+2. UI 吊销失败对 `notifications_disabled` / `unconfigured` 宣布「先恢复 ntfy，手机可能仍在收通知」。
+3. ZCode P1×2 + P2×5 **只记债不改码**（见 `RECEIPT-pr6.md` R8）。
+4. `bun test` **804 pass / 0 fail**；`bun run build` 全绿。独立自审 `e3cb234e-76ca-412d-858e-7e1920d25e55`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：R3 本地收敛把「从未配 ntfy」和「临时关掉 / 缺密码但远端仍可达」混在一起，假吊销后对账永远跳过。
+2. 若挂 `pending_revoke`，UI 会显示「Revoking…」，同样不像诚实失败。
+
+### 我们是如何解决这些错误的？
+
+1. `peekPairedDevice` 后按是否有 `ntfyUsername` 分流；有则 `NotifyError` 503 + message。选拒绝而非 pending，因为凭据存活期间设备不该显示已吊销或正在吊销。
+2. 已 revoked + ntfy 全关：直接 `already_revoked`，回归不外呼。
+3. ZCode 条目写入回执记债表，本轮零改码。
+
 

@@ -9,7 +9,8 @@
  *
  * 吊销：active → pending_revoke（先落盘）→ 删 ntfy user（仅 40031 /
  * "user does not exist" 算缺失成功）→ revoked。步骤 1 失败不得触达 ntfy；
- * 步骤 3 失败保持 pending，启动/列表对账因缺失信号收敛到 revoked。
+ * 步骤 3 失败保持 pending。ntfy 临时关闭且行含 ntfyUsername 时拒绝吊销，
+ * 不得本地假标 revoked。启动/列表对账因缺失信号收敛到 revoked。
  */
 
 import {
@@ -577,6 +578,14 @@ export function listPairedDevices(options: { includeRevoked?: boolean } = {}): P
     return file.devices
       .filter((row) => options.includeRevoked || row.revokeStatus !== 'revoked')
       .map(toListItem);
+  });
+}
+
+/** 吊销入口读一行（含 ntfyUsername）；不走 HTTP 列表。 */
+export function peekPairedDevice(id: string): Promise<DeviceRecord | undefined> {
+  return enqueue(() => {
+    const file = readRegistrySync();
+    return file.devices.find((row) => row.id === id);
   });
 }
 
