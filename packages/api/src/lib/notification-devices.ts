@@ -7,9 +7,9 @@
  * 同目录 .tmp + fsync 文件 + atomic rename + fsync 目录。
  * 覆盖写先把旧文件改名为 .bak，目录 fsync 失败则换回，成功再删 .bak。
  *
- * 吊销：active → pending_revoke（先落盘）→ 删 ntfy user（404/not_found 算成功）
- * → revoked。步骤 1 失败不得触达 ntfy；步骤 3 失败保持 pending，启动/列表对账
- * 因 not_found 收敛到 revoked。
+ * 吊销：active → pending_revoke（先落盘）→ 删 ntfy user（仅 40031 /
+ * "user does not exist" 算缺失成功）→ revoked。步骤 1 失败不得触达 ntfy；
+ * 步骤 3 失败保持 pending，启动/列表对账因缺失信号收敛到 revoked。
  */
 
 import {
@@ -114,6 +114,7 @@ let writeChain: Promise<unknown> = Promise.resolve();
 let persistHookForTests: (() => void) | null = null;
 let dirFsyncHookForTests: (() => void) | null = null;
 let bakRestoreHookForTests: (() => void) | null = null;
+let snapshotRestoreHookForTests: (() => void) | null = null;
 let nowFn: () => number = () => Date.now();
 let failClosed = false;
 
@@ -127,6 +128,10 @@ function tmpPath(): string {
 
 function bakPath(): string {
   return `${storePath()}.bak`;
+}
+
+function unrestoredPath(): string {
+  return `${storePath()}.unrestored`;
 }
 
 /**
@@ -268,6 +273,12 @@ function recoverCrashTmpSync(): void {
 function recoverBackupSync(): void {
   const bak = bakPath();
   const dest = storePath();
+  // 三连失败把新 dest 隔离成 .unrestored：不得当有效文件，也不得丢掉 .bak。
+  if (existsSync(unrestoredPath()) && existsSync(bak)) {
+    failClosed = true;
+    deviceRegistryHealthAlert('crash_bak_restore_exhausted', { path: DEVICE_REGISTRY_FILE });
+    throw new DeviceRegistryCorruptError();
+  }
   if (!existsSync(bak)) return;
   if (!existsSync(dest)) {
     try {
@@ -298,6 +309,7 @@ function recoverBackupSync(): void {
 /** 目录 fsync 失败时把覆盖写滚回旧 registry（.bak 优先，内存快照兜底）。 */
 function restoreOverwrittenRegistry(dest: string, bak: string, previous: Buffer | null): void {
   try {
+    bakRestoreHookForTests?.();
     if (existsSync(bak)) {
       renameSync(bak, dest);
       return;
@@ -305,15 +317,32 @@ function restoreOverwrittenRegistry(dest: string, bak: string, previous: Buffer 
   } catch {
     // 下面用内存快照再写一次
   }
-  if (!previous) return;
   try {
-    writeFileSync(dest, previous, { mode: 0o600 });
+    snapshotRestoreHookForTests?.();
+    if (previous) {
+      writeFileSync(dest, previous, { mode: 0o600 });
+      return;
+    }
   } catch {
-    // 恢复失败仍抛原 fsync 错；调用方看到 persist 失败
+    // 三连失败走 fail-closed
   }
+  failClosed = true;
+  deviceRegistryHealthAlert('crash_bak_restore_exhausted', { path: DEVICE_REGISTRY_FILE });
+  // 把新 dest 挪走，避免下次读盘把新文件当有效并丢掉 .bak。
+  try {
+    if (existsSync(dest)) renameSync(dest, unrestoredPath());
+  } catch {
+    try {
+      rmSync(dest, { force: true });
+    } catch {
+      // dest 挪不走也保持 failClosed；.bak 仍留着
+    }
+  }
+  throw new DeviceRegistryCorruptError();
 }
 
 function readRegistrySync(): RegistryFile {
+  if (failClosed) throw new DeviceRegistryCorruptError();
   recoverCrashTmpSync();
   recoverBackupSync();
   const path = storePath();
@@ -523,11 +552,13 @@ export function revokePairedDevice(
   });
 }
 
-export function reconcilePendingRevokes(deleteUser: DeleteNtfyUser): Promise<void> {
+/** skipDeviceId：revoke 入口对账其它 pending，但跳过本次目标，避免对同一 user 连 DELETE 两次。 */
+export function reconcilePendingRevokes(deleteUser: DeleteNtfyUser, skipDeviceId?: string): Promise<void> {
   return enqueue(async () => {
     const file = readRegistrySync();
     for (const device of file.devices) {
       if (device.revokeStatus !== 'pending_revoke') continue;
+      if (skipDeviceId && device.id === skipDeviceId) continue;
       try {
         await finishRevoke(file, device, deleteUser);
       } catch (err) {
@@ -578,6 +609,10 @@ export function setDeviceRegistryBakRestoreHookForTests(hook: (() => void) | nul
   bakRestoreHookForTests = hook;
 }
 
+export function setDeviceRegistrySnapshotRestoreHookForTests(hook: (() => void) | null): void {
+  snapshotRestoreHookForTests = hook;
+}
+
 export function setDeviceRegistryNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
 }
@@ -587,9 +622,10 @@ export function resetDeviceRegistryForTests(): void {
   persistHookForTests = null;
   dirFsyncHookForTests = null;
   bakRestoreHookForTests = null;
+  snapshotRestoreHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
-  for (const path of [storePath(), tmpPath(), bakPath()]) {
+  for (const path of [storePath(), tmpPath(), bakPath(), unrestoredPath()]) {
     try {
       if (existsSync(path)) rmSync(path, { force: true });
     } catch {

@@ -505,7 +505,7 @@ async function deleteNtfyUser(username: string): Promise<void> {
   }
 }
 
-function ntfyDeleteBodyMeansMissingUser(body: string, allowNotFoundToken: boolean): boolean {
+function ntfyDeleteBodyMeansMissingUser(body: string): boolean {
   const trimmed = body.trim();
   if (!trimmed) return false;
   let code: number | undefined;
@@ -518,16 +518,15 @@ function ntfyDeleteBodyMeansMissingUser(body: string, allowNotFoundToken: boolea
     error = trimmed;
   }
   const haystack = `${error} ${trimmed}`.toLowerCase();
-  if (code === 40031 || haystack.includes('user does not exist')) return true;
-  if (allowNotFoundToken && haystack.includes('not_found')) return true;
-  return false;
+  // 只认 ntfy 缺 user 信号；裸 not_found 会误伤 {"error":"route_not_found"}。
+  return code === 40031 || haystack.includes('user does not exist');
 }
 
 /**
  * 吊销路径：远端 user 已不存在视为删除成功。
  * 现网 ntfy `handleUsersDelete` 对缺失 user 返回 HTTP 400 / code 40031 /
  * "user does not exist"（不是裸 HTTP 404）。网络错误与 5xx 是 transient。
- * 反代/网关裸 404 不得收敛 revoked。
+ * 反代/网关 404（含 route_not_found）不得收敛 revoked。
  */
 export function classifyNtfyUserDeleteResponse(
   status: number,
@@ -536,11 +535,10 @@ export function classifyNtfyUserDeleteResponse(
   if (status >= 200 && status < 300) return 'deleted';
   // 一切 5xx 不看 body：远端 user 可能仍在，不得收敛 revoked。
   if (status >= 500) return 'transient';
-  if (status === 404) {
-    return ntfyDeleteBodyMeansMissingUser(body, true) ? 'not_found' : 'transient';
+  if (status === 404 || status === 400) {
+    return ntfyDeleteBodyMeansMissingUser(body) ? 'not_found' : 'transient';
   }
-  if (status !== 400) return 'transient';
-  return ntfyDeleteBodyMeansMissingUser(body, false) ? 'not_found' : 'transient';
+  return 'transient';
 }
 
 export async function deleteNtfyUserResult(username: string): Promise<NtfyUserDeleteResult> {
@@ -642,8 +640,12 @@ export async function createNotificationDevice(
 
 let reconcileInFlight: Promise<void> | null = null;
 
-export async function reconcileNotificationDevices(): Promise<void> {
+export async function reconcileNotificationDevices(skipDeviceId?: string): Promise<void> {
   if (!config.ntfy.enabled || !config.ntfy.adminPassword) return;
+  // skip 路径只清其它 pending，不占用/替换 list 的 in-flight coalesce。
+  if (skipDeviceId) {
+    return reconcilePendingRevokes(deleteNtfyUserResult, skipDeviceId);
+  }
   // 并发入口共用一次 in-flight（同一 tick 的 list/revoke 不放大 ntfy）。
   // 不做跨请求 TTL：列表必须能收敛刚写入的 pending_revoke。
   if (reconcileInFlight) return reconcileInFlight;
@@ -664,7 +666,8 @@ export async function revokeNotificationDevice(id: string): Promise<'revoked' | 
   if (!config.ntfy.enabled || !config.ntfy.adminPassword) {
     return revokePairedDevice(id, async () => 'deleted');
   }
-  await reconcileNotificationDevices();
+  // 对账其它 pending，但跳过本目标：revoke 自己走单次 DELETE。
+  await reconcileNotificationDevices(id);
   return revokePairedDevice(id, deleteNtfyUserResult);
 }
 

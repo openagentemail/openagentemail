@@ -53,7 +53,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 
 ### 设备吊销一致性
 
-落实 ADR 五步：① 先写 `pending_revoke`，落盘失败不调 ntfy；② 现网 ntfy 缺失 user = HTTP 400 / code 40031 / "user does not exist"（及 HTTP 404）= 成功，网络/5xx = `transient`（`classifyNtfyUserDeleteResponse` 不得把泛 400 或网络错误当 not_found）；③ 再写 `revoked`；④ 启动 `inspectDeviceRegistry` + `initializeNotifications` → `reconcilePendingRevokes`；列表/吊销入口先 reconcile；⑤ 列表默认隐藏 `revoked`，`pending_revoke` 对 admin 显示「Revoking…」。
+落实 ADR 五步：① 先写 `pending_revoke`，落盘失败不调 ntfy；② 现网 ntfy 缺失 user = HTTP 400 / code 40031 / "user does not exist"（HTTP 404 仅当 body 含这两项之一，裸 `not_found` / `route_not_found` 不算）= 成功，网络/5xx = `transient`（`classifyNtfyUserDeleteResponse` 不得把泛 400 或网络错误当 not_found）；③ 再写 `revoked`；④ 启动 `inspectDeviceRegistry` + `initializeNotifications` → `reconcilePendingRevokes`；列表/吊销入口先 reconcile（revoke 跳过本目标）；⑤ 列表默认隐藏 `revoked`，`pending_revoke` 对 admin 显示「Revoking…」。
 
 ### DATA_DIR 单写者
 
@@ -161,7 +161,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 |---|---|---|---|---|
 | A | Codex Local P1 · `qr-byte.ts` alignment（置信 0.99） | v7+ 坐标含 6，只跳三个 finder 角会在 timing 上画 5×5，随后 timing 切中心行/列，功能模块损坏。 | **已修。** finder+timing 先占位；alignment 仅中心空闲才绘制；timing 上省略的 alignment `reserveAlignment` 占位以免数据走进 ISO 扣格。finder 三角只 skip 不 reserve（初版对三角也 reserve，独立自审 P1，已收）。 | `version 7+ omits alignment on timing tracks and keeps timing intact`（含 finder 旁 `isFunc===false`）；R1 `ISO de-interleave plus RS remainder recovers pairing payload` 仍绿 |
 | B | Codex Local P1 · rename 后未 fsync 目录（置信 0.93） | 断电后目录项可能未持久化，已返回成功的创建/吊销可能丢。 | **已修。** rename 后 `open(DATA_DIR)` + `fsync`。EINVAL/ENOTSUP/ENOSYS 视为成功（注释写明，避免 NFS/FUSE 整站无法落盘）。EIO 等真失败：首次创建撤回刚 rename 的文件；覆盖写不删 registry。 | `directory fsync failure on create rolls back and leaves no half state` |
-| C | ZCode P2-1 | 裸 HTTP 404 无条件 not_found → 网关 404 假吊销。 | **已修。** 404 须 body 含 40031 / "user does not exist" / not_found 才收敛；裸 404 与 40401 page not found 为 transient。 | `bare 404 without missing-user body stays transient and does not converge` |
+| C | ZCode P2-1 | 裸 HTTP 404 无条件 not_found → 网关 404 假吊销。 | **R3 方向对；R7 收口。** R3 仍留裸 `not_found` 子串，`{"error":"route_not_found"}` 会误收敛。R7 404 只认 40031 / "user does not exist"。 | R7：`gateway 404 route_not_found body stays transient and does not converge` |
 | D | ZCode P2-3 | ntfy disabled/unconfigured 时 DELETE 仍落盘+外呼。 | **已修（选本地收敛）。** 无远端可对账，`revokePairedDevice(..., () => 'deleted')` 标 revoked 不 fetch，避免 pending 永远卡住。 | `revoke with ntfy disabled converges locally without calling fetch`（含 unconfigured） |
 | E2 | ZCode P2-2 | fetch 无超时致 registry 队列独占。 | **已修。** 管理面 ntfy fetch `AbortSignal.timeout(8s)`。publish/json 长轮询仍走 watcher 既有 abort（记债：不把 8s 套到消息流）。 | 实现：`ntfyFetch` |
 | E4 | ZCode P2-4 | corrupt registry 启动炸全进程。 | **已修。** `inspectDeviceRegistryAtBoot` 吞 corrupt（已 fail-closed+告警），邮件 API 仍监听。 | `corrupt registry at boot fail-closes devices but does not throw` |
@@ -306,6 +306,41 @@ OK pairing payload round-trip
 - **CI 转绿**（push 后盯 run）
 - 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
+---
+
+## 返工 R7（2026-08-13 · Codex 云端 P1 分类器 + P2 三连恢复 + P2 双 DELETE）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。相对 R6 head `c15fb43`。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex 云端 P1 · `notify.ts` 分类器 | 404 匹配名单留裸 `not_found` 子串。反代/错误路由 body `{"error":"route_not_found"}` 含该子串 → 判 missing user → 本地永久 `revoked` 并隐藏，远端账号没删。 | **已修。** `ntfyDeleteBodyMeansMissingUser` 只认 `code === 40031` 或文本 `"user does not exist"`；删掉裸 `not_found`。其余 404/400 一律 transient。5xx 仍不看 body。 | `gateway 404 route_not_found body stays transient and does not converge`（404 + `route_not_found` → pending_revoke）；`5xx body containing user-does-not-exist stays transient; 40031/404 still not_found`（`(404,'not_found')` 现为 transient；40031 / `"user does not exist"` 仍 not_found） |
+| B | Codex 云端 P2 · `notification-devices.ts` | 目录 fsync 失败后 `.bak` rename 失败 + 内存快照 `writeFileSync` 也失败时错误被吞，新 dest 留着；下次读盘 dest+.bak 丢 bak → active 指向已被删的 ntfy 账号。 | **已修。** 两路都失败：`failClosed`、新 dest 隔离为 `.unrestored`、保留 `.bak`、throw `DeviceRegistryCorruptError`。`recoverBackupSync` 见 unrestored+.bak 不得丢 bak。 | `triple restore failure fail-closes and keeps bak evidence`（三连失败 → list/register throw corrupt；`.bak` 仍是 Keep；dest 不在；`.unrestored` 含 New） |
+| C | Codex 云端 P2 · `notify.ts` | `revokeNotificationDevice` 先 `reconcile`（已对 pending 目标 DELETE），再 `revokePairedDevice` 又 DELETE。ntfy 无响应时一次重试吃两个 8s。 | **已修。** `reconcileNotificationDevices(skipDeviceId)` 处理其它 pending 但跳过本次目标；skip 路径不占用/替换 list 的 in-flight coalesce。目标只走 revoke 单次 DELETE。 | `pending_revoke target issues a single DELETE when ntfy is 503`（已 pending + 全 503 → 第二次 revoke 只 1 次 DELETE） |
+
+### 独立自审（R7 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `62d40cd6-c839-4987-b09b-c3fa655f66e5` |
+| 审查对象 | 未提交工作区相对 `c15fb43` 的 R7 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — 只认 40031 / "user does not exist"；`route_not_found` 与裸 `not_found` 为 transient。 |
+| B 裁定 | **过** — 三连失败 failClosed + `.unrestored` 隔离 + `.bak` 保留；下次读盘不得丢 bak 当新 dest 有效。 |
+| C 裁定 | **过** — skip 本目标且不碰 `reconcileInFlight`；单目标 503 revoke 一次 DELETE。 |
+| 过程 | 对照 `git diff c15fb43` 与分类器/恢复/skip 路径；跑 `notify.test.ts` + `notification-devices.test.ts`（65 pass）；未改文件、未委托。 |
+| 残余（不当作 finding） | dest 隔离 rename+rm 都失败时重启仍可能 dest+.bak 丢 bak（同目录 rename 已成功过，未演示）；并发 list+revoke 仍可能双 DELETE（skip 不得加入 in-flight，单次 revoke 调用已是一次 DELETE）。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **802 pass / 0 fail**（本机含 OpenCV；CI 无 cv2 时该条 skip）
+- `bun run build` → Bundled 568 modules，全绿
+- **CI 转绿**（push 后盯 run）
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
+
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 
 未开真浏览器拍屏。依据 shell + CSS：
@@ -331,7 +366,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/data" "$WORKDIR/ntfy"
 chmod 700 "$WORKDIR/data"
 
-# mock ntfy：POST/ACL 200；DELETE 默认 404（幂等成功，便于吊销立刻失效）
+# mock ntfy：POST/ACL 200；DELETE 默认 40031（缺失 user 成功，便于吊销立刻失效）
 cat > "$WORKDIR/mock-ntfy.ts" <<'EOF'
 const users = new Set<string>();
 Bun.serve({
@@ -348,7 +383,10 @@ Bun.serve({
       return new Response('', { status: 200 });
     }
     if (req.method === 'DELETE' && url.pathname === '/v1/users') {
-      return new Response('not_found', { status: 404 });
+      return new Response(
+        JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
+        { status: 400 },
+      );
     }
     return new Response('ok', { status: 200 });
   },
@@ -453,7 +491,7 @@ EOF
 chmod 600 "$WORKDIR/data/notification-devices.json"
 ```
 
-- mock DELETE=404：重启后启动对账会把 `Lost phone` 收敛成 `revoked`（列表默认不再显示）。
+- mock DELETE=40031：重启后启动对账会把 `Lost phone` 收敛成 `revoked`（列表默认不再显示）。
 - mock DELETE=503：`Lost phone` 保持「Revoking…」，可拍中间态。
 - 点 Kitchen phone 的 Revoke → 确认框文案含设备名。
 

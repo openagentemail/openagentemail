@@ -34,7 +34,9 @@ const {
   revokePairedDevice,
   setDeviceRegistryDirFsyncHookForTests,
   setDeviceRegistryBakRestoreHookForTests,
+  setDeviceRegistrySnapshotRestoreHookForTests,
   setDeviceRegistryPersistHookForTests,
+  deviceRegistryFailClosedForTests,
 } = await import('../src/lib/notification-devices.ts');
 
 const topics = { userAlerts: 'user-alerts-abc', userLow: 'user-low-abc' };
@@ -364,5 +366,35 @@ describe('notification device registry', () => {
     expect(readFileSync(bak, 'utf8')).toContain('Keep');
     expect(readFileSync(bak, 'utf8')).toContain(kept.id);
     expect(readFileSync(bak, 'utf8')).not.toContain('New');
+  });
+
+  test('triple restore failure fail-closes and keeps bak evidence', async () => {
+    const kept = await registerPairedDevice(seedInput('Keep'));
+    const dest = deviceRegistryPathForTests();
+    const bak = `${dest}.bak`;
+    const unrestored = `${dest}.unrestored`;
+    setDeviceRegistryDirFsyncHookForTests(() => {
+      const err = new Error('EIO: dir fsync');
+      (err as NodeJS.ErrnoException).code = 'EIO';
+      throw err;
+    });
+    setDeviceRegistryBakRestoreHookForTests(() => {
+      throw new Error('EACCES: bak restore');
+    });
+    setDeviceRegistrySnapshotRestoreHookForTests(() => {
+      throw new Error('ENOSPC: snapshot restore');
+    });
+    await expect(registerPairedDevice(seedInput('New'))).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(deviceRegistryFailClosedForTests()).toBe(true);
+    await expect(listPairedDevices()).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
+    expect(existsSync(bak)).toBe(true);
+    expect(readFileSync(bak, 'utf8')).toContain('Keep');
+    expect(readFileSync(bak, 'utf8')).toContain(kept.id);
+    expect(readFileSync(bak, 'utf8')).not.toContain('New');
+    // 新 dest 不得当有效文件：已隔离或删除，.bak 仍是旧表。
+    expect(existsSync(dest)).toBe(false);
+    expect(existsSync(unrestored)).toBe(true);
+    expect(readFileSync(unrestored, 'utf8')).toContain('New');
+    await expect(registerPairedDevice(seedInput('After'))).rejects.toBeInstanceOf(DeviceRegistryCorruptError);
   });
 });

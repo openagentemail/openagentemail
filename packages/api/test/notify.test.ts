@@ -1200,12 +1200,15 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
         JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
       ),
     ).toBe('not_found');
-    expect(classifyNtfyUserDeleteResponse(404, 'not_found')).toBe('not_found');
+    expect(classifyNtfyUserDeleteResponse(404, 'not_found')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(404, '{"error":"route_not_found"}')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(404, 'user does not exist')).toBe('not_found');
   });
 
-  test('bare 404 without missing-user body stays transient and does not converge', async () => {
+  test('gateway 404 route_not_found body stays transient and does not converge', async () => {
     expect(classifyNtfyUserDeleteResponse(404, '')).toBe('transient');
     expect(classifyNtfyUserDeleteResponse(404, '{}')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(404, '{"error":"route_not_found"}')).toBe('transient');
     const previousNtfy = { ...config.ntfy };
     Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
       enabled: true,
@@ -1213,7 +1216,9 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
       publicUrl: 'https://notify.test',
     });
     globalThis.fetch = (async (_input, init) => {
-      if (init?.method === 'DELETE') return new Response('', { status: 404 });
+      if (init?.method === 'DELETE') {
+        return new Response(JSON.stringify({ error: 'route_not_found' }), { status: 404 });
+      }
       return new Response('', { status: 200 });
     }) as typeof fetch;
     try {
@@ -1337,6 +1342,42 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
       release();
       await Promise.all([a, b]);
       expect(deletes).toBe(1);
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('pending_revoke target issues a single DELETE when ntfy is 503', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    let deletes = 0;
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return new Response('unavailable', { status: 503 });
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Once-delete',
+        ntfyUsername: 'phone-oncedelete',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      await expect(revokeNotificationDevice(record.id)).rejects.toMatchObject({
+        code: 'device_revoke_retry',
+      });
+      expect((await listPairedDevices())[0]?.revokeStatus).toBe('pending_revoke');
+      deletes = 0;
+      await expect(revokeNotificationDevice(record.id)).rejects.toMatchObject({
+        code: 'device_revoke_retry',
+      });
+      expect(deletes).toBe(1);
+      expect((await listPairedDevices())[0]?.revokeStatus).toBe('pending_revoke');
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }

@@ -92,9 +92,11 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   `My "password": vault` is allowed). Revoke is
   `active → pending_revoke` (persist first; failure must not call ntfy) → delete
   ntfy user (live ntfy missing user is HTTP 400 / code 40031 / "user does not
-  exist"; HTTP 404 counts as success **only** with that missing-user body —
-  a bare gateway 404 is transient; **all 5xx are transient regardless of
-  body text**) → `revoked`. If ntfy is disabled or unconfigured, revoke is
+  exist"; HTTP 404 counts as success **only** with code 40031 or that text —
+  a bare `not_found` substring such as `{"error":"route_not_found"}` is
+  transient; **all 5xx are transient regardless of body text**) → `revoked`.
+  Revoke reconciles other pending rows but skips the target so one call
+  issues a single DELETE. If ntfy is disabled or unconfigured, revoke is
   local-only (mark revoked, no outbound call). Pairing QR is ISO/IEC 18004
   byte-mode ECC-M: data codewords are column-interleaved across RS blocks
   (short blocks skip the extra data column), then ECC columns follow. Alignment
@@ -106,4 +108,6 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   Overwrite persist keeps the previous registry as `.bak` and restores it if
   directory fsync fails, so a 502 matches the on-disk devices. If dest is
   missing and `.bak` cannot be renamed back, the registry fail-closes instead
-  of treating the store as empty.
+  of treating the store as empty. If directory fsync, `.bak` rename, and the
+  in-memory snapshot write all fail, the new dest is isolated as `.unrestored`
+  and the API fail-closes; `.bak` is kept and must not be discarded.

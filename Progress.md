@@ -846,4 +846,31 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 3. 恢复失败 failClosed；persist 见 unrestored bak 拒写。
 4. 真扫码脚本 + bun skipIf 无 cv2。解码输出进回执。
 
+---
+
+## #26 PR 6 返工 R7（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **分类器收口：** 404/400 只认 ntfy `code 40031` 或 `"user does not exist"`。裸 `not_found` 子串删除，`{"error":"route_not_found"}` 为 transient，不收敛 revoked。
+2. **覆盖写三连失败 fail-closed：** 目录 fsync + `.bak` rename + 内存快照写都失败时，新 dest 隔离为 `.unrestored`，保留 `.bak`，registry `failClosed`，设备 API 抛 `DeviceRegistryCorruptError`。
+3. **revoke 单次 DELETE：** `reconcileNotificationDevices(skipDeviceId)` 跳过本次目标，不占用 list in-flight；已 pending 目标在 ntfy 503 时一次 revoke 只发一次 DELETE。
+4. `bun test` **802 pass / 0 fail**；`bun run build` 全绿。独立自审 `62d40cd6-c839-4987-b09b-c3fa655f66e5`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex 云端 P1：R3「404 看 body」方向对，但匹配名单留裸 `not_found`，反代 `route_not_found` 被判 missing user。
+2. Codex 云端 P2：restore 两路都失败时错误被吞，新 dest 在位，下次读盘丢 bak。
+3. Codex 云端 P2：revoke 前 reconcile 已对该 pending 目标 DELETE，revoke 再 DELETE 一次。
+
+### 我们是如何解决这些错误的？
+
+1. `ntfyDeleteBodyMeansMissingUser` 去掉 `allowNotFoundToken` / 裸 `not_found`；测试把 `(404,'not_found')` 改为 transient，并钉 `route_not_found` 不收敛。
+2. `restoreOverwrittenRegistry` 两路失败则 failClosed + 隔离 dest + throw；`recoverBackupSync` 见 unrestored+.bak 不得丢 bak。测试缝 `snapshotRestoreHookForTests`。
+3. revoke 调用 `reconcileNotificationDevices(id)` 跳过本目标；skip 不写 `reconcileInFlight`。
+
 
