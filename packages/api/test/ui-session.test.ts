@@ -1,6 +1,6 @@
 // config.ts 在 import 时解析 env；裸 env 单跑会 ZodError/TDZ。套件标准前奏。
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -353,6 +353,61 @@ describe('UI session persistence', () => {
     const afterThrottle = readFileSync(path, 'utf8');
     expect(afterThrottle).not.toBe(afterCreate);
     expect(afterThrottle).toContain(`"lastSeenAt": ${t0 + interval}`);
+  });
+
+  test('文件不存在的 loadFromDisk 也设置 lastSeenPersistedAt', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-ui-sess-missing-'));
+    const path = join(dir, 'ui-sessions.json');
+    expect(existsSync(path)).toBe(false);
+    const store = new UiSessionStore({
+      resolveToken: adminResolver,
+      resolveTokenHash: adminHashResolver,
+      persistPath: path,
+    });
+    expect(store.lastSeenPersistedAtForTests()).toBeGreaterThan(0);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test('不走 create：从磁盘加载后间隔内 authenticate 不落盘', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-ui-sess-reload-throttle-'));
+    const path = join(dir, 'ui-sessions.json');
+    const interval = 60_000;
+    const t0 = Date.now();
+    const writer = new UiSessionStore({
+      resolveToken: adminResolver,
+      resolveTokenHash: adminHashResolver,
+      persistPath: path,
+      lastSeenPersistIntervalMs: interval,
+    });
+    const created = writer.create(adminToken, '127.0.0.1', t0, true);
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error('expected a session');
+    const afterCreate = readFileSync(path, 'utf8');
+
+    // 新 store 只 loadFromDisk，不走 create；节流时钟应已钉住
+    const reloaded = new UiSessionStore({
+      resolveToken: adminResolver,
+      resolveTokenHash: adminHashResolver,
+      persistPath: path,
+      lastSeenPersistIntervalMs: interval,
+    });
+    expect(reloaded.lastSeenPersistedAtForTests()).toBeGreaterThan(0);
+    expect(reloaded.authenticate(created.sid, t0 + 1_000)).not.toBeNull();
+    expect(readFileSync(path, 'utf8')).toBe(afterCreate);
+  });
+
+  test('启动时清理 ui-sessions.json.tmp 残留', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-ui-sess-tmp-'));
+    const path = join(dir, 'ui-sessions.json');
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, '{"stale":true}', { mode: 0o600 });
+    expect(existsSync(tmp)).toBe(true);
+    new UiSessionStore({
+      resolveToken: adminResolver,
+      resolveTokenHash: adminHashResolver,
+      persistPath: path,
+    });
+    expect(existsSync(tmp)).toBe(false);
   });
 
   test('持久化后 LRU / 容量语义不变', () => {

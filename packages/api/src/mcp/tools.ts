@@ -274,7 +274,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "List Email Messages",
       description:
-        "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet/source." +
+        "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet/hasOtp/source." +
         UNTRUSTED_CONTENT_DESCRIPTION +
         " Non-internal snippets are fenced with the same UNTRUSTED EXTERNAL EMAIL markers as full bodies.",
       inputSchema: {

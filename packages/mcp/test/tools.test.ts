@@ -96,6 +96,8 @@ test("读信类工具带 untrustedContentHint，description 钉死 fail-closed �
   // F1：snippet 已围栏，不得再声称 not fenced。
   expect(listDesc).not.toContain("Snippets are not fenced");
   expect(listDesc).toContain("Non-internal snippets are fenced");
+  expect(listDesc).toContain("hasOtp");
+  expect(listDesc).toContain("source");
   // 非读信工具不应误标。
   expect(toolConfigs.get("mail_send")?.annotations?.untrustedContentHint).toBeUndefined();
 });
@@ -222,6 +224,13 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   };
   const listParsed = listMessages.safeParse([summary]);
   expect(listParsed.success).toBe(true);
+  // 缺 source / hasOtp 必须失败——严格客户端靠 advertised schema 认字段，不能当 additional。
+  const { source: _source, hasOtp: _hasOtp, ...summaryWithoutSourceOtp } = summary;
+  expect(listMessages.safeParse([summaryWithoutSourceOtp]).success).toBe(false);
+  expect(listMessages.safeParse([{ ...summaryWithoutSourceOtp, source: "external" }]).success).toBe(
+    false,
+  );
+  expect(listMessages.safeParse([{ ...summaryWithoutSourceOtp, hasOtp: true }]).success).toBe(false);
   if (listParsed.success) {
     const rows = listParsed.data as MessageSummary[];
     expect(rows[0]?.hasOtp).toBe(true);

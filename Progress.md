@@ -1000,4 +1000,28 @@ PR：https://github.com/openagentemail/openagentemail/pull/31
 
 1. 无需修生产码。对齐 `ui-device-load` 的 `new Function` 假 DOM 模式，把呈现钉在可执行断言上，而不是只 `toContain` 源码字符串。
 
+---
+
+## 健康小单 #9 / #22 / #23（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-health`（基线 `94566013`；禁动 main；禁止自 merge）
+
+### 我们实现了哪些功能？
+
+1. **#9：** `NtfyNotificationService.messages()` 复用 `ntfyFetch` 8s 超时；header 与 body 超时都映射 `NotifyError('notify_unavailable')`。/v1 与 /ui 共享。
+2. **#22：** 无文件的 `loadFromDisk` 也设 `lastSeenPersistedAt`；启动删 `ui-sessions.json.tmp`；`docs/security.md` / README / 注释声明 DATA_DIR 单写者。
+3. **#23：** 共享 MCP summary schema 钉 `source`/`hasOtp`（description 补 hasOtp）；detail 仍不含 seen/snippet。发版 tag 不在本单。
+4. `packages/api bun test` **820 pass**；`packages/mcp bun test` **23 pass**；两边 `bun run build` 全绿。无 UI 改动。
+
+### 我们遇到了哪些错误？
+
+1. 全量套件里 `config.ntfy.enabled` 可能已被别的文件关掉，单测 `messages()` 得到 `notifications_disabled`。测试里显式打开并还原。
+2. 独立自审 P1：Bun 上 `fetch()` 在 header 到达后 resolve，卡住的 NDJSON body 让 `response.text()` 抛超时，原先只包了 fetch → 500。
+
+### 我们是如何解决这些错误的？
+
+1. 超时测试 `Object.assign(config.ntfy, { enabled: true, adminPassword })`，`finally` 还原。
+2. `fetch` / `!ok` / `response.text()` 同一 try，`notifyFetchFailed` 映射；补 body 超时测试。复审 mergeable。
+
 

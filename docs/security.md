@@ -20,6 +20,10 @@ retention window before reusing one.
 <!-- Canonical copy lives in the website repo (src/content/docs/docs/); mirror
      this note there when publishing. -->
 
+## DATA_DIR 单写者约定
+
+`DATA_DIR` 下所有 store（`identities.json` / `oauth.json` / `audit.jsonl` / `ui-sessions.json`，以及 `sent-registry.json` / `notification-log.jsonl` / `notification-devices.json`）均为**单写者**设计：进程内串行、tmp+rename、文件 0600 / 目录 0700。**不支持**多容器或多进程共享同一 `DATA_DIR`。
+
 ## Inbox identity ACL（#26 PR 2）
 
 Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁止子串）。
