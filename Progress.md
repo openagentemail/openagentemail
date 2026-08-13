@@ -922,4 +922,36 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 1. 回滚 `try` 之后无条件再 fsync；再失败 `markRegistryFailClosed` + throw corrupt，不把「可能没持久化的回滚」当成功服务。
 2. 现有用例改为只失败第一次 fsync（①）；新增两次失败用例（②）。
 
+---
+
+## #26 阶段2 收官单（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（从 `origin/main` @ `ef880a9` 开出；禁动 main；禁止自 merge）
+
+### 我们实现了哪些功能？
+
+1. **A1 台账 #8：** `allowedDocsHref` 前置黑名单补 data 协议（`'data' + ':'`，避免资产闸命中连续 `data:`）；测试钉 `allowed('data:text/html,…')===''`。
+2. **A2 台账 #13：** `parseFile` 对整个 body 跑 `registryHasForbiddenSecretKey`；顶层 `token` 投毒 fail-closed。
+3. **A3 台账 #11：** `recoverPushTier` 抽到 `api.ts`，Overview / Configure 两处调用；F51 与 Configure 模糊失败闸仍绿。
+4. **A4 台账 #12：** `var confirmModalOnCancel` 迁入 `modal.ts`；未改 IIFE 拼接顺序。
+5. **B1 台账 #1：** 详情主题列 ≤1440 收抽屉 + `min-width: 12em` + `break-word`；撤回误加在 `.meta` 上的 12em。
+6. **B2 台账 #2：** Folders 钉身份栏底 + 标题 `--ink-dim`。
+7. **B3 台账 #3：** RESULT 维持键值表（对象）/ `<pre>`（数组标量）。
+8. **B4 台账 #14：** revoke catch 立刻 `loadPairedDevices()`。
+9. **B5：** 属 UI 的 ZCode P2 即 A3/A4/B4；其余 registry/工具链记债。
+10. `bun test` **810 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. 开工 `git checkout main` 失败：`main` 被另一 worktree `/home/ops/openagentemail` 占用。改 `git fetch origin main && git checkout -b tizerluo/worker-34-wrapup origin/main`，HEAD `ef880a9`。
+2. 三资产闸禁止 UI_JS 出现连续 `data:`；直接写 `indexOf('data:')` 会红。
+3. 独立自审 P2：`.meta` 改成 `minmax(12em, 1fr)` 会在 821–1100 Headers tab 横向溢出。那不是主题列修复所需要的。
+
+### 我们是如何解决这些错误的？
+
+1. 不占用 main worktree，从 `origin/main` 开收官分支。
+2. 运行时拼接 `'data' + ':'`；注释写「data 协议」而不写连续 `data:`。
+3. `.meta` 恢复 `58px minmax(0, 1fr)`；主题列只动 `h2` / `.detail-main-col` / 1440 抽屉。
+
 
