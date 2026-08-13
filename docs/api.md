@@ -14,7 +14,7 @@ The website docs are canonical — edit them in the [website repo](https://githu
 | GET/POST | `/ui/oauth/authorize` | 同意页（需 Dashboard 会话）；回跳一律带 `iss`（RFC 9207） |
 | POST | `/oauth/token` | `authorization_code` + PKCE S256；`refresh_token` 轮换 |
 | POST | `/oauth/revoke` | RFC 7009 |
-| GET | `/ui/oauth/grants` | 已授权客户端管理页 |
+| GET | `/ui/oauth/grants` | 兼容书签：需 Dashboard 会话，302 → `/ui/configure/clients` |
 | GET/DELETE | `/ui/api/oauth/grants[/:id]` | 列表 / 吊销 |
 | POST | `/ui/api/oauth/grants/:id/revoke` | 管理页表单吊销（同 origin + session；成功 302 回列表） |
 

@@ -17,7 +17,7 @@ API 进程暴露无状态 MCP 端点 `POST /mcp`（MCP 2026-07-28 / SDK v2）。
 | AS | `GET /.well-known/oauth-authorization-server`（RFC 8414；CIMD，无 DCR） |
 | 授权 | 浏览器打开 `/authorize`（同意页在 Dashboard 会话内）；业主选已有身份或当场新建 |
 
-网页 Agent（ChatGPT / Claude 等）走标准 OAuth 授权码 + PKCE（仅 S256）+ CIMD。OAuth access token 仅为 **identity** 级（永非 admin），绑定 MCP resource（`…/mcp`）。管理已授权客户端：Dashboard `/ui/oauth/grants`。
+网页 Agent（ChatGPT / Claude 等）走标准 OAuth 授权码 + PKCE（仅 S256）+ CIMD。OAuth access token 仅为 **identity** 级（永非 admin），绑定 MCP resource（`…/mcp`）。管理已授权客户端：Dashboard `/ui/configure/clients`（旧书签 `/ui/oauth/grants` 在已登录时 302 到此页）。
 
 ### Cursor / 通用 MCP `type: http` 示例
 

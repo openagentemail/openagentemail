@@ -338,10 +338,10 @@ describe('UI static asset contract', () => {
       expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     }
 
-    // 旧 OAuth grants 书签 302 → Configure · Authorized Clients
+    // 旧 OAuth grants 书签：未登录先去 Dashboard 登录，不把匿名请求 302 进 Configure
     const grants = await app.request('/ui/oauth/grants');
     expect(grants.status).toBe(302);
-    expect(grants.headers.get('location')).toBe('/ui/configure/clients');
+    expect(grants.headers.get('location')).toBe('/ui');
 
     const disabled = createApp({ uiEnabled: false });
     for (const path of [
@@ -608,7 +608,8 @@ describe('UI static asset contract', () => {
     expect(applyScope).toContain('notifyPanel.hidden = !notifyActive;');
     expect(applyScope).toContain('tasksPanel.hidden = !tasksActive;');
     expect(applyScope).toContain('mainContent.hidden = !inboxActive;');
-    expect(applyScope).toContain("skipLink.textContent = overviewActive");
+    expect(applyScope).toContain('var SCOPE_META = {');
+    expect(applyScope).toContain('skipLink.textContent = meta.skip');
     expect(applyScope).toContain("'Skip to notifications'");
     expect(applyScope).toContain("'Skip to tasks'");
     expect(applyScope).toContain("'#notify-panel'");
@@ -1361,6 +1362,73 @@ describe('UI static asset contract', () => {
     expect(applyIdx).toBeGreaterThanOrEqual(0);
     expect(clearIdx).toBeGreaterThan(applyIdx);
     expect(closeIdx).toBeGreaterThan(clearIdx);
+  });
+
+  // #26 PR 5：Configure 闭环静态契约（token 仪式 / 人话卡 / 自托管空态 / 债项）
+  test('Configure identities uses a single honest token slot and a one-time ceremony', () => {
+    const renderCfg = UI_JS.slice(
+      UI_JS.indexOf('function renderConfigureIdentities('),
+      UI_JS.indexOf('function enterConfigureIdentities('),
+    );
+    expect(renderCfg).toContain("'Token slot: Set'");
+    expect(renderCfg).toContain("'Token slot: Missing'");
+    expect(renderCfg).toContain('if (isAdmin())');
+    expect(renderCfg).toContain("rotate.textContent = 'Rotate'");
+    expect(renderCfg).toContain("del.textContent = 'Delete'");
+    expect(renderCfg).not.toContain('identity.token');
+    expect(UI_JS).toContain('showTokenModal(payload.token');
+    expect(UI_JS).toContain("showTokenModal(payload.token, 'Rotated Token')");
+    expect(UI_HTML).toContain('Copy this token now. It will not be shown again.');
+    expect(UI_JS).toContain("state.scope.indexOf('configure-') === 0");
+  });
+
+  test('Configure push renders three human-language tier cards and server-enforced tier 3 confirm', () => {
+    expect(UI_JS).toContain("title: 'Notify only'");
+    expect(UI_JS).toContain("summary: 'Just tell me a message arrived.'");
+    expect(UI_JS).toContain("title: 'Sender & subject'");
+    expect(UI_JS).toContain("title: 'Body & OTP'");
+    expect(UI_JS).toContain('function handleConfigurePushTier(');
+    const configurePush = UI_JS.slice(
+      UI_JS.indexOf('function handleConfigurePushTier('),
+      UI_JS.indexOf('function renderConfigurePush('),
+    );
+    expect(configurePush).toContain('await apply(3, true)');
+    expect(configurePush).toContain('confirm_risk_required');
+    expect(UI_HTML).toContain('id="configure-push-cards"');
+    expect(UI_HTML).toContain('id="configure-push-devices"');
+    expect(UI_JS).toContain("'Device pairing is not in this release'");
+  });
+
+  test('Plan & Domains are honest empty states with no fake upgrade or quota controls', () => {
+    expect(UI_HTML).not.toContain('Upgrade');
+    expect(UI_JS).not.toContain("'Upgrade'");
+    expect(UI_JS).not.toContain('Upgrade plan');
+    expect(UI_JS).toContain("'Self-hosted instance'");
+    expect(UI_JS).toContain('openagent.email/docs/reference/api/');
+    expect(UI_JS).toContain("'Custom domains are on the roadmap'");
+    expect(UI_JS).toContain('this page has no controls to click.');
+  });
+
+  test('PR1 P2 stubs are filled: app-nav and modal live in their component modules', async () => {
+    const { APP_NAV_JS } = await import('../src/ui/client/components/app-nav.ts');
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(APP_NAV_JS).toContain('function closeNavDrawer(');
+    expect(APP_NAV_JS).toContain('function openNavDrawer(');
+    expect(APP_NAV_JS).toContain('function renderAppNav(');
+    expect(MODAL_JS).toContain('function closeAllModals(');
+    expect(MODAL_JS).toContain('function showTokenModal(');
+    expect(MODAL_JS).toContain('function showCreateModal(');
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    expect(ROUTER_JS).not.toContain('function closeNavDrawer(');
+    expect(API_JS).not.toContain('function closeAllModals(');
+  });
+
+  test('identity session CSS hides admin-only create controls', () => {
+    expect(UI_CSS).toContain(
+      '.inbox-view[data-session="identity"] #configure-identities-create',
+    );
+    expect(UI_JS).toContain('configureIdentitiesCreate.hidden = !isAdmin()');
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

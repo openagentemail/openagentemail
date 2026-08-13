@@ -491,6 +491,36 @@
 3. `loadAllTasksCached` 对 IMAP/测试快照 `map(mergeQueuedEvents)` 再过滤切页。
 4. overlay 退役：IMAP 已有同 state 事件、已 terminal、或已有更晚状态信时丢掉补丁，避免盖住权威的新 input-required；丢掉时 `invalidateTaskListCache`。
 
+---
+
+## #26 PR 5：Configure 完整闭环（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（禁动 main；基线 `676fa3c`）  
+范围：ADR §PR 5（Identities & Tokens / Authorized Clients / Push 人话卡 / Domains·Plan 诚实预留）+ PR1 ZCode P2×3
+
+### 我们实现了哪些功能？
+
+1. **Identities & Tokens：** 单 token slot 只展示 Set/Missing（永不回显明文）；admin 可创建（一次性 token modal）、Rotate（Rotated Token 仪式）、Delete（二次确认后留在 Configure，不跳 Overview）；每行投影当前 push tier。identity 会话无 Create/Rotate/Delete。
+2. **Authorized Clients：** 继续走 `/ui/api/oauth/grants` 列表/吊销；旧 `/ui/oauth/grants` HTML 书签保留 302 fallback。
+3. **Push & Devices：** 三张人话卡（1 只告知有信 / 2 +发件人主题 / 3 +正文验证码）；admin 改档；tier 3 走 confirm modal 且 PUT 必须 `confirm_risk: true`；设备配对诚实空态（PR6）。
+4. **Domains / Plan：** `renderEmptyState` 明确 roadmap / 自托管实例说明 + 文档路径（无 `https://` 远程 href，无配额/升级按钮）。
+5. **PR1 债项：** `/ui/oauth/grants` 未登录先 session 检查再 302 `/ui`；`applyScope` 收成 `SCOPE_META` map；`app-nav` / `modal` 空桩迁入真实现。
+6. 测试：`ui-configure.test.ts` 钉 UI tier3 400、identity 越权 403、grant 吊销即时 204、grants 重定向分流；`ui-assets` 补 Configure 静态契约。`bun test` **746 pass / 0 fail**；`bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. Plan 页若把 `https://openagent.email/docs/...` 写进 JS/HTML，会撞上「三资产禁止远程 `https?://`」闸。
+2. `handleDeleteIdentity` 成功后无条件 `enterOverview`，Configure 施工中途会被踢回 Overview。
+3. `/ui/oauth/grants` 匿名 302 直接进 Configure，与同意页「先查 session」不一致（PR1 P2）。
+
+### 我们是如何解决这些错误的？
+
+1. Plan 空态用无 scheme 的 `openagent.email/docs/reference/api/` 纯文本指针；不把远程 URL 当 href。
+2. 删除成功时若当前 scope 是 configure/plan 则留在本页并 `refreshConfigureSurfaces()`，否则仍回 Overview。
+3. GET `/ui/oauth/grants` 无会话走 `redirectToLogin`（302 `/ui`）；有会话再 302 `/ui/configure/clients`。
+
+
 
 
 

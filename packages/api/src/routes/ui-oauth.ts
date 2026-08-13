@@ -474,7 +474,15 @@ export function createUiOAuthPageRoutes(
   });
 
   // ADR #26：旧书签 /ui/oauth/grants → Configure · Authorized Clients（至少保留两个 minor）。
-  routes.get('/grants', (c) => c.redirect('/ui/configure/clients', 302));
+  // 未登录先走同意页同款 session 检查，避免匿名 302 直接落到需会话的 Configure。
+  routes.get('/grants', (c) => {
+    const sid = getCookie(c, 'oae_ui');
+    const session = sid ? store.authenticate(sid) : null;
+    if (!session) {
+      return redirectToLogin(c);
+    }
+    return c.redirect('/ui/configure/clients', 302);
+  });
 
   return routes;
 }
