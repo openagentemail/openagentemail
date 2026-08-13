@@ -249,27 +249,75 @@ function penalty(modules: number[][]): number {
   return score;
 }
 
-function interleave(ver: number, data: number[]): number[] {
+/** ISO/IEC 18004 ECC-M 分块计划（测试与交织共用）。 */
+export type QrRsPlan = {
+  ver: number;
+  numBlocks: number;
+  eccPerBlock: number;
+  dataCodewords: number;
+  rawCodewords: number;
+  numShortBlocks: number;
+  shortDataLen: number;
+  longDataLen: number;
+};
+
+export function qrRsPlan(ver: number): QrRsPlan {
   const numBlocks = ECC_BLOCKS[ver]!;
-  const shortBlockLen = Math.floor(data.length / numBlocks);
-  const numShort = numBlocks - (data.length % numBlocks);
-  const blocks: number[][] = [];
-  const divisor = reedSolomonDivisor(ECC_PER_BLOCK[ver]!);
+  const eccPerBlock = ECC_PER_BLOCK[ver]!;
+  const rawCodewords = Math.floor(getNumRawDataModules(ver) / 8);
+  const dataCodewords = rawCodewords - eccPerBlock * numBlocks;
+  const numShortBlocks = numBlocks - (rawCodewords % numBlocks);
+  const shortDataLen = Math.floor(dataCodewords / numBlocks);
+  return {
+    ver,
+    numBlocks,
+    eccPerBlock,
+    dataCodewords,
+    rawCodewords,
+    numShortBlocks,
+    shortDataLen,
+    longDataLen: shortDataLen + (numShortBlocks === numBlocks ? 0 : 1),
+  };
+}
+
+/**
+ * ISO/IEC 18004 8.6：先按列跨 block 轮转 data（短块缺席位置跳过），
+ * 全部 data 吐完后再按列跨 block 轮转 ECC。不得把短块 ECC 与长块尾部 data 编进同一列。
+ */
+export function addEccAndInterleave(ver: number, data: number[]): number[] {
+  const plan = qrRsPlan(ver);
+  if (data.length !== plan.dataCodewords) {
+    throw new Error('qr_data_length');
+  }
+  const divisor = reedSolomonDivisor(plan.eccPerBlock);
+  const dataBlocks: number[][] = [];
+  const eccBlocks: number[][] = [];
   let i = 0;
-  for (let b = 0; b < numBlocks; b += 1) {
-    const len = shortBlockLen + (b < numShort ? 0 : 1);
+  for (let b = 0; b < plan.numBlocks; b += 1) {
+    const len = plan.shortDataLen + (b < plan.numShortBlocks ? 0 : 1);
     const block = data.slice(i, i + len);
     i += len;
-    blocks.push(block.concat(reedSolomonRemainder(block, divisor)));
+    dataBlocks.push(block);
+    eccBlocks.push(reedSolomonRemainder(block, divisor));
   }
   const result: number[] = [];
-  const maxLen = Math.max(...blocks.map((block) => block.length));
-  for (let j = 0; j < maxLen; j += 1) {
-    for (const block of blocks) {
+  const maxData = Math.max(...dataBlocks.map((block) => block.length));
+  for (let j = 0; j < maxData; j += 1) {
+    for (const block of dataBlocks) {
       if (j < block.length) result.push(block[j]!);
     }
   }
+  for (let j = 0; j < plan.eccPerBlock; j += 1) {
+    for (const block of eccBlocks) {
+      result.push(block[j]!);
+    }
+  }
   return result;
+}
+
+/** 供测试校验：对 data 块再算一次 RS remainder。 */
+export function qrRsRemainder(data: number[], eccLen: number): number[] {
+  return reedSolomonRemainder(data, reedSolomonDivisor(eccLen));
 }
 
 function drawData(modules: number[][], isFunc: boolean[][], data: number[]): void {
@@ -332,7 +380,12 @@ function encodeBytes(data: Uint8Array): { ver: number; codewords: number[] } {
     for (let j = 0; j < 8; j += 1) v = (v << 1) | bb.bits[i + j]!;
     codewords.push(v);
   }
-  return { ver, codewords: interleave(ver, codewords) };
+  return { ver, codewords: addEccAndInterleave(ver, codewords) };
+}
+
+/** 测试缝：返回选定版本与交织后的 codeword 流（含 ECC）。 */
+export function encodeQrCodewords(text: string): { ver: number; codewords: number[] } {
+  return encodeBytes(new TextEncoder().encode(text));
 }
 
 function buildModules(ver: number, codewords: number[]): number[][] {

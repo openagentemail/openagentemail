@@ -90,7 +90,11 @@ All `/v1/*` require `Authorization: Bearer <key>`.
   lastSeenAt / revokeStatus / revokedAt — **never password or token**. Revoke is
   `active → pending_revoke` (persist first; failure must not call ntfy) → delete
   ntfy user (live ntfy missing user is HTTP 400 / code 40031 / "user does not
-  exist"; HTTP 404 also counts as success) → `revoked`. Startup and
+  exist"; HTTP 404 also counts as success; **all 5xx are transient regardless of
+  body text**, so a gateway error cannot converge the local row to `revoked`) →
+  `revoked`. Pairing QR is ISO/IEC 18004 byte-mode ECC-M: data codewords are
+  column-interleaved across RS blocks (short blocks skip the extra data column),
+  then ECC columns follow — never concat-then-column. Startup and
   admin list/revoke scan `pending_revoke` until local state converges. A corrupt
   file fail-closes (500); `GET /healthz` does not read it. Do not run multiple
   API writers against a shared `DATA_DIR`.

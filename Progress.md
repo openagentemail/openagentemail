@@ -678,8 +678,30 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 4. 密码只展示一次的文案改断言 `UI_HTML`；关窗清密文仍断言 `UI_JS`。
 5. `classifyNtfyUserDeleteResponse` 把 40031 / "user does not exist" 定为 `not_found`；通用 400（如 40024 非法 JSON）与 5xx 仍是 `transient`。补分类单测 + Bearer DELETE 用 40031 体。
 
+---
 
+## #26 PR 6 返工 R1（2026-08-13）
 
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
 
+### 我们实现了哪些功能？
+
+1. **QR ISO 交织：** `addEccAndInterleave` 先按列跨 block 轮转 data（短块缺席跳过），全部 data 吐完后再按列轮转 ECC。导出 `qrRsPlan` / `qrRsRemainder` / `encodeQrCodewords` 给测试。version 9-M：5 blocks、ECC 22、raw 292、data 182、3×36+2×37。
+2. **QR 测试升级：** 结构表 + 规范 data 列序 + `buggyConcatThenColumn` 负例（钉死短块 ECC 不得出现在长块 data 仍应在的位置）+ 独立 ISO de-interleave + RS remainder + byte-mode 还原配对 JSON。形状/确定性测保留，但不再是唯一闸。
+3. **5xx 分类：** `classifyNtfyUserDeleteResponse` 对一切 5xx 不看 body 一律 `transient`；not_found 仅 HTTP 404 与 HTTP 400+`40031`/`"user does not exist"`；泛 400（40024）与网络错误仍 transient。去掉对任意 status 的 `"not_found"` 子串匹配。
+4. **分类测试：** `5xx body containing user-does-not-exist stays transient; 40031/404 still not_found`；`5xx with user-does-not-exist body does not converge pending_revoke to revoked`。
+5. `bun test` **782 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `79098d1b-5391-415d-b686-7e19973a7209`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（qr-byte，置信 0.99）：不等长 RS block 把 data+ECC 拼块再整列轮转，短块 ECC 插进长块尾部 data；旧测只看形状，扫码器无法可靠解码配对 QR。
+2. Codex Local P1（notify.ts，置信 0.96）：5xx body 含 `"user does not exist"`/`"not_found"` 被当成 `not_found` → 本地收敛 `revoked`，远端 user 可能仍在。这正是第二轮自审列为「残余不当作 finding」的那条。
+
+### 我们是如何解决这些错误的？
+
+1. 按 ISO/IEC 18004 8.6 拆成 data 列、ECC 列两阶段；测试用负例对照旧算法，并用独立 de-interleave+RS 证明可解——形状测抓不到「拼块再整列」，负例在 v9 index 180 钉死该错位。
+2. 分类器把 `status>=500` 提到解析 body 之前；400 只认 40031 / "user does not exist"。集成测试用 503 + 40031 JSON，断言 `device_revoke_retry` 且列表仍 `pending_revoke`。
 
 

@@ -485,7 +485,11 @@ export function classifyNtfyUserDeleteResponse(
   body: string,
 ): NtfyUserDeleteResult {
   if (status >= 200 && status < 300) return 'deleted';
+  // 一切 5xx 不看 body：远端 user 可能仍在，不得收敛 revoked。
+  if (status >= 500) return 'transient';
   if (status === 404) return 'not_found';
+  // 文本 / 错误码的 not_found 判定仅对预期客户端错误生效。
+  if (status !== 400) return 'transient';
   const trimmed = body.trim();
   let code: number | undefined;
   let error = '';
@@ -498,7 +502,6 @@ export function classifyNtfyUserDeleteResponse(
   }
   const haystack = `${error} ${trimmed}`.toLowerCase();
   if (code === 40031 || haystack.includes('user does not exist')) return 'not_found';
-  if (code === 40401 || haystack.includes('not_found')) return 'not_found';
   return 'transient';
 }
 

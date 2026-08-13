@@ -35,7 +35,7 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
 | 登记失败无幽灵 user | **过** | `registry persist failure after ntfy create deletes the ghost user and returns 502`：ENOSPC hook 后断言存在 `DELETE /v1/users` |
 | identity / 平台运营主体 → 403 | **过** | Bearer：`old POST… identity cannot list or revoke` + `identity cannot GET or DELETE devices…`；UI：`identity session cannot list, create, or revoke devices`。平台运营主体：现网无独立 operator kind，非 admin 即 403（见上口径） |
 | 旧 POST 兼容 | **过** | `old POST without displayName still 201…`；registry `old clients without displayName get the default Phone name` |
-| `cd packages/api && bun test` + `bun run build` | **过** | **777 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
+| `cd packages/api && bun test` + `bun run build` | **过** | R1 后 **782 pass / 0 fail**；`bun run build` Bundled 568 modules，全绿 |
 
 ### 吊销测试名（notification-devices.test.ts）
 
@@ -74,7 +74,48 @@ PR：https://github.com/openagentemail/openagentemail/pull/30
   - P0/P1：**0**
   - 过程：独立核对 `classifyNtfyUserDeleteResponse` 对 40031 / 404 / 200 / 503 / 40024；步骤 1 失败不碰 ntfy；步骤 3 失败 + not_found 收敛；已 revoked 不打 ntfy；启动 inspect+reconcile；幽灵 user DELETE；identity 403；旧 POST；一次性密码关窗清空；modal 代际。相关测试当时 121 pass。
   - 残余（不当作 finding）：5xx 响应体若碰巧含 `user does not exist` 会被当成成功（真实 ntfy 不太会）；幽灵 user 清理是 best-effort；40031 收敛由分类器测试 + registry 收敛测试拼接。
+  - **R1 注：** 上条「5xx body 当 not_found」残余被 Codex Local 升为 P1，已在本回执 R1 节关闭。
 
+---
+
+## 返工 R1（2026-08-13 · Codex Local P1×2）
+
+分支仍是 `tizerluo/worker-34-pr6`。就地修、就地 push。未新开分支、未动 `main`、未自 merge。
+
+### 评论对账
+
+| # | 来源 | 问题 | 处置 | 证据 / 测试名 |
+|---|---|---|---|---|
+| A | Codex Local P1 · `qr-byte.ts` 原交织循环（置信 0.99） | 不等长 RS block（含配对 payload 附近 version 9）把 data+ECC 拼块后再按列轮转，短块 ECC 插进长块未吐完的 data，违反 ISO/IEC 18004 8.6，扫码器无法可靠解码。旧测只看形状/确定性。 | **已修。** `addEccAndInterleave`：data 按列跨 block 轮转（短块缺席跳过），全部 data 吐完后再按列吐 ECC。 | `version 9 ECC-M has unequal-length data blocks matching ISO tables`；`unequal-block interleave emits all data columns before any ECC (catches concat-then-column)`；`ISO de-interleave plus RS remainder recovers pairing payload (version near 9)` |
+| B | Codex Local P1 · `classifyNtfyUserDeleteResponse`（置信 0.96）；正是第二轮自审列为「残余不当作 finding」的那条 | 含 `"user does not exist"` / `"not_found"` 的 **5xx** 被当成 `not_found` → 本地收敛 `revoked`，远端 user 可能仍在。违反「所有 5xx 皆 transient」。 | **已修。** `status>=500` 在看 body 之前 return `transient`；not_found 文本/错误码仅对 HTTP 404 与 HTTP 400+`40031`/`"user does not exist"`；泛 400 与网络错误仍 transient。 | `5xx body containing user-does-not-exist stays transient; 40031/404 still not_found`；`5xx with user-does-not-exist body does not converge pending_revoke to revoked`；原 `live ntfy missing user is HTTP 400 / code 40031, not 404` 仍绿 |
+
+### 测试为什么能抓住 QR 交织错误
+
+形状/确定性测（size、finder、同一输入同一 modules）在 concat-then-column 下仍然全绿，所以旧测抓不到。R1 三层闸：
+
+1. **结构表：** version 9-M 钉死 5 blocks / ECC 22 / raw 292 / data 182 / 3×36+2×37。块数或短长切分错会红。
+2. **规范序列 + 负例：** 生产 data 前缀必须等于独立写出的 ISO 列序；`buggyConcatThenColumn`（旧错误算法）必须与生产**不等**；并钉死旧算法在 `index = shortDataLen × numBlocks`（v9=180）吐出短块 `ecc[0]`，生产该位仍是长块 data。这正是 Codex 描述的那一列错位。
+3. **可解证明：** 对配对 JSON 做独立 ISO de-interleave（先 data 列再 ECC 列，不调用生产交织），每 block 的 RS remainder 必须匹配，再按 byte-mode 还原原文。若仍 concat-then-column，de-interleave 会把 ECC 字节读进 data 块，remainder 对不上。
+
+`expectedDataInterleave` 与生产 data 段同构，单独不够；负例 + 独立 de-interleave/RS 补上这个洞。配对 fixture 实际落到 v10-M（仍不等长）；v9 由第 1–2 层单独覆盖。
+
+### 独立自审（R1 · 新 agent，禁止自审自）
+
+| 项 | 值 |
+|---|---|
+| Subagent ID | `79098d1b-5391-415d-b686-7e19973a7209` |
+| 审查对象 | 未提交工作区相对 `d12e937`/`f0794a4` 的 R1 diff |
+| 结论 | **mergeable** |
+| P0 / P1 / P2 | **0 / 0 / 0** |
+| A 裁定 | **过** — 两阶段交织；v9 表自算与 ISO 9-M 一致；短块缺席只在 data 最后一列；负例能抓住 concat-then-column |
+| B 裁定 | **过** — 5xx 在看 body 之前 transient；400 只认 40031 / "user does not exist"；503+该正文不收敛 revoked |
+| 过程 | 独立读 `qr-byte.ts` / `notify.ts` / 两份测试 / `notification-devices.ts`；自推 v9 列序与分类表；不采信实现者结论。残余不升 P1：配对 fixture 是 v10 不是 v9（v9 另有表+负例）；网络 catch 本轮无新单测但代码未改仍 return transient。 |
+
+### 完成标准
+
+- `cd packages/api && bun test` → **782 pass / 0 fail**
+- `bun run build` → Bundled 568 modules，全绿
+- 未新开分支；未动 `main`；push 后停等指挥终审，禁止自 merge。
 
 ## 布局自测说明（1280 / 375；线上截屏由指挥做）
 

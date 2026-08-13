@@ -38,6 +38,7 @@ const {
 } = await import('../src/lib/notify.ts');
 const {
   deviceRegistryPathForTests,
+  listPairedDevices,
   registerPairedDevice,
   resetDeviceRegistryForTests,
   setDeviceRegistryPersistHookForTests,
@@ -969,6 +970,63 @@ describe('ntfy user delete classification (revoke reconcile)', () => {
         JSON.stringify({ code: 40024, http: 400, error: 'invalid request: request body must be valid JSON' }),
       ),
     ).toBe('transient');
+  });
+
+  test('5xx body containing user-does-not-exist stays transient; 40031/404 still not_found', () => {
+    const missing = JSON.stringify({
+      code: 40031,
+      http: 500,
+      error: 'invalid request: user does not exist',
+    });
+    expect(classifyNtfyUserDeleteResponse(500, missing)).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(503, 'user does not exist')).toBe('transient');
+    expect(classifyNtfyUserDeleteResponse(502, 'not_found')).toBe('transient');
+    expect(
+      classifyNtfyUserDeleteResponse(
+        400,
+        JSON.stringify({ code: 40024, http: 400, error: 'invalid request: request body must be valid JSON' }),
+      ),
+    ).toBe('transient');
+    expect(
+      classifyNtfyUserDeleteResponse(
+        400,
+        JSON.stringify({ code: 40031, http: 400, error: 'invalid request: user does not exist' }),
+      ),
+    ).toBe('not_found');
+    expect(classifyNtfyUserDeleteResponse(404, 'not_found')).toBe('not_found');
+  });
+
+  test('5xx with user-does-not-exist body does not converge pending_revoke to revoked', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string; publicUrl: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      publicUrl: 'https://notify.test',
+    });
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method === 'DELETE') {
+        return new Response(
+          JSON.stringify({ code: 40031, http: 500, error: 'invalid request: user does not exist' }),
+          { status: 503 },
+        );
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const record = await registerPairedDevice({
+        displayName: 'Still-there',
+        ntfyUsername: 'phone-stillthere',
+        topics: { userAlerts: 'user-alerts-x', userLow: 'user-low-x' },
+      });
+      await expect(revokeNotificationDevice(record.id)).rejects.toMatchObject({
+        code: 'device_revoke_retry',
+      });
+      const listed = await listPairedDevices();
+      expect(listed[0]?.id).toBe(record.id);
+      expect(listed[0]?.revokeStatus).toBe('pending_revoke');
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 });
 
