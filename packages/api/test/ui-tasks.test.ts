@@ -579,3 +579,175 @@ describe('UI task reply / remind / close', () => {
     expect(replyCalls).toEqual([]);
   });
 });
+
+/* ---- 终审 C2：呈现层钉 overdue 红条 + Overdue 文字（PR4 双通道；不改生产码） ---- */
+const { TASKS_PAGE_JS } = await import('../src/ui/client/pages/tasks.ts');
+const { PAGES_CSS } = await import('../src/ui/styles/pages.ts');
+
+/** 从 TASKS_PAGE_JS 抽出一段函数源码。 */
+function sliceTasksFn(startNeedle: string, endNeedle: string): string {
+  const start = TASKS_PAGE_JS.indexOf(startNeedle);
+  const end = TASKS_PAGE_JS.indexOf(endNeedle);
+  if (start < 0 || end <= start) {
+    throw new Error('tasks.ts slice missing: ' + startNeedle);
+  }
+  return TASKS_PAGE_JS.slice(start, end);
+}
+
+type FakeNode = {
+  tagName: string;
+  className: string;
+  textContent: string;
+  type: string;
+  dateTime: string;
+  childNodes: FakeNode[];
+  classList: { add: (name: string) => void; contains: (name: string) => boolean };
+  setAttribute: (key: string, value: string) => void;
+  append: (...nodes: FakeNode[]) => void;
+  addEventListener: () => void;
+};
+
+/** 无 jsdom：够 renderTaskRows 建行、加 class、写 Overdue 文案。 */
+function fakeEl(tag: string): FakeNode {
+  const node: FakeNode = {
+    tagName: String(tag).toUpperCase(),
+    className: '',
+    textContent: '',
+    type: '',
+    dateTime: '',
+    childNodes: [],
+    classList: {
+      add(name: string) {
+        const parts = node.className.split(/\s+/).filter(Boolean);
+        if (!parts.includes(name)) parts.push(name);
+        node.className = parts.join(' ');
+      },
+      contains(name: string) {
+        return node.className.split(/\s+/).includes(name);
+      },
+    },
+    setAttribute() {},
+    append(...nodes: FakeNode[]) {
+      node.childNodes.push(...nodes);
+    },
+    addEventListener() {},
+  };
+  return node;
+}
+
+/** 收集叶子 textContent，用来断言 Overdue 文字通道。 */
+function leafTexts(node: FakeNode): string[] {
+  if (node.childNodes.length === 0) {
+    return node.textContent ? [node.textContent] : [];
+  }
+  return node.childNodes.flatMap(leafTexts);
+}
+
+function makeTaskRowHarness() {
+  const tasksRows = {
+    childNodes: [] as FakeNode[],
+    replaceChildren() {
+      this.childNodes = [];
+    },
+    append(node: FakeNode) {
+      this.childNodes.push(node);
+    },
+  };
+  const tasksShown = { textContent: '' };
+  const tasksStateNode = { textContent: '' };
+  const state = {
+    tasksFilter: 'active',
+    tasksPeriod: '30d',
+    tasksLimit: 20,
+    tasksFetchKey: 'active|30d|20',
+    tasksStatus: 'ready',
+    tasksMessage: '',
+    tasksTotalApprox: 0,
+    activeTaskId: '',
+    tasks: [] as Array<Record<string, unknown>>,
+  };
+  const helpers = sliceTasksFn('function tasksFetchKey(', 'function syncTasksFilters(');
+  const render = sliceTasksFn('function renderTaskRows(', 'function fillTaskFromSelect(');
+  // 中文：抽出真实 renderTaskRows；formatAgo / selectTask 与逾期标记无关，打桩即可
+  const fn = new Function(
+    'document',
+    'state',
+    'tasksRows',
+    'tasksShown',
+    'tasksStateNode',
+    'formatAgo',
+    'selectTask',
+    `${helpers}\n${render}\nreturn renderTaskRows;`,
+  );
+  const renderTaskRows = fn(
+    { createElement: fakeEl },
+    state,
+    tasksRows,
+    tasksShown,
+    tasksStateNode,
+    () => 'just now',
+    () => {},
+  ) as () => void;
+  return { state, tasksRows, renderTaskRows };
+}
+
+describe('UI task overdue presentation (PR4 dual channel)', () => {
+  test('overdue row has is-overdue class and Overdue text; on-time row has neither', () => {
+    const { state, tasksRows, renderTaskRows } = makeTaskRowHarness();
+    // 直造 overdue 字段：不走时钟，钉呈现层对 overdueReason 的分支
+    state.tasks = [
+      {
+        id: 'overdue-row',
+        from: 'fox@test.example',
+        to: 'owl@test.example',
+        subject: 'Stuck in submitted',
+        state: 'submitted',
+        updatedAt: '2026-08-12T07:00:00.000Z',
+        messages: [],
+        overdueReason: 'submitted',
+        overdueAt: '2026-08-12T11:00:00.000Z',
+      },
+      {
+        id: 'ontime-row',
+        from: 'cat@test.example',
+        to: 'dog@test.example',
+        subject: 'Still moving',
+        state: 'working',
+        updatedAt: '2026-08-12T11:50:00.000Z',
+        messages: [],
+        overdueReason: null,
+        overdueAt: null,
+      },
+    ];
+    state.tasksTotalApprox = 2;
+    renderTaskRows();
+
+    expect(tasksRows.childNodes).toHaveLength(2);
+    const overdueRow = tasksRows.childNodes[0];
+    const onTimeRow = tasksRows.childNodes[1];
+
+    expect(overdueRow.classList.contains('task-row')).toBe(true);
+    expect(overdueRow.classList.contains('is-overdue')).toBe(true);
+    expect(leafTexts(overdueRow)).toContain('Overdue');
+    expect(
+      overdueRow.childNodes.some((cell) =>
+        cell.childNodes.some((child) => child.className === 'task-overdue-flag'),
+      ),
+    ).toBe(true);
+
+    expect(onTimeRow.classList.contains('is-overdue')).toBe(false);
+    expect(leafTexts(onTimeRow)).not.toContain('Overdue');
+    expect(
+      onTimeRow.childNodes.some((cell) =>
+        cell.childNodes.some((child) => child.className === 'task-overdue-flag'),
+      ),
+    ).toBe(false);
+  });
+
+  test('is-overdue CSS is an inset red bar; Overdue flag is red text', () => {
+    // 红条通道在 CSS，不只靠 class 名；与 PR4「左侧红条 + Overdue 文字」对齐
+    expect(PAGES_CSS).toContain('.task-row.is-overdue {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
+    expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+  });
+});
+

@@ -978,4 +978,26 @@ PR：https://github.com/openagentemail/openagentemail/pull/31
 1. 对齐 `overviewGen`：新请求占新代际；清会话 bump 代际。try/catch/`!isAdmin` 写路径都先比代际。
 2. 用 `new Function` 抽出真实 `loadPairedDevices`/`clearNotifyState`，可控 Promise 模拟乱序与登出。
 
+---
+
+## #26 收官终审拍板补断言（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-wrapup`（就地修；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/31
+
+### 我们实现了哪些功能？
+
+1. C2 呈现层：`ui-tasks.test.ts` 抽出真实 `renderTaskRows`，直造 `overdueReason` fixture 跑假 DOM。
+2. 钉死：`overdueReason` 非空行带 `is-overdue` + `Overdue` 文字；`null` 行两者皆无。CSS 闸钉 inset 红条与 `.task-overdue-flag` 红色。
+3. 未改生产代码。指挥授权本轮不另起 subagent 自审。
+
+### 我们遇到了哪些错误？
+
+1. 无。对照 `tasks.ts` / `pages.ts` 后，渲染输出已是红条 + Overdue 文字，与 PR4 回执口径一致，未停工上报。
+
+### 我们是如何解决这些错误的？
+
+1. 无需修生产码。对齐 `ui-device-load` 的 `new Function` 假 DOM 模式，把呈现钉在可执行断言上，而不是只 `toContain` 源码字符串。
+
 

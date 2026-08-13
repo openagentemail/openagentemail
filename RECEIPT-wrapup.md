@@ -96,3 +96,7 @@
 | 轮 | agent id | 结论 | 过程 |
 |---|---|---|---|
 | R1 | `11937d98-11b3-4e6a-8bf9-fa1a60883373` | **mergeable**；P0/P1/P2 = 0；无 findings | 解码 `store.ts` / `api.ts` / `push-devices.ts` 相对 `3e764fa` 的语义 diff；核对 `showLogin`→`clearNotifyState` bump、try/catch/`!isAdmin` 三处代际守卫；跑 `bun test test/ui-device-load.test.ts test/ui-assets.test.ts`（72 pass）。确认两条行为测试是 `new Function` 真跑 harness，不是 `toContain`。未改文件、未 commit。 |
+
+## 终审拍板补断言（2026-08-13 · C2 呈现层）
+
+MBP 终审 GO 拍板：纯测试增补，无生产码变更。源码已是 `.task-row.is-overdue` 左侧 inset 红条 + `.task-overdue-flag` 文案 `Overdue`，与 PR4 回执口径一致。测试：`overdue row has is-overdue class and Overdue text; on-time row has neither`；CSS 闸：`is-overdue CSS is an inset red bar; Overdue flag is red text`。
