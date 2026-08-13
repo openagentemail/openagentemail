@@ -3,7 +3,7 @@
 日期：2026-08-13  
 工位：`/home/ops/orca/workspaces/openagentemail/worker-34-pr1`  
 分支：`tizerluo/worker-34-pr6`（禁动 main；基线 `608cbb2`）  
-PR：（push 后填写）
+PR：https://github.com/openagentemail/openagentemail/pull/30
 
 ## 交付
 
