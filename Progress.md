@@ -645,8 +645,281 @@ PR：https://github.com/openagentemail/openagentemail/pull/29
 1. 两个开关同时落地：finally 代际守卫 + beginModal 统一复位。成功路径 bump 后 finally 跳过，下次 beginModal 拉回可点；stale 代际不符跳过，不碰新窗已 disable 的钮。
 2. T1 用挂起的 `apiJson`/`apply` 模拟 stale 完成；T2 抽出真实 `beginModal`，成功 leftover disabled 后再开窗断言可点。
 
+---
 
+## #26 PR 6：设备管理完整闭环（2026-08-13）
 
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（从 `origin/main` @ `608cbb2` 检出；禁动 main，禁止自 merge）
 
+### 我们实现了哪些功能？
+
+1. **device registry：** `DATA_DIR/notification-devices.json`（schemaVersion 1），0600 / 目录 0700，进程内 serial queue，同目录 `.tmp` + fsync + rename 原子写。崩溃 tmp 丢弃并告警；corrupt JSON fail-closed；磁盘满/只读走 `DeviceRegistryPersistError` + HIGH 健康告警。password/token 键拒绝落盘。
+2. **create 补 displayName：** 现有 ntfy user 创建路径在 ACL 成功后 `registerPairedDevice`；缺省名 `Phone`。登记失败 best-effort 删 ntfy user，不留幽灵。
+3. **list/revoke API：** Bearer `/v1/notify/devices` 与 UI `/ui/api/notify/devices`；仅 `kind === 'admin'`。identity 与非 admin（现网无独立平台运营主体 kind，故不能被解释为 admin）一律 403。
+4. **Push & Devices UI：** 设备列表（名称 / User alerts·User low / 配对时间）+ Add device 引导 + 一次性 password modal（同 token 仪式）+ 服务端 QR 模块图（canvas 绘制，零新依赖）。tier 三卡逻辑未改。
+5. **吊销一致性：** `active → pending_revoke`（先落盘，失败不碰 ntfy）→ 删 ntfy（404/not_found = 成功）→ `revoked`。步骤 3 落盘失败保持 pending；启动/列表对账因 not_found 收敛。已 revoked 重复 DELETE 204。
+6. **一次性凭据：** 创建响应 `Cache-Control: no-store`；关窗清 password/QR DOM；磁盘零明文（含日志不写 password）。
+7. **旧 POST 兼容：** `{ publicUrl }` 无 displayName 仍 201。
+
+### 我们遇到了哪些错误？
+
+1. UI 模块是 JSON 字符串导出，直接模板替换会吞转义；shell 插入 modal 时 StrReplace 对不上转义片段。
+2. `beginModal` 增加 `deviceAddSubmit.disabled = false` 后，既有 `ui-modal-buttons` 沙箱没有该变量，T2 会 ReferenceError。
+3. T1 插入 device-revoke 用例时漏了数组 `];`，测试文件语法失败。
+4. 一次性密码文案在 HTML 不在 JS，资产测试若断言 `UI_JS` 会找不到。
+5. 独立自审 P1：现网 ntfy 删缺失 user 返回 HTTP 400 / code 40031，不是 404；只认 404 会让步骤 3 落盘失败后的对账永远停在 `pending_revoke`。
+
+### 我们是如何解决这些错误的？
+
+1. 用 Python `json.loads` / `json.dumps(..., ensure_ascii=False)` 改 shell 与 client 模块。
+2. T2 / create-submit 沙箱补 `var deviceAddSubmit = box.submit`。
+3. 补回 `];`。
+4. 密码只展示一次的文案改断言 `UI_HTML`；关窗清密文仍断言 `UI_JS`。
+5. `classifyNtfyUserDeleteResponse` 把 40031 / "user does not exist" 定为 `not_found`；通用 400（如 40024 非法 JSON）与 5xx 仍是 `transient`。补分类单测 + Bearer DELETE 用 40031 体。
+
+---
+
+## #26 PR 6 返工 R1（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **QR ISO 交织：** `addEccAndInterleave` 先按列跨 block 轮转 data（短块缺席跳过），全部 data 吐完后再按列轮转 ECC。导出 `qrRsPlan` / `qrRsRemainder` / `encodeQrCodewords` 给测试。version 9-M：5 blocks、ECC 22、raw 292、data 182、3×36+2×37。
+2. **QR 测试升级：** 结构表 + 规范 data 列序 + `buggyConcatThenColumn` 负例（钉死短块 ECC 不得出现在长块 data 仍应在的位置）+ 独立 ISO de-interleave + RS remainder + byte-mode 还原配对 JSON。形状/确定性测保留，但不再是唯一闸。
+3. **5xx 分类：** `classifyNtfyUserDeleteResponse` 对一切 5xx 不看 body 一律 `transient`；not_found 仅 HTTP 404 与 HTTP 400+`40031`/`"user does not exist"`；泛 400（40024）与网络错误仍 transient。去掉对任意 status 的 `"not_found"` 子串匹配。
+4. **分类测试：** `5xx body containing user-does-not-exist stays transient; 40031/404 still not_found`；`5xx with user-does-not-exist body does not converge pending_revoke to revoked`。
+5. `bun test` **782 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `79098d1b-5391-415d-b686-7e19973a7209`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（qr-byte，置信 0.99）：不等长 RS block 把 data+ECC 拼块再整列轮转，短块 ECC 插进长块尾部 data；旧测只看形状，扫码器无法可靠解码配对 QR。
+2. Codex Local P1（notify.ts，置信 0.96）：5xx body 含 `"user does not exist"`/`"not_found"` 被当成 `not_found` → 本地收敛 `revoked`，远端 user 可能仍在。这正是第二轮自审列为「残余不当作 finding」的那条。
+
+### 我们是如何解决这些错误的？
+
+1. 按 ISO/IEC 18004 8.6 拆成 data 列、ECC 列两阶段；测试用负例对照旧算法，并用独立 de-interleave+RS 证明可解——形状测抓不到「拼块再整列」，负例在 v9 index 180 钉死该错位。
+2. 分类器把 `status>=500` 提到解析 body 之前；400 只认 40031 / "user does not exist"。集成测试用 503 + 40031 JSON，断言 `device_revoke_retry` 且列表仍 `pending_revoke`。
+
+---
+
+## #26 PR 6 返工 R2（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **结构化 secret-key 闸：** `registryHasForbiddenSecretKey` 递归检查对象键（password/token，大小写不敏感）。persist 与 parse 都走它；不再用正则扫序列化 JSON。displayName 含 `"password":` / `"token":` 可以创建；真含这些键的 payload 仍拒。
+2. **测试：** displayName 含 key-like 文本创建成功且无同名 key、不幽灵 DELETE；`{ password }` / `{ TOKEN }` / 嵌套 `token` 仍拒；落盘带 token 键 fail-close；0600/零明文保持绿。
+3. **B① in-flight 合并：** 并发 list/revoke 共用一次 reconcile；不做跨请求 TTL（记债：顺序入口仍全量对账，保证刚写入的 pending_revoke 能收敛）。
+4. **B② 幽灵清理 warn：** 失败 `console.warn`（username + status/error）；不建重试队列（凭据未落盘无法对账）。
+5. `bun test` **787 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `09117a6e-8372-4f94-9327-8c62aa89d6f6`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：secret-key guard 扫序列化文本，displayName 含 `"password":` 会被当成密钥拒绝并删 ntfy user。
+2. ZCode P2×2：list/revoke 每次全量 reconcile 放大；幽灵清理失败无告警。
+
+### 我们是如何解决这些错误的？
+
+1. 改成递归键检查。独立自审指出：旧正则对 `JSON.stringify` 转义后的 displayName **并不命中**（`\"password\":`）；仍按任务做结构化检查，不把转义当安全属性。
+2. 并发 in-flight 合并 + 清理失败 warn；TTL 与重试队列明确记债（收敛语义 / 未落盘无法对账）。
+
+---
+
+## #26 PR 6 返工 R3（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **QR v7+ 功能模块：** finder/timing 先占位；alignment 仅中心空闲才画 5×5；timing 轨道省略的 alignment 占位 `isFunc`（不画图案）；finder 三角只 skip。
+2. **目录 fsync：** rename 后 fsync `DATA_DIR`；首次创建失败撤回新文件；EINVAL/ENOTSUP/ENOSYS 视为成功。
+3. **404：** 须 missing-user body 才 not_found；裸 404 不收敛。
+4. **ntfy 关/未配置：** 吊销纯本地 revoked，不外呼。
+5. **顺手：** 管理面 fetch 8s 超时；corrupt 启动不阻断 API；UI 坏 JSON 400；GET devices `no-store`。
+6. `bun test` **793 pass / 0 fail**；`bun run build` 全绿。复审 agent `bb8406c4-2c9f-4690-9abf-df1d626fb382`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. Codex P1：v7+ alignment 画在 timing 上再被切一条。
+2. Codex P1：rename 后未 fsync 目录。
+3. 独立自审 P1：对 finder 角也 `reserveAlignment`，多占数据格、zigzag 错位。
+4. ZCode P2-1/3：裸 404 假吊销；disabled 时 DELETE 仍外呼。
+
+### 我们是如何解决这些错误的？
+
+1. 绘制顺序改为 finder→timing→alignment；中心占用则省略图案；仅 timing 非 finder 省略才 reserve。测试钉 timing 完整、无近轨 5×5、finder 旁数据格非 isFunc。
+2. rename 后 open 目录 fsync；EIO 首次创建 rm 新文件。
+3. 初审指出 finder reserve 过占位后收窄条件并补回归格。
+4. 404 看 body；disabled/unconfigured 走本地 `deleted` 回调。
+
+---
+
+## #26 PR 6 返工 R4（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **QR alignment 覆盖 timing（纠正 R3）：** finder + timing 先铺；坐标组合循环对 finder 三角 `(6,6)/(6,size-7)/(size-7,6)` 直接 `continue`；其余一律 `addAlignment`（绘制 + `isFunc` 占位），覆盖 timing 上的中心（v7 `(6,22)`、v10 `(6,28)/(28,6)` 等）。删除 `reserveAlignment`。
+2. **测试反转：** 去掉 R3 的 `version 7+ omits alignment on timing tracks and keeps timing intact`。新测 `alignment bullseye overwrites timing except the three finder corners`：完整 5×5 bullseye、finder 三角无 alignment、未被覆盖的 timing 仍交替、finder 旁数据格非 isFunc。v2 `[6,18]` / v7 / v10 / v14 功能格 + 配对 JSON 全编码。
+3. **R1 回归：** `ISO de-interleave plus RS remainder recovers pairing payload` 仍绿。
+4. `bun test` **793 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `9d3aafec-7c86-4190-a1cb-f8735220f48e`：**mergeable**，P0/P1/P2=0（先独立求证 ISO Annex E/G 再裁）。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（置信 0.99，指挥亲验属实）：R3 对 timing 上的 alignment 只 reserve 不画。R3 把 Codex R2「本应省略」理解反了——R2 的错是绘制顺序（alignment 先、timing 后切坏中心），正解是 alignment 后画覆盖 timing，不是省略。
+2. 全量 `bun test` 第一次 F50 watcher「many tier-2 recipients… stay under 1s」抖到 ~1189ms 失败。隔离重跑 615ms 通过；再跑全量 793 全绿。与 QR diff 无关。
+
+### 我们是如何解决这些错误的？
+
+1. 循环改为 finder 三角 skip、其余 `addAlignment`；删 `reserveAlignment`。v2 `(6,18)` 按 ISO 仍是 finder 角不画；v7/v10 的 timing 中心画完整 bullseye。测试用 `isAlignAt` 钉死外框/白环/中心，防止再退化成 reserve-blank。
+2. 不改 F50 阈值；隔离确认后重跑全量通过。
+
+---
+
+## #26 PR 6 返工 R5（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **启动链 corrupt fail-closed：** `initializeNotifications` 的 reconcile 吞 `DeviceRegistryCorruptError`（读盘路径已告警）。ntfy enabled + corrupt 文件时 API 仍可提供 `/healthz`；设备 API 500 `device_registry_corrupt`。
+2. **覆盖写与 502 一致：** dest→`.bak` → tmp→dest；目录 fsync 失败换回旧 registry（内存快照兜底）；成功删 `.bak`。首次创建撤回不变。
+3. **QR quiet zone：** canvas 内边距 4 模块白底，模块从 `(x+4,y+4)` 绘制。
+4. **tmp 短写：** `writeAllSync` 循环写全量再 fsync+rename。
+5. `bun test` **797 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `2cf614a2-7cf8-47fb-b85b-892bda53760a`：**mergeable**，P0/P1/P2=0（重点攻启动链全路与报告-磁盘一致性）。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1（0.99）：R3 E4 只修 inspect，initialize 的 reconcile 仍 throw，ntfy 开时 API 起不来。
+2. Codex Local P1（0.96）：覆盖写目录 fsync 失败后 502+删新 ntfy user，磁盘却已是含新设备的 registry。
+3. Codex 云端 P2：QR canvas 无 4 模块 quiet zone（CSS 12px 拉到 240px 不够）。
+4. Codex 云端 P2：自管 `writeSync` 一次可能短写。
+
+### 我们是如何解决这些错误的？
+
+1. 只在 `initializeNotifications` 吞 corrupt；运行时 list/create 仍 fail-closed。测试走 inspect + initialize + healthz 200 + devices 500，告警不含文件里的 password 文本。
+2. 覆盖写保留 `.bak`/内存快照，fsync 失败恢复旧字节；create 仍删新 user，磁盘只留旧设备。
+3. 把 quiet zone 画进 canvas 位图，不依赖 CSS padding。
+4. `writeAllSync` 按 offset 循环直到写完。
+
+---
+
+## #26 PR 6 返工 R6（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **CI 超时对症：** 启动链测注入廉价 password hash，fetch 立即失败；不调大 5s 时限。根因是 `writeServerConfig` bcrypt cost=10，不是 ntfyFetch 8s。
+2. **drawFormat `[y][x]`：** ISO (x,y) 写入 `modules[y][x]`。坐标测钉两份 15 位 + 暗模块 + isFunc。
+3. **.bak 恢复失败 fail-closed：** throw + 拒绝空表落盘。
+4. **真扫码：** OpenCV 解码配对 PNG，载荷全等。脚本 `packages/api/scripts/verify-pairing-qr.ts`。
+5. `bun test` **800 pass / 0 fail**；`bun run build` 全绿。独立自审 `94288c31-b372-4110-b2ed-68bac9a6a878`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. CI：corrupt-boot 测 5000ms timeout。本机 1.1s 绿。时间线显示超时后 bcrypt 还跑了约 90s。
+2. format 信息转置，扫码器拿不到 mask。
+3. bak 恢复失败当空表会丢掉历史设备。
+4. PNG 编码器把 filter byte 填成 255，OpenCV `libpng error: bad adaptive filter value`——修 `row[0]=0` 后解码成功。
+
+### 我们是如何解决这些错误的？
+
+1. 查 CI log 排除 8s fetch（该路径不 fetch）；注入 `setNotifyPasswordHashForTests`。
+2. `put(x,y)` → `modules[y][x]`；坐标级断言。
+3. 恢复失败 failClosed；persist 见 unrestored bak 拒写。
+4. 真扫码脚本 + bun skipIf 无 cv2。解码输出进回执。
+
+---
+
+## #26 PR 6 返工 R7（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **分类器收口：** 404/400 只认 ntfy `code 40031` 或 `"user does not exist"`。裸 `not_found` 子串删除，`{"error":"route_not_found"}` 为 transient，不收敛 revoked。
+2. **覆盖写三连失败 fail-closed：** 目录 fsync + `.bak` rename + 内存快照写都失败时，新 dest 隔离为 `.unrestored`，保留 `.bak`，registry `failClosed`，设备 API 抛 `DeviceRegistryCorruptError`。
+3. **revoke 单次 DELETE：** `reconcileNotificationDevices(skipDeviceId)` 跳过本次目标，不占用 list in-flight；已 pending 目标在 ntfy 503 时一次 revoke 只发一次 DELETE。
+4. `bun test` **802 pass / 0 fail**；`bun run build` 全绿。独立自审 `62d40cd6-c839-4987-b09b-c3fa655f66e5`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex 云端 P1：R3「404 看 body」方向对，但匹配名单留裸 `not_found`，反代 `route_not_found` 被判 missing user。
+2. Codex 云端 P2：restore 两路都失败时错误被吞，新 dest 在位，下次读盘丢 bak。
+3. Codex 云端 P2：revoke 前 reconcile 已对该 pending 目标 DELETE，revoke 再 DELETE 一次。
+
+### 我们是如何解决这些错误的？
+
+1. `ntfyDeleteBodyMeansMissingUser` 去掉 `allowNotFoundToken` / 裸 `not_found`；测试把 `(404,'not_found')` 改为 transient，并钉 `route_not_found` 不收敛。
+2. `restoreOverwrittenRegistry` 两路失败则 failClosed + 隔离 dest + throw；`recoverBackupSync` 见 unrestored+.bak 不得丢 bak。测试缝 `snapshotRestoreHookForTests`。
+3. revoke 调用 `reconcileNotificationDevices(id)` 跳过本目标；skip 不写 `reconcileInFlight`。
+
+---
+
+## #26 PR 6 返工 R8（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **拆开 ntfy 未就绪的两种吊销语义：** 行含 `ntfyUsername` 时临时 disabled / 缺 admin 密码 → **拒绝 503**（人话 message），不标 revoked、不外呼。已 revoked 仍幂等。无远端 username 才允许本地收敛。
+2. UI 吊销失败对 `notifications_disabled` / `unconfigured` 宣布「先恢复 ntfy，手机可能仍在收通知」。
+3. ZCode P1×2 + P2×5 **只记债不改码**（见 `RECEIPT-pr6.md` R8）。
+4. `bun test` **804 pass / 0 fail**；`bun run build` 全绿。独立自审 `e3cb234e-76ca-412d-858e-7e1920d25e55`：**mergeable**，P0/P1/P2=0。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：R3 本地收敛把「从未配 ntfy」和「临时关掉 / 缺密码但远端仍可达」混在一起，假吊销后对账永远跳过。
+2. 若挂 `pending_revoke`，UI 会显示「Revoking…」，同样不像诚实失败。
+
+### 我们是如何解决这些错误的？
+
+1. `peekPairedDevice` 后按是否有 `ntfyUsername` 分流；有则 `NotifyError` 503 + message。选拒绝而非 pending，因为凭据存活期间设备不该显示已吊销或正在吊销。
+2. 已 revoked + ntfy 全关：直接 `already_revoked`，回归不外呼。
+3. ZCode 条目写入回执记债表，本轮零改码。
+
+---
+
+## #26 PR 6 返工 R9（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr6`（就地修；禁动 main；禁止新开分支；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/30
+
+### 我们实现了哪些功能？
+
+1. **回滚后再 fsync 目录：** 首次创建 unlink dest、覆盖写 restore `.bak` 之后都再 `fsyncDirectorySync`。成功则仍 502 且磁盘=报告。
+2. **二次 fsync 失败 fail-closed：** 复用 `failClosed`，并写 `.failclosed` 标记（502 后崩溃仍闸住读盘）；保留 dest/.bak 现场；告警无敏感内容。
+3. `bun test` **805 pass / 0 fail**；`bun run build` 全绿。独立自审 `daeab04f-8dd1-473e-8389-52a2b44e29c2`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. Codex Local P1：回滚完成不 fsync 目录，崩溃可能 replay 已失败的 rename，被拒的新 registry 复活而 ntfy user 已删。
+
+### 我们是如何解决这些错误的？
+
+1. 回滚 `try` 之后无条件再 fsync；再失败 `markRegistryFailClosed` + throw corrupt，不把「可能没持久化的回滚」当成功服务。
+2. 现有用例改为只失败第一次 fsync（①）；新增两次失败用例（②）。
 
 

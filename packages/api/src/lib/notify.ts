@@ -21,6 +21,19 @@ import {
   type NotificationLogicalTarget,
   type NotificationSource,
 } from './notification-log.ts';
+import {
+  DeviceNotFoundError,
+  DeviceRegistryCorruptError,
+  DeviceRegistryPersistError,
+  listPairedDevices,
+  peekPairedDevice,
+  reconcilePendingRevokes,
+  registerPairedDevice,
+  revokePairedDevice,
+  type DeviceListItem,
+  type NtfyUserDeleteResult,
+} from './notification-devices.ts';
+import { encodeQrModules } from './qr-byte.ts';
 
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
@@ -75,14 +88,30 @@ export interface NotifyService {
   verify(): Promise<{ ok: true }>;
 }
 
-/** One-time credentials for a human phone, never persisted by this API. */
+/** One-time credentials for a human phone. password 只出现在本响应，永不落盘。 */
 export type NotificationDevice = {
+  id: string;
+  displayName: string;
   username: string;
   password: string;
   serverUrl: string;
   topics: {
     userAlerts: string;
     userLow: string;
+  };
+  qrPayload: {
+    serverUrl: string;
+    username: string;
+    password: string;
+    topics: {
+      userAlerts: string;
+      userLow: string;
+    };
+  };
+  /** 一次性 QR 模块图；列表接口永不返回。编码失败则省略，copy 字段仍可用。 */
+  qr?: {
+    size: number;
+    modules: string;
   };
 };
 
@@ -95,10 +124,13 @@ export class NotifyError extends Error {
       | 'notify_cancelled'
       | 'verify_failed'
       | 'unknown_agent'
-      | 'message_too_large',
+      | 'message_too_large'
+      | 'device_registry_unavailable',
     public readonly details?: {
-      maxRequestBytes: number;
-      availableMessageBytes: number;
+      maxRequestBytes?: number;
+      availableMessageBytes?: number;
+      /** 给人看的原因；API 可原样返回。 */
+      message?: string;
     },
   ) {
     super(code);
@@ -277,8 +309,16 @@ function quoted(value: string): string {
   return JSON.stringify(value);
 }
 
+let passwordHashForTests: ((password: string) => Promise<string>) | null = null;
+
 async function passwordHash(password: string): Promise<string> {
+  if (passwordHashForTests) return passwordHashForTests(password);
   return Bun.password.hash(password, { algorithm: 'bcrypt', cost: 10 });
+}
+
+/** 测试缝：跳过 bcrypt，避免 CI 上 cost=10 把 5s 用例拖死。 */
+export function setNotifyPasswordHashForTests(fn: ((password: string) => Promise<string>) | null): void {
+  passwordHashForTests = fn;
 }
 
 async function writeServerConfig(state: NotifyState): Promise<void> {
@@ -373,8 +413,18 @@ function basic(user: string, password: string): Record<string, string> {
   return { Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
 }
 
+/** 管理面 ntfy fetch 超时，避免 delete 挂死设备 registry 队列。 */
+const NTFY_ADMIN_FETCH_TIMEOUT_MS = 8_000;
+
+async function ntfyFetch(path: string, init: RequestInit): Promise<Response> {
+  return fetch(providerUrl(path), {
+    ...init,
+    signal: AbortSignal.timeout(NTFY_ADMIN_FETCH_TIMEOUT_MS),
+  });
+}
+
 async function ntfyAdminJson(path: string, body: unknown): Promise<Response> {
-  const response = await fetch(providerUrl(path), {
+  return ntfyFetch(path, {
     method: 'POST',
     headers: {
       ...basic('admin', config.ntfy.adminPassword!),
@@ -382,7 +432,6 @@ async function ntfyAdminJson(path: string, body: unknown): Promise<Response> {
     },
     body: JSON.stringify(body),
   });
-  return response;
 }
 
 /**
@@ -409,7 +458,7 @@ export async function createRuntimeReader(entry: Route): Promise<void> {
     });
     if (!access.ok) throw new NotifyError('notify_unavailable');
 
-    const tokenResponse = await fetch(providerUrl('/v1/account/token'), {
+    const tokenResponse = await ntfyFetch('/v1/account/token', {
       method: 'POST',
       headers: { ...basic(entry.reader.username, password), 'content-type': 'application/json' },
       body: JSON.stringify({ label: 'openagentemail-device-reader' }),
@@ -433,7 +482,7 @@ async function deleteRuntimeReader(entry: Route): Promise<void> {
 
 async function deleteNtfyUser(username: string): Promise<void> {
   try {
-    await fetch(providerUrl('/v1/users'), {
+    const response = await ntfyFetch('/v1/users', {
       method: 'DELETE',
       headers: {
         ...basic('admin', config.ntfy.adminPassword!),
@@ -441,9 +490,80 @@ async function deleteNtfyUser(username: string): Promise<void> {
       },
       body: JSON.stringify({ username }),
     });
+    let body = '';
+    try {
+      body = await response.text();
+    } catch {
+      body = '';
+    }
+    // 幽灵清理仍是 best-effort（无重试队列：凭据从未落盘，无法对账）。
+    // 失败只记 warn，不把登记失败改成别的错误码。
+    if (classifyNtfyUserDeleteResponse(response.status, body) === 'transient') {
+      console.warn('[notify] ghost ntfy user cleanup failed', { username, status: response.status });
+    }
+  } catch (err) {
+    console.warn('[notify] ghost ntfy user cleanup failed', {
+      username,
+      error: err instanceof Error ? err.message : 'unknown',
+    });
+  }
+}
+
+function ntfyDeleteBodyMeansMissingUser(body: string): boolean {
+  const trimmed = body.trim();
+  if (!trimmed) return false;
+  let code: number | undefined;
+  let error = '';
+  try {
+    const parsed = JSON.parse(trimmed) as { code?: unknown; error?: unknown };
+    if (typeof parsed.code === 'number') code = parsed.code;
+    if (typeof parsed.error === 'string') error = parsed.error;
   } catch {
-    // The retry uses a unique reader username. A failed best-effort cleanup
-    // cannot expose a route because its token was never persisted.
+    error = trimmed;
+  }
+  const haystack = `${error} ${trimmed}`.toLowerCase();
+  // 只认 ntfy 缺 user 信号；裸 not_found 会误伤 {"error":"route_not_found"}。
+  return code === 40031 || haystack.includes('user does not exist');
+}
+
+/**
+ * 吊销路径：远端 user 已不存在视为删除成功。
+ * 现网 ntfy `handleUsersDelete` 对缺失 user 返回 HTTP 400 / code 40031 /
+ * "user does not exist"（不是裸 HTTP 404）。网络错误与 5xx 是 transient。
+ * 反代/网关 404（含 route_not_found）不得收敛 revoked。
+ */
+export function classifyNtfyUserDeleteResponse(
+  status: number,
+  body: string,
+): NtfyUserDeleteResult {
+  if (status >= 200 && status < 300) return 'deleted';
+  // 一切 5xx 不看 body：远端 user 可能仍在，不得收敛 revoked。
+  if (status >= 500) return 'transient';
+  if (status === 404 || status === 400) {
+    return ntfyDeleteBodyMeansMissingUser(body) ? 'not_found' : 'transient';
+  }
+  return 'transient';
+}
+
+export async function deleteNtfyUserResult(username: string): Promise<NtfyUserDeleteResult> {
+  try {
+    const response = await ntfyFetch('/v1/users', {
+      method: 'DELETE',
+      headers: {
+        ...basic('admin', config.ntfy.adminPassword!),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ username }),
+    });
+    let body = '';
+    try {
+      body = await response.text();
+    } catch {
+      body = '';
+    }
+    return classifyNtfyUserDeleteResponse(response.status, body);
+  } catch {
+    return 'transient';
   }
 }
 
@@ -452,7 +572,9 @@ async function deleteNtfyUser(username: string): Promise<void> {
  * Agent routes are deliberately absent: a phone is for the owner, not an
  * alternate credential for an agent's private wake-up topic.
  */
-export async function createNotificationDevice(): Promise<NotificationDevice> {
+export async function createNotificationDevice(
+  options: { displayName?: string } = {},
+): Promise<NotificationDevice> {
   if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
   if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
   const current = await state();
@@ -476,19 +598,93 @@ export async function createNotificationDevice(): Promise<NotificationDevice> {
         });
         if (!access.ok) throw new NotifyError('notify_unavailable');
       }
+      const topicMap = { userAlerts: current.userAlerts.topic, userLow: current.userLow.topic };
+      let record;
+      try {
+        record = await registerPairedDevice({
+          displayName: options.displayName,
+          ntfyUsername: username,
+          topics: topicMap,
+        });
+      } catch (err) {
+        await deleteNtfyUser(username);
+        if (err instanceof DeviceRegistryPersistError) throw err;
+        throw new DeviceRegistryPersistError(err);
+      }
+      const qrPayload = {
+        serverUrl: config.ntfy.publicUrl,
+        username,
+        password,
+        topics: topicMap,
+      };
+      let qr: { size: number; modules: string } | undefined;
+      try {
+        qr = encodeQrModules(JSON.stringify(qrPayload));
+      } catch {
+        // 配对 copy 字段仍可用；QR 失败不得阻断发凭据。
+      }
       return {
+        id: record.id,
+        displayName: record.displayName,
         username,
         password,
         serverUrl: config.ntfy.publicUrl,
-        topics: { userAlerts: current.userAlerts.topic, userLow: current.userLow.topic },
+        topics: topicMap,
+        qrPayload,
+        ...(qr ? { qr } : {}),
       };
     } catch (err) {
-      if (created) await deleteNtfyUser(username);
-      if (err instanceof NotifyError) throw err;
+      if (created && !(err instanceof DeviceRegistryPersistError)) await deleteNtfyUser(username);
+      if (err instanceof NotifyError || err instanceof DeviceRegistryPersistError) throw err;
       throw new NotifyError('notify_unavailable');
     }
   }
   throw new NotifyError('notify_unavailable');
+}
+
+let reconcileInFlight: Promise<void> | null = null;
+
+export async function reconcileNotificationDevices(skipDeviceId?: string): Promise<void> {
+  if (!config.ntfy.enabled || !config.ntfy.adminPassword) return;
+  // skip 路径只清其它 pending，不占用/替换 list 的 in-flight coalesce。
+  if (skipDeviceId) {
+    return reconcilePendingRevokes(deleteNtfyUserResult, skipDeviceId);
+  }
+  // 并发入口共用一次 in-flight（同一 tick 的 list/revoke 不放大 ntfy）。
+  // 不做跨请求 TTL：列表必须能收敛刚写入的 pending_revoke。
+  if (reconcileInFlight) return reconcileInFlight;
+  const run = reconcilePendingRevokes(deleteNtfyUserResult).finally(() => {
+    if (reconcileInFlight === run) reconcileInFlight = null;
+  });
+  reconcileInFlight = run;
+  return run;
+}
+
+export async function listNotificationDevices(): Promise<DeviceListItem[]> {
+  await reconcileNotificationDevices();
+  return listPairedDevices();
+}
+
+export async function revokeNotificationDevice(id: string): Promise<'revoked' | 'already_revoked'> {
+  const ntfyReady = Boolean(config.ntfy.enabled && config.ntfy.adminPassword);
+  if (!ntfyReady) {
+    const device = await peekPairedDevice(id);
+    if (!device) throw new DeviceNotFoundError();
+    if (device.revokeStatus === 'revoked') return 'already_revoked';
+    // ② 记录含远端 user：临时关 ntfy / 缺 admin 密码时不得本地假吊销（凭据可能仍活着）。
+    if (device.ntfyUsername) {
+      const code = config.ntfy.enabled ? 'notifications_unconfigured' : 'notifications_disabled';
+      throw new NotifyError(code, {
+        message:
+          'Restore ntfy admin access before revoking this device. The phone credential may still receive notifications.',
+      });
+    }
+    // ① 从未配过远端（无 ntfyUsername）：无对账对象，允许本地收敛。
+    return revokePairedDevice(id, async () => 'deleted');
+  }
+  // 对账其它 pending，但跳过本目标：revoke 自己走单次 DELETE。
+  await reconcileNotificationDevices(id);
+  return revokePairedDevice(id, deleteNtfyUserResult);
 }
 
 function parseMessages(text: string): NotifyMessage[] {
@@ -829,4 +1025,11 @@ export async function initializeNotifications(): Promise<void> {
   }
   if (changed) saveState(current);
   await writeServerConfig(current);
+  try {
+    await reconcileNotificationDevices();
+  } catch (err) {
+    // inspect 已 fail-closed+告警；启动对账再读同一 corrupt 文件不得炸 API。
+    if (err instanceof DeviceRegistryCorruptError) return;
+    throw err;
+  }
 }

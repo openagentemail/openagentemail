@@ -8,6 +8,8 @@ import {
   NotifyError,
   NTFY_REQUEST_MAX_BYTES,
   createNotificationDevice,
+  listNotificationDevices,
+  revokeNotificationDevice,
   type NotificationDevice,
   type NotifyLevel,
   type NotifyService,
@@ -15,6 +17,12 @@ import {
   type NotifyTopic,
   notificationService,
 } from '../lib/notify.ts';
+import {
+  DeviceNotFoundError,
+  DeviceRegistryCorruptError,
+  DeviceRegistryPersistError,
+  DeviceRevokeTransientError,
+} from '../lib/notification-devices.ts';
 import {
   checkNotifyUserLimit,
   releaseNotifyUserLimit,
@@ -39,6 +47,7 @@ const deviceSchema = z.object({
   // This must match the active server config. It prevents handing out a phone
   // reader before NOTIFY_PUBLIC_URL has been made public and the stack restarted.
   publicUrl: z.string().url(),
+  displayName: z.string().max(80).optional(),
 }).strict();
 
 /** 与 routes/ui.ts#toNotifyTopic 必须保持同一口径（Bearer 入口）；改则两边同步。 */
@@ -50,11 +59,19 @@ function toTopic(value: string): NotifyTopic | null {
 }
 
 function notificationError(c: Context, err: unknown) {
+  if (err instanceof DeviceNotFoundError) return c.json({ error: err.code }, 404);
+  if (err instanceof DeviceRegistryCorruptError) return c.json({ error: err.code }, 500);
+  if (err instanceof DeviceRegistryPersistError) return c.json({ error: err.code }, 502);
+  if (err instanceof DeviceRevokeTransientError) return c.json({ error: err.code }, 502);
   if (!(err instanceof NotifyError)) throw err;
   if (err.code === 'notifications_disabled' || err.code === 'notifications_unconfigured') {
-    return c.json({ error: err.code }, 503);
+    return c.json(
+      err.details?.message ? { error: err.code, message: err.details.message } : { error: err.code },
+      503,
+    );
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  if (err.code === 'device_registry_unavailable') return c.json({ error: err.code }, 502);
   if (err.code === 'message_too_large') {
     // 413: payload exceeds the ntfy request budget after framing (F76).
     return c.json(
@@ -89,7 +106,7 @@ function requireUserNotifyPermission(c: Context, find = findIdentity) {
 export type NotifyRouteOptions = {
   service?: NotifyService;
   findIdentity?: typeof findIdentity;
-  createDevice?: () => Promise<NotificationDevice>;
+  createDevice?: (options?: { displayName?: string }) => Promise<NotificationDevice>;
   /** Test seam; production always uses the active ntfy configuration. */
   publicUrl?: string;
 };
@@ -190,7 +207,35 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
         return c.json({ error: 'notify_public_url_mismatch: set NOTIFY_PUBLIC_URL and restart the stack first' }, 409);
       }
       try {
-        return c.json(await createDevice(), 201);
+        const created = await createDevice({ displayName: parsed.data.displayName });
+        c.header('Cache-Control', 'no-store');
+        return c.json(created, 201);
+      } catch (err) {
+        return notificationError(c, err);
+      }
+    })
+    .get('/devices', async (c) => {
+      if (getAuth(c).kind !== 'admin') {
+        return c.json({ error: 'forbidden: admin key required' }, 403);
+      }
+      try {
+        c.header('Cache-Control', 'no-store');
+        return c.json({ devices: await listNotificationDevices() });
+      } catch (err) {
+        return notificationError(c, err);
+      }
+    })
+    .delete('/devices/:id', async (c) => {
+      if (getAuth(c).kind !== 'admin') {
+        return c.json({ error: 'forbidden: admin key required' }, 403);
+      }
+      const id = c.req.param('id');
+      if (!id || !id.startsWith('dev_') || id.length > 64) {
+        return c.json({ error: 'invalid_request' }, 400);
+      }
+      try {
+        await revokeNotificationDevice(id);
+        return c.body(null, 204);
       } catch (err) {
         return notificationError(c, err);
       }

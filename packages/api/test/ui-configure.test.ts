@@ -208,4 +208,33 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     expect(authed.status).toBe(302);
     expect(authed.headers.get('location')).toBe('/ui/configure/clients');
   });
+
+  test('identity session cannot list, create, or revoke devices', async () => {
+    const { app, cookie } = authenticatedApp({ kind: 'identity', address: fox.address });
+    const headers = jsonHeaders(cookie);
+    const listed = await app.request('http://localhost/ui/api/notify/devices', { headers: { cookie } });
+    expect(listed.status).toBe(403);
+    const created = await app.request('http://localhost/ui/api/notify/devices', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ displayName: 'Nope' }),
+    });
+    expect(created.status).toBe(403);
+    const revoked = await app.request('http://localhost/ui/api/notify/devices/dev_nope', {
+      method: 'DELETE',
+      headers: { cookie, origin: 'http://localhost' },
+    });
+    expect(revoked.status).toBe(403);
+  });
+
+  test('invalid JSON on UI device create is 400 not a silent Phone', async () => {
+    const { app, cookie } = authenticatedApp({ kind: 'admin' });
+    const created = await app.request('http://localhost/ui/api/notify/devices', {
+      method: 'POST',
+      headers: jsonHeaders(cookie),
+      body: '{not-json',
+    });
+    expect(created.status).toBe(400);
+    expect(await created.json()).toMatchObject({ error: 'invalid_json' });
+  });
 });
