@@ -491,6 +491,161 @@
 3. `loadAllTasksCached` 对 IMAP/测试快照 `map(mergeQueuedEvents)` 再过滤切页。
 4. overlay 退役：IMAP 已有同 state 事件、已 terminal、或已有更晚状态信时丢掉补丁，避免盖住权威的新 input-required；丢掉时 `invalidateTaskListCache`。
 
+---
+
+## #26 PR 5：Configure 完整闭环（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（禁动 main；基线 `676fa3c`）  
+范围：ADR §PR 5（Identities & Tokens / Authorized Clients / Push 人话卡 / Domains·Plan 诚实预留）+ PR1 ZCode P2×3
+
+### 我们实现了哪些功能？
+
+1. **Identities & Tokens：** 单 token slot 只展示 Set/Missing（永不回显明文）；admin 可创建（一次性 token modal）、Rotate（Rotated Token 仪式）、Delete（二次确认后留在 Configure，不跳 Overview）；每行投影当前 push tier。identity 会话无 Create/Rotate/Delete。
+2. **Authorized Clients：** 继续走 `/ui/api/oauth/grants` 列表/吊销；旧 `/ui/oauth/grants` HTML 书签保留 302 fallback。
+3. **Push & Devices：** 三张人话卡（1 只告知有信 / 2 +发件人主题 / 3 +正文验证码）；admin 改档；tier 3 走 confirm modal 且 PUT 必须 `confirm_risk: true`；设备配对诚实空态（PR6）。
+4. **Domains / Plan：** `renderEmptyState` 明确 roadmap / 自托管实例说明 + 文档路径（无 `https://` 远程 href，无配额/升级按钮）。
+5. **PR1 债项：** `/ui/oauth/grants` 未登录先 session 检查再 302 `/ui`；`applyScope` 收成 `SCOPE_META` map；`app-nav` / `modal` 空桩迁入真实现。
+6. 测试：`ui-configure.test.ts` 钉 UI tier3 400、identity 越权 403、grant 吊销即时 204、grants 重定向分流；`ui-assets` 补 Configure 静态契约。`bun test` **746 pass / 0 fail**；`bun run build` 全绿。
+7. 独立自审 agent `8a6cc590-1218-460f-9781-c5feaa5ddb22`：`676fa3c..a0f1059` 当时标 mergeable / 无 P1；指挥随后把 Configure 模糊失败升为 Codex P1，该结论作废，见下方 R1。
+
+### 我们遇到了哪些错误？
+
+1. Plan 页若把 `https://openagent.email/docs/...` 写进 JS/HTML，会撞上「三资产禁止远程 `https?://`」闸。
+2. `handleDeleteIdentity` 成功后无条件 `enterOverview`，Configure 施工中途会被踢回 Overview。
+3. `/ui/oauth/grants` 匿名 302 直接进 Configure，与同意页「先查 session」不一致（PR1 P2）。
+
+### 我们是如何解决这些错误的？
+
+1. Plan 空态用无 scheme 的 `openagent.email/docs/reference/api/` 纯文本指针；不把远程 URL 当 href。
+2. 删除成功时若当前 scope 是 configure/plan 则留在本页并 `refreshConfigureSurfaces()`，否则仍回 Overview。
+3. GET `/ui/oauth/grants` 无会话走 `redirectToLogin`（302 `/ui`）；有会话再 302 `/ui/configure/clients`。
+
+---
+
+## #26 PR 5 返工 R1（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A Codex P1（3771597658）：** `handleConfigurePushTier` 模糊失败（网络/解析/5xx）对齐 Overview F51：先 `bumpIdentityEpoch()`，再 GET `/ui/api/identities` 拉权威 tier，用 `recoveryGen` 丢弃过期响应，announce `(refreshed).` 后再渲染。`confirm_risk_required` / `session_expired` 仍走明确失败、不回拉。
+2. **B Codex P2（3771655230）：** pending 锁 `finally` 清除后若 `state.scope === 'overview'` 调用 `renderOverviewRows()`，避免 Overview 行卡在 disabled + 旧档。
+3. **C Codex P2 + CodeRabbit Minor（3771655235 / 3771617547）：** Push 卡改为 `radiogroup` + `role=radio` + `aria-checked`；identity 会话只读卡 `aria-disabled`、去掉非法 `aria-pressed`；sr-only「Current push content:」标明当前档。
+4. **D CodeRabbit Major（3771617543 之一）：** `applyRoute()` 在关 nav drawer 之后调用 `closeAllModals()`（消费 `confirmModalOnCancel`），Back/导航不残留 token/确认/创建 modal。
+5. **E CodeRabbit Minor（3771617540）：** `closeNavDrawer` 仅在抽屉曾打开时把焦点还给 `navToggle`；Escape（无 modal 时）走同一 `closeNavDrawer()`；backdrop/toggle 共用。
+6. **F CodeRabbit Minor（3771617543 之二）：** `beginModal()` 记录 opener；`closeAllModals` 恢复焦点并清除记录；Cancel/Close/Escape 统一走 `closeAllModals`。
+7. **G CodeRabbit Minor + ZCode（3771617545）：** Plan 用 `docsHref`/`docsLabel` 真链接；`allowedDocsHref` 只放行 `http:`/`https:` 或单个 `/` 相对路径，拒绝 `//` 与 `javascript:`。资产仍用 `'https:' + '/' + '/' + …` 拼接，不把 `https://` 硬编码进 UI_JS。补 `new Function(EMPTY_STATE_JS)` 白名单测试。
+8. **I ZCode P2-2：** `isConfigureScope()` 显式枚举 configure-identities/push/clients/domains 与 plan；去掉 `indexOf('configure-')`。
+9. `packages/api`：`bun test` **751 pass / 0 fail**；`bun run build` 全绿。
+10. 独立自审 agent `0b86e174-dd2b-4c4d-a3b2-5202e8010943`：A–I 均 fixed；P0/P1 无；初审 F 两条 P2（Create→Token opener / Cancel 卸节点）已在同轮关掉；结论 **mergeable**。未自己 merge。
+
+### 我们遇到了哪些错误？
+
+1. 初版回执把 Configure 模糊失败未回拉权威写成「无 P1 / mergeable」，指挥升为 Codex P1 后原结论作废。
+2. Plan 若把 `https://` 字面量写进 UI_JS 会撞三资产契约闸。
+3. `applyRoute` 每次都调 `closeNavDrawer`：若无 `wasOpen` 守卫，已关闭时仍 `navToggle.focus()` 会抢焦点。
+4. identity 只读档位卡用 `div` + `aria-pressed` 对屏幕阅读器是非法语义。
+
+### 我们是如何解决这些错误的？
+
+1. 本轮按 F51 把权威 GET 接到 Configure catch 的模糊分支，并在 RECEIPT R1 更正原 mergeable/无 P1 结论。
+2. Plan href 用字符串拼接构造 scheme；测试文件里才写完整 `https://` 去跑 `allowedDocsHref`。
+3. `closeNavDrawer` 先读 `data-nav-open === 'true'`，仅曾打开才恢复 `navToggle` 焦点。
+4. 统一 radiogroup/radio/`aria-checked`，并加 sr-only 当前档文案。
+
+---
+
+## #26 PR 5 返工 R2（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A 3773347575：** `allowedDocsHref` 相对路径经 `new URL(value, window.location.href)` 解析，必须 `origin` 相同；序列化结果若以 `//` 开头也拒绝（堵住 `/\evil.example` 与 `/foo/../\evil.example`）。
+2. **B 3773323957：** Configure tier 3 成功先 `closeAllModals({ skipFocus: true })` 再 `renderConfigurePush()`，并聚焦新的选中卡。
+3. **C 3773323961 / 3773347580：** `modalGeneration`；`beginModal` 递增；异步成功仅当代际仍当前才关窗/恢复控件/`showTokenModal`；`applyRoute` 的 `closeAllModals` 作废 pending。覆盖 create/rotate/delete、Overview/Configure tier 确认、revoke、关单。
+4. **D 3773323965：** 删除成功若命中 `activeAddress`，立刻清空地址/messages/detail，不靠 Overview 对账。
+5. **E：** 拒绝 `vbscript:` 并补测试。
+6. **F：** `/ui/oauth/grants` 无会话 `redirectToLogin` 注释写明恒 302 `/ui`、无开放重定向。
+7. **G：** `confirmModalOnCancel` 与 `modalOpener` 跨模块耦合记债不修。
+8. `bun test` **752 pass / 0 fail**；`bun run build` 全绿。独立自审 agent `4dae6c68-7509-415b-b775-9213a7876b24`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. `/\evil.example` 被当成同源相对路径，WHATWG 把 `\` 当 `/` 后变成协议相对主机。
+2. origin 通过后返回 pathname，`/foo/../\evil.example` 会序列化成 `//evil.example`，赋给 `<a href>` 仍是开放跳转。
+3. tier 3 成功先 `renderConfigurePush` 再关窗，opener 节点被卸下，键盘丢焦点。
+4. 异步确认返回时若用户已路由到新确认框，旧成功路径会 `closeAllModals` 误关。
+5. 删除当前 inbox 身份后只靠 `loadOverviewCycle` 对账，进 Inbox 会 `cancelOverview` 中止对账。
+
+### 我们是如何解决这些错误的？
+
+1. 相对路径用当前 origin 解析；测试注入 `window.location`，不把 `https://` 写进 UI_JS。
+2. 序列化结果必须是单个 `/` 开头（`rel.charAt(1) !== '/'`），并补 `/foo/../\evil.example` 用例。
+3. 关窗 skipFocus 后再重绘，聚焦 `.push-tier-card.is-selected`。
+4. `modalGeneration` + `openedGen` 守卫；路由关闭不带 `keepGeneration`。
+5. 删除成功路径同步清 `activeAddress` / messages / detail。
+
+---
+
+## #26 PR 5 返工 R3（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A P1（Codex Local 08:03 + ZCode P1-1）：** 五条确认流（create `createModalSubmit`、delete、revoke、Overview/Configure tier-3 的 Confirm+Cancel）的 `finally` 无条件复位本 dialog 控件 `disabled`。代际守卫只拦关窗 / 写状态 / `showTokenModal`。同类关单（tasks）一并修。行为测试 `ui-modal-buttons.test.ts`：抽出真实 onclick/submit，`new Function` + 假按钮，确认 → 请求成功（fake `closeAllModals`/`showTokenModal` bump 代际）→ 断言按钮可再点。仓库无 jsdom，对齐既有切片基建。
+2. **B ZCode P2-1：** `plan.ts` 直写 `https://openagent.email/docs/reference/api/`；三资产闸加 `https://openagent.email/docs` 前缀 allowlist，删掉拼接 trick。
+3. **C ZCode P2-2：** 删除 `ui-configure.test.ts` 两条中文注释断言；保留 Location `/ui`。
+4. **D ZCode P2-3：** `/grants` 加 identity 可见自己 grants 的设计注释，不改行为。
+5. **E ZCode P2-4：** mimosa 过期 checkout 记债不改代码。
+6. `bun test` **758 pass / 0 fail**（752+6 行为测试）；`bun run build` 全绿。本轮未复现指挥记的偶发 1 fail。独立自审 agent `1c05ad79-e953-4478-8d87-612cc8602dff`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. R2 把「恢复控件」也套进 `openedGen === modalGeneration`。成功路径 try 内 `closeAllModals()`/`showTokenModal()` 会 bump 代际，finally 比较失败，共享按钮永远 disabled，只能整页刷新。752 条源码字符串测试测不出此行为。
+2. Plan 曾用 `'https:'+'/'+'/'+…` 拼接绕过三资产禁远程 URL 闸。
+3. `/grants` 测试曾断言源码中文注释，无防护价值且脆弱。
+
+### 我们是如何解决这些错误的？
+
+1. finally 无条件 `disabled = false`；try 里代际守卫保留在关窗/`showTokenModal` 之前。补 DOM 行为级测试（`new Function` 假按钮，无 jsdom）。静态闸：源码不得再出现 `if (openedGen === modalGeneration)`。
+2. 直写完整 https 字面量；闸对 allowlist 前缀 split 后再禁 `\bhttps?:\/\/`。
+3. 删注释断言，只留 302 Location `/ui`。
+
+---
+
+## #26 PR 5 返工 R4（2026-08-13）
+
+日期：2026-08-13  
+分支：`tizerluo/worker-34-pr5`（就地修复，禁动 main，未新开分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/29
+
+### 我们实现了哪些功能？
+
+1. **A P1（Codex Local 08:33）：** 双管齐下收口 R2↔R3 振荡。① `finally` 仅 `openedGen === modalGeneration` 才复位本 dialog 控件（stale 不得复活新窗共享钮）。② `beginModal` 在 bump 代际后无条件复位 `confirmModalConfirm` / `confirmModalCancel` / `createModalSubmit`（成功关窗 finally 跳过后，下次开窗必然可点）。五条流 + tasks 关单均核对 Confirm+Cancel。
+2. **行为测试：** `ui-modal-buttons.test.ts` — **T1** `stale request must not re-enable a newer dialog Confirm`；**T2** `beginModal re-enables buttons after a successful generation bump`。
+3. **B ZCode P2-1：** `handleConfigurePushTier` 与 `handlePushTierChange` 模糊失败恢复重复，记债不修（后续抽 `recoverPushTier`）。
+4. `bun test` **754 pass / 0 fail**（R3 六条行为测例收成 T1/T2 两条）；`bun run build` 全绿。独立自审 agent `fab53156-3103-407e-9a4e-2182c03f6b71`：**mergeable**。
+
+### 我们遇到了哪些错误？
+
+1. R3 无条件 finally 复位：delete pending → Escape bump → 新开 revoke 并点击（disabled=true）→ 旧 delete 返回 finally 把共享 Confirm 拉回可点 → 可重复提交。
+2. 若只恢复 R2 的代际守卫、不在 beginModal 复位，成功关窗 bump 后按钮再次永死。
+
+### 我们是如何解决这些错误的？
+
+1. 两个开关同时落地：finally 代际守卫 + beginModal 统一复位。成功路径 bump 后 finally 跳过，下次 beginModal 拉回可点；stale 代际不符跳过，不碰新窗已 disable 的钮。
+2. T1 用挂起的 `apiJson`/`apply` 模拟 stale 完成；T2 抽出真实 `beginModal`，成功 leftover disabled 后再开窗断言可点。
+
+
 
 
 

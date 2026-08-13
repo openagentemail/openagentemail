@@ -338,10 +338,10 @@ describe('UI static asset contract', () => {
       expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     }
 
-    // 旧 OAuth grants 书签 302 → Configure · Authorized Clients
+    // 旧 OAuth grants 书签：未登录先去 Dashboard 登录，不把匿名请求 302 进 Configure
     const grants = await app.request('/ui/oauth/grants');
     expect(grants.status).toBe(302);
-    expect(grants.headers.get('location')).toBe('/ui/configure/clients');
+    expect(grants.headers.get('location')).toBe('/ui');
 
     const disabled = createApp({ uiEnabled: false });
     for (const path of [
@@ -608,7 +608,8 @@ describe('UI static asset contract', () => {
     expect(applyScope).toContain('notifyPanel.hidden = !notifyActive;');
     expect(applyScope).toContain('tasksPanel.hidden = !tasksActive;');
     expect(applyScope).toContain('mainContent.hidden = !inboxActive;');
-    expect(applyScope).toContain("skipLink.textContent = overviewActive");
+    expect(applyScope).toContain('var SCOPE_META = {');
+    expect(applyScope).toContain('skipLink.textContent = meta.skip');
     expect(applyScope).toContain("'Skip to notifications'");
     expect(applyScope).toContain("'Skip to tasks'");
     expect(applyScope).toContain("'#notify-panel'");
@@ -1020,12 +1021,19 @@ describe('UI static asset contract', () => {
   });
 
   // A18 / A19 / A20 / A21
+  // 远程 URL 闸：仅允许 openagent.email/docs 前缀（Plan 自托管文档），其余仍禁 https://。
+  const UI_REMOTE_HREF_ALLOWLIST = 'https://openagent.email/docs';
+  function withoutAllowedDocsHrefs(asset: string) {
+    return asset.split(UI_REMOTE_HREF_ALLOWLIST).join('');
+  }
+
   test('the three assets stay free of parser sinks and remote references', () => {
+    expect(UI_JS).toContain('https://openagent.email/docs/reference/api/');
     for (const asset of [UI_HTML, UI_CSS, UI_JS]) {
       expect(asset).not.toMatch(
         /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b|createElementNS/,
       );
-      expect(asset).not.toMatch(/\bhttps?:\/\//);
+      expect(withoutAllowedDocsHrefs(asset)).not.toMatch(/\bhttps?:\/\//);
       expect(asset).not.toMatch(/["'(=]\s*\/\//);
       expect(asset).not.toContain('@import');
       expect(asset).not.toContain('data:');
@@ -1339,7 +1347,7 @@ describe('UI static asset contract', () => {
   // select; the confirmed success path must not restore.
   test('tier-3 dialog restores on indirect close but not after confirm (F107)', () => {
     const closeAll = UI_JS.slice(
-      UI_JS.indexOf('function closeAllModals()'),
+      UI_JS.indexOf('function closeAllModals('),
       UI_JS.indexOf('function showTokenModal('),
     );
     // Pending cancel side-effect is consumed exactly once on any close.
@@ -1361,6 +1369,273 @@ describe('UI static asset contract', () => {
     expect(applyIdx).toBeGreaterThanOrEqual(0);
     expect(clearIdx).toBeGreaterThan(applyIdx);
     expect(closeIdx).toBeGreaterThan(clearIdx);
+  });
+
+  // #26 PR 5：Configure 闭环静态契约（token 仪式 / 人话卡 / 自托管空态 / 债项）
+  test('Configure identities uses a single honest token slot and a one-time ceremony', () => {
+    const renderCfg = UI_JS.slice(
+      UI_JS.indexOf('function renderConfigureIdentities('),
+      UI_JS.indexOf('function enterConfigureIdentities('),
+    );
+    expect(renderCfg).toContain("'Token slot: Set'");
+    expect(renderCfg).toContain("'Token slot: Missing'");
+    expect(renderCfg).toContain('if (isAdmin())');
+    expect(renderCfg).toContain("rotate.textContent = 'Rotate'");
+    expect(renderCfg).toContain("del.textContent = 'Delete'");
+    expect(renderCfg).not.toContain('identity.token');
+    expect(UI_JS).toContain('showTokenModal(payload.token');
+    expect(UI_JS).toContain("showTokenModal(payload.token, 'Rotated Token')");
+    expect(UI_HTML).toContain('Copy this token now. It will not be shown again.');
+    expect(UI_JS).toContain('isConfigureScope(state.scope)');
+    expect(UI_JS).not.toContain("indexOf('configure-')");
+  });
+
+  test('Configure push renders three human-language tier cards and server-enforced tier 3 confirm', () => {
+    expect(UI_JS).toContain("title: 'Notify only'");
+    expect(UI_JS).toContain("summary: 'Just tell me a message arrived.'");
+    expect(UI_JS).toContain("title: 'Sender & subject'");
+    expect(UI_JS).toContain("title: 'Body & OTP'");
+    expect(UI_JS).toContain('function handleConfigurePushTier(');
+    const configurePush = UI_JS.slice(
+      UI_JS.indexOf('function handleConfigurePushTier('),
+      UI_JS.indexOf('function renderConfigurePush('),
+    );
+    expect(configurePush).toContain('await apply(3, true, openedGen)');
+    expect(configurePush).toContain('confirm_risk_required');
+    expect(configurePush).toContain("apiJson('/ui/api/identities')");
+    expect(configurePush).toContain('bumpIdentityEpoch()');
+    expect(configurePush).toContain('(refreshed).');
+    expect(configurePush).toContain("if (state.scope === 'overview') renderOverviewRows()");
+    const catchStart = configurePush.indexOf('} catch (error) {');
+    const finallyStart = configurePush.indexOf('} finally {', catchStart);
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    expect(finallyStart).toBeGreaterThan(catchStart);
+    const catchBody = configurePush.slice(catchStart, finallyStart);
+    const fuzzyStart = catchBody.indexOf('// Fuzzy failure');
+    expect(fuzzyStart).toBeGreaterThanOrEqual(0);
+    const fuzzyBranch = catchBody.slice(fuzzyStart);
+    expect(fuzzyBranch.indexOf('bumpIdentityEpoch()')).toBeLessThan(
+      fuzzyBranch.indexOf("apiJson('/ui/api/identities')"),
+    );
+    expect(fuzzyBranch).toContain('var recoveryGen = state.overviewGen;');
+    const confirmIdx = catchBody.indexOf("error.body.error === 'confirm_risk_required'");
+    const sessionIdx = catchBody.indexOf("error.message === 'session_expired'");
+    expect(confirmIdx).toBeGreaterThanOrEqual(0);
+    expect(sessionIdx).toBeGreaterThan(confirmIdx);
+    expect(catchBody.slice(confirmIdx, sessionIdx)).not.toContain("apiJson('/ui/api/identities')");
+    expect(catchBody.slice(sessionIdx, fuzzyStart)).not.toContain("apiJson('/ui/api/identities')");
+    const finallyBody = configurePush.slice(finallyStart);
+    expect(finallyBody).toContain("delete state.tierPending[address]");
+    expect(finallyBody).toContain("if (state.scope === 'overview') renderOverviewRows()");
+    expect(UI_HTML).toContain('id="configure-push-cards"');
+    expect(UI_HTML).toContain('id="configure-push-devices"');
+    expect(UI_JS).toContain("'Device pairing is not in this release'");
+    const renderPush = UI_JS.slice(
+      UI_JS.indexOf('function renderConfigurePush('),
+      UI_JS.indexOf('function enterConfigurePush('),
+    );
+    expect(renderPush).toContain("role', 'radiogroup'");
+    expect(renderPush).toContain("role', 'radio'");
+    expect(renderPush).toContain('aria-checked');
+    expect(renderPush).not.toContain('aria-pressed');
+    expect(renderPush).toContain('Current push content:');
+    expect(renderPush).toContain("aria-disabled', 'true'");
+  });
+
+  test('Plan & Domains are honest empty states with no fake upgrade or quota controls', () => {
+    expect(UI_HTML).not.toContain('Upgrade');
+    expect(UI_JS).not.toContain("'Upgrade'");
+    expect(UI_JS).not.toContain('Upgrade plan');
+    expect(UI_JS).toContain("'Self-hosted instance'");
+    expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
+    expect(UI_JS).toContain("docsHref: 'https://openagent.email/docs/reference/api/'");
+    expect(UI_JS).toContain("'Custom domains are on the roadmap'");
+    expect(UI_JS).toContain('this page has no controls to click.');
+    expect(UI_CSS).toContain('.empty-state-docs');
+  });
+
+  test('PR1 P2 stubs are filled: app-nav and modal live in their component modules', async () => {
+    const { APP_NAV_JS } = await import('../src/ui/client/components/app-nav.ts');
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(APP_NAV_JS).toContain('function closeNavDrawer(');
+    expect(APP_NAV_JS).toContain('function openNavDrawer(');
+    expect(APP_NAV_JS).toContain('function renderAppNav(');
+    expect(MODAL_JS).toContain('function closeAllModals(');
+    expect(MODAL_JS).toContain('function showTokenModal(');
+    expect(MODAL_JS).toContain('function showCreateModal(');
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    expect(ROUTER_JS).not.toContain('function closeNavDrawer(');
+    expect(API_JS).not.toContain('function closeAllModals(');
+  });
+
+  test('applyRoute closes modals so Back cannot leave a token ceremony on the next page', async () => {
+    const { ROUTER_JS } = await import('../src/ui/client/router.ts');
+    const applyRoute = ROUTER_JS.slice(
+      ROUTER_JS.indexOf('async function applyRoute('),
+      ROUTER_JS.indexOf('function navigateTo('),
+    );
+    expect(applyRoute.indexOf('closeNavDrawer();')).toBeGreaterThanOrEqual(0);
+    expect(applyRoute.indexOf('closeAllModals();')).toBeGreaterThan(
+      applyRoute.indexOf('closeNavDrawer();'),
+    );
+  });
+
+  test('nav drawer restore focus to the toggle and Escape uses closeNavDrawer', async () => {
+    const { APP_NAV_JS } = await import('../src/ui/client/components/app-nav.ts');
+    expect(APP_NAV_JS).toContain("var wasOpen = inboxView.getAttribute('data-nav-open') === 'true'");
+    expect(APP_NAV_JS).toContain('if (wasOpen) navToggle.focus()');
+    expect(APP_NAV_JS).toContain("event.key !== 'Escape'");
+    expect(APP_NAV_JS).toContain('closeNavDrawer()');
+  });
+
+  test('modals record the opener and restore it through closeAllModals', async () => {
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(MODAL_JS).toContain('var modalOpener = null');
+    expect(MODAL_JS).toContain('function beginModal(');
+    const closeAll = MODAL_JS.slice(
+      MODAL_JS.indexOf('function closeAllModals('),
+      MODAL_JS.indexOf('function beginModal('),
+    );
+    expect(closeAll).toContain('var opener = modalOpener');
+    expect(closeAll).toContain('opener.isConnected');
+    expect(closeAll).toContain('opener.focus()');
+    expect(closeAll).toContain('opts.skipFocus');
+    expect(MODAL_JS).toContain('function elementInsideModal(');
+    expect(MODAL_JS).toContain("node.closest('#create-modal')");
+    expect(MODAL_JS).toContain('closeAllModals({ skipFocus: true, keepGeneration: true })');
+    expect(MODAL_JS).toContain('var modalGeneration = 0');
+    expect(MODAL_JS).toContain('if (!opts.keepGeneration) modalGeneration += 1');
+    expect(MODAL_JS).toContain('modalGeneration += 1');
+    expect(MODAL_JS).toContain('confirmModalConfirm.disabled = false');
+    expect(MODAL_JS).toContain('confirmModalCancel.disabled = false');
+    expect(MODAL_JS).toContain('createModalSubmit.disabled = false');
+    expect(MODAL_JS).toContain('return modalGeneration');
+    expect(MODAL_JS).toContain('modalOpener = previous');
+    expect(MODAL_JS).toContain('lostFocus && previous');
+    expect(MODAL_JS.indexOf('function showTokenModal(')).toBeGreaterThan(
+      MODAL_JS.indexOf('function beginModal('),
+    );
+    const showToken = MODAL_JS.slice(
+      MODAL_JS.indexOf('function showTokenModal('),
+      MODAL_JS.indexOf('function showCreateModal('),
+    );
+    expect(showToken).toContain('beginModal();');
+    expect(showToken).not.toContain('closeAllModals();');
+    const showCreate = MODAL_JS.slice(
+      MODAL_JS.indexOf('function showCreateModal('),
+    );
+    expect(showCreate).toContain('beginModal();');
+    expect(MODAL_JS).toContain("event.key !== 'Escape'");
+    expect(MODAL_JS).toContain('closeAllModals();');
+    expect(UI_JS).toContain('tokenModalClose.addEventListener(\'click\', closeAllModals)');
+    expect(UI_JS).toContain('createModalCancel.addEventListener(\'click\', closeAllModals)');
+  });
+
+  test('allowedDocsHref permits http(s) and slash-relative hrefs and rejects the rest', async () => {
+    const { EMPTY_STATE_JS } = await import('../src/ui/client/components/empty-state.ts');
+    expect(EMPTY_STATE_JS).toContain('function allowedDocsHref(');
+    expect(EMPTY_STATE_JS).toContain('parsedRel.origin !== window.location.origin');
+    expect(EMPTY_STATE_JS).toContain('rel.charAt(1) === \'/\'');
+    expect(EMPTY_STATE_JS).toContain("lowered.indexOf('vbscript:') === 0");
+    expect(EMPTY_STATE_JS).not.toMatch(/\bhttps?:\/\//);
+    const allowed = new Function(`
+      var window = { location: { href: 'http://localhost/ui/plan', origin: 'http://localhost' } };
+      ${EMPTY_STATE_JS}
+      return allowedDocsHref;
+    `)() as (href: string) => string;
+    expect(allowed('https://openagent.email/docs/reference/api/')).toBe(
+      'https://openagent.email/docs/reference/api/',
+    );
+    expect(allowed('http://example.com/docs')).toBe('http://example.com/docs');
+    expect(allowed('/docs/local')).toBe('/docs/local');
+    expect(allowed('//evil.example/phish')).toBe('');
+    expect(allowed('/\\evil.example')).toBe('');
+    expect(allowed('/\\\\evil.example')).toBe('');
+    expect(allowed('/foo/../\\evil.example')).toBe('');
+    expect(allowed('javascript:alert(1)')).toBe('');
+    expect(allowed('vbscript:alert(1)')).toBe('');
+    expect(allowed('data:text/html,hi')).toBe('');
+    expect(allowed('')).toBe('');
+  });
+
+  test('delete-identity stay-on-configure uses an explicit scope enum', async () => {
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { IDENTITIES_PAGE_JS } = await import('../src/ui/client/pages/identities.ts');
+    expect(IDENTITIES_PAGE_JS).toContain('function isConfigureScope(');
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-identities'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-push'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-clients'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'configure-domains'");
+    expect(IDENTITIES_PAGE_JS).toContain("scope === 'plan'");
+    expect(API_JS).toContain('isConfigureScope(state.scope)');
+    expect(API_JS).not.toContain("indexOf('configure-')");
+    expect(UI_JS).not.toContain("indexOf('configure-')");
+  });
+
+  test('stale modal responses do not close a newer dialog', async () => {
+    const { API_JS } = await import('../src/ui/client/api.ts');
+    const { AUTHORIZED_CLIENTS_PAGE_JS } = await import(
+      '../src/ui/client/pages/authorized-clients.ts'
+    );
+    const { TASKS_PAGE_JS } = await import('../src/ui/client/pages/tasks.ts');
+    const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');
+    for (const src of [API_JS, AUTHORIZED_CLIENTS_PAGE_JS, TASKS_PAGE_JS, PUSH_DEVICES_PAGE_JS]) {
+      expect(src).toContain('var openedGen =');
+      expect(src).toContain('openedGen !== modalGeneration');
+    }
+    const del = API_JS.slice(
+      API_JS.indexOf('function handleDeleteIdentity('),
+      API_JS.indexOf('function bumpIdentityEpoch('),
+    );
+    expect(del.indexOf('openedGen !== modalGeneration')).toBeLessThan(del.indexOf('closeAllModals();'));
+    expect(del).toContain('state.activeAddress === address');
+    expect(del).toContain("state.activeAddress = ''");
+    expect(del).toContain('clearDetail()');
+    expect(del).toContain('renderMessages()');
+    const create = API_JS.slice(
+      API_JS.indexOf('async function handleCreateSubmit('),
+      API_JS.indexOf('async function handleRotateToken('),
+    );
+    expect(create.indexOf('openedGen !== modalGeneration')).toBeLessThan(
+      create.indexOf('showTokenModal(payload.token)'),
+    );
+    const rotate = API_JS.slice(
+      API_JS.indexOf('async function handleRotateToken('),
+      API_JS.indexOf('function handleDeleteIdentity('),
+    );
+    expect(rotate.indexOf('openedGen !== modalGeneration')).toBeLessThan(
+      rotate.indexOf("showTokenModal(payload.token, 'Rotated Token')"),
+    );
+    const configurePush = PUSH_DEVICES_PAGE_JS.slice(
+      PUSH_DEVICES_PAGE_JS.indexOf('function handleConfigurePushTier('),
+      PUSH_DEVICES_PAGE_JS.indexOf('function renderConfigurePush('),
+    );
+    expect(configurePush).toContain('await apply(3, true, openedGen)');
+    expect(configurePush).toContain('closeAllModals({ skipFocus: true })');
+    const closeIdx = configurePush.indexOf('closeAllModals({ skipFocus: true })');
+    const renderIdx = configurePush.indexOf('renderConfigurePush();', closeIdx);
+    expect(renderIdx).toBeGreaterThan(closeIdx);
+    expect(configurePush).toContain("querySelector('.push-tier-card.is-selected')");
+    // P1 R4：finally 仅当前代际才复位；新窗由 beginModal 统一拉回可点。
+    for (const src of [API_JS, AUTHORIZED_CLIENTS_PAGE_JS, TASKS_PAGE_JS, PUSH_DEVICES_PAGE_JS]) {
+      expect(src).toContain('if (openedGen === modalGeneration)');
+    }
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    const beginModal = MODAL_JS.slice(
+      MODAL_JS.indexOf('function beginModal('),
+      MODAL_JS.indexOf('function showTokenModal('),
+    );
+    expect(beginModal).toContain('confirmModalConfirm.disabled = false');
+    expect(beginModal).toContain('confirmModalCancel.disabled = false');
+    expect(beginModal).toContain('createModalSubmit.disabled = false');
+  });
+
+  test('identity session CSS hides admin-only create controls', () => {
+    expect(UI_CSS).toContain(
+      '.inbox-view[data-session="identity"] #configure-identities-create',
+    );
+    expect(UI_JS).toContain('configureIdentitiesCreate.hidden = !isAdmin()');
   });
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动

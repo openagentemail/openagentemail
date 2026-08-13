@@ -58,7 +58,7 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - access / refresh / code 只存 SHA-256 哈希（`DATA_DIR/oauth.json`，0600）；access 默认 1h，refresh 30d 且轮换即作废旧票。
 - 令牌绑定 RFC 8707 `resource`（本机 `{base}/mcp`）；aud 不符 → 403。
 - CIMD SSRF：默认（`OAE_PUBLIC_EDGE=false`）部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback/ULA；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU。公网部署设 `OAE_PUBLIC_EDGE=true` 关闭私网放行（见下节）。
-- 授权响应（含错误）一律带 `iss`（RFC 9207）。Dashboard `/ui/oauth/grants` 可整串吊销。
+- 授权响应（含错误）一律带 `iss`（RFC 9207）。Dashboard `/ui/configure/clients` 可整串吊销（旧 `/ui/oauth/grants` 书签需会话后 302）。
 
 ## 公网开门姿态（P4-code 通用能力；零厂商绑定）
 
