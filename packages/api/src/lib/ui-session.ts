@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -70,6 +71,7 @@ type SessionStoreOptions = {
   /**
    * 持久化文件路径。生产由 app.ts 传入 DATA_DIR/ui-sessions.json；
    * 省略则纯内存（避免测试文件共享 DATA_DIR 时互相污染）。
+   * DATA_DIR 下本 store 与 identities/oauth/audit 等均为单写者，不支持多容器共享。
    */
   persistPath?: string;
   /** lastSeenAt 落盘节流间隔；默认 LAST_SEEN_PERSIST_INTERVAL_MS。 */
@@ -234,6 +236,11 @@ export class UiSessionStore {
     return this.sessions.size;
   }
 
+  /** 测试辅助：lastSeen 落盘节流时钟（墙钟 ms）。 */
+  lastSeenPersistedAtForTests(): number {
+    return this.lastSeenPersistedAt;
+  }
+
   private resolveSession(session: Session): Auth | null {
     if (session.token !== undefined) return this.resolve(session.token);
     if (this.resolveHash) return this.resolveHash(session.tokenHash);
@@ -272,9 +279,26 @@ export class UiSessionStore {
     return recent;
   }
 
+  /** 进程在 write/rename 之间被杀会留 .tmp；启动时顺手删掉（无明文、无安全影响）。 */
+  private discardStaleTmp(path: string): void {
+    const tmp = `${path}.tmp`;
+    if (!existsSync(tmp)) return;
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // best effort：删不掉不得阻断启动
+    }
+  }
+
   private loadFromDisk(now: number): void {
     const path = this.persistPath;
-    if (!path || !existsSync(path)) return;
+    if (!path) return;
+    this.discardStaleTmp(path);
+    // 文件不存在也要钉节流时钟，否则随后 authenticate 会因 lastSeenPersistedAt=0 立刻写盘
+    if (!existsSync(path)) {
+      this.lastSeenPersistedAt = now;
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(readFileSync(path, 'utf8'));

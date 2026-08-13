@@ -413,14 +413,20 @@ function basic(user: string, password: string): Record<string, string> {
   return { Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
 }
 
-/** 管理面 ntfy fetch 超时，避免 delete 挂死设备 registry 队列。 */
-const NTFY_ADMIN_FETCH_TIMEOUT_MS = 8_000;
+/** 管理面 ntfy fetch 超时（含 messages() 缓存读），避免假死实例把 /v1 与 /ui 挂住。 */
+export const NTFY_ADMIN_FETCH_TIMEOUT_MS = 8_000;
 
 async function ntfyFetch(path: string, init: RequestInit): Promise<Response> {
   return fetch(providerUrl(path), {
     ...init,
     signal: AbortSignal.timeout(NTFY_ADMIN_FETCH_TIMEOUT_MS),
   });
+}
+
+/** fetch 超时 / 网络失败统一成现有 NotifyError，避免未捕获 AbortError 变成 500。 */
+function notifyFetchFailed(err: unknown): NotifyError {
+  if (err instanceof NotifyError) return err;
+  return new NotifyError('notify_unavailable');
 }
 
 async function ntfyAdminJson(path: string, body: unknown): Promise<Response> {
@@ -895,11 +901,16 @@ export class NtfyNotificationService implements NotifyService {
     const adminPassword = config.ntfy.adminPassword!;
     const query = new URLSearchParams({ poll: '1' });
     if (since) query.set('since', since);
-    const response = await fetch(providerUrl(`/${encodeURIComponent(physical)}/json?${query.toString()}`), {
-      headers: basic('admin', adminPassword),
-    });
-    if (!response.ok) throw new NotifyError('notify_unavailable');
-    return parseMessages(await response.text());
+    try {
+      // 与管理面 ntfyFetch 同一 8s 超时；header 与 body 阶段都要映射，避免 500。
+      const response = await ntfyFetch(`/${encodeURIComponent(physical)}/json?${query.toString()}`, {
+        headers: basic('admin', adminPassword),
+      });
+      if (!response.ok) throw new NotifyError('notify_unavailable');
+      return parseMessages(await response.text());
+    } catch (err) {
+      throw notifyFetchFailed(err);
+    }
   }
 
   async verify(): Promise<{ ok: true }> {

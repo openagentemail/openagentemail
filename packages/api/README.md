@@ -34,7 +34,7 @@ bun run typecheck
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
-| `DATA_DIR` | `./data` | identity store (`identities.json`); sent registry (`sent-registry.json`); notification log (`notification-log.jsonl`, 30-day delivery audit, 0600, single writer); paired devices (`notification-devices.json`, 0600, single writer, never stores password/token) |
+| `DATA_DIR` | `./data` | 全部 store 单写者，不支持多容器共享（identities / oauth / audit / ui-sessions / sent-registry / notification-log / notification-devices；0600）。 |
 
 ## Endpoints
 

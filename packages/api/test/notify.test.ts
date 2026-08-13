@@ -31,6 +31,7 @@ const {
   listNotificationDevices,
   notifyAvailableMessageBytes,
   NotifyError,
+  NTFY_ADMIN_FETCH_TIMEOUT_MS,
   NTFY_REQUEST_MAX_BYTES,
   NtfyNotificationService,
   physicalAgentTopic,
@@ -1518,6 +1519,79 @@ describe('device list and revoke (Bearer)', () => {
         message: expect.stringContaining('Restore ntfy admin access'),
       });
       expect((await listPairedDevices())[0]?.revokeStatus).toBe('active');
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+});
+
+describe('NtfyNotificationService.messages timeout (#9)', () => {
+  test('messages() fetch timeout maps to NotifyError notify_unavailable', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+    });
+
+    const timeoutMs: number[] = [];
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms);
+      const controller = new AbortController();
+      controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      return controller.signal;
+    }) as typeof AbortSignal.timeout;
+
+    globalThis.fetch = (async (_input, init) => {
+      const signal = init?.signal;
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+      }
+      throw new Error('messages() must pass an already-aborted timeout signal');
+    }) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      let caught: unknown;
+      try {
+        await svc.messages('user-alerts');
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(NotifyError);
+      expect(caught).toMatchObject({ code: 'notify_unavailable' } satisfies Partial<NotifyError>);
+      expect(timeoutMs).toEqual([NTFY_ADMIN_FETCH_TIMEOUT_MS]);
+    } finally {
+      AbortSignal.timeout = originalTimeout;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('messages() body read timeout maps to NotifyError notify_unavailable', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+    });
+
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        async text() {
+          throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        },
+      }) as Response) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      let caught: unknown;
+      try {
+        await svc.messages('user-alerts');
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(NotifyError);
+      expect(caught).toMatchObject({ code: 'notify_unavailable' } satisfies Partial<NotifyError>);
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }
