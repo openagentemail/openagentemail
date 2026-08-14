@@ -8,7 +8,7 @@
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
- *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId}
+   *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId, id?}
  *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
  *   GET  /v1/tasks?state=          -> {tasks:[task]}
  *   GET  /v1/tasks/:id             -> task
@@ -173,6 +173,7 @@ export class OpenAgentEmailClient {
     method: string,
     path: string,
     body?: unknown,
+    opts?: { sendSource?: "mcp" },
   ): Promise<T> {
     let res: Response;
     try {
@@ -181,6 +182,7 @@ export class OpenAgentEmailClient {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
+          ...(opts?.sendSource === "mcp" ? { "X-OAE-Send-Source": "mcp" } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -297,8 +299,8 @@ export class OpenAgentEmailClient {
     subject: string,
     text: string,
     html?: string,
-  ): Promise<{ queued: boolean; messageId: string }> {
-    return this.request("POST", "/v1/send", { from, to, subject, text, html });
+  ): Promise<{ queued: boolean; messageId: string; id?: string }> {
+    return this.request("POST", "/v1/send", { from, to, subject, text, html }, { sendSource: "mcp" });
   }
 
   notifyUser(

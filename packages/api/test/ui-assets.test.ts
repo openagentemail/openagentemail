@@ -163,6 +163,13 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).toContain('id="folder-list"');
     expect(UI_JS).toContain("id: 'inbox', label: 'Inbox'");
     expect(UI_JS).toContain("id: 'sent', label: 'Sent'");
+    expect(UI_JS).toContain("'/ui/api/send-log?address='");
+    expect(UI_JS).toContain("'/ui/api/send-log/'");
+    expect(UI_JS).toContain('No API/MCP sends in 30 days');
+    expect(UI_JS).toContain('Direct SMTP is not listed');
+    expect(UI_JS).toContain("badge.textContent = message.result === 'failed' ? 'Failed' : 'Queued'");
+    expect(UI_CSS).toContain('.send-result-badge[data-result="queued"]');
+    expect(UI_CSS).toContain('.send-result-badge[data-result="failed"]');
     expect(UI_JS).toContain("id: 'all', label: 'All Mail'");
     expect(UI_HTML).not.toContain('Scheduled');
     expect(UI_HTML).not.toContain('Trash');

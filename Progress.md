@@ -1024,4 +1024,33 @@ PR：https://github.com/openagentemail/openagentemail/pull/31
 1. 超时测试 `Object.assign(config.ntfy, { enabled: true, adminPassword })`，`finally` 还原。
 2. `fetch` / `!ok` / `response.text()` 同一 try，`notifyFetchFailed` 映射；补 body 超时测试。复审 mergeable。
 
+---
+
+## #1 Sent box light（2026-08-14）
+
+日期：2026-08-14  
+分支：`tizerluo/worker-34-sentbox`（基线 `origin/main` `3965e01`；禁动 main；禁止自 merge）
+
+### 我们实现了哪些功能？
+
+1. **发送审计 service：** `DATA_DIR/send-log.jsonl`。`/v1/send` 成功 queued + 失败 failed（`smtp_error` / `rate_limited`）都记一行：time/from/to/subject/message-id/result/source(`api|mcp`)。不写正文/token。0600、serial queue、tmp+fsync+rename+目录 fsync、corrupt fail-closed、30 天 sweeper。对齐 notification-log / notification-devices。
+2. **查询 API：** `GET /v1/send/history` 与 `GET /ui/api/send-log`。admin 全量或按 from 筛；identity 只能看自己，看他人 403。limit/cursor 20|50|100，HMAC 游标绑 address。
+3. **Dashboard Sent：** 改读审计日志（不再 IMAP From 匹配）。列时间/双方/主题/Queued 金或 Failed 红+文字；详情无正文；页上口径「API/MCP send audit (30 days). Direct SMTP is not listed.」；空态同步改掉。
+4. **`/v1/send` 回传 logged `id`；** MCP `mail_send` 带 `X-OAE-Send-Source: mcp`，输出 schema `id` 可选。
+5. **边界声明：** README / `docs/security.md` 写明本期只覆盖 API/MCP，SMTP 直发不审计。light 不 IMAP-append，不污染 INBOX unseen。
+6. `packages/api bun test` **836 pass**；`packages/mcp bun test` **24 pass**；两边 `bun run build` 全绿。
+
+### 我们遇到了哪些错误？
+
+1. 本机 `main` worktree 被 `/home/ops/openagentemail` 占用，不能 `git checkout main`。从 `origin/main`（`3965e01`）直接开 `tizerluo/worker-34-sentbox`。
+2. `send-log` 单测：`seed({ messageId: null })` 被 `??` 吃掉，失败行测到默认 message-id；`seed()` 无参时 `partial` 为 undefined。
+3. 初跑 send-log 这两条红，其余 send-history / send / ui-assets 已绿。
+
+### 我们是如何解决这些错误的？
+
+1. 不占用 main worktree，从 `origin/main` 开分支。未动 main。
+2. `seed` 默认参数 `= {}`；`messageId` 用 `=== undefined` 才填默认，显式 `null` 保留。
+3. 修完后全量 836 pass。
+4. 独立自审 P2：目录 fsync 回滚曾 truncate 活文件，崩溃/二次写失败会把审计静默清空。已改成 dest→`.bak` + bak 换回（同 notification-devices），并补磁盘断言与 dest 缺失恢复测试。复审 `6cdf75fb` mergeable，P0/P1/P2=0。
+
 

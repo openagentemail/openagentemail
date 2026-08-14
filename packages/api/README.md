@@ -34,7 +34,7 @@ bun run typecheck
 | `IMAP_TLS` | `true` | `false` for plaintext/STARTTLS (143) |
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
-| `DATA_DIR` | `./data` | 全部 store 单写者，不支持多容器共享（identities / oauth / audit / ui-sessions / sent-registry / notification-log / notification-devices；0600）。 |
+| `DATA_DIR` | `./data` | 全部 store 单写者，不支持多容器共享（identities / oauth / audit / ui-sessions / sent-registry / notification-log / notification-devices / send-log；0600）。 |
 
 ## Endpoints
 
@@ -55,7 +55,8 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO `address` **or** a server-trusted Sent item (From match **and** Message-ID in the outbound registry) — #26 PR 2 / 返工第2轮；reading never sets `\Seen` by itself — agents mark messages processed through here)
 - `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout", timeoutSec}` (IMAP IDLE + 3 s polling hybrid). Schema max 仍 600；服务端按 `MCP_MAX_WAIT_SECONDS` 静默钳制（头 `X-OAE-Wait-Timeout-Sec`）。并发：3/地址、8 全局 → `429 {error:"too_many_waits"}`
-- `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId}` (403 if `from` is not a known identity)
+- `POST /v1/send` `{from,to,subject,text,html?}` → `{queued:true, messageId, id?}`（`id` 为发送审计条目；失败 502 也可带 `id`）。本期只审计 API/MCP 发送，SMTP 直发不在此列。
+- `GET /v1/send/history?address=&limit=20|50|100&cursor=` → `{items,nextCursor,queryNow}`（admin 全量或按 from 筛；identity 只能看自己，看他人 403）
 - `POST /v1/notify/devices` `{publicUrl, displayName?}` → `201` 一次性 ntfy 凭据（password / `qrPayload` / `qr` 只此一次；`Cache-Control: no-store`）。旧 client 只传 `publicUrl` 仍可用，缺省 displayName=`Phone`。**admin only**
 - `GET /v1/notify/devices` → `{devices:[{id,displayName,topicLabels,pairedAt,revokeStatus,…}]}`（默认隐藏 `revoked`；不含 password/token）。**admin only**
 - `DELETE /v1/notify/devices/:id` → `204`（`pending_revoke` 中间态；ntfy 缺失 user = HTTP 400/code 40031 或 404+缺失正文，视为成功；已 revoked 幂等 204）。ntfy 临时关闭且行含 `ntfyUsername` 时 `503`，不标 revoked。**admin only**

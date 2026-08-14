@@ -69,7 +69,8 @@ and TLS certificate verification.
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
 or identity API token. The built-in dashboard lists the addresses the token
-may access, shows Inbox / Sent / All Mail with cursor paging, extracts
+may access, shows Inbox / All Mail (IMAP) and Sent (API/MCP send audit
+for 30 days; direct SMTP is not listed) with cursor paging, extracts
 verification codes and links at the top of a message, offers Rendered
 (isolated HTML iframe), Plain text, or Source views, and can mark messages
 read or unread. Source is fetched on demand from a size-capped `no-store`

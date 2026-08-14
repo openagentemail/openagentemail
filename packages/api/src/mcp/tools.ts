@@ -135,6 +135,8 @@ export function registerOpenAgentEmailTools(
   const sendOutputSchema = {
     queued: z.boolean(),
     messageId: z.string(),
+    // 审计条目 id；记盘失败时省略，严格客户端不得当必填。
+    id: z.string().optional(),
   };
 
   const notifyLevelSchema = z.enum(["urgent", "normal", "low"]);
