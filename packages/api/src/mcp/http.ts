@@ -223,7 +223,9 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       if (!publicBase) {
         throw new Error("mcp factory: missing loopback public base");
       }
-      const client = new OpenAgentEmailClient(publicBase, token, options.apiFetch);
+      const client = new OpenAgentEmailClient(publicBase, token, options.apiFetch, {
+        sendSourceSecret: config.taskSigningSecret,
+      });
       const server = new McpServer(MCP_SERVER_INFO);
       registerOpenAgentEmailTools(server, client);
       return server;

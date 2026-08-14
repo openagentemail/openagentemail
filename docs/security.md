@@ -22,7 +22,20 @@ retention window before reusing one.
 
 ## DATA_DIR 单写者约定
 
-`DATA_DIR` 下所有 store（`identities.json` / `oauth.json` / `audit.jsonl` / `ui-sessions.json`，以及 `sent-registry.json` / `notification-log.jsonl` / `notification-devices.json`）均为**单写者**设计：进程内串行、tmp+rename、文件 0600 / 目录 0700。**不支持**多容器或多进程共享同一 `DATA_DIR`。
+`DATA_DIR` 下所有 store（`identities.json` / `oauth.json` / `audit.jsonl` / `ui-sessions.json`，以及 `sent-registry.json` / `notification-log.jsonl` / `notification-devices.json` / `send-log.jsonl`）均为**单写者**设计：进程内串行、tmp+rename、文件 0600 / 目录 0700。**不支持**多容器或多进程共享同一 `DATA_DIR`。
+
+## Send audit log（#1 light）
+
+`DATA_DIR/send-log.jsonl` 是 API/MCP `POST /v1/send` 的 30 天发送审计（不是 IMAP Sent 文件夹）。
+
+- **覆盖：** 每次 `/v1/send`（成功 queued + 失败 failed+稳定原因）。字段：time / from / to / subject / message-id / result / source(`api|mcp`)。**不写正文、不写 token。**
+- **不覆盖：** SMTP 直发（docker-mailserver 本机投递、外部客户端）。full 版再议 always_bcc 类方案。
+- **来源：** 不信任公共 `X-OAE-Send-Source`。MCP→API 用 `taskSigningSecret` 域分离（`send-source-v1`）HMAC 头 `X-OAE-Send-Source-Mac`；验签通过才记 `mcp`，其余一律 `api`。
+- **有界：** 每身份每限流窗口最多 1 条 `rate_limited`；from/to 单项 ≤254；硬上限 **10_000 行或 8MB**（先到先限，append/compact drop-oldest）。追加热路径不全量解析。
+- **UI：** Dashboard Sent 文件夹读本日志，不再用 IMAP From 匹配（那条路径对 API 发送几乎永远为空且误导）。
+- **INBOX：** 本路径不 IMAP-append 副本，不污染 unseen / Overview。
+- **ACL：** admin 可全量或按 from 筛；identity 只能看自己的 from，看他人 403。
+- **纪律：** 单写者、0600、tmp+fsync+rename+目录 fsync（含首次创建）、corrupt fail-closed、30 天 sweeper。
 
 ## Inbox identity ACL（#26 PR 2）
 

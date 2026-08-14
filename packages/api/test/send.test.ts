@@ -54,7 +54,8 @@ describe('SMTP 错误脱敏', () => {
     const response = await post('smtp-errors@test.example');
     expect(response.status).toBe(502);
     const body = await response.text();
-    expect(JSON.parse(body)).toEqual({ error: 'smtp_error' });
+    expect(JSON.parse(body)).toMatchObject({ error: 'smtp_error' });
+    expect(JSON.parse(body).id).toMatch(/^snd_/);
     expect(body).not.toContain('smtp-secret');
     expect(body).not.toContain('authentication failed');
   });
@@ -189,7 +190,7 @@ describe('出站登记 sent registry', () => {
     });
     const response = await post('sent-nospace@test.example');
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(await response.json()).toMatchObject({
       queued: true,
       messageId: '<diskfull-reg@test.example>',
     });

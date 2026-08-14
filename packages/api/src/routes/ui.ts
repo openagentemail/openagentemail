@@ -44,6 +44,13 @@ import {
 } from '../lib/mail-cursor.ts';
 import { createOverviewCache, type ScanOutcome } from '../lib/overview-cache.ts';
 import {
+  InvalidSendCursorError,
+  SendLogCorruptError,
+  getSendLogRecord,
+  isSendLogLimit,
+  querySendLog,
+} from '../lib/send-log.ts';
+import {
   TASK_BOARD_PERIODS,
   TASK_BOARD_STATUSES,
   type Task,
@@ -662,6 +669,62 @@ export function createUiApiRoutes(
       );
     }
     return c.json(overviewPayload(identities, outcome));
+  });
+
+  const sendLogQuerySchema = z.object({
+    address: z.string().email().max(254).optional(),
+    limit: z
+      .union([z.literal('20'), z.literal('50'), z.literal('100')])
+      .optional()
+      .default('50')
+      .transform((value) => Number(value)),
+    cursor: z.string().min(1).max(1024).optional(),
+  });
+
+  function sendLogQueryError(c: Context, err: unknown) {
+    if (err instanceof InvalidSendCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+    if (err instanceof SendLogCorruptError) return c.json({ error: 'send_log_corrupt' }, 500);
+    throw err;
+  }
+
+  /** Sent 审计：identity 只看自己的 from；admin 可筛地址。 */
+  routes.get('/send-log', async (c) => {
+    const parsed = sendLogQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    if (!isSendLogLimit(parsed.data.limit)) return c.json({ error: 'invalid_request' }, 400);
+    const auth = getAuth(c);
+    let address = parsed.data.address?.toLowerCase();
+    if (auth.kind === 'identity') {
+      if (address && address !== auth.address.toLowerCase()) {
+        return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+      }
+      address = auth.address.toLowerCase();
+    }
+    try {
+      return c.json(
+        await querySendLog({
+          address,
+          limit: parsed.data.limit,
+          cursor: parsed.data.cursor,
+        }),
+      );
+    } catch (err) {
+      return sendLogQueryError(c, err);
+    }
+  });
+
+  routes.get('/send-log/:id', async (c) => {
+    const id = c.req.param('id');
+    if (!id.startsWith('snd_')) return c.json({ error: 'invalid_request' }, 400);
+    try {
+      const row = await getSendLogRecord(id);
+      if (!row) return c.json({ error: 'not_found' }, 404);
+      const denied = forbidUnlessAddress(c, row.from);
+      if (denied) return denied;
+      return c.json(row);
+    } catch (err) {
+      return sendLogQueryError(c, err);
+    }
   });
 
   routes.get('/messages', async (c) => {

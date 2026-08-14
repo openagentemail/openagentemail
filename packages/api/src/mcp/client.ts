@@ -8,12 +8,19 @@
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
- *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId}
+   *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId, id?}
  *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
  *   GET  /v1/tasks?state=          -> {tasks:[task]}
  *   GET  /v1/tasks/:id             -> task
  *   POST /v1/tasks/:id/state       {state,body?,result?} -> task
  */
+
+import { SEND_SOURCE_MAC_HEADER, macForMcpSendSource } from "../lib/send-source.ts";
+
+export type OpenAgentEmailClientOptions = {
+  /** 同进程传入 config.taskSigningSecret；stdio 可省略（回退 env）。 */
+  sendSourceSecret?: string;
+};
 
 /**
  * 可注入的 fetch（HTTP 传输用 app.fetch 做进程内回环）。
@@ -158,21 +165,32 @@ function networkErrorCode(err: unknown): string | undefined {
 
 export class OpenAgentEmailClient {
   private readonly fetchImpl: FetchLike;
+  private readonly sendSourceSecret: string | undefined;
 
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
     /** 默认全局 fetch；API 进程内可注入 app.fetch 避免 TCP loopback。 */
     fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
+    options?: OpenAgentEmailClientOptions,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = fetchImpl;
+    this.sendSourceSecret =
+      options?.sendSourceSecret ?? process.env.TASK_SIGNING_SECRET ?? process.env.SMTP_PASS;
+  }
+
+  /** 有共享密钥才签 mcp 来源；无密钥则不加头（API 记 api）。 */
+  private mcpSourceHeaders(): Record<string, string> {
+    if (!this.sendSourceSecret) return {};
+    return { [SEND_SOURCE_MAC_HEADER]: macForMcpSendSource(this.sendSourceSecret) };
   }
 
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
+    opts?: { sendSource?: "mcp" },
   ): Promise<T> {
     let res: Response;
     try {
@@ -181,6 +199,7 @@ export class OpenAgentEmailClient {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
+          ...(opts?.sendSource === "mcp" ? this.mcpSourceHeaders() : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -297,8 +316,8 @@ export class OpenAgentEmailClient {
     subject: string,
     text: string,
     html?: string,
-  ): Promise<{ queued: boolean; messageId: string }> {
-    return this.request("POST", "/v1/send", { from, to, subject, text, html });
+  ): Promise<{ queued: boolean; messageId: string; id?: string }> {
+    return this.request("POST", "/v1/send", { from, to, subject, text, html }, { sendSource: "mcp" });
   }
 
   notifyUser(

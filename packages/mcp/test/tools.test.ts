@@ -207,6 +207,18 @@ test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
   expect(listOut!.safeParse([row]).success).toBe(true);
 });
 
+test("mail_send 输出含可选审计 id，缺省仍通过", () => {
+  const sendOut = toolConfigs.get("mail_send")!.outputSchema!;
+  expect(sendOut.queued!.safeParse(true).success).toBe(true);
+  expect(sendOut.messageId!.safeParse("<m@test.example>").success).toBe(true);
+  expect(sendOut.id!.safeParse("snd_abc").success).toBe(true);
+  const sendSchema = z.object(sendOut as z.ZodRawShape);
+  expect(sendSchema.safeParse({ queued: true, messageId: "<m@test.example>" }).success).toBe(true);
+  expect(
+    sendSchema.safeParse({ queued: true, messageId: "<m@test.example>", id: "snd_1" }).success,
+  ).toBe(true);
+});
+
 // 输出 schema 与 API 对齐：list/detail 各用真实类型夹具，互不污染。
 test("message summary/detail 输出 schema 按 API 真实形状校验并保留字段", () => {
   const listMessages = toolConfigs.get("mail_list_messages")!.outputSchema!.messages;
