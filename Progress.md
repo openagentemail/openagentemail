@@ -1029,7 +1029,8 @@ PR：https://github.com/openagentemail/openagentemail/pull/31
 ## #1 Sent box light（2026-08-14）
 
 日期：2026-08-14  
-分支：`tizerluo/worker-34-sentbox`（基线 `origin/main` `3965e01`；禁动 main；禁止自 merge）
+分支：`tizerluo/worker-34-sentbox`（基线 `origin/main` `3965e01`；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/33
 
 ### 我们实现了哪些功能？
 

@@ -3,6 +3,7 @@
 日期：2026-08-14  
 工位：`/home/ops/orca/workspaces/openagentemail/worker-34-pr1`  
 分支：`tizerluo/worker-34-sentbox`（基线 `origin/main` **`3965e01`**）  
+PR：https://github.com/openagentemail/openagentemail/pull/33  
 禁动 main，禁止自 merge。PR 描述 **refs #1**，不用 closes（full 版留 issue 收集需求）。
 
 ## 交付
