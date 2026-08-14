@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,12 +14,15 @@ process.env.TASK_SIGNING_SECRET = 'send-log-test-secret';
 
 const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const {
+  SEND_LOG_EMAIL_MAX_LEN,
   SEND_LOG_RETENTION_MS,
   appendSendLog,
   compactSendLog,
   querySendLog,
   resetSendLogForTests,
+  sendLogInspectCountForTests,
   sendLogPathForTests,
+  setSendLogCapsForTests,
   setSendLogDirFsyncHookForTests,
   setSendLogNowForTests,
   setSendLogPersistHookForTests,
@@ -179,6 +182,129 @@ describe('send-log store', () => {
     expect(disk).toContain('new');
     const page = await querySendLog({ limit: 20 });
     expect(page.items.map((row) => row.subject)).toEqual(['new']);
+  });
+
+  test('oversized address is clipped and never writes a giant line', async () => {
+    const huge = `${'a'.repeat(400)}@example.net`;
+    const row = await seed({ from: huge, to: [huge] });
+    expect(row.from.length).toBeLessThanOrEqual(SEND_LOG_EMAIL_MAX_LEN);
+    expect(row.to[0]?.length).toBeLessThanOrEqual(SEND_LOG_EMAIL_MAX_LEN);
+    const disk = readFileSync(sendLogPathForTests(), 'utf8');
+    expect(disk.length).toBeLessThan(2000);
+    expect(disk).not.toContain('a'.repeat(400));
+  });
+
+  test('parseRecord rejects a giant from on disk as corrupt', async () => {
+    const giant = `${'b'.repeat(400)}@x.example`;
+    writeFileSync(
+      sendLogPathForTests(),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: 'snd_deadbeefdeadbeefdeadbeef',
+        sentAt: '2026-08-14T00:00:00.000Z',
+        from: giant,
+        to: ['owl@example.net'],
+        subject: 'x',
+        messageId: null,
+        result: 'queued',
+        source: 'api',
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await expect(querySendLog({ limit: 20 })).rejects.toMatchObject({ code: 'send_log_corrupt' });
+  });
+
+  test('hard cap drop-oldest on append and compact by size', async () => {
+    setSendLogCapsForTests({ rows: 3, bytes: 8 * 1024 * 1024 });
+    let t = Date.parse('2026-08-14T12:00:00.000Z');
+    setSendLogNowForTests(() => t);
+    await seed({ subject: 'one' });
+    t += 1000;
+    await seed({ subject: 'two' });
+    t += 1000;
+    await seed({ subject: 'three' });
+    t += 1000;
+    await seed({ subject: 'four' });
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.map((row) => row.subject)).toEqual(['four', 'three', 'two']);
+    setSendLogCapsForTests({ rows: 10_000, bytes: 80 });
+    const compact = await compactSendLog();
+    expect(compact.kept).toBeLessThan(3);
+    expect(compact.dropped).toBeGreaterThan(0);
+  });
+
+  test('torn trailing line is isolated without fail-closing the log', async () => {
+    const good = JSON.stringify({
+      schemaVersion: 1,
+      id: 'snd_aaaaaaaaaaaaaaaaaaaaaaaa',
+      sentAt: '2026-08-14T00:00:00.000Z',
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'complete',
+      messageId: null,
+      result: 'queued',
+      source: 'api',
+    });
+    writeFileSync(sendLogPathForTests(), `${good}\n{"schemaVersion":1,"id":"snd_torn`, { mode: 0o600 });
+    const before = sendLogInspectCountForTests();
+    await seed({ subject: 'after-torn' });
+    expect(sendLogInspectCountForTests()).toBe(before);
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.map((row) => row.subject).sort()).toEqual(['after-torn', 'complete']);
+    expect(readFileSync(`${sendLogPathForTests()}.partial`, 'utf8')).toContain('snd_torn');
+  });
+
+  test('complete last line missing newline is kept then appended', async () => {
+    const good = JSON.stringify({
+      schemaVersion: 1,
+      id: 'snd_bbbbbbbbbbbbbbbbbbbbbbbb',
+      sentAt: '2026-08-14T00:00:00.000Z',
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'no-nl',
+      messageId: null,
+      result: 'queued',
+      source: 'api',
+    });
+    writeFileSync(sendLogPathForTests(), good, { mode: 0o600 });
+    await seed({ subject: 'next' });
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.map((row) => row.subject).sort()).toEqual(['next', 'no-nl']);
+  });
+
+  test('append hot path does not full-reparse as the file grows', async () => {
+    const lines = Array.from({ length: 80 }, (_, i) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        id: `snd_${i.toString(16).padStart(24, '0')}`,
+        sentAt: '2026-08-14T00:00:00.000Z',
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject: `pre-${i}`,
+        messageId: null,
+        result: 'queued',
+        source: 'api',
+      }),
+    ).join('\n') + '\n';
+    writeFileSync(sendLogPathForTests(), lines, { mode: 0o600 });
+    const before = sendLogInspectCountForTests();
+    await seed({ subject: 'hot' });
+    await seed({ subject: 'hot-2' });
+    expect(sendLogInspectCountForTests()).toBe(before);
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.some((row) => row.subject === 'hot-2')).toBe(true);
+    expect(sendLogInspectCountForTests()).toBeGreaterThan(before);
+  });
+
+  test('first-create dir fsync failure fails persist and leaves no file', async () => {
+    setSendLogDirFsyncHookForTests(() => {
+      throw Object.assign(new Error('EIO: dir fsync'), { code: 'EIO' });
+    });
+    await expect(seed({ subject: 'new-file' })).rejects.toMatchObject({
+      code: 'send_log_persist_failed',
+    });
+    setSendLogDirFsyncHookForTests(null);
+    expect(existsSync(sendLogPathForTests())).toBe(false);
   });
 
   test('dest missing with leftover bak is restored instead of empty log', async () => {

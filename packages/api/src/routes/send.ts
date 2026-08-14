@@ -12,8 +12,10 @@ import { describeFailure } from '../lib/redact.ts';
 import { recordSentMessageIdAfterSend } from '../lib/sent-registry.ts';
 import {
   InvalidSendCursorError,
+  SEND_LOG_EMAIL_MAX_LEN,
   SendLogCorruptError,
   appendSendLog,
+  claimRateLimitedLog,
   getSendLogRecord,
   isSendLogLimit,
   querySendLog,
@@ -21,17 +23,20 @@ import {
   type SendLogRecord,
   type SendLogSource,
 } from '../lib/send-log.ts';
+import { resolveSendLogSource } from '../lib/send-source.ts';
+
+const emailField = z.string().email().max(SEND_LOG_EMAIL_MAX_LEN);
 
 const sendSchema = z.object({
-  from: z.string().email(),
-  to: z.union([z.string().email(), z.array(z.string().email()).min(1).max(50)]),
+  from: emailField,
+  to: z.union([emailField, z.array(emailField).min(1).max(50)]),
   subject: z.string().max(998),
   text: z.string().max(1_000_000),
   html: z.string().max(1_000_000).optional(),
 });
 
 const historyQuerySchema = z.object({
-  address: z.string().email().optional(),
+  address: emailField.optional(),
   limit: z
     .union([z.literal('20'), z.literal('50'), z.literal('100')])
     .optional()
@@ -41,7 +46,8 @@ const historyQuerySchema = z.object({
 });
 
 function sendSource(c: Context): SendLogSource {
-  return c.req.header('x-oae-send-source') === 'mcp' ? 'mcp' : 'api';
+  // 不信任公共 X-OAE-Send-Source；只认 HMAC 签头。
+  return resolveSendLogSource(c.req.header('x-oae-send-source-mac'), config.taskSigningSecret);
 }
 
 function recipientsOf(to: string | string[]): string[] {
@@ -149,14 +155,17 @@ sendRoute.post('/', async (c) => {
   // Per-identity rate limit (rolling hour; 0 disables in config).
   const limit = checkSendLimit(from, config.sendRateLimit);
   if (!limit.allowed) {
-    const logged = await recordSend({
-      from,
-      to: toList,
-      subject,
-      result: 'failed',
-      error: 'rate_limited',
-      source,
-    });
+    // 每身份每窗口最多 1 条 rate_limited，避免 429 刷盘。
+    const logged = claimRateLimitedLog(from)
+      ? await recordSend({
+          from,
+          to: toList,
+          subject,
+          result: 'failed',
+          error: 'rate_limited',
+          source,
+        })
+      : null;
     return c.json(
       {
         error: 'rate_limited',

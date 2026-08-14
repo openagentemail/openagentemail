@@ -9,6 +9,8 @@
  * 同目录 .tmp + 文件 fsync + dest→.bak + rename + 目录 fsync；
  * 目录 fsync 失败则 .bak 换回（不 truncate 活文件）；
  * 末尾半行隔离、中间损坏 fail-closed、30 天 sweeper。
+ * 硬上限 10_000 行或 8MB（先到先限），append 超限 drop-oldest。
+ * 追加热路径不全量解析；inspectAndRepairSync 只在 query/compact/启动。
  */
 
 import {
@@ -16,11 +18,14 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -31,6 +36,12 @@ import { config } from './config.ts';
 export const SEND_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const SEND_LOG_SCHEMA_VERSION = 1;
 export const SEND_LOG_LIMITS = [20, 50, 100] as const;
+/** 单地址字段上限（RFC 5321 mailbox）。 */
+export const SEND_LOG_EMAIL_MAX_LEN = 254;
+/** 日志硬上限：行数与字节数先到先限。 */
+export const SEND_LOG_MAX_ROWS = 10_000;
+export const SEND_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const RATE_LIMITED_WINDOW_MS = 3_600_000;
 export type SendLogLimit = (typeof SEND_LOG_LIMITS)[number];
 
 export type SendLogSource = 'api' | 'mcp';
@@ -89,7 +100,6 @@ const LOG_NAME = 'send-log.jsonl';
 const CURSOR_PREFIX = 'send-log-cursor-v1';
 const SOURCES = new Set<SendLogSource>(['api', 'mcp']);
 const RESULTS = new Set<SendLogResult>(['queued', 'failed']);
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type CursorPayload = { addr: string; t: number; id: string };
 
@@ -98,6 +108,13 @@ let failClosed = false;
 let nowFn: () => number = () => Date.now();
 let persistHookForTests: (() => void) | null = null;
 let dirFsyncHookForTests: (() => void) | null = null;
+let inspectCountForTests = 0;
+let liveLineCount = -1;
+let maxRowsCap = SEND_LOG_MAX_ROWS;
+let maxBytesCap = SEND_LOG_MAX_BYTES;
+/** 每身份每限流窗口最多一条 rate_limited。 */
+const rateLimitedSlots = new Map<string, number>();
+const healthAlerts: string[] = [];
 
 function logPath(): string {
   return join(config.dataDir, LOG_NAME);
@@ -132,8 +149,15 @@ function ensureDataDir(): void {
   }
 }
 
+/** 与 notification-log 同级：`[send-log] HIGH:` 可被采集；并留环供测试。 */
 export function sendLogHealthAlert(kind: string, detail: Record<string, unknown> = {}): void {
   console.error(`[send-log] HIGH: ${kind}`, detail);
+  healthAlerts.push(kind);
+  if (healthAlerts.length > 32) healthAlerts.shift();
+}
+
+export function sendLogAlertsForTests(): string[] {
+  return [...healthAlerts];
 }
 
 function enqueue<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -149,9 +173,13 @@ export function isSendLogLimit(value: number): value is SendLogLimit {
   return (SEND_LOG_LIMITS as readonly number[]).includes(value);
 }
 
-function normalizeEmail(value: string): string | null {
-  const trimmed = value.trim().toLowerCase();
-  return EMAIL_RE.test(trimmed) ? trimmed : null;
+/** 落盘层只做长度截断，不再用第二套 email 正则（口径统一到 sendSchema）。 */
+function clipEmail(value: string): string {
+  return value.trim().toLowerCase().slice(0, SEND_LOG_EMAIL_MAX_LEN);
+}
+
+function isLoggedEmail(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= SEND_LOG_EMAIL_MAX_LEN;
 }
 
 function parseRecord(raw: unknown): SendLogRecord | null {
@@ -160,14 +188,12 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   if (row.schemaVersion !== SEND_LOG_SCHEMA_VERSION) return null;
   if (typeof row.id !== 'string' || !row.id.startsWith('snd_') || row.id.length > 80) return null;
   if (typeof row.sentAt !== 'string' || !Number.isFinite(Date.parse(row.sentAt))) return null;
-  if (typeof row.from !== 'string' || !normalizeEmail(row.from)) return null;
+  if (!isLoggedEmail(row.from)) return null;
   if (!Array.isArray(row.to) || row.to.length === 0 || row.to.length > 50) return null;
   const to: string[] = [];
   for (const item of row.to) {
-    if (typeof item !== 'string') return null;
-    const email = normalizeEmail(item);
-    if (!email) return null;
-    to.push(email);
+    if (!isLoggedEmail(item)) return null;
+    to.push(item.toLowerCase());
   }
   if (typeof row.subject !== 'string' || row.subject.length > 998) return null;
   if (row.messageId !== null && typeof row.messageId !== 'string') return null;
@@ -180,7 +206,7 @@ function parseRecord(raw: unknown): SendLogRecord | null {
     schemaVersion: SEND_LOG_SCHEMA_VERSION,
     id: row.id,
     sentAt: row.sentAt,
-    from: normalizeEmail(row.from)!,
+    from: row.from.toLowerCase(),
     to,
     subject: row.subject,
     messageId: typeof row.messageId === 'string' ? row.messageId : null,
@@ -381,10 +407,11 @@ function writeAtomicSync(text: string): void {
   }
 }
 
-function appendLineSync(line: string): void {
+function appendLineSync(line: string): boolean {
   ensureDataDir();
   persistHookForTests?.();
   const path = logPath();
+  const created = !existsSync(path);
   const fd = openSync(path, 'a', 0o600);
   try {
     writeAllSync(fd, line);
@@ -397,6 +424,20 @@ function appendLineSync(line: string): void {
   } catch {
     // best effort
   }
+  // 首次创建必须目录 fsync，否则崩溃会丢掉目录项（PR 6 纪律）。
+  if (created) {
+    try {
+      fsyncDirectorySync(config.dataDir);
+    } catch (err) {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        // 撤回失败仍按 persist 失败上抛
+      }
+      throw err;
+    }
+  }
+  return created;
 }
 
 function appendMissingFinalNewlineSync(): void {
@@ -411,7 +452,136 @@ function appendMissingFinalNewlineSync(): void {
   }
 }
 
+function fileEndsWithNewline(path: string): boolean {
+  const size = statSync(path).size;
+  if (size === 0) return true;
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(1);
+    const n = readSync(fd, buf, 0, 1, size - 1);
+    return n === 1 && buf[0] === 0x0a;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** 从文件末尾往前找最后一个 \\n，O(尾块) 不扫整文件。 */
+function findLastNewlineOffset(path: string): number {
+  const size = statSync(path).size;
+  if (size === 0) return -1;
+  const fd = openSync(path, 'r');
+  try {
+    const chunk = 4096;
+    let pos = size;
+    while (pos > 0) {
+      const start = Math.max(0, pos - chunk);
+      const len = pos - start;
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, start);
+      for (let i = len - 1; i >= 0; i--) {
+        if (buf[i] === 0x0a) return start + i;
+      }
+      pos = start;
+    }
+    return -1;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readTailAfterLastNewline(path: string): { tailStart: number; tail: string } {
+  const size = statSync(path).size;
+  const lastNl = findLastNewlineOffset(path);
+  const tailStart = lastNl < 0 ? 0 : lastNl + 1;
+  const tailLen = size - tailStart;
+  if (tailLen <= 0) return { tailStart, tail: '' };
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(tailLen);
+    readSync(fd, buf, 0, tailLen, tailStart);
+    return { tailStart, tail: buf.toString('utf8') };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function isolateFragmentToPartial(fragment: string): void {
+  ensureDataDir();
+  const text = fragment.endsWith('\n') ? fragment : `${fragment}\n`;
+  const pfd = openSync(partialPath(), 'a', 0o600);
+  try {
+    writeAllSync(pfd, text);
+    fsyncSync(pfd);
+  } finally {
+    closeSync(pfd);
+  }
+  try {
+    chmodSync(partialPath(), 0o600);
+  } catch {
+    // sidecar 权限失败不否决已隔离
+  }
+  sendLogHealthAlert('trailing_partial_isolated', {
+    path: LOG_NAME,
+    bytes: fragment.length,
+  });
+}
+
+function truncateLogTo(offset: number): void {
+  const fd = openSync(logPath(), 'r+');
+  try {
+    ftruncateSync(fd, offset);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * 热路径只看末行：完整 JSON 缺换行则补 \\n；不可解析半行隔离到 .partial 再截断。
+ * 不调用 inspectAndRepairSync，不扫已完成行。
+ */
+function repairTrailingTailHotPath(): void {
+  const path = logPath();
+  if (!existsSync(path) || fileEndsWithNewline(path)) return;
+  const { tailStart, tail } = readTailAfterLastNewline(path);
+  if (!tail.trim()) {
+    appendMissingFinalNewlineSync();
+    return;
+  }
+  if (parseRecord(safeJson(tail))) {
+    appendMissingFinalNewlineSync();
+    return;
+  }
+  isolateFragmentToPartial(tail);
+  truncateLogTo(tailStart);
+}
+
+function serializedBytes(records: SendLogRecord[]): number {
+  return Buffer.byteLength(records.map((row) => `${JSON.stringify(row)}\n`).join(''));
+}
+
+function oldestFirst(records: SendLogRecord[]): SendLogRecord[] {
+  return [...records].sort((a, b) => {
+    const dt = Date.parse(a.sentAt) - Date.parse(b.sentAt);
+    if (dt !== 0) return dt;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/** 先到先限：超过行数或字节则丢掉最旧行。extra* 为即将追加的新行留空。 */
+function trimToCap(records: SendLogRecord[], extraBytes = 0, extraRows = 0): SendLogRecord[] {
+  const kept = oldestFirst(records);
+  while (
+    kept.length > 0 &&
+    (kept.length + extraRows > maxRowsCap || serializedBytes(kept) + extraBytes > maxBytesCap)
+  ) {
+    kept.shift();
+  }
+  return kept;
+}
+
 function inspectAndRepairSync(): SendLogRecord[] {
+  inspectCountForTests += 1;
   recoverBackupSync();
   const raw = readRawSync();
   const parsed = parseFileText(raw);
@@ -451,6 +621,7 @@ function inspectAndRepairSync(): SendLogRecord[] {
   } else if (raw.length > 0 && !raw.endsWith('\n')) {
     appendMissingFinalNewlineSync();
   }
+  liveLineCount = parsed.records.length;
   return parsed.records;
 }
 
@@ -520,19 +691,43 @@ export type AppendSendLogInput = {
   source: SendLogSource;
 };
 
+/** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
+export function claimRateLimitedLog(address: string, now = nowMs()): boolean {
+  const key = clipEmail(address);
+  if (!key) return false;
+  const prev = rateLimitedSlots.get(key);
+  if (prev !== undefined && now - prev < RATE_LIMITED_WINDOW_MS) return false;
+  rateLimitedSlots.set(key, now);
+  return true;
+}
+
+function prepareAppendHotPath(line: string): void {
+  const path = logPath();
+  if (existsSync(path) && !fileEndsWithNewline(path)) {
+    repairTrailingTailHotPath();
+  }
+  const size = existsSync(path) ? statSync(path).size : 0;
+  const add = Buffer.byteLength(line);
+  const overBytes = size + add > maxBytesCap;
+  const overRows = liveLineCount >= 0 && liveLineCount + 1 > maxRowsCap;
+  if (!overBytes && !overRows) return;
+  // 超限才走全量解析 + drop-oldest，非常驻热路径。
+  const records = inspectAndRepairSync();
+  const kept = trimToCap(records, add, 1);
+  writeAtomicSync(kept.map((row) => `${JSON.stringify(row)}\n`).join(''));
+  liveLineCount = kept.length;
+}
+
 export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord> {
   return enqueue(() => {
-    inspectAndRepairSync();
-    const from = normalizeEmail(input.from);
-    if (!from) throw new Error('invalid_send_log_from');
-    const to = input.to.map((item) => normalizeEmail(item)).filter((item): item is string => Boolean(item));
-    if (to.length === 0) throw new Error('invalid_send_log_to');
+    const from = clipEmail(input.from);
+    const to = input.to.map(clipEmail).filter(Boolean).slice(0, 50);
     const record: SendLogRecord = {
       schemaVersion: SEND_LOG_SCHEMA_VERSION,
       id: `snd_${randomBytes(12).toString('hex')}`,
       sentAt: new Date(nowMs()).toISOString(),
       from,
-      to: to.slice(0, 50),
+      to,
       subject: input.subject.slice(0, 998),
       messageId: input.messageId ?? null,
       result: input.result,
@@ -541,8 +736,12 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     if (input.result === 'failed' && input.error) {
       record.error = input.error.slice(0, 64);
     }
+    const line = `${JSON.stringify(record)}\n`;
     try {
-      appendLineSync(`${JSON.stringify(record)}\n`);
+      prepareAppendHotPath(line);
+      const created = appendLineSync(line);
+      if (liveLineCount < 0) liveLineCount = created ? 1 : -1;
+      else liveLineCount += 1;
     } catch (err) {
       sendLogHealthAlert('persist_failed', { error: (err as Error).message });
       throw new SendLogPersistError(err);
@@ -556,7 +755,7 @@ export function querySendLog(query: SendLogQuery): Promise<SendLogPage> {
     const now = nowMs();
     const records = loadRecordsOrThrow();
     const cutoff = retentionCutoffMs(now);
-    const address = query.address ? normalizeEmail(query.address) : undefined;
+    const address = query.address ? clipEmail(query.address) : undefined;
     const rows = records
       .filter((row) => {
         const t = Date.parse(row.sentAt);
@@ -615,11 +814,13 @@ export function compactSendLog(): Promise<{ kept: number; dropped: number }> {
       }
       throw err;
     }
-    const kept = records.filter((row) => Date.parse(row.sentAt) >= cutoff);
+    const aged = records.filter((row) => Date.parse(row.sentAt) >= cutoff);
+    const kept = trimToCap(aged);
     const dropped = records.length - kept.length;
     if (dropped > 0) {
       writeAtomicSync(kept.map((row) => `${JSON.stringify(row)}\n`).join(''));
     }
+    liveLineCount = kept.length;
     return { kept: kept.length, dropped };
   });
 }
@@ -665,12 +866,27 @@ export function setSendLogDirFsyncHookForTests(hook: (() => void) | null): void 
   dirFsyncHookForTests = hook;
 }
 
+export function setSendLogCapsForTests(caps: { rows?: number; bytes?: number } | null): void {
+  maxRowsCap = caps?.rows ?? SEND_LOG_MAX_ROWS;
+  maxBytesCap = caps?.bytes ?? SEND_LOG_MAX_BYTES;
+}
+
+export function sendLogInspectCountForTests(): number {
+  return inspectCountForTests;
+}
+
 export function resetSendLogForTests(): void {
   failClosed = false;
   persistHookForTests = null;
   dirFsyncHookForTests = null;
   nowFn = () => Date.now();
   writeChain = Promise.resolve();
+  inspectCountForTests = 0;
+  liveLineCount = -1;
+  maxRowsCap = SEND_LOG_MAX_ROWS;
+  maxBytesCap = SEND_LOG_MAX_BYTES;
+  rateLimitedSlots.clear();
+  healthAlerts.length = 0;
   for (const path of [logPath(), tmpPath(), bakPath(), partialPath()]) {
     try {
       if (existsSync(path)) rmSync(path, { recursive: true, force: true });

@@ -1054,4 +1054,32 @@ PR：https://github.com/openagentemail/openagentemail/pull/33
 3. 修完后全量 836 pass。
 4. 独立自审 P2：目录 fsync 回滚曾 truncate 活文件，崩溃/二次写失败会把审计静默清空。已改成 dest→`.bak` + bak 换回（同 notification-devices），并补磁盘断言与 dest 缺失恢复测试。复审 `6cdf75fb` mergeable，P0/P1/P2=0。
 
+---
+
+## #1 Sent box light 返工 R1（2026-08-14）
+
+日期：2026-08-14  
+分支：`tizerluo/worker-34-sentbox`（就地修；禁动 main；禁止自 merge）  
+PR：https://github.com/openagentemail/openagentemail/pull/33
+
+### 我们实现了哪些功能？
+
+1. **A 有界：** 每身份每窗口最多 1 条 `rate_limited`；from/to ≤254；硬上限 10k 行/8MB drop-oldest；append 热路径不再全量解析。
+2. **B：** 首次创建 `send-log.jsonl` 后目录 fsync；失败 unlink + persist 失败。
+3. **C：** 废弃可伪造的 `X-OAE-Send-Source`；`send-source-v1` HMAC 头，验签才记 mcp。
+4. **D：** 落盘层去掉第二套 EMAIL_RE；落盘失败走 `[send-log] HIGH:` 告警环。
+5. **E：** RECEIPT 合并标题、路径/UUID 脱敏。**F** 记债不改码。
+
+### 我们遇到了哪些错误？
+
+1. 行数硬上限在时间戳相同时空 `sentAt` 排序不稳定，测试误断言主题顺序。
+2. 全量套件里 `config.taskSigningSecret` 被先导入的测试钉死，client 若只读后来的 env 会签错密钥。
+3. 独立自审 P1：热路径遇崩溃半行只补换行，会把半截 JSON 钉成中间损坏、整本 fail-closed。
+
+### 我们是如何解决这些错误的？
+
+1. 硬上限测试用 `setSendLogNowForTests` 拉开时间戳。
+2. 同进程 MCP client 显式注入 `config.taskSigningSecret`（stdio 仍回退 env）。
+3. 热路径只解析最后一个 `\\n` 之后的尾块：能 parse 则补换行，否则进 `.partial` 并 truncate。不调用全量 inspect。复审 `f6a3b246` mergeable，P0/P1/P2=0。
+
 

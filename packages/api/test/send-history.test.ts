@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +23,11 @@ const { createIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
-const { resetSendLogForTests, sendLogPathForTests } = await import('../src/lib/send-log.ts');
+const { resetSendLogForTests, sendLogAlertsForTests, sendLogPathForTests } =
+  await import('../src/lib/send-log.ts');
+const { macForMcpSendSource, SEND_SOURCE_MAC_HEADER } = await import('../src/lib/send-source.ts');
+const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+const { config } = await import('../src/lib/config.ts');
 const { resetRateLimits } = await import('../src/lib/ratelimit.ts');
 const { readFileSync: readSrc } = await import('node:fs');
 
@@ -168,7 +172,7 @@ describe('send history ACL and audit', () => {
     expect(await peek.json()).toEqual({ error: 'forbidden: token is scoped to another address' });
   });
 
-  test('MCP header tags source=mcp', async () => {
+  test('forged X-OAE-Send-Source still records api', async () => {
     const app = bearerApp({ kind: 'admin' });
     await app.request('/v1/send', {
       method: 'POST',
@@ -176,12 +180,143 @@ describe('send history ACL and audit', () => {
       body: JSON.stringify({
         from: fox.identity.address,
         to: 'out@example.net',
-        subject: 'from mcp',
+        subject: 'forged public header',
         text: 'x',
       }),
     });
     const listed = await app.request(`/v1/send/history?address=${fox.identity.address}`);
+    expect((await listed.json()).items[0]?.source).toBe('api');
+  });
+
+  test('valid send-source MAC records mcp; bad or missing MAC records api', async () => {
+    const app = bearerApp({ kind: 'admin' });
+    const good = await app.request('/v1/send', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [SEND_SOURCE_MAC_HEADER]: macForMcpSendSource(config.taskSigningSecret),
+      },
+      body: JSON.stringify({
+        from: fox.identity.address,
+        to: 'out@example.net',
+        subject: 'signed mcp',
+        text: 'x',
+      }),
+    });
+    expect(good.status).toBe(200);
+    expect((await app.request(`/v1/send/history?address=${fox.identity.address}`).then((r) => r.json()))
+      .items[0]?.source).toBe('mcp');
+
+    await app.request('/v1/send', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [SEND_SOURCE_MAC_HEADER]: 'not-a-valid-mac',
+      },
+      body: JSON.stringify({
+        from: fox.identity.address,
+        to: 'out@example.net',
+        subject: 'bad mac',
+        text: 'x',
+      }),
+    });
+    expect((await app.request(`/v1/send/history?address=${fox.identity.address}`).then((r) => r.json()))
+      .items[0]?.source).toBe('api');
+  });
+
+  test('OpenAgentEmailClient.send injects MAC and records mcp', async () => {
+    const app = bearerApp({ kind: 'admin' });
+    const client = new OpenAgentEmailClient(
+      'http://localhost',
+      'admin-key',
+      (input, init) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const path = new URL(url, 'http://localhost').pathname;
+        return app.request(path, init);
+      },
+      { sendSourceSecret: config.taskSigningSecret },
+    );
+    const sent = await client.send(fox.identity.address, 'out@example.net', 'from client', 'x');
+    expect(sent.id).toMatch(/^snd_/);
+    const listed = await app.request(`/v1/send/history?address=${fox.identity.address}`);
     expect((await listed.json()).items[0]?.source).toBe('mcp');
+  });
+
+  test('N rate-limited requests log only one rate_limited row', async () => {
+    const prev = config.sendRateLimit;
+    Object.assign(config, { sendRateLimit: 1 });
+    try {
+      const app = bearerApp({ kind: 'admin' });
+      const body = JSON.stringify({
+        from: fox.identity.address,
+        to: 'out@example.net',
+        subject: 'rl',
+        text: 'x',
+      });
+      const first = await app.request('/v1/send', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(first.status).toBe(200);
+      const statuses: number[] = [];
+      for (let i = 0; i < 8; i++) {
+        const res = await app.request('/v1/send', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+        });
+        statuses.push(res.status);
+      }
+      expect(statuses.every((s) => s === 429)).toBe(true);
+      const listed = await app.request(`/v1/send/history?address=${fox.identity.address}`);
+      const rows = (await listed.json()).items as { error?: string; result: string }[];
+      expect(rows.filter((row) => row.error === 'rate_limited')).toHaveLength(1);
+    } finally {
+      Object.assign(config, { sendRateLimit: prev });
+    }
+  });
+
+  test('oversized to address is rejected and does not land a giant row', async () => {
+    const app = bearerApp({ kind: 'admin' });
+    const huge = `${'z'.repeat(300)}@example.net`;
+    const res = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: fox.identity.address,
+        to: huge,
+        subject: 'too long',
+        text: 'x',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(existsSync(sendLogPathForTests()) ? readFileSync(sendLogPathForTests(), 'utf8') : '').not.toContain(
+      'z'.repeat(300),
+    );
+  });
+
+  test('persist failure after send raises HIGH alert and still returns 200', async () => {
+    const { setSendLogPersistHookForTests } = await import('../src/lib/send-log.ts');
+    setSendLogPersistHookForTests(() => {
+      throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    });
+    const app = bearerApp({ kind: 'admin' });
+    const sent = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: fox.identity.address,
+        to: 'out@example.net',
+        subject: 'persist-fail',
+        text: 'x',
+      }),
+    });
+    expect(sent.status).toBe(200);
+    expect((await sent.json()).id).toBeUndefined();
+    expect(sendLogAlertsForTests()).toContain('append_failed_after_send');
+    expect(sendLogAlertsForTests()).toContain('persist_failed');
+    setSendLogPersistHookForTests(null);
   });
 
   test('UI send-log mirrors ACL and identity 403', async () => {

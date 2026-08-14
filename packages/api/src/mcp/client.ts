@@ -15,6 +15,13 @@
  *   POST /v1/tasks/:id/state       {state,body?,result?} -> task
  */
 
+import { SEND_SOURCE_MAC_HEADER, macForMcpSendSource } from "../lib/send-source.ts";
+
+export type OpenAgentEmailClientOptions = {
+  /** 同进程传入 config.taskSigningSecret；stdio 可省略（回退 env）。 */
+  sendSourceSecret?: string;
+};
+
 /**
  * 可注入的 fetch（HTTP 传输用 app.fetch 做进程内回环）。
  * 返回类型对齐 Hono `app.fetch`：允许同步 Response。
@@ -158,15 +165,25 @@ function networkErrorCode(err: unknown): string | undefined {
 
 export class OpenAgentEmailClient {
   private readonly fetchImpl: FetchLike;
+  private readonly sendSourceSecret: string | undefined;
 
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
     /** 默认全局 fetch；API 进程内可注入 app.fetch 避免 TCP loopback。 */
     fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
+    options?: OpenAgentEmailClientOptions,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = fetchImpl;
+    this.sendSourceSecret =
+      options?.sendSourceSecret ?? process.env.TASK_SIGNING_SECRET ?? process.env.SMTP_PASS;
+  }
+
+  /** 有共享密钥才签 mcp 来源；无密钥则不加头（API 记 api）。 */
+  private mcpSourceHeaders(): Record<string, string> {
+    if (!this.sendSourceSecret) return {};
+    return { [SEND_SOURCE_MAC_HEADER]: macForMcpSendSource(this.sendSourceSecret) };
   }
 
   private async request<T>(
@@ -182,7 +199,7 @@ export class OpenAgentEmailClient {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
-          ...(opts?.sendSource === "mcp" ? { "X-OAE-Send-Source": "mcp" } : {}),
+          ...(opts?.sendSource === "mcp" ? this.mcpSourceHeaders() : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });

@@ -672,7 +672,7 @@ export function createUiApiRoutes(
   });
 
   const sendLogQuerySchema = z.object({
-    address: z.string().email().optional(),
+    address: z.string().email().max(254).optional(),
     limit: z
       .union([z.literal('20'), z.literal('50'), z.literal('100')])
       .optional()
