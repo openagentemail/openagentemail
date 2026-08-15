@@ -1,8 +1,8 @@
 {
   "name": "@openagentemail/mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "mcpName": "io.github.openagentemail/mcp",
-  "description": "MCP server for openagent.email — unlimited agent mailboxes via REST + MCP",
+  "description": "MCP server for openagent.email \u2014 unlimited agent mailboxes via REST + MCP",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
