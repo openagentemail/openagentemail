@@ -44,5 +44,8 @@ console.log(`[api] listening on :${config.port} (domain ${config.domain})`);
 
 export default {
   port: config.port,
+  // 禁用 Bun.serve 默认 10s 空闲掐线。mail_wait_for / POST /v1/messages/wait
+  // 等长连接超时由应用层 MCP_MAX_WAIT_SECONDS（默认 60s）治理，不该在 server 层掐断。
+  idleTimeout: 0,
   fetch: app.fetch,
 };
