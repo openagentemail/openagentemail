@@ -1082,4 +1082,55 @@ PR：https://github.com/openagentemail/openagentemail/pull/33
 2. 同进程 MCP client 显式注入 `config.taskSigningSecret`（stdio 仍回退 env）。
 3. 热路径只解析最后一个 `\\n` 之后的尾块：能 parse 则补换行，否则进 `.partial` 并 truncate。不调用全量 inspect。复审 `f6a3b246` mergeable，P0/P1/P2=0。
 
+---
+
+## 总结单 fcbb0848 · 施工视角复盘（2026-08-15）
+
+日期：2026-08-15  
+任务：`fcbb0848-e6b0-4a4d-b76f-42af4e766fe6`（cursor-studio@ ← fox-2xhf@）  
+产物：`/home/ops/fleet-reports/2026-08-15-retro-worker.md`
+
+### 我们实现了哪些功能？
+
+1. 按施工视角写长周期复盘：问题按影响排序（审查闸同题、落盘热路径发明短写法、config 单例、main worktree 占用、UI JSON 字符串）。
+2. 写流程可优化处：任务卡原则要配磁盘断言、同题合并后再派工、验收句漏崩溃半行会诱导向短路径。
+3. 写工具链坑：测试隔离、截图验收与工位无 SMTP、CI bcrypt、禁自 merge 导致提交碎。
+4. 回复本 task `completed`，ntfy 通知 fox-2xhf。
+
+### 我们遇到了哪些错误？
+
+1. 本工位当时没有 `/home/ops/fleet-reports/`，需先建目录。
+2. admin 更新 task 必须带参与方 `from`（`cursor-studio@openagent.email`），否则 400。
+
+### 我们是如何解决这些错误的？
+
+1. `mkdir -p /home/ops/fleet-reports` 后落盘复盘稿。
+2. `POST /v1/tasks/:id/state` 用 admin key + `from=cursor-studio@...` 直接 `submitted → completed`（非终态可直接完成）。
+
+---
+
+## 收尾单 1150aa1d · 重启前确认（2026-08-15）
+
+日期：2026-08-15  
+任务：`1150aa1d-5cdb-4f58-a677-3264f9cd0313`（cursor-studio@ ← fox-2xhf@）  
+纪律：不自行重启，等业主下令。
+
+### 我们实现了哪些功能？
+
+1. 核了名下三个工位：`worker-34-pr1`（sentbox）、`website/worker-34-faq`、`website/worker-34-site-upgrade`。
+2. 核了 cursor-studio@ 任务与 INBOX：除本收尾单外无未回执 task；历史未读邮件对应已 completed 单。
+3. 回复本 task `completed`，结论：可以安全重启（等业主指令）。
+
+### 我们遇到了哪些错误？
+
+1. `worker-34-pr1` 工作区不干净：`Progress.md` 有未提交工日志；`.mimosa/` 未跟踪（hook-state）。
+2. website 两个功能分支在 `origin` 上已删（squash 合入 main），本地仍留原提交链，不是未推送新活。
+3. INBOX 里复盘单 / Wigolo 单 IMAP `seen=false`，但对应 task 已 completed。
+
+### 我们是如何解决这些错误的？
+
+1. 不提交 `Progress.md` / `.mimosa/`（工日志与本地缓存，重启不丢盘）；在回执里写明归属。
+2. 用 `ls-remote` + `gh pr view` 确认 SHA/PR 已 MERGED，无 open PR。
+3. 把已闭环邮件标 seen；本收尾单回复后一并标 seen。
+
 
