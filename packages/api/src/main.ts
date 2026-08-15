@@ -42,10 +42,37 @@ if (config.ntfy.enabled) {
 
 console.log(`[api] listening on :${config.port} (domain ${config.domain})`);
 
+/** 去掉末尾 `/`（根路径除外），避免 `/mcp/` 漏匹配。 */
+function requestPath(req: Request): string {
+  const path = new URL(req.url).pathname;
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+}
+
+/**
+ * 应用层长轮询入口。进 fetch 后才按请求禁用空闲掐线；
+ * 请求尚未读完（慢上传 / 未完成握手）仍受全局 idleTimeout 约束。
+ */
+function isLongPollRequest(req: Request): boolean {
+  const path = requestPath(req);
+  if (req.method === 'POST' && (path === '/mcp' || path === '/v1/messages/wait' || path === '/v1/tasks')) {
+    return true;
+  }
+  // GET /v1/tasks/:id?wait=true 与 mail_wait_for 同属阻塞等待。
+  if (req.method === 'GET' && /^\/v1\/tasks\/[^/]+$/.test(path)) {
+    return new URL(req.url).searchParams.get('wait') === 'true';
+  }
+  return false;
+}
+
 export default {
   port: config.port,
-  // 禁用 Bun.serve 默认 10s 空闲掐线。mail_wait_for / POST /v1/messages/wait
-  // 等长连接超时由应用层 MCP_MAX_WAIT_SECONDS（默认 60s）治理，不该在 server 层掐断。
-  idleTimeout: 0,
-  fetch: app.fetch,
+  // 短请求保留 Bun 默认 10s，避免公网慢连接无限占 socket。
+  // 长轮询在 fetch 里 server.timeout(req, 0) 按请求豁免。
+  idleTimeout: 10,
+  fetch(req: Request, server: { timeout(request: Request, seconds: number): void }) {
+    if (isLongPollRequest(req)) {
+      server.timeout(req, 0);
+    }
+    return app.fetch(req);
+  },
 };

@@ -1,6 +1,6 @@
 /**
  * 回归：Bun.serve 默认 idleTimeout=10s 会掐断无字节长连接（公网 mail_wait_for 实测 502）。
- * 生产 serve 配置必须显式 idleTimeout: 0；本文件用真 Bun.serve 验证 >15s 静默仍能完成。
+ * 生产保留全局 10s；仅对长轮询路径 server.timeout(req, 0)。
  */
 import { describe, expect, test } from 'bun:test';
 
@@ -17,20 +17,31 @@ async function readProductionIdleTimeout(): Promise<number> {
   return Number(match[1]);
 }
 
+/** 钉死生产 fetch 对长轮询调用了 server.timeout(req, 0)。 */
+async function productionDisablesTimeoutPerLongPoll(): Promise<boolean> {
+  const src = await Bun.file(MAIN_PATH).text();
+  return (
+    src.includes('isLongPollRequest') &&
+    /server\.timeout\(\s*req\s*,\s*0\s*\)/.test(src)
+  );
+}
+
 /**
  * 起一个只 sleep、期间不写任何响应字节的本地服务，模拟 wait 类长连接。
- * 返回 fetch 结果；被 idleTimeout 掐断时走 catch。
+ * disableIdle 为 true 时按生产路径调用 server.timeout(req, 0)。
  */
 async function requestSilentWait(
   idleTimeout: number,
   silentMs: number,
+  disableIdle = false,
 ): Promise<{ ok: boolean; status?: number; body?: string; error?: string }> {
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     idleTimeout,
-    fetch: async () => {
+    fetch: async (req, srv) => {
       // 故意不先写字节：复现「handler 仍在跑、连接被 server 层掐」的现场。
+      if (disableIdle) srv.timeout(req, 0);
       await Bun.sleep(silentMs);
       return new Response('still-alive');
     },
@@ -46,21 +57,23 @@ async function requestSilentWait(
 }
 
 describe('Bun.serve idleTimeout（长连接不被 server 层掐断）', () => {
-  test('生产 serve 配置显式 idleTimeout: 0（禁用）', async () => {
-    expect(await readProductionIdleTimeout()).toBe(0);
+  test('生产保留全局 idleTimeout=10，长轮询按请求 server.timeout(req, 0)', async () => {
+    expect(await readProductionIdleTimeout()).toBe(10);
+    expect(await productionDisablesTimeoutPerLongPoll()).toBe(true);
   });
 
-  test('对照：idleTimeout=2 时约 4s 无字节会被掐断（证明本测试打到 server 层）', async () => {
-    const result = await requestSilentWait(2, 4_000);
+  test('对照：idleTimeout=2 且无按请求豁免时，约 4s 无字节会被掐断', async () => {
+    const result = await requestSilentWait(2, 4_000, false);
     expect(result.ok).toBe(false);
     expect(result.body).not.toBe('still-alive');
   }, 15_000);
 
-  test('生产值 idleTimeout=0：15s+ 无字节长连接仍能正常完成', async () => {
+  test('生产路径：全局 10s + server.timeout(req, 0) 时，15s+ 无字节仍能完成', async () => {
     const idleTimeout = await readProductionIdleTimeout();
-    expect(idleTimeout).toBe(0);
+    expect(idleTimeout).toBe(10);
+    expect(await productionDisablesTimeoutPerLongPoll()).toBe(true);
     const started = Date.now();
-    const result = await requestSilentWait(idleTimeout, 16_000);
+    const result = await requestSilentWait(idleTimeout, 16_000, true);
     const elapsedMs = Date.now() - started;
     expect(result.ok).toBe(true);
     expect(result.status).toBe(200);
