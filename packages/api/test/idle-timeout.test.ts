@@ -13,8 +13,12 @@ const MAIN_PATH = new URL('../src/main.ts', import.meta.url);
 /** 从 main.ts 的 default export 钉死生产 idleTimeout，避免误测一份手写副本。 */
 async function readProductionIdleTimeout(): Promise<number> {
   const src = await Bun.file(MAIN_PATH).text();
-  // 只认 export default 对象里的 idleTimeout，防止注释/其它字面量误匹配。
-  const match = src.match(/export default\s*\{[\s\S]*?\bidleTimeout:\s*(\d+)\b/);
+  // 只切 export default 到首个 `};`，避免误捕块外同名键。
+  const block = src.match(/export default\s*\{[\s\S]*?\};/);
+  if (!block) {
+    throw new Error('packages/api/src/main.ts 缺少 export default 块');
+  }
+  const match = block[0].match(/\bidleTimeout:\s*(\d+)\b/);
   if (!match) {
     throw new Error('packages/api/src/main.ts default export 缺少 idleTimeout');
   }
