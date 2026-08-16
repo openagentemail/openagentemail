@@ -1,6 +1,6 @@
 /**
  * 回归：Bun.serve 默认 idleTimeout=10s 会掐断无字节长连接（公网 mail_wait_for 实测 502）。
- * 生产保留全局 10s；仅对长轮询路径 server.timeout(req, 0)。
+ * 生产 serve 配置必须显式 idleTimeout: 0；本文件用真 Bun.serve 验证 >15s 静默仍能完成。
  *
  * 对照不写死掐断秒数：CI bun 1.2.21 与本机 1.3.x 的定时器粒度不同，
  * handler 若在 ~2×idleTimeout 时刚好 return，会和掐线抢跑（GH job 95079538125）。
@@ -21,28 +21,17 @@ async function readProductionIdleTimeout(): Promise<number> {
   return Number(match[1]);
 }
 
-/** 钉死生产 fetch 对长轮询调用了 server.timeout(req, 0)。 */
-async function productionDisablesTimeoutPerLongPoll(): Promise<boolean> {
-  const src = await Bun.file(MAIN_PATH).text();
-  return (
-    src.includes('isLongPollRequest') &&
-    /server\.timeout\(\s*req\s*,\s*0\s*\)/.test(src)
-  );
-}
-
 function isClientCeilingAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === 'TimeoutError';
 }
 
 /**
  * 起一个只 sleep、期间不写任何响应字节的本地服务，模拟 wait 类长连接。
- * disableIdle 为 true 时按生产路径调用 server.timeout(req, 0)。
  * clientCeilingMs 防止 runner 上永不掐线时挂死；触顶视为未打到 server 层。
  */
 async function requestSilentWait(
   idleTimeout: number,
   silentMs: number,
-  disableIdle = false,
   clientCeilingMs?: number,
 ): Promise<{
   ok: boolean;
@@ -56,9 +45,8 @@ async function requestSilentWait(
     hostname: '127.0.0.1',
     port: 0,
     idleTimeout,
-    fetch: async (req, srv) => {
+    fetch: async () => {
       // 故意不先写字节：复现「handler 仍在跑、连接被 server 层掐」的现场。
-      if (disableIdle) srv.timeout(req, 0);
       await Bun.sleep(silentMs);
       return new Response('still-alive');
     },
@@ -88,16 +76,15 @@ async function requestSilentWait(
 }
 
 describe('Bun.serve idleTimeout（长连接不被 server 层掐断）', () => {
-  test('生产保留全局 idleTimeout=10，长轮询按请求 server.timeout(req, 0)', async () => {
-    expect(await readProductionIdleTimeout()).toBe(10);
-    expect(await productionDisablesTimeoutPerLongPoll()).toBe(true);
+  test('生产 serve 配置显式 idleTimeout: 0（禁用）', async () => {
+    expect(await readProductionIdleTimeout()).toBe(0);
   });
 
-  test('对照：无豁免时连接在 idleTimeout 之后、15s 上限之前被 server 层掐断', async () => {
+  test('对照：有限 idleTimeout 时连接在超时之后、15s 上限之前被 server 层掐断', async () => {
     const idleSec = 2;
     const ceilingMs = 15_000;
     // handler 挂住超过观察窗，避免「刚好 return」和掐线抢跑。
-    const result = await requestSilentWait(idleSec, 20_000, false, ceilingMs);
+    const result = await requestSilentWait(idleSec, 20_000, ceilingMs);
     expect(result.clientCeiling).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.body).not.toBe('still-alive');
@@ -105,11 +92,10 @@ describe('Bun.serve idleTimeout（长连接不被 server 层掐断）', () => {
     expect(result.elapsedMs).toBeLessThan(ceilingMs);
   }, 25_000);
 
-  test('生产路径：全局 10s + server.timeout(req, 0) 时，15s+ 无字节仍能完成', async () => {
+  test('生产值 idleTimeout=0：15s+ 无字节长连接仍能正常完成', async () => {
     const idleTimeout = await readProductionIdleTimeout();
-    expect(idleTimeout).toBe(10);
-    expect(await productionDisablesTimeoutPerLongPoll()).toBe(true);
-    const result = await requestSilentWait(idleTimeout, 16_000, true);
+    expect(idleTimeout).toBe(0);
+    const result = await requestSilentWait(idleTimeout, 16_000);
     expect(result.ok).toBe(true);
     expect(result.status).toBe(200);
     expect(result.body).toBe('still-alive');
