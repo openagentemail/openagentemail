@@ -1358,16 +1358,58 @@ async function watchConnection(
   }
 }
 
-async function runWatcher(signal: AbortSignal, dispatch: WatcherDispatch): Promise<void> {
+type WatcherRuntime = {
+  connect: typeof connectImap;
+  watch: typeof watchConnection;
+  wait: typeof sleep;
+  warn: typeof console.warn;
+  connectionId: string;
+};
+
+/** @internal Exported so the reconnect/error boundary can be regression-tested. */
+export async function runWatcher(
+  signal: AbortSignal,
+  dispatch: WatcherDispatch,
+  runtime: WatcherRuntime = {
+    connect: connectImap,
+    watch: watchConnection,
+    wait: sleep,
+    warn: console.warn,
+    connectionId: `${config.imap.user}@${config.imap.host}:${config.imap.port}`,
+  },
+): Promise<void> {
   const watermark: WatcherWatermark = {};
   while (!signal.aborted) {
     try {
-      const client = await connectImap();
-      await watchConnection(signal, client, dispatch, watermark);
+      const client = await runtime.connect();
+      const onError = (err: unknown) => {
+        runtime.warn(
+          `[notify] IMAP watcher connection ${runtime.connectionId} error:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // ImapFlow emits connection errors outside the awaited command chain.
+        // Closing makes the active IDLE/search fail into the reconnect guard.
+        try {
+          client.close();
+        } catch {
+          /* already closed */
+        }
+      };
+      client.on('error', onError);
+      try {
+        await runtime.watch(signal, client, dispatch, watermark);
+      } finally {
+        client.off('error', onError);
+      }
     } catch (err) {
-      if (!signal.aborted) console.warn('[notify] IMAP watcher reconnecting:', (err as Error).message);
+      if (!signal.aborted) {
+        runtime.warn(
+          `[notify] IMAP watcher connection ${runtime.connectionId} reconnecting:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
-    if (!signal.aborted) await sleep(RECONNECT_MS);
+    if (!signal.aborted) await runtime.wait(RECONNECT_MS);
   }
 }
 

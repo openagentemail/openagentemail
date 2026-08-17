@@ -5,6 +5,8 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
+import { EventEmitter } from 'node:events';
+
 const { describe, expect, test } = await import('bun:test');
 const {
   boundPreviewChars,
@@ -17,6 +19,7 @@ const {
   maskTier2Metadata,
   packPushLinkLines,
   processWatchedMessage,
+  runWatcher,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
   PUSH_MESSAGE_MAX_BYTES,
@@ -82,6 +85,50 @@ async function dispatches(
 }
 
 describe('mail-arrival notification watcher', () => {
+  test('连续 2 轮异步连接错误时 watcher 记录连接、按 3 秒退避并继续，不终止循环', async () => {
+    const controller = new AbortController();
+    const warnings: unknown[][] = [];
+    const waits: number[] = [];
+    let attempts = 0;
+
+    await runWatcher(
+      controller.signal,
+      { publish: async () => ({ target: 'user', title: 'unused', level: 'normal' }) },
+      {
+        connect: async () => new EventEmitter() as any,
+        watch: async (_signal, client) => {
+          attempts += 1;
+          if (attempts > 2) {
+            controller.abort();
+            return;
+          }
+          const error = new Error(`socket timeout ${attempts}`);
+          await new Promise<void>((_resolve, reject) => {
+            client.close = () => reject(error);
+            setTimeout(() => client.emit('error', error), 0);
+          });
+        },
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        warn: (...args) => {
+          warnings.push(args);
+        },
+        connectionId: 'agent@test.example@imap.test:993',
+      },
+    );
+
+    expect(attempts).toBe(3);
+    expect(waits).toEqual([3_000, 3_000]);
+    expect(warnings).toHaveLength(4);
+    expect(warnings.map((entry) => entry.join(' '))).toEqual([
+      '[notify] IMAP watcher connection agent@test.example@imap.test:993 error: socket timeout 1',
+      '[notify] IMAP watcher connection agent@test.example@imap.test:993 reconnecting: socket timeout 1',
+      '[notify] IMAP watcher connection agent@test.example@imap.test:993 error: socket timeout 2',
+      '[notify] IMAP watcher connection agent@test.example@imap.test:993 reconnecting: socket timeout 2',
+    ]);
+  });
+
   test('keeps its watermark across reconnects and catches the downtime window', () => {
     const watermark: { uid?: number } = {};
     expect(unseenWatcherUids([10, 11], watermark)).toEqual([]);
