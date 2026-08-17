@@ -22,7 +22,8 @@ import { identitiesRoute } from './routes/identities.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
 import { notifyRoute } from './routes/notify.ts';
-import { tasksRoute } from './routes/tasks.ts';
+import { createTaskRoutes, tasksRoute } from './routes/tasks.ts';
+import type { TaskService } from './lib/tasks.ts';
 import { agentCardRoute } from './routes/agent-card.ts';
 import { registerOAuthRoutes, type OAuthRouteOptions } from './routes/oauth.ts';
 import { createUiApiRoutes } from './routes/ui.ts';
@@ -42,6 +43,11 @@ type AppOptions = {
   oauth?: OAuthRouteOptions;
   /** 测试可注入 MCP 对外 base（等同 MCP_PUBLIC_URL；含 401 resource_metadata）。 */
   mcpPublicBaseUrl?: string;
+  /**
+   * 测试可注入 task 服务（MCP /v1 回环走同一条 REST，不改响应形态）。
+   * @internal 仅测试可用，禁止用于生产组装。
+   */
+  taskService?: TaskService;
 };
 
 export function createApp(options: AppOptions = {}): Hono {
@@ -99,7 +105,10 @@ export function createApp(options: AppOptions = {}): Hono {
   app.route('/v1/messages', messagesRoute);
   app.route('/v1/send', sendRoute);
   app.route('/v1/notify', notifyRoute);
-  app.route('/v1/tasks', tasksRoute);
+  app.route(
+    '/v1/tasks',
+    options.taskService ? createTaskRoutes({ service: options.taskService }) : tasksRoute,
+  );
   app.route('/v1/audit', auditRoute);
 
   if (options.uiEnabled ?? config.uiEnabled) {

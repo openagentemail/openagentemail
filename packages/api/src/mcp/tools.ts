@@ -164,6 +164,8 @@ export function registerOpenAgentEmailTools(
 
   const taskStateSchema = z.enum(["submitted", "working", "input-required", "completed", "failed"]);
 
+  // 与 lib/tasks.ts TaskMessage / TaskEventKind 对齐：催办消息带 kind+idempotencyKey，
+  // 缺字段则 JSON Schema additionalProperties:false 会把 task_list/task_get 打成 -32602。
   const taskMessageSchema = z.object({
     id: z.string(),
     from: z.email(),
@@ -173,6 +175,8 @@ export function registerOpenAgentEmailTools(
     state: taskStateSchema,
     body: z.string(),
     result: z.unknown().optional(),
+    kind: z.enum(["state", "reminder"]).optional(),
+    idempotencyKey: z.string().optional(),
   });
 
   const taskOutputSchema = {
