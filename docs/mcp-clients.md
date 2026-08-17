@@ -21,9 +21,9 @@ API 进程暴露无状态 MCP 端点 `POST /mcp`（MCP 2026-07-28 / SDK v2）。
 
 CIMD 注册校验只接受公共客户端 `none`（token 端点行为不变，仍只支持 `none` + PKCE）。判定信号：
 
-- `token_endpoint_auth_method` 缺省或为 `none`：放行
+- `token_endpoint_auth_method` 缺省或为 `none`：放行（不看 plural）
 - singular 非 `none`，但 `token_endpoint_auth_methods_supported` **为数组且含 `none`**：按公共客户端 `none` 放行（ChatGPT 连接器常见：singular=`private_key_jwt`，plural 同时含 `none` 与 `private_key_jwt`）
-- plural 缺失、非数组、或不含 `none`：拒绝（`auth_method_unsupported`）
+- singular 非 `none` 且 plural 缺失、非数组、或不含 `none`：拒绝（`auth_method_unsupported`）
 
 ### Cursor / 通用 MCP `type: http` 示例
 
