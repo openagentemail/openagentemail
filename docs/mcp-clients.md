@@ -19,6 +19,12 @@ API 进程暴露无状态 MCP 端点 `POST /mcp`（MCP 2026-07-28 / SDK v2）。
 
 网页 Agent（ChatGPT / Claude 等）走标准 OAuth 授权码 + PKCE（仅 S256）+ CIMD。OAuth access token 仅为 **identity** 级（永非 admin），绑定 MCP resource（`…/mcp`）。管理已授权客户端：Dashboard `/ui/configure/clients`（旧书签 `/ui/oauth/grants` 在已登录时 302 到此页）。
 
+CIMD 注册校验只接受公共客户端 `none`（token 端点行为不变，仍只支持 `none` + PKCE）。判定信号：
+
+- `token_endpoint_auth_method` 缺省或为 `none`：放行
+- singular 非 `none`，但 `token_endpoint_auth_methods_supported` **为数组且含 `none`**：按公共客户端 `none` 放行（ChatGPT 连接器常见：singular=`private_key_jwt`，plural 同时含 `none` 与 `private_key_jwt`）
+- plural 缺失、非数组、或不含 `none`：拒绝（`auth_method_unsupported`）
+
 ### Cursor / 通用 MCP `type: http` 示例
 
 ```json
