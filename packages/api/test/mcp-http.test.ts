@@ -239,3 +239,164 @@ describe('MCP HTTP 工具', () => {
     expect(text.toLowerCase()).toMatch(/forbidden|403|scoped/);
   });
 });
+
+/**
+ * 回归：task_list / task_get 的 outputSchema 必须盖住真实 TaskMessage
+ *（含催办 kind=reminder + idempotencyKey）。修前 SDK 出口校验报
+ * -32602 additional properties；注入 task 服务走同一条 /mcp→/v1 回环。
+ */
+describe('MCP task_list/task_get outputSchema 覆盖催办字段', () => {
+  const from = 'alpha@test.example';
+  const to = 'bravo@test.example';
+  const reminderTask = {
+    id: 'a1b2c3d4-e5f6-4780-8bcd-ef1234567890',
+    from,
+    to,
+    subject: 'Need a nudge',
+    state: 'working' as const,
+    createdAt: '2026-08-18T00:00:00.000Z',
+    updatedAt: '2026-08-18T00:10:00.000Z',
+    messages: [
+      {
+        id: '1',
+        from,
+        to,
+        subject: 'Need a nudge',
+        date: '2026-08-18T00:00:00.000Z',
+        state: 'submitted' as const,
+        body: 'Please look.',
+      },
+      {
+        id: '2',
+        from: to,
+        to: from,
+        subject: 'Need a nudge',
+        date: '2026-08-18T00:05:00.000Z',
+        state: 'working' as const,
+        body: 'On it.',
+        kind: 'state' as const,
+      },
+      {
+        id: '3',
+        from,
+        to,
+        subject: 'Need a nudge',
+        date: '2026-08-18T00:10:00.000Z',
+        state: 'working' as const,
+        body: 'Any update?',
+        kind: 'reminder' as const,
+        idempotencyKey: 'nudge-1',
+      },
+    ],
+  };
+  const submittedTask = {
+    id: 'b2c3d4e5-f6a7-4890-9cde-f12345678901',
+    from,
+    to,
+    subject: 'No reminder yet',
+    state: 'submitted' as const,
+    createdAt: '2026-08-18T00:00:00.000Z',
+    updatedAt: '2026-08-18T00:00:00.000Z',
+    messages: [
+      {
+        id: '1',
+        from,
+        to,
+        subject: 'No reminder yet',
+        date: '2026-08-18T00:00:00.000Z',
+        state: 'submitted' as const,
+        body: 'Just filed.',
+      },
+    ],
+  };
+
+  const unused = async () => {
+    throw new Error('unused in outputSchema fixture');
+  };
+  const fixtureApp = createApp({
+    uiEnabled: false,
+    taskService: {
+      create: unused,
+      list: async (state) => {
+        const all = [reminderTask, submittedTask];
+        return state ? all.filter((task) => task.state === state) : all;
+      },
+      listBoard: unused,
+      get: async (id) => (id === reminderTask.id ? reminderTask : null),
+      update: unused,
+      reply: unused,
+      remind: unused,
+      close: unused,
+      waitForTerminal: unused,
+    },
+  });
+
+  function fixtureMcp(method: string, params: Record<string, unknown> = {}, id = 1) {
+    return fixtureApp.request('/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${adminKey}`,
+        'content-type': 'application/json',
+        accept: MCP_ACCEPT,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+    });
+  }
+
+  test('无参 task_list：含 reminder+idempotencyKey 的消息通过出口校验', async () => {
+    const res = await fixtureMcp('tools/call', { name: 'task_list', arguments: {} });
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: {
+        isError?: boolean;
+        structuredContent?: {
+          tasks?: Array<{
+            id: string;
+            messages: Array<{ kind?: string; idempotencyKey?: string }>;
+          }>;
+        };
+      };
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    const tasks = body.result?.structuredContent?.tasks ?? [];
+    expect(tasks.map((t) => t.id)).toEqual([reminderTask.id, submittedTask.id]);
+    const reminder = tasks[0]?.messages.find((m) => m.kind === 'reminder');
+    expect(reminder?.idempotencyKey).toBe('nudge-1');
+  });
+
+  test('带 state 筛选的 task_list 仍正常', async () => {
+    const res = await fixtureMcp('tools/call', {
+      name: 'task_list',
+      arguments: { state: 'submitted' },
+    });
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number };
+      result?: { isError?: boolean; structuredContent?: { tasks?: { id: string }[] } };
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    expect(body.result?.structuredContent?.tasks?.map((t) => t.id)).toEqual([submittedTask.id]);
+  });
+
+  test('task_get 同源 schema：催办消息不触发 -32602', async () => {
+    const res = await fixtureMcp('tools/call', {
+      name: 'task_get',
+      arguments: { id: reminderTask.id },
+    });
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: {
+        isError?: boolean;
+        structuredContent?: { messages?: Array<{ kind?: string; idempotencyKey?: string }> };
+      };
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    const reminder = body.result?.structuredContent?.messages?.find((m) => m.kind === 'reminder');
+    expect(reminder?.idempotencyKey).toBe('nudge-1');
+  });
+});
