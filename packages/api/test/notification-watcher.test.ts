@@ -114,7 +114,7 @@ describe('mail-arrival notification watcher', () => {
         warn: (...args) => {
           warnings.push(args);
         },
-        connectionId: 'agent@test.example@imap.test:993',
+        connectionId: 'imap.test:993',
       },
     );
 
@@ -122,10 +122,10 @@ describe('mail-arrival notification watcher', () => {
     expect(waits).toEqual([3_000, 3_000]);
     expect(warnings).toHaveLength(4);
     expect(warnings.map((entry) => entry.join(' '))).toEqual([
-      '[notify] IMAP watcher connection agent@test.example@imap.test:993 error: socket timeout 1',
-      '[notify] IMAP watcher connection agent@test.example@imap.test:993 reconnecting: socket timeout 1',
-      '[notify] IMAP watcher connection agent@test.example@imap.test:993 error: socket timeout 2',
-      '[notify] IMAP watcher connection agent@test.example@imap.test:993 reconnecting: socket timeout 2',
+      '[notify] IMAP watcher connection imap.test:993 error: socket timeout 1',
+      '[notify] IMAP watcher connection imap.test:993 reconnecting: socket timeout 1',
+      '[notify] IMAP watcher connection imap.test:993 error: socket timeout 2',
+      '[notify] IMAP watcher connection imap.test:993 reconnecting: socket timeout 2',
     ]);
   });
 

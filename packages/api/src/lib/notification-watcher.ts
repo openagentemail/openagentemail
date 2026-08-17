@@ -1375,7 +1375,7 @@ export async function runWatcher(
     watch: watchConnection,
     wait: sleep,
     warn: console.warn,
-    connectionId: `${config.imap.user}@${config.imap.host}:${config.imap.port}`,
+    connectionId: `${config.imap.host}:${config.imap.port}`,
   },
 ): Promise<void> {
   const watermark: WatcherWatermark = {};
