@@ -312,8 +312,16 @@ function validateDocument(
       ? doc.token_endpoint_auth_method
       : 'none';
   if (method !== 'none') {
-    // 声明 private_key_jwt 等一律拒（本 AS 只接受 none）
-    return { ok: false, reason: 'auth_method_unsupported' };
+    // 本 AS token 端点仍只接受 none。singular 非 none 时，仅当 plural
+    // token_endpoint_auth_methods_supported 为数组且含 'none' 才按公共客户端放行
+    //（ChatGPT 连接器：singular=private_key_jwt，plural 同时含 none）。
+    // plural 缺失 / 非数组 / 不含 'none' → 维持拒绝。不另发明 jwks_uri 等条件。
+    const supported = doc.token_endpoint_auth_methods_supported;
+    const canFallbackNone =
+      Array.isArray(supported) && supported.includes('none');
+    if (!canFallbackNone) {
+      return { ok: false, reason: 'auth_method_unsupported' };
+    }
   }
 
   return {

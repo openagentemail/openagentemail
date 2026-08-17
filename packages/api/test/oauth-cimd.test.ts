@@ -241,7 +241,7 @@ describe('fetchClientMetadata（注入 fetcher）', () => {
     if (!r.ok) expect(r.reason).toBe('missing_redirect_uris');
   });
 
-  test('声明 client_secret* / private_key_jwt 拒', async () => {
+  test('声明 client_secret* 仍拒；private_key_jwt 无 none 回退信号仍拒', async () => {
     const secret = await fetchClientMetadata(clientId, {
       fetcher: async () =>
         new Response(
@@ -280,5 +280,66 @@ describe('fetchClientMetadata（注入 fetcher）', () => {
     ]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('ssrf_blocked_ip');
+  });
+});
+
+/**
+ * ChatGPT CIMD：singular 声明 private_key_jwt，但 plural 数组含 none 时可回退公共客户端。
+ * 判定只看 token_endpoint_auth_methods_supported 是否为数组且含 'none'。
+ */
+describe('CIMD auth_method none 回退（ChatGPT 连接器）', () => {
+  const clientId = 'http://127.0.0.1:9/cimd.json';
+
+  async function fetchDoc(body: Record<string, unknown>) {
+    return fetchClientMetadata(clientId, {
+      fetcher: async () =>
+        new Response(JSON.stringify({ client_id: clientId, ...body }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+  }
+
+  test('private_key_jwt + plural 含 none + jwks_uri → 按 none 放行', async () => {
+    const r = await fetchDoc({
+      client_name: 'ChatGPT',
+      redirect_uris: ['https://chatgpt.com/connector/oauth/callback'],
+      token_endpoint_auth_method: 'private_key_jwt',
+      token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+      jwks_uri: 'https://chatgpt.com/oauth/connector/jwks.json',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.doc.token_endpoint_auth_method).toBe('none');
+  });
+
+  test('纯 client_secret_basic 无 none 回退信号 → 仍拒', async () => {
+    const r = await fetchDoc({
+      client_name: 'Basic',
+      redirect_uris: ['https://app.example/cb'],
+      token_endpoint_auth_method: 'client_secret_basic',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('auth_method_unsupported');
+  });
+
+  test('plural 非数组等畸形 → 仍拒', async () => {
+    const notArray = await fetchDoc({
+      client_name: 'Malformed',
+      redirect_uris: ['https://app.example/cb'],
+      token_endpoint_auth_method: 'private_key_jwt',
+      token_endpoint_auth_methods_supported: 'none',
+    });
+    expect(notArray.ok).toBe(false);
+    if (!notArray.ok) expect(notArray.reason).toBe('auth_method_unsupported');
+
+    const missingNone = await fetchDoc({
+      client_name: 'JwtOnly',
+      redirect_uris: ['https://app.example/cb'],
+      token_endpoint_auth_method: 'private_key_jwt',
+      token_endpoint_auth_methods_supported: ['private_key_jwt'],
+    });
+    expect(missingNone.ok).toBe(false);
+    if (!missingNone.ok) expect(missingNone.reason).toBe('auth_method_unsupported');
   });
 });
