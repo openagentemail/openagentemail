@@ -43,7 +43,10 @@ type AppOptions = {
   oauth?: OAuthRouteOptions;
   /** 测试可注入 MCP 对外 base（等同 MCP_PUBLIC_URL；含 401 resource_metadata）。 */
   mcpPublicBaseUrl?: string;
-  /** 测试可注入 task 服务（MCP /v1 回环走同一条 REST，不改响应形态）。 */
+  /**
+   * 测试可注入 task 服务（MCP /v1 回环走同一条 REST，不改响应形态）。
+   * @internal 仅测试可用，禁止用于生产组装。
+   */
   taskService?: TaskService;
 };
 

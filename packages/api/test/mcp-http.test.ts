@@ -241,9 +241,46 @@ describe('MCP HTTP 工具', () => {
 });
 
 /**
- * 回归：task_list / task_get 的 outputSchema 必须盖住真实 TaskMessage
- *（含催办 kind=reminder + idempotencyKey）。修前 SDK 出口校验报
- * -32602 additional properties；注入 task 服务走同一条 /mcp→/v1 回环。
+ * 广播契约：客户端 ajv 用 tools/list 的 JSON Schema（additionalProperties:false）
+ * 校验 structuredContent，这才是生产 -32602 的来源。服务端 zod 默认非严格，
+ * 多余键只剥不抛，所以 POST /mcp tools/call 测不到本 bug。
+ */
+describe('MCP task_list/task_get 广播 outputSchema 契约', () => {
+  type JsonSchema = {
+    additionalProperties?: boolean;
+    properties?: Record<string, JsonSchema>;
+    items?: JsonSchema;
+  };
+
+  function messageItemSchema(toolName: 'task_list' | 'task_get', outputSchema: unknown): JsonSchema {
+    const root = outputSchema as JsonSchema;
+    if (toolName === 'task_list') {
+      return root.properties?.tasks?.items?.properties?.messages?.items ?? {};
+    }
+    return root.properties?.messages?.items ?? {};
+  }
+
+  test('tools/list 广播的 message 层含 kind 与 idempotencyKey，且 additionalProperties=false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; outputSchema?: unknown }> };
+    };
+    for (const name of ['task_list', 'task_get'] as const) {
+      const tool = body.result?.tools?.find((t) => t.name === name);
+      expect(tool, `missing tool ${name}`).toBeTruthy();
+      const item = messageItemSchema(name, tool?.outputSchema);
+      expect(item.additionalProperties).toBe(false);
+      expect(item.properties).toHaveProperty('kind');
+      expect(item.properties).toHaveProperty('idempotencyKey');
+    }
+  });
+});
+
+/**
+ * handler 未剥催办字段：注入含 kind/idempotencyKey 的真实形状，经 /mcp→/v1
+ * 回环仍出现在 structuredContent。这证明对外语义保留，但不能当 -32602 回归网
+ *（服务端 zod 非严格，修前也会绿）。
  */
 describe('MCP task_list/task_get outputSchema 覆盖催办字段', () => {
   const from = 'alpha@test.example';
