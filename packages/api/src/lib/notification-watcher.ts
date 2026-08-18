@@ -88,6 +88,8 @@ export type ProcessWatchedOptions = {
   refreshIdentity?: (address: string) => Identity | undefined;
   /** @internal Retry timer injection; production uses the module sleep helper. */
   wait?: (ms: number) => Promise<void>;
+  /** @internal Identity-level poison logging injection. */
+  error?: typeof console.error;
 };
 
 /** In-memory watermark survives a dropped IMAP connection in this process. */
@@ -1331,6 +1333,14 @@ export async function processWatchedMessage(
         );
         break; // sent
       } catch (err) {
+        if (err instanceof WatcherPublishError) {
+          if (isNotifyServiceFailure(err.reason)) throw err;
+          (options.error ?? console.error)(
+            `[notify] IMAP watcher skipped identity ${current.address} after ${err.attempts} publish attempts:`,
+            err.reason instanceof Error ? err.reason.message : String(err.reason),
+          );
+          break;
+        }
         if (!(err instanceof NotifyError && err.code === 'notify_cancelled')) throw err;
         if (!options.refreshIdentity) break;
         // Downgrade: rebuild at the safer tier. Delete: silent skip.
@@ -1397,6 +1407,7 @@ export async function watchConnection(
                 // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
                 refreshIdentity: (address) => runtime.identity(address),
                 wait: runtime.wait,
+                error: runtime.error,
               },
             );
             consecutivePublishSkips = 0;

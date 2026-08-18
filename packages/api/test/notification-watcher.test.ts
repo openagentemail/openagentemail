@@ -158,9 +158,66 @@ describe('mail-arrival notification watcher', () => {
     expect(retryWaits).toEqual([250, 500, 250, 500, 3_000]);
     expect(watermark.uid).toBe(43);
     expect(errors.map((entry) => entry.join(' '))).toEqual([
-      '[notify] IMAP watcher skipped UID 41 after 3 publish attempts (consecutive skips: 1): notify_unavailable',
-      '[notify] IMAP watcher skipped UID 42 after 3 publish attempts (consecutive skips: 2): notify_unavailable',
+      '[notify] IMAP watcher skipped identity target@test.example after 3 publish attempts: notify_unavailable',
+      '[notify] IMAP watcher skipped identity target@test.example after 3 publish attempts: notify_unavailable',
     ]);
+  });
+
+  test('同一封信首个身份消息级拒绝不连坐，后续身份仍投递且 UID 推进', async () => {
+    const controller = new AbortController();
+    const publishCalls: string[] = [];
+    const errors: unknown[][] = [];
+    const watermark = { uid: 40 };
+    const watched = {
+      ...message('multi@example.net', 'From: multi@example.net\r\n\r\nYour verification code is 888888'),
+      uid: 41,
+      envelope: {
+        ...message('multi@example.net', '').envelope,
+        to: [{ address: 'target@test.example' }, { address: 'sender@test.example' }],
+      },
+    };
+    const client = {
+      mailbox: false,
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => [41],
+      fetch: async function* () { yield watched; },
+      idle: async () => { controller.abort(); },
+      logout: async () => {},
+      close() {},
+    } as any;
+
+    await watchConnection(
+      controller.signal,
+      client,
+      {
+        publish: async (payload) => {
+          publishCalls.push(payload.identityAddress!);
+          if (payload.identityAddress === 'target@test.example') {
+            throw new NotifyError('notify_unavailable', undefined, { failureKind: 'message' });
+          }
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      watermark,
+      {
+        identities: () => baseIdentities,
+        identity: (address) => baseIdentities.find((entry) => entry.address === address),
+        wait: async () => {},
+        error: (...args) => { errors.push(args); },
+        now: () => 0,
+      },
+    );
+
+    expect(publishCalls).toEqual([
+      'target@test.example',
+      'target@test.example',
+      'target@test.example',
+      'sender@test.example',
+    ]);
+    expect(errors.map((entry) => entry.join(' '))).toEqual([
+      '[notify] IMAP watcher skipped identity target@test.example after 3 publish attempts: notify_unavailable',
+    ]);
+    expect(watermark.uid).toBe(41);
   });
 
   test('服务中断超过短重试窗口不消耗 UID，恢复后同一封信最终投递', async () => {
