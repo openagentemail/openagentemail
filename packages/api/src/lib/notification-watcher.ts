@@ -21,6 +21,7 @@ import {
 import { connectImap, messageRecipients } from './imap.ts';
 import {
   jsonEscapedByteLength,
+  isNotifyServiceFailure,
   notifyAvailableMessageBytes,
   NotifyError,
   type NotifyService,
@@ -44,6 +45,7 @@ const RECONNECT_STABLE_MS = 30_000;
 const PUBLISH_MAX_ATTEMPTS = 3;
 const PUBLISH_RETRY_INITIAL_MS = 250;
 const PUBLISH_RETRY_MAX_MS = 500;
+const SERVICE_FAILURE_MAX_MS = 10 * 60_000;
 /** Bounded plain-text preview length for tier-3 mail-arrival pushes. */
 export const PUSH_BODY_PREVIEW_CHARS = 280;
 /** Max OTP codes/links included in a tier-3 push (each list). */
@@ -89,7 +91,12 @@ export type ProcessWatchedOptions = {
 };
 
 /** In-memory watermark survives a dropped IMAP connection in this process. */
-export type WatcherWatermark = { uid?: number; uidValidity?: bigint };
+export type WatcherWatermark = {
+  uid?: number;
+  uidValidity?: bigint;
+  /** @internal First provider-wide failure for the blocked UID, across reconnects. */
+  serviceFailure?: { uid: number; sinceMs: number };
+};
 
 export type MailContentExtras = {
   subject: string;
@@ -160,6 +167,7 @@ export function unseenWatcherUids(
     // First sight of this mailbox generation, or a recreated INBOX: re-anchor
     // instead of comparing against the previous generation's UIDs.
     watermark.uidValidity = uidValidity;
+    watermark.serviceFailure = undefined;
     if (firstSight) {
       watermark.uid = currentHighWater;
       return [];
@@ -1343,6 +1351,7 @@ type WatchConnectionRuntime = {
   identity: typeof findIdentity;
   wait: typeof sleep;
   error: typeof console.error;
+  now: typeof Date.now;
 };
 
 /** @internal Exported so poison-message batch progression can be regression-tested. */
@@ -1356,6 +1365,7 @@ export async function watchConnection(
     identity: findIdentity,
     wait: sleep,
     error: console.error,
+    now: Date.now,
   },
 ): Promise<void> {
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
@@ -1390,14 +1400,32 @@ export async function watchConnection(
               },
             );
             consecutivePublishSkips = 0;
+            watermark.serviceFailure = undefined;
           } catch (err) {
             if (!(err instanceof WatcherPublishError)) throw err;
-            consecutivePublishSkips += 1;
-            runtime.error(
-              `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
-                `(consecutive skips: ${consecutivePublishSkips}):`,
-              err.reason instanceof Error ? err.reason.message : String(err.reason),
-            );
+            if (isNotifyServiceFailure(err.reason)) {
+              const now = runtime.now();
+              const observed = watermark.serviceFailure;
+              if (!observed || observed.uid !== message.uid) {
+                watermark.serviceFailure = { uid: message.uid, sinceMs: now };
+                throw err;
+              }
+              const unavailableMs = Math.max(0, now - observed.sinceMs);
+              if (unavailableMs < SERVICE_FAILURE_MAX_MS) throw err;
+              runtime.error(
+                `[notify] CRITICAL IMAP watcher abandoned UID ${message.uid} after notification service ` +
+                  `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
+                err.reason instanceof Error ? err.reason.message : String(err.reason),
+              );
+            } else {
+              consecutivePublishSkips += 1;
+              runtime.error(
+                `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
+                  `(consecutive skips: ${consecutivePublishSkips}):`,
+                err.reason instanceof Error ? err.reason.message : String(err.reason),
+              );
+            }
+            watermark.serviceFailure = undefined;
           }
           watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
         }

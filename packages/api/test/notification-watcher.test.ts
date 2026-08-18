@@ -126,7 +126,9 @@ describe('mail-arrival notification watcher', () => {
       {
         publish: async (payload) => {
           publishCalls.push(payload.message);
-          if (publishCalls.length <= 6) throw new Error('ntfy poison');
+          // Same public code as an outage, but no internal service marker:
+          // this models ntfy explicitly rejecting this particular request.
+          if (publishCalls.length <= 6) throw new NotifyError('notify_unavailable');
           return { target: payload.target, title: payload.title, level: payload.level };
         },
       },
@@ -140,6 +142,7 @@ describe('mail-arrival notification watcher', () => {
         error: (...args) => {
           errors.push(args);
         },
+        now: () => 0,
       },
     );
 
@@ -147,8 +150,116 @@ describe('mail-arrival notification watcher', () => {
     expect(retryWaits).toEqual([250, 500, 250, 500, 3_000]);
     expect(watermark.uid).toBe(43);
     expect(errors.map((entry) => entry.join(' '))).toEqual([
-      '[notify] IMAP watcher skipped UID 41 after 3 publish attempts (consecutive skips: 1): ntfy poison',
-      '[notify] IMAP watcher skipped UID 42 after 3 publish attempts (consecutive skips: 2): ntfy poison',
+      '[notify] IMAP watcher skipped UID 41 after 3 publish attempts (consecutive skips: 1): notify_unavailable',
+      '[notify] IMAP watcher skipped UID 42 after 3 publish attempts (consecutive skips: 2): notify_unavailable',
+    ]);
+  });
+
+  test('服务中断超过短重试窗口不消耗 UID，恢复后同一封信最终投递', async () => {
+    const watermark = { uid: 40 };
+    const delivered: number[] = [];
+    let now = 0;
+    let publishAttempts = 0;
+    const watched = {
+      ...message('service@example.net', 'From: service@example.net\r\n\r\nYour verification code is 444444'),
+      uid: 41,
+    };
+    const client = (onIdle: () => void) => ({
+      mailbox: false,
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => [41],
+      fetch: async function* () { yield watched; },
+      idle: async () => { onIdle(); },
+      logout: async () => {},
+      close() {},
+    }) as any;
+    const runtime = (onIdle: () => void) => ({
+      identities: () => baseIdentities,
+      identity: (address: string) => baseIdentities.find((entry) => entry.address === address),
+      wait: async () => {},
+      error: () => {},
+      now: () => now,
+    });
+
+    const first = new AbortController();
+    await expect(watchConnection(
+      first.signal,
+      client(() => first.abort()),
+      {
+        publish: async () => {
+          publishAttempts += 1;
+          now += 2_000; // 3 attempts model a 6s outage, well beyond the old 750ms window.
+          throw new NotifyError('notify_unavailable', undefined, { failureKind: 'service' });
+        },
+      },
+      watermark,
+      runtime(() => first.abort()),
+    )).rejects.toThrow('notify_unavailable');
+    expect(publishAttempts).toBe(3);
+    expect(watermark.uid).toBe(40);
+
+    const recovered = new AbortController();
+    await watchConnection(
+      recovered.signal,
+      client(() => recovered.abort()),
+      {
+        publish: async () => {
+          publishAttempts += 1;
+          delivered.push(41);
+          return { target: 'user', title: 'openagent.email new mail', level: 'urgent' };
+        },
+      },
+      watermark,
+      runtime(() => recovered.abort()),
+    );
+
+    expect(delivered).toEqual([41]);
+    expect(publishAttempts).toBe(4);
+    expect(watermark.uid).toBe(41);
+  });
+
+  test('服务中断持续满 10 分钟后高响度跳过并推进水位线', async () => {
+    const watermark = { uid: 40 };
+    const errors: unknown[][] = [];
+    let now = 0;
+    const watched = {
+      ...message('service@example.net', 'From: service@example.net\r\n\r\nYour verification code is 555555'),
+      uid: 41,
+    };
+    const makeClient = (controller: AbortController) => ({
+      mailbox: false,
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => [41],
+      fetch: async function* () { yield watched; },
+      idle: async () => { controller.abort(); },
+      logout: async () => {},
+      close() {},
+    }) as any;
+    const dispatch = {
+      publish: async () => {
+        throw new NotifyError('notify_unavailable', undefined, { failureKind: 'service' });
+      },
+    };
+    const runtime = {
+      identities: () => baseIdentities,
+      identity: (address: string) => baseIdentities.find((entry) => entry.address === address),
+      wait: async () => {},
+      error: (...args: unknown[]) => { errors.push(args); },
+      now: () => now,
+    };
+
+    const first = new AbortController();
+    await expect(watchConnection(first.signal, makeClient(first), dispatch, watermark, runtime))
+      .rejects.toThrow('notify_unavailable');
+    expect(watermark.uid).toBe(40);
+
+    now = 600_000;
+    const expired = new AbortController();
+    await watchConnection(expired.signal, makeClient(expired), dispatch, watermark, runtime);
+
+    expect(watermark.uid).toBe(41);
+    expect(errors.map((entry) => entry.join(' '))).toEqual([
+      '[notify] CRITICAL IMAP watcher abandoned UID 41 after notification service failure persisted for 600000ms (hard limit: 600000ms): notify_unavailable',
     ]);
   });
 

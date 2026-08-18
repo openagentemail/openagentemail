@@ -27,6 +27,7 @@ const {
   createNotificationDevice,
   createRuntimeReader,
   initializeNotifications,
+  isNotifyServiceFailure,
   jsonEscapedByteLength,
   listNotificationDevices,
   notifyAvailableMessageBytes,
@@ -686,6 +687,43 @@ describe('ntfy publish payload budget', () => {
       }
     };
   }
+
+  test('publish keeps notify_unavailable externally while distinguishing rejection from outage internally', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const service = new NtfyNotificationService();
+    const input = {
+      target: 'user' as const,
+      title: 'classification',
+      message: 'classification',
+      level: 'normal' as const,
+    };
+    const caught: unknown[] = [];
+
+    try {
+      for (const response of [
+        async () => new Response('', { status: 400 }),
+        async () => new Response('', { status: 503 }),
+        async () => { throw new TypeError('network down'); },
+      ]) {
+        globalThis.fetch = response as unknown as typeof fetch;
+        try {
+          await service.publish(input);
+        } catch (err) {
+          caught.push(err);
+        }
+      }
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+
+    expect(caught.map((err) => err instanceof NotifyError ? err.code : undefined)).toEqual([
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+    ]);
+    expect(caught.map(isNotifyServiceFailure)).toEqual([false, true, true]);
+  });
 
   test('drops click when serialized JSON would exceed 4000 bytes', withPublishCapture(async (svc, captured) => {
     const longClick = `https://dash.example/ui/${'x'.repeat(800)}`;

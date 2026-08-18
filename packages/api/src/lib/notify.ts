@@ -115,7 +115,12 @@ export type NotificationDevice = {
   };
 };
 
+type NotifyFailureKind = 'message' | 'service';
+const NOTIFY_FAILURE_KIND = Symbol('notifyFailureKind');
+
 export class NotifyError extends Error {
+  readonly [NOTIFY_FAILURE_KIND]?: NotifyFailureKind;
+
   constructor(
     public readonly code:
       | 'notifications_disabled'
@@ -132,9 +137,17 @@ export class NotifyError extends Error {
       /** 给人看的原因；API 可原样返回。 */
       message?: string;
     },
+    /** @internal Watcher-only failure routing; never serialized by REST handlers. */
+    internal?: { failureKind: NotifyFailureKind },
   ) {
     super(code);
+    this[NOTIFY_FAILURE_KIND] = internal?.failureKind;
   }
+}
+
+/** @internal Distinguishes provider-wide outages from one rejected payload. */
+export function isNotifyServiceFailure(err: unknown): boolean {
+  return err instanceof NotifyError && err[NOTIFY_FAILURE_KIND] === 'service';
 }
 
 type Reader = {
@@ -815,8 +828,12 @@ export function boundJsonEscapedText(text: string, maxEscapedBytes: number): str
 
 export class NtfyNotificationService implements NotifyService {
   private async assertEnabled(): Promise<NotifyState> {
-    if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
-    if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
+    if (!config.ntfy.enabled) {
+      throw new NotifyError('notifications_disabled', undefined, { failureKind: 'service' });
+    }
+    if (!config.ntfy.adminPassword) {
+      throw new NotifyError('notifications_unconfigured', undefined, { failureKind: 'service' });
+    }
     return state();
   }
 
@@ -863,12 +880,21 @@ export class NtfyNotificationService implements NotifyService {
     if (input.beforeSend && !input.beforeSend()) {
       throw new NotifyError('notify_cancelled');
     }
-    const response = await fetch(providerUrl('/'), {
-      method: 'POST',
-      headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
-      body,
-    });
-    if (!response.ok) throw new NotifyError('notify_unavailable');
+    let response: Response;
+    try {
+      response = await fetch(providerUrl('/'), {
+        method: 'POST',
+        headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
+        body,
+      });
+    } catch {
+      throw new NotifyError('notify_unavailable', undefined, { failureKind: 'service' });
+    }
+    if (!response.ok) {
+      throw new NotifyError('notify_unavailable', undefined, {
+        failureKind: response.status >= 500 ? 'service' : 'message',
+      });
+    }
     // 送达优先：ntfy 成功后、返回前写日志。append 失败只告警，不把投递改成失败。
     const logicalTarget = input.target as NotificationLogicalTarget;
     const logicalChannel =
