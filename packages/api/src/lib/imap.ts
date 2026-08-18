@@ -180,11 +180,15 @@ export async function withInbox<T>(
     error('[imap] INBOX connection error; closing current operation');
     closeOnce();
   };
+  // Keep this listener for the one-shot client's full lifetime: socket destroy
+  // may emit after teardown returns. The client and closure are collected together.
   client.on('error', onError);
   // Locking is inside the try: getMailboxLock can throw (INBOX missing, socket
   // dropped) and a connected client must never escape without being torn down.
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
   let result: T | undefined;
+  let operationError: unknown;
+  let operationFailed = false;
   try {
     await client.connect();
     if (connectionError) throw connectionError;
@@ -194,7 +198,8 @@ export async function withInbox<T>(
     if (connectionError) throw connectionError;
   } catch (err) {
     failed = true;
-    throw connectionError ?? err;
+    operationFailed = true;
+    operationError = err;
   } finally {
     lock?.release();
     if (failed) {
@@ -206,9 +211,9 @@ export async function withInbox<T>(
         closeOnce();
       }
     }
-    client.off('error', onError);
   }
   if (connectionError) throw connectionError;
+  if (operationFailed) throw operationError;
   return result as T;
 }
 
@@ -255,6 +260,10 @@ export async function withInboxAbortable<T>(
   signal.addEventListener('abort', onAbort, { once: true });
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
   let result: T | undefined;
+  let operationError: unknown;
+  let operationFailed = false;
+  // Keep this listener through any late socket-destroy event. This one-shot
+  // client is discarded after the call, so the client/closure cycle is collectible.
   client.on('error', onError);
   try {
     // ④ 本阶段起，任何 stall 都会被 abort → close() 掐断
@@ -267,7 +276,8 @@ export async function withInboxAbortable<T>(
     if (connectionError) throw connectionError;
   } catch (err) {
     failed = true;
-    throw connectionError ?? err;
+    operationFailed = true;
+    operationError = err;
   } finally {
     signal.removeEventListener('abort', onAbort);
     lock?.release();
@@ -279,9 +289,9 @@ export async function withInboxAbortable<T>(
       }
     }
     closeOnce();
-    client.off('error', onError);
   }
   if (connectionError) throw connectionError;
+  if (operationFailed) throw operationError;
   return result as T;
 }
 
