@@ -29,10 +29,11 @@ export function validateToolList(value: unknown): void {
   }
   const names = new Set<string>();
   for (const tool of tools) {
-    if (!tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string') {
+    const name = tool && typeof tool === 'object' ? (tool as { name?: unknown }).name : undefined;
+    if (typeof name !== 'string' || name.length === 0) {
       throw new CliError('MCP tools/list returned an invalid tool entry', EXIT.MCP_VERIFY_FAILED);
     }
-    names.add((tool as { name: string }).name);
+    names.add(name);
   }
   const missing = REQUIRED_TOOL_NAMES.filter((name) => !names.has(name));
   if (missing.length) {

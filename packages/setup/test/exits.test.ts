@@ -72,6 +72,10 @@ describe('documented exit codes', () => {
   test('4: MCP tool handshake rejects empty, invalid, and incomplete tool lists', async () => {
     await expectCode(() => validateToolList({ tools: [] }), EXIT.MCP_VERIFY_FAILED);
     await expectCode(() => validateToolList({ tools: [{ name: 42 }] }), EXIT.MCP_VERIFY_FAILED);
+    await expectCode(
+      () => validateToolList({ tools: [...REQUIRED_TOOLS, ''].map((name) => ({ name })) }),
+      EXIT.MCP_VERIFY_FAILED,
+    );
     await expectCode(() => validateToolList({ tools: [{ name: 'only-one' }] }), EXIT.MCP_VERIFY_FAILED);
     await expectCode(
       () => validateToolList({ tools: REQUIRED_TOOLS.filter((name) => name !== 'mail_send').map((name) => ({ name })) }),
