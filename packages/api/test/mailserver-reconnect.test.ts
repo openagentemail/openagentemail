@@ -29,6 +29,34 @@ describe('mailserver DNS-refresh reconnect', () => {
     ]);
   });
 
+  test('Bun Nodemailer ESOCKET CONN failure re-resolves once and retries', async () => {
+    const resolve = mock(async () => '172.18.0.5');
+    const attempts: { host: string; servername?: string }[] = [];
+    const bunConnectError = Object.assign(new Error('Failed to connect'), {
+      code: 'ESOCKET',
+      command: 'CONN',
+      syscall: 'connect',
+    });
+
+    expect(isRetryableMailserverConnectionError(bunConnectError)).toBe(true);
+    const result = await withMailserverReconnect(
+      'mailserver',
+      async (endpoint) => {
+        attempts.push(endpoint);
+        if (attempts.length === 1) throw bunConnectError;
+        return 'connected';
+      },
+      { resolve },
+    );
+
+    expect(result).toBe('connected');
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(attempts).toEqual([
+      { host: 'mailserver' },
+      { host: '172.18.0.5', servername: 'mailserver' },
+    ]);
+  });
+
   test('auth failures do not resolve or retry', async () => {
     const resolve = mock(async () => '172.18.0.5');
     const connect = mock(async () => {
@@ -88,6 +116,14 @@ describe('mailserver DNS-refresh reconnect', () => {
     expect(isRetryableMailserverConnectionError(Object.assign(
       new Error('SMTP DATA contained ECONNREFUSED'),
       { code: 'ESOCKET' },
+    ))).toBe(false);
+    expect(isRetryableMailserverConnectionError(Object.assign(
+      new Error('Failed to send data'),
+      { code: 'ESOCKET', command: 'DATA', syscall: 'write' },
+    ))).toBe(false);
+    expect(isRetryableMailserverConnectionError(Object.assign(
+      new Error('SMTP DATA contained connect ECONNREFUSED'),
+      { code: 'ESOCKET', command: 'DATA', syscall: 'write' },
     ))).toBe(false);
   });
 });

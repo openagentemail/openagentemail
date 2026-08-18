@@ -38,6 +38,12 @@ function collectErrorCodes(error: unknown, seen = new Set<unknown>(), codes = ne
 
 function isEsocketConnectFailure(error: unknown): boolean {
   if (errorCode(error) !== 'ESOCKET' || !(error instanceof Error)) return false;
+  const { command, syscall } = error as Error & { command?: unknown; syscall?: unknown };
+  // Bun's Nodemailer keeps the connection phase but replaces ECONNREFUSED with
+  // ESOCKET and a generic "Failed to connect" message.
+  if (command !== undefined || syscall !== undefined) {
+    return command === 'CONN' && syscall === 'connect';
+  }
   const messages = [error.message];
   let cause = error.cause;
   const seen = new Set<unknown>();
