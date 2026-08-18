@@ -67,7 +67,37 @@ export const PUSH_META_FIELD_MAX_BYTES = 400;
 /** UTF-8 ellipsis used when the body is truncated to stay under the byte budget. */
 const PUSH_BODY_ELLIPSIS = '…';
 const PUSH_BODY_ELLIPSIS_BYTES = Buffer.byteLength(PUSH_BODY_ELLIPSIS, 'utf8');
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) {
+    resolve();
+    return;
+  }
+  const finish = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', finish);
+    resolve();
+  };
+  const timer = setTimeout(finish, ms);
+  signal?.addEventListener('abort', finish, { once: true });
+});
+
+async function waitForReconnect(
+  wait: typeof sleep,
+  ms: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return;
+  let onAbort!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([wait(ms, signal), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
 
 export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
 
@@ -1526,7 +1556,8 @@ export async function runWatcher(
     if (connectedAt !== undefined && runtime.now() - connectedAt >= RECONNECT_STABLE_MS) {
       reconnectMs = RECONNECT_INITIAL_MS;
     }
-    await runtime.wait(reconnectMs);
+    await waitForReconnect(runtime.wait, reconnectMs, signal);
+    if (signal.aborted) break;
     reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
   }
 }

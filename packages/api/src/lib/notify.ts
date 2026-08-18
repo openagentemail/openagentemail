@@ -156,17 +156,9 @@ export function isNotifyServiceFailure(err: unknown): boolean {
 
 /** @internal Shared by publish and watcher status-boundary regression tests. */
 export function isNtfyPublishServiceStatus(status: number): boolean {
-  // Changing the payload cannot repair shared auth/proxy auth, a request
-  // timeout, a retry-later response, rate limiting, or a provider 5xx.
-  return (
-    status >= 500 ||
-    status === 401 ||
-    status === 403 ||
-    status === 407 ||
-    status === 408 ||
-    status === 425 ||
-    status === 429
-  );
+  // Only known payload rejections may consume a UID. An unrecognized status
+  // can reflect a shared endpoint/proxy/provider fault, so retain by default.
+  return status !== 400 && status !== 413 && status !== 422;
 }
 
 type Reader = {

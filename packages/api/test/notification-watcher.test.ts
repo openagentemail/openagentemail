@@ -378,6 +378,56 @@ describe('mail-arrival notification watcher', () => {
     }
   });
 
+  test('ntfy 未列出的 404/405 视为服务故障，保留 UID 并在恢复后补投', async () => {
+    for (const status of [404, 405]) {
+      const watermark = { uid: 40 };
+      const delivered: number[] = [];
+      const watched = {
+        ...message('unknown-4xx@example.net', 'From: unknown-4xx@example.net\r\n\r\nYour verification code is 565656'),
+        uid: 41,
+      };
+      const makeClient = (controller: AbortController) => ({
+        mailbox: false,
+        getMailboxLock: async () => ({ release() {} }),
+        search: async () => [41],
+        fetch: async function* () { yield watched; },
+        idle: async () => { controller.abort(); },
+        logout: async () => {},
+        close() {},
+      }) as any;
+      const runtime = {
+        identities: () => baseIdentities,
+        identity: (address: string) => baseIdentities.find((entry) => entry.address === address),
+        wait: async () => {},
+        error: () => {},
+        now: () => 0,
+      };
+      let unavailable = true;
+      const dispatch = {
+        publish: async () => {
+          if (unavailable) {
+            throw new NotifyError('notify_unavailable', undefined, {
+              failureKind: isNtfyPublishServiceStatus(status) ? 'service' : 'message',
+            });
+          }
+          delivered.push(status);
+          return { target: 'user' as const, title: 'openagent.email new mail', level: 'urgent' as const };
+        },
+      };
+
+      const failed = new AbortController();
+      await expect(watchConnection(failed.signal, makeClient(failed), dispatch, watermark, runtime))
+        .rejects.toThrow('notify_unavailable');
+      expect(watermark.uid).toBe(40);
+
+      unavailable = false;
+      const recovered = new AbortController();
+      await watchConnection(recovered.signal, makeClient(recovered), dispatch, watermark, runtime);
+      expect(delivered).toEqual([status]);
+      expect(watermark.uid).toBe(41);
+    }
+  });
+
   test('通知存储损坏抛普通 Error 时保留 UID，修复存储后补投同一封信', async () => {
     const testDir = mkdtempSync(join(tmpdir(), 'oae-watcher-store-'));
     const configPath = join(testDir, 'ntfy', 'server.yml');
@@ -520,6 +570,40 @@ describe('mail-arrival notification watcher', () => {
 
     expect(attempts).toBe(5);
     expect(waits).toEqual([2_000, 4_000, 2_000, 4_000]);
+  });
+
+  test('重连退避期间 abort 会立即结束 watcher，不等待完整延迟', async () => {
+    const controller = new AbortController();
+    let markWaitStarted!: () => void;
+    const waitStarted = new Promise<void>((resolve) => { markWaitStarted = resolve; });
+    const waits: number[] = [];
+
+    const running = runWatcher(
+      controller.signal,
+      { publish: async () => ({ target: 'user', title: 'unused', level: 'normal' }) },
+      {
+        connect: async () => { throw new Error('connect failed'); },
+        watch: async () => {},
+        wait: async (ms) => {
+          waits.push(ms);
+          markWaitStarted();
+          await new Promise<void>(() => {});
+        },
+        warn: () => {},
+        connectionId: 'imap.test:993',
+        now: () => 0,
+      },
+    );
+
+    await waitStarted;
+    controller.abort();
+    const outcome = await Promise.race([
+      running.then(() => 'stopped' as const),
+      new Promise<'still-waiting'>((resolve) => setTimeout(() => resolve('still-waiting'), 50)),
+    ]);
+
+    expect(waits).toEqual([2_000]);
+    expect(outcome).toBe('stopped');
   });
 
   test('keeps its watermark across reconnects and catches the downtime window', () => {

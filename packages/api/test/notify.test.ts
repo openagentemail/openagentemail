@@ -706,6 +706,8 @@ describe('ntfy publish payload budget', () => {
         async () => new Response('', { status: 400 }),
         async () => new Response('', { status: 413 }),
         async () => new Response('', { status: 422 }),
+        async () => new Response('', { status: 404 }),
+        async () => new Response('', { status: 405 }),
         async () => new Response('', { status: 401 }),
         async () => new Response('', { status: 403 }),
         async () => new Response('', { status: 407 }),
@@ -739,9 +741,12 @@ describe('ntfy publish payload budget', () => {
       'notify_unavailable',
       'notify_unavailable',
       'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
     ]);
     expect(caught.map(isNotifyServiceFailure)).toEqual([
       false, false, false,
+      true, true,
       true, true, true, true, true, true, true, true,
     ]);
   });
