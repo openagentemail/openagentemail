@@ -11,20 +11,47 @@ export interface MailserverEndpoint {
 type RetryOptions = {
   resolve?: (hostname: string) => Promise<string>;
   beforeRetry?: (error: unknown) => void | Promise<void>;
+  /** Runs after fresh DNS resolves and immediately before the retry creates a resource. */
+  beforeRetryConnect?: () => void;
 };
 
 const RETRYABLE_NETWORK_CODES = new Set(['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
 
-function errorText(error: unknown): string {
-  if (!(error instanceof Error)) return String(error);
-  const code = typeof (error as NodeJS.ErrnoException).code === 'string'
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && typeof (error as NodeJS.ErrnoException).code === 'string'
     ? (error as NodeJS.ErrnoException).code
-    : '';
-  return `${code} ${error.message} ${error.cause instanceof Error ? errorText(error.cause) : ''}`;
+    : undefined;
+}
+
+function collectErrorCodes(error: unknown, seen = new Set<unknown>(), codes = new Set<string>()): Set<string> {
+  if (!error || typeof error !== 'object' || seen.has(error)) return codes;
+  seen.add(error);
+  const code = errorCode(error);
+  if (code) codes.add(code);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  collectErrorCodes(cause, seen, codes);
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) collectErrorCodes(nested, seen, codes);
+  }
+  return codes;
+}
+
+function isEsocketConnectFailure(error: unknown): boolean {
+  if (errorCode(error) !== 'ESOCKET' || !(error instanceof Error)) return false;
+  const messages = [error.message];
+  let cause = error.cause;
+  const seen = new Set<unknown>();
+  while (cause instanceof Error && !seen.has(cause)) {
+    seen.add(cause);
+    messages.push(cause.message);
+    cause = cause.cause;
+  }
+  return messages.some((message) => /\bconnect\s+(?:ECONNREFUSED|ENETUNREACH|EHOSTUNREACH)\b/.test(message));
 }
 
 export function isRetryableMailserverConnectionError(error: unknown): boolean {
-  return [...RETRYABLE_NETWORK_CODES].some((code) => errorText(error).includes(code));
+  return [...collectErrorCodes(error)].some((code) => RETRYABLE_NETWORK_CODES.has(code)) ||
+    isEsocketConnectFailure(error);
 }
 
 /**
@@ -48,11 +75,13 @@ export async function resolveFreshMailserverHost(hostname: string): Promise<stri
 /**
  * First attempt deliberately uses the configured hostname. Only a stale-network
  * failure gets one fresh-resolution retry; no resolved address is retained after it.
+ * This wrapper does not own teardown: a `connect` callback must close resources it
+ * creates before rethrowing, because retries replace those resources.
  */
 export async function withMailserverReconnect<T>(
   hostname: string,
   connect: (endpoint: MailserverEndpoint) => Promise<T>,
-  { resolve = resolveFreshMailserverHost, beforeRetry }: RetryOptions = {},
+  { resolve = resolveFreshMailserverHost, beforeRetry, beforeRetryConnect }: RetryOptions = {},
 ): Promise<T> {
   try {
     return await connect({ host: hostname });
@@ -60,6 +89,7 @@ export async function withMailserverReconnect<T>(
     if (!isRetryableMailserverConnectionError(error)) throw error;
     await beforeRetry?.(error);
     const address = await resolve(hostname);
+    beforeRetryConnect?.();
     return connect({ host: address, servername: hostname });
   }
 }

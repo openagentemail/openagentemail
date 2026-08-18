@@ -112,6 +112,33 @@ class SuccessfulClient extends EventEmitter {
   }
 }
 
+class RetryClient extends EventEmitter {
+  closeCalls = 0;
+  logoutCalls = 0;
+
+  constructor(private readonly failConnect: boolean) {
+    super();
+  }
+
+  async connect() {
+    if (this.failConnect) {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    }
+  }
+
+  async getMailboxLock() {
+    return { release() {} };
+  }
+
+  async logout() {
+    this.logoutCalls += 1;
+  }
+
+  close() {
+    this.closeCalls += 1;
+  }
+}
+
 describe('IMAP async error boundaries', () => {
   test('withInbox catches an out-of-band error, fails the operation, and closes once', async () => {
     const client = new OperationErrorClient();
@@ -209,5 +236,57 @@ describe('IMAP async error boundaries', () => {
       async () => undefined,
       { createClient: () => abortable as unknown as ImapFlow, error: () => {} },
     )).rejects.toBe(emitted);
+  });
+
+  test('重试前关闭未 emit error 的失败 client，不遗留连接', async () => {
+    const first = new RetryClient(true);
+    const second = new RetryClient(false);
+    let calls = 0;
+
+    await expect(withInbox(async () => 'ok', {
+      createClient: () => (calls++ === 0 ? first : second) as unknown as ImapFlow,
+      resolveMailserver: async () => '172.18.0.5',
+      error: () => {},
+    })).resolves.toBe('ok');
+
+    expect(first.closeCalls).toBe(1);
+    expect(second.logoutCalls).toBe(1);
+  });
+
+  test('abort during fresh DNS resolution never creates a second client', async () => {
+    const controller = new AbortController();
+    const first = new RetryClient(true);
+    let resolveAddress: ((address: string) => void) | undefined;
+    let startedResolve: (() => void) | undefined;
+    const resolving = new Promise<string>((resolve) => {
+      resolveAddress = resolve;
+    });
+    const resolutionStarted = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    let factoryCalls = 0;
+
+    const pending = withInboxAbortable(controller.signal, async () => undefined, {
+      createClient: () => {
+        factoryCalls += 1;
+        return first as unknown as ImapFlow;
+      },
+      resolveMailserver: async () => {
+        startedResolve!();
+        return resolving;
+      },
+      error: () => {},
+    });
+    await resolutionStarted;
+    controller.abort();
+    resolveAddress!('172.18.0.5');
+
+    const rejected = await pending.then(
+      () => undefined,
+      (error) => error,
+    );
+    expect(factoryCalls).toBe(1);
+    expect(first.closeCalls).toBe(1);
+    expect(rejected).toMatchObject({ message: 'scan_aborted' });
   });
 });

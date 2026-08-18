@@ -58,6 +58,36 @@ describe('mailserver DNS-refresh reconnect', () => {
   test('the network-error whitelist includes the required connection failures', () => {
     for (const code of ['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']) {
       expect(isRetryableMailserverConnectionError(Object.assign(new Error(code), { code }))).toBe(true);
+      expect(isRetryableMailserverConnectionError(Object.assign(new Error('outer'), {
+        cause: Object.assign(new Error(code), { code }),
+      }))).toBe(true);
+      expect(isRetryableMailserverConnectionError(new AggregateError([
+        Object.assign(new Error(code), { code }),
+      ], 'Happy Eyeballs failed'))).toBe(true);
     }
+  });
+
+  test('SMTP transaction text cannot trigger a reconnect without a connection error code', async () => {
+    const resolve = mock(async () => '172.18.0.5');
+    const transactionError = Object.assign(
+      new Error('SMTP DATA failed after remote text mentioned ECONNREFUSED'),
+      { code: 'EPIPE' },
+    );
+    const connect = mock(async () => { throw transactionError; });
+
+    await expect(withMailserverReconnect('mailserver', connect, { resolve })).rejects.toBe(transactionError);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  test('ESOCKET retries only when its message identifies a connect-stage network failure', () => {
+    expect(isRetryableMailserverConnectionError(Object.assign(
+      new Error('connect ECONNREFUSED 172.18.0.3:587'),
+      { code: 'ESOCKET' },
+    ))).toBe(true);
+    expect(isRetryableMailserverConnectionError(Object.assign(
+      new Error('SMTP DATA contained ECONNREFUSED'),
+      { code: 'ESOCKET' },
+    ))).toBe(false);
   });
 });

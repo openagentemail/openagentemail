@@ -134,6 +134,7 @@ export const TOTAL_KEY_MAX = 5_000;
 
 /** 只构造，不连接 —— 让取消监听能在 connect() 之前就拿到实例引用。 */
 type ImapClientFactory = (endpoint?: MailserverEndpoint) => ImapFlow;
+type MailserverResolver = (hostname: string) => Promise<string>;
 
 function createImapClient(endpoint: MailserverEndpoint = { host: config.imap.host }): ImapFlow {
   return new ImapFlow({
@@ -155,10 +156,14 @@ async function connectImapClient(
   {
     beforeConnect,
     beforeRetry,
+    beforeRetryConnect,
+    resolveMailserver,
     closeOnConnectError = true,
   }: {
     beforeConnect?: (client: ImapFlow) => void;
     beforeRetry?: (error: unknown) => void | Promise<void>;
+    beforeRetryConnect?: () => void;
+    resolveMailserver?: MailserverResolver;
     closeOnConnectError?: boolean;
   } = {},
 ): Promise<ImapFlow> {
@@ -181,7 +186,7 @@ async function connectImapClient(
         throw error;
       }
     },
-    { beforeRetry },
+    { beforeRetry, beforeRetryConnect, resolve: resolveMailserver },
   );
 }
 
@@ -199,17 +204,18 @@ export async function withInbox<T>(
   {
     createClient = createImapClient,
     error = console.error,
-  }: { createClient?: ImapClientFactory; error?: typeof console.error } = {},
+    resolveMailserver,
+  }: { createClient?: ImapClientFactory; error?: typeof console.error; resolveMailserver?: MailserverResolver } = {},
 ): Promise<T> {
   let client: ImapFlow | undefined;
   let failed = false;
-  let closed = false;
+  const closedClients = new WeakSet<ImapFlow>();
   let connectionError: Error | undefined;
-  const closeOnce = () => {
-    if (closed) return;
-    closed = true;
+  const closeOnce = (target = client) => {
+    if (!target || closedClients.has(target)) return;
+    closedClients.add(target);
     try {
-      client?.close();
+      target.close();
     } catch {
       /* already dead */
     }
@@ -222,7 +228,7 @@ export async function withInbox<T>(
       connectionError = err instanceof Error ? err : new Error(String(err));
       failed = true;
       error('[imap] INBOX connection error; closing current operation');
-      closeOnce();
+      closeOnce(candidate);
     });
     return candidate;
   };
@@ -237,10 +243,11 @@ export async function withInbox<T>(
   try {
     client = await connectImapClient(createTrackedClient, {
       beforeRetry: () => {
+        closeOnce();
         connectionError = undefined;
         failed = false;
-        closed = false;
       },
+      resolveMailserver,
       closeOnConnectError: false,
     });
     if (connectionError) throw connectionError;
@@ -254,7 +261,7 @@ export async function withInbox<T>(
     operationError = err;
   } finally {
     lock?.release();
-    if (failed) {
+    if (failed || !client || closedClients.has(client)) {
       closeOnce();
     } else {
       try {
@@ -283,18 +290,19 @@ export async function withInboxAbortable<T>(
   {
     createClient = createImapClient,
     error = console.error,
-  }: { createClient?: ImapClientFactory; error?: typeof console.error } = {},
+    resolveMailserver,
+  }: { createClient?: ImapClientFactory; error?: typeof console.error; resolveMailserver?: MailserverResolver } = {},
 ): Promise<T> {
   // ① 连接前就已取消
   if (signal.aborted) throw new Error('scan_aborted');
   // ② 同步拿到实例引用
   let client: ImapFlow | undefined;
-  let closed = false;
-  const closeOnce = () => {
-    if (closed) return;
-    closed = true;
+  const closedClients = new WeakSet<ImapFlow>();
+  const closeOnce = (target = client) => {
+    if (!target || closedClients.has(target)) return;
+    closedClients.add(target);
     try {
-      client?.close();
+      target.close();
     } catch {
       /* already dead / not connected */
     }
@@ -310,7 +318,7 @@ export async function withInboxAbortable<T>(
       connectionError = err instanceof Error ? err : new Error(String(err));
       failed = true;
       error('[imap] abortable INBOX connection error; closing current operation');
-      closeOnce();
+      closeOnce(candidate);
     });
     return candidate;
   };
@@ -326,11 +334,15 @@ export async function withInboxAbortable<T>(
     // ④ 本阶段起，任何 stall 都会被 abort → close() 掐断
     client = await connectImapClient(createTrackedClient, {
       beforeRetry: () => {
+        closeOnce();
         if (signal.aborted) throw new Error('scan_aborted');
         connectionError = undefined;
         failed = false;
-        closed = false;
       },
+      beforeRetryConnect: () => {
+        if (signal.aborted) throw new Error('scan_aborted');
+      },
+      resolveMailserver,
       closeOnConnectError: false,
     });
     if (connectionError) throw connectionError;
@@ -346,7 +358,7 @@ export async function withInboxAbortable<T>(
   } finally {
     signal.removeEventListener('abort', onAbort);
     lock?.release();
-    if (!failed && !closed) {
+    if (!failed && client && !closedClients.has(client)) {
       try {
         await client!.logout();
       } catch {
