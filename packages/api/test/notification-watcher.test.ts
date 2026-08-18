@@ -20,6 +20,7 @@ const {
   packPushLinkLines,
   processWatchedMessage,
   runWatcher,
+  watchConnection,
   unseenWatcherUids,
   PUSH_BODY_PREVIEW_CHARS,
   PUSH_MESSAGE_MAX_BYTES,
@@ -85,7 +86,73 @@ async function dispatches(
 }
 
 describe('mail-arrival notification watcher', () => {
-  test('连续 2 轮异步连接错误时 watcher 记录连接、按 3 秒退避并继续，不终止循环', async () => {
+  test('连续毒消息有界重试后按 UID 计数跳过，水位线继续越过并投递后续消息', async () => {
+    const controller = new AbortController();
+    const retryWaits: number[] = [];
+    const errors: unknown[][] = [];
+    const publishCalls: string[] = [];
+    const poison = {
+      ...message('bad@example.net', 'From: bad@example.net\r\n\r\nYour verification code is 111111'),
+      uid: 41,
+    };
+    const secondPoison = {
+      ...message('bad2@example.net', 'From: bad2@example.net\r\n\r\nYour verification code is 222222'),
+      uid: 42,
+    };
+    const healthy = {
+      ...message('good@example.net', 'From: good@example.net\r\n\r\nYour verification code is 333333'),
+      uid: 43,
+    };
+    const watermark = { uid: 40 };
+    const client = {
+      mailbox: false,
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => [41, 42, 43],
+      fetch: async function* () {
+        yield poison;
+        yield secondPoison;
+        yield healthy;
+      },
+      idle: async () => {
+        controller.abort();
+      },
+      logout: async () => {},
+      close() {},
+    } as any;
+
+    await watchConnection(
+      controller.signal,
+      client,
+      {
+        publish: async (payload) => {
+          publishCalls.push(payload.message);
+          if (publishCalls.length <= 6) throw new Error('ntfy poison');
+          return { target: payload.target, title: payload.title, level: payload.level };
+        },
+      },
+      watermark,
+      {
+        identities: () => baseIdentities,
+        identity: (address) => baseIdentities.find((entry) => entry.address === address),
+        wait: async (ms) => {
+          retryWaits.push(ms);
+        },
+        error: (...args) => {
+          errors.push(args);
+        },
+      },
+    );
+
+    expect(publishCalls).toHaveLength(7);
+    expect(retryWaits).toEqual([250, 500, 250, 500, 3_000]);
+    expect(watermark.uid).toBe(43);
+    expect(errors.map((entry) => entry.join(' '))).toEqual([
+      '[notify] IMAP watcher skipped UID 41 after 3 publish attempts (consecutive skips: 1): ntfy poison',
+      '[notify] IMAP watcher skipped UID 42 after 3 publish attempts (consecutive skips: 2): ntfy poison',
+    ]);
+  });
+
+  test('连续异步连接错误按 2s 指数退避到 120s 封顶，循环不终止', async () => {
     const controller = new AbortController();
     const warnings: unknown[][] = [];
     const waits: number[] = [];
@@ -98,7 +165,7 @@ describe('mail-arrival notification watcher', () => {
         connect: async () => new EventEmitter() as any,
         watch: async (_signal, client) => {
           attempts += 1;
-          if (attempts > 2) {
+          if (attempts > 8) {
             controller.abort();
             return;
           }
@@ -115,18 +182,53 @@ describe('mail-arrival notification watcher', () => {
           warnings.push(args);
         },
         connectionId: 'imap.test:993',
+        now: () => 0,
       },
     );
 
-    expect(attempts).toBe(3);
-    expect(waits).toEqual([3_000, 3_000]);
-    expect(warnings).toHaveLength(4);
-    expect(warnings.map((entry) => entry.join(' '))).toEqual([
-      '[notify] IMAP watcher connection imap.test:993 error: socket timeout 1',
-      '[notify] IMAP watcher connection imap.test:993 reconnecting: socket timeout 1',
-      '[notify] IMAP watcher connection imap.test:993 error: socket timeout 2',
-      '[notify] IMAP watcher connection imap.test:993 reconnecting: socket timeout 2',
-    ]);
+    expect(attempts).toBe(9);
+    expect(waits).toEqual([2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 120_000, 120_000]);
+    expect(warnings).toHaveLength(16);
+  });
+
+  test('29.999s 短连不重置，连接存活满 30s 才把指数退避重置为 2s', async () => {
+    const controller = new AbortController();
+    const waits: number[] = [];
+    let attempts = 0;
+    let now = 0;
+
+    await runWatcher(
+      controller.signal,
+      { publish: async () => ({ target: 'user', title: 'unused', level: 'normal' }) },
+      {
+        connect: async () => {
+          attempts += 1;
+          if (attempts === 1 || attempts === 4) throw new Error('connect failed');
+          if (attempts === 5) {
+            controller.abort();
+            throw new Error('done');
+          }
+          return new EventEmitter() as any;
+        },
+        watch: async () => {
+          if (attempts === 2) {
+            now += 29_999;
+            throw new Error('short connection closed');
+          }
+          now += 30_000;
+          throw new Error('stable connection closed');
+        },
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        warn: () => {},
+        connectionId: 'imap.test:993',
+        now: () => now,
+      },
+    );
+
+    expect(attempts).toBe(5);
+    expect(waits).toEqual([2_000, 4_000, 2_000, 4_000]);
   });
 
   test('keeps its watermark across reconnects and catches the downtime window', () => {

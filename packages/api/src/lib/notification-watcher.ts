@@ -38,7 +38,12 @@ import {
 } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 
-const RECONNECT_MS = 3_000;
+const RECONNECT_INITIAL_MS = 2_000;
+const RECONNECT_MAX_MS = 120_000;
+const RECONNECT_STABLE_MS = 30_000;
+const PUBLISH_MAX_ATTEMPTS = 3;
+const PUBLISH_RETRY_INITIAL_MS = 250;
+const PUBLISH_RETRY_MAX_MS = 500;
 /** Bounded plain-text preview length for tier-3 mail-arrival pushes. */
 export const PUSH_BODY_PREVIEW_CHARS = 280;
 /** Max OTP codes/links included in a tier-3 push (each list). */
@@ -79,6 +84,8 @@ export type ProcessWatchedOptions = {
    * deleted (skip publish); when omitted, the matched snapshot is used.
    */
   refreshIdentity?: (address: string) => Identity | undefined;
+  /** @internal Retry timer injection; production uses the module sleep helper. */
+  wait?: (ms: number) => Promise<void>;
 };
 
 /** In-memory watermark survives a dropped IMAP connection in this process. */
@@ -91,6 +98,38 @@ export type MailContentExtras = {
   codes: string[];
   links: string[];
 };
+
+class WatcherPublishError extends Error {
+  readonly attempts: number;
+  readonly reason: unknown;
+
+  constructor(attempts: number, reason: unknown) {
+    super(reason instanceof Error ? reason.message : String(reason));
+    this.name = 'WatcherPublishError';
+    this.attempts = attempts;
+    this.reason = reason;
+  }
+}
+
+async function publishWithRetry(
+  publish: () => ReturnType<NotifyService['publish']>,
+  wait: (ms: number) => Promise<void>,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
+    try {
+      await publish();
+      return;
+    } catch (err) {
+      if (err instanceof NotifyError && err.code === 'notify_cancelled') throw err;
+      lastError = err;
+      if (attempt < PUBLISH_MAX_ATTEMPTS) {
+        await wait(Math.min(PUBLISH_RETRY_INITIAL_MS * 2 ** (attempt - 1), PUBLISH_RETRY_MAX_MS));
+      }
+    }
+  }
+  throw new WatcherPublishError(PUBLISH_MAX_ATTEMPTS, lastError);
+}
 
 /**
  * The first successful connection starts at the mailbox high-water mark so an
@@ -1262,23 +1301,26 @@ export async function processWatchedMessage(
           }
         : undefined;
       try {
-        await dispatch.publish({
-          target: 'user',
-          title: 'openagent.email new mail',
-          message: body,
-          level,
-          tags: ['email'],
-          // Truncate rather than throw: publish errors before UID advance stall
-          // the watcher (F76). Manual /v1/notify keeps the default overflow=error.
-          overflow: 'truncate',
-          source: 'watcher',
-          logicalChannel: 'user-alerts',
-          // tier 3 才把正文/OTP 送出服务器；与 level 正交，供 UI 默认遮蔽。
-          sensitive: tier === 3,
-          identityAddress: current.address,
-          ...(clickUrl ? { click: clickUrl } : {}),
-          ...(beforeSend ? { beforeSend } : {}),
-        });
+        await publishWithRetry(
+          () => dispatch.publish({
+            target: 'user',
+            title: 'openagent.email new mail',
+            message: body,
+            level,
+            tags: ['email'],
+            // Truncate rather than throw: publish errors before UID advance stall
+            // the watcher (F76). Manual /v1/notify keeps the default overflow=error.
+            overflow: 'truncate',
+            source: 'watcher',
+            logicalChannel: 'user-alerts',
+            // tier 3 才把正文/OTP 送出服务器；与 level 正交，供 UI 默认遮蔽。
+            sensitive: tier === 3,
+            identityAddress: current.address,
+            ...(clickUrl ? { click: clickUrl } : {}),
+            ...(beforeSend ? { beforeSend } : {}),
+          }),
+          options.wait ?? sleep,
+        );
         break; // sent
       } catch (err) {
         if (!(err instanceof NotifyError && err.code === 'notify_cancelled')) throw err;
@@ -1296,13 +1338,28 @@ export async function processWatchedMessage(
   }
 }
 
-async function watchConnection(
+type WatchConnectionRuntime = {
+  identities: typeof listIdentities;
+  identity: typeof findIdentity;
+  wait: typeof sleep;
+  error: typeof console.error;
+};
+
+/** @internal Exported so poison-message batch progression can be regression-tested. */
+export async function watchConnection(
   signal: AbortSignal,
   client: ImapFlow,
   dispatch: WatcherDispatch,
   watermark: WatcherWatermark,
+  runtime: WatchConnectionRuntime = {
+    identities: listIdentities,
+    identity: findIdentity,
+    wait: sleep,
+    error: console.error,
+  },
 ): Promise<void> {
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
+  let consecutivePublishSkips = 0;
   try {
     lock = await client.getMailboxLock('INBOX');
     // F111: track the selected mailbox generation so a recreated INBOX
@@ -1319,17 +1376,29 @@ async function watchConnection(
           { envelope: true, headers: ['delivered-to'], source: true },
           { uid: true },
         )) {
-          await processWatchedMessage(
-            message,
-            listIdentities(),
-            config.ntfy.pushPolicy,
-            dispatch,
-            {
-              clickUrl: config.dashboardPublicUrl,
-              // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
-              refreshIdentity: (address) => findIdentity(address),
-            },
-          );
+          try {
+            await processWatchedMessage(
+              message,
+              runtime.identities(),
+              config.ntfy.pushPolicy,
+              dispatch,
+              {
+                clickUrl: config.dashboardPublicUrl,
+                // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
+                refreshIdentity: (address) => runtime.identity(address),
+                wait: runtime.wait,
+              },
+            );
+            consecutivePublishSkips = 0;
+          } catch (err) {
+            if (!(err instanceof WatcherPublishError)) throw err;
+            consecutivePublishSkips += 1;
+            runtime.error(
+              `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
+                `(consecutive skips: ${consecutivePublishSkips}):`,
+              err.reason instanceof Error ? err.reason.message : String(err.reason),
+            );
+          }
           watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
         }
       }
@@ -1339,7 +1408,7 @@ async function watchConnection(
       // heartbeat keeps this watcher correct on servers that occasionally keep
       // an IDLE command open after mail arrives. Socket errors still escape to
       // the outer reconnect loop instead of leaving a stale watcher forever.
-      await Promise.race([client.idle(), sleep(3_000)]);
+      await Promise.race([client.idle(), runtime.wait(3_000)]);
       if (signal.aborted) break;
       const found = await client.search({ all: true }, { uid: true });
       pending = unseenWatcherUids(Array.isArray(found) ? found : [], watermark, uidValidity);
@@ -1364,6 +1433,7 @@ type WatcherRuntime = {
   wait: typeof sleep;
   warn: typeof console.warn;
   connectionId: string;
+  now: typeof Date.now;
 };
 
 /** @internal Exported so the reconnect/error boundary can be regression-tested. */
@@ -1376,12 +1446,16 @@ export async function runWatcher(
     wait: sleep,
     warn: console.warn,
     connectionId: `${config.imap.host}:${config.imap.port}`,
+    now: Date.now,
   },
 ): Promise<void> {
   const watermark: WatcherWatermark = {};
+  let reconnectMs = RECONNECT_INITIAL_MS;
   while (!signal.aborted) {
+    let connectedAt: number | undefined;
     try {
       const client = await runtime.connect();
+      connectedAt = runtime.now();
       const onError = (err: unknown) => {
         runtime.warn(
           `[notify] IMAP watcher connection ${runtime.connectionId} error:`,
@@ -1409,7 +1483,12 @@ export async function runWatcher(
         );
       }
     }
-    if (!signal.aborted) await runtime.wait(RECONNECT_MS);
+    if (signal.aborted) break;
+    if (connectedAt !== undefined && runtime.now() - connectedAt >= RECONNECT_STABLE_MS) {
+      reconnectMs = RECONNECT_INITIAL_MS;
+    }
+    await runtime.wait(reconnectMs);
+    reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
   }
 }
 
