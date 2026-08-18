@@ -1,6 +1,7 @@
 // 端到端（假 IMAP 服务器）的身份隔离测试：验证 listMessages 这条真实路径上
 // 别人的邮件不会被返回，而不只是内部匹配函数的单测。
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -28,11 +29,12 @@ let failMailboxLock = false;
 const createdClients: FakeImapFlow[] = [];
 let deletedUids: number[] = [];
 
-class FakeImapFlow {
+class FakeImapFlow extends EventEmitter {
   closed = false;
   loggedOut = false;
 
   constructor() {
+    super();
     createdClients.push(this);
   }
 

@@ -9,6 +9,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-1';
@@ -23,7 +24,7 @@ const { describe, expect, mock, test } = await import('bun:test');
 // 授权路径的回归需要跑真的 listMessages，所以在导入 imap.ts 之前先替掉 imapflow。
 let fakeMessages: any[] = [];
 
-class FakeImapFlow {
+class FakeImapFlow extends EventEmitter {
   async connect() {}
   async getMailboxLock() {
     return { release() {} };

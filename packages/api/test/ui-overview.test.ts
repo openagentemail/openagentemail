@@ -8,6 +8,7 @@
 // 状态机全部走注入的假时钟与可控 promise：真时间只用来做"多久之内跑完"这类
 // 上界断言，绝不用来推进 TTL 或冷却。
 import { describe, expect, mock, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 import { Hono } from 'hono';
 import type { ImapFlow } from 'imapflow';
 import type { MailboxScanResult, ScanRecord } from '../src/lib/imap.ts';
@@ -41,8 +42,9 @@ let mailboxUids: number[] | null = null;
 let fetchOptionsSeen: unknown[] = [];
 let connections = 0;
 
-class FakeImapFlow {
+class FakeImapFlow extends EventEmitter {
   constructor() {
+    super();
     connections += 1;
   }
   async connect() {}
@@ -1215,7 +1217,7 @@ describe('Overview 缓存状态机', () => {
 
   // A47：截止时间覆盖 connect 与 fetch 两个阶段
   test('connect 与 fetch 两段 stall 都在截止时间被真取消', async () => {
-    class ConnectStallClient {
+    class ConnectStallClient extends EventEmitter {
       closeCalls = 0;
       rejectConnect: ((error: Error) => void) | null = null;
       connect() {
@@ -1240,7 +1242,7 @@ describe('Overview 缓存状态机', () => {
       }
     }
 
-    class FetchStallClient {
+    class FetchStallClient extends EventEmitter {
       closeCalls = 0;
       rejectFetch: ((error: Error) => void) | null = null;
       async connect() {}

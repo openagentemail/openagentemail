@@ -38,6 +38,7 @@ import {
   STRONG_OTP_CUES,
 } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
+import { truncateUtf8Bytes } from './utf8-truncate.ts';
 
 const RECONNECT_INITIAL_MS = 2_000;
 const RECONNECT_MAX_MS = 120_000;
@@ -46,6 +47,8 @@ const PUBLISH_MAX_ATTEMPTS = 3;
 const PUBLISH_RETRY_INITIAL_MS = 250;
 const PUBLISH_RETRY_MAX_MS = 500;
 const SERVICE_FAILURE_MAX_MS = 10 * 60_000;
+const WATCHER_ERROR_LOG_MAX_BYTES = 512;
+const WATCHER_ERROR_TRUNCATED = '… [truncated]';
 /** Bounded plain-text preview length for tier-3 mail-arrival pushes. */
 export const PUSH_BODY_PREVIEW_CHARS = 280;
 /** Max OTP codes/links included in a tier-3 push (each list). */
@@ -80,6 +83,15 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) 
   const timer = setTimeout(finish, ms);
   signal?.addEventListener('abort', finish, { once: true });
 });
+
+function watcherErrorLogMessage(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const encoded = Buffer.from(message, 'utf8');
+  if (encoded.length <= WATCHER_ERROR_LOG_MAX_BYTES) return message;
+  const markerBytes = Buffer.byteLength(WATCHER_ERROR_TRUNCATED, 'utf8');
+  return truncateUtf8Bytes(encoded, WATCHER_ERROR_LOG_MAX_BYTES - markerBytes).toString('utf8') +
+    WATCHER_ERROR_TRUNCATED;
+}
 
 async function waitForReconnect(
   wait: typeof sleep,
@@ -143,7 +155,7 @@ class WatcherPublishError extends Error {
   readonly reason: unknown;
 
   constructor(attempts: number, reason: unknown) {
-    super(reason instanceof Error ? reason.message : String(reason));
+    super(watcherErrorLogMessage(reason));
     this.name = 'WatcherPublishError';
     this.attempts = attempts;
     this.reason = reason;
@@ -1367,7 +1379,7 @@ export async function processWatchedMessage(
           if (isNotifyServiceFailure(err.reason)) throw err;
           (options.error ?? console.error)(
             `[notify] IMAP watcher skipped identity ${current.address} after ${err.attempts} publish attempts:`,
-            err.reason instanceof Error ? err.reason.message : String(err.reason),
+            watcherErrorLogMessage(err.reason),
           );
           break;
         }
@@ -1456,14 +1468,14 @@ export async function watchConnection(
               runtime.error(
                 `[notify] CRITICAL IMAP watcher abandoned UID ${message.uid} after notification service ` +
                   `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
-                err.reason instanceof Error ? err.reason.message : String(err.reason),
+                watcherErrorLogMessage(err.reason),
               );
             } else {
               consecutivePublishSkips += 1;
               runtime.error(
                 `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
                   `(consecutive skips: ${consecutivePublishSkips}):`,
-                err.reason instanceof Error ? err.reason.message : String(err.reason),
+                watcherErrorLogMessage(err.reason),
               );
             }
             watermark.serviceFailure = undefined;
@@ -1528,7 +1540,7 @@ export async function runWatcher(
       const onError = (err: unknown) => {
         runtime.warn(
           `[notify] IMAP watcher connection ${runtime.connectionId} error:`,
-          err instanceof Error ? err.message : String(err),
+          watcherErrorLogMessage(err),
         );
         // ImapFlow emits connection errors outside the awaited command chain.
         // Closing makes the active IDLE/search fail into the reconnect guard.
@@ -1548,7 +1560,7 @@ export async function runWatcher(
       if (!signal.aborted) {
         runtime.warn(
           `[notify] IMAP watcher connection ${runtime.connectionId} reconnecting:`,
-          err instanceof Error ? err.message : String(err),
+          watcherErrorLogMessage(err),
         );
       }
     }

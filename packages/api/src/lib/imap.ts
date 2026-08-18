@@ -154,38 +154,62 @@ export async function connectImap(): Promise<ImapFlow> {
  * On error the socket is dropped synchronously — a graceful LOGOUT can
  * queue behind a stuck command and re-block the caller.
  */
-export async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
-  const client = await connectImap();
+export async function withInbox<T>(
+  fn: (client: ImapFlow) => Promise<T>,
+  {
+    createClient = createImapClient,
+    error = console.error,
+  }: { createClient?: () => ImapFlow; error?: typeof console.error } = {},
+): Promise<T> {
+  const client = createClient();
   let failed = false;
+  let closed = false;
+  let connectionError: Error | undefined;
+  const closeOnce = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      client.close();
+    } catch {
+      /* already dead */
+    }
+  };
+  const onError = (err: unknown) => {
+    connectionError = err instanceof Error ? err : new Error(String(err));
+    failed = true;
+    error('[imap] INBOX connection error; closing current operation');
+    closeOnce();
+  };
+  client.on('error', onError);
   // Locking is inside the try: getMailboxLock can throw (INBOX missing, socket
   // dropped) and a connected client must never escape without being torn down.
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
+  let result: T | undefined;
   try {
+    await client.connect();
+    if (connectionError) throw connectionError;
     lock = await client.getMailboxLock('INBOX');
-    return await fn(client);
+    if (connectionError) throw connectionError;
+    result = await fn(client);
+    if (connectionError) throw connectionError;
   } catch (err) {
     failed = true;
-    throw err;
+    throw connectionError ?? err;
   } finally {
     lock?.release();
     if (failed) {
-      try {
-        client.close();
-      } catch {
-        /* already dead */
-      }
+      closeOnce();
     } else {
       try {
         await client.logout();
       } catch {
-        try {
-          client.close();
-        } catch {
-          /* already closed */
-        }
+        closeOnce();
       }
     }
+    client.off('error', onError);
   }
+  if (connectionError) throw connectionError;
+  return result as T;
 }
 
 /**
@@ -199,7 +223,10 @@ export async function withInbox<T>(fn: (client: ImapFlow) => Promise<T>): Promis
 export async function withInboxAbortable<T>(
   signal: AbortSignal,
   fn: (client: ImapFlow) => Promise<T>,
-  { createClient = createImapClient }: { createClient?: () => ImapFlow } = {},
+  {
+    createClient = createImapClient,
+    error = console.error,
+  }: { createClient?: () => ImapFlow; error?: typeof console.error } = {},
 ): Promise<T> {
   // ① 连接前就已取消
   if (signal.aborted) throw new Error('scan_aborted');
@@ -216,19 +243,31 @@ export async function withInboxAbortable<T>(
     }
   };
   const onAbort = () => closeOnce();
+  let failed = false;
+  let connectionError: Error | undefined;
+  const onError = (err: unknown) => {
+    connectionError = err instanceof Error ? err : new Error(String(err));
+    failed = true;
+    error('[imap] abortable INBOX connection error; closing current operation');
+    closeOnce();
+  };
   // ③ 先挂监听，再连接
   signal.addEventListener('abort', onAbort, { once: true });
-  let failed = false;
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
+  let result: T | undefined;
+  client.on('error', onError);
   try {
     // ④ 本阶段起，任何 stall 都会被 abort → close() 掐断
     await client.connect();
+    if (connectionError) throw connectionError;
     if (signal.aborted) throw new Error('scan_aborted');
     lock = await client.getMailboxLock('INBOX');
-    return await fn(client);
+    if (connectionError) throw connectionError;
+    result = await fn(client);
+    if (connectionError) throw connectionError;
   } catch (err) {
     failed = true;
-    throw err;
+    throw connectionError ?? err;
   } finally {
     signal.removeEventListener('abort', onAbort);
     lock?.release();
@@ -240,7 +279,10 @@ export async function withInboxAbortable<T>(
       }
     }
     closeOnce();
+    client.off('error', onError);
   }
+  if (connectionError) throw connectionError;
+  return result as T;
 }
 
 /**
