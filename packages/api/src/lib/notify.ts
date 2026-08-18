@@ -147,9 +147,11 @@ export class NotifyError extends Error {
 
 /** @internal Distinguishes provider-wide outages from one rejected payload. */
 export function isNotifyServiceFailure(err: unknown): boolean {
-  // Unmarked errors default to message-level: every new publish-path service
-  // failure must opt in here, or the watcher may consume its blocked UID.
-  return err instanceof NotifyError && err[NOTIFY_FAILURE_KIND] === 'service';
+  // Only an explicitly classified payload rejection may consume a UID.
+  // Unknown/plain failures retain it and are still bounded by the watcher's
+  // 10-minute CRITICAL fallback instead of silently losing outage traffic.
+  if (err instanceof NotifyError && err.code === 'notify_cancelled') return false;
+  return !(err instanceof NotifyError) || err[NOTIFY_FAILURE_KIND] !== 'message';
 }
 
 /** @internal Shared by publish and watcher status-boundary regression tests. */
@@ -392,6 +394,11 @@ async function writeServerConfig(state: NotifyState): Promise<void> {
 }
 
 let cachedState: NotifyState | undefined;
+
+/** @internal Test seam for exercising notification-store load and recovery. */
+export function resetNotificationStateForTests(): void {
+  cachedState = undefined;
+}
 
 async function state(): Promise<NotifyState> {
   if (!cachedState) cachedState = loadState();

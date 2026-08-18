@@ -690,6 +690,7 @@ describe('ntfy publish payload budget', () => {
 
   test('publish keeps notify_unavailable externally while distinguishing rejection from outage internally', async () => {
     const previousNtfy = { ...config.ntfy };
+    const previousFetch = globalThis.fetch;
     Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
     const service = new NtfyNotificationService();
     const input = {
@@ -722,6 +723,7 @@ describe('ntfy publish payload budget', () => {
         }
       }
     } finally {
+      globalThis.fetch = previousFetch;
       Object.assign(config.ntfy, previousNtfy);
     }
 
@@ -746,6 +748,7 @@ describe('ntfy publish payload budget', () => {
 
   test('publish aborts a never-settling fetch at the shared 8s deadline and marks it service-level', async () => {
     const previousNtfy = { ...config.ntfy };
+    const previousFetch = globalThis.fetch;
     const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
     Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
     const timeoutMs: number[] = [];
@@ -782,6 +785,7 @@ describe('ntfy publish payload budget', () => {
       expect(timeoutMs).toEqual([NTFY_ADMIN_FETCH_TIMEOUT_MS]);
     } finally {
       AbortSignal.timeout = originalTimeout;
+      globalThis.fetch = previousFetch;
       Object.assign(config.ntfy, previousNtfy);
     }
   });

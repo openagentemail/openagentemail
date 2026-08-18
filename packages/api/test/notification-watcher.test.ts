@@ -6,6 +6,9 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 const { describe, expect, test } = await import('bun:test');
 const {
@@ -30,10 +33,13 @@ const {
 } = await import('../src/lib/notification-watcher.ts');
 const {
   isNtfyPublishServiceStatus,
+  NtfyNotificationService,
   NotifyError,
   jsonEscapedByteLength,
   notifyAvailableMessageBytes,
+  resetNotificationStateForTests,
 } = await import('../src/lib/notify.ts');
+const { config } = await import('../src/lib/config.ts');
 const { hasStrongOtpCue } = await import('../src/lib/otp.ts');
 
 /** Mock publish that honors beforeSend like NtfyNotificationService. */
@@ -127,9 +133,10 @@ describe('mail-arrival notification watcher', () => {
       {
         publish: async (payload) => {
           publishCalls.push(payload.message);
-          // Same public code as an outage, but no internal service marker:
-          // this models ntfy explicitly rejecting this particular request.
-          if (publishCalls.length <= 6) throw new NotifyError('notify_unavailable');
+          // Same public code as an outage, explicitly marked as this payload's rejection.
+          if (publishCalls.length <= 6) {
+            throw new NotifyError('notify_unavailable', undefined, { failureKind: 'message' });
+          }
           return { target: payload.target, title: payload.title, level: payload.level };
         },
       },
@@ -311,6 +318,71 @@ describe('mail-arrival notification watcher', () => {
       await watchConnection(recovered.signal, makeClient(recovered), dispatch, watermark, runtime);
       expect(delivered).toEqual([status]);
       expect(watermark.uid).toBe(41);
+    }
+  });
+
+  test('通知存储损坏抛普通 Error 时保留 UID，修复存储后补投同一封信', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'oae-watcher-store-'));
+    const configPath = join(testDir, 'ntfy', 'server.yml');
+    const statePath = join(dirname(configPath), 'notifications.json');
+    const previousNtfy = { ...config.ntfy };
+    const previousFetch = globalThis.fetch;
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(statePath, '{corrupt');
+    Object.assign(config.ntfy, {
+      enabled: true,
+      adminPassword: 'ntfy-admin-secret',
+      configPath,
+    });
+    resetNotificationStateForTests();
+
+    const watermark = { uid: 40 };
+    const watched = {
+      ...message('store@example.net', 'From: store@example.net\r\n\r\nYour verification code is 777777'),
+      uid: 41,
+    };
+    const makeClient = (controller: AbortController) => ({
+      mailbox: false,
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => [41],
+      fetch: async function* () { yield watched; },
+      idle: async () => { controller.abort(); },
+      logout: async () => {},
+      close() {},
+    }) as any;
+    const runtime = {
+      identities: () => baseIdentities,
+      identity: (address: string) => baseIdentities.find((entry) => entry.address === address),
+      wait: async () => {},
+      error: () => {},
+      now: () => 0,
+    };
+    const service = new NtfyNotificationService();
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const corrupt = new AbortController();
+      await expect(watchConnection(corrupt.signal, makeClient(corrupt), service, watermark, runtime))
+        .rejects.toThrow('notification_store_corrupt');
+      expect(watermark.uid).toBe(40);
+      expect(fetchCalls).toBe(0);
+
+      unlinkSync(statePath);
+      resetNotificationStateForTests();
+      const repaired = new AbortController();
+      await watchConnection(repaired.signal, makeClient(repaired), service, watermark, runtime);
+
+      expect(fetchCalls).toBe(1);
+      expect(watermark.uid).toBe(41);
+    } finally {
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+      resetNotificationStateForTests();
+      rmSync(testDir, { recursive: true, force: true });
     }
   });
 
