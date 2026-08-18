@@ -33,14 +33,28 @@ you control:
 ```bash
 git clone https://github.com/openagentemail/openagentemail.git && cd openagentemail
 cp .env.example .env   # set DOMAIN, API_KEYS, mailbox password, and NTFY_ADMIN_PASSWORD
-docker compose up -d && ./deploy/dns-records.sh   # prints the exact DNS records to create
+docker compose up -d
+sudo ./deploy/dns-records.sh   # prints the exact DNS records to create
 ```
 
 Then verify everything end to end:
 
 ```bash
-./deploy/doctor.sh    # checks DNS, TLS, IMAP/SMTP login, and a round-trip send
+sudo ./deploy/doctor.sh
 ```
+
+`doctor.sh` checks `.env` permissions; MX, A, SPF, DKIM, and DMARC; PTR;
+outbound port 25; DNS blocklists; TLS certificates on 465 and 993; and the
+server-side ntfy verification endpoint. It does not log in over IMAP/SMTP or
+send a round-trip test. Docker Mailserver can create `docker-data/` as root,
+so use `sudo` for these two scripts; an EACCES failure prints the same retry
+instruction instead of pretending the DKIM key is missing.
+
+If no SMTP relay is configured and outbound port 25 is blocked, API
+`queued:true` only means the local mailserver accepted the message. It does
+**not** mean the recipient received it: Postfix can retain the message in its
+queue. Treat doctor's outbound-port-25 result as the delivery prerequisite, or
+configure a relay before relying on direct delivery.
 
 ## Public TLS with Let's Encrypt (opt-in)
 

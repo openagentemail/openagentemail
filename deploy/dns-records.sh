@@ -34,6 +34,27 @@ fi
 MAIL_HOST="mail.${DOMAIN}"
 DKIM_KEY_FILE="docker-data/dms/config/opendkim/keys/${DOMAIN}/mail.txt"
 
+docker_data_eacces() {
+  echo "ERROR: cannot read '$1' (EACCES / permission denied)." >&2
+  echo "请用 sudo 重跑：sudo ./deploy/dns-records.sh" >&2
+  exit 1
+}
+
+# DMS commonly creates this tree as root. Do not silently claim that DKIM has
+# not been generated when the real problem is that this user cannot read it.
+require_docker_data_access() {
+  local path="docker-data"
+  local part
+  for part in dms config opendkim keys "$DOMAIN"; do
+    [ -e "$path" ] || return
+    { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
+    path="${path}/${part}"
+  done
+  [ ! -e "$DKIM_KEY_FILE" ] || [ -r "$DKIM_KEY_FILE" ] || docker_data_eacces "$DKIM_KEY_FILE"
+}
+
+require_docker_data_access
+
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
@@ -66,7 +87,7 @@ EOF
 else
   cat <<EOF
    NOT GENERATED YET. Start the stack once, then either re-run this script:
-     docker compose up -d && ./deploy/dns-records.sh
+     docker compose up -d && sudo ./deploy/dns-records.sh
    or generate the key manually:
      docker compose run --rm mailserver setup config dkim domain ${DOMAIN} selector mail
    The record to publish will be in:
@@ -84,6 +105,6 @@ cat <<EOF
    (DO/Vultr: rename the droplet/instance to ${MAIL_HOST}; Hetzner/AWS: set rDNS in console)
 
 ────────────────────────────────────────────────────────────────────────────
- When DNS has propagated, verify everything with:  ./deploy/doctor.sh
+ When DNS has propagated, verify everything with:  sudo ./deploy/doctor.sh
 ────────────────────────────────────────────────────────────────────────────
 EOF
