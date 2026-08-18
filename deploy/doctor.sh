@@ -51,6 +51,8 @@ require_docker_data_access() {
     { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
     path="${path}/${part}"
   done
+  [ -e "$path" ] || return 0
+  { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
   [ ! -e "$DKIM_KEY_FILE" ] || [ -r "$DKIM_KEY_FILE" ] || docker_data_eacces "$DKIM_KEY_FILE"
 }
 
