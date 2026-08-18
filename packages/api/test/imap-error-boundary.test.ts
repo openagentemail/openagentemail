@@ -253,6 +253,38 @@ describe('IMAP async error boundaries', () => {
     expect(second.logoutCalls).toBe(1);
   });
 
+  test('常驻回归：关闭后、DNS 完成前的迟到 error 不污染成功重试', async () => {
+    for (const abortable of [false, true]) {
+      const first = new RetryClient(true);
+      const second = new RetryClient(false);
+      const lateError = new Error('late error from closed client');
+      let factoryCalls = 0;
+      let resolverCalls = 0;
+      const createClient = () => (factoryCalls++ === 0 ? first : second) as unknown as ImapFlow;
+      const resolveMailserver = async () => {
+        resolverCalls += 1;
+        // This simulates a socket error emitted by the closed first client while
+        // fresh DNS resolution is still in progress.
+        first.emit('error', lateError);
+        return '172.18.0.5';
+      };
+
+      const result = abortable
+        ? withInboxAbortable(new AbortController().signal, async () => 'ok', {
+          createClient,
+          resolveMailserver,
+          error: () => {},
+        })
+        : withInbox(async () => 'ok', { createClient, resolveMailserver, error: () => {} });
+
+      await expect(result).resolves.toBe('ok');
+      expect(factoryCalls).toBe(2);
+      expect(resolverCalls).toBe(1);
+      expect(first.closeCalls).toBe(1);
+      expect(second.logoutCalls).toBe(1);
+    }
+  });
+
   test('abort during fresh DNS resolution never creates a second client', async () => {
     const controller = new AbortController();
     const first = new RetryClient(true);

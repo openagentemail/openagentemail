@@ -243,7 +243,9 @@ export async function withInbox<T>(
   try {
     client = await connectImapClient(createTrackedClient, {
       beforeRetry: () => {
-        closeOnce();
+        const failedClient = client;
+        client = undefined;
+        closeOnce(failedClient);
         connectionError = undefined;
         failed = false;
       },
@@ -334,7 +336,9 @@ export async function withInboxAbortable<T>(
     // ④ 本阶段起，任何 stall 都会被 abort → close() 掐断
     client = await connectImapClient(createTrackedClient, {
       beforeRetry: () => {
-        closeOnce();
+        const failedClient = client;
+        client = undefined;
+        closeOnce(failedClient);
         if (signal.aborted) throw new Error('scan_aborted');
         connectionError = undefined;
         failed = false;
