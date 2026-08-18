@@ -606,6 +606,37 @@ describe('mail-arrival notification watcher', () => {
     expect(outcome).toBe('stopped');
   });
 
+  test('上游超长 error message 写日志时按 512 bytes 截断并保留明确标记', async () => {
+    const controller = new AbortController();
+    const warnings: unknown[][] = [];
+    const upstream = new Error('x'.repeat(5_000));
+    const client = new EventEmitter() as any;
+    client.close = () => {};
+
+    await runWatcher(
+      controller.signal,
+      { publish: async () => ({ target: 'user', title: 'unused', level: 'normal' }) },
+      {
+        connect: async () => client,
+        watch: async () => {
+          client.emit('error', upstream);
+          controller.abort();
+          throw upstream;
+        },
+        wait: async () => {},
+        warn: (...args) => { warnings.push(args); },
+        connectionId: 'imap.test:993',
+        now: () => 0,
+      },
+    );
+
+    expect(warnings).toHaveLength(1);
+    const logged = String(warnings[0]?.[1]);
+    expect(Buffer.byteLength(logged, 'utf8')).toBeLessThanOrEqual(512);
+    expect(logged.endsWith('… [truncated]')).toBe(true);
+    expect(upstream.message).toHaveLength(5_000);
+  });
+
   test('keeps its watermark across reconnects and catches the downtime window', () => {
     const watermark: { uid?: number } = {};
     expect(unseenWatcherUids([10, 11], watermark)).toEqual([]);
