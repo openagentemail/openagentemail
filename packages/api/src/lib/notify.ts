@@ -147,7 +147,24 @@ export class NotifyError extends Error {
 
 /** @internal Distinguishes provider-wide outages from one rejected payload. */
 export function isNotifyServiceFailure(err: unknown): boolean {
+  // Unmarked errors default to message-level: every new publish-path service
+  // failure must opt in here, or the watcher may consume its blocked UID.
   return err instanceof NotifyError && err[NOTIFY_FAILURE_KIND] === 'service';
+}
+
+/** @internal Shared by publish and watcher status-boundary regression tests. */
+export function isNtfyPublishServiceStatus(status: number): boolean {
+  // Changing the payload cannot repair shared auth/proxy auth, a request
+  // timeout, a retry-later response, rate limiting, or a provider 5xx.
+  return (
+    status >= 500 ||
+    status === 401 ||
+    status === 403 ||
+    status === 407 ||
+    status === 408 ||
+    status === 425 ||
+    status === 429
+  );
 }
 
 type Reader = {
@@ -886,13 +903,16 @@ export class NtfyNotificationService implements NotifyService {
         method: 'POST',
         headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
         body,
+        // Match management reads/writes: a hung provider must reach watcher
+        // retry/backoff instead of pinning one UID forever.
+        signal: AbortSignal.timeout(NTFY_ADMIN_FETCH_TIMEOUT_MS),
       });
     } catch {
       throw new NotifyError('notify_unavailable', undefined, { failureKind: 'service' });
     }
     if (!response.ok) {
       throw new NotifyError('notify_unavailable', undefined, {
-        failureKind: response.status >= 500 ? 'service' : 'message',
+        failureKind: isNtfyPublishServiceStatus(response.status) ? 'service' : 'message',
       });
     }
     // 送达优先：ntfy 成功后、返回前写日志。append 失败只告警，不把投递改成失败。

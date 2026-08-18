@@ -703,6 +703,14 @@ describe('ntfy publish payload budget', () => {
     try {
       for (const response of [
         async () => new Response('', { status: 400 }),
+        async () => new Response('', { status: 413 }),
+        async () => new Response('', { status: 422 }),
+        async () => new Response('', { status: 401 }),
+        async () => new Response('', { status: 403 }),
+        async () => new Response('', { status: 407 }),
+        async () => new Response('', { status: 408 }),
+        async () => new Response('', { status: 425 }),
+        async () => new Response('', { status: 429 }),
         async () => new Response('', { status: 503 }),
         async () => { throw new TypeError('network down'); },
       ]) {
@@ -721,8 +729,61 @@ describe('ntfy publish payload budget', () => {
       'notify_unavailable',
       'notify_unavailable',
       'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
+      'notify_unavailable',
     ]);
-    expect(caught.map(isNotifyServiceFailure)).toEqual([false, true, true]);
+    expect(caught.map(isNotifyServiceFailure)).toEqual([
+      false, false, false,
+      true, true, true, true, true, true, true, true,
+    ]);
+  });
+
+  test('publish aborts a never-settling fetch at the shared 8s deadline and marks it service-level', async () => {
+    const previousNtfy = { ...config.ntfy };
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const timeoutMs: number[] = [];
+
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms);
+      const controller = new AbortController();
+      queueMicrotask(() => controller.abort(new DOMException('publish timed out', 'TimeoutError')));
+      return controller.signal;
+    }) as typeof AbortSignal.timeout;
+    globalThis.fetch = ((_input, init) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      const abort = () => reject(signal.reason ?? new DOMException('publish timed out', 'TimeoutError'));
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    })) as unknown as typeof fetch;
+
+    try {
+      const pending = new NtfyNotificationService().publish({
+        target: 'user',
+        title: 'timeout',
+        message: 'timeout',
+        level: 'normal',
+      }).catch((err) => err as unknown);
+      const outcome = await Promise.race([
+        pending,
+        new Promise<'still-pending'>((resolve) => setTimeout(() => resolve('still-pending'), 50)),
+      ]);
+
+      expect(outcome).toBeInstanceOf(NotifyError);
+      expect(outcome).toMatchObject({ code: 'notify_unavailable' });
+      expect(isNotifyServiceFailure(outcome)).toBe(true);
+      expect(timeoutMs).toEqual([NTFY_ADMIN_FETCH_TIMEOUT_MS]);
+    } finally {
+      AbortSignal.timeout = originalTimeout;
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 
   test('drops click when serialized JSON would exceed 4000 bytes', withPublishCapture(async (svc, captured) => {

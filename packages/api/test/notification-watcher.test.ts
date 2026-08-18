@@ -29,6 +29,7 @@ const {
   PUSH_OTP_ITEM_MAX,
 } = await import('../src/lib/notification-watcher.ts');
 const {
+  isNtfyPublishServiceStatus,
   NotifyError,
   jsonEscapedByteLength,
   notifyAvailableMessageBytes,
@@ -261,6 +262,56 @@ describe('mail-arrival notification watcher', () => {
     expect(errors.map((entry) => entry.join(' '))).toEqual([
       '[notify] CRITICAL IMAP watcher abandoned UID 41 after notification service failure persisted for 600000ms (hard limit: 600000ms): notify_unavailable',
     ]);
+  });
+
+  test('ntfy 401/403/429 不消耗 UID，服务恢复后逐一补投', async () => {
+    for (const status of [401, 403, 429]) {
+      const watermark = { uid: 40 };
+      const delivered: number[] = [];
+      const watched = {
+        ...message('global-4xx@example.net', 'From: global-4xx@example.net\r\n\r\nYour verification code is 666666'),
+        uid: 41,
+      };
+      const makeClient = (controller: AbortController) => ({
+        mailbox: false,
+        getMailboxLock: async () => ({ release() {} }),
+        search: async () => [41],
+        fetch: async function* () { yield watched; },
+        idle: async () => { controller.abort(); },
+        logout: async () => {},
+        close() {},
+      }) as any;
+      const runtime = {
+        identities: () => baseIdentities,
+        identity: (address: string) => baseIdentities.find((entry) => entry.address === address),
+        wait: async () => {},
+        error: () => {},
+        now: () => 0,
+      };
+      let unavailable = true;
+      const dispatch = {
+        publish: async () => {
+          if (unavailable) {
+            throw new NotifyError('notify_unavailable', undefined, {
+              failureKind: isNtfyPublishServiceStatus(status) ? 'service' : 'message',
+            });
+          }
+          delivered.push(status);
+          return { target: 'user' as const, title: 'openagent.email new mail', level: 'urgent' as const };
+        },
+      };
+
+      const failed = new AbortController();
+      await expect(watchConnection(failed.signal, makeClient(failed), dispatch, watermark, runtime))
+        .rejects.toThrow('notify_unavailable');
+      expect(watermark.uid).toBe(40);
+
+      unavailable = false;
+      const recovered = new AbortController();
+      await watchConnection(recovered.signal, makeClient(recovered), dispatch, watermark, runtime);
+      expect(delivered).toEqual([status]);
+      expect(watermark.uid).toBe(41);
+    }
   });
 
   test('连续异步连接错误按 2s 指数退避到 120s 封顶，循环不终止', async () => {
