@@ -42,6 +42,55 @@ Then verify everything end to end:
 ./deploy/doctor.sh    # checks DNS, TLS, IMAP/SMTP login, and a round-trip send
 ```
 
+## Public TLS with Let's Encrypt (opt-in)
+
+The default `docker compose up -d` path remains self-signed: it does not start
+or pull Certbot and does not publish TCP 80. To use a publicly trusted mail
+certificate, opt in only after `mail.$DOMAIN` has an A (and, if used, AAAA)
+record pointing at this host and the firewall permits inbound TCP 80. HTTP-01
+cannot create those DNS or firewall prerequisites for you.
+
+In `.env`, set the following (use a reachable contact address outside this
+mailserver when possible):
+
+```dotenv
+SSL_TYPE=letsencrypt
+SSL_DOMAIN=mail.example.com       # exactly mail.$DOMAIN
+LETSENCRYPT_EMAIL=admin@example.net  # optional, but recommended
+```
+
+First issue the certificate with the explicitly enabled sidecar; do not start
+the mailserver in `letsencrypt` mode before this succeeds:
+
+```bash
+docker compose --profile letsencrypt up -d certbot
+docker compose logs -f certbot
+# Wait for “Successfully received certificate”, then confirm:
+docker compose --profile letsencrypt exec certbot \
+  ls -l /etc/letsencrypt/live/mail.example.com/{fullchain.pem,privkey.pem}
+```
+
+The entire `/etc/letsencrypt` tree is a persistent named volume shared with
+the mailserver read-only: Certbot's `live/` files are symlinks into `archive/`,
+so mounting only `live/` is incorrect. Once the first certificate exists,
+start the full opt-in stack and verify the public endpoints:
+
+```bash
+docker compose --profile letsencrypt up -d
+./deploy/doctor.sh
+openssl s_client -connect mail.example.com:465 -servername mail.example.com </dev/null \
+  2>/dev/null | openssl x509 -noout -issuer -subject -dates
+openssl s_client -connect mail.example.com:993 -servername mail.example.com </dev/null \
+  2>/dev/null | openssl x509 -noout -issuer -subject -dates
+```
+
+The Certbot sidecar runs `renew` every 12 hours. docker-mailserver's change
+detection service watches `SSL_TYPE=letsencrypt` certificate updates and
+reloads Postfix and Dovecot, so renewed certificates take effect on 465/993
+without a manual container restart. Keep the `letsencrypt` profile enabled for
+normal operation. If it is omitted, the sidecar and TCP 80 are absent and the
+original self-signed path is unchanged.
+
 Create an identity and hand your agent its scoped token (shown once):
 
 ```bash
