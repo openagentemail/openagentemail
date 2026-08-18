@@ -115,7 +115,12 @@ export type NotificationDevice = {
   };
 };
 
+type NotifyFailureKind = 'message' | 'service';
+const NOTIFY_FAILURE_KIND = Symbol('notifyFailureKind');
+
 export class NotifyError extends Error {
+  readonly [NOTIFY_FAILURE_KIND]?: NotifyFailureKind;
+
   constructor(
     public readonly code:
       | 'notifications_disabled'
@@ -132,9 +137,28 @@ export class NotifyError extends Error {
       /** 给人看的原因；API 可原样返回。 */
       message?: string;
     },
+    /** @internal Watcher-only failure routing; never serialized by REST handlers. */
+    internal?: { failureKind: NotifyFailureKind },
   ) {
     super(code);
+    this[NOTIFY_FAILURE_KIND] = internal?.failureKind;
   }
+}
+
+/** @internal Distinguishes provider-wide outages from one rejected payload. */
+export function isNotifyServiceFailure(err: unknown): boolean {
+  // Only an explicitly classified payload rejection may consume a UID.
+  // Unknown/plain failures retain it and are still bounded by the watcher's
+  // 10-minute CRITICAL fallback instead of silently losing outage traffic.
+  if (err instanceof NotifyError && err.code === 'notify_cancelled') return false;
+  return !(err instanceof NotifyError) || err[NOTIFY_FAILURE_KIND] !== 'message';
+}
+
+/** @internal Shared by publish and watcher status-boundary regression tests. */
+export function isNtfyPublishServiceStatus(status: number): boolean {
+  // Only known payload rejections may consume a UID. An unrecognized status
+  // can reflect a shared endpoint/proxy/provider fault, so retain by default.
+  return status !== 400 && status !== 413 && status !== 422;
 }
 
 type Reader = {
@@ -362,6 +386,11 @@ async function writeServerConfig(state: NotifyState): Promise<void> {
 }
 
 let cachedState: NotifyState | undefined;
+
+/** @internal Test seam for exercising notification-store load and recovery. */
+export function resetNotificationStateForTests(): void {
+  cachedState = undefined;
+}
 
 async function state(): Promise<NotifyState> {
   if (!cachedState) cachedState = loadState();
@@ -815,8 +844,12 @@ export function boundJsonEscapedText(text: string, maxEscapedBytes: number): str
 
 export class NtfyNotificationService implements NotifyService {
   private async assertEnabled(): Promise<NotifyState> {
-    if (!config.ntfy.enabled) throw new NotifyError('notifications_disabled');
-    if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
+    if (!config.ntfy.enabled) {
+      throw new NotifyError('notifications_disabled', undefined, { failureKind: 'service' });
+    }
+    if (!config.ntfy.adminPassword) {
+      throw new NotifyError('notifications_unconfigured', undefined, { failureKind: 'service' });
+    }
     return state();
   }
 
@@ -863,12 +896,24 @@ export class NtfyNotificationService implements NotifyService {
     if (input.beforeSend && !input.beforeSend()) {
       throw new NotifyError('notify_cancelled');
     }
-    const response = await fetch(providerUrl('/'), {
-      method: 'POST',
-      headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
-      body,
-    });
-    if (!response.ok) throw new NotifyError('notify_unavailable');
+    let response: Response;
+    try {
+      response = await fetch(providerUrl('/'), {
+        method: 'POST',
+        headers: { ...bearer(current.publisherToken), 'content-type': 'application/json' },
+        body,
+        // Match management reads/writes: a hung provider must reach watcher
+        // retry/backoff instead of pinning one UID forever.
+        signal: AbortSignal.timeout(NTFY_ADMIN_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      throw new NotifyError('notify_unavailable', undefined, { failureKind: 'service' });
+    }
+    if (!response.ok) {
+      throw new NotifyError('notify_unavailable', undefined, {
+        failureKind: isNtfyPublishServiceStatus(response.status) ? 'service' : 'message',
+      });
+    }
     // 送达优先：ntfy 成功后、返回前写日志。append 失败只告警，不把投递改成失败。
     const logicalTarget = input.target as NotificationLogicalTarget;
     const logicalChannel =
