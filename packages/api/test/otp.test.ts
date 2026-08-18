@@ -136,6 +136,14 @@ describe('extractCodes', () => {
     expect(extractCodes('call 555-1234')).toEqual([]);
   });
 
+  test('ISO date beside a real OTP is never extracted as a code (Jakarta A6)', () => {
+    const codes = extractCodes('Your verification code is 593018 (real-sender test, 2026-08-19).');
+    expect(codes).toContain('593018');
+    expect(codes).not.toContain('2026-08-19');
+    expect(codes).not.toContain('2026');
+    expect(codes).not.toContain('08-19');
+  });
+
   test('single-digit chains need strong cues (F132)', () => {
     // Providers render codes spaced for readability: `1 2 3 4 5 6`.
     expect(extractCodes('Your verification code is 1 2 3 4 5 6')).toEqual(['1 2 3 4 5 6']);

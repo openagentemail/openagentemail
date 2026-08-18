@@ -81,6 +81,7 @@ function buildStrongOtpCueRe(cues: readonly string[]): RegExp {
 }
 
 const STRONG_OTP_CUE = buildStrongOtpCueRe(STRONG_OTP_CUES);
+const ISO_DATE_FORM = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * True when text contains a strong OTP cue (F71 list; case-folded for Latin).
@@ -365,6 +366,9 @@ export function extractCodes(text: string): string[] {
   for (const match of text.matchAll(delimitedOtpCaptureRe())) {
     const form = match[1]!;
     const idx = match.index ?? 0;
+    // Three groups shaped YYYY-MM-DD are dates, not OTPs, even when a nearby
+    // real code supplies the strong cue for this window (Jakarta A6).
+    if (ISO_DATE_FORM.test(form)) continue;
     const window = keywordWindow(text, idx, form.length);
     if (!STRONG_OTP_CUE.test(window)) continue;
     if (!seen.has(form)) {
