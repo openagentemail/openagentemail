@@ -476,13 +476,16 @@ describe('task board in-memory baseline', () => {
       let pages = 0;
       let cursor: string | undefined;
       let totalApprox = 0;
+      const seenIds: string[] = [];
       do {
         const page = await listTaskBoard(
           { status: 'all', period: '30d', limit: 100, cursor },
           { kind: 'admin' },
         );
+        expect(page.totalApprox).toBe(size);
         totalApprox = page.totalApprox;
         pages += 1;
+        seenIds.push(...page.tasks.map((task) => task.id));
         cursor = page.nextCursor ?? undefined;
       } while (cursor);
       results[String(size)] = {
@@ -490,13 +493,23 @@ describe('task board in-memory baseline', () => {
         pages,
         totalApprox,
       };
+      const expectedIds = [...catalog]
+        .sort((a, b) => {
+          const dt = Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+          if (dt !== 0) return dt;
+          return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+        })
+        .map((task) => task.id);
+      expect(totalApprox).toBe(size);
+      expect(pages).toBe(size / 100);
+      expect(seenIds).toHaveLength(size);
+      expect(new Set(seenIds).size).toBe(size);
+      expect(seenIds).toEqual(expectedIds);
     }
     console.log('[task-board baseline]', JSON.stringify(results));
-    expect(results['1000']!.totalApprox).toBeGreaterThan(0);
-    expect(results['10000']!.pages).toBeGreaterThan(results['1000']!.pages);
-    // 短缓存只减重复 IMAP 解析；本基准是纯内存 filter/sort/page。
-    expect(results['10000']!.ms).toBeLessThan(30_000);
-  });
+    expect(results['10000']!.pages).toBe(results['1000']!.pages * 10);
+    // 不再断言墙钟：并发负载会制造假红；显式 timeout 只隔离 Bun 默认 5s 掐断。
+  }, 30_000);
 });
 
 describe('concurrent reply under per-task lock', () => {
