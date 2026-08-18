@@ -1133,4 +1133,106 @@ PR：https://github.com/openagentemail/openagentemail/pull/33
 2. 用 `ls-remote` + `gh pr view` 确认 SHA/PR 已 MERGED，无 open PR。
 3. 把已闭环邮件标 seen；本收尾单回复后一并标 seen。
 
+---
+
+## 派单 2026-08-17-① · ChatGPT CIMD 兼容修复
+
+日期：2026-08-17  
+分支：`fix/cimd-chatgpt-none-fallback`  
+PR：https://github.com/openagentemail/openagentemail/pull/37  
+回执：`/home/ops/fleet-roles/state/receipt-cimd-r1.md`
+
+### 我们实现了哪些功能？
+
+1. 放宽 CIMD `validateDocument`：`token_endpoint_auth_method` 非 `none` 时，仅当 `token_endpoint_auth_methods_supported` 为数组且含 `'none'` 才按公共客户端 `none` 放行（ChatGPT 连接器 singular=`private_key_jwt`、plural 含 none）。
+2. 补测试：放行（private_key_jwt + plural 含 none + jwks_uri）+ 仍拒（纯 client_secret_basic；plural 非数组 / 不含 none）。
+3. `docs/mcp-clients.md` 同步判定口径。token 端点、`client_secret*`、redirect_uri scheme、私网 fetch 例外未改。
+4. 独立 subagent 审查（agent `938fe6f7-9455-4c7d-843b-77dde00bc04e`）：No findings。
+5. 开非 Draft PR #37。未 merge、未 main 直推。
+
+### 我们遇到了哪些错误？
+
+1. 本机 `packages/api` 无 `node_modules`，`bun test` 报 `Cannot find module 'hono/bun'`。
+2. `packages/api` 全量 `bun test` 出现 3 fail（notify 401、`uiEnabled` false、admin-key hash 为 null）。
+3. `git commit` 因本机未配 `user.name`/`user.email` 失败；铁律禁止改 git config。
+4. 向回执追加 1217 行全量测试原文时，共享 state 路径的整份 dump 被环境拦截。
+
+### 我们是如何解决这些错误的？
+
+1. 在 `packages/api` 执行 `bun install` 后 CIMD 单测 24 pass。
+2. 隔离复跑 3 条全绿；在 `origin/main` 上同一 3 条也失败，属既有测试间 env 串扰。按任务卡「范围外只报告不改」记入回执。
+3. 单次 commit 用环境变量传入 author/committer（与仓内近期提交一致），不写 git config。
+4. 回执贴 CIMD 单测完整原文 + 全量套件 CIMD 段与收尾原文；全量 1217 行留在 `/tmp/api-test-full.txt`。
+
+---
+
+## 派单 2026-08-17-① R1.1 · CodeRabbit Minor 文档措辞
+
+日期：2026-08-17  
+分支：`fix/cimd-chatgpt-none-fallback`  
+提交：`ee06309`
+
+### 我们实现了哪些功能？
+
+1. 只改 `docs/mcp-clients.md`：拒绝句限定为「singular 非 none 且 plural 缺失/非数组/不含 none」；缺省或 none 的放行句标明「不看 plural」。
+2. commit+push 到同一功能分支；回执追加 R1.1 段。代码与测试未动。
+
+### 我们遇到了哪些错误？
+
+1. 无新运行时/测试错误（本轮不改代码）。
+
+### 我们是如何解决这些错误的？
+
+1. 无。
+
+---
+
+## 派单 2026-08-18-① · MCP task_list outputSchema
+
+日期：2026-08-18  
+分支：`fix/mcp-task-list-output-schema`（从 `origin/main` `6aacc6c` 新切，未续 CIMD 已合并分支）  
+PR：https://github.com/openagentemail/openagentemail/pull/38  
+回执：`/home/ops/openagentemail/state/receipt-tasklist-schema-r1.md`
+
+### 我们实现了哪些功能？
+
+1. `taskMessageSchema` 补可选 `kind`（state|reminder）与 `idempotencyKey`，与 `TaskMessage` 对齐；`task_list`/`task_get` 一处两治。
+2. `createApp` 增加测试用 `taskService` 注入（默认仍走生产 REST）。
+3. `mcp-http.test.ts` 三条回归：无参 list、state 筛选、task_get，均走真实 `/mcp` 出口校验。
+4. 独立 subagent 审查 `be1925a4-02ba-4503-ad29-9f964b13aff7`：No findings。未自行 merge。
+
+### 我们遇到了哪些错误？
+
+1. 本机曾停在 CIMD 功能分支；若从那里续长会把已合并 commit 混进新 PR。
+2. 工作区 `Progress.md` 有未提交改动，FC 明确禁止带进本单。
+3. 全量 `bun test` 仍有 main 既有 3 fail（隔离全绿）。
+
+### 我们是如何解决这些错误的？
+
+1. `git fetch && checkout main && pull` 到 `6aacc6c` 后再切新分支。
+2. 先 stash `Progress.md`，commit 只含 3 个本单文件；回执写在未跟踪的 `state/`。
+3. 3 fail 记债不修。
+
+---
+
+## 派单 2026-08-18-① R1 · 契约测试返工
+
+日期：2026-08-18  
+提交：`e561328`  
+PR：https://github.com/openagentemail/openagentemail/pull/38
+
+### 我们实现了哪些功能？
+
+1. A：`tools/list` 广播契约——`task_list`/`task_get` message 层含 `kind`/`idempotencyKey` 且 `additionalProperties===false`。未修 main 负控 1 fail，本分支 18 pass。
+2. B：回执更正生产 -32602 来自客户端 ajv，不是服务端 zod。
+3. C：`taskService` 标 `@internal`。ZCode P2-1 按 FC 裁定不改，PR 评论引用。
+
+### 我们遇到了哪些错误？
+
+1. 原三条 HTTP `tools/call` 测的是服务端非严格 zod，修前也绿，对本 bug 零保护。
+
+### 我们是如何解决这些错误的？
+
+1. 改测广播 JSON Schema；worktree 把新测试搬到 `6aacc6c` 窄 schema 上跑出修前 fail 原文。
+
 
