@@ -101,13 +101,13 @@ services:
       retries: 10
       start_period: 90s   # first boot generates DH params / DKIM keys — be patient
 
-  # Explicit opt-in only: `docker compose --profile letsencrypt …` starts this
-  # standalone HTTP-01 certbot sidecar. Default `docker compose up -d` does not
-  # create it, publish :80, or pull its image.
-  certbot:
+  # Explicit opt-in only: the bootstrap and renewal profiles start these
+  # standalone HTTP-01 certbot sidecars. Default `docker compose up -d` does
+  # not create them, publish :80, or pull their image.
+  certbot-bootstrap:
     image: certbot/certbot:latest
-    container_name: openagent-certbot
-    profiles: ["letsencrypt"]
+    container_name: openagent-certbot-bootstrap
+    profiles: ["letsencrypt-bootstrap"]
     environment:
       SSL_TYPE: ${SSL_TYPE:-self-signed}
       SSL_DOMAIN: ${SSL_DOMAIN:-mail.${DOMAIN}}
@@ -121,7 +121,7 @@ services:
     command:
       - |
         if [ "$$SSL_TYPE" != "letsencrypt" ]; then
-          echo "Set SSL_TYPE=letsencrypt before enabling the letsencrypt profile." >&2
+          echo "Set SSL_TYPE=letsencrypt before enabling the letsencrypt-bootstrap profile." >&2
           exit 64
         fi
         if [ -n "$$LETSENCRYPT_EMAIL" ]; then
@@ -133,9 +133,28 @@ services:
             --register-unsafely-without-email --keep-until-expiring \
             --preferred-challenges http -d "$$SSL_DOMAIN"
         fi
+    # A failed first issuance must stop for operator diagnosis instead of
+    # repeatedly hitting ACME and risking rate limits.
+    restart: "no"
+
+  # Start this only after bootstrap has succeeded. It survives daemon restarts
+  # so routine renewal remains automatic; its standalone challenge listens on
+  # 80 only during `certbot renew`.
+  certbot-renew:
+    image: certbot/certbot:latest
+    container_name: openagent-certbot-renew
+    profiles: ["letsencrypt"]
+    ports:
+      - "80:80"
+    volumes:
+      - letsencrypt-certs:/etc/letsencrypt
+      - letsencrypt-logs:/var/log/letsencrypt
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
         while :; do
-          sleep 12h
           certbot renew --non-interactive || echo "certbot renew failed; will retry in 12 hours" >&2
+          sleep 12h
         done
     restart: unless-stopped
 

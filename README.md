@@ -63,12 +63,17 @@ First issue the certificate with the explicitly enabled sidecar; do not start
 the mailserver in `letsencrypt` mode before this succeeds:
 
 ```bash
-docker compose --profile letsencrypt up -d certbot
-docker compose logs -f certbot
+docker compose --profile letsencrypt-bootstrap up -d certbot-bootstrap
+docker compose logs -f certbot-bootstrap
 # Wait for “Successfully received certificate”, then confirm:
-docker compose --profile letsencrypt exec certbot \
+docker compose --profile letsencrypt-bootstrap exec certbot-bootstrap \
   ls -l /etc/letsencrypt/live/mail.example.com/{fullchain.pem,privkey.pem}
 ```
+
+If first issuance fails, Certbot stops instead of retrying the ACME request in
+a tight loop. Correct the DNS/port-80/domain prerequisite, then explicitly run
+the same `docker compose --profile letsencrypt-bootstrap up -d certbot-bootstrap`
+command again.
 
 The entire `/etc/letsencrypt` tree is a persistent named volume shared with
 the mailserver read-only: Certbot's `live/` files are symlinks into `archive/`,
@@ -84,12 +89,12 @@ openssl s_client -connect mail.example.com:993 -servername mail.example.com </de
   2>/dev/null | openssl x509 -noout -issuer -subject -dates
 ```
 
-The Certbot sidecar runs `renew` every 12 hours. docker-mailserver's change
-detection service watches `SSL_TYPE=letsencrypt` certificate updates and
-reloads Postfix and Dovecot, so renewed certificates take effect on 465/993
-without a manual container restart. Keep the `letsencrypt` profile enabled for
-normal operation. If it is omitted, the sidecar and TCP 80 are absent and the
-original self-signed path is unchanged.
+After bootstrap, the renewal sidecar runs `renew` every 12 hours and restarts
+with Docker. docker-mailserver's change-detection service watches
+`SSL_TYPE=letsencrypt` certificate updates and reloads Postfix and Dovecot, so
+renewed certificates take effect on 465/993 without a manual container restart.
+Keep the `letsencrypt` profile enabled for normal operation. If it is omitted,
+the sidecars and TCP 80 are absent and the original self-signed path is unchanged.
 
 Create an identity and hand your agent its scoped token (shown once):
 
