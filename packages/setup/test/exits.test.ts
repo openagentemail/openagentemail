@@ -11,6 +11,14 @@ import {
 import { CliError, EXIT } from '../src/types.ts';
 import { validateToolList } from '../src/verify.ts';
 
+const REQUIRED_TOOLS = [
+  'mail_list_identities',
+  'mail_list_messages',
+  'mail_read_message',
+  'mail_send',
+  'mail_mark_seen',
+];
+
 async function expectCode(operation: () => unknown | Promise<unknown>, code: number) {
   try {
     await operation();
@@ -61,8 +69,38 @@ describe('documented exit codes', () => {
     );
   });
 
-  test('4: MCP tool handshake is incomplete', async () => {
+  test('4: MCP tool handshake rejects empty, invalid, and incomplete tool lists', async () => {
+    await expectCode(() => validateToolList({ tools: [] }), EXIT.MCP_VERIFY_FAILED);
+    await expectCode(() => validateToolList({ tools: [{ name: 42 }] }), EXIT.MCP_VERIFY_FAILED);
     await expectCode(() => validateToolList({ tools: [{ name: 'only-one' }] }), EXIT.MCP_VERIFY_FAILED);
+    await expectCode(
+      () => validateToolList({ tools: REQUIRED_TOOLS.filter((name) => name !== 'mail_send').map((name) => ({ name })) }),
+      EXIT.MCP_VERIFY_FAILED,
+    );
+  });
+
+  test('MCP tool handshake accepts seven tools when every required mail tool is present', () => {
+    expect(() => validateToolList({
+      tools: [...REQUIRED_TOOLS, 'notify_messages', 'task_list'].map((name) => ({ name })),
+    })).not.toThrow();
+  });
+
+  test('MCP tool handshake accepts fifteen tools including extra notify and task tools', () => {
+    expect(() => validateToolList({
+      tools: [
+        ...REQUIRED_TOOLS,
+        'notify_messages',
+        'notify_register',
+        'task_list',
+        'task_create',
+        'task_get',
+        'task_reply',
+        'mail_delete_messages',
+        'mail_wait',
+        'mail_get_source',
+        'mail_get_message',
+      ].map((name) => ({ name })),
+    })).not.toThrow();
   });
 
   test('5: Docker or Compose is missing', async () => {
