@@ -482,6 +482,7 @@ describe('task board in-memory baseline', () => {
           { status: 'all', period: '30d', limit: 100, cursor },
           { kind: 'admin' },
         );
+        expect(page.totalApprox).toBe(size);
         totalApprox = page.totalApprox;
         pages += 1;
         seenIds.push(...page.tasks.map((task) => task.id));
