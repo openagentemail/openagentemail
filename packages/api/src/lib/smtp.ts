@@ -10,6 +10,10 @@ import { config } from './config.ts';
 import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
 import { htmlToText } from './otp.ts';
 import { recordSentMessageIdAfterSend } from './sent-registry.ts';
+import {
+  withMailserverReconnect,
+  type MailserverEndpoint,
+} from './mailserver-reconnect.ts';
 
 export interface SendInput {
   from: string;
@@ -30,9 +34,9 @@ export function coerceOutboundText(text: string, html?: string): string {
   return htmlToText(html);
 }
 
-export async function sendMail(input: SendInput): Promise<{ messageId: string }> {
-  const transporter = nodemailer.createTransport({
-    host: config.smtp.host,
+function createSmtpTransport(endpoint: MailserverEndpoint) {
+  return nodemailer.createTransport({
+    host: endpoint.host,
     port: config.smtp.port,
     secure: config.smtp.port === 465,
     auth: { user: config.smtp.user, pass: config.smtp.pass },
@@ -40,9 +44,14 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
       // The bundled mailserver starts with a self-signed cert. External public
       // mail servers should set SMTP_TLS_REJECT_UNAUTHORIZED=true.
       rejectUnauthorized: config.smtp.tlsRejectUnauthorized,
+      // A retry dials a freshly resolved IP only once, while TLS still verifies
+      // the configured hostname instead of treating that container IP as identity.
+      ...(endpoint.servername ? { servername: endpoint.servername } : {}),
     },
   });
+}
 
+export async function sendMail(input: SendInput): Promise<{ messageId: string }> {
   // 显式 Date + 毫秒归零：发读两侧 stamp 载荷用同一 ISO 字符串。
   const date = stampDate();
   const text = coerceOutboundText(input.text, input.html);
@@ -55,20 +64,23 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
     config.domain,
   );
 
-  try {
-    const info = await transporter.sendMail({
-      from: input.from,
-      to: input.to,
-      subject: input.subject,
-      text,
-      date,
-      ...(input.html ? { html: input.html } : {}),
-      headers,
-    });
-    // 服务端真正出站成功才登记。登记失败不得否决这次投递（否则 502 重试会重复外发）。
-    recordSentMessageIdAfterSend(info.messageId, input.from);
-    return { messageId: info.messageId };
-  } finally {
-    transporter.close();
-  }
+  return withMailserverReconnect(config.smtp.host, async (endpoint) => {
+    const transporter = createSmtpTransport(endpoint);
+    try {
+      const info = await transporter.sendMail({
+        from: input.from,
+        to: input.to,
+        subject: input.subject,
+        text,
+        date,
+        ...(input.html ? { html: input.html } : {}),
+        headers,
+      });
+      // 服务端真正出站成功才登记。登记失败不得否决这次投递（否则 502 重试会重复外发）。
+      recordSentMessageIdAfterSend(info.messageId, input.from);
+      return { messageId: info.messageId };
+    } finally {
+      transporter.close();
+    }
+  });
 }

@@ -235,6 +235,8 @@ services:
       SMTP_PORT: 587
       SMTP_USER: ${MAIL_ACCOUNT:-agent}@${DOMAIN}
       SMTP_PASS: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
+      # Safety belt: avoid Bun retaining mailserver's old container IP after a rebuild.
+      BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS: "0"
       TASK_SIGNING_SECRET: ${TASK_SIGNING_SECRET:?Set TASK_SIGNING_SECRET in .env (openssl rand -hex 32)}
       # DMS ships a self-signed cert until you configure Let's Encrypt, so
       # certificate verification stays off by default for these private hops.
