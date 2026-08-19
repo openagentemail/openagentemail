@@ -5,6 +5,10 @@ MCP server (**stdio** transport) for [openagent.email](https://openagent.email) 
 工具注册与 REST 客户端实现与 API 进程共享（`packages/api/src/mcp/`）。若客户端支持
 远程 MCP，也可直接 `type: http` 连接 API 的 `POST /mcp`（见仓库 `docs/mcp-clients.md`），无需本包。
 
+## 0.5.2
+
+Patch release — self-hosting fixes from a fresh-VPS install drill. Shared MCP surface: OTP extraction no longer picks up ISO dates that sit next to real codes (#52), and the task-message schema accepts reminder fields (#38). Server-side (same repo, shipped to self-hosters): mailserver connections re-resolve DNS and retry once after container IP changes (#49), IMAP watcher livelock/backoff hardening (#40/#46/#47), opt-in Let's Encrypt sidecar in docker-compose (#51). No client config change required.
+
 ## 0.5.1
 
 Patch release — advertised output schemas realigned with the API: `mail_list_messages` summaries now declare `source` / `hasOtp`, and the `mail_read_message` detail schema matches what the API actually returns. Strict schema-validating clients (e.g. Kimi Code) no longer error on 0.5.0's drift. No behavior change otherwise.
