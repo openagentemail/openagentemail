@@ -84,8 +84,8 @@ describe('sent registry 持久化', () => {
   });
 
   test('过期按 TTL 淘汰', () => {
-    resetSentRegistryForTests({ ttlMs: 10 });
-    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 50);
+    resetSentRegistryForTests({ ttlMs: 2000 });
+    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 10_000);
     expect(hasSentMessageId('old@test.example', 'fox@test.example')).toBe(false);
     // 读路径不 prune：条数仍在，等下次写入再淘汰
     expect(sentRegistrySizeForTests()).toBe(1);
@@ -96,8 +96,8 @@ describe('sent registry 持久化', () => {
   });
 
   test('读路径不写盘（过期查询也不 persist）', () => {
-    resetSentRegistryForTests({ ttlMs: 10 });
-    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 50);
+    resetSentRegistryForTests({ ttlMs: 2000 });
+    recordSentMessageId('<old@test.example>', 'fox@test.example', Date.now() - 10_000);
     let persistCalls = 0;
     setSentRegistryPersistHookForTests(() => {
       persistCalls += 1;
