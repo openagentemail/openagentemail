@@ -67,7 +67,7 @@ docker compose --profile letsencrypt-bootstrap up -d certbot-bootstrap
 docker compose logs -f certbot-bootstrap
 # Wait for “Successfully received certificate”, then confirm:
 docker compose --profile letsencrypt-bootstrap run --rm --no-deps \
-  --entrypoint ls certbot-bootstrap -- -l \
+  --entrypoint ls certbot-bootstrap -l \
   /etc/letsencrypt/live/mail.example.com/fullchain.pem \
   /etc/letsencrypt/live/mail.example.com/privkey.pem
 ```
@@ -83,7 +83,8 @@ command again.
 The entire `/etc/letsencrypt` tree is a persistent named volume shared with
 the mailserver read-only: Certbot's `live/` files are symlinks into `archive/`,
 so mounting only `live/` is incorrect. Once the first certificate exists,
-start the full opt-in stack and verify the public endpoints:
+start the full opt-in stack and verify the public endpoints. Do not enable
+`letsencrypt-bootstrap` and `letsencrypt` together: both publish host TCP 80.
 
 ```bash
 docker compose --profile letsencrypt up -d
