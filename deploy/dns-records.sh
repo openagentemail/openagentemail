@@ -46,7 +46,7 @@ require_docker_data_access() {
   local path="docker-data"
   local part
   for part in dms config opendkim keys "$DOMAIN"; do
-    [ -e "$path" ] || return
+    [ -e "$path" ] || return 0
     { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
     path="${path}/${part}"
   done
