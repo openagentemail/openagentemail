@@ -33,6 +33,30 @@ fi
 [ -n "$NTFY_ENABLED" ] || NTFY_ENABLED="true"
 MAIL_HOST="mail.${DOMAIN}"
 DKIM_SELECTOR="mail"
+DKIM_KEY_FILE="docker-data/dms/config/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.txt"
+
+docker_data_eacces() {
+  echo "ERROR: cannot read '$1' (EACCES / permission denied)." >&2
+  echo "Re-run with sudo: sudo ./deploy/doctor.sh" >&2
+  exit 1
+}
+
+# DMS commonly creates this tree as root. A non-root doctor must fail clearly
+# instead of reporting a readable-on-disk DKIM key as missing.
+require_docker_data_access() {
+  local path="docker-data"
+  local part
+  for part in dms config opendkim keys "$DOMAIN"; do
+    [ -e "$path" ] || return 0
+    { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
+    path="${path}/${part}"
+  done
+  [ -e "$path" ] || return 0
+  { [ -r "$path" ] && [ -x "$path" ]; } || docker_data_eacces "$path"
+  [ ! -e "$DKIM_KEY_FILE" ] || [ -r "$DKIM_KEY_FILE" ] || docker_data_eacces "$DKIM_KEY_FILE"
+}
+
+require_docker_data_access
 
 PASS=0; WARN=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
@@ -79,7 +103,7 @@ elif [ -n "$MX" ]; then
   hint "set: ${DOMAIN}. MX 10 ${MAIL_HOST}."
 else
   bad "no MX record for ${DOMAIN}"
-  hint "create: ${DOMAIN}. MX 10 ${MAIL_HOST}. (run ./deploy/dns-records.sh)"
+  hint "create: ${DOMAIN}. MX 10 ${MAIL_HOST}. (run sudo ./deploy/dns-records.sh)"
 fi
 
 # ── 2. A record ─────────────────────────────────────────────────────────────
@@ -115,10 +139,10 @@ if echo "$DKIM" | grep -q 'v=DKIM1'; then
   ok "DKIM public key published"
 else
   bad "no DKIM record at ${DKIM_SELECTOR}._domainkey.${DOMAIN}"
-  if [ -f "docker-data/dms/config/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.txt" ]; then
+  if [ -f "$DKIM_KEY_FILE" ]; then
     hint "publish the key from ./deploy/dns-records.sh output (it's generated locally already)"
   else
-    hint "start the stack once (docker compose up -d), then run ./deploy/dns-records.sh"
+    hint "start the stack once (docker compose up -d), then run sudo ./deploy/dns-records.sh"
   fi
 fi
 
