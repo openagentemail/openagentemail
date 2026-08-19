@@ -66,9 +66,14 @@ the mailserver in `letsencrypt` mode before this succeeds:
 docker compose --profile letsencrypt-bootstrap up -d certbot-bootstrap
 docker compose logs -f certbot-bootstrap
 # Wait for “Successfully received certificate”, then confirm:
-docker compose --profile letsencrypt-bootstrap exec certbot-bootstrap \
-  ls -l /etc/letsencrypt/live/mail.example.com/{fullchain.pem,privkey.pem}
+docker compose --profile letsencrypt-bootstrap run --rm --no-deps \
+  --entrypoint ls certbot-bootstrap -- -l \
+  /etc/letsencrypt/live/mail.example.com/fullchain.pem \
+  /etc/letsencrypt/live/mail.example.com/privkey.pem
 ```
+
+This temporary container reads the shared certificate volume, so confirmation
+still works after the one-shot bootstrap has stopped.
 
 If first issuance fails, Certbot stops instead of retrying the ACME request in
 a tight loop. Correct the DNS/port-80/domain prerequisite, then explicitly run
