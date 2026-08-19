@@ -37,7 +37,7 @@ DKIM_KEY_FILE="docker-data/dms/config/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.t
 
 docker_data_eacces() {
   echo "ERROR: cannot read '$1' (EACCES / permission denied)." >&2
-  echo "请用 sudo 重跑：sudo ./deploy/doctor.sh" >&2
+  echo "Re-run with sudo: sudo ./deploy/doctor.sh" >&2
   exit 1
 }
 
@@ -103,7 +103,7 @@ elif [ -n "$MX" ]; then
   hint "set: ${DOMAIN}. MX 10 ${MAIL_HOST}."
 else
   bad "no MX record for ${DOMAIN}"
-  hint "create: ${DOMAIN}. MX 10 ${MAIL_HOST}. (run ./deploy/dns-records.sh)"
+  hint "create: ${DOMAIN}. MX 10 ${MAIL_HOST}. (run sudo ./deploy/dns-records.sh)"
 fi
 
 # ── 2. A record ─────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ else
   if [ -f "$DKIM_KEY_FILE" ]; then
     hint "publish the key from ./deploy/dns-records.sh output (it's generated locally already)"
   else
-    hint "start the stack once (docker compose up -d), then run ./deploy/dns-records.sh"
+    hint "start the stack once (docker compose up -d), then run sudo ./deploy/dns-records.sh"
   fi
 fi
 

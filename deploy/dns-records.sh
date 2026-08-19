@@ -36,7 +36,7 @@ DKIM_KEY_FILE="docker-data/dms/config/opendkim/keys/${DOMAIN}/mail.txt"
 
 docker_data_eacces() {
   echo "ERROR: cannot read '$1' (EACCES / permission denied)." >&2
-  echo "请用 sudo 重跑：sudo ./deploy/dns-records.sh" >&2
+  echo "Re-run with sudo: sudo ./deploy/dns-records.sh" >&2
   exit 1
 }
 
