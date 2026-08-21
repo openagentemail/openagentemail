@@ -39,7 +39,7 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A56 desktop overview has exactly one visible main');
     expect(source).toContain('A56 mobile list keeps #main-content as the only visible main');
     expect(source).toContain('A56 mobile detail keeps exactly one visible main');
-    expect(source).toContain('A56 identity inbox has exactly one visible main');
+    expect(source).toContain('A56 identity Home has exactly one visible main');
   });
 
   // A70：对比度必须向上解析有效合成底色
@@ -54,13 +54,13 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('ratio >= 3');
   });
 
-  // A51 / A52 / A54 / A55 / A58：落地 Inbox，再进 Overview 钻入/返回/skip link
-  test('overview landing, drill-in, back, and skip-link probes are present', () => {
-    expect(source).toContain('A51 inbox main is visible');
-    expect(source).toContain('A51 overview panel is hidden on landing');
-    expect(source).toContain('A51 data-scope is inbox');
-    expect(source).toContain('A51 session lands on the inbox panel');
-    expect(source).toContain('A52 session renewal lands on the inbox panel');
+  // A51 / A52 / A54 / A55 / A58：落地 Home，再钻入/返回/skip link
+  test('Home landing, drill-in, back, and skip-link probes are present', () => {
+    expect(source).toContain('A51 Home panel is visible');
+    expect(source).toContain('A51 Mail main is hidden on Home landing');
+    expect(source).toContain('A51 data-scope is Home');
+    expect(source).toContain('A51 session lands on the Home panel');
+    expect(source).toContain('A52 session renewal lands on the Home panel');
     expect(source).toContain('A54 active address follows the row');
     expect(source).toContain('A55 focus returns to the row button');
     expect(source).toContain('A55 a fresh snapshot (<15 s) is not refetched when going back');
@@ -69,14 +69,14 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A58 mobile detail skip link focuses the visible #main-content');
   });
 
-  // A53：identity 会话零 overview 请求
-  test('the identity session probe asserts zero overview requests', () => {
+  // A53：identity 会话零 overview 请求、只有 Home 壳
+  test('the identity session probe asserts zero overview requests and a data-free Home shell', () => {
     expect(source).toContain('preview-identity-token');
     expect(source).toContain('A53 an identity session never requests /ui/api/overview');
-    expect(source).toContain('A53 ← Overview is out of the tab order');
-    expect(source).toContain('A53 Overview global nav is hidden for identity sessions');
+    expect(source).toContain('A53 ← Home return is out of the tab order');
+    expect(source).toContain('A53 Home global nav is available to identity sessions');
+    expect(source).toContain('A53 identity Home does not render admin overview data');
     expect(source).toContain('[data-nav="overview"]');
-    expect(source).toContain('#nav-overview-item');
     expect(previewSource).toContain('preview-identity-token');
     expect(previewSource).toContain("kind: 'identity'");
   });
@@ -95,8 +95,8 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A62b the Retry button counts down instead of spinning');
     expect(source).toContain('A62b stale rows keep the previous numbers instead of falling back to 0');
     expect(source).toContain('A63 count columns read Unavailable, not 0');
-    expect(source).toContain('A64 the IN WINDOW card stays out of the DOM');
-    expect(source).toContain('A64 no create button is offered');
+    expect(source).toContain('A64 the removed IN WINDOW card stays out of the DOM');
+    expect(source).toContain('A64 the existing admin Create Identity control is preserved');
   });
 
   // A59 / A60：移动三级与 200 行 fixture
@@ -109,21 +109,16 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A60 exactly one sort button is pressed');
   });
 
-  // F2：侧栏地址与移动 selector 两条激活路径
-  test('both non-row entries into the inbox are exercised in a real browser', () => {
-    expect(source).toContain('F2 the sidebar address opens its own inbox');
-    expect(source).toContain('F2 the sidebar address switches the visible main to the inbox');
-    expect(source).toContain('F2 the mobile overview shows the address selector');
-    expect(source).toContain(
-      'F2 the selector lives outside the inbox main, so scope=overview cannot hide it',
-    );
-    expect(source).toContain('F2 the mobile selector enters the chosen inbox');
-    expect(source).toContain("new Event('change', { bubbles: true })");
+  // F2：地址控件只在 Mail 显示；Home 地址行是唯一的跨 scope 入口
+  test('Mail-only address controls and Home-to-Mail activation are exercised in a real browser', () => {
+    expect(source).toContain('F2 Home hides address and folder controls outside Mail');
+    expect(source).toContain('F2 mobile Home hides every Mail address control');
+    expect(source).toContain('Home 的实际地址行仍会明确进入 Mail。');
   });
 
   // F3：exact:false 的总计卡片
   test('the inexact fixture asserts the total cards render bounds', () => {
-    expect(source).toContain('F3 the IN WINDOW card shows a bound');
+    expect(source).toContain('F3 the obsolete IN WINDOW card is not rendered');
     expect(source).toContain('F3 a zero lower bound reads Unknown, never 0');
     expect(source).toContain('F3 the exact ADDRESSES card keeps its plain number');
     expect(source).toContain('F3 the disclosure now matches what the DOM actually shows');
@@ -131,10 +126,10 @@ describe('development browser acceptance harness', () => {
   });
 
   // F6：活动地址被删后的自愈迁移
-  test('the removed-identity probe drives the migration back to the overview', () => {
+  test('the removed-identity probe drives the migration back to Home', () => {
     expect(source).toContain('F6 the removal is announced');
     expect(source).toContain('F6 the stale active address is cleared');
-    expect(source).toContain('F6 the user lands back on the overview');
+    expect(source).toContain('F6 the user lands back on Home');
     expect(source).toContain("document.querySelector('#refresh-button').click()");
     expect(source).toContain('new MutationObserver(');
   });

@@ -76,6 +76,9 @@ export function registerUiAssets(app: Hono): void {
  * 路径与 API 前缀无交集，但后挂才能保证后续加宽匹配时不吞专用路由。
  */
 export function registerUiShell(app: Hono): void {
+  // B6 0 期：旧 Overview 书签只做永久兼容跳转，不再返回旧 shell。
+  app.get('/ui/overview', (c) => c.redirect('/ui', 301));
+  app.get('/ui/overview/', (c) => c.redirect('/ui', 301));
   for (const path of UI_SHELL_PATHS) {
     app.get(path, shell);
   }

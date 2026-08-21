@@ -94,13 +94,12 @@ describe('UI real-file manifest (#520-A)', () => {
     expect(Buffer.from(expected, 'utf8')).toEqual(Buffer.from(UI_CSS, 'utf8'));
   });
 
-  // #520-A 提取 PR 的硬契约：真文件迁移后产物字节与 origin/main 完全一致。
-  // sha256 = origin/main @ 49d8bc25 的产物指纹；有意改 UI 时（如 B6 重写）
-  // 须先跑 scripts/compare-ui-gold.ts 确认差异是有意的，再同步更新本指纹。
-  test('served bundle bytes are pinned to the origin/main gold', () => {
+  // B6 0 期的真文件基线。更新前必须以 compare-ui-gold.ts 确认差异有意，
+  // 从而避免把逻辑重新塞回 TS 字符串或无意修改已抽出的 UI 资源。
+  test('served bundle bytes are pinned to the B6 real-file baseline', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
-    expect(sha256(UI_JS)).toBe('f2571bde4a827b847209fc420cf6bdb99ed046e028c1106054857bc3ffaf3220');
-    expect(sha256(UI_CSS)).toBe('7660764698cbc2b949745852460b994f98ad66256884716a9c03665c7b2c0e01');
+    expect(sha256(UI_JS)).toBe('52399bd44c56348b44c8813dcdbbf3a8a3d1508ea1b66fbc555346b5bd0f737b');
+    expect(sha256(UI_CSS)).toBe('d6b07b230029b770519425bfbfc72f3be57a62b5d72881c796856adc967e6478');
   });
 });

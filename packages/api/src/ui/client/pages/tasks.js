@@ -62,6 +62,7 @@
 
   function taskStateLabel(task) {
     if (taskIsClosed(task)) return 'Closed';
+    if (task && task.state === 'input-required') return 'Waiting for you';
     return task && task.state ? task.state : '—';
   }
 
@@ -419,7 +420,7 @@
       replyTitle.textContent = 'Reply';
       var replyHelp = document.createElement('p');
       replyHelp.className = 'muted';
-      replyHelp.textContent = 'This writes a working event on the mail thread.';
+      replyHelp.textContent = 'Write a reply. This goes back to the agent as a working update.';
       var replyBody = document.createElement('textarea');
       replyBody.rows = 4;
       replyBody.required = true;
@@ -725,4 +726,3 @@
     }
     loadTasks().then(after);
   }
-

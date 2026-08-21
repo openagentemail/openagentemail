@@ -888,6 +888,6 @@ describe('Dashboard 授权管理吊销', () => {
       headers: { cookie },
     });
     expect(clients.status).toBe(200);
-    expect(await clients.text()).toContain('Authorized Clients');
+    expect(await clients.text()).toContain('Connected apps');
   });
 });

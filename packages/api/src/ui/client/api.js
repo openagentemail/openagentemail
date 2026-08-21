@@ -103,12 +103,10 @@
 
   function configureSession() {
     inboxView.dataset.session = isAdmin() ? 'admin' : 'identity';
-    /* identity 会话下 Overview 相关节点不可见，因此也不在 tab 序里。 */
+    /* 地址返回按钮只适用于管理员的现有 Home 数据面。 */
     backToOverview.hidden = !isAdmin();
     createIdentityButton.hidden = !isAdmin();
     configureIdentitiesCreate.hidden = !isAdmin();
-    /* Overview 是 admin 专属入口：identity 会话隐藏全局 nav，避免点了再 fallback。 */
-    navOverviewItem.hidden = !isAdmin();
   }
 
   async function apiJson(path, options) {
@@ -222,7 +220,7 @@
           announce(address + ' deleted.');
           refreshConfigureSurfaces();
         } else {
-          enterOverview({ announce: address + ' deleted. Back to overview.' });
+          enterOverview({ announce: address + ' deleted. Back to Home.' });
         }
         loadOverviewCycle({ refresh: false });
       } catch (error) {
@@ -477,5 +475,3 @@
     placeholder.append(title, purpose, btn);
     detailContent.append(placeholder);
   }
-
-

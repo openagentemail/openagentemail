@@ -285,9 +285,11 @@
         : 'No notifications in the last 12 hours. Refresh after a push is sent.';
       return;
     }
+    var cacheExplanation =
+      'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.';
     notifyStateNode.textContent = truncated
-      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications. Transport cache (ntfy 12h), not the 30-day log.'
-      : 'Transport cache (ntfy 12h), not the 30-day log.';
+      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications. ' + cacheExplanation
+      : cacheExplanation;
     visible.forEach(function (row) {
       var tier = tierFromPriority(row.priority);
       var item = document.createElement('article');
@@ -356,8 +358,8 @@
   function renderNotifyMeta() {
     if (notifySubtitle) {
       notifySubtitle.textContent = state.notifySource === 'cache'
-        ? 'Transport cache (ntfy 12h fallback) · not a 30-day audit log'
-        : '30-day delivery log · ntfy is transport only';
+        ? 'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.'
+        : 'What we tried to send to your phone and computers';
     }
     renderNotifySummaryBar();
     renderNotifyDiagnostics();
@@ -739,4 +741,3 @@
     ) return;
     loadNotificationLog();
   }
-

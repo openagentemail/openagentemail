@@ -16,7 +16,7 @@ const {
   uiSessionBodyLimit,
 } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
-const { registerUiAssets } = await import('../src/routes/ui-assets.ts');
+const { registerUiAssets, registerUiShell } = await import('../src/routes/ui-assets.ts');
 const { createUiFrameRoutes } = await import('../src/routes/ui-frame.ts');
 
 // PREVIEW_OVERVIEW=ready|stale|loading|unavailable|empty 切换 Overview 的五种状态；
@@ -343,6 +343,7 @@ app.use('/ui/api/session', requireUiOrigin);
 app.route('/ui/api/session', createUiSessionRoutes(sessions));
 app.route('/ui/api', createUiApiRoutes(sessions, dependencies));
 app.route('/ui/frame', createUiFrameRoutes(sessions, dependencies));
+registerUiShell(app);
 
 const port = Number(process.env.PREVIEW_PORT ?? 4310);
 Bun.serve({ port, fetch: app.fetch });

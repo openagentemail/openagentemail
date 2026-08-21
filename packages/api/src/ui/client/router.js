@@ -11,8 +11,8 @@
   function parseLocationRoute() {
     var path = window.location.pathname || '/ui';
     if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
-    if (path === '/ui' || path === '/ui/inbox') return { scope: 'inbox', taskId: '', address: '', folder: '' };
-    if (path === '/ui/overview') return { scope: 'overview', taskId: '', address: '', folder: '' };
+    if (path === '/ui') return { scope: 'overview', taskId: '', address: '', folder: '' };
+    if (path === '/ui/inbox') return { scope: 'inbox', taskId: '', address: '', folder: '' };
     if (path === '/ui/notifications') return { scope: 'notifications', taskId: '', address: '', folder: '' };
     if (path === '/ui/tasks') return { scope: 'tasks', taskId: '', address: '', folder: '' };
     if (path.indexOf('/ui/tasks/') === 0) {
@@ -47,7 +47,7 @@
 
   function pathForScope(scope, extras) {
     var extra = extras || {};
-    if (scope === 'overview') return '/ui/overview';
+    if (scope === 'overview') return '/ui';
     if (scope === 'notifications') return '/ui/notifications';
     if (scope === 'tasks') {
       return extra.taskId ? '/ui/tasks/' + encodeURIComponent(extra.taskId) : '/ui/tasks';
@@ -84,10 +84,6 @@
       current = current.slice(0, -1);
     }
     var hist = inboxHistoryState();
-    if (current === '/ui' && path === '/ui/inbox') {
-      history.replaceState(hist, '', path);
-      return;
-    }
     if (current === path) {
       if (replace) history.replaceState(hist, '', path);
       return;
@@ -101,10 +97,6 @@
     closeNavDrawer();
     closeAllModals();
     if (route.scope === 'overview') {
-      if (!isAdmin()) {
-        applyScope('inbox', { replaceUrl: true, announce: opts.announce || 'Overview is admin-only. Showing inbox.' });
-        return;
-      }
       enterOverview({ announce: opts.announce, skipUrl: true });
       syncUrlFromScope(true);
       return;
@@ -211,16 +203,16 @@
     var planActive = next === 'plan';
     var SCOPE_META = {
       overview: {
-        title: 'Overview',
-        docTitle: 'OpenAgent Overview',
-        skip: 'Skip to overview',
+        title: 'Home',
+        docTitle: 'OpenAgent Home',
+        skip: 'Skip to Home',
         href: '#overview-panel',
         mobileView: 'overview'
       },
       notifications: {
-        title: 'Notifications',
-        docTitle: 'OpenAgent Notifications',
-        skip: 'Skip to notifications',
+        title: 'Alerts',
+        docTitle: 'OpenAgent Alerts',
+        skip: 'Skip to Alerts',
         href: '#notify-panel',
         mobileView: 'notifications'
       },
@@ -246,9 +238,9 @@
         mobileView: ''
       },
       'configure-clients': {
-        title: 'Clients',
-        docTitle: 'OpenAgent Clients',
-        skip: 'Skip to clients',
+        title: 'Connected apps',
+        docTitle: 'OpenAgent Connected apps',
+        skip: 'Skip to Connected apps',
         href: '#configure-clients-panel',
         mobileView: ''
       },
@@ -260,16 +252,16 @@
         mobileView: ''
       },
       plan: {
-        title: 'Plan & Usage',
-        docTitle: 'OpenAgent Plan & Usage',
-        skip: 'Skip to plan',
+        title: 'Plan',
+        docTitle: 'OpenAgent Plan',
+        skip: 'Skip to Plan',
         href: '#plan-panel',
         mobileView: ''
       },
       inbox: {
-        title: 'Inbox',
-        docTitle: 'OpenAgent Inbox',
-        skip: 'Skip to inbox',
+        title: 'Mail',
+        docTitle: 'OpenAgent Mail',
+        skip: 'Skip to Mail',
         href: '#main-content',
         mobileView: ''
       }
@@ -286,6 +278,8 @@
     configureClientsPanel.hidden = !cfgClientsActive;
     configureDomainsPanel.hidden = !cfgDomainsActive;
     planPanel.hidden = !planActive;
+    identityPanel.hidden = !inboxActive;
+    mobileIdentityContainer.hidden = !inboxActive;
     viewTitle.textContent = meta.title;
     document.title = meta.docTitle;
     skipLink.textContent = meta.skip;
@@ -296,4 +290,3 @@
     if (!opts.skipUrl) syncUrlFromScope(opts.replaceUrl);
     if (opts.announce) announce(opts.announce);
   }
-

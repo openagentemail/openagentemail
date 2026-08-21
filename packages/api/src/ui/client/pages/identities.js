@@ -52,7 +52,7 @@
       var token = document.createElement('p');
       token.className = 'identity-token-slot';
       /* 单 slot 诚实展示：只报 Set/Missing，永不回显旧 token 明文。 */
-      token.textContent = identity.hasToken ? 'Token slot: Set' : 'Token slot: Missing';
+      token.textContent = identity.hasToken ? 'Key: set' : 'Key: missing';
       var tier = document.createElement('p');
       tier.className = 'muted';
       tier.textContent = 'Push: ' + pushTierProjection(currentPushTier(identity));
@@ -86,4 +86,3 @@
     renderConfigureIdentities();
     configureIdentitiesPanel.focus({ preventScroll: true });
   }
-

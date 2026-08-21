@@ -104,18 +104,6 @@
     card('Addresses', {
       text: totals ? formatNumber(totals.addresses) : String(state.identities.length)
     });
-    /* skipped:true 时窗口派生量未被观测，整张卡片不进 DOM。 */
-    if (!scan || !scan.skipped) {
-      var windowed = fallback;
-      if (totals && scan && scan.scanned !== null) {
-        windowed = boundParts(totals.matchedInWindow, exact);
-        /* Unknown 是"没数过"，再除以窗口大小没有意义；有下界时才写 N / 窗口。 */
-        if (windowed.text !== 'Unknown') {
-          windowed.text += ' / ' + formatNumber(scan.scanned);
-        }
-      }
-      card('In window', windowed);
-    }
     card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);
     card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);
     /* 通知数字卡与 Notifications 今日小结同一 /ui/api/notify/summary 源。 */
@@ -349,6 +337,26 @@
   }
 
   function renderOverview() {
+    var showData = isAdmin();
+    overviewSubtitle.hidden = !showData;
+    overviewOverlap.hidden = !showData;
+    overviewUpdated.hidden = !showData;
+    overviewRefresh.hidden = !showData;
+    overviewStats.hidden = !showData;
+    overviewDisclosure.hidden = !showData;
+    overviewControls.hidden = !showData;
+    overviewSort.hidden = !showData;
+    overviewStateNode.hidden = !showData;
+    overviewHeader.hidden = !showData;
+    overviewRows.hidden = !showData;
+    if (!showData) {
+      overviewNotice.hidden = true;
+      overviewNotice.textContent = '';
+      overviewStats.replaceChildren();
+      overviewSort.replaceChildren();
+      overviewRows.replaceChildren();
+      return;
+    }
     renderOverviewMeta();
     renderOverviewStats();
     renderSortControls();
@@ -399,9 +407,9 @@
   function readyAnnouncement(payload) {
     var totals = payload.totals;
     if (payload.scan && payload.scan.skipped) {
-      return 'Overview loaded: 0 addresses.';
+      return 'Home loaded: 0 addresses.';
     }
-    return 'Overview loaded: ' + totals.addresses + ' addresses, ' +
+    return 'Home loaded: ' + totals.addresses + ' addresses, ' +
       totals.matchedInWindow + ' messages in the newest ' + payload.scan.scanned +
       ', ' + totals.unseenInWindow + ' unseen.';
   }
@@ -422,7 +430,7 @@
         return;
       }
       scheduleOverviewPoll(payload.retryAfterMs);
-      announce('Overview counts are still loading.');
+      announce('Home counts are still loading.');
       return;
     }
 
@@ -457,7 +465,7 @@
     }
     state.overviewStatus = 'unavailable';
     state.overviewMessage = 'Message counts are unavailable right now.';
-    announce('Overview counts are unavailable. Addresses are listed without counts.');
+    announce('Home counts are unavailable. Addresses are listed without counts.');
   }
 
   function handleIdentitiesError(error) {
@@ -469,7 +477,7 @@
   }
 
   /* 新一轮 /identities 里活动地址消失了（被删/被 retention 清掉）：不能把用户留在
-     一个失效的 inbox 里反复报"邮件加载失败"，清掉活动状态并回 Overview + 播报。 */
+     一个失效的 inbox 里反复报"邮件加载失败"，清掉活动状态并回 Home + 播报。 */
   function reconcileActiveAddress() {
     if (!state.activeAddress) return;
     var survivors = state.identities.filter(function (identity) {
@@ -483,7 +491,7 @@
     clearDetail();
     renderMessages();
     if (state.scope !== 'inbox') return;
-    enterOverview({ announce: lost + ' is no longer available. Back to overview.' });
+    enterOverview({ announce: lost + ' is no longer available. Back to Home.' });
   }
 
   /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
@@ -606,6 +614,7 @@
       ? Math.max(0, Date.now() - Date.parse(state.overview.generatedAt))
       : Infinity;
     if (state.overviewStatus === 'ready' && age < FRESH_MS) return;
+    if (!isAdmin()) return;
     loadOverviewCycle({ refresh: false });
   }
 
@@ -620,4 +629,3 @@
     messagesTitle.focus();
     selectIdentity(address);
   }
-

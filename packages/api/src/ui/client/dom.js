@@ -14,6 +14,8 @@
   var identitySearch = byId('identity-search');
   var identityCount = byId('identity-count');
   var folderList = byId('folder-list');
+  var identityPanel = byId('identity-panel');
+  var mobileIdentityContainer = byId('mobile-identity');
   var mobileIdentity = byId('mobile-identity-select');
   var activeAddress = byId('active-address');
   var messageList = byId('message-list');
@@ -27,6 +29,8 @@
   var mainContent = byId('main-content');
   var overviewPanel = byId('overview-panel');
   var overviewStats = byId('overview-stats');
+  var overviewSubtitle = byId('overview-subtitle');
+  var overviewOverlap = byId('overview-overlap');
   var overviewRows = byId('overview-rows');
   var overviewSearch = byId('overview-search');
   var overviewSort = byId('overview-sort');
@@ -36,6 +40,8 @@
   var overviewDisclosure = byId('overview-disclosure');
   var overviewShown = byId('overview-shown');
   var overviewRefresh = byId('overview-refresh');
+  var overviewControls = byId('overview-controls');
+  var overviewHeader = byId('overview-header');
   var createIdentityButton = byId('create-identity-button');
   var backToOverview = byId('back-to-overview');
   var skipLink = byId('skip-link');
@@ -73,7 +79,6 @@
   var tasksDetailContent = byId('tasks-detail-content');
   var tasksMobileBack = byId('tasks-mobile-back');
   var appNav = byId('app-nav');
-  var navOverviewItem = byId('nav-overview-item');
   var navToggle = byId('nav-toggle');
   var navBackdrop = byId('nav-backdrop');
   var configureIdentitiesPanel = byId('configure-identities-panel');
@@ -131,4 +136,3 @@
   var createDomain = byId('create-domain');
   var createModalCancel = byId('create-modal-cancel');
   var createModalSubmit = byId('create-modal-submit');
-

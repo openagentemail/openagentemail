@@ -645,19 +645,7 @@
     announce(sortedModels().length + ' addresses match your filter.');
   });
   mobileIdentity.addEventListener('change', function () {
-    if (mobileIdentity.value === '') {
-      enterOverview({ announce: 'Back to overview' });
-      return;
-    }
-    if (mobileIdentity.value === '__notifications__') {
-      enterNotifications({ announce: 'Opened notifications' });
-      return;
-    }
-    if (mobileIdentity.value === '__tasks__') {
-      enterTasks({ announce: 'Opened tasks' });
-      return;
-    }
-    activateAddress(mobileIdentity.value);
+    if (mobileIdentity.value) activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
     /* identity 会话只有一个地址、也没有 Overview 可回，所以只有 admin 需要这一步。 */
@@ -751,7 +739,7 @@
   });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
-    enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });
+    enterOverview({ returnTo: state.returnAddress, announce: 'Back to Home' });
   });
   function handleInboxMobileBack() {
     history.back();
