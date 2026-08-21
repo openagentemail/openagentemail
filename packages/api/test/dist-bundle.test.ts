@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 process.env.DOMAIN = 'test.example';
@@ -22,7 +22,7 @@ const sha256 = (s: string) => new Bun.CryptoHasher('sha256').update(Buffer.from(
 const pkgDir = join(import.meta.dir, '..');
 const dist = join(pkgDir, 'dist');
 
-async function waitForServer(port: number, deadlineMs: number): Promise<void> {
+async function waitForServer(port: number, deadlineMs: number, getBootLog: () => string): Promise<void> {
   const started = Date.now();
   for (;;) {
     try {
@@ -31,7 +31,7 @@ async function waitForServer(port: number, deadlineMs: number): Promise<void> {
     } catch {
       /* not up yet */
     }
-    if (Date.now() - started > deadlineMs) throw new Error('dist server did not come up');
+    if (Date.now() - started > deadlineMs) throw new Error(`dist server did not come up; boot log:\n${getBootLog()}`);
     await Bun.sleep(200);
   }
 }
@@ -39,7 +39,6 @@ async function waitForServer(port: number, deadlineMs: number): Promise<void> {
 describe('dist bundle is self-contained (#520-A)', () => {
   test('built dist/main.js serves byte-gold /ui/app.js, /ui/styles.css and fonts', async () => {
     rmSync(dist, { recursive: true, force: true });
-    mkdirSync(dist, { recursive: false });
 
     const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
     if (build.exitCode !== 0) throw new Error(`bun run build failed:\n${build.stderr}`);
@@ -73,7 +72,7 @@ describe('dist bundle is self-contained (#520-A)', () => {
     child.stderr.on('data', onOut);
 
     try {
-      await waitForServer(Number(PORT), 20000);
+      await waitForServer(Number(PORT), 20000, () => bootLog);
 
       const js = await fetch(`http://127.0.0.1:${PORT}/ui/app.js`);
       expect(js.status).toBe(200);
@@ -89,7 +88,6 @@ describe('dist bundle is self-contained (#520-A)', () => {
       child.kill('SIGKILL');
       await new Promise((resolve) => child.once('exit', resolve));
       rmSync(join(pkgDir, 'test', '.tmp-dist-data'), { recursive: true, force: true });
-      if (!child.killed) throw new Error('dist server failed to stop: ' + bootLog);
     }
   }, 60000);
 });
