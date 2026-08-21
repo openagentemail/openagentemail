@@ -1,2 +1,8 @@
-/** Domains 空态 + Plan & Usage（自托管诚实说明）。 */
-export const PLAN_PAGE_JS = "  function enterConfigureDomains(options) {\n    var opts = options || {};\n    cancelOverview();\n    cancelNotifyLoad();\n    cancelTasksLoad();\n    applyScope('configure-domains', { announce: opts.announce });\n    renderEmptyState(configureDomainsState, {\n      title: 'Custom domains are on the roadmap',\n      purpose: 'This instance keeps using the configured primary domain. Multi-suffix routing and certificates are not available yet, so this page has no controls to click.'\n    });\n    configureDomainsPanel.focus({ preventScroll: true });\n  }\n\n  function enterPlan(options) {\n    var opts = options || {};\n    cancelOverview();\n    cancelNotifyLoad();\n    cancelTasksLoad();\n    applyScope('plan', { announce: opts.announce });\n    renderEmptyState(planState, {\n      title: 'Self-hosted instance',\n      purpose: 'This dashboard does not bill, quota, or upgrade a self-hosted deployment. Hosted plan meters will appear here only when a real control-plane contract exists.',\n      docsHref: 'https://openagent.email/docs/reference/api/',\n      docsLabel: 'Read the self-hosted API docs'\n    });\n    planPanel.focus({ preventScroll: true });\n  }\n\n";
+/**
+ * Domains 空态 + Plan & Usage（自托管诚实说明）。
+ * 内容维护在相邻真文件 plan.js（ESLint 管辖）；本模块仅启动时读入，
+ * 拼接产物字节由 /ui/app.js 金标测试钉死。
+ */
+import { readFileSync } from 'node:fs';
+
+export const PLAN_PAGE_JS = readFileSync(new URL('./plan.js', import.meta.url), 'utf8');

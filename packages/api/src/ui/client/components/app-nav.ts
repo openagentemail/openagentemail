@@ -1,2 +1,8 @@
-/** 全局导航抽屉与当前页高亮。 */
-export const APP_NAV_JS = "  /* \u5168\u5c40\u5bfc\u822a\uff1a\u4ece router \u8fc1\u5165\uff1bOverview \u9879\u4ecd\u7531 configureSession \u6309 isAdmin \u663e\u9690\u3002 */\n  function closeNavDrawer() {\n    var wasOpen = inboxView.getAttribute('data-nav-open') === 'true';\n    inboxView.removeAttribute('data-nav-open');\n    navToggle.setAttribute('aria-expanded', 'false');\n    navBackdrop.hidden = true;\n    if (wasOpen) navToggle.focus();\n  }\n\n  function openNavDrawer() {\n    inboxView.setAttribute('data-nav-open', 'true');\n    navToggle.setAttribute('aria-expanded', 'true');\n    navBackdrop.hidden = false;\n    var current = appNav.querySelector('[aria-current=\"page\"]');\n    if (current) current.focus();\n  }\n\n  function renderAppNav() {\n    var links = appNav.querySelectorAll('[data-nav]');\n    Array.prototype.forEach.call(links, function (link) {\n      var key = link.getAttribute('data-nav');\n      if (key === state.scope) link.setAttribute('aria-current', 'page');\n      else link.removeAttribute('aria-current');\n    });\n  }\n\n  document.addEventListener('keydown', function (event) {\n    if (event.key !== 'Escape') return;\n    if (!tokenModal.hidden || !confirmModal.hidden || !createModal.hidden) return;\n    if (inboxView.getAttribute('data-nav-open') !== 'true') return;\n    event.preventDefault();\n    closeNavDrawer();\n  });\n\n";
+/**
+ * 全局导航抽屉与当前页高亮。
+ * 内容维护在相邻真文件 app-nav.js（ESLint 管辖）；本模块仅启动时读入，
+ * 拼接产物字节由 /ui/app.js 金标测试钉死。
+ */
+import { readFileSync } from 'node:fs';
+
+export const APP_NAV_JS = readFileSync(new URL('./app-nav.js', import.meta.url), 'utf8');
