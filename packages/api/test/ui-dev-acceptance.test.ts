@@ -154,6 +154,8 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('A66 topbar shows OpenAgent.email exactly once');
     expect(source).toContain("fetch('/ui/favicon.svg')");
     expect(source).toContain('securitypolicyviolation');
+    expect(source).toContain('async function findInsecureBase()');
+    expect(source).toContain('No reachable non-loopback IPv4 address');
     expect(source).toContain('A67 the insecure origin disables token entry');
     expect(source).toContain('A68 a successful copy enters .copied');
     expect(source).toContain('A68 .copied clears after ~1.2 s');

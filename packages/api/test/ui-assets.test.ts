@@ -325,6 +325,7 @@ describe('UI static asset contract', () => {
       const legacy = await app.request(path);
       expect(legacy.status).toBe(301);
       expect(legacy.headers.get('location')).toBe('/ui');
+      expect(legacy.headers.get('cache-control')).toBe('no-store');
     }
 
     // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404（含尾斜杠变体）
@@ -471,10 +472,11 @@ describe('UI static asset contract', () => {
       expect(route.unknown).toBe(true);
       expect(route.scope).toBe('inbox');
     }
-    // Home 是唯一的 Overview 数据壳入口；旧书签由服务端 301，而非客户端认领。
+    // Home 是唯一的 Overview 数据壳入口；旧 History API 条目也会在客户端归一化。
     expect(wrap('/ui').scope).toBe('overview');
     expect(wrap('/ui').unknown).toBeUndefined();
-    expect(wrap('/ui/overview').unknown).toBe(true);
+    expect(wrap('/ui/overview').scope).toBe('overview');
+    expect(wrap('/ui/overview').unknown).toBeUndefined();
     expect(wrap('/ui/inbox').unknown).toBeUndefined();
   });
 
@@ -986,13 +988,19 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Urgent today'");
     expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
 
-    // ADR #26：所有 session（含 admin）默认落地 Inbox；深链由 applyRoute 恢复
+    // B6 0 期：Home/非 Mail 深链必须在 Mail 初载前落面，慢邮箱不能挡住首屏。
     const startSession = UI_JS.slice(
       UI_JS.indexOf('async function startSession('),
       UI_JS.indexOf("loginForm.addEventListener('submit'"),
     );
+    const route = startSession.indexOf('var route = parseLocationRoute();');
+    const firstLoad = startSession.indexOf('await loadInbox();');
+    expect(route).toBeGreaterThan(-1);
+    expect(firstLoad).toBeGreaterThan(route);
+    expect(startSession).toContain("if (route.scope !== 'inbox') {");
+    expect(startSession).toContain('await applyRoute(route, { replaceUrl: true, announce: \'\', seedMobileStack: true });');
     expect(startSession).toContain('await loadInbox()');
-    expect(startSession).toContain('await applyRoute(parseLocationRoute()');
+    expect(startSession).toContain('await applyRoute(route, { replaceUrl: true, announce: \'\', seedMobileStack: true });');
     expect(startSession).not.toContain('focusOverviewPanel();');
     expect(UI_JS).toContain('function applyRoute(');
     expect(UI_JS).toContain('function parseLocationRoute(');

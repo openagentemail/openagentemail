@@ -12,6 +12,8 @@
     var path = window.location.pathname || '/ui';
     if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
     if (path === '/ui') return { scope: 'overview', taskId: '', address: '', folder: '' };
+    // 已载入 shell 的旧 History API 条目不经过服务端 301，也须归一化为 Home。
+    if (path === '/ui/overview') return { scope: 'overview', taskId: '', address: '', folder: '' };
     if (path === '/ui/inbox') return { scope: 'inbox', taskId: '', address: '', folder: '' };
     if (path === '/ui/notifications') return { scope: 'notifications', taskId: '', address: '', folder: '' };
     if (path === '/ui/tasks') return { scope: 'tasks', taskId: '', address: '', folder: '' };

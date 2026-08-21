@@ -580,9 +580,15 @@
     byId('session-label').textContent = state.me.kind === 'admin'
       ? 'Admin session'
       : state.me.address;
-    /* ADR #26：所有 session（含 admin）默认落地 Inbox；深链由路径恢复。 */
+    /* Home/其它非 Mail 深链必须先落面：不能被首个邮箱的消息加载挡住。 */
+    var route = parseLocationRoute();
+    if (route.scope !== 'inbox') {
+      await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
+      await loadInbox();
+      return;
+    }
     await loadInbox();
-    await applyRoute(parseLocationRoute(), { replaceUrl: true, announce: '', seedMobileStack: true });
+    await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
   }
 
   loginForm.addEventListener('submit', async function (event) {

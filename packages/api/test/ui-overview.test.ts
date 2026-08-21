@@ -532,6 +532,7 @@ describe('Overview 端点契约', () => {
       const response = await full.request(path);
       expect(response.status).toBe(301);
       expect(response.headers.get('location')).toBe('/ui');
+      expect(response.headers.get('cache-control')).toBe('no-store');
     }
     expect(full.routes.some((route) => route.path.startsWith('/v1') && route.path.includes('overview'))).toBe(
       false,

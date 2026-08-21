@@ -13,12 +13,27 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const base = process.env.PREVIEW_BASE ?? 'http://127.0.0.1:4310';
-const localIpv4 = Object.values(networkInterfaces())
+const localIpv4s = Object.values(networkInterfaces())
   .flat()
-  .find((entry) => entry?.family === 'IPv4' && !entry.internal)?.address;
-// 非 loopback host 才能验证 HTTP 的不安全上下文；仍访问本机预览服务。
-if (!localIpv4) throw new Error('No non-loopback IPv4 address is available for the insecure-context probe');
-const insecureBase = `http://${localIpv4}:${new URL(base).port}`;
+  .filter((entry) => entry?.family === 'IPv4' && !entry.internal)
+  .map((entry) => entry.address);
+const previewPort = new URL(base).port || '80';
+
+// 非 loopback host 才能验证 HTTP 的不安全上下文。多网卡时只用实际连得上本机预览的地址。
+async function findInsecureBase() {
+  for (const address of localIpv4s) {
+    const candidate = `http://${address}:${previewPort}`;
+    try {
+      const response = await fetch(`${candidate}/ui`, { signal: AbortSignal.timeout(2000) });
+      if (response.ok) return candidate;
+    } catch (_error) {
+      // 尝试下一个本机地址。
+    }
+  }
+  throw new Error('No reachable non-loopback IPv4 address is available for the insecure-context probe');
+}
+
+const insecureBase = await findInsecureBase();
 const debugPort = Number(process.env.CHROME_DEBUG_PORT ?? 9334);
 // 慢用例（15 次轮询放弃、20 s 冷却窗口）默认跑；PROBE_SLOW=0 可跳过。
 const runSlow = process.env.PROBE_SLOW !== '0';

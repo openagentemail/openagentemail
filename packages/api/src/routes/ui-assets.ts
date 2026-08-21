@@ -35,6 +35,12 @@ function shell(c: Context) {
   return c.body(UI_HTML);
 }
 
+function legacyOverviewRedirect(c: Context) {
+  // 保留卡片要求的 301，同时禁止浏览器把兼容跳转长期存储为不可撤销的本地路由规则。
+  c.header('Cache-Control', 'no-store');
+  return c.redirect('/ui', 301);
+}
+
 /** 静态资产：js/css/fonts/favicon。不含 shell 深链（防注册顺序吞路由）。 */
 export function registerUiAssets(app: Hono): void {
   app.get('/ui/app.js', (c) => {
@@ -77,8 +83,8 @@ export function registerUiAssets(app: Hono): void {
  */
 export function registerUiShell(app: Hono): void {
   // B6 0 期：旧 Overview 书签只做永久兼容跳转，不再返回旧 shell。
-  app.get('/ui/overview', (c) => c.redirect('/ui', 301));
-  app.get('/ui/overview/', (c) => c.redirect('/ui', 301));
+  app.get('/ui/overview', legacyOverviewRedirect);
+  app.get('/ui/overview/', legacyOverviewRedirect);
   for (const path of UI_SHELL_PATHS) {
     app.get(path, shell);
   }
