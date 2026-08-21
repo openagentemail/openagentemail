@@ -6,6 +6,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -36,6 +37,19 @@ async function waitForServer(port: number, deadlineMs: number, getBootLog: () =>
   }
 }
 
+async function freePort(): Promise<number> {
+  // 探测一个当下空闲的端口（绑定后立即释放，交给 dist 进程使用）；
+  // 免并行 CI 下硬编码端口碰撞。
+  for (let candidate = 24_000 + Math.floor(Math.random() * 20_000); ; candidate++) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const probe = createServer();
+      probe.once('error', () => resolve(false));
+      probe.listen(candidate, '127.0.0.1', () => probe.close(() => resolve(true)));
+    });
+    if (ok) return candidate;
+  }
+}
+
 describe('dist bundle is self-contained (#520-A)', () => {
   test('built dist/main.js serves byte-gold /ui/app.js, /ui/styles.css and fonts', async () => {
     rmSync(dist, { recursive: true, force: true });
@@ -53,7 +67,7 @@ describe('dist bundle is self-contained (#520-A)', () => {
       ...readdirSync(join(pkgDir, 'src/ui/fonts')),
     ].sort());
 
-    const PORT = '39321';
+    const PORT = String(await freePort());
     const child = spawn('bun', ['dist/main.js'], {
       cwd: pkgDir,
       env: {

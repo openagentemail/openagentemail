@@ -12,8 +12,14 @@ import { existsSync, readFileSync } from 'node:fs';
  * 先试相邻布局，不存在再回落 ui/<name>；两处都缺才抛 ENOENT（与原先
  * 单布局行为一致：缺文件=启动即报错，不半死不活）。
  */
+
+/** 布局探测：先试相对模块的相邻路径，不存在再回落扁平 <moduleDir>/ui/<flatName>。 */
+export function resolveUiAssetUrl(moduleUrl: string, siblingPath: string, flatName: string): URL {
+  const beside = new URL(siblingPath, moduleUrl);
+  if (existsSync(beside)) return beside;
+  return new URL(`./ui/${flatName}`, moduleUrl);
+}
+
 export function readUiSibling(moduleUrl: string, fileName: string): string {
-  const beside = new URL(`./${fileName}`, moduleUrl);
-  if (existsSync(beside)) return readFileSync(beside, 'utf8');
-  return readFileSync(new URL(`./ui/${fileName}`, moduleUrl), 'utf8');
+  return readFileSync(resolveUiAssetUrl(moduleUrl, `./${fileName}`, fileName), 'utf8');
 }
