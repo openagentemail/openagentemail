@@ -3,6 +3,6 @@
  * 内容维护在相邻真文件 api.js（ESLint 管辖）；本模块仅启动时读入，
  * 拼接产物字节由 /ui/app.js 金标测试钉死。
  */
-import { readFileSync } from 'node:fs';
+import { readUiSibling } from '../load-ui-asset.ts';
 
-export const API_JS = readFileSync(new URL('./api.js', import.meta.url), 'utf8');
+export const API_JS = readUiSibling(import.meta.url, 'api.js');

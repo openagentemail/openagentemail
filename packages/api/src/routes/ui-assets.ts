@@ -1,15 +1,22 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
 import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
 
 // Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
+// 双布局：源码树相邻（../ui/fonts/）；dist 打平后 dist/ui/<name>（与 UI 真文件同目录）。
+function readUiFont(name: string): Buffer {
+  const beside = new URL(`../ui/fonts/${name}`, import.meta.url);
+  if (existsSync(beside)) return readFileSync(beside);
+  return readFileSync(new URL(`./ui/${name}`, import.meta.url));
+}
+
 const UI_FONTS: Record<string, Uint8Array> = {
-  'Satoshi-Regular.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Regular.woff2', import.meta.url)),
-  'Satoshi-Medium.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Medium.woff2', import.meta.url)),
-  'Satoshi-Bold.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Bold.woff2', import.meta.url)),
-  'Satoshi-Black.woff2': readFileSync(new URL('../ui/fonts/Satoshi-Black.woff2', import.meta.url)),
+  'Satoshi-Regular.woff2': readUiFont('Satoshi-Regular.woff2'),
+  'Satoshi-Medium.woff2': readUiFont('Satoshi-Medium.woff2'),
+  'Satoshi-Bold.woff2': readUiFont('Satoshi-Bold.woff2'),
+  'Satoshi-Black.woff2': readUiFont('Satoshi-Black.woff2'),
 };
 
 /** ADR #26：app shell 覆盖的真实 /ui/* 子路径（须在 API/assets/frame/OAuth 之后注册）。 */
