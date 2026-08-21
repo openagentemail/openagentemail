@@ -18,6 +18,11 @@ let ref = 'origin/main';
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--ref' && args[i + 1]) ref = args[i + 1];
 }
+// ref 会传给 git rev-parse / worktree add：只放行"分支名点线"或完整/短 SHA，
+// 拒绝以 - 开头的值被 git 当选项解析（ZCode P2 建议）。
+if (!/^[\w][\w./-]*$/.test(ref) || ref.startsWith('-')) {
+  throw new Error(`invalid --ref value: ${ref}`);
+}
 
 function sh(cwd: string, cmd: string[]): string {
   const r = spawnSync(cmd[0], cmd.slice(1), { cwd, encoding: 'utf8' });
