@@ -9,7 +9,10 @@
     "start": "bun run src/main.ts",
     "build": "bun build src/main.ts --target bun --outdir dist",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "lint:ui": "eslint src/ui",
+    "format:ui": "prettier --write 'src/ui/**/*.{js,css}'",
+    "gold:ui": "bun run scripts/compare-ui-gold.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
@@ -25,6 +28,8 @@
     "@types/nodemailer": "^6.4.17",
     "@types/sanitize-html": "2.16.1",
     "bun-types": "^1.2.21",
+    "eslint": "^10.9.0",
+    "prettier": "^3.9.6",
     "typescript": "^5.7.2"
   }
 }

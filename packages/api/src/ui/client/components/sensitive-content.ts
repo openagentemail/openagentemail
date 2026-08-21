@@ -1,2 +1,8 @@
-/** 敏感内容遮蔽（PR3）。 */
-export const SENSITIVE_CONTENT_JS = "  /* sensitive-content\uff1a\u9ed8\u8ba4\u906e\u853d \u2022\u2022\u2022\uff0c\u9010\u6761\u5c55\u5f00\uff0c\u4e0d\u5199 localStorage\u3002 */\n  function renderSensitiveText(container, text, opts) {\n    container.replaceChildren();\n    var options = opts || {};\n    if (!options.sensitive) {\n      var plain = document.createElement('p');\n      plain.className = 'notify-body-text';\n      plain.textContent = text;\n      container.append(plain);\n      return;\n    }\n    var wrap = document.createElement('div');\n    wrap.className = 'sensitive-wrap';\n    if (!options.expanded) {\n      var mask = document.createElement('span');\n      mask.className = 'sensitive-mask';\n      mask.textContent = '\u2022\u2022\u2022';\n      mask.setAttribute('aria-label', 'Sensitive content hidden');\n      var btn = document.createElement('button');\n      btn.type = 'button';\n      btn.className = 'quiet sensitive-reveal';\n      btn.textContent = 'Reveal';\n      btn.addEventListener('click', function (event) {\n        event.preventDefault();\n        if (options.onToggle) options.onToggle();\n      });\n      wrap.append(mask, btn);\n    } else {\n      var body = document.createElement('p');\n      body.className = 'notify-body-text';\n      body.textContent = text;\n      var hide = document.createElement('button');\n      hide.type = 'button';\n      hide.className = 'quiet sensitive-reveal';\n      hide.textContent = 'Hide';\n      hide.addEventListener('click', function (event) {\n        event.preventDefault();\n        if (options.onToggle) options.onToggle();\n      });\n      wrap.append(body, hide);\n    }\n    container.append(wrap);\n  }\n\n";
+/**
+ * 敏感内容遮蔽（PR3）。
+ * 内容维护在相邻真文件 sensitive-content.js（ESLint 管辖）；本模块仅启动时读入，
+ * 拼接产物字节由 /ui/app.js 金标测试钉死。
+ */
+import { readFileSync } from 'node:fs';
+
+export const SENSITIVE_CONTENT_JS = readFileSync(new URL('./sensitive-content.js', import.meta.url), 'utf8');
