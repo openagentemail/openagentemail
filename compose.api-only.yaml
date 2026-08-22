@@ -55,7 +55,7 @@ services:
       # Auto-delete mail older than this many days (0 = keep forever):
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
     volumes:
-      - api-data:/app/data
+      - ${CONTAINER_NAME:-api-data}:/app/data
     ports:
       # SAFETY DEFAULT: localhost only. Reach it from your agent host over an
       # SSH tunnel (ssh -L 3100:127.0.0.1:3100 user@server) or put a TLS
@@ -71,4 +71,4 @@ services:
       start_period: 10s
 
 volumes:
-  api-data:
+  ${CONTAINER_NAME:-api-data}:
