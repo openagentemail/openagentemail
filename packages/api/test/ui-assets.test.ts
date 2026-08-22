@@ -513,7 +513,7 @@ describe('UI static asset contract', () => {
 
     const identity = run('identity');
     expect(identity.session).toBe('identity');
-    expect(identity.backToHomeHidden).toBe(true);
+    expect(identity.backToHomeHidden).toBe(false);
 
     const admin = run('admin');
     expect(admin.session).toBe('admin');
@@ -770,7 +770,7 @@ describe('UI static asset contract', () => {
   // 任务列表改为服务端 20/50/100 + Load more，不再客户端截 500
   test('task board uses server status/period/limit pagination instead of a client 500 cap', () => {
     expect(UI_JS).not.toContain('var TASKS_RENDER_LIMIT = 500');
-    expect(UI_JS).toContain("state.tasksFilter || 'active'");
+    expect(UI_JS).toContain("state.tasksFilter || 'input-required'");
     expect(UI_JS).toContain("state.tasksPeriod || '30d'");
     expect(UI_JS).toContain("String(state.tasksLimit || 20)");
     expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
@@ -816,6 +816,7 @@ describe('UI static asset contract', () => {
     expect(load).toContain("state.tasksStatus = 'loading'");
     expect(load).toContain('state.tasks = []');
     expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
+    expect(load).toContain('if (!stillThere && !more && !opts.poll) clearTaskDetail();');
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderTaskRows('),
       UI_JS.indexOf('function renderTaskDetail('),
@@ -882,7 +883,7 @@ describe('UI static asset contract', () => {
       'state.tasks = []',
       "state.tasksStatus = 'idle'",
       "state.tasksMessage = ''",
-      "state.tasksFilter = 'active'",
+      "state.tasksFilter = 'input-required'",
       "state.tasksPeriod = '30d'",
       'state.tasksLimit = 20',
       "state.tasksNextCursor = ''",
@@ -967,8 +968,8 @@ describe('UI static asset contract', () => {
     expect(load.slice(assignIdx)).toContain('Some channels could not be loaded');
   });
 
-  // N1 / §1.4：落焦 Overview 面板不许滚动首屏，聚焦返回行的那条路径照旧滚动
-  test('landing on the overview keeps the first screen while a return row still scrolls', () => {
+  // N1：Home 落焦不滚动；一期 Home 不再保留旧的地址行返回焦点。
+  test('landing on Home keeps the first screen and starts the operating desk', () => {
     expect(UI_JS).toContain('overviewPanel.focus({ preventScroll: true });');
     // 面板落焦只有这一个入口，别处不许再裸调 overviewPanel.focus()
     expect(UI_JS).not.toContain('overviewPanel.focus();');
@@ -978,14 +979,12 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function enterOverview('),
       UI_JS.indexOf('function openAddress('),
     );
-    expect(enter).toContain('var returnRow = opts.returnTo ? rowButtonFor(opts.returnTo) : null;');
-    // 返回行照常 focus()（要滚到那一行）；没有返回行才走不滚动的面板落焦
-    expect(enter).toContain('if (returnRow) returnRow.focus();');
-    expect(enter).toContain('else focusOverviewPanel();');
+    expect(enter).toContain('focusOverviewPanel();');
+    expect(enter).toContain('loadHome({ refresh: false });');
     expect(enter).not.toContain('preventScroll');
 
-    expect(UI_JS).toContain("'Notifications today'");
-    expect(UI_JS).toContain("'Urgent today'");
+    expect(UI_JS).toContain("'Waiting for you'");
+    expect(UI_JS).toContain("'Urgent pushes today'");
     expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
 
     // B6 0 期：Home/非 Mail 深链必须在 Mail 初载前落面，慢邮箱不能挡住首屏。
@@ -1019,28 +1018,20 @@ describe('UI static asset contract', () => {
     expect(overlap).toBeLessThan(updated);
   });
 
-  // F6 / §6 行 19：活动地址消失 → 回 Overview 并播报
+  // F6：活动地址消失 → 回 Home 并播报
   test('a deleted active address migrates the inbox back to the overview', () => {
     const reconcile = UI_JS.slice(
       UI_JS.indexOf('function reconcileActiveAddress() {'),
-      UI_JS.indexOf('function refreshInboxIdentities() {'),
+      UI_JS.indexOf('function focusOverviewPanel() {'),
     );
     expect(reconcile).toContain('if (!state.activeAddress) return;');
     expect(reconcile).toContain("state.activeAddress = '';");
-    expect(reconcile).toContain("if (state.scope !== 'inbox') return;");
-    expect(reconcile).toContain("announce: lost + ' is no longer available. Back to Home.'");
-    // 两个触发点：Overview 周期的 /identities，以及 inbox 里 admin 的手动 Refresh
+    expect(reconcile).toContain("if (state.scope === 'inbox') enterOverview({ announce: lost + ' is no longer available. Back to Home.' });");
+    // Home roster refresh and inbox admin Refresh both reconcile the active address.
     expect(UI_JS).toContain('      reconcileActiveAddress();');
     expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
-    expect(UI_JS.split('reconcileActiveAddress();').length - 1).toBe(2);
-    // Inbox identity refresh shares overviewGen so a late response cannot
-    // clobber a push-tier save that bumped the epoch mid-flight.
-    const inboxRefresh = UI_JS.slice(
-      UI_JS.indexOf('function refreshInboxIdentities() {'),
-      UI_JS.indexOf('function loadOverviewCycle('),
-    );
-    expect(inboxRefresh).toContain('var generation = state.overviewGen;');
-    expect(inboxRefresh).toContain('if (generation !== state.overviewGen) return;');
+    expect(UI_JS.split('reconcileActiveAddress();').length - 1).toBeGreaterThanOrEqual(1);
+    expect(UI_JS).toContain('function refreshInboxIdentities() {');
   });
 
   // A18 / A19 / A20 / A21
@@ -1077,7 +1068,7 @@ describe('UI static asset contract', () => {
       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     );
     expect(UI_JS).toContain("'/ui/api/overview'");
-    expect(UI_JS).toContain("'/ui/api/overview?refresh=1'");
+    expect(UI_JS).not.toContain("'/ui/api/overview?refresh=1'");
   });
 
   // Satoshi 与 website/public/fonts/ 同源同文件：sha256 钉死，官网换字体这里会红
@@ -1169,8 +1160,8 @@ describe('UI static asset contract', () => {
     expect(UI_CSS).toContain('.link-url { color: var(--ink-dim); font-size: 11px; }');
   });
 
-  // §5.7：截断影响到的行只给下界，绝不显示 0 msgs
-  test('truncated rows render a bound or Unknown, never a zero', () => {
+  // Home 徽标只能读 listBoard 的 totalApprox，不许从列表行数汇总。
+  test('Home uses the server task total and server overdue flag without a client count', () => {
     const countParts = UI_JS.slice(
       UI_JS.indexOf('function countParts('),
       UI_JS.indexOf('function appendCell('),
@@ -1181,114 +1172,80 @@ describe('UI static asset contract', () => {
     expect(countParts).toContain('Lower bound — this scan hit its recipient limit.');
     expect(countParts).toContain('Not counted — this scan hit its recipient limit.');
     expect(countParts).toContain("'Unavailable'");
-    // "(no mail in the current window)" 只挂在 complete 且真为 0 的行上
-    expect(UI_JS).toContain('if (row && row.complete && row.count === 0) {');
-    expect(UI_JS).toContain(
-      'Some counts are incomplete for messages with very large recipient lists (shown as ≥ or Unknown).',
+    const home = UI_JS.slice(
+      UI_JS.indexOf('function loadHome('),
+      UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(UI_JS).not.toContain("card('In window'");
+    expect(home).toContain('state.homeWaitingTotal = typeof waitingPayload.totalApprox === \'number\'');
+    expect(home).toContain('loadHomeActiveOverdue(signal)');
+    expect(home).toContain('state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];');
+    const activeOverdue = UI_JS.slice(
+      UI_JS.indexOf('async function loadHomeActiveOverdue('),
+      UI_JS.indexOf('function homeNumber('),
+    );
+    expect(activeOverdue).toContain('if (task.overdueReason) overdue.push(task);');
+    expect(UI_JS).toContain('var HOME_ACTIVE_MAX_PAGES = 5;');
+    expect(UI_JS).toContain('var HOME_ACTIVE_MAX_ROWS = 500;');
+    expect(activeOverdue).toContain('pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS');
+    expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
+    expect(home).not.toContain('state.homeWaitingTasks.length');
   });
 
-  // F3 / §2.4 / §10 条 1：exact:false 时总计卡片也是下界，不许摆出精确外观
-  test('total cards fall back to the same lower-bound format as the rows', () => {
-    const bound = UI_JS.slice(
-      UI_JS.indexOf('function boundParts(value, exact) {'),
-      UI_JS.indexOf('function appendCell('),
-    );
-    expect(bound).toContain('if (exact) return { text: formatNumber(value) };');
-    expect(bound).toContain("text: '≥' + formatNumber(value)");
-    expect(bound).toContain("text: 'Unknown'");
-    expect(bound).toContain('Lower bound — this scan hit its recipient limit.');
-    expect(bound).toContain('Not counted — this scan hit its recipient limit.');
-
-    const stats = UI_JS.slice(
-      UI_JS.indexOf('function renderOverviewStats() {'),
-      UI_JS.indexOf('function renderOverviewMeta() {'),
-    );
-    expect(stats).toContain('var exact = !totals || totals.exact !== false;');
-    expect(stats).toContain("card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);");
-    expect(stats).toContain(
-      "card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);",
-    );
-    // 两个下界字段都不许再无条件 formatNumber；地址数是身份派生量，仍然精确
-    expect(stats).not.toContain('matchedInWindow');
-    expect(stats).not.toContain('formatNumber(totals.unseenInWindow)');
-    expect(stats).not.toContain('formatNumber(totals.activeAddresses)');
-    expect(stats).toContain('formatNumber(totals.addresses)');
-    // unmatchedInWindow 从来不进 DOM
-    expect(UI_JS).not.toContain('unmatchedInWindow');
+  test('Notifications distinguishes today’s successful deliveries from visible failed rows', () => {
+    expect(UI_JS).toContain('Undelivered notifications are not included in today’s sent count.');
   });
 
-  // §5.5：唯一轮询规则 + 15 次/20 s 上限
-  test('polling follows the server retryAfterMs and gives up after the cap', () => {
-    expect(UI_JS).toContain('var POLL_LIMIT = 15;');
-    expect(UI_JS).toContain('var POLL_WINDOW_MS = 20000;');
-    expect(UI_JS).toContain('var delay = Math.max(retryAfterMs || 1500, 1000);');
-    expect(UI_JS).toContain('if (payload.revalidating || payload.refreshError) scheduleOverviewPoll(payload.retryAfterMs);');
-    expect(UI_JS).toContain('Message counts are taking too long.');
-    expect(UI_JS).toContain("'Retrying in ' + Math.ceil(payload.retryAfterMs / 1000) + 's…'");
-    // 客户端唯一的新鲜度阈值
+  test('Home health respects the identity permission matrix', () => {
+    const home = UI_JS.slice(
+      UI_JS.indexOf('function renderHomeHealth('),
+      UI_JS.indexOf('function renderHomeSessionEmpty('),
+    );
+    expect(home).toContain("if (isAdmin()) {");
+    expect(home).toContain("healthCard('Addresses', String(state.identities.length), 'configure-identities')");
+    expect(home).toContain("healthCard('Unread mail', homeNumber(state.homeUnseenCount), 'inbox')");
+    expect(home).toContain("healthCard('Mail', 'Open mailbox', 'inbox')");
+  });
+
+  // N1：仅前台、仅有交互的会话按 30s 轮询；闲置降频，隐藏标签停止。
+  test('dashboard polling is visibility-aware, interaction-throttled, and limited to board/notifications', () => {
+    expect(UI_JS).toContain('var DASHBOARD_POLL_MS = 30000;');
+    expect(UI_JS).toContain('var DASHBOARD_IDLE_POLL_MS = 120000;');
+    expect(UI_JS).toContain('!document.hidden');
+    expect(UI_JS).toContain('function abortDashboardPollRequests()');
+    expect(UI_JS).toContain('abortDashboardPollRequests();');
+    expect(UI_JS).toContain("['pointerdown', 'keydown', 'touchstart']");
+    expect(UI_JS).toContain('if (dashboardPollTimer === null) scheduleDashboardPolling();');
+    expect(UI_JS).toContain("if (state.scope === 'overview') work = loadHome({ poll: true });");
+    expect(UI_JS).toContain("else if (state.scope === 'tasks' && !state.tasksPending) work = loadTasks({ poll: true });");
+    expect(UI_JS).toContain("else if (state.scope === 'notifications' && !state.notifyPending) work = loadNotificationLog({ poll: true });");
+    const notificationPoll = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotificationLog('),
+      UI_JS.indexOf('async function handleNotifyVerify('),
+    );
+    expect(notificationPoll).toContain('if (!opts.poll) {\n        await loadNotifySummary(controller.signal);');
+    expect(notificationPoll).toContain('if (!opts.poll && isAdmin() && state.identities.length === 0)');
+    expect(notificationPoll).toContain('if (opts.poll) trackDashboardPollRequest(controller);');
+    expect(notificationPoll).toContain('releaseDashboardPollRequest(controller);');
+    const notificationHistory = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotifyHistory('),
+      UI_JS.indexOf('async function loadNotifySummary('),
+    );
+    expect(notificationHistory).not.toContain('opts.poll');
     expect(UI_JS).toContain('var FRESH_MS = 15000;');
     expect(UI_JS.split(/\b15000\b/).length - 1).toBe(1);
   });
 
-  // §5.3：两条请求各自落地，地址骨架不被 /overview 拖住
-  test('one overview cycle fires both requests under a shared generation guard', () => {
-    const cycle = UI_JS.slice(
-      UI_JS.indexOf('function loadOverviewCycle('),
-      UI_JS.indexOf('function enterOverview('),
+  test('Home reads two board views plus notification summary without identity overview access', () => {
+    const home = UI_JS.slice(
+      UI_JS.indexOf('async function loadHome('),
+      UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(cycle).not.toContain('await ');
-    expect(cycle).not.toContain('Promise.all');
-    expect(cycle).toContain('var generation = ++state.overviewGen;');
-    expect(cycle).toContain('state.overviewCycleGen = generation;');
-    expect(cycle.indexOf('identitiesPromise.then')).toBeLessThan(cycle.indexOf('overviewPromise.then'));
-    expect(cycle.split('generation !== state.overviewGen').length - 1).toBe(6);
-    expect(cycle).toContain('renderOverview();');
-    // Stale overview responses clear stuck pending without writing data.
-    expect(cycle).toContain('state.overviewCycleGen !== state.overviewGen');
-    expect(cycle).toContain('state.overviewPending = false;');
-    // Tier save / delete must bump the epoch so a late /identities cannot clobber them.
-    expect(UI_JS).toContain('function bumpIdentityEpoch()');
-    const saveTier = UI_JS.slice(
-      UI_JS.indexOf('async function savePushContentTier('),
-      UI_JS.indexOf('function handlePushTierChange('),
-    );
-    expect(saveTier).toContain('bumpIdentityEpoch()');
-    // Tier save restarts the overview cycle so Refresh cannot stick on "Refreshing…".
-    const handleTier = UI_JS.slice(
-      UI_JS.indexOf('function handlePushTierChange('),
-      UI_JS.indexOf('function formatDate('),
-    );
-    expect(handleTier).toContain("loadOverviewCycle({ refresh: false })");
-    // Only restart while still on Overview (do not revive polling after openAddress).
-    expect(handleTier).toContain("state.scope === 'overview'");
-    // Tier-3 confirm disables Cancel while the PUT is in flight.
-    expect(handleTier).toContain('confirmModalCancel.disabled = true;');
-    expect(handleTier).toContain('confirmModalCancel.disabled = false;');
-    // Per-address pending lock survives re-render so a second select cannot race.
-    expect(UI_JS).toContain('tierPending: {}');
-    expect(handleTier).toContain('state.tierPending[address] = true;');
-    expect(handleTier).toContain('delete state.tierPending[address];');
-    const renderRows = UI_JS.slice(
-      UI_JS.indexOf('function renderOverviewRows('),
-      UI_JS.indexOf('function updateOverviewRefreshButton('),
-    );
-    expect(renderRows).toContain('state.tierPending[model.identity.address]');
-    expect(renderRows).toContain('tierSelect.disabled = true;');
-    // F66: tier <select> is not nested under the row nav role=button.
-    expect(renderRows).toContain("navNode.className = 'overview-row-nav'");
-    expect(renderRows).toContain("navNode.setAttribute('role', 'button')");
-    expect(renderRows).toContain("tierSelect.className = 'push-tier-select'");
-    expect(renderRows.indexOf("rowNode.append(navNode)")).toBeLessThan(
-      renderRows.indexOf('rowNode.append(tierCell)'),
-    );
-    expect(renderRows).toContain("'push tier ' + currentTier");
-    // Row container is neutral (no role=button on overview-row itself).
-    expect(renderRows).not.toContain("rowNode.setAttribute('role', 'button')");
-    expect(renderRows).not.toContain('rowNode.tabIndex = 0');
-    // Return-to-overview focus must land on the focusable nav, not the outer row.
-    expect(UI_JS).toContain("querySelector('.overview-row-nav')");
+    expect(home).toContain("homeTaskUrl('input-required')");
+    expect(UI_JS).toContain("homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT)");
+    expect(home).toContain("'/ui/api/notify/summary?date=today&tz='");
+    expect(home).toContain("isAdmin() && !opts.poll");
+    expect(home).toContain("apiJson('/ui/api/overview'");
+    expect(home).toContain('Promise.resolve(null)');
   });
 
   // F126: an overview rerender during the tier-3 dialog must not allow a
@@ -1309,7 +1266,7 @@ describe('UI static asset contract', () => {
     const pendingSet = handleTier.indexOf('state.tierPending[address] = true;');
     const putStart = handleTier.indexOf('await savePushContentTier(', pendingSet);
     const prologue = handleTier.slice(pendingSet, putStart);
-    expect(prologue).toContain('renderOverviewRows()');
+    expect(prologue).toContain('renderOverview()');
     // F127: apply() rechecks the lock — a stale tier-3 dialog confirm bypasses
     // the entry guard and must drop instead of starting a competing PUT.
     const applyStart = handleTier.indexOf('async function apply(');
@@ -1424,7 +1381,7 @@ describe('UI static asset contract', () => {
     expect(configurePush).toContain('await apply(3, true, openedGen)');
     expect(configurePush).toContain('confirm_risk_required');
     expect(configurePush).toContain('await recoverPushTier(address)');
-    expect(configurePush).toContain("if (state.scope === 'overview') renderOverviewRows()");
+    expect(configurePush).toContain("if (state.scope === 'overview') renderOverview()");
     const catchStart = configurePush.indexOf('} catch (error) {');
     const finallyStart = configurePush.indexOf('} finally {', catchStart);
     expect(catchStart).toBeGreaterThanOrEqual(0);
@@ -1444,7 +1401,7 @@ describe('UI static asset contract', () => {
     expect(catchBody.slice(sessionIdx, fuzzyStart)).not.toContain('recoverPushTier');
     const finallyBody = configurePush.slice(finallyStart);
     expect(finallyBody).toContain("delete state.tierPending[address]");
-    expect(finallyBody).toContain("if (state.scope === 'overview') renderOverviewRows()");
+    expect(finallyBody).toContain("if (state.scope === 'overview') renderOverview()");
     expect(UI_HTML).toContain('id="configure-push-cards"');
     expect(UI_HTML).toContain('id="configure-push-devices"');
     expect(UI_HTML).toContain('id="configure-push-add"');

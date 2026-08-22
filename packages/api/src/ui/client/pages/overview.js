@@ -1,621 +1,448 @@
-  function overviewModels() {
-    var needle = state.overviewFilter.toLowerCase();
-    var models = [];
-    state.identities.forEach(function (identity) {
-      if (needle &&
-        identity.address.toLowerCase().indexOf(needle) === -1 &&
-        (identity.name || '').toLowerCase().indexOf(needle) === -1) return;
-      models.push({ identity: identity, stats: statsRow(identity.address) });
-    });
-    return models;
+  /* ---- Home 值班台：只呈现服务端投影，不在浏览器合成任务状态或徽标。 ---- */
+  var HOME_TASK_LIMIT = 20;
+  var HOME_ACTIVE_PAGE_LIMIT = 100;
+  var HOME_ACTIVE_MAX_PAGES = 5;
+  var HOME_ACTIVE_MAX_ROWS = 500;
+  var HOME_VISIBLE_ROWS = 5;
+  var DASHBOARD_POLL_MS = 30000;
+  var DASHBOARD_IDLE_POLL_MS = 120000;
+  var DASHBOARD_IDLE_AFTER_MS = 120000;
+  var dashboardPollTimer = null;
+  var dashboardPollControllers = [];
+  var dashboardLastInteractionAt = Date.now();
+
+  function homeTaskUrl(status, cursor, limit) {
+    return '/ui/api/tasks?status=' + encodeURIComponent(status) +
+      '&period=30d&limit=' + encodeURIComponent(String(limit || HOME_TASK_LIMIT)) +
+      (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
   }
 
-  /* Unknown / Unavailable / 无命中的行始终排在同组末尾。 */
-  function sortRank(model) {
-    if (!model.stats) return 1;
-    if (!model.stats.complete && model.stats.count === 0) return 1;
-    if (state.overviewSort.key === 'last' && !model.stats.lastReceivedAt) return 1;
-    return 0;
-  }
-
-  function sortValue(model) {
-    var key = state.overviewSort.key;
-    var stats = model.stats;
-    if (key === 'address') return model.identity.address.toLowerCase();
-    if (key === 'name') return (model.identity.name || '').toLowerCase();
-    if (key === 'created') return Date.parse(model.identity.createdAt) || 0;
-    if (key === 'count') return stats ? stats.count : -1;
-    if (key === 'unseen') return stats ? stats.unseen : -1;
-    return stats && stats.lastReceivedAt ? Date.parse(stats.lastReceivedAt) : 0;
-  }
-
-  function sortedModels() {
-    var direction = state.overviewSort.dir === 'asc' ? 1 : -1;
-    return overviewModels().slice().sort(function (left, right) {
-      var rank = sortRank(left) - sortRank(right);
-      if (rank !== 0) return rank;
-      var a = sortValue(left);
-      var b = sortValue(right);
-      if (a < b) return -1 * direction;
-      if (a > b) return 1 * direction;
-      var created = (Date.parse(right.identity.createdAt) || 0) - (Date.parse(left.identity.createdAt) || 0);
-      if (created !== 0) return created;
-      return left.identity.address < right.identity.address ? -1 : 1;
-    });
-  }
-
-  function buildSortControls() {
-    overviewSort.replaceChildren();
-    SORT_COLUMNS.forEach(function (column) {
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'sort-button';
-      button.dataset.sortKey = column.key;
-      button.addEventListener('click', function () {
-        if (state.overviewSort.key === column.key) {
-          state.overviewSort.dir = state.overviewSort.dir === 'asc' ? 'desc' : 'asc';
-        } else {
-          state.overviewSort.key = column.key;
-          state.overviewSort.dir = column.key === 'address' || column.key === 'name' ? 'asc' : 'desc';
-        }
-        renderOverview();
+  /* listBoard 的逾期标记是每一行的服务端投影，不是跨 tab 汇总。分页直到能填满
+     Home 的五条可见位、列表结束或 5 页 / 500 行上限，避免轮询扫完整个 Active tab。 */
+  async function loadHomeActiveOverdue(signal) {
+    var cursor = '';
+    var overdue = [];
+    var pages = 0;
+    var scannedRows = 0;
+    do {
+      var payload = await apiJson(
+        homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT),
+        { signal: signal },
+      );
+      var board = payload || {};
+      var tasks = Array.isArray(board.tasks) ? board.tasks : [];
+      var allowedRows = tasks.slice(0, HOME_ACTIVE_MAX_ROWS - scannedRows);
+      scannedRows += allowedRows.length;
+      allowedRows.forEach(function (task) {
+        if (task.overdueReason) overdue.push(task);
       });
-      overviewSort.append(button);
-    });
+      pages += 1;
+      cursor = board.nextCursor || '';
+    } while (cursor && overdue.length < HOME_VISIBLE_ROWS &&
+      pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS);
+    return overdue;
   }
 
-  function renderSortControls() {
-    Array.prototype.forEach.call(overviewSort.children, function (button) {
-      var column = SORT_COLUMNS.filter(function (candidate) {
-        return candidate.key === button.dataset.sortKey;
-      })[0];
-      var active = state.overviewSort.key === button.dataset.sortKey;
-      button.setAttribute('aria-pressed', active ? 'true' : 'false');
-      button.textContent = active
-        ? column.label + (state.overviewSort.dir === 'asc' ? ' ▲' : ' ▼')
-        : column.label;
-    });
+  function homeNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : 'Unavailable';
   }
 
-  function renderOverviewStats() {
-    overviewStats.replaceChildren();
-    var payload = state.overview;
-    var scan = payload ? payload.scan : null;
-    var totals = payload ? payload.totals : null;
-    var pending = state.overviewStatus === 'loading' || state.overviewStatus === 'idle';
-    var fallback = { text: pending ? 'Loading…' : 'Unavailable' };
-    var exact = !totals || totals.exact !== false;
+  function homeTaskButton(task) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'home-task-row';
+    if (task.overdueReason) button.classList.add('is-overdue');
+    var subject = document.createElement('span');
+    subject.className = 'home-task-subject';
+    subject.textContent = task.subject || '(no subject)';
+    var meta = document.createElement('span');
+    meta.className = 'home-task-meta';
+    meta.textContent = taskStateLabel(task) + ' · ' + formatAgo(task.updatedAt);
+    button.append(subject, meta);
+    button.addEventListener('click', function () {
+      navigateTo('tasks', { taskId: task.id });
+    });
+    return button;
+  }
 
-    function card(label, parts) {
-      var wrapper = document.createElement('div');
-      wrapper.className = 'stat-card';
-      var labelNode = document.createElement('span');
-      labelNode.className = 'stat-label';
-      labelNode.textContent = label;
-      var valueNode = document.createElement('span');
-      valueNode.className = 'stat-value';
-      valueNode.textContent = parts.text;
-      if (parts.title) valueNode.title = parts.title;
-      wrapper.append(labelNode, valueNode);
-      overviewStats.append(wrapper);
+  function homeLinkButton(label, scope, extras) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'quiet home-link';
+    button.textContent = label;
+    button.addEventListener('click', function () {
+      navigateTo(scope, extras || {});
+    });
+    return button;
+  }
+
+  function homeSection(title, count) {
+    var section = document.createElement('section');
+    section.className = 'home-section';
+    var heading = document.createElement('div');
+    heading.className = 'home-section-heading';
+    var label = document.createElement('h2');
+    label.textContent = title;
+    heading.append(label);
+    if (typeof count === 'number') {
+      var badge = document.createElement('span');
+      badge.className = 'count home-count';
+      /* totalApprox 是本次 query 的服务端计数；不可用数组长度代替。 */
+      badge.textContent = String(count);
+      heading.append(badge);
     }
-
-    /* 地址数是身份派生量，永远精确。 */
-    card('Addresses', {
-      text: totals ? formatNumber(totals.addresses) : String(state.identities.length)
-    });
-    card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);
-    card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);
-    /* 通知数字卡与 Notifications 今日小结同一 /ui/api/notify/summary 源。 */
-    var notifySummary = state.notifySummary;
-    var notifyPending = state.notifySummaryStatus === 'loading' || state.notifySummaryStatus === 'idle';
-    card('Notifications today', notifySummary
-      ? { text: formatNumber(notifySummary.total) }
-      : { text: notifyPending ? 'Loading…' : 'Unavailable' });
-    card('Urgent today', notifySummary
-      ? { text: formatNumber(notifySummary.ringCount) }
-      : { text: notifyPending ? 'Loading…' : 'Unavailable' });
+    section.append(heading);
+    return section;
   }
 
-  function renderOverviewMeta() {
-    var payload = state.overview;
-    overviewPanel.classList.toggle('is-ready', state.overviewStatus === 'ready');
-    overviewPanel.classList.toggle('is-stale', state.overviewStatus === 'stale');
-    overviewPanel.classList.toggle(
-      'is-error',
-      state.overviewStatus === 'unavailable' || state.overviewStatus === 'error'
-    );
+  function appendHomeEmpty(section, title, detail, actionLabel, actionScope) {
+    var empty = document.createElement('div');
+    empty.className = 'home-empty';
+    var heading = document.createElement('h3');
+    heading.textContent = title;
+    var copy = document.createElement('p');
+    copy.textContent = detail;
+    empty.append(heading, copy);
+    if (actionLabel && actionScope) empty.append(homeLinkButton(actionLabel, actionScope));
+    section.append(empty);
+  }
 
-    if (!payload) {
-      overviewUpdated.textContent = state.overviewStatus === 'loading' ? 'Counting messages…' : '';
-    } else if (payload.scan && payload.scan.skipped) {
-      overviewUpdated.textContent = 'Updated ' + formatClock(payload.generatedAt, true);
+  function renderHomeWaiting(section) {
+    var rows = Array.isArray(state.homeWaitingTasks) ? state.homeWaitingTasks : [];
+    if (state.homeStatus === 'loading' && !rows.length) {
+      appendHomeEmpty(section, 'Loading tasks', 'Checking the tasks that need your input.');
+      return;
+    }
+    if (!rows.length) {
+      appendHomeEmpty(section, 'Nothing needs you right now.', 'New requests that need your input will appear here.', 'Open Tasks', 'tasks');
+      return;
+    }
+    var list = document.createElement('div');
+    list.className = 'home-task-list';
+    rows.slice(0, HOME_VISIBLE_ROWS).forEach(function (task) {
+      list.append(homeTaskButton(task));
+    });
+    section.append(list, homeLinkButton('Open Tasks', 'tasks'));
+  }
+
+  function renderHomeStuck(section) {
+    var overdue = Array.isArray(state.homeStuckTasks) ? state.homeStuckTasks : [];
+    var hasFailures = typeof state.homeFailedUrgentCount === 'number' && state.homeFailedUrgentCount > 0;
+    if (!overdue.length && !hasFailures) {
+      appendHomeEmpty(section, 'Nothing is blocked.', 'Overdue tasks and failed urgent pushes will be listed here.');
+      return;
+    }
+    if (overdue.length) {
+      var taskList = document.createElement('div');
+      taskList.className = 'home-task-list';
+      overdue.slice(0, HOME_VISIBLE_ROWS).forEach(function (task) {
+        taskList.append(homeTaskButton(task));
+      });
+      section.append(taskList);
+    }
+    if (hasFailures) {
+      var failed = document.createElement('button');
+      failed.type = 'button';
+      failed.className = 'home-failed-push';
+      failed.textContent = state.homeFailedUrgentCount +
+        (state.homeFailedUrgentCount === 1 ? ' urgent push failed today' : ' urgent pushes failed today');
+      failed.addEventListener('click', function () { navigateTo('notifications'); });
+      section.append(failed);
+    }
+    section.append(homeLinkButton('Open Alerts', 'notifications'));
+  }
+
+  function healthCard(label, value, scope) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'home-health-card';
+    var labelNode = document.createElement('span');
+    labelNode.className = 'home-health-label';
+    labelNode.textContent = label;
+    var valueNode = document.createElement('strong');
+    valueNode.textContent = value;
+    button.append(labelNode, valueNode);
+    button.addEventListener('click', function () { navigateTo(scope); });
+    return button;
+  }
+
+  function renderHomeHealth(section) {
+    var sentence = document.createElement('p');
+    sentence.className = 'home-health-copy';
+    sentence.textContent = 'A quick read on your addresses, unread mail, and urgent pushes today.';
+    section.append(sentence);
+    var grid = document.createElement('div');
+    grid.className = 'home-health-grid';
+    if (isAdmin()) {
+      grid.append(healthCard('Addresses', String(state.identities.length), 'configure-identities'));
+      grid.append(healthCard('Unread mail', homeNumber(state.homeUnseenCount), 'inbox'));
     } else {
-      var line = 'Updated ' + formatClock(payload.generatedAt, true) +
-        ' · newest ' + formatNumber(payload.scan.scanned) + ' of ' +
-        formatNumber(payload.scan.mailboxTotal) + ' in the mailbox';
-      if (state.overviewStatus === 'stale' && payload.refreshError) {
-        line = 'Counts from ' + formatClock(payload.generatedAt, false) + ' · last refresh failed';
-      }
-      overviewUpdated.textContent = line;
+      grid.append(healthCard('Mail', 'Open mailbox', 'inbox'));
     }
-
-    var exact = !payload || !payload.totals || payload.totals.exact !== false;
-    overviewDisclosure.hidden = exact;
-    overviewDisclosure.textContent = exact
-      ? ''
-      : 'Some counts are incomplete for messages with very large recipient lists (shown as ≥ or Unknown).';
-
-    overviewNotice.hidden = !state.overviewMessage;
-    overviewNotice.textContent = state.overviewMessage;
+    grid.append(healthCard('Urgent pushes today', homeNumber(state.homeUrgentSentCount), 'notifications'));
+    section.append(grid);
   }
 
-  function renderOverviewRows() {
-    overviewRows.replaceChildren();
-    var models = sortedModels();
-    overviewShown.textContent = state.overviewFilter
-      ? models.length + ' of ' + state.identities.length
-      : models.length + ' shown';
-
-    if (state.identities.length === 0) {
-      overviewStateNode.textContent =
-        'No addresses yet. Create one with the REST API or the MCP server, then it appears here.';
-      return;
+  function renderHomeSessionEmpty(host) {
+    var noWaiting = state.homeWaitingTotal === 0;
+    var noStuck = !state.homeStuckTasks.length && state.homeFailedUrgentCount === 0;
+    if (!noWaiting || !noStuck) return;
+    var section = document.createElement('section');
+    section.className = 'home-session-empty';
+    if (isAdmin() && state.identities.length === 0) {
+      appendHomeEmpty(
+        section,
+        'No addresses yet.',
+        'Create an address to start receiving mail and task updates.',
+        'Open Identities',
+        'configure-identities',
+      );
+    } else if (!isAdmin()) {
+      appendHomeEmpty(
+        section,
+        'Your desk is clear.',
+        'Open Mail to check your address or return when an agent needs you.',
+        'Open Mail',
+        'inbox',
+      );
     }
-    if (models.length === 0) {
-      overviewStateNode.textContent = 'No addresses match your filter.';
-      return;
-    }
-    overviewStateNode.textContent = '';
-
-    models.forEach(function (model) {
-      var row = model.stats;
-      var rowNode = document.createElement('div');
-      rowNode.className = 'overview-row';
-      rowNode.dataset.address = model.identity.address;
-      rowNode.setAttribute('aria-current', 'false');
-
-      // F66: navigation is a sibling of tier/actions, not an ancestor of <select>.
-      var navNode = document.createElement('div');
-      navNode.className = 'overview-row-nav';
-      navNode.setAttribute('role', 'button');
-      navNode.tabIndex = 0;
-
-      var identityCell = document.createElement('span');
-      identityCell.className = 'cell';
-      var name = document.createElement('span');
-      name.className = 'row-name';
-      name.textContent = model.identity.name || model.identity.address.split('@')[0];
-      var addressNode = document.createElement('span');
-      addressNode.className = 'row-address';
-      addressNode.textContent = model.identity.address;
-      identityCell.append(name, addressNode);
-      if (row && row.complete && row.count === 0) {
-        var note = document.createElement('span');
-        note.className = 'row-note';
-        note.textContent = '(no mail in the current window)';
-        identityCell.append(note);
-      }
-      navNode.append(identityCell);
-
-      var tokenCell = document.createElement('span');
-      tokenCell.className = 'cell token-cell';
-      var tokenLabel = document.createElement('span');
-      tokenLabel.className = 'cell-label';
-      tokenLabel.textContent = 'Token';
-      var tokenStatus = document.createElement('span');
-      tokenStatus.className = 'cell-value' + (model.identity.hasToken ? '' : ' row-flat');
-      var tokenDot = document.createElement('span');
-      tokenDot.className = 'token-dot' + (model.identity.hasToken ? ' has-token' : '');
-      tokenStatus.append(tokenDot, document.createTextNode(model.identity.hasToken ? 'Set' : 'None'));
-      tokenCell.append(tokenLabel, tokenStatus);
-      navNode.append(tokenCell);
-
-      var countText = appendCell(navNode, 'Messages', countParts(row, 'count'));
-      var unseenText = appendCell(navNode, 'Unseen', countParts(row, 'unseen'));
-
-      var dot = null;
-      if (isActiveRow(row)) {
-        dot = document.createElement('span');
-        dot.className = 'active-dot';
-      }
-      var lastParts = row && row.lastReceivedAt
-        ? { text: formatAgo(row.lastReceivedAt) }
-        : { text: row ? '—' : 'Unavailable', flat: true };
-      var lastText = appendCell(navNode, 'Last', lastParts, dot);
-      var createdText = appendCell(navNode, 'Created', { text: formatDay(model.identity.createdAt) });
-
-      var currentTier = model.identity.pushContentTier === 2 || model.identity.pushContentTier === 3
-        ? model.identity.pushContentTier
-        : 1;
-      var ariaParts = [
-        model.identity.name || model.identity.address,
-        model.identity.address,
-        model.identity.hasToken ? 'token set' : 'no token',
-        countText,
-        unseenText,
-        'last ' + lastText,
-        'created ' + createdText,
-        'push tier ' + currentTier
-      ];
-      navNode.setAttribute('aria-label', ariaParts.join(', '));
-      navNode.addEventListener('click', function () {
-        openAddress(model.identity.address);
-      });
-      navNode.addEventListener('keydown', function (event) {
-        if (event.target !== navNode || (event.key !== 'Enter' && event.key !== ' ')) return;
-        event.preventDefault();
-        openAddress(model.identity.address);
-      });
-      rowNode.append(navNode);
-
-      if (isAdmin()) {
-        var tierCell = document.createElement('span');
-        tierCell.className = 'cell push-tier-cell';
-        var tierLabelNode = document.createElement('span');
-        tierLabelNode.className = 'cell-label';
-        tierLabelNode.textContent = 'Push content';
-        var tierSelect = document.createElement('select');
-        tierSelect.className = 'push-tier-select';
-        tierSelect.setAttribute('aria-label', 'Push content tier for ' + model.identity.address);
-        tierSelect.dataset.currentTier = String(currentTier);
-        if (state.tierPending[model.identity.address]) {
-          tierSelect.disabled = true;
-        }
-        [
-          { value: 1, label: '1 · interrupt only' },
-          { value: 2, label: '2 · + subject / from' },
-          { value: 3, label: '3 · + body / OTP (sensitive)' }
-        ].forEach(function (optionDef) {
-          var option = document.createElement('option');
-          option.value = String(optionDef.value);
-          option.textContent = optionDef.label;
-          if (optionDef.value === currentTier) option.selected = true;
-          tierSelect.append(option);
-        });
-        tierSelect.addEventListener('click', function (event) {
-          event.stopPropagation();
-        });
-        tierSelect.addEventListener('change', function (event) {
-          event.stopPropagation();
-          handlePushTierChange(model.identity.address, tierSelect);
-        });
-        tierCell.append(tierLabelNode, tierSelect);
-        if (currentTier === 3) {
-          var riskHint = document.createElement('span');
-          riskHint.className = 'push-tier-hint';
-          riskHint.textContent = 'Body/OTP leave server';
-          riskHint.title = model.identity.pushContentTierWarning || PUSH_TIER3_WARNING;
-          tierCell.append(riskHint);
-        }
-        rowNode.append(tierCell);
-
-        var actionsCell = document.createElement('span');
-        actionsCell.className = 'cell row-actions';
-        var actionsLabel = document.createElement('span');
-        actionsLabel.className = 'cell-label';
-        actionsLabel.textContent = 'Actions';
-        var rotateButton = document.createElement('button');
-        rotateButton.type = 'button';
-        rotateButton.className = 'quiet row-action';
-        rotateButton.textContent = 'Rotate';
-        rotateButton.addEventListener('click', function (event) {
-          event.stopPropagation();
-          handleRotateToken(model.identity.address);
-        });
-        var deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.className = 'quiet row-action delete-action';
-        deleteButton.textContent = 'Delete';
-        deleteButton.addEventListener('click', function (event) {
-          event.stopPropagation();
-          handleDeleteIdentity(model.identity.address);
-        });
-        actionsCell.append(actionsLabel, rotateButton, deleteButton);
-        rowNode.append(actionsCell);
-      }
-
-      overviewRows.append(rowNode);
-    });
-  }
-
-  function updateOverviewRefreshButton() {
-    if (state.overviewPending) {
-      overviewRefresh.disabled = true;
-      overviewRefresh.textContent = 'Refreshing…';
-      return;
-    }
-    overviewRefresh.disabled = false;
-    var payload = state.overview;
-    if (state.overviewStatus === 'stale' && payload && payload.refreshError && payload.retryAfterMs) {
-      /* 冷却期不假装正在刷新：明说下一次重试还有几秒。 */
-      overviewRefresh.textContent = 'Retrying in ' + Math.ceil(payload.retryAfterMs / 1000) + 's…';
-      return;
-    }
-    overviewRefresh.textContent =
-      state.overviewStatus === 'unavailable' || state.overviewStatus === 'error' ? 'Retry' : 'Refresh';
+    if (section.childNodes.length) host.append(section);
   }
 
   function renderOverview() {
-    var showData = isAdmin();
-    overviewSubtitle.hidden = !showData;
-    overviewOverlap.hidden = !showData;
-    overviewUpdated.hidden = !showData;
-    overviewRefresh.hidden = !showData;
-    overviewStats.hidden = !showData;
-    overviewDisclosure.hidden = !showData;
-    overviewControls.hidden = !showData;
-    overviewSort.hidden = !showData;
-    overviewStateNode.hidden = !showData;
-    overviewHeader.hidden = !showData;
-    overviewRows.hidden = !showData;
-    if (!showData) {
-      overviewNotice.hidden = true;
-      overviewNotice.textContent = '';
-      overviewStats.replaceChildren();
-      overviewSort.replaceChildren();
-      overviewRows.replaceChildren();
+    overviewPanel.classList.add('home-panel');
+    overviewSubtitle.hidden = false;
+    overviewSubtitle.textContent = 'What needs your attention today.';
+    overviewOverlap.hidden = true;
+    overviewDisclosure.hidden = true;
+    overviewControls.hidden = true;
+    overviewSort.hidden = true;
+    overviewHeader.hidden = true;
+    overviewRows.hidden = true;
+    overviewRows.replaceChildren();
+    overviewStateNode.hidden = true;
+    overviewStateNode.textContent = '';
+    createIdentityButton.hidden = true;
+    overviewRefresh.hidden = false;
+    overviewRefresh.disabled = state.homeStatus === 'loading';
+    overviewRefresh.textContent = state.homeStatus === 'loading' ? 'Refreshing…' : 'Refresh';
+    overviewUpdated.textContent = state.homeUpdatedAt
+      ? 'Updated ' + formatClock(new Date(state.homeUpdatedAt).toISOString(), true)
+      : '';
+    overviewNotice.hidden = !state.homeMessage;
+    overviewNotice.textContent = state.homeMessage;
+
+    overviewStats.hidden = false;
+    overviewStats.className = 'overview-stats home-dashboard';
+    overviewStats.replaceChildren();
+    var waiting = homeSection('Waiting for you', state.homeWaitingTotal);
+    renderHomeWaiting(waiting);
+    var stuck = homeSection('Blocked');
+    renderHomeStuck(stuck);
+    var health = homeSection('Health');
+    renderHomeHealth(health);
+    overviewStats.append(waiting, stuck, health);
+    renderHomeSessionEmpty(overviewStats);
+  }
+
+  function homeResult(promise) {
+    return promise.then(
+      function (payload) { return { ok: true, payload: payload }; },
+      function (error) { return { ok: false, error: error }; },
+    );
+  }
+
+  function homeTimeZone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch (_err) {
+      return 'UTC';
+    }
+  }
+
+  async function loadHome(options) {
+    var opts = options || {};
+    if (!state.me) return;
+    if (overviewController) overviewController.abort();
+    var controller = new AbortController();
+    overviewController = controller;
+    if (opts.poll) trackDashboardPollRequest(controller);
+    if (!opts.poll) state.homeStatus = 'loading';
+    state.homeMessage = '';
+    if (state.scope === 'overview') renderOverview();
+
+    var signal = controller.signal;
+    var waiting = homeResult(apiJson(homeTaskUrl('input-required'), { signal: signal }));
+    var active = homeResult(loadHomeActiveOverdue(signal));
+    var summary = homeResult(apiJson(
+      '/ui/api/notify/summary?date=today&tz=' + encodeURIComponent(homeTimeZone()),
+      { signal: signal },
+    ));
+    /* Overview 的全局未读仅管理员首屏读取；identity 永不触碰会返回 403 的接口。
+       它不是轮询的一部分，N1 的周期请求只走 listBoard + notify/n。 */
+    var unread = isAdmin() && !opts.poll
+      ? homeResult(apiJson('/ui/api/overview', { signal: signal }))
+      : Promise.resolve(null);
+    var results = await Promise.all([waiting, active, summary, unread]);
+    if (overviewController !== controller || signal.aborted) {
+      if (overviewController === controller) overviewController = null;
+      releaseDashboardPollRequest(controller);
       return;
     }
-    renderOverviewMeta();
-    renderOverviewStats();
-    renderSortControls();
-    renderOverviewRows();
-    updateOverviewRefreshButton();
-  }
-
-  function rowButtonFor(address) {
-    // Focus the row's nav hit-target (role=button), not the neutral outer row (F66).
-    var rows = overviewRows.children;
-    for (var index = 0; index < rows.length; index += 1) {
-      if (rows[index].dataset.address === address) {
-        return rows[index].querySelector('.overview-row-nav') || rows[index];
+    overviewController = null;
+    var issues = [];
+    if (results[0] && results[0].ok) {
+      var waitingPayload = results[0].payload || {};
+      state.homeWaitingTasks = Array.isArray(waitingPayload.tasks) ? waitingPayload.tasks : [];
+      state.homeWaitingTotal = typeof waitingPayload.totalApprox === 'number'
+        ? waitingPayload.totalApprox
+        : 0;
+    } else if (results[0] && results[0].error.message !== 'session_expired') {
+      issues.push('Tasks that need you could not be loaded.');
+    }
+    if (results[1] && results[1].ok) {
+      state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];
+    } else if (results[1] && results[1].error.message !== 'session_expired') {
+      issues.push('Blocked tasks could not be loaded.');
+    }
+    if (results[2] && results[2].ok) {
+      var summaryPayload = results[2].payload || {};
+      state.homeUrgentSentCount = typeof summaryPayload.ringCount === 'number'
+        ? summaryPayload.ringCount
+        : null;
+      state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === 'number'
+        ? summaryPayload.failedUrgentCount
+        : 0;
+    } else if (results[2] && results[2].error.message !== 'session_expired') {
+      state.homeUrgentSentCount = null;
+      issues.push('Today’s push summary is unavailable.');
+    }
+    if (results[3]) {
+      if (results[3].ok) {
+        var overviewPayload = results[3].payload || {};
+        state.homeUnseenCount = overviewPayload.totals &&
+          typeof overviewPayload.totals.unseenInWindow === 'number'
+          ? overviewPayload.totals.unseenInWindow
+          : null;
+      } else if (results[3].error.message !== 'session_expired') {
+        state.homeUnseenCount = null;
+        issues.push('Unread mail count is unavailable.');
       }
     }
-    return null;
+    state.homeStatus = issues.length ? 'error' : 'ready';
+    state.homeMessage = issues.join(' ');
+    state.homeUpdatedAt = Date.now();
+    releaseDashboardPollRequest(controller);
+    if (state.scope === 'overview') renderOverview();
   }
 
-  function cancelOverviewPoll() {
-    if (overviewTimer !== null) {
-      window.clearTimeout(overviewTimer);
-      overviewTimer = null;
+  function stopDashboardPolling() {
+    if (dashboardPollTimer !== null) {
+      window.clearTimeout(dashboardPollTimer);
+      dashboardPollTimer = null;
     }
   }
 
+  function trackDashboardPollRequest(controller) {
+    dashboardPollControllers.push(controller);
+  }
+
+  function releaseDashboardPollRequest(controller) {
+    dashboardPollControllers = dashboardPollControllers.filter(function (candidate) {
+      return candidate !== controller;
+    });
+  }
+
+  function abortDashboardPollRequests() {
+    var pending = dashboardPollControllers.slice();
+    dashboardPollControllers = [];
+    pending.forEach(function (controller) { controller.abort(); });
+  }
+
+  function dashboardPollAllowed() {
+    return Boolean(state.me) && !document.hidden &&
+      (state.scope === 'overview' || state.scope === 'tasks' || state.scope === 'notifications');
+  }
+
+  function scheduleDashboardPolling() {
+    stopDashboardPolling();
+    if (!dashboardPollAllowed()) return;
+    var idle = Date.now() - dashboardLastInteractionAt >= DASHBOARD_IDLE_AFTER_MS;
+    dashboardPollTimer = window.setTimeout(function () {
+      dashboardPollTimer = null;
+      if (!dashboardPollAllowed()) return;
+      var work = Promise.resolve();
+      if (state.scope === 'overview') work = loadHome({ poll: true });
+      else if (state.scope === 'tasks' && !state.tasksPending) work = loadTasks({ poll: true });
+      else if (state.scope === 'notifications' && !state.notifyPending) work = loadNotificationLog({ poll: true });
+      work.then(scheduleDashboardPolling, scheduleDashboardPolling);
+    }, idle ? DASHBOARD_IDLE_POLL_MS : DASHBOARD_POLL_MS);
+  }
+
+  function noteDashboardInteraction() {
+    dashboardLastInteractionAt = Date.now();
+    if (dashboardPollTimer === null) scheduleDashboardPolling();
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      stopDashboardPolling();
+      abortDashboardPollRequests();
+    }
+    else scheduleDashboardPolling();
+  });
+  ['pointerdown', 'keydown', 'touchstart'].forEach(function (type) {
+    document.addEventListener(type, noteDashboardInteraction, { passive: true });
+  });
+
   function cancelOverview() {
-    cancelOverviewPoll();
     if (overviewController) {
       overviewController.abort();
       overviewController = null;
     }
-    state.overviewPending = false;
-    state.overviewPolls = 0;
-    state.overviewLoadingSince = 0;
+    stopDashboardPolling();
   }
 
-  /* 服务端给的 retryAfterMs 是"最早可再来"的时刻，客户端必须遵守它。 */
-  function scheduleOverviewPoll(retryAfterMs) {
-    cancelOverviewPoll();
-    var delay = Math.max(retryAfterMs || 1500, 1000);
-    state.overviewRetryAt = Date.now() + delay;
-    overviewTimer = window.setTimeout(function () {
-      overviewTimer = null;
-      loadOverviewCycle({ refresh: false });
-    }, delay);
+  function refreshInboxIdentities() {
+    return apiJson('/ui/api/identities').then(function (payload) {
+      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
+      renderIdentities();
+      reconcileActiveAddress();
+      if (state.scope === 'overview') renderOverview();
+    }).catch(function () {
+      /* Inbox keeps its last known roster when a background refresh fails. */
+    });
   }
 
-  function readyAnnouncement(payload) {
-    var totals = payload.totals;
-    if (payload.scan && payload.scan.skipped) {
-      return 'Home loaded: 0 addresses.';
-    }
-    return 'Home loaded: ' + totals.addresses + ' addresses, ' +
-      totals.matchedInWindow + ' messages in the newest ' + payload.scan.scanned +
-      ', ' + totals.unseenInWindow + ' unseen.';
-  }
-
-  function applyOverviewPayload(payload) {
-    cancelOverviewPoll();
-    if (payload.status === 'loading') {
-      /* 202 不覆盖上一次的载荷：表格继续显示旧数值，而不是掉回 0。 */
-      state.overviewStatus = 'loading';
-      state.overviewMessage = '';
-      if (!state.overviewLoadingSince) state.overviewLoadingSince = Date.now();
-      state.overviewPolls += 1;
-      if (state.overviewPolls >= POLL_LIMIT ||
-        Date.now() - state.overviewLoadingSince > POLL_WINDOW_MS) {
-        state.overviewStatus = 'unavailable';
-        state.overviewMessage = 'Message counts are taking too long.';
-        announce('Message counts are taking too long.');
-        return;
-      }
-      scheduleOverviewPoll(payload.retryAfterMs);
-      announce('Home counts are still loading.');
-      return;
-    }
-
-    state.overview = payload;
-    state.overviewStatus = payload.status === 'stale' ? 'stale' : 'ready';
-    state.overviewPolls = 0;
-    state.overviewLoadingSince = 0;
-    state.overviewMessage = '';
-
-    if (state.overviewStatus === 'ready') {
-      announce(readyAnnouncement(payload));
-      return;
-    }
-    if (payload.refreshError) {
-      state.overviewMessage = 'The last refresh failed. Showing the previous counts.';
-      announce('Showing counts from ' + formatClock(payload.generatedAt, false) + '. Refresh failed.');
-    } else {
-      announce(readyAnnouncement(payload));
-    }
-    /* 唯一轮询规则：只有在途 flight 或待重试的失败才安排下一周期。 */
-    if (payload.revalidating || payload.refreshError) scheduleOverviewPoll(payload.retryAfterMs);
-  }
-
-  function applyOverviewError(error) {
-    cancelOverviewPoll();
-    if (error.message === 'session_expired') return;
-    if (error.status === 500) {
-      state.overviewStatus = 'error';
-      state.overviewMessage = 'Addresses could not be read from the server.';
-      announce('Addresses could not be read from the server.');
-      return;
-    }
-    state.overviewStatus = 'unavailable';
-    state.overviewMessage = 'Message counts are unavailable right now.';
-    announce('Home counts are unavailable. Addresses are listed without counts.');
-  }
-
-  function handleIdentitiesError(error) {
-    if (error.message === 'session_expired') return;
-    state.overviewStatus = 'error';
-    state.overviewMessage = 'Addresses could not be read from the server.';
-    announce('Addresses could not be read from the server.');
-    renderOverview();
-  }
-
-  /* 新一轮 /identities 里活动地址消失了（被删/被 retention 清掉）：不能把用户留在
-     一个失效的 inbox 里反复报"邮件加载失败"，清掉活动状态并回 Home + 播报。 */
   function reconcileActiveAddress() {
     if (!state.activeAddress) return;
-    var survivors = state.identities.filter(function (identity) {
+    var exists = state.identities.some(function (identity) {
       return identity.address === state.activeAddress;
     });
-    if (survivors.length) return;
+    if (exists) return;
     var lost = state.activeAddress;
     state.activeAddress = '';
     state.messages = [];
-    state.returnAddress = '';
+    state.nextCursor = '';
+    state.sourceCache = null;
     clearDetail();
     renderMessages();
-    if (state.scope !== 'inbox') return;
-    enterOverview({ announce: lost + ' is no longer available. Back to Home.' });
+    if (state.scope === 'inbox') enterOverview({ announce: lost + ' is no longer available. Back to Home.' });
   }
 
-  /* inbox 里触发身份刷新的时机：admin 每次手动 Refresh。停在 inbox 时 Overview
-     周期是停掉的（cancelOverview），所以这是"活动地址被删"能被发现的那一刻。 */
-  function refreshInboxIdentities() {
-    // Same epoch as loadOverviewCycle: a tier save mid-flight must not be
-    // overwritten by a slower inbox identity refresh.
-    var generation = state.overviewGen;
-    apiJson('/ui/api/identities').then(function (payload) {
-      if (state.scope !== 'inbox') return;
-      if (generation !== state.overviewGen) return;
-      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
-      renderIdentities();
-      reconcileActiveAddress();
-    }).catch(function () {
-      /* 名单取不到就沿用旧名单：邮件本身的失败由 refreshMessages 自己报。 */
-    });
-  }
-
-  /* 一个 Overview 周期：同一代际下并发发起两条请求，且两条各自独立落地 ——
-     /identities 一到就渲染地址骨架，绝不等 /overview 的扫描预算。 */
-  function loadOverviewCycle(options) {
-    var opts = options || {};
-    var generation = ++state.overviewGen;
-    cancelOverviewPoll();
-    if (overviewController) overviewController.abort();
-    overviewController = new AbortController();
-    var signal = overviewController.signal;
-    state.overviewPending = true;
-    state.overviewCycleGen = generation;
-    updateOverviewRefreshButton();
-
-    var identitiesPromise = apiJson('/ui/api/identities', { signal: signal });
-    var overviewPromise = apiJson(
-      opts.refresh ? '/ui/api/overview?refresh=1' : '/ui/api/overview',
-      { signal: signal }
-    );
-    var tz = 'UTC';
-    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_err) {}
-    var notifySummaryPromise = apiJson(
-      '/ui/api/notify/summary?date=today&tz=' + encodeURIComponent(tz),
-      { signal: signal }
-    );
-    state.notifySummaryStatus = 'loading';
-    notifySummaryPromise.then(function (payload) {
-      if (generation !== state.overviewGen) return;
-      state.notifySummary = payload;
-      state.notifySummaryStatus = 'ready';
-      if (state.scope === 'overview') renderOverviewStats();
-    }).catch(function (error) {
-      if (generation !== state.overviewGen) return;
-      if (error.name === 'AbortError' || error.message === 'session_expired') return;
-      state.notifySummaryStatus = 'error';
-      if (state.scope === 'overview') renderOverviewStats();
-    });
-
-    identitiesPromise.then(function (payload) {
-      if (generation !== state.overviewGen) return;
-      state.identities = Array.isArray(payload.identities) ? payload.identities : [];
-      /* 侧栏与总览行都吃这份名单，两边都得重画（只重画总览会让侧栏一直空着）。 */
-      renderIdentities();
-      renderOverview();
-      refreshConfigureSurfaces();
-      reconcileActiveAddress();
-    }).catch(function (error) {
-      if (generation !== state.overviewGen) return;
-      handleIdentitiesError(error);
-    });
-
-    overviewPromise.then(function (payload) {
-      if (generation !== state.overviewGen) {
-        // Superseded by bumpIdentityEpoch or a newer cycle: never write data,
-        // but if no live cycle owns the current gen, clear a stuck Refresh.
-        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
-          state.overviewPending = false;
-          updateOverviewRefreshButton();
-        }
-        return;
-      }
-      state.overviewPending = false;
-      applyOverviewPayload(payload);
-      renderOverview();
-    }).catch(function (error) {
-      if (generation !== state.overviewGen) {
-        if (state.overviewPending && state.overviewCycleGen !== state.overviewGen) {
-          state.overviewPending = false;
-          updateOverviewRefreshButton();
-        }
-        return;
-      }
-      state.overviewPending = false;
-      if (error.name === 'AbortError') return;
-      applyOverviewError(error);
-      renderOverview();
-    });
-  }
-
-  /* Overview 面板在 375 px 下 min-height 就有 calc(100vh - 66px)，顶上还压着 topbar 与
-     Address 标签，所以普通 focus() 会为了"把整块拉进视口"往下滚一截，首屏看不到 topbar/
-     Sign out/Address（CONSOLIDATED §1.4 要求首屏从 topbar 开始，A66 要求 logo 可见）。
-     面板只是个 tabindex="-1" 的落焦点，本来就不需要滚动，所以这条路径一律 preventScroll。 */
   function focusOverviewPanel() {
     overviewPanel.focus({ preventScroll: true });
   }
 
   function enterOverview(options) {
     var opts = options || {};
-    cancelOverviewPoll();
     cancelNotifyLoad();
     cancelTasksLoad();
     applyScope('overview', { announce: opts.announce, skipUrl: opts.skipUrl, replaceUrl: opts.replaceUrl });
     renderOverview();
-    /* 两条聚焦路径分开处理：从 inbox 返回时焦点回到原来那一行，那一行可能在长表格深处，
-       必须照常滚动过去；没有返回行时焦点落在面板上，不滚。 */
-    var returnRow = opts.returnTo ? rowButtonFor(opts.returnTo) : null;
-    if (returnRow) returnRow.focus();
-    else focusOverviewPanel();
-    /* 唯一新鲜度口径：generatedAt 的本机年龄 <15 s 就直接重渲染，0 请求。 */
-    var age = state.overview
-      ? Math.max(0, Date.now() - Date.parse(state.overview.generatedAt))
-      : Infinity;
-    if (state.overviewStatus === 'ready' && age < FRESH_MS) return;
-    if (!isAdmin()) return;
-    loadOverviewCycle({ refresh: false });
+    focusOverviewPanel();
+    var fresh = state.homeUpdatedAt && Date.now() - state.homeUpdatedAt < FRESH_MS;
+    if (!fresh) loadHome({ refresh: false });
   }
 
   function openAddress(address) {

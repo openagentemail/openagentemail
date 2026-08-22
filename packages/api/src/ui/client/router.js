@@ -290,5 +290,6 @@
     renderIdentities();
     renderAppNav();
     if (!opts.skipUrl) syncUrlFromScope(opts.replaceUrl);
+    scheduleDashboardPolling();
     if (opts.announce) announce(opts.announce);
   }

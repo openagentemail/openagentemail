@@ -854,6 +854,45 @@ export class NtfyNotificationService implements NotifyService {
   }
 
   async publish(input: NotifyInput): Promise<{ target: NotifyTarget; title: string; level: NotifyLevel }> {
+    try {
+      return await this.publishOnce(input);
+    } catch (err) {
+      /* 只把已发往 provider、但未送达的 urgent 推送记进值班台；配置/大小/取消
+         都不是投递失败。 */
+      if (input.level === 'urgent' && err instanceof NotifyError && err.code === 'notify_unavailable') {
+        await this.recordUrgentFailure(input);
+      }
+      throw err;
+    }
+  }
+
+  private async recordUrgentFailure(input: NotifyInput): Promise<void> {
+    const logicalTarget = input.target as NotificationLogicalTarget;
+    const logicalChannel = input.logicalChannel ?? logicalChannelFor(logicalTarget, input.level);
+    try {
+      await appendNotificationLog({
+        source: input.source ?? 'manual',
+        logicalTarget,
+        logicalChannel,
+        level: input.level,
+        title: input.title,
+        /* 不把未送达的正文再落盘；Home 只需要服务端计数。 */
+        message: '',
+        tags: input.tags,
+        sensitive: Boolean(input.sensitive),
+        identityAddress: input.identityAddress,
+        delivery: 'failed',
+      });
+    } catch (logError) {
+      notificationLogHealthAlert('append_failed_delivery_failure', {
+        source: input.source ?? 'manual',
+        logicalChannel,
+        error: (logError as Error).message,
+      });
+    }
+  }
+
+  private async publishOnce(input: NotifyInput): Promise<{ target: NotifyTarget; title: string; level: NotifyLevel }> {
     const current = await this.assertEnabled();
     const topic = await physicalTopic(input.target, input.level);
     // ntfy rejects bodies near ~4096 bytes. Prefer keeping click; if the

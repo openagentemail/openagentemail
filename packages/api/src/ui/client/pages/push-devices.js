@@ -83,14 +83,14 @@
           renderConfigurePush();
           if (recovered.status !== 'error') {
             if (state.scope === 'configure-identities') renderConfigureIdentities();
-            if (state.scope === 'overview') renderOverviewRows();
+            if (state.scope === 'overview') renderOverview();
           }
         }
       } finally {
         delete state.tierPending[address];
         renderConfigurePush();
         /* 中途切到 Overview 时，行上的 select 仍可能停在 disabled + 旧档。 */
-        if (state.scope === 'overview') renderOverviewRows();
+        if (state.scope === 'overview') renderOverview();
         if (state.scope === 'configure-push' && !configurePushPanel.hidden && confirmModal.hidden) {
           var focusCard = configurePushCards.querySelector('.push-tier-card.is-selected');
           if (focusCard && typeof focusCard.focus === 'function') focusCard.focus();
@@ -425,4 +425,3 @@
     loadPairedDevices();
     configurePushPanel.focus({ preventScroll: true });
   }
-

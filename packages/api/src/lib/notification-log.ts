@@ -39,8 +39,9 @@ export type NotificationSource = 'watcher' | 'manual' | 'task' | 'verify';
 export type NotificationLevel = 'urgent' | 'normal' | 'low';
 export type NotificationLogicalTarget = 'user' | `agent:${string}`;
 export type NotificationLogicalChannel = 'user-alerts' | 'user-low' | `agent:${string}`;
+export type NotificationDelivery = 'sent' | 'failed';
 
-/** 落盘行。delivery 恒为 sent：未成功的 publish 根本不会出现在这里。 */
+/** 落盘行：成功与失败均记录，以便值班台显示当天未送达的紧急推送。 */
 export type NotificationLogRecord = {
   schemaVersion: typeof NOTIFICATION_LOG_SCHEMA_VERSION;
   id: string;
@@ -54,7 +55,7 @@ export type NotificationLogRecord = {
   tags: string[];
   sensitive: boolean;
   identityAddress?: string;
-  delivery: 'sent';
+  delivery: NotificationDelivery;
 };
 
 export type NotificationLogQuery = {
@@ -83,6 +84,7 @@ export type NotificationSummary = {
   byLevel: { urgent: number; normal: number; low: number };
   byChannel: Record<string, number>;
   lastSuccessfulAt: string | null;
+  failedUrgentCount: number;
 };
 
 /** 中间损坏：不得把残缺日志当完整审计返回。 */
@@ -205,7 +207,7 @@ function parseRecord(raw: unknown): NotificationLogRecord | null {
   if (typeof row.title !== 'string' || typeof row.message !== 'string') return null;
   if (!Array.isArray(row.tags) || row.tags.some((tag) => typeof tag !== 'string')) return null;
   if (typeof row.sensitive !== 'boolean') return null;
-  if (row.delivery !== 'sent') return null;
+  if (row.delivery !== 'sent' && row.delivery !== 'failed') return null;
   if (row.identityAddress !== undefined && typeof row.identityAddress !== 'string') return null;
   const record: NotificationLogRecord = {
     schemaVersion: NOTIFICATION_LOG_SCHEMA_VERSION,
@@ -219,7 +221,7 @@ function parseRecord(raw: unknown): NotificationLogRecord | null {
     message: row.message,
     tags: row.tags as string[],
     sensitive: row.sensitive,
-    delivery: 'sent',
+    delivery: row.delivery,
   };
   if (typeof row.identityAddress === 'string' && row.identityAddress.includes('@')) {
     record.identityAddress = row.identityAddress.toLowerCase();
@@ -517,10 +519,11 @@ export type AppendNotificationInput = {
   tags?: string[];
   sensitive?: boolean;
   identityAddress?: string;
+  delivery?: NotificationDelivery;
 };
 
 /**
- * 在 ntfy 成功响应后调用。串行入队；写盘失败抛给调用方，由 publish 改成告警而非失败。
+ * 在推送成功或失败后调用。串行入队；写盘失败不改变原有推送结果。
  */
 export function appendNotificationLog(input: AppendNotificationInput): Promise<NotificationLogRecord> {
   return enqueue(() => {
@@ -538,7 +541,7 @@ export function appendNotificationLog(input: AppendNotificationInput): Promise<N
       message: input.message,
       tags: Array.isArray(input.tags) ? input.tags.slice(0, 16) : [],
       sensitive: Boolean(input.sensitive),
-      delivery: 'sent',
+      delivery: input.delivery === 'failed' ? 'failed' : 'sent',
     };
     if (input.identityAddress && input.identityAddress.includes('@')) {
       record.identityAddress = input.identityAddress.toLowerCase();
@@ -730,21 +733,28 @@ export function summarizeNotificationLog(options: {
     const byLevel = { urgent: 0, normal: 0, low: 0 };
     const byChannel: Record<string, number> = {};
     let lastSuccessfulAt: string | null = null;
+    let failedUrgentCount = 0;
     for (const row of rows) {
+      if (row.delivery === 'failed') {
+        if (row.level === 'urgent') failedUrgentCount += 1;
+        continue;
+      }
       byLevel[row.level] += 1;
       byChannel[row.logicalChannel] = (byChannel[row.logicalChannel] ?? 0) + 1;
       if (!lastSuccessfulAt || row.publishedAt > lastSuccessfulAt) lastSuccessfulAt = row.publishedAt;
     }
+    const total = byLevel.urgent + byLevel.normal + byLevel.low;
     return {
       date: bounds.date,
       tz: options.tz,
       from: bounds.from,
       to: bounds.to,
-      total: rows.length,
+      total,
       ringCount: byLevel.urgent,
       byLevel,
       byChannel,
       lastSuccessfulAt,
+      failedUrgentCount,
     };
   });
 }
@@ -754,7 +764,8 @@ export function lastSuccessfulAt(channel?: NotificationLogicalChannel): Promise<
     const now = nowMs();
     const records = loadRecordsOrThrow();
     const { rows } = applyWindow(records, { channel, limit: 20 }, now);
-    return rows[0]?.publishedAt ?? null;
+    const sent = rows.find((row) => row.delivery === 'sent');
+    return sent?.publishedAt ?? null;
   });
 }
 

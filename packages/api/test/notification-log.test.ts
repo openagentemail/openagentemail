@@ -18,6 +18,7 @@ const {
   NOTIFICATION_LOG_RETENTION_MS,
   appendNotificationLog,
   compactNotificationLog,
+  lastSuccessfulAt,
   queryNotificationLog,
   resetNotificationLogForTests,
   setNotificationLogNowForTests,
@@ -298,6 +299,46 @@ describe('notification-log store', () => {
     expect(summary.total).toBe(2);
     expect(summary.ringCount).toBe(1);
     expect(summary.byLevel).toEqual({ urgent: 1, normal: 1, low: 0 });
+  });
+
+  test('summary keeps failed urgent delivery separate from successful push totals', async () => {
+    const now = Date.parse('2026-08-12T08:00:00.000Z');
+    setNotificationLogNowForTests(() => now);
+    await appendNotificationLog({
+      source: 'watcher',
+      logicalTarget: 'user',
+      logicalChannel: 'user-alerts',
+      level: 'urgent',
+      title: 'not delivered',
+      message: '',
+      delivery: 'failed',
+    });
+    const summary = await summarizeNotificationLog({ date: 'today', tz: 'UTC' });
+    expect(summary.total).toBe(0);
+    expect(summary.ringCount).toBe(0);
+    expect(summary.failedUrgentCount).toBe(1);
+    const page = await queryNotificationLog({ limit: 20 });
+    expect(page.items[0]).toMatchObject({ delivery: 'failed', level: 'urgent' });
+  });
+
+  test('last successful delivery is not hidden by more than twenty later failures', async () => {
+    let clock = Date.parse('2026-08-12T08:00:00.000Z');
+    setNotificationLogNowForTests(() => clock);
+    await seed({ title: 'last good delivery' });
+    const expected = new Date(clock).toISOString();
+    for (let i = 0; i < 21; i += 1) {
+      clock += 1_000;
+      await appendNotificationLog({
+        source: 'watcher',
+        logicalTarget: 'user',
+        logicalChannel: 'user-alerts',
+        level: 'urgent',
+        title: 'not delivered',
+        message: '',
+        delivery: 'failed',
+      });
+    }
+    expect(await lastSuccessfulAt()).toBe(expected);
   });
 
   test('append after a complete last record missing final newline stays readable', async () => {

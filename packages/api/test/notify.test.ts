@@ -1225,6 +1225,29 @@ describe('publish success path writes the 30-day notification log', () => {
     expect(logText()).toBe('');
   });
 
+  test('a failed urgent publish records a body-free delivery failure for the dashboard', async () => {
+    await withLivePublish(async () => new Response('nope', { status: 503 }), async (svc) => {
+      await expect(svc.publish({
+        target: 'user',
+        title: 'urgent task update',
+        message: 'do not persist this body',
+        level: 'urgent',
+        source: 'task',
+        sensitive: true,
+      })).rejects.toThrow('notify_unavailable');
+      const page = await queryNotificationLog({ limit: 20 });
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]).toMatchObject({
+        delivery: 'failed',
+        level: 'urgent',
+        source: 'task',
+        title: 'urgent task update',
+        message: '',
+        sensitive: true,
+      });
+    });
+  });
+
   test('verify() self-call records source=verify on the same success path', async () => {
     let posted = '';
     await withLivePublish(async (input, init) => {

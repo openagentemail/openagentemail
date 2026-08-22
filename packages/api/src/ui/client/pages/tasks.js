@@ -50,7 +50,7 @@
 
   function tasksFetchKey() {
     return [
-      state.tasksFilter || 'active',
+      state.tasksFilter || 'input-required',
       state.tasksPeriod || '30d',
       String(state.tasksLimit || 20)
     ].join('|');
@@ -75,7 +75,7 @@
     if (tasksStatusTabs) {
       var buttons = tasksStatusTabs.querySelectorAll('[data-status]');
       Array.prototype.forEach.call(buttons, function (button) {
-        var selected = button.getAttribute('data-status') === (state.tasksFilter || 'active');
+        var selected = button.getAttribute('data-status') === (state.tasksFilter || 'input-required');
         button.setAttribute('aria-selected', selected ? 'true' : 'false');
       });
     }
@@ -188,7 +188,7 @@
     var total = typeof state.tasksTotalApprox === 'number' ? state.tasksTotalApprox : shown;
     tasksShown.textContent = shown === total ? String(shown) : shown + ' of ~' + total;
     if (rows.length === 0) {
-      var filter = state.tasksFilter || 'active';
+      var filter = state.tasksFilter || 'input-required';
       tasksStateNode.textContent = filter === 'all'
         ? 'No tasks in this period. Refresh after a task mail arrives.'
         : 'No tasks in "' + filter + '" for this period.';
@@ -328,7 +328,7 @@
       ' · ' +
       (Array.isArray(task.messages) ? task.messages.length : 0) +
       ' messages';
-    head.append(badge, title, meta);
+    head.append(title, badge, meta);
     if (task.overdueReason) {
       var overdueNote = document.createElement('p');
       overdueNote.className = 'task-overdue-flag';
@@ -395,10 +395,15 @@
       when.dateTime = message.date || '';
       when.textContent = message.date ? formatDate(message.date) : '—';
       metaRow.append(msgBadge, from, when);
-      var body = document.createElement('p');
+      var messageBlock = document.createElement('details');
+      messageBlock.className = 'task-timeline-message';
+      var messageSummary = document.createElement('summary');
+      messageSummary.textContent = 'View message';
+      var body = document.createElement('pre');
       body.className = 'task-timeline-body';
       body.textContent = taskTimelineBody(message.body);
-      item.append(metaRow, body);
+      messageBlock.append(messageSummary, body);
+      item.append(metaRow, messageBlock);
       timeline.append(item);
     });
     tasksDetailContent.append(timeline);
@@ -493,6 +498,7 @@
     cancelTasksListLoad();
     var controller = new AbortController();
     tasksController = controller;
+    if (opts.poll) trackDashboardPollRequest(controller);
     state.tasksPending = true;
     state.tasksMessage = '';
     /* F1：filter 一变 fetchKey 就变——立刻 loading，别等网络返回才撤掉假空态。 */
@@ -506,7 +512,7 @@
     renderTasks();
     try {
       var params = [
-        'status=' + encodeURIComponent(state.tasksFilter || 'active'),
+        'status=' + encodeURIComponent(state.tasksFilter || 'input-required'),
         'period=' + encodeURIComponent(state.tasksPeriod || '30d'),
         'limit=' + encodeURIComponent(String(state.tasksLimit || 20))
       ];
@@ -532,12 +538,12 @@
       state.tasksStatus = 'ready';
       state.tasksMessage = '';
       renderTasks();
-      announce(state.tasks.length + ' tasks loaded');
+      if (!opts.poll) announce(state.tasks.length + ' tasks loaded');
       if (state.activeTaskId) {
         var stillThere = state.tasks.some(function (task) {
           return task.id === state.activeTaskId;
         });
-        if (!stillThere && !more) clearTaskDetail();
+        if (!stillThere && !more && !opts.poll) clearTaskDetail();
       }
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
@@ -552,6 +558,7 @@
       }
       renderTasks();
     } finally {
+      releaseDashboardPollRequest(controller);
       if (tasksController === controller) {
         tasksController = null;
         state.tasksPending = false;
