@@ -1184,9 +1184,15 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function homeNumber('),
     );
     expect(activeOverdue).toContain('if (task.overdueReason) overdue.push(task);');
-    expect(activeOverdue).toContain('while (cursor && overdue.length < HOME_VISIBLE_ROWS);');
+    expect(UI_JS).toContain('var HOME_ACTIVE_MAX_PAGES = 5;');
+    expect(UI_JS).toContain('var HOME_ACTIVE_MAX_ROWS = 500;');
+    expect(activeOverdue).toContain('pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS');
     expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
     expect(home).not.toContain('state.homeWaitingTasks.length');
+  });
+
+  test('Notifications distinguishes today’s successful deliveries from visible failed rows', () => {
+    expect(UI_JS).toContain('Undelivered notifications are not included in today’s sent count.');
   });
 
   test('Home health respects the identity permission matrix', () => {

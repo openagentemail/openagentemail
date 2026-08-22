@@ -1,6 +1,8 @@
   /* ---- Home 值班台：只呈现服务端投影，不在浏览器合成任务状态或徽标。 ---- */
   var HOME_TASK_LIMIT = 20;
   var HOME_ACTIVE_PAGE_LIMIT = 100;
+  var HOME_ACTIVE_MAX_PAGES = 5;
+  var HOME_ACTIVE_MAX_ROWS = 500;
   var HOME_VISIBLE_ROWS = 5;
   var DASHBOARD_POLL_MS = 30000;
   var DASHBOARD_IDLE_POLL_MS = 120000;
@@ -16,10 +18,12 @@
   }
 
   /* listBoard 的逾期标记是每一行的服务端投影，不是跨 tab 汇总。分页直到能填满
-     Home 的五条可见位或列表结束，避免较旧的 overdue 行被 Active 首屏遮住。 */
+     Home 的五条可见位、列表结束或 5 页 / 500 行上限，避免轮询扫完整个 Active tab。 */
   async function loadHomeActiveOverdue(signal) {
     var cursor = '';
     var overdue = [];
+    var pages = 0;
+    var scannedRows = 0;
     do {
       var payload = await apiJson(
         homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT),
@@ -27,11 +31,15 @@
       );
       var board = payload || {};
       var tasks = Array.isArray(board.tasks) ? board.tasks : [];
-      tasks.forEach(function (task) {
+      var allowedRows = tasks.slice(0, HOME_ACTIVE_MAX_ROWS - scannedRows);
+      scannedRows += allowedRows.length;
+      allowedRows.forEach(function (task) {
         if (task.overdueReason) overdue.push(task);
       });
+      pages += 1;
       cursor = board.nextCursor || '';
-    } while (cursor && overdue.length < HOME_VISIBLE_ROWS);
+    } while (cursor && overdue.length < HOME_VISIBLE_ROWS &&
+      pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS);
     return overdue;
   }
 

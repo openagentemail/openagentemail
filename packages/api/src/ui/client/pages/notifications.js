@@ -134,7 +134,8 @@
     }
     notifySummary.textContent = 'Today (' + summary.tz + '): ' +
       summary.total + ' sent · ' + summary.ringCount + ' urgent' +
-      (summary.lastSuccessfulAt ? ' · last ' + formatClock(summary.lastSuccessfulAt, true) : '');
+      (summary.lastSuccessfulAt ? ' · last ' + formatClock(summary.lastSuccessfulAt, true) : '') +
+      '. Undelivered notifications are not included in today’s sent count.';
   }
 
   function renderNotifyDiagnostics() {
