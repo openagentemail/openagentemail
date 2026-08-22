@@ -1207,6 +1207,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('function abortDashboardPollRequests()');
     expect(UI_JS).toContain('abortDashboardPollRequests();');
     expect(UI_JS).toContain("['pointerdown', 'keydown', 'touchstart']");
+    expect(UI_JS).toContain('if (dashboardPollTimer === null) scheduleDashboardPolling();');
     expect(UI_JS).toContain("if (state.scope === 'overview') work = loadHome({ poll: true });");
     expect(UI_JS).toContain("else if (state.scope === 'tasks' && !state.tasksPending) work = loadTasks({ poll: true });");
     expect(UI_JS).toContain("else if (state.scope === 'notifications' && !state.notifyPending) work = loadNotificationLog({ poll: true });");

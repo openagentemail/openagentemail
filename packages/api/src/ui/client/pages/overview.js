@@ -373,7 +373,7 @@
 
   function noteDashboardInteraction() {
     dashboardLastInteractionAt = Date.now();
-    scheduleDashboardPolling();
+    if (dashboardPollTimer === null) scheduleDashboardPolling();
   }
 
   document.addEventListener('visibilitychange', function () {
