@@ -53,15 +53,27 @@
   font-weight: 700;
 }
 .detail-otp { margin: 12px 0 0; }
-.detail-main-col { min-width: 12em; }
-.detail-body-layout { display: grid; grid-template-columns: minmax(12em, 1fr) minmax(0, 240px); gap: 16px; align-items: start; }
+.detail-main-col { min-width: 0; }
+.detail-body-layout { display: grid; gap: 18px; }
 .metadata-drawer {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-card);
-  padding: 14px 14px 18px;
+  padding: 13px 16px;
 }
-.metadata-drawer h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-dim); }
+.metadata-drawer h3 { margin: 0 0 9px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+.metadata-drawer .metadata-summary {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+.metadata-summary .metadata-item { min-width: 0; }
+.metadata-summary .metadata-item:nth-child(-n + 2) { grid-column: span 3; }
+.metadata-summary .metadata-item:nth-child(n + 3) { grid-column: span 2; }
+.metadata-summary .metadata-item dt { font-size: 11px; }
+.metadata-summary .metadata-item dd { margin: 2px 0 0; font-size: 13px; }
+.metadata-summary .metadata-item:nth-child(n + 4) dt,
+.metadata-summary .metadata-item:nth-child(n + 4) dd { color: var(--ink-dim); font-size: 12px; }
 .tab-headers { display: none; }
 .source-body {
   min-height: 180px;
@@ -117,7 +129,7 @@
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
-.home-dashboard { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+.home-dashboard { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; }
 .home-section, .home-session-empty {
   min-width: 0;
   padding: 16px;
@@ -422,17 +434,15 @@
  * Desktop overview fixed tracks+gaps ≈724px + 240 sidebar + panel pad ≈1044px → compact to 1100px.
  * Compact fixed tracks+gaps+row pad ≈542px + 210 sidebar + panel pad ≈800px → stack below 820px
  * so portrait tablets (720–800) do not collapse the identity track.
- * 1280 详情列：220 nav + 240 身份 + 360 列表 ≈820，剩余详情约 460；再减 padding 与 240 抽屉后主题列 <100px，中文逐字竖排。
- * 抽屉改在 ≤1440 收起（算术含 app-nav）；1100 仍只管 overview 轨与侧栏收窄。
+ * 1280 详情列：220 nav + 240 身份 + 360 列表 ≈820，剩余详情约 460。邮件元数据现置于全文宽顶部，
+ * 不再与正文争抢横向空间；1100 以下摘要改为单列，避免嵌套桌面列把元数据压得过窄。
  */
-@media (max-width: 1440px) {
-  .detail-body-layout { display: block; }
-  .metadata-drawer { display: none; }
-  .tab-headers { display: inline-flex; min-height: 44px; }
-}
+@media (max-width: 1440px) { .tab-headers { display: inline-flex; min-height: 44px; } }
 @media (max-width: 1100px) {
   .inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
+  .metadata-drawer .metadata-summary { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .metadata-summary .metadata-item { grid-column: auto !important; }
   .overview-header, .overview-row {
     gap: 6px;
     grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 100px 58px;

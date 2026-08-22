@@ -133,6 +133,13 @@
     list.append(term, value);
   }
 
+  function appendMetadataItem(list, labelText, valueText) {
+    var item = document.createElement('div');
+    item.className = 'metadata-item';
+    appendMeta(item, labelText, valueText);
+    list.append(item);
+  }
+
   function selectForManualCopy(sourceNode) {
     var range = document.createRange();
     range.selectNodeContents(sourceNode);
@@ -340,28 +347,24 @@
     }
   }
 
-  function fillMetadata(drawer, detail) {
+  function fillMetadata(drawer, detail, summary) {
     drawer.replaceChildren();
     var heading = document.createElement('h3');
     heading.textContent = 'Headers';
     var meta = document.createElement('dl');
-    meta.className = 'meta';
-    appendMeta(meta, 'From', detail.from);
-    appendMeta(meta, 'To', detail.to);
-    appendMeta(meta, 'Date', formatDate(detail.date));
-    appendMeta(meta, 'Id', detail.id);
-    appendMeta(meta, 'Source', detail.source === 'internal' ? 'internal' : 'external');
+    meta.className = summary ? 'meta metadata-summary' : 'meta';
+    var append = summary ? appendMetadataItem : appendMeta;
+    append(meta, 'From', detail.from);
+    append(meta, 'To', detail.to);
+    append(meta, 'Date', formatDate(detail.date));
+    append(meta, 'Id', detail.id);
+    append(meta, 'Source', detail.source === 'internal' ? 'internal' : 'external');
     drawer.append(heading, meta);
   }
 
   function renderDetail(detail) {
     detailContent.replaceChildren();
     state.bodyView = detail.hasHtml && !detail.htmlTooLarge ? 'rendered' : 'plain';
-
-    var layout = document.createElement('div');
-    layout.className = 'detail-body-layout';
-    var mainCol = document.createElement('div');
-    mainCol.className = 'detail-main-col';
 
     var header = document.createElement('header');
     header.className = 'detail-header';
@@ -447,7 +450,9 @@
     sourceTab.addEventListener('click', function () { selectBodyView('source'); });
     headersTab.addEventListener('click', function () { selectBodyView('headers'); });
 
-    mainCol.append(header, otpHost, tabs);
+    var mainCol = document.createElement('div');
+    mainCol.className = 'detail-main-col';
+    mainCol.append(otpHost, tabs);
     if (detail.htmlTooLarge) {
       var htmlUnavailable = document.createElement('p');
       htmlUnavailable.className = 'notice warning';
@@ -457,12 +462,14 @@
     }
     mainCol.append(body);
 
-    var drawer = document.createElement('aside');
+    var drawer = document.createElement('section');
     drawer.className = 'metadata-drawer';
     drawer.setAttribute('aria-label', 'Message metadata');
-    fillMetadata(drawer, detail);
+    fillMetadata(drawer, detail, true);
 
-    layout.append(mainCol, drawer);
+    var layout = document.createElement('div');
+    layout.className = 'detail-body-layout';
+    layout.append(header, drawer, mainCol);
     detailContent.append(layout);
     selectBodyView(state.bodyView);
   }
