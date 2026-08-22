@@ -13,8 +13,14 @@ import { existsSync, readFileSync } from 'node:fs';
  * 单布局行为一致：缺文件=启动即报错，不半死不活）。
  */
 
+/** 扁平回落名只许安全字符（路径段自守，防未来传参变成穿越点）。 */
+const SAFE_FLAT_NAME = /^[A-Za-z0-9._-]+$/;
+
 /** 布局探测：先试相对模块的相邻路径，不存在再回落扁平 <moduleDir>/ui/<flatName>。 */
 export function resolveUiAssetUrl(moduleUrl: string, siblingPath: string, flatName: string): URL {
+  if (!SAFE_FLAT_NAME.test(flatName)) {
+    throw new Error(`invalid flat asset name: ${JSON.stringify(flatName)}`);
+  }
   const beside = new URL(siblingPath, moduleUrl);
   if (existsSync(beside)) return beside;
   return new URL(`./ui/${flatName}`, moduleUrl);

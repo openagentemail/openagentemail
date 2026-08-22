@@ -15,11 +15,15 @@ const srcUi = join(here, '..', 'src', 'ui');
 const distUi = join(here, '..', 'dist', 'ui');
 
 mkdirSync(distUi, { recursive: true });
+const seen = new Set<string>();
 for (const dir of ['client', 'client/components', 'client/pages', 'styles', 'fonts']) {
   // 只拷真资产（.js/.css/.woff2），不带 .ts loader；文件名全局唯一，直接打平。
   for (const name of readdirSync(join(srcUi, dir))) {
     const ext = extname(name);
     if (ext === '.js' || ext === '.css' || ext === '.woff2') {
+      // 重名即 build 失败：扁平布局靠 basename 唯一，静默覆盖会把产物悄悄换血。
+      if (seen.has(name)) throw new Error(`duplicate UI asset basename: ${name}`);
+      seen.add(name);
       copyFileSync(join(srcUi, dir, name), join(distUi, name));
     }
   }
