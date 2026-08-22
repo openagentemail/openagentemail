@@ -99,7 +99,7 @@ describe('UI real-file manifest (#520-A)', () => {
   test('served bundle bytes are pinned to the B6 real-file baseline', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
-    expect(sha256(UI_JS)).toBe('82734e2d92f26346e0a63c830f75daa2a8a253ae37f25f7da90d964a9652d68e');
+    expect(sha256(UI_JS)).toBe('0ef65bcdcfd3e48077f888f8b183303143b365fa293d88ffbc9a364e27ebb1a3');
     expect(sha256(UI_CSS)).toBe('71e5c8e09e6e3e6867b495e39e31fc32a353b481b02a2f6174cfdee0507bc93e');
   });
 });

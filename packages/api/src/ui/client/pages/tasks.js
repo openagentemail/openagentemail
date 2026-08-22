@@ -543,7 +543,7 @@
         var stillThere = state.tasks.some(function (task) {
           return task.id === state.activeTaskId;
         });
-        if (!stillThere && !more) clearTaskDetail();
+        if (!stillThere && !more && !opts.poll) clearTaskDetail();
       }
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
