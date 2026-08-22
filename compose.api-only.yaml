@@ -63,7 +63,7 @@ services:
       - "${API_BIND:-127.0.0.1}:${API_PORT:-3100}:3100"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "bun -e 'fetch(\"http://localhost:3100/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"]
+      test: ["CMD-SHELL", "bun -e 'fetch(\"http://localhost:${API_PORT:-3100}/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"]
       interval: 30s
       timeout: 5s
       retries: 5
