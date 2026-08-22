@@ -1,7 +1,7 @@
   function renderConfigureClients(grants) {
     configureClientsRows.replaceChildren();
     if (!grants.length) {
-      configureClientsState.textContent = 'No authorized clients.';
+      configureClientsState.textContent = 'No connected apps.';
       return;
     }
     configureClientsState.textContent = '';
@@ -62,7 +62,7 @@
       renderConfigureClients(grants);
     } catch (error) {
       if (error.message !== 'session_expired') {
-        configureClientsState.textContent = 'Could not load authorized clients.';
+        configureClientsState.textContent = 'Could not load connected apps.';
       }
     }
   }
@@ -76,4 +76,3 @@
     configureClientsPanel.focus({ preventScroll: true });
     loadConfigureClients();
   }
-

@@ -33,7 +33,7 @@
     if (!state.activeAddress) {
       renderEmptyState(messageState, {
         title: 'Choose an address',
-        purpose: 'Inbox lists mail for one identity at a time. Pick an address in the left column, then open Inbox, Sent, or All Mail.',
+        purpose: 'Mail lists messages for one identity at a time. Pick an address in the left column, then open Inbox, Sent, or All Mail.',
         actionLabel: isAdmin() ? 'Create identity' : 'Refresh addresses',
         onAction: function () {
           if (isAdmin()) showCreateModal();
@@ -187,4 +187,3 @@
     var since = Date.parse(state.overview.totals.recentSince);
     return !Number.isNaN(since) && Date.parse(row.lastReceivedAt) >= since;
   }
-

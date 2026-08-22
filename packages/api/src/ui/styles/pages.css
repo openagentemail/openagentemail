@@ -373,7 +373,7 @@
   .tab-headers { display: inline-flex; min-height: 44px; }
 }
 @media (max-width: 1100px) {
-  .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
+  .inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
   .overview-header, .overview-row {
     gap: 6px;

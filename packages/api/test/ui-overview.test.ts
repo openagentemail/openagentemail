@@ -516,8 +516,8 @@ describe('Overview 端点契约', () => {
     expect(second.headers.get('retry-after')).toBe('3');
   });
 
-  // A12：/v1/* 路由表零新增；ADR #26 允许 /ui/overview shell
-  test('Overview 只存在于 /ui/api 下，/v1 没有新增路由', async () => {
+  // A12：/v1/* 路由表零新增；旧 /ui/overview 只保留兼容跳转。
+  test('Overview API stays under /ui/api, legacy bookmarks redirect, and /v1 gains no route', async () => {
     const { createApp } = await import('../src/app.ts');
     const full = createApp({ uiEnabled: true });
     // 直接查路由表，避免依赖测试进程里 API_KEYS 的加载顺序
@@ -528,6 +528,12 @@ describe('Overview 端点契约', () => {
     expect(overviewRoutes).toEqual(
       ['GET /ui/api/overview', 'GET /ui/overview', 'GET /ui/overview/'].sort(),
     );
+    for (const path of ['/ui/overview', '/ui/overview/']) {
+      const response = await full.request(path);
+      expect(response.status).toBe(301);
+      expect(response.headers.get('location')).toBe('/ui');
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    }
     expect(full.routes.some((route) => route.path.startsWith('/v1') && route.path.includes('overview'))).toBe(
       false,
     );

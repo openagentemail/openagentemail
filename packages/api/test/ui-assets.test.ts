@@ -318,8 +318,15 @@ describe('UI static asset contract', () => {
     expect(frame.body).not.toContain('id="app-nav"');
   });
 
-  test('unknown UI paths are 404 and UI_ENABLED=false removes the whole surface', async () => {
+  test('unknown UI paths are 404, old Overview bookmarks redirect, and UI_ENABLED=false removes the whole surface', async () => {
     expect((await app.request('/ui/unknown')).status).toBe(404);
+
+    for (const path of ['/ui/overview', '/ui/overview/']) {
+      const legacy = await app.request(path);
+      expect(legacy.status).toBe(301);
+      expect(legacy.headers.get('location')).toBe('/ui');
+      expect(legacy.headers.get('cache-control')).toBe('no-store');
+    }
 
     // ADR #26 PR1：真实 /ui/* shell 子路径刷新不 404（含尾斜杠变体）
     const { UI_SHELL_EXACT_PATHS, UI_SHELL_PREFIX_PATHS } = await import(
@@ -327,7 +334,6 @@ describe('UI static asset contract', () => {
     );
     for (const path of [
       '/ui/inbox',
-      '/ui/overview',
       '/ui/tasks',
       '/ui/tasks/demo-id',
       '/ui/notifications',
@@ -466,22 +472,20 @@ describe('UI static asset contract', () => {
       expect(route.unknown).toBe(true);
       expect(route.scope).toBe('inbox');
     }
-    // 合法 dashboard 深链仍有明确 scope
+    // Home 是唯一的 Overview 数据壳入口；旧 History API 条目也会在客户端归一化。
+    expect(wrap('/ui').scope).toBe('overview');
+    expect(wrap('/ui').unknown).toBeUndefined();
     expect(wrap('/ui/overview').scope).toBe('overview');
     expect(wrap('/ui/overview').unknown).toBeUndefined();
     expect(wrap('/ui/inbox').unknown).toBeUndefined();
   });
 
-  // Codex P2：identity 看不到 Overview 全局导航；admin 看得到
-  test('Overview global nav is visible for admin sessions and hidden for identity sessions', () => {
-    expect(UI_HTML).toContain('id="nav-overview-item"');
-    expect(UI_HTML).toMatch(
-      /<li id="nav-overview-item" hidden><a class="app-nav-link" data-nav="overview"/,
-    );
-    expect(UI_JS).toContain('navOverviewItem.hidden = !isAdmin()');
-    expect(UI_CSS).toContain(
-      '.inbox-view[data-session="identity"] #nav-overview-item { display: none; }',
-    );
+  // B6 0 期：Home 对所有会话可见；身份会话只看壳，不得到管理员概览数据。
+  test('Home global nav is visible to every session while admin-only controls remain guarded', () => {
+    expect(UI_HTML).toContain('<a class="app-nav-link" data-nav="overview" href="/ui">Home</a>');
+    expect(UI_HTML).not.toContain('nav-overview-item');
+    expect(UI_JS).not.toContain('navOverviewItem.hidden');
+    expect(UI_CSS).not.toContain('#nav-overview-item');
 
     const start = UI_JS.indexOf('function isAdmin()');
     const end = UI_JS.indexOf('async function apiJson(');
@@ -494,28 +498,26 @@ describe('UI static asset contract', () => {
         var backToOverview = { hidden: false };
         var createIdentityButton = { hidden: true };
         var configureIdentitiesCreate = { hidden: true };
-        var navOverviewItem = { hidden: true };
         var state = { me: { kind: kind } };
         ${snippet}
         configureSession();
         return {
           session: inboxView.dataset.session,
-          overviewNavHidden: navOverviewItem.hidden,
-          inboxNavUnaffected: true
+          backToHomeHidden: backToOverview.hidden
         };
       };
     `)() as (kind: string) => {
       session: string;
-      overviewNavHidden: boolean;
+      backToHomeHidden: boolean;
     };
 
     const identity = run('identity');
     expect(identity.session).toBe('identity');
-    expect(identity.overviewNavHidden).toBe(true);
+    expect(identity.backToHomeHidden).toBe(true);
 
     const admin = run('admin');
     expect(admin.session).toBe('admin');
-    expect(admin.overviewNavHidden).toBe(false);
+    expect(admin.backToHomeHidden).toBe(false);
   });
 
   // A14
@@ -615,9 +617,11 @@ describe('UI static asset contract', () => {
     expect(applyScope).toContain('notifyPanel.hidden = !notifyActive;');
     expect(applyScope).toContain('tasksPanel.hidden = !tasksActive;');
     expect(applyScope).toContain('mainContent.hidden = !inboxActive;');
+    expect(applyScope).toContain('identityPanel.hidden = !inboxActive;');
+    expect(applyScope).toContain('mobileIdentityContainer.hidden = !inboxActive;');
     expect(applyScope).toContain('var SCOPE_META = {');
     expect(applyScope).toContain('skipLink.textContent = meta.skip');
-    expect(applyScope).toContain("'Skip to notifications'");
+    expect(applyScope).toContain("'Skip to Alerts'");
     expect(applyScope).toContain("'Skip to tasks'");
     expect(applyScope).toContain("'#notify-panel'");
     expect(applyScope).toContain("'#tasks-panel'");
@@ -633,9 +637,9 @@ describe('UI static asset contract', () => {
     expect(selectMessage).not.toContain('mainContent.focus()');
   });
 
-  // F2 / §1.3 / §1.4：侧栏地址与移动 selector 是 Overview / Notifications / Tasks 之外的入口
-  test('the sidebar address and the mobile selector both reach the inbox from the overview', () => {
-    // 唯一的移动 selector 必须挂在内容 <main> 之外，否则 scope 切换会把它一起藏掉
+  // B6 0 期：地址控件只在 Mail 内可见；未来非 Mail 链接会先进入 Mail。
+  test('address controls are Mail-only and a non-Mail address activation enters Mail', () => {
+    // 唯一的移动 selector 挂在内容 <main> 之外，由 scope 显式切 hidden。
     const layout = UI_HTML.indexOf('<div class="inbox-layout">');
     const selector = UI_HTML.indexOf('id="mobile-identity-select"');
     const overviewMain = UI_HTML.indexOf('<main id="overview-panel"');
@@ -649,29 +653,32 @@ describe('UI static asset contract', () => {
     expect(selector).toBeLessThan(tasksMain);
     expect(selector).toBeLessThan(inboxMain);
     expect(UI_HTML).toContain('<label for="mobile-identity-select">Address</label>');
-    // 移动端只有 .inbox-layout 展开成 block，所以这层包装在各 scope 都可见
+    expect(UI_HTML).toContain('id="identity-panel"');
+    expect(UI_HTML).toContain('id="mobile-identity"');
+    // 移动端 Mail 仍沿用原有 folder/list/detail stack。
     expect(UI_CSS).toContain('.mobile-back, .mobile-identity { display: none; }');
     expect(UI_CSS).toContain('.mobile-identity { display: grid;');
 
-    // 非 inbox scope 下都走 openAddress（它才会切 scope、播报、聚焦）
+    // 非 Mail scope 下都走 openAddress（它才会切 scope、播报、聚焦）。
     expect(UI_JS).toContain('function activateAddress(address) {');
     const activate = UI_JS.slice(
       UI_JS.indexOf('function activateAddress(address) {'),
       UI_JS.indexOf('function filteredIdentities('),
     );
-    expect(activate).toContain(
-      "state.scope === 'overview' || state.scope === 'notifications' || state.scope === 'tasks'",
-    );
+    expect(activate).toContain("if (state.scope !== 'inbox') {");
     expect(activate).toContain('openAddress(address);');
     expect(activate).toContain('selectIdentity(address);');
     expect(UI_JS).toContain('activateAddress(identity.address);');
-    expect(UI_JS).toContain('activateAddress(mobileIdentity.value);');
-    // 侧栏/选择器不许再直接调 selectIdentity（那样画面会停在 Overview/Notifications/Tasks）
+    expect(UI_JS).toContain('if (mobileIdentity.value) activateAddress(mobileIdentity.value);');
+    // 地址控件不保留伪造页面跳转选项。
+    expect(UI_JS).not.toContain('__notifications__');
+    expect(UI_JS).not.toContain('__tasks__');
+    // 侧栏/选择器不许再直接调 selectIdentity（那样会绕开 openAddress 的路由处理）。
     expect(UI_JS).not.toContain('selectIdentity(identity.address);');
     expect(UI_JS).not.toContain('selectIdentity(mobileIdentity.value);');
   });
 
-  // 通知记录：30 天日志为主数据源；12h ntfy 仅作 transport cache fallback
+  // 通知记录：30 天日志为主数据源；12h cache fallback 用人话说明。
   test('notifications panel loads history via /ui/api/notify/messages with session-scoped topics', () => {
     expect(UI_JS).toContain('function enterNotifications(');
     expect(UI_JS).toContain('function loadNotificationLog(');
@@ -690,13 +697,14 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'user-alerts'");
     expect(UI_JS).toContain("'user-low'");
     expect(UI_JS).toContain("'agent:' + localpart");
-    expect(UI_JS).toContain("value = '__notifications__'");
+    expect(UI_JS).not.toContain("value = '__notifications__'");
     expect(UI_JS).toContain('notifyPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('tierFromPriority');
     expect(UI_JS).toContain("priority === 5");
     expect(UI_JS).toContain("priority === 1");
     expect(UI_JS).toContain("return 'unknown'");
-    expect(UI_JS).toContain('Transport cache (ntfy 12h');
+    expect(UI_JS).toContain('What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.');
+    expect(UI_JS).not.toContain('Transport cache (ntfy 12h)');
     expect(UI_JS).toContain('renderSensitiveText');
     expect(UI_JS).toContain("'•••'");
     // 前端不得直接打 Bearer 的 /v1/notify
@@ -710,7 +718,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('async function selectTask(');
     expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
-    expect(UI_JS).toContain("value = '__tasks__'");
+    expect(UI_JS).not.toContain("value = '__tasks__'");
+    expect(UI_JS).toContain("return 'Waiting for you'");
+    expect(UI_JS).toContain('Write a reply. This goes back to the agent as a working update.');
     expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('function clearTasksState(');
     expect(UI_JS).toContain('function cancelTasksLoad(');
@@ -978,13 +988,19 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Urgent today'");
     expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
 
-    // ADR #26：所有 session（含 admin）默认落地 Inbox；深链由 applyRoute 恢复
+    // B6 0 期：Home/非 Mail 深链必须在 Mail 初载前落面，慢邮箱不能挡住首屏。
     const startSession = UI_JS.slice(
       UI_JS.indexOf('async function startSession('),
       UI_JS.indexOf("loginForm.addEventListener('submit'"),
     );
+    const route = startSession.indexOf('var route = parseLocationRoute();');
+    const firstLoad = startSession.indexOf('await loadInbox();');
+    expect(route).toBeGreaterThan(-1);
+    expect(firstLoad).toBeGreaterThan(route);
+    expect(startSession).toContain("if (route.scope !== 'inbox') {");
+    expect(startSession).toContain('await applyRoute(route, { replaceUrl: true, announce: \'\', seedMobileStack: true });');
     expect(startSession).toContain('await loadInbox()');
-    expect(startSession).toContain('await applyRoute(parseLocationRoute()');
+    expect(startSession).toContain('await applyRoute(route, { replaceUrl: true, announce: \'\', seedMobileStack: true });');
     expect(startSession).not.toContain('focusOverviewPanel();');
     expect(UI_JS).toContain('function applyRoute(');
     expect(UI_JS).toContain('function parseLocationRoute(');
@@ -1012,7 +1028,7 @@ describe('UI static asset contract', () => {
     expect(reconcile).toContain('if (!state.activeAddress) return;');
     expect(reconcile).toContain("state.activeAddress = '';");
     expect(reconcile).toContain("if (state.scope !== 'inbox') return;");
-    expect(reconcile).toContain("announce: lost + ' is no longer available. Back to overview.'");
+    expect(reconcile).toContain("announce: lost + ' is no longer available. Back to Home.'");
     // 两个触发点：Overview 周期的 /identities，以及 inbox 里 admin 的手动 Refresh
     expect(UI_JS).toContain('      reconcileActiveAddress();');
     expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
@@ -1091,9 +1107,11 @@ describe('UI static asset contract', () => {
     const flat = UI_CSS.replace(/\s+/g, ' ');
     expect(UI_CSS).toContain('@media (max-width: 1100px)');
     expect(UI_CSS).toContain('@media (max-width: 820px)');
-    expect(UI_CSS).toContain('[data-scope="overview"]');
+    expect(UI_CSS).toContain('[data-scope="inbox"]');
     expect(UI_CSS).toContain('[data-mobile-view="overview"]');
-    expect(flat).toContain('.inbox-layout { min-height: calc(100vh - 74px); display: grid; grid-template-columns: 240px minmax(0, 1fr); }');
+    expect(flat).toContain('.inbox-layout { min-height: calc(100vh - 74px); display: grid; grid-template-columns: minmax(0, 1fr); }');
+    expect(flat).toContain('.inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 240px minmax(0, 1fr); }');
+    expect(flat).toContain('@media (max-width: 1100px) { .inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }');
     expect(flat).toContain('.inbox-main { min-width: 0; display: grid; grid-template-columns: 360px minmax(0, 1fr); }');
     expect(flat).toContain('.inbox-main { display: block; }');
     // 仓库里的移动规则是后代选择器，多包一层 <main> 后仍然命中
@@ -1168,7 +1186,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain(
       'Some counts are incomplete for messages with very large recipient lists (shown as ≥ or Unknown).',
     );
-    expect(UI_JS).toContain("if (!scan || !scan.skipped) {");
+    expect(UI_JS).not.toContain("card('In window'");
   });
 
   // F3 / §2.4 / §10 条 1：exact:false 时总计卡片也是下界，不许摆出精确外观
@@ -1188,13 +1206,12 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function renderOverviewMeta() {'),
     );
     expect(stats).toContain('var exact = !totals || totals.exact !== false;');
-    expect(stats).toContain('windowed = boundParts(totals.matchedInWindow, exact);');
     expect(stats).toContain("card('Unseen', totals ? boundParts(totals.unseenInWindow, exact) : fallback);");
     expect(stats).toContain(
       "card('Active 24h', totals ? boundParts(totals.activeAddresses, exact) : fallback);",
     );
-    // 三个下界字段都不许再无条件 formatNumber；地址数是身份派生量，仍然精确
-    expect(stats).not.toContain('formatNumber(totals.matchedInWindow)');
+    // 两个下界字段都不许再无条件 formatNumber；地址数是身份派生量，仍然精确
+    expect(stats).not.toContain('matchedInWindow');
     expect(stats).not.toContain('formatNumber(totals.unseenInWindow)');
     expect(stats).not.toContain('formatNumber(totals.activeAddresses)');
     expect(stats).toContain('formatNumber(totals.addresses)');
@@ -1378,8 +1395,11 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function renderConfigureIdentities('),
       UI_JS.indexOf('function enterConfigureIdentities('),
     );
-    expect(renderCfg).toContain("'Token slot: Set'");
-    expect(renderCfg).toContain("'Token slot: Missing'");
+    expect(renderCfg).toContain("'Key: set'");
+    expect(renderCfg).toContain("'Key: missing'");
+    expect(UI_JS).toContain('No connected apps.');
+    expect(UI_JS).toContain('Could not load connected apps.');
+    expect(UI_JS).not.toContain('authorized clients');
     expect(renderCfg).toContain('if (isAdmin())');
     expect(renderCfg).toContain("rotate.textContent = 'Rotate'");
     expect(renderCfg).toContain("del.textContent = 'Delete'");

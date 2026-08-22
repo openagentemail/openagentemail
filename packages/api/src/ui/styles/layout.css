@@ -17,8 +17,9 @@
 .inbox-layout {
   min-height: calc(100vh - 74px);
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
+.inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 240px minmax(0, 1fr); }
 .inbox-main {
   min-width: 0;
   display: grid;
@@ -40,9 +41,6 @@
   min-height: 0;
   overflow-y: auto;
 }
-.inbox-view[data-scope="overview"] .identity-panel,
-.inbox-view[data-scope="notifications"] .identity-panel,
-.inbox-view[data-scope="tasks"] .identity-panel { border-right-color: var(--line-strong); }
 .message-panel { background: var(--bg-raise); }
 .detail-panel { background: var(--bg); }
 .overview-panel, .notify-panel, .tasks-panel { background: var(--bg); padding: 20px clamp(16px, 3vw, 30px) 48px; overflow-x: hidden; }
@@ -248,7 +246,7 @@
 .app-nav-group { margin: 0 0 18px; }
 .app-nav-label {
   margin: 0 8px 8px;
-  color: var(--ink-faint);
+  color: var(--ink-dim);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: .12em;
@@ -275,8 +273,6 @@
   background: var(--gold-dim);
   color: var(--gold-soft);
 }
-/* identity 会话隐藏 admin 专属 Overview 导航（ADR 权限原则；与 configureSession 双保险） */
-.inbox-view[data-session="identity"] #nav-overview-item { display: none; }
 .nav-toggle {
   display: none;
   min-width: 44px;

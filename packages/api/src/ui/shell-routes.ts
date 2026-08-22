@@ -5,7 +5,6 @@
 
 /** 精确页面路径（无通配）；刷新时尾斜杠变体也必须 200。 */
 export const UI_SHELL_EXACT_PATHS = [
-  '/ui/overview',
   '/ui/notifications',
   '/ui/configure/identities',
   '/ui/configure/push',
@@ -19,7 +18,7 @@ export const UI_SHELL_PREFIX_PATHS = ['/ui/inbox', '/ui/tasks'] as const;
 
 /**
  * 交给 Hono 注册的完整 path 表。
- * 精确路径显式挂尾斜杠，避免 `/ui/overview/` 刷新 404（ADR「刷新不 404」）。
+ * 精确路径显式挂尾斜杠，避免合法深链刷新 404（ADR「刷新不 404」）。
  */
 export function uiShellRegisterPaths(): string[] {
   const paths: string[] = ['/ui', '/ui/'];

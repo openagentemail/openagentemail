@@ -9,10 +9,31 @@
 // from real computed styles.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const base = process.env.PREVIEW_BASE ?? 'http://127.0.0.1:4310';
+const localIpv4s = Object.values(networkInterfaces())
+  .flat()
+  .filter((entry) => entry?.family === 'IPv4' && !entry.internal)
+  .map((entry) => entry.address);
+const previewPort = new URL(base).port || '80';
+
+// 非 loopback host 才能验证 HTTP 的不安全上下文。多网卡时只用实际连得上本机预览的地址。
+async function findInsecureBase() {
+  for (const address of localIpv4s) {
+    const candidate = `http://${address}:${previewPort}`;
+    try {
+      const response = await fetch(`${candidate}/ui`, { signal: AbortSignal.timeout(2000) });
+      if (response.ok) return candidate;
+    } catch (_error) {
+      // 尝试下一个本机地址。
+    }
+  }
+  throw new Error('No reachable non-loopback IPv4 address is available for the insecure-context probe');
+}
+
+const insecureBase = await findInsecureBase();
 const debugPort = Number(process.env.CHROME_DEBUG_PORT ?? 9334);
 // 慢用例（15 次轮询放弃、20 s 冷却窗口）默认跑；PROBE_SLOW=0 可跳过。
 const runSlow = process.env.PROBE_SLOW !== '0';
@@ -33,6 +54,7 @@ const browser = spawn(
   [
     '--headless=new',
     '--disable-gpu',
+    '--no-proxy-server',
     '--no-first-run',
     '--no-default-browser-check',
     `--remote-debugging-port=${debugPort}`,
@@ -249,7 +271,7 @@ function overviewCount() {
 
 // fixture 里只有这个地址有邮件，钻入相关的探针都点它。
 const FOX_ROW_CLICK =
-  "document.querySelector('.overview-row[data-address=\"fox@preview.test\"]').click()";
+  "document.querySelector('.overview-row[data-address=\"fox@preview.test\"] .overview-row-nav').click()";
 
 try {
   await retry(
@@ -321,7 +343,7 @@ try {
       const url = message.params.request.url;
       if (url.includes('/ui/api/overview')) overviewRequests.push(Date.now());
       if (url.includes('/ui/api/messages')) messageRequests.push(url);
-      if (!url.startsWith(base) && !url.startsWith('data:') && !url.startsWith('http://0.0.0.0')) {
+      if (!url.startsWith(base) && !url.startsWith('data:') && !url.startsWith(insecureBase)) {
         requestedExternalUrls.add(url);
       }
       return;
@@ -355,7 +377,7 @@ try {
           message.params.entry.text,
         )
       ) &&
-      // A67 故意走 http://0.0.0.0，Chrome 会为此抱怨 COOP/安全上下文 —— 那正是被测行为。
+      // A67 故意走本机的非 loopback HTTP host；Chrome 的 COOP/安全上下文提示是被测行为。
       !/Cross-Origin-Opener-Policy header has been ignored/.test(message.params.entry.text)
     ) {
       record('Log.entryAdded', message.params.entry.text);
@@ -376,7 +398,7 @@ try {
       message.method === 'Page.frameNavigated' &&
       message.params.frame.parentId === undefined &&
       !message.params.frame.url.startsWith(base) &&
-      !message.params.frame.url.startsWith('http://0.0.0.0')
+      !message.params.frame.url.startsWith(insecureBase)
     ) {
       record('Page.frameNavigated', message.params.frame.url);
     }
@@ -400,7 +422,7 @@ try {
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
   }).catch(() => {});
 
-  /* ============ A51 / A52：admin 落地 Inbox（ADR #26）；随后进入 Overview 跑面板用例 ============ */
+  /* ============ A51 / A52：admin 落地 Home（ADR #26） ============ */
   // 登录屏是 .fine-print 唯一出现的地方，A70① 的三个点名选择器要在这里各测一次。
   await send('Page.navigate', { url: `${base}/ui` });
   await waitFor(
@@ -412,42 +434,41 @@ try {
 
   await login('preview-token');
   await waitFor(
-    "!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox'",
-    'inbox after login',
+    "!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'Home after login',
   );
   await injectProbes();
 
-  // A51：落地就是 Inbox（含 admin）
-  check(await evaluate("__oae.visible('#main-content')"), 'A51 inbox main is visible');
+  // A51：落地就是 Home（含 admin）
+  check(await evaluate("__oae.visible('#overview-panel')"), 'A51 Home panel is visible');
   check(
-    !(await evaluate("__oae.visible('#overview-panel')")),
-    'A51 overview panel is hidden on landing',
+    !(await evaluate("__oae.visible('#main-content')")),
+    'A51 Mail main is hidden on Home landing',
   );
   check(
-    (await evaluate("document.querySelector('#inbox-view').dataset.scope")) === 'inbox',
-    'A51 data-scope is inbox',
+    (await evaluate("document.querySelector('#inbox-view').dataset.scope")) === 'overview',
+    'A51 data-scope is Home',
   );
   check(
     (await evaluate('__oae.visibleMains().length')) === 1 &&
-      (await evaluate('__oae.visibleMains()[0].id')) === 'main-content',
-    'A51 session lands on the inbox panel',
+      (await evaluate('__oae.visibleMains()[0].id')) === 'overview-panel',
+    'A51 session lands on the Home panel',
   );
 
-  // A52：带 cookie 重新加载（/me 续期）同样落地 Inbox
+  // A52：带 cookie 重新加载（/me 续期）同样落地 Home
   await resume();
   await waitFor(
-    "document.querySelector('#login-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox'",
-    'inbox after session renewal',
+    "document.querySelector('#login-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'Home after session renewal',
   );
   await injectProbes();
   check(
     (await evaluate('__oae.visibleMains().length')) === 1 &&
-      (await evaluate('__oae.visibleMains()[0].id')) === 'main-content',
-    'A52 session renewal lands on the inbox panel',
+      (await evaluate('__oae.visibleMains()[0].id')) === 'overview-panel',
+    'A52 session renewal lands on the Home panel',
   );
 
-  // 进入 Overview，后续 A56+ 面板用例复用原路径
-  await evaluate("document.querySelector('[data-nav=\"overview\"]').click()");
+  // Home 已承载现有管理员数据壳，后续 A56+ 面板用例直接复用。
   await waitFor(
     "!document.querySelector('#inbox-view').hidden && document.querySelectorAll('.overview-row').length > 0",
     'overview rows',
@@ -468,51 +489,37 @@ try {
   const order = await evaluate(`(() => {
     const nodes = __oae.tabOrder();
     const sorted = [...document.querySelectorAll('#overview-sort .sort-button')];
-    const rows = [...document.querySelectorAll('.overview-row')];
+    const rows = [...document.querySelectorAll('.overview-row-nav')];
     return {
       ids: nodes.map((el) => el.id || el.className),
       firstSortIndex: nodes.indexOf(sorted[0]),
       firstRowIndex: nodes.indexOf(rows[0]),
       searchIndex: nodes.indexOf(document.querySelector('#overview-search')),
       refreshIndex: nodes.indexOf(document.querySelector('#overview-refresh')),
-      navIndex: nodes.indexOf(document.querySelector('.overview-nav')),
-      identityIndex: nodes.indexOf(
-        [...document.querySelectorAll('.identity-button')].filter(
-          (el) => !el.classList.contains('overview-nav'),
-        )[0],
-      ),
-      sidebarTotal: document.querySelectorAll('.identity-button').length,
-      sidebarCount: [...document.querySelectorAll('.identity-button')].filter(
-        (el) => el.getClientRects().length > 0,
-      ).length,
+      homeNavIndex: nodes.indexOf(document.querySelector('[data-nav="overview"]')),
       viewport: [window.innerWidth, window.innerHeight],
     };
   })()`);
   check(
-    order.ids[0] === 'skip-link' &&
-      order.ids[1] === 'logout-button' &&
-      order.ids[2] === 'identity-search',
-    `A57 tab order starts with skip link, sign out, identity search (saw ${order.ids.slice(0, 3).join(' → ')})`,
+    order.ids[0] === 'skip-link' && order.homeNavIndex >= 0,
+    `A57 tab order starts with skip link and includes Home navigation (saw ${order.ids.slice(0, 4).join(' → ')})`,
   );
   check(
-    order.navIndex === 3 &&
-      order.identityIndex === 4 &&
-      order.refreshIndex > order.identityIndex &&
+    order.refreshIndex >= 0 &&
       order.searchIndex === order.refreshIndex + 1 &&
       order.firstSortIndex > order.searchIndex &&
       order.firstRowIndex > order.firstSortIndex,
-    'A57 tab order continues nav → addresses → refresh → filter → sort → rows ' +
-      `(nav ${order.navIndex}, address ${order.identityIndex}, refresh ${order.refreshIndex}, ` +
-      `filter ${order.searchIndex}, sort ${order.firstSortIndex}, row ${order.firstRowIndex}; ` +
-      `order: ${order.ids.slice(0, 8).join(' → ')}; sidebar ${order.sidebarCount}/${order.sidebarTotal})`,
+    'A57 Home tab order continues refresh → filter → sort → rows ' +
+      `(refresh ${order.refreshIndex}, filter ${order.searchIndex}, sort ${order.firstSortIndex}, ` +
+      `row ${order.firstRowIndex}; order: ${order.ids.slice(0, 10).join(' → ')})`,
   );
 
   // A58：skip link 文案/目标随 scope 变，激活后焦点真的落到 overview
   check(
-    (await evaluate("__oae.text('#skip-link').trim()")) === 'Skip to overview' &&
+    (await evaluate("__oae.text('#skip-link').trim()")) === 'Skip to Home' &&
       (await evaluate("document.querySelector('#skip-link').getAttribute('href')")) ===
         '#overview-panel',
-    'A58 skip link points at the overview panel',
+    'A58 skip link points at the Home panel',
   );
   await evaluate("document.querySelector('#skip-link').click()");
   await delay(100);
@@ -660,20 +667,20 @@ try {
   const drill = await evaluate(`(() => ({
     active: __oae.text('#active-address').trim(),
     currents: [...document.querySelectorAll('#identity-list [aria-current="true"]')].map((el) => el.className),
-    navCurrent: document.querySelector('.overview-nav').getAttribute('aria-current'),
+    navCurrent: document.querySelector('[data-nav="overview"]').getAttribute('aria-current'),
     mains: __oae.visibleMains().map((main) => main.id),
     skip: [__oae.text('#skip-link').trim(), document.querySelector('#skip-link').getAttribute('href')]
   }))()`);
   check(drill.active === 'fox@preview.test', `A54 active address follows the row (${drill.active})`);
   check(drill.currents.length === 1, 'A54 exactly one sidebar item is aria-current="true"');
-  check(drill.navCurrent === 'false', 'A54 the Overview nav item is not current inside an inbox');
+  check(drill.navCurrent === null, 'A54 the Home nav item is not current inside Mail');
   check(
     drill.mains.length === 1 && drill.mains[0] === 'main-content',
     'A56 desktop inbox has exactly one visible main (#main-content)',
   );
   check(
-    drill.skip[0] === 'Skip to inbox' && drill.skip[1] === '#main-content',
-    'A58 skip link returns to the inbox target',
+    drill.skip[0] === 'Skip to Mail' && drill.skip[1] === '#main-content',
+    'A58 skip link returns to the Mail target',
   );
 
   const beforeBack = overviewCount();
@@ -692,38 +699,15 @@ try {
     'A55 a fresh snapshot (<15 s) is not refetched when going back',
   );
 
-  /* ============ F2：侧栏地址是 Overview 之外的第二条入口 ============ */
-  const sidebarClicked = await evaluate(`(() => {
-    const button = [...document.querySelectorAll('#identity-list .identity-button')]
-      .filter((el) => !el.classList.contains('overview-nav'))
-      .filter((el) => el.textContent.includes('fox@preview.test'))[0];
-    if (!button) return false;
-    button.click();
-    return true;
-  })()`);
-  check(sidebarClicked, 'F2 the overview sidebar offers the fox address');
-  await waitFor(
-    "document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelectorAll('.message-button').length > 0",
-    'the inbox after activating the sidebar address',
-  );
-  await injectProbes();
-  const sidebarDrill = await evaluate(`(() => ({
-    active: __oae.text('#active-address').trim(),
-    mains: __oae.visibleMains().map((main) => main.id),
-    status: __oae.text('#status')
+  /* ============ F2：地址与文件夹控件只属于 Mail ============ */
+  const homeAddressControls = await evaluate(`(() => ({
+    identityPanel: __oae.visible('#identity-panel'),
+    mobileIdentity: __oae.visible('#mobile-identity'),
+    folders: __oae.visible('#folder-nav')
   }))()`);
   check(
-    sidebarDrill.active === 'fox@preview.test',
-    `F2 the sidebar address opens its own inbox (saw ${sidebarDrill.active})`,
-  );
-  check(
-    sidebarDrill.mains.length === 1 && sidebarDrill.mains[0] === 'main-content',
-    `F2 the sidebar address switches the visible main to the inbox (saw ${sidebarDrill.mains.join(',')})`,
-  );
-  await evaluate("document.querySelector('#back-to-overview').click()");
-  await waitFor(
-    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
-    'the overview after the sidebar probe',
+    !homeAddressControls.identityPanel && !homeAddressControls.mobileIdentity && !homeAddressControls.folders,
+    'F2 Home hides address and folder controls outside Mail',
   );
 
   /* ============ A68：复制反馈 ============ */
@@ -801,8 +785,8 @@ try {
   })()`);
   if (containment.parentMarked) record('containment', 'email script changed the parent');
   if (!containment.frameOpaque) record('containment', 'sandboxed frame origin is readable');
-  // skip link 会留下 #overview-panel 这样的片段，那不是导航。
-  if (containment.location.split('#')[0] !== `${base}/ui`) {
+  // Mail 深链与 skip-link 留下的 hash 都不是越权导航。
+  if (containment.location.split('#')[0] !== `${base}/ui/inbox/fox%40preview.test/inbox`) {
     record('navigation', containment.location);
   }
 
@@ -815,74 +799,31 @@ try {
   });
   await send('Emulation.setTouchEmulationEnabled', { enabled: true });
   await login('preview-token');
-  await waitFor("document.querySelectorAll('.overview-row').length > 0", 'mobile overview');
+  await waitFor("document.querySelectorAll('.overview-row').length > 0", 'mobile Home');
   await injectProbes();
   check(
     (await evaluate("document.querySelector('#inbox-view').dataset.mobileView")) === 'overview',
-    'A59 mobile lands in the overview view',
+    'A59 mobile lands in the Home view',
   );
-  const mobileOverviewShot = await screenshot('mobile-overview');
+  const mobileOverviewShot = await screenshot('mobile-home');
 
-  /* ============ F2 / §1.4：移动 Overview 必须能看见并使用地址 selector ============ */
-  const mobileSelector = await evaluate(`(() => {
+  /* ============ F2 / §1.4：移动 Home 也不显示 Mail 的地址控件 ============ */
+  const mobileHomeControls = await evaluate(`(() => {
     const select = document.querySelector('#mobile-identity-select');
     return {
-      visible: __oae.visible('#mobile-identity-select'),
+      wrapperVisible: __oae.visible('#mobile-identity'),
+      selectorVisible: __oae.visible('#mobile-identity-select'),
+      panelVisible: __oae.visible('#identity-panel'),
       insideInboxMain: !!select.closest('#main-content'),
-      options: [...select.options].map((option) => option.value),
-      value: select.value,
-      height: Math.round(select.getBoundingClientRect().height)
     };
   })()`);
-  check(mobileSelector.visible, 'F2 the mobile overview shows the address selector');
   check(
-    !mobileSelector.insideInboxMain,
-    'F2 the selector lives outside the inbox main, so scope=overview cannot hide it',
+    !mobileHomeControls.wrapperVisible && !mobileHomeControls.selectorVisible &&
+      !mobileHomeControls.panelVisible && !mobileHomeControls.insideInboxMain,
+    'F2 mobile Home hides every Mail address control',
   );
-  check(
-    mobileSelector.options[0] === '' && mobileSelector.value === '',
-    'F2 the selector starts on the empty back-to-overview sentinel',
-  );
-  check(
-    mobileSelector.options.includes('fox@preview.test'),
-    'F2 the selector lists the addresses',
-  );
-  check(
-    mobileSelector.height >= 44,
-    `A59 the mobile selector keeps a 44px touch target in the overview (saw ${mobileSelector.height})`,
-  );
-  await evaluate(`(() => {
-    const select = document.querySelector('#mobile-identity-select');
-    select.value = 'fox@preview.test';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
-  })()`);
-  await waitFor(
-    "document.querySelector('#inbox-view').dataset.mobileView === 'list' && document.querySelectorAll('.message-button').length > 0",
-    'the mobile list after choosing an address in the selector',
-  );
-  await injectProbes();
-  const selectorDrill = await evaluate(`(() => ({
-    active: __oae.text('#active-address').trim(),
-    scope: document.querySelector('#inbox-view').dataset.scope,
-    selectorVisible: __oae.visible('#mobile-identity-select')
-  }))()`);
-  check(
-    selectorDrill.active === 'fox@preview.test' && selectorDrill.scope === 'inbox',
-    `F2 the mobile selector enters the chosen inbox (saw ${selectorDrill.scope}/${selectorDrill.active})`,
-  );
-  check(selectorDrill.selectorVisible, 'F2 the selector stays visible inside the mobile inbox');
-  await evaluate("document.querySelector('#back-to-overview').click()");
-  await waitFor(
-    "document.querySelector('#inbox-view').dataset.mobileView === 'overview'",
-    'the mobile overview after the selector probe',
-  );
-  await waitFor(
-    "document.querySelectorAll('.overview-row').length > 0",
-    'the mobile rows after the selector probe',
-  );
-  await injectProbes();
 
+  // Home 的实际地址行仍会明确进入 Mail。
   await evaluate(FOX_ROW_CLICK);
   await waitFor(
     "document.querySelector('#inbox-view').dataset.mobileView === 'list'",
@@ -899,7 +840,7 @@ try {
         (el) => el.getClientRects().length > 0
       ),
       overflow: document.documentElement.scrollWidth > window.innerWidth,
-      touch: [...document.querySelectorAll('.message-button, #mobile-identity-select')]
+      touch: [...document.querySelectorAll('.message-button')]
         .map((el) => Math.round(el.getBoundingClientRect().height))
     };
   })()`);
@@ -944,11 +885,6 @@ try {
     'A58 mobile detail skip link focuses the visible #main-content',
   );
   const mobileDetailShot = await screenshot('mobile-detail');
-  await evaluate("document.querySelector('#mobile-back').click()");
-  await waitFor(
-    "document.querySelector('#inbox-view').dataset.mobileView === 'list'",
-    'mobile back to list',
-  );
   await evaluate("document.querySelector('#back-to-overview').click()");
   await waitFor(
     "document.querySelector('#inbox-view').dataset.mobileView === 'overview'",
@@ -957,12 +893,12 @@ try {
   await send('Emulation.clearDeviceMetricsOverride');
   await send('Emulation.setTouchEmulationEnabled', { enabled: false });
 
-  /* ============ A53：identity 会话不碰 Overview ============ */
+  /* ============ A53：identity 会话只得到 Home 壳，不碰管理员 Overview API ============ */
   const overviewBeforeIdentity = overviewCount();
   await login('preview-identity-token');
   await waitFor(
-    "document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelectorAll('.message-button').length > 0",
-    'identity inbox',
+    "document.querySelector('#inbox-view').dataset.scope === 'overview' && __oae.visible('#overview-panel')",
+    'identity Home shell',
   );
   await injectProbes();
   await delay(300);
@@ -973,25 +909,27 @@ try {
   const identityProbe = await evaluate(`(() => {
     const back = document.querySelector('#back-to-overview');
     const nav = document.querySelector('[data-nav="overview"]');
-    const navItem = document.querySelector('#nav-overview-item');
     const order = __oae.tabOrder();
     return {
       backRects: back.getClientRects().length,
       backTabbable: order.includes(back),
-      navHidden: !navItem || navItem.hidden || navItem.getClientRects().length === 0,
+      navVisible: nav && nav.getClientRects().length > 0,
       navTabbable: nav ? order.includes(nav) : false,
+      adminDataVisible: __oae.visible('#overview-stats') || __oae.visible('#overview-rows'),
+      addressControlsVisible: __oae.visible('#identity-panel') || __oae.visible('#mobile-identity'),
       session: document.querySelector('#inbox-view').dataset.session,
       mains: __oae.visibleMains().map((main) => main.id)
     };
   })()`);
-  check(identityProbe.backRects === 0, 'A53 ← Overview is invisible for identity sessions');
-  check(!identityProbe.backTabbable, 'A53 ← Overview is out of the tab order');
+  check(identityProbe.backRects === 0, 'A53 ← Home return is invisible for identity sessions');
+  check(!identityProbe.backTabbable, 'A53 ← Home return is out of the tab order');
   check(identityProbe.session === 'identity', 'A53 identity session dataset is identity');
-  check(identityProbe.navHidden, 'A53 Overview global nav is hidden for identity sessions');
-  check(!identityProbe.navTabbable, 'A53 the Overview nav item is out of the tab order');
+  check(identityProbe.navVisible && identityProbe.navTabbable, 'A53 Home global nav is available to identity sessions');
+  check(!identityProbe.adminDataVisible, 'A53 identity Home does not render admin overview data');
+  check(!identityProbe.addressControlsVisible, 'A53 identity Home hides Mail address controls');
   check(
-    identityProbe.mains.length === 1 && identityProbe.mains[0] === 'main-content',
-    'A56 identity inbox has exactly one visible main',
+    identityProbe.mains.length === 1 && identityProbe.mains[0] === 'overview-panel',
+    'A56 identity Home has exactly one visible main',
   );
 
   /* ============ A61 / A61b / A62 / A62b / A63 / A64：五种 fixture ============ */
@@ -1062,7 +1000,7 @@ try {
   );
   await delay(2500);
   check(overviewCount() - loadingStart >= 2, 'A61 the client polls while loading');
-  await evaluate("document.querySelector('.overview-row').click()");
+  await evaluate("document.querySelector('.overview-row .overview-row-nav').click()");
   await waitFor(
     "document.querySelector('#inbox-view').dataset.scope === 'inbox'",
     'drill-in during loading',
@@ -1210,12 +1148,12 @@ try {
       .filter((button) => /create|add address|new address/i.test(button.textContent))
       .map((button) => button.textContent.trim())
   }))()`);
-  check(!/In window/.test(empty.stats), 'A64 the IN WINDOW card stays out of the DOM');
+  check(!/In window/.test(empty.stats), 'A64 the removed IN WINDOW card stays out of the DOM');
   check(!/newest/.test(empty.updated), 'A64 no "newest N of M" disclosure with zero identities');
   check(empty.disclosureHidden, 'A64 the truncation disclosure stays hidden');
   check(
-    empty.createButtons.length === 0,
-    `A64 no create button is offered (saw ${empty.createButtons.join('|')})`,
+    empty.createButtons.length === 1 && empty.createButtons[0] === 'Create Identity',
+    `A64 the existing admin Create Identity control is preserved (saw ${empty.createButtons.join('|')})`,
   );
   identitiesStub = null;
   overviewStub = null;
@@ -1251,14 +1189,11 @@ try {
     disclosureHidden: document.querySelector('#overview-disclosure').hidden,
     disclosure: __oae.text('#overview-disclosure'),
     affectedRow: (document.querySelector(
-      '.overview-row[data-address="' + ${JSON.stringify(inexactAddress)} + '"]'
-    ) || {}).ariaLabel
+      '.overview-row[data-address="' + ${JSON.stringify(inexactAddress)} + '"] .overview-row-nav'
+    ) || {}).getAttribute?.('aria-label')
   }))()`);
   const cardFor = (label) => inexact.cards.filter((card) => card.label === label)[0];
-  check(
-    cardFor('In window') !== undefined && /^≥128 \/ /.test(cardFor('In window').value),
-    `F3 the IN WINDOW card shows a bound (saw ${cardFor('In window')?.value})`,
-  );
+  check(cardFor('In window') === undefined, 'F3 the obsolete IN WINDOW card is not rendered');
   check(
     cardFor('Unseen') !== undefined && cardFor('Unseen').value === 'Unknown',
     `F3 a zero lower bound reads Unknown, never 0 (saw ${cardFor('Unseen')?.value})`,
@@ -1272,7 +1207,7 @@ try {
     `F3 the exact ADDRESSES card keeps its plain number (saw ${cardFor('Addresses')?.value})`,
   );
   check(
-    /Lower bound/.test(cardFor('In window')?.title ?? '') &&
+    /Lower bound/.test(cardFor('Active 24h')?.title ?? '') &&
       /Not counted/.test(cardFor('Unseen')?.title ?? ''),
     'F3 the bound cards explain themselves in a title',
   );
@@ -1286,11 +1221,11 @@ try {
   );
   overviewStub = null;
 
-  /* ============ F6 / §6 行 19：活动地址被删 → 回 Overview 并播报 ============ */
+  /* ============ F6 / §6 行 19：活动地址被删 → 回 Home 并播报 ============ */
   await login('preview-token');
   await waitFor(
     "document.querySelectorAll('.overview-row').length > 0",
-    'the overview before the removal probe',
+    'the Home before the removal probe',
   );
   await evaluate(FOX_ROW_CLICK);
   await waitFor(
@@ -1324,7 +1259,7 @@ try {
   await evaluate("document.querySelector('#refresh-button').click()");
   await waitFor(
     "document.querySelector('#inbox-view').dataset.scope === 'overview'",
-    'the overview after the active address disappeared',
+    'the Home after the active address disappeared',
   );
   await injectProbes();
   const removed = await evaluate(`(() => ({
@@ -1340,11 +1275,11 @@ try {
   check(removed.active === '', `F6 the stale active address is cleared (saw ${removed.active})`);
   check(
     !removed.addresses.includes('fox@preview.test'),
-    'F6 the removed address leaves the overview roster',
+    'F6 the removed address leaves the Home roster',
   );
   check(
     removed.mains.length === 1 && removed.mains[0] === 'overview-panel',
-    `F6 the user lands back on the overview (saw ${removed.mains.join(',')})`,
+    `F6 the user lands back on Home (saw ${removed.mains.join(',')})`,
   );
   identitiesStub = null;
 
@@ -1417,7 +1352,7 @@ try {
       );
       // 让卡片、行与 notice 都画完再拍，否则截到的是半张骨架
       await delay(250);
-      // N1 / §1.4：375×812 首屏必须从 topbar 开始，落焦 Overview 面板不许把页面滚下去
+      // N1 / §1.4：375×812 首屏必须从 topbar 开始，落焦 Home 面板不许把页面滚下去
       if (viewport.mobile) {
         const firstScreen = await evaluate(`(() => {
           const box = (selector) => {
@@ -1430,9 +1365,8 @@ try {
             topbar: box('#inbox-view .topbar'),
             logo: box('.topbar-brand .brand-logo'),
             signOut: box('#logout-button'),
-            label: box('.mobile-identity label'),
-            labelText: document.querySelector('.mobile-identity label').textContent.trim(),
-            selector: box('#mobile-identity-select')
+            mobileIdentityVisible: __oae.visible('#mobile-identity'),
+            identityPanelVisible: __oae.visible('#identity-panel')
           };
         })()`);
         const inside = (rect) => rect.top >= 0 && rect.bottom <= firstScreen.viewport;
@@ -1447,12 +1381,8 @@ try {
             `logo ${firstScreen.logo.top}, sign out ${firstScreen.signOut.top})`,
         );
         check(
-          firstScreen.labelText === 'Address' &&
-            inside(firstScreen.label) &&
-            inside(firstScreen.selector),
-          `N1 the ${fixture.name} mobile first screen keeps the Address label above its selector in the ` +
-            `viewport (label ${firstScreen.label.top}..${firstScreen.label.bottom}, ` +
-            `selector ${firstScreen.selector.top}..${firstScreen.selector.bottom})`,
+          !firstScreen.mobileIdentityVisible && !firstScreen.identityPanelVisible,
+          `N1 the ${fixture.name} mobile Home first screen hides Mail address controls`,
         );
       }
       matrixShots.push(await screenshot(`${fixture.name}-${viewport.name}`));
@@ -1464,8 +1394,7 @@ try {
   await send('Emulation.clearDeviceMetricsOverride');
 
   /* ============ A67：不安全上下文闸门 ============ */
-  const insecure = base.replace(/\/\/[^:]+/, '//0.0.0.0');
-  await send('Page.navigate', { url: `${insecure}/ui` });
+  await send('Page.navigate', { url: `${insecureBase}/ui` });
   await waitFor("document.readyState === 'complete'", 'insecure origin login screen');
   await injectProbes();
   const gate = await evaluate(`(() => ({

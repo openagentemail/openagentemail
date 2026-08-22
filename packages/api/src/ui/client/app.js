@@ -580,9 +580,15 @@
     byId('session-label').textContent = state.me.kind === 'admin'
       ? 'Admin session'
       : state.me.address;
-    /* ADR #26：所有 session（含 admin）默认落地 Inbox；深链由路径恢复。 */
+    /* Home/其它非 Mail 深链必须先落面：不能被首个邮箱的消息加载挡住。 */
+    var route = parseLocationRoute();
+    if (route.scope !== 'inbox') {
+      await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
+      await loadInbox();
+      return;
+    }
     await loadInbox();
-    await applyRoute(parseLocationRoute(), { replaceUrl: true, announce: '', seedMobileStack: true });
+    await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
   }
 
   loginForm.addEventListener('submit', async function (event) {
@@ -645,19 +651,7 @@
     announce(sortedModels().length + ' addresses match your filter.');
   });
   mobileIdentity.addEventListener('change', function () {
-    if (mobileIdentity.value === '') {
-      enterOverview({ announce: 'Back to overview' });
-      return;
-    }
-    if (mobileIdentity.value === '__notifications__') {
-      enterNotifications({ announce: 'Opened notifications' });
-      return;
-    }
-    if (mobileIdentity.value === '__tasks__') {
-      enterTasks({ announce: 'Opened tasks' });
-      return;
-    }
-    activateAddress(mobileIdentity.value);
+    if (mobileIdentity.value) activateAddress(mobileIdentity.value);
   });
   refreshButton.addEventListener('click', function () {
     /* identity 会话只有一个地址、也没有 Overview 可回，所以只有 admin 需要这一步。 */
@@ -751,7 +745,7 @@
   });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
-    enterOverview({ returnTo: state.returnAddress, announce: 'Back to overview' });
+    enterOverview({ returnTo: state.returnAddress, announce: 'Back to Home' });
   });
   function handleInboxMobileBack() {
     history.back();
