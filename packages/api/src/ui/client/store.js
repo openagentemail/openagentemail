@@ -73,11 +73,11 @@
     notifyDiagnostics: null,
     notifyRevealed: {},
     notifyVerifyPending: false,
-    /* 任务工单：列表 + 详情缓存；默认 Active tab */
+  /* 任务工单：列表 + 详情缓存；一期默认 Waiting for you。 */
     tasks: [],
     tasksStatus: 'idle',
     tasksMessage: '',
-    tasksFilter: 'active',
+    tasksFilter: 'input-required',
     tasksPeriod: '30d',
     tasksLimit: 20,
     tasksNextCursor: '',
@@ -90,6 +90,16 @@
     taskDetail: null,
     taskDetailStatus: 'idle',
     taskDetailMessage: '',
+    /* Home 值班台：各块只保存服务端投影，绝不从行数组推导徽标。 */
+    homeStatus: 'idle',
+    homeMessage: '',
+    homeWaitingTasks: [],
+    homeWaitingTotal: 0,
+    homeStuckTasks: [],
+    homeFailedUrgentCount: 0,
+    homeUrgentSentCount: null,
+    homeUnseenCount: null,
+    homeUpdatedAt: 0,
     /* Configure · Push 当前编辑的身份（admin 可切）。 */
     configurePushAddress: ''
   };
@@ -102,4 +112,3 @@
   var notifyController = null;
   var tasksController = null;
   var taskDetailController = null;
-

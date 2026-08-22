@@ -52,7 +52,7 @@
     state.tasks = [];
     state.tasksStatus = 'idle';
     state.tasksMessage = '';
-    state.tasksFilter = 'active';
+    state.tasksFilter = 'input-required';
     state.tasksPeriod = '30d';
     state.tasksLimit = 20;
     state.tasksNextCursor = '';
@@ -66,12 +66,25 @@
     state.taskDetailMessage = '';
   }
 
+  function clearHomeState() {
+    state.homeStatus = 'idle';
+    state.homeMessage = '';
+    state.homeWaitingTasks = [];
+    state.homeWaitingTotal = 0;
+    state.homeStuckTasks = [];
+    state.homeFailedUrgentCount = 0;
+    state.homeUrgentSentCount = null;
+    state.homeUnseenCount = null;
+    state.homeUpdatedAt = 0;
+  }
+
   function showLogin(message) {
     cancelOverview();
     cancelNotifyLoad();
     cancelTasksLoad();
     clearNotifyState();
     clearTasksState();
+    clearHomeState();
     closeAllModals();
     inboxView.hidden = true;
     loginView.hidden = false;
@@ -103,8 +116,7 @@
 
   function configureSession() {
     inboxView.dataset.session = isAdmin() ? 'admin' : 'identity';
-    /* 地址返回按钮只适用于管理员的现有 Home 数据面。 */
-    backToOverview.hidden = !isAdmin();
+    backToOverview.hidden = false;
     createIdentityButton.hidden = !isAdmin();
     configureIdentitiesCreate.hidden = !isAdmin();
   }
@@ -153,7 +165,8 @@
       });
       if (openedGen !== modalGeneration) return;
       showTokenModal(payload.token);
-      loadOverviewCycle({ refresh: false });
+      await refreshInboxIdentities();
+      loadHome({ refresh: false });
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
@@ -176,7 +189,8 @@
       );
       if (openedGen !== modalGeneration) return;
       showTokenModal(payload.token, 'Rotated Token');
-      loadOverviewCycle({ refresh: false });
+      refreshInboxIdentities();
+      loadHome({ refresh: false });
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.message !== 'session_expired') {
@@ -222,7 +236,7 @@
         } else {
           enterOverview({ announce: address + ' deleted. Back to Home.' });
         }
-        loadOverviewCycle({ refresh: false });
+        loadHome({ refresh: false });
       } catch (error) {
         if (openedGen !== modalGeneration) return;
         if (error.message !== 'session_expired') {
@@ -327,16 +341,16 @@
       // F126: render the pending state immediately — the modal background is
       // not inert, so a row recreated mid-flight must come back disabled, or
       // keyboard users can start a competing PUT on the replacement select.
-      if (state.scope === 'overview') renderOverviewRows();
+      if (state.scope === 'overview') renderOverview();
       try {
         await savePushContentTier(address, tier, confirmRisk);
         selectEl.dataset.currentTier = String(tier);
         announce('Push content set to tier ' + tier + ' for ' + address + '.');
-        renderOverviewRows();
+        renderOverview();
         // Restart overview only while still on Overview: unstick Refresh after
         // bumpIdentityEpoch, but do not revive overview polling after openAddress.
         if (state.scope === 'overview') {
-          loadOverviewCycle({ refresh: false });
+          loadHome({ refresh: false });
         }
       } catch (error) {
         if (
@@ -359,14 +373,14 @@
           } else {
             selectEl.value = String(recovered.authoritative);
             selectEl.dataset.currentTier = String(recovered.authoritative);
-            renderOverviewRows();
+            renderOverview();
           }
         }
       } finally {
         delete state.tierPending[address];
         selectEl.disabled = false;
         // Re-render so a select recreated mid-flight drops disabled correctly.
-        if (state.scope === 'overview') renderOverviewRows();
+        if (state.scope === 'overview') renderOverview();
       }
     }
 

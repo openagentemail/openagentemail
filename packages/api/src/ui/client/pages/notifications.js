@@ -224,6 +224,12 @@
       tierValue.setAttribute('data-tier', row.level || 'unknown');
       tierValue.textContent = row.level || 'unknown';
       tierCell.append(tierLabel, tierValue);
+      if (row.delivery === 'failed') {
+        var delivery = document.createElement('span');
+        delivery.className = 'notify-delivery-failed';
+        delivery.textContent = 'Delivery failed';
+        tierCell.append(delivery);
+      }
 
       var contentCell = document.createElement('div');
       contentCell.className = 'cell notify-content';
@@ -443,6 +449,7 @@
     cancelNotifyLoad();
     var controller = new AbortController();
     notifyController = controller;
+    if (opts.poll) trackDashboardPollRequest(controller);
     state.notifyPending = true;
     state.notifyMessage = '';
     state.notifySource = 'cache';
@@ -579,6 +586,7 @@
       }
       renderNotify();
     } finally {
+      releaseDashboardPollRequest(controller);
       if (notifyController === controller) {
         notifyController = null;
         state.notifyPending = false;
@@ -631,7 +639,9 @@
     }
     renderNotify();
     try {
-      if (isAdmin() && state.identities.length === 0) {
+      /* N1 polling stays in the notification data plane: no roster, diagnostics,
+         summary, or transport fallback requests on the 30-second path. */
+      if (!opts.poll && isAdmin() && state.identities.length === 0) {
         var identityPayload = await apiJson('/ui/api/identities', { signal: controller.signal });
         if (controller.signal.aborted || notifyController !== controller) return;
         state.identities = Array.isArray(identityPayload.identities)
@@ -668,8 +678,10 @@
       state.notifyUpdatedAt = Date.now();
       state.notifyStatus = 'ready';
       state.notifyMessage = '';
-      await loadNotifySummary(controller.signal);
-      await loadNotifyDiagnostics(controller.signal);
+      if (!opts.poll) {
+        await loadNotifySummary(controller.signal);
+        await loadNotifyDiagnostics(controller.signal);
+      }
       if (notifyController !== controller) return;
       if (
         !opts.more &&
@@ -680,11 +692,11 @@
         !state.notifyTo
       ) {
         /* 未筛选且 30 天日志为空：12h transport cache 作 fallback，不回填日志。 */
-        await loadNotifyHistory();
+        if (!opts.poll) await loadNotifyHistory();
         return;
       }
       renderNotify();
-      announce(state.notifyLogItems.length + ' notifications loaded');
+      if (!opts.poll) announce(state.notifyLogItems.length + ' notifications loaded');
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyLogItems.length === 0) {

@@ -571,6 +571,7 @@
     renderIdentities();
     renderFolderNav();
     renderMessages();
+    if (state.scope === 'overview') renderOverview();
     clearDetail();
     if (state.activeAddress) await refreshMessages();
   }
@@ -645,11 +646,6 @@
     state.identityFilter = identitySearch.value;
     renderIdentities();
   });
-  overviewSearch.addEventListener('input', function () {
-    state.overviewFilter = overviewSearch.value;
-    renderOverview();
-    announce(sortedModels().length + ' addresses match your filter.');
-  });
   mobileIdentity.addEventListener('change', function () {
     if (mobileIdentity.value) activateAddress(mobileIdentity.value);
   });
@@ -659,9 +655,7 @@
     refreshMessages();
   });
   overviewRefresh.addEventListener('click', function () {
-    state.overviewPolls = 0;
-    state.overviewLoadingSince = 0;
-    loadOverviewCycle({ refresh: true });
+    loadHome({ refresh: true });
   });
   notifyRefresh.addEventListener('click', function () {
     loadNotificationLog({ force: true });
@@ -793,8 +787,6 @@
     copyValue(devicePairPassword.textContent, devicePairPassword, devicePairCopy);
   });
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
-
-  buildSortControls();
 
   (async function start() {
     configureLoginGate();
