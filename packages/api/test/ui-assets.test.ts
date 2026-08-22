@@ -1209,6 +1209,13 @@ describe('UI static asset contract', () => {
     );
     expect(notificationPoll).toContain('if (!opts.poll) {\n        await loadNotifySummary(controller.signal);');
     expect(notificationPoll).toContain('if (!opts.poll && isAdmin() && state.identities.length === 0)');
+    expect(notificationPoll).toContain('if (opts.poll) trackDashboardPollRequest(controller);');
+    expect(notificationPoll).toContain('releaseDashboardPollRequest(controller);');
+    const notificationHistory = UI_JS.slice(
+      UI_JS.indexOf('async function loadNotifyHistory('),
+      UI_JS.indexOf('async function loadNotifySummary('),
+    );
+    expect(notificationHistory).not.toContain('opts.poll');
     expect(UI_JS).toContain('var FRESH_MS = 15000;');
     expect(UI_JS.split(/\b15000\b/).length - 1).toBe(1);
   });

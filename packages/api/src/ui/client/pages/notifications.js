@@ -449,7 +449,6 @@
     cancelNotifyLoad();
     var controller = new AbortController();
     notifyController = controller;
-    if (opts.poll) trackDashboardPollRequest(controller);
     state.notifyPending = true;
     state.notifyMessage = '';
     state.notifySource = 'cache';
@@ -586,7 +585,6 @@
       }
       renderNotify();
     } finally {
-      releaseDashboardPollRequest(controller);
       if (notifyController === controller) {
         notifyController = null;
         state.notifyPending = false;
@@ -626,6 +624,7 @@
     cancelNotifyLoad();
     var controller = new AbortController();
     notifyController = controller;
+    if (opts.poll) trackDashboardPollRequest(controller);
     state.notifyPending = true;
     state.notifyMessage = '';
     state.notifySource = 'log';
@@ -709,6 +708,7 @@
       }
       renderNotify();
     } finally {
+      releaseDashboardPollRequest(controller);
       if (notifyController === controller) {
         notifyController = null;
         state.notifyPending = false;
