@@ -23,6 +23,7 @@ jobs:
         run: |
           bun install
           bun test
+          bun run lint:ui
 
       - name: Typecheck + build packages/mcp
         working-directory: packages/mcp
