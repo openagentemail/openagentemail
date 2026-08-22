@@ -435,16 +435,14 @@
  * Compact fixed tracks+gaps+row pad ≈542px + 210 sidebar + panel pad ≈800px → stack below 820px
  * so portrait tablets (720–800) do not collapse the identity track.
  * 1280 详情列：220 nav + 240 身份 + 360 列表 ≈820，剩余详情约 460。邮件元数据现置于全文宽顶部，
- * 不再与正文争抢横向空间；1100 仍只管 overview 轨与侧栏收窄。
+ * 不再与正文争抢横向空间；1100 以下摘要改为单列，避免嵌套桌面列把元数据压得过窄。
  */
 @media (max-width: 1440px) { .tab-headers { display: inline-flex; min-height: 44px; } }
-@media (max-width: 520px) {
-  .metadata-drawer .metadata-summary { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .metadata-summary .metadata-item { grid-column: auto !important; }
-}
 @media (max-width: 1100px) {
   .inbox-view[data-scope="inbox"] .inbox-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .inbox-main { grid-template-columns: 320px minmax(0, 1fr); }
+  .metadata-drawer .metadata-summary { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .metadata-summary .metadata-item { grid-column: auto !important; }
   .overview-header, .overview-row {
     gap: 6px;
     grid-template-columns: minmax(0, 1fr) 58px 60px 58px 80px 66px 100px 58px;
