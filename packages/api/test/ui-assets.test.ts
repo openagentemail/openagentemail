@@ -1176,7 +1176,14 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function stopDashboardPolling('),
     );
     expect(home).toContain('state.homeWaitingTotal = typeof waitingPayload.totalApprox === \'number\'');
-    expect(home).toContain('activeTasks.filter(function (task) { return !!task.overdueReason; })');
+    expect(home).toContain('loadHomeActiveOverdue(signal)');
+    expect(home).toContain('state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];');
+    const activeOverdue = UI_JS.slice(
+      UI_JS.indexOf('async function loadHomeActiveOverdue('),
+      UI_JS.indexOf('function homeNumber('),
+    );
+    expect(activeOverdue).toContain('if (task.overdueReason) overdue.push(task);');
+    expect(activeOverdue).toContain('while (cursor && overdue.length < HOME_VISIBLE_ROWS);');
     expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
     expect(home).not.toContain('state.homeWaitingTasks.length');
   });
@@ -1226,7 +1233,7 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function stopDashboardPolling('),
     );
     expect(home).toContain("homeTaskUrl('input-required')");
-    expect(home).toContain("homeTaskUrl('active')");
+    expect(UI_JS).toContain("homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT)");
     expect(home).toContain("'/ui/api/notify/summary?date=today&tz='");
     expect(home).toContain("isAdmin() && !opts.poll");
     expect(home).toContain("apiJson('/ui/api/overview'");

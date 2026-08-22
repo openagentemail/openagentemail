@@ -1,5 +1,6 @@
   /* ---- Home 值班台：只呈现服务端投影，不在浏览器合成任务状态或徽标。 ---- */
   var HOME_TASK_LIMIT = 20;
+  var HOME_ACTIVE_PAGE_LIMIT = 100;
   var HOME_VISIBLE_ROWS = 5;
   var DASHBOARD_POLL_MS = 30000;
   var DASHBOARD_IDLE_POLL_MS = 120000;
@@ -8,9 +9,30 @@
   var dashboardPollControllers = [];
   var dashboardLastInteractionAt = Date.now();
 
-  function homeTaskUrl(status) {
+  function homeTaskUrl(status, cursor, limit) {
     return '/ui/api/tasks?status=' + encodeURIComponent(status) +
-      '&period=30d&limit=' + encodeURIComponent(String(HOME_TASK_LIMIT));
+      '&period=30d&limit=' + encodeURIComponent(String(limit || HOME_TASK_LIMIT)) +
+      (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+  }
+
+  /* listBoard 的逾期标记是每一行的服务端投影，不是跨 tab 汇总。分页直到能填满
+     Home 的五条可见位或列表结束，避免较旧的 overdue 行被 Active 首屏遮住。 */
+  async function loadHomeActiveOverdue(signal) {
+    var cursor = '';
+    var overdue = [];
+    do {
+      var payload = await apiJson(
+        homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT),
+        { signal: signal },
+      );
+      var board = payload || {};
+      var tasks = Array.isArray(board.tasks) ? board.tasks : [];
+      tasks.forEach(function (task) {
+        if (task.overdueReason) overdue.push(task);
+      });
+      cursor = board.nextCursor || '';
+    } while (cursor && overdue.length < HOME_VISIBLE_ROWS);
+    return overdue;
   }
 
   function homeNumber(value) {
@@ -243,7 +265,7 @@
 
     var signal = controller.signal;
     var waiting = homeResult(apiJson(homeTaskUrl('input-required'), { signal: signal }));
-    var active = homeResult(apiJson(homeTaskUrl('active'), { signal: signal }));
+    var active = homeResult(loadHomeActiveOverdue(signal));
     var summary = homeResult(apiJson(
       '/ui/api/notify/summary?date=today&tz=' + encodeURIComponent(homeTimeZone()),
       { signal: signal },
@@ -271,9 +293,7 @@
       issues.push('Tasks that need you could not be loaded.');
     }
     if (results[1] && results[1].ok) {
-      var activePayload = results[1].payload || {};
-      var activeTasks = Array.isArray(activePayload.tasks) ? activePayload.tasks : [];
-      state.homeStuckTasks = activeTasks.filter(function (task) { return !!task.overdueReason; });
+      state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];
     } else if (results[1] && results[1].error.message !== 'session_expired') {
       issues.push('Blocked tasks could not be loaded.');
     }
