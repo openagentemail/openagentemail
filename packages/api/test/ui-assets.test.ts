@@ -1717,10 +1717,12 @@ describe('UI static asset contract', () => {
     );
   });
 
-  test('1280 detail subject wraps as a row, not per-character vertical CJK', () => {
+  test('1280 detail keeps the subject and metadata in a full-width header', () => {
     expect(UI_CSS).toContain('@media (max-width: 1440px)');
     expect(UI_CSS).toContain('@media (max-width: 1100px)');
-    expect(UI_CSS).toContain('minmax(12em, 1fr) minmax(0, 240px)');
+    expect(UI_CSS).toContain('.detail-body-layout { display: grid; gap: 18px; }');
+    expect(UI_CSS).toContain('.metadata-drawer .metadata-summary');
+    expect(UI_CSS).not.toContain('minmax(12em, 1fr) minmax(0, 240px)');
     expect(UI_CSS).toContain('.detail-header h2 { margin: 5px 0 18px; font-size: clamp(24px, 4vw, 34px); line-height: 1.18; overflow-wrap: break-word; word-break: normal; min-width: 0; }');
     expect(UI_CSS).toContain('.meta { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 5px 14px; margin: 0 0 22px; }');
     expect(UI_CSS).toContain('.folder-nav-title');
