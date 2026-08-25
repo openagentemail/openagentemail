@@ -636,6 +636,7 @@ type FakeNode = {
   textContent: string;
   type: string;
   dateTime: string;
+  disabled: boolean;
   attributes: Record<string, string>;
   childNodes: FakeNode[];
   classList: { add: (name: string) => void; contains: (name: string) => boolean };
@@ -654,6 +655,7 @@ function fakeEl(tag: string): FakeNode {
     textContent: '',
     type: '',
     dateTime: '',
+    disabled: false,
     attributes: {},
     childNodes: [],
     classList: {
@@ -683,7 +685,7 @@ function fakeEl(tag: string): FakeNode {
   return node;
 }
 
-function makeApprovalActionHarness() {
+function makeApprovalActionHarness(apiJsonImpl?: (path: string, init: RequestInit) => Promise<Task>) {
   const state = { me: { address: 'owl@test.example' }, taskDetail: null as unknown, taskDetailStatus: '' };
   const calls: Array<{ path: string; init: RequestInit }> = [];
   const announced: string[] = [];
@@ -697,7 +699,10 @@ function makeApprovalActionHarness() {
   );
   const renderer = fn(
     { createElement: fakeEl }, state, () => false,
-    async (path: string, init: RequestInit) => { calls.push({ path, init }); return updated; },
+    async (path: string, init: RequestInit) => {
+      calls.push({ path, init });
+      return apiJsonImpl ? apiJsonImpl(path, init) : updated;
+    },
     () => { renderCount += 1; }, () => { loadCount += 1; }, (message: string) => { announced.push(message); },
   ) as {
     approvalCanDecide: (task: Task) => boolean;
@@ -788,6 +793,77 @@ function makeTaskRowHarness() {
 }
 
 describe('UI approval decision endpoint', () => {
+  test('R9 RED: dashboard authorizes outsider detail and task mutations before lazy expiry materialization', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const expiredApproval = async () => {
+      const sent: unknown[] = [];
+      setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+      setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r9-ui-${sent.length}@test.example>` }; });
+      const task = await taskService.createApproval!({
+        from: 'fox@test.example', to: 'owl@test.example', subject: 'R9 dashboard auth before expiry', body: 'record only',
+        action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+      });
+      setTaskGetForTests(async () => task);
+      const session = makeApp({ kind: 'identity', address: 'cat@test.example' }, { taskService }, [task]);
+      setTaskNowForTests(() => Date.parse(boundary));
+      return { ...session, task, sent };
+    };
+    const inspect = async (request: (fixture: Awaited<ReturnType<typeof expiredApproval>>) => Response | Promise<Response>) => {
+      const fixture = await expiredApproval();
+      const response = await request(fixture);
+      return {
+        status: response.status,
+        body: await response.json(),
+        deliveries: fixture.sent.length,
+        durable: { state: fixture.task.state, messages: fixture.task.messages.length, result: fixture.task.result ?? null },
+      };
+    };
+
+    const matrix = {
+      detail: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie } })),
+      decision: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      })),
+      reply: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}/reply`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ body: 'outsider write' }),
+      })),
+    };
+    expect(matrix).toEqual({
+      detail: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      decision: { status: 404, body: { error: 'not_found' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      reply: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+    });
+
+  });
+
+  test('R9 control: dashboard participant detail materializes expiry once and reviewer decision remains task_expired', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const sent: unknown[] = [];
+    setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r9-ui-control-${sent.length}@test.example>` }; });
+    const task = await taskService.createApproval!({
+      from: 'fox@test.example', to: 'owl@test.example', subject: 'R9 dashboard auth control', body: 'record only',
+      action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+    });
+    setTaskGetForTests(async () => task);
+    const reviewer = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService }, [task]);
+    setTaskNowForTests(() => Date.parse(boundary));
+    const firstDetail = await reviewer.app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie: reviewer.cookie } });
+    const repeatedDetail = await reviewer.app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie: reviewer.cookie } });
+    const decision = await reviewer.app.request(`/ui/api/tasks/${task.id}/decision`, {
+      method: 'POST', headers: { cookie: reviewer.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect({
+      detailStatuses: [firstDetail.status, repeatedDetail.status],
+      decision: { status: decision.status, body: await decision.json() },
+      deliveries: sent.length,
+    }).toEqual({
+      detailStatuses: [200, 200],
+      decision: { status: 409, body: { error: 'task_expired' } },
+      deliveries: 2,
+    });
+  });
+
   test('R8-D RED: dashboard preserves task_expired after production detail read materializes expiry', async () => {
     const boundary = '2026-08-24T00:00:00.000Z';
     const sent: unknown[] = [];
@@ -838,6 +914,49 @@ describe('UI approval decision endpoint', () => {
     } finally {
       Date.now = originalNow;
     }
+  });
+
+  test('R9-D RED: exact served approval controls allow only one in-flight decision', async () => {
+    let settle: (task: Task) => void = () => {};
+    const blocked = new Promise<Task>((resolve) => { settle = resolve; });
+    const { calls, renderer } = makeApprovalActionHarness(async () => blocked);
+    const section = renderer.renderApprovalAction(APPROVAL_TASK)!;
+    const buttons = section.childNodes.filter((node) => node.tagName === 'BUTTON');
+    buttons[0]!.click();
+    await Promise.resolve();
+    buttons[1]!.click();
+    expect({ calls: calls.length, disabled: buttons.map((button) => button.disabled) }).toEqual({ calls: 1, disabled: [true, true] });
+    settle({ ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(buttons.map((button) => button.disabled)).toEqual([false, false]);
+  });
+
+  test('R9-E RED: exact served approval heading is neutral after terminal state', () => {
+    const { renderer } = makeApprovalActionHarness();
+    const pending = renderer.renderApprovalAction(APPROVAL_TASK)!;
+    const terminalHeadings = [
+      { state: 'completed' as const, result: { decision: 'approved' } },
+      { state: 'completed' as const, result: { decision: 'rejected' } },
+      { state: 'failed' as const, result: { decision: 'expired' } },
+    ].map((terminal) => leafTexts(renderer.renderApprovalAction({ ...APPROVAL_TASK, ...terminal })!));
+    expect(leafTexts(pending)).toContain('Approval required');
+    expect(terminalHeadings).toEqual([
+      expect.arrayContaining(['Approval details']),
+      expect.arrayContaining(['Approval details']),
+      expect.arrayContaining(['Approval details']),
+    ]);
+    expect(terminalHeadings.flat()).not.toContain('Approval required');
+  });
+
+  test('R9-D control: one settled served decision reloads normal terminal state', async () => {
+    const { calls, state, renderer, counts } = makeApprovalActionHarness();
+    const button = renderer.renderApprovalAction(APPROVAL_TASK)!.childNodes.find((node) => node.tagName === 'BUTTON')!;
+    button.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect({ calls: calls.length, state: (state.taskDetail as Task).state, counts: counts() }).toEqual({
+      calls: 1, state: 'completed', counts: { renderCount: 1, loadCount: 1 },
+    });
   });
 
   test('dashboard actor matrix keeps approval authority at the stored reviewer and core service', async () => {

@@ -174,8 +174,12 @@
       String(state.me.address || '').toLowerCase() === String(task.approval.reviewer || '').toLowerCase();
   }
 
-  async function submitApprovalDecision(task, decision, button) {
-    button.disabled = true;
+  var approvalDecisionInFlight = {};
+
+  async function submitApprovalDecision(task, decision, buttons) {
+    if (approvalDecisionInFlight[task.id]) return;
+    approvalDecisionInFlight[task.id] = true;
+    buttons.forEach(function (button) { button.disabled = true; });
     try {
       var updated = await apiJson('/ui/api/tasks/' + encodeURIComponent(task.id) + '/decision', {
         method: 'POST',
@@ -192,7 +196,8 @@
         announce(error.status === 409 ? 'This approval is no longer pending.' : 'Approval decision could not be recorded.');
       }
     } finally {
-      button.disabled = false;
+      delete approvalDecisionInFlight[task.id];
+      buttons.forEach(function (button) { button.disabled = false; });
     }
   }
 
@@ -202,7 +207,7 @@
     var section = document.createElement('section');
     section.className = 'task-approval';
     var title = document.createElement('h4');
-    title.textContent = 'Approval required';
+    title.textContent = task.state === 'input-required' ? 'Approval required' : 'Approval details';
     var type = document.createElement('p');
     type.textContent = 'Type: ' + String(approval.action.type || '—');
     var name = document.createElement('p');
@@ -217,13 +222,13 @@
       approve.className = 'primary';
       approve.setAttribute('aria-label', 'Approve action');
       approve.textContent = 'Approve';
-      approve.addEventListener('click', function () { submitApprovalDecision(task, 'approved', approve); });
+      approve.addEventListener('click', function () { submitApprovalDecision(task, 'approved', [approve, reject]); });
       var reject = document.createElement('button');
       reject.type = 'button';
       reject.className = 'quiet delete-action';
       reject.setAttribute('aria-label', 'Reject action');
       reject.textContent = 'Reject';
-      reject.addEventListener('click', function () { submitApprovalDecision(task, 'rejected', reject); });
+      reject.addEventListener('click', function () { submitApprovalDecision(task, 'rejected', [approve, reject]); });
       section.append(approve, reject);
     }
     return section;

@@ -158,6 +158,28 @@ describe('MCP 元数据 origin / insecure issuer', () => {
 });
 
 describe('MCP HTTP 工具', () => {
+  test('R9-F RED: shipped public docs describe typed approval creation, decision, and the 16-tool contained inventory', async () => {
+    const [rootReadme, packageReadme, security] = await Promise.all([
+      Bun.file(new URL('../../../README.md', import.meta.url)).text(),
+      Bun.file(new URL('../../mcp/README.md', import.meta.url)).text(),
+      Bun.file(new URL('../../../docs/security.md', import.meta.url)).text(),
+    ]);
+    const docs = `${rootReadme}\n${packageReadme}`;
+    expect({
+      existingCreate: docs.includes('task_create(to, subject, body, wait?)'),
+      typedApproval: /approval.*action.*expiresAt|kind.*approval/s.test(docs),
+      decide: docs.includes('task_decide'),
+      securityToolCount: /16\s+tools/i.test(security),
+      containedDecision: /contained[^\n]*task_decide|task_decide[^\n]*contained/i.test(security),
+    }).toEqual({
+      existingCreate: true,
+      typedApproval: true,
+      decide: true,
+      securityToolCount: true,
+      containedDecision: true,
+    });
+  });
+
   test('admin key：tools/list 返回全部 16 工具', async () => {
     const res = await mcpRequest(adminKey, 'tools/list');
     expect(res.status).toBe(200);

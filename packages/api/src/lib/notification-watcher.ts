@@ -1281,7 +1281,11 @@ export async function processWatchedMessage(
         }
       }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
-      const approval = await approvalEventForWatcher(message as FetchMessageObject);
+      // Header presence is only a cheap parser gate, never authentication: a
+      // forged approval header still reaches the full signed parser below.
+      const approval = parsed.headers.has('x-oa-task-approval-event')
+        ? await approvalEventForWatcher(message as FetchMessageObject)
+        : null;
       if (approval) {
         hasAuthenticatedApproval = true;
         approvalPreview = approval.type === 'request'

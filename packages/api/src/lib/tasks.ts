@@ -189,6 +189,8 @@ export type TaskService = {
   create(input: CreateTaskInput): Promise<Task>;
   list(state?: TaskState): Promise<Task[]>;
   listBoard(query: TaskBoardQuery, viewer: TaskBoardViewer): Promise<TaskBoardPage>;
+  /** Raw durable/queued view for route authorization; never materializes expiry. */
+  getForAuthorization?(id: string): Promise<Task | null>;
   get(id: string): Promise<Task | null>;
   update(input: UpdateTaskInput): Promise<Task | null>;
   reply(input: { id: string; from: string; body: string }): Promise<Task>;
@@ -540,7 +542,7 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
       date: new Date(message.internalDate ?? message.envelope.date ?? new Date(0)).toISOString(),
       state: headerState,
       body,
-      ...(result !== undefined ? { result } : {}),
+      ...(approvalPayload.event !== 'request' && result !== undefined ? { result } : {}),
       approval,
     };
   }
@@ -891,8 +893,7 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
       const indexed = message.approval;
       if (!indexed || indexed.type !== queuedApproval.type || indexed.digest !== queuedApproval.digest) return false;
       if (indexed.type === 'decision' && (queuedApproval.type !== 'decision' || indexed.decision !== queuedApproval.decision)) return false;
-      const at = Date.parse(message.date);
-      return message.state === queued.message.state && Number.isFinite(at) && at >= queued.sentAt - 1000;
+      return message.state === queued.message.state;
     });
   }
   return (
@@ -1539,6 +1540,7 @@ export const taskService: TaskService = {
   createApproval: createApprovalTask,
   list: listTasks,
   listBoard: listTaskBoard,
+  getForAuthorization: getTaskSnapshot,
   get: getTask,
   update: updateTask,
   reply: replyTask,

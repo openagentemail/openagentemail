@@ -1,7 +1,7 @@
 // #55 R1b behavioral RED. This file intentionally changes no production
 // source. Every fixture is inert; no credential-like value appears in action
 // arguments or in an RFC-822 payload.
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { SendInput } from '../src/lib/smtp.ts';
 import type { ApprovalTask, Task } from '../src/lib/tasks.ts';
@@ -107,6 +107,10 @@ function appFor(
   }));
   return app;
 }
+
+beforeEach(() => {
+  tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+});
 
 afterEach(() => {
   tasks.setTaskGetForTests(null);
@@ -358,6 +362,85 @@ describe('#55 R5: approval reminder integrity', () => {
 });
 
 describe('#55 R1b: signed IMAP rebuild', () => {
+  test('R9 RED: REST authorizes outsider detail and mutations before lazy expiry materialization', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const expiredApproval = async () => {
+      tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+      const fixture = await requestFixture(boundary);
+      tasks.setTaskGetForTests(async () => fixture.task);
+      tasks.setTaskNowForTests(() => Date.parse(boundary));
+      return fixture;
+    };
+    const outsider = appFor({ kind: 'identity', address: OUTSIDER });
+    const inspect = async (request: (id: string) => Response | Promise<Response>) => {
+      const { task, sent } = await expiredApproval();
+      const response = await request(task.id);
+      return {
+        status: response.status,
+        body: await response.json(),
+        deliveries: sent.length,
+        durable: { state: task.state, messages: task.messages.length, result: task.result ?? null },
+      };
+    };
+
+    const matrix = {
+      detail: await inspect((id) => outsider.request(`/v1/tasks/${id}`)),
+      decision: await inspect((id) => outsider.request(`/v1/tasks/${id}/decision`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      })),
+      state: await inspect((id) => outsider.request(`/v1/tasks/${id}/state`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: 'working' }),
+      })),
+    };
+    expect(matrix).toEqual({
+      detail: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      decision: { status: 404, body: { error: 'not_found' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      state: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+    });
+
+  });
+
+  test('R9 control: REST participant detail materializes expiry once and reviewer decision remains task_expired', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    const { task, sent } = await requestFixture(boundary);
+    tasks.setTaskGetForTests(async () => task);
+    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    const reviewer = appFor({ kind: 'identity', address: REVIEWER });
+    const firstDetail = await reviewer.request(`/v1/tasks/${task.id}`);
+    const repeatedDetail = await reviewer.request(`/v1/tasks/${task.id}`);
+    const decision = await reviewer.request(`/v1/tasks/${task.id}/decision`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect({
+      detailStatuses: [firstDetail.status, repeatedDetail.status],
+      decision: { status: decision.status, body: await decision.json() },
+      deliveries: sent.length,
+    }).toEqual({
+      detailStatuses: [200, 200],
+      decision: { status: 409, body: { error: 'task_expired' } },
+      deliveries: 2,
+    });
+  });
+
+  test('R9-B RED: an approval request body cannot turn an ordinary result block into an approval result', async () => {
+    const parse = api().parseStampedTaskMessageForTests;
+    expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
+    const bodyWithOrdinaryResult = [
+      'Caller-supplied context only.',
+      '<!-- openagent.email task result -->',
+      '```json',
+      JSON.stringify({ decision: 'approved', digest: 'a'.repeat(64), reviewer: REVIEWER, decidedAt: EXPIRES }),
+      '```',
+    ].join('\n');
+    const { task, sent } = await requestFixture(EXPIRES, ACTION, bodyWithOrdinaryResult);
+    const parsed = await parse!({ id: task.id, uid: 43, source: rfc822(sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
+    expect(parsed).not.toBeNull();
+    const rebuilt = tasks.taskFromMessages(task.id, [parsed!] as Parameters<typeof tasks.taskFromMessages>[1]);
+    expect(rebuilt).toMatchObject({ kind: 'approval', state: 'input-required', approval: { digest: task.approval.digest } });
+    expect(rebuilt?.result).toBeUndefined();
+  });
+
   test('R8-A RED: inert snapshot-marker strings in signed action JSON cannot replace the structural frame', async () => {
     const parse = api().parseStampedTaskMessageForTests;
     expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
@@ -393,8 +476,10 @@ describe('#55 R1b: signed IMAP rebuild', () => {
     tasks.setTaskNowForTests(() => Date.parse(before));
     const { task, sent } = await requestFixture();
     tasks.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
+    const sentAt = '2026-08-24T00:00:02.000Z';
+    tasks.setTaskNowForTests(() => Date.parse(sentAt));
     await decide({ id: task.id, from: REVIEWER, decision: 'approved' });
-    tasks.setTaskNowForTests(() => Date.parse(before) + 60_001);
+    tasks.setTaskNowForTests(() => Date.parse(sentAt) + 60_001);
     const opposite = await decide({ id: task.id, from: REVIEWER, decision: 'rejected' }).then(
       () => 'resolved', (error: Error) => error.message,
     );
@@ -424,6 +509,17 @@ describe('#55 R1b: signed IMAP rebuild', () => {
       () => 'resolved', (error: Error) => error.message,
     );
     expect({ repeated, delivered: sent.length }).toEqual({ repeated: 'task_expired', delivered: 2 });
+    const parse = api().parseStampedTaskMessageForTests!;
+    const request = await parse({ id: task.id, uid: 53, source: rfc822(sent[0]!), internalDate: '2026-08-23T23:59:59.999Z' });
+    const terminal = await parse({ id: task.id, uid: 54, source: rfc822(sent[1]!), internalDate: '2026-08-23T23:59:58.000Z' });
+    expect(request).not.toBeNull();
+    expect(terminal).not.toBeNull();
+    const indexed = tasks.taskFromMessages(task.id, [request!, terminal!] as Parameters<typeof tasks.taskFromMessages>[1])!;
+    tasks.setTaskGetForTests(async () => indexed);
+    const stable = await tasks.getTask(task.id);
+    expect(stable).toMatchObject({ state: 'failed', result: { decision: 'expired', digest: task.approval.digest } });
+    expect(stable?.messages).toHaveLength(indexed.messages.length);
+    expect(sent).toHaveLength(2);
   });
 
   test('R8-D RED: REST preserves task_expired after a detail read materializes the signed failure', async () => {

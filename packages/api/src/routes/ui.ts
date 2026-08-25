@@ -152,7 +152,7 @@ export type UiApiDependencies = {
    */
   taskService?: Pick<
     TaskService,
-    'list' | 'listBoard' | 'get' | 'reply' | 'remind' | 'close' | 'decideApproval'
+    'list' | 'listBoard' | 'get' | 'getForAuthorization' | 'reply' | 'remind' | 'close' | 'decideApproval'
   >;
 };
 
@@ -222,6 +222,13 @@ function canReadUiTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   // 参与者集合按小写存；identity 会话地址比较前归一化，避免大小写漂移。
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
+}
+
+function authorizationUiTask(service: Pick<TaskService, 'get' | 'getForAuthorization'>, id: string): Promise<Task | null> {
+  const read = service === taskService || service.getForAuthorization !== taskService.getForAuthorization
+    ? service.getForAuthorization
+    : undefined;
+  return (read ?? service.get)(id);
 }
 
 /** GET :id 与 reply/remind/close 成功体同一套 viewer 投影，不扩权限。 */
@@ -855,7 +862,12 @@ export function createUiApiRoutes(
     const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
     if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
     const service = dependencies.taskService ?? taskService;
-    const task = await service.get(parsed.data);
+    const authorization = await authorizationUiTask(service, parsed.data);
+    if (!authorization) return c.json({ error: 'not_found' }, 404);
+    if (!canReadUiTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
+    const task = service.getForAuthorization && (service === taskService || service.getForAuthorization !== taskService.getForAuthorization)
+      ? await service.get(parsed.data)
+      : authorization;
     if (!task) return c.json({ error: 'not_found' }, 404);
     // overdue 由服务端按 queryNow 同类时钟计算，避免各浏览器口径漂移。
     return presentUiTask(c, task);
@@ -875,7 +887,7 @@ export function createUiApiRoutes(
     const body = taskDecisionSchema.safeParse(raw);
     if (!body.success) return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     const service = dependencies.taskService ?? taskService;
-    const task = await service.get(parsed.data);
+    const task = await authorizationUiTask(service, parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) return c.json({ error: 'not_found' }, 404);
     if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -912,7 +924,7 @@ export function createUiApiRoutes(
       return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const task = await service.get(parsed.data);
+    const task = await authorizationUiTask(service, parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) {
       return c.json({ error: 'forbidden: task participant required' }, 403);

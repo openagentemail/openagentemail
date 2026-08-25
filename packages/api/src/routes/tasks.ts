@@ -70,6 +70,13 @@ function canReadTask(c: Context, task: Task): boolean {
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
 }
 
+function authorizationTask(service: TaskService, id: string): Promise<Task | null> {
+  const read = service === taskService || service.getForAuthorization !== taskService.getForAuthorization
+    ? service.getForAuthorization
+    : undefined;
+  return (read ?? service.get)(id);
+}
+
 async function waitWithSlot(
   c: Context,
   service: TaskService,
@@ -183,9 +190,13 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
       const query = getSchema.safeParse(c.req.query());
       if (!query.success) return c.json({ error: 'invalid_request', details: query.error.issues }, 400);
-      const task = await service.get(parsed.data);
+      const authorization = await authorizationTask(service, parsed.data);
+      if (!authorization) return c.json({ error: 'not_found' }, 404);
+      if (!canReadTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
+      const task = service.getForAuthorization && (service === taskService || service.getForAuthorization !== taskService.getForAuthorization)
+        ? await service.get(parsed.data)
+        : authorization;
       if (!task) return c.json({ error: 'not_found' }, 404);
-      if (!canReadTask(c, task)) return c.json({ error: 'forbidden: task participant required' }, 403);
       if (query.data.wait !== 'true') return c.json(task);
       const auth = getAuth(c);
       const address = auth.kind === 'identity' ? auth.address : task.from;
@@ -206,7 +217,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await service.get(id.data);
+      const task = await authorizationTask(service, id.data);
       if (!task) return c.json({ error: 'not_found' }, 404);
       if (!canReadTask(c, task)) return c.json({ error: 'not_found' }, 404);
       if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -248,7 +259,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await service.get(id.data);
+      const task = await authorizationTask(service, id.data);
       if (!task) return c.json({ error: 'not_found' }, 404);
       // This is a hard server-side ACL boundary. A guessed task UUID alone
       // never gives another identity authority to advance its state.
