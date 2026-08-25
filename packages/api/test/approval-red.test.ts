@@ -275,9 +275,13 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
       messages: [{ id: '1', from: REQUESTER, to: REVIEWER, subject: 'Approve preview', date: '2026-08-24T00:00:00.000Z', state: 'input-required', body: 'request' }],
       kind: 'approval', approval: { action: ACTION, reviewer: REVIEWER, expiresAt: EXPIRES, digest: 'a'.repeat(64) },
     };
+    const ordinary: Task = {
+      id: '9ab7d4ad-4051-4b33-a4f0-4c5267ea8800', from: REQUESTER, to: REVIEWER, subject: 'Ordinary task', state: 'input-required',
+      createdAt: stored.createdAt, updatedAt: stored.updatedAt, messages: [],
+    };
     const service = {
       ...tasks.taskService,
-      get: async () => stored,
+      get: async (id: string) => id === ordinary.id ? ordinary : stored,
       update: async () => { throw new Error('approval_decision_required'); },
       decideApproval: async (input: { from: string; decision: 'approved' | 'rejected' }) => {
         if (input.from !== REVIEWER) throw new Error('approval_reviewer_required');
@@ -288,20 +292,64 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
     });
     expect(reviewer.status).toBe(200);
-    for (const address of [REQUESTER, OUTSIDER]) {
+    // A task participant can still discover the approval, but cannot make a
+    // decision unless they are its stored reviewer.
+    for (const address of [REQUESTER]) {
       const denied = await appFor({ kind: 'identity', address }, service as typeof tasks.taskService).request(`/v1/tasks/${stored.id}/decision`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
       });
       expect(denied.status).toBe(403);
     }
+    // R6 RED: an outsider must not learn either ordinary-vs-approval kind or
+    // the stored reviewer from a guessed decision URL.
+    for (const id of [ordinary.id, stored.id]) {
+      const hidden = await appFor({ kind: 'identity', address: OUTSIDER }, service as typeof tasks.taskService).request(`/v1/tasks/${id}/decision`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      expect(hidden.status).toBe(404);
+      expect(await hidden.json()).toEqual({ error: 'not_found' });
+    }
     const admin = await appFor({ kind: 'admin' }, service as typeof tasks.taskService).request(`/v1/tasks/${stored.id}/decision`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ from: REVIEWER, decision: 'rejected' }),
     });
     expect(admin.status).toBe(200);
+    const adminOrdinary = await appFor({ kind: 'admin' }, service as typeof tasks.taskService).request(`/v1/tasks/${ordinary.id}/decision`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ from: REVIEWER, decision: 'rejected' }),
+    });
+    expect(adminOrdinary.status).toBe(409);
+    expect(await adminOrdinary.json()).toEqual({ error: 'not_approval_task' });
     const bypass = await appFor({ kind: 'identity', address: REVIEWER }, service as typeof tasks.taskService).request(`/v1/tasks/${stored.id}/state`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: 'completed', result: { decision: 'approved' } }),
     });
     expect(bypass.status).toBe(409);
+  });
+});
+
+describe('#55 R5: approval reminder integrity', () => {
+  test('regression: an approval reminder cannot emit the ordinary event that corrupts reconstruction', async () => {
+    const { task, sent } = await requestFixture();
+    const parse = api().parseStampedTaskMessageForTests;
+    expect(parse, 'production parser seam is missing').toBeFunction();
+    tasks.setTaskGetForTests(async () => task);
+    await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'This must not become an approval reminder.' }))
+      .rejects.toThrow('approval_decision_required');
+    expect(sent).toHaveLength(1);
+    const request = await parse!({ id: task.id, uid: 1, source: rfc822(sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
+    expect(tasks.taskFromMessages(task.id, [request!] as Parameters<typeof tasks.taskFromMessages>[1]))
+      .toMatchObject({ kind: 'approval', state: 'input-required', approval: { digest: task.approval.digest } });
+  });
+
+  test('approval reminder is rejected before delivery and leaves the authenticated request reconstructable', async () => {
+    const { task, sent } = await requestFixture();
+    const parse = api().parseStampedTaskMessageForTests;
+    expect(parse, 'production parser seam is missing').toBeFunction();
+    tasks.setTaskGetForTests(async () => task);
+    await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'Do not send this.' }))
+      .rejects.toThrow('approval_decision_required');
+    expect(sent).toHaveLength(1);
+    const request = await parse!({ id: task.id, uid: 1, source: rfc822(sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
+    expect(tasks.taskFromMessages(task.id, [request!] as Parameters<typeof tasks.taskFromMessages>[1]))
+      .toMatchObject({ kind: 'approval', state: 'input-required', approval: { digest: task.approval.digest } });
   });
 });
 

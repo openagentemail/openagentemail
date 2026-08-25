@@ -517,7 +517,7 @@
       tasksDetailContent.append(reply);
     }
 
-    if (isAdmin() && task.state !== 'completed' && task.state !== 'failed') {
+    if (isAdmin() && task.kind !== 'approval' && task.state !== 'completed' && task.state !== 'failed') {
       var admin = document.createElement('div');
       admin.className = 'task-admin-actions';
       var fromSelect = document.createElement('select');

@@ -257,7 +257,7 @@ function taskMutationError(c: Context, err: unknown): Response {
   const code = (err as Error).message;
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
   if (code === 'task_already_terminal') return c.json({ error: 'task_already_terminal' }, 409);
-  if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task') {
+  if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task' || code === 'approval_decision_required') {
     return c.json({ error: code }, 409);
   }
   if (code === 'task_not_input_required') return c.json({ error: 'task_not_input_required' }, 409);
@@ -877,6 +877,7 @@ export function createUiApiRoutes(
     const service = dependencies.taskService ?? taskService;
     const task = await service.get(parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
+    if (!canReadUiTask(c, task)) return c.json({ error: 'not_found' }, 404);
     if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
     const auth = getAuth(c);
     const from = auth.kind === 'identity'
@@ -943,6 +944,7 @@ export function createUiApiRoutes(
     const service = dependencies.taskService ?? taskService;
     const task = await service.get(parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
+    if (task.kind === 'approval') return c.json({ error: 'approval_decision_required' }, 409);
     const from = taskActionFrom(c, task, body.data.from);
     if (from instanceof Response) return from;
     try {

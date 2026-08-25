@@ -1286,6 +1286,7 @@ export async function remindTask(input: {
     const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (!taskParticipants(existing).has(input.from)) throw new Error('task_participant_required');
+    if (existing.kind === 'approval') throw new Error('approval_decision_required');
     if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
     if (input.idempotencyKey) {
       const replay = existing.messages.find(

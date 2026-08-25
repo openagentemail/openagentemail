@@ -206,6 +206,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (from instanceof Response) return from;
       const task = await service.get(id.data);
       if (!task) return c.json({ error: 'not_found' }, 404);
+      if (!canReadTask(c, task)) return c.json({ error: 'not_found' }, 404);
       if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
       // Check the stored reviewer before calling the core; the core repeats
       // this ACL under its task lock, so neither REST nor a forged body gains

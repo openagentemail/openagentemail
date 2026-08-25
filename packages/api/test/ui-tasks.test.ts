@@ -108,6 +108,8 @@ const TASK_INPUT: Task = {
   ],
 };
 
+const APPROVAL_EXPIRES_AT = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
 const APPROVAL_TASK: Task = {
   id: '55555555-5555-4555-8555-555555555555',
   from: 'fox@test.example', to: 'owl@test.example', subject: 'Approve preview', state: 'input-required',
@@ -115,7 +117,7 @@ const APPROVAL_TASK: Task = {
   messages: [], kind: 'approval',
   approval: {
     action: { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } },
-    reviewer: 'owl@test.example', expiresAt: '2030-08-25T00:00:00.000Z', digest: 'a'.repeat(64),
+    reviewer: 'owl@test.example', expiresAt: APPROVAL_EXPIRES_AT, digest: 'a'.repeat(64),
   },
 };
 
@@ -540,6 +542,17 @@ describe('UI task reply / remind / close', () => {
     expect(await terminal.json()).toEqual({ error: 'task_already_terminal' });
   });
 
+  test('admin reminder rejects an approval before the service can deliver it', async () => {
+    const { app, cookie, remindCalls } = makeApp({ kind: 'admin' }, {}, [APPROVAL_TASK]);
+    const response = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/remind`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'fox@test.example', body: 'Do not remind approval.' }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'approval_decision_required' });
+    expect(remindCalls).toEqual([]);
+  });
+
   test('admin close writes structured closed_by_admin; repeat terminal is 409', async () => {
     const { app, cookie, closeCalls } = makeApp({ kind: 'admin' });
     const ok = await app.request(`/ui/api/tasks/${TASK_A.id}/close`, {
@@ -616,6 +629,7 @@ type FakeNode = {
   classList: { add: (name: string) => void; contains: (name: string) => boolean };
   setAttribute: (key: string, value: string) => void;
   append: (...nodes: FakeNode[]) => void;
+  replaceChildren: (...nodes: FakeNode[]) => void;
   addEventListener: (event: string, listener: () => void) => void;
   click: () => void;
 };
@@ -646,6 +660,9 @@ function fakeEl(tag: string): FakeNode {
     append(...nodes: FakeNode[]) {
       node.childNodes.push(...nodes);
     },
+    replaceChildren(...nodes: FakeNode[]) {
+      node.childNodes = [...nodes];
+    },
     addEventListener(event: string, listener: () => void) {
       if (event === 'click') node.click = listener;
     },
@@ -675,6 +692,31 @@ function makeApprovalActionHarness() {
     renderApprovalAction: (task: Task) => FakeNode | null;
   };
   return { state, calls, announced, renderer, counts: () => ({ renderCount, loadCount }) };
+}
+
+function makeAdminTaskDetailHarness(task: Task) {
+  const tasksDetailContent = fakeEl('div');
+  const state = { activeTaskId: task.id, taskDetailStatus: 'ready', taskDetailMessage: '', taskDetail: task };
+  const source = sliceTasksFn('function renderTaskDetail(', 'function renderTasks(');
+  const fn = new Function(
+    'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail', 'taskStateToken', 'taskStateLabel',
+    'formatAgo', 'taskTimelineBody', 'formatDate', 'taskIsClosed', 'renderTaskResultNode', 'renderApprovalAction',
+    'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+    `${source}\nreturn renderTaskDetail;`,
+  );
+  const renderTaskDetail = fn(
+    { createElement: fakeEl }, state, tasksDetailContent, () => true, () => {}, () => 'input-required', () => 'Input required',
+    () => 'just now', (value: string) => value, () => '2026-08-12', () => false, () => fakeEl('pre'),
+    () => {
+      const actions = fakeEl('section');
+      const approve = fakeEl('button'); approve.type = 'button'; approve.textContent = 'Approve';
+      const reject = fakeEl('button'); reject.type = 'button'; reject.textContent = 'Reject';
+      actions.append(approve, reject);
+      return actions;
+    },
+    () => {}, () => {}, () => {}, () => {}, 100,
+  ) as () => void;
+  return { tasksDetailContent, renderTaskDetail };
 }
 
 /** 收集叶子 textContent，用来断言 Overdue 文字通道。 */
@@ -759,11 +801,22 @@ describe('UI approval decision endpoint', () => {
       });
     }
 
-    for (const address of ['fox@test.example', 'stranger@test.example']) {
+    for (const address of ['fox@test.example']) {
       const denied = makeApp({ kind: 'identity', address }, {}, [APPROVAL_TASK]);
       const response = await decide(denied.app, denied.cookie, { decision: 'approved' });
       expect(response.status).toBe(403);
       expect(await response.json()).toEqual({ error: 'forbidden: approval reviewer required' });
+    }
+
+    // R6 RED: a dashboard outsider guessing an ordinary or approval decision
+    // URL sees neither the task kind nor the stored reviewer ACL outcome.
+    for (const task of [TASK_A, APPROVAL_TASK]) {
+      const outsider = makeApp({ kind: 'identity', address: 'stranger@test.example' }, {}, [task]);
+      const response = await outsider.app.request(`/ui/api/tasks/${task.id}/decision`, {
+        method: 'POST', headers: { cookie: outsider.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'not_found' });
     }
 
     const admin = makeApp({ kind: 'admin' }, {}, [APPROVAL_TASK]);
@@ -834,6 +887,19 @@ describe('UI approval decision endpoint', () => {
     expect(state.taskDetailStatus).toBe('ready');
     expect(counts()).toEqual({ renderCount: 1, loadCount: 1 });
     expect(announced).toEqual(['Approval recorded.']);
+  });
+
+  test('the exact served admin detail hides generic actions for approval but retains them for ordinary tasks', () => {
+    const approval = makeAdminTaskDetailHarness(APPROVAL_TASK);
+    approval.renderTaskDetail();
+    expect(leafTexts(approval.tasksDetailContent)).toContain('Approve');
+    expect(leafTexts(approval.tasksDetailContent)).toContain('Reject');
+    expect(approval.tasksDetailContent.childNodes.some((node) => node.className === 'task-admin-actions')).toBe(false);
+
+    const ordinary = makeAdminTaskDetailHarness(TASK_A);
+    ordinary.renderTaskDetail();
+    expect(ordinary.tasksDetailContent.childNodes.some((node) => node.className === 'task-admin-actions')).toBe(true);
+    expect(leafTexts(ordinary.tasksDetailContent)).toEqual(expect.arrayContaining(['Remind', 'Close']));
   });
 });
 
