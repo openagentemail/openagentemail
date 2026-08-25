@@ -42,7 +42,7 @@ mock.module("@modelcontextprotocol/server/stdio", () => ({
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
 
-test("15 个工具都公布新 SDK 支持的元数据", () => {
+test("16 个工具都公布新 SDK 支持的元数据", () => {
   expect([...toolConfigs.keys()]).toEqual([
     "mail_new_identity",
     "mail_list_identities",
@@ -59,6 +59,7 @@ test("15 个工具都公布新 SDK 支持的元数据", () => {
     "task_list",
     "task_get",
     "task_update",
+    "task_decide",
   ]);
 
   for (const config of toolConfigs.values()) {
@@ -79,6 +80,7 @@ test("15 个工具都公布新 SDK 支持的元数据", () => {
   expect(toolConfigs.get("task_get")?.annotations?.readOnlyHint).toBe(true);
   expect(toolConfigs.get("task_create")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("task_update")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_decide")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
     toolConfigs.get("mail_wait_for")?.outputSchema,
   );
@@ -188,6 +190,11 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskUpdate, "state", "input-required")).toBe(true);
   expect(ok(taskUpdate, "state", "reopened")).toBe(false);
   expect(ok(taskUpdate, "body", "x".repeat(1_000_001))).toBe(false);
+
+  const taskDecide = toolSchemas.get("task_decide")!;
+  expect(ok(taskDecide, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
+  expect(ok(taskDecide, "decision", "approved")).toBe(true);
+  expect(ok(taskDecide, "decision", "execute")).toBe(false);
 });
 
 test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {

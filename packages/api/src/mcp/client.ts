@@ -78,6 +78,24 @@ export interface NotificationMessage {
 
 export type TaskState = "submitted" | "working" | "input-required" | "completed" | "failed";
 
+export interface ApprovalAction {
+  type: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface ApprovalSnapshot {
+  action: ApprovalAction;
+  reviewer: string;
+  expiresAt: string;
+  digest: string;
+}
+
+export type ApprovalEvent =
+  | { type: 'request'; snapshot: ApprovalSnapshot }
+  | { type: 'decision'; digest: string; decision: 'approved' | 'rejected' }
+  | { type: 'expired'; digest: string };
+
 export interface TaskMessage {
   id: string;
   from: string;
@@ -87,6 +105,9 @@ export interface TaskMessage {
   state: TaskState;
   body: string;
   result?: unknown;
+  kind?: 'state' | 'reminder';
+  idempotencyKey?: string;
+  approval?: ApprovalEvent;
 }
 
 export interface Task {
@@ -99,6 +120,8 @@ export interface Task {
   updatedAt: string;
   messages: TaskMessage[];
   result?: unknown;
+  kind?: 'approval';
+  approval?: ApprovalSnapshot;
 }
 
 /**
@@ -362,6 +385,25 @@ export class OpenAgentEmailClient {
     return this.request("POST", "/v1/tasks", { to, subject, body, wait });
   }
 
+  /** Additive approval creation. Ordinary createTask bytes remain unchanged. */
+  createApprovalTask(
+    to: string,
+    subject: string,
+    action: ApprovalAction,
+    expiresAt: string,
+    body?: string,
+    wait = false,
+  ): Promise<Task> {
+    return this.request("POST", "/v1/tasks", {
+      to,
+      subject,
+      ...(body === undefined ? {} : { body }),
+      kind: 'approval',
+      approval: { action, expiresAt },
+      wait,
+    });
+  }
+
   async listTasks(state?: TaskState): Promise<Task[]> {
     const params = new URLSearchParams();
     if (state) params.set("state", state);
@@ -385,5 +427,9 @@ export class OpenAgentEmailClient {
       ...(body === undefined ? {} : { body }),
       ...(result === undefined ? {} : { result }),
     });
+  }
+
+  decideTask(id: string, decision: 'approved' | 'rejected'): Promise<Task> {
+    return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/decision`, { decision });
   }
 }

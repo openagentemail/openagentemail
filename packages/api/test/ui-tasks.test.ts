@@ -108,6 +108,17 @@ const TASK_INPUT: Task = {
   ],
 };
 
+const APPROVAL_TASK: Task = {
+  id: '55555555-5555-4555-8555-555555555555',
+  from: 'fox@test.example', to: 'owl@test.example', subject: 'Approve preview', state: 'input-required',
+  createdAt: '2026-08-12T08:00:00.000Z', updatedAt: '2026-08-12T08:00:00.000Z',
+  messages: [], kind: 'approval',
+  approval: {
+    action: { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } },
+    reviewer: 'owl@test.example', expiresAt: '2030-08-25T00:00:00.000Z', digest: 'a'.repeat(64),
+  },
+};
+
 type AuthKind = { kind: 'admin' } | { kind: 'identity'; address: string };
 
 const ORIGIN = { origin: 'http://localhost' };
@@ -600,11 +611,13 @@ type FakeNode = {
   textContent: string;
   type: string;
   dateTime: string;
+  attributes: Record<string, string>;
   childNodes: FakeNode[];
   classList: { add: (name: string) => void; contains: (name: string) => boolean };
   setAttribute: (key: string, value: string) => void;
   append: (...nodes: FakeNode[]) => void;
-  addEventListener: () => void;
+  addEventListener: (event: string, listener: () => void) => void;
+  click: () => void;
 };
 
 /** 无 jsdom：够 renderTaskRows 建行、加 class、写 Overdue 文案。 */
@@ -615,6 +628,7 @@ function fakeEl(tag: string): FakeNode {
     textContent: '',
     type: '',
     dateTime: '',
+    attributes: {},
     childNodes: [],
     classList: {
       add(name: string) {
@@ -626,13 +640,41 @@ function fakeEl(tag: string): FakeNode {
         return node.className.split(/\s+/).includes(name);
       },
     },
-    setAttribute() {},
+    setAttribute(key: string, value: string) {
+      node.attributes[key] = value;
+    },
     append(...nodes: FakeNode[]) {
       node.childNodes.push(...nodes);
     },
-    addEventListener() {},
+    addEventListener(event: string, listener: () => void) {
+      if (event === 'click') node.click = listener;
+    },
+    click() {},
   };
   return node;
+}
+
+function makeApprovalActionHarness() {
+  const state = { me: { address: 'owl@test.example' }, taskDetail: null as unknown, taskDetailStatus: '' };
+  const calls: Array<{ path: string; init: RequestInit }> = [];
+  const announced: string[] = [];
+  let renderCount = 0;
+  let loadCount = 0;
+  const updated = { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved' } };
+  const source = sliceTasksFn('function approvalCanDecide(', 'function renderTaskRows(');
+  const fn = new Function(
+    'document', 'state', 'isAdmin', 'apiJson', 'renderTasks', 'loadTasks', 'announce',
+    `${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
+  );
+  const renderer = fn(
+    { createElement: fakeEl }, state, () => false,
+    async (path: string, init: RequestInit) => { calls.push({ path, init }); return updated; },
+    () => { renderCount += 1; }, () => { loadCount += 1; }, (message: string) => { announced.push(message); },
+  ) as {
+    approvalCanDecide: (task: Task) => boolean;
+    renderApprovalAction: (task: Task) => FakeNode | null;
+  };
+  return { state, calls, announced, renderer, counts: () => ({ renderCount, loadCount }) };
 }
 
 /** 收集叶子 textContent，用来断言 Overdue 文字通道。 */
@@ -690,6 +732,110 @@ function makeTaskRowHarness() {
   ) as () => void;
   return { state, tasksRows, renderTaskRows };
 }
+
+describe('UI approval decision endpoint', () => {
+  test('dashboard actor matrix keeps approval authority at the stored reviewer and core service', async () => {
+    const decided: unknown[] = [];
+    const { app, cookie, deps } = makeApp(
+      { kind: 'identity', address: 'owl@test.example' },
+      {},
+      [APPROVAL_TASK],
+    );
+    (deps.taskService as any).decideApproval = mock(async (input: unknown) => {
+      decided.push(input);
+      return { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved', digest: APPROVAL_TASK.approval!.digest } };
+    });
+    const ok = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ kind: 'approval', state: 'completed', approval: { reviewer: 'owl@test.example' } });
+    expect(decided).toEqual([{ id: APPROVAL_TASK.id, from: 'owl@test.example', decision: 'approved' }]);
+
+    async function decide(app: Hono, cookie: string, body: unknown) {
+      return app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+    }
+
+    for (const address of ['fox@test.example', 'stranger@test.example']) {
+      const denied = makeApp({ kind: 'identity', address }, {}, [APPROVAL_TASK]);
+      const response = await decide(denied.app, denied.cookie, { decision: 'approved' });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'forbidden: approval reviewer required' });
+    }
+
+    const admin = makeApp({ kind: 'admin' }, {}, [APPROVAL_TASK]);
+    expect((await decide(admin.app, admin.cookie, { decision: 'approved' })).status).toBe(403);
+    expect((await decide(admin.app, admin.cookie, { from: 'fox@test.example', decision: 'approved' })).status).toBe(403);
+    (admin.deps.taskService as any).decideApproval = mock(async (input: unknown) => {
+      decided.push(input);
+      return { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'rejected' } };
+    });
+    const adminOk = await decide(admin.app, admin.cookie, { from: 'owl@test.example', decision: 'rejected' });
+    expect(adminOk.status).toBe(200);
+    expect(decided.at(-1)).toEqual({ id: APPROVAL_TASK.id, from: 'owl@test.example', decision: 'rejected' });
+
+    const missing = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, []);
+    expect((await decide(missing.app, missing.cookie, { decision: 'approved' })).status).toBe(404);
+    const ordinary = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [TASK_A]);
+    const ordinaryResponse = await ordinary.app.request(`/ui/api/tasks/${TASK_A.id}/decision`, {
+      method: 'POST', headers: { cookie: ordinary.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect(ordinaryResponse.status).toBe(409);
+    expect(await ordinaryResponse.json()).toEqual({ error: 'not_approval_task' });
+
+    const terminalTask: Task = { ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } };
+    const terminal = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [terminalTask]);
+    (terminal.deps.taskService as any).decideApproval = mock(async () => { throw new Error('task_already_decided'); });
+    expect((await decide(terminal.app, terminal.cookie, { decision: 'approved' })).status).toBe(409);
+
+    const coreRecheck = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [APPROVAL_TASK]);
+    (coreRecheck.deps.taskService as any).decideApproval = mock(async () => { throw new Error('approval_reviewer_required'); });
+    const rechecked = await decide(coreRecheck.app, coreRecheck.cookie, { decision: 'approved' });
+    expect(rechecked.status).toBe(403);
+    expect(await rechecked.json()).toEqual({ error: 'forbidden: approval reviewer required' });
+  });
+
+  test('the exact served renderer keeps action text inert and posts an approval decision', async () => {
+    const { state, calls, announced, renderer, counts } = makeApprovalActionHarness();
+    const malicious: Task = {
+      ...APPROVAL_TASK,
+      approval: {
+        ...APPROVAL_TASK.approval!,
+        action: {
+          type: 'deployment', name: '<img src=x onerror=alert(1)>',
+          arguments: { html: '<img src=x onerror=alert(1)>', flags: ['safe', 'dry-run'] },
+        },
+      },
+    };
+    const section = renderer.renderApprovalAction(malicious)!;
+    expect(renderer.approvalCanDecide(malicious)).toBe(true);
+    expect(leafTexts(section)).toContain('Name: <img src=x onerror=alert(1)>');
+    expect(leafTexts(section)).toContain(JSON.stringify(malicious.approval!.action.arguments));
+    expect(Object.hasOwn(section, 'innerHTML')).toBe(false);
+    const buttons = section.childNodes.filter((node) => node.tagName === 'BUTTON');
+    expect(buttons.map((button) => ({ type: button.type, label: button.attributes['aria-label'], text: button.textContent }))).toEqual([
+      { type: 'button', label: 'Approve action', text: 'Approve' },
+      { type: 'button', label: 'Reject action', text: 'Reject' },
+    ]);
+    buttons[0]!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      path: `/ui/api/tasks/${APPROVAL_TASK.id}/decision`,
+      init: {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      },
+    });
+    expect(state.taskDetail).toEqual({ ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } });
+    expect(state.taskDetailStatus).toBe('ready');
+    expect(counts()).toEqual({ renderCount: 1, loadCount: 1 });
+    expect(announced).toEqual(['Approval recorded.']);
+  });
+});
 
 describe('UI task overdue presentation (PR4 dual channel)', () => {
   test('overdue row has is-overdue class and Overdue text; on-time row has neither', () => {
@@ -750,4 +896,3 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
   });
 });
-

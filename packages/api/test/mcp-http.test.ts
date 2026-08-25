@@ -158,7 +158,7 @@ describe('MCP 元数据 origin / insecure issuer', () => {
 });
 
 describe('MCP HTTP 工具', () => {
-  test('admin key：tools/list 返回全部 15 工具', async () => {
+  test('admin key：tools/list 返回全部 16 工具', async () => {
     const res = await mcpRequest(adminKey, 'tools/list');
     expect(res.status).toBe(200);
     const body = (await readMcpJson(res)) as {
@@ -178,20 +178,21 @@ describe('MCP HTTP 工具', () => {
       'notify_user',
       'notify_verify',
       'task_create',
+      'task_decide',
       'task_get',
       'task_list',
       'task_update',
     ].sort());
   });
 
-  test('identity token：tools/list 同样返回 15 工具', async () => {
+  test('identity token：tools/list 同样返回 16 工具', async () => {
     const { token } = createIdentity({ localpart: 'mcp-list-id' })!;
     const res = await mcpRequest(token, 'tools/list');
     expect(res.status).toBe(200);
     const body = (await readMcpJson(res)) as {
       result?: { tools?: unknown[] };
     };
-    expect(body.result?.tools?.length).toBe(15);
+    expect(body.result?.tools?.length).toBe(16);
   });
 
   test('mail_list_identities 无状态直连：连续两请求无 session 头各自成功', async () => {
@@ -274,6 +275,20 @@ describe('MCP task_list/task_get 广播 outputSchema 契约', () => {
       expect(item.properties).toHaveProperty('kind');
       expect(item.properties).toHaveProperty('idempotencyKey');
     }
+  });
+
+  test('approval create/decide and task output schemas are broadcast with typed approval fields', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    const body = (await readMcpJson(res)) as { result?: { tools?: Array<{ name: string; inputSchema?: JsonSchema; outputSchema?: JsonSchema }> } };
+    const tools = body.result?.tools ?? [];
+    const create = tools.find((tool) => tool.name === 'task_create');
+    const decide = tools.find((tool) => tool.name === 'task_decide');
+    const get = tools.find((tool) => tool.name === 'task_get');
+    expect(create?.inputSchema?.properties).toHaveProperty('kind');
+    expect(create?.inputSchema?.properties).toHaveProperty('approval');
+    expect(decide?.inputSchema?.properties).toHaveProperty('decision');
+    expect(get?.outputSchema?.properties).toHaveProperty('kind');
+    expect(get?.outputSchema?.properties).toHaveProperty('approval');
   });
 });
 
@@ -435,5 +450,71 @@ describe('MCP task_list/task_get outputSchema 覆盖催办字段', () => {
     expect(body.result?.isError).toBeFalsy();
     const reminder = body.result?.structuredContent?.messages?.find((m) => m.kind === 'reminder');
     expect(reminder?.idempotencyKey).toBe('nudge-1');
+  });
+});
+
+describe('MCP registered task handlers execute through the production HTTP transport', () => {
+  test('ordinary/approval create and contained decide preserve their distinct REST contracts', async () => {
+    const requester = createIdentity({ localpart: `r3b-requester-${crypto.randomUUID().slice(0, 8)}` })!;
+    const reviewer = createIdentity({ localpart: `r3b-reviewer-${crypto.randomUUID().slice(0, 8)}` })!;
+    const ordinary = {
+      id: 'ac1b2c3d-e5f6-4780-8bcd-ef1234567890', from: requester.identity.address, to: reviewer.identity.address,
+      subject: 'Ordinary handler task', state: 'submitted' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+    };
+    const action = { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } };
+    const approval = {
+      id: 'bc1b2c3d-e5f6-4780-8bcd-ef1234567890', from: requester.identity.address, to: reviewer.identity.address,
+      subject: 'Approval handler task', state: 'input-required' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+      kind: 'approval' as const,
+      approval: { action, reviewer: reviewer.identity.address, expiresAt: '2030-08-25T00:00:00.000Z', digest: 'a'.repeat(64) },
+    };
+    const calls: { ordinary?: unknown; approval?: unknown; decide?: unknown } = {};
+    const unused = async () => { throw new Error('unused in MCP handler fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: async (input) => { calls.ordinary = input; return ordinary; },
+        createApproval: async (input) => { calls.approval = input; return approval; },
+        decideApproval: async (input) => {
+          calls.decide = input;
+          return { ...approval, state: 'completed' as const, result: { decision: input.decision } };
+        },
+        list: unused, listBoard: unused, get: async (id) => id === approval.id ? approval : null,
+        update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+      },
+    });
+    const call = (token: string, name: string, args: Record<string, unknown>, id: number) =>
+      handlerApp.request('/mcp', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
+      });
+
+    const ordinaryResponse = await call(requester.token, 'task_create', {
+      to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body',
+    }, 801);
+    const approvalResponse = await call(requester.token, 'task_create', {
+      to: reviewer.identity.address, subject: approval.subject, body: 'record only', kind: 'approval',
+      approval: { action, expiresAt: approval.approval.expiresAt },
+    }, 802);
+    const decideResponse = await call(reviewer.token, 'task_decide', {
+      id: approval.id, decision: 'approved',
+    }, 803);
+    for (const response of [ordinaryResponse, approvalResponse, decideResponse]) {
+      expect(response.status).toBe(200);
+      const body = (await readMcpJson(response)) as { result?: { isError?: boolean } };
+      expect(body.result?.isError, JSON.stringify(body)).toBeFalsy();
+    }
+    expect(calls).toEqual({
+      ordinary: { from: requester.identity.address, to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body' },
+      approval: {
+        from: requester.identity.address, to: reviewer.identity.address, subject: approval.subject, body: 'record only',
+        action, expiresAt: '2030-08-25T00:00:00.000Z',
+      },
+      // The handler received no `from`; the REST identity binding supplied it.
+      decide: { id: approval.id, from: reviewer.identity.address, decision: 'approved' },
+    });
   });
 });

@@ -152,7 +152,7 @@ export type UiApiDependencies = {
    */
   taskService?: Pick<
     TaskService,
-    'list' | 'listBoard' | 'get' | 'reply' | 'remind' | 'close'
+    'list' | 'listBoard' | 'get' | 'reply' | 'remind' | 'close' | 'decideApproval'
   >;
 };
 
@@ -212,6 +212,10 @@ const taskCloseSchema = z
     from: z.string().email().optional(),
   })
   .strict();
+const taskDecisionSchema = z.object({
+  from: z.string().email().optional(),
+  decision: z.enum(['approved', 'rejected']),
+}).strict();
 
 /** 与 routes/tasks.ts#canReadTask 保持同一口径（Dashboard cookie 入口的镜像）。 */
 function canReadUiTask(c: Context, task: Task): boolean {
@@ -253,11 +257,15 @@ function taskMutationError(c: Context, err: unknown): Response {
   const code = (err as Error).message;
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
   if (code === 'task_already_terminal') return c.json({ error: 'task_already_terminal' }, 409);
+  if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task') {
+    return c.json({ error: code }, 409);
+  }
   if (code === 'task_not_input_required') return c.json({ error: 'task_not_input_required' }, 409);
   if (code === 'task_remind_cooldown') return c.json({ error: 'task_remind_cooldown' }, 429);
   if (code === 'task_participant_required') {
     return c.json({ error: 'forbidden: task participant required' }, 403);
   }
+  if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
   if (err instanceof InvalidTaskCursorError) return c.json({ error: 'invalid_cursor' }, 400);
   console.warn('[task] ui mutation failed:', (err as Error).message);
   return c.json({ error: 'smtp_error' }, 502);
@@ -851,6 +859,40 @@ export function createUiApiRoutes(
     if (!task) return c.json({ error: 'not_found' }, 404);
     // overdue 由服务端按 queryNow 同类时钟计算，避免各浏览器口径漂移。
     return presentUiTask(c, task);
+  });
+
+  /** Approval decisions share the core service gate; this route merely maps
+   * cookie identity/admin context to its stored reviewer. */
+  routes.post('/tasks/:id/decision', async (c) => {
+    const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
+    if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = null;
+    }
+    const body = taskDecisionSchema.safeParse(raw);
+    if (!body.success) return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
+    const service = dependencies.taskService ?? taskService;
+    const task = await service.get(parsed.data);
+    if (!task) return c.json({ error: 'not_found' }, 404);
+    if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
+    const auth = getAuth(c);
+    const from = auth.kind === 'identity'
+      ? (body.data.from && body.data.from.toLowerCase() !== auth.address.toLowerCase()
+        ? null
+        : auth.address.toLowerCase())
+      : body.data.from?.toLowerCase();
+    if (!from || from !== task.approval.reviewer) {
+      return c.json({ error: 'forbidden: approval reviewer required' }, 403);
+    }
+    try {
+      const decide = service.decideApproval ?? taskService.decideApproval;
+      return presentUiTask(c, await decide!({ id: parsed.data, from, decision: body.data.decision }));
+    } catch (err) {
+      return taskMutationError(c, err);
+    }
   });
 
   /** 人在 input-required 时补料；写 working 事件。identity=自身，admin 必须显式选本方 from。 */
