@@ -7,6 +7,8 @@ export const TASK_LEASE_REAPER_INTERVAL_MS = 60_000;
 type IntervalHandle = { unref?: () => void };
 
 type ReaperScheduler = {
+  /** @internal test-only feature-gate seam; production reads config. */
+  leaseEnabledForTests?: boolean;
   reapOnce?: () => Promise<number>;
   setInterval?: (callback: () => void, milliseconds: number) => IntervalHandle;
   warn?: (...args: unknown[]) => void;
@@ -15,7 +17,8 @@ type ReaperScheduler = {
 /** Starts the fixed production cadence. The callback is single-flight so a
  * slow IMAP/SMTP round cannot overlap a later tick. */
 export function startTaskLeaseReaper(dependencies: ReaperScheduler = {}): void {
-  if (!config.taskLeasesEnabled) return;
+  const leasesEnabled = dependencies.leaseEnabledForTests ?? config.taskLeasesEnabled;
+  if (!leasesEnabled) return;
   const reapOnce = dependencies.reapOnce ?? reapExpiredTaskLeasesOnce;
   const schedule = dependencies.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
   const warn = dependencies.warn ?? console.warn;

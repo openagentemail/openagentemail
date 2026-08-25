@@ -681,6 +681,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     let release: (() => void) | undefined;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     startTaskLeaseReaper({
+      leaseEnabledForTests: true,
       reapOnce: async () => {
         calls += 1;
         if (calls === 1) await pending;

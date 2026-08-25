@@ -607,6 +607,7 @@ describe('MCP registered task handlers execute through the production HTTP trans
     const unused = async () => { throw new Error('unused in R9 lease fixture'); };
     const handlerApp = createApp({
       uiEnabled: false,
+      leaseEnabledForTests: true,
       taskService: {
         create: unused, list: unused, listBoard: unused, get: async () => base,
         update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
