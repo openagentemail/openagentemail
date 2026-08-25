@@ -1487,13 +1487,25 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
 }
 
 /** Called while the task lock is held before an ordinary worker state write. */
+let taskLeasesEnabledForTests: boolean | undefined;
+
+function taskLeasesEnabled(): boolean {
+  return taskLeasesEnabledForTests ?? config.taskLeasesEnabled;
+}
+
+/** @internal Test-only core feature-gate seam; production reads config. */
+export function setTaskLeasesEnabledForTests(enabled: boolean | undefined): boolean {
+  taskLeasesEnabledForTests = enabled;
+  return taskLeasesEnabled();
+}
+
 function assertActiveRecipientLeaseCredential(
   current: Task | null | undefined,
   from: string,
   leaseToken?: string,
 ): void {
   if (
-    config.taskLeasesEnabled
+    taskLeasesEnabled()
     && current?.to.toLowerCase() === from.toLowerCase()
     && current.lease?.claimedUntil
     && isLeaseDeadlineActive(current.lease.claimedUntil)

@@ -13,11 +13,13 @@ process.env.TASK_LEASES_ENABLED = 'true';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const {
   listTaskBoard,
   clearQueuedEventsForTests,
   setTaskGetForTests,
+  setTaskLeasesEnabledForTests,
   setTaskListAllForTests,
   setTaskSendMailForTests,
   setTaskNowForTests,
@@ -30,6 +32,7 @@ for (const localpart of ['fox', 'owl']) {
 }
 
 afterEach(() => {
+  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
   setTaskGetForTests(null);
@@ -1295,6 +1298,10 @@ describe('#56 R9 lease final dashboard surfaces', () => {
 
 describe('#56 R13 dashboard reply lease boundary RED', () => {
   test('R13 RED: recipient/worker reply without a lease token rejects before delivery or queued mutation', async () => {
+    const effectiveLeaseEnabled = setTaskLeasesEnabledForTests(true);
+    console.info(JSON.stringify({ r16CoreLeaseGate: {
+      test: 'R13-dashboard', configuredSingleton: config.taskLeasesEnabled, effectiveLeaseEnabled,
+    } }));
     const task: Task = {
       ...TASK_INPUT,
       id: '13131313-1313-4313-8313-131313131313',

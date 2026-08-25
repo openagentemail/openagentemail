@@ -17,7 +17,7 @@ process.env.TASK_LEASES_ENABLED = 'true';
 
 const { afterEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
-const { parseConfig } = await import('../src/lib/config.ts');
+const { config, parseConfig } = await import('../src/lib/config.ts');
 const {
   TASK_LEASE_DEFAULT_SEC,
   TASK_LEASE_MAX_SEC,
@@ -29,6 +29,7 @@ const {
   isTaskLeaseTokenCurrent,
   parseTaskMessageForTests,
   setTaskGetForTests,
+  setTaskLeasesEnabledForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
   taskService,
@@ -77,6 +78,7 @@ async function parsedClaim(input: SendInput, uid = 2, extra: Record<string, stri
 }
 
 afterEach(() => {
+  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
@@ -454,6 +456,10 @@ async function r13bActiveLeaseFixture() {
 
 describe('#56 R13b real REST state actor matrix RED', () => {
   test('R13b RED: requester is unfenced while recipient without the current token remains fenced', async () => {
+    const effectiveLeaseEnabled = setTaskLeasesEnabledForTests(true);
+    console.info(JSON.stringify({ r16CoreLeaseGate: {
+      test: 'R13b', configuredSingleton: config.taskLeasesEnabled, effectiveLeaseEnabled,
+    } }));
     const requester = await r13bActiveLeaseFixture();
     const requesterUpdate = await post(productionApp(taskService, A), 'state', {
       state: 'input-required',
