@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FetchMessageObject } from 'imapflow';
+import nodemailer from 'nodemailer';
 import type { SendInput } from '../src/lib/smtp.ts';
 import type { RawTaskMessage, Task, TaskService } from '../src/lib/tasks.ts';
 
@@ -22,12 +23,14 @@ const {
   TASK_LEASE_DEFAULT_SEC,
   TASK_LEASE_MAX_SEC,
   TASK_LEASE_MIN_SEC,
+  TASK_LEASE_REASON_MAX_CHARS,
   claimLeaseHeadersForTests,
   claimTask,
   createApprovalTask,
   clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
   parseTaskMessageForTests,
+  releaseTask,
   setTaskGetForTests,
   setTaskLeasesEnabledForTests,
   setTaskNowForTests,
@@ -1264,17 +1267,146 @@ if (process.env.TASK_LEASES_R6_RED === '1') {
       expect({
         first: first.status,
         authenticatedRelease: releaseEvent !== null,
+        productionParserRestoresReason: releaseEvent?.lease?.event === 'release' && releaseEvent.lease.reason === reason,
         releasedRebuild: rebuilt?.lease === undefined && rebuilt?.releasedLease !== undefined,
+        rebuildRestoresReason: rebuilt?.releasedLease?.reason === reason,
         replay: replay.status,
         sameClosedBody: JSON.stringify(first.body) === JSON.stringify(replay.body),
         deliveries: sent.length,
       }).toEqual({
         first: 200,
         authenticatedRelease: true,
+        productionParserRestoresReason: true,
         releasedRebuild: true,
+        rebuildRestoresReason: true,
         replay: 200,
         sameClosedBody: true,
         deliveries: 2,
+      });
+    });
+
+    test('R17 GREEN: owner-approved release reason limit survives actual folded mail parser and rebuild', async () => {
+      const durable = submittedTask();
+      const sent: SendInput[] = [];
+      const reason = 'r'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+      setTaskNowForTests(() => START);
+      setTaskGetForTests(async () => durable);
+      setTaskSendMailForTests(async (input) => {
+        sent.push(input);
+        return { messageId: `<r17-8000-${sent.length}>` };
+      });
+      const app = productionApp();
+      const claim = await post(app, 'claim', { leaseSec: 300 });
+      const leaseToken = objectValue(claim.body).leaseToken;
+      const token = typeof leaseToken === 'string' ? leaseToken : '';
+      const release = await post(app, 'release', { leaseToken: token, reason });
+      const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+      const serialize = async (input: SendInput) => {
+        const result = await transport.sendMail({
+          from: input.from, to: input.to, subject: input.subject, text: input.text, headers: input.headers,
+        });
+        if (!Buffer.isBuffer(result.message)) throw new Error('R17 stream transport must return buffered RFC 5322 source');
+        return result.message;
+      };
+      const claimSource = sent[0] ? await serialize(sent[0]) : null;
+      const releaseSource = sent[1] ? await serialize(sent[1]) : null;
+      const asFetch = (source: Buffer, input: SendInput, uid: number) => ({
+        uid, source,
+        envelope: { from: [{ address: input.from }], to: [{ address: input.to[0] }], subject: input.subject },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject);
+      const claimEvent = claimSource && sent[0] ? await parseTaskMessageForTests(asFetch(claimSource, sent[0], 2), ID) : null;
+      const releaseEvent = releaseSource && sent[1] ? await parseTaskMessageForTests(asFetch(releaseSource, sent[1], 3), ID) : null;
+      const headerBlock = releaseSource?.toString('utf8').split(/\r?\n\r?\n/, 1)[0] ?? '';
+      const payloadWire = headerBlock.match(/^X-OA-Task-Lease-Payload:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*/mi)?.[0] ?? '';
+      const payloadValue = sent[1]?.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+      const rebuilt = claimEvent && releaseEvent ? taskFromMessages(ID, [submittedRaw(), claimEvent, releaseEvent]) : null;
+      const evidence = {
+        reasonChars: reason.length,
+        base64PayloadChars: payloadValue.length,
+        base64Expanded: payloadValue.length > reason.length,
+        payloadFolded: /\r?\n[ \t]/.test(payloadWire),
+        payloadUnfoldsExactly: payloadWire.replace(/^X-OA-Task-Lease-Payload:\s*/i, '').replace(/\r?\n[ \t]+/g, '') === payloadValue,
+        productionParserRestoresReason: releaseEvent?.lease?.event === 'release' && releaseEvent.lease.reason === reason,
+        releasedRebuildRestoresReason: rebuilt?.releasedLease?.reason === reason && rebuilt.lease === undefined,
+      };
+      console.info(JSON.stringify({ r17Reason8000WireEvidence: evidence }));
+      expect({ claim: claim.status, release: release.status, ...evidence }).toEqual({
+        claim: 200,
+        release: 200,
+        reasonChars: TASK_LEASE_REASON_MAX_CHARS,
+        base64PayloadChars: expect.any(Number),
+        base64Expanded: true,
+        payloadFolded: true,
+        payloadUnfoldsExactly: true,
+        productionParserRestoresReason: true,
+        releasedRebuildRestoresReason: true,
+      });
+    });
+
+    test('R17 GREEN: route rejects an over-limit reason before service, delivery, event, or queue mutation', async () => {
+      let serviceCalls = 0;
+      const deliveries: SendInput[] = [];
+      setTaskSendMailForTests(async (input) => {
+        deliveries.push(input);
+        return { messageId: '<r17-route-should-not-deliver>' };
+      });
+      const service: TaskService = {
+        ...taskService,
+        get: async () => {
+          serviceCalls += 1;
+          return submittedTask();
+        },
+        release: async () => {
+          serviceCalls += 1;
+          return submittedTask();
+        },
+      };
+      const response = await post(productionApp(service), 'release', {
+        leaseToken: 'r17-route-token', reason: 'r'.repeat(TASK_LEASE_REASON_MAX_CHARS + 1),
+      });
+      expect({
+        status: response.status,
+        error: objectValue(response.body).error ?? null,
+        serviceCalls,
+        deliveries: deliveries.length,
+      }).toEqual({
+        status: 400,
+        error: 'invalid_request',
+        serviceCalls: 0,
+        deliveries: 0,
+      });
+    });
+
+    test('R17 GREEN: core bypass rejects an over-limit reason before side effects and preserves authority', async () => {
+      const durable = submittedTask();
+      const sent: SendInput[] = [];
+      setTaskNowForTests(() => START);
+      setTaskGetForTests(async () => durable);
+      setTaskSendMailForTests(async (input) => {
+        sent.push(input);
+        return { messageId: `<r17-core-${sent.length}>` };
+      });
+      const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const before = await taskService.get(ID);
+      const attempt = await Promise.allSettled([
+        releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'r'.repeat(TASK_LEASE_REASON_MAX_CHARS + 1) }),
+      ]);
+      const after = await taskService.get(ID);
+      expect({
+        rejectedInvalidRequest: attempt[0]?.status === 'rejected' && String(attempt[0].reason).includes('invalid_request'),
+        deliveries: sent.length,
+        stateUnchanged: after?.state === before?.state,
+        authorityUnchanged: after?.lease?.leaseGeneration === before?.lease?.leaseGeneration
+          && after?.lease?.claimedUntil === before?.lease?.claimedUntil
+          && after?.lease?.tokenVerifier === before?.lease?.tokenVerifier,
+        noReleasedReceipt: after?.releasedLease === undefined,
+      }).toEqual({
+        rejectedInvalidRequest: true,
+        deliveries: 1,
+        stateUnchanged: true,
+        authorityUnchanged: true,
+        noReleasedReceipt: true,
       });
     });
 

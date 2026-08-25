@@ -27,6 +27,8 @@ export const TASK_WAIT_MAX_SEC = 600;
 export const TASK_LEASE_DEFAULT_SEC = 300;
 export const TASK_LEASE_MIN_SEC = 30;
 export const TASK_LEASE_MAX_SEC = 3600;
+/** Owner-approved product value; selected for single-header line constraints and base64 expansion, not as an RFC universal safe maximum. */
+export const TASK_LEASE_REASON_MAX_CHARS = 8_000;
 
 /** 工单板 status 查询；active = submitted+working（Input required 是独立 tab）。 */
 export const TASK_BOARD_STATUSES = [
@@ -1808,6 +1810,7 @@ export async function releaseTask(input: {
   reason?: string;
 }): Promise<Task> {
   const reason = input.reason ?? '';
+  if (reason.length > TASK_LEASE_REASON_MAX_CHARS) throw new Error('invalid_request');
   return withTaskLock(input.id, async () => {
     const current = await getTaskSnapshot(input.id);
     if (!current) throw new Error('not_found');

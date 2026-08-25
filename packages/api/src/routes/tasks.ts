@@ -10,6 +10,7 @@ import {
   type Task,
   type TaskService,
   TASK_LEASE_MAX_SEC,
+  TASK_LEASE_REASON_MAX_CHARS,
   TASK_LEASE_MIN_SEC,
   taskParticipants,
   taskService,
@@ -62,7 +63,7 @@ const renewLeaseSchema = z.object({
 
 const releaseLeaseSchema = z.object({
   leaseToken: z.string().min(1),
-  reason: z.string().optional(),
+  reason: z.string().max(TASK_LEASE_REASON_MAX_CHARS).optional(),
 }).strict();
 
 const decisionSchema = z.object({
