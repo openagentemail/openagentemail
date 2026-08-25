@@ -624,7 +624,7 @@ export function registerOpenAgentEmailTools(
     "task_claim",
     {
       title: "Claim Email Task",
-      description: "Claim a submitted task as its managed recipient for a bounded lease.",
+      description: "Claim a submitted task as its managed recipient for a bounded lease; a working task may be reclaimed only with an authenticated expired or released lease receipt.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         leaseSec: z.number().int().min(30).max(3600).optional().describe("Lease duration in seconds (30..3600; default 300)"),
@@ -640,7 +640,7 @@ export function registerOpenAgentEmailTools(
     "task_renew",
     {
       title: "Renew Task Lease",
-      description: "Renew a task lease using its opaque bearer token.",
+      description: "Renew a task lease only with its current active opaque lease token.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         leaseToken: z.string().min(1).describe("Opaque current lease token"),
@@ -657,7 +657,7 @@ export function registerOpenAgentEmailTools(
     "task_release",
     {
       title: "Release Task Lease",
-      description: "Release a task lease using its opaque bearer token.",
+      description: "Release a task lease only with its current active opaque lease token.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         leaseToken: z.string().min(1).describe("Opaque current lease token"),

@@ -1225,6 +1225,19 @@ export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
 }
 
+function indexedLeaseGenerationDominates(
+  task: Task,
+  queuedGeneration: number,
+  expiredReceipt: 'exclude' | 'strict' | 'equal-or-newer',
+): boolean {
+  const indexedGeneration = task.lease?.leaseGeneration
+    ?? task.releasedLease?.leaseGeneration
+    ?? (expiredReceipt === 'exclude' ? undefined : task.expiredLease?.leaseGeneration)
+    ?? 0;
+  return indexedGeneration > queuedGeneration
+    || (expiredReceipt === 'equal-or-newer' && task.expiredLease?.leaseGeneration === queuedGeneration);
+}
+
 /** 已索引的事件不再需要 synthetic 补丁。 */
 function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
   if (queued.lease) {
@@ -1236,14 +1249,15 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
         && receipt.claimedUntil === queued.lease.claimedUntil
         && receipt.expiredAt === queued.lease.expiredAt
       ) return true;
-      return (authority?.leaseGeneration ?? task.releasedLease?.leaseGeneration ?? receipt?.leaseGeneration ?? 0) > queued.lease.generation;
+      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
     }
     if (queued.lease.event === 'release') {
-      return (authority?.leaseGeneration ?? task.releasedLease?.leaseGeneration ?? 0) > queued.lease.generation
+      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')
         || (task.releasedLease?.leaseGeneration === queued.lease.generation
         && task.releasedLease.tokenVerifier === queued.lease.tokenVerifier
         && task.releasedLease.reason === queued.lease.reason);
     }
+    if (indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')) return true;
     const released = task.releasedLease;
     if (!authority) {
       return !!released
@@ -1472,18 +1486,30 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
   return next;
 }
 
-export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
-  return withTaskLock(input.id, async () => {
-    const current = await getTaskSnapshot(input.id);
-    if (
-      config.taskLeasesEnabled
-      && current?.lease?.claimedUntil
-      && nowMs() < Date.parse(current.lease.claimedUntil)
-      && !isTaskLeaseTokenCurrent(current, input.leaseToken ?? '')
+/** Called while the task lock is held before an ordinary worker state write. */
+function assertActiveRecipientLeaseCredential(
+  current: Task | null | undefined,
+  from: string,
+  leaseToken?: string,
+): void {
+  if (
+    config.taskLeasesEnabled
+    && current?.to.toLowerCase() === from.toLowerCase()
+    && current.lease?.claimedUntil
+    && isLeaseDeadlineActive(current.lease.claimedUntil)
+    && !isTaskLeaseTokenCurrent(current, leaseToken ?? '')
+  ) {
     // The frozen R5a route contract exposes established state conflicts as
     // `task_already_terminal`; keep that route unchanged while failing closed
     // before SMTP for a stale active-lease credential.
-    ) throw new Error('task_already_terminal');
+    throw new Error('task_already_terminal');
+  }
+}
+
+export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
+  return withTaskLock(input.id, async () => {
+    const current = await getTaskSnapshot(input.id);
+    assertActiveRecipientLeaseCredential(current, input.from, input.leaseToken);
     return updateTaskUnlocked(input, current ?? undefined);
   });
 }
@@ -1568,6 +1594,7 @@ export async function claimTask(input: {
           leaseGeneration: generation,
           tokenVerifier: lease.tokenVerifier,
         },
+        releasedLease: undefined,
         expiredLease: undefined,
       },
       leaseToken: token,
@@ -2065,6 +2092,7 @@ export async function replyTask(input: { id: string; from: string; body: string 
     const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (existing.state !== 'input-required') throw new Error('task_not_input_required');
+    assertActiveRecipientLeaseCredential(existing, input.from);
     const updated = await updateTaskUnlocked({
       id: input.id,
       from: input.from,

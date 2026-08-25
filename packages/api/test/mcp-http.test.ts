@@ -260,6 +260,26 @@ describe('MCP HTTP 工具', () => {
     expect(claim?.outputSchema?.properties).not.toHaveProperty('leaseTokenHash');
   });
 
+  test('#56 R15: tools/list describes lease eligibility and current-token requirements', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; description?: string }> };
+    };
+    const description = (name: string) => body.result?.tools?.find((tool) => tool.name === name)?.description ?? '';
+    expect({
+      claimSubmittedInitial: /submitted task/i.test(description('task_claim')),
+      claimAuthenticatedReceiptReclaim: /authenticated expired or released lease receipt/i.test(description('task_claim')),
+      renewCurrentActiveOpaqueToken: /current active opaque lease token/i.test(description('task_renew')),
+      releaseCurrentActiveOpaqueToken: /current active opaque lease token/i.test(description('task_release')),
+    }).toEqual({
+      claimSubmittedInitial: true,
+      claimAuthenticatedReceiptReclaim: true,
+      renewCurrentActiveOpaqueToken: true,
+      releaseCurrentActiveOpaqueToken: true,
+    });
+  });
+
   test('#56 RED：identity token tools/list 同样返回 19 工具', async () => {
     const { token } = createIdentity({ localpart: 'mcp-list-id' })!;
     const res = await mcpRequest(token, 'tools/list');
@@ -710,13 +730,14 @@ describe('MCP registered task handlers execute through the production HTTP trans
       headers: { authorization: `Bearer ${identity.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
       body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'tools/call', params: { name: 'task_update', arguments: args } }),
     });
-    const [withToken, omittedToken] = await Promise.all([
-      call({ id, state: 'input-required', leaseToken }, 1201),
-      call({ id, state: 'working' }, 1202),
-    ]);
-    const [withTokenBody, omittedTokenBody] = await Promise.all([withToken, omittedToken].map(readMcpJson)) as Array<{
+    const withToken = await call({ id, state: 'input-required', leaseToken }, 1201);
+    const withTokenBody = await readMcpJson(withToken) as {
       result?: { isError?: boolean; structuredContent?: Record<string, unknown> };
-    }>;
+    };
+    const omittedToken = await call({ id, state: 'working' }, 1202);
+    const omittedTokenBody = await readMcpJson(omittedToken) as {
+      result?: { isError?: boolean; structuredContent?: Record<string, unknown> };
+    };
     expect({
       statuses: [withToken.status, omittedToken.status],
       successfulSchemas: [withTokenBody, omittedTokenBody].every((body) => !body.result?.isError),

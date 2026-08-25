@@ -330,10 +330,10 @@ type LeaseGrantBody = {
 
 type RouteResult = { status: number; body: unknown };
 
-function productionApp(service: TaskService = taskService) {
+function productionApp(service: TaskService = taskService, actor = B) {
   const app = new Hono();
   app.use('*', async (c, next) => {
-    c.set('auth', { kind: 'identity' as const, address: B });
+    c.set('auth', { kind: 'identity' as const, address: actor });
     await next();
   });
   app.route('/v1/tasks', createTaskRoutes({
@@ -435,6 +435,84 @@ async function reclaimAtEquality(fixture: Awaited<ReturnType<typeof leaseFixture
   }
   return { claim, grant };
 }
+
+async function r13bActiveLeaseFixture() {
+  const durable = submittedTask();
+  const sent: SendInput[] = [];
+  clearQueuedEventsForTests();
+  setTaskNowForTests(() => START);
+  setTaskGetForTests(async () => durable);
+  setTaskSendMailForTests(async (input) => {
+    sent.push(input);
+    return { messageId: `<r13b-${sent.length}>` };
+  });
+  const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  const active = await taskService.get(ID);
+  if (!active?.lease) throw new Error('R13b fixture must retain active authority');
+  return { app: productionApp(), active, grant, sent };
+}
+
+describe('#56 R13b real REST state actor matrix RED', () => {
+  test('R13b RED: requester is unfenced while recipient without the current token remains fenced', async () => {
+    const requester = await r13bActiveLeaseFixture();
+    const requesterUpdate = await post(productionApp(taskService, A), 'state', {
+      state: 'input-required',
+      body: 'requester update without lease token',
+    });
+    const requesterBody = objectValue(requesterUpdate.body);
+
+    const worker = await r13bActiveLeaseFixture();
+    const workerBefore = worker.active;
+    const workerUpdate = await post(worker.app, 'state', {
+      state: 'input-required',
+      body: 'worker update without lease token',
+    });
+    const workerBody = objectValue(workerUpdate.body);
+    const workerAfter = await taskService.get(ID);
+
+    expect({
+      requester: {
+        status: requesterUpdate.status,
+        state: requesterBody.state ?? null,
+        deliveries: requester.sent.length,
+        tokenFree: !containsSecret(requesterUpdate.body, requester.grant.leaseToken),
+      },
+      worker: {
+        actorIsRecipient: workerBefore.to === B,
+        activeLease: workerBefore.lease?.claimedUntil === worker.grant.claimedUntil,
+        status: workerUpdate.status,
+        error: workerBody.error ?? null,
+        state: workerAfter?.state ?? null,
+        deliveries: worker.sent.length,
+        events: (workerAfter?.messages.length ?? 0) - workerBefore.messages.length,
+        queued: workerAfter?.state === workerBefore.state ? 0 : 1,
+        authorityUnchanged: workerAfter?.lease?.claimedUntil === workerBefore.lease?.claimedUntil
+          && workerAfter?.lease?.leaseGeneration === workerBefore.lease?.leaseGeneration
+          && workerAfter?.lease?.tokenVerifier === workerBefore.lease?.tokenVerifier,
+        tokenFree: !containsSecret(workerUpdate.body, worker.grant.leaseToken),
+      },
+    }).toEqual({
+      requester: {
+        status: 200,
+        state: 'input-required',
+        deliveries: 2,
+        tokenFree: true,
+      },
+      worker: {
+        actorIsRecipient: true,
+        activeLease: true,
+        status: 409,
+        error: 'task_already_terminal',
+        state: 'working',
+        deliveries: 1,
+        events: 0,
+        queued: 0,
+        authorityUnchanged: true,
+        tokenFree: true,
+      },
+    });
+  });
+});
 
 if (process.env.TASK_LEASES_R5B_RED === '1') {
   describe('#56 R5b production lease-core matrix RED', () => {
@@ -901,11 +979,16 @@ describe('#56 R12 remaining P1 gates', () => {
       releasedWorking: released.state,
       authenticatedReleaseReceipt: released.releasedLease?.tokenVerifier === first.task.lease?.tokenVerifier,
       reclaimGeneration: reclaimed.leaseGeneration,
+      reclaimedAuthority: reclaimed.task.lease?.leaseGeneration === reclaimed.leaseGeneration
+        && reclaimed.task.lease?.claimedUntil === reclaimed.claimedUntil,
+      reclaimedHasNoStaleReceipt: reclaimed.task.releasedLease === undefined && reclaimed.task.expiredLease === undefined,
       deliveries: sent.length,
     }).toEqual({
       releasedWorking: 'working',
       authenticatedReleaseReceipt: true,
       reclaimGeneration: 2,
+      reclaimedAuthority: true,
+      reclaimedHasNoStaleReceipt: true,
       deliveries: 3,
     });
   });

@@ -603,6 +603,77 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     });
   });
 
+  test('R14 RED: durable expiry receipt dominates same-generation queued authority without swallowing generation 2', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r14-${sent.length}>` };
+    });
+    if (!taskService.claim) throw new Error('shipped claim service is unavailable');
+
+    const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    now = Date.parse(first.claimedUntil);
+    const firstReap = await reapExpiredTaskLeasesOnce();
+    const claim = await parseCaptured(sent[0]!, 2);
+    const expiry = await parseCaptured(sent[1]!, 3);
+    const expiredDurable = claim && expiry ? taskFromMessages(ID, [submittedRaw(), claim, expiry]) : null;
+    if (!expiredDurable) throw new Error('R14 fixture must rebuild the authenticated expiry receipt');
+    durable = expiredDurable;
+    // Deliberately keep the accepted claim and expiry synthetic rows: IMAP has
+    // indexed the durable history, but per-row queue retirement is delayed.
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    const beforeSecondReap = sent.length;
+    const dominated = await taskService.get(ID);
+    const dominatedView = dominated ? toTaskView(dominated) : null;
+    const secondReap = await reapExpiredTaskLeasesOnce();
+    const duplicateDeliveries = sent.length - beforeSecondReap;
+
+    // A later generation is an independent authority and must not be retired
+    // by the durable generation-1 expiry receipt.
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const later = await taskService.get(ID);
+    const laterView = later ? toTaskView(later) : null;
+
+    expect({
+      authenticatedHistory: claim !== null && expiry !== null && expiredDurable.expiredLease?.leaseGeneration === 1,
+      sameGeneration: {
+        privateLeaseGeneration: dominated?.lease?.leaseGeneration ?? null,
+        expiredReceiptGeneration: dominated?.expiredLease?.leaseGeneration ?? null,
+        messageCount: dominated?.messages.length ?? null,
+        publicTiming: [dominatedView?.claimedUntil ?? null, dominatedView?.leaseGeneration ?? null],
+        reaper: { first: firstReap, second: secondReap, duplicateDeliveries },
+      },
+      laterGenerationQueuedAuthority: {
+        generation: second.leaseGeneration,
+        privateLeaseGeneration: later?.lease?.leaseGeneration ?? null,
+        publicTiming: [laterView?.claimedUntil ?? null, laterView?.leaseGeneration ?? null],
+      },
+    }).toEqual({
+      authenticatedHistory: true,
+      sameGeneration: {
+        privateLeaseGeneration: null,
+        expiredReceiptGeneration: 1,
+        messageCount: 3,
+        publicTiming: [null, null],
+        reaper: { first: 1, second: 0, duplicateDeliveries: 0 },
+      },
+      laterGenerationQueuedAuthority: {
+        generation: 2,
+        privateLeaseGeneration: 2,
+        publicTiming: [second.claimedUntil, 2],
+      },
+    });
+  });
+
   test('at exact expiry reaper races stale renew and release, materializing exactly one audit', async () => {
     for (const operation of ['renew', 'release'] as const) {
       let now = START;

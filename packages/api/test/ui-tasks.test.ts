@@ -9,6 +9,7 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+process.env.TASK_LEASES_ENABLED = 'true';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -1288,6 +1289,158 @@ describe('#56 R9 lease final dashboard surfaces', () => {
       },
       deliveries: [0, 0, 0],
       privateAuthorityUnchanged: true,
+    });
+  });
+});
+
+describe('#56 R13 dashboard reply lease boundary RED', () => {
+  test('R13 RED: recipient/worker reply without a lease token rejects before delivery or queued mutation', async () => {
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '13131313-1313-4313-8313-131313131313',
+      state: 'submitted',
+      messages: [TASK_INPUT.messages[0]!],
+    };
+    let durable = task;
+    const deliveries: unknown[] = [];
+    setTaskNowForTests(() => Date.parse(NOW));
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: `<r13-${deliveries.length}>` };
+    });
+
+    const grant = await taskService.claim!({ id: task.id, from: task.to, leaseSec: 300 });
+    await taskService.update({
+      id: task.id,
+      from: task.to,
+      state: 'input-required',
+      body: 'need the attachment',
+      leaseToken: grant.leaseToken,
+    });
+    const before = await taskService.get(task.id);
+    if (!before?.lease) throw new Error('R13 fixture must retain active authority');
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.to },
+      { taskService },
+      [task],
+    );
+    setTaskNowForTests(() => Date.parse(NOW) + 2_000);
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const replyBody = await reply.json() as Record<string, unknown>;
+    const [detail, list] = await Promise.all([
+      app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie } }),
+      app.request('/ui/api/tasks', { headers: { cookie } }),
+    ]);
+    const detailBody = await detail.json() as Record<string, unknown>;
+    const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+    const after = await taskService.get(task.id);
+    const listed = listBody.tasks?.find((row) => row.id === task.id) ?? null;
+    const publicJson = JSON.stringify({ replyBody, detailBody, listed });
+    expect({
+      reply: { status: reply.status, error: replyBody.error ?? null },
+      task: { state: after?.state ?? null, messages: after?.messages.length ?? null },
+      privateAuthorityUnchanged: after?.lease?.claimedUntil === before.lease.claimedUntil
+        && after.lease?.leaseGeneration === before.lease.leaseGeneration
+        && after.lease?.tokenVerifier === before.lease.tokenVerifier,
+      deltas: {
+        deliveries: deliveries.length - 2,
+        events: (after?.messages.length ?? 0) - before.messages.length,
+        queued: after?.state === before.state ? 0 : 1,
+      },
+      publicTokenFree: !publicJson.includes(grant.leaseToken) && !publicJson.includes(before.lease.tokenVerifier),
+    }).toEqual({
+      reply: { status: 409, error: 'task_already_terminal' },
+      task: { state: 'input-required', messages: before.messages.length },
+      privateAuthorityUnchanged: true,
+      deltas: { deliveries: 0, events: 0, queued: 0 },
+      publicTokenFree: true,
+    });
+  });
+
+  test('R13 RED control: ordinary input-required dashboard reply still succeeds without a lease', async () => {
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '14141414-1414-4414-8414-141414141414',
+    };
+    const deliveries: unknown[] = [];
+    setTaskGetForTests(async () => task);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: '<r13-control>' };
+    });
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.to },
+      { taskService },
+      [task],
+    );
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const body = await reply.json() as Record<string, unknown>;
+    expect({
+      status: reply.status,
+      state: body.state ?? null,
+      deliveries: deliveries.length,
+      tokenFree: !JSON.stringify(body).includes('leaseToken'),
+    }).toEqual({
+      status: 200,
+      state: 'working',
+      deliveries: 1,
+      tokenFree: true,
+    });
+  });
+
+  test('R13 RED control: requester reply succeeds without a token while the recipient lease is active', async () => {
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '15151515-1515-4515-8515-151515151515',
+      state: 'submitted',
+      messages: [TASK_INPUT.messages[0]!],
+    };
+    const deliveries: unknown[] = [];
+    setTaskNowForTests(() => Date.parse(NOW));
+    setTaskGetForTests(async () => task);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: `<r13-requester-${deliveries.length}>` };
+    });
+    const grant = await taskService.claim!({ id: task.id, from: task.to, leaseSec: 300 });
+    await taskService.update({
+      id: task.id,
+      from: task.to,
+      state: 'input-required',
+      body: 'need the attachment',
+      leaseToken: grant.leaseToken,
+    });
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.from },
+      { taskService },
+      [task],
+    );
+    setTaskNowForTests(() => Date.parse(NOW) + 2_000);
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const body = await reply.json() as Record<string, unknown>;
+    expect({
+      status: reply.status,
+      state: body.state ?? null,
+      deliveries: deliveries.length,
+      tokenFree: !JSON.stringify(body).includes(grant.leaseToken),
+    }).toEqual({
+      status: 200,
+      state: 'working',
+      deliveries: 3,
+      tokenFree: true,
     });
   });
 });
