@@ -1236,6 +1236,7 @@ export async function processWatchedMessage(
 
   let hasOtpOrLink = false;
   let approvalPreview: string | null = null;
+  let hasAuthenticatedApproval = false;
   const extras: MailContentExtras = {
     subject: typeof message.envelope?.subject === 'string' ? message.envelope.subject : '',
     from: formatAddressList(message.envelope?.from as Array<{ name?: string | null; address?: string | null }> | undefined),
@@ -1282,6 +1283,7 @@ export async function processWatchedMessage(
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
       const approval = await approvalEventForWatcher(message as FetchMessageObject);
       if (approval) {
+        hasAuthenticatedApproval = true;
         approvalPreview = approval.type === 'request'
           ? 'Approval request recorded. Open the task dashboard to review.'
           : approval.type === 'decision'
@@ -1331,7 +1333,7 @@ export async function processWatchedMessage(
       if (!extras.codes.includes(code)) extras.codes.push(code);
     }
   }
-  if (policy === 'otp' && !hasOtpOrLink) return;
+  if (policy === 'otp' && !hasOtpOrLink && !hasAuthenticatedApproval) return;
 
   const clickUrl = options.clickUrl;
   // Tier-2 metadata mask is message-level; compute at most once per mail.

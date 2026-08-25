@@ -170,7 +170,6 @@
 
   function approvalCanDecide(task) {
     if (!task || task.kind !== 'approval' || !task.approval || task.state !== 'input-required') return false;
-    if (!task.approval.expiresAt || Date.now() >= Date.parse(task.approval.expiresAt)) return false;
     return !isAdmin() && !!state.me &&
       String(state.me.address || '').toLowerCase() === String(task.approval.reviewer || '').toLowerCase();
   }

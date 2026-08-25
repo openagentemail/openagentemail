@@ -401,9 +401,10 @@ function approvalRequestBody(body: string | undefined, snapshot: ApprovalSnapsho
 }
 
 function readApprovalSnapshot(body: string): ApprovalSnapshot | null {
-  const marker = body.lastIndexOf(APPROVAL_MARKER);
-  if (marker < 0) return null;
-  const match = body.slice(marker + APPROVAL_MARKER.length).match(/^\s*```json\s*\n([\s\S]*?)\n```/);
+  // The marker is a generated frame delimiter, not an arbitrary payload
+  // token: action JSON may safely contain its literal spelling.
+  const matches = [...body.matchAll(/(?:^|\n)<!-- openagent\.email approval snapshot -->\n```json\s*\n([\s\S]*?)\n```/g)];
+  const match = matches.at(-1);
   if (!match) return null;
   try {
     const parsed = JSON.parse(match[1]) as Record<string, unknown>;
@@ -884,6 +885,16 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
       );
     });
   }
+  const queuedApproval = queued.message.approval;
+  if (queuedApproval?.type === 'decision' || queuedApproval?.type === 'expired') {
+    return task.messages.some((message) => {
+      const indexed = message.approval;
+      if (!indexed || indexed.type !== queuedApproval.type || indexed.digest !== queuedApproval.digest) return false;
+      if (indexed.type === 'decision' && (queuedApproval.type !== 'decision' || indexed.decision !== queuedApproval.decision)) return false;
+      const at = Date.parse(message.date);
+      return message.state === queued.message.state && Number.isFinite(at) && at >= queued.sentAt - 1000;
+    });
+  }
   return (
     task.messages.some((message) => {
       if (message.kind === 'reminder' || message.state !== queued.message.state) return false;
@@ -920,7 +931,8 @@ function mergeQueuedEvents(task: Task): Task {
   if (!pending || pending.length === 0) return task;
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
-    if (now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
+    const approvalTerminal = row.message.approval?.type === 'decision' || row.message.approval?.type === 'expired';
+    if (!approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
     return !eventIsIndexed(task, row);
   });
   if (stillLagging.length === 0) {
@@ -1099,6 +1111,9 @@ export async function decideApprovalTask(input: {
     const current = await getTaskSnapshot(input.id);
     if (!current) throw new Error('not_found');
     if (!isApprovalTask(current)) throw new Error('not_approval_task');
+    if (current.state === 'failed' && readApprovalExpiry(current.result)?.digest === current.approval.digest) {
+      throw new Error('task_expired');
+    }
     if (current.state === 'completed' || current.state === 'failed') throw new Error('task_already_decided');
     if (isApprovalExpired(current.approval.expiresAt)) {
       await materializeApprovalExpiryUnlocked(current);

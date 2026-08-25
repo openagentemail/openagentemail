@@ -135,8 +135,10 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       }
 
       try {
+        const createApproval = service.createApproval;
+        if (parsed.data.kind === 'approval' && !createApproval) throw new Error('approval_service_unavailable');
         const task = parsed.data.kind === 'approval'
-          ? await (service.createApproval ?? taskService.createApproval!)({
+          ? await createApproval!({
             from,
             to: parsed.data.to.toLowerCase(),
             subject: parsed.data.subject,
@@ -215,7 +217,9 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         return c.json({ error: 'forbidden: approval reviewer required' }, 403);
       }
       try {
-        return c.json(await (service.decideApproval ?? taskService.decideApproval!)({
+        const decideApproval = service.decideApproval;
+        if (!decideApproval) throw new Error('approval_service_unavailable');
+        return c.json(await decideApproval({
           id: id.data,
           from,
           decision: parsed.data.decision,

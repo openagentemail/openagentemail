@@ -889,8 +889,9 @@ export function createUiApiRoutes(
       return c.json({ error: 'forbidden: approval reviewer required' }, 403);
     }
     try {
-      const decide = service.decideApproval ?? taskService.decideApproval;
-      return presentUiTask(c, await decide!({ id: parsed.data, from, decision: body.data.decision }));
+      const decide = service.decideApproval;
+      if (!decide) throw new Error('approval_service_unavailable');
+      return presentUiTask(c, await decide({ id: parsed.data, from, decision: body.data.decision }));
     } catch (err) {
       return taskMutationError(c, err);
     }

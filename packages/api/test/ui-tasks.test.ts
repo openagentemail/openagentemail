@@ -12,16 +12,28 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const {
   listTaskBoard,
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
   setTaskListAllForTests,
+  setTaskSendMailForTests,
   setTaskNowForTests,
+  taskService,
   toUiTaskView,
 } = await import('../src/lib/tasks.ts');
+
+for (const localpart of ['fox', 'owl']) {
+  if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
+}
 
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
+  setTaskGetForTests(null);
+  setTaskSendMailForTests(null);
+  clearQueuedEventsForTests();
 });
 
 const NOW = '2026-08-12T12:00:00.000Z';
@@ -776,6 +788,58 @@ function makeTaskRowHarness() {
 }
 
 describe('UI approval decision endpoint', () => {
+  test('R8-D RED: dashboard preserves task_expired after production detail read materializes expiry', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const sent: unknown[] = [];
+    setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r8-expiry-${sent.length}@test.example>` }; });
+    const pending = await taskService.createApproval!({
+      from: 'fox@test.example', to: 'owl@test.example', subject: 'R8 dashboard expiry', body: 'record only',
+      action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+    });
+    setTaskGetForTests(async () => pending);
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService }, [pending]);
+    setTaskNowForTests(() => Date.parse(boundary));
+    expect((await app.request(`/ui/api/tasks/${pending.id}`, { headers: { cookie } })).status).toBe(200);
+    const responses = await Promise.all([0, 1].map(async () => {
+      const response = await app.request(`/ui/api/tasks/${pending.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      return { status: response.status, body: await response.json() };
+    }));
+    expect({ responses, delivered: sent.length }).toEqual({
+      responses: [{ status: 409, body: { error: 'task_expired' } }, { status: 409, body: { error: 'task_expired' } }], delivered: 2,
+    });
+  });
+
+  test('R8-E RED: an injected dashboard service never falls back to global approval decisions', async () => {
+    const sent: unknown[] = [];
+    setTaskGetForTests(async () => APPROVAL_TASK);
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<global-fallback@test.example>' }; });
+    const injected = {
+      ...taskService,
+      get: async () => APPROVAL_TASK,
+      decideApproval: undefined,
+    } as typeof taskService;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService: injected }, [APPROVAL_TASK]);
+    const response = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect({ status: response.status, sent: sent.length }).toEqual({ status: 502, sent: 0 });
+  });
+
+  test('R8-F RED: exact served approval controls follow server state, not an ahead browser clock', () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => Date.parse(APPROVAL_EXPIRES_AT) + 1;
+      const { renderer } = makeApprovalActionHarness();
+      const failed: Task = { ...APPROVAL_TASK, state: 'failed', result: { decision: 'expired' } };
+      expect([renderer.approvalCanDecide(APPROVAL_TASK), renderer.approvalCanDecide(failed)]).toEqual([true, false]);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test('dashboard actor matrix keeps approval authority at the stored reviewer and core service', async () => {
     const decided: unknown[] = [];
     const { app, cookie, deps } = makeApp(

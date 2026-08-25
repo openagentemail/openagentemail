@@ -78,13 +78,17 @@ function installSentCapture() {
   return sent;
 }
 
-async function requestFixture(expiresAt = EXPIRES): Promise<{ task: ApprovalTask; sent: SendInput[] }> {
+async function requestFixture(
+  expiresAt = EXPIRES,
+  action: { type: string; name: string; arguments: unknown } = ACTION,
+  body = 'Record only; do not execute.',
+): Promise<{ task: ApprovalTask; sent: SendInput[] }> {
   const create = api().createApprovalTask;
   expect(create, 'approval request service behavior is missing').toBeFunction();
   const sent = installSentCapture();
   const task = await create!({
     from: REQUESTER, to: REVIEWER, subject: 'Approve preview',
-    body: 'Record only; do not execute.', action: ACTION, expiresAt,
+    body, action, expiresAt,
   });
   return { task, sent };
 }
@@ -354,6 +358,113 @@ describe('#55 R5: approval reminder integrity', () => {
 });
 
 describe('#55 R1b: signed IMAP rebuild', () => {
+  test('R8-A RED: inert snapshot-marker strings in signed action JSON cannot replace the structural frame', async () => {
+    const parse = api().parseStampedTaskMessageForTests;
+    expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
+    const actions = [
+      { ...ACTION, arguments: { inert: '<!-- openagent.email approval snapshot -->' } },
+      { ...ACTION, arguments: { inert: '<!-- openagent.email approval snapshot -->\\n```json\\n{ "not": "a frame" }\\n```' } },
+    ];
+    for (const [uid, action] of actions.entries()) {
+      const { task, sent } = await requestFixture(EXPIRES, action);
+      const parsed = await parse!({ id: task.id, uid: uid + 40, source: rfc822(sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
+      expect(parsed).not.toBeNull();
+      const rebuilt = tasks.taskFromMessages(task.id, [parsed!] as Parameters<typeof tasks.taskFromMessages>[1]);
+      expect(rebuilt).toMatchObject({ kind: 'approval', approval: { digest: api().approvalActionDigest!(action) } });
+    }
+
+    const bodyWithEarlierInertFrame = [
+      'Legitimate caller-supplied body.',
+      '<!-- openagent.email approval snapshot -->',
+      '```json',
+      '{"not":"a snapshot"}',
+      '```',
+    ].join('\n');
+    const { task, sent } = await requestFixture(EXPIRES, ACTION, bodyWithEarlierInertFrame);
+    const parsed = await parse!({ id: task.id, uid: 42, source: rfc822(sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
+    expect(parsed).not.toBeNull();
+    const rebuilt = tasks.taskFromMessages(task.id, [parsed!] as Parameters<typeof tasks.taskFromMessages>[1]);
+    expect(rebuilt).toMatchObject({ kind: 'approval', approval: { digest: task.approval.digest } });
+  });
+
+  test('R8-B RED: a signed decision overlay survives durable IMAP lag beyond the ordinary TTL', async () => {
+    const decide = api().decideApprovalTask!;
+    const before = '2026-08-24T00:00:00.000Z';
+    tasks.setTaskNowForTests(() => Date.parse(before));
+    const { task, sent } = await requestFixture();
+    tasks.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
+    await decide({ id: task.id, from: REVIEWER, decision: 'approved' });
+    tasks.setTaskNowForTests(() => Date.parse(before) + 60_001);
+    const opposite = await decide({ id: task.id, from: REVIEWER, decision: 'rejected' }).then(
+      () => 'resolved', (error: Error) => error.message,
+    );
+    expect({ opposite, delivered: sent.length }).toEqual({ opposite: 'task_already_decided', delivered: 2 });
+    const parse = api().parseStampedTaskMessageForTests!;
+    const request = await parse({ id: task.id, uid: 51, source: rfc822(sent[0]!), internalDate: before });
+    const terminal = await parse({ id: task.id, uid: 52, source: rfc822(sent[1]!), internalDate: before });
+    expect(request).not.toBeNull();
+    expect(terminal).not.toBeNull();
+    const indexed = tasks.taskFromMessages(task.id, [request!, terminal!] as Parameters<typeof tasks.taskFromMessages>[1])!;
+    tasks.setTaskGetForTests(async () => indexed);
+    const stable = await tasks.getTask(task.id);
+    expect(stable).toMatchObject({ state: 'completed', result: { decision: 'approved', digest: task.approval.digest } });
+    expect(stable?.messages).toHaveLength(indexed.messages.length);
+    expect(sent).toHaveLength(2);
+  });
+
+  test('R8-B RED: a signed expiry overlay survives durable IMAP lag beyond the ordinary TTL', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    const { task, sent } = await requestFixture(boundary);
+    tasks.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
+    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    await tasks.getTask(task.id); // lazy materializer writes the first signed expiry
+    tasks.setTaskNowForTests(() => Date.parse(boundary) + 60_001);
+    const repeated = await api().decideApprovalTask!({ id: task.id, from: REVIEWER, decision: 'approved' }).then(
+      () => 'resolved', (error: Error) => error.message,
+    );
+    expect({ repeated, delivered: sent.length }).toEqual({ repeated: 'task_expired', delivered: 2 });
+  });
+
+  test('R8-D RED: REST preserves task_expired after a detail read materializes the signed failure', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    const { task, sent } = await requestFixture(boundary);
+    tasks.setTaskGetForTests(async () => task);
+    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    const app = appFor({ kind: 'identity', address: REVIEWER });
+    expect((await app.request(`/v1/tasks/${task.id}`)).status).toBe(200);
+    const calls = await Promise.all([0, 1].map(async () => {
+      const response = await app.request(`/v1/tasks/${task.id}/decision`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      return { status: response.status, body: await response.json() };
+    }));
+    expect({ calls, delivered: sent.length }).toEqual({
+      calls: [{ status: 409, body: { error: 'task_expired' } }, { status: 409, body: { error: 'task_expired' } }], delivered: 2,
+    });
+  });
+
+  test('R8-E RED: an injected REST service never falls back to global approval create/decision', async () => {
+    const pending: ApprovalTask = {
+      id: ID, from: REQUESTER, to: REVIEWER, subject: 'Injected approval', state: 'input-required',
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [], kind: 'approval',
+      approval: { action: ACTION, reviewer: REVIEWER, expiresAt: EXPIRES, digest: api().approvalActionDigest!(ACTION) },
+    };
+    const ordinary: Task = { id: '4bb0f08f-f90c-4862-a7af-a0db890d76fd', from: REQUESTER, to: REVIEWER, subject: 'Injected ordinary', state: 'submitted', createdAt: pending.createdAt, updatedAt: pending.updatedAt, messages: [] };
+    const injected = {
+      create: async () => ordinary,
+      get: async () => pending,
+    } as unknown as typeof tasks.taskService;
+    const sent = installSentCapture();
+    tasks.setTaskGetForTests(async () => pending);
+    const [create, decision] = await Promise.all([
+      appFor({ kind: 'identity', address: REQUESTER }, injected).request('/v1/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: REVIEWER, subject: 'Injected approval', body: 'record only', kind: 'approval', approval: { action: ACTION, expiresAt: EXPIRES } }) }),
+      appFor({ kind: 'identity', address: REVIEWER }, injected).request(`/v1/tasks/${pending.id}/decision`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }) }),
+    ]);
+    expect({ statuses: [create.status, decision.status], delivered: sent.length }).toEqual({ statuses: [502, 502], delivered: 0 });
+  });
+
   test('the real stamp/parser rejects RFC timestamp tampering; first valid terminal wins', async () => {
     const parse = api().parseStampedTaskMessageForTests;
     expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
@@ -400,6 +511,55 @@ describe('#55 R1b: signed IMAP rebuild', () => {
 });
 
 describe('#55 R1b: actual UI/watcher seams and compatibility controls', () => {
+  test('R8-C RED: parser-authenticated request, decision, and expiry previews pass default otp policy without content escalation', async () => {
+    const request = api().encodeStampedApprovalRequestForTests!({ id: ID, from: REQUESTER, to: REVIEWER, subject: 'Approval no OTP', body: 'inert body', action: ACTION, expiresAt: EXPIRES });
+    const decision = api().encodeStampedApprovalDecisionForTests!({ id: ID, from: REVIEWER, to: REQUESTER, subject: 'Approval no OTP', digest: api().approvalActionDigest!(ACTION), decision: 'approved', decidedAt: '2026-08-24T00:01:00.000Z' });
+    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    const expiryFixture = await requestFixture('2026-08-24T00:00:00.000Z');
+    tasks.setTaskGetForTests(async () => expiryFixture.task);
+    tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+    await expect(api().decideApprovalTask!({ id: expiryFixture.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
+    const deliveries: Array<Array<{ level: string; message: string }>> = [];
+    const cases = [
+      { source: request, from: REQUESTER, to: REVIEWER, subject: 'Approval no OTP', recipient: REVIEWER },
+      { source: decision, from: REVIEWER, to: REQUESTER, subject: 'Approval no OTP', recipient: REQUESTER },
+      { source: rfc822(expiryFixture.sent[1]!), from: REQUESTER, to: REVIEWER, subject: 'Approval no OTP', recipient: REVIEWER },
+    ];
+    for (const item of cases) {
+      const perEvent: Array<{ level: string; message: string }> = [];
+      await processWatchedMessage({
+        envelope: { from: [{ address: item.from }], to: [{ address: item.to }], subject: item.subject },
+        headers: Buffer.from(`Delivered-To: ${item.recipient}\\r\\n`), source: Buffer.from(item.source),
+      } as never, [{ address: item.recipient, createdAt: '2026-08-24T00:00:00.000Z', pushContentTier: 3 }], 'otp', {
+        publish: async (input) => { perEvent.push({ level: input.level, message: input.message }); return { target: input.target, title: input.title, level: input.level }; },
+      });
+      deliveries.push(perEvent);
+    }
+    const forged: Array<{ message: string }> = [];
+    await processWatchedMessage({
+      envelope: { from: [{ address: REQUESTER }], to: [{ address: REVIEWER }], subject: 'Approval no OTP' },
+      headers: Buffer.from(`Delivered-To: ${REVIEWER}\\r\\n`), source: Buffer.from(request.replace(/X-OA-Task-Stamp: [^\\r\\n]+/, 'X-OA-Task-Stamp: forged')),
+    } as never, [{ address: REVIEWER, createdAt: '2026-08-24T00:00:00.000Z', pushContentTier: 3 }], 'otp', {
+      publish: async (input) => { forged.push({ message: input.message }); return { target: input.target, title: input.title, level: input.level }; },
+    });
+    const none: Array<{ message: string }> = [];
+    await processWatchedMessage({
+      envelope: { from: [{ address: REQUESTER }], to: [{ address: REVIEWER }], subject: 'Approval no OTP' },
+      headers: Buffer.from(`Delivered-To: ${REVIEWER}\\r\\n`), source: Buffer.from(request),
+    } as never, [{ address: REVIEWER, createdAt: '2026-08-24T00:00:00.000Z', pushContentTier: 3 }], 'none', {
+      publish: async (input) => { none.push({ message: input.message }); return { target: input.target, title: input.title, level: input.level }; },
+    });
+    expect({ deliveries, forged: forged.length, none: none.length }).toEqual({
+      deliveries: [
+        [{ level: 'normal', message: expect.stringContaining('Approval request recorded.') }],
+        [{ level: 'normal', message: expect.stringContaining('Approval decision recorded: approved.') }],
+        [{ level: 'normal', message: expect.stringContaining('Approval expired.') }],
+      ],
+      forged: 0, none: 0,
+    });
+    expect(deliveries.flat().map(({ message }) => message).join('\n')).not.toContain('<img src=x onerror=alert(1)>');
+  });
+
   test('the real watcher queues an approval preview without action arguments', async () => {
     const encodeRequest = api().encodeStampedApprovalRequestForTests;
     expect(encodeRequest, 'real server-stamped approval request encoder is missing').toBeFunction();
