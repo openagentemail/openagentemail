@@ -130,14 +130,16 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 
 `/mcp` 审计行按 caller 分清：OAuth → `clientId`+`grantId`+`address`；`oa_` → `address`；admin → `address: "admin"`（仅 attribution；REST 侧 actor 行为另案，不在此改）。
 
-### 16 tools / 十六工具四级分层
+### 19 tools / 十九工具四级分层
 
 | 级别 | 工具 | 策略要点 |
 | --- | --- | --- |
 | read | mail_list_messages, mail_read_message, mail_wait_for, mail_list_identities, notify_check, task_list, task_get | 观测 |
 | minimal | mail_mark_seen, task_create | 轻状态变更 |
-| contained | mail_send, task_update, task_decide, notify_agent, notify_user | 外发 / 唤醒 |
+| contained | mail_send, task_update, task_decide, task_claim, task_renew, task_release, notify_agent, notify_user | 外发 / 唤醒 |
 | critical | mail_new_identity, notify_verify | **OAuth 票 deny-by-default（403）**；`oa_` 走 REST scope；admin 全通 |
+
+这份 19 tools 清单取代先前的 16 tools 清单，新增的三项 task lease 调用均为 `contained`。
 
 新工具须在注册处声明 tier；未声明 → 注册即报错，HTTP 对未知工具名 403（default deny）。
 分层 / 限量 / 写审计**仅强制于 `POST /mcp`**（含拒绝 JSON-RPC batch）；stdio 不拦；`/v1` 既有 REST ACL 不变（OAuth 直打 REST 仍受 identity scope 约束，但不走本表 critical 预检）。

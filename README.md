@@ -344,9 +344,14 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 | `notify_verify()` | Publish and poll a harmless server-side notification self-check |
 | `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; typed approvals add `kind: "approval"` with `approval:{action,expiresAt}` |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
+| `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |
+| `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer |
+| `task_release(id, leaseToken, reason?)` | Release a claimed task using its opaque bearer |
 | `task_list(state?)` | List task threads visible to the calling identity |
 | `task_get(id, wait?)` | Read a task thread and its stamped state history; optionally wait up to 10 minutes |
 | `task_update(id, state, body?, result?)` | Advance a participating task; structured output goes in `result` |
+
+Task leases are opt-in; `TASK_LEASES_ENABLED` is disabled by default (`false`) via `TASK_LEASES_ENABLED=false`, so existing clients remain compatible. The opaque `leaseToken` is only the claim bearer and is never listed, rendered, logged, or emailed.
 
 Full per-client setup (Claude Code, Claude Desktop, Cursor, Kimi Code, generic):
 [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) · server details:

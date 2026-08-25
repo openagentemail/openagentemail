@@ -114,6 +114,10 @@ const envSchema = z.object({
   // password rotations so old task threads remain verifiable.
   TASK_SIGNING_SECRET: z.string().min(16).optional(),
 
+  // Optional managed-identity task leases. Keep the historical task API
+  // byte-compatible unless an operator explicitly enables this authority.
+  TASK_LEASES_ENABLED: z.enum(['true', 'false']).default('false'),
+
   // Comma-separated domains allowed as the `from` domain of an identity.
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
@@ -245,6 +249,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     // a bare-process config yet. Both Compose variants require the dedicated
     // secret, which is the supported v0.4 deployment path.
     taskSigningSecret,
+    taskLeasesEnabled: raw.TASK_LEASES_ENABLED === 'true',
     // 通知游标与 task/mail 游标域分离；不新增 env。旧 notify 游标失效可接受。
     notifyCursorSecret: createHmac('sha256', taskSigningSecret)
       .update('notify-cursor-v1')

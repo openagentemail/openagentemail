@@ -4,7 +4,7 @@
  * store and the task view can always be rebuilt after an API restart.
  */
 
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { simpleParser } from 'mailparser';
 import type { FetchMessageObject } from 'imapflow';
 import { config } from './config.ts';
@@ -24,6 +24,11 @@ export const TASK_STATES = ['submitted', 'working', 'input-required', 'completed
 export type TaskState = (typeof TASK_STATES)[number];
 export const TERMINAL_TASK_STATES: readonly TaskState[] = ['completed', 'failed'];
 export const TASK_WAIT_MAX_SEC = 600;
+export const TASK_LEASE_DEFAULT_SEC = 300;
+export const TASK_LEASE_MIN_SEC = 30;
+export const TASK_LEASE_MAX_SEC = 3600;
+/** Owner-approved product value; selected for single-header line constraints and base64 expansion, not as an RFC universal safe maximum. */
+export const TASK_LEASE_REASON_MAX_CHARS = 8_000;
 
 /** 工单板 status 查询；active = submitted+working（Input required 是独立 tab）。 */
 export const TASK_BOARD_STATUSES = [
@@ -102,6 +107,56 @@ export type TaskMessage = {
   approval?: ApprovalEvent;
 };
 
+/** Private rebuilt lease authority; never serialize this directly. */
+type TaskLeaseAuthority = {
+  leaseGeneration: number;
+  claimedUntil: string;
+  tokenVerifier: string;
+};
+
+type ReleasedLeaseReceipt = { leaseGeneration: number; tokenVerifier: string; reason: string };
+
+type ClaimLeaseEvent = {
+  version: 1;
+  event: 'claim';
+  actor: string;
+  at: string;
+  generation: number;
+  claimedUntil: string;
+  tokenVerifier: string;
+};
+
+type RenewLeaseEvent = Omit<ClaimLeaseEvent, 'event'> & { event: 'renew' };
+
+type ReleaseLeaseEvent = {
+  version: 1;
+  event: 'release';
+  actor: string;
+  at: string;
+  generation: number;
+  tokenVerifier: string;
+  reason: string;
+};
+
+type ExpiredLeaseEvent = {
+  version: 1;
+  event: 'expired';
+  /** Server authority marker, never an identity or envelope participant. */
+  actor: 'server';
+  at: string;
+  generation: number;
+  claimedUntil: string;
+  expiredAt: string;
+};
+
+type LeaseEvent = ClaimLeaseEvent | RenewLeaseEvent | ReleaseLeaseEvent | ExpiredLeaseEvent;
+
+type ExpiredLeaseReceipt = {
+  leaseGeneration: number;
+  claimedUntil: string;
+  expiredAt: string;
+};
+
 export type Task = {
   id: string;
   from: string;
@@ -114,6 +169,24 @@ export type Task = {
   result?: unknown;
   kind?: 'approval';
   approval?: ApprovalSnapshot;
+  /** Private authority reconstructed only from authenticated lease events. */
+  lease?: TaskLeaseAuthority;
+  /** Private, non-active durable replay receipt; never serialize this directly. */
+  releasedLease?: ReleasedLeaseReceipt;
+  /** Durable non-secret record that an expired generation was materialized. */
+  expiredLease?: ExpiredLeaseReceipt;
+};
+
+export type TaskView = Omit<Task, 'lease' | 'releasedLease' | 'expiredLease'> & {
+  claimedUntil?: string;
+  leaseGeneration?: number;
+};
+
+export type TaskLeaseGrant = {
+  task: Task;
+  leaseToken: string;
+  claimedUntil: string;
+  leaseGeneration: number;
 };
 
 export type ApprovalTask = Task & { kind: 'approval'; approval: ApprovalSnapshot };
@@ -134,6 +207,7 @@ export type RawTaskMessage = {
   kind?: TaskEventKind;
   idempotencyKey?: string;
   approval?: ApprovalEvent;
+  lease?: LeaseEvent;
 };
 
 export type CreateTaskInput = {
@@ -158,6 +232,8 @@ export type UpdateTaskInput = {
   state: TaskState;
   body?: string;
   result?: unknown;
+  /** Accepted now for disabled-mode compatibility; enforced in a later round. */
+  leaseToken?: string;
 };
 
 export type TaskBoardViewer =
@@ -176,7 +252,7 @@ export type TaskOverdue = {
   overdueAt: string | null;
 };
 
-export type TaskBoardItem = Task & TaskOverdue;
+export type TaskBoardItem = TaskView & TaskOverdue;
 
 export type TaskBoardPage = {
   tasks: TaskBoardItem[];
@@ -193,6 +269,9 @@ export type TaskService = {
   getForAuthorization?(id: string): Promise<Task | null>;
   get(id: string): Promise<Task | null>;
   update(input: UpdateTaskInput): Promise<Task | null>;
+  claim?(input: { id: string; from: string; leaseSec?: number }): Promise<TaskLeaseGrant>;
+  renew?(input: { id: string; from: string; leaseToken: string; leaseSec?: number }): Promise<Task>;
+  release?(input: { id: string; from: string; leaseToken: string; reason?: string }): Promise<Task>;
   reply(input: { id: string; from: string; body: string }): Promise<Task>;
   remind(input: {
     id: string;
@@ -276,6 +355,101 @@ function taskStamp(id: string, state: TaskState, from: string, to: string): stri
     .digest('base64url');
 }
 
+function canonicalLeaseEvent(event: LeaseEvent): string {
+  if (event.event === 'release') {
+    return JSON.stringify({
+      version: event.version,
+      event: event.event,
+      actor: event.actor,
+      at: event.at,
+      generation: event.generation,
+      tokenVerifier: event.tokenVerifier,
+      reason: event.reason,
+    });
+  }
+  if (event.event === 'expired') {
+    return JSON.stringify({
+      version: event.version,
+      event: event.event,
+      actor: event.actor,
+      at: event.at,
+      generation: event.generation,
+      claimedUntil: event.claimedUntil,
+      expiredAt: event.expiredAt,
+    });
+  }
+  return JSON.stringify({
+    version: event.version,
+    event: event.event,
+    actor: event.actor,
+    at: event.at,
+    generation: event.generation,
+    claimedUntil: event.claimedUntil,
+    tokenVerifier: event.tokenVerifier,
+  });
+}
+
+function leaseTokenVerifier(id: string, generation: number, token: string): string {
+  return createHmac('sha256', config.taskSigningSecret)
+    .update(`task-lease-token-verifier-v1\n${id}\n${generation}\n${token}`)
+    .digest('base64url');
+}
+
+function leaseEventStamp(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  canonical: string,
+): string {
+  return createHmac('sha256', config.taskSigningSecret)
+    .update(`task-lease-event-v1\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}\n${canonical}`)
+    .digest('base64url');
+}
+
+/** Accept claim records written before lease events were generalized. The
+ * payload stays canonical; only the historic signing domain differs. */
+function legacyClaimLeaseStamp(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  canonical: string,
+): string {
+  return createHmac('sha256', config.taskSigningSecret)
+    .update(`task-lease-claim-event-v1\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}\n${canonical}`)
+    .digest('base64url');
+}
+
+function leaseEventHeaders(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  event: LeaseEvent,
+): Record<string, string> {
+  const canonical = canonicalLeaseEvent(event);
+  return {
+    'X-OA-Task': id,
+    'X-OA-Task-State': state,
+    'X-OA-Task-Lease-Event': event.event,
+    'X-OA-Task-Lease-Payload': Buffer.from(canonical, 'utf8').toString('base64url'),
+    'X-OA-Task-Stamp': leaseEventStamp(id, state, from, to, canonical),
+  };
+}
+
+/** Test-only production seam: permits parser/rebuild tamper cases without a
+ * runtime route or a duplicated HMAC implementation in tests. */
+export function claimLeaseHeadersForTests(input: {
+  id: string;
+  state: TaskState;
+  from: string;
+  to: string;
+  event: LeaseEvent;
+}): Record<string, string> {
+  return leaseEventHeaders(input.id, input.state, input.from, input.to, input.event);
+}
+
 function approvalStamp(
   id: string,
   state: TaskState,
@@ -331,6 +505,57 @@ function readApprovalPayloadHeader(value: unknown): { payload: ApprovalEventPayl
     else return null;
     const canonical = canonicalApprovalEventPayload(payload);
     return decoded === canonical ? { payload, canonical } : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLeaseEventPayload(value: unknown): { event: LeaseEvent; canonical: string } | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const bytes = Buffer.from(value, 'base64url');
+    if (!bytes.length || bytes.toString('base64url') !== value) return null;
+    const canonical = bytes.toString('utf8');
+    const parsed = JSON.parse(canonical) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (
+      parsed.version !== 1 || (parsed.event !== 'claim' && parsed.event !== 'renew' && parsed.event !== 'release' && parsed.event !== 'expired')
+      || typeof parsed.actor !== 'string' || !parsed.actor
+      || typeof parsed.at !== 'string' || !Number.isFinite(Date.parse(parsed.at))
+      || typeof parsed.generation !== 'number' || !Number.isInteger(parsed.generation) || parsed.generation < 1
+    ) return null;
+    if (parsed.event === 'expired') {
+      if (
+        parsed.actor !== 'server'
+        || typeof parsed.claimedUntil !== 'string' || !Number.isFinite(Date.parse(parsed.claimedUntil))
+        || typeof parsed.expiredAt !== 'string' || !Number.isFinite(Date.parse(parsed.expiredAt))
+        || parsed.at !== parsed.expiredAt || Date.parse(parsed.expiredAt) < Date.parse(parsed.claimedUntil)
+        || Object.keys(parsed).length !== 7
+      ) return null;
+      const event: ExpiredLeaseEvent = {
+        version: 1, event: 'expired', actor: 'server', at: parsed.at,
+        generation: parsed.generation, claimedUntil: parsed.claimedUntil, expiredAt: parsed.expiredAt,
+      };
+      return canonical === canonicalLeaseEvent(event) ? { event, canonical } : null;
+    }
+    if (typeof parsed.tokenVerifier !== 'string' || !/^[A-Za-z0-9_-]{32,}$/.test(parsed.tokenVerifier)) return null;
+    if (parsed.event === 'release') {
+      if (typeof parsed.reason !== 'string' || Object.keys(parsed).length !== 7) return null;
+      const event: ReleaseLeaseEvent = {
+        version: 1, event: 'release', actor: parsed.actor.toLowerCase(), at: parsed.at,
+        generation: parsed.generation, tokenVerifier: parsed.tokenVerifier, reason: parsed.reason,
+      };
+      return canonical === canonicalLeaseEvent(event) ? { event, canonical } : null;
+    }
+    if (
+      typeof parsed.claimedUntil !== 'string' || !Number.isFinite(Date.parse(parsed.claimedUntil))
+      || Object.keys(parsed).length !== 7
+    ) return null;
+    const event: ClaimLeaseEvent | RenewLeaseEvent = {
+      version: 1, event: parsed.event, actor: parsed.actor.toLowerCase(), at: parsed.at,
+      generation: parsed.generation, claimedUntil: parsed.claimedUntil, tokenVerifier: parsed.tokenVerifier,
+    };
+    return canonical === canonicalLeaseEvent(event) ? { event, canonical } : null;
   } catch {
     return null;
   }
@@ -478,9 +703,35 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
   const approvalDigestRaw = parsed.headers.get('x-oa-task-approval-digest');
   const approvalDecisionRaw = parsed.headers.get('x-oa-task-approval-decision');
   const approvalPayloadRaw = parsed.headers.get('x-oa-task-approval-payload');
+  const leaseEventRaw = parsed.headers.get('x-oa-task-lease-event');
+  const leasePayloadRaw = parsed.headers.get('x-oa-task-lease-payload');
   if (headerId !== id || typeof headerState !== 'string' || !isTaskState(headerState)) return null;
   const body = (parsed.text ?? '').trim();
   const result = readResult(body);
+  if (leaseEventRaw !== undefined || leasePayloadRaw !== undefined) {
+    if ((leaseEventRaw !== 'claim' && leaseEventRaw !== 'renew' && leaseEventRaw !== 'release' && leaseEventRaw !== 'expired') || typeof stamp !== 'string') return null;
+    const lease = readLeaseEventPayload(leasePayloadRaw);
+    if (
+      !lease
+      || lease.event.event !== leaseEventRaw
+      || (lease.event.event === 'expired'
+        ? lease.event.actor !== 'server'
+        : lease.event.actor !== from)
+      || (lease.event.event !== 'release' && lease.event.event !== 'expired' && Date.parse(lease.event.claimedUntil) <= Date.parse(lease.event.at))
+      || (stamp !== leaseEventStamp(id, headerState, from, to, lease.canonical)
+        && (lease.event.event !== 'claim' || stamp !== legacyClaimLeaseStamp(id, headerState, from, to, lease.canonical)))
+    ) return null;
+    return {
+      uid: message.uid,
+      from,
+      to,
+      subject: parsed.subject ?? message.envelope.subject ?? '',
+      date: new Date(message.internalDate ?? message.envelope.date ?? new Date(0)).toISOString(),
+      state: headerState,
+      body,
+      lease: lease.event,
+    };
+  }
   if (typeof approvalEventRaw === 'string') {
     if (
       (approvalEventRaw !== 'request' && approvalEventRaw !== 'decision' && approvalEventRaw !== 'expired')
@@ -567,6 +818,14 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
   };
 }
 
+/** Test-only production parser seam; runtime reads exclusively through IMAP. */
+export async function parseTaskMessageForTests(
+  message: FetchMessageObject,
+  id: string,
+): Promise<RawTaskMessage | null> {
+  return parseTaskMessage(message, id);
+}
+
 export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null {
   if (raw.length === 0) return null;
   // IMAP UID order is the durable order for a single mailbox. This gives
@@ -576,6 +835,87 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const participants = new Set([first.from, first.to]);
   if (participants.size !== 2) return null;
   if (ordered.some((message) => !participants.has(message.from) || !participants.has(message.to))) return null;
+  const leaseEvents = ordered.filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease);
+  let previousGeneration = 0;
+  let leaseAuthority: TaskLeaseAuthority | undefined;
+  let releasedLease: ReleasedLeaseReceipt | undefined;
+  let expiredLease: ExpiredLeaseReceipt | undefined;
+  const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt>();
+  const exactDuplicateExpiryMessages = new Set<RawTaskMessage>();
+  for (const message of leaseEvents) {
+    const lease = message.lease;
+    if (lease.event === 'expired') {
+      const priorReceipt = appliedExpiryReceipts.get(lease.generation);
+      if (
+        priorReceipt?.leaseGeneration === lease.generation
+        && priorReceipt.claimedUntil === lease.claimedUntil
+        && priorReceipt.expiredAt === lease.expiredAt
+      ) {
+        exactDuplicateExpiryMessages.add(message);
+        continue;
+      }
+      if (
+        lease.actor !== 'server'
+        || !leaseAuthority?.claimedUntil
+        || lease.generation !== leaseAuthority.leaseGeneration
+        || lease.claimedUntil !== leaseAuthority.claimedUntil
+        || lease.at !== lease.expiredAt
+        || Date.parse(lease.expiredAt) < Date.parse(lease.claimedUntil)
+      ) return null;
+      leaseAuthority = undefined;
+      releasedLease = undefined;
+      expiredLease = {
+        leaseGeneration: lease.generation,
+        claimedUntil: lease.claimedUntil,
+        expiredAt: lease.expiredAt,
+      };
+      appliedExpiryReceipts.set(lease.generation, expiredLease);
+      continue;
+    }
+    if (
+      message.from !== first.to || message.to !== first.from
+      || lease.actor !== first.to
+      || !Number.isFinite(Date.parse(lease.at))
+      || !/^[A-Za-z0-9_-]{32,}$/.test(lease.tokenVerifier)
+    ) return null;
+    if (lease.event === 'claim') {
+      if (
+        message.state !== 'working'
+        || lease.generation !== previousGeneration + 1
+        || (leaseAuthority?.claimedUntil && Date.parse(lease.at) < Date.parse(leaseAuthority.claimedUntil))
+        || Date.parse(lease.claimedUntil) <= Date.parse(lease.at)
+      ) return null;
+      previousGeneration = lease.generation;
+      releasedLease = undefined;
+      expiredLease = undefined;
+      leaseAuthority = {
+        claimedUntil: lease.claimedUntil,
+        leaseGeneration: lease.generation,
+        tokenVerifier: lease.tokenVerifier,
+      };
+      continue;
+    }
+    if (lease.event === 'renew') {
+      if (
+        !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
+        || lease.generation !== leaseAuthority.leaseGeneration
+        || lease.tokenVerifier !== leaseAuthority.tokenVerifier
+        || Date.parse(lease.at) >= Date.parse(leaseAuthority.claimedUntil)
+        || Date.parse(lease.claimedUntil) <= Date.parse(leaseAuthority.claimedUntil)
+      ) return null;
+      leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
+      continue;
+    }
+    if (
+      !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
+      || lease.generation !== leaseAuthority.leaseGeneration
+      || lease.tokenVerifier !== leaseAuthority.tokenVerifier
+      || Date.parse(lease.at) >= Date.parse(leaseAuthority.claimedUntil)
+    ) return null;
+    leaseAuthority = undefined;
+    expiredLease = undefined;
+    releasedLease = { leaseGeneration: lease.generation, tokenVerifier: lease.tokenVerifier, reason: lease.reason };
+  }
   const request = first.approval;
   if (request?.type === 'request') {
     const snapshot = request.snapshot;
@@ -585,6 +925,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       || snapshot.reviewer === first.from
       || approvalActionDigest(snapshot.action) !== snapshot.digest
       || !Number.isFinite(Date.parse(snapshot.expiresAt))
+      || leaseEvents.length > 0
       || ordered.some((message) => {
         const event = message.approval;
         if (!event) return true;
@@ -598,7 +939,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     const terminal = ordered.find((message) =>
       message.approval?.type === 'decision' || message.approval?.type === 'expired',
     ) ?? first;
-    const messages = ordered.map(({ uid, ...message }) => ({ id: String(uid), ...message }));
+    const messages = ordered.map(({ uid, lease: _lease, ...message }) => ({ id: String(uid), ...message }));
     return {
       id,
       from: first.from,
@@ -620,9 +961,16 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // (but validly signed) submitted/working mail can appear again in IMAP, but
   // it cannot reopen the completed/failed task. Before that point normal
   // concurrent writes retain mailbox-order last-writer-wins semantics.
-  const current = currentTaskMessage(ordered);
-  const messages = ordered.map(({ uid, ...message }) => ({ id: String(uid), ...message }));
-  return {
+  const durableOrdered = ordered.filter((message) => !exactDuplicateExpiryMessages.has(message)).map((message) => message.lease
+    ? { ...message, date: message.lease.at }
+    : message);
+  const current = currentTaskMessage(durableOrdered);
+  const messages = durableOrdered.map(({ uid, lease, ...message }) => ({
+    id: String(uid),
+    ...message,
+    ...(lease ? { date: lease.at } : {}),
+  }));
+  const task: Task = {
     id,
     from: first.from,
     to: first.to,
@@ -630,10 +978,18 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     state: current.state,
     createdAt: first.date,
     // 催办可把工单顶到列表前；terminal 之后重放的旧状态信不得刷新可见窗。
-    updatedAt: boardUpdatedAt(ordered, current),
+    updatedAt: boardUpdatedAt(durableOrdered, current),
     messages,
     ...(current.result !== undefined ? { result: current.result } : {}),
   };
+  if (leaseAuthority && !TERMINAL_TASK_STATES.includes(current.state)) {
+    task.lease = leaseAuthority;
+  } else if (releasedLease && !TERMINAL_TASK_STATES.includes(current.state)) {
+    task.releasedLease = releasedLease;
+  } else if (expiredLease && !TERMINAL_TASK_STATES.includes(current.state)) {
+    task.expiredLease = expiredLease;
+  }
+  return task;
 }
 
 /** 列表 updatedAt：权威状态事件与 reminder 的较新者。
@@ -838,13 +1194,14 @@ let listCache: { at: number; tasks: Task[] } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
-/** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder），供后续读合并。 */
+/** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder + lease），供后续读合并。 */
 const queuedEvents = new Map<string, QueuedEvent[]>();
 const QUEUED_EVENT_TTL_MS = 60 * 1000;
 
 type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
+  lease?: LeaseEvent;
 };
 
 export function setTaskNowForTests(fn: (() => number) | null): void {
@@ -870,8 +1227,51 @@ export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
 }
 
+function indexedLeaseGenerationDominates(
+  task: Task,
+  queuedGeneration: number,
+  expiredReceipt: 'exclude' | 'strict' | 'equal-or-newer',
+): boolean {
+  const indexedGeneration = task.lease?.leaseGeneration
+    ?? task.releasedLease?.leaseGeneration
+    ?? (expiredReceipt === 'exclude' ? undefined : task.expiredLease?.leaseGeneration)
+    ?? 0;
+  return indexedGeneration > queuedGeneration
+    || (expiredReceipt === 'equal-or-newer' && task.expiredLease?.leaseGeneration === queuedGeneration);
+}
+
 /** 已索引的事件不再需要 synthetic 补丁。 */
 function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
+  if (queued.lease) {
+    const authority = task.lease;
+    if (queued.lease.event === 'expired') {
+      const receipt = task.expiredLease;
+      if (
+        receipt?.leaseGeneration === queued.lease.generation
+        && receipt.claimedUntil === queued.lease.claimedUntil
+        && receipt.expiredAt === queued.lease.expiredAt
+      ) return true;
+      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
+    }
+    if (queued.lease.event === 'release') {
+      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')
+        || (task.releasedLease?.leaseGeneration === queued.lease.generation
+        && task.releasedLease.tokenVerifier === queued.lease.tokenVerifier
+        && task.releasedLease.reason === queued.lease.reason);
+    }
+    if (indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')) return true;
+    const released = task.releasedLease;
+    if (!authority) {
+      return !!released
+        && (released.leaseGeneration > queued.lease.generation
+          || (released.leaseGeneration === queued.lease.generation
+            && released.tokenVerifier === queued.lease.tokenVerifier));
+    }
+    if (authority.leaseGeneration > queued.lease.generation) return true;
+    if (authority.leaseGeneration !== queued.lease.generation) return false;
+    return authority.tokenVerifier === queued.lease.tokenVerifier
+      && Date.parse(authority.claimedUntil) >= Date.parse(queued.lease.claimedUntil);
+  }
   if (queued.message.kind === 'reminder') {
     return task.messages.some((message) => {
       if (message.kind !== 'reminder') return false;
@@ -912,8 +1312,8 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
   );
 }
 
-function applyOverlayMessages(task: Task, extra: TaskMessage[]): Task {
-  const messages = [...task.messages, ...extra];
+function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
+  const messages = [...task.messages, ...extra.map((row) => row.message)];
   const ordered = messages.map((message, index) => ({ ...message, uid: index + 1 }));
   const current = currentTaskMessage(ordered);
   const next: Task = {
@@ -924,6 +1324,56 @@ function applyOverlayMessages(task: Task, extra: TaskMessage[]): Task {
   };
   if (current.result !== undefined) next.result = current.result;
   else delete next.result;
+  let authority = task.lease;
+  let releasedLease = task.releasedLease;
+  let expiredLease = task.expiredLease;
+  for (const event of extra.map((row) => row.lease).filter((lease): lease is LeaseEvent => !!lease)) {
+    if (event.event === 'expired') {
+      // A stale queued receipt must never clear a later authority.
+      if (
+        authority?.leaseGeneration === event.generation
+        && authority.claimedUntil === event.claimedUntil
+      ) {
+        authority = undefined;
+        releasedLease = undefined;
+        expiredLease = {
+          leaseGeneration: event.generation,
+          claimedUntil: event.claimedUntil,
+          expiredAt: event.expiredAt,
+        };
+      }
+      continue;
+    }
+    if (event.event === 'release') {
+      authority = undefined;
+      expiredLease = undefined;
+      releasedLease = { leaseGeneration: event.generation, tokenVerifier: event.tokenVerifier, reason: event.reason };
+    } else {
+      releasedLease = undefined;
+      expiredLease = undefined;
+      authority = {
+        leaseGeneration: event.generation,
+        claimedUntil: event.claimedUntil,
+        tokenVerifier: event.tokenVerifier,
+      };
+    }
+  }
+  if (TERMINAL_TASK_STATES.includes(next.state)) {
+    delete next.lease;
+    delete next.releasedLease;
+    delete next.expiredLease;
+  } else if (authority) {
+    next.lease = authority;
+    delete next.releasedLease;
+  } else if (releasedLease) {
+    delete next.lease;
+    next.releasedLease = releasedLease;
+    delete next.expiredLease;
+  } else if (expiredLease) {
+    delete next.lease;
+    delete next.releasedLease;
+    next.expiredLease = expiredLease;
+  }
   return next;
 }
 
@@ -933,7 +1383,7 @@ function mergeQueuedEvents(task: Task): Task {
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
     const approvalTerminal = row.message.approval?.type === 'decision' || row.message.approval?.type === 'expired';
-    if (!approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
+    if (!row.lease && !approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
     return !eventIsIndexed(task, row);
   });
   if (stillLagging.length === 0) {
@@ -943,12 +1393,12 @@ function mergeQueuedEvents(task: Task): Task {
   }
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
   queuedEvents.set(task.id, stillLagging);
-  return applyOverlayMessages(task, stillLagging.map((row) => row.message));
+  return applyOverlayMessages(task, stillLagging);
 }
 
-function queueEventUntilIndexed(taskId: string, message: TaskMessage): void {
+function queueEventUntilIndexed(taskId: string, message: TaskMessage, lease?: LeaseEvent): void {
   const list = queuedEvents.get(taskId) ?? [];
-  list.push({ message, sentAt: Date.parse(message.date) || nowMs() });
+  list.push({ message, sentAt: Date.parse(message.date) || nowMs(), ...(lease ? { lease } : {}) });
   queuedEvents.set(taskId, list);
 }
 
@@ -963,6 +1413,11 @@ export function invalidateTaskListCache(): void {
 
 function nowMs(): number {
   return nowFn();
+}
+
+/** Internal server-clock lease boundary: equality is expired. */
+function isLeaseDeadlineActive(claimedUntil: string, now = nowMs()): boolean {
+  return now < Date.parse(claimedUntil);
 }
 
 async function withTaskLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -1018,17 +1473,384 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
   // IMAP 未索引时不得把旧 state 当真；把 synthetic 转移排进 overlay，后续读才能拒冲突。
   if (persisted && eventIsIndexed(persisted, queued)) return persisted;
   queueEventUntilIndexed(current.id, eventMessage);
-  return {
+  const next: Task = {
     ...current,
     state: input.state,
     updatedAt: now,
     messages: [...current.messages, eventMessage],
     ...(input.result !== undefined ? { result: input.result } : {}),
   };
+  if (TERMINAL_TASK_STATES.includes(input.state)) {
+    delete next.lease;
+    delete next.releasedLease;
+    delete next.expiredLease;
+  }
+  return next;
+}
+
+/** Called while the task lock is held before an ordinary worker state write. */
+let taskLeasesEnabledForTests: boolean | undefined;
+
+function taskLeasesEnabled(): boolean {
+  return taskLeasesEnabledForTests ?? config.taskLeasesEnabled;
+}
+
+/** @internal Test-only core feature-gate seam; production reads config. */
+export function setTaskLeasesEnabledForTests(enabled: boolean | undefined): boolean {
+  taskLeasesEnabledForTests = enabled;
+  return taskLeasesEnabled();
+}
+
+function assertActiveRecipientLeaseCredential(
+  current: Task | null | undefined,
+  from: string,
+  leaseToken?: string,
+): void {
+  if (
+    taskLeasesEnabled()
+    && current?.to.toLowerCase() === from.toLowerCase()
+    && current.lease?.claimedUntil
+    && isLeaseDeadlineActive(current.lease.claimedUntil)
+    && !isTaskLeaseTokenCurrent(current, leaseToken ?? '')
+  ) {
+    // The frozen R5a route contract exposes established state conflicts as
+    // `task_already_terminal`; keep that route unchanged while failing closed
+    // before SMTP for a stale active-lease credential.
+    throw new Error('task_already_terminal');
+  }
 }
 
 export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
-  return withTaskLock(input.id, async () => updateTaskUnlocked(input));
+  return withTaskLock(input.id, async () => {
+    const current = await getTaskSnapshot(input.id);
+    assertActiveRecipientLeaseCredential(current, input.from, input.leaseToken);
+    return updateTaskUnlocked(input, current ?? undefined);
+  });
+}
+
+function validLeaseSeconds(value: number | undefined): number {
+  if (value === undefined) return TASK_LEASE_DEFAULT_SEC;
+  if (!Number.isInteger(value) || value < TASK_LEASE_MIN_SEC || value > TASK_LEASE_MAX_SEC) {
+    throw new Error('invalid_lease_seconds');
+  }
+  return value;
+}
+
+/** The only lease grant authority. The durable verifier, rather than any
+ * process-local plaintext secret map, preserves the server-time exclusive
+ * window through restart/rebuild. */
+export async function claimTask(input: {
+  id: string;
+  from: string;
+  leaseSec?: number;
+}): Promise<TaskLeaseGrant> {
+  const seconds = validLeaseSeconds(input.leaseSec);
+  return withTaskLock(input.id, async () => {
+    let current = await getTaskSnapshot(input.id);
+    if (!current) throw new Error('not_found');
+    const actor = input.from.toLowerCase();
+    if (actor !== current.to) throw new Error('lease_recipient_required');
+    if (isApprovalTask(current)) throw new Error('task_not_claimable');
+    if ((current.state !== 'submitted' && current.state !== 'working') || isClosedByAdmin(current)) {
+      throw new Error('task_not_claimable');
+    }
+    const wasWorking = current.state === 'working';
+    current = await materializeLeaseExpiryUnlocked(current);
+    if (current.lease?.claimedUntil && nowMs() < Date.parse(current.lease.claimedUntil)) {
+      throw new Error('lease_already_claimed');
+    }
+    if (wasWorking && !current.expiredLease && !current.releasedLease) throw new Error('task_not_claimable');
+    const generation = (current.lease?.leaseGeneration
+      ?? current.releasedLease?.leaseGeneration
+      ?? current.expiredLease?.leaseGeneration
+      ?? 0) + 1;
+    const token = randomBytes(32).toString('base64url');
+    const at = new Date(nowMs()).toISOString();
+    const claimedUntil = new Date(nowMs() + seconds * 1_000).toISOString();
+    const lease: ClaimLeaseEvent = {
+      version: 1,
+      event: 'claim',
+      actor,
+      at,
+      generation,
+      claimedUntil,
+      tokenVerifier: leaseTokenVerifier(current.id, generation, token),
+    };
+    const to = actor === current.from ? current.to : current.from;
+    const text = 'Lease claimed.';
+    const { messageId } = await deliverMail({
+      from: actor,
+      to: [to],
+      subject: current.subject,
+      text,
+      headers: leaseEventHeaders(current.id, 'working', actor, to, lease),
+    });
+    void notifyTrustedAgentDelivery(to);
+    invalidateTaskListCache();
+    const eventMessage: TaskMessage = {
+      id: String(current.messages.length + 1),
+      from: actor,
+      to,
+      subject: current.subject,
+      date: at,
+      state: 'working',
+      body: text,
+    };
+    queueEventUntilIndexed(current.id, eventMessage, lease);
+    return {
+      task: {
+        ...current,
+        state: 'working',
+        updatedAt: at,
+        messages: [...current.messages, eventMessage],
+        lease: {
+          claimedUntil,
+          leaseGeneration: generation,
+          tokenVerifier: lease.tokenVerifier,
+        },
+        releasedLease: undefined,
+        expiredLease: undefined,
+      },
+      leaseToken: token,
+      claimedUntil,
+      leaseGeneration: generation,
+    };
+  });
+}
+
+/** Public task projection used by REST success responses. */
+export function toTaskView(task: Task): TaskView {
+  return {
+    id: task.id,
+    from: task.from,
+    to: task.to,
+    subject: task.subject,
+    state: task.state,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    messages: task.messages,
+    ...(task.result !== undefined ? { result: task.result } : {}),
+    ...(task.kind === 'approval' && task.approval ? { kind: task.kind, approval: task.approval } : {}),
+    ...(task.lease?.claimedUntil && isLeaseDeadlineActive(task.lease.claimedUntil)
+      ? { claimedUntil: task.lease.claimedUntil, leaseGeneration: task.lease.leaseGeneration }
+      : {}),
+  };
+}
+
+export function toTaskLeaseGrantView(grant: TaskLeaseGrant): {
+  task: TaskView;
+  leaseToken: string;
+  claimedUntil: string;
+  leaseGeneration: number;
+} {
+  return {
+    task: toTaskView(grant.task),
+    leaseToken: grant.leaseToken,
+    claimedUntil: grant.claimedUntil,
+    leaseGeneration: grant.leaseGeneration,
+  };
+}
+
+/** Shared core validation for future renew/release/state enforcement. */
+export function isTaskLeaseTokenCurrent(task: Task, token: string, now = nowMs()): boolean {
+  const lease = task.lease;
+  return !!lease
+    && typeof lease.tokenVerifier === 'string'
+    && typeof lease.claimedUntil === 'string'
+    && isLeaseDeadlineActive(lease.claimedUntil, now)
+    && leaseTokenVerifier(task.id, lease.leaseGeneration, token) === lease.tokenVerifier;
+}
+
+function leaseRecipientAndCurrent(task: Task, actor: string, token: string, now = nowMs()): void {
+  if (actor !== task.to) throw new Error('lease_recipient_required');
+  if (isApprovalTask(task) || !canAdvanceTask(task.state) || isClosedByAdmin(task)) throw new Error('task_not_claimable');
+  if (!isTaskLeaseTokenCurrent(task, token, now)) throw new Error('stale_lease');
+}
+
+function leaseEventMessage(input: {
+  task: Task;
+  from: string;
+  to: string;
+  state: TaskState;
+  at: string;
+  body: string;
+}): TaskMessage {
+  return {
+    // Lease audit messages rebuild by IMAP UID. Keeping the synthetic ID in
+    // that same order makes a just-accepted view identical after re-indexing.
+    id: String(input.task.messages.length + 1),
+    from: input.from,
+    to: input.to,
+    subject: input.task.subject,
+    date: input.at,
+    state: input.state,
+    body: input.body,
+  };
+}
+
+/** Must run under the existing per-task lock. It emits a server-authored,
+ * durable receipt only after SMTP accepts it, so retries cannot invent an
+ * in-memory success state. */
+async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
+  const active = current.lease;
+  const now = nowMs();
+  if (
+    !active?.claimedUntil
+    || now < Date.parse(active.claimedUntil)
+    || isApprovalTask(current)
+    || !canAdvanceTask(current.state)
+    || isClosedByAdmin(current)
+  ) return current;
+  const expiredAt = new Date(now).toISOString();
+  const lease: ExpiredLeaseEvent = {
+    version: 1,
+    event: 'expired',
+    actor: 'server',
+    at: expiredAt,
+    generation: active.leaseGeneration,
+    claimedUntil: active.claimedUntil,
+    expiredAt,
+  };
+  // The requester→recipient envelope is only mail transport. The signed
+  // actor above is the sole expiry authority and is intentionally not either
+  // participant.
+  const from = current.from;
+  const to = current.to;
+  const text = 'Lease expired.';
+  const { messageId: _messageId } = await deliverMail({
+    from,
+    to: [to],
+    subject: current.subject,
+    text,
+    headers: leaseEventHeaders(current.id, current.state, from, to, lease),
+  });
+  invalidateTaskListCache();
+  const eventMessage = leaseEventMessage({ task: current, from, to, state: current.state, at: expiredAt, body: text });
+  queueEventUntilIndexed(current.id, eventMessage, lease);
+  return {
+    ...current,
+    updatedAt: expiredAt,
+    messages: [...current.messages, eventMessage],
+    lease: undefined,
+    releasedLease: undefined,
+    expiredLease: {
+      leaseGeneration: lease.generation,
+      claimedUntil: lease.claimedUntil,
+      expiredAt: lease.expiredAt,
+    },
+  };
+}
+
+/** One bounded pass for the server reaper. All task authority remains in the
+ * shared lock-held materializer, so a concurrent reclaim cannot overtake it. */
+export async function reapExpiredTaskLeasesOnce(): Promise<number> {
+  const candidates = await loadAllTasksCached();
+  let materialized = 0;
+  for (const candidate of candidates) {
+    const didMaterialize = await withTaskLock(candidate.id, async () => {
+      const current = await getTaskSnapshot(candidate.id);
+      if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
+      const next = await materializeLeaseExpiryUnlocked(current);
+      return !!next.expiredLease
+        && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
+        && next.expiredLease.claimedUntil === current.lease.claimedUntil;
+    });
+    if (didMaterialize) materialized += 1;
+  }
+  return materialized;
+}
+
+export async function renewTask(input: {
+  id: string;
+  from: string;
+  leaseToken: string;
+  leaseSec?: number;
+}): Promise<Task> {
+  const seconds = validLeaseSeconds(input.leaseSec);
+  return withTaskLock(input.id, async () => {
+    const current = await getTaskSnapshot(input.id);
+    if (!current) throw new Error('not_found');
+    const actor = input.from.toLowerCase();
+    const now = nowMs();
+    leaseRecipientAndCurrent(current, actor, input.leaseToken, now);
+    const active = current.lease!;
+    const claimedUntil = new Date(now + seconds * 1_000).toISOString();
+    if (Date.parse(claimedUntil) <= Date.parse(active.claimedUntil)) return current;
+    const at = new Date(now).toISOString();
+    const lease: RenewLeaseEvent = {
+      version: 1, event: 'renew', actor, at,
+      generation: active.leaseGeneration,
+      claimedUntil,
+      tokenVerifier: active.tokenVerifier!,
+    };
+    const to = current.from;
+    const text = 'Lease renewed.';
+    const { messageId: _messageId } = await deliverMail({
+      from: actor, to: [to], subject: current.subject, text,
+      headers: leaseEventHeaders(current.id, current.state, actor, to, lease),
+    });
+    void notifyTrustedAgentDelivery(to);
+    invalidateTaskListCache();
+    const eventMessage = leaseEventMessage({ task: current, from: actor, to, state: current.state, at, body: text });
+    queueEventUntilIndexed(current.id, eventMessage, lease);
+    return {
+      ...current,
+      updatedAt: at,
+      messages: [...current.messages, eventMessage],
+      lease: { leaseGeneration: active.leaseGeneration, claimedUntil, tokenVerifier: active.tokenVerifier },
+      expiredLease: undefined,
+    };
+  });
+}
+
+export async function releaseTask(input: {
+  id: string;
+  from: string;
+  leaseToken: string;
+  reason?: string;
+}): Promise<Task> {
+  const reason = input.reason ?? '';
+  if (reason.length > TASK_LEASE_REASON_MAX_CHARS) throw new Error('invalid_request');
+  return withTaskLock(input.id, async () => {
+    const current = await getTaskSnapshot(input.id);
+    if (!current) throw new Error('not_found');
+    const actor = input.from.toLowerCase();
+    if (actor !== current.to) throw new Error('lease_recipient_required');
+    const receipt = current.releasedLease;
+    if (receipt) {
+      if (
+        leaseTokenVerifier(current.id, receipt.leaseGeneration, input.leaseToken) === receipt.tokenVerifier
+        && reason === receipt.reason
+      ) return current;
+      throw new Error('stale_lease');
+    }
+    leaseRecipientAndCurrent(current, actor, input.leaseToken);
+    const active = current.lease!;
+    const at = new Date(nowMs()).toISOString();
+    const lease: ReleaseLeaseEvent = {
+      version: 1, event: 'release', actor, at,
+      generation: active.leaseGeneration,
+      tokenVerifier: active.tokenVerifier!, reason,
+    };
+    const to = current.from;
+    const text = 'Lease released.';
+    const { messageId: _messageId } = await deliverMail({
+      from: actor, to: [to], subject: current.subject, text,
+      headers: leaseEventHeaders(current.id, current.state, actor, to, lease),
+    });
+    void notifyTrustedAgentDelivery(to);
+    invalidateTaskListCache();
+    const eventMessage = leaseEventMessage({ task: current, from: actor, to, state: current.state, at, body: text });
+    queueEventUntilIndexed(current.id, eventMessage, lease);
+    return {
+      ...current,
+      updatedAt: at,
+      messages: [...current.messages, eventMessage],
+      lease: undefined,
+      releasedLease: { leaseGeneration: active.leaseGeneration, tokenVerifier: active.tokenVerifier!, reason },
+      expiredLease: undefined,
+    };
+  });
 }
 
 async function writeApprovalTerminal(
@@ -1181,6 +2003,10 @@ export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
     messages: task.messages,
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.kind === 'approval' && task.approval ? { kind: 'approval' as const, approval: task.approval } : {}),
+    ...(task.lease?.claimedUntil && typeof task.lease.leaseGeneration === 'number'
+      && isLeaseDeadlineActive(task.lease.claimedUntil, now)
+      ? { claimedUntil: task.lease.claimedUntil, leaseGeneration: task.lease.leaseGeneration }
+      : {}),
     ...taskOverdue(task, now),
   };
 }
@@ -1281,6 +2107,7 @@ export async function replyTask(input: { id: string; from: string; body: string 
     const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (existing.state !== 'input-required') throw new Error('task_not_input_required');
+    assertActiveRecipientLeaseCredential(existing, input.from);
     const updated = await updateTaskUnlocked({
       id: input.id,
       from: input.from,
@@ -1543,6 +2370,9 @@ export const taskService: TaskService = {
   getForAuthorization: getTaskSnapshot,
   get: getTask,
   update: updateTask,
+  claim: claimTask,
+  renew: renewTask,
+  release: releaseTask,
   reply: replyTask,
   remind: remindTask,
   close: closeTask,

@@ -9,14 +9,17 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+process.env.TASK_LEASES_ENABLED = 'true';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const {
   listTaskBoard,
   clearQueuedEventsForTests,
   setTaskGetForTests,
+  setTaskLeasesEnabledForTests,
   setTaskListAllForTests,
   setTaskSendMailForTests,
   setTaskNowForTests,
@@ -29,6 +32,7 @@ for (const localpart of ['fox', 'owl']) {
 }
 
 afterEach(() => {
+  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
   setTaskGetForTests(null);
@@ -1143,5 +1147,307 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     // 红条通道在 CSS，不只靠 class 名；与 PR4「左侧红条 + Overdue 文字」对齐
     expect(PAGES_CSS).toContain('.task-row.is-overdue {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+  });
+});
+
+describe('#56 R9 lease final dashboard surfaces', () => {
+  test('R9 RED: real dashboard list and detail project public lease timing without private lease authority', async () => {
+    const verifier = 'r9-dashboard-verifier-never-public';
+    const bearer = 'r9-dashboard-bearer-never-public';
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const leased = {
+      ...TASK_A,
+      lease: { leaseGeneration: 7, claimedUntil, tokenVerifier: verifier },
+      releasedLease: { leaseGeneration: 6, tokenVerifier: verifier, reason: 'old' },
+      expiredLease: { leaseGeneration: 5, claimedUntil: '2026-08-12T11:00:00.000Z', expiredAt: '2026-08-12T11:00:00.000Z' },
+      tokenVerifier: verifier,
+      leaseToken: bearer,
+    } as Task & Record<string, unknown>;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [leased]);
+    const list = await app.request('/ui/api/tasks', { headers: { cookie } });
+    const detail = await app.request(`/ui/api/tasks/${leased.id}`, { headers: { cookie } });
+    const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+    const detailBody = await detail.json() as Record<string, unknown>;
+    const listed = listBody.tasks?.[0];
+    const privateKeys = ['lease', 'releasedLease', 'expiredLease', 'tokenVerifier', 'leaseToken'];
+    expect({
+      statuses: [list.status, detail.status],
+      listTiming: listed && [listed.claimedUntil, listed.leaseGeneration],
+      detailTiming: [detailBody.claimedUntil, detailBody.leaseGeneration],
+      noPrivateKeys: [listed, detailBody].every((view) => !!view && privateKeys.every((key) => !Object.hasOwn(view, key))),
+      noPrivateValues: !JSON.stringify({ listBody, detailBody }).includes(verifier)
+        && !JSON.stringify({ listBody, detailBody }).includes(bearer),
+    }).toEqual({
+      statuses: [200, 200],
+      listTiming: [claimedUntil, 7],
+      detailTiming: [claimedUntil, 7],
+      noPrivateKeys: true,
+      noPrivateValues: true,
+    });
+  });
+
+  test('R9 RED: exact served task renderer exposes only public claimed timing and generation', () => {
+    const verifier = 'r9-render-verifier-never-public';
+    const bearer = 'r9-render-bearer-never-public';
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const active = {
+      ...TASK_A,
+      claimedUntil,
+      leaseGeneration: 7,
+      tokenVerifier: verifier,
+      leaseToken: bearer,
+    } as Task & Record<string, unknown>;
+    const inactive = { ...TASK_A, id: '99999999-9999-4999-8999-999999999999' } as Task & Record<string, unknown>;
+    const activeDetail = makeAdminTaskDetailHarness(active);
+    activeDetail.renderTaskDetail();
+    const activeRows = makeTaskRowHarness();
+    activeRows.state.tasks = [active];
+    activeRows.state.tasksTotalApprox = 1;
+    activeRows.renderTaskRows();
+    const inactiveDetail = makeAdminTaskDetailHarness(inactive);
+    inactiveDetail.renderTaskDetail();
+    const inactiveRows = makeTaskRowHarness();
+    inactiveRows.state.tasks = [inactive];
+    inactiveRows.state.tasksTotalApprox = 1;
+    inactiveRows.renderTaskRows();
+    const activeText = [
+      ...leafTexts(activeDetail.tasksDetailContent),
+      ...activeRows.tasksRows.childNodes.flatMap(leafTexts),
+    ].join('\n');
+    const inactiveText = [
+      ...leafTexts(inactiveDetail.tasksDetailContent),
+      ...inactiveRows.tasksRows.childNodes.flatMap(leafTexts),
+    ].join('\n');
+    expect({
+      activeDetailLeaseVisible: activeText.includes('Claimed until') && activeText.includes(claimedUntil) && activeText.includes('7'),
+      activeListLeaseVisible: activeRows.tasksRows.childNodes.length === 1
+        && leafTexts(activeRows.tasksRows.childNodes[0]!).join('\n').includes('Claimed until'),
+      inactiveLeaseAbsent: !inactiveText.includes('Claimed until'),
+      secretsAbsentFromRenderedText: !activeText.includes(verifier) && !activeText.includes(bearer),
+    }).toEqual({
+      activeDetailLeaseVisible: true,
+      activeListLeaseVisible: true,
+      inactiveLeaseAbsent: true,
+      secretsAbsentFromRenderedText: true,
+    });
+  });
+
+  test('R11 RED: dashboard list and detail hide public lease timing at the half-open expiry boundary without writes', async () => {
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const privateVerifier = 'r11-dashboard-verifier-never-public';
+    const leased = {
+      ...TASK_A,
+      lease: { leaseGeneration: 11, claimedUntil, tokenVerifier: privateVerifier },
+    } as Task;
+    let deliveries = 0;
+    setTaskSendMailForTests(async () => {
+      deliveries += 1;
+      return { messageId: '<r11-unexpected-write>' };
+    });
+    let now = Date.parse(claimedUntil) - 1;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [leased]);
+    setTaskNowForTests(() => now);
+    const read = async () => {
+      const [list, detail] = await Promise.all([
+        app.request('/ui/api/tasks', { headers: { cookie } }),
+        app.request(`/ui/api/tasks/${leased.id}`, { headers: { cookie } }),
+      ]);
+      const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+      const detailBody = await detail.json() as Record<string, unknown>;
+      const listed = listBody.tasks?.[0];
+      return {
+        statuses: [list.status, detail.status],
+        listTiming: [listed?.claimedUntil ?? null, listed?.leaseGeneration ?? null],
+        detailTiming: [detailBody.claimedUntil ?? null, detailBody.leaseGeneration ?? null],
+        publicHasNoVerifier: !JSON.stringify({ listBody, detailBody }).includes(privateVerifier),
+      };
+    };
+
+    const deliveriesBeforeReads = deliveries;
+    const before = await read();
+    const deliveriesAfterBefore = deliveries;
+    now = Date.parse(claimedUntil);
+    const atBoundary = await read();
+    const deliveriesAfterBoundary = deliveries;
+
+    expect({
+      before,
+      atBoundary,
+      deliveries: [deliveriesBeforeReads, deliveriesAfterBefore, deliveriesAfterBoundary],
+      privateAuthorityUnchanged: leased.lease?.claimedUntil === claimedUntil
+        && leased.lease?.leaseGeneration === 11
+        && leased.lease?.tokenVerifier === privateVerifier,
+    }).toEqual({
+      before: {
+        statuses: [200, 200],
+        listTiming: [claimedUntil, 11],
+        detailTiming: [claimedUntil, 11],
+        publicHasNoVerifier: true,
+      },
+      atBoundary: {
+        statuses: [200, 200],
+        listTiming: [null, null],
+        detailTiming: [null, null],
+        publicHasNoVerifier: true,
+      },
+      deliveries: [0, 0, 0],
+      privateAuthorityUnchanged: true,
+    });
+  });
+});
+
+describe('#56 R13 dashboard reply lease boundary RED', () => {
+  test('R13 RED: recipient/worker reply without a lease token rejects before delivery or queued mutation', async () => {
+    const effectiveLeaseEnabled = setTaskLeasesEnabledForTests(true);
+    console.info(JSON.stringify({ r16CoreLeaseGate: {
+      test: 'R13-dashboard', configuredSingleton: config.taskLeasesEnabled, effectiveLeaseEnabled,
+    } }));
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '13131313-1313-4313-8313-131313131313',
+      state: 'submitted',
+      messages: [TASK_INPUT.messages[0]!],
+    };
+    let durable = task;
+    const deliveries: unknown[] = [];
+    setTaskNowForTests(() => Date.parse(NOW));
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: `<r13-${deliveries.length}>` };
+    });
+
+    const grant = await taskService.claim!({ id: task.id, from: task.to, leaseSec: 300 });
+    await taskService.update({
+      id: task.id,
+      from: task.to,
+      state: 'input-required',
+      body: 'need the attachment',
+      leaseToken: grant.leaseToken,
+    });
+    const before = await taskService.get(task.id);
+    if (!before?.lease) throw new Error('R13 fixture must retain active authority');
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.to },
+      { taskService },
+      [task],
+    );
+    setTaskNowForTests(() => Date.parse(NOW) + 2_000);
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const replyBody = await reply.json() as Record<string, unknown>;
+    const [detail, list] = await Promise.all([
+      app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie } }),
+      app.request('/ui/api/tasks', { headers: { cookie } }),
+    ]);
+    const detailBody = await detail.json() as Record<string, unknown>;
+    const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+    const after = await taskService.get(task.id);
+    const listed = listBody.tasks?.find((row) => row.id === task.id) ?? null;
+    const publicJson = JSON.stringify({ replyBody, detailBody, listed });
+    expect({
+      reply: { status: reply.status, error: replyBody.error ?? null },
+      task: { state: after?.state ?? null, messages: after?.messages.length ?? null },
+      privateAuthorityUnchanged: after?.lease?.claimedUntil === before.lease.claimedUntil
+        && after.lease?.leaseGeneration === before.lease.leaseGeneration
+        && after.lease?.tokenVerifier === before.lease.tokenVerifier,
+      deltas: {
+        deliveries: deliveries.length - 2,
+        events: (after?.messages.length ?? 0) - before.messages.length,
+        queued: after?.state === before.state ? 0 : 1,
+      },
+      publicTokenFree: !publicJson.includes(grant.leaseToken) && !publicJson.includes(before.lease.tokenVerifier),
+    }).toEqual({
+      reply: { status: 409, error: 'task_already_terminal' },
+      task: { state: 'input-required', messages: before.messages.length },
+      privateAuthorityUnchanged: true,
+      deltas: { deliveries: 0, events: 0, queued: 0 },
+      publicTokenFree: true,
+    });
+  });
+
+  test('R13 RED control: ordinary input-required dashboard reply still succeeds without a lease', async () => {
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '14141414-1414-4414-8414-141414141414',
+    };
+    const deliveries: unknown[] = [];
+    setTaskGetForTests(async () => task);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: '<r13-control>' };
+    });
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.to },
+      { taskService },
+      [task],
+    );
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const body = await reply.json() as Record<string, unknown>;
+    expect({
+      status: reply.status,
+      state: body.state ?? null,
+      deliveries: deliveries.length,
+      tokenFree: !JSON.stringify(body).includes('leaseToken'),
+    }).toEqual({
+      status: 200,
+      state: 'working',
+      deliveries: 1,
+      tokenFree: true,
+    });
+  });
+
+  test('R13 RED control: requester reply succeeds without a token while the recipient lease is active', async () => {
+    const task: Task = {
+      ...TASK_INPUT,
+      id: '15151515-1515-4515-8515-151515151515',
+      state: 'submitted',
+      messages: [TASK_INPUT.messages[0]!],
+    };
+    const deliveries: unknown[] = [];
+    setTaskNowForTests(() => Date.parse(NOW));
+    setTaskGetForTests(async () => task);
+    setTaskSendMailForTests(async (input) => {
+      deliveries.push(input);
+      return { messageId: `<r13-requester-${deliveries.length}>` };
+    });
+    const grant = await taskService.claim!({ id: task.id, from: task.to, leaseSec: 300 });
+    await taskService.update({
+      id: task.id,
+      from: task.to,
+      state: 'input-required',
+      body: 'need the attachment',
+      leaseToken: grant.leaseToken,
+    });
+    const { app, cookie } = makeApp(
+      { kind: 'identity', address: task.from },
+      { taskService },
+      [task],
+    );
+    setTaskNowForTests(() => Date.parse(NOW) + 2_000);
+    const reply = await app.request(`/ui/api/tasks/${task.id}/reply`, {
+      method: 'POST',
+      headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'the requested attachment' }),
+    });
+    const body = await reply.json() as Record<string, unknown>;
+    expect({
+      status: reply.status,
+      state: body.state ?? null,
+      deliveries: deliveries.length,
+      tokenFree: !JSON.stringify(body).includes(grant.leaseToken),
+    }).toEqual({
+      status: 200,
+      state: 'working',
+      deliveries: 3,
+      tokenFree: true,
+    });
   });
 });

@@ -41,6 +41,9 @@ export const TOOL_TIER_SPEC = {
   mail_send: 'contained',
   task_update: 'contained',
   task_decide: 'contained',
+  task_claim: 'contained',
+  task_renew: 'contained',
+  task_release: 'contained',
   notify_agent: 'contained',
   notify_user: 'contained',
   // critical：OAuth deny-by-default

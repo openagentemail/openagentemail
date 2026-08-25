@@ -41,9 +41,14 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `notify_verify()` | Send and poll a harmless server-side notification self-check |
 | `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; typed approvals add `kind: "approval"` with `approval:{action,expiresAt}`; `wait:true` waits up to 10 minutes for a terminal state |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
+| `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |
+| `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer |
+| `task_release(id, leaseToken, reason?)` | Release a claimed task using its opaque bearer |
 | `task_list(state?)` | List this identity's task threads, optionally by current state |
 | `task_get(id, wait?)` | Read one task thread and its stamped state history; `wait:true` waits up to 10 minutes |
 | `task_update(id, state, body?, result?)` | Advance a participating task; `result` is written as a JSON block in the reply body |
+
+Task leases are opt-in; `TASK_LEASES_ENABLED` is disabled by default (`false`) via `TASK_LEASES_ENABLED=false`, so existing clients remain compatible. The opaque `leaseToken` is only the claim bearer and is never listed, rendered, logged, or emailed.
 
 Errors come back as `isError` tool results with actionable messages (a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 means the token's scope doesn't cover what you asked for — identity tokens only touch their own address, and identity management is admin-only; a 429 means the per-identity send rate limit kicked in).
 

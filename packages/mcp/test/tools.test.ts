@@ -42,8 +42,8 @@ mock.module("@modelcontextprotocol/server/stdio", () => ({
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
 
-test("16 个工具都公布新 SDK 支持的元数据", () => {
-  expect([...toolConfigs.keys()]).toEqual([
+test("#56 RED：19 个工具公布任务租约的 registry/schema 元数据", () => {
+  const expected = [
     "mail_new_identity",
     "mail_list_identities",
     "mail_list_messages",
@@ -60,7 +60,21 @@ test("16 个工具都公布新 SDK 支持的元数据", () => {
     "task_get",
     "task_update",
     "task_decide",
-  ]);
+    "task_claim",
+    "task_renew",
+    "task_release",
+  ];
+  const missingLeaseTools = ["task_claim", "task_renew", "task_release"].filter(
+    (name) => !toolConfigs.has(name),
+  );
+  // Keep this inventory RED behavior-level and named. Do not fall through to
+  // undefined configs, which turns a missing production registration into a
+  // TypeError rather than its own actionable contract failure.
+  if (missingLeaseTools.length > 0) {
+    expect(missingLeaseTools, "#56 lease tool inventory must register claim/renew/release").toEqual([]);
+    return;
+  }
+  expect([...toolConfigs.keys()]).toEqual(expected);
 
   for (const config of toolConfigs.values()) {
     expect(config.title).toBeTruthy();
@@ -81,6 +95,9 @@ test("16 个工具都公布新 SDK 支持的元数据", () => {
   expect(toolConfigs.get("task_create")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("task_update")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("task_decide")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_claim")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_renew")?.annotations?.readOnlyHint).toBe(false);
+  expect(toolConfigs.get("task_release")?.annotations?.readOnlyHint).toBe(false);
   expect(toolConfigs.get("mail_read_message")?.outputSchema).toBe(
     toolConfigs.get("mail_wait_for")?.outputSchema,
   );
@@ -195,6 +212,50 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskDecide, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
   expect(ok(taskDecide, "decision", "approved")).toBe(true);
   expect(ok(taskDecide, "decision", "execute")).toBe(false);
+
+  const taskClaim = toolSchemas.get("task_claim");
+  const taskRenew = toolSchemas.get("task_renew");
+  const taskRelease = toolSchemas.get("task_release");
+  if (!taskClaim || !taskRenew || !taskRelease) {
+    expect(
+      { task_claim: !!taskClaim, task_renew: !!taskRenew, task_release: !!taskRelease },
+      "#56 lease schemas require registered claim/renew/release tools",
+    ).toEqual({ task_claim: true, task_renew: true, task_release: true });
+    return;
+  }
+  expect(ok(taskClaim, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
+  expect(ok(taskClaim, "leaseSec", 120)).toBe(true);
+  expect(ok(taskClaim, "leaseSec", 0)).toBe(false);
+
+  expect(ok(taskRenew, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
+  expect(ok(taskRenew, "leaseToken", "opaque-current-lease-token")).toBe(true);
+  expect(ok(taskRenew, "leaseSec", 120)).toBe(true);
+
+  expect(ok(taskRelease, "id", "0fdc3207-056e-47c1-a65c-b29d39f66b83")).toBe(true);
+  expect(ok(taskRelease, "leaseToken", "opaque-current-lease-token")).toBe(true);
+  expect(ok(taskRelease, "reason", "worker stopped")).toBe(true);
+});
+
+test("R12 RED: task_update registry/schema publishes an optional non-empty leaseToken", () => {
+  const taskUpdate = toolSchemas.get("task_update");
+  if (!taskUpdate) {
+    expect(taskUpdate, "R12 task_update must be registered before leaseToken schema is checked").toBeDefined();
+    return;
+  }
+  const leaseToken = taskUpdate.leaseToken;
+  if (!leaseToken) {
+    expect(leaseToken, "R12 task_update must publish its optional leaseToken schema").toBeDefined();
+    return;
+  }
+  expect({
+    opaqueToken: leaseToken.safeParse("opaque-current-lease-token").success,
+    emptyToken: leaseToken.safeParse("").success,
+    omittedToken: leaseToken.safeParse(undefined).success,
+  }).toEqual({
+    opaqueToken: true,
+    emptyToken: false,
+    omittedToken: true,
+  });
 });
 
 test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
