@@ -1,5 +1,5 @@
 // #56 R2: production lease event, parser/rebuild, restart, and config gates.
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FetchMessageObject } from 'imapflow';
@@ -116,6 +116,36 @@ if (process.env.TASK_LEASES_R4_RED === '1') {
 }
 
 describe('#56 R2 lease authority', () => {
+  test('R18 GREEN: shipped Compose deployments expose the opt-in flag with an explicit false default', () => {
+    const deployments = [
+      {
+        name: 'bundled',
+        compose: readFileSync(new URL('../../../compose.yaml', import.meta.url), 'utf8'),
+        example: readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8'),
+      },
+      {
+        name: 'api-only',
+        compose: readFileSync(new URL('../../../compose.api-only.yaml', import.meta.url), 'utf8'),
+        example: readFileSync(new URL('../../../.env.api-only.example', import.meta.url), 'utf8'),
+      },
+    ];
+    const observed = deployments.map(({ name, compose, example }) => {
+      const fallback = compose.match(/^\s+TASK_LEASES_ENABLED:\s*\$\{TASK_LEASES_ENABLED:-([^}]+)\}\s*$/m)?.[1];
+      const interpolate = (value?: string) => value || fallback;
+      return {
+        name,
+        explicitMapping: fallback !== undefined,
+        exampleDefaultsFalse: /Default false = disabled\.\r?\nTASK_LEASES_ENABLED=false/m.test(example),
+        unsetInterpolation: interpolate(),
+        trueInterpolation: interpolate('true'),
+      };
+    });
+    expect(observed).toEqual([
+      { name: 'bundled', explicitMapping: true, exampleDefaultsFalse: true, unsetInterpolation: 'false', trueInterpolation: 'true' },
+      { name: 'api-only', explicitMapping: true, exampleDefaultsFalse: true, unsetInterpolation: 'false', trueInterpolation: 'true' },
+    ]);
+  });
+
   test('config defaults disabled and parses the fixed enable/duration policy', () => {
     const base = {
       DOMAIN: 'test.example', API_KEYS: 'admin-key', IMAP_USER: A, IMAP_PASS: 'imap-secret',
