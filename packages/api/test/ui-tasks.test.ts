@@ -12,16 +12,28 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const {
   listTaskBoard,
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
   setTaskListAllForTests,
+  setTaskSendMailForTests,
   setTaskNowForTests,
+  taskService,
   toUiTaskView,
 } = await import('../src/lib/tasks.ts');
+
+for (const localpart of ['fox', 'owl']) {
+  if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
+}
 
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
+  setTaskGetForTests(null);
+  setTaskSendMailForTests(null);
+  clearQueuedEventsForTests();
 });
 
 const NOW = '2026-08-12T12:00:00.000Z';
@@ -106,6 +118,19 @@ const TASK_INPUT: Task = {
       body: 'which spec?',
     },
   ],
+};
+
+const APPROVAL_EXPIRES_AT = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+const APPROVAL_TASK: Task = {
+  id: '55555555-5555-4555-8555-555555555555',
+  from: 'fox@test.example', to: 'owl@test.example', subject: 'Approve preview', state: 'input-required',
+  createdAt: '2026-08-12T08:00:00.000Z', updatedAt: '2026-08-12T08:00:00.000Z',
+  messages: [], kind: 'approval',
+  approval: {
+    action: { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } },
+    reviewer: 'owl@test.example', expiresAt: APPROVAL_EXPIRES_AT, digest: 'a'.repeat(64),
+  },
 };
 
 type AuthKind = { kind: 'admin' } | { kind: 'identity'; address: string };
@@ -529,6 +554,17 @@ describe('UI task reply / remind / close', () => {
     expect(await terminal.json()).toEqual({ error: 'task_already_terminal' });
   });
 
+  test('admin reminder rejects an approval before the service can deliver it', async () => {
+    const { app, cookie, remindCalls } = makeApp({ kind: 'admin' }, {}, [APPROVAL_TASK]);
+    const response = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/remind`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'fox@test.example', body: 'Do not remind approval.' }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'approval_decision_required' });
+    expect(remindCalls).toEqual([]);
+  });
+
   test('admin close writes structured closed_by_admin; repeat terminal is 409', async () => {
     const { app, cookie, closeCalls } = makeApp({ kind: 'admin' });
     const ok = await app.request(`/ui/api/tasks/${TASK_A.id}/close`, {
@@ -600,11 +636,15 @@ type FakeNode = {
   textContent: string;
   type: string;
   dateTime: string;
+  disabled: boolean;
+  attributes: Record<string, string>;
   childNodes: FakeNode[];
   classList: { add: (name: string) => void; contains: (name: string) => boolean };
   setAttribute: (key: string, value: string) => void;
   append: (...nodes: FakeNode[]) => void;
-  addEventListener: () => void;
+  replaceChildren: (...nodes: FakeNode[]) => void;
+  addEventListener: (event: string, listener: () => void) => void;
+  click: () => void;
 };
 
 /** 无 jsdom：够 renderTaskRows 建行、加 class、写 Overdue 文案。 */
@@ -615,6 +655,8 @@ function fakeEl(tag: string): FakeNode {
     textContent: '',
     type: '',
     dateTime: '',
+    disabled: false,
+    attributes: {},
     childNodes: [],
     classList: {
       add(name: string) {
@@ -626,13 +668,72 @@ function fakeEl(tag: string): FakeNode {
         return node.className.split(/\s+/).includes(name);
       },
     },
-    setAttribute() {},
+    setAttribute(key: string, value: string) {
+      node.attributes[key] = value;
+    },
     append(...nodes: FakeNode[]) {
       node.childNodes.push(...nodes);
     },
-    addEventListener() {},
+    replaceChildren(...nodes: FakeNode[]) {
+      node.childNodes = [...nodes];
+    },
+    addEventListener(event: string, listener: () => void) {
+      if (event === 'click') node.click = listener;
+    },
+    click() {},
   };
   return node;
+}
+
+function makeApprovalActionHarness(apiJsonImpl?: (path: string, init: RequestInit) => Promise<Task>) {
+  const state = { me: { address: 'owl@test.example' }, taskDetail: null as unknown, taskDetailStatus: '' };
+  const calls: Array<{ path: string; init: RequestInit }> = [];
+  const announced: string[] = [];
+  let renderCount = 0;
+  let loadCount = 0;
+  const updated = { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved' } };
+  const source = sliceTasksFn('function approvalCanDecide(', 'function renderTaskRows(');
+  const fn = new Function(
+    'document', 'state', 'isAdmin', 'apiJson', 'renderTasks', 'loadTasks', 'announce',
+    `${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
+  );
+  const renderer = fn(
+    { createElement: fakeEl }, state, () => false,
+    async (path: string, init: RequestInit) => {
+      calls.push({ path, init });
+      return apiJsonImpl ? apiJsonImpl(path, init) : updated;
+    },
+    () => { renderCount += 1; }, () => { loadCount += 1; }, (message: string) => { announced.push(message); },
+  ) as {
+    approvalCanDecide: (task: Task) => boolean;
+    renderApprovalAction: (task: Task) => FakeNode | null;
+  };
+  return { state, calls, announced, renderer, counts: () => ({ renderCount, loadCount }) };
+}
+
+function makeAdminTaskDetailHarness(task: Task) {
+  const tasksDetailContent = fakeEl('div');
+  const state = { activeTaskId: task.id, taskDetailStatus: 'ready', taskDetailMessage: '', taskDetail: task };
+  const source = sliceTasksFn('function renderTaskDetail(', 'function renderTasks(');
+  const fn = new Function(
+    'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail', 'taskStateToken', 'taskStateLabel',
+    'formatAgo', 'taskTimelineBody', 'formatDate', 'taskIsClosed', 'renderTaskResultNode', 'renderApprovalAction',
+    'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+    `${source}\nreturn renderTaskDetail;`,
+  );
+  const renderTaskDetail = fn(
+    { createElement: fakeEl }, state, tasksDetailContent, () => true, () => {}, () => 'input-required', () => 'Input required',
+    () => 'just now', (value: string) => value, () => '2026-08-12', () => false, () => fakeEl('pre'),
+    () => {
+      const actions = fakeEl('section');
+      const approve = fakeEl('button'); approve.type = 'button'; approve.textContent = 'Approve';
+      const reject = fakeEl('button'); reject.type = 'button'; reject.textContent = 'Reject';
+      actions.append(approve, reject);
+      return actions;
+    },
+    () => {}, () => {}, () => {}, () => {}, 100,
+  ) as () => void;
+  return { tasksDetailContent, renderTaskDetail };
 }
 
 /** 收集叶子 textContent，用来断言 Overdue 文字通道。 */
@@ -690,6 +791,300 @@ function makeTaskRowHarness() {
   ) as () => void;
   return { state, tasksRows, renderTaskRows };
 }
+
+describe('UI approval decision endpoint', () => {
+  test('R9 RED: dashboard authorizes outsider detail and task mutations before lazy expiry materialization', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const expiredApproval = async () => {
+      const sent: unknown[] = [];
+      setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+      setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r9-ui-${sent.length}@test.example>` }; });
+      const task = await taskService.createApproval!({
+        from: 'fox@test.example', to: 'owl@test.example', subject: 'R9 dashboard auth before expiry', body: 'record only',
+        action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+      });
+      setTaskGetForTests(async () => task);
+      const session = makeApp({ kind: 'identity', address: 'cat@test.example' }, { taskService }, [task]);
+      setTaskNowForTests(() => Date.parse(boundary));
+      return { ...session, task, sent };
+    };
+    const inspect = async (request: (fixture: Awaited<ReturnType<typeof expiredApproval>>) => Response | Promise<Response>) => {
+      const fixture = await expiredApproval();
+      const response = await request(fixture);
+      return {
+        status: response.status,
+        body: await response.json(),
+        deliveries: fixture.sent.length,
+        durable: { state: fixture.task.state, messages: fixture.task.messages.length, result: fixture.task.result ?? null },
+      };
+    };
+
+    const matrix = {
+      detail: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie } })),
+      decision: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      })),
+      reply: await inspect(({ app, cookie, task }) => app.request(`/ui/api/tasks/${task.id}/reply`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ body: 'outsider write' }),
+      })),
+    };
+    expect(matrix).toEqual({
+      detail: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      decision: { status: 404, body: { error: 'not_found' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+      reply: { status: 403, body: { error: 'forbidden: task participant required' }, deliveries: 1, durable: { state: 'input-required', messages: 1, result: null } },
+    });
+
+  });
+
+  test('R9 control: dashboard participant detail materializes expiry once and reviewer decision remains task_expired', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const sent: unknown[] = [];
+    setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r9-ui-control-${sent.length}@test.example>` }; });
+    const task = await taskService.createApproval!({
+      from: 'fox@test.example', to: 'owl@test.example', subject: 'R9 dashboard auth control', body: 'record only',
+      action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+    });
+    setTaskGetForTests(async () => task);
+    const reviewer = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService }, [task]);
+    setTaskNowForTests(() => Date.parse(boundary));
+    const firstDetail = await reviewer.app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie: reviewer.cookie } });
+    const repeatedDetail = await reviewer.app.request(`/ui/api/tasks/${task.id}`, { headers: { cookie: reviewer.cookie } });
+    const decision = await reviewer.app.request(`/ui/api/tasks/${task.id}/decision`, {
+      method: 'POST', headers: { cookie: reviewer.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect({
+      detailStatuses: [firstDetail.status, repeatedDetail.status],
+      decision: { status: decision.status, body: await decision.json() },
+      deliveries: sent.length,
+    }).toEqual({
+      detailStatuses: [200, 200],
+      decision: { status: 409, body: { error: 'task_expired' } },
+      deliveries: 2,
+    });
+  });
+
+  test('R8-D RED: dashboard preserves task_expired after production detail read materializes expiry', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const sent: unknown[] = [];
+    setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r8-expiry-${sent.length}@test.example>` }; });
+    const pending = await taskService.createApproval!({
+      from: 'fox@test.example', to: 'owl@test.example', subject: 'R8 dashboard expiry', body: 'record only',
+      action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+    });
+    setTaskGetForTests(async () => pending);
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService }, [pending]);
+    setTaskNowForTests(() => Date.parse(boundary));
+    expect((await app.request(`/ui/api/tasks/${pending.id}`, { headers: { cookie } })).status).toBe(200);
+    const responses = await Promise.all([0, 1].map(async () => {
+      const response = await app.request(`/ui/api/tasks/${pending.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      return { status: response.status, body: await response.json() };
+    }));
+    expect({ responses, delivered: sent.length }).toEqual({
+      responses: [{ status: 409, body: { error: 'task_expired' } }, { status: 409, body: { error: 'task_expired' } }], delivered: 2,
+    });
+  });
+
+  test('R8-E RED: an injected dashboard service never falls back to global approval decisions', async () => {
+    const sent: unknown[] = [];
+    setTaskGetForTests(async () => APPROVAL_TASK);
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<global-fallback@test.example>' }; });
+    const injected = {
+      ...taskService,
+      get: async () => APPROVAL_TASK,
+      decideApproval: undefined,
+    } as typeof taskService;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, { taskService: injected }, [APPROVAL_TASK]);
+    const response = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect({ status: response.status, sent: sent.length }).toEqual({ status: 502, sent: 0 });
+  });
+
+  test('R8-F RED: exact served approval controls follow server state, not an ahead browser clock', () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => Date.parse(APPROVAL_EXPIRES_AT) + 1;
+      const { renderer } = makeApprovalActionHarness();
+      const failed: Task = { ...APPROVAL_TASK, state: 'failed', result: { decision: 'expired' } };
+      expect([renderer.approvalCanDecide(APPROVAL_TASK), renderer.approvalCanDecide(failed)]).toEqual([true, false]);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test('R9-D RED: exact served approval controls allow only one in-flight decision', async () => {
+    let settle: (task: Task) => void = () => {};
+    const blocked = new Promise<Task>((resolve) => { settle = resolve; });
+    const { calls, renderer } = makeApprovalActionHarness(async () => blocked);
+    const section = renderer.renderApprovalAction(APPROVAL_TASK)!;
+    const buttons = section.childNodes.filter((node) => node.tagName === 'BUTTON');
+    buttons[0]!.click();
+    await Promise.resolve();
+    buttons[1]!.click();
+    expect({ calls: calls.length, disabled: buttons.map((button) => button.disabled) }).toEqual({ calls: 1, disabled: [true, true] });
+    settle({ ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(buttons.map((button) => button.disabled)).toEqual([false, false]);
+  });
+
+  test('R9-E RED: exact served approval heading is neutral after terminal state', () => {
+    const { renderer } = makeApprovalActionHarness();
+    const pending = renderer.renderApprovalAction(APPROVAL_TASK)!;
+    const terminalHeadings = [
+      { state: 'completed' as const, result: { decision: 'approved' } },
+      { state: 'completed' as const, result: { decision: 'rejected' } },
+      { state: 'failed' as const, result: { decision: 'expired' } },
+    ].map((terminal) => leafTexts(renderer.renderApprovalAction({ ...APPROVAL_TASK, ...terminal })!));
+    expect(leafTexts(pending)).toContain('Approval required');
+    expect(terminalHeadings).toEqual([
+      expect.arrayContaining(['Approval details']),
+      expect.arrayContaining(['Approval details']),
+      expect.arrayContaining(['Approval details']),
+    ]);
+    expect(terminalHeadings.flat()).not.toContain('Approval required');
+  });
+
+  test('R9-D control: one settled served decision reloads normal terminal state', async () => {
+    const { calls, state, renderer, counts } = makeApprovalActionHarness();
+    const button = renderer.renderApprovalAction(APPROVAL_TASK)!.childNodes.find((node) => node.tagName === 'BUTTON')!;
+    button.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect({ calls: calls.length, state: (state.taskDetail as Task).state, counts: counts() }).toEqual({
+      calls: 1, state: 'completed', counts: { renderCount: 1, loadCount: 1 },
+    });
+  });
+
+  test('dashboard actor matrix keeps approval authority at the stored reviewer and core service', async () => {
+    const decided: unknown[] = [];
+    const { app, cookie, deps } = makeApp(
+      { kind: 'identity', address: 'owl@test.example' },
+      {},
+      [APPROVAL_TASK],
+    );
+    (deps.taskService as any).decideApproval = mock(async (input: unknown) => {
+      decided.push(input);
+      return { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved', digest: APPROVAL_TASK.approval!.digest } };
+    });
+    const ok = await app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ kind: 'approval', state: 'completed', approval: { reviewer: 'owl@test.example' } });
+    expect(decided).toEqual([{ id: APPROVAL_TASK.id, from: 'owl@test.example', decision: 'approved' }]);
+
+    async function decide(app: Hono, cookie: string, body: unknown) {
+      return app.request(`/ui/api/tasks/${APPROVAL_TASK.id}/decision`, {
+        method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+    }
+
+    for (const address of ['fox@test.example']) {
+      const denied = makeApp({ kind: 'identity', address }, {}, [APPROVAL_TASK]);
+      const response = await decide(denied.app, denied.cookie, { decision: 'approved' });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'forbidden: approval reviewer required' });
+    }
+
+    // R6 RED: a dashboard outsider guessing an ordinary or approval decision
+    // URL sees neither the task kind nor the stored reviewer ACL outcome.
+    for (const task of [TASK_A, APPROVAL_TASK]) {
+      const outsider = makeApp({ kind: 'identity', address: 'stranger@test.example' }, {}, [task]);
+      const response = await outsider.app.request(`/ui/api/tasks/${task.id}/decision`, {
+        method: 'POST', headers: { cookie: outsider.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'not_found' });
+    }
+
+    const admin = makeApp({ kind: 'admin' }, {}, [APPROVAL_TASK]);
+    expect((await decide(admin.app, admin.cookie, { decision: 'approved' })).status).toBe(403);
+    expect((await decide(admin.app, admin.cookie, { from: 'fox@test.example', decision: 'approved' })).status).toBe(403);
+    (admin.deps.taskService as any).decideApproval = mock(async (input: unknown) => {
+      decided.push(input);
+      return { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'rejected' } };
+    });
+    const adminOk = await decide(admin.app, admin.cookie, { from: 'owl@test.example', decision: 'rejected' });
+    expect(adminOk.status).toBe(200);
+    expect(decided.at(-1)).toEqual({ id: APPROVAL_TASK.id, from: 'owl@test.example', decision: 'rejected' });
+
+    const missing = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, []);
+    expect((await decide(missing.app, missing.cookie, { decision: 'approved' })).status).toBe(404);
+    const ordinary = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [TASK_A]);
+    const ordinaryResponse = await ordinary.app.request(`/ui/api/tasks/${TASK_A.id}/decision`, {
+      method: 'POST', headers: { cookie: ordinary.cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+    });
+    expect(ordinaryResponse.status).toBe(409);
+    expect(await ordinaryResponse.json()).toEqual({ error: 'not_approval_task' });
+
+    const terminalTask: Task = { ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } };
+    const terminal = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [terminalTask]);
+    (terminal.deps.taskService as any).decideApproval = mock(async () => { throw new Error('task_already_decided'); });
+    expect((await decide(terminal.app, terminal.cookie, { decision: 'approved' })).status).toBe(409);
+
+    const coreRecheck = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [APPROVAL_TASK]);
+    (coreRecheck.deps.taskService as any).decideApproval = mock(async () => { throw new Error('approval_reviewer_required'); });
+    const rechecked = await decide(coreRecheck.app, coreRecheck.cookie, { decision: 'approved' });
+    expect(rechecked.status).toBe(403);
+    expect(await rechecked.json()).toEqual({ error: 'forbidden: approval reviewer required' });
+  });
+
+  test('the exact served renderer keeps action text inert and posts an approval decision', async () => {
+    const { state, calls, announced, renderer, counts } = makeApprovalActionHarness();
+    const malicious: Task = {
+      ...APPROVAL_TASK,
+      approval: {
+        ...APPROVAL_TASK.approval!,
+        action: {
+          type: 'deployment', name: '<img src=x onerror=alert(1)>',
+          arguments: { html: '<img src=x onerror=alert(1)>', flags: ['safe', 'dry-run'] },
+        },
+      },
+    };
+    const section = renderer.renderApprovalAction(malicious)!;
+    expect(renderer.approvalCanDecide(malicious)).toBe(true);
+    expect(leafTexts(section)).toContain('Name: <img src=x onerror=alert(1)>');
+    expect(leafTexts(section)).toContain(JSON.stringify(malicious.approval!.action.arguments));
+    expect(Object.hasOwn(section, 'innerHTML')).toBe(false);
+    const buttons = section.childNodes.filter((node) => node.tagName === 'BUTTON');
+    expect(buttons.map((button) => ({ type: button.type, label: button.attributes['aria-label'], text: button.textContent }))).toEqual([
+      { type: 'button', label: 'Approve action', text: 'Approve' },
+      { type: 'button', label: 'Reject action', text: 'Reject' },
+    ]);
+    buttons[0]!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      path: `/ui/api/tasks/${APPROVAL_TASK.id}/decision`,
+      init: {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }),
+      },
+    });
+    expect(state.taskDetail).toEqual({ ...APPROVAL_TASK, state: 'completed', result: { decision: 'approved' } });
+    expect(state.taskDetailStatus).toBe('ready');
+    expect(counts()).toEqual({ renderCount: 1, loadCount: 1 });
+    expect(announced).toEqual(['Approval recorded.']);
+  });
+
+  test('the exact served admin detail hides generic actions for approval but retains them for ordinary tasks', () => {
+    const approval = makeAdminTaskDetailHarness(APPROVAL_TASK);
+    approval.renderTaskDetail();
+    expect(leafTexts(approval.tasksDetailContent)).toContain('Approve');
+    expect(leafTexts(approval.tasksDetailContent)).toContain('Reject');
+    expect(approval.tasksDetailContent.childNodes.some((node) => node.className === 'task-admin-actions')).toBe(false);
+
+    const ordinary = makeAdminTaskDetailHarness(TASK_A);
+    ordinary.renderTaskDetail();
+    expect(ordinary.tasksDetailContent.childNodes.some((node) => node.className === 'task-admin-actions')).toBe(true);
+    expect(leafTexts(ordinary.tasksDetailContent)).toEqual(expect.arrayContaining(['Remind', 'Close']));
+  });
+});
 
 describe('UI task overdue presentation (PR4 dual channel)', () => {
   test('overdue row has is-overdue class and Overdue text; on-time row has neither', () => {
@@ -750,4 +1145,3 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
   });
 });
-

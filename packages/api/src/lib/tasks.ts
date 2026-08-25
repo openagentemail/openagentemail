@@ -4,10 +4,11 @@
  * store and the task view can always be rebuilt after an API restart.
  */
 
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { simpleParser } from 'mailparser';
 import type { FetchMessageObject } from 'imapflow';
 import { config } from './config.ts';
+import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
@@ -57,8 +58,33 @@ const PERIOD_MS: Record<TaskBoardPeriod, number> = {
 /** 催办不是状态转移；IMAP 重建时必须能与 working 区分。 */
 export type TaskEventKind = 'state' | 'reminder';
 
+export type ApprovalAction = {
+  type: string;
+  name: string;
+  arguments: unknown;
+};
+
+export type ApprovalSnapshot = {
+  action: ApprovalAction;
+  reviewer: string;
+  expiresAt: string;
+  digest: string;
+};
+
+export type ApprovalEvent =
+  | { type: 'request'; snapshot: ApprovalSnapshot }
+  | { type: 'decision'; digest: string; decision: 'approved' | 'rejected' }
+  | { type: 'expired'; digest: string };
+
+type ApprovalEventPayload =
+  | { event: 'request'; digest: string; reviewer: string; expiresAt: string }
+  | { event: 'decision'; digest: string; decision: 'approved' | 'rejected'; reviewer: string; decidedAt: string }
+  | { event: 'expired'; digest: string; expiredAt: string };
+
 const TASK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RESULT_MARKER = '<!-- openagent.email task result -->';
+const APPROVAL_MARKER = '<!-- openagent.email approval snapshot -->';
+const APPROVAL_DIGEST_RE = /^[a-f0-9]{64}$/;
 const sleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 export type TaskMessage = {
@@ -73,6 +99,7 @@ export type TaskMessage = {
   /** 缺省为 state 转移；reminder 不改变 task.state。 */
   kind?: TaskEventKind;
   idempotencyKey?: string;
+  approval?: ApprovalEvent;
 };
 
 export type Task = {
@@ -85,7 +112,15 @@ export type Task = {
   updatedAt: string;
   messages: TaskMessage[];
   result?: unknown;
+  kind?: 'approval';
+  approval?: ApprovalSnapshot;
 };
+
+export type ApprovalTask = Task & { kind: 'approval'; approval: ApprovalSnapshot };
+
+function isApprovalTask(task: Task): task is ApprovalTask {
+  return task.kind === 'approval' && !!task.approval;
+}
 
 export type RawTaskMessage = {
   uid: number;
@@ -98,6 +133,7 @@ export type RawTaskMessage = {
   result?: unknown;
   kind?: TaskEventKind;
   idempotencyKey?: string;
+  approval?: ApprovalEvent;
 };
 
 export type CreateTaskInput = {
@@ -105,6 +141,15 @@ export type CreateTaskInput = {
   to: string;
   subject: string;
   body: string;
+};
+
+export type CreateApprovalTaskInput = {
+  from: string;
+  to: string;
+  subject: string;
+  body?: string;
+  action: ApprovalAction;
+  expiresAt: string;
 };
 
 export type UpdateTaskInput = {
@@ -144,6 +189,8 @@ export type TaskService = {
   create(input: CreateTaskInput): Promise<Task>;
   list(state?: TaskState): Promise<Task[]>;
   listBoard(query: TaskBoardQuery, viewer: TaskBoardViewer): Promise<TaskBoardPage>;
+  /** Raw durable/queued view for route authorization; never materializes expiry. */
+  getForAuthorization?(id: string): Promise<Task | null>;
   get(id: string): Promise<Task | null>;
   update(input: UpdateTaskInput): Promise<Task | null>;
   reply(input: { id: string; from: string; body: string }): Promise<Task>;
@@ -154,6 +201,9 @@ export type TaskService = {
     idempotencyKey?: string;
   }): Promise<Task>;
   close(input: { id: string; from: string; reason: string }): Promise<Task>;
+  /** Additive #55 core. REST decision routing remains a later round. */
+  createApproval?(input: CreateApprovalTaskInput): Promise<ApprovalTask>;
+  decideApproval?(input: { id: string; from: string; decision: 'approved' | 'rejected' }): Promise<ApprovalTask>;
   waitForTerminal(id: string, address: string, timeoutSec?: number): Promise<Task | null>;
 };
 
@@ -170,11 +220,120 @@ export function canAdvanceTask(current: TaskState): boolean {
   return !TERMINAL_TASK_STATES.includes(current);
 }
 
+/** JSON canonicalization used by the approval digest recipe: recursively sort
+ * object keys, preserve array order, and serialize without whitespace. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('invalid_approval_action');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error('invalid_approval_action');
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+function normalizedApprovalAction(value: unknown): ApprovalAction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_approval_action');
+  const input = value as Record<string, unknown>;
+  if (
+    Object.keys(input).length !== 3
+    || typeof input.type !== 'string' || !input.type
+    || typeof input.name !== 'string' || !input.name
+    || !Object.prototype.hasOwnProperty.call(input, 'arguments')
+  ) throw new Error('invalid_approval_action');
+  // Parse the canonical form back so callers cannot mutate the persisted
+  // snapshot after creation and so only JSON values cross the event boundary.
+  return JSON.parse(canonicalJson({ type: input.type, name: input.name, arguments: input.arguments })) as ApprovalAction;
+}
+
+/** Reproducible recipe: SHA-256 of canonical UTF-8 JSON, lower-case hex. */
+export function canonicalApprovalAction(action: unknown): string {
+  return canonicalJson(normalizedApprovalAction(action));
+}
+
+export function approvalActionDigest(action: unknown): string {
+  return createHash('sha256').update(canonicalApprovalAction(action), 'utf8').digest('hex');
+}
+
+function validApprovalExpiry(expiresAt: string, now = nowMs()): boolean {
+  const time = Date.parse(expiresAt);
+  return Number.isFinite(time) && time > now;
+}
+
+export function isApprovalExpired(expiresAt: string, now = nowMs()): boolean {
+  const time = Date.parse(expiresAt);
+  return !Number.isFinite(time) || now >= time;
+}
+
 /** A private signature makes a copied client-side task header non-authoritative. */
 function taskStamp(id: string, state: TaskState, from: string, to: string): string {
   return createHmac('sha256', config.taskSigningSecret)
     .update(`${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}`)
     .digest('base64url');
+}
+
+function approvalStamp(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  payload: string,
+): string {
+  return createHmac('sha256', config.taskSigningSecret)
+    .update(`approval-event-v1\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}\n${payload}`)
+    .digest('base64url');
+}
+
+/** One canonical, domain-separated signed payload for every authoritative
+ * approval event. Headers carry base64url so the RFC field itself is inert. */
+function canonicalApprovalEventPayload(payload: ApprovalEventPayload): string {
+  return canonicalJson(payload);
+}
+
+function approvalPayloadHeader(payload: string): string {
+  return Buffer.from(payload, 'utf8').toString('base64url');
+}
+
+function readApprovalPayloadHeader(value: unknown): { payload: ApprovalEventPayload; canonical: string } | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const bytes = Buffer.from(value, 'base64url');
+    if (!bytes.length || bytes.toString('base64url') !== value) return null;
+    const decoded = bytes.toString('utf8');
+    const parsed = JSON.parse(decoded) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.event !== 'string') return null;
+    let payload: ApprovalEventPayload;
+    if (
+      parsed.event === 'request'
+      && typeof parsed.digest === 'string' && APPROVAL_DIGEST_RE.test(parsed.digest)
+      && typeof parsed.reviewer === 'string' && typeof parsed.expiresAt === 'string'
+      && Number.isFinite(Date.parse(parsed.expiresAt))
+      && Object.keys(parsed).length === 4
+    ) payload = { event: 'request', digest: parsed.digest, reviewer: parsed.reviewer.toLowerCase(), expiresAt: parsed.expiresAt };
+    else if (
+      parsed.event === 'decision'
+      && typeof parsed.digest === 'string' && APPROVAL_DIGEST_RE.test(parsed.digest)
+      && (parsed.decision === 'approved' || parsed.decision === 'rejected')
+      && typeof parsed.reviewer === 'string' && typeof parsed.decidedAt === 'string'
+      && Number.isFinite(Date.parse(parsed.decidedAt))
+      && Object.keys(parsed).length === 5
+    ) payload = { event: 'decision', digest: parsed.digest, decision: parsed.decision, reviewer: parsed.reviewer.toLowerCase(), decidedAt: parsed.decidedAt };
+    else if (
+      parsed.event === 'expired'
+      && typeof parsed.digest === 'string' && APPROVAL_DIGEST_RE.test(parsed.digest)
+      && typeof parsed.expiredAt === 'string' && Number.isFinite(Date.parse(parsed.expiredAt))
+      && Object.keys(parsed).length === 3
+    ) payload = { event: 'expired', digest: parsed.digest, expiredAt: parsed.expiredAt };
+    else return null;
+    const canonical = canonicalApprovalEventPayload(payload);
+    return decoded === canonical ? { payload, canonical } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 催办 stamp 与状态转移分离，避免伪装成 working。 */
@@ -189,6 +348,25 @@ function taskHeaders(id: string, state: TaskState, from: string, to: string): Re
     'X-OA-Task': id,
     'X-OA-Task-State': state,
     'X-OA-Task-Stamp': taskStamp(id, state, from, to),
+  };
+}
+
+function approvalHeaders(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  payload: ApprovalEventPayload,
+): Record<string, string> {
+  const canonical = canonicalApprovalEventPayload(payload);
+  return {
+    'X-OA-Task': id,
+    'X-OA-Task-State': state,
+    'X-OA-Task-Approval-Event': payload.event,
+    'X-OA-Task-Approval-Digest': payload.digest,
+    ...(payload.event === 'decision' ? { 'X-OA-Task-Approval-Decision': payload.decision } : {}),
+    'X-OA-Task-Approval-Payload': approvalPayloadHeader(canonical),
+    'X-OA-Task-Stamp': approvalStamp(id, state, from, to, canonical),
   };
 }
 
@@ -218,6 +396,61 @@ function taskBody(body: string, result: unknown): string {
   return [plain, resultBlock(result)].filter(Boolean).join('\n\n');
 }
 
+function approvalRequestBody(body: string | undefined, snapshot: ApprovalSnapshot): string {
+  const plain = (body ?? '').trim();
+  const block = `${APPROVAL_MARKER}\n\`\`\`json\n${JSON.stringify(snapshot)}\n\`\`\``;
+  return [plain, block].filter(Boolean).join('\n\n');
+}
+
+function readApprovalSnapshot(body: string): ApprovalSnapshot | null {
+  // The marker is a generated frame delimiter, not an arbitrary payload
+  // token: action JSON may safely contain its literal spelling.
+  const matches = [...body.matchAll(/(?:^|\n)<!-- openagent\.email approval snapshot -->\n```json\s*\n([\s\S]*?)\n```/g)];
+  const match = matches.at(-1);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).length !== 4
+      || !Object.prototype.hasOwnProperty.call(parsed, 'action')
+      || typeof parsed.reviewer !== 'string'
+      || typeof parsed.expiresAt !== 'string'
+      || typeof parsed.digest !== 'string'
+      || !APPROVAL_DIGEST_RE.test(parsed.digest)
+    ) return null;
+    const action = normalizedApprovalAction(parsed.action);
+    if (approvalActionDigest(action) !== parsed.digest || !Number.isFinite(Date.parse(parsed.expiresAt))) return null;
+    return { action, reviewer: parsed.reviewer.toLowerCase(), expiresAt: parsed.expiresAt, digest: parsed.digest };
+  } catch {
+    return null;
+  }
+}
+
+function readApprovalDecision(result: unknown): { decision: 'approved' | 'rejected'; digest: string; reviewer: string; decidedAt: string } | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const value = result as Record<string, unknown>;
+  if (
+    Object.keys(value).length !== 4
+    || (value.decision !== 'approved' && value.decision !== 'rejected')
+    || typeof value.digest !== 'string' || !APPROVAL_DIGEST_RE.test(value.digest)
+    || typeof value.reviewer !== 'string' || typeof value.decidedAt !== 'string'
+    || !Number.isFinite(Date.parse(value.decidedAt))
+  ) return null;
+  return { decision: value.decision, digest: value.digest, reviewer: value.reviewer.toLowerCase(), decidedAt: value.decidedAt };
+}
+
+function readApprovalExpiry(result: unknown): { decision: 'expired'; digest: string; expiredAt: string } | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const value = result as Record<string, unknown>;
+  if (
+    Object.keys(value).length !== 3
+    || value.decision !== 'expired'
+    || typeof value.digest !== 'string' || !APPROVAL_DIGEST_RE.test(value.digest)
+    || typeof value.expiredAt !== 'string' || !Number.isFinite(Date.parse(value.expiredAt))
+  ) return null;
+  return { decision: 'expired', digest: value.digest, expiredAt: value.expiredAt };
+}
+
 function isStampedTaskMessage(
   id: string,
   state: TaskState,
@@ -241,7 +474,78 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
   const stamp = parsed.headers.get('x-oa-task-stamp');
   const eventRaw = parsed.headers.get('x-oa-task-event');
   const idempotencyRaw = parsed.headers.get('x-oa-task-idempotency-key');
+  const approvalEventRaw = parsed.headers.get('x-oa-task-approval-event');
+  const approvalDigestRaw = parsed.headers.get('x-oa-task-approval-digest');
+  const approvalDecisionRaw = parsed.headers.get('x-oa-task-approval-decision');
+  const approvalPayloadRaw = parsed.headers.get('x-oa-task-approval-payload');
   if (headerId !== id || typeof headerState !== 'string' || !isTaskState(headerState)) return null;
+  const body = (parsed.text ?? '').trim();
+  const result = readResult(body);
+  if (typeof approvalEventRaw === 'string') {
+    if (
+      (approvalEventRaw !== 'request' && approvalEventRaw !== 'decision' && approvalEventRaw !== 'expired')
+      || typeof approvalDigestRaw !== 'string' || !APPROVAL_DIGEST_RE.test(approvalDigestRaw)
+      || typeof stamp !== 'string'
+    ) return null;
+    const payloadHeader = readApprovalPayloadHeader(approvalPayloadRaw);
+    if (!payloadHeader || payloadHeader.payload.event !== approvalEventRaw || payloadHeader.payload.digest !== approvalDigestRaw) return null;
+    const approvalPayload = payloadHeader.payload;
+    const decision = approvalDecisionRaw === 'approved' || approvalDecisionRaw === 'rejected' ? approvalDecisionRaw : undefined;
+    if (
+      (approvalPayload.event === 'decision' && (decision === undefined || approvalPayload.decision !== decision))
+      || (approvalPayload.event !== 'decision' && approvalDecisionRaw !== undefined)
+      || stamp !== approvalStamp(id, headerState, from, to, payloadHeader.canonical)
+    ) return null;
+    let approval: ApprovalEvent;
+    if (approvalPayload.event === 'request') {
+      const snapshot = readApprovalSnapshot(body);
+      if (
+        headerState !== 'input-required'
+        || decision !== undefined
+        || !snapshot
+        || snapshot.digest !== approvalDigestRaw
+        || snapshot.reviewer !== approvalPayload.reviewer
+        || snapshot.expiresAt !== approvalPayload.expiresAt
+        || snapshot.reviewer !== to
+        || snapshot.reviewer === from
+      ) return null;
+      approval = { type: 'request', snapshot };
+    } else if (approvalPayload.event === 'decision') {
+      const resultDecision = readApprovalDecision(result);
+      if (
+        headerState !== 'completed'
+        || !decision
+        || !resultDecision
+        || resultDecision.decision !== decision
+        || resultDecision.digest !== approvalDigestRaw
+        || resultDecision.reviewer !== approvalPayload.reviewer
+        || resultDecision.decidedAt !== approvalPayload.decidedAt
+        || resultDecision.reviewer !== from
+      ) return null;
+      approval = { type: 'decision', digest: approvalDigestRaw, decision };
+    } else {
+      const resultExpiry = readApprovalExpiry(result);
+      if (
+        headerState !== 'failed'
+        || decision !== undefined
+        || !resultExpiry
+        || resultExpiry.digest !== approvalDigestRaw
+        || resultExpiry.expiredAt !== approvalPayload.expiredAt
+      ) return null;
+      approval = { type: 'expired', digest: approvalDigestRaw };
+    }
+    return {
+      uid: message.uid,
+      from,
+      to,
+      subject: parsed.subject ?? message.envelope.subject ?? '',
+      date: new Date(message.internalDate ?? message.envelope.date ?? new Date(0)).toISOString(),
+      state: headerState,
+      body,
+      ...(approvalPayload.event !== 'request' && result !== undefined ? { result } : {}),
+      approval,
+    };
+  }
   const isReminder = eventRaw === 'reminder';
   if (isReminder) {
     if (typeof stamp !== 'string' || stamp !== reminderStamp(id, headerState, from, to)) return null;
@@ -249,7 +553,6 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
     return null;
   }
 
-  const body = (parsed.text ?? '').trim();
   return {
     uid: message.uid,
     from,
@@ -258,7 +561,7 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
     date: new Date(message.internalDate ?? message.envelope.date ?? new Date(0)).toISOString(),
     state: headerState,
     body,
-    ...(readResult(body) !== undefined ? { result: readResult(body) } : {}),
+    ...(result !== undefined ? { result } : {}),
     ...(isReminder ? { kind: 'reminder' as const } : {}),
     ...(typeof idempotencyRaw === 'string' && idempotencyRaw ? { idempotencyKey: idempotencyRaw } : {}),
   };
@@ -273,6 +576,46 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const participants = new Set([first.from, first.to]);
   if (participants.size !== 2) return null;
   if (ordered.some((message) => !participants.has(message.from) || !participants.has(message.to))) return null;
+  const request = first.approval;
+  if (request?.type === 'request') {
+    const snapshot = request.snapshot;
+    if (
+      first.state !== 'input-required'
+      || snapshot.reviewer !== first.to
+      || snapshot.reviewer === first.from
+      || approvalActionDigest(snapshot.action) !== snapshot.digest
+      || !Number.isFinite(Date.parse(snapshot.expiresAt))
+      || ordered.some((message) => {
+        const event = message.approval;
+        if (!event) return true;
+        if (event.type === 'request') return message !== first;
+        return event.digest !== snapshot.digest;
+      })
+    ) return null;
+    // Only parser-validated approval events reach this point. Select the
+    // mailbox-first terminal decision deterministically even if a duplicate
+    // or a later validly stamped conflicting event exists.
+    const terminal = ordered.find((message) =>
+      message.approval?.type === 'decision' || message.approval?.type === 'expired',
+    ) ?? first;
+    const messages = ordered.map(({ uid, ...message }) => ({ id: String(uid), ...message }));
+    return {
+      id,
+      from: first.from,
+      to: first.to,
+      subject: first.subject,
+      state: terminal.state,
+      createdAt: first.date,
+      updatedAt: boardUpdatedAt(ordered, terminal),
+      messages,
+      ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+      kind: 'approval',
+      approval: snapshot,
+    };
+  }
+  // An approval decision without the authenticated immutable request is never
+  // allowed to masquerade as an ordinary task thread.
+  if (ordered.some((message) => message.approval)) return null;
   // Once an API-stamped terminal event exists it is immutable. A copied old
   // (but validly signed) submitted/working mail can appear again in IMAP, but
   // it cannot reopen the completed/failed task. Before that point normal
@@ -353,7 +696,9 @@ async function findTaskMessages(id: string): Promise<RawTaskMessage[]> {
   });
 }
 
-export async function getTask(id: string): Promise<Task | null> {
+/** Raw durable/queued snapshot. Lock-holding writers must use this rather
+ * than public getTask(), whose approval read path may itself materialize. */
+async function getTaskSnapshot(id: string): Promise<Task | null> {
   if (!isTaskId(id)) return null;
   // 单测注入内存目录，避免并发 reply / IMAP 滞后 reminder 回归打真 IMAP。
   const raw = getTaskForTests
@@ -361,6 +706,21 @@ export async function getTask(id: string): Promise<Task | null> {
     : taskFromMessages(id, await findTaskMessages(id));
   // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic 事件并进读路径。
   return raw ? mergeQueuedEvents(raw) : null;
+}
+
+/** Service detail reads lazily make an expired approval terminal. There is no
+ * scheduler or list sweep: only the next detail/wait/decision observes it. */
+async function materializeApprovalExpiry(task: Task | null): Promise<Task | null> {
+  if (!task || !isApprovalTask(task) || task.state !== 'input-required' || !isApprovalExpired(task.approval.expiresAt)) return task;
+  return withTaskLock(task.id, async () => {
+    const current = await getTaskSnapshot(task.id);
+    if (!current || !isApprovalTask(current) || current.state !== 'input-required' || !isApprovalExpired(current.approval.expiresAt)) return current;
+    return materializeApprovalExpiryUnlocked(current);
+  });
+}
+
+export async function getTask(id: string): Promise<Task | null> {
+  return materializeApprovalExpiry(await getTaskSnapshot(id));
 }
 
 export async function listTasks(state?: TaskState): Promise<Task[]> {
@@ -420,6 +780,58 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return syntheticTask(input, id, messageId);
 }
 
+function knownManagedIdentity(address: string): boolean {
+  return address.split('@')[1]?.toLowerCase() === config.domain && !!findIdentity(address);
+}
+
+/** Creates the only mutable approval request event. The action is recorded,
+ * never executed; its canonical snapshot is immutable after this point. */
+export async function createApprovalTask(input: CreateApprovalTaskInput): Promise<ApprovalTask> {
+  const from = input.from.toLowerCase();
+  const to = input.to.toLowerCase();
+  if (from === to) throw new Error('approval_participants_must_differ');
+  if (!knownManagedIdentity(from) || !knownManagedIdentity(to)) throw new Error('approval_identity_required');
+  if (!validApprovalExpiry(input.expiresAt)) throw new Error('invalid_approval_expiry');
+  const action = normalizedApprovalAction(input.action);
+  const digest = approvalActionDigest(action);
+  const snapshot: ApprovalSnapshot = { action, reviewer: to, expiresAt: input.expiresAt, digest };
+  const id = randomUUID();
+  const text = approvalRequestBody(input.body, snapshot);
+  const { messageId } = await deliverMail({
+    from,
+    to: [to],
+    subject: input.subject,
+    text,
+    headers: approvalHeaders(id, 'input-required', from, to, {
+      event: 'request', digest, reviewer: to, expiresAt: input.expiresAt,
+    }),
+  });
+  void notifyTrustedAgentDelivery(to);
+  invalidateTaskListCache();
+  const now = new Date(nowMs()).toISOString();
+  return {
+    id,
+    from,
+    to,
+    subject: input.subject,
+    state: 'input-required',
+    createdAt: now,
+    updatedAt: now,
+    messages: [{
+      id: messageId,
+      from,
+      to,
+      subject: input.subject,
+      date: now,
+      state: 'input-required',
+      body: text,
+      approval: { type: 'request', snapshot },
+    }],
+    kind: 'approval',
+    approval: snapshot,
+  };
+}
+
 const taskLocks = new Map<string, Promise<void>>();
 let nowFn: () => number = () => Date.now();
 let listCache: { at: number; tasks: Task[] } | null = null;
@@ -475,6 +887,15 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
       );
     });
   }
+  const queuedApproval = queued.message.approval;
+  if (queuedApproval?.type === 'decision' || queuedApproval?.type === 'expired') {
+    return task.messages.some((message) => {
+      const indexed = message.approval;
+      if (!indexed || indexed.type !== queuedApproval.type || indexed.digest !== queuedApproval.digest) return false;
+      if (indexed.type === 'decision' && (queuedApproval.type !== 'decision' || indexed.decision !== queuedApproval.decision)) return false;
+      return message.state === queued.message.state;
+    });
+  }
   return (
     task.messages.some((message) => {
       if (message.kind === 'reminder' || message.state !== queued.message.state) return false;
@@ -511,7 +932,8 @@ function mergeQueuedEvents(task: Task): Task {
   if (!pending || pending.length === 0) return task;
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
-    if (now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
+    const approvalTerminal = row.message.approval?.type === 'decision' || row.message.approval?.type === 'expired';
+    if (!approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
     return !eventIsIndexed(task, row);
   });
   if (stillLagging.length === 0) {
@@ -562,8 +984,9 @@ async function withTaskLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
  *（同 id 会自死锁）。调用方负责在锁内完成前置状态断言。
  */
 async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Promise<Task | null> {
-  const current = existing ?? await getTask(input.id);
+  const current = existing ?? await getTaskSnapshot(input.id);
   if (!current) return null;
+  if (isApprovalTask(current)) throw new Error('approval_decision_required');
   if (!taskParticipants(current).has(input.from)) throw new Error('task_participant_required');
   if (!canAdvanceTask(current.state)) throw new Error('task_already_terminal');
 
@@ -591,7 +1014,7 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
     ...(input.result !== undefined ? { result: input.result } : {}),
   };
   const queued = { message: eventMessage, sentAt: Date.parse(now) || nowMs() };
-  const persisted = await getTask(current.id);
+  const persisted = await getTaskSnapshot(current.id);
   // IMAP 未索引时不得把旧 state 当真；把 synthetic 转移排进 overlay，后续读才能拒冲突。
   if (persisted && eventIsIndexed(persisted, queued)) return persisted;
   queueEventUntilIndexed(current.id, eventMessage);
@@ -606,6 +1029,109 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
 
 export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
   return withTaskLock(input.id, async () => updateTaskUnlocked(input));
+}
+
+async function writeApprovalTerminal(
+  current: ApprovalTask,
+  input: { from: string; state: 'completed' | 'failed'; event: 'decision' | 'expired'; decision?: 'approved' | 'rejected'; result: Record<string, unknown> },
+): Promise<ApprovalTask> {
+  const to = input.from === current.from ? current.to : current.from;
+  const payload: ApprovalEventPayload = input.event === 'decision'
+    ? (() => {
+      const result = readApprovalDecision(input.result);
+      if (!result || !input.decision || result.digest !== current.approval.digest || result.decision !== input.decision || result.reviewer !== input.from.toLowerCase()) {
+        throw new Error('invalid_approval_decision_event');
+      }
+      return {
+        event: 'decision', digest: result.digest, decision: result.decision,
+        reviewer: result.reviewer, decidedAt: result.decidedAt,
+      };
+    })()
+    : (() => {
+      const result = readApprovalExpiry(input.result);
+      if (!result || result.digest !== current.approval.digest) throw new Error('invalid_approval_expiry_event');
+      return { event: 'expired', digest: result.digest, expiredAt: result.expiredAt };
+    })();
+  const text = taskBody('', input.result);
+  const { messageId } = await deliverMail({
+    from: input.from,
+    to: [to],
+    subject: current.subject,
+    text,
+    headers: approvalHeaders(current.id, input.state, input.from, to, payload),
+  });
+  void notifyTrustedAgentDelivery(to);
+  invalidateTaskListCache();
+  const date = new Date(nowMs()).toISOString();
+  const eventMessage: TaskMessage = {
+    id: messageId,
+    from: input.from,
+    to,
+    subject: current.subject,
+    date,
+    state: input.state,
+    body: text,
+    result: input.result,
+    approval: input.event === 'decision'
+      ? { type: 'decision', digest: current.approval.digest, decision: input.decision! }
+      : { type: 'expired', digest: current.approval.digest },
+  };
+  const queued = { message: eventMessage, sentAt: Date.parse(date) || nowMs() };
+  const persisted = await getTaskSnapshot(current.id);
+  if (persisted && eventIsIndexed(persisted, queued) && isApprovalTask(persisted)) return persisted;
+  queueEventUntilIndexed(current.id, eventMessage);
+  return {
+    ...current,
+    state: input.state,
+    updatedAt: date,
+    messages: [...current.messages, eventMessage],
+    result: input.result,
+  };
+}
+
+/** Must run under the existing task lock. Public detail reads and decision
+ * both call this path, so an expiry can produce at most one signed event. */
+async function materializeApprovalExpiryUnlocked(current: ApprovalTask): Promise<ApprovalTask> {
+  const expiredAt = new Date(nowMs()).toISOString();
+  return writeApprovalTerminal(current, {
+    from: current.from,
+    state: 'failed',
+    event: 'expired',
+    result: { decision: 'expired', digest: current.approval.digest, expiredAt },
+  });
+}
+
+/** The single approval decision gate. It runs entirely under the existing
+ * per-task lock and re-reads queued overlay state after waiting for the lock. */
+export async function decideApprovalTask(input: {
+  id: string;
+  from: string;
+  decision: 'approved' | 'rejected';
+}): Promise<ApprovalTask> {
+  return withTaskLock(input.id, async () => {
+    const current = await getTaskSnapshot(input.id);
+    if (!current) throw new Error('not_found');
+    if (!isApprovalTask(current)) throw new Error('not_approval_task');
+    if (current.state === 'failed' && readApprovalExpiry(current.result)?.digest === current.approval.digest) {
+      throw new Error('task_expired');
+    }
+    if (current.state === 'completed' || current.state === 'failed') throw new Error('task_already_decided');
+    if (isApprovalExpired(current.approval.expiresAt)) {
+      await materializeApprovalExpiryUnlocked(current);
+      throw new Error('task_expired');
+    }
+    if (current.state !== 'input-required') throw new Error('task_already_decided');
+    const actor = input.from.toLowerCase();
+    if (actor !== current.approval.reviewer || actor === current.from) throw new Error('approval_reviewer_required');
+    const decidedAt = new Date(nowMs()).toISOString();
+    return writeApprovalTerminal(current, {
+      from: actor,
+      state: 'completed',
+      event: 'decision',
+      decision: input.decision,
+      result: { decision: input.decision, digest: current.approval.digest, reviewer: actor, decidedAt },
+    });
+  });
 }
 
 export function taskParticipants(task: Task): Set<string> {
@@ -654,6 +1180,7 @@ export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
     updatedAt: task.updatedAt,
     messages: task.messages,
     ...(task.result !== undefined ? { result: task.result } : {}),
+    ...(task.kind === 'approval' && task.approval ? { kind: 'approval' as const, approval: task.approval } : {}),
     ...taskOverdue(task, now),
   };
 }
@@ -751,7 +1278,7 @@ export async function replyTask(input: { id: string; from: string; body: string 
   // 状态检查与 working 写入必须在同一把 per-task 锁内，否则并发双 reply
   // 都能过锁外 input-required 检，随后 updateTask 只拦 terminal，会写出第二条 working。
   return withTaskLock(input.id, async () => {
-    const existing = await getTask(input.id);
+    const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (existing.state !== 'input-required') throw new Error('task_not_input_required');
     const updated = await updateTaskUnlocked({
@@ -772,9 +1299,10 @@ export async function remindTask(input: {
   idempotencyKey?: string;
 }): Promise<Task> {
   return withTaskLock(input.id, async () => {
-    const existing = await getTask(input.id);
+    const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (!taskParticipants(existing).has(input.from)) throw new Error('task_participant_required');
+    if (existing.kind === 'approval') throw new Error('approval_decision_required');
     if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
     if (input.idempotencyKey) {
       const replay = existing.messages.find(
@@ -816,7 +1344,7 @@ export async function remindTask(input: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     };
     const queued = { message: reminderMessage, sentAt: Date.parse(reminderMessage.date) || nowMs() };
-    const persisted = await getTask(existing.id);
+    const persisted = await getTaskSnapshot(existing.id);
     // 仅当 IMAP 已能看到刚发的这条 reminder 才当真持久化；否则回 synthetic，
     // 并把它并进读路径，避免同 key 重试/15s 冷却窗口读到催办前的旧 task。
     if (persisted && eventIsIndexed(persisted, queued)) return persisted;
@@ -832,7 +1360,7 @@ export async function remindTask(input: {
 export async function closeTask(input: { id: string; from: string; reason: string }): Promise<Task> {
   // terminal 预检与 failed 写入同一把锁，避免与并发 reply 交叉各写一封。
   return withTaskLock(input.id, async () => {
-    const existing = await getTask(input.id);
+    const existing = await getTaskSnapshot(input.id);
     if (!existing) throw new Error('not_found');
     if (!canAdvanceTask(existing.state)) throw new Error('task_already_terminal');
     const updated = await updateTaskUnlocked({
@@ -899,14 +1427,125 @@ export async function waitForTaskTerminal(
   return waitForTaskTerminalWith(id, address, timeoutSec);
 }
 
+function stampedApprovalSource(input: {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  headers: Record<string, string>;
+}): string {
+  return [
+    `From: ${input.from}`,
+    `To: ${input.to}`,
+    `Subject: ${input.subject}`,
+    ...Object.entries(input.headers).map(([name, value]) => `${name}: ${value}`),
+    '',
+    input.text,
+  ].join('\r\n');
+}
+
+/** @internal Test-only access to the production parser. No alternate parser. */
+export async function parseStampedTaskMessageForTests(input: {
+  id: string;
+  uid: number;
+  source: string;
+  internalDate: string;
+}): Promise<RawTaskMessage | null> {
+  const parsed = await simpleParser(input.source);
+  const addresses = (value: unknown) => {
+    const values = Array.isArray(value) ? value : [value];
+    return values.flatMap((row) => {
+      const entries = (row as { value?: Array<{ address?: string }> } | undefined)?.value ?? [];
+      return entries.map((entry) => ({ address: entry.address ?? undefined }));
+    });
+  };
+  return parseTaskMessage({
+    uid: input.uid,
+    source: Buffer.from(input.source),
+    envelope: {
+      from: addresses(parsed.from),
+      to: addresses(parsed.to),
+      subject: parsed.subject ?? undefined,
+    },
+    internalDate: new Date(input.internalDate),
+  } as FetchMessageObject, input.id);
+}
+
+/** Narrow watcher bridge: it deliberately returns only parser-authenticated
+ * approval event kind, never an action/body snapshot. */
+export async function approvalEventForWatcher(message: FetchMessageObject): Promise<ApprovalEvent | null> {
+  if (!message.source || !message.envelope) return null;
+  try {
+    const parsed = await simpleParser(message.source);
+    const id = parsed.headers.get('x-oa-task');
+    if (typeof id !== 'string' || !isTaskId(id)) return null;
+    return (await parseTaskMessage(message, id))?.approval ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** @internal Test-only encoder which delegates to the production request body
+ * and approval HMAC header construction. */
+export function encodeStampedApprovalRequestForTests(input: {
+  id: string;
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  action: ApprovalAction;
+  expiresAt: string;
+}): string {
+  const action = normalizedApprovalAction(input.action);
+  const digest = approvalActionDigest(action);
+  const snapshot: ApprovalSnapshot = { action, reviewer: input.to.toLowerCase(), expiresAt: input.expiresAt, digest };
+  return stampedApprovalSource({
+    from: input.from,
+    to: input.to,
+    subject: input.subject,
+    text: approvalRequestBody(input.body, snapshot),
+    headers: approvalHeaders(input.id, 'input-required', input.from, input.to, {
+      event: 'request', digest, reviewer: input.to.toLowerCase(), expiresAt: input.expiresAt,
+    }),
+  });
+}
+
+/** @internal Test-only encoder which delegates to the production decision
+ * result and approval HMAC header construction. */
+export function encodeStampedApprovalDecisionForTests(input: {
+  id: string;
+  from: string;
+  to: string;
+  subject: string;
+  digest: string;
+  decision: 'approved' | 'rejected';
+  decidedAt: string;
+}): string {
+  if (!APPROVAL_DIGEST_RE.test(input.digest)) throw new Error('invalid_approval_digest');
+  const result = { decision: input.decision, digest: input.digest, reviewer: input.from.toLowerCase(), decidedAt: input.decidedAt };
+  return stampedApprovalSource({
+    from: input.from,
+    to: input.to,
+    subject: input.subject,
+    text: taskBody('', result),
+    headers: approvalHeaders(input.id, 'completed', input.from, input.to, {
+      event: 'decision', digest: input.digest, decision: input.decision,
+      reviewer: input.from.toLowerCase(), decidedAt: input.decidedAt,
+    }),
+  });
+}
+
 export const taskService: TaskService = {
   create: createTask,
+  createApproval: createApprovalTask,
   list: listTasks,
   listBoard: listTaskBoard,
+  getForAuthorization: getTaskSnapshot,
   get: getTask,
   update: updateTask,
   reply: replyTask,
   remind: remindTask,
   close: closeTask,
+  decideApproval: decideApprovalTask,
   waitForTerminal: waitForTaskTerminal,
 };

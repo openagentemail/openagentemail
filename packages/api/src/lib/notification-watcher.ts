@@ -38,6 +38,7 @@ import {
   STRONG_OTP_CUES,
 } from './otp.ts';
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
+import { approvalEventForWatcher } from './tasks.ts';
 import { truncateUtf8Bytes } from './utf8-truncate.ts';
 
 const RECONNECT_INITIAL_MS = 2_000;
@@ -1234,6 +1235,8 @@ export async function processWatchedMessage(
   if (matched.length === 0) return;
 
   let hasOtpOrLink = false;
+  let approvalPreview: string | null = null;
+  let hasAuthenticatedApproval = false;
   const extras: MailContentExtras = {
     subject: typeof message.envelope?.subject === 'string' ? message.envelope.subject : '',
     from: formatAddressList(message.envelope?.from as Array<{ name?: string | null; address?: string | null }> | undefined),
@@ -1278,6 +1281,25 @@ export async function processWatchedMessage(
         }
       }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
+      // Header presence is only a cheap parser gate, never authentication: a
+      // forged approval header still reaches the full signed parser below.
+      const approval = parsed.headers.has('x-oa-task-approval-event')
+        ? await approvalEventForWatcher(message as FetchMessageObject)
+        : null;
+      if (approval) {
+        hasAuthenticatedApproval = true;
+        approvalPreview = approval.type === 'request'
+          ? 'Approval request recorded. Open the task dashboard to review.'
+          : approval.type === 'decision'
+            ? `Approval decision recorded: ${approval.decision}.`
+            : 'Approval expired.';
+        // A trusted approval push is intentionally metadata-only. Do not let
+        // arbitrary action arguments/body be reintroduced through OTP/links.
+        extras.preview = approvalPreview;
+        extras.codes = [];
+        extras.links = [];
+        hasOtpOrLink = false;
+      }
     } catch {
       // A malformed message is never an OTP match. `all` policy still sends a
       // payload with no message content, which is safe and useful.
@@ -1290,7 +1312,7 @@ export async function processWatchedMessage(
   // — tier 3 would otherwise truncate a long signed subject URL at the
   // metadata cap and publish an unusable partial link, even when the body
   // independently matched.
-  if (extras.subject) {
+  if (extras.subject && !approvalPreview) {
     const subjectOtp = extractOtp(extras.subject);
     hasOtpOrLink =
       hasOtpOrLink || subjectOtp.codes.length > 0 || subjectOtp.links.length > 0;
@@ -1315,7 +1337,7 @@ export async function processWatchedMessage(
       if (!extras.codes.includes(code)) extras.codes.push(code);
     }
   }
-  if (policy === 'otp' && !hasOtpOrLink) return;
+  if (policy === 'otp' && !hasOtpOrLink && !hasAuthenticatedApproval) return;
 
   const clickUrl = options.clickUrl;
   // Tier-2 metadata mask is message-level; compute at most once per mail.

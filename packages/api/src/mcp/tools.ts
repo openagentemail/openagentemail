@@ -1,5 +1,5 @@
 /**
- * 15 个 MCP 工具的注册逻辑（stdio 与 HTTP /mcp 共用唯一实现）。
+ * 16 个 MCP 工具的注册逻辑（stdio 与 HTTP /mcp 共用唯一实现）。
  * 每个工具在注册处声明 WriteGuard tier（见 lib/tool-tiers.ts）；
  * 未声明 → HTTP default deny；注册与规格表不一致 → throw。
  * stdio 不执行 tier 策略（operator 本地；REST ACL 兜底）。
@@ -177,6 +177,14 @@ export function registerOpenAgentEmailTools(
     result: z.unknown().optional(),
     kind: z.enum(["state", "reminder"]).optional(),
     idempotencyKey: z.string().optional(),
+    approval: z.union([
+      z.object({ type: z.literal('request'), snapshot: z.object({
+        action: z.object({ type: z.string(), name: z.string(), arguments: z.unknown() }),
+        reviewer: z.email(), expiresAt: z.string(), digest: z.string(),
+      }) }),
+      z.object({ type: z.literal('decision'), digest: z.string(), decision: z.enum(['approved', 'rejected']) }),
+      z.object({ type: z.literal('expired'), digest: z.string() }),
+    ]).optional(),
   });
 
   const taskOutputSchema = {
@@ -189,6 +197,11 @@ export function registerOpenAgentEmailTools(
     updatedAt: z.string(),
     messages: z.array(taskMessageSchema),
     result: z.unknown().optional(),
+    kind: z.literal('approval').optional(),
+    approval: z.object({
+      action: z.object({ type: z.string(), name: z.string(), arguments: z.unknown() }),
+      reviewer: z.email(), expiresAt: z.string(), digest: z.string(),
+    }).optional(),
   };
 
   const taskListOutputSchema = {
@@ -499,7 +512,12 @@ export function registerOpenAgentEmailTools(
       inputSchema: {
         to: z.email().describe("Managed recipient identity address"),
         subject: z.string().min(1).max(998).describe("Task subject"),
-        body: z.string().max(1_000_000).describe("Task instructions in plain text"),
+        body: z.string().max(1_000_000).optional().describe("Task instructions in plain text"),
+        kind: z.literal('approval').optional().describe('Use approval with the typed action and expiry below.'),
+        approval: z.object({
+          action: z.object({ type: z.string().min(1).max(200), name: z.string().min(1).max(200), arguments: z.unknown() }).strict(),
+          expiresAt: z.string().datetime({ offset: true }),
+        }).strict().optional(),
         wait: z
           .boolean()
           .optional()
@@ -511,7 +529,13 @@ export function registerOpenAgentEmailTools(
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
     },
-    ({ to, subject, body, wait }) => callApi(() => client.createTask(to, subject, body, wait ?? false)),
+    ({ to, subject, body, kind, approval, wait }) => callApi(() => {
+      if (kind === 'approval' && approval) {
+        return client.createApprovalTask(to, subject, approval.action, approval.expiresAt, body, wait ?? false);
+      }
+      if (kind === 'approval' || approval || body === undefined) throw new Error('approval task_create requires approval; ordinary task_create requires body');
+      return client.createTask(to, subject, body, wait ?? false);
+    }),
   );
 
   tier("task_list", "read");
@@ -569,6 +593,22 @@ export function registerOpenAgentEmailTools(
     ({ id, state, body, result }) => callApi(() => client.updateTask(id, state, body, result)),
   );
 
-  // 收尾：规格表 15 工具均须已在本次注册中 declare（declared 不预填，漏 tier() 即炸）
+  tier("task_decide", "contained");
+  server.registerTool(
+    "task_decide",
+    {
+      title: 'Decide Approval Task',
+      description: 'Approve or reject an approval task as the identity bound to this MCP token. This records a decision only; it never executes the action.',
+      inputSchema: {
+        id: z.string().uuid().describe('Approval task UUID'),
+        decision: z.enum(['approved', 'rejected']),
+      },
+      outputSchema: taskOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id, decision }) => callApi(() => client.decideTask(id, decision)),
+  );
+
+  // 收尾：规格表 16 工具均须已在本次注册中 declare（declared 不预填，漏 tier() 即炸）
   assertAllSpecTiersDeclared();
 }

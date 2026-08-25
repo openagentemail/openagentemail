@@ -22,7 +22,17 @@ const createSchema = z.object({
   from: z.string().email().optional(),
   to: z.string().email(),
   subject: z.string().min(1).max(998),
-  body: z.string().max(1_000_000),
+  body: z.string().max(1_000_000).optional(),
+  /** Additive #55 request creation; decision route stays frozen for R3. */
+  kind: z.literal('approval').optional(),
+  approval: z.object({
+    action: z.object({
+      type: z.string().min(1).max(200),
+      name: z.string().min(1).max(200),
+      arguments: z.unknown(),
+    }).strict(),
+    expiresAt: z.string().datetime({ offset: true }),
+  }).strict().optional(),
   wait: z.boolean().optional(),
 }).strict();
 
@@ -33,6 +43,11 @@ const updateSchema = z.object({
   // A task result is serialized by the API into a JSON block in the reply
   // body. It replaces attachments until v0.5 blob storage exists.
   result: z.unknown().optional(),
+}).strict();
+
+const decisionSchema = z.object({
+  from: z.string().email().optional(),
+  decision: z.enum(['approved', 'rejected']),
 }).strict();
 
 const listSchema = z.object({ state: taskStateSchema.optional() });
@@ -53,6 +68,13 @@ function actorAddress(c: Context, supplied: string | undefined): string | Respon
 function canReadTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
+}
+
+function authorizationTask(service: TaskService, id: string): Promise<Task | null> {
+  const read = service === taskService || service.getForAuthorization !== taskService.getForAuthorization
+    ? service.getForAuthorization
+    : undefined;
+  return (read ?? service.get)(id);
 }
 
 async function waitWithSlot(
@@ -103,6 +125,12 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       }
       const parsed = createSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+      if (parsed.data.kind === 'approval' && !parsed.data.approval) {
+        return c.json({ error: 'invalid_request: approval is required for approval tasks' }, 400);
+      }
+      if (parsed.data.kind !== 'approval' && (parsed.data.approval || parsed.data.body === undefined)) {
+        return c.json({ error: 'invalid_request' }, 400);
+      }
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
       const sender = known(c, from);
@@ -114,12 +142,23 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       }
 
       try {
-        const task = await service.create({
-          from,
-          to: parsed.data.to.toLowerCase(),
-          subject: parsed.data.subject,
-          body: parsed.data.body,
-        });
+        const createApproval = service.createApproval;
+        if (parsed.data.kind === 'approval' && !createApproval) throw new Error('approval_service_unavailable');
+        const task = parsed.data.kind === 'approval'
+          ? await createApproval!({
+            from,
+            to: parsed.data.to.toLowerCase(),
+            subject: parsed.data.subject,
+            ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),
+            action: parsed.data.approval!.action,
+            expiresAt: parsed.data.approval!.expiresAt,
+          })
+          : await service.create({
+            from,
+            to: parsed.data.to.toLowerCase(),
+            subject: parsed.data.subject,
+            body: parsed.data.body!,
+          });
         if (!parsed.data.wait) return c.json(task, 201);
         // `wait` deliberately has one capped server turn. Long tasks are
         // resumed by asking task_get or calling task_create(wait) again.
@@ -127,7 +166,11 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (waited instanceof Response) return waited;
         return c.json(waited ?? task, 201);
       } catch (err) {
-        console.warn('[task] create failed:', (err as Error).message);
+        const code = (err as Error).message;
+        if (code === 'invalid_approval_expiry') {
+          return c.json({ error: 'invalid_request' }, 400);
+        }
+        console.warn('[task] create failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
       }
     })
@@ -147,15 +190,61 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
       const query = getSchema.safeParse(c.req.query());
       if (!query.success) return c.json({ error: 'invalid_request', details: query.error.issues }, 400);
-      const task = await service.get(parsed.data);
+      const authorization = await authorizationTask(service, parsed.data);
+      if (!authorization) return c.json({ error: 'not_found' }, 404);
+      if (!canReadTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
+      const task = service.getForAuthorization && (service === taskService || service.getForAuthorization !== taskService.getForAuthorization)
+        ? await service.get(parsed.data)
+        : authorization;
       if (!task) return c.json({ error: 'not_found' }, 404);
-      if (!canReadTask(c, task)) return c.json({ error: 'forbidden: task participant required' }, 403);
       if (query.data.wait !== 'true') return c.json(task);
       const auth = getAuth(c);
       const address = auth.kind === 'identity' ? auth.address : task.from;
       const waited = await waitWithSlot(c, service, task, address);
       if (waited instanceof Response) return waited;
       return c.json(waited ?? task);
+    })
+    .post('/:id/decision', async (c) => {
+      const id = taskIdSchema.safeParse(c.req.param('id'));
+      if (!id.success) return c.json({ error: 'invalid_request' }, 400);
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: 'invalid_json' }, 400);
+      }
+      const parsed = decisionSchema.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+      const from = actorAddress(c, parsed.data.from);
+      if (from instanceof Response) return from;
+      const task = await authorizationTask(service, id.data);
+      if (!task) return c.json({ error: 'not_found' }, 404);
+      if (!canReadTask(c, task)) return c.json({ error: 'not_found' }, 404);
+      if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
+      // Check the stored reviewer before calling the core; the core repeats
+      // this ACL under its task lock, so neither REST nor a forged body gains
+      // authority during a concurrent transition.
+      if (from !== task.approval.reviewer) {
+        return c.json({ error: 'forbidden: approval reviewer required' }, 403);
+      }
+      try {
+        const decideApproval = service.decideApproval;
+        if (!decideApproval) throw new Error('approval_service_unavailable');
+        return c.json(await decideApproval({
+          id: id.data,
+          from,
+          decision: parsed.data.decision,
+        }));
+      } catch (err) {
+        const code = (err as Error).message;
+        if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
+        if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
+        if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task') {
+          return c.json({ error: code }, 409);
+        }
+        console.warn('[task] decision failed:', code);
+        return c.json({ error: 'smtp_error' }, 502);
+      }
     })
     .post('/:id/state', async (c) => {
       const id = taskIdSchema.safeParse(c.req.param('id'));
@@ -170,7 +259,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await service.get(id.data);
+      const task = await authorizationTask(service, id.data);
       if (!task) return c.json({ error: 'not_found' }, 404);
       // This is a hard server-side ACL boundary. A guessed task UUID alone
       // never gives another identity authority to advance its state.
@@ -188,8 +277,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (!updated) return c.json({ error: 'not_found' }, 404);
         return c.json(updated);
       } catch (err) {
-        if ((err as Error).message === 'task_already_terminal') {
-          return c.json({ error: 'task_already_terminal' }, 409);
+        if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'approval_decision_required') {
+          return c.json({ error: (err as Error).message }, 409);
         }
         if ((err as Error).message === 'task_participant_required') {
           return c.json({ error: 'forbidden: task participant required' }, 403);

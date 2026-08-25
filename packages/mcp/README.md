@@ -39,7 +39,8 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing a topic or ntfy credential |
 | `notify_check(since?)` | Read recent notifications for the calling identity only |
 | `notify_verify()` | Send and poll a harmless server-side notification self-check |
-| `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; `wait:true` waits up to 10 minutes for a terminal state |
+| `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; typed approvals add `kind: "approval"` with `approval:{action,expiresAt}`; `wait:true` waits up to 10 minutes for a terminal state |
+| `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
 | `task_list(state?)` | List this identity's task threads, optionally by current state |
 | `task_get(id, wait?)` | Read one task thread and its stamped state history; `wait:true` waits up to 10 minutes |
 | `task_update(id, state, body?, result?)` | Advance a participating task; `result` is written as a JSON block in the reply body |

@@ -168,6 +168,72 @@
     return pre;
   }
 
+  function approvalCanDecide(task) {
+    if (!task || task.kind !== 'approval' || !task.approval || task.state !== 'input-required') return false;
+    return !isAdmin() && !!state.me &&
+      String(state.me.address || '').toLowerCase() === String(task.approval.reviewer || '').toLowerCase();
+  }
+
+  var approvalDecisionInFlight = {};
+
+  async function submitApprovalDecision(task, decision, buttons) {
+    if (approvalDecisionInFlight[task.id]) return;
+    approvalDecisionInFlight[task.id] = true;
+    buttons.forEach(function (button) { button.disabled = true; });
+    try {
+      var updated = await apiJson('/ui/api/tasks/' + encodeURIComponent(task.id) + '/decision', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decision: decision })
+      });
+      state.taskDetail = updated;
+      state.taskDetailStatus = 'ready';
+      renderTasks();
+      loadTasks();
+      announce(decision === 'approved' ? 'Approval recorded.' : 'Rejection recorded.');
+    } catch (error) {
+      if (error.message !== 'session_expired') {
+        announce(error.status === 409 ? 'This approval is no longer pending.' : 'Approval decision could not be recorded.');
+      }
+    } finally {
+      delete approvalDecisionInFlight[task.id];
+      buttons.forEach(function (button) { button.disabled = false; });
+    }
+  }
+
+  function renderApprovalAction(task) {
+    var approval = task.approval;
+    if (!approval || !approval.action) return null;
+    var section = document.createElement('section');
+    section.className = 'task-approval';
+    var title = document.createElement('h4');
+    title.textContent = task.state === 'input-required' ? 'Approval required' : 'Approval details';
+    var type = document.createElement('p');
+    type.textContent = 'Type: ' + String(approval.action.type || '—');
+    var name = document.createElement('p');
+    name.textContent = 'Name: ' + String(approval.action.name || '—');
+    var args = document.createElement('pre');
+    args.className = 'task-approval-arguments';
+    try { args.textContent = JSON.stringify(approval.action.arguments); } catch (_err) { args.textContent = String(approval.action.arguments); }
+    section.append(title, type, name, args);
+    if (approvalCanDecide(task)) {
+      var approve = document.createElement('button');
+      approve.type = 'button';
+      approve.className = 'primary';
+      approve.setAttribute('aria-label', 'Approve action');
+      approve.textContent = 'Approve';
+      approve.addEventListener('click', function () { submitApprovalDecision(task, 'approved', [approve, reject]); });
+      var reject = document.createElement('button');
+      reject.type = 'button';
+      reject.className = 'quiet delete-action';
+      reject.setAttribute('aria-label', 'Reject action');
+      reject.textContent = 'Reject';
+      reject.addEventListener('click', function () { submitApprovalDecision(task, 'rejected', [approve, reject]); });
+      section.append(approve, reject);
+    }
+    return section;
+  }
+
   function renderTaskRows() {
     tasksRows.replaceChildren();
     /* fetchKey 不匹配时旧缓存不可见，避免切筛选闪错位行。 */
@@ -418,7 +484,10 @@
       tasksDetailContent.append(resultBlock);
     }
 
-    if (task.state === 'input-required') {
+    var approvalAction = task.kind === 'approval' ? renderApprovalAction(task) : null;
+    if (approvalAction) tasksDetailContent.append(approvalAction);
+
+    if (task.state === 'input-required' && task.kind !== 'approval') {
       var reply = document.createElement('form');
       reply.className = 'task-reply';
       var replyTitle = document.createElement('h4');
@@ -452,7 +521,7 @@
       tasksDetailContent.append(reply);
     }
 
-    if (isAdmin() && task.state !== 'completed' && task.state !== 'failed') {
+    if (isAdmin() && task.kind !== 'approval' && task.state !== 'completed' && task.state !== 'failed') {
       var admin = document.createElement('div');
       admin.className = 'task-admin-actions';
       var fromSelect = document.createElement('select');
