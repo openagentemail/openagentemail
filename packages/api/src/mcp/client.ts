@@ -122,6 +122,15 @@ export interface Task {
   result?: unknown;
   kind?: 'approval';
   approval?: ApprovalSnapshot;
+  claimedUntil?: string;
+  leaseGeneration?: number;
+}
+
+export interface TaskLeaseGrant {
+  task: Task;
+  leaseToken: string;
+  claimedUntil: string;
+  leaseGeneration: number;
 }
 
 /**
@@ -431,5 +440,25 @@ export class OpenAgentEmailClient {
 
   decideTask(id: string, decision: 'approved' | 'rejected'): Promise<Task> {
     return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/decision`, { decision });
+  }
+
+  claimTask(id: string, leaseSec?: number): Promise<TaskLeaseGrant> {
+    return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/claim`, {
+      ...(leaseSec === undefined ? {} : { leaseSec }),
+    });
+  }
+
+  renewTask(id: string, leaseToken: string, leaseSec?: number): Promise<Task> {
+    return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/lease`, {
+      leaseToken,
+      ...(leaseSec === undefined ? {} : { leaseSec }),
+    });
+  }
+
+  releaseTask(id: string, leaseToken: string, reason?: string): Promise<Task> {
+    return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/release`, {
+      leaseToken,
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 }

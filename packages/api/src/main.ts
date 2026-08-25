@@ -27,11 +27,13 @@ import { startNotificationWatcher } from './lib/notification-watcher.ts';
 import { startNotificationLogMaintenance } from './lib/notification-log.ts';
 import { startSendLogMaintenance } from './lib/send-log.ts';
 import { startRetentionLoop } from './lib/retention.ts';
+import { startTaskLeaseReaper } from './lib/task-lease-reaper.ts';
 import { createApp } from './app.ts';
 
 const app = createApp();
 
 startRetentionLoop();
+startTaskLeaseReaper();
 startNotificationLogMaintenance();
 startSendLogMaintenance();
 await inspectDeviceRegistryAtBoot();

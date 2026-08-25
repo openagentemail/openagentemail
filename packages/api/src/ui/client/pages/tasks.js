@@ -314,6 +314,19 @@
       updatedValue.textContent = formatAgo(task.updatedAt);
       updatedCell.append(updatedLabel, updatedValue);
 
+      var hasActiveLease = typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number';
+      var leaseCell;
+      if (hasActiveLease) {
+        leaseCell = document.createElement('div');
+        leaseCell.className = 'cell';
+        var leaseLabel = document.createElement('span');
+        leaseLabel.className = 'cell-label';
+        leaseLabel.textContent = 'Claimed until';
+        var leaseValue = document.createElement('span');
+        leaseValue.textContent = task.claimedUntil + ' · generation ' + task.leaseGeneration;
+        leaseCell.append(leaseLabel, leaseValue);
+      }
+
       var msgsCell = document.createElement('div');
       msgsCell.className = 'cell task-msgs';
       var msgsLabel = document.createElement('span');
@@ -323,7 +336,9 @@
       msgsValue.textContent = String(Array.isArray(task.messages) ? task.messages.length : 0);
       msgsCell.append(msgsLabel, msgsValue);
 
-      button.append(stateCell, peopleCell, subjectCell, updatedCell, msgsCell);
+      button.append(stateCell, peopleCell, subjectCell, updatedCell);
+      if (leaseCell) button.append(leaseCell);
+      button.append(msgsCell);
       button.addEventListener('click', function () {
         selectTask(task.id);
       });
@@ -395,6 +410,12 @@
       (Array.isArray(task.messages) ? task.messages.length : 0) +
       ' messages';
     head.append(title, badge, meta);
+    if (typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number') {
+      var leaseMeta = document.createElement('p');
+      leaseMeta.className = 'task-detail-meta';
+      leaseMeta.textContent = 'Claimed until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration;
+      head.append(leaseMeta);
+    }
     if (task.overdueReason) {
       var overdueNote = document.createElement('p');
       overdueNote.className = 'task-overdue-flag';

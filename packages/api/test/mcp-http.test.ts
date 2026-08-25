@@ -13,6 +13,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-mcp-http-'));
 process.env.UI_ENABLED = 'false';
+process.env.TASK_LEASES_ENABLED = 'true';
 
 const { describe, expect, test } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
@@ -180,7 +181,32 @@ describe('MCP HTTP 工具', () => {
     });
   });
 
-  test('admin key：tools/list 返回全部 16 工具', async () => {
+  test('R9 RED: shipped MCP docs and security inventory describe all lease surfaces', async () => {
+    const [rootReadme, packageReadme, security] = await Promise.all([
+      Bun.file(new URL('../../../README.md', import.meta.url)).text(),
+      Bun.file(new URL('../../mcp/README.md', import.meta.url)).text(),
+      Bun.file(new URL('../../../docs/security.md', import.meta.url)).text(),
+    ]);
+    const signatures = ['task_claim(id, leaseSec?)', 'task_renew(id, leaseToken, leaseSec?)', 'task_release(id, leaseToken, reason?)'];
+    const docs = `${rootReadme}\n${packageReadme}`;
+    expect({
+      rootSignatures: signatures.every((signature) => rootReadme.includes(signature)),
+      packageSignatures: signatures.every((signature) => packageReadme.includes(signature)),
+      optInDefaultDisabled: /TASK_LEASES_ENABLED[\s\S]{0,160}(default|默认)[\s\S]{0,80}(false|关闭)|(?:default|默认)[\s\S]{0,80}(false|关闭)[\s\S]{0,160}TASK_LEASES_ENABLED/i.test(docs),
+      bearerSecrecy: /leaseToken[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}(bearer|token)|(?:bearer|token)[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}leaseToken/i.test(docs),
+      securityNineteenTools: /19\s+tools/i.test(security),
+      securityContainedLeases: ['task_claim', 'task_renew', 'task_release'].every((tool) => new RegExp(`contained[^\\n]*${tool}|${tool}[^\\n]*contained`, 'i').test(security)),
+    }).toEqual({
+      rootSignatures: true,
+      packageSignatures: true,
+      optInDefaultDisabled: true,
+      bearerSecrecy: true,
+      securityNineteenTools: true,
+      securityContainedLeases: true,
+    });
+  });
+
+  test('#56 RED：admin key tools/list 返回任务租约的 19 工具', async () => {
     const res = await mcpRequest(adminKey, 'tools/list');
     expect(res.status).toBe(200);
     const body = (await readMcpJson(res)) as {
@@ -204,17 +230,43 @@ describe('MCP HTTP 工具', () => {
       'task_get',
       'task_list',
       'task_update',
+      'task_claim',
+      'task_renew',
+      'task_release',
     ].sort());
   });
 
-  test('identity token：tools/list 同样返回 16 工具', async () => {
+  test('#56 RED：admin key tools/list 广播 claim 的 input/output schema', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> }; outputSchema?: { properties?: Record<string, unknown> } }> };
+    };
+    const claim = body.result?.tools?.find((tool) => tool.name === 'task_claim') as {
+      inputSchema?: { properties?: Record<string, unknown> };
+      outputSchema?: { properties?: Record<string, unknown> };
+    } | undefined;
+    // This runs independently of the inventory assertion above, while making
+    // an absent tool a named schema-contract RED rather than a TypeError.
+    if (!claim) {
+      expect(claim, '#56 task_claim must be registered before its schema can be broadcast').toBeDefined();
+      return;
+    }
+    expect(claim?.inputSchema?.properties).toHaveProperty('leaseSec');
+    expect(claim?.outputSchema?.properties).toHaveProperty('leaseToken');
+    expect(claim?.outputSchema?.properties).toHaveProperty('claimedUntil');
+    expect(claim?.outputSchema?.properties).toHaveProperty('leaseGeneration');
+    expect(claim?.outputSchema?.properties).not.toHaveProperty('leaseTokenHash');
+  });
+
+  test('#56 RED：identity token tools/list 同样返回 19 工具', async () => {
     const { token } = createIdentity({ localpart: 'mcp-list-id' })!;
     const res = await mcpRequest(token, 'tools/list');
     expect(res.status).toBe(200);
     const body = (await readMcpJson(res)) as {
       result?: { tools?: unknown[] };
     };
-    expect(body.result?.tools?.length).toBe(16);
+    expect(body.result?.tools?.length).toBe(19);
   });
 
   test('mail_list_identities 无状态直连：连续两请求无 session 头各自成功', async () => {
@@ -537,6 +589,91 @@ describe('MCP registered task handlers execute through the production HTTP trans
       },
       // The handler received no `from`; the REST identity binding supplied it.
       decide: { id: approval.id, from: reviewer.identity.address, decision: 'approved' },
+    });
+  });
+
+  test('R9 proof: real HTTP MCP lease calls bind identity, validate schema, and redact renew/release', async () => {
+    const recipient = createIdentity({ localpart: `r9-lease-${crypto.randomUUID().slice(0, 8)}` })!;
+    const id = 'c1c2c3c4-c5c6-47c8-89ca-cbcccccccccc';
+    const verifier = 'r9-mcp-verifier-never-public';
+    const bearer = 'r9-mcp-bearer-opaque';
+    const claimedUntil = '2026-08-24T00:05:00.000Z';
+    const renewedUntil = '2026-08-24T00:06:00.000Z';
+    const base = {
+      id, from: 'origin@test.example', to: recipient.identity.address, subject: 'MCP lease proof', state: 'working' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+    };
+    const calls: { claim?: unknown; renew?: unknown; release?: unknown } = {};
+    const unused = async () => { throw new Error('unused in R9 lease fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: unused, list: unused, listBoard: unused, get: async () => base,
+        update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+        claim: async (input) => {
+          calls.claim = input;
+          return {
+            task: { ...base, lease: { leaseGeneration: 1, claimedUntil, tokenVerifier: verifier } },
+            leaseToken: bearer,
+            claimedUntil,
+            leaseGeneration: 1,
+          };
+        },
+        renew: async (input) => {
+          calls.renew = input;
+          return { ...base, lease: { leaseGeneration: 1, claimedUntil: renewedUntil, tokenVerifier: verifier } };
+        },
+        release: async (input) => {
+          calls.release = input;
+          return { ...base, releasedLease: { leaseGeneration: 1, tokenVerifier: verifier, reason: input.reason ?? '' } };
+        },
+      },
+    });
+    const call = (name: string, args: Record<string, unknown>, requestId: number) => handlerApp.request('/mcp', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${recipient.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+      body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'tools/call', params: { name, arguments: args } }),
+    });
+    const invalid = await call('task_claim', { id, leaseSec: 29 }, 901);
+    const callsBeforeValid = { ...calls };
+    const claim = await call('task_claim', { id, leaseSec: 120 }, 902);
+    const renew = await call('task_renew', { id, leaseToken: bearer, leaseSec: 180 }, 903);
+    const release = await call('task_release', { id, leaseToken: bearer, reason: 'handoff' }, 904);
+    const [invalidBody, claimBody, renewBody, releaseBody] = await Promise.all([invalid, claim, renew, release].map(readMcpJson)) as Array<{
+      result?: { isError?: boolean; structuredContent?: Record<string, unknown> };
+    }>;
+    const claimContent = claimBody.result?.structuredContent;
+    const renewContent = renewBody.result?.structuredContent;
+    const releaseContent = releaseBody.result?.structuredContent;
+    expect({
+      statuses: [invalid.status, claim.status, renew.status, release.status],
+      invalidStoppedBeforeCallback: invalidBody.result?.isError === true && Object.keys(callsBeforeValid).length === 0,
+      callbacks: calls,
+      successfulSchemas: [claimBody, renewBody, releaseBody].every((body) => !body.result?.isError),
+      claimBearerOnly: claimContent?.leaseToken === bearer
+        && !JSON.stringify({ renewContent, releaseContent }).includes(bearer),
+      privateVerifierAbsent: !JSON.stringify({ claimContent, renewContent, releaseContent }).includes(verifier),
+      publicTiming: {
+        claim: [claimContent?.claimedUntil, claimContent?.leaseGeneration],
+        renewTask: [renewContent?.claimedUntil, renewContent?.leaseGeneration],
+        releaseTask: [releaseContent?.claimedUntil, releaseContent?.leaseGeneration],
+      },
+    }).toEqual({
+      statuses: [200, 200, 200, 200],
+      invalidStoppedBeforeCallback: true,
+      callbacks: {
+        claim: { id, from: recipient.identity.address, leaseSec: 120 },
+        renew: { id, from: recipient.identity.address, leaseToken: bearer, leaseSec: 180 },
+        release: { id, from: recipient.identity.address, leaseToken: bearer, reason: 'handoff' },
+      },
+      successfulSchemas: true,
+      claimBearerOnly: true,
+      privateVerifierAbsent: true,
+      publicTiming: {
+        claim: [claimedUntil, 1],
+        renewTask: [renewedUntil, 1],
+        releaseTask: [undefined, undefined],
+      },
     });
   });
 });

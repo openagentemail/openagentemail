@@ -202,10 +202,19 @@ export function registerOpenAgentEmailTools(
       action: z.object({ type: z.string(), name: z.string(), arguments: z.unknown() }),
       reviewer: z.email(), expiresAt: z.string(), digest: z.string(),
     }).optional(),
+    claimedUntil: z.string().optional(),
+    leaseGeneration: z.number().int().optional(),
   };
 
   const taskListOutputSchema = {
     tasks: z.array(z.object(taskOutputSchema)),
+  };
+
+  const taskLeaseGrantOutputSchema = {
+    task: z.object(taskOutputSchema),
+    leaseToken: z.string(),
+    claimedUntil: z.string(),
+    leaseGeneration: z.number().int(),
   };
 
   function ok(data: unknown): CallToolResult {
@@ -609,6 +618,56 @@ export function registerOpenAgentEmailTools(
     ({ id, decision }) => callApi(() => client.decideTask(id, decision)),
   );
 
-  // 收尾：规格表 16 工具均须已在本次注册中 declare（declared 不预填，漏 tier() 即炸）
+  tier("task_claim", "contained");
+  server.registerTool(
+    "task_claim",
+    {
+      title: "Claim Email Task",
+      description: "Claim a submitted task as its managed recipient for a bounded lease.",
+      inputSchema: {
+        id: z.string().uuid().describe("Task UUID"),
+        leaseSec: z.number().int().min(30).max(3600).optional().describe("Lease duration in seconds (30..3600; default 300)"),
+      },
+      outputSchema: taskLeaseGrantOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id, leaseSec }) => callApi(() => client.claimTask(id, leaseSec)),
+  );
+
+  tier("task_renew", "contained");
+  server.registerTool(
+    "task_renew",
+    {
+      title: "Renew Task Lease",
+      description: "Renew a task lease using its opaque bearer token.",
+      inputSchema: {
+        id: z.string().uuid().describe("Task UUID"),
+        leaseToken: z.string().min(1).describe("Opaque current lease token"),
+        leaseSec: z.number().int().min(30).max(3600).optional().describe("Lease duration in seconds (30..3600; default 300)"),
+      },
+      outputSchema: taskOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id, leaseToken, leaseSec }) => callApi(() => client.renewTask(id, leaseToken, leaseSec)),
+  );
+
+  tier("task_release", "contained");
+  server.registerTool(
+    "task_release",
+    {
+      title: "Release Task Lease",
+      description: "Release a task lease using its opaque bearer token.",
+      inputSchema: {
+        id: z.string().uuid().describe("Task UUID"),
+        leaseToken: z.string().min(1).describe("Opaque current lease token"),
+        reason: z.string().optional().describe("Optional release reason"),
+      },
+      outputSchema: taskOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id, leaseToken, reason }) => callApi(() => client.releaseTask(id, leaseToken, reason)),
+  );
+
+  // 收尾：规格表内全部 19 工具均须已在本次注册中 declare。
   assertAllSpecTiersDeclared();
 }

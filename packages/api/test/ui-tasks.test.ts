@@ -1145,3 +1145,86 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
   });
 });
+
+describe('#56 R9 lease final dashboard surfaces', () => {
+  test('R9 RED: real dashboard list and detail project public lease timing without private lease authority', async () => {
+    const verifier = 'r9-dashboard-verifier-never-public';
+    const bearer = 'r9-dashboard-bearer-never-public';
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const leased = {
+      ...TASK_A,
+      lease: { leaseGeneration: 7, claimedUntil, tokenVerifier: verifier },
+      releasedLease: { leaseGeneration: 6, tokenVerifier: verifier, reason: 'old' },
+      expiredLease: { leaseGeneration: 5, claimedUntil: '2026-08-12T11:00:00.000Z', expiredAt: '2026-08-12T11:00:00.000Z' },
+      tokenVerifier: verifier,
+      leaseToken: bearer,
+    } as Task & Record<string, unknown>;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [leased]);
+    const list = await app.request('/ui/api/tasks', { headers: { cookie } });
+    const detail = await app.request(`/ui/api/tasks/${leased.id}`, { headers: { cookie } });
+    const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+    const detailBody = await detail.json() as Record<string, unknown>;
+    const listed = listBody.tasks?.[0];
+    const privateKeys = ['lease', 'releasedLease', 'expiredLease', 'tokenVerifier', 'leaseToken'];
+    expect({
+      statuses: [list.status, detail.status],
+      listTiming: listed && [listed.claimedUntil, listed.leaseGeneration],
+      detailTiming: [detailBody.claimedUntil, detailBody.leaseGeneration],
+      noPrivateKeys: [listed, detailBody].every((view) => !!view && privateKeys.every((key) => !Object.hasOwn(view, key))),
+      noPrivateValues: !JSON.stringify({ listBody, detailBody }).includes(verifier)
+        && !JSON.stringify({ listBody, detailBody }).includes(bearer),
+    }).toEqual({
+      statuses: [200, 200],
+      listTiming: [claimedUntil, 7],
+      detailTiming: [claimedUntil, 7],
+      noPrivateKeys: true,
+      noPrivateValues: true,
+    });
+  });
+
+  test('R9 RED: exact served task renderer exposes only public claimed timing and generation', () => {
+    const verifier = 'r9-render-verifier-never-public';
+    const bearer = 'r9-render-bearer-never-public';
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const active = {
+      ...TASK_A,
+      claimedUntil,
+      leaseGeneration: 7,
+      tokenVerifier: verifier,
+      leaseToken: bearer,
+    } as Task & Record<string, unknown>;
+    const inactive = { ...TASK_A, id: '99999999-9999-4999-8999-999999999999' } as Task & Record<string, unknown>;
+    const activeDetail = makeAdminTaskDetailHarness(active);
+    activeDetail.renderTaskDetail();
+    const activeRows = makeTaskRowHarness();
+    activeRows.state.tasks = [active];
+    activeRows.state.tasksTotalApprox = 1;
+    activeRows.renderTaskRows();
+    const inactiveDetail = makeAdminTaskDetailHarness(inactive);
+    inactiveDetail.renderTaskDetail();
+    const inactiveRows = makeTaskRowHarness();
+    inactiveRows.state.tasks = [inactive];
+    inactiveRows.state.tasksTotalApprox = 1;
+    inactiveRows.renderTaskRows();
+    const activeText = [
+      ...leafTexts(activeDetail.tasksDetailContent),
+      ...activeRows.tasksRows.childNodes.flatMap(leafTexts),
+    ].join('\n');
+    const inactiveText = [
+      ...leafTexts(inactiveDetail.tasksDetailContent),
+      ...inactiveRows.tasksRows.childNodes.flatMap(leafTexts),
+    ].join('\n');
+    expect({
+      activeDetailLeaseVisible: activeText.includes('Claimed until') && activeText.includes(claimedUntil) && activeText.includes('7'),
+      activeListLeaseVisible: activeRows.tasksRows.childNodes.length === 1
+        && leafTexts(activeRows.tasksRows.childNodes[0]!).join('\n').includes('Claimed until'),
+      inactiveLeaseAbsent: !inactiveText.includes('Claimed until'),
+      secretsAbsentFromRenderedText: !activeText.includes(verifier) && !activeText.includes(bearer),
+    }).toEqual({
+      activeDetailLeaseVisible: true,
+      activeListLeaseVisible: true,
+      inactiveLeaseAbsent: true,
+      secretsAbsentFromRenderedText: true,
+    });
+  });
+});
