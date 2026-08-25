@@ -430,11 +430,13 @@ export class OpenAgentEmailClient {
     state: TaskState,
     body?: string,
     result?: unknown,
+    leaseToken?: string,
   ): Promise<Task> {
     return this.request("POST", `/v1/tasks/${encodeURIComponent(id)}/state`, {
       state,
       ...(body === undefined ? {} : { body }),
       ...(result === undefined ? {} : { result }),
+      ...(leaseToken === undefined ? {} : { leaseToken }),
     });
   }
 

@@ -13,8 +13,9 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-leases-red-'));
 
-const { beforeEach, describe, expect, test } = await import('bun:test');
+const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
+const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
@@ -126,11 +127,16 @@ function appFor(address: string, leaseEnabledForTests = true, selectedService: T
 }
 
 beforeEach(() => {
+  setTaskNowForTests(() => Date.parse('2026-08-24T00:01:59.999Z'));
   current = task();
   calls.length = 0;
   claimed = false;
   widerClaim = false;
   leaseCalls.length = 0;
+});
+
+afterEach(() => {
+  setTaskNowForTests(null);
 });
 
 describe('#56 lease contract RED', () => {

@@ -1345,6 +1345,7 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   if (TERMINAL_TASK_STATES.includes(next.state)) {
     delete next.lease;
     delete next.releasedLease;
+    delete next.expiredLease;
   } else if (authority) {
     next.lease = authority;
     delete next.releasedLease;
@@ -1396,6 +1397,11 @@ export function invalidateTaskListCache(): void {
 
 function nowMs(): number {
   return nowFn();
+}
+
+/** Internal server-clock lease boundary: equality is expired. */
+function isLeaseDeadlineActive(claimedUntil: string, now = nowMs()): boolean {
+  return now < Date.parse(claimedUntil);
 }
 
 async function withTaskLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -1505,11 +1511,15 @@ export async function claimTask(input: {
     const actor = input.from.toLowerCase();
     if (actor !== current.to) throw new Error('lease_recipient_required');
     if (isApprovalTask(current)) throw new Error('task_not_claimable');
-    if (!canAdvanceTask(current.state) || isClosedByAdmin(current)) throw new Error('task_not_claimable');
+    if ((current.state !== 'submitted' && current.state !== 'working') || isClosedByAdmin(current)) {
+      throw new Error('task_not_claimable');
+    }
+    const wasWorking = current.state === 'working';
     current = await materializeLeaseExpiryUnlocked(current);
     if (current.lease?.claimedUntil && nowMs() < Date.parse(current.lease.claimedUntil)) {
       throw new Error('lease_already_claimed');
     }
+    if (wasWorking && !current.expiredLease && !current.releasedLease) throw new Error('task_not_claimable');
     const generation = (current.lease?.leaseGeneration
       ?? current.releasedLease?.leaseGeneration
       ?? current.expiredLease?.leaseGeneration
@@ -1580,7 +1590,9 @@ export function toTaskView(task: Task): TaskView {
     messages: task.messages,
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.kind === 'approval' && task.approval ? { kind: task.kind, approval: task.approval } : {}),
-    ...(task.lease?.claimedUntil ? { claimedUntil: task.lease.claimedUntil, leaseGeneration: task.lease.leaseGeneration } : {}),
+    ...(task.lease?.claimedUntil && isLeaseDeadlineActive(task.lease.claimedUntil)
+      ? { claimedUntil: task.lease.claimedUntil, leaseGeneration: task.lease.leaseGeneration }
+      : {}),
   };
 }
 
@@ -1604,7 +1616,7 @@ export function isTaskLeaseTokenCurrent(task: Task, token: string, now = nowMs()
   return !!lease
     && typeof lease.tokenVerifier === 'string'
     && typeof lease.claimedUntil === 'string'
-    && now < Date.parse(lease.claimedUntil)
+    && isLeaseDeadlineActive(lease.claimedUntil, now)
     && leaseTokenVerifier(task.id, lease.leaseGeneration, token) === lease.tokenVerifier;
 }
 
@@ -1950,6 +1962,7 @@ export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.kind === 'approval' && task.approval ? { kind: 'approval' as const, approval: task.approval } : {}),
     ...(task.lease?.claimedUntil && typeof task.lease.leaseGeneration === 'number'
+      && isLeaseDeadlineActive(task.lease.claimedUntil, now)
       ? { claimedUntil: task.lease.claimedUntil, leaseGeneration: task.lease.leaseGeneration }
       : {}),
     ...taskOverdue(task, now),

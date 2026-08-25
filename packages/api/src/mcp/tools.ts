@@ -595,11 +595,12 @@ export function registerOpenAgentEmailTools(
         state: taskStateSchema.describe("Next server-stamped task state"),
         body: z.string().max(1_000_000).optional().describe("Optional human-readable update"),
         result: z.unknown().optional().describe("Optional JSON result for a completed or failed task"),
+        leaseToken: z.string().min(1).optional().describe("Optional opaque current lease token"),
       },
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
     },
-    ({ id, state, body, result }) => callApi(() => client.updateTask(id, state, body, result)),
+    ({ id, state, body, result, leaseToken }) => callApi(() => client.updateTask(id, state, body, result, leaseToken)),
   );
 
   tier("task_decide", "contained");

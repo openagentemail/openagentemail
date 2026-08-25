@@ -236,6 +236,28 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskRelease, "reason", "worker stopped")).toBe(true);
 });
 
+test("R12 RED: task_update registry/schema publishes an optional non-empty leaseToken", () => {
+  const taskUpdate = toolSchemas.get("task_update");
+  if (!taskUpdate) {
+    expect(taskUpdate, "R12 task_update must be registered before leaseToken schema is checked").toBeDefined();
+    return;
+  }
+  const leaseToken = taskUpdate.leaseToken;
+  if (!leaseToken) {
+    expect(leaseToken, "R12 task_update must publish its optional leaseToken schema").toBeDefined();
+    return;
+  }
+  expect({
+    opaqueToken: leaseToken.safeParse("opaque-current-lease-token").success,
+    emptyToken: leaseToken.safeParse("").success,
+    omittedToken: leaseToken.safeParse(undefined).success,
+  }).toEqual({
+    opaqueToken: true,
+    emptyToken: false,
+    omittedToken: true,
+  });
+});
+
 test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
   const createOut = toolConfigs.get("mail_new_identity")!.outputSchema!;
   expect(createOut.pushContentTier).toBeDefined();

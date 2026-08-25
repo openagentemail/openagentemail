@@ -18,6 +18,7 @@ process.env.TASK_LEASES_ENABLED = 'true';
 const { describe, expect, test } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
+const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
 // bun 共享模块注册表下 config 可能被其他测试文件先冻结；取当前进程里已生效的合法 admin 凭证，
 // 勿写死 'admin-key'（冻结方 identities.test.ts 的 API_KEYS 不含该字面值）。
 const { config } = await import('../src/lib/config.ts');
@@ -599,6 +600,8 @@ describe('MCP registered task handlers execute through the production HTTP trans
     const bearer = 'r9-mcp-bearer-opaque';
     const claimedUntil = '2026-08-24T00:05:00.000Z';
     const renewedUntil = '2026-08-24T00:06:00.000Z';
+    setTaskNowForTests(() => Date.parse('2026-08-24T00:04:59.999Z'));
+    try {
     const base = {
       id, from: 'origin@test.example', to: recipient.identity.address, subject: 'MCP lease proof', state: 'working' as const,
       createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
@@ -675,6 +678,58 @@ describe('MCP registered task handlers execute through the production HTTP trans
         renewTask: [renewedUntil, 1],
         releaseTask: [undefined, undefined],
       },
+    });
+    } finally {
+      setTaskNowForTests(null);
+    }
+  });
+
+  test('R12 RED: real HTTP MCP task_update propagates an optional lease token without returning it', async () => {
+    const identity = createIdentity({ localpart: `r12-update-${crypto.randomUUID().slice(0, 8)}` })!;
+    const id = 'd1d2d3d4-d5d6-47d8-89ca-dbdddddddddd';
+    const leaseToken = 'r12-opaque-lease-token-never-returned';
+    const base = {
+      id, from: 'origin@test.example', to: identity.identity.address, subject: 'MCP update lease proof', state: 'working' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+    };
+    const updates: unknown[] = [];
+    const unused = async () => { throw new Error('unused in R12 update fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: unused, list: unused, listBoard: unused, get: async () => base,
+        update: async (input) => {
+          updates.push(input);
+          return { ...base, state: input.state };
+        },
+        reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+      },
+    });
+    const call = (args: Record<string, unknown>, requestId: number) => handlerApp.request('/mcp', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${identity.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+      body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'tools/call', params: { name: 'task_update', arguments: args } }),
+    });
+    const [withToken, omittedToken] = await Promise.all([
+      call({ id, state: 'input-required', leaseToken }, 1201),
+      call({ id, state: 'working' }, 1202),
+    ]);
+    const [withTokenBody, omittedTokenBody] = await Promise.all([withToken, omittedToken].map(readMcpJson)) as Array<{
+      result?: { isError?: boolean; structuredContent?: Record<string, unknown> };
+    }>;
+    expect({
+      statuses: [withToken.status, omittedToken.status],
+      successfulSchemas: [withTokenBody, omittedTokenBody].every((body) => !body.result?.isError),
+      updates,
+      resultTokenFree: !JSON.stringify({ withTokenBody, omittedTokenBody }).includes(leaseToken),
+    }).toEqual({
+      statuses: [200, 200],
+      successfulSchemas: true,
+      updates: [
+        { id, from: identity.identity.address, state: 'input-required', leaseToken },
+        { id, from: identity.identity.address, state: 'working' },
+      ],
+      resultTokenFree: true,
     });
   });
 });

@@ -1227,4 +1227,67 @@ describe('#56 R9 lease final dashboard surfaces', () => {
       secretsAbsentFromRenderedText: true,
     });
   });
+
+  test('R11 RED: dashboard list and detail hide public lease timing at the half-open expiry boundary without writes', async () => {
+    const claimedUntil = '2026-08-12T12:30:00.000Z';
+    const privateVerifier = 'r11-dashboard-verifier-never-public';
+    const leased = {
+      ...TASK_A,
+      lease: { leaseGeneration: 11, claimedUntil, tokenVerifier: privateVerifier },
+    } as Task;
+    let deliveries = 0;
+    setTaskSendMailForTests(async () => {
+      deliveries += 1;
+      return { messageId: '<r11-unexpected-write>' };
+    });
+    let now = Date.parse(claimedUntil) - 1;
+    const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {}, [leased]);
+    setTaskNowForTests(() => now);
+    const read = async () => {
+      const [list, detail] = await Promise.all([
+        app.request('/ui/api/tasks', { headers: { cookie } }),
+        app.request(`/ui/api/tasks/${leased.id}`, { headers: { cookie } }),
+      ]);
+      const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+      const detailBody = await detail.json() as Record<string, unknown>;
+      const listed = listBody.tasks?.[0];
+      return {
+        statuses: [list.status, detail.status],
+        listTiming: [listed?.claimedUntil ?? null, listed?.leaseGeneration ?? null],
+        detailTiming: [detailBody.claimedUntil ?? null, detailBody.leaseGeneration ?? null],
+        publicHasNoVerifier: !JSON.stringify({ listBody, detailBody }).includes(privateVerifier),
+      };
+    };
+
+    const deliveriesBeforeReads = deliveries;
+    const before = await read();
+    const deliveriesAfterBefore = deliveries;
+    now = Date.parse(claimedUntil);
+    const atBoundary = await read();
+    const deliveriesAfterBoundary = deliveries;
+
+    expect({
+      before,
+      atBoundary,
+      deliveries: [deliveriesBeforeReads, deliveriesAfterBefore, deliveriesAfterBoundary],
+      privateAuthorityUnchanged: leased.lease?.claimedUntil === claimedUntil
+        && leased.lease?.leaseGeneration === 11
+        && leased.lease?.tokenVerifier === privateVerifier,
+    }).toEqual({
+      before: {
+        statuses: [200, 200],
+        listTiming: [claimedUntil, 11],
+        detailTiming: [claimedUntil, 11],
+        publicHasNoVerifier: true,
+      },
+      atBoundary: {
+        statuses: [200, 200],
+        listTiming: [null, null],
+        detailTiming: [null, null],
+        publicHasNoVerifier: true,
+      },
+      deliveries: [0, 0, 0],
+      privateAuthorityUnchanged: true,
+    });
+  });
 });

@@ -33,6 +33,7 @@ const {
   setTaskSendMailForTests,
   taskService,
   taskFromMessages,
+  toTaskView,
 } = await import('../src/lib/tasks.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
@@ -728,6 +729,219 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
     });
   });
 }
+
+describe('#56 R11 public lease expiry', () => {
+  test('R11 RED: REST list and detail hide public lease timing at the half-open expiry boundary without writes', async () => {
+      const fixture = await leaseFixture();
+      const claimedUntil = fixture.grant.claimedUntil;
+      const privateVerifier = fixture.durable().lease?.tokenVerifier;
+      const publicApp = productionApp({
+        ...taskService,
+        async list() { return [fixture.durable()]; },
+        async get() { return fixture.durable(); },
+      });
+      const read = async () => {
+        const [list, detail] = await Promise.all([
+          publicApp.request('/v1/tasks'),
+          publicApp.request(`/v1/tasks/${ID}`),
+        ]);
+        const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+        const detailBody = await detail.json() as Record<string, unknown>;
+        const listed = listBody.tasks?.[0];
+        return {
+          statuses: [list.status, detail.status],
+          listTiming: [listed?.claimedUntil ?? null, listed?.leaseGeneration ?? null],
+          detailTiming: [detailBody.claimedUntil ?? null, detailBody.leaseGeneration ?? null],
+        };
+      };
+
+      fixture.clock.now = Date.parse(claimedUntil) - 1;
+      const deliveriesBeforeReads = fixture.sent.length;
+      const before = await read();
+      const deliveriesAfterBefore = fixture.sent.length;
+      fixture.clock.now = Date.parse(claimedUntil);
+      const atBoundary = await read();
+      const deliveriesAfterBoundary = fixture.sent.length;
+
+      expect({
+        before,
+        atBoundary,
+        deliveries: [deliveriesBeforeReads, deliveriesAfterBefore, deliveriesAfterBoundary],
+        privateAuthorityUnchanged: fixture.durable().lease?.claimedUntil === claimedUntil
+          && fixture.durable().lease?.leaseGeneration === fixture.grant.leaseGeneration
+          && fixture.durable().lease?.tokenVerifier === privateVerifier,
+      }).toEqual({
+        before: {
+          statuses: [200, 200],
+          listTiming: [claimedUntil, fixture.grant.leaseGeneration],
+          detailTiming: [claimedUntil, fixture.grant.leaseGeneration],
+        },
+        atBoundary: {
+          statuses: [200, 200],
+          listTiming: [null, null],
+          detailTiming: [null, null],
+        },
+        deliveries: [1, 1, 1],
+        privateAuthorityUnchanged: true,
+      });
+  });
+});
+
+describe('#56 R12 remaining P1 gates', () => {
+  test('R12 RED: production claim rejects input-required without a delivery or queued working projection', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    const inputRequired = { ...submittedTask(), state: 'input-required' as const };
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => inputRequired);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: '<r12-unexpected-claim>' };
+    });
+
+    const outcome = await claimTask({ id: ID, from: B, leaseSec: 300 }).then(
+      () => 'granted',
+      (error: Error) => error.message,
+    );
+    const projected = await taskService.get(ID);
+    expect({
+      outcome,
+      deliveries: sent.length,
+      durableState: inputRequired.state,
+      activeLease: inputRequired.lease !== undefined,
+      queuedWorkingProjection: projected?.state === 'working',
+    }).toEqual({
+      outcome: 'task_not_claimable',
+      deliveries: 0,
+      durableState: 'input-required',
+      activeLease: false,
+      queuedWorkingProjection: false,
+    });
+  });
+
+  test('R12 GREEN: queued active lease projection hides at equality without a read write', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    const durable = submittedTask();
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: '<r12-queued-claim>' };
+    });
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const publicApp = productionApp({
+      ...taskService,
+      async list() {
+        const task = await taskService.get(ID);
+        return task ? [task] : [];
+      },
+      async get() { return taskService.get(ID); },
+    });
+    const read = async () => {
+      const [list, detail] = await Promise.all([
+        publicApp.request('/v1/tasks'),
+        publicApp.request(`/v1/tasks/${ID}`),
+      ]);
+      const listBody = await list.json() as { tasks?: Array<Record<string, unknown>> };
+      const detailBody = await detail.json() as Record<string, unknown>;
+      const listed = listBody.tasks?.[0];
+      return {
+        statuses: [list.status, detail.status],
+        listTiming: [listed?.claimedUntil ?? null, listed?.leaseGeneration ?? null],
+        detailTiming: [detailBody.claimedUntil ?? null, detailBody.leaseGeneration ?? null],
+      };
+    };
+
+    now = Date.parse(grant.claimedUntil) - 1;
+    const deliveriesBeforeReads = sent.length;
+    const before = await read();
+    const deliveriesAfterBefore = sent.length;
+    now = Date.parse(grant.claimedUntil);
+    const atBoundary = await read();
+    const deliveriesAfterBoundary = sent.length;
+    const queued = await taskService.get(ID);
+    expect({
+      before,
+      atBoundary,
+      deliveries: [deliveriesBeforeReads, deliveriesAfterBefore, deliveriesAfterBoundary],
+      privateAuthorityUnchanged: queued?.lease?.claimedUntil === grant.claimedUntil
+        && queued.lease?.leaseGeneration === grant.leaseGeneration
+        && queued.lease?.tokenVerifier === grant.task.lease?.tokenVerifier,
+    }).toEqual({
+      before: {
+        statuses: [200, 200],
+        listTiming: [grant.claimedUntil, grant.leaseGeneration],
+        detailTiming: [grant.claimedUntil, grant.leaseGeneration],
+      },
+      atBoundary: {
+        statuses: [200, 200],
+        listTiming: [null, null],
+        detailTiming: [null, null],
+      },
+      deliveries: [1, 1, 1],
+      privateAuthorityUnchanged: true,
+    });
+  });
+
+  test('R12 GREEN: released working task reclaims only from its authenticated release receipt', async () => {
+    let now = START;
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r12-release-reclaim-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const released = await taskService.release!({ id: ID, from: B, leaseToken: first.leaseToken });
+    const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect({
+      releasedWorking: released.state,
+      authenticatedReleaseReceipt: released.releasedLease?.tokenVerifier === first.task.lease?.tokenVerifier,
+      reclaimGeneration: reclaimed.leaseGeneration,
+      deliveries: sent.length,
+    }).toEqual({
+      releasedWorking: 'working',
+      authenticatedReleaseReceipt: true,
+      reclaimGeneration: 2,
+      deliveries: 3,
+    });
+  });
+
+  test('R12 GREEN: terminal queued overlay clears stale expiry receipt privately and publicly', async () => {
+    const expired = {
+      ...submittedTask(),
+      state: 'working' as const,
+      expiredLease: {
+        leaseGeneration: 1,
+        claimedUntil: '2026-08-24T00:05:00.000Z',
+        expiredAt: '2026-08-24T00:05:00.000Z',
+      },
+    };
+    const sent: SendInput[] = [];
+    setTaskGetForTests(async () => expired);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: '<r12-terminal-overlay>' };
+    });
+    await taskService.update({ id: ID, from: A, state: 'completed' });
+    const queued = await taskService.get(ID);
+    const publicView = queued ? toTaskView(queued) : null;
+    expect({
+      delivery: sent.length,
+      terminal: queued?.state,
+      privateExpiredReceipt: queued?.expiredLease !== undefined,
+      publicExpiredReceipt: publicView ? Object.hasOwn(publicView, 'expiredLease') : null,
+    }).toEqual({
+      delivery: 1,
+      terminal: 'completed',
+      privateExpiredReceipt: false,
+      publicExpiredReceipt: false,
+    });
+  });
+});
 
 if (process.env.TASK_LEASES_R6_RED === '1') {
   describe('#56 R6a production lease-core matrix RED', () => {
