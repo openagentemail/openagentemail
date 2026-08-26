@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "bun run --watch src/main.ts",
     "start": "bun run src/main.ts",
-    "build": "bun build src/main.ts --target bun --outdir dist && bun run scripts/copy-ui-to-dist.ts",
+    "build": "bun build src/main.ts src/ntfy-provision.ts --target bun --outdir dist && bun run scripts/copy-ui-to-dist.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint:ui": "eslint src/ui",

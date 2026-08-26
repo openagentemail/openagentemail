@@ -17,7 +17,7 @@ process.env.NODE_ENV = 'test';
 const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
-const { setTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
@@ -113,19 +113,24 @@ const capableService = {
 } as LeaseCapableService;
 
 function appFor(address: string, leaseEnabledForTests = true, selectedService: TaskService = capableService) {
-  setTaskLeasesEnabledForTests(leaseEnabledForTests);
-  const app = new Hono();
-  app.use('*', async (c, next) => {
-    c.set('auth', { kind: 'identity' as const, address });
-    await next();
+  const app = withTaskLeasesEnabledForTests(leaseEnabledForTests, () => {
+    const scoped = new Hono();
+    scoped.use('*', async (c, next) => {
+      c.set('auth', { kind: 'identity' as const, address });
+      await next();
+    });
+    scoped.route('/v1/tasks', createTaskRoutes({
+      service: selectedService,
+      findIdentity: (candidate) => [REQUESTER, RECIPIENT, OUTSIDER].includes(candidate.toLowerCase())
+        ? { address: candidate, createdAt: '2026-08-24T00:00:00.000Z' }
+        : undefined,
+    }));
+    return scoped;
   });
-  app.route('/v1/tasks', createTaskRoutes({
-    service: selectedService,
-    findIdentity: (candidate) => [REQUESTER, RECIPIENT, OUTSIDER].includes(candidate.toLowerCase())
-      ? { address: candidate, createdAt: '2026-08-24T00:00:00.000Z' }
-      : undefined,
-  }));
-  return app;
+  const request = app.request.bind(app);
+  return {
+    request: (...args: Parameters<typeof app.request>) => withTaskLeasesEnabledForTests(leaseEnabledForTests, () => request(...args)),
+  };
 }
 
 beforeEach(() => {
@@ -138,7 +143,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
 });
 

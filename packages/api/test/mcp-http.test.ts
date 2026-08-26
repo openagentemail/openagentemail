@@ -15,10 +15,12 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-mcp-http-'));
 process.env.UI_ENABLED = 'false';
 process.env.TASK_LEASES_ENABLED = 'true';
 
-const { describe, expect, test } = await import('bun:test');
+const { describe, expect, test: bunTest } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
+const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 // bun 共享模块注册表下 config 可能被其他测试文件先冻结；取当前进程里已生效的合法 admin 凭证，
 // 勿写死 'admin-key'（冻结方 identities.test.ts 的 API_KEYS 不含该字面值）。
 const { config } = await import('../src/lib/config.ts');

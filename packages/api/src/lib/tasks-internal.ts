@@ -12,6 +12,7 @@ import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
+import { taskLeasesEnabled } from './task-lease-gate.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 
 export {
@@ -87,7 +88,6 @@ type ApprovalEventPayload =
   | { event: 'expired'; digest: string; expiredAt: string };
 
 const TASK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const configuredTaskLeasesEnabled = config.taskLeasesEnabled;
 const RESULT_MARKER = '<!-- openagent.email task result -->';
 const APPROVAL_MARKER = '<!-- openagent.email approval snapshot -->';
 const APPROVAL_DIGEST_RE = /^[a-f0-9]{64}$/;
@@ -1497,16 +1497,6 @@ async function updateTaskUnlocked(input: UpdateTaskInput, existing?: Task): Prom
   return next;
 }
 
-function taskLeasesEnabled(): boolean {
-  return config.taskLeasesEnabled;
-}
-
-/** Build-excluded seam; the public tasks facade does not re-export it. */
-export function setTaskLeasesEnabledForTests(enabled: boolean | undefined): boolean {
-  (config as { taskLeasesEnabled: boolean }).taskLeasesEnabled = enabled ?? configuredTaskLeasesEnabled;
-  return config.taskLeasesEnabled;
-}
-
 /** Shared core boundary for every lease mutation. Route and reaper callers
  * retain their public behavior, but no in-process caller may bypass this. */
 function assertTaskLeasesEnabled(): void {
@@ -1758,6 +1748,7 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
 /** One bounded pass for the server reaper. All task authority remains in the
  * shared lock-held materializer, so a concurrent reclaim cannot overtake it. */
 export async function reapExpiredTaskLeasesOnce(): Promise<number> {
+  assertTaskLeasesEnabled();
   const candidates = await loadAllTasksCached();
   let materialized = 0;
   for (const candidate of candidates) {

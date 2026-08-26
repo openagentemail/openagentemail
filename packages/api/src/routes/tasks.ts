@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
+import { taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 import {
   TASK_STATES,
@@ -127,7 +128,7 @@ export type TaskRouteOptions = {
 export function createTaskRoutes(options: TaskRouteOptions = {}) {
   const service = options.service ?? taskService;
   const find = options.findIdentity ?? findIdentity;
-  const leasesEnabled = config.taskLeasesEnabled;
+  const leasesEnabled = () => taskLeasesEnabled();
 
   function known(c: Context, address: string): Response | null {
     const domain = address.split('@')[1]?.toLowerCase();
@@ -238,7 +239,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       const parsed = claimSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       // Disabled direct lease operations must have no service/mutation side effect.
-      if (!leasesEnabled) return c.json({ error: 'task_leases_disabled' }, 409);
+      if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
       const task = await authorizationTask(service, id.data);
@@ -269,7 +270,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       }
       const parsed = renewLeaseSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
-      if (!leasesEnabled) return c.json({ error: 'task_leases_disabled' }, 409);
+      if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
       const task = await authorizationTask(service, id.data);
@@ -308,7 +309,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       }
       const parsed = releaseLeaseSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
-      if (!leasesEnabled) return c.json({ error: 'task_leases_disabled' }, 409);
+      if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
       const task = await authorizationTask(service, id.data);

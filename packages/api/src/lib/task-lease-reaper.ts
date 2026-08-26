@@ -1,4 +1,4 @@
-import { config } from './config.ts';
+import { taskLeasesEnabled } from './task-lease-gate.ts';
 import { reapExpiredTaskLeasesOnce } from './tasks.ts';
 
 // #56 requires explicit recovery, not configurability; a tunable cadence is a separate task.
@@ -15,7 +15,7 @@ type ReaperScheduler = {
 /** Starts the fixed production cadence. The callback is single-flight so a
  * slow IMAP/SMTP round cannot overlap a later tick. */
 export function startTaskLeaseReaper(dependencies: ReaperScheduler = {}): void {
-  const leasesEnabled = config.taskLeasesEnabled;
+  const leasesEnabled = taskLeasesEnabled();
   if (!leasesEnabled) return;
   const reapOnce = dependencies.reapOnce ?? reapExpiredTaskLeasesOnce;
   const schedule = dependencies.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));

@@ -13,7 +13,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-lease-verifier-'));
 process.env.TASK_LEASES_ENABLED = 'true';
 
-const { expect, test } = await import('bun:test');
+const { expect, test: bunTest } = await import('bun:test');
 const {
   claimTask,
   clearQueuedEventsForTests,
@@ -24,6 +24,8 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('../src/lib/tasks.ts');
+const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
 

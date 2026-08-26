@@ -164,7 +164,7 @@ services:
   ntfy-provision:
     build: ./packages/api
     container_name: openagent-ntfy-provision
-    command: ["bun", "run", "src/ntfy-provision.ts"]
+    command: ["bun", "dist/ntfy-provision.js"]
     environment:
       DOMAIN: ${DOMAIN}
       API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}

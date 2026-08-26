@@ -16,9 +16,14 @@ test('#89 RED: production lease modules expose neither signing/parser helpers no
   expect(Object.hasOwn(tasks, 'claimLeaseHeadersForTests')).toBe(false);
   expect(Object.hasOwn(tasks, 'parseTaskMessageForTests')).toBe(false);
   expect(Object.hasOwn(tasks, 'setTaskLeasesEnabledForTests')).toBe(false);
+  expect(Object.hasOwn(tasks, 'withTaskLeasesEnabledForTests')).toBe(false);
   expect(Object.hasOwn(tasks, 'parseStampedTaskMessageForTests')).toBe(false);
-  for (const path of ['../src/routes/tasks.ts', '../src/lib/task-lease-reaper.ts', '../src/app.ts']) {
-    expect(readFileSync(new URL(path, import.meta.url), 'utf8')).not.toContain('leaseEnabledForTests');
+  for (const path of ['../src/lib/tasks.ts', '../src/routes/tasks.ts', '../src/lib/task-lease-reaper.ts', '../src/app.ts']) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    expect(source).not.toContain('leaseEnabledForTests');
+    expect(source).not.toContain('setTaskLeasesEnabledForTests');
+    expect(source).not.toContain('withTaskLeasesEnabledForTests');
+    expect(source).not.toContain('taskLeaseTestRegistry');
   }
 });
 
@@ -31,6 +36,7 @@ test('#89 GREEN: canonical production bundle and final Docker stage exclude ever
     'claimLeaseHeadersForTests',
     'parseTaskMessageForTests',
     'setTaskLeasesEnabledForTests',
+    'withTaskLeasesEnabledForTests',
     'parseStampedTaskMessageForTests',
     'taskLeaseTestRegistry',
   ]) expect(bundle).not.toContain(seam);

@@ -16,7 +16,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-lease-reaper-red-'))
 process.env.TASK_LEASES_ENABLED = 'true';
 process.env.NODE_ENV = 'test';
 
-const { afterEach, describe, expect, test } = await import('bun:test');
+const { afterEach, describe, expect, test: bunTest } = await import('bun:test');
 const {
   clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
@@ -29,7 +29,8 @@ const {
   taskService,
   toTaskView,
 } = await import('../src/lib/tasks.ts');
-const { claimLeaseHeadersForTests, parseTaskMessageForTests } = await import('./support/task-lease-seams.ts');
+const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { startTaskLeaseReaper, TASK_LEASE_REAPER_INTERVAL_MS } = await import('../src/lib/task-lease-reaper.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
