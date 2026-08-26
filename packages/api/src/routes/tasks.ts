@@ -122,14 +122,12 @@ async function waitWithSlot(
 export type TaskRouteOptions = {
   service?: TaskService;
   findIdentity?: typeof findIdentity;
-  /** @internal test seam; production always reads config.taskLeasesEnabled. */
-  leaseEnabledForTests?: boolean;
 };
 
 export function createTaskRoutes(options: TaskRouteOptions = {}) {
   const service = options.service ?? taskService;
   const find = options.findIdentity ?? findIdentity;
-  const leasesEnabled = options.leaseEnabledForTests ?? config.taskLeasesEnabled;
+  const leasesEnabled = config.taskLeasesEnabled;
 
   function known(c: Context, address: string): Response | null {
     const domain = address.split('@')[1]?.toLowerCase();

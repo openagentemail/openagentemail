@@ -15,6 +15,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-lease-admin-override-'));
 process.env.TASK_LEASES_ENABLED = 'true';
+process.env.NODE_ENV = 'test';
 
 const { afterEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
@@ -24,13 +25,13 @@ const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const {
   clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
-  parseTaskMessageForTests,
   setTaskGetForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
   taskService,
   taskFromMessages,
 } = await import('../src/lib/tasks.ts');
+const { parseTaskMessageForTests } = await import('./support/task-lease-seams.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
 const REQUESTER = 'alpha@test.example';
@@ -102,7 +103,6 @@ function recipientTaskApp() {
   // No service injection: stale operations use the production TaskService.
   app.route('/v1/tasks', createTaskRoutes({
     findIdentity: (address) => ({ address, createdAt: '2026-08-24T00:00:00.000Z' }),
-    leaseEnabledForTests: true,
   }));
   return app;
 }

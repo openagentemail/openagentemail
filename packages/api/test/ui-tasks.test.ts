@@ -10,6 +10,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.TASK_LEASES_ENABLED = 'true';
+process.env.NODE_ENV = 'test';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -19,13 +20,13 @@ const {
   listTaskBoard,
   clearQueuedEventsForTests,
   setTaskGetForTests,
-  setTaskLeasesEnabledForTests,
   setTaskListAllForTests,
   setTaskSendMailForTests,
   setTaskNowForTests,
   taskService,
   toUiTaskView,
 } = await import('../src/lib/tasks.ts');
+const { setTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 
 for (const localpart of ['fox', 'owl']) {
   if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
