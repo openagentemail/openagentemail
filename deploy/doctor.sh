@@ -149,14 +149,55 @@ fi
 # ── 5. DMARC ─────────────────────────────────────────────────────────────────
 echo "[DNS] DMARC"
 DMARC="$(dig +short TXT "_dmarc.${DOMAIN}" | tr -d '\\"')"
-if echo "$DMARC" | grep -q 'v=DMARC1'; then
-  ok "DMARC present ($(dig +short TXT "_dmarc.${DOMAIN}" | grep -i 'v=DMARC1' | head -1 | tr -d '"'))"
-  echo "$DMARC" | grep -q 'p=none' && \
-    warn "DMARC policy is p=none (monitoring only)" \
-         "       hint: fine for launch; move to p=quarantine then p=reject once mail flows cleanly"
+dmarc_tag_value() {
+  printf '%s\n' "$1" | awk -v wanted="$2" '
+    {
+      tag_count = split($0, tags, ";")
+      for (i = 1; i <= tag_count; i++) {
+        tag = tags[i]
+        sub(/^[[:space:]]*/, "", tag)
+        sub(/[[:space:]]*$/, "", tag)
+        separator = index(tag, "=")
+        if (!separator) continue
+        key = substr(tag, 1, separator - 1)
+        value = substr(tag, separator + 1)
+        gsub(/[[:space:]]/, "", key)
+        gsub(/^[[:space:]]*|[[:space:]]*$/, "", value)
+        if (tolower(key) == tolower(wanted)) print tolower(value)
+      }
+    }
+  '
+}
+
+DMARC_RECORD_COUNT="$(printf '%s\n' "$DMARC" | awk 'NF { count++ } END { print count + 0 }')"
+DMARC_VERSIONS="$(dmarc_tag_value "$DMARC" v)"
+DMARC_POLICIES="$(dmarc_tag_value "$DMARC" p)"
+DMARC_VERSION_COUNT="$(printf '%s\n' "$DMARC_VERSIONS" | awk 'NF { count++ } END { print count + 0 }')"
+DMARC_POLICY_COUNT="$(printf '%s\n' "$DMARC_POLICIES" | awk 'NF { count++ } END { print count + 0 }')"
+DMARC_VERSION="$(printf '%s\n' "$DMARC_VERSIONS" | head -1)"
+DMARC_POLICY="$(printf '%s\n' "$DMARC_POLICIES" | head -1)"
+if [ "$DMARC_RECORD_COUNT" -ne 1 ] || [ "$DMARC_VERSION_COUNT" -ne 1 ] || \
+   [ "$DMARC_POLICY_COUNT" -ne 1 ] || [ "$DMARC_VERSION" != "dmarc1" ]; then
+  bad "no valid DMARC policy"
+  hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=quarantine; rua=mailto:postmaster@${DOMAIN}\""
 else
-  bad "no DMARC record"
-  hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=none; rua=mailto:postmaster@${DOMAIN}\""
+  case "$DMARC_POLICY" in
+    none)
+      warn "DMARC policy is p=none (monitoring only)" \
+           "       hint: upgrade to p=quarantine after the first observation week"
+      ;;
+    quarantine)
+      ok "DMARC policy is p=quarantine"
+      hint "p=reject is the next stage after doctor.sh stays green"
+      ;;
+    reject)
+      ok "DMARC policy is p=reject"
+      ;;
+    *)
+      bad "no valid DMARC policy"
+      hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=quarantine; rua=mailto:postmaster@${DOMAIN}\""
+      ;;
+  esac
 fi
 
 # ── 6. PTR (reverse DNS) ────────────────────────────────────────────────────
