@@ -148,38 +148,120 @@ fi
 
 # ── 5. DMARC ─────────────────────────────────────────────────────────────────
 echo "[DNS] DMARC"
-DMARC="$(dig +short TXT "_dmarc.${DOMAIN}" | tr -d '\\"')"
-dmarc_tag_value() {
-  printf '%s\n' "$1" | awk -v wanted="$2" '
-    {
-      tag_count = split($0, tags, ";")
-      for (i = 1; i <= tag_count; i++) {
-        tag = tags[i]
-        sub(/^[[:space:]]*/, "", tag)
-        sub(/[[:space:]]*$/, "", tag)
-        separator = index(tag, "=")
-        if (!separator) continue
-        key = substr(tag, 1, separator - 1)
-        value = substr(tag, separator + 1)
-        gsub(/[[:space:]]/, "", key)
-        gsub(/^[[:space:]]*|[[:space:]]*$/, "", value)
-        if (tolower(key) == tolower(wanted)) print tolower(value)
+# dig prints one TXT resource record per line, with long records split across
+# adjacent quoted character-strings. Reassemble each line without adding bytes;
+# unquoted CNAME answers are deliberately ignored.
+DMARC_TXT_RECORDS="$(dig +short TXT "_dmarc.${DOMAIN}" | awk '
+  {
+    record = ""
+    quoted = 0
+    escaped = 0
+    saw_quote = 0
+    for (i = 1; i <= length($0); i++) {
+      character = substr($0, i, 1)
+      if (quoted) {
+        if (escaped) {
+          record = record character
+          escaped = 0
+        } else if (character == "\\") {
+          escaped = 1
+        } else if (character == "\"") {
+          quoted = 0
+        } else {
+          record = record character
+        }
+      } else if (character == "\"") {
+        quoted = 1
+        saw_quote = 1
       }
     }
-  '
-}
+    if (saw_quote && !quoted && !escaped) print record
+  }
+')"
 
-DMARC_RECORD_COUNT="$(printf '%s\n' "$DMARC" | awk 'NF { count++ } END { print count + 0 }')"
-DMARC_VERSIONS="$(dmarc_tag_value "$DMARC" v)"
-DMARC_POLICIES="$(dmarc_tag_value "$DMARC" p)"
-DMARC_VERSION_COUNT="$(printf '%s\n' "$DMARC_VERSIONS" | awk 'NF { count++ } END { print count + 0 }')"
-DMARC_POLICY_COUNT="$(printf '%s\n' "$DMARC_POLICIES" | awk 'NF { count++ } END { print count + 0 }')"
-DMARC_VERSION="$(printf '%s\n' "$DMARC_VERSIONS" | head -1)"
-DMARC_POLICY="$(printf '%s\n' "$DMARC_POLICIES" | head -1)"
-if [ "$DMARC_RECORD_COUNT" -ne 1 ] || [ "$DMARC_VERSION_COUNT" -ne 1 ] || \
-   [ "$DMARC_POLICY_COUNT" -ne 1 ] || [ "$DMARC_VERSION" != "dmarc1" ]; then
+# RFC 9989 discovery recognizes only records whose first tag is the exact,
+# case-sensitive version value DMARC1. Other TXT records are unrelated data.
+DMARC_CANDIDATES="$(printf '%s\n' "$DMARC_TXT_RECORDS" | awk '
+  function trim(value) {
+    sub(/^[[:space:]]*/, "", value)
+    sub(/[[:space:]]*$/, "", value)
+    return value
+  }
+  NF {
+    split($0, tags, ";")
+    tag = trim(tags[1])
+    separator = index(tag, "=")
+    if (!separator) next
+    key = trim(substr(tag, 1, separator - 1))
+    value = trim(substr(tag, separator + 1))
+    if (tolower(key) == "v" && value == "DMARC1") print $0
+  }
+')"
+DMARC_CANDIDATE_COUNT="$(printf '%s\n' "$DMARC_CANDIDATES" | awk 'NF { count++ } END { print count + 0 }')"
+
+DMARC_POLICY_RESULT=""
+if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
+  DMARC_POLICY_RESULT="$(printf '%s\n' "$DMARC_CANDIDATES" | awk '
+    function trim(value) {
+      sub(/^[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      return value
+    }
+    {
+      tag_count = split($0, tags, ";")
+      version_count = 0
+      policy_count = 0
+      test_mode_count = 0
+      policy = ""
+      test_mode = "n"
+      for (i = 1; i <= tag_count; i++) {
+        tag = trim(tags[i])
+        if (!length(tag)) continue
+        separator = index(tag, "=")
+        if (!separator) continue
+        key = tolower(trim(substr(tag, 1, separator - 1)))
+        value = trim(substr(tag, separator + 1))
+        if (key == "v") version_count++
+        if (key == "p") {
+          policy_count++
+          policy = tolower(value)
+        }
+        if (key == "t") {
+          test_mode_count++
+          test_mode = tolower(value)
+        }
+      }
+      if (version_count == 1 && policy_count == 1 && test_mode_count <= 1 && \
+          (test_mode == "n" || test_mode == "y")) print policy, test_mode
+    }
+  ')"
+fi
+DMARC_POLICY="${DMARC_POLICY_RESULT%% *}"
+DMARC_TEST_MODE="${DMARC_POLICY_RESULT#* }"
+[ "$DMARC_TEST_MODE" != "$DMARC_POLICY_RESULT" ] || DMARC_TEST_MODE=""
+
+if [ "$DMARC_CANDIDATE_COUNT" -ne 1 ] || [ -z "$DMARC_POLICY" ] || [ -z "$DMARC_TEST_MODE" ]; then
   bad "no valid DMARC policy"
   hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=quarantine; rua=mailto:postmaster@${DOMAIN}\""
+elif [ "$DMARC_TEST_MODE" = "y" ]; then
+  case "$DMARC_POLICY" in
+    reject)
+      ok "DMARC configured p=reject; t=y; effective policy is p=quarantine"
+      hint "remove t=y or set t=n to enforce p=reject"
+      ;;
+    quarantine)
+      warn "DMARC configured p=quarantine; t=y; effective policy is p=none" \
+           "       hint: remove t=y or set t=n to enforce p=quarantine"
+      ;;
+    none)
+      warn "DMARC configured p=none; t=y; effective policy is p=none (monitoring only)" \
+           "       hint: remove t=y or set t=n, then upgrade to p=quarantine after the observation period"
+      ;;
+    *)
+      bad "no valid DMARC policy"
+      hint "create TXT: _dmarc.${DOMAIN}. \"v=DMARC1; p=quarantine; rua=mailto:postmaster@${DOMAIN}\""
+      ;;
+  esac
 else
   case "$DMARC_POLICY" in
     none)
