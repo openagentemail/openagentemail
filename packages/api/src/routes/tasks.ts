@@ -51,7 +51,7 @@ const updateSchema = z.object({
   result: z.unknown().optional(),
   // R5: undefined is the only omission signal. A supplied empty/malformed
   // token reaches the shared active-lease fence and gets task_lease_required.
-  leaseToken: z.string().max(16_384).optional(),
+  leaseToken: z.string().optional(),
 }).strict();
 
 const claimSchema = z.object({

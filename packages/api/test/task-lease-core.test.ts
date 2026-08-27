@@ -1378,6 +1378,98 @@ describe('#56 R12 remaining P1 gates', () => {
   });
 });
 
+describe('PR98 R14 current-head gate regressions', () => {
+  test('#79 supplied update bearer reaches the REST lease fence across the request envelope', async () => {
+    const fixture = await r13bActiveLeaseFixture();
+    const oversizedBearer = `wrong-${'x'.repeat(16_384)}`;
+
+    const response = await post(fixture.app, 'state', {
+      state: 'input-required',
+      leaseToken: oversizedBearer,
+    });
+    const after = await taskService.get(ID);
+
+    expect({
+      status: response.status,
+      error: objectValue(response.body).error ?? null,
+      deliveries: fixture.sent.length,
+      state: after?.state,
+      generation: after?.lease?.leaseGeneration,
+      bearerAbsent: !containsSecret(response.body, oversizedBearer),
+    }).toEqual({
+      status: 409,
+      error: 'task_lease_required',
+      deliveries: 1,
+      state: 'working',
+      generation: fixture.grant.leaseGeneration,
+      bearerAbsent: true,
+    });
+  });
+
+  test('#81 claim refreshes server time after expiry materialization before granting', async () => {
+    const firstClaimedAt = START;
+    const cap = firstClaimedAt + 7 * 24 * 60 * 60 * 1_000;
+    let now = cap - 1;
+    const durable: Task = {
+      ...submittedTask(),
+      state: 'working',
+      updatedAt: new Date(START + 60_000).toISOString(),
+      lease: {
+        leaseGeneration: 1,
+        claimedUntil: new Date(START + 60_000).toISOString(),
+        tokenVerifier: 'durable-expired-verifier',
+        generationClaimedAt: new Date(START).toISOString(),
+        firstClaimedAt: new Date(firstClaimedAt).toISOString(),
+      },
+    };
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      if (sent.length === 1) now = cap;
+      return { messageId: `<r14-grant-clock-${sent.length}>` };
+    });
+
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_task_cap_exhausted');
+    const projected = await taskService.get(ID);
+    expect({
+      deliveries: sent.length,
+      events: sent.map((input) => input.headers?.['X-OA-Task-Lease-Event']),
+      activeGeneration: projected?.lease?.leaseGeneration ?? null,
+      expiredGeneration: projected?.expiredLease?.leaseGeneration ?? null,
+    }).toEqual({
+      deliveries: 1,
+      events: ['expired'],
+      activeGeneration: null,
+      expiredGeneration: 1,
+    });
+  });
+
+  test('renew fails closed on authenticated active authority missing either clock anchor', async () => {
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    const sent: SendInput[] = [];
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r14-missing-anchor-${sent.length}>` };
+    });
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    clearQueuedEventsForTests();
+
+    for (const missing of ['generationClaimedAt', 'firstClaimedAt'] as const) {
+      const lease = { ...grant.task.lease! };
+      delete lease[missing];
+      const durable = { ...grant.task, lease };
+      setTaskGetForTests(async () => durable);
+
+      await expect(renewTask({ id: ID, from: B, leaseToken: 'wrong-bearer', leaseSec: 600 })).rejects.toThrow('stale_lease');
+      await expect(renewTask({ id: ID, from: B, leaseToken: grant.leaseToken, leaseSec: 600 })).rejects.toThrow('stale_lease');
+    }
+    expect(sent).toHaveLength(1);
+  });
+});
+
 if (process.env.TASK_LEASES_R6_RED === '1') {
   describe('#56 R6a production lease-core matrix RED', () => {
     test('indexed release dominates queued same-generation claim and renew overlays', async () => {

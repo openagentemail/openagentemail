@@ -1700,13 +1700,15 @@ export async function claimTask(input: {
     if ((current.state !== 'submitted' && current.state !== 'working') || isClosedByAdmin(current)) {
       throw new Error('task_not_claimable');
     }
-    const now = nowMs();
+    const beforeMaterialization = nowMs();
     // This must precede expiry materialization: at the absolute boundary a
     // rejected claim is a true zero-side-effect operation.
-    assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), now);
+    assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), beforeMaterialization);
     const wasWorking = current.state === 'working';
     current = await materializeLeaseExpiryUnlocked(current);
-    if (current.lease?.claimedUntil && nowMs() < Date.parse(current.lease.claimedUntil)) {
+    const now = nowMs();
+    assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), now);
+    if (current.lease?.claimedUntil && now < Date.parse(current.lease.claimedUntil)) {
       throw new Error('lease_already_claimed');
     }
     if (wasWorking && !current.expiredLease && !current.releasedLease) throw new Error('task_not_claimable');
@@ -1957,33 +1959,27 @@ export async function renewTask(input: {
     if (!isTaskLeaseTokenVerified(current, input.leaseToken)) throw new Error('stale_lease');
     const generationClaimedAt = active?.generationClaimedAt;
     const firstClaimedAt = active?.firstClaimedAt;
+    if (!generationClaimedAt || !firstClaimedAt) throw new Error('stale_lease');
     const deadline = Date.parse(active?.claimedUntil ?? '');
-    const generationCap = generationClaimedAt
-      ? Date.parse(generationClaimedAt) + TASK_LEASE_GENERATION_MAX_MS
-      : undefined;
-    const taskCap = firstClaimedAt
-      ? Date.parse(firstClaimedAt) + TASK_LEASE_TASK_MAX_MS
-      : undefined;
+    const generationCap = Date.parse(generationClaimedAt) + TASK_LEASE_GENERATION_MAX_MS;
+    const taskCap = Date.parse(firstClaimedAt) + TASK_LEASE_TASK_MAX_MS;
+    if (!Number.isFinite(generationCap) || !Number.isFinite(taskCap)) throw new Error('stale_lease');
     // An ordinary expired deadline remains stale even when it is observed at
     // a later cap. Exact capped deadlines retain their public cap-specific
     // errors, with the absolute task cap winning a simultaneous boundary.
     if (!Number.isFinite(deadline) || now >= deadline) {
-      if (taskCap !== undefined && deadline === taskCap && now >= taskCap) {
+      if (deadline === taskCap && now >= taskCap) {
         throw new Error('lease_task_cap_exhausted');
       }
-      if (generationCap !== undefined && deadline === generationCap && now >= generationCap) {
+      if (deadline === generationCap && now >= generationCap) {
         throw new Error('lease_tenure_exhausted');
       }
       throw new Error('stale_lease');
     }
-    if (taskCap !== undefined && now >= taskCap) throw new Error('lease_task_cap_exhausted');
-    if (generationCap !== undefined && now >= generationCap) throw new Error('lease_tenure_exhausted');
+    if (now >= taskCap) throw new Error('lease_task_cap_exhausted');
+    if (now >= generationCap) throw new Error('lease_tenure_exhausted');
     const currentLease = active!;
-    // All production authorities receive these anchors from claim/rebuild.
-    // The fallback maintains compatibility with pre-anchor in-memory seams.
-    const generationAnchor = generationClaimedAt ?? current.updatedAt;
-    const taskAnchor = firstClaimedAt ?? generationAnchor;
-    const claimedUntil = capLeaseDeadline(now, seconds, generationAnchor, taskAnchor);
+    const claimedUntil = capLeaseDeadline(now, seconds, generationClaimedAt, firstClaimedAt);
     if (Date.parse(claimedUntil) <= Date.parse(currentLease.claimedUntil)) return current;
     const at = new Date(now).toISOString();
     const lease: RenewLeaseEvent = {
@@ -2010,8 +2006,8 @@ export async function renewTask(input: {
         leaseGeneration: currentLease.leaseGeneration,
         claimedUntil,
         tokenVerifier: currentLease.tokenVerifier,
-        generationClaimedAt: generationAnchor,
-        firstClaimedAt: taskAnchor,
+        generationClaimedAt,
+        firstClaimedAt,
       },
       expiredLease: undefined,
     };

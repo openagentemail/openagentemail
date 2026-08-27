@@ -815,4 +815,53 @@ describe('MCP registered task handlers execute through the production HTTP trans
       ],
     });
   });
+
+  test('#79 MCP forwards an oversized supplied update bearer to the shared lease fence', async () => {
+    const identity = createIdentity({ localpart: `r14-update-${crypto.randomUUID().slice(0, 8)}` })!;
+    const id = 'e1e2e3e4-e5e6-47e8-89ca-ebeeeeeeeeee';
+    const supplied = `wrong-${'x'.repeat(16_384)}`;
+    const base = {
+      id, from: 'origin@test.example', to: identity.identity.address, subject: 'MCP envelope bearer proof', state: 'working' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+      lease: { claimedUntil: '2026-08-24T01:00:00.000Z', leaseGeneration: 1, tokenVerifier: 'private-verifier' },
+    };
+    const updates: Array<{ leaseToken?: string }> = [];
+    const unused = async () => { throw new Error('unused in R14 MCP fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: unused, list: unused, listBoard: unused, get: async () => base,
+        update: async (input) => {
+          updates.push(input);
+          throw new Error('task_lease_required');
+        },
+        reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+      },
+    });
+    const response = await handlerApp.request('/mcp', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${identity.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1401, method: 'tools/call', params: { name: 'task_update', arguments: { id, state: 'input-required', leaseToken: supplied } } }),
+    });
+    const body = await readMcpJson(response) as { result?: { isError?: boolean } };
+    const text = JSON.stringify(body);
+
+    expect({
+      status: response.status,
+      toolError: body.result?.isError,
+      code: text.includes('task_lease_required'),
+      statusText: text.includes('409'),
+      inputValidationAbsent: !/input validation|invalid (input|argument)|-32602/i.test(text),
+      forwarded: updates[0]?.leaseToken === supplied,
+      bearerAbsent: !text.includes(supplied),
+    }).toEqual({
+      status: 200,
+      toolError: true,
+      code: true,
+      statusText: true,
+      inputValidationAbsent: true,
+      forwarded: true,
+      bearerAbsent: true,
+    });
+  });
 });
