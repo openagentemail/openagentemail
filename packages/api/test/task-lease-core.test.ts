@@ -512,7 +512,7 @@ describe('#81 renewal tenure', () => {
     expect(sent).toHaveLength(deliveries);
   });
 
-  test('fails closed on authenticated histories that exceed either cap', async () => {
+  test('rebuilds authenticated pre-cap histories while preserving their private anchors', async () => {
     const verifier = 'a'.repeat(43);
     const signed = async (uid: number, event: Parameters<typeof claimLeaseHeadersForTests>[0]['event']) => {
       const headers = claimLeaseHeadersForTests({ id: ID, state: 'working', from: B, to: A, event });
@@ -537,8 +537,14 @@ describe('#81 renewal tenure', () => {
     });
     expect(overGeneration).not.toBeNull();
     expect(overRenewal).not.toBeNull();
-    expect(taskFromMessages(ID, [submittedRaw(), overGeneration!])).toBeNull();
-    expect(taskFromMessages(ID, [submittedRaw(), claim!, overRenewal!])).toBeNull();
+    expect(taskFromMessages(ID, [submittedRaw(), overGeneration!])?.lease).toMatchObject({
+      generationClaimedAt: new Date(START).toISOString(),
+      firstClaimedAt: new Date(START).toISOString(),
+    });
+    expect(taskFromMessages(ID, [submittedRaw(), claim!, overRenewal!])?.lease).toMatchObject({
+      generationClaimedAt: new Date(START).toISOString(),
+      firstClaimedAt: new Date(START).toISOString(),
+    });
   });
 });
 

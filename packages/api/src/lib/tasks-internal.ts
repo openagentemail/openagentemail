@@ -981,9 +981,6 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || !Number.isFinite(taskClaimedAtMs)
         || (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil))
         || claimedUntil <= claimedAt
-        || claimedUntil > claimedAt + TASK_LEASE_GENERATION_MAX_MS
-        || claimedAt >= taskClaimedAtMs + TASK_LEASE_TASK_MAX_MS
-        || claimedUntil > taskClaimedAtMs + TASK_LEASE_TASK_MAX_MS
       ) return null;
       firstClaimedAt = taskClaimedAt;
       previousGeneration = lease.generation;
@@ -1013,10 +1010,6 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || !Number.isFinite(taskClaimedAt)
         || renewedAt >= Date.parse(leaseAuthority.claimedUntil)
         || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
-        || renewedAt >= generationClaimedAt + TASK_LEASE_GENERATION_MAX_MS
-        || renewedAt >= taskClaimedAt + TASK_LEASE_TASK_MAX_MS
-        || claimedUntil > generationClaimedAt + TASK_LEASE_GENERATION_MAX_MS
-        || claimedUntil > taskClaimedAt + TASK_LEASE_TASK_MAX_MS
       ) return null;
       leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
       continue;
