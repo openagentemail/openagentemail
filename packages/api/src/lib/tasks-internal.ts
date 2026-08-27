@@ -393,7 +393,9 @@ function assertApprovalActionBounds(value: unknown): void {
   }
 }
 
-function normalizedApprovalAction(value: unknown): ApprovalAction {
+/** Validate only the fixed approval-action envelope; policy bounds are a
+ * creation concern, while signed historical JSON must remain readable. */
+function approvalActionFields(value: unknown): ApprovalAction {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_approval_action');
   const input = value as Record<string, unknown>;
   if (
@@ -402,10 +404,14 @@ function normalizedApprovalAction(value: unknown): ApprovalAction {
     || typeof input.name !== 'string' || !input.name
     || !Object.prototype.hasOwnProperty.call(input, 'arguments')
   ) throw new Error('invalid_approval_action');
-  assertApprovalActionBounds({ type: input.type, name: input.name, arguments: input.arguments });
+  return { type: input.type, name: input.name, arguments: input.arguments };
+}
+
+function normalizedApprovalAction(value: unknown): ApprovalAction {
+  const input = approvalActionFields(value);
   // Parse the canonical form back so callers cannot mutate the persisted
   // snapshot after creation and so only JSON values cross the event boundary.
-  return JSON.parse(canonicalJson({ type: input.type, name: input.name, arguments: input.arguments })) as ApprovalAction;
+  return JSON.parse(canonicalJson(input)) as ApprovalAction;
 }
 
 /** Reproducible recipe: SHA-256 of canonical UTF-8 JSON, lower-case hex. */
@@ -1261,7 +1267,9 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
   if (from === to) throw new Error('approval_participants_must_differ');
   if (!knownManagedIdentity(from) || !knownManagedIdentity(to)) throw new Error('approval_identity_required');
   assertApprovalExpiryBound(input.expiresAt);
-  const action = normalizedApprovalAction(input.action);
+  const rawAction = approvalActionFields(input.action);
+  assertApprovalActionBounds(rawAction);
+  const action = normalizedApprovalAction(rawAction);
   const digest = approvalActionDigest(action);
   const snapshot: ApprovalSnapshot = { action, reviewer: to, expiresAt: input.expiresAt, digest };
   const id = randomUUID();
