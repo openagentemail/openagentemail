@@ -1264,7 +1264,7 @@ describe('#56 R9 lease final dashboard surfaces', () => {
     });
   });
 
-  test('R11 RED: dashboard list and detail hide public lease timing at the half-open expiry boundary without writes', async () => {
+  test('R11 RED: dashboard list and detail hide public lease timing at the half-open expiry boundary without writes', () => withTaskLeasesEnabledForTests(true, async () => {
     const claimedUntil = '2026-08-12T12:30:00.000Z';
     const privateVerifier = 'r11-dashboard-verifier-never-public';
     const leased = {
@@ -1325,7 +1325,7 @@ describe('#56 R9 lease final dashboard surfaces', () => {
       deliveries: [0, 0, 0],
       privateAuthorityUnchanged: true,
     });
-  });
+  }));
 });
 
 describe('#56 R13 dashboard reply lease boundary RED', () => {
