@@ -18,6 +18,9 @@ jobs:
         with:
           bun-version: "1.2.21"
 
+      - name: Test mail-security scripts
+        run: bash deploy/test-mail-security.sh
+
       - name: Test packages/api
         working-directory: packages/api
         run: |

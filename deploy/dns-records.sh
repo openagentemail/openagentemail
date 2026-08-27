@@ -99,8 +99,9 @@ fi
 
 cat <<EOF
 
-5) DMARC — starter policy (monitoring only; tighten to quarantine/reject later)
-   _dmarc.${DOMAIN}.   TXT   "v=DMARC1; p=none; rua=mailto:postmaster@${DOMAIN}"
+5) DMARC — default policy
+   _dmarc.${DOMAIN}.   TXT   "v=DMARC1; p=quarantine; rua=mailto:postmaster@${DOMAIN}"
+   Start with p=quarantine. For the first observation week, you may use p=none. After doctor.sh is green, move to p=reject.
 
 6) Reverse DNS (PTR) — set at your VPS HOST (not your DNS provider):
    ${SERVER_IP}  ->  ${MAIL_HOST}
