@@ -151,20 +151,57 @@ echo "[DNS] DMARC"
 # dig prints one TXT resource record per line, with long records split across
 # adjacent quoted character-strings. Reassemble each line without adding bytes;
 # unquoted CNAME answers are deliberately ignored.
-DMARC_TXT_RECORDS="$(dig +short TXT "_dmarc.${DOMAIN}" | awk '
+DMARC_TXT_RECORDS="$(dig +short TXT "_dmarc.${DOMAIN}" | LC_ALL=C awk '
+  BEGIN {
+    valid_prefix = "__OAE_DMARC_RR_VALID__:"
+    invalid_prefix = "__OAE_DMARC_RR_INVALID_CANDIDATE__:"
+  }
+  function trim(value) {
+    sub(/^[ \t]*/, "", value)
+    sub(/[ \t]*$/, "", value)
+    return value
+  }
+  function has_complete_version_tag(body, tags, tag, separator, key, value) {
+    if (!index(body, ";")) return 0
+    split(body, tags, ";")
+    tag = tags[1]
+    if (tag ~ /^[ \t]/) return 0
+    tag = trim(tag)
+    separator = index(tag, "=")
+    if (!separator) return 0
+    key = trim(substr(tag, 1, separator - 1))
+    value = trim(substr(tag, separator + 1))
+    return tolower(key) == "v" && value == "DMARC1"
+  }
   {
     record = ""
     quoted = 0
-    escaped = 0
     saw_quote = 0
+    invalid_record = 0
+    invalid_candidate = 0
     for (i = 1; i <= length($0); i++) {
       character = substr($0, i, 1)
       if (quoted) {
-        if (escaped) {
-          record = record character
-          escaped = 0
-        } else if (character == "\\") {
-          escaped = 1
+        if (character == "\\") {
+          decimal = substr($0, i + 1, 3)
+          if (decimal ~ /^[0-9][0-9][0-9]$/) {
+            octet = decimal + 0
+            i += 3
+            if (octet == 9) {
+              record = record sprintf("%c", octet)
+            } else if (octet < 32 || octet > 126) {
+              if (!invalid_record) invalid_candidate = has_complete_version_tag(record)
+              invalid_record = 1
+            } else {
+              record = record sprintf("%c", octet)
+            }
+          } else if (i < length($0)) {
+            i++
+            record = record substr($0, i, 1)
+          } else {
+            if (!invalid_record) invalid_candidate = has_complete_version_tag(record)
+            invalid_record = 1
+          }
         } else if (character == "\"") {
           quoted = 0
         } else {
@@ -175,21 +212,36 @@ DMARC_TXT_RECORDS="$(dig +short TXT "_dmarc.${DOMAIN}" | awk '
         saw_quote = 1
       }
     }
-    if (saw_quote && !quoted && !escaped) print record
+    if (saw_quote && !quoted) {
+      if (!invalid_record) print valid_prefix record
+      else if (invalid_candidate) print invalid_prefix
+    }
   }
 ')"
 
 # RFC 9989 discovery recognizes only records whose first tag is the exact,
 # case-sensitive version value DMARC1. Other TXT records are unrelated data.
-DMARC_CANDIDATES="$(printf '%s\n' "$DMARC_TXT_RECORDS" | awk '
+DMARC_CANDIDATES="$(printf '%s\n' "$DMARC_TXT_RECORDS" | LC_ALL=C awk '
+  BEGIN {
+    valid_prefix = "__OAE_DMARC_RR_VALID__:"
+    invalid_prefix = "__OAE_DMARC_RR_INVALID_CANDIDATE__:"
+  }
   function trim(value) {
     sub(/^[[:space:]]*/, "", value)
     sub(/[[:space:]]*$/, "", value)
     return value
   }
   NF {
-    split($0, tags, ";")
-    tag = trim(tags[1])
+    if (index($0, invalid_prefix) == 1) {
+      print invalid_prefix
+      next
+    }
+    if (index($0, valid_prefix) != 1) next
+    record = substr($0, length(valid_prefix) + 1)
+    split(record, tags, ";")
+    tag = tags[1]
+    if (tag ~ /^[ \t]/) next
+    tag = trim(tag)
     separator = index(tag, "=")
     if (!separator) next
     key = trim(substr(tag, 1, separator - 1))
@@ -201,27 +253,45 @@ DMARC_CANDIDATE_COUNT="$(printf '%s\n' "$DMARC_CANDIDATES" | awk 'NF { count++ }
 
 DMARC_POLICY_RESULT=""
 if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
-  DMARC_POLICY_RESULT="$(printf '%s\n' "$DMARC_CANDIDATES" | awk '
+  DMARC_POLICY_RESULT="$(printf '%s\n' "$DMARC_CANDIDATES" | LC_ALL=C awk '
+    BEGIN { valid_prefix = "__OAE_DMARC_RR_VALID__:" }
     function trim(value) {
       sub(/^[[:space:]]*/, "", value)
       sub(/[[:space:]]*$/, "", value)
       return value
     }
     {
-      tag_count = split($0, tags, ";")
+      if (index($0, valid_prefix) != 1) next
+      record = substr($0, length(valid_prefix) + 1)
+      tag_count = split(record, tags, ";")
       version_count = 0
       policy_count = 0
       test_mode_count = 0
       duplicate_tag = 0
+      invalid_tag = 0
+      invalid_subpolicy = 0
       policy = ""
       test_mode = "n"
       for (i = 1; i <= tag_count; i++) {
-        tag = trim(tags[i])
-        if (!length(tag)) continue
+        tag = tags[i]
+        sub(/^[ \t]*/, "", tag)
+        if (i < tag_count) sub(/[ \t]*$/, "", tag)
+        if (!length(tag)) {
+          if (i < tag_count) invalid_tag = 1
+          continue
+        }
         separator = index(tag, "=")
-        if (!separator) continue
+        if (!separator) {
+          invalid_tag = 1
+          continue
+        }
         key = tolower(trim(substr(tag, 1, separator - 1)))
-        value = trim(substr(tag, separator + 1))
+        value = substr(tag, separator + 1)
+        sub(/^[ \t]*/, "", value)
+        if (key !~ /^[a-z]+$/ || value !~ /^([ -:]|[<-~])+$/) {
+          invalid_tag = 1
+          continue
+        }
         if (++seen[key] > 1) duplicate_tag = 1
         if (key == "v") version_count++
         if (key == "p") {
@@ -232,10 +302,14 @@ if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
           test_mode_count++
           test_mode = tolower(value)
         }
+        if ((key == "sp" || key == "np") && tolower(value) != "none" && \
+            tolower(value) != "quarantine" && tolower(value) != "reject") \
+            invalid_subpolicy = 1
       }
-      if (!duplicate_tag && version_count == 1 && policy_count == 1 && \
-          test_mode_count <= 1 && (policy == "none" || policy == "quarantine" || \
-          policy == "reject") && (test_mode == "n" || test_mode == "y")) \
+      if (!invalid_tag && !duplicate_tag && !invalid_subpolicy && version_count == 1 && \
+          policy_count == 1 && test_mode_count <= 1 && (policy == "none" || \
+          policy == "quarantine" || policy == "reject") && \
+          (test_mode == "n" || test_mode == "y")) \
           print policy, test_mode
     }
   ')"

@@ -106,6 +106,210 @@ run_doctor '"v=DMARC1; p=reject bogus"' "$MALFORMED_POLICY_OUTPUT"
 assert_contains "$MALFORMED_POLICY_OUTPUT" 'FAIL'
 assert_contains "$MALFORMED_POLICY_OUTPUT" 'no valid DMARC policy'
 
+MISSING_SEPARATOR_OUTPUT="$TMP_ROOT/missing-separator.out"
+run_doctor '"v=DMARC1; p=reject; rua"' "$MISSING_SEPARATOR_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'DMARC tag missing = must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$MISSING_SEPARATOR_OUTPUT" 'FAIL'
+assert_contains "$MISSING_SEPARATOR_OUTPUT" 'no valid DMARC policy'
+
+EMPTY_VALUE_OUTPUT="$TMP_ROOT/empty-value.out"
+run_doctor '"v=DMARC1; p=reject; rua="' "$EMPTY_VALUE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'DMARC tag with empty value must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$EMPTY_VALUE_OUTPUT" 'FAIL'
+assert_contains "$EMPTY_VALUE_OUTPUT" 'no valid DMARC policy'
+
+INVALID_KEY_OUTPUT="$TMP_ROOT/invalid-key.out"
+run_doctor '"v=DMARC1; p=reject; r1ua=mailto:postmaster@example.test"' "$INVALID_KEY_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'non-alphabetic DMARC tag name must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INVALID_KEY_OUTPUT" 'FAIL'
+assert_contains "$INVALID_KEY_OUTPUT" 'no valid DMARC policy'
+
+INTERIOR_EMPTY_OUTPUT="$TMP_ROOT/interior-empty.out"
+run_doctor '"v=DMARC1; p=reject;; rua=mailto:postmaster@example.test"' "$INTERIOR_EMPTY_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'interior empty DMARC tag fragment must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INTERIOR_EMPTY_OUTPUT" 'FAIL'
+assert_contains "$INTERIOR_EMPTY_OUTPUT" 'no valid DMARC policy'
+
+UNKNOWN_TRAILING_OUTPUT="$TMP_ROOT/unknown-trailing.out"
+run_doctor '"v=DMARC1; x=value; p=reject;"' "$UNKNOWN_TRAILING_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'valid unknown DMARC tag and trailing separator must not fail doctor\n' >&2; sed -n '1,240p' "$UNKNOWN_TRAILING_OUTPUT" >&2; exit 1; }
+assert_contains "$UNKNOWN_TRAILING_OUTPUT" 'PASS'
+assert_contains "$UNKNOWN_TRAILING_OUTPUT" 'DMARC policy is p=reject'
+
+NON_ASCII_VALUE_OUTPUT="$TMP_ROOT/non-ascii-value.out"
+run_doctor '"v=DMARC1; p=reject; x=é"' "$NON_ASCII_VALUE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'non-ASCII DMARC tag value must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$NON_ASCII_VALUE_OUTPUT" 'FAIL'
+assert_contains "$NON_ASCII_VALUE_OUTPUT" 'no valid DMARC policy'
+
+TAB_VALUE_OUTPUT="$TMP_ROOT/tab-value.out"
+run_doctor $'"v=DMARC1; p=reject; x=hello\tworld"' "$TAB_VALUE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'control byte in DMARC tag value must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TAB_VALUE_OUTPUT" 'FAIL'
+assert_contains "$TAB_VALUE_OUTPUT" 'no valid DMARC policy'
+
+LEADING_WSP_OUTPUT="$TMP_ROOT/leading-wsp.out"
+run_doctor '"  v=DMARC1; p=reject"' "$LEADING_WSP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'leading WSP before DMARC version must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$LEADING_WSP_OUTPUT" 'FAIL'
+assert_contains "$LEADING_WSP_OUTPUT" 'no valid DMARC policy'
+
+VALID_WSP_OUTPUT="$TMP_ROOT/valid-wsp.out"
+run_doctor '"v = DMARC1;   p = reject;   x = value"' "$VALID_WSP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'valid DMARC WSP around = and after separators must not fail doctor\n' >&2; sed -n '1,240p' "$VALID_WSP_OUTPUT" >&2; exit 1; }
+assert_contains "$VALID_WSP_OUTPUT" 'PASS'
+assert_contains "$VALID_WSP_OUTPUT" 'DMARC policy is p=reject'
+
+DECIMAL_HTAB_WSP_OUTPUT="$TMP_ROOT/decimal-htab-wsp.out"
+run_doctor '"v\009=\009DMARC1\009;\009p\009=\009reject\009;"' "$DECIMAL_HTAB_WSP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'decimal-escaped HTAB in equals/separator WSP must not fail doctor\n' >&2; sed -n '1,240p' "$DECIMAL_HTAB_WSP_OUTPUT" >&2; exit 1; }
+assert_contains "$DECIMAL_HTAB_WSP_OUTPUT" 'PASS'
+assert_contains "$DECIMAL_HTAB_WSP_OUTPUT" 'DMARC policy is p=reject'
+
+DECIMAL_CONTROL_OUTPUT="$TMP_ROOT/decimal-control.out"
+run_doctor '"v=DMARC1; p=reject; x=\009"' "$DECIMAL_CONTROL_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'decimal-escaped control byte must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$DECIMAL_CONTROL_OUTPUT" 'FAIL'
+assert_contains "$DECIMAL_CONTROL_OUTPUT" 'no valid DMARC policy'
+
+DECIMAL_NON_ASCII_OUTPUT="$TMP_ROOT/decimal-non-ascii.out"
+run_doctor '"v=DMARC1; p=reject; x=\195\169"' "$DECIMAL_NON_ASCII_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'decimal-escaped non-ASCII bytes must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$DECIMAL_NON_ASCII_OUTPUT" 'FAIL'
+assert_contains "$DECIMAL_NON_ASCII_OUTPUT" 'no valid DMARC policy'
+
+PRINTABLE_DECIMAL_OUTPUT="$TMP_ROOT/printable-decimal.out"
+run_doctor '"v=DMARC1; p=reject; x=\065"' "$PRINTABLE_DECIMAL_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'printable decimal TXT escape must not fail doctor\n' >&2; sed -n '1,240p' "$PRINTABLE_DECIMAL_OUTPUT" >&2; exit 1; }
+assert_contains "$PRINTABLE_DECIMAL_OUTPUT" 'PASS'
+assert_contains "$PRINTABLE_DECIMAL_OUTPUT" 'DMARC policy is p=reject'
+
+ESCAPED_BACKSLASH_OUTPUT="$TMP_ROOT/escaped-backslash.out"
+run_doctor '"v=DMARC1; p=reject; x=left\\right"' "$ESCAPED_BACKSLASH_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'literal escaped backslash in valid unknown value must not fail doctor\n' >&2; sed -n '1,240p' "$ESCAPED_BACKSLASH_OUTPUT" >&2; exit 1; }
+assert_contains "$ESCAPED_BACKSLASH_OUTPUT" 'PASS'
+assert_contains "$ESCAPED_BACKSLASH_OUTPUT" 'DMARC policy is p=reject'
+
+ESCAPED_QUOTE_OUTPUT="$TMP_ROOT/escaped-quote.out"
+run_doctor '"v=DMARC1; p=reject; x=left\"right"' "$ESCAPED_QUOTE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'literal escaped quote in valid unknown value must not fail doctor\n' >&2; sed -n '1,240p' "$ESCAPED_QUOTE_OUTPUT" >&2; exit 1; }
+assert_contains "$ESCAPED_QUOTE_OUTPUT" 'PASS'
+assert_contains "$ESCAPED_QUOTE_OUTPUT" 'DMARC policy is p=reject'
+
+TERMINAL_POLICY_SP_OUTPUT="$TMP_ROOT/terminal-policy-sp.out"
+run_doctor '"v=DMARC1; p=reject "' "$TERMINAL_POLICY_SP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal SP in DMARC policy must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_POLICY_SP_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_POLICY_SP_OUTPUT" 'no valid DMARC policy'
+
+TERMINAL_POLICY_TAB_OUTPUT="$TMP_ROOT/terminal-policy-tab.out"
+run_doctor $'"v=DMARC1; p=reject\t"' "$TERMINAL_POLICY_TAB_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal TAB in DMARC policy must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_POLICY_TAB_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_POLICY_TAB_OUTPUT" 'no valid DMARC policy'
+
+TERMINAL_TEST_SP_OUTPUT="$TMP_ROOT/terminal-test-sp.out"
+run_doctor '"v=DMARC1; p=reject; t=y "' "$TERMINAL_TEST_SP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal SP in DMARC test mode must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_TEST_SP_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_TEST_SP_OUTPUT" 'no valid DMARC policy'
+
+TERMINAL_TEST_TAB_OUTPUT="$TMP_ROOT/terminal-test-tab.out"
+run_doctor $'"v=DMARC1; p=reject; t=y\t"' "$TERMINAL_TEST_TAB_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal TAB in DMARC test mode must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_TEST_TAB_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_TEST_TAB_OUTPUT" 'no valid DMARC policy'
+
+TERMINAL_POLICY_DECIMAL_HTAB_OUTPUT="$TMP_ROOT/terminal-policy-decimal-htab.out"
+run_doctor '"v=DMARC1; p=reject\009"' "$TERMINAL_POLICY_DECIMAL_HTAB_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal decimal-escaped HTAB in DMARC policy must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_POLICY_DECIMAL_HTAB_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_POLICY_DECIMAL_HTAB_OUTPUT" 'no valid DMARC policy'
+
+TERMINAL_TEST_DECIMAL_HTAB_OUTPUT="$TMP_ROOT/terminal-test-decimal-htab.out"
+run_doctor '"v=DMARC1; p=reject; t=y\009"' "$TERMINAL_TEST_DECIMAL_HTAB_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'terminal decimal-escaped HTAB in DMARC test mode must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$TERMINAL_TEST_DECIMAL_HTAB_OUTPUT" 'FAIL'
+assert_contains "$TERMINAL_TEST_DECIMAL_HTAB_OUTPUT" 'no valid DMARC policy'
+
+WSP_BEFORE_SEPARATOR_OUTPUT="$TMP_ROOT/wsp-before-separator.out"
+run_doctor $'"v=DMARC1; p=reject \t ; t=n"' "$WSP_BEFORE_SEPARATOR_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'WSP before a real DMARC separator must not fail doctor\n' >&2; sed -n '1,240p' "$WSP_BEFORE_SEPARATOR_OUTPUT" >&2; exit 1; }
+assert_contains "$WSP_BEFORE_SEPARATOR_OUTPUT" 'PASS'
+assert_contains "$WSP_BEFORE_SEPARATOR_OUTPUT" 'DMARC policy is p=reject'
+
+TRAILING_SEPARATOR_WSP_OUTPUT="$TMP_ROOT/trailing-separator-wsp.out"
+run_doctor '"v=DMARC1; p=reject;   "' "$TRAILING_SEPARATOR_WSP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'single trailing separator WSP must not fail doctor\n' >&2; sed -n '1,240p' "$TRAILING_SEPARATOR_WSP_OUTPUT" >&2; exit 1; }
+assert_contains "$TRAILING_SEPARATOR_WSP_OUTPUT" 'PASS'
+assert_contains "$TRAILING_SEPARATOR_WSP_OUTPUT" 'DMARC policy is p=reject'
+
+VALID_PLUS_NUL_CANDIDATE_OUTPUT="$TMP_ROOT/valid-plus-nul-candidate.out"
+run_doctor '"v=DMARC1; p=reject"'$'\n''"v=DMARC1; p=none; x=\000"' "$VALID_PLUS_NUL_CANDIDATE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'valid plus later-NUL DMARC candidates must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$VALID_PLUS_NUL_CANDIDATE_OUTPUT" 'FAIL'
+assert_contains "$VALID_PLUS_NUL_CANDIDATE_OUTPUT" 'no valid DMARC policy'
+
+VALID_PLUS_HTAB_CANDIDATE_OUTPUT="$TMP_ROOT/valid-plus-htab-candidate.out"
+run_doctor '"v=DMARC1; p=reject"'$'\n''"v=DMARC1; p=none; x=bad\009value"' "$VALID_PLUS_HTAB_CANDIDATE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'valid plus later-invalid-HTAB DMARC candidates must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$VALID_PLUS_HTAB_CANDIDATE_OUTPUT" 'FAIL'
+assert_contains "$VALID_PLUS_HTAB_CANDIDATE_OUTPUT" 'no valid DMARC policy'
+
+VALID_PLUS_NON_ASCII_CANDIDATE_OUTPUT="$TMP_ROOT/valid-plus-non-ascii-candidate.out"
+run_doctor '"v=DMARC1; p=reject"'$'\n''"v=DMARC1; p=none; x=\195\169"' "$VALID_PLUS_NON_ASCII_CANDIDATE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'valid plus later-non-ASCII DMARC candidates must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$VALID_PLUS_NON_ASCII_CANDIDATE_OUTPUT" 'FAIL'
+assert_contains "$VALID_PLUS_NON_ASCII_CANDIDATE_OUTPUT" 'no valid DMARC policy'
+
+VALID_PLUS_OUT_OF_RANGE_CANDIDATE_OUTPUT="$TMP_ROOT/valid-plus-out-of-range-candidate.out"
+run_doctor '"v=DMARC1; p=reject"'$'\n''"v=DMARC1; p=none; x=\256"' "$VALID_PLUS_OUT_OF_RANGE_CANDIDATE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'valid plus later-out-of-range DMARC candidates must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$VALID_PLUS_OUT_OF_RANGE_CANDIDATE_OUTPUT" 'FAIL'
+assert_contains "$VALID_PLUS_OUT_OF_RANGE_CANDIDATE_OUTPUT" 'no valid DMARC policy'
+
+INVALID_UNRELATED_CONTROL_OUTPUT="$TMP_ROOT/invalid-unrelated-control.out"
+run_doctor '"site-verification=bad\000value"'$'\n''"v=DMARC1; p=reject"' "$INVALID_UNRELATED_CONTROL_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'invalid unrelated TXT plus one valid DMARC candidate must not fail doctor\n' >&2; sed -n '1,240p' "$INVALID_UNRELATED_CONTROL_OUTPUT" >&2; exit 1; }
+assert_contains "$INVALID_UNRELATED_CONTROL_OUTPUT" 'PASS'
+assert_contains "$INVALID_UNRELATED_CONTROL_OUTPUT" 'DMARC policy is p=reject'
+
+INVALID_FIRST_TAG_OUTPUT="$TMP_ROOT/invalid-first-tag.out"
+run_doctor '"v=DM\000ARC1; p=none"'$'\n''"v=DMARC1; p=reject"' "$INVALID_FIRST_TAG_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'invalid byte inside first tag must not manufacture a DMARC candidate\n' >&2; sed -n '1,240p' "$INVALID_FIRST_TAG_OUTPUT" >&2; exit 1; }
+assert_contains "$INVALID_FIRST_TAG_OUTPUT" 'PASS'
+assert_contains "$INVALID_FIRST_TAG_OUTPUT" 'DMARC policy is p=reject'
+
+VALID_SUBPOLICIES_OUTPUT="$TMP_ROOT/valid-subpolicies.out"
+run_doctor '"v=DMARC1; p=reject; SP=NoNe; nP=QuArAnTiNe"' "$VALID_SUBPOLICIES_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 0 ] || { printf 'valid mixed-case sp/np policies must not fail doctor\n' >&2; sed -n '1,240p' "$VALID_SUBPOLICIES_OUTPUT" >&2; exit 1; }
+assert_contains "$VALID_SUBPOLICIES_OUTPUT" 'PASS'
+assert_contains "$VALID_SUBPOLICIES_OUTPUT" 'DMARC policy is p=reject'
+
+INVALID_SP_OUTPUT="$TMP_ROOT/invalid-sp.out"
+run_doctor '"v=DMARC1; p=reject; sp=bogus"' "$INVALID_SP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'invalid sp must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INVALID_SP_OUTPUT" 'FAIL'
+assert_contains "$INVALID_SP_OUTPUT" 'no valid DMARC policy'
+
+INVALID_SP_RUA_OUTPUT="$TMP_ROOT/invalid-sp-rua.out"
+run_doctor '"v=DMARC1; p=reject; sp=bogus; rua=mailto:a@example.test"' "$INVALID_SP_RUA_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'invalid sp with rua must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INVALID_SP_RUA_OUTPUT" 'FAIL'
+assert_contains "$INVALID_SP_RUA_OUTPUT" 'no valid DMARC policy'
+
+INVALID_NP_OUTPUT="$TMP_ROOT/invalid-np.out"
+run_doctor '"v=DMARC1; p=reject; np=bogus"' "$INVALID_NP_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'invalid np must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INVALID_NP_OUTPUT" 'FAIL'
+assert_contains "$INVALID_NP_OUTPUT" 'no valid DMARC policy'
+
+INVALID_NP_RUA_OUTPUT="$TMP_ROOT/invalid-np-rua.out"
+run_doctor '"v=DMARC1; p=reject; np=bogus; rua=mailto:a@example.test"' "$INVALID_NP_RUA_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'invalid np with rua must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$INVALID_NP_RUA_OUTPUT" 'FAIL'
+assert_contains "$INVALID_NP_RUA_OUTPUT" 'no valid DMARC policy'
+
 MULTIPLE_OUTPUT="$TMP_ROOT/multiple.out"
 run_doctor $'"v=DMARC1; p=reject"\n"v=DMARC1; p=none"' "$MULTIPLE_OUTPUT"
 [ "$DOCTOR_STATUS" -eq 1 ] || { printf 'multiple DMARC records must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
@@ -202,4 +406,4 @@ if grep -Fq 'DMARC policy is p=none' "$REJECT_OUTPUT"; then
   exit 1
 fi
 
-printf '%s\n' 'mail-security shell tests: 20 passed'
+printf '%s\n' 'mail-security shell tests: 54 passed'
