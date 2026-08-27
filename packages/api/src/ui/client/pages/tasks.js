@@ -314,16 +314,20 @@
       updatedValue.textContent = formatAgo(task.updatedAt);
       updatedCell.append(updatedLabel, updatedValue);
 
-      var hasActiveLease = typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number';
+      var hasLeaseAuthority = typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number';
+      var hasActiveLease = hasLeaseAuthority && task.leaseStatus !== 'disabled';
+      var hasDisabledLeaseAuthority = hasLeaseAuthority && task.leaseStatus === 'disabled';
       var leaseCell;
-      if (hasActiveLease) {
+      if (hasActiveLease || hasDisabledLeaseAuthority) {
         leaseCell = document.createElement('div');
         leaseCell.className = 'cell';
         var leaseLabel = document.createElement('span');
         leaseLabel.className = 'cell-label';
-        leaseLabel.textContent = 'Claimed until';
+        leaseLabel.textContent = hasDisabledLeaseAuthority ? 'Lease disabled' : 'Claimed until';
         var leaseValue = document.createElement('span');
-        leaseValue.textContent = task.claimedUntil + ' · generation ' + task.leaseGeneration;
+        leaseValue.textContent = hasDisabledLeaseAuthority
+          ? 'Retained authority until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration
+          : task.claimedUntil + ' · generation ' + task.leaseGeneration;
         leaseCell.append(leaseLabel, leaseValue);
       }
 
@@ -410,10 +414,15 @@
       (Array.isArray(task.messages) ? task.messages.length : 0) +
       ' messages';
     head.append(title, badge, meta);
-    if (typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number') {
+    var hasLeaseAuthority = typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number';
+    var hasActiveLease = hasLeaseAuthority && task.leaseStatus !== 'disabled';
+    var hasDisabledLeaseAuthority = hasLeaseAuthority && task.leaseStatus === 'disabled';
+    if (hasActiveLease || hasDisabledLeaseAuthority) {
       var leaseMeta = document.createElement('p');
       leaseMeta.className = 'task-detail-meta';
-      leaseMeta.textContent = 'Claimed until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration;
+      leaseMeta.textContent = hasDisabledLeaseAuthority
+        ? 'Lease disabled · Retained authority until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration
+        : 'Claimed until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration;
       head.append(leaseMeta);
     }
     if (task.overdueReason) {

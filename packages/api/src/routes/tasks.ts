@@ -49,8 +49,9 @@ const updateSchema = z.object({
   // A task result is serialized by the API into a JSON block in the reply
   // body. It replaces attachments until v0.5 blob storage exists.
   result: z.unknown().optional(),
-  // R2: accepted and ignored in disabled mode; lease enforcement follows.
-  leaseToken: z.string().min(1).optional(),
+  // R5: undefined is the only omission signal. A supplied empty/malformed
+  // token reaches the shared active-lease fence and gets task_lease_required.
+  leaseToken: z.string().max(16_384).optional(),
 }).strict();
 
 const claimSchema = z.object({
@@ -190,8 +191,9 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         return c.json(toTaskView(waited ?? task), 201);
       } catch (err) {
         const code = (err as Error).message;
-        if (code === 'invalid_approval_expiry') {
-          return c.json({ error: 'invalid_request' }, 400);
+        if (code === 'invalid_approval_expiry') return c.json({ error: 'invalid_request' }, 400);
+        if (code === 'approval_action_too_large' || code === 'approval_action_too_deep' || code === 'approval_expiry_too_far') {
+          return c.json({ error: code }, 400);
         }
         console.warn('[task] create failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
@@ -253,7 +255,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
-        if (code === 'lease_already_claimed' || code === 'task_not_claimable') return c.json({ error: code }, 409);
+        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted') return c.json({ error: code }, 409);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
@@ -291,7 +293,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
-        if (code === 'stale_lease' || code === 'lease_already_released' || code === 'task_not_claimable' || code === 'task_already_terminal') {
+        if (code === 'stale_lease' || code === 'lease_already_released' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted') {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] renew failed');
@@ -411,7 +413,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (!updated) return c.json({ error: 'not_found' }, 404);
         return c.json(toTaskView(updated));
       } catch (err) {
-        if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'approval_decision_required') {
+        if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'task_lease_required' || (err as Error).message === 'approval_decision_required') {
           return c.json({ error: (err as Error).message }, 409);
         }
         if ((err as Error).message === 'task_participant_required') {

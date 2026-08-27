@@ -46,9 +46,11 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `task_release(id, leaseToken, reason?)` | Release a claimed task using its opaque bearer |
 | `task_list(state?)` | List this identity's task threads, optionally by current state |
 | `task_get(id, wait?)` | Read one task thread and its stamped state history; `wait:true` waits up to 10 minutes |
-| `task_update(id, state, body?, result?)` | Advance a participating task; `result` is written as a JSON block in the reply body |
+| `task_update(id, state, body?, result?, leaseToken?)` | Advance a participating task; `result` is written as a JSON block in the reply body |
 
-Task leases are opt-in; `TASK_LEASES_ENABLED` is disabled by default (`false`) via `TASK_LEASES_ENABLED=false`, so existing clients remain compatible. The opaque `leaseToken` is only the claim bearer and is never listed, rendered, logged, or emailed.
+Typed approval actions are JSON-only and limited to 65,536 canonical UTF-8 bytes, root-inclusive depth 10, and a server-clock lifetime of 30 days. Exact limits pass; REST and MCP surface `approval_action_too_large`, `approval_action_too_deep`, or `approval_expiry_too_far` as stable client errors when a bound is exceeded.
+
+Task leases are opt-in; `TASK_LEASES_ENABLED` is disabled by default (`false`) via `TASK_LEASES_ENABLED=false`, so existing clients remain compatible. If the flag is turned off after a lease exists, list/detail responses retain its safe timing and generation fields and add `leaseStatus: "disabled"`; no lease is silently cleaned up. A lease generation is capped at 24 hours from its initial claim, and no claim or renewal is allowed at or after seven days from the task's first claim; renewals cap their deadline rather than resetting either anchor, and equality is rejected. During an active recipient lease, omitting the optional credential retains `task_already_terminal`; a supplied wrong, malformed, expired, or reclaimed-generation credential returns `task_lease_required` at HTTP 409. The opaque `leaseToken` is only the claim bearer and is never listed, rendered, logged, or emailed.
 
 Errors come back as `isError` tool results with actionable messages (a 401 tells you to check `OPENAGENTEMAIL_API_KEY`; a 403 means the token's scope doesn't cover what you asked for — identity tokens only touch their own address, and identity management is admin-only; a 429 means the per-identity send rate limit kicked in).
 

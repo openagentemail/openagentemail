@@ -25,7 +25,9 @@ const REQUESTER = 'requester@test.example';
 const REVIEWER = 'reviewer@test.example';
 const OUTSIDER = 'outsider@test.example';
 const ID = '2c3d77bc-6e13-48bb-b470-f394cd73a60f';
-const EXPIRES = '2030-08-25T00:00:00.000Z';
+// #74: keep the ordinary approval fixture inside the new 30-day server-clock cap.
+const EXPIRES = '2026-08-25T00:00:00.000Z';
+const WATCHER_EXPIRES = '2030-08-25T00:00:00.000Z';
 const ACTION = {
   type: 'deployment',
   name: 'publish-preview',
@@ -133,6 +135,50 @@ describe('#55 R1b: canonical request behavior', () => {
     expect(approvalActionDigest!(reordered)).toBe(approvalActionDigest!(ACTION));
     expect(approvalActionDigest!(changed)).not.toBe(approvalActionDigest!(ACTION));
     expect(approvalActionDigest!(reorderedArray)).not.toBe(approvalActionDigest!(ACTION));
+  });
+
+  test('shallow, deep-prefix, and array cycles are invalid before delivery while shared acyclic values canonicalize normally', async () => {
+    const create = api().createApprovalTask;
+    const { canonicalApprovalAction } = api();
+    expect(create, 'approval creation service behavior is missing').toBeFunction();
+    expect(canonicalApprovalAction, 'canonical JSON behavior is missing').toBeFunction();
+    const sent = installSentCapture();
+    const shallow: { self?: unknown } = {};
+    shallow.self = shallow;
+    const deepPrefix: { next?: unknown; self?: unknown } = {};
+    let tail = deepPrefix;
+    // The final first-seen node is at root-inclusive depth 10; its self edge
+    // reaches the already-active ancestor at depth 11.
+    for (let index = 0; index < 8; index += 1) {
+      const next: { next?: unknown; self?: unknown } = {};
+      tail.next = next;
+      tail = next;
+    }
+    tail.self = tail;
+    const arrayCycle: unknown[] = [];
+    arrayCycle.push(arrayCycle);
+    for (const [name, argumentsValue] of [
+      ['shallow object', shallow],
+      ['deep-prefix object', deepPrefix],
+      ['array', arrayCycle],
+    ] as const) {
+      await expect(create!({
+        from: REQUESTER, to: REVIEWER, subject: `${name} circular action`, body: 'Record only; do not execute.',
+        action: { type: 'deployment', name: 'cycle', arguments: argumentsValue }, expiresAt: EXPIRES,
+      })).rejects.toThrow('invalid_approval_action');
+    }
+    expect(sent).toHaveLength(0);
+
+    const shared = { retries: 2, safe: true };
+    const sharedAction = { type: 'deployment', name: 'shared', arguments: { first: shared, second: shared } };
+    expect(canonicalApprovalAction!(sharedAction)).toBe(
+      '{"arguments":{"first":{"retries":2,"safe":true},"second":{"retries":2,"safe":true}},"name":"shared","type":"deployment"}',
+    );
+    await expect(create!({
+      from: REQUESTER, to: REVIEWER, subject: 'Shared action', body: 'Record only; do not execute.',
+      action: sharedAction, expiresAt: EXPIRES,
+    })).resolves.toMatchObject({ approval: { action: sharedAction } });
+    expect(sent).toHaveLength(1);
   });
 
   test('approval creation rejects self at the service boundary and an unknown reviewer at the route boundary before mail writes', async () => {
@@ -686,8 +732,8 @@ describe('#55 R1b: actual UI/watcher seams and compatibility controls', () => {
     expect(decisionCalls[0]!.message).toContain('Preview: Approval decision recorded: approved.');
 
     tasks.setTaskNowForTests(() => Date.parse('2030-08-24T23:59:59.999Z'));
-    const expired = await requestFixture(EXPIRES);
-    tasks.setTaskNowForTests(() => Date.parse(EXPIRES));
+    const expired = await requestFixture(WATCHER_EXPIRES);
+    tasks.setTaskNowForTests(() => Date.parse(WATCHER_EXPIRES));
     tasks.setTaskGetForTests(async () => expired.task);
     await expect(api().decideApprovalTask!({ id: expired.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
     const expiryCalls: Array<{ message: string }> = [];

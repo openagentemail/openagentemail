@@ -124,6 +124,7 @@ export interface Task {
   approval?: ApprovalSnapshot;
   claimedUntil?: string;
   leaseGeneration?: number;
+  leaseStatus?: 'disabled';
 }
 
 export interface TaskLeaseGrant {

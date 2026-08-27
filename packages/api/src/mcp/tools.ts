@@ -204,6 +204,7 @@ export function registerOpenAgentEmailTools(
     }).optional(),
     claimedUntil: z.string().optional(),
     leaseGeneration: z.number().int().optional(),
+    leaseStatus: z.literal('disabled').optional(),
   };
 
   const taskListOutputSchema = {
@@ -517,7 +518,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Create Email Task",
       description:
-        "Assign a task to another managed identity. The server creates a stamped email thread and wakes that identity's agent route. With wait=true it waits up to MCP_MAX_WAIT_SECONDS for completed or failed; call task_get again for longer work.",
+        "Assign a task to another managed identity. The server creates a stamped email thread and wakes that identity's agent route. Typed approval actions are JSON-only, at most 65,536 canonical UTF-8 bytes and depth 10, with expiry at most 30 days from the server clock; approval_action_too_large, approval_action_too_deep, and approval_expiry_too_far are stable client errors. With wait=true it waits up to MCP_MAX_WAIT_SECONDS for completed or failed; call task_get again for longer work.",
       inputSchema: {
         to: z.email().describe("Managed recipient identity address"),
         subject: z.string().min(1).max(998).describe("Task subject"),
@@ -552,7 +553,7 @@ export function registerOpenAgentEmailTools(
     "task_list",
     {
       title: "List Email Tasks",
-      description: "List this identity's email-backed tasks, optionally filtered by their current state.",
+      description: "List this identity's email-backed tasks, optionally filtered by their current state. A durable lease retained while leases are disabled is visible with leaseStatus=disabled.",
       inputSchema: {
         state: taskStateSchema.optional().describe("Optional current state filter"),
       },
@@ -567,7 +568,7 @@ export function registerOpenAgentEmailTools(
     "task_get",
     {
       title: "Get Email Task",
-      description: "Read one task thread and its server-stamped state history.",
+      description: "Read one task thread and its server-stamped state history. A durable lease retained while leases are disabled is visible with leaseStatus=disabled.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID from task_create or task_list"),
         wait: z
@@ -589,13 +590,13 @@ export function registerOpenAgentEmailTools(
     {
       title: "Update Email Task",
       description:
-        "Advance a task as one of its two participants. The API stamps the state header; completed and failed are terminal. Put structured output in result, which the server writes as a JSON result block in the reply body.",
+        "Advance a task as one of its two participants. The API stamps the state header; completed and failed are terminal. For an active recipient lease, omitting leaseToken retains task_already_terminal, while a supplied wrong or expired token returns task_lease_required. Put structured output in result, which the server writes as a JSON result block in the reply body.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         state: taskStateSchema.describe("Next server-stamped task state"),
         body: z.string().max(1_000_000).optional().describe("Optional human-readable update"),
         result: z.unknown().optional().describe("Optional JSON result for a completed or failed task"),
-        leaseToken: z.string().min(1).optional().describe("Optional opaque current lease token"),
+        leaseToken: z.string().max(16_384).optional().describe("Optional opaque current lease token"),
       },
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
@@ -624,7 +625,7 @@ export function registerOpenAgentEmailTools(
     "task_claim",
     {
       title: "Claim Email Task",
-      description: "Claim a submitted task as its managed recipient for a bounded lease; a working task may be reclaimed only with an authenticated expired or released lease receipt.",
+      description: "Claim a submitted task as its managed recipient for a bounded lease. Each generation is capped at 24 hours and the task cannot claim or renew at or after its first claim plus seven days; a working task may otherwise be reclaimed with an authenticated expired or released lease receipt.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         leaseSec: z.number().int().min(30).max(3600).optional().describe("Lease duration in seconds (30..3600; default 300)"),
@@ -640,7 +641,7 @@ export function registerOpenAgentEmailTools(
     "task_renew",
     {
       title: "Renew Task Lease",
-      description: "Renew a task lease only with its current active opaque lease token.",
+      description: "Renew a task lease only with its current active opaque lease token. Renewal never resets its generation's 24-hour cap or the task's first-claim seven-day cap; equality is rejected.",
       inputSchema: {
         id: z.string().uuid().describe("Task UUID"),
         leaseToken: z.string().min(1).describe("Opaque current lease token"),

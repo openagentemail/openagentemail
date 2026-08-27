@@ -1186,7 +1186,7 @@ describe('#56 R9 lease final dashboard surfaces', () => {
     });
   });
 
-  test('R9 RED: exact served task renderer exposes only public claimed timing and generation', () => {
+  test('R5: exact served task renderer distinguishes active and disabled retained lease authority without private fields', () => {
     const verifier = 'r9-render-verifier-never-public';
     const bearer = 'r9-render-bearer-never-public';
     const claimedUntil = '2026-08-12T12:30:00.000Z';
@@ -1197,38 +1197,70 @@ describe('#56 R9 lease final dashboard surfaces', () => {
       tokenVerifier: verifier,
       leaseToken: bearer,
     } as Task & Record<string, unknown>;
-    const inactive = { ...TASK_A, id: '99999999-9999-4999-8999-999999999999' } as Task & Record<string, unknown>;
-    const activeDetail = makeAdminTaskDetailHarness(active);
-    activeDetail.renderTaskDetail();
-    const activeRows = makeTaskRowHarness();
-    activeRows.state.tasks = [active];
-    activeRows.state.tasksTotalApprox = 1;
-    activeRows.renderTaskRows();
-    const inactiveDetail = makeAdminTaskDetailHarness(inactive);
-    inactiveDetail.renderTaskDetail();
-    const inactiveRows = makeTaskRowHarness();
-    inactiveRows.state.tasks = [inactive];
-    inactiveRows.state.tasksTotalApprox = 1;
-    inactiveRows.renderTaskRows();
-    const activeText = [
-      ...leafTexts(activeDetail.tasksDetailContent),
-      ...activeRows.tasksRows.childNodes.flatMap(leafTexts),
-    ].join('\n');
-    const inactiveText = [
-      ...leafTexts(inactiveDetail.tasksDetailContent),
-      ...inactiveRows.tasksRows.childNodes.flatMap(leafTexts),
-    ].join('\n');
+    const disabledFuture = {
+      ...active,
+      id: '99999999-9999-4999-8999-999999999999',
+      claimedUntil: '2026-08-12T13:30:00.000Z',
+      leaseGeneration: 8,
+      leaseStatus: 'disabled',
+      firstClaimedAt: '2026-08-12T10:00:00.000Z',
+      generationClaimedAt: '2026-08-12T12:00:00.000Z',
+    } as Task & Record<string, unknown>;
+    const disabledPast = {
+      ...disabledFuture,
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      claimedUntil: '2026-08-12T11:30:00.000Z',
+      leaseGeneration: 9,
+    } as Task & Record<string, unknown>;
+    const renderedSurfaces = (task: Task & Record<string, unknown>) => {
+      const detail = makeAdminTaskDetailHarness(task);
+      detail.renderTaskDetail();
+      const rows = makeTaskRowHarness();
+      rows.state.tasks = [task];
+      rows.state.tasksTotalApprox = 1;
+      rows.renderTaskRows();
+      return {
+        detailText: leafTexts(detail.tasksDetailContent).join('\n'),
+        listText: rows.tasksRows.childNodes.flatMap(leafTexts).join('\n'),
+      };
+    };
+    const activeSurfaces = renderedSurfaces(active);
+    const disabledFutureSurfaces = renderedSurfaces(disabledFuture);
+    const disabledPastSurfaces = renderedSurfaces(disabledPast);
+    const privateAuthorityAbsent = (text: string) => ![
+      verifier, bearer, 'leaseToken', 'firstClaimedAt', 'generationClaimedAt',
+      '2026-08-12T10:00:00.000Z', '2026-08-12T12:00:00.000Z',
+    ].some((value) => text.includes(value));
     expect({
-      activeDetailLeaseVisible: activeText.includes('Claimed until') && activeText.includes(claimedUntil) && activeText.includes('7'),
-      activeListLeaseVisible: activeRows.tasksRows.childNodes.length === 1
-        && leafTexts(activeRows.tasksRows.childNodes[0]!).join('\n').includes('Claimed until'),
-      inactiveLeaseAbsent: !inactiveText.includes('Claimed until'),
-      secretsAbsentFromRenderedText: !activeText.includes(verifier) && !activeText.includes(bearer),
+      enabledActive: {
+        list: activeSurfaces.listText.includes('Claimed until') && activeSurfaces.listText.includes(claimedUntil) && activeSurfaces.listText.includes('7') && !activeSurfaces.listText.includes('Lease disabled'),
+        detail: activeSurfaces.detailText.includes('Claimed until') && activeSurfaces.detailText.includes(claimedUntil) && activeSurfaces.detailText.includes('7') && !activeSurfaces.detailText.includes('Lease disabled'),
+      },
+      disabledFuture: {
+        list: disabledFutureSurfaces.listText.includes('Lease disabled') && disabledFutureSurfaces.listText.includes('Retained authority until 2026-08-12T13:30:00.000Z · generation 8') && !disabledFutureSurfaces.listText.includes('Claimed until'),
+        detail: disabledFutureSurfaces.detailText.includes('Lease disabled') && disabledFutureSurfaces.detailText.includes('Retained authority until 2026-08-12T13:30:00.000Z · generation 8') && !disabledFutureSurfaces.detailText.includes('Claimed until'),
+      },
+      disabledPast: {
+        list: disabledPastSurfaces.listText.includes('Lease disabled') && disabledPastSurfaces.listText.includes('Retained authority until 2026-08-12T11:30:00.000Z · generation 9') && !disabledPastSurfaces.listText.includes('Claimed until'),
+        detail: disabledPastSurfaces.detailText.includes('Lease disabled') && disabledPastSurfaces.detailText.includes('Retained authority until 2026-08-12T11:30:00.000Z · generation 9') && !disabledPastSurfaces.detailText.includes('Claimed until'),
+      },
+      privateAuthorityAbsent: {
+        activeList: privateAuthorityAbsent(activeSurfaces.listText),
+        activeDetail: privateAuthorityAbsent(activeSurfaces.detailText),
+        disabledFutureList: privateAuthorityAbsent(disabledFutureSurfaces.listText),
+        disabledFutureDetail: privateAuthorityAbsent(disabledFutureSurfaces.detailText),
+        disabledPastList: privateAuthorityAbsent(disabledPastSurfaces.listText),
+        disabledPastDetail: privateAuthorityAbsent(disabledPastSurfaces.detailText),
+      },
     }).toEqual({
-      activeDetailLeaseVisible: true,
-      activeListLeaseVisible: true,
-      inactiveLeaseAbsent: true,
-      secretsAbsentFromRenderedText: true,
+      enabledActive: { list: true, detail: true },
+      disabledFuture: { list: true, detail: true },
+      disabledPast: { list: true, detail: true },
+      privateAuthorityAbsent: {
+        activeList: true, activeDetail: true,
+        disabledFutureList: true, disabledFutureDetail: true,
+        disabledPastList: true, disabledPastDetail: true,
+      },
     });
   });
 

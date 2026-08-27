@@ -31,12 +31,15 @@ const {
   clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
   releaseTask,
+  replyTask,
+  renewTask,
   setTaskGetForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
   taskService,
   taskFromMessages,
   toTaskView,
+  updateTask,
 } = await import('../src/lib/tasks.ts');
 const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
@@ -356,6 +359,309 @@ describe('#56 R2 lease authority', () => {
     const sameGeneration = await parsedClaim(original, 3);
     expect(sameGeneration).not.toBeNull();
     expect(taskFromMessages(ID, [submittedRaw(), (await parsedClaim(original, 2))!, sameGeneration!])).toBeNull();
+  });
+});
+
+describe('#81 renewal tenure', () => {
+  test('caps a generation at 24 hours, rejects equality before delivery, and keeps the anchors private', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<tenure-${sent.length}>` }; });
+
+    const claim = await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    durable = claim.task;
+    for (let renewal = 0; renewal < 24; renewal += 1) {
+      now = Date.parse(durable.lease!.claimedUntil) - 1;
+      clearQueuedEventsForTests();
+      durable = await renewTask({ id: ID, from: B, leaseToken: claim.leaseToken, leaseSec: 3600 });
+    }
+    expect(durable.lease?.claimedUntil).toBe('2026-08-25T00:00:00.000Z');
+    expect(toTaskView(durable)).not.toHaveProperty('lease');
+    expect(JSON.stringify(toTaskView(durable))).not.toContain('firstClaimedAt');
+    const deliveries = sent.length;
+    now = START + 24 * 60 * 60 * 1_000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: claim.leaseToken })).rejects.toThrow('lease_tenure_exhausted');
+    expect(sent).toHaveLength(deliveries);
+  });
+
+  test('authenticates before cap errors and keeps stale bearers fenced at every boundary', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<fence-${sent.length}>` }; });
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    clearQueuedEventsForTests();
+    durable = grant.task;
+    const stale = 'not-the-current-bearer';
+    for (const boundary of [START + 1, START + 24 * 60 * 60 * 1_000, START + 7 * 24 * 60 * 60 * 1_000]) {
+      now = boundary;
+      await expect(renewTask({ id: ID, from: B, leaseToken: stale })).rejects.toThrow('stale_lease');
+    }
+    for (const boundary of [START + 24 * 60 * 60 * 1_000, START + 7 * 24 * 60 * 60 * 1_000]) {
+      durable = grant.task;
+      now = boundary;
+      await expect(renewTask({ id: ID, from: B, leaseToken: grant.leaseToken })).rejects.toThrow('stale_lease');
+      expect({ deliveries: sent.length, state: durable.state, messages: durable.messages.length }).toEqual({
+        deliveries: 1, state: 'working', messages: 2,
+      });
+    }
+    const simultaneous = {
+      ...grant.task.lease!,
+      generationClaimedAt: new Date(START).toISOString(),
+      firstClaimedAt: new Date(START - 6 * 24 * 60 * 60 * 1_000).toISOString(),
+      claimedUntil: new Date(START + 24 * 60 * 60 * 1_000).toISOString(),
+    };
+    durable = { ...grant.task, lease: simultaneous };
+    now = START + 24 * 60 * 60 * 1_000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: stale })).rejects.toThrow('stale_lease');
+    await expect(renewTask({ id: ID, from: B, leaseToken: grant.leaseToken })).rejects.toThrow('lease_task_cap_exhausted');
+    durable = { ...grant.task, lease: { ...grant.task.lease!, claimedUntil: new Date(START + 300_000).toISOString() } };
+    now = START + 301_000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: grant.leaseToken })).rejects.toThrow('stale_lease');
+    // Replacing the durable source with its older request proves none of the
+    // rejected renewals left a synthetic queued mutation behind.
+    durable = submittedTask();
+    now = START + 1;
+    expect((await taskService.get(ID))?.state).toBe('submitted');
+    expect(sent).toHaveLength(1);
+  });
+
+  test('an unindexed queued claim overlay retains private anchors through normal detail reconstruction', async () => {
+    let now = START;
+    const durable = submittedTask();
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async () => ({ messageId: '<queued-tenure>' }));
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    // Deliberately leave the accepted claim unindexed: the get seam still
+    // returns only the older submitted source, so this exercises the actual
+    // queued overlay merge rather than a rebuilt durable history.
+    const overlay = await taskService.get(ID);
+    expect({
+      generation: overlay?.lease?.leaseGeneration,
+      generationClaimedAt: overlay?.lease?.generationClaimedAt,
+      firstClaimedAt: overlay?.lease?.firstClaimedAt,
+    }).toEqual({
+      generation: 1,
+      generationClaimedAt: new Date(START).toISOString(),
+      firstClaimedAt: new Date(START).toISOString(),
+    });
+    now = START + 24 * 60 * 60 * 1_000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: grant.leaseToken })).rejects.toThrow('stale_lease');
+  });
+
+  test('rebuild and queued overlays retain the first signed claim anchor across renew, release, expiry, and reclaim', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<anchor-${sent.length}>` }; });
+
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const firstRaw = await parsedClaim(sent[0]!, 2);
+    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!])!;
+    clearQueuedEventsForTests();
+    now = START + 10_000;
+    await renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 300 });
+    const renewRaw = await parsedClaim(sent[1]!, 3);
+    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!])!;
+    clearQueuedEventsForTests();
+    now = START + 20_000;
+    await releaseTask({ id: ID, from: B, leaseToken: first.leaseToken, reason: 'handoff' });
+    const releaseRaw = await parsedClaim(sent[2]!, 4);
+    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!])!;
+    clearQueuedEventsForTests();
+    const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const reclaimRaw = await parsedClaim(sent[3]!, 5);
+    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!])!;
+    clearQueuedEventsForTests();
+    now = Date.parse(reclaimed.claimedUntil);
+    const afterExpiry = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const expiryRaw = await parsedClaim(sent[4]!, 6);
+    const afterExpiryRaw = await parsedClaim(sent[5]!, 7);
+    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!, expiryRaw!, afterExpiryRaw!])!;
+    clearQueuedEventsForTests();
+    expect({ generation: afterExpiry.leaseGeneration, firstClaimedAt: durable.lease?.firstClaimedAt }).toEqual({
+      generation: 3,
+      firstClaimedAt: new Date(START).toISOString(),
+    });
+
+    now = START + 7 * 24 * 60 * 60 * 1_000 - 1;
+    const capped = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(capped.claimedUntil).toBe('2026-08-31T00:00:00.000Z');
+    const deliveries = sent.length;
+    now += 1;
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_task_cap_exhausted');
+    expect(sent).toHaveLength(deliveries);
+    // The same absolute equality wins over stale-token fencing, even for a
+    // rebuilt generation whose per-generation tenure has not yet elapsed.
+    const equalityLease = {
+      ...afterExpiry.task.lease!,
+      generationClaimedAt: new Date(START + 6 * 24 * 60 * 60 * 1_000 + 23 * 60 * 60 * 1_000).toISOString(),
+      claimedUntil: new Date(START + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+    };
+    clearQueuedEventsForTests();
+    durable = { ...afterExpiry.task, lease: equalityLease };
+    await expect(renewTask({ id: ID, from: B, leaseToken: afterExpiry.leaseToken })).rejects.toThrow('lease_task_cap_exhausted');
+    expect(sent).toHaveLength(deliveries);
+  });
+
+  test('fails closed on authenticated histories that exceed either cap', async () => {
+    const verifier = 'a'.repeat(43);
+    const signed = async (uid: number, event: Parameters<typeof claimLeaseHeadersForTests>[0]['event']) => {
+      const headers = claimLeaseHeadersForTests({ id: ID, state: 'working', from: B, to: A, event });
+      return parseTaskMessageForTests({
+        uid,
+        source: source({ from: B, to: [A], subject: 'Lease this task', text: 'signed', headers }),
+        envelope: { from: [{ address: B }], to: [{ address: A }], subject: 'Lease this task' },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject, ID);
+    };
+    const overGeneration = await signed(2, {
+      version: 1, event: 'claim', actor: B, at: new Date(START).toISOString(), generation: 1,
+      claimedUntil: new Date(START + 24 * 60 * 60 * 1_000 + 1).toISOString(), tokenVerifier: verifier,
+    });
+    const claim = await signed(2, {
+      version: 1, event: 'claim', actor: B, at: new Date(START).toISOString(), generation: 1,
+      claimedUntil: new Date(START + 24 * 60 * 60 * 1_000).toISOString(), tokenVerifier: verifier,
+    });
+    const overRenewal = await signed(3, {
+      version: 1, event: 'renew', actor: B, at: new Date(START + 23 * 60 * 60 * 1_000).toISOString(), generation: 1,
+      claimedUntil: new Date(START + 24 * 60 * 60 * 1_000 + 1).toISOString(), tokenVerifier: verifier,
+    });
+    expect(overGeneration).not.toBeNull();
+    expect(overRenewal).not.toBeNull();
+    expect(taskFromMessages(ID, [submittedRaw(), overGeneration!])).toBeNull();
+    expect(taskFromMessages(ID, [submittedRaw(), claim!, overRenewal!])).toBeNull();
+  });
+});
+
+test('#86 disabled durable lease visibility survives signed rebuild, queued overlay, and re-enable', async () => {
+  let now = START;
+  let durable = submittedTask();
+  const sent: SendInput[] = [];
+  setTaskNowForTests(() => now);
+  setTaskGetForTests(async () => durable);
+  setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<disabled-${sent.length}>` }; });
+
+  const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  const claimRaw = await parsedClaim(sent[0]!, 2);
+  durable = taskFromMessages(ID, [submittedRaw(), claimRaw!])!;
+  clearQueuedEventsForTests();
+  const sendsBeforeReads = sent.length;
+  await withTaskLeasesEnabledForTests(false, async () => {
+    const active = toTaskView(durable);
+    expect(active).toMatchObject({ claimedUntil: first.claimedUntil, leaseGeneration: 1, leaseStatus: 'disabled' });
+    expect(await taskService.get(ID)).toEqual(durable);
+    now = Date.parse(first.claimedUntil);
+    const past = toTaskView(durable);
+    expect(past).toMatchObject({ claimedUntil: first.claimedUntil, leaseGeneration: 1, leaseStatus: 'disabled' });
+    expect(JSON.stringify({ active, past })).not.toContain('tokenVerifier');
+    expect(JSON.stringify({ active, past })).not.toContain('firstClaimedAt');
+    expect(JSON.stringify({ active, past })).not.toContain('generationClaimedAt');
+  });
+  expect({ sends: sent.length, authority: durable.lease?.leaseGeneration }).toEqual({ sends: sendsBeforeReads, authority: 1 });
+
+  now = START + 1;
+  await withTaskLeasesEnabledForTests(true, async () => {
+    expect(toTaskView(durable)).toMatchObject({ claimedUntil: first.claimedUntil, leaseGeneration: 1 });
+    expect(toTaskView(durable)).not.toHaveProperty('leaseStatus');
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_already_claimed');
+  });
+  now = Date.parse(first.claimedUntil);
+  await withTaskLeasesEnabledForTests(true, async () => {
+    const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(reclaimed.leaseGeneration).toBe(2);
+  });
+  expect(sent).toHaveLength(3); // original claim, authenticated expiry, normal reclaim
+
+  // A second task source deliberately remains older than its accepted claim;
+  // disabled projection must read the private anchors through the real queue.
+  clearQueuedEventsForTests();
+  const queuedSource = submittedTask();
+  setTaskGetForTests(async () => queuedSource);
+  now = START;
+  const queued = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  await withTaskLeasesEnabledForTests(false, async () => {
+    const overlay = await taskService.get(ID);
+    expect({
+      firstClaimedAt: overlay?.lease?.firstClaimedAt,
+      generationClaimedAt: overlay?.lease?.generationClaimedAt,
+      view: overlay && toTaskView(overlay),
+    }).toEqual({
+      firstClaimedAt: new Date(START).toISOString(),
+      generationClaimedAt: new Date(START).toISOString(),
+      view: expect.objectContaining({ claimedUntil: queued.claimedUntil, leaseGeneration: 1, leaseStatus: 'disabled' }),
+    });
+  });
+});
+
+test('#86 disabled mode keeps ordinary recipient update and reply compatibility unfenced', async () => {
+  const activeLease = {
+    leaseGeneration: 1,
+    claimedUntil: new Date(START + 300_000).toISOString(),
+    tokenVerifier: 'disabled-compat-verifier-which-is-never-projected-000',
+    generationClaimedAt: new Date(START).toISOString(),
+    firstClaimedAt: new Date(START).toISOString(),
+  };
+  let durable: Task = { ...submittedTask(), state: 'working', lease: activeLease };
+  const sent: SendInput[] = [];
+  setTaskNowForTests(() => START + 1);
+  setTaskGetForTests(async () => durable);
+  setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<disabled-compat-${sent.length}>` }; });
+  await withTaskLeasesEnabledForTests(false, async () => {
+    const updated = await updateTask({ id: ID, from: B, state: 'input-required', body: 'need input' });
+    expect(updated?.state).toBe('input-required');
+    clearQueuedEventsForTests();
+    durable = { ...submittedTask(), state: 'input-required', lease: activeLease };
+    const replied = await replyTask({ id: ID, from: B, body: 'continuing' });
+    expect(replied.state).toBe('working');
+  });
+  expect(sent).toHaveLength(2);
+});
+
+test('#79 recipient lease fence distinguishes omitted and supplied credentials without writes', async () => {
+  let now = START;
+  let durable = submittedTask();
+  const sent: SendInput[] = [];
+  setTaskNowForTests(() => now);
+  setTaskGetForTests(async () => durable);
+  setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<dual-track-${sent.length}>` }; });
+  const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  const active = first.task;
+  durable = active;
+  clearQueuedEventsForTests();
+  for (const [token, error] of [[undefined, 'task_already_terminal'], ['wrong-bearer', 'task_lease_required'], ['\u0000malformed-bearer', 'task_lease_required']] as const) {
+    await expect(updateTask({ id: ID, from: B, state: 'input-required', ...(token === undefined ? {} : { leaseToken: token }) })).rejects.toThrow(error);
+  }
+  expect({ sends: sent.length, state: durable.state, messages: durable.messages.length }).toEqual({ sends: 1, state: 'working', messages: 2 });
+  durable = submittedTask();
+  expect((await taskService.get(ID))?.state).toBe('submitted');
+
+  durable = active;
+  await expect(updateTask({ id: ID, from: A, state: 'input-required', leaseToken: 'irrelevant-requester-bearer' })).resolves.toMatchObject({ state: 'input-required' });
+  clearQueuedEventsForTests();
+  now = Date.parse(first.claimedUntil);
+  durable = active;
+  const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  durable = reclaimed.task;
+  clearQueuedEventsForTests();
+  await expect(updateTask({ id: ID, from: B, state: 'input-required', leaseToken: first.leaseToken })).rejects.toThrow('task_lease_required');
+  await expect(updateTask({ id: ID, from: B, state: 'input-required', leaseToken: reclaimed.leaseToken })).resolves.toMatchObject({ state: 'input-required' });
+  clearQueuedEventsForTests();
+
+  durable = submittedTask();
+  await expect(updateTask({ id: ID, from: B, state: 'input-required', leaseToken: 'no-authority-bearer' })).resolves.toMatchObject({ state: 'input-required' });
+  clearQueuedEventsForTests();
+  durable = reclaimed.task;
+  await withTaskLeasesEnabledForTests(false, async () => {
+    await expect(updateTask({ id: ID, from: B, state: 'input-required', leaseToken: 'flag-off-bearer' })).resolves.toMatchObject({ state: 'input-required' });
   });
 });
 

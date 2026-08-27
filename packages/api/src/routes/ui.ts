@@ -263,7 +263,7 @@ function taskActionFrom(c: Context, task: Task, supplied: string | undefined): s
 function taskMutationError(c: Context, err: unknown): Response {
   const code = (err as Error).message;
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
-  if (code === 'task_already_terminal') return c.json({ error: 'task_already_terminal' }, 409);
+  if (code === 'task_already_terminal' || code === 'task_lease_required') return c.json({ error: code }, 409);
   if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task' || code === 'approval_decision_required') {
     return c.json({ error: code }, 409);
   }
