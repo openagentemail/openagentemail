@@ -10,6 +10,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.TASK_LEASES_ENABLED = 'true';
+process.env.NODE_ENV = 'test';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -19,20 +20,19 @@ const {
   listTaskBoard,
   clearQueuedEventsForTests,
   setTaskGetForTests,
-  setTaskLeasesEnabledForTests,
   setTaskListAllForTests,
   setTaskSendMailForTests,
   setTaskNowForTests,
   taskService,
   toUiTaskView,
 } = await import('../src/lib/tasks.ts');
+const { taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 
 for (const localpart of ['fox', 'owl']) {
   if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
 }
 
 afterEach(() => {
-  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
   setTaskListAllForTests(null);
   setTaskGetForTests(null);
@@ -1297,8 +1297,9 @@ describe('#56 R9 lease final dashboard surfaces', () => {
 });
 
 describe('#56 R13 dashboard reply lease boundary RED', () => {
-  test('R13 RED: recipient/worker reply without a lease token rejects before delivery or queued mutation', async () => {
-    const effectiveLeaseEnabled = setTaskLeasesEnabledForTests(true);
+  const leaseTest = (name: string, work: () => void | Promise<void>) => test(name, () => withTaskLeasesEnabledForTests(true, work));
+  leaseTest('R13 RED: recipient/worker reply without a lease token rejects before delivery or queued mutation', async () => {
+    const effectiveLeaseEnabled = taskLeasesEnabled();
     console.info(JSON.stringify({ r16CoreLeaseGate: {
       test: 'R13-dashboard', configuredSingleton: config.taskLeasesEnabled, effectiveLeaseEnabled,
     } }));
@@ -1369,7 +1370,7 @@ describe('#56 R13 dashboard reply lease boundary RED', () => {
     });
   });
 
-  test('R13 RED control: ordinary input-required dashboard reply still succeeds without a lease', async () => {
+  leaseTest('R13 RED control: ordinary input-required dashboard reply still succeeds without a lease', async () => {
     const task: Task = {
       ...TASK_INPUT,
       id: '14141414-1414-4414-8414-141414141414',
@@ -1404,7 +1405,7 @@ describe('#56 R13 dashboard reply lease boundary RED', () => {
     });
   });
 
-  test('R13 RED control: requester reply succeeds without a token while the recipient lease is active', async () => {
+  leaseTest('R13 RED control: requester reply succeeds without a token while the recipient lease is active', async () => {
     const task: Task = {
       ...TASK_INPUT,
       id: '15151515-1515-4515-8515-151515151515',

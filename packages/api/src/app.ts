@@ -48,8 +48,6 @@ type AppOptions = {
    * @internal 仅测试可用，禁止用于生产组装。
    */
   taskService?: TaskService;
-  /** @internal test-only task lease feature-gate seam. */
-  leaseEnabledForTests?: boolean;
 };
 
 export function createApp(options: AppOptions = {}): Hono {
@@ -110,9 +108,8 @@ export function createApp(options: AppOptions = {}): Hono {
   app.route(
     '/v1/tasks',
     options.taskService
-      ? createTaskRoutes({
+        ? createTaskRoutes({
           service: options.taskService,
-          leaseEnabledForTests: options.leaseEnabledForTests,
         })
       : tasksRoute,
   );

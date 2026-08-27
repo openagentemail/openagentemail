@@ -1,4 +1,5 @@
 // #56 R2: production lease event, parser/rebuild, restart, and config gates.
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,8 +16,9 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-lease-core-'));
 process.env.TASK_LEASES_ENABLED = 'true';
+process.env.NODE_ENV = 'test';
 
-const { afterEach, describe, expect, test } = await import('bun:test');
+const { afterEach, describe, expect, test: bunTest } = await import('bun:test');
 const { Hono } = await import('hono');
 const { config, parseConfig } = await import('../src/lib/config.ts');
 const {
@@ -24,21 +26,20 @@ const {
   TASK_LEASE_MAX_SEC,
   TASK_LEASE_MIN_SEC,
   TASK_LEASE_REASON_MAX_CHARS,
-  claimLeaseHeadersForTests,
   claimTask,
   createApprovalTask,
   clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
-  parseTaskMessageForTests,
   releaseTask,
   setTaskGetForTests,
-  setTaskLeasesEnabledForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
   taskService,
   taskFromMessages,
   toTaskView,
 } = await import('../src/lib/tasks.ts');
+const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
@@ -81,7 +82,6 @@ async function parsedClaim(input: SendInput, uid = 2, extra: Record<string, stri
 }
 
 afterEach(() => {
-  setTaskLeasesEnabledForTests(undefined);
   setTaskNowForTests(null);
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
@@ -177,14 +177,16 @@ describe('#56 R2 lease authority', () => {
       async claim() { claims += 1; throw new Error('must not run'); }, async reply() { throw new Error('unused'); },
       async remind() { throw new Error('unused'); }, async close() { throw new Error('unused'); }, async waitForTerminal() { return null; },
     };
-    const app = new Hono();
-    app.use('*', async (c, next) => { c.set('auth', { kind: 'identity' as const, address: B }); await next(); });
-    app.route('/v1/tasks', createTaskRoutes({ service, findIdentity: () => ({ address: B, createdAt: '2026-08-24T00:00:00.000Z' }), leaseEnabledForTests: false }));
-    const response = await app.request(`/v1/tasks/${ID}/claim`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leaseSec: 300 }),
+    await withTaskLeasesEnabledForTests(false, async () => {
+      const app = new Hono();
+      app.use('*', async (c, next) => { c.set('auth', { kind: 'identity' as const, address: B }); await next(); });
+      app.route('/v1/tasks', createTaskRoutes({ service, findIdentity: () => ({ address: B, createdAt: '2026-08-24T00:00:00.000Z' }) }));
+      const response = await app.request(`/v1/tasks/${ID}/claim`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leaseSec: 300 }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: 'task_leases_disabled' });
     });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: 'task_leases_disabled' });
     expect(claims).toBe(0);
   });
 
@@ -273,8 +275,9 @@ describe('#56 R2 lease authority', () => {
   });
 
   test('production approval requests are not claimable or mutated by lease authority', async () => {
-    const requester = createIdentity({ localpart: 'lease-approval-requester' })!.identity;
-    const reviewer = createIdentity({ localpart: 'lease-approval-reviewer' })!.identity;
+    const fixtureId = randomUUID().replaceAll('-', '');
+    const requester = createIdentity({ localpart: `lease-approval-requester-${fixtureId}` })!.identity;
+    const reviewer = createIdentity({ localpart: `lease-approval-reviewer-${fixtureId}` })!.identity;
     const sent: SendInput[] = [];
     setTaskNowForTests(() => START);
     setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<approval-request>' }; });
@@ -306,7 +309,6 @@ describe('#56 R2 lease authority', () => {
     app.use('*', async (c, next) => { c.set('auth', { kind: 'identity' as const, address: B }); await next(); });
     app.route('/v1/tasks', createTaskRoutes({
       findIdentity: (address) => ({ address, createdAt: '2026-08-24T00:00:00.000Z' }),
-      leaseEnabledForTests: true,
     }));
     const response = await app.request(`/v1/tasks/${ID}/claim`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leaseSec: 300 }),
@@ -374,7 +376,6 @@ function productionApp(service: TaskService = taskService, actor = B) {
   app.route('/v1/tasks', createTaskRoutes({
     service,
     findIdentity: (address) => ({ address, createdAt: '2026-08-24T00:00:00.000Z' }),
-    leaseEnabledForTests: true,
   }));
   return app;
 }
@@ -489,7 +490,7 @@ async function r13bActiveLeaseFixture() {
 
 describe('#56 R13b real REST state actor matrix RED', () => {
   test('R13b RED: requester is unfenced while recipient without the current token remains fenced', async () => {
-    const effectiveLeaseEnabled = setTaskLeasesEnabledForTests(true);
+    const effectiveLeaseEnabled = taskLeasesEnabled();
     console.info(JSON.stringify({ r16CoreLeaseGate: {
       test: 'R13b', configuredSingleton: config.taskLeasesEnabled, effectiveLeaseEnabled,
     } }));

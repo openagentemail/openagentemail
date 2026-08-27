@@ -15,6 +15,7 @@ process.env.SMTP_PASS = 'test-only';
 process.env.DATA_DIR = '/tmp/oae-approval-red';
 
 const tasks = await import('../src/lib/tasks.ts');
+const { parseStampedTaskMessageForTests } = await import('./support/task-lease-seams.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const { processWatchedMessage } = await import('../src/lib/notification-watcher.ts');
 const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
@@ -44,10 +45,6 @@ type ApprovalModule = typeof tasks & {
   decideApprovalTask?: (input: {
     id: string; from: string; decision: 'approved' | 'rejected';
   }) => Promise<ApprovalTask>;
-  /** R1b test seam: invokes the private production IMAP parser on this source. */
-  parseStampedTaskMessageForTests?: (input: {
-    id: string; uid: number; source: string; internalDate: string;
-  }) => Promise<unknown | null>;
   /** R1b test seam: produces a normal server-stamped approval decision event. */
   encodeStampedApprovalDecisionForTests?: (input: {
     id: string; from: string; to: string; subject: string; digest: string;
@@ -336,7 +333,7 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
 describe('#55 R5: approval reminder integrity', () => {
   test('regression: an approval reminder cannot emit the ordinary event that corrupts reconstruction', async () => {
     const { task, sent } = await requestFixture();
-    const parse = api().parseStampedTaskMessageForTests;
+    const parse = parseStampedTaskMessageForTests;
     expect(parse, 'production parser seam is missing').toBeFunction();
     tasks.setTaskGetForTests(async () => task);
     await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'This must not become an approval reminder.' }))
@@ -349,7 +346,7 @@ describe('#55 R5: approval reminder integrity', () => {
 
   test('approval reminder is rejected before delivery and leaves the authenticated request reconstructable', async () => {
     const { task, sent } = await requestFixture();
-    const parse = api().parseStampedTaskMessageForTests;
+    const parse = parseStampedTaskMessageForTests;
     expect(parse, 'production parser seam is missing').toBeFunction();
     tasks.setTaskGetForTests(async () => task);
     await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'Do not send this.' }))
@@ -424,7 +421,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
   });
 
   test('R9-B RED: an approval request body cannot turn an ordinary result block into an approval result', async () => {
-    const parse = api().parseStampedTaskMessageForTests;
+    const parse = parseStampedTaskMessageForTests;
     expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
     const bodyWithOrdinaryResult = [
       'Caller-supplied context only.',
@@ -442,7 +439,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
   });
 
   test('R8-A RED: inert snapshot-marker strings in signed action JSON cannot replace the structural frame', async () => {
-    const parse = api().parseStampedTaskMessageForTests;
+    const parse = parseStampedTaskMessageForTests;
     expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
     const actions = [
       { ...ACTION, arguments: { inert: '<!-- openagent.email approval snapshot -->' } },
@@ -484,7 +481,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
       () => 'resolved', (error: Error) => error.message,
     );
     expect({ opposite, delivered: sent.length }).toEqual({ opposite: 'task_already_decided', delivered: 2 });
-    const parse = api().parseStampedTaskMessageForTests!;
+    const parse = parseStampedTaskMessageForTests;
     const request = await parse({ id: task.id, uid: 51, source: rfc822(sent[0]!), internalDate: before });
     const terminal = await parse({ id: task.id, uid: 52, source: rfc822(sent[1]!), internalDate: before });
     expect(request).not.toBeNull();
@@ -509,7 +506,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
       () => 'resolved', (error: Error) => error.message,
     );
     expect({ repeated, delivered: sent.length }).toEqual({ repeated: 'task_expired', delivered: 2 });
-    const parse = api().parseStampedTaskMessageForTests!;
+    const parse = parseStampedTaskMessageForTests;
     const request = await parse({ id: task.id, uid: 53, source: rfc822(sent[0]!), internalDate: '2026-08-23T23:59:59.999Z' });
     const terminal = await parse({ id: task.id, uid: 54, source: rfc822(sent[1]!), internalDate: '2026-08-23T23:59:58.000Z' });
     expect(request).not.toBeNull();
@@ -562,7 +559,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
   });
 
   test('the real stamp/parser rejects RFC timestamp tampering; first valid terminal wins', async () => {
-    const parse = api().parseStampedTaskMessageForTests;
+    const parse = parseStampedTaskMessageForTests;
     expect(parse, 'real IMAP stamp/parser seam is missing').toBeFunction();
     const encodeDecision = api().encodeStampedApprovalDecisionForTests;
     expect(encodeDecision, 'real server-stamped decision encoder is missing').toBeFunction();
