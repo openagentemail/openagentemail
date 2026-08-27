@@ -94,6 +94,18 @@ run_doctor '"v=DMARC1; p=reject; p=none"' "$DUPLICATE_OUTPUT"
 assert_contains "$DUPLICATE_OUTPUT" 'FAIL'
 assert_contains "$DUPLICATE_OUTPUT" 'no valid DMARC policy'
 
+DUPLICATE_NON_CORE_OUTPUT="$TMP_ROOT/duplicate-non-core.out"
+run_doctor '"v=DMARC1; p=reject; rua=mailto:first@example.test; RUA=mailto:second@example.test"' "$DUPLICATE_NON_CORE_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'duplicate normalized DMARC tag names must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$DUPLICATE_NON_CORE_OUTPUT" 'FAIL'
+assert_contains "$DUPLICATE_NON_CORE_OUTPUT" 'no valid DMARC policy'
+
+MALFORMED_POLICY_OUTPUT="$TMP_ROOT/malformed-policy.out"
+run_doctor '"v=DMARC1; p=reject bogus"' "$MALFORMED_POLICY_OUTPUT"
+[ "$DOCTOR_STATUS" -eq 1 ] || { printf 'malformed DMARC policy must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
+assert_contains "$MALFORMED_POLICY_OUTPUT" 'FAIL'
+assert_contains "$MALFORMED_POLICY_OUTPUT" 'no valid DMARC policy'
+
 MULTIPLE_OUTPUT="$TMP_ROOT/multiple.out"
 run_doctor $'"v=DMARC1; p=reject"\n"v=DMARC1; p=none"' "$MULTIPLE_OUTPUT"
 [ "$DOCTOR_STATUS" -eq 1 ] || { printf 'multiple DMARC records must exit 1, got %s\n' "$DOCTOR_STATUS" >&2; exit 1; }
@@ -190,4 +202,4 @@ if grep -Fq 'DMARC policy is p=none' "$REJECT_OUTPUT"; then
   exit 1
 fi
 
-printf '%s\n' 'mail-security shell tests: 18 passed'
+printf '%s\n' 'mail-security shell tests: 20 passed'

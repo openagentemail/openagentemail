@@ -212,6 +212,7 @@ if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
       version_count = 0
       policy_count = 0
       test_mode_count = 0
+      duplicate_tag = 0
       policy = ""
       test_mode = "n"
       for (i = 1; i <= tag_count; i++) {
@@ -221,6 +222,7 @@ if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
         if (!separator) continue
         key = tolower(trim(substr(tag, 1, separator - 1)))
         value = trim(substr(tag, separator + 1))
+        if (++seen[key] > 1) duplicate_tag = 1
         if (key == "v") version_count++
         if (key == "p") {
           policy_count++
@@ -231,8 +233,10 @@ if [ "$DMARC_CANDIDATE_COUNT" -eq 1 ]; then
           test_mode = tolower(value)
         }
       }
-      if (version_count == 1 && policy_count == 1 && test_mode_count <= 1 && \
-          (test_mode == "n" || test_mode == "y")) print policy, test_mode
+      if (!duplicate_tag && version_count == 1 && policy_count == 1 && \
+          test_mode_count <= 1 && (policy == "none" || policy == "quarantine" || \
+          policy == "reject") && (test_mode == "n" || test_mode == "y")) \
+          print policy, test_mode
     }
   ')"
 fi
