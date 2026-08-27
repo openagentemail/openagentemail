@@ -236,7 +236,7 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(taskRelease, "reason", "worker stopped")).toBe(true);
 });
 
-test("R12 RED: task_update registry/schema publishes an optional non-empty leaseToken", () => {
+test("#79 task_update schema forwards every supplied string to the shared lease fence", () => {
   const taskUpdate = toolSchemas.get("task_update");
   if (!taskUpdate) {
     expect(taskUpdate, "R12 task_update must be registered before leaseToken schema is checked").toBeDefined();
@@ -250,10 +250,12 @@ test("R12 RED: task_update registry/schema publishes an optional non-empty lease
   expect({
     opaqueToken: leaseToken.safeParse("opaque-current-lease-token").success,
     emptyToken: leaseToken.safeParse("").success,
+    oversizedToken: leaseToken.safeParse("x".repeat(16_385)).success,
     omittedToken: leaseToken.safeParse(undefined).success,
   }).toEqual({
     opaqueToken: true,
-    emptyToken: false,
+    emptyToken: true,
+    oversizedToken: true,
     omittedToken: true,
   });
 });

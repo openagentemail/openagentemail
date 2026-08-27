@@ -754,4 +754,114 @@ describe('MCP registered task handlers execute through the production HTTP trans
       resultTokenFree: true,
     });
   });
+
+  test('#79 real HTTP MCP relays task_lease_required as an opaque 409 tool error', async () => {
+    const identity = createIdentity({ localpart: `r79-update-${crypto.randomUUID().slice(0, 8)}` })!;
+    const id = 'e1e2e3e4-e5e6-47e8-89ca-ebdddddddddd';
+    const supplied = 'r79-wrong-opaque-bearer';
+    const base = {
+      id, from: 'origin@test.example', to: identity.identity.address, subject: 'MCP dual-track proof', state: 'working' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+    };
+    const updates: Array<{ id: string; from: string; state: string; leaseToken?: string }> = [];
+    const unused = async () => { throw new Error('unused in R79 MCP fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: unused, list: unused, listBoard: unused, get: async () => base,
+        update: async (input) => {
+          updates.push(input);
+          throw new Error('task_lease_required');
+        },
+        reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+      },
+    });
+    const call = (leaseToken: string, requestId: number) => handlerApp.request('/mcp', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${identity.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+      body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'tools/call', params: { name: 'task_update', arguments: { id, state: 'input-required', leaseToken } } }),
+    });
+    const [response, emptyResponse] = await Promise.all([call(supplied, 1301), call('', 1302)]);
+    const [body, emptyBody] = await Promise.all([response, emptyResponse].map(readMcpJson)) as Array<{ result?: { isError?: boolean; content?: Array<{ text?: string }> } }>;
+    const wrongText = JSON.stringify(body);
+    const emptyText = JSON.stringify(emptyBody);
+    const privateAuthorityPattern = /tokenVerifier|firstClaimedAt|generationClaimedAt/;
+    expect({
+      wrong: {
+        status: response.status,
+        toolError: body.result?.isError,
+        code: wrongText.includes('task_lease_required'),
+        statusText: wrongText.includes('409'),
+        bearerAbsent: !wrongText.includes(supplied),
+        privateAuthorityAbsent: !privateAuthorityPattern.test(wrongText),
+      },
+      empty: {
+        status: emptyResponse.status,
+        toolError: emptyBody.result?.isError,
+        code: emptyText.includes('task_lease_required'),
+        statusText: emptyText.includes('409'),
+        inputValidationAbsent: !/input validation|invalid (input|argument)|-32602/i.test(emptyText),
+        privateAuthorityAbsent: !privateAuthorityPattern.test(emptyText),
+      },
+      updates: updates
+        .map((input) => ({ id: input.id, from: input.from, state: input.state, leaseToken: input.leaseToken }))
+        .sort((left, right) => (left.leaseToken ?? '').localeCompare(right.leaseToken ?? '')),
+    }).toEqual({
+      wrong: { status: 200, toolError: true, code: true, statusText: true, bearerAbsent: true, privateAuthorityAbsent: true },
+      empty: { status: 200, toolError: true, code: true, statusText: true, inputValidationAbsent: true, privateAuthorityAbsent: true },
+      updates: [
+        { id, from: identity.identity.address, state: 'input-required', leaseToken: '' },
+        { id, from: identity.identity.address, state: 'input-required', leaseToken: supplied },
+      ],
+    });
+  });
+
+  test('#79 MCP forwards an oversized supplied update bearer to the shared lease fence', async () => {
+    const identity = createIdentity({ localpart: `r14-update-${crypto.randomUUID().slice(0, 8)}` })!;
+    const id = 'e1e2e3e4-e5e6-47e8-89ca-ebeeeeeeeeee';
+    const supplied = `wrong-${'x'.repeat(16_384)}`;
+    const base = {
+      id, from: 'origin@test.example', to: identity.identity.address, subject: 'MCP envelope bearer proof', state: 'working' as const,
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+      lease: { claimedUntil: '2026-08-24T01:00:00.000Z', leaseGeneration: 1, tokenVerifier: 'private-verifier' },
+    };
+    const updates: Array<{ leaseToken?: string }> = [];
+    const unused = async () => { throw new Error('unused in R14 MCP fixture'); };
+    const handlerApp = createApp({
+      uiEnabled: false,
+      taskService: {
+        create: unused, list: unused, listBoard: unused, get: async () => base,
+        update: async (input) => {
+          updates.push(input);
+          throw new Error('task_lease_required');
+        },
+        reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+      },
+    });
+    const response = await handlerApp.request('/mcp', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${identity.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1401, method: 'tools/call', params: { name: 'task_update', arguments: { id, state: 'input-required', leaseToken: supplied } } }),
+    });
+    const body = await readMcpJson(response) as { result?: { isError?: boolean } };
+    const text = JSON.stringify(body);
+
+    expect({
+      status: response.status,
+      toolError: body.result?.isError,
+      code: text.includes('task_lease_required'),
+      statusText: text.includes('409'),
+      inputValidationAbsent: !/input validation|invalid (input|argument)|-32602/i.test(text),
+      forwarded: updates[0]?.leaseToken === supplied,
+      bearerAbsent: !text.includes(supplied),
+    }).toEqual({
+      status: 200,
+      toolError: true,
+      code: true,
+      statusText: true,
+      inputValidationAbsent: true,
+      forwarded: true,
+      bearerAbsent: true,
+    });
+  });
 });
