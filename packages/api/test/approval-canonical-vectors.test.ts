@@ -40,6 +40,7 @@ function validateMutation(value: unknown, label: string) {
   if (!isRecord(value) || !sameKeys(value, ['path', 'value', 'sha256']) ||
       typeof value.path !== 'string' || !value.path || !Object.hasOwn(value, 'value') ||
       typeof value.sha256 !== 'string' || !HEX_SHA256.test(value.sha256)) invalid(`${label} mutation`);
+  try { mutationPath(value.path); } catch (_error) { invalid(`${label} mutation path`); }
 }
 function validateV1Fixture(candidate: unknown) {
   if (!isRecord(candidate) || candidate.format !== V1_HEADER.format || candidate.version !== V1_HEADER.version ||
@@ -94,8 +95,15 @@ function action(value: unknown) {
   return input;
 }
 function digest(value: unknown) { return createHash('sha256').update(canonical(action(value)), 'utf8').digest('hex'); }
+function mutationPath(path: string) {
+  if (!path.startsWith('/')) throw new Error('mutation path must be a non-root JSON Pointer');
+  return path.slice(1).split('/').map((segment) => {
+    if (/~(?:[^01]|$)/.test(segment)) throw new Error('invalid JSON Pointer escape');
+    return segment.replaceAll('~1', '/').replaceAll('~0', '~');
+  });
+}
 function mutated(source: any, path: string, value: unknown) {
-  const result = structuredClone(source); const keys = path.split('.'); let target = result;
+  const result = structuredClone(source); const keys = mutationPath(path); let target = result;
   for (const key of keys.slice(0, -1)) target = target[key]; target[keys.at(-1)!] = value; return result;
 }
 
@@ -136,4 +144,20 @@ test('public v1 fixture validation fails closed on incomplete or malformed data'
   const missingUtf16 = structuredClone(fixture) as any;
   missingUtf16.vectors[3].id = 'wrong-key-order-v1';
   expect(() => validateV1Fixture(missingUtf16)).toThrow('required vector ids');
+  const ambiguousPath = structuredClone(fixture) as any;
+  ambiguousPath.vectors[0].mutations[0].path = 'arguments.literal.dot';
+  expect(() => validateV1Fixture(ambiguousPath)).toThrow('unicode-v1 mutation path');
+});
+
+test('mutation JSON Pointers preserve literal dots and reject ambiguous dot-split paths', () => {
+  const source = { type: 'tool_call', name: 'pointer', arguments: { 'literal.dot': { unchanged: true } } };
+  const changed = mutated(source, '/arguments/literal.dot/unchanged', false);
+  expect(changed.arguments['literal.dot'].unchanged).toBe(false);
+  expect(source.arguments['literal.dot'].unchanged).toBe(true);
+  const emptyKeySource = { '': true };
+  const emptyKeyChanged = mutated(emptyKeySource, '/', false);
+  expect(emptyKeyChanged['']).toBe(false);
+  expect(emptyKeySource['']).toBe(true);
+  expect(() => mutated(emptyKeySource, '', false)).toThrow('JSON Pointer');
+  expect(() => mutated(source, 'arguments.literal.dot', false)).toThrow('JSON Pointer');
 });

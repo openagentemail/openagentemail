@@ -11,8 +11,10 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveInsecureBase } from './acceptance-insecure-base.mjs';
 
 const base = process.env.PREVIEW_BASE ?? 'http://127.0.0.1:4310';
+const approvalKeyboardOnly = process.env.APPROVAL_KEYBOARD_ONLY === '1';
 const localIpv4s = Object.values(networkInterfaces())
   .flat()
   .filter((entry) => entry?.family === 'IPv4' && !entry.internal)
@@ -33,7 +35,9 @@ async function findInsecureBase() {
   throw new Error('No reachable non-loopback IPv4 address is available for the insecure-context probe');
 }
 
-const insecureBase = await findInsecureBase();
+// Focused A75 only needs its explicit loopback preview. The full path still
+// discovers this origin for A67 and for its deliberate external-origin allowance.
+const insecureBase = await resolveInsecureBase(approvalKeyboardOnly, findInsecureBase);
 const debugPort = Number(process.env.CHROME_DEBUG_PORT ?? 9334);
 // 慢用例（15 次轮询放弃、20 s 冷却窗口）默认跑；PROBE_SLOW=0 可跳过。
 const runSlow = process.env.PROBE_SLOW !== '0';
@@ -560,7 +564,8 @@ async function runAcceptance() {
       const url = message.params.request.url;
       if (url.includes('/ui/api/overview')) overviewRequests.push(Date.now());
       if (url.includes('/ui/api/messages')) messageRequests.push(url);
-      if (!url.startsWith(base) && !url.startsWith('data:') && !url.startsWith(insecureBase)) {
+      if (!url.startsWith(base) && !url.startsWith('data:') &&
+          (insecureBase === null || !url.startsWith(insecureBase))) {
         requestedExternalUrls.add(url);
       }
       return;
@@ -615,7 +620,7 @@ async function runAcceptance() {
       message.method === 'Page.frameNavigated' &&
       message.params.frame.parentId === undefined &&
       !message.params.frame.url.startsWith(base) &&
-      !message.params.frame.url.startsWith(insecureBase)
+      (insecureBase === null || !message.params.frame.url.startsWith(insecureBase))
     ) {
       record('Page.frameNavigated', message.params.frame.url);
     }
@@ -640,7 +645,7 @@ async function runAcceptance() {
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
   }).catch(() => {});
 
-  if (process.env.APPROVAL_KEYBOARD_ONLY === '1') {
+  if (approvalKeyboardOnly) {
     await runA75ApprovalKeyboard();
     if (violations.length) {
       throw new Error(`Browser acceptance violations:\n${violations.join('\n')}`);

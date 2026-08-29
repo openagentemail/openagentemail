@@ -10,7 +10,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "approval-digest.md",
+    "approval-canonical-vectors.v1.json"
   ],
   "scripts": {
     "build": "bun build src/main.ts --target node --outfile dist/main.js",

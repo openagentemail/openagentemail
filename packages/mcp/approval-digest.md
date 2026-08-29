@@ -25,7 +25,7 @@ behavior. Any incompatible canonicalization change requires a new recipe version
 and corresponding new versioned vectors.
 
 The public, versioned interoperability vectors are
-[`packages/api/test/fixtures/approval-canonical-vectors.v1.json`](../packages/api/test/fixtures/approval-canonical-vectors.v1.json).
+[`approval-canonical-vectors.v1.json`](./approval-canonical-vectors.v1.json).
 Each mutation `path` is a non-root [RFC 6901 JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901),
 not a dot-split path. The empty string is the rejected root pointer; `/` is valid
 and addresses a member whose key is the empty string, while `/arguments/literal.dot`

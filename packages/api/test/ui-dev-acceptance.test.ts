@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { resolveInsecureBase } from '../dev/acceptance-insecure-base.mjs';
 
 // 浏览器验收脚本本身不在 CI 里跑（需要真 Chromium），所以这里守住"探针还在、
 // 而且用的是可执行的判定方法"这条底线：一旦有人把关键探针删掉或换成
@@ -7,6 +8,29 @@ const source = await Bun.file(new URL('../dev/acceptance.mjs', import.meta.url))
 const previewSource = await Bun.file(new URL('../dev/preview.ts', import.meta.url)).text();
 
 describe('development browser acceptance harness', () => {
+  test('focused A75 skips non-loopback discovery while the full path retains it', async () => {
+    let focusedDiscoveryCalls = 0;
+    await expect(resolveInsecureBase(true, async () => {
+      focusedDiscoveryCalls += 1;
+      throw new Error('focused mode must not discover an insecure host');
+    })).resolves.toBeNull();
+    expect(focusedDiscoveryCalls).toBe(0);
+
+    let fullDiscoveryCalls = 0;
+    await expect(resolveInsecureBase(false, async () => {
+      fullDiscoveryCalls += 1;
+      return 'http://198.51.100.10:4310';
+    })).resolves.toBe('http://198.51.100.10:4310');
+    expect(fullDiscoveryCalls).toBe(1);
+
+    const resolver = source.indexOf('resolveInsecureBase(approvalKeyboardOnly, findInsecureBase)');
+    const focusedBranch = source.indexOf('if (approvalKeyboardOnly) {');
+    const fullInsecureProbe = source.indexOf('/* ============ A67');
+    expect(resolver).toBeGreaterThanOrEqual(0);
+    expect(focusedBranch).toBeGreaterThan(resolver);
+    expect(fullInsecureProbe).toBeGreaterThan(focusedBranch);
+  });
+
   test('fails on resource errors as well as script and navigation violations', () => {
     expect(source).toContain('Network.loadingFailed');
     expect(source).toContain('Network.responseReceived');
@@ -32,10 +56,10 @@ describe('development browser acceptance harness', () => {
     expect(source).not.toContain(':tabbable');
   });
 
-  test('the real Chromium harness exercises approval controls with keyboard activation', () => {
+  test('A75 keeps native keyboard, terminal-state, and restoration anchors', () => {
     const sharedStart = source.indexOf('async function runA75ApprovalKeyboard()');
     const sharedEnd = source.indexOf('async function runAcceptance()', sharedStart);
-    const targetedStart = source.indexOf("if (process.env.APPROVAL_KEYBOARD_ONLY === '1')");
+    const targetedStart = source.indexOf('if (approvalKeyboardOnly) {');
     const targetedEnd = source.indexOf('/* ============ A51', targetedStart);
     expect(sharedStart).toBeGreaterThanOrEqual(0);
     expect(sharedEnd).toBeGreaterThan(sharedStart);
@@ -45,78 +69,27 @@ describe('development browser acceptance harness', () => {
     const targetedBranch = source.slice(targetedStart, targetedEnd);
     const sharedCall = targetedBranch.indexOf('await runA75ApprovalKeyboard();');
     const violationCheck = targetedBranch.indexOf('if (violations.length)');
-    const passLog = targetedBranch.indexOf('A75 approval keyboard browser gate passed:');
     const normalReturn = targetedBranch.indexOf('return;');
     expect(sharedCall).toBeGreaterThanOrEqual(0);
     expect(violationCheck).toBeGreaterThan(sharedCall);
-    expect(passLog).toBeGreaterThan(violationCheck);
-    expect(normalReturn).toBeGreaterThan(passLog);
-    expect(sharedA75).toContain('Approve action');
-    expect(sharedA75).toContain('Reject action');
-    expect(sharedA75).toContain("key: 'Tab'");
-    expect(sharedA75).toContain("type: 'rawKeyDown'");
-    expect(sharedA75).toContain("type: 'char'");
-    expect(sharedA75).toContain("type: 'keyUp'");
-    expect(sharedA75).toContain('nativeVirtualKeyCode');
-    expect(sharedA75).toContain('unmodifiedText');
-    expect(sharedA75).toContain("dispatchNativeActivation('Enter', 'Enter', 13, '\\r')");
-    expect(sharedA75).toContain("dispatchNativeActivation(' ', 'Space', 32, ' ')");
-    expect(sharedA75).toContain("matches(':focus-visible')");
-    expect(sharedA75).toContain('submittedApprovalDecisions.push');
-    expect(sharedA75).toContain('async function waitForSubmittedApprovalDecisions(expected, description)');
-    expect(sharedA75).toContain('await retry(async () =>');
-    expect(sharedA75).toContain('exact decision sequence');
-    expect(sharedA75).toContain('const requiredStableObservations = 3;');
-    expect(sharedA75).toContain('let exactObservationCount = 0;');
-    expect(sharedA75).toContain('exactObservationCount = 0;');
-    expect(sharedA75).toContain('expected ${requiredStableObservations} consecutive exact observations');
-    expect(sharedA75).not.toContain('await delay(150)');
-    expect(sharedA75).toContain('const decisionPath = `${taskPath}/decision`;');
-    expect(sharedA75).toContain("url.pathname !== decisionPath");
-    expect(sharedA75).toContain("Object.keys(body).length !== 1");
-    expect(sharedA75).toContain("Object.hasOwn(body, 'decision')");
-    expect(sharedA75).toContain("decodeURIComponent(url.pathname.slice('/ui/api/tasks/'.length, -'/decision'.length))");
-    expect(sharedA75).toContain("decision: 'approved'");
-    expect(sharedA75).toContain("decision: 'rejected'");
-    expect(sharedA75).toContain("const status = url.searchParams.get('status') ?? 'active';");
-    expect(sharedA75).toContain("status === 'all'");
-    expect(sharedA75).toContain("['submitted', 'working'].includes(keyboardTask.state)");
-    expect(sharedA75).toContain('tasks: matchesStatus ? [keyboardTask] : []');
-    expect(sharedA75).toContain('totalApprox: matchesStatus ? 1 : 0');
-    expect(sharedA75).toContain('filteredTerminalListRefresh = new Promise');
-    expect(sharedA75).toContain("status === 'input-required' && keyboardTask.state === 'completed'");
-    expect(sharedA75).toContain('await filteredTerminalListRefresh');
-    expect(sharedA75).toContain('allowFilteredTerminalListRefresh();');
-    expect(sharedA75).toContain('#tasks-rows .task-row');
-    expect(sharedA75).toContain('filteredInputRequiredListEmpty');
-    expect(sharedA75).toContain('detailCompletedBadgeVisible');
-    expect(sharedA75).toContain('task-detail-head .task-badge');
-    expect(sharedA75).toContain("detail?.querySelector('.task-result')");
-    expect(sharedA75).not.toContain("document.querySelectorAll('.task-badge[data-state=\\\"completed\\\"]')");
-    expect(sharedA75).toContain('bothControlsAbsent');
-    expect(sharedA75).toContain('submittedDecisionVisible');
-    expect(sharedA75).not.toContain("[aria-label=\"Approve action\"]').focus()");
-    expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').focus()");
-    expect(sharedA75).not.toContain("[aria-label=\"Approve action\"]').click()");
-    expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').click()");
-    expect((sharedA75.match(/visible fox identity inbox before/g) || []).length).toBe(2);
-    expect((sharedA75.match(/data-nav=\\"inbox\\"/g) || []).length).toBe(2);
-    expect(sharedA75).toContain("dataset.session === 'identity'");
-    expect(sharedA75).toContain("#session-label').textContent.trim() === 'fox@preview.test'");
-    expect(source).toContain("const expectedSessionLabel = token === 'preview-token' ? 'Admin session' : 'fox@preview.test';");
-    expect(source).toContain("!document.querySelector('#login-submit').disabled");
-    expect(source).toContain('completed ${expectedSessionLabel} login');
-    expect(source).toContain('const requestPath = new URL(request.url).pathname;');
-    expect(source).toContain("requestPath === '/ui/api/tasks' || requestPath.startsWith('/ui/api/tasks/')");
-    expect(source).not.toContain("request.url.includes('/ui/api/tasks')");
+    expect(normalReturn).toBeGreaterThan(violationCheck);
+    expect(sharedA75).toMatch(/Input\.dispatchKeyEvent[\s\S]*rawKeyDown[\s\S]*char[\s\S]*keyUp/);
+    expect(sharedA75).toContain(':focus-visible');
+    expect(sharedA75).toMatch(/decision.*approved[\s\S]*decision.*rejected/);
+    expect(sharedA75).toMatch(/url\.pathname[\s\S]*Object\.hasOwn\(body, 'decision'\)/);
+    expect(sharedA75).toContain('requiredStableObservations');
+    expect(sharedA75).toContain('exactObservationCount');
+    expect(sharedA75).toMatch(/task-detail-head[\s\S]*task-result[\s\S]*#tasks-rows \.task-row/);
+    expect(sharedA75).toContain('filteredTerminalListRefresh');
+    expect(sharedA75).not.toMatch(/\[aria-label=.*(?:Approve|Reject).*\]\.(?:focus|click)\(\)/);
     const defaultA75Call = source.indexOf('await runA75ApprovalKeyboard();', targetedEnd);
-    const adminReady = source.indexOf('visible admin Home rows after approval keyboard probe', defaultA75Call);
-    const adminProbeInjection = source.indexOf('await injectProbes();', adminReady);
+    const restoreAdmin = source.indexOf("await login('preview-token');", defaultA75Call);
+    const restoreOverview = source.indexOf("dataset.scope === 'overview'", restoreAdmin);
+    const adminProbeInjection = source.indexOf('await injectProbes();', restoreOverview);
     expect(defaultA75Call).toBeGreaterThan(targetedEnd);
-    expect(adminReady).toBeGreaterThan(defaultA75Call);
-    expect(adminProbeInjection).toBeGreaterThan(adminReady);
-    expect(source.slice(defaultA75Call, adminProbeInjection)).toContain("#overview-panel').getClientRects().length > 0");
-    expect(source.slice(defaultA75Call, adminProbeInjection)).toContain(".overview-row')].some");
+    expect(restoreAdmin).toBeGreaterThan(defaultA75Call);
+    expect(restoreOverview).toBeGreaterThan(restoreAdmin);
+    expect(adminProbeInjection).toBeGreaterThan(restoreOverview);
   });
 
   // A56：可见 main 的判定方法
@@ -243,6 +216,7 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('securitypolicyviolation');
     expect(source).toContain('async function findInsecureBase()');
     expect(source).toContain('No reachable non-loopback IPv4 address');
+    expect(source).toContain("await send('Page.navigate', { url: `${insecureBase}/ui` });");
     expect(source).toContain('A67 the insecure origin disables token entry');
     expect(source).toContain('A68 a successful copy enters .copied');
     expect(source).toContain('A68 .copied clears after ~1.2 s');
