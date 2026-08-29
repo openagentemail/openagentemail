@@ -20,5 +20,9 @@ The action digest is SHA-256 of those UTF-8 bytes, expressed as raw lower-case
 hexadecimal. It has no `sha256:` prefix. This describes the existing v1 behavior;
 it is not a general canonical-JSON standard.
 
+Implementations of v1 **must not** change this documented canonicalization
+behavior. Any incompatible canonicalization change requires a new recipe version
+and corresponding new versioned vectors.
+
 The public, versioned interoperability vectors are
 [`packages/api/test/fixtures/approval-canonical-vectors.v1.json`](../packages/api/test/fixtures/approval-canonical-vectors.v1.json).

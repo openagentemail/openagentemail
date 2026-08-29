@@ -385,6 +385,26 @@ async function runA75ApprovalKeyboard() {
     check(terminal.completedBadgeVisible, `A75 ${decision} terminal shows completed badge`);
     check(terminal.submittedDecisionVisible, `A75 ${decision} terminal result visibly contains submitted decision`);
   }
+  async function waitForSubmittedApprovalDecisions(expected, description) {
+    const expectedJson = JSON.stringify(expected);
+    const requiredStableObservations = 3;
+    let exactObservationCount = 0;
+    await retry(async () => {
+      const actualJson = JSON.stringify(submittedApprovalDecisions);
+      if (actualJson !== expectedJson) {
+        exactObservationCount = 0;
+        throw new Error(`expected ${expectedJson}; saw ${actualJson}; stable observations reset`);
+      }
+      exactObservationCount += 1;
+      if (exactObservationCount < requiredStableObservations) {
+        throw new Error(`expected ${requiredStableObservations} consecutive exact observations; saw ${exactObservationCount}`);
+      }
+    }, `${description} exact decision sequence`);
+    check(
+      exactObservationCount >= requiredStableObservations && JSON.stringify(submittedApprovalDecisions) === expectedJson,
+      `${description} stable ${exactObservationCount}/${requiredStableObservations} (${JSON.stringify(submittedApprovalDecisions)})`,
+    );
+  }
 
   try {
     await login('preview-identity-token');
@@ -398,8 +418,10 @@ async function runA75ApprovalKeyboard() {
     check(approveTabPresses > 0 && approveTabPresses <= 20, `A75 Tab reaches visible Approve within bound (saw ${approveTabPresses})`);
     await dispatchNativeActivation('Enter', 'Enter', 13, '\r');
     await assertApprovalTerminal('approved');
-    await delay(150);
-    check(JSON.stringify(submittedApprovalDecisions) === JSON.stringify([{ id: keyboardTask.id, decision: 'approved' }]), `A75 Enter POST body records exactly one approved decision (${JSON.stringify(submittedApprovalDecisions)})`);
+    await waitForSubmittedApprovalDecisions(
+      [{ id: keyboardTask.id, decision: 'approved' }],
+      'A75 Enter POST body records exactly one approved decision',
+    );
     keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000076');
     await login('preview-identity-token');
     await evaluate("document.querySelector('[data-nav=\"inbox\"]').click()");
@@ -412,11 +434,10 @@ async function runA75ApprovalKeyboard() {
     check(rejectTabPresses > 0 && rejectTabPresses <= 20, `A75 Tab reaches visible Reject within bound (saw ${rejectTabPresses})`);
     await dispatchNativeActivation(' ', 'Space', 32, ' ');
     await assertApprovalTerminal('rejected');
-    await delay(150);
-    check(JSON.stringify(submittedApprovalDecisions) === JSON.stringify([
+    await waitForSubmittedApprovalDecisions([
       { id: '00000000-0000-4000-8000-000000000075', decision: 'approved' },
       { id: '00000000-0000-4000-8000-000000000076', decision: 'rejected' },
-    ]), `A75 Enter then Space POST bodies are approved then rejected exactly once (${JSON.stringify(submittedApprovalDecisions)})`);
+    ], 'A75 Enter then Space POST bodies are approved then rejected exactly once');
   } finally {
     tasksStub = null;
   }

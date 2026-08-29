@@ -63,6 +63,14 @@ describe('development browser acceptance harness', () => {
     expect(sharedA75).toContain("dispatchNativeActivation(' ', 'Space', 32, ' ')");
     expect(sharedA75).toContain("matches(':focus-visible')");
     expect(sharedA75).toContain('submittedApprovalDecisions.push');
+    expect(sharedA75).toContain('async function waitForSubmittedApprovalDecisions(expected, description)');
+    expect(sharedA75).toContain('await retry(async () =>');
+    expect(sharedA75).toContain('exact decision sequence');
+    expect(sharedA75).toContain('const requiredStableObservations = 3;');
+    expect(sharedA75).toContain('let exactObservationCount = 0;');
+    expect(sharedA75).toContain('exactObservationCount = 0;');
+    expect(sharedA75).toContain('expected ${requiredStableObservations} consecutive exact observations');
+    expect(sharedA75).not.toContain('await delay(150)');
     expect(sharedA75).toContain('const decisionPath = `${taskPath}/decision`;');
     expect(sharedA75).toContain("url.pathname !== decisionPath");
     expect(sharedA75).toContain("Object.keys(body).length !== 1");
