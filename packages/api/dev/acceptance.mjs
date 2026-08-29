@@ -287,34 +287,44 @@ async function runA75ApprovalKeyboard() {
   let keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000075');
   tasksStub = (request) => {
     const url = new URL(request.url);
-    if (request.method === 'POST' && url.pathname.endsWith('/decision')) {
-      let decision;
+    const taskPath = `/ui/api/tasks/${encodeURIComponent(keyboardTask.id)}`;
+    const decisionPath = `${taskPath}/decision`;
+    if (request.method === 'POST') {
+      if (url.pathname !== decisionPath) return { status: 404, body: { error: 'unknown decision task' } };
+      let body;
       try {
-        decision = JSON.parse(request.postData ?? '').decision;
+        body = JSON.parse(request.postData ?? '');
       } catch (_error) {
         return { status: 400, body: { error: 'invalid decision body' } };
       }
-      if (decision !== 'approved' && decision !== 'rejected') {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 ||
+          !Object.hasOwn(body, 'decision') || (body.decision !== 'approved' && body.decision !== 'rejected')) {
         return { status: 400, body: { error: 'invalid decision' } };
       }
-      submittedApprovalDecisions.push({ id: keyboardTask.id, decision });
+      const id = decodeURIComponent(url.pathname.slice('/ui/api/tasks/'.length, -'/decision'.length));
+      const decision = body.decision;
+      submittedApprovalDecisions.push({ id, decision });
       keyboardTask = { ...keyboardTask, state: 'completed', result: { decision } };
       return { status: 200, body: keyboardTask };
     }
-    if (url.pathname.endsWith('/tasks')) return { status: 200, body: { tasks: [keyboardTask], nextCursor: null, totalApprox: 1, queryNow: new Date().toISOString() } };
-    return { status: 200, body: keyboardTask };
+    if (request.method === 'GET' && url.pathname === '/ui/api/tasks') return { status: 200, body: { tasks: [keyboardTask], nextCursor: null, totalApprox: 1, queryNow: new Date().toISOString() } };
+    if (request.method === 'GET' && url.pathname === taskPath) return { status: 200, body: keyboardTask };
+    return { status: 404, body: { error: 'unknown task endpoint' } };
   };
   async function tabToApprovalControl(label) {
     const ready = await evaluate(`(() => {
       document.querySelector('#oae-a75-tab-start')?.remove();
+      const control = document.querySelector('[aria-label=${JSON.stringify(label)}]');
+      const startBefore = document.querySelector('[aria-label="Approve action"]');
+      if (!control || !startBefore) return false;
       const start = document.createElement('button');
       start.id = 'oae-a75-tab-start';
       start.type = 'button';
       start.textContent = 'Keyboard probe start';
       start.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647';
-      document.body.prepend(start);
+      startBefore.before(start);
       start.focus();
-      return document.activeElement === start && start.matches(':focus-visible');
+      return document.activeElement === start;
     })()`);
     if (!ready) throw new Error(`A75 could not establish deterministic Tab start for ${label}`);
     for (let presses = 1; presses <= 20; presses += 1) {
@@ -378,7 +388,8 @@ async function runA75ApprovalKeyboard() {
 
   try {
     await login('preview-identity-token');
-    await waitFor("document.querySelector('#inbox-view').dataset.scope === 'inbox'", 'identity inbox before approval keyboard probe');
+    await evaluate("document.querySelector('[data-nav=\"inbox\"]').click()");
+    await waitFor("!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelector('#inbox-view').dataset.session === 'identity' && document.querySelector('#session-label').textContent.trim() === 'fox@preview.test'", 'visible fox identity inbox before approval keyboard probe');
     await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
     await waitFor("document.querySelectorAll('.task-row').length === 1", 'approval task row');
     await evaluate("document.querySelector('.task-row').click()");
@@ -391,7 +402,8 @@ async function runA75ApprovalKeyboard() {
     check(JSON.stringify(submittedApprovalDecisions) === JSON.stringify([{ id: keyboardTask.id, decision: 'approved' }]), `A75 Enter POST body records exactly one approved decision (${JSON.stringify(submittedApprovalDecisions)})`);
     keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000076');
     await login('preview-identity-token');
-    await waitFor("document.querySelector('#inbox-view').dataset.scope === 'inbox'", 'identity inbox before fresh rejection fixture');
+    await evaluate("document.querySelector('[data-nav=\"inbox\"]').click()");
+    await waitFor("!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelector('#inbox-view').dataset.session === 'identity' && document.querySelector('#session-label').textContent.trim() === 'fox@preview.test'", 'visible fox identity inbox before fresh rejection fixture');
     await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
     await waitFor("document.querySelectorAll('.task-row').length === 1", 'fresh rejection task row');
     await evaluate("document.querySelector('.task-row').click()");
@@ -631,8 +643,8 @@ async function runAcceptance() {
   await runA75ApprovalKeyboard();
   await login('preview-token');
   await waitFor(
-    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
-    'admin Home after approval keyboard probe',
+    "!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'overview' && document.querySelector('#overview-panel').getClientRects().length > 0 && [...document.querySelectorAll('.overview-row')].some((row) => row.getClientRects().length > 0)",
+    'visible admin Home rows after approval keyboard probe',
   );
   await injectProbes();
 

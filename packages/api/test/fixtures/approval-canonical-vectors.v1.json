@@ -24,6 +24,14 @@
       "canonicalUtf8Json": "{\"arguments\":{\"a\":{\"x\":1,\"y\":2},\"z\":[{\"a\":1,\"b\":2},[\"x\",{\"α\":null,\"β\":true}]]},\"name\":\"nested\",\"type\":\"tool_call\"}",
       "sha256": "5c545d4785b95fcc5dd412b2450dfa237dd925612d40e1c21f676fd069c83603",
       "mutations": [{ "path": "arguments.a.x", "value": 2, "sha256": "9ab054a0a91fc2f7dcdd22f67327c2891e6c9c89f5b7f9ad513b73928862528c" }]
+    },
+    {
+      "id": "utf16-key-order-v1",
+      "source": { "type": "tool_call", "name": "utf16-key-order", "arguments": { "\uFFFF": "bmp-noncharacter", "😀": "astral" } },
+      "equivalentSource": { "arguments": { "😀": "astral", "\uFFFF": "bmp-noncharacter" }, "name": "utf16-key-order", "type": "tool_call" },
+      "canonicalUtf8Json": "{\"arguments\":{\"😀\":\"astral\",\"￿\":\"bmp-noncharacter\"},\"name\":\"utf16-key-order\",\"type\":\"tool_call\"}",
+      "sha256": "5dc63b41cccb8f4093e56d15861ca80c609dfa841efd833d2db97241f1c6d2d4",
+      "mutations": [{ "path": "arguments.😀", "value": "astral-mutated", "sha256": "edf7b3b69c0d48b380078e0a640fccab9838bff683fc84830d2a4b6c379396ae" }]
     }
   ]
 }

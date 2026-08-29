@@ -63,6 +63,11 @@ describe('development browser acceptance harness', () => {
     expect(sharedA75).toContain("dispatchNativeActivation(' ', 'Space', 32, ' ')");
     expect(sharedA75).toContain("matches(':focus-visible')");
     expect(sharedA75).toContain('submittedApprovalDecisions.push');
+    expect(sharedA75).toContain('const decisionPath = `${taskPath}/decision`;');
+    expect(sharedA75).toContain("url.pathname !== decisionPath");
+    expect(sharedA75).toContain("Object.keys(body).length !== 1");
+    expect(sharedA75).toContain("Object.hasOwn(body, 'decision')");
+    expect(sharedA75).toContain("decodeURIComponent(url.pathname.slice('/ui/api/tasks/'.length, -'/decision'.length))");
     expect(sharedA75).toContain("decision: 'approved'");
     expect(sharedA75).toContain("decision: 'rejected'");
     expect(sharedA75).toContain('.task-badge[data-state="completed"]');
@@ -73,6 +78,18 @@ describe('development browser acceptance harness', () => {
     expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').focus()");
     expect(sharedA75).not.toContain("[aria-label=\"Approve action\"]').click()");
     expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').click()");
+    expect((sharedA75.match(/visible fox identity inbox before/g) || []).length).toBe(2);
+    expect((sharedA75.match(/data-nav=\\"inbox\\"/g) || []).length).toBe(2);
+    expect(sharedA75).toContain("dataset.session === 'identity'");
+    expect(sharedA75).toContain("#session-label').textContent.trim() === 'fox@preview.test'");
+    const defaultA75Call = source.indexOf('await runA75ApprovalKeyboard();', targetedEnd);
+    const adminReady = source.indexOf('visible admin Home rows after approval keyboard probe', defaultA75Call);
+    const adminProbeInjection = source.indexOf('await injectProbes();', adminReady);
+    expect(defaultA75Call).toBeGreaterThan(targetedEnd);
+    expect(adminReady).toBeGreaterThan(defaultA75Call);
+    expect(adminProbeInjection).toBeGreaterThan(adminReady);
+    expect(source.slice(defaultA75Call, adminProbeInjection)).toContain("#overview-panel').getClientRects().length > 0");
+    expect(source.slice(defaultA75Call, adminProbeInjection)).toContain(".overview-row')].some");
   });
 
   // A56：可见 main 的判定方法

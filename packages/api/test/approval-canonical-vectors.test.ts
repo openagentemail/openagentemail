@@ -15,11 +15,12 @@ const V1_HEADER = {
   version: 1,
   digest: { algorithm: 'sha256', encoding: 'hex-lowercase', prefix: '' },
 };
-const VECTOR_IDS = ['unicode-v1', 'number-boundaries-v1', 'nested-order-v1'];
+const VECTOR_IDS = ['unicode-v1', 'number-boundaries-v1', 'nested-order-v1', 'utf16-key-order-v1'];
 const CANONICAL_BY_ID: Record<string, string> = {
   'unicode-v1': '{"arguments":{"combining":"é","emoji":"😀","雪":"東京"},"name":"café","type":"tool_call"}',
   'number-boundaries-v1': '{"arguments":{"decimal":0.000001,"exponentHigh":1e+21,"exponentLow":1e-7,"fraction":1.23,"integers":[0,0,9007199254740991],"negativeZero":0},"name":"numeric-boundaries","type":"tool_call"}',
   'nested-order-v1': '{"arguments":{"a":{"x":1,"y":2},"z":[{"a":1,"b":2},["x",{"α":null,"β":true}]]},"name":"nested","type":"tool_call"}',
+  'utf16-key-order-v1': '{"arguments":{"😀":"astral","￿":"bmp-noncharacter"},"name":"utf16-key-order","type":"tool_call"}',
 };
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
 
@@ -54,7 +55,7 @@ function validateV1Fixture(candidate: unknown) {
   if (VECTOR_IDS.some((id) => !byId.has(id))) invalid('required vector ids');
   for (const id of VECTOR_IDS) {
     const vector = byId.get(id)!;
-    const keys = id === 'nested-order-v1'
+    const keys = id === 'nested-order-v1' || id === 'utf16-key-order-v1'
       ? ['id', 'source', 'equivalentSource', 'canonicalUtf8Json', 'sha256', 'mutations']
       : ['id', 'source', 'canonicalUtf8Json', 'sha256', 'mutations'];
     if (!sameKeys(vector, keys) || typeof vector.canonicalUtf8Json !== 'string' ||
@@ -70,6 +71,11 @@ function validateV1Fixture(candidate: unknown) {
   if (!Object.is(number.source.arguments?.negativeZero, -0)) invalid('number-boundaries raw -0');
   const nested = byId.get('nested-order-v1')!;
   validateActionShape(nested.equivalentSource, 'nested equivalentSource');
+  const utf16 = byId.get('utf16-key-order-v1')!;
+  validateActionShape(utf16.equivalentSource, 'utf16 equivalentSource');
+  if (utf16.source.arguments?.['😀'] !== 'astral' || utf16.source.arguments?.['\uFFFF'] !== 'bmp-noncharacter') {
+    invalid('UTF-16 key-order content');
+  }
 }
 
 function canonical(value: unknown): string {
@@ -126,4 +132,7 @@ test('public v1 fixture validation fails closed on incomplete or malformed data'
   const malformedDigest = structuredClone(fixture) as any;
   malformedDigest.vectors[1].sha256 = 'ABC';
   expect(() => validateV1Fixture(malformedDigest)).toThrow('number-boundaries-v1 required shape');
+  const missingUtf16 = structuredClone(fixture) as any;
+  missingUtf16.vectors[3].id = 'wrong-key-order-v1';
+  expect(() => validateV1Fixture(missingUtf16)).toThrow('required vector ids');
 });
