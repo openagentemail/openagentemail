@@ -32,6 +32,49 @@ describe('development browser acceptance harness', () => {
     expect(source).not.toContain(':tabbable');
   });
 
+  test('the real Chromium harness exercises approval controls with keyboard activation', () => {
+    const sharedStart = source.indexOf('async function runA75ApprovalKeyboard()');
+    const sharedEnd = source.indexOf('async function runAcceptance()', sharedStart);
+    const targetedStart = source.indexOf("if (process.env.APPROVAL_KEYBOARD_ONLY === '1')");
+    const targetedEnd = source.indexOf('/* ============ A51', targetedStart);
+    expect(sharedStart).toBeGreaterThanOrEqual(0);
+    expect(sharedEnd).toBeGreaterThan(sharedStart);
+    expect(targetedStart).toBeGreaterThanOrEqual(0);
+    expect(targetedEnd).toBeGreaterThan(targetedStart);
+    const sharedA75 = source.slice(sharedStart, sharedEnd);
+    const targetedBranch = source.slice(targetedStart, targetedEnd);
+    const sharedCall = targetedBranch.indexOf('await runA75ApprovalKeyboard();');
+    const violationCheck = targetedBranch.indexOf('if (violations.length)');
+    const passLog = targetedBranch.indexOf('A75 approval keyboard browser gate passed:');
+    const normalReturn = targetedBranch.indexOf('return;');
+    expect(sharedCall).toBeGreaterThanOrEqual(0);
+    expect(violationCheck).toBeGreaterThan(sharedCall);
+    expect(passLog).toBeGreaterThan(violationCheck);
+    expect(normalReturn).toBeGreaterThan(passLog);
+    expect(sharedA75).toContain('Approve action');
+    expect(sharedA75).toContain('Reject action');
+    expect(sharedA75).toContain("key: 'Tab'");
+    expect(sharedA75).toContain("type: 'rawKeyDown'");
+    expect(sharedA75).toContain("type: 'char'");
+    expect(sharedA75).toContain("type: 'keyUp'");
+    expect(sharedA75).toContain('nativeVirtualKeyCode');
+    expect(sharedA75).toContain('unmodifiedText');
+    expect(sharedA75).toContain("dispatchNativeActivation('Enter', 'Enter', 13, '\\r')");
+    expect(sharedA75).toContain("dispatchNativeActivation(' ', 'Space', 32, ' ')");
+    expect(sharedA75).toContain("matches(':focus-visible')");
+    expect(sharedA75).toContain('submittedApprovalDecisions.push');
+    expect(sharedA75).toContain("decision: 'approved'");
+    expect(sharedA75).toContain("decision: 'rejected'");
+    expect(sharedA75).toContain('.task-badge[data-state="completed"]');
+    expect(sharedA75).toContain("document.querySelector('.task-result')");
+    expect(sharedA75).toContain('bothControlsAbsent');
+    expect(sharedA75).toContain('submittedDecisionVisible');
+    expect(sharedA75).not.toContain("[aria-label=\"Approve action\"]').focus()");
+    expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').focus()");
+    expect(sharedA75).not.toContain("[aria-label=\"Approve action\"]').click()");
+    expect(sharedA75).not.toContain("[aria-label=\"Reject action\"]').click()");
+  });
+
   // A56：可见 main 的判定方法
   test('the visible-main probe counts rendered mains', () => {
     expect(source).toContain("document.querySelectorAll('main')");

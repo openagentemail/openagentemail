@@ -103,6 +103,7 @@ function isExpectedUnauthenticatedProbe(status, url) {
 // fixture 拦截：null = 放行真实响应；否则用这个函数造响应。
 let overviewStub = null;
 let identitiesStub = null;
+let tasksStub = null;
 
 function send(method, params = {}) {
   const id = ++nextId;
@@ -139,7 +140,9 @@ async function waitFor(expression, description, attempts = 100) {
     scope: (document.querySelector('#inbox-view') || { dataset: {} }).dataset.scope,
     rows: document.querySelectorAll('.overview-row').length,
     status: (document.querySelector('#status') || {}).textContent,
-    notice: (document.querySelector('#overview-notice') || {}).textContent
+    notice: (document.querySelector('#overview-notice') || {}).textContent,
+    taskBadges: [...document.querySelectorAll('.task-badge')].map((badge) => badge.getAttribute('data-state')),
+    taskResult: (document.querySelector('.task-result') || {}).textContent
   }))()`).catch(() => null);
   throw new Error(`Timed out waiting for ${description}: ${JSON.stringify(state)}`);
 }
@@ -273,7 +276,142 @@ function overviewCount() {
 const FOX_ROW_CLICK =
   "document.querySelector('.overview-row[data-address=\"fox@preview.test\"] .overview-row-nav').click()";
 
-try {
+/* ============ A75: typed approval keyboard controls, real Chromium/CDP ============ */
+async function runA75ApprovalKeyboard() {
+  const submittedApprovalDecisions = [];
+  const approvalFixture = (id) => ({
+    id, from: 'requester@preview.test', to: 'fox@preview.test', subject: 'Keyboard approval',
+    state: 'input-required', createdAt: '2026-08-29T00:00:00.000Z', updatedAt: '2026-08-29T00:00:00.000Z', messages: [],
+    kind: 'approval', approval: { reviewer: 'fox@preview.test', expiresAt: '2030-08-29T00:00:00.000Z', digest: 'a'.repeat(64), action: { type: 'tool_call', name: 'publish', arguments: { safe: true } } },
+  });
+  let keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000075');
+  tasksStub = (request) => {
+    const url = new URL(request.url);
+    if (request.method === 'POST' && url.pathname.endsWith('/decision')) {
+      let decision;
+      try {
+        decision = JSON.parse(request.postData ?? '').decision;
+      } catch (_error) {
+        return { status: 400, body: { error: 'invalid decision body' } };
+      }
+      if (decision !== 'approved' && decision !== 'rejected') {
+        return { status: 400, body: { error: 'invalid decision' } };
+      }
+      submittedApprovalDecisions.push({ id: keyboardTask.id, decision });
+      keyboardTask = { ...keyboardTask, state: 'completed', result: { decision } };
+      return { status: 200, body: keyboardTask };
+    }
+    if (url.pathname.endsWith('/tasks')) return { status: 200, body: { tasks: [keyboardTask], nextCursor: null, totalApprox: 1, queryNow: new Date().toISOString() } };
+    return { status: 200, body: keyboardTask };
+  };
+  async function tabToApprovalControl(label) {
+    const ready = await evaluate(`(() => {
+      document.querySelector('#oae-a75-tab-start')?.remove();
+      const start = document.createElement('button');
+      start.id = 'oae-a75-tab-start';
+      start.type = 'button';
+      start.textContent = 'Keyboard probe start';
+      start.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647';
+      document.body.prepend(start);
+      start.focus();
+      return document.activeElement === start && start.matches(':focus-visible');
+    })()`);
+    if (!ready) throw new Error(`A75 could not establish deterministic Tab start for ${label}`);
+    for (let presses = 1; presses <= 20; presses += 1) {
+      await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, text: '', unmodifiedText: '' });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+      const reached = await evaluate(`(() => {
+        const control = document.querySelector('[aria-label=${JSON.stringify(label)}]');
+        return document.activeElement === control && control?.matches(':focus-visible');
+      })()`);
+      if (reached) {
+        await evaluate("document.querySelector('#oae-a75-tab-start')?.remove()");
+        return presses;
+      }
+    }
+    await evaluate("document.querySelector('#oae-a75-tab-start')?.remove()");
+    throw new Error(`A75 Tab did not reach ${label} within 20 presses`);
+  }
+  async function dispatchNativeActivation(key, code, virtualKeyCode, text) {
+    const params = {
+      key,
+      code,
+      windowsVirtualKeyCode: virtualKeyCode,
+      nativeVirtualKeyCode: virtualKeyCode,
+      text,
+      unmodifiedText: text,
+    };
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params });
+    await send('Input.dispatchKeyEvent', { type: 'char', ...params });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
+  }
+  async function assertApprovalTerminal(decision) {
+    await waitFor(
+      "!document.querySelector('[aria-label=\"Approve action\"]') && !document.querySelector('[aria-label=\"Reject action\"]')",
+      `${decision} terminal controls removed`,
+    );
+    await waitFor(
+      "[...document.querySelectorAll('.task-badge[data-state=\"completed\"]')].some((badge) => badge.getClientRects().length > 0)",
+      `${decision} completed terminal badge`,
+    );
+    await waitFor(`(() => {
+      const result = document.querySelector('.task-result');
+      return !!result && result.open && result.getClientRects().length > 0 &&
+        result.textContent.includes(${JSON.stringify(decision)});
+    })()`, `${decision} open terminal result`);
+    const terminal = await evaluate(`(() => {
+      const approve = document.querySelector('[aria-label="Approve action"]');
+      const reject = document.querySelector('[aria-label="Reject action"]');
+      const badges = [...document.querySelectorAll('.task-badge[data-state="completed"]')];
+      const result = document.querySelector('.task-result');
+      return {
+        bothControlsAbsent: !approve && !reject,
+        completedBadgeVisible: badges.some((badge) => badge.getClientRects().length > 0),
+        submittedDecisionVisible: !!result && result.open && result.getClientRects().length > 0 &&
+          result.textContent.includes(${JSON.stringify(decision)}),
+      };
+    })()`);
+    check(terminal.bothControlsAbsent, `A75 ${decision} terminal removes both approval controls`);
+    check(terminal.completedBadgeVisible, `A75 ${decision} terminal shows completed badge`);
+    check(terminal.submittedDecisionVisible, `A75 ${decision} terminal result visibly contains submitted decision`);
+  }
+
+  try {
+    await login('preview-identity-token');
+    await waitFor("document.querySelector('#inbox-view').dataset.scope === 'inbox'", 'identity inbox before approval keyboard probe');
+    await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
+    await waitFor("document.querySelectorAll('.task-row').length === 1", 'approval task row');
+    await evaluate("document.querySelector('.task-row').click()");
+    await waitFor("document.querySelector('[aria-label=\"Approve action\"]')", 'approval controls');
+    const approveTabPresses = await tabToApprovalControl('Approve action');
+    check(approveTabPresses > 0 && approveTabPresses <= 20, `A75 Tab reaches visible Approve within bound (saw ${approveTabPresses})`);
+    await dispatchNativeActivation('Enter', 'Enter', 13, '\r');
+    await assertApprovalTerminal('approved');
+    await delay(150);
+    check(JSON.stringify(submittedApprovalDecisions) === JSON.stringify([{ id: keyboardTask.id, decision: 'approved' }]), `A75 Enter POST body records exactly one approved decision (${JSON.stringify(submittedApprovalDecisions)})`);
+    keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000076');
+    await login('preview-identity-token');
+    await waitFor("document.querySelector('#inbox-view').dataset.scope === 'inbox'", 'identity inbox before fresh rejection fixture');
+    await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
+    await waitFor("document.querySelectorAll('.task-row').length === 1", 'fresh rejection task row');
+    await evaluate("document.querySelector('.task-row').click()");
+    await waitFor("document.querySelector('[aria-label=\"Reject action\"]')", 'fresh rejection control');
+    const rejectTabPresses = await tabToApprovalControl('Reject action');
+    check(rejectTabPresses > 0 && rejectTabPresses <= 20, `A75 Tab reaches visible Reject within bound (saw ${rejectTabPresses})`);
+    await dispatchNativeActivation(' ', 'Space', 32, ' ');
+    await assertApprovalTerminal('rejected');
+    await delay(150);
+    check(JSON.stringify(submittedApprovalDecisions) === JSON.stringify([
+      { id: '00000000-0000-4000-8000-000000000075', decision: 'approved' },
+      { id: '00000000-0000-4000-8000-000000000076', decision: 'rejected' },
+    ]), `A75 Enter then Space POST bodies are approved then rejected exactly once (${JSON.stringify(submittedApprovalDecisions)})`);
+  } finally {
+    tasksStub = null;
+  }
+}
+
+async function runAcceptance() {
+  try {
   await retry(
     async () => {
       const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
@@ -317,6 +455,8 @@ try {
         ? overviewStub
         : request.url.includes('/ui/api/identities')
           ? identitiesStub
+          : request.url.includes('/ui/api/tasks')
+            ? tasksStub
           : null;
       if (!stub) {
         void send('Fetch.continueRequest', { requestId });
@@ -413,6 +553,7 @@ try {
       patterns: [
         { urlPattern: '*/ui/api/overview*', requestStage: 'Request' },
         { urlPattern: '*/ui/api/identities*', requestStage: 'Request' },
+        { urlPattern: '*/ui/api/tasks*', requestStage: 'Request' },
       ],
     }),
   ]);
@@ -421,6 +562,15 @@ try {
     origin: base,
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
   }).catch(() => {});
+
+  if (process.env.APPROVAL_KEYBOARD_ONLY === '1') {
+    await runA75ApprovalKeyboard();
+    if (violations.length) {
+      throw new Error(`Browser acceptance violations:\n${violations.join('\n')}`);
+    }
+    console.log('A75 approval keyboard browser gate passed: real Tab focus-visible, Enter approved, Space rejected, POST bodies verified.');
+    return;
+  }
 
   /* ============ A51 / A52：admin 落地 Home（ADR #26） ============ */
   // 登录屏是 .fine-print 唯一出现的地方，A70① 的三个点名选择器要在这里各测一次。
@@ -477,6 +627,14 @@ try {
 
   // 真实 ready 载荷留作后面几个 fixture 的底稿（此刻还没装拦截桩）。
   const readyBody = await evaluate("fetch('/ui/api/overview').then((response) => response.json())");
+
+  await runA75ApprovalKeyboard();
+  await login('preview-token');
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'admin Home after approval keyboard probe',
+  );
+  await injectProbes();
 
   // A56①②：桌面 overview 恰好一个可见 main
   check(
@@ -1430,8 +1588,11 @@ try {
   );
   console.log(`screenshots: ${[mobileOverviewShot, mobileListShot, mobileDetailShot].join(' ')}`);
   console.log(`A69 matrix (${matrixShots.length}): ${matrixShots.join(' ')}`);
-} finally {
+  } finally {
   if (socket?.readyState === WebSocket.OPEN) socket.close();
   browser.kill('SIGTERM');
   rmSync(profile, { recursive: true, force: true });
 }
+}
+
+await runAcceptance();
