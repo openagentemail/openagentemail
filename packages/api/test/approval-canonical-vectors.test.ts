@@ -78,6 +78,7 @@ function validateV1Fixture(candidate: unknown) {
   }
 }
 
+// This JavaScript reference verifier intentionally does not call production helpers.
 function canonical(value: unknown): string {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('non-finite'); return JSON.stringify(value); }
@@ -98,7 +99,7 @@ function mutated(source: any, path: string, value: unknown) {
   for (const key of keys.slice(0, -1)) target = target[key]; target[keys.at(-1)!] = value; return result;
 }
 
-test('public v1 vectors are independently reproducible and production agrees', () => {
+test('public v1 vectors match a JS reference verifier independent of production helpers', () => {
   validateV1Fixture(fixture);
   for (const vector of fixture.vectors) {
     if (vector.id === 'number-boundaries-v1') {

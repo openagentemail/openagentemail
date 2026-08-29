@@ -26,3 +26,7 @@ and corresponding new versioned vectors.
 
 The public, versioned interoperability vectors are
 [`packages/api/test/fixtures/approval-canonical-vectors.v1.json`](../packages/api/test/fixtures/approval-canonical-vectors.v1.json).
+The committed fixture is the normative v1 corpus; tests do not generate it.
+They verify it with a JavaScript reference verifier implemented independently of
+the production canonicalization helper. That is not a non-JavaScript,
+cross-runtime generation or cross-check.

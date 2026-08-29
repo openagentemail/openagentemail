@@ -241,6 +241,7 @@ async function injectProbes() {
 }
 
 async function login(token) {
+  const expectedSessionLabel = token === 'preview-token' ? 'Admin session' : 'fox@preview.test';
   // 每次都从零开始：留着 cookie 会让页面直接进 Overview，登录表单根本不出现。
   // 先真正登出，否则每次换 fixture 都留一个活会话，5 个之后服务端就拒绝登录了。
   await evaluate(
@@ -259,6 +260,10 @@ async function login(token) {
     document.querySelector('#login-form').requestSubmit();
     return true;
   })()`);
+  await waitFor(
+    `document.querySelector('#login-view').hidden && !document.querySelector('#login-submit').disabled && document.querySelector('#session-label').textContent.trim() === ${JSON.stringify(expectedSessionLabel)}`,
+    `completed ${expectedSessionLabel} login`,
+  );
 }
 
 /** 带着已有 cookie 重新加载：走 /ui/api/me 续期路径（A52）。 */
@@ -279,13 +284,19 @@ const FOX_ROW_CLICK =
 /* ============ A75: typed approval keyboard controls, real Chromium/CDP ============ */
 async function runA75ApprovalKeyboard() {
   const submittedApprovalDecisions = [];
+  let filteredTerminalListRefresh = Promise.resolve();
+  let releaseFilteredTerminalListRefresh = null;
+  function allowFilteredTerminalListRefresh() {
+    releaseFilteredTerminalListRefresh?.();
+    releaseFilteredTerminalListRefresh = null;
+  }
   const approvalFixture = (id) => ({
     id, from: 'requester@preview.test', to: 'fox@preview.test', subject: 'Keyboard approval',
     state: 'input-required', createdAt: '2026-08-29T00:00:00.000Z', updatedAt: '2026-08-29T00:00:00.000Z', messages: [],
     kind: 'approval', approval: { reviewer: 'fox@preview.test', expiresAt: '2030-08-29T00:00:00.000Z', digest: 'a'.repeat(64), action: { type: 'tool_call', name: 'publish', arguments: { safe: true } } },
   });
   let keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000075');
-  tasksStub = (request) => {
+  tasksStub = async (request) => {
     const url = new URL(request.url);
     const taskPath = `/ui/api/tasks/${encodeURIComponent(keyboardTask.id)}`;
     const decisionPath = `${taskPath}/decision`;
@@ -305,9 +316,21 @@ async function runA75ApprovalKeyboard() {
       const decision = body.decision;
       submittedApprovalDecisions.push({ id, decision });
       keyboardTask = { ...keyboardTask, state: 'completed', result: { decision } };
+      // Let A75 observe the direct POST detail before the faithful filtered list refresh clears it.
+      filteredTerminalListRefresh = new Promise((resolve) => {
+        releaseFilteredTerminalListRefresh = resolve;
+      });
       return { status: 200, body: keyboardTask };
     }
-    if (request.method === 'GET' && url.pathname === '/ui/api/tasks') return { status: 200, body: { tasks: [keyboardTask], nextCursor: null, totalApprox: 1, queryNow: new Date().toISOString() } };
+    if (request.method === 'GET' && url.pathname === '/ui/api/tasks') {
+      const status = url.searchParams.get('status') ?? 'active';
+      const matchesStatus = status === 'all' ||
+        (status === 'active' ? ['submitted', 'working'].includes(keyboardTask.state) : keyboardTask.state === status);
+      if (status === 'input-required' && keyboardTask.state === 'completed') {
+        await filteredTerminalListRefresh;
+      }
+      return { status: 200, body: { tasks: matchesStatus ? [keyboardTask] : [], nextCursor: null, totalApprox: matchesStatus ? 1 : 0, queryNow: new Date().toISOString() } };
+    }
     if (request.method === 'GET' && url.pathname === taskPath) return { status: 200, body: keyboardTask };
     return { status: 404, body: { error: 'unknown task endpoint' } };
   };
@@ -361,29 +384,48 @@ async function runA75ApprovalKeyboard() {
       `${decision} terminal controls removed`,
     );
     await waitFor(
-      "[...document.querySelectorAll('.task-badge[data-state=\"completed\"]')].some((badge) => badge.getClientRects().length > 0)",
-      `${decision} completed terminal badge`,
+      `(() => {
+        const detail = document.querySelector('#tasks-detail-content');
+        const badge = detail?.querySelector('.task-detail-head .task-badge[data-state="completed"]');
+        return !!badge && badge.getClientRects().length > 0;
+      })()`,
+      `${decision} completed terminal detail badge`,
     );
     await waitFor(`(() => {
-      const result = document.querySelector('.task-result');
+      const detail = document.querySelector('#tasks-detail-content');
+      const result = detail?.querySelector('.task-result');
       return !!result && result.open && result.getClientRects().length > 0 &&
         result.textContent.includes(${JSON.stringify(decision)});
     })()`, `${decision} open terminal result`);
-    const terminal = await evaluate(`(() => {
+    const detailTerminal = await evaluate(`(() => {
       const approve = document.querySelector('[aria-label="Approve action"]');
       const reject = document.querySelector('[aria-label="Reject action"]');
-      const badges = [...document.querySelectorAll('.task-badge[data-state="completed"]')];
-      const result = document.querySelector('.task-result');
+      const detail = document.querySelector('#tasks-detail-content');
+      const detailBadge = detail?.querySelector('.task-detail-head .task-badge[data-state="completed"]');
+      const result = detail?.querySelector('.task-result');
       return {
         bothControlsAbsent: !approve && !reject,
-        completedBadgeVisible: badges.some((badge) => badge.getClientRects().length > 0),
+        detailCompletedBadgeVisible: !!detailBadge && detailBadge.getClientRects().length > 0,
         submittedDecisionVisible: !!result && result.open && result.getClientRects().length > 0 &&
           result.textContent.includes(${JSON.stringify(decision)}),
       };
     })()`);
-    check(terminal.bothControlsAbsent, `A75 ${decision} terminal removes both approval controls`);
-    check(terminal.completedBadgeVisible, `A75 ${decision} terminal shows completed badge`);
-    check(terminal.submittedDecisionVisible, `A75 ${decision} terminal result visibly contains submitted decision`);
+    check(detailTerminal.bothControlsAbsent, `A75 ${decision} terminal removes both approval controls`);
+    check(detailTerminal.detailCompletedBadgeVisible, `A75 ${decision} terminal detail shows completed badge`);
+    check(detailTerminal.submittedDecisionVisible, `A75 ${decision} terminal result visibly contains submitted decision`);
+    allowFilteredTerminalListRefresh();
+    await waitFor(
+      `(() => {
+        const state = document.querySelector('#tasks-state');
+        return document.querySelectorAll('#tasks-rows .task-row').length === 0 &&
+          state?.textContent.includes('No tasks in "input-required"');
+      })()`,
+      `${decision} filtered input-required task list refresh`,
+    );
+    const filteredInputRequiredListEmpty = await evaluate(
+      "document.querySelectorAll('#tasks-rows .task-row').length === 0 && document.querySelector('#tasks-state')?.textContent.includes('No tasks in \"input-required\"')",
+    );
+    check(filteredInputRequiredListEmpty, `A75 ${decision} filtered input-required list removes terminal row`);
   }
   async function waitForSubmittedApprovalDecisions(expected, description) {
     const expectedJson = JSON.stringify(expected);
@@ -439,6 +481,7 @@ async function runA75ApprovalKeyboard() {
       { id: '00000000-0000-4000-8000-000000000076', decision: 'rejected' },
     ], 'A75 Enter then Space POST bodies are approved then rejected exactly once');
   } finally {
+    allowFilteredTerminalListRefresh();
     tasksStub = null;
   }
 }
@@ -484,11 +527,12 @@ async function runAcceptance() {
 
     if (message.method === 'Fetch.requestPaused') {
       const { requestId, request } = message.params;
+      const requestPath = new URL(request.url).pathname;
       const stub = request.url.includes('/ui/api/overview')
         ? overviewStub
         : request.url.includes('/ui/api/identities')
           ? identitiesStub
-          : request.url.includes('/ui/api/tasks')
+          : requestPath === '/ui/api/tasks' || requestPath.startsWith('/ui/api/tasks/')
             ? tasksStub
           : null;
       if (!stub) {
