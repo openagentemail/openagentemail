@@ -39,7 +39,7 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing a topic or ntfy credential |
 | `notify_check(since?)` | Read recent notifications for the calling identity only |
 | `notify_verify()` | Send and poll a harmless server-side notification self-check |
-| `task_create(to, subject, body, wait?, parentTaskId?)` | Assign an email-backed task; `parentTaskId` must be a durable readable parent and never changes task state |
+| `task_create(to, subject, body, wait?, parentTaskId?)` or `task_create(to, subject, kind: "approval", approval: { action, expiresAt }, body?, wait?, parentTaskId?)` | Create an ordinary email-backed task (required `body`) or a typed approval (required `approval.action` and `approval.expiresAt`); `parentTaskId` must be a durable readable parent and never changes task state |
 | `task_list_children(parentTaskId, limit?, cursor?)` | List only direct readable children (20/50/100, default 20); cursor is scoped to parent and caller, with no totals or descendants |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
 | `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |

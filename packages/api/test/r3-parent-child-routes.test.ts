@@ -206,6 +206,23 @@ test('R3 REST children maps unknown unreadable invalid limit and returns no tota
   expect((await app(service).request(`/v1/tasks/${PARENT}/children?limit=21`)).status).toBe(400); expect((await app(service).request(`/v1/tasks/61d1105a-4fbd-4e19-b682-754c3ef0f1bc/children`)).status).toBe(404);
 });
 
+test('R5e REST children preserves bounded errors from the authoritative list snapshot', async () => {
+  const parent = task(PARENT, A, B);
+  for (const [code, status, error] of [
+    ['not_found', 404, 'not_found'],
+    ['forbidden', 403, 'forbidden: task participant required'],
+  ] as const) {
+    const service = {
+      ...tasks.taskService,
+      getForAuthorization: async () => parent,
+      listChildren: async () => { throw new Error(code); },
+    } as TaskService;
+    const res = await app(service).request(`/v1/tasks/${PARENT}/children`);
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({ error });
+  }
+});
+
 test('R3 REST children enforces unreadable 403 and forwards exact 20/50/100/default pagination inputs', async () => {
   const parent = task(PARENT, A, B); const child = task(CHILD, A, B, 'submitted', PARENT); const seen: unknown[] = [];
   const service = { ...tasks.taskService, getForAuthorization: async () => parent, listChildren: async (query: unknown) => { seen.push(query); return { children: [child], nextCursor: null }; } } as TaskService;

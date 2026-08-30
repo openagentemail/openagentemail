@@ -251,7 +251,10 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const page = await service.listChildren({ parentTaskId: id.data, limit: (query.data.limit ?? 20) as 20 | 50 | 100, ...(query.data.cursor ? { cursor: query.data.cursor } : {}) }, auth.kind === 'admin' ? { kind: 'admin' } : { kind: 'identity', address: auth.address });
         return c.json({ children: page.children.map((child) => taskViewFor(c, child, parent)), nextCursor: page.nextCursor });
       } catch (err) {
-        if ((err as Error).message === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
+        const code = (err as Error).message;
+        if (code === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
+        if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
+        if (code === 'forbidden') return c.json({ error: 'forbidden: task participant required' }, 403);
         throw err;
       }
     })
