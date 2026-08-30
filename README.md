@@ -342,7 +342,8 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 | `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing an ntfy topic or token |
 | `notify_check(since?)` | Read recent notifications for the calling identity only |
 | `notify_verify()` | Publish and poll a harmless server-side notification self-check |
-| `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; typed approvals add `kind: "approval"` with `approval:{action,expiresAt}` |
+| `task_create(to, subject, body?, kind?, approval?, wait?, parentTaskId?)` | Assign an ordinary email-backed task (required `body`) or typed approval (`kind: "approval"` with required `approval:{action,expiresAt}`); `parentTaskId` selects a durable readable parent |
+| `task_list_children(parentTaskId, limit?, cursor?)` | List only direct children readable by the current viewer, with 20/50/100 pagination, a parent/viewer/limit-scoped cursor, and no totals or descendants |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
 | `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |
 | `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer |

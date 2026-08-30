@@ -9,9 +9,13 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
 
 export const TASK_BOARD_CURSOR_PREFIX = 'task-board-cursor-v1';
+export const TASK_CHILDREN_CURSOR_PREFIX = 'task-children-cursor-v1';
 
 const cursorKey = createHmac('sha256', config.taskSigningSecret)
   .update(TASK_BOARD_CURSOR_PREFIX)
+  .digest();
+const childrenCursorKey = createHmac('sha256', config.taskSigningSecret)
+  .update(TASK_CHILDREN_CURSOR_PREFIX)
   .digest();
 
 export class InvalidTaskCursorError extends Error {
@@ -68,5 +72,48 @@ export function decodeTaskBoardCursor(token: string): TaskBoardCursorPayload {
     if (err instanceof InvalidTaskCursorError) throw err;
     throw new InvalidTaskCursorError();
   }
+  return payload;
+}
+
+export type TaskChildrenCursorPayload = { fp: string; t: number; id: string };
+
+function childrenCursorMac(payload: TaskChildrenCursorPayload): string {
+  return createHmac('sha256', childrenCursorKey)
+    .update(`${TASK_CHILDREN_CURSOR_PREFIX}\n${payload.fp}\n${payload.t}\n${payload.id}`)
+    .digest('base64url');
+}
+
+export function encodeTaskChildrenCursor(payload: TaskChildrenCursorPayload): string {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return `${TASK_CHILDREN_CURSOR_PREFIX}.${body}.${childrenCursorMac(payload)}`;
+}
+
+export function decodeTaskChildrenCursor(token: string): TaskChildrenCursorPayload {
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== TASK_CHILDREN_CURSOR_PREFIX || !parts[1] || !parts[2]) throw new InvalidTaskCursorError();
+  let bodyBytes: Buffer;
+  let parsed: unknown;
+  try {
+    bodyBytes = Buffer.from(parts[1], 'base64url');
+    if (!bodyBytes.length || bodyBytes.toString('base64url') !== parts[1]) throw new InvalidTaskCursorError();
+    parsed = JSON.parse(bodyBytes.toString('utf8'));
+  } catch { throw new InvalidTaskCursorError(); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new InvalidTaskCursorError();
+  const raw = parsed as { fp?: unknown; t?: unknown; id?: unknown };
+  if (
+    Object.keys(raw).length !== 3
+    || !Object.hasOwn(raw, 'fp') || !Object.hasOwn(raw, 't') || !Object.hasOwn(raw, 'id')
+    || typeof raw.fp !== 'string' || !raw.fp
+    || typeof raw.t !== 'number' || !Number.isFinite(raw.t)
+    || typeof raw.id !== 'string' || !raw.id
+  ) throw new InvalidTaskCursorError();
+  const payload: TaskChildrenCursorPayload = { fp: raw.fp, t: raw.t, id: raw.id };
+  const canonicalBody = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  if (parts[1] !== canonicalBody) throw new InvalidTaskCursorError();
+  const expected = childrenCursorMac(payload);
+  try {
+    const a = Buffer.from(parts[2]); const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new InvalidTaskCursorError();
+  } catch (err) { if (err instanceof InvalidTaskCursorError) throw err; throw new InvalidTaskCursorError(); }
   return payload;
 }
