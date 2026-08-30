@@ -180,7 +180,7 @@ describe('MCP HTTP 工具', () => {
     expect(check.exitCode).toBe(0);
   });
 
-  test('R9-F RED: shipped public docs describe typed approval creation, decision, and the 16-tool contained inventory', async () => {
+  test('R9-F RED: shipped public docs describe typed approval creation, children listing, decision, and the 20-tool inventory', async () => {
     const [rootReadme, packageReadme, security] = await Promise.all([
       Bun.file(new URL('../../../README.md', import.meta.url)).text(),
       Bun.file(new URL('../../mcp/README.md', import.meta.url)).text(),
@@ -188,16 +188,23 @@ describe('MCP HTTP 工具', () => {
     ]);
     const docs = `${rootReadme}\n${packageReadme}`;
     expect({
-      existingCreate: docs.includes('task_create(to, subject, body, wait?)'),
+      rootCreate: rootReadme.includes('task_create(to, subject, body?, kind?, approval?, wait?, parentTaskId?)'),
+      packageCreate: packageReadme.includes('task_create(to, subject, body, wait?, parentTaskId?)')
+        && packageReadme.includes('task_create(to, subject, kind: "approval", approval: { action, expiresAt }, body?, wait?, parentTaskId?)'),
+      listChildren: [rootReadme, packageReadme].every((readme) => readme.includes('task_list_children(parentTaskId, limit?, cursor?)')),
       typedApproval: /approval.*action.*expiresAt|kind.*approval/s.test(docs),
       decide: docs.includes('task_decide'),
-      securityToolCount: /16\s+tools/i.test(security),
+      securityToolCount: /20\s+tools/i.test(security),
+      readChildren: /read[^\n]*task_list_children|task_list_children[^\n]*read/i.test(security),
       containedDecision: /contained[^\n]*task_decide|task_decide[^\n]*contained/i.test(security),
     }).toEqual({
-      existingCreate: true,
+      rootCreate: true,
+      packageCreate: true,
+      listChildren: true,
       typedApproval: true,
       decide: true,
       securityToolCount: true,
+      readChildren: true,
       containedDecision: true,
     });
   });
@@ -215,14 +222,14 @@ describe('MCP HTTP 工具', () => {
       packageSignatures: signatures.every((signature) => packageReadme.includes(signature)),
       optInDefaultDisabled: /TASK_LEASES_ENABLED[\s\S]{0,160}(default|默认)[\s\S]{0,80}(false|关闭)|(?:default|默认)[\s\S]{0,80}(false|关闭)[\s\S]{0,160}TASK_LEASES_ENABLED/i.test(docs),
       bearerSecrecy: /leaseToken[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}(bearer|token)|(?:bearer|token)[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}leaseToken/i.test(docs),
-      securityNineteenTools: /19\s+tools/i.test(security),
+      securityTwentyTools: /20\s+tools/i.test(security),
       securityContainedLeases: ['task_claim', 'task_renew', 'task_release'].every((tool) => new RegExp(`contained[^\\n]*${tool}|${tool}[^\\n]*contained`, 'i').test(security)),
     }).toEqual({
       rootSignatures: true,
       packageSignatures: true,
       optInDefaultDisabled: true,
       bearerSecrecy: true,
-      securityNineteenTools: true,
+      securityTwentyTools: true,
       securityContainedLeases: true,
     });
   });
