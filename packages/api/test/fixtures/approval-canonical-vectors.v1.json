@@ -1,0 +1,37 @@
+{
+  "format": "openagentemail.approval-canonical-vectors",
+  "version": 1,
+  "digest": { "algorithm": "sha256", "encoding": "hex-lowercase", "prefix": "" },
+  "vectors": [
+    {
+      "id": "unicode-v1",
+      "source": { "type": "tool_call", "name": "café", "arguments": { "emoji": "😀", "combining": "é", "雪": "東京" } },
+      "canonicalUtf8Json": "{\"arguments\":{\"combining\":\"é\",\"emoji\":\"😀\",\"雪\":\"東京\"},\"name\":\"café\",\"type\":\"tool_call\"}",
+      "sha256": "a87abcaf6eb5c9a719d336856bb2de7b8ecf7378fd8bedc042c7643656b88a77",
+      "mutations": [{ "path": "/name", "value": "cafe", "sha256": "3de937398cad47e152fe835b7b86183394ef416d374a73d67c4959eb5d863656" }]
+    },
+    {
+      "id": "number-boundaries-v1",
+      "source": { "type": "tool_call", "name": "numeric-boundaries", "arguments": { "negativeZero": -0, "decimal": 0.000001, "exponentLow": 1e-7, "exponentHigh": 1e+21, "fraction": 1.23, "integers": [0, 0, 9007199254740991] } },
+      "canonicalUtf8Json": "{\"arguments\":{\"decimal\":0.000001,\"exponentHigh\":1e+21,\"exponentLow\":1e-7,\"fraction\":1.23,\"integers\":[0,0,9007199254740991],\"negativeZero\":0},\"name\":\"numeric-boundaries\",\"type\":\"tool_call\"}",
+      "sha256": "69b85b388cde3525e01656a818a33aed7729ce00b38d350dfe36e88bf8ebc7b0",
+      "mutations": [{ "path": "/arguments/fraction", "value": 1.24, "sha256": "3addb8b7e8e24165c72083912f7f1c7179fd50a3d12c32ef484fb48c23f00f12" }]
+    },
+    {
+      "id": "nested-order-v1",
+      "source": { "type": "tool_call", "name": "nested", "arguments": { "z": [{ "b": 2, "a": 1 }, ["x", { "β": true, "α": null }]], "a": { "y": 2, "x": 1 } } },
+      "equivalentSource": { "arguments": { "a": { "x": 1, "y": 2 }, "z": [{ "a": 1, "b": 2 }, ["x", { "α": null, "β": true }]] }, "name": "nested", "type": "tool_call" },
+      "canonicalUtf8Json": "{\"arguments\":{\"a\":{\"x\":1,\"y\":2},\"z\":[{\"a\":1,\"b\":2},[\"x\",{\"α\":null,\"β\":true}]]},\"name\":\"nested\",\"type\":\"tool_call\"}",
+      "sha256": "5c545d4785b95fcc5dd412b2450dfa237dd925612d40e1c21f676fd069c83603",
+      "mutations": [{ "path": "/arguments/a/x", "value": 2, "sha256": "9ab054a0a91fc2f7dcdd22f67327c2891e6c9c89f5b7f9ad513b73928862528c" }]
+    },
+    {
+      "id": "utf16-key-order-v1",
+      "source": { "type": "tool_call", "name": "utf16-key-order", "arguments": { "\uFFFF": "bmp-noncharacter", "😀": "astral" } },
+      "equivalentSource": { "arguments": { "😀": "astral", "\uFFFF": "bmp-noncharacter" }, "name": "utf16-key-order", "type": "tool_call" },
+      "canonicalUtf8Json": "{\"arguments\":{\"😀\":\"astral\",\"￿\":\"bmp-noncharacter\"},\"name\":\"utf16-key-order\",\"type\":\"tool_call\"}",
+      "sha256": "5dc63b41cccb8f4093e56d15861ca80c609dfa841efd833d2db97241f1c6d2d4",
+      "mutations": [{ "path": "/arguments/😀", "value": "astral-mutated", "sha256": "edf7b3b69c0d48b380078e0a640fccab9838bff683fc84830d2a4b6c379396ae" }]
+    }
+  ]
+}

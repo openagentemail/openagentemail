@@ -10,11 +10,16 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "approval-digest.md",
+    "approval-canonical-vectors.v1.json"
   ],
   "scripts": {
     "build": "bun build src/main.ts --target node --outfile dist/main.js",
-    "prepublishOnly": "bun run build",
+    "check:approval-publication": "node ../api/scripts/sync-approval-publication.mjs --check",
+    "sync:approval-publication": "node ../api/scripts/sync-approval-publication.mjs --write",
+    "prepack": "node ../api/scripts/sync-approval-publication.mjs --check",
+    "prepublishOnly": "bun run check:approval-publication && bun run build",
     "start": "bun run src/main.ts",
     "test": "bun test"
   },

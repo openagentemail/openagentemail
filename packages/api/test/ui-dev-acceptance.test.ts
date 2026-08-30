@@ -1,12 +1,37 @@
 import { describe, expect, test } from 'bun:test';
+import { resolveInsecureBase } from '../dev/acceptance-insecure-base.mjs';
 
 // 浏览器验收脚本本身不在 CI 里跑（需要真 Chromium），所以这里守住"探针还在、
 // 而且用的是可执行的判定方法"这条底线：一旦有人把关键探针删掉或换成
 // querySelectorAll(':focusable') 那种会直接抛错的写法，这些断言就会红。
 const source = await Bun.file(new URL('../dev/acceptance.mjs', import.meta.url)).text();
+const fetchDispatchSource = await Bun.file(new URL('../dev/acceptance-fetch-dispatch.mjs', import.meta.url)).text();
 const previewSource = await Bun.file(new URL('../dev/preview.ts', import.meta.url)).text();
 
 describe('development browser acceptance harness', () => {
+  test('focused A75 skips non-loopback discovery while the full path retains it', async () => {
+    let focusedDiscoveryCalls = 0;
+    await expect(resolveInsecureBase(true, async () => {
+      focusedDiscoveryCalls += 1;
+      throw new Error('focused mode must not discover an insecure host');
+    })).resolves.toBeNull();
+    expect(focusedDiscoveryCalls).toBe(0);
+
+    let fullDiscoveryCalls = 0;
+    await expect(resolveInsecureBase(false, async () => {
+      fullDiscoveryCalls += 1;
+      return 'http://198.51.100.10:4310';
+    })).resolves.toBe('http://198.51.100.10:4310');
+    expect(fullDiscoveryCalls).toBe(1);
+
+    const resolver = source.indexOf('resolveInsecureBase(approvalKeyboardOnly, findInsecureBase)');
+    const focusedBranch = source.indexOf('if (approvalKeyboardOnly) {');
+    const fullInsecureProbe = source.indexOf('/* ============ A67');
+    expect(resolver).toBeGreaterThanOrEqual(0);
+    expect(focusedBranch).toBeGreaterThan(resolver);
+    expect(fullInsecureProbe).toBeGreaterThan(focusedBranch);
+  });
+
   test('fails on resource errors as well as script and navigation violations', () => {
     expect(source).toContain('Network.loadingFailed');
     expect(source).toContain('Network.responseReceived');
@@ -30,6 +55,42 @@ describe('development browser acceptance harness', () => {
     // 原生 CSS 没有"可聚焦"伪类，这类选择器会让 querySelectorAll 直接抛 SyntaxError
     expect(source).not.toContain(':focusable');
     expect(source).not.toContain(':tabbable');
+  });
+
+  test('A75 keeps native keyboard, terminal-state, and restoration anchors', () => {
+    const sharedStart = source.indexOf('async function runA75ApprovalKeyboard()');
+    const sharedEnd = source.indexOf('async function runAcceptance()', sharedStart);
+    const targetedStart = source.indexOf('if (approvalKeyboardOnly) {');
+    const targetedEnd = source.indexOf('/* ============ A51', targetedStart);
+    expect(sharedStart).toBeGreaterThanOrEqual(0);
+    expect(sharedEnd).toBeGreaterThan(sharedStart);
+    expect(targetedStart).toBeGreaterThanOrEqual(0);
+    expect(targetedEnd).toBeGreaterThan(targetedStart);
+    const sharedA75 = source.slice(sharedStart, sharedEnd);
+    const targetedBranch = source.slice(targetedStart, targetedEnd);
+    const sharedCall = targetedBranch.indexOf('await runA75ApprovalKeyboard();');
+    const violationCheck = targetedBranch.indexOf('if (violations.length)');
+    const normalReturn = targetedBranch.indexOf('return;');
+    expect(sharedCall).toBeGreaterThanOrEqual(0);
+    expect(violationCheck).toBeGreaterThan(sharedCall);
+    expect(normalReturn).toBeGreaterThan(violationCheck);
+    expect(sharedA75).toMatch(/Input\.dispatchKeyEvent[\s\S]*rawKeyDown[\s\S]*char[\s\S]*keyUp/);
+    expect(sharedA75).toContain(':focus-visible');
+    expect(sharedA75).toMatch(/decision.*approved[\s\S]*decision.*rejected/);
+    expect(sharedA75).toMatch(/url\.pathname[\s\S]*Object\.hasOwn\(body, 'decision'\)/);
+    expect(sharedA75).toContain('requiredStableObservations');
+    expect(sharedA75).toContain('exactObservationCount');
+    expect(sharedA75).toMatch(/task-detail-head[\s\S]*task-result[\s\S]*#tasks-rows \.task-row/);
+    expect(sharedA75).toContain('filteredTerminalListRefresh');
+    expect(sharedA75).not.toMatch(/\[aria-label=.*(?:Approve|Reject).*\]\.(?:focus|click)\(\)/);
+    const defaultA75Call = source.indexOf('await runA75ApprovalKeyboard();', targetedEnd);
+    const restoreAdmin = source.indexOf("await login('preview-token');", defaultA75Call);
+    const restoreOverview = source.indexOf("dataset.scope === 'overview'", restoreAdmin);
+    const adminProbeInjection = source.indexOf('await injectProbes();', restoreOverview);
+    expect(defaultA75Call).toBeGreaterThan(targetedEnd);
+    expect(restoreAdmin).toBeGreaterThan(defaultA75Call);
+    expect(restoreOverview).toBeGreaterThan(restoreAdmin);
+    expect(adminProbeInjection).toBeGreaterThan(restoreOverview);
   });
 
   // A56：可见 main 的判定方法
@@ -84,7 +145,9 @@ describe('development browser acceptance harness', () => {
   // A61 / A61b / A62 / A62b / A63 / A64：五个 fixture 与骨架/冷却行为
   test('all five overview fixtures are exercised, including the skeleton and cooldown probes', () => {
     expect(source).toContain('Fetch.requestPaused');
-    expect(source).toContain('Fetch.fulfillRequest');
+    expect(source).toContain("import { dispatchPausedRequest } from './acceptance-fetch-dispatch.mjs';");
+    expect(fetchDispatchSource).toContain('Fetch.fulfillRequest');
+    expect(fetchDispatchSource).toContain('Fetch.continueRequest');
     expect(source).toContain('A61 the loading fixture shows a Loading… skeleton');
     expect(source).toContain('A61 the client polls while loading');
     expect(source).toContain('the give-up notice after 15 polls');
@@ -156,6 +219,7 @@ describe('development browser acceptance harness', () => {
     expect(source).toContain('securitypolicyviolation');
     expect(source).toContain('async function findInsecureBase()');
     expect(source).toContain('No reachable non-loopback IPv4 address');
+    expect(source).toContain("await send('Page.navigate', { url: `${insecureBase}/ui` });");
     expect(source).toContain('A67 the insecure origin disables token entry');
     expect(source).toContain('A68 a successful copy enters .copied');
     expect(source).toContain('A68 .copied clears after ~1.2 s');

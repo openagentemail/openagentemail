@@ -18,6 +18,14 @@ jobs:
         with:
           bun-version: "1.2.21"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.3"
+
       - name: Test mail-security scripts
         run: bash deploy/test-mail-security.sh
 
@@ -25,6 +33,7 @@ jobs:
         working-directory: packages/api
         run: |
           bun install
+          bun run check:approval-publication
           bun test
           bun run lint:ui
 

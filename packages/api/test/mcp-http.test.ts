@@ -4,6 +4,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -162,6 +163,23 @@ describe('MCP 元数据 origin / insecure issuer', () => {
 });
 
 describe('MCP HTTP 工具', () => {
+  test('published MCP README bundles and links the canonical approval recipe and vectors', async () => {
+    const [packageReadme, packageJson] = await Promise.all([
+      Bun.file(new URL('../../mcp/README.md', import.meta.url)).text(),
+      Bun.file(new URL('../../mcp/package.json', import.meta.url)).json() as Promise<{ files: string[] }>,
+    ]);
+    const check = Bun.spawnSync({
+      cmd: ['node', fileURLToPath(new URL('../scripts/sync-approval-publication.mjs', import.meta.url)), '--check'],
+      stdout: 'pipe', stderr: 'pipe',
+    });
+    expect(packageReadme).toContain('[recipe](./approval-digest.md)');
+    expect(packageReadme).toContain('[public vectors](./approval-canonical-vectors.v1.json)');
+    expect(packageJson.files).toEqual([
+      'dist', 'README.md', 'approval-digest.md', 'approval-canonical-vectors.v1.json',
+    ]);
+    expect(check.exitCode).toBe(0);
+  });
+
   test('R9-F RED: shipped public docs describe typed approval creation, decision, and the 16-tool contained inventory', async () => {
     const [rootReadme, packageReadme, security] = await Promise.all([
       Bun.file(new URL('../../../README.md', import.meta.url)).text(),

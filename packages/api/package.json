@@ -10,6 +10,7 @@
     "build": "bun build src/main.ts src/ntfy-provision.ts --target bun --outdir dist && bun run scripts/copy-ui-to-dist.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "check:approval-publication": "node scripts/sync-approval-publication.mjs --check && node scripts/run-approval-python-verifier.mjs",
     "lint:ui": "eslint src/ui",
     "format:ui": "prettier --write 'src/ui/**/*.{js,css}'",
     "gold:ui": "bun run scripts/compare-ui-gold.ts"

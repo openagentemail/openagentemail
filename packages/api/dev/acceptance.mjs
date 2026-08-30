@@ -11,8 +11,11 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveInsecureBase } from './acceptance-insecure-base.mjs';
+import { dispatchPausedRequest } from './acceptance-fetch-dispatch.mjs';
 
 const base = process.env.PREVIEW_BASE ?? 'http://127.0.0.1:4310';
+const approvalKeyboardOnly = process.env.APPROVAL_KEYBOARD_ONLY === '1';
 const localIpv4s = Object.values(networkInterfaces())
   .flat()
   .filter((entry) => entry?.family === 'IPv4' && !entry.internal)
@@ -33,7 +36,9 @@ async function findInsecureBase() {
   throw new Error('No reachable non-loopback IPv4 address is available for the insecure-context probe');
 }
 
-const insecureBase = await findInsecureBase();
+// Focused A75 only needs its explicit loopback preview. The full path still
+// discovers this origin for A67 and for its deliberate external-origin allowance.
+const insecureBase = await resolveInsecureBase(approvalKeyboardOnly, findInsecureBase);
 const debugPort = Number(process.env.CHROME_DEBUG_PORT ?? 9334);
 // 慢用例（15 次轮询放弃、20 s 冷却窗口）默认跑；PROBE_SLOW=0 可跳过。
 const runSlow = process.env.PROBE_SLOW !== '0';
@@ -89,7 +94,9 @@ const overviewRequests = [];
 const messageRequests = [];
 
 function record(kind, value) {
-  violations.push(`${kind}: ${String(value).slice(0, 300)}`);
+  const violation = `${kind}: ${String(value).slice(0, 300)}`;
+  violations.push(violation);
+  if (process.env.ACCEPTANCE_DEBUG === '1') console.error(violation);
 }
 
 function check(condition, description) {
@@ -103,6 +110,7 @@ function isExpectedUnauthenticatedProbe(status, url) {
 // fixture 拦截：null = 放行真实响应；否则用这个函数造响应。
 let overviewStub = null;
 let identitiesStub = null;
+let tasksStub = null;
 
 function send(method, params = {}) {
   const id = ++nextId;
@@ -139,7 +147,9 @@ async function waitFor(expression, description, attempts = 100) {
     scope: (document.querySelector('#inbox-view') || { dataset: {} }).dataset.scope,
     rows: document.querySelectorAll('.overview-row').length,
     status: (document.querySelector('#status') || {}).textContent,
-    notice: (document.querySelector('#overview-notice') || {}).textContent
+    notice: (document.querySelector('#overview-notice') || {}).textContent,
+    taskBadges: [...document.querySelectorAll('.task-badge')].map((badge) => badge.getAttribute('data-state')),
+    taskResult: (document.querySelector('.task-result') || {}).textContent
   }))()`).catch(() => null);
   throw new Error(`Timed out waiting for ${description}: ${JSON.stringify(state)}`);
 }
@@ -238,6 +248,7 @@ async function injectProbes() {
 }
 
 async function login(token) {
+  const expectedSessionLabel = token === 'preview-token' ? 'Admin session' : 'fox@preview.test';
   // 每次都从零开始：留着 cookie 会让页面直接进 Overview，登录表单根本不出现。
   // 先真正登出，否则每次换 fixture 都留一个活会话，5 个之后服务端就拒绝登录了。
   await evaluate(
@@ -256,6 +267,10 @@ async function login(token) {
     document.querySelector('#login-form').requestSubmit();
     return true;
   })()`);
+  await waitFor(
+    `document.querySelector('#login-view').hidden && !document.querySelector('#login-submit').disabled && document.querySelector('#session-label').textContent.trim() === ${JSON.stringify(expectedSessionLabel)}`,
+    `completed ${expectedSessionLabel} login`,
+  );
 }
 
 /** 带着已有 cookie 重新加载：走 /ui/api/me 续期路径（A52）。 */
@@ -273,7 +288,213 @@ function overviewCount() {
 const FOX_ROW_CLICK =
   "document.querySelector('.overview-row[data-address=\"fox@preview.test\"] .overview-row-nav').click()";
 
-try {
+/* ============ A75: typed approval keyboard controls, real Chromium/CDP ============ */
+async function runA75ApprovalKeyboard() {
+  const submittedApprovalDecisions = [];
+  let filteredTerminalListRefresh = Promise.resolve();
+  let releaseFilteredTerminalListRefresh = null;
+  function allowFilteredTerminalListRefresh() {
+    releaseFilteredTerminalListRefresh?.();
+    releaseFilteredTerminalListRefresh = null;
+  }
+  const approvalFixture = (id) => ({
+    id, from: 'requester@preview.test', to: 'fox@preview.test', subject: 'Keyboard approval',
+    state: 'input-required', createdAt: '2026-08-29T00:00:00.000Z', updatedAt: '2026-08-29T00:00:00.000Z', messages: [],
+    kind: 'approval', approval: { reviewer: 'fox@preview.test', expiresAt: '2030-08-29T00:00:00.000Z', digest: 'a'.repeat(64), action: { type: 'tool_call', name: 'publish', arguments: { safe: true } } },
+  });
+  let keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000075');
+  tasksStub = async (request) => {
+    const url = new URL(request.url);
+    const taskPath = `/ui/api/tasks/${encodeURIComponent(keyboardTask.id)}`;
+    const decisionPath = `${taskPath}/decision`;
+    if (request.method === 'POST') {
+      if (url.pathname !== decisionPath) return { status: 404, body: { error: 'unknown decision task' } };
+      let body;
+      try {
+        body = JSON.parse(request.postData ?? '');
+      } catch (_error) {
+        return { status: 400, body: { error: 'invalid decision body' } };
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 ||
+          !Object.hasOwn(body, 'decision') || (body.decision !== 'approved' && body.decision !== 'rejected')) {
+        return { status: 400, body: { error: 'invalid decision' } };
+      }
+      const id = decodeURIComponent(url.pathname.slice('/ui/api/tasks/'.length, -'/decision'.length));
+      const decision = body.decision;
+      submittedApprovalDecisions.push({ id, decision });
+      keyboardTask = { ...keyboardTask, state: 'completed', result: { decision } };
+      // Let A75 observe the direct POST detail before the faithful filtered list refresh clears it.
+      filteredTerminalListRefresh = new Promise((resolve) => {
+        releaseFilteredTerminalListRefresh = resolve;
+      });
+      return { status: 200, body: keyboardTask };
+    }
+    if (request.method === 'GET' && url.pathname === '/ui/api/tasks') {
+      const status = url.searchParams.get('status') ?? 'active';
+      const matchesStatus = status === 'all' ||
+        (status === 'active' ? ['submitted', 'working'].includes(keyboardTask.state) : keyboardTask.state === status);
+      if (status === 'input-required' && keyboardTask.state === 'completed') {
+        await filteredTerminalListRefresh;
+      }
+      return { status: 200, body: { tasks: matchesStatus ? [keyboardTask] : [], nextCursor: null, totalApprox: matchesStatus ? 1 : 0, queryNow: new Date().toISOString() } };
+    }
+    if (request.method === 'GET' && url.pathname === taskPath) return { status: 200, body: keyboardTask };
+    return { status: 404, body: { error: 'unknown task endpoint' } };
+  };
+  async function tabToApprovalControl(label) {
+    const ready = await evaluate(`(() => {
+      document.querySelector('#oae-a75-tab-start')?.remove();
+      const control = document.querySelector('[aria-label=${JSON.stringify(label)}]');
+      const startBefore = document.querySelector('[aria-label="Approve action"]');
+      if (!control || !startBefore) return false;
+      const start = document.createElement('button');
+      start.id = 'oae-a75-tab-start';
+      start.type = 'button';
+      start.textContent = 'Keyboard probe start';
+      start.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647';
+      startBefore.before(start);
+      start.focus();
+      return document.activeElement === start;
+    })()`);
+    if (!ready) throw new Error(`A75 could not establish deterministic Tab start for ${label}`);
+    for (let presses = 1; presses <= 20; presses += 1) {
+      await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, text: '', unmodifiedText: '' });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+      const reached = await evaluate(`(() => {
+        const control = document.querySelector('[aria-label=${JSON.stringify(label)}]');
+        return document.activeElement === control && control?.matches(':focus-visible');
+      })()`);
+      if (reached) {
+        await evaluate("document.querySelector('#oae-a75-tab-start')?.remove()");
+        return presses;
+      }
+    }
+    await evaluate("document.querySelector('#oae-a75-tab-start')?.remove()");
+    throw new Error(`A75 Tab did not reach ${label} within 20 presses`);
+  }
+  async function dispatchNativeActivation(key, code, virtualKeyCode, text) {
+    const params = {
+      key,
+      code,
+      windowsVirtualKeyCode: virtualKeyCode,
+      nativeVirtualKeyCode: virtualKeyCode,
+      text,
+      unmodifiedText: text,
+    };
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params });
+    await send('Input.dispatchKeyEvent', { type: 'char', ...params });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
+  }
+  async function assertApprovalTerminal(decision) {
+    await waitFor(
+      "!document.querySelector('[aria-label=\"Approve action\"]') && !document.querySelector('[aria-label=\"Reject action\"]')",
+      `${decision} terminal controls removed`,
+    );
+    await waitFor(
+      `(() => {
+        const detail = document.querySelector('#tasks-detail-content');
+        const badge = detail?.querySelector('.task-detail-head .task-badge[data-state="completed"]');
+        return !!badge && badge.getClientRects().length > 0;
+      })()`,
+      `${decision} completed terminal detail badge`,
+    );
+    await waitFor(`(() => {
+      const detail = document.querySelector('#tasks-detail-content');
+      const result = detail?.querySelector('.task-result');
+      return !!result && result.open && result.getClientRects().length > 0 &&
+        result.textContent.includes(${JSON.stringify(decision)});
+    })()`, `${decision} open terminal result`);
+    const detailTerminal = await evaluate(`(() => {
+      const approve = document.querySelector('[aria-label="Approve action"]');
+      const reject = document.querySelector('[aria-label="Reject action"]');
+      const detail = document.querySelector('#tasks-detail-content');
+      const detailBadge = detail?.querySelector('.task-detail-head .task-badge[data-state="completed"]');
+      const result = detail?.querySelector('.task-result');
+      return {
+        bothControlsAbsent: !approve && !reject,
+        detailCompletedBadgeVisible: !!detailBadge && detailBadge.getClientRects().length > 0,
+        submittedDecisionVisible: !!result && result.open && result.getClientRects().length > 0 &&
+          result.textContent.includes(${JSON.stringify(decision)}),
+      };
+    })()`);
+    check(detailTerminal.bothControlsAbsent, `A75 ${decision} terminal removes both approval controls`);
+    check(detailTerminal.detailCompletedBadgeVisible, `A75 ${decision} terminal detail shows completed badge`);
+    check(detailTerminal.submittedDecisionVisible, `A75 ${decision} terminal result visibly contains submitted decision`);
+    allowFilteredTerminalListRefresh();
+    await waitFor(
+      `(() => {
+        const state = document.querySelector('#tasks-state');
+        return document.querySelectorAll('#tasks-rows .task-row').length === 0 &&
+          state?.textContent.includes('No tasks in "input-required"');
+      })()`,
+      `${decision} filtered input-required task list refresh`,
+    );
+    const filteredInputRequiredListEmpty = await evaluate(
+      "document.querySelectorAll('#tasks-rows .task-row').length === 0 && document.querySelector('#tasks-state')?.textContent.includes('No tasks in \"input-required\"')",
+    );
+    check(filteredInputRequiredListEmpty, `A75 ${decision} filtered input-required list removes terminal row`);
+  }
+  async function waitForSubmittedApprovalDecisions(expected, description) {
+    const expectedJson = JSON.stringify(expected);
+    const requiredStableObservations = 3;
+    let exactObservationCount = 0;
+    await retry(async () => {
+      const actualJson = JSON.stringify(submittedApprovalDecisions);
+      if (actualJson !== expectedJson) {
+        exactObservationCount = 0;
+        throw new Error(`expected ${expectedJson}; saw ${actualJson}; stable observations reset`);
+      }
+      exactObservationCount += 1;
+      if (exactObservationCount < requiredStableObservations) {
+        throw new Error(`expected ${requiredStableObservations} consecutive exact observations; saw ${exactObservationCount}`);
+      }
+    }, `${description} exact decision sequence`);
+    check(
+      exactObservationCount >= requiredStableObservations && JSON.stringify(submittedApprovalDecisions) === expectedJson,
+      `${description} stable ${exactObservationCount}/${requiredStableObservations} (${JSON.stringify(submittedApprovalDecisions)})`,
+    );
+  }
+
+  try {
+    await login('preview-identity-token');
+    await evaluate("document.querySelector('[data-nav=\"inbox\"]').click()");
+    await waitFor("!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelector('#inbox-view').dataset.session === 'identity' && document.querySelector('#session-label').textContent.trim() === 'fox@preview.test'", 'visible fox identity inbox before approval keyboard probe');
+    await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
+    await waitFor("document.querySelectorAll('.task-row').length === 1", 'approval task row');
+    await evaluate("document.querySelector('.task-row').click()");
+    await waitFor("document.querySelector('[aria-label=\"Approve action\"]')", 'approval controls');
+    const approveTabPresses = await tabToApprovalControl('Approve action');
+    check(approveTabPresses > 0 && approveTabPresses <= 20, `A75 Tab reaches visible Approve within bound (saw ${approveTabPresses})`);
+    await dispatchNativeActivation('Enter', 'Enter', 13, '\r');
+    await assertApprovalTerminal('approved');
+    await waitForSubmittedApprovalDecisions(
+      [{ id: keyboardTask.id, decision: 'approved' }],
+      'A75 Enter POST body records exactly one approved decision',
+    );
+    keyboardTask = approvalFixture('00000000-0000-4000-8000-000000000076');
+    await login('preview-identity-token');
+    await evaluate("document.querySelector('[data-nav=\"inbox\"]').click()");
+    await waitFor("!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'inbox' && document.querySelector('#inbox-view').dataset.session === 'identity' && document.querySelector('#session-label').textContent.trim() === 'fox@preview.test'", 'visible fox identity inbox before fresh rejection fixture');
+    await evaluate("document.querySelector('[data-nav=\"tasks\"]').click()");
+    await waitFor("document.querySelectorAll('.task-row').length === 1", 'fresh rejection task row');
+    await evaluate("document.querySelector('.task-row').click()");
+    await waitFor("document.querySelector('[aria-label=\"Reject action\"]')", 'fresh rejection control');
+    const rejectTabPresses = await tabToApprovalControl('Reject action');
+    check(rejectTabPresses > 0 && rejectTabPresses <= 20, `A75 Tab reaches visible Reject within bound (saw ${rejectTabPresses})`);
+    await dispatchNativeActivation(' ', 'Space', 32, ' ');
+    await assertApprovalTerminal('rejected');
+    await waitForSubmittedApprovalDecisions([
+      { id: '00000000-0000-4000-8000-000000000075', decision: 'approved' },
+      { id: '00000000-0000-4000-8000-000000000076', decision: 'rejected' },
+    ], 'A75 Enter then Space POST bodies are approved then rejected exactly once');
+  } finally {
+    allowFilteredTerminalListRefresh();
+    tasksStub = null;
+  }
+}
+
+async function runAcceptance() {
+  try {
   await retry(
     async () => {
       const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
@@ -312,30 +533,9 @@ try {
     }
 
     if (message.method === 'Fetch.requestPaused') {
-      const { requestId, request } = message.params;
-      const stub = request.url.includes('/ui/api/overview')
-        ? overviewStub
-        : request.url.includes('/ui/api/identities')
-          ? identitiesStub
-          : null;
-      if (!stub) {
-        void send('Fetch.continueRequest', { requestId });
-        return;
-      }
-      void (async () => {
-        const reply = await stub(request);
-        await delay(reply.delayMs ?? 0);
-        // 页面在这段延迟里可能已经导航掉了，那时 interceptionId 会失效 —— 忽略即可。
-        await send('Fetch.fulfillRequest', {
-          requestId,
-          responseCode: reply.status,
-          responseHeaders: [
-            { name: 'content-type', value: 'application/json' },
-            { name: 'cache-control', value: 'no-store' },
-          ],
-          body: Buffer.from(JSON.stringify(reply.body)).toString('base64'),
-        }).catch(() => {});
-      })();
+      void dispatchPausedRequest(message.params, {
+        overviewStub, identitiesStub, tasksStub, send, delay, record,
+      });
       return;
     }
 
@@ -343,7 +543,8 @@ try {
       const url = message.params.request.url;
       if (url.includes('/ui/api/overview')) overviewRequests.push(Date.now());
       if (url.includes('/ui/api/messages')) messageRequests.push(url);
-      if (!url.startsWith(base) && !url.startsWith('data:') && !url.startsWith(insecureBase)) {
+      if (!url.startsWith(base) && !url.startsWith('data:') &&
+          (insecureBase === null || !url.startsWith(insecureBase))) {
         requestedExternalUrls.add(url);
       }
       return;
@@ -398,7 +599,7 @@ try {
       message.method === 'Page.frameNavigated' &&
       message.params.frame.parentId === undefined &&
       !message.params.frame.url.startsWith(base) &&
-      !message.params.frame.url.startsWith(insecureBase)
+      (insecureBase === null || !message.params.frame.url.startsWith(insecureBase))
     ) {
       record('Page.frameNavigated', message.params.frame.url);
     }
@@ -413,6 +614,7 @@ try {
       patterns: [
         { urlPattern: '*/ui/api/overview*', requestStage: 'Request' },
         { urlPattern: '*/ui/api/identities*', requestStage: 'Request' },
+        { urlPattern: '*/ui/api/tasks*', requestStage: 'Request' },
       ],
     }),
   ]);
@@ -421,6 +623,15 @@ try {
     origin: base,
     permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
   }).catch(() => {});
+
+  if (approvalKeyboardOnly) {
+    await runA75ApprovalKeyboard();
+    if (violations.length) {
+      throw new Error(`Browser acceptance violations:\n${violations.join('\n')}`);
+    }
+    console.log('A75 approval keyboard browser gate passed: real Tab focus-visible, Enter approved, Space rejected, POST bodies verified.');
+    return;
+  }
 
   /* ============ A51 / A52：admin 落地 Home（ADR #26） ============ */
   // 登录屏是 .fine-print 唯一出现的地方，A70① 的三个点名选择器要在这里各测一次。
@@ -477,6 +688,14 @@ try {
 
   // 真实 ready 载荷留作后面几个 fixture 的底稿（此刻还没装拦截桩）。
   const readyBody = await evaluate("fetch('/ui/api/overview').then((response) => response.json())");
+
+  await runA75ApprovalKeyboard();
+  await login('preview-token');
+  await waitFor(
+    "!document.querySelector('#inbox-view').hidden && document.querySelector('#inbox-view').dataset.scope === 'overview' && document.querySelector('#overview-panel').getClientRects().length > 0 && [...document.querySelectorAll('.overview-row')].some((row) => row.getClientRects().length > 0)",
+    'visible admin Home rows after approval keyboard probe',
+  );
+  await injectProbes();
 
   // A56①②：桌面 overview 恰好一个可见 main
   check(
@@ -1430,8 +1649,11 @@ try {
   );
   console.log(`screenshots: ${[mobileOverviewShot, mobileListShot, mobileDetailShot].join(' ')}`);
   console.log(`A69 matrix (${matrixShots.length}): ${matrixShots.join(' ')}`);
-} finally {
+  } finally {
   if (socket?.readyState === WebSocket.OPEN) socket.close();
   browser.kill('SIGTERM');
   rmSync(profile, { recursive: true, force: true });
 }
+}
+
+await runAcceptance();
