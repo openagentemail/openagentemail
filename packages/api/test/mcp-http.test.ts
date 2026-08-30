@@ -4,6 +4,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -168,7 +169,7 @@ describe('MCP HTTP 工具', () => {
       Bun.file(new URL('../../mcp/package.json', import.meta.url)).json() as Promise<{ files: string[] }>,
     ]);
     const check = Bun.spawnSync({
-      cmd: ['node', new URL('../scripts/sync-approval-publication.mjs', import.meta.url).pathname, '--check'],
+      cmd: ['node', fileURLToPath(new URL('../scripts/sync-approval-publication.mjs', import.meta.url)), '--check'],
       stdout: 'pipe', stderr: 'pipe',
     });
     expect(packageReadme).toContain('[recipe](./approval-digest.md)');

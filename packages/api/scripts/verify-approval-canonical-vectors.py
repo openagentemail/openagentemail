@@ -26,9 +26,9 @@ NEGATIVE_ZERO = NegativeZero()
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def parse_integer(token: str) -> int | NegativeZero:
+def parse_integer(token: str) -> float | NegativeZero:
     # json.loads otherwise turns the JSON lexical token -0 into Python int 0.
-    return NEGATIVE_ZERO if token == "-0" else int(token)
+    return NEGATIVE_ZERO if token == "-0" else float(token)
 
 
 def js_number(value: Any) -> str:
@@ -43,7 +43,10 @@ def js_number(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("not a JSON number")
     if isinstance(value, int):
-        return str(value)
+        try:
+            value = float(value)
+        except OverflowError as error:
+            raise ValueError("non-finite number") from error
     if not math.isfinite(value):
         raise ValueError("non-finite number")
     if value == 0:
@@ -172,6 +175,14 @@ def check_number_boundaries(vector: dict[str, Any]) -> None:
     }
     for key, spelling in expected.items():
         require(js_number(arguments[key]) == spelling, f"wrong JavaScript number spelling for {key}")
+    require(js_number(parse_integer("9007199254740993")) == "9007199254740992", "large integer Number rounding")
+    require(js_number(parse_integer("1000000000000000000000")) == "1e+21", "large integer exponent spelling")
+    try:
+        js_number(parse_integer("1" + "0" * 400))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-finite parsed integer must fail closed")
 
 
 def main() -> None:
@@ -191,7 +202,6 @@ def main() -> None:
         source = action(vector["source"])
         canonical_text = canonical(source)
         require(canonical_text == vector["canonicalUtf8Json"], f"{vector['id']} canonical JSON")
-        require(canonical_text.encode("utf-8").decode("utf-8") == canonical_text, f"{vector['id']} UTF-8")
         require(HEX_SHA256.fullmatch(vector["sha256"]) is not None, f"{vector['id']} lowercase SHA-256")
         require(digest(source) == vector["sha256"], f"{vector['id']} digest")
         if "equivalentSource" in vector:

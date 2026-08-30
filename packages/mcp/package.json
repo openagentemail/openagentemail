@@ -17,7 +17,8 @@
   "scripts": {
     "build": "bun build src/main.ts --target node --outfile dist/main.js",
     "check:approval-publication": "node ../api/scripts/sync-approval-publication.mjs --check",
-    "prepack": "node ../api/scripts/sync-approval-publication.mjs",
+    "sync:approval-publication": "node ../api/scripts/sync-approval-publication.mjs",
+    "prepack": "node ../api/scripts/sync-approval-publication.mjs --check",
     "prepublishOnly": "bun run check:approval-publication && bun run build",
     "start": "bun run src/main.ts",
     "test": "bun test"

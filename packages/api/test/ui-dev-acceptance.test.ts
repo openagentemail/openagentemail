@@ -5,6 +5,7 @@ import { resolveInsecureBase } from '../dev/acceptance-insecure-base.mjs';
 // 而且用的是可执行的判定方法"这条底线：一旦有人把关键探针删掉或换成
 // querySelectorAll(':focusable') 那种会直接抛错的写法，这些断言就会红。
 const source = await Bun.file(new URL('../dev/acceptance.mjs', import.meta.url)).text();
+const fetchDispatchSource = await Bun.file(new URL('../dev/acceptance-fetch-dispatch.mjs', import.meta.url)).text();
 const previewSource = await Bun.file(new URL('../dev/preview.ts', import.meta.url)).text();
 
 describe('development browser acceptance harness', () => {
@@ -144,7 +145,9 @@ describe('development browser acceptance harness', () => {
   // A61 / A61b / A62 / A62b / A63 / A64：五个 fixture 与骨架/冷却行为
   test('all five overview fixtures are exercised, including the skeleton and cooldown probes', () => {
     expect(source).toContain('Fetch.requestPaused');
-    expect(source).toContain('Fetch.fulfillRequest');
+    expect(source).toContain("import { dispatchPausedRequest } from './acceptance-fetch-dispatch.mjs';");
+    expect(fetchDispatchSource).toContain('Fetch.fulfillRequest');
+    expect(fetchDispatchSource).toContain('Fetch.continueRequest');
     expect(source).toContain('A61 the loading fixture shows a Loading… skeleton');
     expect(source).toContain('A61 the client polls while loading');
     expect(source).toContain('the give-up notice after 15 polls');

@@ -12,6 +12,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveInsecureBase } from './acceptance-insecure-base.mjs';
+import { dispatchPausedRequest } from './acceptance-fetch-dispatch.mjs';
 
 const base = process.env.PREVIEW_BASE ?? 'http://127.0.0.1:4310';
 const approvalKeyboardOnly = process.env.APPROVAL_KEYBOARD_ONLY === '1';
@@ -93,7 +94,9 @@ const overviewRequests = [];
 const messageRequests = [];
 
 function record(kind, value) {
-  violations.push(`${kind}: ${String(value).slice(0, 300)}`);
+  const violation = `${kind}: ${String(value).slice(0, 300)}`;
+  violations.push(violation);
+  if (process.env.ACCEPTANCE_DEBUG === '1') console.error(violation);
 }
 
 function check(condition, description) {
@@ -530,33 +533,9 @@ async function runAcceptance() {
     }
 
     if (message.method === 'Fetch.requestPaused') {
-      const { requestId, request } = message.params;
-      const requestPath = new URL(request.url).pathname;
-      const stub = request.url.includes('/ui/api/overview')
-        ? overviewStub
-        : request.url.includes('/ui/api/identities')
-          ? identitiesStub
-          : requestPath === '/ui/api/tasks' || requestPath.startsWith('/ui/api/tasks/')
-            ? tasksStub
-          : null;
-      if (!stub) {
-        void send('Fetch.continueRequest', { requestId });
-        return;
-      }
-      void (async () => {
-        const reply = await stub(request);
-        await delay(reply.delayMs ?? 0);
-        // 页面在这段延迟里可能已经导航掉了，那时 interceptionId 会失效 —— 忽略即可。
-        await send('Fetch.fulfillRequest', {
-          requestId,
-          responseCode: reply.status,
-          responseHeaders: [
-            { name: 'content-type', value: 'application/json' },
-            { name: 'cache-control', value: 'no-store' },
-          ],
-          body: Buffer.from(JSON.stringify(reply.body)).toString('base64'),
-        }).catch(() => {});
-      })();
+      void dispatchPausedRequest(message.params, {
+        overviewStub, identitiesStub, tasksStub, send, delay, record,
+      });
       return;
     }
 

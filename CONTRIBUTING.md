@@ -23,6 +23,11 @@ work is licensed under the same terms.
 
 All tests must pass before a PR is considered:
 
+Python 3.12.3 (or a compatible Python 3 exposing `python3`) is an API-test
+prerequisite: it runs the independent approval canonical-vector corpus check.
+CI installs Python 3.12.3 explicitly; local contributors must install it before
+running the API suite.
+
 ```bash
 cd packages/api   && npx -y bun test
 cd packages/mcp   && npx -y bun test && npx -y bun run build
