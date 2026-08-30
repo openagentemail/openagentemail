@@ -2,6 +2,10 @@ function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isExpectedStaleInterceptionError(error) {
+  return /^Invalid InterceptionId\.?$/.test(errorText(error));
+}
+
 function note(record, kind, detail) {
   try { record(kind, detail); } catch (_error) { /* A reporting failure must not leak from CDP dispatch. */ }
 }
@@ -64,7 +68,9 @@ export async function dispatchPausedRequest({ requestId, request }, {
       await send('Fetch.fulfillRequest', fulfill);
     } catch (error) {
       // A fulfill attempt already resolves this interception; do not double-resolve it.
-      note(record, 'Fetch.fulfillRequest', `fulfill failed: ${errorText(error)}`);
+      if (!isExpectedStaleInterceptionError(error)) {
+        note(record, 'Fetch.fulfillRequest', `fulfill failed: ${errorText(error)}`);
+      }
     }
   } catch (error) {
     // This boundary keeps a future dispatcher regression from becoming unhandled.

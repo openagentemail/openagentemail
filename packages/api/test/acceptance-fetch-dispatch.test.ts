@@ -47,3 +47,34 @@ test('paused-fetch parsing and rejected stubs fall back once without unhandled r
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('only known stale fulfill failures are ignored after exactly one fulfill attempt', async () => {
+  const run = async (message: string) => {
+    const sent: string[] = [];
+    const records: Array<[string, string]> = [];
+    await dispatchPausedRequest({ requestId: 'stale-request', request: { url: 'http://preview.test/ui/api/overview' } }, {
+      overviewStub: async () => ({ status: 200, body: {} }),
+      identitiesStub: null,
+      tasksStub: null,
+      send: async (method: string) => {
+        sent.push(method);
+        if (method === 'Fetch.fulfillRequest') throw new Error(message);
+      },
+      delay: async () => {},
+      record: (kind: string, detail: string) => records.push([kind, detail]),
+    });
+    return { sent, records };
+  };
+
+  const stale = await run('Invalid InterceptionId.');
+  expect(stale.sent).toEqual(['Fetch.fulfillRequest']);
+  expect(stale.records).toEqual([]);
+
+  const invalidRequestId = await run('Invalid requestId.');
+  expect(invalidRequestId.sent).toEqual(['Fetch.fulfillRequest']);
+  expect(invalidRequestId.records).toEqual([['Fetch.fulfillRequest', 'fulfill failed: Invalid requestId.']]);
+
+  const unexpected = await run('CDP disconnected');
+  expect(unexpected.sent).toEqual(['Fetch.fulfillRequest']);
+  expect(unexpected.records).toEqual([['Fetch.fulfillRequest', 'fulfill failed: CDP disconnected']]);
+});

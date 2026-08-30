@@ -19,8 +19,11 @@ function packageRecipeFrom(canonical) {
   return canonical.split(sourceVectorLink).join(packageVectorLink);
 }
 
-const check = process.argv.slice(2).join(' ') === '--check';
-if (!check && process.argv.length !== 2) throw new Error('usage: sync-approval-publication.mjs [--check]');
+const mode = process.argv[2];
+if (process.argv.length !== 3 || !['--check', '--write'].includes(mode)) {
+  throw new Error('usage: sync-approval-publication.mjs --check|--write');
+}
+const check = mode === '--check';
 
 const canonical = await readFile(canonicalRecipe, 'utf8');
 const vectors = await readFile(canonicalVectors, 'utf8');

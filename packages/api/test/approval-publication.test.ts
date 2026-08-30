@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test } from 'bun:test';
 
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
-test('stale publication artifacts fail the explicit and prepack checks without touching the worktree', () => {
+test('publication sync refuses implicit writes and only --write repairs stale isolated artifacts', () => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'oae-approval-publication-'));
   try {
     for (const path of ['docs', 'packages/api/scripts', 'packages/api/test/fixtures', 'packages/mcp']) {
@@ -18,16 +18,25 @@ test('stale publication artifacts fail the explicit and prepack checks without t
     writeFileSync(join(fixtureRoot, 'packages/mcp/approval-digest.md'), 'stale artifact\n');
     copyFileSync(join(repositoryRoot, 'packages/mcp/approval-canonical-vectors.v1.json'), join(fixtureRoot, 'packages/mcp/approval-canonical-vectors.v1.json'));
     const fixtureSyncScript = join(fixtureRoot, 'packages/api/scripts/sync-approval-publication.mjs');
-    const adversarialEnv = { ...process.env, APPROVAL_PUBLICATION_ROOT: repositoryRoot };
-    const explicitCheck = Bun.spawnSync({ cmd: ['node', fixtureSyncScript, '--check'], env: adversarialEnv, stdout: 'pipe', stderr: 'pipe' });
-    const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'packages/mcp/package.json'), 'utf8')) as { scripts: { prepack: string } };
+    const implicitWrite = Bun.spawnSync({ cmd: ['node', fixtureSyncScript], stdout: 'pipe', stderr: 'pipe' });
+    const inexactMode = Bun.spawnSync({ cmd: ['node', fixtureSyncScript, '--check', '--write'], stdout: 'pipe', stderr: 'pipe' });
+    const explicitCheck = Bun.spawnSync({ cmd: ['node', fixtureSyncScript, '--check'], stdout: 'pipe', stderr: 'pipe' });
+    const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'packages/mcp/package.json'), 'utf8')) as { scripts: Record<string, string> };
     const prepackCheck = Bun.spawnSync({
-      cmd: ['npm', 'run', 'prepack'], cwd: join(fixtureRoot, 'packages/mcp'), env: adversarialEnv, stdout: 'pipe', stderr: 'pipe',
+      cmd: ['npm', 'run', 'prepack'], cwd: join(fixtureRoot, 'packages/mcp'), stdout: 'pipe', stderr: 'pipe',
     });
     expect(packageJson.scripts.prepack).toBe('node ../api/scripts/sync-approval-publication.mjs --check');
+    expect(packageJson.scripts['sync:approval-publication']).toBe('node ../api/scripts/sync-approval-publication.mjs --write');
+    expect(implicitWrite.exitCode).toBe(1);
+    expect(inexactMode.exitCode).toBe(1);
     expect(explicitCheck.exitCode).toBe(1);
     expect(prepackCheck.exitCode).toBe(1);
     expect(readFileSync(join(fixtureRoot, 'packages/mcp/approval-digest.md'), 'utf8')).toBe('stale artifact\n');
+    const explicitWrite = Bun.spawnSync({ cmd: ['node', fixtureSyncScript, '--write'], stdout: 'pipe', stderr: 'pipe' });
+    const repairedCheck = Bun.spawnSync({ cmd: ['node', fixtureSyncScript, '--check'], stdout: 'pipe', stderr: 'pipe' });
+    expect(explicitWrite.exitCode).toBe(0);
+    expect(repairedCheck.exitCode).toBe(0);
+    expect(readFileSync(join(fixtureRoot, 'packages/mcp/approval-digest.md'), 'utf8')).not.toBe('stale artifact\n');
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
