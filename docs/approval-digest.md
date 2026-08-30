@@ -12,6 +12,15 @@ JavaScript `JSON.stringify` escaping and number spelling. Thus `-0` serializes a
 `0`. Objects use no whitespace (`{"key":value}`), arrays use no whitespace, and
 the resulting text is encoded as UTF-8.
 
+Number spelling is normatively the finite-number path of ECMA-262
+[`SerializeJSONProperty`](https://tc39.es/ecma262/#sec-serializejsonproperty),
+which uses [`Number::toString`](https://tc39.es/ecma262/#sec-numeric-types-number-tostring).
+That algorithm chooses the shortest round-trippable decimal. Its decimal notation
+window is `1e-6 <= abs(x) < 1e21`: `0.000001` is decimal, while `1e-7` is
+exponential; `1e21` is exponential. Exponential notation uses a signed exponent
+for non-negative exponents (`1e+21`, not `1e21`) and no padded exponent zeros.
+These requirements are part of v1, not illustrative formatting preferences.
+
 Non-JavaScript implementations must reproduce the corpus's JavaScript behavior:
 UTF-16 key ordering, `JSON.stringify` escaping and number spelling (including
 exponent spelling), `-0` normalization, UTF-8 bytes, and lower-case SHA-256 hex.
@@ -32,5 +41,6 @@ and addresses a member whose key is the empty string, while `/arguments/literal.
 addresses a key containing a literal dot.
 The committed fixture is the normative v1 corpus; tests do not generate it.
 They verify it with a JavaScript reference verifier implemented independently of
-the production canonicalization helper. That is not a non-JavaScript,
-cross-runtime generation or cross-check.
+the production canonicalization helper, and with a separate Python standard-library
+verifier. The Python verifier is a corpus check, not a replacement for the
+ECMA-262 algorithms above or a proof about arbitrary JSON implementations.

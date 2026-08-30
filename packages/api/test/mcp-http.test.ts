@@ -163,29 +163,20 @@ describe('MCP 元数据 origin / insecure issuer', () => {
 
 describe('MCP HTTP 工具', () => {
   test('published MCP README bundles and links the canonical approval recipe and vectors', async () => {
-    const [packageReadme, packageJson, packageDigest, packageVectors, sourceDigest, sourceVectors] = await Promise.all([
+    const [packageReadme, packageJson] = await Promise.all([
       Bun.file(new URL('../../mcp/README.md', import.meta.url)).text(),
       Bun.file(new URL('../../mcp/package.json', import.meta.url)).json() as Promise<{ files: string[] }>,
-      Bun.file(new URL('../../mcp/approval-digest.md', import.meta.url)).text(),
-      Bun.file(new URL('../../mcp/approval-canonical-vectors.v1.json', import.meta.url)).text(),
-      Bun.file(new URL('../../../docs/approval-digest.md', import.meta.url)).text(),
-      Bun.file(new URL('./fixtures/approval-canonical-vectors.v1.json', import.meta.url)).text(),
     ]);
+    const check = Bun.spawnSync({
+      cmd: ['node', new URL('../scripts/sync-approval-publication.mjs', import.meta.url).pathname, '--check'],
+      stdout: 'pipe', stderr: 'pipe',
+    });
     expect(packageReadme).toContain('[recipe](./approval-digest.md)');
     expect(packageReadme).toContain('[public vectors](./approval-canonical-vectors.v1.json)');
     expect(packageJson.files).toEqual([
       'dist', 'README.md', 'approval-digest.md', 'approval-canonical-vectors.v1.json',
     ]);
-    expect(packageDigest).toBe(sourceDigest
-      .replace(
-        '`packages/api/test/fixtures/approval-canonical-vectors.v1.json`',
-        '`approval-canonical-vectors.v1.json`',
-      )
-      .replace(
-        '../packages/api/test/fixtures/approval-canonical-vectors.v1.json',
-        './approval-canonical-vectors.v1.json',
-      ));
-    expect(packageVectors).toBe(sourceVectors);
+    expect(check.exitCode).toBe(0);
   });
 
   test('R9-F RED: shipped public docs describe typed approval creation, decision, and the 16-tool contained inventory', async () => {
