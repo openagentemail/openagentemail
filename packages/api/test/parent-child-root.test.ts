@@ -300,21 +300,33 @@ test('R5g an intact authenticated root survives injected tampered and stripped r
     source: removeHeader(rootSource(ID, PARENT), 'X-OA-Task-Root'),
     internalDate: '2026-08-30T00:02:00.000Z',
   });
-  const later = await integrity.parseTaskMessageWithIntegrityForTests!({
+  const unsignedFieldReplay = await integrity.parseTaskMessageWithIntegrityForTests!({
     id: ID,
     uid: 4,
+    source: changeHeader(rootSource(ID, PARENT), 'Subject', 'forged unsigned subject')
+      .replace(/\r\n\r\n[\s\S]*$/, '\r\n\r\nforged unsigned body'),
+    internalDate: '2026-08-30T00:03:00.000Z',
+  });
+  const later = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 5,
     source: rfc822({
       from: TO, to: [FROM], subject: 'Signed root', text: 'working',
       headers: { 'X-OA-Task': ID, 'X-OA-Task-State': 'working', 'X-OA-Task-Stamp': v1Stamp(ID, 'working', TO, FROM) },
     }),
-    internalDate: '2026-08-30T00:03:00.000Z',
+    internalDate: '2026-08-30T00:04:00.000Z',
   });
   expect(tampered).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID });
   expect(stripped).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID });
-  expect(integrity.taskFromParsedMessagesForTests!(ID, [intact, tampered, stripped, later])).toMatchObject({
+  expect(unsignedFieldReplay).toMatchObject({ parentTaskId: PARENT, subject: 'forged unsigned subject', body: 'forged unsigned body' });
+  const rebuilt = integrity.taskFromParsedMessagesForTests!(ID, [intact, tampered, stripped, unsignedFieldReplay, later]) as Task;
+  expect(rebuilt).toMatchObject({
     parentTaskId: PARENT,
+    subject: 'Signed root',
     state: 'working',
   });
+  expect(rebuilt.messages).toHaveLength(2);
+  expect(JSON.stringify(rebuilt)).not.toContain('forged unsigned');
 });
 
 test('R5a: deleting a v2 root header cannot downgrade ordinary or approval history to parentless', async () => {

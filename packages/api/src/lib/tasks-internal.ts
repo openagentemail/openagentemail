@@ -1119,11 +1119,11 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   if (raw.length === 0) return null;
   // IMAP UID order is the durable order for a single mailbox. This gives
   // concurrent non-terminal writes ordinary last-writer-wins semantics.
-  const ordered = [...raw].sort((a, b) => a.uid - b.uid);
-  const first = ordered[0]!;
+  const mailboxOrdered = [...raw].sort((a, b) => a.uid - b.uid);
+  const first = mailboxOrdered[0]!;
   const participants = new Set([first.from, first.to]);
   if (participants.size !== 2) return null;
-  if (ordered.some((message) => !participants.has(message.from) || !participants.has(message.to))) return null;
+  if (mailboxOrdered.some((message) => !participants.has(message.from) || !participants.has(message.to))) return null;
   // Never reconstruct a task from a surviving state transition after its
   // authenticated creation record was deleted. This also prevents a stripped
   // v2 relationship root from being downgraded to a parentless legacy task.
@@ -1131,21 +1131,23 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const firstIsApprovalRoot = first.state === 'input-required' && first.approval?.type === 'request';
   if (!firstIsOrdinaryRoot && !firstIsApprovalRoot) return null;
   const rootParent = first.parentTaskId;
-  const relationshipRoots = ordered.filter((message) => message.parentTaskId !== undefined);
+  const relationshipRoots = mailboxOrdered.filter((message) => message.parentTaskId !== undefined);
   if (relationshipRoots.length > 0) {
     // A v2 relationship exists only on the immutable first creation event.
-    // Exact copied roots are harmless only when every root datum agrees.
+    // Only fields authenticated by the v2 root stamp may establish a conflict.
+    // Later roots with the same authenticated transcript are replay noise;
+    // their unsigned subject/body must never suppress or mutate the first root.
     if (!rootParent || !isTaskId(rootParent) || (!firstIsOrdinaryRoot && !firstIsApprovalRoot)) return null;
     for (const message of relationshipRoots) {
       if (
         message.parentTaskId !== rootParent
         || message.from !== first.from || message.to !== first.to
-        || message.subject !== first.subject || message.state !== first.state
-        || message.body !== first.body || message.kind !== first.kind
+        || message.state !== first.state
         || JSON.stringify(message.approval) !== JSON.stringify(first.approval)
       ) return null;
     }
   }
+  const ordered = mailboxOrdered.filter((message) => message === first || message.parentTaskId === undefined);
   const leaseEvents = ordered.filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease);
   let previousGeneration = 0;
   let leaseAuthority: TaskLeaseAuthority | undefined;
