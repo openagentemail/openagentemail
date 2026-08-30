@@ -139,6 +139,24 @@ test('R3 create projection edge depends on the parent authorization read for ord
   }
 });
 
+test('R5e create remains successful when the post-delivery parent projection read fails', async () => {
+  const child = task(CHILD, A, B, 'submitted', PARENT);
+  let creates = 0;
+  const service = {
+    ...tasks.taskService,
+    create: async () => { creates += 1; return child; },
+    getForAuthorization: async () => { throw new Error('transient_imap_failure'); },
+  } as TaskService;
+  const res = await app(service).request('/v1/tasks', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ to: B, subject: 'x', body: 'b', parentTaskId: PARENT }),
+  });
+  expect(res.status).toBe(201);
+  expect(creates).toBe(1);
+  expect(await res.json()).not.toHaveProperty('parentTaskId');
+});
+
 test('R3 core mixed updatedAt/id ordering continues exactly across the 20-row boundary', async () => {
   const parent = task(PARENT, A, B);
   const timestamps = [

@@ -196,7 +196,15 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
             body: parsed.data.body!,
             ...(parsed.data.parentTaskId !== undefined ? { parentTaskId: parsed.data.parentTaskId } : {}),
           });
-        const parent = task.parentTaskId ? await authorizationTask(service, task.parentTaskId) : null;
+        let parent: Task | null = null;
+        if (task.parentTaskId) {
+          try {
+            parent = await authorizationTask(service, task.parentTaskId);
+          } catch {
+            // Delivery is already durable. A projection-only parent read must
+            // not turn success into a retryable 502 and duplicate the child.
+          }
+        }
         if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
         // `wait` deliberately has one capped server turn. Long tasks are
         // resumed by asking task_get or calling task_create(wait) again.

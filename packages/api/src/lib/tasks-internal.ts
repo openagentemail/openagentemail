@@ -1062,8 +1062,8 @@ function isRelationshipIntegrityFailure(value: ParsedTaskMessage): value is Task
 
 /**
  * Only a record already matched to this task id can poison its reconstruction.
- * Relationship-header presence or an authenticated v2 witness is enough to
- * fail closed. Unauthenticated same-id noise remains ignorable.
+ * Only an authenticated v2 witness may fail closed. Header presence alone is
+ * attacker-controlled same-id noise and must remain ignorable.
  */
 async function relationshipIntegrityFailureFor(
   message: FetchMessageObject,
@@ -1073,14 +1073,13 @@ async function relationshipIntegrityFailureFor(
   try {
     const parsed = await simpleParser(message.source);
     if (parsed.headers.get('x-oa-task') !== id) return null;
-    const hasRelationshipHeader = parsed.headers.get('x-oa-task-root') !== undefined || parsed.headers.get('x-oa-task-parent') !== undefined;
     const hasRootWitness = hasValidTaskRootWitness(
       message,
       id,
       parsed.headers.get('x-oa-task-state'),
       parsed.headers.get('x-oa-task-stamp'),
     );
-    if (!hasRelationshipHeader && !hasRootWitness) return null;
+    if (!hasRootWitness) return null;
     return { kind: 'relationship-integrity-failure', taskId: id };
   } catch {
     return null;

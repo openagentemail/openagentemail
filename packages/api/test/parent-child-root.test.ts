@@ -353,7 +353,12 @@ test('R5a: deleting a v2 root header cannot downgrade ordinary or approval histo
     uid: 11,
     source: rfc822({
       from: 'attacker@external.example', to: [TO], subject: 'forged same id', text: 'noise',
-      headers: { 'X-OA-Task': ID, 'X-OA-Task-State': 'working' },
+      headers: {
+        'X-OA-Task': ID,
+        'X-OA-Task-State': 'working',
+        'X-OA-Task-Root': Buffer.from(`{"version":2,"parentTaskId":"${OTHER_PARENT}"}`, 'utf8').toString('base64url'),
+        'X-OA-Task-Parent': OTHER_PARENT,
+      },
     }),
     internalDate: '2026-08-30T00:03:00.000Z',
   });
