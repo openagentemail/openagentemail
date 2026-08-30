@@ -13,13 +13,16 @@ import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
 import { taskLeasesEnabled } from './task-lease-gate.ts';
+import { isTaskId } from './task-id.ts';
 import * as taskBoardCursor from './task-cursor.ts';
+import * as taskChildrenCursor from './task-cursor.ts';
 
 export {
   decodeTaskBoardCursor,
   encodeTaskBoardCursor,
   InvalidTaskCursorError,
 } from './task-cursor.ts';
+export { isTaskId } from './task-id.ts';
 
 export const TASK_STATES = ['submitted', 'working', 'input-required', 'completed', 'failed'] as const;
 export type TaskState = (typeof TASK_STATES)[number];
@@ -87,7 +90,9 @@ type ApprovalEventPayload =
   | { event: 'decision'; digest: string; decision: 'approved' | 'rejected'; reviewer: string; decidedAt: string }
   | { event: 'expired'; digest: string; expiredAt: string };
 
-const TASK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Frozen v2 root-envelope HMAC domain. Do not rename: durable IMAP history uses it. */
+const TASK_ROOT_V2_DOMAIN = 'openagentemail-task-root-v2';
+const TASK_ROOT_V2_WITNESS_DOMAIN = 'openagentemail-task-root-v2-witness';
 const RESULT_MARKER = '<!-- openagent.email task result -->';
 const APPROVAL_MARKER = '<!-- openagent.email approval snapshot -->';
 const APPROVAL_DIGEST_RE = /^[a-f0-9]{64}$/;
@@ -183,6 +188,8 @@ export type Task = {
   state: TaskState;
   createdAt: string;
   updatedAt: string;
+  /** Immutable only when authenticated on the root creation record. */
+  parentTaskId?: string;
   messages: TaskMessage[];
   result?: unknown;
   kind?: 'approval';
@@ -195,7 +202,7 @@ export type Task = {
   expiredLease?: ExpiredLeaseReceipt;
 };
 
-export type TaskView = Omit<Task, 'lease' | 'releasedLease' | 'expiredLease'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -227,13 +234,24 @@ export type RawTaskMessage = {
   idempotencyKey?: string;
   approval?: ApprovalEvent;
   lease?: LeaseEvent;
+  /** Present only on a parser-authenticated v2 parented creation root. */
+  parentTaskId?: string;
 };
+
+/** Private poison marker: never populated from relationship metadata itself. */
+type TaskRelationshipIntegrityFailure = {
+  kind: 'relationship-integrity-failure';
+  taskId: string;
+};
+type ParsedTaskMessage = RawTaskMessage | TaskRelationshipIntegrityFailure | null;
 
 export type CreateTaskInput = {
   from: string;
   to: string;
   subject: string;
   body: string;
+  /** Internal only in R1; REST/MCP/UI exposure and parent validation are R2+. */
+  parentTaskId?: string;
 };
 
 export type CreateApprovalTaskInput = {
@@ -243,6 +261,8 @@ export type CreateApprovalTaskInput = {
   body?: string;
   action: ApprovalAction;
   expiresAt: string;
+  /** Internal only in R1; REST/MCP/UI exposure and parent validation are R2+. */
+  parentTaskId?: string;
 };
 
 export type UpdateTaskInput = {
@@ -280,10 +300,14 @@ export type TaskBoardPage = {
   queryNow: string;
 };
 
+export type TaskChildrenQuery = { parentTaskId: string; limit: 20 | 50 | 100; cursor?: string };
+export type TaskChildrenPage = { children: Task[]; nextCursor: string | null };
+
 export type TaskService = {
   create(input: CreateTaskInput): Promise<Task>;
   list(state?: TaskState): Promise<Task[]>;
   listBoard(query: TaskBoardQuery, viewer: TaskBoardViewer): Promise<TaskBoardPage>;
+  listChildren?(query: TaskChildrenQuery, viewer: TaskBoardViewer): Promise<TaskChildrenPage>;
   /** Raw durable/queued view for route authorization; never materializes expiry. */
   getForAuthorization?(id: string): Promise<Task | null>;
   get(id: string): Promise<Task | null>;
@@ -307,10 +331,6 @@ export type TaskService = {
 
 function isTaskState(value: string | undefined): value is TaskState {
   return !!value && (TASK_STATES as readonly string[]).includes(value);
-}
-
-export function isTaskId(value: string): boolean {
-  return TASK_ID_RE.test(value);
 }
 
 /** Terminal task states never reopen, even when a stale participant retries. */
@@ -439,6 +459,82 @@ function taskStamp(id: string, state: TaskState, from: string, to: string): stri
   return createHmac('sha256', config.taskSigningSecret)
     .update(`${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}`)
     .digest('base64url');
+}
+
+type TaskRootEnvelope = { version: 2; parentTaskId: string };
+
+function normalizeParentTaskId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isTaskId(value)) throw new Error('invalid_parent_task_id');
+  return value.toLowerCase();
+}
+
+/** The v2 root envelope is deliberately tiny and byte-canonical. */
+function canonicalTaskRootEnvelope(parentTaskId: string): string {
+  return JSON.stringify({ version: 2, parentTaskId });
+}
+
+function taskRootEnvelopeHeader(parentTaskId: string): { canonical: string; header: string } {
+  const canonical = canonicalTaskRootEnvelope(parentTaskId);
+  return { canonical, header: Buffer.from(canonical, 'utf8').toString('base64url') };
+}
+
+function readTaskRootEnvelope(value: unknown): { envelope: TaskRootEnvelope; canonical: string } | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const bytes = Buffer.from(value, 'base64url');
+    if (!bytes.length || bytes.toString('base64url') !== value) return null;
+    const canonical = bytes.toString('utf8');
+    const parsed = JSON.parse(canonical) as Record<string, unknown>;
+    if (
+      !parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+      || parsed.version !== 2 || typeof parsed.parentTaskId !== 'string'
+      || !isTaskId(parsed.parentTaskId) || Object.keys(parsed).length !== 2
+    ) return null;
+    const envelope: TaskRootEnvelope = { version: 2, parentTaskId: parsed.parentTaskId.toLowerCase() };
+    return canonical === canonicalTaskRootEnvelope(envelope.parentTaskId) ? { envelope, canonical } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parent v2 roots use a distinct HMAC domain. Approval request payload remains
+ * in the signed transcript so adding a relationship never weakens its binding.
+ */
+function taskRootStamp(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  rootCanonical: string,
+  approvalCanonical = '',
+): string {
+  const witness = createHmac('sha256', config.taskSigningSecret)
+    .update(`${TASK_ROOT_V2_WITNESS_DOMAIN}\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}`)
+    .digest('base64url');
+  const rootMac = createHmac('sha256', config.taskSigningSecret)
+    .update(`${TASK_ROOT_V2_DOMAIN}\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}\n${rootCanonical}\n${approvalCanonical}`)
+    .digest('base64url');
+  return `v2.${witness}.${rootMac}`;
+}
+
+function hasValidTaskRootWitness(message: FetchMessageObject, id: string, state: unknown, stamp: unknown): boolean {
+  if (!message.envelope || typeof state !== 'string' || !isTaskState(state) || typeof stamp !== 'string') return false;
+  const from = firstAddress(message.envelope.from);
+  const to = firstAddress(message.envelope.to);
+  const parts = stamp.split('.');
+  if (!from || !to || parts.length !== 3 || parts[0] !== 'v2') return false;
+  const expected = createHmac('sha256', config.taskSigningSecret)
+    .update(`${TASK_ROOT_V2_WITNESS_DOMAIN}\n${id}\n${state}\n${from.toLowerCase()}\n${to.toLowerCase()}`)
+    .digest('base64url');
+  try {
+    const actualBytes = Buffer.from(parts[1]!);
+    const expectedBytes = Buffer.from(expected);
+    return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+  } catch {
+    return false;
+  }
 }
 
 function canonicalLeaseEvent(event: LeaseEvent): string {
@@ -663,7 +759,22 @@ function reminderStamp(id: string, state: TaskState, from: string, to: string): 
     .digest('base64url');
 }
 
-function taskHeaders(id: string, state: TaskState, from: string, to: string): Record<string, string> {
+function taskHeaders(
+  id: string,
+  state: TaskState,
+  from: string,
+  to: string,
+  parentTaskId?: string,
+): Record<string, string> {
+  if (parentTaskId !== undefined) {
+    const root = taskRootEnvelopeHeader(parentTaskId);
+    return {
+      'X-OA-Task': id,
+      'X-OA-Task-State': state,
+      'X-OA-Task-Root': root.header,
+      'X-OA-Task-Stamp': taskRootStamp(id, state, from, to, root.canonical),
+    };
+  }
   return {
     'X-OA-Task': id,
     'X-OA-Task-State': state,
@@ -684,8 +795,10 @@ function approvalHeaders(
   from: string,
   to: string,
   payload: ApprovalEventPayload,
+  parentTaskId?: string,
 ): Record<string, string> {
   const canonical = canonicalApprovalEventPayload(payload);
+  const root = parentTaskId === undefined ? undefined : taskRootEnvelopeHeader(parentTaskId);
   return {
     'X-OA-Task': id,
     'X-OA-Task-State': state,
@@ -693,7 +806,10 @@ function approvalHeaders(
     'X-OA-Task-Approval-Digest': payload.digest,
     ...(payload.event === 'decision' ? { 'X-OA-Task-Approval-Decision': payload.decision } : {}),
     'X-OA-Task-Approval-Payload': approvalPayloadHeader(canonical),
-    'X-OA-Task-Stamp': approvalStamp(id, state, from, to, canonical),
+    ...(root ? { 'X-OA-Task-Root': root.header } : {}),
+    'X-OA-Task-Stamp': root
+      ? taskRootStamp(id, state, from, to, root.canonical, canonical)
+      : approvalStamp(id, state, from, to, canonical),
   };
 }
 
@@ -799,6 +915,10 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
   const headerId = parsed.headers.get('x-oa-task');
   const headerState = parsed.headers.get('x-oa-task-state');
   const stamp = parsed.headers.get('x-oa-task-stamp');
+  const rootRaw = parsed.headers.get('x-oa-task-root');
+  // There is intentionally no standalone parent header. Reject it instead of
+  // silently treating attacker-controlled metadata as an authority candidate.
+  const nakedParentRaw = parsed.headers.get('x-oa-task-parent');
   const eventRaw = parsed.headers.get('x-oa-task-event');
   const idempotencyRaw = parsed.headers.get('x-oa-task-idempotency-key');
   const approvalEventRaw = parsed.headers.get('x-oa-task-approval-event');
@@ -808,9 +928,13 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
   const leaseEventRaw = parsed.headers.get('x-oa-task-lease-event');
   const leasePayloadRaw = parsed.headers.get('x-oa-task-lease-payload');
   if (headerId !== id || typeof headerState !== 'string' || !isTaskState(headerState)) return null;
+  if (nakedParentRaw !== undefined) return null;
+  const root = rootRaw === undefined ? undefined : readTaskRootEnvelope(rootRaw);
+  if (rootRaw !== undefined && !root) return null;
   const body = (parsed.text ?? '').trim();
   const result = readResult(body);
   if (leaseEventRaw !== undefined || leasePayloadRaw !== undefined) {
+    if (root) return null;
     if ((leaseEventRaw !== 'claim' && leaseEventRaw !== 'renew' && leaseEventRaw !== 'release' && leaseEventRaw !== 'expired') || typeof stamp !== 'string') return null;
     const lease = readLeaseEventPayload(leasePayloadRaw);
     if (
@@ -847,7 +971,13 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
     if (
       (approvalPayload.event === 'decision' && (decision === undefined || approvalPayload.decision !== decision))
       || (approvalPayload.event !== 'decision' && approvalDecisionRaw !== undefined)
-      || stamp !== approvalStamp(id, headerState, from, to, payloadHeader.canonical)
+      || (root
+        ? (
+          approvalEventRaw !== 'request'
+          || headerState !== 'input-required'
+          || stamp !== taskRootStamp(id, headerState, from, to, root.canonical, payloadHeader.canonical)
+        )
+        : stamp !== approvalStamp(id, headerState, from, to, payloadHeader.canonical))
     ) return null;
     let approval: ApprovalEvent;
     if (approvalPayload.event === 'request') {
@@ -897,11 +1027,16 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
       body,
       ...(approvalPayload.event !== 'request' && result !== undefined ? { result } : {}),
       approval,
+      ...(root ? { parentTaskId: root.envelope.parentTaskId } : {}),
     };
   }
   const isReminder = eventRaw === 'reminder';
   if (isReminder) {
+    if (root) return null;
     if (typeof stamp !== 'string' || stamp !== reminderStamp(id, headerState, from, to)) return null;
+  } else if (root) {
+    // Ordinary tasks can carry a relationship only on their submitted root.
+    if (headerState !== 'submitted' || typeof stamp !== 'string' || stamp !== taskRootStamp(id, headerState, from, to, root.canonical)) return null;
   } else if (!isStampedTaskMessage(id, headerState, from, to, typeof stamp === 'string' ? stamp : undefined)) {
     return null;
   }
@@ -917,7 +1052,60 @@ async function parseTaskMessage(message: FetchMessageObject, id: string): Promis
     ...(result !== undefined ? { result } : {}),
     ...(isReminder ? { kind: 'reminder' as const } : {}),
     ...(typeof idempotencyRaw === 'string' && idempotencyRaw ? { idempotencyKey: idempotencyRaw } : {}),
+    ...(root ? { parentTaskId: root.envelope.parentTaskId } : {}),
   };
+}
+
+function isRelationshipIntegrityFailure(value: ParsedTaskMessage): value is TaskRelationshipIntegrityFailure {
+  return !!value && value.kind === 'relationship-integrity-failure';
+}
+
+/**
+ * Only a record already matched to this task id can poison its reconstruction.
+ * Relationship-header presence or an authenticated v2 witness is enough to
+ * fail closed. Unauthenticated same-id noise remains ignorable.
+ */
+async function relationshipIntegrityFailureFor(
+  message: FetchMessageObject,
+  id: string,
+): Promise<TaskRelationshipIntegrityFailure | null> {
+  if (!message.source) return null;
+  try {
+    const parsed = await simpleParser(message.source);
+    if (parsed.headers.get('x-oa-task') !== id) return null;
+    const hasRelationshipHeader = parsed.headers.get('x-oa-task-root') !== undefined || parsed.headers.get('x-oa-task-parent') !== undefined;
+    const hasRootWitness = hasValidTaskRootWitness(
+      message,
+      id,
+      parsed.headers.get('x-oa-task-state'),
+      parsed.headers.get('x-oa-task-stamp'),
+    );
+    if (!hasRelationshipHeader && !hasRootWitness) return null;
+    return { kind: 'relationship-integrity-failure', taskId: id };
+  } catch {
+    return null;
+  }
+}
+
+async function parseTaskMessageWithIntegrity(message: FetchMessageObject, id: string): Promise<ParsedTaskMessage> {
+  try {
+    const parsed = await parseTaskMessage(message, id);
+    return parsed ?? await relationshipIntegrityFailureFor(message, id);
+  } catch (err) {
+    const failure = await relationshipIntegrityFailureFor(message, id);
+    if (failure) return failure;
+    throw err;
+  }
+}
+
+function taskFromParsedMessages(id: string, messages: ParsedTaskMessage[]): Task | null {
+  if (messages.some(isRelationshipIntegrityFailure)) return null;
+  return taskFromMessages(id, messages.filter((message): message is RawTaskMessage => !!message));
+}
+
+function toPublicTaskMessage(message: RawTaskMessage): TaskMessage {
+  const { uid, lease: _lease, parentTaskId: _parentTaskId, ...publicMessage } = message;
+  return { id: String(uid), ...publicMessage };
 }
 
 export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null {
@@ -929,6 +1117,28 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const participants = new Set([first.from, first.to]);
   if (participants.size !== 2) return null;
   if (ordered.some((message) => !participants.has(message.from) || !participants.has(message.to))) return null;
+  // Never reconstruct a task from a surviving state transition after its
+  // authenticated creation record was deleted. This also prevents a stripped
+  // v2 relationship root from being downgraded to a parentless legacy task.
+  const firstIsOrdinaryRoot = first.state === 'submitted' && !first.approval && first.kind !== 'reminder' && !first.lease;
+  const firstIsApprovalRoot = first.state === 'input-required' && first.approval?.type === 'request';
+  if (!firstIsOrdinaryRoot && !firstIsApprovalRoot) return null;
+  const rootParent = first.parentTaskId;
+  const relationshipRoots = ordered.filter((message) => message.parentTaskId !== undefined);
+  if (relationshipRoots.length > 0) {
+    // A v2 relationship exists only on the immutable first creation event.
+    // Exact copied roots are harmless only when every root datum agrees.
+    if (!rootParent || !isTaskId(rootParent) || (!firstIsOrdinaryRoot && !firstIsApprovalRoot)) return null;
+    for (const message of relationshipRoots) {
+      if (
+        message.parentTaskId !== rootParent
+        || message.from !== first.from || message.to !== first.to
+        || message.subject !== first.subject || message.state !== first.state
+        || message.body !== first.body || message.kind !== first.kind
+        || JSON.stringify(message.approval) !== JSON.stringify(first.approval)
+      ) return null;
+    }
+  }
   const leaseEvents = ordered.filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease);
   let previousGeneration = 0;
   let leaseAuthority: TaskLeaseAuthority | undefined;
@@ -1058,7 +1268,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     const terminal = ordered.find((message) =>
       message.approval?.type === 'decision' || message.approval?.type === 'expired',
     ) ?? first;
-    const messages = ordered.map(({ uid, lease: _lease, ...message }) => ({ id: String(uid), ...message }));
+    const messages = ordered.map(toPublicTaskMessage);
     return {
       id,
       from: first.from,
@@ -1067,6 +1277,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       state: terminal.state,
       createdAt: first.date,
       updatedAt: boardUpdatedAt(ordered, terminal),
+      ...(rootParent !== undefined ? { parentTaskId: rootParent } : {}),
       messages,
       ...(terminal.result !== undefined ? { result: terminal.result } : {}),
       kind: 'approval',
@@ -1084,10 +1295,9 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     ? { ...message, date: message.lease.at }
     : message);
   const current = currentTaskMessage(durableOrdered);
-  const messages = durableOrdered.map(({ uid, lease, ...message }) => ({
-    id: String(uid),
-    ...message,
-    ...(lease ? { date: lease.at } : {}),
+  const messages = durableOrdered.map((message) => ({
+    ...toPublicTaskMessage(message),
+    ...(message.lease ? { date: message.lease.at } : {}),
   }));
   const task: Task = {
     id,
@@ -1098,6 +1308,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     createdAt: first.date,
     // 催办可把工单顶到列表前；terminal 之后重放的旧状态信不得刷新可见窗。
     updatedAt: boardUpdatedAt(durableOrdered, current),
+    ...(rootParent !== undefined ? { parentTaskId: rootParent } : {}),
     messages,
     ...(current.result !== undefined ? { result: current.result } : {}),
   };
@@ -1154,17 +1365,17 @@ export function currentTaskMessage<T extends { uid: number; state: TaskState; ki
   return firstTerminal ?? pool[pool.length - 1]!;
 }
 
-async function findTaskMessages(id: string): Promise<RawTaskMessage[]> {
+async function findTaskMessages(id: string): Promise<ParsedTaskMessage[]> {
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': id } }, { uid: true });
     if (!uids || uids.length === 0) return [];
-    const messages: RawTaskMessage[] = [];
+    const messages: ParsedTaskMessage[] = [];
     for await (const message of client.fetch(
       uids,
       { envelope: true, internalDate: true, source: true },
       { uid: true },
     )) {
-      const parsed = await parseTaskMessage(message, id);
+      const parsed = await parseTaskMessageWithIntegrity(message, id);
       if (parsed) messages.push(parsed);
     }
     return messages;
@@ -1178,9 +1389,51 @@ async function getTaskSnapshot(id: string): Promise<Task | null> {
   // 单测注入内存目录，避免并发 reply / IMAP 滞后 reminder 回归打真 IMAP。
   const raw = getTaskForTests
     ? await getTaskForTests(id)
-    : taskFromMessages(id, await findTaskMessages(id));
+    : taskFromParsedMessages(id, await findTaskMessages(id));
   // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic 事件并进读路径。
   return raw ? mergeQueuedEvents(raw) : null;
+}
+
+/** Durable authority only: R2 parent eligibility never trusts queued overlays. */
+async function getDurableTaskSnapshot(id: string): Promise<Task | null> {
+  if (!isTaskId(id)) return null;
+  return getTaskForTests
+    ? await getTaskForTests(id)
+    : taskFromParsedMessages(id, await findTaskMessages(id));
+}
+
+const PARENT_CHAIN_MAX = 64;
+
+async function validateParentChain(parentTaskId: string, childId: string, sender: string): Promise<void> {
+  const first = await getDurableTaskSnapshot(parentTaskId);
+  if (!first) throw new Error('parent_task_not_found');
+  if (!taskParticipants(first).has(sender.toLowerCase())) throw new Error('parent_task_sender_not_participant');
+  const seen = new Set<string>();
+  let current: Task | null = first;
+  for (let depth = 0; current; depth += 1) {
+    if (current.id === childId || seen.has(current.id)) throw new Error('parent_task_invalid_chain');
+    seen.add(current.id);
+    const next = current.parentTaskId;
+    if (next === undefined) return;
+    if (!isTaskId(next) || seen.size >= PARENT_CHAIN_MAX) throw new Error('parent_task_invalid_chain');
+    current = await getDurableTaskSnapshot(next);
+    if (!current) throw new Error('parent_task_invalid_chain');
+  }
+}
+
+async function withValidatedParent<T>(
+  parentTaskId: string | undefined,
+  childId: string,
+  sender: string,
+  deliver: () => Promise<T>,
+): Promise<T> {
+  if (parentTaskId === undefined) return deliver();
+  // Parent pointers are immutable authenticated roots, so the immediate-parent
+  // lock serializes validation/delivery without ancestor multi-lock deadlocks.
+  return withTaskLock(parentTaskId, async () => {
+    await validateParentChain(parentTaskId, childId, sender);
+    return deliver();
+  });
 }
 
 /** Service detail reads lazily make an expired approval terminal. There is no
@@ -1202,7 +1455,7 @@ export async function listTasks(state?: TaskState): Promise<Task[]> {
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': true } }, { uid: true });
     if (!uids || uids.length === 0) return [];
-    const grouped = new Map<string, RawTaskMessage[]>();
+    const grouped = new Map<string, ParsedTaskMessage[]>();
     for await (const message of client.fetch(
       uids,
       { envelope: true, internalDate: true, source: true },
@@ -1212,14 +1465,14 @@ export async function listTasks(state?: TaskState): Promise<Task[]> {
       const parsed = await simpleParser(message.source);
       const id = parsed.headers.get('x-oa-task');
       if (typeof id !== 'string' || !isTaskId(id)) continue;
-      const taskMessage = await parseTaskMessage(message, id);
+      const taskMessage = await parseTaskMessageWithIntegrity(message, id);
       if (!taskMessage) continue;
       const entries = grouped.get(id) ?? [];
       entries.push(taskMessage);
       grouped.set(id, entries);
     }
     return [...grouped.entries()]
-      .map(([id, messages]) => taskFromMessages(id, messages))
+      .map(([id, messages]) => taskFromParsedMessages(id, messages))
       .filter((task): task is Task => !!task && (!state || task.state === state))
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   });
@@ -1235,24 +1488,28 @@ function syntheticTask(input: CreateTaskInput, id: string, messageId: string): T
     state: 'submitted',
     createdAt: now,
     updatedAt: now,
+    ...(input.parentTaskId !== undefined ? { parentTaskId: input.parentTaskId } : {}),
     messages: [{ id: messageId, from: input.from, to: input.to, subject: input.subject, date: now, state: 'submitted', body: input.body }],
   };
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
-  const id = randomUUID();
-  const { messageId } = await sendMail({
+  const id = taskIdForTests ? taskIdForTests() : randomUUID();
+  const parentTaskId = normalizeParentTaskId(input.parentTaskId);
+  const normalized = parentTaskId === undefined ? input : { ...input, parentTaskId };
+  const deliver = async () => deliverMail({
     from: input.from,
     to: [input.to],
     subject: input.subject,
     text: input.body,
-    headers: taskHeaders(id, 'submitted', input.from, input.to),
+    headers: taskHeaders(id, 'submitted', input.from, input.to, parentTaskId),
   });
+  const { messageId } = await withValidatedParent(parentTaskId, id, input.from, deliver);
   // This is a server-authenticated assignment, so it may wake the target's
   // agent route. The generic IMAP watcher never has that authority.
-  void notifyTrustedAgentDelivery(input.to);
+  notifyTrustedTaskDelivery(input.to);
   invalidateTaskListCache();
-  return syntheticTask(input, id, messageId);
+  return syntheticTask(normalized, id, messageId);
 }
 
 function knownManagedIdentity(address: string): boolean {
@@ -1264,6 +1521,7 @@ function knownManagedIdentity(address: string): boolean {
 export async function createApprovalTask(input: CreateApprovalTaskInput): Promise<ApprovalTask> {
   const from = input.from.toLowerCase();
   const to = input.to.toLowerCase();
+  const parentTaskId = normalizeParentTaskId(input.parentTaskId);
   if (from === to) throw new Error('approval_participants_must_differ');
   if (!knownManagedIdentity(from) || !knownManagedIdentity(to)) throw new Error('approval_identity_required');
   assertApprovalExpiryBound(input.expiresAt);
@@ -1272,18 +1530,19 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
   const action = normalizedApprovalAction(rawAction);
   const digest = approvalActionDigest(action);
   const snapshot: ApprovalSnapshot = { action, reviewer: to, expiresAt: input.expiresAt, digest };
-  const id = randomUUID();
+  const id = taskIdForTests ? taskIdForTests() : randomUUID();
   const text = approvalRequestBody(input.body, snapshot);
-  const { messageId } = await deliverMail({
+  const deliver = async () => deliverMail({
     from,
     to: [to],
     subject: input.subject,
     text,
     headers: approvalHeaders(id, 'input-required', from, to, {
       event: 'request', digest, reviewer: to, expiresAt: input.expiresAt,
-    }),
+    }, parentTaskId),
   });
-  void notifyTrustedAgentDelivery(to);
+  const { messageId } = await withValidatedParent(parentTaskId, id, from, deliver);
+  notifyTrustedTaskDelivery(to);
   invalidateTaskListCache();
   const now = new Date(nowMs()).toISOString();
   return {
@@ -1294,6 +1553,7 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
     state: 'input-required',
     createdAt: now,
     updatedAt: now,
+    ...(parentTaskId !== undefined ? { parentTaskId } : {}),
     messages: [{
       id: messageId,
       from,
@@ -1315,6 +1575,14 @@ let listCache: { at: number; tasks: Task[] } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
+/** Test-only deterministic child id; production always uses crypto.randomUUID. */
+let taskIdForTests: (() => string) | null = null;
+type TaskSideEffectObserverForTests = {
+  notifications: string[];
+  cacheInvalidations: number;
+  queuedTaskIds: string[];
+};
+let taskSideEffectObserverForTests: TaskSideEffectObserverForTests | null = null;
 /** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder + lease），供后续读合并。 */
 const queuedEvents = new Map<string, QueuedEvent[]>();
 const QUEUED_EVENT_TTL_MS = 60 * 1000;
@@ -1343,6 +1611,22 @@ export function setTaskSendMailForTests(
 ): void {
   sendMailForTests = fn;
 }
+
+/** Narrow R2 seam: makes server-generated-child self-reference rejectable in tests. */
+export function setTaskIdForTests(fn: (() => string) | null): void {
+  taskIdForTests = fn;
+}
+
+/** Internal test observer for create-side-effect boundary; production keeps it null. */
+export function observeTaskSideEffectsForTests(): TaskSideEffectObserverForTests {
+  return taskSideEffectObserverForTests = { notifications: [], cacheInvalidations: 0, queuedTaskIds: [] };
+}
+
+export function clearTaskSideEffectObserverForTests(): void {
+  taskSideEffectObserverForTests = null;
+}
+
+
 
 export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
@@ -1531,6 +1815,7 @@ function mergeQueuedEvents(task: Task): Task {
 }
 
 function queueEventUntilIndexed(taskId: string, message: TaskMessage, lease?: LeaseEvent): void {
+  taskSideEffectObserverForTests?.queuedTaskIds.push(taskId);
   const list = queuedEvents.get(taskId) ?? [];
   list.push({ message, sentAt: Date.parse(message.date) || nowMs(), ...(lease ? { lease } : {}) });
   queuedEvents.set(taskId, list);
@@ -1542,7 +1827,13 @@ async function deliverMail(input: SendInput): Promise<{ messageId: string }> {
 }
 
 export function invalidateTaskListCache(): void {
+  if (taskSideEffectObserverForTests) taskSideEffectObserverForTests.cacheInvalidations += 1;
   listCache = null;
+}
+
+function notifyTrustedTaskDelivery(address: string): void {
+  taskSideEffectObserverForTests?.notifications.push(address);
+  void notifyTrustedAgentDelivery(address);
 }
 
 function nowMs(): number {
@@ -2315,6 +2606,34 @@ export async function listTaskBoard(
   };
 }
 
+/** Direct children only; ACL filtering occurs before sorting and pagination. */
+export async function listTaskChildren(query: TaskChildrenQuery, viewer: TaskBoardViewer): Promise<TaskChildrenPage> {
+  const all = await loadAllTasksCached();
+  const parent = all.find((task) => task.id === query.parentTaskId);
+  if (!parent) throw new Error('not_found');
+  if (viewer.kind !== 'admin' && !taskParticipants(parent).has(viewer.address.toLowerCase())) throw new Error('forbidden');
+  const visible = (viewer.kind === 'admin' ? all : all.filter((task) => taskParticipants(task).has(viewer.address.toLowerCase())))
+    .filter((task) => task.parentTaskId === query.parentTaskId);
+  visible.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  const who = viewer.kind === 'admin' ? 'admin' : viewer.address.toLowerCase();
+  const fp = `children-v1|${query.parentTaskId}|${who}|${query.limit}`;
+  let start = 0;
+  if (query.cursor) {
+    const cursor = taskChildrenCursor.decodeTaskChildrenCursor(query.cursor);
+    if (cursor.fp !== fp) throw new taskChildrenCursor.InvalidTaskCursorError();
+    start = visible.findIndex((task) => olderThanCursor(task, cursor));
+    if (start < 0) start = visible.length;
+  }
+  const children = visible.slice(start, start + query.limit);
+  const last = children[children.length - 1];
+  return {
+    children,
+    nextCursor: start + children.length < visible.length && last
+      ? taskChildrenCursor.encodeTaskChildrenCursor({ fp, t: Date.parse(last.updatedAt), id: last.id })
+      : null,
+  };
+}
+
 export async function replyTask(input: { id: string; from: string; body: string }): Promise<Task> {
   // 状态检查与 working 写入必须在同一把 per-task 锁内，否则并发双 reply
   // 都能过锁外 input-required 检，随后 updateTask 只拦 terminal，会写出第二条 working。
@@ -2513,6 +2832,38 @@ export async function parseStampedTaskMessageForTests(input: {
   } as FetchMessageObject, input.id);
 }
 
+/** @internal Test-only access to the production relationship-integrity path. */
+export async function parseTaskMessageWithIntegrityForTests(input: {
+  id: string;
+  uid: number;
+  source: string;
+  internalDate: string;
+}): Promise<ParsedTaskMessage> {
+  const parsed = await simpleParser(input.source);
+  const addresses = (value: unknown) => {
+    const values = Array.isArray(value) ? value : [value];
+    return values.flatMap((row) => {
+      const entries = (row as { value?: Array<{ address?: string }> } | undefined)?.value ?? [];
+      return entries.map((entry) => ({ address: entry.address ?? undefined }));
+    });
+  };
+  return parseTaskMessageWithIntegrity({
+    uid: input.uid,
+    source: Buffer.from(input.source),
+    envelope: {
+      from: addresses(parsed.from),
+      to: addresses(parsed.to),
+      subject: parsed.subject ?? undefined,
+    },
+    internalDate: new Date(input.internalDate),
+  } as FetchMessageObject, input.id);
+}
+
+/** @internal Test-only reconstruction entry used by both IMAP read pipelines. */
+export function taskFromParsedMessagesForTests(id: string, messages: ParsedTaskMessage[]): Task | null {
+  return taskFromParsedMessages(id, messages);
+}
+
 /** Narrow watcher bridge: it deliberately returns only parser-authenticated
  * approval event kind, never an action/body snapshot. */
 export async function approvalEventForWatcher(message: FetchMessageObject): Promise<ApprovalEvent | null> {
@@ -2582,6 +2933,7 @@ export const taskService: TaskService = {
   createApproval: createApprovalTask,
   list: listTasks,
   listBoard: listTaskBoard,
+  listChildren: listTaskChildren,
   getForAuthorization: getTaskSnapshot,
   get: getTask,
   update: updateTask,

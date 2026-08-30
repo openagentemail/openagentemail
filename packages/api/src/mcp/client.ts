@@ -118,6 +118,7 @@ export interface Task {
   state: TaskState;
   createdAt: string;
   updatedAt: string;
+  parentTaskId?: string;
   messages: TaskMessage[];
   result?: unknown;
   kind?: 'approval';
@@ -391,8 +392,9 @@ export class OpenAgentEmailClient {
     subject: string,
     body: string,
     wait = false,
+    parentTaskId?: string,
   ): Promise<Task> {
-    return this.request("POST", "/v1/tasks", { to, subject, body, wait });
+    return this.request("POST", "/v1/tasks", { to, subject, body, wait, ...(parentTaskId === undefined ? {} : { parentTaskId }) });
   }
 
   /** Additive approval creation. Ordinary createTask bytes remain unchanged. */
@@ -403,6 +405,7 @@ export class OpenAgentEmailClient {
     expiresAt: string,
     body?: string,
     wait = false,
+    parentTaskId?: string,
   ): Promise<Task> {
     return this.request("POST", "/v1/tasks", {
       to,
@@ -411,6 +414,7 @@ export class OpenAgentEmailClient {
       kind: 'approval',
       approval: { action, expiresAt },
       wait,
+      ...(parentTaskId === undefined ? {} : { parentTaskId }),
     });
   }
 
@@ -424,6 +428,14 @@ export class OpenAgentEmailClient {
 
   getTask(id: string, wait = false): Promise<Task> {
     return this.request("GET", `/v1/tasks/${encodeURIComponent(id)}${wait ? "?wait=true" : ""}`);
+  }
+
+  async listTaskChildren(parentTaskId: string, limit?: 20 | 50 | 100, cursor?: string): Promise<{ children: Task[]; nextCursor: string | null }> {
+    const params = new URLSearchParams();
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (cursor !== undefined) params.set('cursor', cursor);
+    const suffix = params.size ? `?${params.toString()}` : '';
+    return this.request('GET', `/v1/tasks/${encodeURIComponent(parentTaskId)}/children${suffix}`);
   }
 
   updateTask(

@@ -247,6 +247,7 @@ describe('MCP HTTP 工具', () => {
       'notify_user',
       'notify_verify',
       'task_create',
+      'task_list_children',
       'task_decide',
       'task_get',
       'task_list',
@@ -300,14 +301,14 @@ describe('MCP HTTP 工具', () => {
     });
   });
 
-  test('#56 RED：identity token tools/list 同样返回 19 工具', async () => {
+  test('#56/#58：identity token tools/list returns the full tool inventory', async () => {
     const { token } = createIdentity({ localpart: 'mcp-list-id' })!;
     const res = await mcpRequest(token, 'tools/list');
     expect(res.status).toBe(200);
     const body = (await readMcpJson(res)) as {
       result?: { tools?: unknown[] };
     };
-    expect(body.result?.tools?.length).toBe(19);
+    expect(body.result?.tools?.length).toBe(20);
   });
 
   test('mail_list_identities 无状态直连：连续两请求无 session 头各自成功', async () => {
@@ -575,17 +576,19 @@ describe('MCP registered task handlers execute through the production HTTP trans
     const ordinary = {
       id: 'ac1b2c3d-e5f6-4780-8bcd-ef1234567890', from: requester.identity.address, to: reviewer.identity.address,
       subject: 'Ordinary handler task', state: 'submitted' as const,
-      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [], parentTaskId: 'dc1b2c3d-e5f6-4780-8bcd-ef1234567890',
     };
     const action = { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } };
     const approval = {
       id: 'bc1b2c3d-e5f6-4780-8bcd-ef1234567890', from: requester.identity.address, to: reviewer.identity.address,
       subject: 'Approval handler task', state: 'input-required' as const,
       createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [],
-      kind: 'approval' as const,
+      kind: 'approval' as const, parentTaskId: 'dc1b2c3d-e5f6-4780-8bcd-ef1234567890',
       approval: { action, reviewer: reviewer.identity.address, expiresAt: '2030-08-25T00:00:00.000Z', digest: 'a'.repeat(64) },
     };
     const calls: { ordinary?: unknown; approval?: unknown; decide?: unknown } = {};
+    const parentId = 'dc1b2c3d-e5f6-4780-8bcd-ef1234567890';
+    const parent = { ...ordinary, id: parentId, subject: 'durable parent' };
     const unused = async () => { throw new Error('unused in MCP handler fixture'); };
     const handlerApp = createApp({
       uiEnabled: false,
@@ -596,7 +599,7 @@ describe('MCP registered task handlers execute through the production HTTP trans
           calls.decide = input;
           return { ...approval, state: 'completed' as const, result: { decision: input.decision } };
         },
-        list: unused, listBoard: unused, get: async (id) => id === approval.id ? approval : null,
+        list: unused, listBoard: unused, getForAuthorization: async (id) => id === parentId ? parent : id === approval.id ? approval : ordinary, get: async (id) => id === approval.id ? approval : null,
         update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
       },
     });
@@ -608,11 +611,11 @@ describe('MCP registered task handlers execute through the production HTTP trans
       });
 
     const ordinaryResponse = await call(requester.token, 'task_create', {
-      to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body',
+      to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body', parentTaskId: parentId,
     }, 801);
     const approvalResponse = await call(requester.token, 'task_create', {
       to: reviewer.identity.address, subject: approval.subject, body: 'record only', kind: 'approval',
-      approval: { action, expiresAt: approval.approval.expiresAt },
+      approval: { action, expiresAt: approval.approval.expiresAt }, parentTaskId: parentId,
     }, 802);
     const decideResponse = await call(reviewer.token, 'task_decide', {
       id: approval.id, decision: 'approved',
@@ -623,14 +626,65 @@ describe('MCP registered task handlers execute through the production HTTP trans
       expect(body.result?.isError, JSON.stringify(body)).toBeFalsy();
     }
     expect(calls).toEqual({
-      ordinary: { from: requester.identity.address, to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body' },
+      ordinary: { from: requester.identity.address, to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body', parentTaskId: parentId },
       approval: {
         from: requester.identity.address, to: reviewer.identity.address, subject: approval.subject, body: 'record only',
-        action, expiresAt: '2030-08-25T00:00:00.000Z',
+        action, expiresAt: '2030-08-25T00:00:00.000Z', parentTaskId: parentId,
       },
       // The handler received no `from`; the REST identity binding supplied it.
       decide: { id: approval.id, from: reviewer.identity.address, decision: 'approved' },
     });
+    const acceptedCalls = structuredClone(calls);
+    for (const [id, invalidParent] of [
+      [804, '018f8d1d-4d7e-7b0a-8000-000000000000'],
+      [805, '018f8d1d-4d7e-8b0a-8000-000000000000'],
+    ] as const) {
+      const invalid = await call(requester.token, 'task_create', {
+        to: reviewer.identity.address, subject: ordinary.subject, body: 'ordinary body', parentTaskId: invalidParent,
+      }, id);
+      expect(invalid.status).toBe(200);
+      expect((await readMcpJson(invalid) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
+      expect(calls).toEqual(acceptedCalls);
+    }
+  });
+
+  test('R3 task_list_children forwards the scoped cursor request through production MCP transport', async () => {
+    const requester = createIdentity({ localpart: `r3-children-${crypto.randomUUID().slice(0, 8)}` })!;
+    const recipient = createIdentity({ localpart: `r3-child-recipient-${crypto.randomUUID().slice(0, 8)}` })!;
+    const parentId = 'ec1b2c3d-e5f6-4780-8bcd-ef1234567890';
+    const childId = 'fc1b2c3d-e5f6-4780-8bcd-ef1234567890';
+    const parent = { id: parentId, from: requester.identity.address, to: recipient.identity.address, subject: 'parent', state: 'submitted' as const, createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', messages: [] };
+    const child = { ...parent, id: childId, subject: 'child', parentTaskId: parentId };
+    let seen: unknown; let rejectParent = false; let listChildrenCalls = 0;
+    const hiddenParent = { ...parent, from: 'hidden@test.example', to: 'also-hidden@test.example' };
+    const unused = async () => { throw new Error('unused R3 child handler fixture'); };
+    const handlerApp = createApp({ uiEnabled: false, taskService: {
+      create: unused, list: unused, listBoard: unused, get: async (id) => id === parentId ? parent : null,
+      getForAuthorization: async (id) => id === parentId ? (rejectParent ? hiddenParent : parent) : null,
+      listChildren: async (query, viewer) => { listChildrenCalls += 1; seen = { query, viewer }; return { children: [child], nextCursor: 'opaque-next' }; },
+      update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
+    } });
+    const call = (args: Record<string, unknown>, id: number) => handlerApp.request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${requester.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'task_list_children', arguments: args } }) });
+    const response = await call({ parentTaskId: parentId, limit: 50, cursor: 'opaque-input' }, 880);
+    expect(response.status).toBe(200); const body = await readMcpJson(response) as any;
+    expect(body.result?.isError).toBeFalsy(); expect(body.result?.structuredContent).toEqual({ children: [child], nextCursor: 'opaque-next' });
+    expect(seen).toEqual({ query: { parentTaskId: parentId, limit: 50, cursor: 'opaque-input' }, viewer: { kind: 'identity', address: requester.identity.address } });
+    rejectParent = true;
+    const denied = await call({ parentTaskId: parentId, limit: 20 }, 881);
+    expect(denied.status).toBe(200); const deniedBody = await readMcpJson(denied) as any;
+    const deniedText = JSON.stringify(deniedBody);
+    expect(deniedBody.result?.isError).toBe(true); expect(deniedBody.result?.structuredContent).toBeUndefined();
+    expect(deniedText).toContain('Forbidden (403): forbidden: task participant required');
+    expect(deniedText).not.toContain('zod'); expect(deniedText).not.toContain('schema'); expect(deniedText).not.toContain('stack'); expect(listChildrenCalls).toBe(1);
+    for (const [id, invalidParent] of [
+      [882, '018f8d1d-4d7e-7b0a-8000-000000000000'],
+      [883, '018f8d1d-4d7e-8b0a-8000-000000000000'],
+    ] as const) {
+      const invalid = await call({ parentTaskId: invalidParent, limit: 20 }, id);
+      expect(invalid.status).toBe(200);
+      expect((await readMcpJson(invalid) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
+      expect(listChildrenCalls).toBe(1);
+    }
   });
 
   test('R9 proof: real HTTP MCP lease calls bind identity, validate schema, and redact renew/release', async () => {

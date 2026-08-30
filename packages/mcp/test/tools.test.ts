@@ -42,7 +42,7 @@ mock.module("@modelcontextprotocol/server/stdio", () => ({
 process.env.OPENAGENTEMAIL_API_KEY = "test-key";
 await import("../src/main.ts");
 
-test("#56 RED：19 个工具公布任务租约的 registry/schema 元数据", () => {
+test("#56/#58 tools registry/schema metadata", () => {
   const expected = [
     "mail_new_identity",
     "mail_list_identities",
@@ -56,6 +56,7 @@ test("#56 RED：19 个工具公布任务租约的 registry/schema 元数据", ()
     "notify_check",
     "notify_verify",
     "task_create",
+    "task_list_children",
     "task_list",
     "task_get",
     "task_update",
@@ -129,6 +130,22 @@ test("mail_list_messages limit 不能超出 REST API 接受的范围", () => {
   // GET /v1/messages 的 zod 是 .max(200)，201 会被服务端以 400 拒掉。
   expect(limit.safeParse(201).success).toBe(false);
   expect(limit.safeParse(500).success).toBe(false);
+});
+
+test('#58 R3 RED: task tools accept the authenticated parent pointer and expose bounded direct-child reads', () => {
+  const taskCreate = toolSchemas.get('task_create');
+  const children = toolSchemas.get('task_list_children');
+  expect(taskCreate, 'task_create must retain REST parentTaskId parity').toBeDefined();
+  expect(taskCreate!.parentTaskId.safeParse('f0c4a8e6-1e22-4c66-8c2f-0955a20d81bf').success).toBe(true);
+  expect(taskCreate!.parentTaskId.safeParse('not-a-uuid').success).toBe(false);
+  expect(taskCreate!.parentTaskId.safeParse('018f8d1d-4d7e-7b0a-8000-000000000000').success).toBe(false);
+  expect(taskCreate!.parentTaskId.safeParse('018f8d1d-4d7e-8b0a-8000-000000000000').success).toBe(false);
+  expect(children, 'task_list_children must be registered').toBeDefined();
+  expect(children!.parentTaskId.safeParse('f0c4a8e6-1e22-4c66-8c2f-0955a20d81bf').success).toBe(true);
+  expect(children!.parentTaskId.safeParse('018f8d1d-4d7e-7b0a-8000-000000000000').success).toBe(false);
+  expect(children!.parentTaskId.safeParse('018f8d1d-4d7e-8b0a-8000-000000000000').success).toBe(false);
+  expect(children!.limit.safeParse(20).success).toBe(true);
+  expect(children!.limit.safeParse(21).success).toBe(false);
 });
 
 test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放过去", () => {

@@ -39,7 +39,8 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `notify_agent(name, title, message, level?, tags?)` | Wake a named agent without exposing a topic or ntfy credential |
 | `notify_check(since?)` | Read recent notifications for the calling identity only |
 | `notify_verify()` | Send and poll a harmless server-side notification self-check |
-| `task_create(to, subject, body, wait?)` | Assign an email-backed task to another managed identity; typed approvals add `kind: "approval"` with `approval:{action,expiresAt}`; `wait:true` waits up to 10 minutes for a terminal state |
+| `task_create(to, subject, body, wait?, parentTaskId?)` | Assign an email-backed task; `parentTaskId` must be a durable readable parent and never changes task state |
+| `task_list_children(parentTaskId, limit?, cursor?)` | List only direct readable children (20/50/100, default 20); cursor is scoped to parent and caller, with no totals or descendants |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
 | `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |
 | `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer |
@@ -47,6 +48,8 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `task_list(state?)` | List this identity's task threads, optionally by current state |
 | `task_get(id, wait?)` | Read one task thread and its stamped state history; `wait:true` waits up to 10 minutes |
 | `task_update(id, state, body?, result?, leaseToken?)` | Advance a participating task; `result` is written as a JSON block in the reply body |
+
+`parentTaskId` is optional only at task creation and immutable afterward. When supplied it is authenticated in the signed creation root and survives IMAP reconstruction. `task_list_children` returns only direct children readable by the caller, bounded to 20/50/100 with an opaque scoped continuation; it exposes no hidden/global total or descendants. Parent and child state are independent: this API/MCP change has no automatic completion/failure propagation, scheduling, agent selection, result sharing, or descendant automation. Dashboard ancestry and rollup are intentionally not part of this backend/API/MCP change; the UI remains frozen.
 
 Typed approval actions are JSON-only and limited to 65,536 canonical UTF-8 bytes, root-inclusive depth 10, and a server-clock lifetime of 30 days. Exact limits pass; REST and MCP surface `approval_action_too_large`, `approval_action_too_deep`, or `approval_expiry_too_far` as stable client errors when a bound is exceeded.
 

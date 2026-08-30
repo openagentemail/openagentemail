@@ -13,6 +13,7 @@ import {
   TASK_LEASE_MAX_SEC,
   TASK_LEASE_REASON_MAX_CHARS,
   TASK_LEASE_MIN_SEC,
+  isTaskId,
   taskParticipants,
   taskService,
   toTaskLeaseGrantView,
@@ -29,6 +30,7 @@ const createSchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1).max(998),
   body: z.string().max(1_000_000).optional(),
+  parentTaskId: z.string().refine(isTaskId).optional(),
   /** Additive #55 request creation; decision route stays frozen for R3. */
   kind: z.literal('approval').optional(),
   approval: z.object({
@@ -75,6 +77,7 @@ const decisionSchema = z.object({
 
 const listSchema = z.object({ state: taskStateSchema.optional() });
 const getSchema = z.object({ wait: z.enum(['true', 'false']).optional() });
+const childrenSchema = z.object({ limit: z.coerce.number().refine((value) => value === 20 || value === 50 || value === 100).optional(), cursor: z.string().optional() });
 
 function actorAddress(c: Context, supplied: string | undefined): string | Response {
   const auth = getAuth(c);
@@ -91,6 +94,14 @@ function actorAddress(c: Context, supplied: string | undefined): string | Respon
 function canReadTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
+}
+
+/** Relationship edges are independently ACL-scoped; the base task stays readable. */
+function taskViewFor(c: Context, task: Task, parent: Task | null | undefined) {
+  const view = toTaskView(task);
+  return task.parentTaskId && parent && canReadTask(c, parent)
+    ? { ...view, parentTaskId: task.parentTaskId }
+    : view;
 }
 
 function authorizationTask(service: TaskService, id: string): Promise<Task | null> {
@@ -174,6 +185,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
             to: parsed.data.to.toLowerCase(),
             subject: parsed.data.subject,
             ...(parsed.data.body !== undefined ? { body: parsed.data.body } : {}),
+            ...(parsed.data.parentTaskId !== undefined ? { parentTaskId: parsed.data.parentTaskId } : {}),
             action: parsed.data.approval!.action,
             expiresAt: parsed.data.approval!.expiresAt,
           })
@@ -182,16 +194,21 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
             to: parsed.data.to.toLowerCase(),
             subject: parsed.data.subject,
             body: parsed.data.body!,
+            ...(parsed.data.parentTaskId !== undefined ? { parentTaskId: parsed.data.parentTaskId } : {}),
           });
-        if (!parsed.data.wait) return c.json(toTaskView(task), 201);
+        const parent = task.parentTaskId ? await authorizationTask(service, task.parentTaskId) : null;
+        if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
         // `wait` deliberately has one capped server turn. Long tasks are
         // resumed by asking task_get or calling task_create(wait) again.
         const waited = await waitWithSlot(c, service, task, from);
         if (waited instanceof Response) return waited;
-        return c.json(toTaskView(waited ?? task), 201);
+        return c.json(taskViewFor(c, waited ?? task, parent), 201);
       } catch (err) {
         const code = (err as Error).message;
-        if (code === 'invalid_approval_expiry') return c.json({ error: 'invalid_request' }, 400);
+        if (code === 'invalid_approval_expiry' || code === 'invalid_parent_task_id') return c.json({ error: 'invalid_request' }, 400);
+        if (code === 'parent_task_not_found') return c.json({ error: 'not_found' }, 404);
+        if (code === 'parent_task_sender_not_participant') return c.json({ error: 'forbidden: task participant required' }, 403);
+        if (code === 'parent_task_invalid_chain') return c.json({ error: 'task_parent_invalid' }, 409);
         if (code === 'approval_action_too_large' || code === 'approval_action_too_deep' || code === 'approval_expiry_too_far') {
           return c.json({ error: code }, 400);
         }
@@ -202,13 +219,33 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
     .get('/', async (c) => {
       const parsed = listSchema.safeParse(c.req.query());
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
-      const tasks = await service.list(parsed.data.state);
+      // One durable snapshot keeps state filtering and parent projection coherent
+      // without a second IMAP scan or a state-filtered parent map.
+      const allTasks = await service.list();
+      const tasks = parsed.data.state === undefined
+        ? allTasks
+        : allTasks.filter((task) => task.state === parsed.data.state);
       const auth = getAuth(c);
-      return c.json({
-        tasks: auth.kind === 'admin'
-          ? tasks.map(toTaskView)
-          : tasks.filter((task) => taskParticipants(task).has(auth.address)).map(toTaskView),
-      });
+      const visible = auth.kind === 'admin' ? tasks : tasks.filter((task) => taskParticipants(task).has(auth.address));
+      const byId = new Map(allTasks.map((task) => [task.id, task]));
+      return c.json({ tasks: visible.map((task) => taskViewFor(c, task, task.parentTaskId ? byId.get(task.parentTaskId) : null)) });
+    })
+    .get('/:id/children', async (c) => {
+      const id = taskIdSchema.safeParse(c.req.param('id'));
+      const query = childrenSchema.safeParse(c.req.query());
+      if (!id.success || !query.success) return c.json({ error: 'invalid_request' }, 400);
+      const parent = await authorizationTask(service, id.data);
+      if (!parent) return c.json({ error: 'not_found' }, 404);
+      if (!canReadTask(c, parent)) return c.json({ error: 'forbidden: task participant required' }, 403);
+      if (!service.listChildren) return c.json({ error: 'not_found' }, 404);
+      try {
+        const auth = getAuth(c);
+        const page = await service.listChildren({ parentTaskId: id.data, limit: (query.data.limit ?? 20) as 20 | 50 | 100, ...(query.data.cursor ? { cursor: query.data.cursor } : {}) }, auth.kind === 'admin' ? { kind: 'admin' } : { kind: 'identity', address: auth.address });
+        return c.json({ children: page.children.map((child) => taskViewFor(c, child, parent)), nextCursor: page.nextCursor });
+      } catch (err) {
+        if ((err as Error).message === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
+        throw err;
+      }
     })
     .get('/:id', async (c) => {
       const parsed = taskIdSchema.safeParse(c.req.param('id'));
@@ -222,12 +259,13 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         ? await service.get(parsed.data)
         : authorization;
       if (!task) return c.json({ error: 'not_found' }, 404);
-      if (query.data.wait !== 'true') return c.json(toTaskView(task));
+      const parent = task.parentTaskId ? await authorizationTask(service, task.parentTaskId) : null;
+      if (query.data.wait !== 'true') return c.json(taskViewFor(c, task, parent));
       const auth = getAuth(c);
       const address = auth.kind === 'identity' ? auth.address : task.from;
       const waited = await waitWithSlot(c, service, task, address);
       if (waited instanceof Response) return waited;
-      return c.json(toTaskView(waited ?? task));
+      return c.json(taskViewFor(c, waited ?? task, parent));
     })
     .post('/:id/claim', async (c) => {
       const id = taskIdSchema.safeParse(c.req.param('id'));

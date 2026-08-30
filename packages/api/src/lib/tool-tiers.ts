@@ -34,6 +34,7 @@ export const TOOL_TIER_SPEC = {
   notify_check: 'read',
   task_list: 'read',
   task_get: 'read',
+  task_list_children: 'read',
   // minimal
   mail_mark_seen: 'minimal',
   task_create: 'minimal',

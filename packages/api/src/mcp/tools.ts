@@ -14,6 +14,7 @@ import {
   TOOL_TIER_SPEC,
   type ToolTier,
 } from "../lib/tool-tiers.ts";
+import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
 
@@ -24,6 +25,7 @@ export function registerOpenAgentEmailTools(
   server: McpServer,
   client: OpenAgentEmailClient,
 ): void {
+  const durableTaskIdSchema = z.string().refine(isTaskId, 'Invalid task UUID');
   /**
    * 注册处声明级别。主力护栏是收尾 assertAllSpecTiersDeclared()——
    * 漏调本函数则 declared 缺项、收尾必炸（declared 不预填 SPEC）。
@@ -195,6 +197,7 @@ export function registerOpenAgentEmailTools(
     state: taskStateSchema,
     createdAt: z.string(),
     updatedAt: z.string(),
+    parentTaskId: z.string().uuid().optional(),
     messages: z.array(taskMessageSchema),
     result: z.unknown().optional(),
     kind: z.literal('approval').optional(),
@@ -209,6 +212,10 @@ export function registerOpenAgentEmailTools(
 
   const taskListOutputSchema = {
     tasks: z.array(z.object(taskOutputSchema)),
+  };
+  const taskChildrenOutputSchema = {
+    children: z.array(z.object(taskOutputSchema)),
+    nextCursor: z.string().nullable(),
   };
 
   const taskLeaseGrantOutputSchema = {
@@ -535,17 +542,35 @@ export function registerOpenAgentEmailTools(
           .describe(
             "Wait up to MCP_MAX_WAIT_SECONDS for completed or failed (default false; schema legacy max 600)",
           ),
+        parentTaskId: durableTaskIdSchema.optional().describe('Optional authenticated durable parent task UUID.'),
       },
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
     },
-    ({ to, subject, body, kind, approval, wait }) => callApi(() => {
+    ({ to, subject, body, kind, approval, wait, parentTaskId }) => callApi(() => {
       if (kind === 'approval' && approval) {
-        return client.createApprovalTask(to, subject, approval.action, approval.expiresAt, body, wait ?? false);
+        return client.createApprovalTask(to, subject, approval.action, approval.expiresAt, body, wait ?? false, parentTaskId);
       }
       if (kind === 'approval' || approval || body === undefined) throw new Error('approval task_create requires approval; ordinary task_create requires body');
-      return client.createTask(to, subject, body, wait ?? false);
+      return client.createTask(to, subject, body, wait ?? false, parentTaskId);
     }),
+  );
+
+  tier('task_list_children', 'read');
+  server.registerTool(
+    'task_list_children',
+    {
+      title: 'List Direct Task Children',
+      description: 'List only direct readable children of a readable parent. Results are viewer-filtered before paging and contain no totals or descendants.',
+      inputSchema: {
+        parentTaskId: durableTaskIdSchema.describe('Readable parent task UUID'),
+        limit: z.union([z.literal(20), z.literal(50), z.literal(100)]).optional(),
+        cursor: z.string().optional(),
+      },
+      outputSchema: taskChildrenOutputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    ({ parentTaskId, limit, cursor }) => callApi(() => client.listTaskChildren(parentTaskId, limit, cursor)),
   );
 
   tier("task_list", "read");
