@@ -280,6 +280,43 @@ test('R1a RED: parser integrity signal poisons get/list reconstruction instead o
   expect(integrity.taskFromParsedMessagesForTests!(ID, [poisoned, validLater])).toBeNull();
 });
 
+test('R5g an intact authenticated root survives injected tampered and stripped replays', async () => {
+  const intact = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 1, source: rootSource(ID, PARENT), internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  const tampered = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 2,
+    source: changeHeader(
+      rootSource(ID, PARENT),
+      'X-OA-Task-Root',
+      Buffer.from(`{"version":2,"parentTaskId":"${OTHER_PARENT}"}`, 'utf8').toString('base64url'),
+    ),
+    internalDate: '2026-08-30T00:01:00.000Z',
+  });
+  const stripped = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 3,
+    source: removeHeader(rootSource(ID, PARENT), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:02:00.000Z',
+  });
+  const later = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 4,
+    source: rfc822({
+      from: TO, to: [FROM], subject: 'Signed root', text: 'working',
+      headers: { 'X-OA-Task': ID, 'X-OA-Task-State': 'working', 'X-OA-Task-Stamp': v1Stamp(ID, 'working', TO, FROM) },
+    }),
+    internalDate: '2026-08-30T00:03:00.000Z',
+  });
+  expect(tampered).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID });
+  expect(stripped).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID });
+  expect(integrity.taskFromParsedMessagesForTests!(ID, [intact, tampered, stripped, later])).toMatchObject({
+    parentTaskId: PARENT,
+    state: 'working',
+  });
+});
+
 test('R5a: deleting a v2 root header cannot downgrade ordinary or approval history to parentless', async () => {
   tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();

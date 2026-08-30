@@ -1098,8 +1098,16 @@ async function parseTaskMessageWithIntegrity(message: FetchMessageObject, id: st
 }
 
 function taskFromParsedMessages(id: string, messages: ParsedTaskMessage[]): Task | null {
-  if (messages.some(isRelationshipIntegrityFailure)) return null;
-  return taskFromMessages(id, messages.filter((message): message is RawTaskMessage => !!message));
+  const authenticated = messages.filter((message): message is RawTaskMessage => !!message && !isRelationshipIntegrityFailure(message));
+  // An injected stripped/tampered replay cannot suppress an intact authenticated
+  // relationship root already present in the same durable history. The marker
+  // remains fail-closed only when no such root survives, preventing downgrade
+  // after the real creation root was removed or corrupted.
+  if (
+    messages.some(isRelationshipIntegrityFailure)
+    && !authenticated.some((message) => message.parentTaskId !== undefined)
+  ) return null;
+  return taskFromMessages(id, authenticated);
 }
 
 function toPublicTaskMessage(message: RawTaskMessage): TaskMessage {
