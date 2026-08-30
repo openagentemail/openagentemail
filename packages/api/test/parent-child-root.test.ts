@@ -47,10 +47,12 @@ for (const localpart of ['root-from', 'root-to']) {
 
 beforeEach(() => {
   tasks.setTaskGetForTests(async (id) => id === PARENT ? authenticatedTask(PARENT) : null);
+  tasks.setTaskListAllForTests(async () => [await authenticatedTask(PARENT)]);
 });
 
 afterEach(() => {
   tasks.setTaskGetForTests(null);
+  tasks.setTaskListAllForTests(null);
   tasks.setTaskSendMailForTests(null);
   tasks.clearQueuedEventsForTests();
   tasks.setTaskNowForTests(null);
@@ -424,7 +426,8 @@ test('R2 parent validation rejects unavailable/nonparticipant chains before deli
   expect(integrity.observeTaskSideEffectsForTests).toBeFunction();
   const effects = integrity.observeTaskSideEffectsForTests!();
   const parents = new Map<string, Task>();
-  tasks.setTaskGetForTests(async (id) => parents.get(id) ?? null);
+  const useParents = () => tasks.setTaskListAllForTests(async () => [...parents.values()].filter((task): task is Task => !!task));
+  useParents();
   let unknownChild: Task | undefined;
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'no parent', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]).then((task) => { unknownChild = task; }))
     .rejects.toThrow('parent_task_not_found');
@@ -432,6 +435,7 @@ test('R2 parent validation rejects unavailable/nonparticipant chains before deli
   expect(unknownChild).toBeUndefined();
   expect(effects).toEqual({ notifications: [], cacheInvalidations: 0, queuedTaskIds: [] });
   parents.set(PARENT, await authenticatedTask(PARENT, 'other@test.example', TO));
+  useParents();
   let nonparticipantApproval: Task | undefined;
   await expect(tasks.createApprovalTask({ from: FROM, to: TO, subject: 'not participant', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]).then((task) => { nonparticipantApproval = task; }))
     .rejects.toThrow('parent_task_sender_not_participant');
@@ -439,6 +443,7 @@ test('R2 parent validation rejects unavailable/nonparticipant chains before deli
   expect(nonparticipantApproval).toBeUndefined();
   expect(effects).toEqual({ notifications: [], cacheInvalidations: 0, queuedTaskIds: [] });
   parents.set(PARENT, await authenticatedTask(PARENT));
+  useParents();
   const ordinary = await tasks.createTask({ from: FROM, to: TO, subject: 'accepted', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
   const approval = await tasks.createApprovalTask({ from: FROM, to: TO, subject: 'accepted approval', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]);
   expect(ordinary.parentTaskId).toBe(PARENT);
@@ -452,7 +457,7 @@ test('R2 parent validation rejects unavailable/nonparticipant chains before deli
 test('R2 rejects a just-created synthetic parent until its authenticated root is durably reconstructed', async () => {
   const sent = capture();
   const effects = integrity.observeTaskSideEffectsForTests!();
-  tasks.setTaskGetForTests(async () => null);
+  tasks.setTaskListAllForTests(async () => []);
   const syntheticParent = await tasks.createTask({ from: FROM, to: TO, subject: 'not indexed', body: 'body' });
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'child', body: 'body', parentTaskId: syntheticParent.id } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_not_found');
@@ -468,7 +473,12 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
   const parents = new Map<string, Task>();
   parents.set(PARENT, await authenticatedTask(PARENT, FROM, TO, OTHER_PARENT));
   parents.set(OTHER_PARENT, await authenticatedTask(OTHER_PARENT, FROM, TO, PARENT));
-  tasks.setTaskGetForTests(async (id) => parents.get(id) ?? null);
+  let snapshotReads = 0;
+  const useParents = () => tasks.setTaskListAllForTests(async () => {
+    snapshotReads += 1;
+    return [...parents.values()].filter((task): task is Task => !!task);
+  });
+  useParents();
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'cycle', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_invalid_chain');
   expect(sent).toHaveLength(0);
@@ -480,15 +490,18 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
   expect(integrity.taskFromParsedMessagesForTests!(OTHER_PARENT, [malformedRaw])).toBeNull();
   parents.set(PARENT, await authenticatedTask(PARENT, FROM, TO, OTHER_PARENT));
   parents.set(OTHER_PARENT, null as unknown as Task);
+  useParents();
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'malformed', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_invalid_chain');
   parents.set(PARENT, await authenticatedTask(PARENT, FROM, TO, OTHER_PARENT));
   parents.delete(OTHER_PARENT);
+  useParents();
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'missing ancestor', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_invalid_chain');
 
   parents.clear();
   parents.set(PARENT, await authenticatedTask(PARENT));
+  useParents();
   expect(integrity.setTaskIdForTests).toBeFunction();
   integrity.setTaskIdForTests!(() => PARENT);
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'self', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]))
@@ -500,28 +513,42 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
   const valid = Array.from({ length: 64 }, (_, index) => chainId(index));
   parents.clear();
   for (const [index, id] of valid.entries()) parents.set(id, await authenticatedTask(id, FROM, TO, valid[index + 1]));
+  useParents();
+  snapshotReads = 0;
   await tasks.createTask({ from: FROM, to: TO, subject: 'depth 64', body: 'body', parentTaskId: valid[0]! } as Parameters<typeof tasks.createTask>[0]);
+  expect(snapshotReads).toBe(1);
   const overflow = Array.from({ length: 65 }, (_, index) => chainId(index + 100));
   parents.clear();
   for (const [index, id] of overflow.entries()) parents.set(id, await authenticatedTask(id, FROM, TO, overflow[index + 1]));
+  useParents();
+  snapshotReads = 0;
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'depth 65', body: 'body', parentTaskId: overflow[0]! } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_invalid_chain');
+  expect(snapshotReads).toBe(1);
   expect(sent).toHaveLength(1);
   expect(effects.notifications).toEqual([TO]);
   expect(effects.cacheInvalidations).toBe(1);
   expect(effects.queuedTaskIds).toEqual([]);
 });
 
-test('R2 parent validation is serialized inside the immediate-parent lock and cannot bypass failure', async () => {
-  const sent = capture();
+test('R5f parent validation uses one snapshot under the immediate-parent lock and delivers outside it', async () => {
+  const sent: SendInput[] = [];
   let releaseLookup!: () => void;
   const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
   let lookups = 0;
-  tasks.setTaskGetForTests(async (id) => {
-    expect(id).toBe(PARENT);
+  tasks.setTaskListAllForTests(async () => {
     lookups += 1;
     await lookupGate;
-    return authenticatedTask(PARENT);
+    return [await authenticatedTask(PARENT)];
+  });
+  let releaseFirstDelivery!: () => void;
+  const firstDeliveryGate = new Promise<void>((resolve) => { releaseFirstDelivery = resolve; });
+  let deliveries = 0;
+  tasks.setTaskSendMailForTests(async (input) => {
+    sent.push(input);
+    deliveries += 1;
+    if (deliveries === 1) await firstDeliveryGate;
+    return { messageId: `<parent-root-${deliveries}@test.example>` };
   });
   const first = tasks.createTask({ from: FROM, to: TO, subject: 'first', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
   while (lookups === 0) await Promise.resolve();
@@ -529,11 +556,14 @@ test('R2 parent validation is serialized inside the immediate-parent lock and ca
   await Promise.resolve();
   expect(lookups).toBe(1);
   releaseLookup();
-  await Promise.all([first, second]);
+  while (deliveries < 2) await Bun.sleep(1);
   expect(lookups).toBe(2);
+  expect(deliveries).toBe(2);
+  releaseFirstDelivery();
+  await Promise.all([first, second]);
   expect(sent).toHaveLength(2);
 
-  tasks.setTaskGetForTests(async () => authenticatedTask(PARENT, 'other@test.example', TO));
+  tasks.setTaskListAllForTests(async () => [await authenticatedTask(PARENT, 'other@test.example', TO)]);
   const rejected = await Promise.allSettled([
     tasks.createTask({ from: FROM, to: TO, subject: 'reject ordinary', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]),
     tasks.createApprovalTask({ from: FROM, to: TO, subject: 'reject approval', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]),

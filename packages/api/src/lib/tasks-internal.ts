@@ -1393,18 +1393,11 @@ async function getTaskSnapshot(id: string): Promise<Task | null> {
   return raw ? mergeQueuedEvents(raw) : null;
 }
 
-/** Durable authority only: R2 parent eligibility never trusts queued overlays. */
-async function getDurableTaskSnapshot(id: string): Promise<Task | null> {
-  if (!isTaskId(id)) return null;
-  return getTaskForTests
-    ? await getTaskForTests(id)
-    : taskFromParsedMessages(id, await findTaskMessages(id));
-}
-
 const PARENT_CHAIN_MAX = 64;
 
-async function validateParentChain(parentTaskId: string, childId: string, sender: string): Promise<void> {
-  const first = await getDurableTaskSnapshot(parentTaskId);
+function validateParentChain(snapshot: Task[], parentTaskId: string, childId: string, sender: string): void {
+  const byId = new Map(snapshot.map((task) => [task.id, task]));
+  const first = byId.get(parentTaskId) ?? null;
   if (!first) throw new Error('parent_task_not_found');
   if (!taskParticipants(first).has(sender.toLowerCase())) throw new Error('parent_task_sender_not_participant');
   const seen = new Set<string>();
@@ -1415,7 +1408,7 @@ async function validateParentChain(parentTaskId: string, childId: string, sender
     const next = current.parentTaskId;
     if (next === undefined) return;
     if (!isTaskId(next) || seen.size >= PARENT_CHAIN_MAX) throw new Error('parent_task_invalid_chain');
-    current = await getDurableTaskSnapshot(next);
+    current = byId.get(next) ?? null;
     if (!current) throw new Error('parent_task_invalid_chain');
   }
 }
@@ -1427,12 +1420,13 @@ async function withValidatedParent<T>(
   deliver: () => Promise<T>,
 ): Promise<T> {
   if (parentTaskId === undefined) return deliver();
-  // Parent pointers are immutable authenticated roots, so the immediate-parent
-  // lock serializes validation/delivery without ancestor multi-lock deadlocks.
-  return withTaskLock(parentTaskId, async () => {
-    await validateParentChain(parentTaskId, childId, sender);
-    return deliver();
+  // One durable cached IMAP snapshot validates the immutable ancestor chain.
+  // The immediate-parent lock serializes only validation; SMTP is deliberately
+  // outside the lock so a slow external round-trip cannot block peer creates.
+  await withTaskLock(parentTaskId, async () => {
+    validateParentChain(await loadImapTaskSnapshot(), parentTaskId, childId, sender);
   });
+  return deliver();
 }
 
 /** Service detail reads lazily make an expired approval terminal. There is no
