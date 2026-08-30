@@ -197,6 +197,8 @@ test('R3 REST get emits a readable parent edge and silently omits unavailable pa
   const first = await app(readable).request(`/v1/tasks/${CHILD}`); expect(first.status).toBe(200); expect((await first.json() as any).parentTaskId).toBe(PARENT);
   const unavailable = { ...readable, getForAuthorization: async (id: string) => id === CHILD ? child : null } as TaskService;
   const second = await app(unavailable).request(`/v1/tasks/${CHILD}`); expect(second.status).toBe(200); expect((await second.json() as any).parentTaskId).toBeUndefined();
+  const transient = { ...readable, getForAuthorization: async (id: string) => id === CHILD ? child : Promise.reject(new Error('transient_imap_failure')) } as TaskService;
+  const third = await app(transient).request(`/v1/tasks/${CHILD}`); expect(third.status).toBe(200); expect((await third.json() as any).parentTaskId).toBeUndefined();
 });
 
 test('R3 REST children maps unknown unreadable invalid limit and returns no totals', async () => {

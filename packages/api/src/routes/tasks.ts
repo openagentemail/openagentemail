@@ -111,6 +111,17 @@ function authorizationTask(service: TaskService, id: string): Promise<Task | nul
   return (read ?? service.get)(id);
 }
 
+async function projectedParentTask(service: TaskService, parentTaskId: string | undefined): Promise<Task | null> {
+  if (!parentTaskId) return null;
+  try {
+    return await authorizationTask(service, parentTaskId);
+  } catch {
+    // Parent edges are optional ACL projections. A transient read must not
+    // fail an already-durable create or an otherwise-readable child GET.
+    return null;
+  }
+}
+
 async function waitWithSlot(
   c: Context,
   service: TaskService,
@@ -196,15 +207,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
             body: parsed.data.body!,
             ...(parsed.data.parentTaskId !== undefined ? { parentTaskId: parsed.data.parentTaskId } : {}),
           });
-        let parent: Task | null = null;
-        if (task.parentTaskId) {
-          try {
-            parent = await authorizationTask(service, task.parentTaskId);
-          } catch {
-            // Delivery is already durable. A projection-only parent read must
-            // not turn success into a retryable 502 and duplicate the child.
-          }
-        }
+        const parent = await projectedParentTask(service, task.parentTaskId);
         if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
         // `wait` deliberately has one capped server turn. Long tasks are
         // resumed by asking task_get or calling task_create(wait) again.
@@ -270,7 +273,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         ? await service.get(parsed.data)
         : authorization;
       if (!task) return c.json({ error: 'not_found' }, 404);
-      const parent = task.parentTaskId ? await authorizationTask(service, task.parentTaskId) : null;
+      const parent = await projectedParentTask(service, task.parentTaskId);
       if (query.data.wait !== 'true') return c.json(taskViewFor(c, task, parent));
       const auth = getAuth(c);
       const address = auth.kind === 'identity' ? auth.address : task.from;
