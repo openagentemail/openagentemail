@@ -108,16 +108,24 @@ export class FakeOaeService {
   private readonly tasks = new Map<string, OaeTask>(); private readonly tokenIndex: Map<string, Actor>; private sequence = 0; private clockSequence = 0;
   readonly fetch: typeof globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init); const url = new URL(request.url); const actor = this.actor(request.headers.get('authorization'));
-    if (!actor) return json({ error: 'scoped authority required' }, 403); if (url.pathname === '/v1/identities') return json({ error: 'identity provisioning unavailable' }, 403);
-    if (url.pathname === '/v1/tasks' && request.method === 'GET') return json({ tasks: [...this.tasks.values()].filter((task) => task.from === actor.address || task.to === actor.address) });
-    if (url.pathname === '/v1/tasks' && request.method === 'POST') return json({ error: 'scenario tasks must be declaratively seeded' }, 403);
-    const match = /^\/v1\/tasks\/([^/]+)(?:\/state)?$/.exec(url.pathname); if (!match) return json({ error: 'not found' }, 404); let id: string; try { id = decodeURIComponent(match[1]!); } catch { return json({ error: 'not found' }, 404); } const task = this.tasks.get(id); if (!task || (task.from !== actor.address && task.to !== actor.address)) return json({ error: 'not found' }, 404);
+    if (!actor) return json({ error: 'scoped authority required' }, 403); const pathname = this.routedPath(actor, url); if (pathname === null) return json({ error: 'configured fake authority required' }, 403); if (pathname === '/v1/identities') return json({ error: 'identity provisioning unavailable' }, 403);
+    if (pathname === '/v1/tasks' && request.method === 'GET') return json({ tasks: [...this.tasks.values()].filter((task) => task.from === actor.address || task.to === actor.address) });
+    if (pathname === '/v1/tasks' && request.method === 'POST') return json({ error: 'scenario tasks must be declaratively seeded' }, 403);
+    const match = /^\/v1\/tasks\/([^/]+)(?:\/state)?$/.exec(pathname); if (!match) return json({ error: 'not found' }, 404); let id: string; try { id = decodeURIComponent(match[1]!); } catch { return json({ error: 'not found' }, 404); } const task = this.tasks.get(id); if (!task || (task.from !== actor.address && task.to !== actor.address)) return json({ error: 'not found' }, 404);
     if (request.method === 'GET') return json(task, 200, url.searchParams.get('wait') === 'true' ? { 'X-OAE-Wait-Timeout-Sec': '1' } : {});
-    if (request.method !== 'POST' || !url.pathname.endsWith('/state')) return json({ error: 'method' }, 405); const payload = await request.json() as { state?: unknown; body?: unknown; result?: unknown }; return this.update(task, actor, payload);
+    if (request.method !== 'POST' || !pathname.endsWith('/state')) return json({ error: 'method' }, 405); const payload = await request.json() as { state?: unknown; body?: unknown; result?: unknown }; return this.update(task, actor, payload);
   };
   constructor(private readonly scenario: Scenario, private readonly actors: Record<string, Actor>) { this.tokenIndex = new Map(Object.values(actors).map((actor) => [digest(actor.token), actor])); for (const seed of scenario.tasks) { const from = actors[seed.from]!.address; const to = actors[seed.to]!.address; const root: TaskMessage = { id: seed.rootMessageId, from, to, subject: seed.subject, date: this.time(), state: 'submitted', body: seed.body }; this.tasks.set(seed.id, { id: seed.id, from, to, subject: seed.subject, state: 'submitted', createdAt: root.date, updatedAt: root.date, messages: [root] }); } }
   task(id: string): OaeTask { const task = this.tasks.get(id); if (!task) throw new Error('missing seeded task'); return task; }
   private actor(header: string | null): Actor | null { if (!header?.startsWith('Bearer ')) return null; return this.tokenIndex.get(digest(header.slice('Bearer '.length))) ?? null; }
+  /** Route only a token holder's configured origin and whole base-path segment. */
+  private routedPath(actor: Actor, request: URL): string | null {
+    const base = new URL(actor.baseUrl); if (request.origin !== base.origin) return null;
+    const prefix = base.pathname === '/' ? '' : base.pathname.replace(/\/$/, '');
+    if (!prefix) return request.pathname;
+    if (!request.pathname.startsWith(`${prefix}/`)) return null;
+    return request.pathname.slice(prefix.length);
+  }
   private update(task: OaeTask, actor: Actor | null, payload: { state?: unknown; body?: unknown; result?: unknown }): Response { if (!actor || !state(payload.state)) return json({ error: 'scoped authority required' }, 403); const next = payload.state;
     const requester = task.from; const responder = task.to; const allowed = (next === 'input-required' && (task.state === 'submitted' || task.state === 'input-required') && actor.address === requester && typeof payload.body === 'string') || (next === 'working' && task.state === 'input-required' && actor.address === responder) || (next === 'completed' && task.state === 'working' && actor.address === responder && object(payload.result) && Object.keys(payload.result).length === 1 && ((payload.result as { decision?: unknown }).decision === 'approved' || (payload.result as { decision?: unknown }).decision === 'rejected'));
     if (!allowed) return json({ error: 'stale, contradictory, or unauthorized update' }, 409); const event: TaskMessage = { id: `event-${++this.sequence}`, from: actor.address, to: actor.address === requester ? responder : requester, subject: task.subject, date: this.time(), state: next, body: typeof payload.body === 'string' ? payload.body : next, ...(next === 'completed' ? { result: payload.result } : {}) }; const updated: OaeTask = { ...task, state: next, updatedAt: event.date, messages: [...task.messages, event], ...(next === 'completed' ? { result: payload.result } : {}) }; this.tasks.set(task.id, updated); return json(updated);

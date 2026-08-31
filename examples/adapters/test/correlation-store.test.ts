@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { access, chmod, mkdtemp, readdir, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readdir, rename, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { CorrelationSafetyError, CorrelationStore, createIntent, isCorrelationId, requestFingerprint, transition } from '../src/correlation-store.js';
 
 function intent(id = '11111111-1111-4111-8111-111111111111') {
   return createIntent({ framework: 'neutral', correlationId: id, operationKey: 'workflow/node/approval', requestFingerprint: requestFingerprint({ safe: 'request' }), expectedParticipants: { requester: 'asker@example.test', responder: 'reviewer@example.test' }, frameworkStateRef: 'sensitive-state.bin', approvalItemKey: null, now: '2026-01-01T00:00:00.000Z' });
 }
+const execFileAsync = promisify(execFile);
 
 test('store accepts only an adjacent durable phase machine with immutable fields', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'oae-correlation-'));
@@ -88,6 +91,23 @@ test('file safety requires exact 0600, rejects symlink/corruption, and clears fa
   const failing = new CorrelationStore(failedDirectory, { beforeRename: async () => { throw new Error('injected rename failure'); } });
   await assert.rejects(() => failing.save(intent('55555555-5555-4555-8555-555555555555')), /injected rename failure/);
   assert.deepEqual(await readdir(failedDirectory), []);
+});
+
+test('R5l correlation loads read one validated descriptor and refuse unsafe non-regular targets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oae-descriptor-load-'));
+  const id = '77777777-7777-4777-8777-777777777777'; const original = intent(id); const path = join(directory, `${id}.json`);
+  await new CorrelationStore(directory).save(original);
+  const replacement = { ...original, operationKey: 'workflow/node/replacement' };
+  const replacementPath = join(directory, 'replacement.json'); await writeFile(replacementPath, JSON.stringify(replacement), { mode: 0o600 });
+  const raced = new CorrelationStore(directory, { afterLoadValidation: async () => { await rename(replacementPath, path); } });
+  assert.equal((await raced.load(id)).operationKey, original.operationKey, 'the read must remain bound to the opened inode');
+  assert.equal((await new CorrelationStore(directory).load(id)).operationKey, replacement.operationKey, 'the replacement is visible only to a later open');
+
+  const fifoId = '88888888-8888-4888-8888-888888888888'; const fifo = join(directory, `${fifoId}.json`);
+  if (process.platform === 'linux') { await execFileAsync('mkfifo', [fifo]); const started = performance.now(); await assert.rejects(() => new CorrelationStore(directory).load(fifoId), CorrelationSafetyError); assert.ok(performance.now() - started < 1_000, 'non-regular FIFO load must not block'); }
+  const modeId = '99999999-9999-4999-8999-999999999999'; const modePath = join(directory, `${modeId}.json`); await writeFile(modePath, JSON.stringify(intent(modeId)), { mode: 0o600 }); await chmod(modePath, 0o640); await assert.rejects(() => new CorrelationStore(directory).load(modeId), CorrelationSafetyError);
+  const linkId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; await symlink(path, join(directory, `${linkId}.json`)); await assert.rejects(() => new CorrelationStore(directory).load(linkId), CorrelationSafetyError);
+  const ownerId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; const ownerPath = join(directory, `${ownerId}.json`); await writeFile(ownerPath, JSON.stringify(intent(ownerId)), { mode: 0o600 }); const getuid = process.getuid; Object.defineProperty(process, 'getuid', { configurable: true, value: () => (getuid?.() ?? 0) + 1 }); try { await assert.rejects(() => new CorrelationStore(directory).load(ownerId), CorrelationSafetyError); } finally { Object.defineProperty(process, 'getuid', { configurable: true, value: getuid }); }
 });
 
 test('per-record lock makes a concurrent durable transition fail busy instead of overwriting', async () => {

@@ -60,6 +60,17 @@ test('R4 ordinary polling observes non-terminal state while wait=true is termina
   assert.equal((await requester.get('scenario-task-1')).state, 'submitted'); const waiting = await requester.waitForTerminal('scenario-task-1'); assert.equal(waiting.task.state, 'submitted'); assert.equal(waiting.timeoutSec, 1); await requester.inputRequired('scenario-task-1', 'approve-or-reject'); await responder.working('scenario-task-1'); await responder.complete('scenario-task-1', { decision: 'approved' }); const terminal = await requester.waitForTerminal('scenario-task-1'); assert.equal(terminal.task.state, 'completed'); assert.equal(terminal.timeoutSec, 1);
 });
 
+test('R5l local fake service binds every scoped token to its validated origin and base-path prefix', async () => {
+  const input = await scenario('input-resume');
+  const httpsEnvironment = { ...environment, OPENAGENTEMAIL_API_URL: 'https://oae.example.test/tenant-a' }; const httpsCompleted = await runScenario({ scenario: input, environment: httpsEnvironment, stateDirectory: await stateDirectory('r5l-prefixed-https') }); assert.equal(httpsCompleted.state, 'completed'); const httpsService = createLocalFakeService(input, httpsEnvironment);
+  const requester = new OaeClient({ baseUrl: httpsEnvironment.OPENAGENTEMAIL_API_URL, token: httpsEnvironment.OAE_FIXTURE_REQUESTER_TOKEN, fetch: httpsService.fetch });
+  assert.equal((await requester.get('scenario-task-1')).id, 'scenario-task-1'); assert.equal((await requester.list()).length, 1);
+  for (const baseUrl of ['https://wrong.example.test/tenant-a', 'https://oae.example.test/tenant-a-confused', 'https://oae.example.test/tenant-ae']) {
+    const confused = new OaeClient({ baseUrl, token: httpsEnvironment.OAE_FIXTURE_REQUESTER_TOKEN, fetch: httpsService.fetch }); await assert.rejects(() => confused.get('scenario-task-1'));
+  }
+  const loopbackEnvironment = { ...environment, OPENAGENTEMAIL_API_URL: 'http://127.0.0.1/local-fixture' }; const completed = await runScenario({ scenario: input, environment: loopbackEnvironment, stateDirectory: await stateDirectory('r5l-prefixed-loopback') }); assert.equal(completed.state, 'completed');
+});
+
 test('R5c multi-task dispatch retains each task state while correlation mutates only the selected approval task', async () => {
   const input = structuredClone(await scenario('input-resume')); const second = structuredClone(input.tasks[0]!); second.id = 'scenario-task-2'; second.rootMessageId = 'root-2'; input.tasks.push(second);
   input.steps.push({ action: 'input-required', actor: 'requester', task: second.id, body: 'secondary-input' }, { action: 'working', actor: 'responder', task: second.id }, { action: 'completed', actor: 'responder', task: second.id, result: { decision: 'rejected' } });

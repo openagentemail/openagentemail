@@ -137,9 +137,8 @@ export class OaeClient {
   /** A single server-capped terminal wait. Non-terminal timeout returns are valid. */
   async waitForTerminal(id: string): Promise<WaitResult> {
     const { value, response } = await this.request<OaeTask>('wait for terminal task', `/v1/tasks/${encodeURIComponent(id)}?wait=true`, validTask, undefined, this.terminalWaitTimeoutMs);
-    const rawCap = response.headers.get('X-OAE-Wait-Timeout-Sec');
-    const timeoutSec = rawCap === null ? undefined : Number(rawCap);
-    return Number.isFinite(timeoutSec) ? { task: value, timeoutSec: timeoutSec! } : { task: value };
+    const timeoutSec = parseWaitTimeoutSec(response.headers.get('X-OAE-Wait-Timeout-Sec'));
+    return timeoutSec === undefined ? { task: value } : { task: value, timeoutSec };
   }
 
   async inputRequired(id: string, body: string): Promise<OaeTask> {
@@ -161,6 +160,13 @@ export class OaeClient {
     const payload = { state, ...(body === undefined ? {} : { body }), ...(result === undefined ? {} : { result }) };
     return (await this.request<OaeTask>('update task', `/v1/tasks/${encodeURIComponent(id)}/state`, validTask, { method: 'POST', body: JSON.stringify(payload) })).value;
   }
+}
+
+/** An untrusted server hint: accept only canonical decimal whole seconds within the documented cap. */
+function parseWaitTimeoutSec(raw: string | null): number | undefined {
+  if (raw === null || !/^[1-9]\d{0,2}$/.test(raw)) return undefined;
+  const value = Number(raw);
+  return value <= 900 ? value : undefined;
 }
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }

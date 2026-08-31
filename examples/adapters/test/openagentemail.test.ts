@@ -85,3 +85,11 @@ test('R5k terminal waits use their own finite scaled deadline while ordinary cal
   const caller = new AbortController(); let aborts = 0; const callerTimed = new OaeClient({ baseUrl: 'http://127.0.0.1', token: 'opaque-token', terminalWaitTimeoutMs: 60, signal: caller.signal, fetch: (async (_input, init) => new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => { aborts += 1; reject(new Error('caller-canary')); }, { once: true }))) as typeof fetch }); const pending = callerTimed.waitForTerminal('task-1'); caller.abort(); await assert.rejects(() => pending, (error: unknown) => error instanceof OaeRequestError && error.kind === 'aborted' && !error.message.includes('canary')); assert.equal(aborts, 1);
   for (const terminalWaitTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 900_001]) assert.throws(() => new OaeClient({ baseUrl: 'http://127.0.0.1', token: 'opaque-token', terminalWaitTimeoutMs, fetch: delayed as typeof fetch }));
 });
+
+test('R5l terminal-wait cap header accepts only canonical whole seconds from 1 through 900', async () => {
+  const wait = async (raw: string | null) => {
+    let calls = 0; const client = new OaeClient({ baseUrl: 'http://127.0.0.1', token: 'opaque-token', fetch: (async () => { calls += 1; return new Response(JSON.stringify(task('working')), { status: 200, headers: raw === null ? {} : { 'X-OAE-Wait-Timeout-Sec': raw } }); }) as typeof fetch }); const result = await client.waitForTerminal('task-1'); assert.equal(calls, 1); return result;
+  };
+  for (const raw of [null, '', '0', '-1', '1.5', '1e2', '901', '999', '060']) assert.equal((await wait(raw)).timeoutSec, undefined, String(raw));
+  for (const raw of ['1', '60', '600', '900']) assert.equal((await wait(raw)).timeoutSec, Number(raw));
+});

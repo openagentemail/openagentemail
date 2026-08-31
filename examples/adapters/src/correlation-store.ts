@@ -1,4 +1,4 @@
-import { constants, lstat, mkdir, open, readFile, rename, rmdir, stat, unlink } from 'node:fs/promises';
+import { constants, lstat, mkdir, open, readFile, rename, rmdir, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
@@ -83,6 +83,8 @@ export function transition(record: CorrelationRecord, phase: Phase, changes: Tra
 export interface StoreHooks {
   /** Test seam: invoked after file fsync and before rename. */
   beforeRename?: () => Promise<void>;
+  /** Test seam: invoked after descriptor validation and before descriptor read. */
+  afterLoadValidation?: () => Promise<void>;
 }
 
 export class CorrelationStore {
@@ -132,9 +134,19 @@ export class CorrelationStore {
   async load(correlationId: string): Promise<CorrelationRecord> {
     const path = this.path(correlationId);
     await ensureTrustedDirectory(this.directory);
-    await validateSafeFile(path);
+    let handle: FileHandle;
+    try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+      throw new CorrelationSafetyError('state file cannot be safely opened');
+    }
     let parsed: unknown;
-    try { parsed = JSON.parse(await readFile(path, 'utf8')); } catch { throw new CorrelationSafetyError('correlation file is corrupt or truncated'); }
+    try {
+      await validateSafeDescriptor(handle);
+      await this.hooks.afterLoadValidation?.();
+      try { parsed = JSON.parse(await handle.readFile({ encoding: 'utf8' })); }
+      catch { throw new CorrelationSafetyError('correlation file is corrupt or truncated'); }
+    } finally { await handle.close(); }
     validateRecord(parsed);
     if (parsed.correlationId !== correlationId) throw new CorrelationSafetyError('correlation filename and record ID differ');
     return parsed;
@@ -200,6 +212,13 @@ async function validateSafeFile(path: string): Promise<void> {
   if (!entry.isFile() || entry.isSymbolicLink()) throw new CorrelationSafetyError('state file must be a regular non-symlink file');
   if (entry.uid !== currentUid() || (entry.mode & 0o777) !== 0o600) throw new CorrelationSafetyError('state file must be owned and mode 0600');
   if (!(await stat(path)).isFile()) throw new CorrelationSafetyError('state file changed during validation');
+}
+
+/** Validate the opened inode, never a second pathname lookup used for reading. */
+async function validateSafeDescriptor(handle: FileHandle): Promise<void> {
+  const entry = await handle.stat();
+  if (!entry.isFile()) throw new CorrelationSafetyError('state file must be a regular non-symlink file');
+  if (entry.uid !== currentUid() || (entry.mode & 0o777) !== 0o600) throw new CorrelationSafetyError('state file must be owned and mode 0600');
 }
 
 async function removeExactTemporary(path: string): Promise<void> {
