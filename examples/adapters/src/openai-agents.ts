@@ -143,8 +143,27 @@ async function fsyncDirectory(path: string): Promise<void> { const handle = awai
 async function safeRemove(path: string): Promise<void> { try { const entry = await lstat(path); if (entry.isFile() && !entry.isSymbolicLink()) await unlink(path); } catch { /* owned temporary only */ } }
 function uid(): number { const value = process.getuid?.(); if (value === undefined) throw new CorrelationSafetyError('owner validation unavailable'); return value; }
 
-/** Explicit live-only path. Its no-key branch returns before agent construction or any network activity. */
-export async function runExplicitLiveExample(input: string): Promise<{ status: 'skipped-no-key' | 'completed'; output?: unknown }> {
-  const key = process.env.OPENAI_API_KEY; if (!key) return { status: 'skipped-no-key' };
-  const agent = new Agent({ name: 'explicit-user-live-example', instructions: 'Reply concisely.' }); const result = await run(agent, safeWorkflowInput(input)); return { status: 'completed', output: result.finalOutput };
+export interface ExplicitLiveDependencies {
+  /** Local tests may model authorization without providing an API key or a network client. */
+  authorized?: boolean;
+  run?: (input: string) => Promise<unknown>;
+}
+
+/** Explicit live-only path. Its no-key branch returns before agent construction, client creation, or network activity. */
+export async function runExplicitLiveExample(input: string, dependencies: ExplicitLiveDependencies = {}): Promise<{ status: 'skipped-no-key' | 'completed'; output?: string }> {
+  const authorized = dependencies.authorized ?? Boolean(process.env.OPENAI_API_KEY); if (!authorized) return { status: 'skipped-no-key' };
+  const workflow = safeWorkflowInput(input);
+  const output = dependencies.run ? await dependencies.run(workflow) : (await run(new Agent({ name: 'explicit-user-live-example', instructions: 'Reply concisely.' }), workflow)).finalOutput;
+  return { status: 'completed', output: safeLiveOutput(output) };
+}
+
+/** CLI output is deliberately status-first and bounded to the already-sanitized returned model text. */
+export function formatExplicitLiveResult(result: { status: 'skipped-no-key' | 'completed'; output?: string }): string {
+  return result.status === 'skipped-no-key' ? 'skipped-no-key\n' : `completed\n${result.output ?? '[missing model output]'}\n`;
+}
+
+function safeLiveOutput(value: unknown): string {
+  let text: string; try { text = typeof value === 'string' ? value : JSON.stringify(value); } catch { text = '[unserializable model output]'; }
+  if (!text || isCredentialShaped(text)) return '[redacted model output]';
+  return text.slice(0, 4096);
 }

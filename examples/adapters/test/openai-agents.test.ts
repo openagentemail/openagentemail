@@ -8,7 +8,7 @@ import { Agent, RunState, run, tool } from '@openai/agents';
 import { ScriptedModel, assistantMessage, functionCall } from '@openai/agents/testing';
 import { CorrelationSafetyError, CorrelationStore, createIntent, requestFingerprint, transition, type CorrelationRecord } from '../src/correlation-store.js';
 import type { OaeTask } from '../src/openagentemail.js';
-import { applyAuthoritativeOaeDecision, applyDecision, approvalIdentity, buildScriptedApprovalAgent, pauseWithScriptedModel, restoreRunState, resumeAuthoritativeOaeRun, RunStateStore, selectApproval } from '../src/openai-agents.js';
+import { applyAuthoritativeOaeDecision, applyDecision, approvalIdentity, buildScriptedApprovalAgent, formatExplicitLiveResult, pauseWithScriptedModel, restoreRunState, resumeAuthoritativeOaeRun, RunStateStore, runExplicitLiveExample, selectApproval } from '../src/openai-agents.js';
 import { inputBodyFor, resumeDecision, withMarker } from '../src/retry.js';
 import { sanitizedTimeline } from '../src/sanitize.js';
 
@@ -243,4 +243,9 @@ test('R2 live entrypoint explicitly skips without an API key or network client',
   const child = spawnSync(process.execPath, [runner, fixture], { encoding: 'utf8', env: {} });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(child.stdout.trim(), 'skipped-no-key');
+});
+
+test('R5j key-present live branch reports a bounded safe stubbed model result without an API key or live client', async () => {
+  let calls = 0; const completed = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async (input) => { calls += 1; assert.equal(input, 'local-safe-input'); return 'local stub output'; } }); assert.deepEqual(completed, { status: 'completed', output: 'local stub output' }); assert.equal(formatExplicitLiveResult(completed), 'completed\nlocal stub output\n'); assert.equal(calls, 1);
+  const bounded = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async () => 'x'.repeat(5_000) }); assert.equal(bounded.status, 'completed'); assert.equal(bounded.output?.length, 4_096); const redacted = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async () => 'Bearer credential-canary' }); assert.deepEqual(redacted, { status: 'completed', output: '[redacted model output]' });
 });

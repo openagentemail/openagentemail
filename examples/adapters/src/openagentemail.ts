@@ -49,11 +49,22 @@ export class OaeHttpError extends Error {
   }
 }
 
+/** Transport failures intentionally carry no URL, headers, request body, or response body. */
+export class OaeRequestError extends Error {
+  constructor(readonly kind: 'timeout' | 'aborted' | 'transport', readonly operation: string) {
+    super(`OpenAgentEmail ${operation} ${kind}`);
+  }
+}
+
 export interface OaeClientOptions {
   baseUrl: string;
   /** The calling participant's scoped token. Never persist this value. */
   token: string;
   fetch?: typeof globalThis.fetch;
+  /** Finite client-side deadline covering both fetch and response body parsing. */
+  timeoutMs?: number;
+  /** Optional caller cancellation composed with each individual request. */
+  signal?: AbortSignal;
 }
 
 /** A real client may use HTTPS, or explicit loopback HTTP for local development only. */
@@ -69,24 +80,40 @@ export class OaeClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly fetchFn: typeof globalThis.fetch;
+  private readonly timeoutMs: number;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(options: OaeClientOptions) {
-    if (!options.token) throw new Error('A participant-scoped token is required');
+    if (!options.token || /[\r\n]/.test(options.token)) throw new Error('A participant-scoped token is required');
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new Error('OpenAgentEmail timeout must be a finite positive millisecond value');
     this.baseUrl = safeOaeBaseUrl(options.baseUrl);
     this.token = options.token;
     this.fetchFn = options.fetch ?? globalThis.fetch;
+    this.timeoutMs = timeoutMs;
+    this.signal = options.signal;
   }
 
   private async request<T>(operation: string, path: string, validate: (value: unknown) => value is T, init?: RequestInit): Promise<{ value: T; response: Response }> {
-    const response = await this.fetchFn(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...init?.headers },
-    });
-    if (!response.ok) throw new OaeHttpError(response.status, operation);
-    let value: unknown; try { value = await response.json(); }
-    catch { throw new OaeHttpError(response.status, `${operation} returned invalid JSON`); }
-    if (!validate(value)) throw new OaeHttpError(response.status, `${operation} returned invalid response schema`);
-    return { value, response };
+    const controller = new AbortController(); let timedOut = false;
+    const signals = [this.signal, init?.signal].filter((signal): signal is AbortSignal => signal !== undefined && signal !== null);
+    const abort = () => controller.abort();
+    for (const signal of signals) signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs);
+    try {
+      if (signals.some((signal) => signal.aborted)) throw new OaeRequestError('aborted', operation);
+      let response: Response;
+      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...init?.headers } }); }
+      catch { throw new OaeRequestError(timedOut ? 'timeout' : controller.signal.aborted ? 'aborted' : 'transport', operation); }
+      if (!response.ok) throw new OaeHttpError(response.status, operation);
+      let value: unknown; try { value = await response.json(); }
+      catch { if (timedOut) throw new OaeRequestError('timeout', operation); if (controller.signal.aborted) throw new OaeRequestError('aborted', operation); throw new OaeHttpError(response.status, `${operation} returned invalid JSON`); }
+      if (!validate(value)) throw new OaeHttpError(response.status, `${operation} returned invalid response schema`);
+      return { value, response };
+    } finally {
+      clearTimeout(timer);
+      for (const signal of signals) signal.removeEventListener('abort', abort);
+    }
   }
 
   async create(input: { to: string; subject: string; body: string }): Promise<OaeTask> {
@@ -113,6 +140,9 @@ export class OaeClient {
     return this.setState(id, 'input-required', body);
   }
 
+  /** The only non-terminal working transition exposed to adapter callers. */
+  async working(id: string): Promise<OaeTask> { return this.setState(id, 'working'); }
+
   async complete(id: string, result: unknown): Promise<OaeTask> {
     return this.setState(id, 'completed', undefined, result);
   }
@@ -134,10 +164,11 @@ function safeText(value: unknown): value is string { return typeof value === 'st
 function validBody(value: unknown): value is string { return typeof value === 'string' && value.length <= 1_000_000; }
 const APPROVAL_DIGEST = /^[a-f0-9]{64}$/;
 function validApprovalDigest(value: unknown): value is string { return typeof value === 'string' && APPROVAL_DIGEST.test(value); }
-function jsonValue(value: unknown, depth = 1): boolean { if (depth > 10) return false; if (value === null || typeof value === 'boolean' || typeof value === 'string') return true; if (typeof value === 'number') return Number.isFinite(value); if (Array.isArray(value)) return value.length <= 1_000 && value.every((item) => jsonValue(item, depth + 1)); if (!object(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length > 1_000) return false; return Object.values(value).every((item) => jsonValue(item, depth + 1)); }
+/** Response snapshots can contain signed legacy actions; creation-only policy bounds belong to the server. */
+function jsonValue(value: unknown): boolean { const pending: unknown[] = [value]; const seen = new WeakSet<object>(); while (pending.length > 0) { const current = pending.pop(); if (current === null || typeof current === 'boolean' || typeof current === 'string') continue; if (typeof current === 'number') { if (Number.isFinite(current)) continue; return false; } if (Array.isArray(current)) { if (seen.has(current)) return false; seen.add(current); pending.push(...current); continue; } if (!object(current) || Object.getPrototypeOf(current) !== Object.prototype || seen.has(current)) return false; seen.add(current); pending.push(...Object.values(current)); } return true; }
 function validApprovalSnapshot(value: unknown): value is ApprovalSnapshot { if (!object(value) || !exactKeys(value, ['action', 'reviewer', 'expiresAt', 'digest'], ['action', 'reviewer', 'expiresAt', 'digest']) || !object(value.action) || !exactKeys(value.action, ['type', 'name', 'arguments'], ['type', 'name', 'arguments'])) return false; return safeText(value.action.type) && safeText(value.action.name) && jsonValue(value.action.arguments) && safeText(value.reviewer) && safeText(value.expiresAt) && validApprovalDigest(value.digest); }
 function validApprovalEvent(value: unknown): value is ApprovalEvent { if (!object(value) || typeof value.type !== 'string') return false; if (value.type === 'request') return exactKeys(value, ['type', 'snapshot'], ['type', 'snapshot']) && validApprovalSnapshot(value.snapshot); if (value.type === 'decision') return exactKeys(value, ['type', 'digest', 'decision'], ['type', 'digest', 'decision']) && validApprovalDigest(value.digest) && (value.decision === 'approved' || value.decision === 'rejected'); return value.type === 'expired' && exactKeys(value, ['type', 'digest'], ['type', 'digest']) && validApprovalDigest(value.digest); }
 function validMessage(value: unknown): value is TaskMessage { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'date', 'state', 'body', 'result', 'kind', 'idempotencyKey', 'approval'], ['id', 'from', 'to', 'subject', 'date', 'state', 'body'])) return false; return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.date) && validBody(value.body) && validState(value.state) && (value.kind === undefined || value.kind === 'state' || value.kind === 'reminder') && (value.idempotencyKey === undefined || safeText(value.idempotencyKey)) && (value.approval === undefined || validApprovalEvent(value.approval)); }
 export function isValidTaskView(value: unknown): value is OaeTask { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages', 'result', 'parentTaskId', 'kind', 'approval', 'claimedUntil', 'leaseGeneration', 'leaseStatus'], ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages'])) return false; const leasePair = (value.claimedUntil === undefined && value.leaseGeneration === undefined && value.leaseStatus === undefined) || (safeText(value.claimedUntil) && Number.isInteger(value.leaseGeneration) && (value.leaseGeneration as number) >= 1 && ((value.leaseStatus === undefined) || value.leaseStatus === 'disabled')); return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.createdAt) && safeText(value.updatedAt) && validState(value.state) && Array.isArray(value.messages) && value.messages.length <= 1_000 && value.messages.every(validMessage) && (value.parentTaskId === undefined || safeText(value.parentTaskId)) && (value.kind === undefined || value.kind === 'approval') && ((value.kind === 'approval') === (value.approval !== undefined)) && (value.approval === undefined || validApprovalSnapshot(value.approval)) && leasePair; }
 const validTask = isValidTaskView;
-function validTaskList(value: unknown): value is { tasks: OaeTask[] } { return object(value) && exactKeys(value, ['tasks'], ['tasks']) && Array.isArray(value.tasks) && value.tasks.length <= 1_000 && value.tasks.every(validTask); }
+function validTaskList(value: unknown): value is { tasks: OaeTask[] } { return object(value) && exactKeys(value, ['tasks'], ['tasks']) && Array.isArray(value.tasks) && value.tasks.every(validTask); }
