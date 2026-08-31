@@ -25,7 +25,12 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const issue = context.payload.issue;
-            const internal = ["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association);
+            // Team issues are filed through the maintainer account; keep an explicit
+            // allowlist so team-agent filings never fall into the external queue.
+            const teamLogins = ["tizerluo"];
+            const internal =
+              ["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association) ||
+              teamLogins.includes(issue.user.login.toLowerCase());
             const name = internal ? "source: internal" : "source: external";
             const other = internal ? "source: external" : "source: internal";
             const color = internal ? "1f6feb" : "0e8a16";
