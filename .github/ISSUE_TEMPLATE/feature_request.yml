@@ -27,3 +27,15 @@ body:
     attributes:
       label: Alternatives you considered (optional)
       description: Other tools or workarounds you tried.
+
+  - type: dropdown
+    id: willing_to_pr
+    attributes:
+      label: Would you like to open a PR yourself? (optional)
+      description: External contributors who want to implement their own request are especially welcome — we review AI-assisted and human PRs at the same bar.
+      options:
+        - "No"
+        - "Yes — I can try on my own"
+        - "Yes — with maintainer guidance"
+    validations:
+      required: false

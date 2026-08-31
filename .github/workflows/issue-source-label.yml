@@ -1,0 +1,40 @@
+name: Label issues by author source
+
+# Rule-based first pass of the issue triage standard (no AI):
+# every new issue gets a source label so the external queue is visible.
+# Priority (prio: P0–P3) stays a maintainer decision; see CONTRIBUTING.md.
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-source-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  label-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply source label
+        uses: actions/github-script@60a0d83039c74a4aee543835d87978cb4c6399e3 # v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const internal = ["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association);
+            const name = internal ? "source: internal" : "source: external";
+            const color = internal ? "1f6feb" : "0e8a16";
+            const description = internal
+              ? "Filed by a maintainer or team agent"
+              : "Filed by a community user; first-response clock starts at creation";
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              await github.rest.issues.createLabel({ owner, repo, name, color, description });
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [name] });
