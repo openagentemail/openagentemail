@@ -11,7 +11,7 @@ test('typed REST client covers create, get, terminal wait, input, complete and f
     const wait = String(input).includes('wait=true');
     return new Response(JSON.stringify(task(wait ? 'working' : 'submitted')), { status: 200, headers: wait ? { 'X-OAE-Wait-Timeout-Sec': '60' } : {} });
   };
-  const client = new OaeClient({ baseUrl: 'http://oae.test/', token: 'scoped-canary-token', fetch: fetch as typeof globalThis.fetch });
+  const client = new OaeClient({ baseUrl: 'http://127.0.0.1/', token: 'scoped-canary-token', fetch: fetch as typeof globalThis.fetch });
   await client.create({ to: 'reviewer@example.test', subject: 's', body: 'b' });
   await client.get('task-1');
   const waited = await client.waitForTerminal('task-1');
@@ -20,7 +20,7 @@ test('typed REST client covers create, get, terminal wait, input, complete and f
   await client.fail('task-1', { reason: 'stop' });
   assert.equal(calls.length, 6);
   assert.deepEqual(calls.map((call) => call.method), ['POST', 'GET', 'GET', 'POST', 'POST', 'POST']);
-  assert.equal(calls[2]!.path, 'http://oae.test/v1/tasks/task-1?wait=true');
+  assert.equal(calls[2]!.path, 'http://127.0.0.1/v1/tasks/task-1?wait=true');
   assert.equal(waited.task.state, 'working');
   assert.equal(waited.timeoutSec, 60);
   assert.deepEqual(calls[3]!.body, { state: 'input-required', body: 'need input' });
@@ -28,8 +28,12 @@ test('typed REST client covers create, get, terminal wait, input, complete and f
   assert.deepEqual(calls[5]!.body, { state: 'failed', result: { reason: 'stop' } });
 });
 
+test('R5e accepted base path prefixes every operation without query ambiguity', async () => {
+  let url = ''; const client = new OaeClient({ baseUrl: 'https://oae.example.test/tenant-a/', token: 'opaque-token', fetch: (async (input) => { url = String(input); return new Response(JSON.stringify(task()), { status: 200, headers: { 'content-type': 'application/json' } }); }) as typeof fetch }); await client.get('task-1'); assert.equal(url, 'https://oae.example.test/tenant-a/v1/tasks/task-1');
+});
+
 test('HTTP errors expose status and operation but never response body', async () => {
-  const client = new OaeClient({ baseUrl: 'http://oae.test', token: 'token', fetch: (async () => new Response('raw-secret-body', { status: 403 })) as typeof globalThis.fetch });
+  const client = new OaeClient({ baseUrl: 'http://127.0.0.1', token: 'token', fetch: (async () => new Response('raw-secret-body', { status: 403 })) as typeof globalThis.fetch });
   await assert.rejects(() => client.get('nope'), (error: unknown) => error instanceof OaeHttpError && error.status === 403 && !error.message.includes('raw-secret-body'));
 });
 

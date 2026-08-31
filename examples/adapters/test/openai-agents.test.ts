@@ -76,6 +76,12 @@ test('R2 malformed or wrong OAE decision fails before real SDK approval mutation
   assert.equal(graph.executions.count, 0);
 });
 
+test('R5e approval identity binds canonical arguments and receipt validation precedes durable final success', async () => {
+  const graph = buildScriptedApprovalAgent('final'); const paused = await pauseWithScriptedModel(graph); const item = paused.state.getInterruptions()[0]!; const raw = item.rawItem as { type: string; callId: string; name: string; arguments: string }; const altered = { rawItem: { ...raw, arguments: '{"changed":true}' }, toJSON: () => item.toJSON() } as never; const reorderedLeft = { rawItem: { ...raw, arguments: '{"b":2,"a":1}' }, toJSON: () => item.toJSON() } as never; const reorderedRight = { rawItem: { ...raw, arguments: '{"a":1,"b":2}' }, toJSON: () => item.toJSON() } as never;
+  assert.notEqual(approvalIdentity(item), approvalIdentity(altered)); assert.equal(approvalIdentity(reorderedLeft), approvalIdentity(reorderedRight)); const before = paused.state.toString(); assert.throws(() => applyDecision(paused.state, approvalIdentity(altered), { decision: 'approved' }), CorrelationSafetyError); assert.equal(paused.state.toString(), before); assert.equal(graph.executions.count, 0);
+  const directory = await mkdtemp(join(tmpdir(), 'r5e-receipt-')); const stateStore = new RunStateStore(directory); const receiptStore = new RunStateStore(directory, 'tool-receipt.json'); await stateStore.save(paused.state.toString()); const durable = await durableAwaiting(directory, paused.approvalKey); const task = authoritativeTask(durable.record); await assert.rejects(() => resumeAuthoritativeOaeRun({ agent: graph.agent, stateStore, receiptStore, correlationStore: durable.store, record: durable.record, task, executionCount: () => 0 }), CorrelationSafetyError); await assert.rejects(() => receiptStore.load(), CorrelationSafetyError); assert.equal((await durable.store.load(durable.record.correlationId)).phase, 'resume-started');
+});
+
 test('R2 OpenAI adapter accepts only authoritative R1 terminal evidence before SDK mutation', async () => {
   const graph = buildScriptedApprovalAgent('authoritative'); const paused = await pauseWithScriptedModel(graph); const record = oaeRecord(paused.approvalKey); const before = paused.state.toString();
   const valid = authoritativeTask(record); applyAuthoritativeOaeDecision(paused.state, paused.approvalKey, valid, record);

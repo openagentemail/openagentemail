@@ -46,9 +46,9 @@ export interface OaeClientOptions {
 /** A real client may use HTTPS, or explicit loopback HTTP for local development only. */
 export function safeOaeBaseUrl(value: string): string {
   let url: URL; try { url = new URL(value); } catch { throw new Error('OpenAgentEmail URL must be an absolute HTTPS or loopback HTTP URL'); }
-  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error('OpenAgentEmail participant tokens require HTTPS or loopback HTTP');
-  if (url.username || url.password || url.hash) throw new Error('OpenAgentEmail URL must not contain credentials or a fragment');
+  if (url.username || url.password || url.hash || url.search) throw new Error('OpenAgentEmail URL must not contain credentials, query, or fragment');
   return url.toString().replace(/\/$/, '');
 }
 
@@ -59,7 +59,7 @@ export class OaeClient {
 
   constructor(options: OaeClientOptions) {
     if (!options.token) throw new Error('A participant-scoped token is required');
-    this.baseUrl = options.fetch ? options.baseUrl.replace(/\/+$/, '') : safeOaeBaseUrl(options.baseUrl);
+    this.baseUrl = safeOaeBaseUrl(options.baseUrl);
     this.token = options.token;
     this.fetchFn = options.fetch ?? globalThis.fetch;
   }

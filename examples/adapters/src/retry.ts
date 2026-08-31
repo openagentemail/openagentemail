@@ -77,7 +77,7 @@ export async function reconcileTask(client: Pick<OaeClient, 'list'>, record: Cor
 export async function createOrAdopt(store: CorrelationWriter, client: Pick<OaeClient, 'create' | 'list'>, record: CorrelationRecord, request: { to: string; subject: string; body: string }, attempts = 2): Promise<CorrelationRecord> {
   validateOutboundRequest(record, request); // validate before durable attempt/network I/O
   if (record.phase === 'intent-created') {
-    const stamp = new Date().toISOString();
+    const stamp = new Date(Math.max(Date.now(), Date.parse(record.updatedAt) + 1)).toISOString();
     const attempted = transition(record, 'create-attempted', { createAttemptedAt: stamp }, stamp);
     await store.save(attempted);
     const task = await client.create(request);

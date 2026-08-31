@@ -39,6 +39,11 @@ test('canonical request validation rejects copied marker, bad suffix, roots and 
   await assert.rejects(async () => createOrAdopt({ save: async () => undefined }, { create: async () => valid, list: async () => [valid] }, row, { to: row.expectedParticipants.responder, subject: `${valid.subject} extra`, body: 'non-secret approval request' }), /marker/);
 });
 
+test('R5e create adoption stamp is strictly monotonic over future durable time before network I/O', async () => {
+  const future = createIntent({ framework: 'neutral', correlationId: '67666666-6666-4666-8666-666666666666', operationKey: 'thread/future', requestFingerprint: requestFingerprint({ requester: 'asker@example.test', responder: 'reviewer@example.test', subject: 'Approve transfer', body: 'non-secret approval request' }), expectedParticipants: { requester: 'asker@example.test', responder: 'reviewer@example.test' }, frameworkStateRef: 'checkpoint.sqlite', approvalItemKey: null, now: '2999-01-01T00:00:00.000Z' }); const saved: CorrelationRecord[] = []; let creates = 0;
+  await assert.rejects(() => createOrAdopt({ save: async (value) => { saved.push(value); } }, { create: async () => { creates += 1; throw new Error('stop-after-attempt'); }, list: async () => [] }, future, { to: 'reviewer@example.test', subject: withMarker(future, 'Approve transfer'), body: 'non-secret approval request' }), /stop-after-attempt/); assert.equal(creates, 1); assert.equal(saved.length, 1); assert.equal(saved[0]!.phase, 'create-attempted'); assert.ok(saved[0]!.updatedAt > future.updatedAt); assert.equal(saved[0]!.createAttemptedAt, saved[0]!.updatedAt);
+});
+
 test('complete history rejects a contradictory second root and every mixed terminal impostor', async () => {
   const row = transition(record(), 'create-attempted', { createAttemptedAt: '2026-01-01T00:00:01.000Z' }, '2026-01-01T00:00:01.000Z');
   const rootConflict = { ...taskFor(row), messages: [...taskFor(row).messages, { ...taskFor(row).messages[0]!, id: 'root-2', body: 'contradictory root' }] };

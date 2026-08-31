@@ -14,13 +14,14 @@ export type DeterministicAgent = { agent: Agent; model: ScriptedModel; execution
 type CorrelationWriter = { save(record: CorrelationRecord): Promise<void> };
 const SAFE_FILENAMES = new Set(['run-state.json', 'tool-receipt.json']);
 
-/** SDK-owned fields only; the hash keeps correlation persistence free of tool arguments. */
+/** SDK identity includes canonical invocation arguments, not merely a transport call ID. */
 export function approvalIdentity(item: RunToolApprovalItem): string {
   const raw = item.rawItem;
   if (raw.type !== 'function_call' || !raw.callId || !raw.name) throw new CorrelationSafetyError('approval interruption lacks a stable SDK function identity');
   const sdkToolKey = item.toJSON().functionToolStateKey;
   if (!sdkToolKey) throw new CorrelationSafetyError('approval interruption lacks an SDK tool state key');
-  return `approval:${createHash('sha256').update(JSON.stringify({ sdkToolKey, name: raw.name, callId: raw.callId })).digest('hex')}`;
+  const argumentsText = (raw as { arguments?: unknown }).arguments; if (typeof argumentsText !== 'string') throw new CorrelationSafetyError('approval interruption lacks canonical tool arguments'); let argumentsValue: unknown; try { argumentsValue = JSON.parse(argumentsText); } catch { throw new CorrelationSafetyError('approval interruption has invalid tool arguments'); }
+  return `approval:${createHash('sha256').update(canonicalJson({ sdkToolKey, name: raw.name, callId: raw.callId, arguments: argumentsValue })).digest('hex')}`;
 }
 
 export function selectApproval(state: RunState<any, Agent>, expected: string): RunToolApprovalItem {
@@ -114,7 +115,7 @@ async function finishStartedRun(input: DurableResumeInput, record: CorrelationRe
   const { agent, stateStore, receiptStore, correlationStore, task } = input;
   await checkpoint('before-sdk-run'); const completed = await run(agent, state); void completed; await checkpoint('after-sdk-run');
   if (state.getInterruptions().length !== 0) throw new CorrelationSafetyError('SDK completed with a pending interruption');
-  const finalState = state.toString(); const { value, evidence } = validateDecision(task, record); if (!record.taskId) throw new CorrelationSafetyError('final receipt lacks adopted task ID'); const receipt: ResumeReceipt = { version: 2, correlationId: record.correlationId, taskId: record.taskId, requestFingerprint: record.requestFingerprint, operationKey: record.operationKey, approvalItemKey, decision: value.decision, messageId: evidence.messageId, evidenceFingerprint: evidence.evidenceFingerprint, finalStateHash: sha(finalState), executions: input.executionCount() };
+  const finalState = state.toString(); const { value, evidence } = validateDecision(task, record); if (!record.taskId) throw new CorrelationSafetyError('final receipt lacks adopted task ID'); const receipt: ResumeReceipt = { version: 2, correlationId: record.correlationId, taskId: record.taskId, requestFingerprint: record.requestFingerprint, operationKey: record.operationKey, approvalItemKey, decision: value.decision, messageId: evidence.messageId, evidenceFingerprint: evidence.evidenceFingerprint, finalStateHash: sha(finalState), executions: input.executionCount() }; validateReceipt(receipt, record);
   await checkpoint('before-final-state-save'); await stateStore.save(finalState); await checkpoint('after-final-state-save'); await checkpoint('before-receipt-save'); await receiptStore.save(JSON.stringify(receipt)); await checkpoint('after-receipt-save');
   const resumed = transition(record, 'resumed', { resumeEvidence: receiptEvidence(receipt) }); await checkpoint('before-resumed-save'); await correlationStore.save(resumed); await checkpoint('after-resumed-save'); return resumed;
 }

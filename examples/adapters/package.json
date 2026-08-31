@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "fixture": "env OPENAGENTEMAIL_API_URL=http://oae-fixture.invalid OAE_FIXTURE_REQUESTER_TOKEN=fixture-requester-scope OAE_FIXTURE_RESPONDER_TOKEN=fixture-responder-scope tsx src/scenario-cli.ts"
+    "fixture": "env OPENAGENTEMAIL_API_URL=http://127.0.0.1 OAE_FIXTURE_REQUESTER_TOKEN=fixture-requester-scope OAE_FIXTURE_RESPONDER_TOKEN=fixture-responder-scope tsx src/scenario-cli.ts"
   },
   "dependencies": {
     "@langchain/core": "1.1.48",

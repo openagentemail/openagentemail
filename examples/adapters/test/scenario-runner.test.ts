@@ -4,10 +4,10 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, symlink, unlin
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { OaeClient } from '../src/openagentemail.js';
-import { createLocalFakeService, loadScenario, runScenario, sanitizeFailure, ScenarioFailure, writeScenarioArtifact } from '../src/scenario-runner.js';
+import { createLocalFakeService, loadScenario, parseRestrictedYaml, runScenario, sanitizeFailure, ScenarioFailure, writeScenarioArtifact } from '../src/scenario-runner.js';
 
 const scenarios = join(process.cwd(), 'scenarios');
-const environment = { OPENAGENTEMAIL_API_URL: 'http://oae-fixture.invalid', OAE_FIXTURE_REQUESTER_TOKEN: 'fixture-requester-scope', OAE_FIXTURE_RESPONDER_TOKEN: 'fixture-responder-scope' };
+const environment = { OPENAGENTEMAIL_API_URL: 'http://127.0.0.1', OAE_FIXTURE_REQUESTER_TOKEN: 'fixture-requester-scope', OAE_FIXTURE_RESPONDER_TOKEN: 'fixture-responder-scope' };
 async function stateDirectory(label: string): Promise<string> { return mkdtemp(join(tmpdir(), `r4-${label}-`)); }
 async function scenario(name: string) { return loadScenario(join(scenarios, `${name}.yaml`)); }
 
@@ -37,8 +37,22 @@ test('R5d pathname replacement after open cannot alter descriptor-bound YAML par
   const parsed = await loadScenario(path, { afterOpen: async () => { hookCalls += 1; await rename(replacement, path); } }); assert.equal(hookCalls, 1); assert.equal(parsed.name, 'input-resume'); assert.equal(parsed.participants.requester!.tokenEnv, 'OAE_FIXTURE_REQUESTER_TOKEN'); const result = await runScenario({ scenario: parsed, environment, stateDirectory: join(directory, 'state') }); assert.equal(result.state, 'completed');
 });
 
+test('R5e restricted YAML nesting is bounded before service work while depth 32 remains structurally parseable', async () => {
+  const nested = (depth: number) => Array.from({ length: depth }, (_, index) => `${'  '.repeat(index)}level${index}:`).join('\n') + `\n${'  '.repeat(depth)}leaf: value\n`; assert.ok(parseRestrictedYaml(nested(32))); assert.throws(() => parseRestrictedYaml(nested(33)), ScenarioFailure);
+  const directory = await stateDirectory('deep-yaml'); const path = join(directory, 'deep.yaml'); await writeFile(path, nested(33), { mode: 0o600 }); await assert.rejects(() => loadScenario(path), ScenarioFailure); await assert.rejects(() => lstat(join(directory, 'state', 'correlation')));
+});
+
+test('R5e fake server follows duplicate transport parity while runner suppresses duplicate effects at its boundary', async () => {
+  const input = await scenario('input-resume'); const service = createLocalFakeService(input, environment); const requester = new OaeClient({ baseUrl: environment.OPENAGENTEMAIL_API_URL!, token: environment.OAE_FIXTURE_REQUESTER_TOKEN!, fetch: service.fetch }); const responder = new OaeClient({ baseUrl: environment.OPENAGENTEMAIL_API_URL!, token: environment.OAE_FIXTURE_RESPONDER_TOKEN!, fetch: service.fetch }); await requester.inputRequired('scenario-task-1', 'first'); const repeated = await requester.inputRequired('scenario-task-1', 'first'); assert.equal(repeated.messages.filter((message) => message.state === 'input-required').length, 2); await (responder as unknown as { setState(id: string, state: 'working'): Promise<unknown> }).setState('scenario-task-1', 'working'); await responder.complete('scenario-task-1', { decision: 'approved' }); await assert.rejects(() => responder.complete('scenario-task-1', { decision: 'approved' }));
+  const result = await runScenario({ scenario: await scenario('duplicate-delivery'), environment, stateDirectory: await stateDirectory('duplicate-boundary') }); assert.equal(result.events.filter((event) => event.state === 'input-required').length, 1); assert.equal(result.events.filter((event) => event.state === 'completed').length, 1); assert.equal(result.frameworkResumes, 1);
+});
+
+test('R5e sanitizeFailure reconstructs only documented bounded fields', () => {
+  const hostile = new ScenarioFailure({ scenario: 'safe', step: 1, code: 'timeout', expectedState: 'completed', observedState: 'working', taskId: 'task-1', correlationId: '11111111-1111-4111-8111-111111111111', elapsedMs: 5, authorization: 'Bearer canary', rawBody: 'body-canary', extra: 'nope' } as never); const sanitized = sanitizeFailure(hostile); assert.deepEqual(sanitized, { scenario: 'safe', step: 1, code: 'timeout', expectedState: 'completed', observedState: 'working', taskId: 'task-1', correlationId: '11111111-1111-4111-8111-111111111111', elapsedMs: 5 }); assert.deepEqual(Object.keys(sanitized).sort(), ['code', 'correlationId', 'elapsedMs', 'expectedState', 'observedState', 'scenario', 'step', 'taskId']);
+});
+
 test('R4 fake authority separates requester/responder tokens and exposes no identity provisioning or admin bootstrap', async () => {
-  const input = await scenario('input-resume'); const service = createLocalFakeService(input, environment); const identity = await service.fetch('http://oae-fixture.invalid/v1/identities', { method: 'POST', headers: { authorization: `Bearer ${environment.OAE_FIXTURE_REQUESTER_TOKEN}` } }); const unscoped = await service.fetch('http://oae-fixture.invalid/v1/tasks'); assert.equal(identity.status, 403); assert.equal(unscoped.status, 403); const body = await identity.text(); assert.ok(!body.includes(environment.OAE_FIXTURE_REQUESTER_TOKEN!)); assert.ok(!body.includes('admin'));
+  const input = await scenario('input-resume'); const service = createLocalFakeService(input, environment); const identity = await service.fetch('http://127.0.0.1/v1/identities', { method: 'POST', headers: { authorization: `Bearer ${environment.OAE_FIXTURE_REQUESTER_TOKEN}` } }); const unscoped = await service.fetch('http://127.0.0.1/v1/tasks'); assert.equal(identity.status, 403); assert.equal(unscoped.status, 403); const body = await identity.text(); assert.ok(!body.includes(environment.OAE_FIXTURE_REQUESTER_TOKEN!)); assert.ok(!body.includes('admin'));
 });
 
 test('R4 ordinary polling observes non-terminal state while wait=true is terminal-only and returns its cap header', async () => {

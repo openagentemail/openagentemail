@@ -6,10 +6,16 @@ import { createIntent, requestFingerprint } from '../src/correlation-store.js';
 import { canonicalRequest } from '../src/retry.js';
 
 test('R5c real OAE boundary accepts HTTPS or loopback HTTP only and construction makes no network call', () => {
-  assert.equal(safeOaeBaseUrl('https://oae.example.test/'), 'https://oae.example.test'); assert.equal(safeOaeBaseUrl('http://127.0.0.1:8080/'), 'http://127.0.0.1:8080');
-  for (const url of ['http://oae.example.test', 'ftp://oae.example.test', 'https://user:pass@oae.example.test', 'https://oae.example.test/#fragment']) assert.throws(() => safeOaeBaseUrl(url));
+  assert.equal(safeOaeBaseUrl('https://oae.example.test/api/'), 'https://oae.example.test/api'); assert.equal(safeOaeBaseUrl('http://127.0.0.1:8080/'), 'http://127.0.0.1:8080'); assert.equal(safeOaeBaseUrl('http://[::1]:8080/'), 'http://[::1]:8080');
+  for (const url of ['http://oae.example.test', 'ftp://oae.example.test', 'https://user:pass@oae.example.test', 'https://oae.example.test/#fragment', 'https://oae.example.test/?swallow=/v1/tasks']) assert.throws(() => safeOaeBaseUrl(url));
   let calls = 0; const runtime = createRuntimeParticipants({ OPENAGENTEMAIL_API_URL: 'https://oae.example.test', OAE_REQUESTER_EMAIL: 'requester@example.test', OAE_RESPONDER_EMAIL: 'responder@example.test', OAE_REQUESTER_TOKEN: 'opaque-requester-value', OAE_RESPONDER_TOKEN: 'opaque-responder-value' }, (async () => { calls += 1; return new Response('{}'); }) as typeof fetch);
   assert.equal(calls, 0); assert.ok(runtime.requester.client instanceof OaeClient); assert.ok(runtime.responder.client instanceof OaeClient);
+});
+
+test('R5e wrapped custom fetch cannot send Authorization to unsafe or query-bearing origins', () => {
+  let calls = 0; const wrapped = (async () => { calls += 1; return new Response('{}'); }) as typeof fetch;
+  for (const baseUrl of ['http://oae.example.test', 'https://oae.example.test/?x=/v1/tasks']) assert.throws(() => new OaeClient({ baseUrl, token: 'opaque-token', fetch: wrapped }));
+  assert.equal(calls, 0);
 });
 
 test('R5d canonical requester and responder validation rejects each mixed-case value before fetch and preserves lower-case fingerprint identity', async () => {
