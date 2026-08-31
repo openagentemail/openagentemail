@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Apply source label
-        uses: actions/github-script@60a0d83039c74a4aee543835d87978cb4c6399e3 # v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -38,13 +38,19 @@ jobs:
               } catch (err) {
                 if (err.status !== 404) throw err;
                 const isCurrent = label === name;
-                await github.rest.issues.createLabel({
-                  owner, repo, name: label,
-                  color: isCurrent ? color : (internal ? "0e8a16" : "1f6feb"),
-                  description: isCurrent ? description : (internal
-                    ? "Filed by a community user; first-response clock starts at creation"
-                    : "Filed by a maintainer or team agent"),
-                });
+                try {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: label,
+                    color: isCurrent ? color : (internal ? "0e8a16" : "1f6feb"),
+                    description: isCurrent ? description : (internal
+                      ? "Filed by a community user; first-response clock starts at creation"
+                      : "Filed by a maintainer or team agent"),
+                  });
+                } catch (createErr) {
+                  // Two issues opened concurrently race on first create: 422 = already exists.
+                  if (createErr.status !== 422) throw createErr;
+                  await github.rest.issues.getLabel({ owner, repo, name: label });
+                }
               }
             }
             // Reclassification on reopen must not leave both mutually exclusive labels.

@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure labels exist
-        uses: actions/github-script@60a0d83039c74a4aee543835d87978cb4c6399e3 # v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -38,11 +38,12 @@ jobs:
             }
 
       - name: Mark and close stale needs-info issues
-        uses: actions/stale@28f10391e5e8fe9d3f28795c41b8f36a3b1ad4e8 # v9
+        uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
         with:
           days-before-issue-stale: 14
           days-before-issue-close: 7
           only-issue-labels: needs-info
+          exempt-issue-labels: security,prio: P0,prio: P1
           stale-issue-label: stale
           stale-issue-message: |
             This issue is waiting on reporter-provided detail (`needs-info`) and has seen no
