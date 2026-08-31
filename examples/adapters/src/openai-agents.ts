@@ -67,12 +67,12 @@ export class RunStateStore {
   constructor(readonly directory: string, filename = 'run-state.json', private readonly hooks: RunStateStoreHooks = {}) { this.filename = safeFilename(filename); }
   async save(serialized: string): Promise<void> {
     if (!serialized) throw new CorrelationSafetyError('serialized RunState is empty');
-    const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); await safeExistingTarget(target);
+    const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); const before = await fileIdentity(target);
     const temporary = contained(directory, `.${this.filename}.${randomUUID()}.tmp`); let created = false;
     try {
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); created = true;
       try { await handle.writeFile(serialized, 'utf8'); await handle.sync(); } finally { await handle.close(); }
-      await safeFileAtPath(temporary); await this.hooks.beforeRename?.(target); await safeExistingTarget(target); await rename(temporary, target); created = false; await safeFileAtPath(target); await fsyncDirectory(directory);
+      await safeFileAtPath(temporary); await this.hooks.beforeRename?.(target); if (!sameIdentity(before, await fileIdentity(target))) throw new CorrelationSafetyError('RunState target changed during atomic replacement'); await rename(temporary, target); created = false; await safeFileAtPath(target); await fsyncDirectory(directory);
     } catch (error) { if (created) await safeRemove(temporary); throw error; }
   }
   async load(): Promise<string> {
@@ -136,6 +136,8 @@ function contained(directory: string, filename: string): string { const target =
 async function trustedDirectory(path: string): Promise<string> { await mkdir(path, { recursive: true, mode: 0o700 }); const entry = await lstat(path); if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o700) throw new CorrelationSafetyError('RunState directory must be owner-owned mode 0700'); return realpath(path); }
 async function safeExistingTarget(path: string): Promise<void> { try { await safeFileAtPath(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; } }
 async function safeFileAtPath(path: string): Promise<void> { const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o600 || !(await stat(path)).isFile()) throw new CorrelationSafetyError('RunState file must be owner-owned regular mode 0600'); }
+async function fileIdentity(path: string): Promise<{ dev: number; ino: number } | null> { try { await safeFileAtPath(path); const entry = await lstat(path); return { dev: entry.dev, ino: entry.ino }; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; } }
+function sameIdentity(first: { dev: number; ino: number } | null, second: { dev: number; ino: number } | null): boolean { return first === null ? second === null : second !== null && first.dev === second.dev && first.ino === second.ino; }
 async function safeFileHandle(handle: Awaited<ReturnType<typeof open>>): Promise<void> { const entry = await handle.stat(); if (!entry.isFile() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o600) throw new CorrelationSafetyError('RunState descriptor must be owner-owned regular mode 0600'); }
 async function fsyncDirectory(path: string): Promise<void> { const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY); try { await handle.sync(); } finally { await handle.close(); } }
 async function safeRemove(path: string): Promise<void> { try { const entry = await lstat(path); if (entry.isFile() && !entry.isSymbolicLink()) await unlink(path); } catch { /* owned temporary only */ } }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, mkdir, mkdtemp, readFile, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -122,7 +122,8 @@ test('R2 RunStateStore confines basename targets and rejects unsafe replacement/
   const store = new RunStateStore(directory); await store.save('safe-one'); const target = join(directory, 'run-state.json'); await chmod(target, 0o644); await assert.rejects(() => store.save('safe-two'), CorrelationSafetyError); await chmod(target, 0o600);
   await unlink(target); await symlink(victim, target); await assert.rejects(() => store.save('replacement'), CorrelationSafetyError); assert.equal(await readFile(victim, 'utf8'), 'outside-victim'); await unlink(target);
   await mkdir(target); await assert.rejects(() => store.save('directory-target'), CorrelationSafetyError); await rmdir(target);
-  const raced = new RunStateStore(directory, 'run-state.json', { beforeRename: async (targetPath) => { await symlink(victim, targetPath); } }); await assert.rejects(() => raced.save('raced'), CorrelationSafetyError); assert.equal(await readFile(victim, 'utf8'), 'outside-victim'); await unlink(target);
+  const attacker = join(directory, 'attacker.json'); await writeFile(attacker, 'attacker-bytes', { mode: 0o600 }); const raced = new RunStateStore(directory, 'run-state.json', { beforeRename: async (targetPath) => { await rename(attacker, targetPath); } }); await assert.rejects(() => raced.save('raced'), CorrelationSafetyError); assert.equal(await readFile(target, 'utf8'), 'attacker-bytes'); assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith('.run-state.json.')), []); await unlink(target);
+  await store.save('present-before-race'); const replacement = join(directory, 'replacement.json'); await writeFile(replacement, 'replacement-bytes', { mode: 0o600 }); const presentRaced = new RunStateStore(directory, 'run-state.json', { beforeRename: async (targetPath) => { await rename(replacement, targetPath); } }); await assert.rejects(() => presentRaced.save('raced-present'), CorrelationSafetyError); assert.equal(await readFile(target, 'utf8'), 'replacement-bytes'); assert.deepEqual((await readdir(directory)).filter((name) => name.startsWith('.run-state.json.')), []); await unlink(target);
   await writeFile(target, 'descriptor-safe', { mode: 0o600 }); const loadRaced = new RunStateStore(directory, 'run-state.json', { beforeLoadFstat: async (targetPath) => { await unlink(targetPath); await symlink(victim, targetPath); } }); assert.equal(await loadRaced.load(), 'descriptor-safe'); assert.equal(await readFile(victim, 'utf8'), 'outside-victim');
 });
 

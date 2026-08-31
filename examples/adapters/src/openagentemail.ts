@@ -11,7 +11,12 @@ export interface TaskMessage {
   state: TaskState;
   body: string;
   result?: unknown;
+  kind?: 'state' | 'reminder';
+  idempotencyKey?: string;
+  approval?: ApprovalSnapshot;
 }
+
+export interface ApprovalSnapshot { action: { type: string; name: string; arguments: unknown }; reviewer: string; expiresAt: string; digest: string; }
 
 export interface OaeTask {
   id: string;
@@ -23,6 +28,13 @@ export interface OaeTask {
   updatedAt: string;
   messages: TaskMessage[];
   result?: unknown;
+  /** Additive production projections; they are never used as local authority. */
+  parentTaskId?: string;
+  kind?: 'approval';
+  approval?: ApprovalSnapshot;
+  claimedUntil?: string;
+  leaseGeneration?: number;
+  leaseStatus?: 'disabled';
 }
 
 export interface WaitResult {
@@ -118,6 +130,9 @@ function object(value: unknown): value is Record<string, unknown> { return !!val
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): boolean { const keys = Object.keys(value); return keys.every((key) => allowed.includes(key)) && required.every((key) => key in value); }
 function validState(value: unknown): value is TaskState { return value === 'submitted' || value === 'working' || value === 'input-required' || value === 'completed' || value === 'failed'; }
 function safeText(value: unknown): value is string { return typeof value === 'string' && value.length <= 16_384; }
-function validMessage(value: unknown): value is TaskMessage { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'date', 'state', 'body', 'result'], ['id', 'from', 'to', 'subject', 'date', 'state', 'body'])) return false; return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.date) && safeText(value.body) && validState(value.state); }
-function validTask(value: unknown): value is OaeTask { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages', 'result'], ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages'])) return false; return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.createdAt) && safeText(value.updatedAt) && validState(value.state) && Array.isArray(value.messages) && value.messages.length <= 1_000 && value.messages.every(validMessage); }
+function validBody(value: unknown): value is string { return typeof value === 'string' && value.length <= 1_000_000; }
+function jsonValue(value: unknown, depth = 0): boolean { if (depth > 10 || value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return value === null || typeof value !== 'number' || Number.isFinite(value); if (Array.isArray(value)) return value.length <= 1_000 && value.every((item) => jsonValue(item, depth + 1)); if (!object(value) || Object.keys(value).length > 1_000) return false; return Object.values(value).every((item) => jsonValue(item, depth + 1)); }
+function validApproval(value: unknown): value is ApprovalSnapshot { if (!object(value) || !exactKeys(value, ['action', 'reviewer', 'expiresAt', 'digest'], ['action', 'reviewer', 'expiresAt', 'digest']) || !object(value.action) || !exactKeys(value.action, ['type', 'name', 'arguments'], ['type', 'name', 'arguments'])) return false; return safeText(value.action.type) && safeText(value.action.name) && jsonValue(value.action.arguments) && safeText(value.reviewer) && safeText(value.expiresAt) && typeof value.digest === 'string' && /^[a-f0-9]{64}$/i.test(value.digest); }
+function validMessage(value: unknown): value is TaskMessage { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'date', 'state', 'body', 'result', 'kind', 'idempotencyKey', 'approval'], ['id', 'from', 'to', 'subject', 'date', 'state', 'body'])) return false; return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.date) && validBody(value.body) && validState(value.state) && (value.kind === undefined || value.kind === 'state' || value.kind === 'reminder') && (value.idempotencyKey === undefined || safeText(value.idempotencyKey)) && (value.approval === undefined || validApproval(value.approval)); }
+function validTask(value: unknown): value is OaeTask { if (!object(value) || !exactKeys(value, ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages', 'result', 'parentTaskId', 'kind', 'approval', 'claimedUntil', 'leaseGeneration', 'leaseStatus'], ['id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'messages'])) return false; const leasePair = (value.claimedUntil === undefined && value.leaseGeneration === undefined && value.leaseStatus === undefined) || (safeText(value.claimedUntil) && Number.isInteger(value.leaseGeneration) && (value.leaseGeneration as number) >= 1 && ((value.leaseStatus === undefined) || value.leaseStatus === 'disabled')); return safeText(value.id) && safeText(value.from) && safeText(value.to) && safeText(value.subject) && safeText(value.createdAt) && safeText(value.updatedAt) && validState(value.state) && Array.isArray(value.messages) && value.messages.length <= 1_000 && value.messages.every(validMessage) && (value.parentTaskId === undefined || safeText(value.parentTaskId)) && (value.kind === undefined || value.kind === 'approval') && ((value.kind === 'approval') === (value.approval !== undefined)) && (value.approval === undefined || validApproval(value.approval)) && leasePair; }
 function validTaskList(value: unknown): value is { tasks: OaeTask[] } { return object(value) && exactKeys(value, ['tasks'], ['tasks']) && Array.isArray(value.tasks) && value.tasks.length <= 1_000 && value.tasks.every(validTask); }
