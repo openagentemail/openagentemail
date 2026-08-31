@@ -4,7 +4,7 @@ import { createOrAdopt, withMarker } from '../../src/retry.js';
 import type { OaeTask } from '../../src/openagentemail.js';
 
 const [mode, directory, serverPath] = process.argv.slice(2);
-if (!mode || !directory || !serverPath) throw new Error('usage: reconcile-child <create|recover> <state-dir> <server.json>');
+if (!mode || !directory || !serverPath) throw new Error('usage: reconcile-child <init|advance|create|recover> <state-dir> <server.json>');
 const base = { requester: 'asker@example.test', responder: 'reviewer@example.test', subject: 'Approve transfer', body: 'non-secret approval request' };
 const correlationId = '88888888-8888-4888-8888-888888888888';
 const record = createIntent({ framework: 'neutral', correlationId, operationKey: 'process/reconciliation', requestFingerprint: requestFingerprint(base), expectedParticipants: { requester: base.requester, responder: base.responder }, frameworkStateRef: 'checkpoint.sqlite', approvalItemKey: null });
@@ -14,10 +14,13 @@ const readServer = async (): Promise<Server> => JSON.parse(await readFile(server
 const writeServer = async (server: Server) => writeFile(serverPath, JSON.stringify(server), 'utf8');
 const makeTask = (): OaeTask => ({ id: 'task-1', from: base.requester, to: base.responder, subject: request.subject, state: 'submitted', createdAt: 'x', updatedAt: 'x', messages: [{ id: 'root-1', from: base.requester, to: base.responder, subject: request.subject, date: 'x', state: 'submitted', body: base.body }] });
 
-if (mode === 'advance') {
+if (mode === 'init') {
+  await new CorrelationStore(directory).save(record);
+} else if (mode === 'advance') {
   const store = new CorrelationStore(directory);
   const loaded = await store.load(correlationId);
-  const stamp = process.argv[5] ?? '2026-01-01T00:00:01.000Z';
+  const supplied = process.argv[5]; const stamp = supplied ?? new Date(Date.parse(loaded.updatedAt) + 1).toISOString();
+  if (!Number.isFinite(Date.parse(stamp)) || Date.parse(stamp) <= Date.parse(loaded.updatedAt)) throw new Error('reconcile fixture create-attempted stamp must be strictly after durable updatedAt');
   const { transition } = await import('../../src/correlation-store.js');
   await store.save(transition(loaded, 'create-attempted', { createAttemptedAt: stamp }, stamp));
 } else if (mode === 'create') {

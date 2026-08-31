@@ -126,9 +126,14 @@ function validateInputResponse(task: OaeTask, record: CorrelationRecord, body: s
   if (inputEvents.length !== 1 || stamped.length !== 1) throw new CorrelationSafetyError(`ambiguous input-required history: expected one exact stamped event, got ${inputEvents.length}`);
 }
 
-export async function pollNonTerminal(client: Pick<OaeClient, 'get'>, id: string, expected: TaskState, maxGets: number): Promise<OaeTask> {
+export interface PollTiming { sleep(milliseconds: number): Promise<void>; delayMs?: number; }
+/** Bounded ordinary polling; callers may inject timing for deterministic tests. */
+export async function pollNonTerminal(client: Pick<OaeClient, 'get'>, id: string, expected: TaskState, maxGets: number, timing: PollTiming = { sleep: async (milliseconds) => new Promise((done) => setTimeout(done, milliseconds)), delayMs: 1 }): Promise<OaeTask> {
+  if (!Number.isSafeInteger(maxGets) || maxGets < 1 || maxGets > 100) throw new CorrelationSafetyError('poll attempts must be a positive safe integer no greater than 100');
+  const delayMs = timing.delayMs ?? 1; if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 1000) throw new CorrelationSafetyError('poll delay must be a bounded safe integer');
   let observed: TaskState | undefined;
   for (let attempt = 0; attempt < maxGets; attempt += 1) {
+    if (attempt > 0) await timing.sleep(delayMs);
     const task = await client.get(id);
     observed = task.state;
     if (task.state === expected) return task;

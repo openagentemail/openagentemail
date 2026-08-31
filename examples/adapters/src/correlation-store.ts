@@ -41,6 +41,8 @@ export function isCorrelationId(value: unknown): value is string { return typeof
 
 /** Shared semantic task ID boundary for persistence and public diagnostics. */
 export function isSafeTaskId(value: unknown): value is string { return validSafeText(value, /^[A-Za-z0-9._:-]{1,240}$/); }
+/** Defense-in-depth detector; allowlisted schemas remain the primary persistence control. */
+export function isCredentialShaped(value: unknown): boolean { return typeof value === 'string' && (/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value) || /(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)); }
 
 export function requestFingerprint(value: Record<string, unknown>): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -227,9 +229,7 @@ function validateAdjacentChange(prior: CorrelationRecord, next: CorrelationRecor
   if (prior.resumeEvidence !== null && next.resumeEvidence !== prior.resumeEvidence) throw new CorrelationSafetyError('resume evidence cannot be rewritten');
 }
 
-function validSafeText(value: unknown, pattern: RegExp): value is string {
-  return typeof value === 'string' && pattern.test(value) && !/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value) && !/(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value);
-}
+function validSafeText(value: unknown, pattern: RegExp): value is string { return typeof value === 'string' && pattern.test(value) && !isCredentialShaped(value); }
 
 function exactKeys(value: object, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createIntent, requestFingerprint, transition, type CorrelationRecord } from '../src/correlation-store.js';
+import { CorrelationSafetyError, createIntent, requestFingerprint, transition, type CorrelationRecord } from '../src/correlation-store.js';
 import { createOrAdopt, validateCorrelatedTask, validateDecision, withMarker } from '../src/retry.js';
 import type { OaeTask, TaskMessage } from '../src/openagentemail.js';
 
@@ -31,8 +31,8 @@ test('R1g root history variants execute validateCorrelatedTask and createOrAdopt
   ];
   for (const row of rows) {
     const record = attempted(); const corrupt = row.mutate(validTask(record)); let saves = 0;
-    assert.throws(() => validateCorrelatedTask(corrupt, record), row.name);
-    await assert.rejects(() => createOrAdopt({ save: async () => { saves += 1; } }, { create: async () => { throw new Error('create must not run from create-attempted'); }, list: async () => [corrupt] }, record, { to: request.responder, subject: validTask(record).subject, body: request.body }));
+    assert.throws(() => validateCorrelatedTask(corrupt, record), CorrelationSafetyError, row.name);
+    await assert.rejects(() => createOrAdopt({ save: async () => { saves += 1; } }, { create: async () => { throw new Error('create must not run from create-attempted'); }, list: async () => [corrupt] }, record, { to: request.responder, subject: validTask(record).subject, body: request.body }), CorrelationSafetyError, row.name);
     assert.equal(saves, 0, row.name);
   }
 });
@@ -53,7 +53,7 @@ test('R1g terminal history variants execute validateDecision and preserve non-ad
   ];
   for (const row of rows) {
     const record = adopted(); const terminal = row.mutate(completed(record)); const before = structuredClone(record);
-    assert.throws(() => validateDecision(terminal, record), row.name);
+    assert.throws(() => validateDecision(terminal, record), CorrelationSafetyError, row.name);
     assert.deepEqual(record, before, row.name);
   }
 });

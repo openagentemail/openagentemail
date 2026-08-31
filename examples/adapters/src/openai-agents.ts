@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { Agent, RunState, run, tool, type RunToolApprovalItem } from '@openai/agents';
 import { ScriptedModel, assistantMessage, functionCall, modelResponder } from '@openai/agents/testing';
-import { CorrelationSafetyError, canonicalJson, transition, type CorrelationRecord } from './correlation-store.js';
+import { CorrelationSafetyError, canonicalJson, isCredentialShaped, transition, type CorrelationRecord } from './correlation-store.js';
 import type { OaeTask } from './openagentemail.js';
 import { receiveDecision, validateDecision } from './retry.js';
 
@@ -13,7 +13,6 @@ export interface ToolCrashHooks { beforeSideEffect?: () => Promise<void>; observ
 export type DeterministicAgent = { agent: Agent; model: ScriptedModel; executions: { count: number } };
 type CorrelationWriter = { save(record: CorrelationRecord): Promise<void> };
 const SAFE_FILENAMES = new Set(['run-state.json', 'tool-receipt.json']);
-const CREDENTIAL_SHAPED = /(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|-----begin|private[ _-]?key|\r|\n)|(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i;
 
 /** SDK-owned fields only; the hash keeps correlation persistence free of tool arguments. */
 export function approvalIdentity(item: RunToolApprovalItem): string {
@@ -43,7 +42,7 @@ export function applyAuthoritativeOaeDecision(state: RunState<any, Agent>, expec
 
 /** Reject credentials and header/error-shaped content before it can reach SDK state. */
 export function safeWorkflowInput(input: string): string {
-  if (!input || CREDENTIAL_SHAPED.test(input)) throw new CorrelationSafetyError('workflow input is empty or credential-shaped');
+  if (!input || isCredentialShaped(input)) throw new CorrelationSafetyError('workflow input is empty or credential-shaped');
   return input;
 }
 

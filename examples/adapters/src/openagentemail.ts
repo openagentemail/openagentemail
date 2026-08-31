@@ -43,6 +43,15 @@ export interface OaeClientOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+/** A real client may use HTTPS, or explicit loopback HTTP for local development only. */
+export function safeOaeBaseUrl(value: string): string {
+  let url: URL; try { url = new URL(value); } catch { throw new Error('OpenAgentEmail URL must be an absolute HTTPS or loopback HTTP URL'); }
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error('OpenAgentEmail participant tokens require HTTPS or loopback HTTP');
+  if (url.username || url.password || url.hash) throw new Error('OpenAgentEmail URL must not contain credentials or a fragment');
+  return url.toString().replace(/\/$/, '');
+}
+
 export class OaeClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -50,7 +59,7 @@ export class OaeClient {
 
   constructor(options: OaeClientOptions) {
     if (!options.token) throw new Error('A participant-scoped token is required');
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = options.fetch ? options.baseUrl.replace(/\/+$/, '') : safeOaeBaseUrl(options.baseUrl);
     this.token = options.token;
     this.fetchFn = options.fetch ?? globalThis.fetch;
   }
@@ -61,7 +70,8 @@ export class OaeClient {
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...init?.headers },
     });
     if (!response.ok) throw new OaeHttpError(response.status, operation);
-    return { value: await response.json() as T, response };
+    try { return { value: await response.json() as T, response }; }
+    catch { throw new OaeHttpError(response.status, `${operation} returned invalid JSON`); }
   }
 
   async create(input: { to: string; subject: string; body: string }): Promise<OaeTask> {

@@ -116,3 +116,8 @@ test('ordinary polling observes non-terminal state without terminal wait', async
   assert.equal(gets, 2);
   assert.equal(markerFor(record()).includes(record().requestFingerprint), true);
 });
+
+test('R5c bounded polling delays only between valid attempts and invalid bounds perform zero I/O', async () => {
+  let gets = 0; const waits: number[] = []; const current = taskFor(record(), 'submitted'); const result = await pollNonTerminal({ get: async () => (++gets === 2 ? { ...current, state: 'input-required' as const } : current) }, 'task-1', 'input-required', 2, { delayMs: 7, sleep: async (milliseconds) => { waits.push(milliseconds); } }); assert.equal(result.state, 'input-required'); assert.equal(gets, 2); assert.deepEqual(waits, [7]);
+  for (const invalid of [0, -1, 1.5, 101, Number.NaN]) await assert.rejects(() => pollNonTerminal({ get: async () => { gets += 1; return current; } }, 'task-1', 'input-required', invalid), CorrelationSafetyError); assert.equal(gets, 2);
+});
