@@ -32,3 +32,10 @@ test('HTTP errors expose status and operation but never response body', async ()
   const client = new OaeClient({ baseUrl: 'http://oae.test', token: 'token', fetch: (async () => new Response('raw-secret-body', { status: 403 })) as typeof globalThis.fetch });
   await assert.rejects(() => client.get('nope'), (error: unknown) => error instanceof OaeHttpError && error.status === 403 && !error.message.includes('raw-secret-body'));
 });
+
+test('R5d every successful OAE task/list response family rejects malformed JSON objects without leaking canaries', async () => {
+  const malformed = { id: 'credential-canary', nested: { rawBody: 'body-canary' } }; const routes: Array<{ name: string; invoke(client: OaeClient): Promise<unknown> }> = [
+    { name: 'create', invoke: (client) => client.create({ to: 'reviewer@example.test', subject: 's', body: 'b' }) }, { name: 'get', invoke: (client) => client.get('task-1') }, { name: 'list', invoke: (client) => client.list() }, { name: 'wait', invoke: (client) => client.waitForTerminal('task-1') }, { name: 'state-update', invoke: (client) => client.inputRequired('task-1', 'need input') },
+  ];
+  for (const route of routes) { const client = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: (async () => new Response(JSON.stringify(route.name === 'list' ? { tasks: [malformed] } : malformed), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch }); await assert.rejects(() => route.invoke(client), (error: unknown) => error instanceof OaeHttpError && error.status === 200 && !error.message.includes('credential-canary') && !error.message.includes('body-canary'), route.name); }
+});

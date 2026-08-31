@@ -15,6 +15,8 @@ export interface ScenarioStep { action: 'input-required' | 'working' | 'complete
 export interface Scenario { name: string; correlationId: string; participants: Record<string, ParticipantScenario>; tasks: TaskSeed[]; steps: ScenarioStep[]; transitionDelayMs?: number; timeoutMs?: number; }
 export interface ScenarioHandlers { pause(input: { scenario: Scenario; task: OaeTask; correlation: CorrelationRecord }): Promise<void>; resume(input: { scenario: Scenario; task: OaeTask; correlation: CorrelationRecord }): Promise<void>; }
 export interface Timing { now(): number; sleep(milliseconds: number): Promise<void>; }
+/** Test-only descriptor seam; production callers use the unchanged default. */
+export interface ScenarioLoadHooks { afterOpen?(): Promise<void>; }
 export interface ScenarioRunInput { scenario: Scenario; environment: NodeJS.ProcessEnv; stateDirectory: string; handlers?: Partial<ScenarioHandlers>; timing?: Timing; }
 export interface ScenarioResult { scenario: string; correlationId: string; taskId: string; state: TaskState; result?: { decision: 'approved' | 'rejected' }; frameworkPauses: number; frameworkResumes: number; events: Array<{ id: string; from: string; state: TaskState }>; }
 export interface FailureExport { scenario: string; step: number; code: 'authority' | 'schema' | 'timeout' | 'conflict'; expectedState?: TaskState; observedState?: TaskState; taskId?: string; correlationId?: string; elapsedMs?: number; }
@@ -25,11 +27,11 @@ export class ScenarioFailure extends Error {
 }
 
 /** Strict caller-supplied YAML boundary. It never accepts credentials or identity provisioning directives. */
-export async function loadScenario(path: string): Promise<Scenario> {
+export async function loadScenario(path: string, hooks: ScenarioLoadHooks = {}): Promise<Scenario> {
   try {
     if (!path || path.includes('\0') || !/\.ya?ml$/i.test(path)) throw schema('unknown');
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { const entry = await handle.stat(); if (!entry.isFile() || entry.uid !== owner() || entry.size > MAX_SCENARIO_BYTES) throw schema('unknown'); const source = await handle.readFile({ encoding: 'utf8' }); return validateScenario(parseRestrictedYaml(source)); }
+    try { await hooks.afterOpen?.(); const entry = await handle.stat(); if (!entry.isFile() || entry.uid !== owner() || entry.size > MAX_SCENARIO_BYTES) throw schema('unknown'); const source = await handle.readFile({ encoding: 'utf8' }); return validateScenario(parseRestrictedYaml(source)); }
     finally { await handle.close(); }
   } catch (error) { if (error instanceof ScenarioFailure) throw error; throw schema('unknown'); }
 }
