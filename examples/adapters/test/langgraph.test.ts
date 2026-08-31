@@ -30,6 +30,13 @@ test('R3 real SQLite-backed interrupt fresh-process restores approved and reject
   }
 });
 
+test('R5m descriptor-bound LangGraph JSON loads retain opened evidence across pathname replacement', async () => {
+  for (const artifact of ['ledger', 'observation', 'receipt'] as const) {
+    const directory = await pausedDirectory('approved'); child('resume', directory, 'approved'); const current = await durable(directory); const paths = { ...effectPaths(directory), receipt: receiptPath(directory) }; const target = paths[artifact]; const original = await readFile(target, 'utf8'); const replacement = `${target}.replacement`; const row = JSON.parse(original) as Record<string, unknown>; if (artifact === 'ledger') row.effectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; else if (artifact === 'observation') row.effectLedgerFingerprint = 'a'.repeat(64); else row.finalStateFingerprint = 'a'.repeat(64); await writeFile(replacement, JSON.stringify(row), { mode: 0o600 }); const hook = artifact === 'receipt' ? 'after-receipt-descriptor-validation' : `after-${target.split('/').at(-1)!}-descriptor-validation`;
+    const resumed = await resumeLangGraph({ directory, threadId, record: current.record, correlationStore: current.store, task: current.task, checkpoints: async (name) => { if (name === hook) await rename(replacement, target); } }); assert.equal(resumed.phase, 'resumed'); assert.equal(await readFile(target, 'utf8'), JSON.stringify(row));
+  }
+});
+
 test('R5c two real LangGraph threads share only SQLite directory, never receipts or protected effects', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'r5c-two-threads-')); const store = new CorrelationStore(join(directory, 'correlation'));
   const runOne = async (identity: Identity, decision: 'approved' | 'rejected') => {

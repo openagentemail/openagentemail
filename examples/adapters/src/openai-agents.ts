@@ -164,6 +164,12 @@ export function formatExplicitLiveResult(result: { status: 'skipped-no-key' | 'c
 
 function safeLiveOutput(value: unknown): string {
   let text: string; try { text = typeof value === 'string' ? value : JSON.stringify(value); } catch { text = '[unserializable model output]'; }
-  if (!text || isCredentialShaped(text)) return '[redacted model output]';
+  text = neutralizeTerminalControls(text);
+  if (!text || isCredentialShaped(text.replace(/\n/g, ' '))) return '[redacted model output]';
   return text.slice(0, 4096);
+}
+
+/** Preserve printable text/tabs/newlines while removing terminal control execution and normalizing CRLF. */
+function neutralizeTerminalControls(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x9d[^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 }

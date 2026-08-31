@@ -249,3 +249,9 @@ test('R5j key-present live branch reports a bounded safe stubbed model result wi
   let calls = 0; const completed = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async (input) => { calls += 1; assert.equal(input, 'local-safe-input'); return 'local stub output'; } }); assert.deepEqual(completed, { status: 'completed', output: 'local stub output' }); assert.equal(formatExplicitLiveResult(completed), 'completed\nlocal stub output\n'); assert.equal(calls, 1);
   const bounded = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async () => 'x'.repeat(5_000) }); assert.equal(bounded.status, 'completed'); assert.equal(bounded.output?.length, 4_096); const redacted = await runExplicitLiveExample('local-safe-input', { authorized: true, run: async () => 'Bearer credential-canary' }); assert.deepEqual(redacted, { status: 'completed', output: '[redacted model output]' });
 });
+
+test('R5m local explicit-live formatter neutralizes terminal controls before redaction and bounds', async () => {
+  const output = async (value: unknown) => (await runExplicitLiveExample('local-safe-input', { authorized: true, run: async () => value })).output;
+  assert.equal(await output('\u001b[31mred\u001b[0m\u001b[2J'), 'red'); assert.equal(await output('\u001b]0;title\u0007\u001b]52;c;clipboard\u001b\\ok'), 'ok'); assert.equal(await output('a\u0007b\rwin\r\nnext\tcolumn'), 'abwin\nnext\tcolumn'); assert.equal(await output('before\u009b31mafter'), 'beforeafter');
+  assert.equal(await output('Bearer cred\u001b[31mential-canary'), '[redacted model output]'); assert.equal(await output({ toJSON() { throw new Error('local only'); } }), '[unserializable model output]'); assert.equal((await output(`\u001b[31m${'x'.repeat(5_000)}`))?.length, 4_096);
+});

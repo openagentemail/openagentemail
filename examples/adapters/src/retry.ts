@@ -60,10 +60,16 @@ export function matchesCorrelation(task: OaeTask, record: CorrelationRecord): bo
   try { validateCorrelatedTask(task, record); return true; } catch { return false; }
 }
 
-export async function reconcileTask(client: Pick<OaeClient, 'list'>, record: CorrelationRecord, attempts = 2): Promise<OaeTask> {
+export interface ReconciliationTiming { intervalMs: number; sleep(milliseconds: number): Promise<void>; }
+/** Exceeds the production 30s task-list cache without delaying normal create attempts. */
+export const DEFAULT_RECONCILIATION_TIMING: ReconciliationTiming = { intervalMs: 30_100, sleep: async (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)) };
+
+export async function reconcileTask(client: Pick<OaeClient, 'list'>, record: CorrelationRecord, attempts = 2, timing: ReconciliationTiming = DEFAULT_RECONCILIATION_TIMING): Promise<OaeTask> {
   if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > MAX_RECONCILIATION_ATTEMPTS) throw new CorrelationSafetyError(`reconciliation attempts must be an integer from 1 to ${MAX_RECONCILIATION_ATTEMPTS}`);
+  if (!Number.isSafeInteger(timing.intervalMs) || timing.intervalMs < 30_001 || timing.intervalMs > 60_000 || typeof timing.sleep !== 'function') throw new CorrelationSafetyError('reconciliation timing must exceed the 30-second task-list cache');
   const candidates = new Map<string, OaeTask>();
   for (let turn = 0; turn < attempts; turn += 1) {
+    if (turn > 0) await timing.sleep(timing.intervalMs);
     const listed = await client.list();
     const marked = listed.filter((task) => task.subject.includes(markerFor(record)));
     if (marked.some((task) => !matchesCorrelation(task, record))) throw new CorrelationSafetyError('contradictory task with this correlation marker is visible');
@@ -74,7 +80,7 @@ export async function reconcileTask(client: Pick<OaeClient, 'list'>, record: Cor
   throw new CorrelationSafetyError(`ambiguous create: ${candidates.size} correlated tasks are visible`);
 }
 
-export async function createOrAdopt(store: CorrelationWriter, client: Pick<OaeClient, 'create' | 'list'>, record: CorrelationRecord, request: { to: string; subject: string; body: string }, attempts = 2): Promise<CorrelationRecord> {
+export async function createOrAdopt(store: CorrelationWriter, client: Pick<OaeClient, 'create' | 'list'>, record: CorrelationRecord, request: { to: string; subject: string; body: string }, attempts = 2, timing: ReconciliationTiming = DEFAULT_RECONCILIATION_TIMING): Promise<CorrelationRecord> {
   validateOutboundRequest(record, request); // validate before durable attempt/network I/O
   if (record.phase === 'intent-created') {
     const stamp = new Date(Math.max(Date.now(), Date.parse(record.updatedAt) + 1)).toISOString();
@@ -87,7 +93,7 @@ export async function createOrAdopt(store: CorrelationWriter, client: Pick<OaeCl
     return adopted;
   }
   if (record.phase !== 'create-attempted') throw new CorrelationSafetyError(`create/adopt cannot start in ${record.phase}`);
-  const task = await reconcileTask(client, record, attempts);
+  const task = await reconcileTask(client, record, attempts, timing);
   const adopted = transition(record, 'task-adopted', { taskId: task.id });
   await store.save(adopted);
   return adopted;
