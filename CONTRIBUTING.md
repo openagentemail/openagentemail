@@ -104,9 +104,9 @@ internal and external issues:
 
 External issues additionally follow three rules:
 
-1. **First response within 24 hours.** Even "got it, looking" counts. A patrol
-   automation watches the external queue and escalates to a maintainer; a human
-   still writes or approves every posted reply.
+1. **First response within 24 hours.** Even "got it, looking" counts. A
+   maintainer-side patrol (run outside this repository) watches the external
+   queue and escalates; a human still writes or approves every posted reply.
 2. **Feature requests pass a roadmap-alignment check.** Aligned → scheduled as
    P1/P2. Valuable but misaligned → parked at P3 with a courteous explanation.
    Declined → closed with thanks and one sentence of reasoning. Silence is not
