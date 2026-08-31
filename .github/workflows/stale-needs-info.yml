@@ -1,0 +1,56 @@
+name: Close stale needs-info issues
+
+# When a maintainer asks for more detail (label `needs-info`) and the reporter
+# stays silent, the issue is marked stale after 14 days and closed 7 days later.
+# Removing the label or any new comment resets the clock (actions/stale default).
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: stale-needs-info
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure labels exist
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            for (const [name, color, description] of [
+              ["needs-info", "d4c5f9", "Maintainer asked for more detail; waiting on the reporter"],
+              ["stale", "ffffff", "No activity on a needs-info issue; will close soon unless updated"],
+            ]) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (err) {
+                if (err.status !== 404) throw err;
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              }
+            }
+
+      - name: Mark and close stale needs-info issues
+        uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
+        with:
+          days-before-issue-stale: 14
+          days-before-issue-close: 7
+          only-issue-labels: needs-info
+          exempt-issue-labels: "security,prio: P0,prio: P1"
+          stale-issue-label: stale
+          stale-issue-message: |
+            This issue is waiting on reporter-provided detail (`needs-info`) and has seen no
+            activity for 14 days. If we do not hear back within 7 days it will be closed;
+            commenting or updating the issue resets the clock.
+          close-issue-message: |
+            Closed for inactivity while waiting on requested information. You are welcome to
+            reopen (or file a fresh issue) with the details any time.
+          days-before-pr-stale: -1
+          days-before-pr-close: -1

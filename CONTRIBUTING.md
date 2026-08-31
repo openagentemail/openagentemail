@@ -80,3 +80,41 @@ What to expect when you open a PR from a fork:
 - **AI-authored PRs** are held to the same bar as human ones; our review chain
   (bots + maintainer review) provides the independent review, so you do not
   need to arrange your own.
+
+## Issue triage (v1.1)
+
+Every issue gets classified on two axes:
+
+- **Source**: `source: internal` (maintainers/team agents) or `source: external`
+  (community). Applied automatically on open.
+- **Type**: `bug`, `feature` (label `enhancement`), `follow-up`, `hardening`,
+  `docs`, `security`.
+
+Priority is a maintainer decision made at triage, using one shared ruler for
+internal and external issues:
+
+- **P0 — firefighting**: production outage, security hole, data corruption.
+  Drops everything.
+- **P1 — this week**: defects on a core path users are hitting now, or work
+  blocking the current roadmap milestone.
+- **P2 — this month**: valuable but not urgent; tech-debt batches; roadmap
+  items outside the current milestone.
+- **P3 — recorded**: theoretical corners, nice-to-haves, ideas not aligned
+  with the roadmap right now. Recording it is the completion.
+
+External issues additionally follow three rules:
+
+1. **First response within 24 hours.** Even "got it, looking" counts. A
+   maintainer-side patrol (run outside this repository) watches the external
+   queue and escalates; a human still writes or approves every posted reply.
+2. **Feature requests pass a roadmap-alignment check.** Aligned → scheduled as
+   P1/P2. Valuable but misaligned → parked at P3 with a courteous explanation.
+   Declined → closed with thanks and one sentence of reasoning. Silence is not
+   an answer we give.
+3. **Security reports go private.** We redirect to the channel in
+   [SECURITY.md](SECURITY.md) instead of discussing details in public.
+
+Labels: `source: internal|external`, `prio: P0|P1|P2|P3`, plus the type labels
+above. An issue is triaged when it carries a source label, a type, and a
+priority. Issues labeled `needs-info` are closed automatically after 14 days
+of no issue activity plus a 7-day grace period (see `stale-needs-info.yml`).
