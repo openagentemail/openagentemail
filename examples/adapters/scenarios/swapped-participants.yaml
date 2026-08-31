@@ -1,0 +1,21 @@
+name: swapped-participants
+correlationId: 66666666-6666-4666-8666-666666666666
+participants:
+  requester:
+    address: requester@example.test
+    tokenEnv: OAE_FIXTURE_REQUESTER_TOKEN
+  responder:
+    address: responder@example.test
+    tokenEnv: OAE_FIXTURE_RESPONDER_TOKEN
+tasks:
+  - id: scenario-task-6
+    from: responder
+    to: requester
+    subject: "Approval [scenario:66666666-6666-4666-8666-666666666666]"
+    body: safe-workflow-r4
+    rootMessageId: root-6
+steps:
+  - action: input-required
+    actor: responder
+    task: scenario-task-6
+    body: approve-or-reject

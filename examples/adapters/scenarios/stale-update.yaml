@@ -1,0 +1,32 @@
+name: stale-update
+correlationId: 44444444-4444-4444-8444-444444444444
+participants:
+  requester:
+    address: requester@example.test
+    tokenEnv: OAE_FIXTURE_REQUESTER_TOKEN
+  responder:
+    address: responder@example.test
+    tokenEnv: OAE_FIXTURE_RESPONDER_TOKEN
+tasks:
+  - id: scenario-task-4
+    from: requester
+    to: responder
+    subject: "Approval [scenario:44444444-4444-4444-8444-444444444444]"
+    body: safe-workflow-r4
+    rootMessageId: root-4
+steps:
+  - action: input-required
+    actor: requester
+    task: scenario-task-4
+    body: approve-or-reject
+  - action: working
+    actor: responder
+    task: scenario-task-4
+  - action: completed
+    actor: responder
+    task: scenario-task-4
+    result:
+      decision: approved
+  - action: working
+    actor: responder
+    task: scenario-task-4

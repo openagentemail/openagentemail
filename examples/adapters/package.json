@@ -1,0 +1,26 @@
+{
+  "name": "openagentemail-adapters-example",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "fixture": "env OPENAGENTEMAIL_API_URL=http://127.0.0.1 OAE_FIXTURE_REQUESTER_TOKEN=fixture-requester-scope OAE_FIXTURE_RESPONDER_TOKEN=fixture-responder-scope tsx src/scenario-cli.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "1.1.48",
+    "@langchain/langgraph": "1.4.13",
+    "@langchain/langgraph-checkpoint-sqlite": "1.0.4",
+    "@openai/agents": "0.17.0",
+    "zod": "4.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.4",
+    "tsx": "4.23.13",
+    "typescript": "5.7.3"
+  }
+}

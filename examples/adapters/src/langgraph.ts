@@ -1,0 +1,156 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, lstat, mkdir, open, realpath, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { basename, isAbsolute, resolve } from 'node:path';
+import { Annotation, Command, END, interrupt, START, StateGraph } from '@langchain/langgraph';
+import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
+import { CorrelationSafetyError, canonicalJson, isCredentialShaped, requestFingerprint, transition, type CorrelationRecord } from './correlation-store.js';
+import type { OaeTask } from './openagentemail.js';
+import { createOrAdopt, receiveDecision, requestInputOrReconcile, validateDecision, withMarker } from './retry.js';
+
+const DB_FILENAME = 'langgraph-checkpoints.sqlite';
+const GRAPH_NAME = 'oae-approval-graph';
+const NODE_NAME = 'await_authoritative_decision';
+
+const LangState = Annotation.Root({ workflow: Annotation<string>, threadId: Annotation<string>, operationKey: Annotation<string>, decision: Annotation<'approved' | 'rejected'>(), effect: Annotation<number>() });
+type GraphConfig = { configurable: { thread_id: string } };
+type EffectBinding = { correlationId: string; taskId: string; requestFingerprint: string; operationKey: string; threadId: string; decision: 'approved' | 'rejected'; messageId: string; evidenceFingerprint: string };
+type EffectLedger = EffectBinding & { version: 1; effectId: string };
+type ApprovedEffectObservation = EffectBinding & { version: 1; effectLedgerFingerprint: string; effects: 1 };
+type RejectedEffectObservation = EffectBinding & { version: 1; effects: 0 };
+type EffectObservation = ApprovedEffectObservation | RejectedEffectObservation;
+type Receipt = EffectBinding & { version: 2; finalCheckpointId: string; finalStateFingerprint: string; effectObservationFingerprint: string; effects: 0 | 1 };
+
+export interface LangGraphPauseInput { directory: string; threadId: string; workflow: string; record: CorrelationRecord; correlationStore: { save(record: CorrelationRecord): Promise<void> }; oae: Parameters<typeof createOrAdopt>[1] & Parameters<typeof requestInputOrReconcile>[1]; checkpoints?: (name: string) => Promise<void>; }
+export interface LangGraphResumeInput { directory: string; threadId: string; record: CorrelationRecord; correlationStore: { save(record: CorrelationRecord): Promise<void> }; task: OaeTask; onEffect?: () => void; checkpoints?: (name: string) => Promise<void>; }
+
+export function langGraphOperationKey(threadId: string): string { return `langgraph/${GRAPH_NAME}/${NODE_NAME}/${safeThreadId(threadId)}`; }
+export function langGraphApprovalKey(threadId: string): string { return `langgraph-thread:${safeThreadId(threadId)}`; }
+export function safeLangGraphWorkflow(value: string): string { if (!value || isCredentialShaped(value)) throw new CorrelationSafetyError('LangGraph workflow input is empty or credential-shaped'); return value; }
+
+/** Opens the real SQLite saver only after exact owner-only directory/file validation. */
+export async function openLangGraphSqlite(directory: string): Promise<{ saver: SqliteSaver; databasePath: string; close(): Promise<void> }> {
+  const trusted = await trustedDirectory(directory); const databasePath = contained(trusted, DB_FILENAME); await ensureDatabaseFile(databasePath); await validateSqliteArtifacts(trusted);
+  const saver = SqliteSaver.fromConnString(databasePath);
+  try { saver.db.pragma('journal_mode = WAL'); await saver.getTuple({ configurable: { thread_id: '__langgraph_safety_probe__' } }); await validateSqliteArtifacts(trusted); }
+  catch (error) { try { saver.db.close(); } catch { /* best effort after failed open */ } throw error; }
+  return { saver, databasePath, async close() { try { saver.db.pragma('wal_checkpoint(TRUNCATE)'); } finally { saver.db.close(); } await validateSqliteArtifacts(trusted); } };
+}
+
+export async function validateLangGraphSqlite(directory: string): Promise<void> { await validateSqliteArtifacts(await trustedDirectory(directory)); }
+
+export function buildLangGraph(saver: SqliteSaver, effectSink?: EffectSink, onEffect?: () => void) {
+  return new StateGraph(LangState)
+    .addNode(NODE_NAME, async (state) => {
+      const resumed = interrupt({ kind: 'oae-authoritative-decision', threadId: state.threadId, operationKey: state.operationKey });
+      const decision = exactDecision(resumed); if (!effectSink) throw new CorrelationSafetyError('LangGraph resumed node lacks its protected effect sink'); const observation = await effectSink.execute(decision); if (observation.effects === 1) onEffect?.(); return { decision: decision.decision, effect: observation.effects };
+    })
+    .addEdge(START, NODE_NAME).addEdge(NODE_NAME, END).compile({ checkpointer: saver });
+}
+type CompiledGraph = ReturnType<typeof buildLangGraph>;
+
+/** Real initial invoke: the node reaches interrupt() before any effect or OAE external action. */
+export async function pauseLangGraph(input: LangGraphPauseInput): Promise<CorrelationRecord> {
+  safeLangGraphWorkflow(input.workflow); assertBinding(input.record, input.threadId);
+  const checkpoint = await openLangGraphSqlite(input.directory);
+  try {
+    const graph = buildLangGraph(checkpoint.saver); const config = graphConfig(input.threadId); const mark = async (name: string) => input.checkpoints?.(name); let record = input.record; const existing = await graph.getState(config);
+    if (existing.next.length !== 0) { validateInterruptedCheckpoint(existing, record, input.threadId, input.workflow); }
+    else if (record.phase === 'intent-created') { if (hasPersistedGraphState(existing)) throw new CorrelationSafetyError('LangGraph completed checkpoint cannot be reused by a new correlation'); await mark('before-initial-invoke'); const paused = await graph.invoke({ workflow: input.workflow, threadId: input.threadId, operationKey: input.record.operationKey }, config); const interrupted = paused as unknown as { __interrupt__?: unknown[] }; if (!Array.isArray(interrupted.__interrupt__) || interrupted.__interrupt__.length !== 1) throw new CorrelationSafetyError('real LangGraph invoke did not persist exactly one interrupt'); await mark('after-initial-invoke'); await mark('before-checkpoint-visible'); const state = await graph.getState(config); validateInterruptedCheckpoint(state, record, input.threadId, input.workflow); await mark('after-checkpoint-visible'); }
+    else throw new CorrelationSafetyError('LangGraph re-entry lacks the original durable interrupt');
+    if (record.phase === 'intent-created' || record.phase === 'create-attempted') { await mark('before-task-adopt'); record = await createOrAdopt(input.correlationStore, input.oae, record, { to: record.expectedParticipants.responder, subject: awaitSubject(record), body: input.workflow }); await mark('after-task-adopt'); }
+    if (record.phase === 'task-adopted' || record.phase === 'input-request-attempted') { await mark('before-input-accept'); record = await requestInputOrReconcile(input.correlationStore, input.oae, record); await mark('after-input-accept'); }
+    if (record.phase !== 'awaiting-input') throw new CorrelationSafetyError(`LangGraph pause cannot finish in ${record.phase}`); return record;
+  } finally { await checkpoint.close(); }
+}
+
+/** Resume is fail-closed: a durable resume-started record never invokes Command again without a bound receipt. */
+export async function resumeLangGraph(input: LangGraphResumeInput): Promise<CorrelationRecord> {
+  assertBinding(input.record, input.threadId); const checkpoint = await openLangGraphSqlite(input.directory);
+  const mark = async (name: string) => input.checkpoints?.(name);
+  try {
+    const graph = buildLangGraph(checkpoint.saver); const config = graphConfig(input.threadId); if (input.record.phase !== 'resumed' && input.record.phase !== 'resume-started') validateInterruptedCheckpoint(await graph.getState(config), input.record, input.threadId); await mark('before-decision-evidence'); let record = await receiveDecision(input.correlationStore, input.record, input.task); await mark('after-decision-evidence'); const receiptStore = new ReceiptStore(input.directory, receiptFilename(record), mark); const effectSink = new EffectSink(input.directory, bindingFrom(record, input.threadId), mark);
+    const resumedGraph = buildLangGraph(checkpoint.saver, effectSink, input.onEffect);
+    if (record.phase === 'resumed') { await verifyReceipt(receiptStore, effectSink, resumedGraph, config, record, input.threadId); return record; }
+    if (record.phase === 'resume-started') { const receipt = await verifyReceipt(receiptStore, effectSink, resumedGraph, config, record, input.threadId); const resumed = transition(record, 'resumed', { resumeEvidence: receiptEvidence(receipt) }); await input.correlationStore.save(resumed); return resumed; }
+    if (record.phase !== 'decision-received') throw new CorrelationSafetyError(`LangGraph cannot resume from ${record.phase}`);
+    const before = await resumedGraph.getState(config); validateInterruptedCheckpoint(before, record, input.threadId);
+    await mark('before-resume-started'); const started = transition(record, 'resume-started'); await input.correlationStore.save(started); await mark('after-resume-started'); record = started;
+    await mark('before-command-resume'); const { value, evidence } = validateDecision(input.task, record); await mark('before-graph-completion'); await resumedGraph.invoke(new Command({ resume: value }), config); await mark('after-command-resume'); await mark('after-graph-completion');
+    const final = await resumedGraph.getState(config); const finalCheckpointId = checkpointId(final); const values = final.values as Record<string, unknown>; const observation = await effectSink.inspect();
+    if (final.next.length !== 0 || values.decision !== value.decision || values.effect !== observation.effects) throw new CorrelationSafetyError('LangGraph resumed checkpoint lacks its exact final decision/effect state');
+    const receipt: Receipt = { version: 2, ...bindingFrom(record, input.threadId), finalCheckpointId, finalStateFingerprint: sha(canonicalJson(values)), effectObservationFingerprint: sha(canonicalJson(observation)), effects: observation.effects };
+    await mark('before-receipt-save'); await receiptStore.save(receipt); await mark('after-receipt-save'); const resumed = transition(record, 'resumed', { resumeEvidence: receiptEvidence(receipt) }); await mark('before-resumed-save'); await input.correlationStore.save(resumed); await mark('after-resumed-save'); return resumed;
+  } finally { await checkpoint.close(); }
+}
+
+/** Opens a fresh real SQLite connection and derives final decision/effect evidence from the checkpoint itself. */
+export async function inspectLangGraphFinal(directory: string, threadId: string, record: CorrelationRecord): Promise<{ decision: 'approved' | 'rejected'; effects: 0 | 1; checkpointId: string; finalStateFingerprint: string; effectObservationFingerprint: string }> {
+  const checkpoint = await openLangGraphSqlite(directory); try { const final = await buildLangGraph(checkpoint.saver).getState(graphConfig(threadId)); const values = final.values as Record<string, unknown>; const decision = values.decision; const observation = await new EffectSink(directory, bindingFrom(record, threadId)).inspect(); if (final.next.length !== 0 || decision !== observation.decision || values.effect !== observation.effects) throw new CorrelationSafetyError('LangGraph SQLite checkpoint is not a completed durable-effect final state'); return { decision: observation.decision, effects: observation.effects, checkpointId: checkpointId(final), finalStateFingerprint: sha(canonicalJson(values)), effectObservationFingerprint: sha(canonicalJson(observation)) }; } finally { await checkpoint.close(); }
+}
+
+function awaitSubject(record: CorrelationRecord): string { return withMarker(record, 'R3 LangGraph approval'); }
+function graphConfig(threadId: string): GraphConfig { return { configurable: { thread_id: safeThreadId(threadId) } }; }
+function hasPersistedGraphState(state: unknown): boolean { const values = (state as { values?: unknown }).values; return !!values && typeof values === 'object' && !Array.isArray(values) && Object.keys(values as Record<string, unknown>).length !== 0; }
+function safeThreadId(value: string): string { if (!/^[A-Za-z0-9._:-]{1,160}$/.test(value) || isCredentialShaped(value)) throw new CorrelationSafetyError('LangGraph thread_id is unsafe'); return value; }
+function assertBinding(record: CorrelationRecord, threadId: string): void { if (record.framework !== 'langgraph' || record.operationKey !== langGraphOperationKey(threadId) || record.approvalItemKey !== langGraphApprovalKey(threadId) || record.frameworkStateRef !== DB_FILENAME) throw new CorrelationSafetyError('LangGraph correlation does not bind this thread/checkpoint identity'); }
+function validateInterruptedCheckpoint(state: unknown, record: CorrelationRecord, threadId: string, expectedWorkflow?: string): void { const row = state as { next?: unknown; values?: unknown }; const values = row.values as Record<string, unknown>; if (!Array.isArray(row.next) || row.next.length !== 1 || row.next[0] !== NODE_NAME || !values || typeof values.workflow !== 'string' || values.threadId !== threadId || values.operationKey !== record.operationKey || (expectedWorkflow !== undefined && values.workflow !== expectedWorkflow) || requestFingerprint({ requester: record.expectedParticipants.requester, responder: record.expectedParticipants.responder, subject: 'R3 LangGraph approval', body: values.workflow }) !== record.requestFingerprint) throw new CorrelationSafetyError('LangGraph interrupted checkpoint contradicts workflow/thread/correlation binding'); }
+function exactDecision(value: unknown): { decision: 'approved' | 'rejected' } { if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || Object.keys(value)[0] !== 'decision' || ((value as { decision?: unknown }).decision !== 'approved' && (value as { decision?: unknown }).decision !== 'rejected')) throw new CorrelationSafetyError('LangGraph Command resume must be exactly an authoritative decision'); return value as { decision: 'approved' | 'rejected' }; }
+function bindingFrom(record: CorrelationRecord, threadId: string): EffectBinding { if (!record.taskId || !record.decisionEvidence) throw new CorrelationSafetyError('LangGraph effect lacks authoritative OAE evidence'); return { correlationId: record.correlationId, taskId: record.taskId, requestFingerprint: record.requestFingerprint, operationKey: record.operationKey, threadId, decision: record.decisionEvidence.decision, messageId: record.decisionEvidence.messageId, evidenceFingerprint: record.decisionEvidence.evidenceFingerprint }; }
+function checkpointId(state: unknown): string { const row = state as { config?: { configurable?: { checkpoint_id?: unknown } } }; const id = row.config?.configurable?.checkpoint_id; if (typeof id !== 'string' || !/^[A-Za-z0-9-]{16,120}$/.test(id)) throw new CorrelationSafetyError('LangGraph final checkpoint identity is unsafe'); return id; }
+function sha(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+function receiptEvidence(receipt: Receipt): string { return `langgraph:${sha(canonicalJson(receipt))}`; }
+
+async function verifyReceipt(store: ReceiptStore, effectSink: EffectSink, graph: CompiledGraph, config: GraphConfig, record: CorrelationRecord, threadId: string): Promise<Receipt> {
+  const receipt = validateReceipt(await store.load(), record, threadId); const observation = await effectSink.inspect(); if (receipt.effectObservationFingerprint !== sha(canonicalJson(observation)) || receipt.effects !== observation.effects) throw new CorrelationSafetyError('LangGraph receipt and durable effect observation contradict'); if (record.phase === 'resumed' && record.resumeEvidence !== receiptEvidence(receipt)) throw new CorrelationSafetyError('LangGraph resumed receipt contradicts durable correlation'); const final = await graph.getState(config); const values = final.values as Record<string, unknown>; if (final.next.length !== 0 || checkpointId(final) !== receipt.finalCheckpointId || sha(canonicalJson(values)) !== receipt.finalStateFingerprint || values.decision !== receipt.decision || values.effect !== observation.effects) throw new CorrelationSafetyError('LangGraph receipt and final SQLite checkpoint contradict'); return receipt;
+}
+function validateReceipt(value: unknown, record: CorrelationRecord, threadId: string): Receipt {
+  const row = value as Partial<Receipt>; const binding = bindingFrom(record, threadId); if (!row || typeof row !== 'object' || Object.keys(row).length !== 13 || row.version !== 2 || !sameBinding(row, binding) || typeof row.finalCheckpointId !== 'string' || !/^[A-Za-z0-9-]{16,120}$/.test(row.finalCheckpointId) || typeof row.finalStateFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(row.finalStateFingerprint) || typeof row.effectObservationFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(row.effectObservationFingerprint) || row.effects !== (binding.decision === 'approved' ? 1 : 0)) throw new CorrelationSafetyError('LangGraph receipt is missing or contradicts correlation'); return row as Receipt;
+}
+
+/** The ledger creation is the real protected durable effect; rejected outcomes persist only a bound zero-effect observation. */
+class EffectSink {
+  constructor(private readonly directory: string, private readonly binding: EffectBinding, private readonly checkpoint?: (name: string) => Promise<void>) {}
+  private readonly afterLoadValidation = async (filename: string): Promise<void> => { await this.checkpoint?.(`after-${filename}-descriptor-validation`); };
+  async execute(decision: { decision: 'approved' | 'rejected' }): Promise<EffectObservation> {
+    if (decision.decision !== this.binding.decision) throw new CorrelationSafetyError('LangGraph effect decision contradicts authoritative evidence'); const ledgerStore = new JsonStore<EffectLedger>(this.directory, effectLedgerFilename(this.binding), this.afterLoadValidation);
+    if (decision.decision === 'rejected') { if (await ledgerStore.loadOptional()) throw new CorrelationSafetyError('LangGraph rejected decision has a protected effect ledger'); await this.checkpoint?.('before-rejection-observation'); const observation: RejectedEffectObservation = { version: 1, ...this.binding, effects: 0 }; const saved = await new JsonStore<EffectObservation>(this.directory, effectObservationFilename(this.binding), this.afterLoadValidation).createOrLoad(observation, (value) => validObservation(value, this.binding), this.checkpoint, 'rejection-observation'); await this.checkpoint?.('after-rejection-observation'); return saved; }
+    await this.checkpoint?.('before-protected-effect'); let ledger = await ledgerStore.loadOptional();
+    if (!ledger) { const proposed: EffectLedger = { version: 1, ...this.binding, effectId: randomUUID() }; ledger = await ledgerStore.createOrLoad(proposed, (value) => validLedger(value, this.binding), this.checkpoint, 'effect-ledger'); }
+    if (!validLedger(ledger, this.binding)) throw new CorrelationSafetyError('LangGraph protected effect ledger is foreign or corrupt'); await this.checkpoint?.('after-protected-effect-before-observation'); await this.checkpoint?.('before-effect-observation'); const observation: ApprovedEffectObservation = { version: 1, ...this.binding, effectLedgerFingerprint: sha(canonicalJson(ledger)), effects: 1 }; const observationStore = new JsonStore<EffectObservation>(this.directory, effectObservationFilename(this.binding), this.afterLoadValidation); const saved = await observationStore.createOrLoad(observation, (value) => validObservation(value, this.binding), this.checkpoint, 'effect-observation'); await this.checkpoint?.('after-effect-observation'); return saved;
+  }
+  async inspect(): Promise<EffectObservation> { const ledgerStore = new JsonStore<EffectLedger>(this.directory, effectLedgerFilename(this.binding), this.afterLoadValidation); const observation = await new JsonStore<EffectObservation>(this.directory, effectObservationFilename(this.binding), this.afterLoadValidation).loadRequired('LangGraph effect observation is absent'); if (!validObservation(observation, this.binding)) throw new CorrelationSafetyError('LangGraph effect observation is foreign or corrupt'); const ledger = await ledgerStore.loadOptional(); if (observation.effects === 0) { if (ledger) throw new CorrelationSafetyError('LangGraph rejected observation has a protected effect ledger'); return observation; } if (!ledger || !validLedger(ledger, this.binding) || observation.effectLedgerFingerprint !== sha(canonicalJson(ledger))) throw new CorrelationSafetyError('LangGraph protected effect ledger is absent, foreign, or corrupt'); return observation; }
+}
+
+class JsonStore<T> {
+  constructor(private readonly directory: string, private readonly filename: string, private readonly afterLoadValidation?: (filename: string) => Promise<void>) {}
+  async loadOptional(): Promise<T | null> { const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); let handle: FileHandle; try { handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw new CorrelationSafetyError('LangGraph durable effect artifact cannot be safely loaded'); } try { await safeFileHandle(handle); await this.afterLoadValidation?.(this.filename); try { return JSON.parse(await handle.readFile({ encoding: 'utf8' })) as T; } catch { throw new CorrelationSafetyError('LangGraph durable effect artifact is corrupt'); } } finally { await handle.close(); } }
+  async loadRequired(message: string): Promise<T> { const value = await this.loadOptional(); if (!value) throw new CorrelationSafetyError(message); return value; }
+  async createOrLoad(value: T, validate: (candidate: unknown) => candidate is T, checkpoint?: (name: string) => Promise<void>, label?: string): Promise<T> { const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); const encoded = JSON.stringify(value); try { const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); try { await handle.writeFile(encoded, 'utf8'); await handle.sync(); } finally { await handle.close(); } await safeFile(target); if (label) await checkpoint?.(`before-${label}-directory-sync`); await fsyncDirectory(directory); if (label) await checkpoint?.(`after-${label}-directory-sync`); return value; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; const existing = await this.loadRequired('LangGraph durable effect artifact is absent'); if (!validate(existing)) throw new CorrelationSafetyError('LangGraph durable effect artifact contradicts this resume'); return existing; } }
+}
+
+function effectLedgerFilename(binding: EffectBinding): string { return `langgraph-effect-ledger-${binding.correlationId}.json`; }
+function effectObservationFilename(binding: EffectBinding): string { return `langgraph-effect-observation-${binding.correlationId}.json`; }
+function sameBinding(value: Partial<EffectBinding>, binding: EffectBinding): boolean { return value.correlationId === binding.correlationId && value.taskId === binding.taskId && value.requestFingerprint === binding.requestFingerprint && value.operationKey === binding.operationKey && value.threadId === binding.threadId && value.decision === binding.decision && value.messageId === binding.messageId && value.evidenceFingerprint === binding.evidenceFingerprint; }
+function validLedger(value: unknown, binding: EffectBinding): value is EffectLedger { const row = value as Partial<EffectLedger>; return !!row && typeof row === 'object' && Object.keys(row).length === 10 && row.version === 1 && sameBinding(row, binding) && typeof row.effectId === 'string' && /^[0-9a-f-]{36}$/.test(row.effectId); }
+function validObservation(value: unknown, binding: EffectBinding): value is EffectObservation { const row = value as Partial<EffectObservation>; if (!row || typeof row !== 'object' || !sameBinding(row, binding) || row.version !== 1) return false; return row.effects === 1 ? Object.keys(row).length === 11 && typeof row.effectLedgerFingerprint === 'string' && /^[0-9a-f]{64}$/.test(row.effectLedgerFingerprint) : row.effects === 0 && Object.keys(row).length === 10 && !('effectLedgerFingerprint' in row); }
+
+class ReceiptStore {
+  constructor(private readonly directory: string, private readonly filename: string, private readonly checkpoint?: (name: string) => Promise<void>) {}
+  async save(value: Receipt): Promise<void> { const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); const before = await fileIdentity(target); const temporary = contained(directory, `.${this.filename}.${randomUUID()}.tmp`); let created = false; try { const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); created = true; try { await handle.writeFile(JSON.stringify(value), 'utf8'); await handle.sync(); } finally { await handle.close(); } await safeFile(temporary); await this.checkpoint?.('before-receipt-rename'); if (!sameFileIdentity(before, await fileIdentity(target))) throw new CorrelationSafetyError('LangGraph receipt target changed during atomic replacement'); await rename(temporary, target); created = false; await safeFile(target); await this.checkpoint?.('before-receipt-directory-sync'); await fsyncDirectory(directory); await this.checkpoint?.('after-receipt-directory-sync'); } catch (error) { if (created) await removeFile(temporary); throw error; } }
+  async load(): Promise<unknown> { const directory = await trustedDirectory(this.directory); const target = contained(directory, this.filename); let handle: FileHandle; try { handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { throw new CorrelationSafetyError('LangGraph resume has no valid durable receipt'); } try { await safeFileHandle(handle); await this.checkpoint?.('after-receipt-descriptor-validation'); try { return JSON.parse(await handle.readFile({ encoding: 'utf8' })); } catch { throw new CorrelationSafetyError('LangGraph resume has no valid durable receipt'); } } finally { await handle.close(); } }
+}
+/** The effect receipt is bound to the correlation, never shared by another graph thread. */
+export function langGraphReceiptFilename(correlationId: string): string { return `langgraph-receipt-${correlationId}.json`; }
+function receiptFilename(record: CorrelationRecord): string { return langGraphReceiptFilename(record.correlationId); }
+async function trustedDirectory(directory: string): Promise<string> { await mkdir(directory, { recursive: true, mode: 0o700 }); const entry = await lstat(directory); if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o700) throw new CorrelationSafetyError('LangGraph SQLite directory must be owner-owned mode 0700'); return realpath(directory); }
+function contained(directory: string, filename: string): string { if (!filename || filename === '.' || filename === '..' || basename(filename) !== filename || isAbsolute(filename) || /[\\/]|%2e|%2f/i.test(filename)) throw new CorrelationSafetyError('LangGraph state filename is unsafe'); const target = resolve(directory, filename); if (target === directory || !target.startsWith(`${directory}/`)) throw new CorrelationSafetyError('LangGraph state path escapes its trusted directory'); return target; }
+async function ensureDatabaseFile(path: string): Promise<void> { try { await safeFile(path); return; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); await handle.close(); await safeFile(path); }
+async function validateSqliteArtifacts(directory: string): Promise<void> { for (const name of [DB_FILENAME, `${DB_FILENAME}-wal`, `${DB_FILENAME}-shm`, `${DB_FILENAME}-journal`]) { const path = contained(directory, name); try { await safeFile(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } } }
+async function safeExisting(path: string): Promise<void> { try { await safeFile(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
+async function safeFile(path: string): Promise<void> { const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o600 || !(await stat(path)).isFile()) throw new CorrelationSafetyError('LangGraph SQLite artifact must be owner-owned regular mode 0600'); }
+async function safeFileHandle(handle: FileHandle): Promise<void> { const entry = await handle.stat(); if (!entry.isFile() || entry.uid !== uid() || (entry.mode & 0o777) !== 0o600) throw new CorrelationSafetyError('LangGraph durable JSON artifact must be owner-owned regular mode 0600'); }
+async function fileIdentity(path: string): Promise<{ dev: number; ino: number } | null> { try { await safeFile(path); const entry = await lstat(path); return { dev: entry.dev, ino: entry.ino }; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; } }
+function sameFileIdentity(first: { dev: number; ino: number } | null, second: { dev: number; ino: number } | null): boolean { return first === null ? second === null : second !== null && first.dev === second.dev && first.ino === second.ino; }
+async function fsyncDirectory(directory: string): Promise<void> { const handle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY); try { await handle.sync(); } finally { await handle.close(); } }
+async function removeFile(path: string): Promise<void> { try { const entry = await lstat(path); if (entry.isFile() && !entry.isSymbolicLink()) await unlink(path); } catch { /* owned temporary only */ } }
+function uid(): number { const value = process.getuid?.(); if (value === undefined) throw new CorrelationSafetyError('owner validation unavailable'); return value; }

@@ -1,0 +1,21 @@
+name: copied-marker
+correlationId: 77777777-7777-4777-8777-777777777777
+participants:
+  requester:
+    address: requester@example.test
+    tokenEnv: OAE_FIXTURE_REQUESTER_TOKEN
+  responder:
+    address: responder@example.test
+    tokenEnv: OAE_FIXTURE_RESPONDER_TOKEN
+tasks:
+  - id: scenario-task-7
+    from: requester
+    to: responder
+    subject: "Approval [scenario:11111111-1111-4111-8111-111111111111]"
+    body: safe-workflow-r4
+    rootMessageId: root-7
+steps:
+  - action: input-required
+    actor: requester
+    task: scenario-task-7
+    body: approve-or-reject
