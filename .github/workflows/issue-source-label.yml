@@ -27,14 +27,28 @@ jobs:
             const issue = context.payload.issue;
             const internal = ["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association);
             const name = internal ? "source: internal" : "source: external";
+            const other = internal ? "source: external" : "source: internal";
             const color = internal ? "1f6feb" : "0e8a16";
             const description = internal
               ? "Filed by a maintainer or team agent"
               : "Filed by a community user; first-response clock starts at creation";
-            try {
-              await github.rest.issues.getLabel({ owner, repo, name });
-            } catch (err) {
-              if (err.status !== 404) throw err;
-              await github.rest.issues.createLabel({ owner, repo, name, color, description });
+            for (const label of [name, other]) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (err) {
+                if (err.status !== 404) throw err;
+                const isCurrent = label === name;
+                await github.rest.issues.createLabel({
+                  owner, repo, name: label,
+                  color: isCurrent ? color : (internal ? "0e8a16" : "1f6feb"),
+                  description: isCurrent ? description : (internal
+                    ? "Filed by a community user; first-response clock starts at creation"
+                    : "Filed by a maintainer or team agent"),
+                });
+              }
             }
+            // Reclassification on reopen must not leave both mutually exclusive labels.
+            await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: other }).catch((err) => {
+              if (err.status !== 404) throw err;
+            });
             await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [name] });
