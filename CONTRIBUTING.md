@@ -117,4 +117,4 @@ External issues additionally follow three rules:
 Labels: `source: internal|external`, `prio: P0|P1|P2|P3`, plus the type labels
 above. An issue is triaged when it carries a source label, a type, and a
 priority. Issues labeled `needs-info` are closed automatically after 14 days
-of reporter silence plus a 7-day grace period (see `stale-needs-info.yml`).
+of no issue activity plus a 7-day grace period (see `stale-needs-info.yml`).
