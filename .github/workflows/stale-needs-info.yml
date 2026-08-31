@@ -43,7 +43,7 @@ jobs:
           days-before-issue-stale: 14
           days-before-issue-close: 7
           only-issue-labels: needs-info
-          exempt-issue-labels: security,prio: P0,prio: P1
+          exempt-issue-labels: "security,prio: P0,prio: P1"
           stale-issue-label: stale
           stale-issue-message: |
             This issue is waiting on reporter-provided detail (`needs-info`) and has seen no
