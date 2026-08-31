@@ -63,6 +63,8 @@ export interface OaeClientOptions {
   fetch?: typeof globalThis.fetch;
   /** Finite client-side deadline covering both fetch and response body parsing. */
   timeoutMs?: number;
+  /** Finite deadline for one server-capped terminal wait, including response margin. */
+  terminalWaitTimeoutMs?: number;
   /** Optional caller cancellation composed with each individual request. */
   signal?: AbortSignal;
 }
@@ -81,25 +83,29 @@ export class OaeClient {
   private readonly token: string;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly timeoutMs: number;
+  private readonly terminalWaitTimeoutMs: number;
   private readonly signal: AbortSignal | undefined;
 
   constructor(options: OaeClientOptions) {
     if (!options.token || /[\r\n]/.test(options.token)) throw new Error('A participant-scoped token is required');
     const timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new Error('OpenAgentEmail timeout must be a finite positive millisecond value');
+    const terminalWaitTimeoutMs = options.terminalWaitTimeoutMs ?? 610_000;
+    if (!Number.isFinite(terminalWaitTimeoutMs) || terminalWaitTimeoutMs <= 0 || terminalWaitTimeoutMs > 900_000) throw new Error('OpenAgentEmail terminal wait timeout must be a finite positive millisecond value up to 900000');
     this.baseUrl = safeOaeBaseUrl(options.baseUrl);
     this.token = options.token;
     this.fetchFn = options.fetch ?? globalThis.fetch;
     this.timeoutMs = timeoutMs;
+    this.terminalWaitTimeoutMs = terminalWaitTimeoutMs;
     this.signal = options.signal;
   }
 
-  private async request<T>(operation: string, path: string, validate: (value: unknown) => value is T, init?: RequestInit): Promise<{ value: T; response: Response }> {
+  private async request<T>(operation: string, path: string, validate: (value: unknown) => value is T, init?: RequestInit, deadlineMs = this.timeoutMs): Promise<{ value: T; response: Response }> {
     const controller = new AbortController(); let timedOut = false;
     const signals = [this.signal, init?.signal].filter((signal): signal is AbortSignal => signal !== undefined && signal !== null);
     const abort = () => controller.abort();
     for (const signal of signals) signal.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, deadlineMs);
     try {
       if (signals.some((signal) => signal.aborted)) throw new OaeRequestError('aborted', operation);
       let response: Response;
@@ -130,7 +136,7 @@ export class OaeClient {
 
   /** A single server-capped terminal wait. Non-terminal timeout returns are valid. */
   async waitForTerminal(id: string): Promise<WaitResult> {
-    const { value, response } = await this.request<OaeTask>('wait for terminal task', `/v1/tasks/${encodeURIComponent(id)}?wait=true`, validTask);
+    const { value, response } = await this.request<OaeTask>('wait for terminal task', `/v1/tasks/${encodeURIComponent(id)}?wait=true`, validTask, undefined, this.terminalWaitTimeoutMs);
     const rawCap = response.headers.get('X-OAE-Wait-Timeout-Sec');
     const timeoutSec = rawCap === null ? undefined : Number(rawCap);
     return Number.isFinite(timeoutSec) ? { task: value, timeoutSec: timeoutSec! } : { task: value };
