@@ -1,0 +1,21 @@
+name: wrong-responder
+correlationId: 55555555-5555-4555-8555-555555555555
+participants:
+  requester:
+    address: requester@example.test
+    tokenEnv: OAE_FIXTURE_REQUESTER_TOKEN
+  responder:
+    address: responder@example.test
+    tokenEnv: OAE_FIXTURE_RESPONDER_TOKEN
+tasks:
+  - id: scenario-task-5
+    from: requester
+    to: responder
+    subject: "Approval [scenario:55555555-5555-4555-8555-555555555555]"
+    body: safe-workflow-r4
+    rootMessageId: root-5
+steps:
+  - action: input-required
+    actor: responder
+    task: scenario-task-5
+    body: approve-or-reject

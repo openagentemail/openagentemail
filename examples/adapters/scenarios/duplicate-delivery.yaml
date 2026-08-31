@@ -1,0 +1,38 @@
+name: duplicate-delivery
+correlationId: 22222222-2222-4222-8222-222222222222
+participants:
+  requester:
+    address: requester@example.test
+    tokenEnv: OAE_FIXTURE_REQUESTER_TOKEN
+  responder:
+    address: responder@example.test
+    tokenEnv: OAE_FIXTURE_RESPONDER_TOKEN
+tasks:
+  - id: scenario-task-2
+    from: requester
+    to: responder
+    subject: "Approval [scenario:22222222-2222-4222-8222-222222222222]"
+    body: safe-workflow-r4
+    rootMessageId: root-2
+steps:
+  - action: input-required
+    actor: requester
+    task: scenario-task-2
+    body: approve-or-reject
+  - action: input-required
+    actor: requester
+    task: scenario-task-2
+    body: approve-or-reject
+  - action: working
+    actor: responder
+    task: scenario-task-2
+  - action: completed
+    actor: responder
+    task: scenario-task-2
+    result:
+      decision: approved
+  - action: completed
+    actor: responder
+    task: scenario-task-2
+    result:
+      decision: approved
