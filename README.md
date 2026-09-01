@@ -145,19 +145,24 @@ listens on port 3100 inside its container; `API_PORT` changes only the host-side
 mapping. For example:
 
 ```bash
-cp .env.api-only.example .env.alpha
-cp .env.api-only.example .env.beta
-# Set API_PORT=3100 in .env.alpha and API_PORT=3101 in .env.beta.
+mkdir -p ../oae-api-only-env
+cp .env.api-only.example ../oae-api-only-env/alpha.env
+cp .env.api-only.example ../oae-api-only-env/beta.env
+# Set API_PORT=3100 in alpha.env and API_PORT=3101 in beta.env.
+# Generate separate API_KEYS and TASK_SIGNING_SECRET values in each file.
 
-docker compose -p oae-alpha --env-file .env.alpha -f compose.api-only.yaml up -d
-docker compose -p oae-beta  --env-file .env.beta  -f compose.api-only.yaml up -d
+docker compose -p oae-alpha --env-file ../oae-api-only-env/alpha.env -f compose.api-only.yaml up -d
+docker compose -p oae-beta  --env-file ../oae-api-only-env/beta.env  -f compose.api-only.yaml up -d
 ```
 
 You may set a unique `COMPOSE_PROJECT_NAME` for each command instead of using
 `-p`. The project names make Compose generate distinct container names and
 project-scoped named volumes (for example `oae-alpha_api-data` and
 `oae-beta_api-data`). Do not reuse a project name or `API_PORT` between the two
-instances.
+instances. Each instance must have independently generated `API_KEYS` and
+`TASK_SIGNING_SECRET` values; configure its IMAP and SMTP credentials for that
+instance's intended mailbox/provider boundary as well. Keep these populated
+environment files outside the repository, as in the example above.
 
 ## Read mail in a browser
 
