@@ -453,6 +453,7 @@ through a [relay](https://openagent.email/docs/guides/deliverability/) and you d
 - [docs/api.md](https://openagent.email/docs/reference/api/) — REST API reference with curl examples
 - [docs/security.md](https://openagent.email/docs/guides/security/) — tokens, exposure, rate limits, retention
 - [docs/mcp-clients.md](https://openagent.email/docs/reference/mcp-clients/) — MCP setup for every major client
+- [docs/cloudflare-zero-trust.md](https://openagent.email/docs/guides/cloudflare-zero-trust/) — Cloudflare Tunnel and Access for the Dashboard without blocking MCP
 - [docs/agent-signup.md](https://openagent.email/docs/guides/agent-signup/) — let agents finish sign-ups that email a code, with a verified OKX wallet example
 - [docs/dns-setup.md](https://openagent.email/docs/guides/dns-setup/) — DNS records, explained one by one
 - [docs/deliverability.md](https://openagent.email/docs/guides/deliverability/) — the field guide to actually
