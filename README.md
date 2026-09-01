@@ -139,6 +139,37 @@ catch-all mailbox. The [external mail server guide](https://openagent.email/docs
 covers the required catch-all setup, Portainer deployment, SMTP sender limits,
 and TLS certificate verification.
 
+The standalone default project name is `openagentemail`. If the full
+`compose.yaml` stack also runs on the same host, the API-only stack must not
+share that default project: give it an explicitly different `-p` value or
+`COMPOSE_PROJECT_NAME` so the two stacks cannot adopt each other's resources.
+
+To run multiple API-only instances on one host, give every instance its own
+environment file, unique Compose project, and host `API_PORT`. The API always
+listens on port 3100 inside its container; `API_PORT` changes only the host-side
+mapping. For example:
+
+```bash
+mkdir -p ../oae-api-only-env
+cp .env.api-only.example ../oae-api-only-env/alpha.env
+cp .env.api-only.example ../oae-api-only-env/beta.env
+chmod 600 ../oae-api-only-env/*.env
+# Set API_PORT=3100 in alpha.env and API_PORT=3101 in beta.env.
+# Generate separate API_KEYS and TASK_SIGNING_SECRET values in each file.
+
+docker compose -p oae-alpha --env-file ../oae-api-only-env/alpha.env -f compose.api-only.yaml up -d
+docker compose -p oae-beta  --env-file ../oae-api-only-env/beta.env  -f compose.api-only.yaml up -d
+```
+
+You may set a unique `COMPOSE_PROJECT_NAME` for each command instead of using
+`-p`. The project names make Compose generate distinct container names and
+project-scoped named volumes (for example `oae-alpha_api-data` and
+`oae-beta_api-data`). Do not reuse a project name or `API_PORT` between the two
+instances. Each instance must have independently generated `API_KEYS` and
+`TASK_SIGNING_SECRET` values; configure its IMAP and SMTP credentials for that
+instance's intended mailbox/provider boundary as well. Keep these populated
+environment files outside the repository, as in the example above.
+
 ## Read mail in a browser
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin
