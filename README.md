@@ -139,6 +139,26 @@ catch-all mailbox. The [external mail server guide](https://openagent.email/docs
 covers the required catch-all setup, Portainer deployment, SMTP sender limits,
 and TLS certificate verification.
 
+To run multiple API-only instances on one host, give every instance its own
+environment file, unique Compose project, and host `API_PORT`. The API always
+listens on port 3100 inside its container; `API_PORT` changes only the host-side
+mapping. For example:
+
+```bash
+cp .env.api-only.example .env.alpha
+cp .env.api-only.example .env.beta
+# Set API_PORT=3100 in .env.alpha and API_PORT=3101 in .env.beta.
+
+docker compose -p oae-alpha --env-file .env.alpha -f compose.api-only.yaml up -d
+docker compose -p oae-beta  --env-file .env.beta  -f compose.api-only.yaml up -d
+```
+
+You may set a unique `COMPOSE_PROJECT_NAME` for each command instead of using
+`-p`. The project names make Compose generate distinct container names and
+project-scoped named volumes (for example `oae-alpha_api-data` and
+`oae-beta_api-data`). Do not reuse a project name or `API_PORT` between the two
+instances.
+
 ## Read mail in a browser
 
 Open [`http://localhost:3100/ui`](http://localhost:3100/ui) and paste an admin

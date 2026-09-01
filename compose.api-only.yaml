@@ -10,7 +10,6 @@ name: openagentemail
 services:
   api:
     build: ./packages/api
-    container_name: openagent-api
     environment:
       # --- shared API contract env ---
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
