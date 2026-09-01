@@ -139,6 +139,11 @@ catch-all mailbox. The [external mail server guide](https://openagent.email/docs
 covers the required catch-all setup, Portainer deployment, SMTP sender limits,
 and TLS certificate verification.
 
+The standalone default project name is `openagentemail`. If the full
+`compose.yaml` stack also runs on the same host, the API-only stack must not
+share that default project: give it an explicitly different `-p` value or
+`COMPOSE_PROJECT_NAME` so the two stacks cannot adopt each other's resources.
+
 To run multiple API-only instances on one host, give every instance its own
 environment file, unique Compose project, and host `API_PORT`. The API always
 listens on port 3100 inside its container; `API_PORT` changes only the host-side
@@ -148,6 +153,7 @@ mapping. For example:
 mkdir -p ../oae-api-only-env
 cp .env.api-only.example ../oae-api-only-env/alpha.env
 cp .env.api-only.example ../oae-api-only-env/beta.env
+chmod 600 ../oae-api-only-env/*.env
 # Set API_PORT=3100 in alpha.env and API_PORT=3101 in beta.env.
 # Generate separate API_KEYS and TASK_SIGNING_SECRET values in each file.
 

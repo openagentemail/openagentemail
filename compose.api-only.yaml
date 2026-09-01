@@ -2,8 +2,11 @@
 #
 # Use this when your mail provider already hosts your domain. It runs only the
 # API: IMAP reads one catch-all mailbox and SMTP sends through that provider.
-# Copy .env.api-only.example to .env, fill every required value, then run:
+# Copy .env.api-only.example to .env, fill every required value, then run this
+# standalone default. If compose.yaml also runs on this host, this API-only
+# stack MUST use an explicitly different -p / COMPOSE_PROJECT_NAME instead:
 #   docker compose -f compose.api-only.yaml up -d
+#   docker compose -p oae-api-only -f compose.api-only.yaml up -d
 
 name: openagentemail
 
