@@ -344,14 +344,17 @@ The archive is a trust boundary, not an ordinary untrusted external recipient:
 for all-local visible recipients it receives the exact MIME, including the
 `X-OA-Mail-Stamp` that preserves local `internal` classification. Configure it
 only for a controlled compliance mailbox; otherwise leave `ALWAYS_BCC` unset.
-An external archive requires an explicit high-entropy `TASK_SIGNING_SECRET` of
-at least 32 characters. The SMTP-password fallback is allowed only when the
-archive is absent or on the configured `DOMAIN`. A same-domain archive may use
-that fallback only when its mailbox is not aliased or forwarded outside this
-trusted compliance boundary; if it can forward externally, configure the same
-explicit 32+ character secret. The application cannot discover downstream
-alias expansion, so this routing assessment remains an operator/MTA
-responsibility. Both Compose deployments already require the dedicated secret.
+An external archive requires an explicit `TASK_SIGNING_SECRET` of at least 32
+characters. The application enforces only presence and that length minimum; it
+does not prove entropy, so operators must generate a high-entropy secret (the
+Compose examples use `openssl rand -hex 32`). The SMTP-password fallback is
+allowed only when the archive is absent or on the configured `DOMAIN`. A
+same-domain archive may use that fallback only when its mailbox is not aliased
+or forwarded outside this trusted compliance boundary; if it can forward
+externally, configure the same explicit 32+ character secret. The application
+cannot discover downstream alias expansion, so this routing assessment remains
+an operator/MTA responsibility. Both Compose deployments already require the
+dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs
@@ -360,6 +363,12 @@ the archive is accepted while no original recipient is reported accepted, the
 API fails instead. After an upstream SMTP server accepts or queues the archive
 RCPT, later delivery failures appear in SMTP/Postfix/relay logs or DSNs rather
 than synchronously in the API response.
+
+SMTP result matching deliberately keeps local-part spelling exact. A relay that
+rewrites accepted RCPT local-part case can therefore cause a conservative
+failure/retry; configure relays to preserve RCPT spelling. Case-distinct archive
+and original local-parts are intentionally separate SMTP mailboxes and can
+produce two copies with a case-folding provider, so use consistent spelling.
 
 ## Use it from your agent (MCP)
 

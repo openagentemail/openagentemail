@@ -58,6 +58,35 @@ describe('ALWAYS_BCC configuration', () => {
     );
   });
 
+  test('limits a nonblank archive mailbox to the SMTP maximum without disclosing secrets', () => {
+    const maximumMailbox = `${'a'.repeat(242)}@example.com`;
+    const overlongMailbox = `${'a'.repeat(243)}@example.com`;
+    const smtpPassword = 'smtp-password-not-for-validation-errors';
+    const taskSigningSecret = 'task-signing-secret-not-for-validation-errors';
+
+    expect(maximumMailbox).toHaveLength(254);
+    expect(
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: maximumMailbox }).alwaysBcc,
+    ).toBe(maximumMailbox);
+    expect(overlongMailbox).toHaveLength(255);
+
+    const parseOverlongArchive = () =>
+      parseConfig({
+        ...requiredEnv,
+        SMTP_PASS: smtpPassword,
+        TASK_SIGNING_SECRET: taskSigningSecret,
+        ALWAYS_BCC: overlongMailbox,
+      });
+    expect(parseOverlongArchive).toThrow();
+    try {
+      parseOverlongArchive();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain(smtpPassword);
+      expect(message).not.toContain(taskSigningSecret);
+    }
+  });
+
   test('rejects a malformed address, display name, or address list at startup', () => {
     for (const value of ['not-an-address', 'Archive <archive@example.net>', 'a@example.net,b@example.net']) {
       expect(() => parseConfig({ ...requiredEnv, ALWAYS_BCC: value })).toThrow();

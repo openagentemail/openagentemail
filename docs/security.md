@@ -58,17 +58,19 @@ mailbox controlled by the same trusted compliance boundary, and leave it unset
 when that premise cannot be made. This preserves source-classification behavior
 rather than silently downgrading original local delivery to `external`.
 
-An external archive requires an explicit high-entropy `TASK_SIGNING_SECRET` of
-at least 32 characters at startup. The historical bare-process `SMTP_PASS`
-fallback remains only when `ALWAYS_BCC` is absent or its mailbox is on
-`DOMAIN`; this prevents a stamped external archive copy from becoming a
-known-message password-guessing surface. A same-domain archive may use that
-fallback only if it is not aliased or forwarded outside the trusted compliance
-boundary. If it can forward externally, it needs the same explicit 32+
-character secret as an external archive. Application code cannot discover
-downstream alias expansion; configuring and enforcing that routing boundary is
-the operator/MTA responsibility. Both Compose configurations already require
-the dedicated secret.
+An external archive requires an explicit `TASK_SIGNING_SECRET` of at least 32
+characters at startup. The application enforces presence and this length
+minimum only; it does not guarantee entropy. Operators must generate a
+high-entropy secret (the Compose examples use `openssl rand -hex 32`). The
+historical bare-process `SMTP_PASS` fallback remains only when `ALWAYS_BCC` is
+absent or its mailbox is on `DOMAIN`; this prevents a stamped external archive
+copy from becoming a known-message password-guessing surface. A same-domain
+archive may use that fallback only if it is not aliased or forwarded outside
+the trusted compliance boundary. If it can forward externally, it needs the
+same explicit 32+ character secret as an external archive. Application code
+cannot discover downstream alias expansion; configuring and enforcing that
+routing boundary is the operator/MTA responsibility. Both Compose
+configurations already require the dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs
@@ -77,6 +79,15 @@ the archive is accepted while no original recipient is reported accepted, the
 API fails. Once the upstream SMTP server accepts/queues the archive RCPT, any
 later off-domain delivery failure is observable through SMTP/Postfix/relay logs
 or DSNs, not synchronously through this API.
+
+**SMTP relay compatibility:** result matching intentionally preserves exact
+local-part spelling. A relay that rewrites an accepted RCPT local-part's case
+can cause a conservative failure/retry, so operators should configure relays
+to preserve RCPT spelling. Case-distinct archive and original local-parts are
+intentionally separate SMTP mailboxes and can produce two copies on
+case-folding providers; use consistent spelling. There is intentionally no
+case-insensitive result fallback, because it could confuse archive-only
+acceptance with original-recipient acceptance.
 
 ## Inbox identity ACL（#26 PR 2）
 

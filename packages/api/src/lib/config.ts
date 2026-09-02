@@ -17,6 +17,9 @@ function emptyAsUndefined(value: unknown): unknown {
   return value.trim() === '' ? undefined : value;
 }
 
+/** RFC 5321 mailbox maximum; matches the API send-route address boundary. */
+const SMTP_MAILBOX_MAX_LENGTH = 254;
+
 /** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
 const httpUrl = z
   .string()
@@ -112,7 +115,10 @@ const envSchema = z.object({
 
   // Optional compliance archive recipient. Empty Compose interpolation stays
   // disabled; a nonblank value must be exactly one mailbox, not a list/name.
-  ALWAYS_BCC: z.preprocess(emptyAsUndefined, z.string().email().optional()),
+  ALWAYS_BCC: z.preprocess(
+    emptyAsUndefined,
+    z.string().email().max(SMTP_MAILBOX_MAX_LENGTH).optional(),
+  ),
 
   // Stable private key for task-header stamps. This must outlive SMTP account
   // password rotations so old task threads remain verifiable.
