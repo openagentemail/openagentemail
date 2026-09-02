@@ -58,12 +58,13 @@ mailbox controlled by the same trusted compliance boundary, and leave it unset
 when that premise cannot be made. This preserves source-classification behavior
 rather than silently downgrading original local delivery to `external`.
 
-If every original recipient is accepted and only the archive RCPT is rejected,
-the API preserves successful send semantics and logs a content-free warning.
-If original recipients are all rejected while only the archive is accepted, the
-send fails. Once the upstream SMTP server accepts/queues the archive RCPT, any
-later off-domain delivery failure is observable through SMTP/Postfix/relay logs
-or DSNs, not synchronously through this API.
+If at least one original recipient is accepted and the configured archive RCPT
+is rejected, the API preserves Nodemailer's partial-success semantics and logs
+a content-free warning, even when another original recipient was rejected. If
+the archive is accepted while every original recipient is rejected, the API
+fails. Once the upstream SMTP server accepts/queues the archive RCPT, any later
+off-domain delivery failure is observable through SMTP/Postfix/relay logs or
+DSNs, not synchronously through this API.
 
 ## Inbox identity ACL（#26 PR 2）
 

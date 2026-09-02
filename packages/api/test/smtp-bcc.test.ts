@@ -19,6 +19,7 @@ import {
 import {
   applyArchiveRecipientPolicy,
   buildSmtpEnvelope,
+  buildSmtpEnvelopePlan,
   stripBccHeaders,
 } from '../src/lib/smtp-envelope.ts';
 
@@ -79,7 +80,7 @@ describe('automatic compliance BCC envelope', () => {
     expect(mime).not.toContain(archive);
   });
 
-  test('warns and stays successful only when the archive alone is rejected', () => {
+  test('warns and preserves success when an accepted primary accompanies archive rejection', () => {
     const originalWarn = console.warn;
     const warnings: unknown[][] = [];
     console.warn = (...args: unknown[]) => warnings.push(args);
@@ -127,17 +128,53 @@ describe('automatic compliance BCC envelope', () => {
     ]);
   });
 
-  test('normalizes Nodemailer Address result values before applying the policy', () => {
-    expect(() =>
-      applyArchiveRecipientPolicy(
+  test('normalizes Nodemailer Address result values and emits one static warning', () => {
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    try {
+      expect(() =>
+        applyArchiveRecipientPolicy(
         {
           accepted: [{ address: 'primary@example.net' }],
           rejected: [{ address: 'archive@EXAMPLE.net' }],
         },
         ['primary@example.net'],
         'archive@example.net',
-      ),
-    ).not.toThrow();
+        ),
+      ).not.toThrow();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      ['[smtp] archive recipient rejected; preserving successful send for original recipients'],
+    ]);
+  });
+
+  test('production envelope plan keeps configured archive policy after duplicate suppression', () => {
+    const original = ['archive@example.net', 'other@example.net'];
+    const plan = buildSmtpEnvelopePlan(
+      'sender@test.example',
+      original,
+      'archive@EXAMPLE.net',
+    );
+    expect(plan.envelope.to).toEqual(original);
+
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    try {
+      applyArchiveRecipientPolicy(
+        { accepted: ['other@example.net'], rejected: ['archive@example.net'] },
+        original,
+        plan.archiveRecipient,
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      ['[smtp] archive recipient rejected; preserving successful send for original recipients'],
+    ]);
   });
 
   test('a controlled archive does not change internal stamping for all-local visible recipients', () => {

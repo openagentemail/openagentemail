@@ -345,10 +345,13 @@ for all-local visible recipients it receives the exact MIME, including the
 `X-OA-Mail-Stamp` that preserves local `internal` classification. Configure it
 only for a controlled compliance mailbox; otherwise leave `ALWAYS_BCC` unset.
 
-If the original recipients are accepted and only the archive RCPT is rejected,
-the API keeps the send successful and logs a warning. After an upstream SMTP
-server accepts or queues that archive RCPT, later delivery failures appear in
-SMTP/Postfix/relay logs or DSNs rather than synchronously in the API response.
+If at least one original recipient is accepted and the configured archive RCPT
+is rejected, the API preserves Nodemailer's partial-success semantics and logs
+a content-free warning, even when another original recipient was rejected. If
+the archive is accepted while every original recipient is rejected, the API
+fails instead. After an upstream SMTP server accepts or queues the archive RCPT,
+later delivery failures appear in SMTP/Postfix/relay logs or DSNs rather than
+synchronously in the API response.
 
 ## Use it from your agent (MCP)
 

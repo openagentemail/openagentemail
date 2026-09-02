@@ -51,6 +51,21 @@ export function buildSmtpEnvelope(
   return { from, to: archive ? [...originalRecipients, archive] : [...originalRecipients] };
 }
 
+/**
+ * Couples the configured archive identity used for result policy to the
+ * envelope that may omit an already-present archive recipient.
+ */
+export function buildSmtpEnvelopePlan(
+  from: string,
+  originalRecipients: readonly string[],
+  configuredArchive?: string,
+) {
+  return {
+    envelope: buildSmtpEnvelope(from, originalRecipients, configuredArchive),
+    archiveRecipient: configuredArchive,
+  };
+}
+
 /** The API never emits a MIME Bcc header, including from internal callers. */
 export function stripBccHeaders(headers: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
@@ -59,9 +74,9 @@ export function stripBccHeaders(headers: Record<string, string>): Record<string,
 }
 
 /**
- * Nodemailer SMTP results contain string or Address values. An archive-only
- * rejection is fail-open after any primary acceptance; archive-only acceptance
- * must never turn total primary rejection into success.
+ * Nodemailer SMTP results contain string or Address values. Any configured
+ * archive rejection is fail-open after a primary acceptance; archive-only
+ * acceptance must never turn total primary rejection into success.
  */
 export function applyArchiveRecipientPolicy(
   result: RecipientDeliveryResult,

@@ -12,8 +12,8 @@ import { htmlToText } from './otp.ts';
 import { recordSentMessageIdAfterSend } from './sent-registry.ts';
 import {
   applyArchiveRecipientPolicy,
-  archiveRecipientToAppend,
   buildSmtpEnvelope,
+  buildSmtpEnvelopePlan,
   stripBccHeaders,
 } from './smtp-envelope.ts';
 import {
@@ -43,8 +43,8 @@ export function coerceOutboundText(text: string, html?: string): string {
 // Retain these module exports for callers that imported the initial #72 seam.
 export {
   applyArchiveRecipientPolicy,
-  archiveRecipientToAppend,
   buildSmtpEnvelope,
+  buildSmtpEnvelopePlan,
   stripBccHeaders,
 } from './smtp-envelope.ts';
 
@@ -74,8 +74,11 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   const headers = stripBccHeaders(
     buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.domain),
   );
-  const archiveRecipient = archiveRecipientToAppend(input.to, config.alwaysBcc);
-  const envelope = buildSmtpEnvelope(input.from, input.to, archiveRecipient);
+  const { envelope, archiveRecipient } = buildSmtpEnvelopePlan(
+    input.from,
+    input.to,
+    config.alwaysBcc,
+  );
 
   return withMailserverReconnect(config.smtp.host, async (endpoint) => {
     const transporter = createSmtpTransport(endpoint);
