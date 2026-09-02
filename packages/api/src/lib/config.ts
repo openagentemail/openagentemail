@@ -20,6 +20,7 @@ function emptyAsUndefined(value: unknown): unknown {
 /** RFC 5321 mailbox maximum; matches the API send-route address boundary. */
 const SMTP_MAILBOX_MAX_LENGTH = 254;
 const SMTP_LOCAL_PART_MAX_OCTETS = 64;
+const SMTP_DOMAIN_LABEL_MAX_OCTETS = 63;
 
 /** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
 const httpUrl = z
@@ -127,6 +128,14 @@ const envSchema = z.object({
           Buffer.byteLength(address.slice(0, address.lastIndexOf('@')), 'utf8')
           <= SMTP_LOCAL_PART_MAX_OCTETS,
         { message: 'SMTP local part must be at most 64 octets' },
+      )
+      .refine(
+        (address) =>
+          address
+            .slice(address.lastIndexOf('@') + 1)
+            .split('.')
+            .every((label) => Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS),
+        { message: 'SMTP domain labels must be at most 63 octets' },
       )
       .optional(),
   ),

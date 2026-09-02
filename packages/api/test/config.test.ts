@@ -63,6 +63,8 @@ describe('ALWAYS_BCC configuration', () => {
     const overlongMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(62)}`;
     const maximumLocalPartMailbox = `${'a'.repeat(64)}@example.com`;
     const overlongLocalPartMailbox = `${'a'.repeat(65)}@example.com`;
+    const maximumDomainLabelMailbox = `archive@${'a'.repeat(63)}.com`;
+    const overlongDomainLabelMailbox = `archive@${'a'.repeat(64)}.com`;
     const smtpPassword = 'smtp-password-not-for-validation-errors';
     const taskSigningSecret = 'task-signing-secret-not-for-validation-errors';
 
@@ -81,6 +83,20 @@ describe('ALWAYS_BCC configuration', () => {
     expect(() =>
       parseConfig({ ...requiredEnv, ALWAYS_BCC: overlongLocalPartMailbox }),
     ).toThrow('SMTP local part must be at most 64 octets');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumDomainLabelMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(maximumDomainLabelMailbox);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: overlongDomainLabelMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }),
+    ).toThrow('SMTP domain labels must be at most 63 octets');
 
     const parseOverlongArchive = () =>
       parseConfig({
