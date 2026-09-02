@@ -233,13 +233,16 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     .toLowerCase();
   const externalArchive =
     raw.ALWAYS_BCC !== undefined && archiveDomain !== raw.DOMAIN.toLowerCase();
-  if (externalArchive && !raw.TASK_SIGNING_SECRET) {
-    throw new Error('TASK_SIGNING_SECRET is required for an external compliance archive');
-  }
-  if (externalArchive && raw.TASK_SIGNING_SECRET.length < 32) {
-    throw new Error(
-      'TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive',
-    );
+  if (externalArchive) {
+    const externalArchiveSigningSecret = raw.TASK_SIGNING_SECRET;
+    if (!externalArchiveSigningSecret) {
+      throw new Error('TASK_SIGNING_SECRET is required for an external compliance archive');
+    }
+    if (externalArchiveSigningSecret.length < 32) {
+      throw new Error(
+        'TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive',
+      );
+    }
   }
   const taskSigningSecret = raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS;
 

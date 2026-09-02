@@ -73,7 +73,23 @@ describe('ALWAYS_BCC configuration', () => {
       parseConfig({
         ...requiredEnv,
         ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(15),
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
         TASK_SIGNING_SECRET: 'a'.repeat(16),
+      }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(31),
       }),
     ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive');
 
