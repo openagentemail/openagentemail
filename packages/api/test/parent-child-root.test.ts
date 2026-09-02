@@ -581,6 +581,7 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
 });
 
 test('R5f parent validation uses one snapshot under the immediate-parent lock and delivers outside it', async () => {
+  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent: SendInput[] = [];
   let releaseLookup!: () => void;
   const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
