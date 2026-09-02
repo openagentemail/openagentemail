@@ -329,6 +329,26 @@ IMAP, matches messages to identities by the `To`/`Delivered-To` header, and send
 via SMTP with the `From` rewritten to the chosen identity. Polling + IMAP IDLE for
 low-latency waits.
 
+### Optional compliance archive
+
+Set `ALWAYS_BCC=archive@example.net` only when your compliance policy permits
+an additional external delivery copy. It is off by default and adds the archive
+once to the SMTP envelope for API, MCP, and task sends—case-insensitively
+deduplicated with visible recipients—without adding a MIME `Bcc` header or
+changing visible `To`, header From, envelope MAIL FROM, SPF, DKIM content, or
+DMARC alignment. Archive mailbox access, privacy, retention, aliases, and
+forwarding are operator/MTA responsibilities.
+
+The archive is a trust boundary, not an ordinary untrusted external recipient:
+for all-local visible recipients it receives the exact MIME, including the
+`X-OA-Mail-Stamp` that preserves local `internal` classification. Configure it
+only for a controlled compliance mailbox; otherwise leave `ALWAYS_BCC` unset.
+
+If the original recipients are accepted and only the archive RCPT is rejected,
+the API keeps the send successful and logs a warning. After an upstream SMTP
+server accepts or queues that archive RCPT, later delivery failures appear in
+SMTP/Postfix/relay logs or DSNs rather than synchronously in the API response.
+
 ## Use it from your agent (MCP)
 
 Requires Node.js 18+ on the machine running the MCP client — no install step,

@@ -110,6 +110,10 @@ const envSchema = z.object({
   // certificate, while external public SMTP servers should normally use true.
   SMTP_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).default('false'),
 
+  // Optional compliance archive recipient. Empty Compose interpolation stays
+  // disabled; a nonblank value must be exactly one mailbox, not a list/name.
+  ALWAYS_BCC: z.preprocess(emptyAsUndefined, z.string().email().optional()),
+
   // Stable private key for task-header stamps. This must outlive SMTP account
   // password rotations so old task threads remain verifiable.
   TASK_SIGNING_SECRET: z.string().min(16).optional(),
@@ -245,6 +249,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       pass: raw.SMTP_PASS,
       tlsRejectUnauthorized: raw.SMTP_TLS_REJECT_UNAUTHORIZED === 'true',
     },
+    alwaysBcc: raw.ALWAYS_BCC,
     // The fallback supports an upgrade where the new variable has not reached
     // a bare-process config yet. Both Compose variants require the dedicated
     // secret, which is the supported v0.4 deployment path.

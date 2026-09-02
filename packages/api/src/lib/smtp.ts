@@ -34,6 +34,72 @@ export function coerceOutboundText(text: string, html?: string): string {
   return htmlToText(html);
 }
 
+function recipientKey(address: string): string {
+  return address.toLowerCase();
+}
+
+/**
+ * SMTP recipients are independent of MIME headers. Keep the caller's first
+ * spelling/order, while preventing case-only duplicate RCPT commands.
+ */
+export function buildSmtpEnvelope(
+  from: string,
+  originalRecipients: readonly string[],
+  archiveRecipient?: string,
+) {
+  const seen = new Set<string>();
+  const to = [...originalRecipients, ...(archiveRecipient ? [archiveRecipient] : [])].filter(
+    (recipient) => {
+      const key = recipientKey(recipient);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    },
+  );
+  return { from, to };
+}
+
+/** The API never emits a MIME Bcc header, including from internal callers. */
+export function stripBccHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'bcc'),
+  );
+}
+
+interface RecipientDeliveryResult {
+  accepted?: readonly string[];
+  rejected?: readonly string[];
+}
+
+/**
+ * Nodemailer exposes per-RCPT outcomes for SMTP transports. An archive-only
+ * rejection is deliberately fail-open after every primary RCPT was accepted;
+ * archive-only acceptance must never turn total primary rejection into success.
+ */
+export function applyArchiveRecipientPolicy(
+  result: RecipientDeliveryResult,
+  originalRecipients: readonly string[],
+  archiveRecipient?: string,
+): void {
+  if (!archiveRecipient) return;
+
+  const original = new Set(originalRecipients.map(recipientKey));
+  const accepted = new Set((result.accepted ?? []).map(recipientKey));
+  const rejected = new Set((result.rejected ?? []).map(recipientKey));
+  const archive = recipientKey(archiveRecipient);
+  const acceptedOriginal = [...original].some((recipient) => accepted.has(recipient));
+  const rejectedOriginal = [...original].some((recipient) => rejected.has(recipient));
+
+  if (accepted.has(archive) && !acceptedOriginal && rejectedOriginal) {
+    throw new Error('SMTP rejected all original recipients; archive acceptance does not make send successful');
+  }
+
+  if (rejected.has(archive) && acceptedOriginal && !rejectedOriginal) {
+    // Do not include the archive address, message content, or SMTP response.
+    console.warn('[smtp] archive recipient rejected; preserving successful send for original recipients');
+  }
+}
+
 function createSmtpTransport(endpoint: MailserverEndpoint) {
   return nodemailer.createTransport({
     host: endpoint.host,
@@ -57,12 +123,10 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   const text = coerceOutboundText(input.text, input.html);
   const outbound = { ...input, text };
   // 仅当全部 To 均在本域时写 stamp（防 HMAC 预言机随外发信泄漏）。
-  const headers = buildOutboundStampHeaders(
-    outbound,
-    date,
-    config.taskSigningSecret,
-    config.domain,
+  const headers = stripBccHeaders(
+    buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.domain),
   );
+  const envelope = buildSmtpEnvelope(input.from, input.to, config.alwaysBcc);
 
   return withMailserverReconnect(config.smtp.host, async (endpoint) => {
     const transporter = createSmtpTransport(endpoint);
@@ -75,7 +139,11 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
         date,
         ...(input.html ? { html: input.html } : {}),
         headers,
+        envelope,
       });
+      // Nodemailer's generic SentMessageInfo type omits SMTP's accepted/rejected
+      // arrays, although SMTP transport supplies them at runtime.
+      applyArchiveRecipientPolicy(info as unknown as RecipientDeliveryResult, input.to, config.alwaysBcc);
       // 服务端真正出站成功才登记。登记失败不得否决这次投递（否则 502 重试会重复外发）。
       recordSentMessageIdAfterSend(info.messageId, input.from);
       return { messageId: info.messageId };

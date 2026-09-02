@@ -9,7 +9,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-import { normalizeUrl, parseConfig } from '../src/lib/config.ts';
+const { normalizeUrl, parseConfig } = await import('../src/lib/config.ts');
 
 const requiredEnv: NodeJS.ProcessEnv = {
   DOMAIN: 'example.com',
@@ -46,6 +46,22 @@ describe('TLS certificate verification configuration', () => {
     expect(() =>
       parseConfig({ ...requiredEnv, SMTP_TLS_REJECT_UNAUTHORIZED: 'no' }),
     ).toThrow();
+  });
+});
+
+describe('ALWAYS_BCC configuration', () => {
+  test('is disabled when unset or blank and exposes the configured mailbox', () => {
+    expect(parseConfig(requiredEnv).alwaysBcc).toBeUndefined();
+    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: '   ' }).alwaysBcc).toBeUndefined();
+    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@example.net' }).alwaysBcc).toBe(
+      'archive@example.net',
+    );
+  });
+
+  test('rejects a malformed address, display name, or address list at startup', () => {
+    for (const value of ['not-an-address', 'Archive <archive@example.net>', 'a@example.net,b@example.net']) {
+      expect(() => parseConfig({ ...requiredEnv, ALWAYS_BCC: value })).toThrow();
+    }
   });
 });
 
