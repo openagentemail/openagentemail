@@ -19,6 +19,7 @@ function emptyAsUndefined(value: unknown): unknown {
 
 /** RFC 5321 mailbox maximum; matches the API send-route address boundary. */
 const SMTP_MAILBOX_MAX_LENGTH = 254;
+const SMTP_LOCAL_PART_MAX_OCTETS = 64;
 
 /** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
 const httpUrl = z
@@ -117,7 +118,17 @@ const envSchema = z.object({
   // disabled; a nonblank value must be exactly one mailbox, not a list/name.
   ALWAYS_BCC: z.preprocess(
     emptyAsUndefined,
-    z.string().email().max(SMTP_MAILBOX_MAX_LENGTH).optional(),
+    z
+      .string()
+      .email()
+      .max(SMTP_MAILBOX_MAX_LENGTH)
+      .refine(
+        (address) =>
+          Buffer.byteLength(address.slice(0, address.lastIndexOf('@')), 'utf8')
+          <= SMTP_LOCAL_PART_MAX_OCTETS,
+        { message: 'SMTP local part must be at most 64 octets' },
+      )
+      .optional(),
   ),
 
   // Stable private key for task-header stamps. This must outlive SMTP account

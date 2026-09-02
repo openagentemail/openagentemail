@@ -58,17 +58,29 @@ describe('ALWAYS_BCC configuration', () => {
     );
   });
 
-  test('limits a nonblank archive mailbox to the SMTP maximum without disclosing secrets', () => {
-    const maximumMailbox = `${'a'.repeat(242)}@example.com`;
-    const overlongMailbox = `${'a'.repeat(243)}@example.com`;
+  test('limits a nonblank archive mailbox to SMTP local-part and total maximums without disclosing secrets', () => {
+    const maximumMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
+    const overlongMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(62)}`;
+    const maximumLocalPartMailbox = `${'a'.repeat(64)}@example.com`;
+    const overlongLocalPartMailbox = `${'a'.repeat(65)}@example.com`;
     const smtpPassword = 'smtp-password-not-for-validation-errors';
     const taskSigningSecret = 'task-signing-secret-not-for-validation-errors';
 
     expect(maximumMailbox).toHaveLength(254);
     expect(
-      parseConfig({ ...requiredEnv, ALWAYS_BCC: maximumMailbox }).alwaysBcc,
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
     ).toBe(maximumMailbox);
     expect(overlongMailbox).toHaveLength(255);
+    expect(
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: maximumLocalPartMailbox }).alwaysBcc,
+    ).toBe(maximumLocalPartMailbox);
+    expect(() =>
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: overlongLocalPartMailbox }),
+    ).toThrow('SMTP local part must be at most 64 octets');
 
     const parseOverlongArchive = () =>
       parseConfig({
