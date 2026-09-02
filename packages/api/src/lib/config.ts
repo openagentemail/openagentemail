@@ -21,6 +21,7 @@ function emptyAsUndefined(value: unknown): unknown {
 const SMTP_MAILBOX_MAX_LENGTH = 254;
 const SMTP_LOCAL_PART_MAX_OCTETS = 64;
 const SMTP_DOMAIN_LABEL_MAX_OCTETS = 63;
+const SMTP_DOMAIN_LABEL_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 
 /** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
 const httpUrl = z
@@ -134,8 +135,12 @@ const envSchema = z.object({
           address
             .slice(address.lastIndexOf('@') + 1)
             .split('.')
-            .every((label) => Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS),
-        { message: 'SMTP domain labels must be at most 63 octets' },
+            .every(
+              (label) =>
+                Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS
+                && SMTP_DOMAIN_LABEL_PATTERN.test(label),
+            ),
+        { message: 'SMTP domain labels must be valid ASCII labels of at most 63 octets' },
       )
       .optional(),
   ),
