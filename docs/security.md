@@ -61,10 +61,10 @@ rather than silently downgrading original local delivery to `external`.
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs
 a content-free warning, even when another original recipient was rejected. If
-the archive is accepted while every original recipient is rejected, the API
-fails. Once the upstream SMTP server accepts/queues the archive RCPT, any later
-off-domain delivery failure is observable through SMTP/Postfix/relay logs or
-DSNs, not synchronously through this API.
+the archive is accepted while no original recipient is reported accepted, the
+API fails. Once the upstream SMTP server accepts/queues the archive RCPT, any
+later off-domain delivery failure is observable through SMTP/Postfix/relay logs
+or DSNs, not synchronously through this API.
 
 ## Inbox identity ACL（#26 PR 2）
 

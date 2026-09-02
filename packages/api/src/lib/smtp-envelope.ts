@@ -90,9 +90,8 @@ export function applyArchiveRecipientPolicy(
   const rejected = new Set((result.rejected ?? []).map(normalizeDeliveryAddress).map(mailboxComparisonKey));
   const archive = mailboxComparisonKey(archiveRecipient);
   const acceptedOriginal = [...original].some((recipient) => accepted.has(recipient));
-  const rejectedOriginal = [...original].some((recipient) => rejected.has(recipient));
 
-  if (accepted.has(archive) && !acceptedOriginal && rejectedOriginal) {
+  if (accepted.has(archive) && !acceptedOriginal) {
     throw new Error('SMTP rejected all original recipients; archive acceptance does not make send successful');
   }
 

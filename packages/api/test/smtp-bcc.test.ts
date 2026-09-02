@@ -110,6 +110,26 @@ describe('automatic compliance BCC envelope', () => {
     ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
   });
 
+  test('rejects archive-only acceptance when rejected outcomes are omitted', () => {
+    expect(() =>
+      applyArchiveRecipientPolicy(
+        { accepted: ['archive@example.net'] },
+        ['primary@example.net'],
+        'archive@example.net',
+      ),
+    ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+  });
+
+  test('rejects archive-only acceptance when rejected outcomes are empty', () => {
+    expect(() =>
+      applyArchiveRecipientPolicy(
+        { accepted: ['archive@example.net'], rejected: [] },
+        ['primary@example.net'],
+        'archive@example.net',
+      ),
+    ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+  });
+
   test('warns exactly once when an archive rejection accompanies partial primary rejection', () => {
     const originalWarn = console.warn;
     const warnings: unknown[][] = [];
@@ -135,12 +155,12 @@ describe('automatic compliance BCC envelope', () => {
     try {
       expect(() =>
         applyArchiveRecipientPolicy(
-        {
-          accepted: [{ address: 'primary@example.net' }],
-          rejected: [{ address: 'archive@EXAMPLE.net' }],
-        },
-        ['primary@example.net'],
-        'archive@example.net',
+          {
+            accepted: [{ address: 'primary@example.net' }],
+            rejected: [{ address: 'archive@EXAMPLE.net' }],
+          },
+          ['primary@example.net'],
+          'archive@example.net',
         ),
       ).not.toThrow();
     } finally {
