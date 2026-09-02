@@ -53,8 +53,8 @@ describe('ALWAYS_BCC configuration', () => {
   test('is disabled when unset or blank and exposes the configured mailbox', () => {
     expect(parseConfig(requiredEnv).alwaysBcc).toBeUndefined();
     expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: '   ' }).alwaysBcc).toBeUndefined();
-    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@example.net' }).alwaysBcc).toBe(
-      'archive@example.net',
+    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@example.com' }).alwaysBcc).toBe(
+      'archive@example.com',
     );
   });
 
@@ -62,6 +62,29 @@ describe('ALWAYS_BCC configuration', () => {
     for (const value of ['not-an-address', 'Archive <archive@example.net>', 'a@example.net,b@example.net']) {
       expect(() => parseConfig({ ...requiredEnv, ALWAYS_BCC: value })).toThrow();
     }
+  });
+
+  test('requires an explicit signing secret for an external archive', () => {
+    expect(() =>
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@external.example' }),
+    ).toThrow('TASK_SIGNING_SECRET is required for an external compliance archive');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'dedicated-archive-signing-secret',
+      }).taskSigningSecret,
+    ).toBe('dedicated-archive-signing-secret');
+  });
+
+  test('keeps the SMTP password fallback for a same-domain archive, case-insensitively', () => {
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'EXAMPLE.COM',
+        ALWAYS_BCC: 'archive@example.com',
+      }).taskSigningSecret,
+    ).toBe('smtp-secret');
   });
 });
 

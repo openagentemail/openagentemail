@@ -228,6 +228,12 @@ export function normalizeUrl(value: string): string {
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
+  const archiveDomain = raw.ALWAYS_BCC
+    ?.slice(raw.ALWAYS_BCC.lastIndexOf('@') + 1)
+    .toLowerCase();
+  if (raw.ALWAYS_BCC && !raw.TASK_SIGNING_SECRET && archiveDomain !== raw.DOMAIN.toLowerCase()) {
+    throw new Error('TASK_SIGNING_SECRET is required for an external compliance archive');
+  }
   const taskSigningSecret = raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS;
 
   return {

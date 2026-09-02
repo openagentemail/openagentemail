@@ -58,6 +58,12 @@ mailbox controlled by the same trusted compliance boundary, and leave it unset
 when that premise cannot be made. This preserves source-classification behavior
 rather than silently downgrading original local delivery to `external`.
 
+An external archive requires an explicit dedicated `TASK_SIGNING_SECRET` at
+startup. The historical bare-process `SMTP_PASS` fallback remains only when
+`ALWAYS_BCC` is absent or its mailbox is on `DOMAIN`; this prevents a stamped
+external archive copy from becoming a known-message password-guessing surface.
+Both Compose configurations already require the dedicated secret.
+
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs
 a content-free warning, even when another original recipient was rejected. If
