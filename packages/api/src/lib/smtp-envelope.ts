@@ -92,7 +92,9 @@ export function applyArchiveRecipientPolicy(
   const acceptedOriginal = [...original].some((recipient) => accepted.has(recipient));
 
   if (accepted.has(archive) && !acceptedOriginal) {
-    throw new Error('SMTP rejected all original recipients; archive acceptance does not make send successful');
+    throw new Error(
+      'SMTP reported archive acceptance without any accepted original recipient; send cannot be considered successful',
+    );
   }
 
   if (rejected.has(archive) && acceptedOriginal) {

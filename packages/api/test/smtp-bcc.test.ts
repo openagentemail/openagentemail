@@ -107,7 +107,9 @@ describe('automatic compliance BCC envelope', () => {
         ['one@example.net'],
         'archive@example.net',
       ),
-    ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+    ).toThrow(
+      'SMTP reported archive acceptance without any accepted original recipient; send cannot be considered successful',
+    );
   });
 
   test('rejects archive-only acceptance when rejected outcomes are omitted', () => {
@@ -117,7 +119,9 @@ describe('automatic compliance BCC envelope', () => {
         ['primary@example.net'],
         'archive@example.net',
       ),
-    ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+    ).toThrow(
+      'SMTP reported archive acceptance without any accepted original recipient; send cannot be considered successful',
+    );
   });
 
   test('rejects archive-only acceptance when rejected outcomes are empty', () => {
@@ -127,7 +131,9 @@ describe('automatic compliance BCC envelope', () => {
         ['primary@example.net'],
         'archive@example.net',
       ),
-    ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+    ).toThrow(
+      'SMTP reported archive acceptance without any accepted original recipient; send cannot be considered successful',
+    );
   });
 
   test('warns exactly once when an archive rejection accompanies partial primary rejection', () => {
