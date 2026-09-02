@@ -33,6 +33,8 @@ services:
       SMTP_TLS_REJECT_UNAUTHORIZED: ${SMTP_TLS_REJECT_UNAUTHORIZED:-false}
       SMTP_USER: ${SMTP_USER:?Set SMTP_USER in .env}
       SMTP_PASS: ${SMTP_PASS:?Set SMTP_PASS in .env}
+      # Optional envelope-only compliance archive recipient; blank = disabled.
+      ALWAYS_BCC: ${ALWAYS_BCC:-}
       TASK_SIGNING_SECRET: ${TASK_SIGNING_SECRET:?Set TASK_SIGNING_SECRET in .env (openssl rand -hex 32)}
       # Optional dashboard origin for ntfy click actions on mail-arrival pushes.
       DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-}

@@ -17,6 +17,12 @@ function emptyAsUndefined(value: unknown): unknown {
   return value.trim() === '' ? undefined : value;
 }
 
+/** RFC 5321 mailbox maximum; matches the API send-route address boundary. */
+const SMTP_MAILBOX_MAX_LENGTH = 254;
+const SMTP_LOCAL_PART_MAX_OCTETS = 64;
+const SMTP_DOMAIN_LABEL_MAX_OCTETS = 63;
+const SMTP_DOMAIN_LABEL_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+
 /** Only http(s) — these values feed ntfy HTTP calls and push click actions. */
 const httpUrl = z
   .string()
@@ -109,6 +115,35 @@ const envSchema = z.object({
   // Same default as IMAP: bundled docker-mailserver starts with a self-signed
   // certificate, while external public SMTP servers should normally use true.
   SMTP_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).default('false'),
+
+  // Optional compliance archive recipient. Empty Compose interpolation stays
+  // disabled; a nonblank value must be exactly one mailbox, not a list/name.
+  ALWAYS_BCC: z.preprocess(
+    emptyAsUndefined,
+    z
+      .string()
+      .email()
+      .max(SMTP_MAILBOX_MAX_LENGTH)
+      .refine(
+        (address) =>
+          Buffer.byteLength(address.slice(0, address.lastIndexOf('@')), 'utf8')
+          <= SMTP_LOCAL_PART_MAX_OCTETS,
+        { message: 'SMTP local part must be at most 64 octets' },
+      )
+      .refine(
+        (address) =>
+          address
+            .slice(address.lastIndexOf('@') + 1)
+            .split('.')
+            .every(
+              (label) =>
+                Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS
+                && SMTP_DOMAIN_LABEL_PATTERN.test(label),
+            ),
+        { message: 'SMTP domain labels must be valid ASCII labels of at most 63 octets' },
+      )
+      .optional(),
+  ),
 
   // Stable private key for task-header stamps. This must outlive SMTP account
   // password rotations so old task threads remain verifiable.
@@ -224,6 +259,25 @@ export function normalizeUrl(value: string): string {
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
+  const archiveDomain = raw.ALWAYS_BCC
+    ?.slice(raw.ALWAYS_BCC.lastIndexOf('@') + 1)
+    .toLowerCase();
+  const canonicalArchiveDomain = archiveDomain?.replace(/\.+$/, '');
+  const canonicalConfiguredDomain = raw.DOMAIN.toLowerCase().replace(/\.+$/, '');
+  if (raw.ALWAYS_BCC && canonicalArchiveDomain === canonicalConfiguredDomain) {
+    throw new Error('ALWAYS_BCC must be an external compliance archive');
+  }
+  if (raw.ALWAYS_BCC) {
+    const externalArchiveSigningSecret = raw.TASK_SIGNING_SECRET;
+    if (!externalArchiveSigningSecret) {
+      throw new Error('TASK_SIGNING_SECRET is required for an external compliance archive');
+    }
+    if (externalArchiveSigningSecret.length < 32) {
+      throw new Error(
+        'TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive',
+      );
+    }
+  }
   const taskSigningSecret = raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS;
 
   return {
@@ -245,6 +299,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       pass: raw.SMTP_PASS,
       tlsRejectUnauthorized: raw.SMTP_TLS_REJECT_UNAUTHORIZED === 'true',
     },
+    alwaysBcc: raw.ALWAYS_BCC,
     // The fallback supports an upgrade where the new variable has not reached
     // a bare-process config yet. Both Compose variants require the dedicated
     // secret, which is the supported v0.4 deployment path.

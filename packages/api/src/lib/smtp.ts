@@ -11,6 +11,12 @@ import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
 import { htmlToText } from './otp.ts';
 import { recordSentMessageIdAfterSend } from './sent-registry.ts';
 import {
+  applyArchiveRecipientPolicy,
+  buildSmtpEnvelope,
+  buildSmtpEnvelopePlan,
+  stripBccHeaders,
+} from './smtp-envelope.ts';
+import {
   withMailserverReconnect,
   type MailserverEndpoint,
 } from './mailserver-reconnect.ts';
@@ -33,6 +39,14 @@ export function coerceOutboundText(text: string, html?: string): string {
   if (text.trim() || !html) return text;
   return htmlToText(html);
 }
+
+// Retain these module exports for callers that imported the initial #72 seam.
+export {
+  applyArchiveRecipientPolicy,
+  buildSmtpEnvelope,
+  buildSmtpEnvelopePlan,
+  stripBccHeaders,
+} from './smtp-envelope.ts';
 
 function createSmtpTransport(endpoint: MailserverEndpoint) {
   return nodemailer.createTransport({
@@ -57,11 +71,13 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   const text = coerceOutboundText(input.text, input.html);
   const outbound = { ...input, text };
   // 仅当全部 To 均在本域时写 stamp（防 HMAC 预言机随外发信泄漏）。
-  const headers = buildOutboundStampHeaders(
-    outbound,
-    date,
-    config.taskSigningSecret,
-    config.domain,
+  const headers = stripBccHeaders(
+    buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.domain),
+  );
+  const { envelope, archiveRecipient } = buildSmtpEnvelopePlan(
+    input.from,
+    input.to,
+    config.alwaysBcc,
   );
 
   return withMailserverReconnect(config.smtp.host, async (endpoint) => {
@@ -75,7 +91,9 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
         date,
         ...(input.html ? { html: input.html } : {}),
         headers,
+        envelope,
       });
+      applyArchiveRecipientPolicy(info, input.to, archiveRecipient);
       // 服务端真正出站成功才登记。登记失败不得否决这次投递（否则 502 重试会重复外发）。
       recordSentMessageIdAfterSend(info.messageId, input.from);
       return { messageId: info.messageId };

@@ -329,6 +329,46 @@ IMAP, matches messages to identities by the `To`/`Delivered-To` header, and send
 via SMTP with the `From` rewritten to the chosen identity. Polling + IMAP IDLE for
 low-latency waits.
 
+### Optional compliance archive
+
+Set `ALWAYS_BCC=archive@example.net` only when your compliance policy permits
+an additional external delivery copy. It is off by default and adds the archive
+once to the SMTP envelope for API, MCP, and task sends, preserving visible
+recipient order and matching an existing recipient only by exact local-part and
+case-insensitive domain—without adding a MIME `Bcc` header or
+changing visible `To`, header From, envelope MAIL FROM, SPF, DKIM content, or
+DMARC alignment. Archive mailbox access, privacy, retention, aliases, and
+forwarding are operator/MTA responsibilities.
+
+The archive is an independent, off-domain compliance destination—not an
+ordinary untrusted recipient. For all-local visible recipients it receives the
+exact MIME, including the `X-OA-Mail-Stamp` that preserves local `internal`
+classification. Same-domain `ALWAYS_BCC` values are rejected at startup: on a
+shared catch-all deployment they are not an independent archive destination,
+and duplicate suppression is not a substitute for that boundary. Configure a
+controlled external compliance mailbox or leave `ALWAYS_BCC` unset.
+
+Every enabled archive requires an explicit `TASK_SIGNING_SECRET` of at least
+32 characters. The application enforces only presence and that length minimum;
+it does not prove entropy, so operators must generate a high-entropy secret
+(the Compose examples use `openssl rand -hex 32`). The historical SMTP-password
+fallback remains only when the archive is absent or blank. Both Compose
+deployments already require the dedicated secret.
+
+If at least one original recipient is accepted and the configured archive RCPT
+is rejected, the API preserves Nodemailer's partial-success semantics and logs
+a content-free warning, even when another original recipient was rejected. If
+the archive is accepted while no original recipient is reported accepted, the
+API fails instead. After an upstream SMTP server accepts or queues the archive
+RCPT, later delivery failures appear in SMTP/Postfix/relay logs or DSNs rather
+than synchronously in the API response.
+
+SMTP result matching deliberately keeps local-part spelling exact. A relay that
+rewrites accepted RCPT local-part case can therefore cause a conservative
+failure/retry; configure relays to preserve RCPT spelling. Case-distinct archive
+and original local-parts are intentionally separate SMTP mailboxes and can
+produce two copies with a case-folding provider, so use consistent spelling.
+
 ## Use it from your agent (MCP)
 
 Requires Node.js 18+ on the machine running the MCP client — no install step,

@@ -9,7 +9,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-import { normalizeUrl, parseConfig } from '../src/lib/config.ts';
+const { normalizeUrl, parseConfig } = await import('../src/lib/config.ts');
 
 const requiredEnv: NodeJS.ProcessEnv = {
   DOMAIN: 'example.com',
@@ -46,6 +46,159 @@ describe('TLS certificate verification configuration', () => {
     expect(() =>
       parseConfig({ ...requiredEnv, SMTP_TLS_REJECT_UNAUTHORIZED: 'no' }),
     ).toThrow();
+  });
+});
+
+describe('ALWAYS_BCC configuration', () => {
+  test('is disabled when unset or blank and exposes the configured mailbox', () => {
+    expect(parseConfig(requiredEnv).alwaysBcc).toBeUndefined();
+    expect(parseConfig(requiredEnv).taskSigningSecret).toBe('smtp-secret');
+    const blankArchive = parseConfig({ ...requiredEnv, ALWAYS_BCC: '   ' });
+    expect(blankArchive.alwaysBcc).toBeUndefined();
+    expect(blankArchive.taskSigningSecret).toBe('smtp-secret');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(
+      'archive@external.example',
+    );
+  });
+
+  test('limits a nonblank archive mailbox to SMTP local-part and total maximums without disclosing secrets', () => {
+    const maximumMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
+    const overlongMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(62)}`;
+    const maximumLocalPartMailbox = `${'a'.repeat(64)}@example.net`;
+    const overlongLocalPartMailbox = `${'a'.repeat(65)}@example.net`;
+    const maximumDomainLabelMailbox = `archive@${'a'.repeat(63)}.com`;
+    const overlongDomainLabelMailbox = `archive@${'a'.repeat(64)}.com`;
+    const punycodeDomainLabelMailbox = 'archive@xn--bcher-kva.example';
+    const smtpPassword = 'smtp-password-not-for-validation-errors';
+    const taskSigningSecret = 'task-signing-secret-not-for-validation-errors';
+
+    expect(maximumMailbox).toHaveLength(254);
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(maximumMailbox);
+    expect(overlongMailbox).toHaveLength(255);
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumLocalPartMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(maximumLocalPartMailbox);
+    expect(() =>
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: overlongLocalPartMailbox }),
+    ).toThrow('SMTP local part must be at most 64 octets');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumDomainLabelMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(maximumDomainLabelMailbox);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: overlongDomainLabelMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }),
+    ).toThrow('SMTP domain labels must be valid ASCII labels of at most 63 octets');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: punycodeDomainLabelMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(punycodeDomainLabelMailbox);
+    for (const malformedDomainLabelMailbox of [
+      'archive@example-.com',
+      'archive@a.example-.com',
+    ]) {
+      expect(() =>
+        parseConfig({ ...requiredEnv, ALWAYS_BCC: malformedDomainLabelMailbox }),
+      ).toThrow('SMTP domain labels must be valid ASCII labels of at most 63 octets');
+    }
+
+    const parseOverlongArchive = () =>
+      parseConfig({
+        ...requiredEnv,
+        SMTP_PASS: smtpPassword,
+        TASK_SIGNING_SECRET: taskSigningSecret,
+        ALWAYS_BCC: overlongMailbox,
+      });
+    expect(parseOverlongArchive).toThrow();
+    try {
+      parseOverlongArchive();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain(smtpPassword);
+      expect(message).not.toContain(taskSigningSecret);
+    }
+  });
+
+  test('rejects a malformed address, display name, or address list at startup', () => {
+    for (const value of ['not-an-address', 'Archive <archive@example.net>', 'a@example.net,b@example.net']) {
+      expect(() => parseConfig({ ...requiredEnv, ALWAYS_BCC: value })).toThrow();
+    }
+  });
+
+  test('requires a 32-character explicit signing secret for an external archive', () => {
+    expect(() =>
+      parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@external.example' }),
+    ).toThrow('TASK_SIGNING_SECRET is required for an external compliance archive');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(15),
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(16),
+      }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(31),
+      }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive');
+
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).taskSigningSecret,
+    ).toBe('a'.repeat(32));
+  });
+
+  test('rejects same-domain archives case-insensitively, including DNS root dots', () => {
+    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.', 'EXAMPLE.COM..']) {
+      expect(() =>
+        parseConfig({
+          ...requiredEnv,
+          DOMAIN: domain,
+          ALWAYS_BCC: 'archive@example.com',
+          TASK_SIGNING_SECRET: 'a'.repeat(32),
+        }),
+      ).toThrow('ALWAYS_BCC must be an external compliance archive');
+    }
   });
 });
 
