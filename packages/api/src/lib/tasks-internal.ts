@@ -1374,10 +1374,15 @@ export function currentTaskMessage<T extends { uid: number; state: TaskState; ki
   return firstTerminal ?? pool[pool.length - 1]!;
 }
 
-async function findTaskMessages(id: string): Promise<ParsedTaskMessage[]> {
+type TaskLookupResult = {
+  messages: ParsedTaskMessage[];
+  hadMatchingRows: boolean;
+};
+
+async function findTaskMessages(id: string): Promise<TaskLookupResult> {
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': id } }, { uid: true });
-    if (!uids || uids.length === 0) return [];
+    if (!uids || uids.length === 0) return { messages: [], hadMatchingRows: false };
     const messages: ParsedTaskMessage[] = [];
     for await (const message of client.fetch(
       uids,
@@ -1387,7 +1392,7 @@ async function findTaskMessages(id: string): Promise<ParsedTaskMessage[]> {
       const parsed = await parseTaskMessageWithIntegrity(message, id);
       if (parsed) messages.push(parsed);
     }
-    return messages;
+    return { messages, hadMatchingRows: true };
   });
 }
 
@@ -1395,12 +1400,34 @@ async function findTaskMessages(id: string): Promise<ParsedTaskMessage[]> {
  * than public getTask(), whose approval read path may itself materialize. */
 async function getTaskSnapshot(id: string): Promise<Task | null> {
   if (!isTaskId(id)) return null;
-  // 单测注入内存目录，避免并发 reply / IMAP 滞后 reminder 回归打真 IMAP。
-  const raw = getTaskForTests
-    ? await getTaskForTests(id)
-    : taskFromParsedMessages(id, await findTaskMessages(id));
-  // SMTP 已接受但 Dovecot 尚未索引时，把刚发出的 synthetic 事件并进读路径。
-  return raw ? mergeQueuedEvents(raw) : null;
+  let raw: Task | null;
+  let hadMatchingRows: boolean;
+
+  if (getTaskForTests) {
+    raw = await getTaskForTests(id);
+    hadMatchingRows = raw !== null;
+  } else {
+    const lookup = await findTaskMessages(id);
+    hadMatchingRows = lookup.hadMatchingRows;
+    raw = lookup.messages.length > 0 ? taskFromParsedMessages(id, lookup.messages) : null;
+  }
+
+  if (raw) {
+    return mergeQueuedEvents(raw);
+  }
+
+  // Matching rows existed in IMAP but reconstruction failed (e.g. integrity failure).
+  // Fail closed: suppress/retire synthetic base and return null.
+  if (hadMatchingRows) {
+    if (syntheticTaskBases.has(id)) {
+      syntheticTaskBases.delete(id);
+      invalidateTaskListCache();
+    }
+    return null;
+  }
+
+  const synthetic = getSyntheticTaskBase(id);
+  return synthetic ? mergeQueuedEvents(synthetic) : null;
 }
 
 const PARENT_CHAIN_MAX = 64;
@@ -1454,10 +1481,16 @@ export async function getTask(id: string): Promise<Task | null> {
   return materializeApprovalExpiry(await getTaskSnapshot(id));
 }
 
-export async function listTasks(state?: TaskState): Promise<Task[]> {
+type TaskListSnapshot = {
+  tasks: Task[];
+  hadMatchingRowsIds: Set<string>;
+};
+
+async function scanDurableTasks(): Promise<TaskListSnapshot> {
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': true } }, { uid: true });
-    if (!uids || uids.length === 0) return [];
+    if (!uids || uids.length === 0) return { tasks: [], hadMatchingRowsIds: new Set() };
+    const hadMatchingRowsIds = new Set<string>();
     const grouped = new Map<string, ParsedTaskMessage[]>();
     for await (const message of client.fetch(
       uids,
@@ -1468,21 +1501,28 @@ export async function listTasks(state?: TaskState): Promise<Task[]> {
       const parsed = await simpleParser(message.source);
       const id = parsed.headers.get('x-oa-task');
       if (typeof id !== 'string' || !isTaskId(id)) continue;
+      hadMatchingRowsIds.add(id);
       const taskMessage = await parseTaskMessageWithIntegrity(message, id);
       if (!taskMessage) continue;
       const entries = grouped.get(id) ?? [];
       entries.push(taskMessage);
       grouped.set(id, entries);
     }
-    return [...grouped.entries()]
+    const tasks = [...grouped.entries()]
       .map(([id, messages]) => taskFromParsedMessages(id, messages))
-      .filter((task): task is Task => !!task && (!state || task.state === state))
+      .filter((task): task is Task => !!task)
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    return { tasks, hadMatchingRowsIds };
   });
 }
 
+export async function listTasks(state?: TaskState): Promise<Task[]> {
+  const { tasks } = await scanDurableTasks();
+  return state ? tasks.filter((task) => task.state === state) : tasks;
+}
+
 function syntheticTask(input: CreateTaskInput, id: string, messageId: string): Task {
-  const now = new Date().toISOString();
+  const now = new Date(nowMs()).toISOString();
   return {
     id,
     from: input.from,
@@ -1512,7 +1552,9 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   // agent route. The generic IMAP watcher never has that authority.
   notifyTrustedTaskDelivery(input.to);
   invalidateTaskListCache();
-  return syntheticTask(normalized, id, messageId);
+  const task = syntheticTask(normalized, id, messageId);
+  recordSyntheticTaskBase(task);
+  return task;
 }
 
 function knownManagedIdentity(address: string): boolean {
@@ -1548,7 +1590,7 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
   notifyTrustedTaskDelivery(to);
   invalidateTaskListCache();
   const now = new Date(nowMs()).toISOString();
-  return {
+  const task: ApprovalTask = {
     id,
     from,
     to,
@@ -1570,11 +1612,13 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
     kind: 'approval',
     approval: snapshot,
   };
+  recordSyntheticTaskBase(task);
+  return task;
 }
 
 const taskLocks = new Map<string, Promise<void>>();
 let nowFn: () => number = () => Date.now();
-let listCache: { at: number; tasks: Task[] } | null = null;
+let listCache: { at: number; snapshot: TaskListSnapshot } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
@@ -1595,6 +1639,81 @@ type QueuedEvent = {
   sentAt: number;
   lease?: LeaseEvent;
 };
+
+type SyntheticTaskBase = {
+  task: Task;
+  createdAtMs: number;
+};
+
+/** Bounded in-memory synthetic task base retained after SMTP acceptance during the IMAP indexing lag window. */
+const syntheticTaskBases = new Map<string, SyntheticTaskBase>();
+const SYNTHETIC_TASK_TTL_MS = QUEUED_EVENT_TTL_MS;
+const SYNTHETIC_TASK_BASE_CAPACITY = 100;
+
+function evictExpiredSyntheticTaskBases(now: number): void {
+  for (const [id, entry] of syntheticTaskBases.entries()) {
+    if (now - entry.createdAtMs > SYNTHETIC_TASK_TTL_MS) {
+      syntheticTaskBases.delete(id);
+    }
+  }
+}
+
+function recordSyntheticTaskBase(task: Task): void {
+  const now = nowMs();
+  syntheticTaskBases.delete(task.id);
+
+  if (syntheticTaskBases.size >= SYNTHETIC_TASK_BASE_CAPACITY) {
+    evictExpiredSyntheticTaskBases(now);
+  }
+
+  while (syntheticTaskBases.size >= SYNTHETIC_TASK_BASE_CAPACITY) {
+    const oldestId = syntheticTaskBases.keys().next().value;
+    if (oldestId === undefined) break;
+    syntheticTaskBases.delete(oldestId);
+  }
+
+  syntheticTaskBases.set(task.id, {
+    task: structuredClone(task),
+    createdAtMs: now,
+  });
+}
+
+function getSyntheticTaskBase(id: string): Task | null {
+  const entry = syntheticTaskBases.get(id);
+  if (!entry) return null;
+  if (nowMs() - entry.createdAtMs > SYNTHETIC_TASK_TTL_MS) {
+    syntheticTaskBases.delete(id);
+    return null;
+  }
+  return structuredClone(entry.task);
+}
+
+function getUnindexedSyntheticTaskBases(
+  indexed: Task[],
+  hadMatchingRowsIds: ReadonlySet<string> = new Set(indexed.map((task) => task.id)),
+): Task[] {
+  const indexedIds = new Set(indexed.map((task) => task.id));
+  const now = nowMs();
+  const unindexed: Task[] = [];
+  for (const [id, entry] of syntheticTaskBases.entries()) {
+    if (indexedIds.has(id)) {
+      syntheticTaskBases.delete(id);
+      continue;
+    }
+    if (hadMatchingRowsIds.has(id)) {
+      // Matching row(s) exist in IMAP but reconstruction failed (e.g. integrity failure).
+      // Fail closed: suppress and delete synthetic base so board reads do not expose it.
+      syntheticTaskBases.delete(id);
+      continue;
+    }
+    if (now - entry.createdAtMs > SYNTHETIC_TASK_TTL_MS) {
+      syntheticTaskBases.delete(id);
+      continue;
+    }
+    unindexed.push(structuredClone(entry.task));
+  }
+  return unindexed;
+}
 
 export function setTaskNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
@@ -1629,10 +1748,9 @@ export function clearTaskSideEffectObserverForTests(): void {
   taskSideEffectObserverForTests = null;
 }
 
-
-
 export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
+  syntheticTaskBases.clear();
 }
 
 function indexedLeaseGenerationDominates(
@@ -2543,19 +2661,29 @@ function olderThanCursor(task: Task, cursor: { t: number; id: string }): boolean
   return task.id < cursor.id;
 }
 
-async function loadAllTasksCached(): Promise<Task[]> {
-  const snapshot = await loadImapTaskSnapshot();
-  // 列表与详情同一套 overlay：IMAP 滞后窗口内扫描也要看到刚接受的转移/催办。
-  return snapshot.map(mergeQueuedEvents);
+async function loadImapTaskSnapshotWithMatching(): Promise<TaskListSnapshot> {
+  if (listAllForTests) {
+    const tasks = await listAllForTests();
+    return { tasks, hadMatchingRowsIds: new Set(tasks.map((t) => t.id)) };
+  }
+  const now = nowMs();
+  if (listCache && now - listCache.at < TASK_LIST_CACHE_MS) return listCache.snapshot;
+  const snapshot = await scanDurableTasks();
+  listCache = { at: now, snapshot };
+  return snapshot;
 }
 
 async function loadImapTaskSnapshot(): Promise<Task[]> {
-  if (listAllForTests) return listAllForTests();
-  const now = nowMs();
-  if (listCache && now - listCache.at < TASK_LIST_CACHE_MS) return listCache.tasks;
-  const tasks = await listTasks();
-  listCache = { at: now, tasks };
+  const { tasks } = await loadImapTaskSnapshotWithMatching();
   return tasks;
+}
+
+async function loadAllTasksCached(): Promise<Task[]> {
+  const { tasks: snapshot, hadMatchingRowsIds } = await loadImapTaskSnapshotWithMatching();
+  const unindexed = getUnindexedSyntheticTaskBases(snapshot, hadMatchingRowsIds);
+  const combined = unindexed.length === 0 ? snapshot : [...snapshot, ...unindexed];
+  // 列表与详情同一套 overlay：IMAP 滞后窗口内扫描也要看到刚接受的转移/催办。
+  return combined.map(mergeQueuedEvents);
 }
 
 /**

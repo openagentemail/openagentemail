@@ -242,6 +242,8 @@ test('root pointer survives later v1 state events, conflicting second roots fail
   expect(tasks.taskFromMessages(approval.id, [approvalRoot!, decisionRaw!])).toMatchObject({ parentTaskId: PARENT, state: 'completed' });
 
   tasks.setTaskGetForTests(async () => null);
+  expect(await tasks.getTask(created.id)).toMatchObject({ id: created.id, state: 'submitted' });
+  tasks.clearQueuedEventsForTests();
   expect(await tasks.getTask(created.id)).toBeNull();
 });
 
