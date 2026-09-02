@@ -16,11 +16,11 @@ import {
   normalizeToList,
   stampDate,
 } from '../src/lib/mail-stamp.ts';
-const {
+import {
   applyArchiveRecipientPolicy,
   buildSmtpEnvelope,
   stripBccHeaders,
-} = await import('../src/lib/smtp.ts');
+} from '../src/lib/smtp-envelope.ts';
 
 describe('automatic compliance BCC envelope', () => {
   test('adds one archive RCPT to single and multi-recipient envelopes', () => {
@@ -40,14 +40,21 @@ describe('automatic compliance BCC envelope', () => {
     });
   });
 
-  test('deduplicates envelope RCPT case-insensitively while preserving original order', () => {
+  test('preserves case-distinct primary RCPTs and only compares archive domains case-insensitively', () => {
     expect(
       buildSmtpEnvelope(
         'sender@test.example',
-        ['First@example.net', 'first@EXAMPLE.net', 'alias+legal@example.net'],
-        'FIRST@example.net',
+        ['Case@case-sensitive.example', 'case@case-sensitive.example'],
+        'Case@CASE-SENSITIVE.example',
       ).to,
-    ).toEqual(['First@example.net', 'alias+legal@example.net']);
+    ).toEqual(['Case@case-sensitive.example', 'case@case-sensitive.example']);
+    expect(
+      buildSmtpEnvelope(
+        'sender@test.example',
+        ['Case@case-sensitive.example'],
+        'case@CASE-SENSITIVE.example',
+      ).to,
+    ).toEqual(['Case@case-sensitive.example', 'case@CASE-SENSITIVE.example']);
   });
 
   test('keeps alias-shaped visible recipients untouched and serializes no archive/Bcc MIME header', async () => {
@@ -100,6 +107,37 @@ describe('automatic compliance BCC envelope', () => {
         'archive@example.net',
       ),
     ).toThrow('SMTP rejected all original recipients; archive acceptance does not make send successful');
+  });
+
+  test('warns exactly once when an archive rejection accompanies partial primary rejection', () => {
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    try {
+      applyArchiveRecipientPolicy(
+        { accepted: ['primary1@example.net'], rejected: ['primary2@example.net', 'archive@example.net'] },
+        ['primary1@example.net', 'primary2@example.net'],
+        'archive@example.net',
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      ['[smtp] archive recipient rejected; preserving successful send for original recipients'],
+    ]);
+  });
+
+  test('normalizes Nodemailer Address result values before applying the policy', () => {
+    expect(() =>
+      applyArchiveRecipientPolicy(
+        {
+          accepted: [{ address: 'primary@example.net' }],
+          rejected: [{ address: 'archive@EXAMPLE.net' }],
+        },
+        ['primary@example.net'],
+        'archive@example.net',
+      ),
+    ).not.toThrow();
   });
 
   test('a controlled archive does not change internal stamping for all-local visible recipients', () => {

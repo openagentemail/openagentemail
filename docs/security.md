@@ -41,7 +41,9 @@ retention window before reusing one.
 
 `ALWAYS_BCC` is optional and off by default. When set to exactly one valid
 mailbox, the API adds it once to the SMTP envelope RCPT list for each API/MCP/
-task send, case-insensitively deduplicated with the original recipients. It is
+task send, preserving the original recipient list exactly and appending the
+archive only when no original recipient has the same exact local-part and a
+case-insensitively matching domain. It is
 not a Nodemailer `bcc` field: visible `To`, MIME headers, header From, envelope
 MAIL FROM, SPF, DKIM content, and DMARC alignment are unchanged. The added
 recipient does create another delivery copy, so its external mailbox, privacy,

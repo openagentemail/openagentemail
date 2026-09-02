@@ -333,8 +333,9 @@ low-latency waits.
 
 Set `ALWAYS_BCC=archive@example.net` only when your compliance policy permits
 an additional external delivery copy. It is off by default and adds the archive
-once to the SMTP envelope for API, MCP, and task sends—case-insensitively
-deduplicated with visible recipients—without adding a MIME `Bcc` header or
+once to the SMTP envelope for API, MCP, and task sends, preserving visible
+recipient order and matching an existing recipient only by exact local-part and
+case-insensitive domain—without adding a MIME `Bcc` header or
 changing visible `To`, header From, envelope MAIL FROM, SPF, DKIM content, or
 DMARC alignment. Archive mailbox access, privacy, retention, aliases, and
 forwarding are operator/MTA responsibilities.
