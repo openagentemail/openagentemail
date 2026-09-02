@@ -340,21 +340,20 @@ changing visible `To`, header From, envelope MAIL FROM, SPF, DKIM content, or
 DMARC alignment. Archive mailbox access, privacy, retention, aliases, and
 forwarding are operator/MTA responsibilities.
 
-The archive is a trust boundary, not an ordinary untrusted external recipient:
-for all-local visible recipients it receives the exact MIME, including the
-`X-OA-Mail-Stamp` that preserves local `internal` classification. Configure it
-only for a controlled compliance mailbox; otherwise leave `ALWAYS_BCC` unset.
-An external archive requires an explicit `TASK_SIGNING_SECRET` of at least 32
-characters. The application enforces only presence and that length minimum; it
-does not prove entropy, so operators must generate a high-entropy secret (the
-Compose examples use `openssl rand -hex 32`). The SMTP-password fallback is
-allowed only when the archive is absent or on the configured `DOMAIN`. A
-same-domain archive may use that fallback only when its mailbox is not aliased
-or forwarded outside this trusted compliance boundary; if it can forward
-externally, configure the same explicit 32+ character secret. The application
-cannot discover downstream alias expansion, so this routing assessment remains
-an operator/MTA responsibility. Both Compose deployments already require the
-dedicated secret.
+The archive is an independent, off-domain compliance destination—not an
+ordinary untrusted recipient. For all-local visible recipients it receives the
+exact MIME, including the `X-OA-Mail-Stamp` that preserves local `internal`
+classification. Same-domain `ALWAYS_BCC` values are rejected at startup: on a
+shared catch-all deployment they are not an independent archive destination,
+and duplicate suppression is not a substitute for that boundary. Configure a
+controlled external compliance mailbox or leave `ALWAYS_BCC` unset.
+
+Every enabled archive requires an explicit `TASK_SIGNING_SECRET` of at least
+32 characters. The application enforces only presence and that length minimum;
+it does not prove entropy, so operators must generate a high-entropy secret
+(the Compose examples use `openssl rand -hex 32`). The historical SMTP-password
+fallback remains only when the archive is absent or blank. Both Compose
+deployments already require the dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs

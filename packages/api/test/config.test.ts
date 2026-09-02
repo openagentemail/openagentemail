@@ -52,17 +52,26 @@ describe('TLS certificate verification configuration', () => {
 describe('ALWAYS_BCC configuration', () => {
   test('is disabled when unset or blank and exposes the configured mailbox', () => {
     expect(parseConfig(requiredEnv).alwaysBcc).toBeUndefined();
-    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: '   ' }).alwaysBcc).toBeUndefined();
-    expect(parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@example.com' }).alwaysBcc).toBe(
-      'archive@example.com',
+    expect(parseConfig(requiredEnv).taskSigningSecret).toBe('smtp-secret');
+    const blankArchive = parseConfig({ ...requiredEnv, ALWAYS_BCC: '   ' });
+    expect(blankArchive.alwaysBcc).toBeUndefined();
+    expect(blankArchive.taskSigningSecret).toBe('smtp-secret');
+    expect(
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
+    ).toBe(
+      'archive@external.example',
     );
   });
 
   test('limits a nonblank archive mailbox to SMTP local-part and total maximums without disclosing secrets', () => {
     const maximumMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
     const overlongMailbox = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(62)}`;
-    const maximumLocalPartMailbox = `${'a'.repeat(64)}@example.com`;
-    const overlongLocalPartMailbox = `${'a'.repeat(65)}@example.com`;
+    const maximumLocalPartMailbox = `${'a'.repeat(64)}@example.net`;
+    const overlongLocalPartMailbox = `${'a'.repeat(65)}@example.net`;
     const maximumDomainLabelMailbox = `archive@${'a'.repeat(63)}.com`;
     const overlongDomainLabelMailbox = `archive@${'a'.repeat(64)}.com`;
     const punycodeDomainLabelMailbox = 'archive@xn--bcher-kva.example';
@@ -79,7 +88,11 @@ describe('ALWAYS_BCC configuration', () => {
     ).toBe(maximumMailbox);
     expect(overlongMailbox).toHaveLength(255);
     expect(
-      parseConfig({ ...requiredEnv, ALWAYS_BCC: maximumLocalPartMailbox }).alwaysBcc,
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: maximumLocalPartMailbox,
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }).alwaysBcc,
     ).toBe(maximumLocalPartMailbox);
     expect(() =>
       parseConfig({ ...requiredEnv, ALWAYS_BCC: overlongLocalPartMailbox }),
@@ -175,14 +188,15 @@ describe('ALWAYS_BCC configuration', () => {
     ).toBe('a'.repeat(32));
   });
 
-  test('keeps the SMTP password fallback for a same-domain archive, case-insensitively', () => {
-    expect(
+  test('rejects a same-domain archive, case-insensitively', () => {
+    expect(() =>
       parseConfig({
         ...requiredEnv,
         DOMAIN: 'EXAMPLE.COM',
-        ALWAYS_BCC: 'archive@EXAMPLE.COM',
-      }).taskSigningSecret,
-    ).toBe('smtp-secret');
+        ALWAYS_BCC: 'archive@example.com',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }),
+    ).toThrow('ALWAYS_BCC must be an external compliance archive');
   });
 });
 

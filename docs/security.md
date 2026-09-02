@@ -50,27 +50,21 @@ recipient does create another delivery copy, so its external mailbox, privacy,
 access, and retention controls are an operator responsibility. Aliases and
 forwarding remain downstream MTA behavior.
 
-**Trust boundary:** this is not an ordinary untrusted external recipient. When
-all visible `To` recipients are local, the exact MIME retains its
-`X-OA-Mail-Stamp` so local recipients continue to classify it as `internal`;
-the archive receives that same signed MIME. Configure `ALWAYS_BCC` only for a
-mailbox controlled by the same trusted compliance boundary, and leave it unset
-when that premise cannot be made. This preserves source-classification behavior
-rather than silently downgrading original local delivery to `external`.
+**Trust boundary:** this is an independent, off-domain compliance destination,
+not an ordinary untrusted recipient. When all visible `To` recipients are
+local, the exact MIME retains its `X-OA-Mail-Stamp` so local recipients continue
+to classify it as `internal`; the archive receives that same signed MIME.
+Same-domain `ALWAYS_BCC` values are rejected at startup: a mailbox on the shared
+catch-all domain is not an independent archive destination, and duplicate
+suppression cannot establish that boundary. Configure a controlled external
+compliance mailbox or leave the setting unset.
 
-An external archive requires an explicit `TASK_SIGNING_SECRET` of at least 32
-characters at startup. The application enforces presence and this length
-minimum only; it does not guarantee entropy. Operators must generate a
-high-entropy secret (the Compose examples use `openssl rand -hex 32`). The
-historical bare-process `SMTP_PASS` fallback remains only when `ALWAYS_BCC` is
-absent or its mailbox is on `DOMAIN`; this prevents a stamped external archive
-copy from becoming a known-message password-guessing surface. A same-domain
-archive may use that fallback only if it is not aliased or forwarded outside
-the trusted compliance boundary. If it can forward externally, it needs the
-same explicit 32+ character secret as an external archive. Application code
-cannot discover downstream alias expansion; configuring and enforcing that
-routing boundary is the operator/MTA responsibility. Both Compose
-configurations already require the dedicated secret.
+Every enabled archive requires an explicit `TASK_SIGNING_SECRET` of at least 32
+characters at startup. The application enforces presence and this length minimum
+only; it does not guarantee entropy. Operators must generate a high-entropy
+secret (the Compose examples use `openssl rand -hex 32`). The historical
+bare-process `SMTP_PASS` fallback remains only when `ALWAYS_BCC` is absent or
+blank. Both Compose configurations already require the dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs

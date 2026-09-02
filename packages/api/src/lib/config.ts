@@ -262,9 +262,10 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
   const archiveDomain = raw.ALWAYS_BCC
     ?.slice(raw.ALWAYS_BCC.lastIndexOf('@') + 1)
     .toLowerCase();
-  const externalArchive =
-    raw.ALWAYS_BCC !== undefined && archiveDomain !== raw.DOMAIN.toLowerCase();
-  if (externalArchive) {
+  if (raw.ALWAYS_BCC && archiveDomain === raw.DOMAIN.toLowerCase()) {
+    throw new Error('ALWAYS_BCC must be an external compliance archive');
+  }
+  if (raw.ALWAYS_BCC) {
     const externalArchiveSigningSecret = raw.TASK_SIGNING_SECRET;
     if (!externalArchiveSigningSecret) {
       throw new Error('TASK_SIGNING_SECRET is required for an external compliance archive');
