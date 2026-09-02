@@ -1516,9 +1516,21 @@ async function scanDurableTasks(): Promise<TaskListSnapshot> {
   });
 }
 
+/**
+ * Project a durable task list snapshot by combining it with allowed unindexed
+ * synthetic task bases and applying queued-event overlays.
+ */
+function projectTaskListSnapshot(snapshot: TaskListSnapshot): Task[] {
+  const unindexed = getUnindexedSyntheticTaskBases(snapshot.tasks, snapshot.hadMatchingRowsIds);
+  const combined = unindexed.length === 0 ? snapshot.tasks : [...snapshot.tasks, ...unindexed];
+  return combined.map(mergeQueuedEvents);
+}
+
 export async function listTasks(state?: TaskState): Promise<Task[]> {
-  const { tasks } = await scanDurableTasks();
-  return state ? tasks.filter((task) => task.state === state) : tasks;
+  const snapshot = await scanDurableTasks();
+  const projected = projectTaskListSnapshot(snapshot);
+  const filtered = state ? projected.filter((task) => task.state === state) : projected;
+  return filtered.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 function syntheticTask(input: CreateTaskInput, id: string, messageId: string): Task {
@@ -2679,11 +2691,8 @@ async function loadImapTaskSnapshot(): Promise<Task[]> {
 }
 
 async function loadAllTasksCached(): Promise<Task[]> {
-  const { tasks: snapshot, hadMatchingRowsIds } = await loadImapTaskSnapshotWithMatching();
-  const unindexed = getUnindexedSyntheticTaskBases(snapshot, hadMatchingRowsIds);
-  const combined = unindexed.length === 0 ? snapshot : [...snapshot, ...unindexed];
-  // 列表与详情同一套 overlay：IMAP 滞后窗口内扫描也要看到刚接受的转移/催办。
-  return combined.map(mergeQueuedEvents);
+  const snapshot = await loadImapTaskSnapshotWithMatching();
+  return projectTaskListSnapshot(snapshot);
 }
 
 /**
