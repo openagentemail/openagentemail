@@ -344,9 +344,14 @@ The archive is a trust boundary, not an ordinary untrusted external recipient:
 for all-local visible recipients it receives the exact MIME, including the
 `X-OA-Mail-Stamp` that preserves local `internal` classification. Configure it
 only for a controlled compliance mailbox; otherwise leave `ALWAYS_BCC` unset.
-An external archive also requires an explicit dedicated `TASK_SIGNING_SECRET`:
-the SMTP-password fallback is allowed only when the archive is absent or on the
-configured `DOMAIN`. Both Compose deployments already require this secret.
+An external archive requires an explicit high-entropy `TASK_SIGNING_SECRET` of
+at least 32 characters. The SMTP-password fallback is allowed only when the
+archive is absent or on the configured `DOMAIN`. A same-domain archive may use
+that fallback only when its mailbox is not aliased or forwarded outside this
+trusted compliance boundary; if it can forward externally, configure the same
+explicit 32+ character secret. The application cannot discover downstream
+alias expansion, so this routing assessment remains an operator/MTA
+responsibility. Both Compose deployments already require the dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs

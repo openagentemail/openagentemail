@@ -58,11 +58,17 @@ mailbox controlled by the same trusted compliance boundary, and leave it unset
 when that premise cannot be made. This preserves source-classification behavior
 rather than silently downgrading original local delivery to `external`.
 
-An external archive requires an explicit dedicated `TASK_SIGNING_SECRET` at
-startup. The historical bare-process `SMTP_PASS` fallback remains only when
-`ALWAYS_BCC` is absent or its mailbox is on `DOMAIN`; this prevents a stamped
-external archive copy from becoming a known-message password-guessing surface.
-Both Compose configurations already require the dedicated secret.
+An external archive requires an explicit high-entropy `TASK_SIGNING_SECRET` of
+at least 32 characters at startup. The historical bare-process `SMTP_PASS`
+fallback remains only when `ALWAYS_BCC` is absent or its mailbox is on
+`DOMAIN`; this prevents a stamped external archive copy from becoming a
+known-message password-guessing surface. A same-domain archive may use that
+fallback only if it is not aliased or forwarded outside the trusted compliance
+boundary. If it can forward externally, it needs the same explicit 32+
+character secret as an external archive. Application code cannot discover
+downstream alias expansion; configuring and enforcing that routing boundary is
+the operator/MTA responsibility. Both Compose configurations already require
+the dedicated secret.
 
 If at least one original recipient is accepted and the configured archive RCPT
 is rejected, the API preserves Nodemailer's partial-success semantics and logs

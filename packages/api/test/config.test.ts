@@ -64,17 +64,26 @@ describe('ALWAYS_BCC configuration', () => {
     }
   });
 
-  test('requires an explicit signing secret for an external archive', () => {
+  test('requires a 32-character explicit signing secret for an external archive', () => {
     expect(() =>
       parseConfig({ ...requiredEnv, ALWAYS_BCC: 'archive@external.example' }),
     ).toThrow('TASK_SIGNING_SECRET is required for an external compliance archive');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        ALWAYS_BCC: 'archive@external.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(16),
+      }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters for an external compliance archive');
+
     expect(
       parseConfig({
         ...requiredEnv,
         ALWAYS_BCC: 'archive@external.example',
-        TASK_SIGNING_SECRET: 'dedicated-archive-signing-secret',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
       }).taskSigningSecret,
-    ).toBe('dedicated-archive-signing-secret');
+    ).toBe('a'.repeat(32));
   });
 
   test('keeps the SMTP password fallback for a same-domain archive, case-insensitively', () => {
@@ -82,7 +91,7 @@ describe('ALWAYS_BCC configuration', () => {
       parseConfig({
         ...requiredEnv,
         DOMAIN: 'EXAMPLE.COM',
-        ALWAYS_BCC: 'archive@example.com',
+        ALWAYS_BCC: 'archive@EXAMPLE.COM',
       }).taskSigningSecret,
     ).toBe('smtp-secret');
   });
