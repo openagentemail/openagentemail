@@ -262,7 +262,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
   const archiveDomain = raw.ALWAYS_BCC
     ?.slice(raw.ALWAYS_BCC.lastIndexOf('@') + 1)
     .toLowerCase();
-  if (raw.ALWAYS_BCC && archiveDomain === raw.DOMAIN.toLowerCase()) {
+  const canonicalArchiveDomain = archiveDomain?.replace(/\.+$/, '');
+  const canonicalConfiguredDomain = raw.DOMAIN.toLowerCase().replace(/\.+$/, '');
+  if (raw.ALWAYS_BCC && canonicalArchiveDomain === canonicalConfiguredDomain) {
     throw new Error('ALWAYS_BCC must be an external compliance archive');
   }
   if (raw.ALWAYS_BCC) {

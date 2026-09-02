@@ -188,15 +188,17 @@ describe('ALWAYS_BCC configuration', () => {
     ).toBe('a'.repeat(32));
   });
 
-  test('rejects a same-domain archive, case-insensitively', () => {
-    expect(() =>
-      parseConfig({
-        ...requiredEnv,
-        DOMAIN: 'EXAMPLE.COM',
-        ALWAYS_BCC: 'archive@example.com',
-        TASK_SIGNING_SECRET: 'a'.repeat(32),
-      }),
-    ).toThrow('ALWAYS_BCC must be an external compliance archive');
+  test('rejects same-domain archives case-insensitively, including DNS root dots', () => {
+    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.', 'EXAMPLE.COM..']) {
+      expect(() =>
+        parseConfig({
+          ...requiredEnv,
+          DOMAIN: domain,
+          ALWAYS_BCC: 'archive@example.com',
+          TASK_SIGNING_SECRET: 'a'.repeat(32),
+        }),
+      ).toThrow('ALWAYS_BCC must be an external compliance archive');
+    }
   });
 });
 
