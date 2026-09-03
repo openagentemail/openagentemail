@@ -607,9 +607,15 @@ export function createUiApiRoutes(
   routes.post('/identities/:address/token', (c) => {
     const denied = requireUiAdmin(c);
     if (denied) return denied;
-    const token = rotateIdentityToken(c.req.param('address'));
+    const address = c.req.param('address').toLowerCase();
+    const token = rotateIdentityToken(address);
     if (!token) return c.json({ error: 'not_found' }, 404);
-    return c.json({ address: c.req.param('address').toLowerCase(), token });
+    const updated = findIdentity(address);
+    return c.json({
+      address,
+      token,
+      ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+    });
   });
 
   routes.put('/identities/:address/push-tier', async (c) => {

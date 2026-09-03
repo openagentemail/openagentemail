@@ -14,6 +14,7 @@ import {
   TOOL_TIER_SPEC,
   type ToolTier,
 } from "../lib/tool-tiers.ts";
+import { MAX_SCOPES_COUNT, SUPPORTED_SCOPES } from "../lib/identities.ts";
 import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
@@ -75,6 +76,7 @@ export function registerOpenAgentEmailTools(
     pushContentTier: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     pushContentTierWarning: z.string().optional(),
     token: z.string().optional(),
+    scopes: z.array(z.string()).optional(),
   };
 
   // list / read 真交集。from/to 是服务端可信数据的契约声明（非输入消毒）：
@@ -262,7 +264,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Create Email Identity",
       description:
-        "Create a new email identity (mailbox address) on this openagent.email server. Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address; the address also gets a scoped API token.",
+        "Admin only: create a new email identity (mailbox address) on this openagent.email server. Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address and a one-time API token; omit scopes for legacy full identity permissions.",
       inputSchema: {
         // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
         name: z
@@ -285,11 +287,18 @@ export function registerOpenAgentEmailTools(
           .boolean()
           .optional()
           .describe("Admin only: allow this identity to send human-alert notifications"),
+        scopes: z
+          .array(z.enum(SUPPORTED_SCOPES))
+          .max(MAX_SCOPES_COUNT)
+          .refine((items) => new Set(items).size === items.length, "duplicate scopes are not allowed")
+          .optional()
+          .describe("Optional token scopes. Supported: read:messages. Use [] for no API operation permissions; omit for legacy full identity permissions."),
       },
       outputSchema: identitySchema,
       annotations: mutatingAnnotations,
     },
-    ({ name, localpart, canNotifyUser }) => callApi(() => client.createIdentity({ name, localpart, canNotifyUser })),
+    ({ name, localpart, canNotifyUser, scopes }) =>
+      callApi(() => client.createIdentity({ name, localpart, canNotifyUser, scopes })),
   );
 
   tier("mail_list_identities", "read");

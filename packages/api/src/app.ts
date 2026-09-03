@@ -9,6 +9,7 @@ import {
 } from './lib/auth.ts';
 import { config } from './lib/config.ts';
 import { JSON_BODY_LIMIT_BYTES } from './lib/limits.ts';
+import { scopePolicyMiddleware } from './lib/scope-policy.ts';
 import {
   UiSessionStore,
   createUiSessionRoutes,
@@ -101,6 +102,7 @@ export function createApp(options: AppOptions = {}): Hono {
     }),
   );
   app.use('/v1/*', bearerAuth);
+  app.use('/v1/*', scopePolicyMiddleware);
   app.route('/v1/identities', identitiesRoute);
   app.route('/v1/messages', messagesRoute);
   app.route('/v1/send', sendRoute);

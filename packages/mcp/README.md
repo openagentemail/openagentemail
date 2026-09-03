@@ -32,7 +32,7 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 
 | Tool | Description |
 | --- | --- |
-| `mail_new_identity(name?, localpart?)` | Create an identity; pass `localpart` for a custom address (e.g. `qa-bot`), or omit for a random one like `fox-k7d2` |
+| `mail_new_identity(name?, localpart?, scopes?)` | Admin only: create an identity and one-time token; pass `scopes: ["read:messages"]` for read-only own-mailbox access, `scopes: []` for no API operation permissions, or omit for legacy full identity permissions |
 | `mail_list_identities()` | List all identities |
 | `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet/hasOtp/source); `from`/`to` are RFC-5322 raw header text (may include display names), not bare addresses |
 | `mail_read_message(address, id)` | Full message: text, html?, `otp:{codes:[],links:[]}`, top-level `links`, and optional `taskId`/`taskState` |

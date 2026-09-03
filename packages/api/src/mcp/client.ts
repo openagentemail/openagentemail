@@ -2,8 +2,9 @@
  * openagent.email REST 最小客户端（stdio MCP 与 HTTP /mcp 共用）。
  *
  * API 契约：
- *   POST /v1/identities            {name?, localpart?, canNotifyUser?} -> 201 {address, name?, token}
- *   GET  /v1/identities            -> {identities:[{address,name?,createdAt}]}
+ *   POST /v1/identities            {name?, localpart?, canNotifyUser?, scopes?} -> 201 {address, name?, token, scopes?}
+ *   GET  /v1/identities            -> {identities:[{address,name?,createdAt,scopes?}]}
+ *   POST /v1/identities/:address/token {scopes?} -> 200 {address, token, scopes?}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
  *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
@@ -49,6 +50,7 @@ export interface Identity {
   /** REST publicIdentity 始终带 1|2|3 */
   pushContentTier?: 1 | 2 | 3;
   pushContentTierWarning?: string;
+  scopes?: string[];
 }
 
 export interface MessageSummary {
@@ -274,7 +276,7 @@ export class OpenAgentEmailClient {
       if (res.status === 403) {
         throw new ApiError(
           403,
-          `Forbidden (403): ${serverMsg}. The 'from' address must be an existing identity — create one with mail_new_identity first.`,
+          `Forbidden (403): ${serverMsg}.`,
         );
       }
       if (res.status === 404) {
@@ -295,19 +297,42 @@ export class OpenAgentEmailClient {
     return data as T;
   }
 
-  createIdentity(opts: { name?: string; localpart?: string; canNotifyUser?: boolean }): Promise<{
+  createIdentity(opts: {
+    name?: string;
+    localpart?: string;
+    canNotifyUser?: boolean;
+    scopes?: string[];
+  }): Promise<{
     address: string;
     name?: string;
     canNotifyUser?: boolean;
     pushContentTier?: 1 | 2 | 3;
     /** 仅创建/轮换响应出现一次 */
     token?: string;
+    scopes?: string[];
   }> {
-    const body: Record<string, string | boolean> = {};
+    const body: Record<string, unknown> = {};
     if (opts.name) body.name = opts.name;
     if (opts.localpart) body.localpart = opts.localpart;
     if (opts.canNotifyUser) body.canNotifyUser = true;
+    if (opts.scopes !== undefined) body.scopes = opts.scopes;
     return this.request("POST", "/v1/identities", body);
+  }
+
+  rotateIdentityToken(
+    address: string,
+    opts?: { scopes?: string[] },
+  ): Promise<{
+    address: string;
+    token: string;
+    scopes?: string[];
+  }> {
+    const body = opts?.scopes !== undefined ? { scopes: opts.scopes } : undefined;
+    return this.request(
+      "POST",
+      `/v1/identities/${encodeURIComponent(address)}/token`,
+      body,
+    );
   }
 
   async listIdentities(): Promise<Identity[]> {
