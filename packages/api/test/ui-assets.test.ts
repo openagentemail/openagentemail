@@ -139,6 +139,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).not.toMatch(/location\.search/);
 
     // searchParams / URLSearchParams 必须受控，仅允许出现在 consumeQueryToken 函数内部
+    // Assumption: The exemption region is delimited by `function consumeQueryToken()` up to `async function loginWithToken(` — inserting new code between these two functions shifts the boundary, so the slicing anchors must move with them.
     const consumeQueryTokenStart = UI_JS.indexOf('function consumeQueryToken()');
     expect(consumeQueryTokenStart).toBeGreaterThan(-1);
     const consumeQueryTokenEnd = UI_JS.indexOf('async function loginWithToken(', consumeQueryTokenStart);
