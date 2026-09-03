@@ -735,6 +735,7 @@ export function putAccessTokenForTests(input: {
   aud: string;
   expiresAt: number;
   ensureGrant?: { clientId: string; clientName: string };
+  runSave?: boolean;
 }): void {
   const data = loadRaw();
   if (input.ensureGrant && !data.grants[input.grantId]) {
