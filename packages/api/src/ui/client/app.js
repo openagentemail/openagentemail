@@ -885,26 +885,33 @@
 
   function setLinkLoginMarker() {
     try {
-      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
-      if (storage) storage.setItem('oae-link-login', '1');
+      if (typeof document !== 'undefined') {
+        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+      }
     } catch (_err) {
-      /* storage unavailable or restricted */
+      /* cookie unavailable or restricted */
     }
   }
 
   function clearLinkLoginMarker() {
     try {
-      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
-      if (storage) storage.removeItem('oae-link-login');
+      if (typeof document !== 'undefined') {
+        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0';
+      }
     } catch (_err) {
-      /* storage unavailable or restricted */
+      /* cookie unavailable or restricted */
     }
   }
 
   function hasLinkLoginMarker() {
     try {
-      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
-      return storage ? storage.getItem('oae-link-login') === '1' : false;
+      if (typeof document === 'undefined' || !document.cookie) return false;
+      var parts = document.cookie.split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var part = parts[i].trim();
+        if (part === 'oae-link-login=1') return true;
+      }
+      return false;
     } catch (_err) {
       return false;
     }

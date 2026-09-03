@@ -58,13 +58,69 @@ const endLogout = APP_JS.indexOf("identitySearch.addEventListener('input',", sta
 expect(endLogout).toBeGreaterThan(startLogout);
 const logoutSrc = APP_JS.slice(startLogout, endLogout);
 
+class CookieJar {
+  private cookies = new Map<string, string>();
+  public writes: string[] = [];
+
+  get cookie(): string {
+    const pairs: string[] = [];
+    for (const [k, v] of this.cookies.entries()) {
+      pairs.push(`${k}=${v}`);
+    }
+    return pairs.join('; ');
+  }
+
+  set cookie(cookieStr: string) {
+    this.writes.push(cookieStr);
+    const parts = cookieStr.split(';');
+    const firstPart = parts[0] || '';
+    const eqIdx = firstPart.indexOf('=');
+    if (eqIdx === -1) return;
+    const name = firstPart.slice(0, eqIdx).trim();
+    const val = firstPart.slice(eqIdx + 1).trim();
+
+    let isMaxAge0 = false;
+    for (let i = 1; i < parts.length; i++) {
+      const attr = parts[i].trim().toLowerCase();
+      if (attr === 'max-age=0') {
+        isMaxAge0 = true;
+      }
+    }
+
+    if (isMaxAge0 || val === '') {
+      this.cookies.delete(name);
+    } else {
+      this.cookies.set(name, val);
+    }
+  }
+
+  get(name: string): string | undefined {
+    return this.cookies.get(name);
+  }
+
+  set(name: string, val: string) {
+    this.cookies.set(name, val);
+  }
+
+  delete(name: string) {
+    this.cookies.delete(name);
+  }
+
+  clear() {
+    this.cookies.clear();
+  }
+}
+
 interface HarnessOptions {
   initialUrl: string;
   isSecure?: boolean;
   hasReplaceState?: boolean;
   storageThrows?: boolean;
+  cookieThrows?: boolean;
   hangStartSession?: Promise<void>;
+  initialCookies?: Record<string, string>;
   initialStorage?: Record<string, string>;
+  sharedCookieJar?: CookieJar;
   sharedStorage?: Map<string, string>;
   meResponse?: { status: number; body?: unknown; error?: Error };
   sessionResponse?: { status: number; body?: unknown; error?: Error };
@@ -83,8 +139,32 @@ function createClientHarness(options: HarnessOptions) {
 
   let currentUrl = options.initialUrl;
   const historyState = { count: 0 };
+  const cookieJar = options.sharedCookieJar ?? new CookieJar();
+  if (options.initialCookies) {
+    for (const [k, v] of Object.entries(options.initialCookies)) {
+      cookieJar.set(k, v);
+    }
+  }
+  if (options.initialStorage) {
+    for (const [k, v] of Object.entries(options.initialStorage)) {
+      cookieJar.set(k, v);
+    }
+  }
+
   const bodyClassSet = new Set<string>();
   const mockDocument = {
+    get cookie() {
+      if (options.cookieThrows || options.storageThrows) {
+        throw new Error('Cookies disabled');
+      }
+      return cookieJar.cookie;
+    },
+    set cookie(str: string) {
+      if (options.cookieThrows || options.storageThrows) {
+        throw new Error('Cookies disabled');
+      }
+      cookieJar.cookie = str;
+    },
     body: {
       classList: {
         add: (c: string) => bodyClassSet.add(c),
@@ -351,6 +431,7 @@ function createClientHarness(options: HarnessOptions) {
   return {
     mockWindow,
     mockDocument,
+    cookieJar,
     loginToken,
     loginError,
     loginSubmit,
@@ -359,7 +440,11 @@ function createClientHarness(options: HarnessOptions) {
     inboxView,
     insecureWarning,
     linkLoginNotice,
-    sessionStorage: sessionStorageMock,
+    sessionStorage: {
+      getItem: (key: string) => cookieJar.get(key) ?? null,
+      setItem: (key: string, val: string) => cookieJar.set(key, val),
+      removeItem: (key: string) => cookieJar.delete(key),
+    },
     state,
     calls,
     getCurrentUrl: () => currentUrl,
@@ -943,14 +1028,14 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(linkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
   });
 
-  // 17. R9 Fix (Codex Local P1-1): query login + returnTo sets marker before OAuth redirect, banner restored on subsequent load
+  // 17. R9 Fix (Codex Local P1-1) & R11: query login + returnTo sets marker before OAuth redirect, banner restored on subsequent load
   test('17. Query login with returnTo sets marker before redirect, and banner is restored on subsequent load', async () => {
-    const sharedTabStorage = new Map<string, string>();
+    const sharedCookieJar = new CookieJar();
 
     // 步骤 1: 首次访问带 ?token=query-token，POST /ui/api/session 返回带 returnTo 的响应
     const oauthLoginHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui?token=query-oauth-token',
-      sharedStorage: sharedTabStorage,
+      sharedCookieJar,
       meResponse: { status: 401 },
       sessionResponse: {
         status: 200,
@@ -965,13 +1050,13 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(oauthLoginHarness.linkLoginNotice.hidden).toBe(true);
     expect(oauthLoginHarness.calls.replacedUrls).toContain('/ui/oauth/consent');
 
-    // 断言 2 (R9 核心修复): marker 在重定向之前已经写入 sessionStorage!
-    expect(sharedTabStorage.get('oae-link-login')).toBe('1');
+    // 断言 2 (R9 核心修复): marker 在重定向之前已经写入 cookie!
+    expect(sharedCookieJar.get('oae-link-login')).toBe('1');
 
     // 步骤 2: 同一个 tab 在同意页重定向之后重新加载 /ui，session 已建立 (/ui/api/me 返回 200)
     const afterRedirectHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui',
-      sharedStorage: sharedTabStorage,
+      sharedCookieJar,
       meResponse: { status: 200, body: { kind: 'identity', address: 'oauth-agent@example.com' } },
     });
 
@@ -982,6 +1067,77 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(afterRedirectHarness.linkLoginNotice.hidden).toBe(false);
     expect(afterRedirectHarness.linkLoginNotice.textContent).toBe('Signed in via link as oauth-agent@example.com');
     expect(afterRedirectHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
-    expect(sharedTabStorage.get('oae-link-login')).toBe('1');
+    expect(sharedCookieJar.get('oae-link-login')).toBe('1');
+  });
+
+  // 18. R11 (provenance storage): origin-wide session cookie persists banner across tabs, no Max-Age/Expires on set, cleared across all tabs on logout/form-login
+  test('18. Origin-wide JS session cookie shares provenance across tabs and clears on logout or form login', async () => {
+    const sharedCookieJar = new CookieJar();
+
+    // Tab 1: 通过 ?token= 链接登录
+    const tab1 = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=tab1-link-token',
+      sharedCookieJar,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await tab1.instance.runStart();
+
+    // 断言 1: Tab 1 正常展示横幅
+    expect(tab1.linkLoginNotice.hidden).toBe(false);
+    expect(tab1.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+
+    // 断言 2: 写入的 cookie 为 session cookie：无 Max-Age，无 Expires
+    const lastWrite = sharedCookieJar.writes[sharedCookieJar.writes.length - 1];
+    expect(lastWrite).toBe('oae-link-login=1; path=/; SameSite=Strict');
+    expect(lastWrite).not.toContain('Max-Age');
+    expect(lastWrite).not.toContain('Expires');
+    expect(sharedCookieJar.get('oae-link-login')).toBe('1');
+
+    // Tab 2 (跨标签页仿真): 打开新标签页，共享同一源 cookie 罐，已有会话 (/ui/api/me 返回 200)
+    const tab2 = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      sharedCookieJar,
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await tab2.instance.runStart();
+
+    // 断言 3: Tab 2 继承会话的同时，成功识别跨标签页的 origin-wide cookie marker，展示链接登录警示横幅！
+    expect(tab2.calls.showInboxCount).toBe(1);
+    expect(tab2.linkLoginNotice.hidden).toBe(false);
+    expect(tab2.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
+    expect(tab2.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+
+    // Tab 2 登出 → 清除 origin-wide cookie (Max-Age=0)
+    await tab2.instance.runLogout();
+    expect(tab2.linkLoginNotice.hidden).toBe(true);
+    expect(sharedCookieJar.get('oae-link-login')).toBeUndefined();
+    const clearWrite = sharedCookieJar.writes[sharedCookieJar.writes.length - 1];
+    expect(clearWrite).toBe('oae-link-login=; path=/; SameSite=Strict; Max-Age=0');
+
+    // Tab 3: 新开或刷新标签页，此时 cookie 已被全局清理，不展示横幅
+    const tab3 = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      sharedCookieJar,
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await tab3.instance.runStart();
+    expect(tab3.linkLoginNotice.hidden).toBe(true);
+    expect(tab3.mockDocument.body.classList.contains('link-login-active')).toBe(false);
+
+    // Tab 4 (表单登录测试): 手动表单登录也清除 origin-wide cookie
+    sharedCookieJar.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+    expect(sharedCookieJar.get('oae-link-login')).toBe('1');
+    const tab4 = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      sharedCookieJar,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await tab4.instance.runStart();
+    await tab4.instance.runPasteLogin('admin-paste-token');
+    expect(sharedCookieJar.get('oae-link-login')).toBeUndefined();
+    expect(tab4.linkLoginNotice.hidden).toBe(true);
+    expect(tab4.mockDocument.body.classList.contains('link-login-active')).toBe(false);
   });
 });
