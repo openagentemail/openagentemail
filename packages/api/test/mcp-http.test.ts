@@ -364,8 +364,10 @@ describe('MCP HTTP 工具', () => {
   });
 
   test('MCP create/read roundtrip for bot@localhost and bot@example.com. succeeds', async () => {
+    const prevNtfy = config.ntfy.enabled;
     const prevHadLocalhost = config.allDomains.has('localhost');
     const prevHadDotted = config.allDomains.has('example.com.');
+    (config.ntfy as { enabled: boolean }).enabled = false;
     (config.allDomains as Set<string>).add('localhost');
     (config.allDomains as Set<string>).add('example.com.');
     try {
@@ -407,6 +409,7 @@ describe('MCP HTTP 工具', () => {
       expect(addresses).toContain('bot-lh@localhost');
       expect(addresses).toContain('bot-dot@example.com.');
     } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       if (!prevHadLocalhost) (config.allDomains as Set<string>).delete('localhost');
       if (!prevHadDotted) (config.allDomains as Set<string>).delete('example.com.');
     }
