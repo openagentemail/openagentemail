@@ -795,11 +795,73 @@
   });
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
 
+  /* Issue #60：剥离并返回 URL 中的 token query 参数（replaceState 保证历史与刷新安全）。 */
+  function consumeQueryToken() {
+    try {
+      var url = new URL(window.location.href);
+      if (!url.searchParams.has('token')) return null;
+      var token = url.searchParams.get('token');
+      url.searchParams.delete('token');
+      var cleanSearch = url.searchParams.toString();
+      var cleanUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
+      if (window.history && typeof window.history.replaceState === 'function') {
+        window.history.replaceState(window.history.state, '', cleanUrl);
+      }
+      return token;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  /* Issue #60：URL token 自动登录，路径与表单 submit 完全对齐，token 永不回显。 */
+  async function loginWithToken(credential) {
+    if (!configureLoginGate()) {
+      showLogin('');
+      return;
+    }
+    loginError.textContent = '';
+    loginSubmit.disabled = true;
+    loginToken.value = '';
+    try {
+      var response = await fetch('/ui/api/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: credential, remember: loginRemember.checked })
+      });
+      if (!response.ok) {
+        var msg = response.status === 401 || response.status === 400
+          ? 'That token is not valid.'
+          : 'Sign-in is temporarily unavailable. Try again.';
+        showLogin(msg);
+        return;
+      }
+      var loginPayload = await response.json();
+      state.me = loginPayload;
+      /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
+      if (consumeReturnTo(loginPayload)) return;
+      showInbox();
+      await startSession();
+    } catch {
+      showLogin('Could not reach the server.');
+    } finally {
+      loginSubmit.disabled = !isLoginContextSafe();
+    }
+  }
+
   (async function start() {
     configureLoginGate();
+    var queryToken = consumeQueryToken();
     try {
       var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
-      if (response.status === 401) { showLogin(''); return; }
+      if (response.status === 401) {
+        if (queryToken !== null) {
+          await loginWithToken(queryToken);
+          return;
+        }
+        showLogin('');
+        return;
+      }
       if (!response.ok) throw new Error('request_failed');
       var mePayload = await response.json();
       state.me = mePayload;

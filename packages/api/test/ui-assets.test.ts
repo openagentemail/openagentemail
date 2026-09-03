@@ -132,17 +132,18 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Could not revoke that client.'");
   });
 
-  test('front-end code contains no HTML parser sinks or URL-token reader', () => {
+  test('front-end code contains no HTML parser sinks and strips query token via replaceState', () => {
     expect(UI_JS).not.toMatch(
       /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b/,
     );
-    expect(UI_JS).not.toMatch(/URLSearchParams|location\.search|searchParams/);
+    expect(UI_JS).toContain('searchParams');
     expect(UI_JS).toContain('history.replaceState');
     expect(UI_JS).toContain('window.isSecureContext');
   });
 
   test('a first visit is not mislabeled as an expired session', () => {
-    expect(UI_JS).toContain("if (response.status === 401) { showLogin(''); return; }");
+    expect(UI_JS).toContain('if (response.status === 401)');
+    expect(UI_JS).toContain("showLogin('');");
   });
 
   test('link and frame creation retain both execution-point defenses', () => {
