@@ -795,25 +795,32 @@
   });
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
 
-  /* Issue #60：剥离并返回 URL 中的 token query 参数（replaceState 保证历史与刷新安全）。 */
+  /**
+   * Consumes and strips the ?token= query parameter from window.location via history.replaceState.
+   * Returns the token if present and successfully stripped, or null if absent or if stripping is unavailable.
+   */
   function consumeQueryToken() {
     try {
       var url = new URL(window.location.href);
       if (!url.searchParams.has('token')) return null;
+      if (!window.history || typeof window.history.replaceState !== 'function') {
+        return null;
+      }
       var token = url.searchParams.get('token');
       url.searchParams.delete('token');
       var cleanSearch = url.searchParams.toString();
       var cleanUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
-      if (window.history && typeof window.history.replaceState === 'function') {
-        window.history.replaceState(window.history.state, '', cleanUrl);
-      }
+      window.history.replaceState(window.history.state, '', cleanUrl);
       return token;
     } catch (_err) {
       return null;
     }
   }
 
-  /* Issue #60：URL token 自动登录，路径与表单 submit 完全对齐，token 永不回显。 */
+  /**
+   * Performs automated session login using a credential from a query parameter,
+   * matching standard form submission semantics without echoing the credential on failure.
+   */
   async function loginWithToken(credential) {
     if (!configureLoginGate()) {
       showLogin('');
@@ -842,6 +849,7 @@
       if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
+      announce('Signed in via link as ' + (state.me.kind === 'admin' ? 'Admin session' : state.me.address));
     } catch {
       showLogin('Could not reach the server.');
     } finally {
@@ -849,6 +857,10 @@
     }
   }
 
+  /**
+   * Initializes the application UI, consumes any URL query token,
+   * and verifies or establishes the user session.
+   */
   (async function start() {
     configureLoginGate();
     var queryToken = consumeQueryToken();

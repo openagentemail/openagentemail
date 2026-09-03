@@ -46,9 +46,16 @@ const endStart = APP_JS.lastIndexOf('})();') + 5;
 expect(endStart).toBeGreaterThan(startStart);
 const startSrc = APP_JS.slice(startStart, endStart);
 
+const startFormSubmit = APP_JS.indexOf("loginForm.addEventListener('submit', async function (event) {");
+expect(startFormSubmit).toBeGreaterThan(-1);
+const endFormSubmit = APP_JS.indexOf("byId('logout-button').addEventListener('click',", startFormSubmit);
+expect(endFormSubmit).toBeGreaterThan(startFormSubmit);
+const formSubmitSrc = APP_JS.slice(startFormSubmit, endFormSubmit);
+
 interface HarnessOptions {
   initialUrl: string;
   isSecure?: boolean;
+  hasReplaceState?: boolean;
   meResponse?: { status: number; body?: unknown; error?: Error };
   sessionResponse?: { status: number; body?: unknown; error?: Error };
   customFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -61,6 +68,7 @@ function createClientHarness(options: HarnessOptions) {
     showLogin: [] as string[],
     showInboxCount: 0,
     startSessionCount: 0,
+    announced: [] as string[],
   };
 
   let currentUrl = options.initialUrl;
@@ -87,11 +95,14 @@ function createClientHarness(options: HarnessOptions) {
     },
     history: {
       state: historyState,
-      replaceState: (state: unknown, _title: string, url: string) => {
-        const resolved = new URL(url, currentUrl).href;
-        currentUrl = resolved;
-        calls.replacedUrls.push(url);
-      },
+      replaceState:
+        options.hasReplaceState === false
+          ? undefined
+          : (state: unknown, _title: string, url: string) => {
+              const resolved = new URL(url, currentUrl).href;
+              currentUrl = resolved;
+              calls.replacedUrls.push(url);
+            },
     },
   };
 
@@ -103,6 +114,13 @@ function createClientHarness(options: HarnessOptions) {
   const inboxView = { hidden: true };
   const insecureWarning = { hidden: true };
   const state = { me: null as unknown };
+
+  const loginForm = {
+    submitHandler: null as any,
+    addEventListener: (event: string, fn: any) => {
+      if (event === 'submit') loginForm.submitHandler = fn;
+    },
+  };
 
   const isLoginContextSafe = () => {
     try {
@@ -143,6 +161,10 @@ function createClientHarness(options: HarnessOptions) {
   };
 
   const consumeReturnTo = (_payload: unknown) => false;
+
+  const announce = (msg: string) => {
+    calls.announced.push(msg);
+  };
 
   const mockFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     calls.fetches.push({ url, init });
@@ -191,14 +213,23 @@ function createClientHarness(options: HarnessOptions) {
     'showInbox',
     'startSession',
     'consumeReturnTo',
+    'announce',
+    'loginForm',
     `
       ${consumeQueryTokenSrc}
       ${loginWithTokenSrc}
+      ${formSubmitSrc}
       return {
         consumeQueryToken: consumeQueryToken,
         loginWithToken: loginWithToken,
         runStart: function () {
           return ${startSrc}
+        },
+        runPasteLogin: async function (token) {
+          loginToken.value = token;
+          if (loginForm.submitHandler) {
+            await loginForm.submitHandler({ preventDefault: function () {} });
+          }
         }
       };
     `,
@@ -221,6 +252,8 @@ function createClientHarness(options: HarnessOptions) {
     showInbox,
     startSession,
     consumeReturnTo,
+    announce,
+    loginForm,
   );
 
   return {
@@ -481,5 +514,75 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(postCalls.length).toBe(0);
     // Cookie 未被更改
     expect(cookieHeader).toBe(cookieBefore);
+  });
+
+  // 9. Fix 1 (ZCode P2-2): history.replaceState 不可用时 fail-closed：拒绝 query 自动登录，退回表单登录，token 不回显
+  test('9. Unavailable history.replaceState fails closed: refuses query auto-login, shows form, does not echo token', async () => {
+    const harness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=super-secret-token',
+      hasReplaceState: false,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+
+    await harness.instance.runStart();
+
+    // 断言 1: 没有发起 POST /ui/api/session 发送 token（硬性拒绝，避免凭据残留在地址栏）
+    expect(harness.calls.fetches.length).toBe(1);
+    expect(harness.calls.fetches[0].url).toBe('/ui/api/me');
+
+    // 断言 2: 退回普通表单登录
+    expect(harness.loginView.hidden).toBe(false);
+    expect(harness.inboxView.hidden).toBe(true);
+    expect(harness.calls.showInboxCount).toBe(0);
+    expect(harness.calls.showLogin).toEqual(['']);
+
+    // 断言 3: token 永不回显进输入框
+    expect(harness.loginToken.value).toBe('');
+    expect(harness.loginError.textContent).toBe('');
+    expect(harness.calls.announced).toHaveLength(0);
+  });
+
+  // 10. Fix 2 (ZCode P2-3): query 链接登录成功展示 announcement 提示，粘贴表单登录不展示
+  test('10. Visible notice appears on query-login success and does NOT appear on paste-form login success', async () => {
+    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session"
+    const adminLinkHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=admin-query-token',
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await adminLinkHarness.instance.runStart();
+    expect(adminLinkHarness.calls.showInboxCount).toBe(1);
+    expect(adminLinkHarness.calls.announced).toEqual(['Signed in via link as Admin session']);
+
+    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>"
+    const identityLinkHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=identity-query-token',
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'identity', address: 'agent-bot@example.com' } },
+    });
+    await identityLinkHarness.instance.runStart();
+    expect(identityLinkHarness.calls.showInboxCount).toBe(1);
+    expect(identityLinkHarness.calls.announced).toEqual(['Signed in via link as agent-bot@example.com']);
+
+    // 场景 C: 表单粘贴输入登录成功 → 不展示 "Signed in via link" 提示
+    const formHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    // 启动显示登录表单
+    await formHarness.instance.runStart();
+    expect(formHarness.calls.showLogin).toEqual(['']);
+    expect(formHarness.calls.announced).toHaveLength(0);
+
+    // 用户在表单粘贴 token 提交
+    await formHarness.instance.runPasteLogin('admin-paste-token');
+    expect(formHarness.calls.showInboxCount).toBe(1);
+    // 验证：表单登录完全不触发链接登录提示
+    const linkAnnouncements = formHarness.calls.announced.filter((m) =>
+      m.includes('Signed in via link'),
+    );
+    expect(linkAnnouncements).toHaveLength(0);
   });
 });
