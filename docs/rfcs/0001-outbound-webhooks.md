@@ -1,8 +1,13 @@
 # RFC-0001: Outbound event webhooks
 
-- **Status:** Proposed — draft for owner ratification. This document authorizes no
-  implementation and commits no schedule.
-- **Date:** 2026-09-03
+- **Status:** **Accepted** — ratified 2026-09-03. Superseded the earlier "Proposed — draft
+  for owner ratification" state. Acceptance authorizes the six PRs in §15 to be scheduled;
+  it commits no schedule, and PR 2 must not start until its owner is named (**D8**).
+- **Date:** 2026-09-03 (drafted and ratified the same day)
+- **Decisions:** all seventeen open questions are answered itemized in **§17**. Four were
+  decided by the owner (D1–D4), thirteen approved by the commander at recommended values
+  (D5–D17), and one derived consequence (**D2a**) is flagged for confirmation. Where §16
+  still reads as open, §17 is authoritative.
 - **Issue:** [#109](https://github.com/openagentemail/openagentemail/issues/109)
 - **Decision scope:** event catalog, payload schema, signing and verification, delivery
   semantics (retry, ordering, dead letters), SSRF and egress safety, configuration
@@ -55,7 +60,7 @@ The decisions that carry the most risk are **not** cryptographic. They are:
    reach OAE; webhooks require OAE to reach the *agent*. Neither replaces the other, and
    the long-poll path must not be deprecated (§11.2).
 
-Consequently three of the five PRs in §15 touch production code that predates this feature
+Consequently three of the six PRs in §15 touch production code that predates this feature
 —the SSRF fetcher extraction, the event-bus refactor, and exposing the existing mail cursor
 on the bearer API (§3.7) — and those, not the signing scheme, are where the implementation
 risk lives.
@@ -66,10 +71,11 @@ risk lives.
 
 ### 2.1 v1 goals
 
-1. Deliver `mail.received` events to operator-registered HTTPS endpoints, at-least-once.
+1. Deliver `mail.received` **and `approval.requested`** events to operator-registered
+   HTTPS endpoints, at-least-once. Two event types, not one — decision **D1** (§17).
 2. Sign every delivery with HMAC-SHA256 so a consumer can prove authenticity and reject
    replays, and document verification **before** documenting anything else.
-3. Bound payloads structurally: a webhook never carries a full mail body (§6.4).
+3. Bound payloads structurally: a webhook never carries a full mail body (§6.5).
 4. Refuse to become an SSRF amplifier or a DDoS reflector — reusing the existing shared
    IP policy rather than writing a second one, **and** composing it correctly, which is
    not the same thing (§9.1).
@@ -77,6 +83,10 @@ risk lives.
 6. Coexist cleanly with `mail_wait_for`; consume no wait slots (§11).
 7. Be configurable entirely through the repo's existing env, REST, and MCP-tool
    conventions (§10), with no new datastore technology.
+8. Ship a **read-only** dashboard panel under Configure showing subscriptions, deliveries,
+   and dead letters (§10.8) — decision **D4** (§17), which reverses this document's
+   original "no new UI" non-goal. Read-only is the whole scope: no create, edit, rotate, or
+   delete from the browser in v1.
 
 ### 2.2 Non-goals (explicit)
 
@@ -93,15 +103,39 @@ These are refused for v1, not deferred by accident:
   so that a future asymmetric scheme is additive rather than breaking.
 - **No inbound webhooks** (external system POSTs in and becomes mail or a task).
   Different trust direction, different auth model, different abuse surface. Separate card.
-- **No events other than `mail.received`.** `mail.sent`, `task.*`, `approval.*`, and
-  lease lifecycle events get **reserved names** (§5.2) so that adding them later is not a
-  breaking change, but v1 emits exactly one event type.
+- **No events beyond `mail.received` and `approval.requested`.** `mail.sent`, `task.*`,
+  `approval.decided`, `approval.expired`, and lease lifecycle events get **reserved names**
+  (§5.2) so that adding them later is not a breaking change.
+
+  **`approval.expired` is explicitly deferred to v1.1, and the reason is a missing emitter,
+  not a missing design.** Expiry is not observed when it happens: `materializeApprovalExpiry()`
+  (`tasks-internal.ts:1444`) makes an expired approval terminal only when something next
+  reads it, and its own source comment states the rule — *"Service detail reads lazily make
+  an expired approval terminal. There is no scheduler or list sweep: only the next
+  detail/wait/decision observes it"* (`tasks-internal.ts:1442`, translated). Called only from
+  `getTask()` (`:1454`) and the decision path (`:2454`), so an approval that nobody looks at
+  never transitions at all. A webhook cannot be emitted at a moment nothing observes.
+  Making `approval.expired` real therefore requires **a reaper or list sweep** that advances
+  expired approvals on a timer — new production machinery with its own locking and
+  idempotency questions, because it would race `materializeApprovalExpiry()` on the same task
+  lock. That is a separate PR and a separate review, so v1 ships the two events that already
+  have clean emission sites and `approval.expired` waits for the reaper.
+
+  `approval.decided` is *not* blocked the same way — `decideApprovalTask()`
+  (`tasks-internal.ts:2440`) is a clean emitter — but it is still out of v1 because D1 scoped
+  v1 to the two events that serve #109's stated unlocks, and adding a third would grow the
+  authorization and payload work without a requested use case.
 - **No ordering guarantee, and no exactly-once delivery.** Both are documented as
   absent rather than approximated (§8.1, §8.4).
 - **No durable queue surviving restart with full fidelity.** §8.6 states precisely what
   is and is not recovered across a process restart.
-- **No new UI.** v1 exposes REST only. A read-only dashboard view is an open question
-  (§16, Q10).
+- **No *write* operations from the dashboard.** Decision **D4** (§17) reversed this
+  document's original "no new UI" non-goal: v1 ships a read-only panel (§10.8). What remains
+  refused is mutating webhook state from a browser session — create, update, rotate, delete,
+  enable, and redeliver stay on the bearer REST API. The panel is for *diagnosis* ("why did
+  my endpoint stop getting mail?"), not for administration, which keeps the cookie-session
+  surface (`requireUiOrigin`, `uiSessionBodyLimit`) out of the secret-handling paths
+  entirely.
 - **No batching, no bulk subscribe, no consumer-supplied rate limits.**
 - **No replacement of `mail_wait_for`.** It stays, unchanged, first-class (§11.5).
 
@@ -362,7 +396,7 @@ constant in a design document becomes an invented requirement in an implementati
 - **Fat payloads.** GitHub sends the whole resource — a `push` event can carry hundreds of
   commits. That works because GitHub's consumers are CI systems with fat pipes and because
   GitHub owns both ends of the trust relationship. OAE's payload crosses to a third party
-  and may contain mail metadata, so bounding is structural (§6.4), not best-effort.
+  and may contain mail metadata, so bounding is structural (§6.5), not best-effort.
 - **Repository-scoped, UI-first management.** OAE has no per-repo concept and, per §2.2,
   no new UI in v1.
 
@@ -397,7 +431,7 @@ mechanism OAE adopts.
   Stripe documents this explicitly: consumers should *"retrieve the API resource from the
   Stripe API to access the latest and up-to-date object definition."* It is the decision
   that makes everything else cheap. If the webhook only has to be *good enough to act on*,
-  the payload can stay small, the content-exposure question collapses (§6.4), and OAE never
+  the payload can stay small, the content-exposure question collapses (§6.5), and OAE never
   has to design a webhook-side representation of a mail body. The consumer fetches
   `GET /v1/messages/:id` with its own credentials. Adopted as a hard rule.
   **Consequence worth stating plainly: possession of a webhook signing secret is not a
@@ -420,19 +454,19 @@ mechanism OAE adopts.
   the order that they're generated."* One sentence, prominently documented, and it removes
   an entire class of integrator bug. Adopted, plus the reconstruction tools Stripe does not
   offer (§8.4).
+- **The three-day retry horizon.** Stripe retries *"for up to three days with an exponential
+  back off in live mode"*. This RFC's first draft **refused** this and recommended ~27 hours,
+  arguing that mail is perishable and that a JSONL file is a poor three-day queue. Decision
+  **D2** (§17) overrode that and adopted the three-day horizon to align with Stripe and
+  SendGrid, so it belongs in this column rather than the one below. What survives of the
+  original argument is recorded rather than quietly deleted, because it still constrains the
+  design: the perishability objection is answered by **front-loading** (four attempts inside
+  35 minutes, §8.3), and the queue-cost objection is carried into §8.6 as a real constraint
+  on the durable log. What is *not* borrowed is Stripe's opacity — Stripe publishes no
+  attempt count, so §8.3 enumerates all eleven offsets explicitly.
 
 **Refuse:**
 
-- **The ~3-day retry budget.** Stripe retries *"for up to three days with an exponential
-  back off in live mode"*; the number of attempts is not published, and the three-day
-  figure is scoped to live mode. Stripe can afford this because its events are financial
-  and eventually-consistent reconciliation is normal. Mail events are **perishable** in the
-  front and **recoverable** in the tail: an OTP is worthless in an hour, while "your
-  endpoint was down overnight" is worth more than a day of patience. OAE therefore adopts a
-  schedule that is *front-loaded* for perishability and *bounded* to about a day (§8.3),
-  following Resend's published shape rather than Stripe's unpublished one. A three-day
-  budget also means three days of durable queue in a process whose only durable store is a
-  JSONL file (§8.6).
 - **`api_version` pinning per endpoint.** Stripe's per-account API version pinning is a
   large compatibility machine justified by thousands of breaking-change-averse
   integrations. OAE has one payload version and additive-only evolution rules (§5.3).
@@ -543,7 +577,7 @@ because it signs one webhook and not the other, and the contrast is instructive.
 | Replay defense | none intrinsic | timestamp tolerance (5 min library default) | timestamp tolerance | URL secrecy | timestamp tolerance + `id` dedupe |
 | Response timeout | **10 s (published)** | not published ("quickly") | not published | not published | **10 s** |
 | Payload | full resource | snapshot + refetch | thin `type`/`created_at`/`data` | raw MIME / form data | **bounded metadata + refetch** |
-| Auto-retry | **none** | ~3 days, exponential, live mode; attempt count unpublished | **8 delays published (docs list 6 elsewhere)** | 3 days on 5XX, then drop | **8 attempts / ~27 h 35 min** |
+| Auto-retry | **none** | ~3 days, exponential, live mode; attempt count unpublished | **8 delays published (docs list 6 elsewhere)** | 3 days on 5XX, then drop | **11 attempts / exactly 72 h, all offsets published** |
 | Manual redelivery | yes, 3-day window | via dashboard | yes; failed **and** succeeded | no | **yes, 30-day log** |
 | Ordering | not documented | **explicitly not guaranteed** | not guaranteed (spec) | n/a | **not guaranteed, cursor provided** |
 | Rotation | undocumented; dual-emits SHA-1 + SHA-256 | **multiple `v1=` during secret roll** | **space-delimited multi-sig overlap** | n/a | **multi-sig overlap window** |
@@ -564,23 +598,39 @@ taste).
 
 ### 5.1 v1 catalog
 
-Exactly one event type is emitted in v1:
+Two domain event types are emitted in v1, plus the operational `webhook.ping`. Decision
+**D1** (§17) expanded this from one type to two:
 
 | Type | Trigger | Emitted from |
 | --- | --- | --- |
 | `mail.received` | a new message becomes visible in the catch-all inbox and is attributable to at least one identity | the inbound-mail event loop (§11.4), once per new UID |
-| `webhook.ping` | operator requests endpoint validation | `POST /v1/webhooks/:id/test`, and optionally at creation (§16, Q12) |
+| `approval.requested` | an approval task is created and enters `input-required` | `createApprovalTask()` (`tasks-internal.ts:1524`), after the task is durably written |
+| `webhook.ping` | operator requests endpoint validation | `POST /v1/webhooks/:id/test`, and asynchronously at creation (§10.3) |
 
-`webhook.ping` is not a domain event; it carries no mail data and exists only to prove
-reachability and signature correctness. It is delivered with the same signing, retry, and
-logging machinery, but with a reduced retry budget (§8.3) — there is no point retrying a
-connectivity test for a day.
+The two domain types have **different emission sites**, and that is the single largest
+implementation consequence of D1: `mail.received` comes off the IMAP inbound loop while
+`approval.requested` comes off the task-creation path. §11.4's event bus must therefore span
+both, which is a bigger refactor than the mail-only version this document originally scoped.
+§15 sequences it accordingly.
 
-**Emission granularity.** One event per (message, address) pair, not one per message.
-A message delivered to two identities on the instance produces two events, each scoped to
-one address, because subscriptions are address-scoped (§10.4) and a consumer must never
-receive metadata about a mailbox it did not subscribe to. This mirrors how
-`messageAccessibleToAddress()` already scopes reads.
+`webhook.ping` is not a domain event; it carries no mail or task data and exists only to
+prove reachability and signature correctness. It is delivered with the same signing, retry,
+and logging machinery, but with a reduced retry budget (§8.3) — there is no point retrying a
+connectivity test for three days. Per decision **D12** (§17) the ping at creation is fired
+**asynchronously**, and the endpoint starts in state `unverified` until one succeeds
+(§8.5), so create latency is never coupled to a third party.
+
+**Emission granularity.**
+
+- `mail.received`: one event per **(message, address)** pair, not one per message. A message
+  delivered to two identities on the instance produces two events, each scoped to one
+  address, because subscriptions are address-scoped (§10.4) and a consumer must never
+  receive metadata about a mailbox it did not subscribe to. This mirrors how
+  `messageAccessibleToAddress()` already scopes reads.
+- `approval.requested`: **one event per approval task, with no fan-out**, matched to
+  subscriptions on the `reviewer` address (§6.3). An approval has exactly one reviewer, so
+  there is nothing to fan out to; if the reviewer is not an address on this instance, no
+  event is emitted at all.
 
 ### 5.2 Reserved names
 
@@ -591,13 +641,20 @@ a name costs nothing and prevents a future breaking rename.
 | --- | --- | --- |
 | `mail.sent` | a message leaves via `POST /v1/send` | needs a send-path hook, not the IMAP loop |
 | `task.created` / `task.updated` / `task.completed` / `task.failed` | task state events | the task state machine already writes stamped events to IMAP threads |
-| `approval.requested` / `approval.decided` / `approval.expired` | approval lifecycle | `approval.expired` has no emitter today; expiry is evaluated lazily on read, so this event requires a reaper |
+| `approval.decided` | a reviewer approves or rejects | clean emitter exists: `decideApprovalTask()` (`tasks-internal.ts:2440`). Not blocked, just not requested for v1 |
+| `approval.expired` | an approval passes its deadline | **blocked on a missing emitter** — expiry is materialized lazily on read with no scheduler (§2.2). Needs a reaper. Deferred to v1.1 |
 | `task.lease.claimed` / `renewed` / `released` / `expired` | lease lifecycle | gated on `TASK_LEASES_ENABLED` |
 
-`approval.requested` is called out in #109 as the highest-value human-in-the-loop case
-(push to ntfy/Telegram the moment an approval is needed). It is *not* in v1 because it
-requires emitting from the task path as well as the mail path, and v1 proves the delivery
-machinery on one event type first. Whether to pull it forward is §16, Q1.
+`approval.requested` was reserved in the first draft of this RFC and **D1 promoted it into
+v1** (§17), because #109 names it as the highest-value human-in-the-loop case: pushing
+"an approval needs you" to ntfy or Telegram the moment it happens, instead of leaving it to
+be discovered by a poll. The cost the owner accepted in doing so is written down in §2.2 and
+§11.4 — the event bus must span the task path, not only the mail path — and the part that
+could not be pulled forward is `approval.expired`, which has no emitter to hook because
+nothing observes expiry until someone reads the task. Shipping two of the three approval
+events is a deliberate asymmetry, not an oversight: `requested` and `decided` are both
+caused by an API call, while `expired` is caused by a clock, and this codebase has no clock
+sweep over tasks.
 
 ### 5.3 Catalog evolution rules
 
@@ -671,7 +728,66 @@ without the value. They are the most valuable two bytes in the payload for the f
 use case in #109 — waking a postmaster agent only for mail that actually needs action —
 and they leak almost nothing.
 
-### 6.3 Example delivery
+### 6.3 `approval.requested` data object
+
+Added to v1 by decision **D1** (§17). Fields derive from `ApprovalSnapshot`
+(`tasks-internal.ts:76-81`), which is exactly `{action, reviewer, expiresAt, digest}`, and
+from the approval digest rules already documented normatively in `docs/approval-digest.md`.
+
+| Field | Type | Scope | Meaning |
+| --- | --- | --- | --- |
+| `object` | `"approval"` | metadata | Discriminator, so `data` stays self-describing across event types. |
+| `taskId` | string | metadata | UUID. Usable directly against `GET /v1/tasks/:id`. |
+| `taskState` | `"input-required"` | metadata | Approvals are created in this state (`tasks-internal.ts:1556`); always literal at emission. |
+| `from` | string | metadata | Requesting address. |
+| `to` | string | metadata | Task assignee. |
+| `reviewer` | string | metadata | **The party who must act.** Lower-cased, as stored. Subscription matching key — see below. |
+| `subject` | string | metadata | Truncated to `WEBHOOK_META_FIELD_MAX_BYTES`. |
+| `createdAt` | string | metadata | RFC 3339 UTC task creation time. |
+| `expiresAt` | string | metadata | RFC 3339 UTC approval deadline, from the snapshot. |
+| `expiresInSec` | integer | metadata | `expiresAt - createdAt` in whole seconds. Always **> 0** at emission, because `assertApprovalExpiryBound()` (`tasks-internal.ts:446`) refuses to create an already-expired approval, and always ≤ 2592000 because the same validator enforces `APPROVAL_MAX_LIFETIME_MS` = 30 days (`:101`). |
+| `digest` | string | metadata | Lower-case hex SHA-256 of the canonical action JSON (`approvalActionDigest()`, `tasks-internal.ts:442`). 64 characters. |
+| `actionType` | string | metadata | `action.type` — a non-empty string per `docs/approval-digest.md`. |
+| `actionName` | string | metadata | `action.name` — a non-empty string, truncated to `WEBHOOK_META_FIELD_MAX_BYTES`. |
+| `actionArguments` | object | `preview` | The action's `arguments` value, bounded by `WEBHOOK_APPROVAL_ARGS_MAX_BYTES` and `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH`. |
+
+**Why `actionType` and `actionName` are metadata but `arguments` is not.** A human-in-the-loop
+push is useless if the reviewer cannot tell *what* is being asked — "approve `send_email` /
+`notify-owner`?" is the entire decision to wake up for, and both fields are short
+non-empty strings. `arguments` is arbitrary JSON up to 64 KiB at depth 10
+(`tasks-internal.ts:99-100`) and can contain mail content, credentials, or anything else a
+caller put there, so it is gated exactly like a mail body (§6.5) and requires admin.
+
+**The digest makes the refetch pattern verifiable, which is stronger than for mail.** For
+`mail.received`, re-fetching gives current state and the consumer must trust it. For
+`approval.requested`, the consumer can recompute `approvalActionDigest()` over the action it
+fetches from `GET /v1/tasks/:id` and compare with the announced `digest`: a match proves the
+action it is about to approve is byte-identical to the one announced. The canonicalization
+rules are already written down normatively for third-party implementers, with committed
+interop vectors verified by an independent Python implementation — so a non-JavaScript
+consumer can do this. That is a real security property, and it is free.
+
+**Subscription matching for approval events.** An `approval.requested` event is delivered to
+subscriptions whose `address` equals the **`reviewer`**, not `from` or `to`. The reviewer is
+the party who must act, which is who #109's human-in-the-loop case is about; `from` and `to`
+are carried as context. Consequences, stated explicitly because they differ from mail:
+
+- One event per approval task, with **no per-address fan-out**. `mail.received` fans out per
+  recipient (§5.1) because several mailboxes legitimately own one message; an approval has
+  exactly one reviewer.
+- If the reviewer is not an address on this instance, **no event is emitted**. There is no
+  matching subscription and no fallback. This fails closed, consistent with the rule that a
+  consumer never receives metadata about a mailbox it did not subscribe to.
+- An agent whose own address is the reviewer can subscribe to its own approval requests with
+  an identity token, which is the autonomous-agent half of the use case. A push to a *human*
+  channel (ntfy, Telegram) is an operator-configured endpoint and needs an admin key, since
+  it typically wants `preview` scope.
+
+**Emission site.** `createApprovalTask()` (`tasks-internal.ts:1524`), after the task is
+durably written. This is **not** the IMAP inbound-mail loop, which is the ripple D1 causes
+for §11.4 and §15: the event bus must span the task path as well as the mail path.
+
+### 6.4 Example delivery
 
 Request:
 
@@ -724,18 +840,49 @@ The same delivery with `contentScope: "preview"` adds:
 }
 ```
 
+An `approval.requested` delivery at `metadata` scope (§6.3):
+
+```json
+{
+  "id": "evt_7c4d9f02-1a6b-4e83-9c25-4f0a7b1e6d38",
+  "type": "approval.requested",
+  "payloadVersion": "v1",
+  "createdAt": "2026-09-03T12:31:07.884Z",
+  "domain": "openagent.email",
+  "data": {
+    "object": "approval",
+    "taskId": "3f8a1c62-9d4e-4b07-a5f1-6c2e8d904b73",
+    "taskState": "input-required",
+    "from": "researcher@openagent.email",
+    "to": "postmaster@openagent.email",
+    "reviewer": "owner@openagent.email",
+    "subject": "Approve outbound send to press@example.com",
+    "createdAt": "2026-09-03T12:31:07.512Z",
+    "expiresAt": "2026-09-04T12:31:07.512Z",
+    "expiresInSec": 86400,
+    "digest": "9f2c4a71b8e03d56f1a9c24e7b03d8f6a1c94e27b05d83f6a1c49e27b0d83f6a",
+    "actionType": "tool_call",
+    "actionName": "send_email"
+  }
+}
+```
+
+At `preview` scope this adds `actionArguments`, bounded by
+`WEBHOOK_APPROVAL_ARGS_MAX_BYTES` and `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` — and the consumer
+can verify what it fetches from `GET /v1/tasks/:id` against `digest` before acting (§6.3).
+
 Expected consumer response: any `2xx`. OAE reads at most
 `WEBHOOK_RESPONSE_MAX_BYTES` of the response body and discards it; the response body has
 no defined meaning and must not be relied upon by either side.
 
-### 6.4 Content scope and bounding
+### 6.5 Content scope and bounding
 
 Two scopes, per subscription:
 
 | Scope | Who may set it | Contents |
 | --- | --- | --- |
-| `metadata` (**default**) | admin or the address's own identity token | envelope + metadata fields only |
-| `preview` | **admin only** | metadata + `textPreview` + `securityCodes` + `links` |
+| `metadata` (**default**) | admin or the address's own identity token | envelope + metadata fields only, for both event types |
+| `preview` | **admin only** | metadata, plus `textPreview` / `securityCodes` / `links` for `mail.received` (§6.2) and `actionArguments` for `approval.requested` (§6.3) |
 
 Three reasons the bounding is structural rather than a truncation pass:
 
@@ -751,7 +898,7 @@ Three reasons the bounding is structural rather than a truncation pass:
 3. **Bounds reuse the push-tier constants' shape, not their values.** The ntfy caps
    (3500 bytes total, 280-char preview) exist because a phone-push relay is the
    bottleneck. A webhook's bottleneck is OAE's own egress and the JSONL log, so the caps
-   are relaxed but still explicit (§6.5). The *helpers* — `truncateUtf8Bytes()`,
+   are relaxed but still explicit (§6.6). The *helpers* — `truncateUtf8Bytes()`,
    `boundPreviewChars()` — are reused so truncation stays UTF-8-safe.
 
 **Deliberately not reused: `pushContentTier` itself.** Webhook scope is a separate
@@ -766,7 +913,7 @@ delivery log, following the tier-3 precedent (`notification-watcher.ts` sets
 `sensitive` on log rows). Sensitive deliveries additionally never write any payload
 fragment to the log (§8.6).
 
-### 6.5 Size limits
+### 6.6 Size limits
 
 | Constant | Proposed default | Rationale |
 | --- | --- | --- |
@@ -775,6 +922,8 @@ fragment to the log (§8.6).
 | `WEBHOOK_BODY_PREVIEW_CHARS` | 280 | Same as `PUSH_BODY_PREVIEW_CHARS`; a proven preview length. |
 | `WEBHOOK_MAX_CODE_ITEMS` | 5 | Same as `PUSH_OTP_ITEM_MAX`. |
 | `WEBHOOK_CODE_ENTRY_CHARS` | 200 | Same as `PUSH_OTP_ENTRY_CHARS`. |
+| `WEBHOOK_APPROVAL_ARGS_MAX_BYTES` | 4096 | Far below the 64 KiB the task API allows (`APPROVAL_ACTION_MAX_BYTES`, `tasks-internal.ts:99`). A reviewer deciding on a phone needs the gist; the full arguments are one `GET /v1/tasks/:id` away, and the `digest` proves they are the announced ones (§6.3). |
+| `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` | 4 | Below the API's 10 (`APPROVAL_ACTION_MAX_DEPTH`). Deep nesting buys a reviewer nothing and costs payload. |
 | `WEBHOOK_RESPONSE_MAX_BYTES` | 4096 | Mirrors `CIMD_MAX_BYTES` (5 KiB) and `NTFY_REQUEST_MAX_BYTES`. OAE needs only the status code; an unbounded response read is an amplification vector. |
 
 Overflow behavior: if a payload still exceeds `WEBHOOK_PAYLOAD_MAX_BYTES` after field
@@ -970,59 +1119,88 @@ must stop immediately and loudly (§9).
 
 ### 8.3 Retry schedule
 
-Eight attempts, adopting the schedule Resend publishes (§4.3) because it is the only
-enumerated, bounded, email-domain schedule among the vendors surveyed:
+Eleven attempts spanning exactly **72 hours**, per decision **D2** (§17), which extended this
+document's original ~27 h recommendation to align with Stripe's and SendGrid's three-day
+budgets. Attempts 1–7 keep the front-loaded shape Resend publishes (§4.3); attempts 8–11
+extend the tail to three days at roughly half-day and daily cadence.
 
-| Attempt | Delay before this attempt | Cumulative from first attempt |
-| --- | --- | --- |
-| 1 | immediate | 0 |
-| 2 | 5 s | ~5 s |
-| 3 | 5 min | ~5 min |
-| 4 | 30 min | ~35 min |
-| 5 | 2 h | ~2 h 35 min |
-| 6 | 5 h | ~7 h 35 min |
-| 7 | 10 h | ~17 h 35 min |
-| 8 | 10 h | **~27 h 35 min** |
+| Attempt | Offset from first attempt |
+| --- | --- |
+| 1 | 0 (immediate) |
+| 2 | +5 s |
+| 3 | +5 min |
+| 4 | +30 min |
+| 5 | +2 h |
+| 6 | +5 h |
+| 7 | +10 h |
+| 8 | +20 h |
+| 9 | +34 h |
+| 10 | +48 h |
+| 11 | **+72 h** |
 
-**The values above are inter-attempt delays, stated normatively.** Resend publishes neither
-a single consistent list (its two pages give eight delays and six — §4.3) nor whether its
-numbers are delays between attempts or offsets from the first, and the difference moves the
-total span by hours. OAE specifies delays, publishes the resulting worst-case span of
-~27 h 35 min, and does not inherit either ambiguity — an integrator planning a catch-up job
-needs the real number.
+**These are cumulative offsets from the first attempt, stated normatively.** The first draft
+of this section specified inter-attempt *delays*, and criticized Resend for not
+disambiguating delays from offsets (§4.3). At a 27-hour horizon that was a manageable
+ambiguity; at 72 hours it is not, because eleven delay values have to be summed correctly by
+every reader and every implementation to know when the last attempt happens. Offsets are
+self-describing, so the ambiguity this RFC objected to is removed rather than inherited.
 
-The shape is what matters and it is doing two different jobs:
+The shape is doing two different jobs, and only the first one changed:
 
 - **Attempts 1–4 (first ~35 minutes) serve perishability.** An OTP or verification link is
   acted on within minutes; four attempts inside half an hour means a transient consumer
-  error, a deploy, or a single bad response never costs the agent the mail.
-- **Attempts 5–8 (out to ~27 hours) serve availability.** They cover an overnight outage,
-  a weekend, or a consumer host that is down for hours. Nothing in that tail is urgent, so
-  spacing it widely costs nothing and keeps egress low.
+  error, a deploy, or a single bad response never costs the agent the mail. This half is
+  unchanged from the original design and is the reason a three-day budget costs nothing for
+  urgent mail — the urgent attempts already happened on day one.
+- **Attempts 5–11 (out to 72 hours) serve availability.** They cover an overnight outage, a
+  weekend, a consumer host that is down for a day, or an integrator who notices on Monday
+  that their endpoint broke on Friday. This is what D2 bought.
 
-After attempt 8 the event is dead-lettered (§8.6) and counts toward the circuit breaker
-(§8.5). Jitter is **full** (`uniform(0, delay)`) rather than decorrelated, because many
-subscribers on one instance fail simultaneously when a popular consumer or a shared hosting
-provider has an outage, and correlated retries would arrive as a thundering herd on an
-already-struggling endpoint.
+After attempt 11 the event is dead-lettered (§8.6) and counts toward the circuit breaker
+(§8.5). Jitter is **full** (`uniform(0, offset - previousOffset)`) rather than decorrelated,
+because many subscribers on one instance fail simultaneously when a popular consumer or a
+shared hosting provider has an outage, and correlated retries would arrive as a thundering
+herd on an already-struggling endpoint. Jitter is applied to the gap, never to the offset
+order, so attempts stay monotonic.
 
-`WEBHOOK_MAX_ATTEMPTS` (default 8, minimum 1) **truncates this table**; there is no base or
-multiplier knob, because a fixed published schedule is easier for an integrator to reason
-about than a formula. `WEBHOOK_MAX_ATTEMPTS=1` gives fire-and-forget for operators who want
-it, and `=4` gives the perishability-only half.
+`WEBHOOK_MAX_ATTEMPTS` (default **11**, minimum 1) **truncates this table**; there is no base
+or multiplier knob, because a fixed published schedule is easier for an integrator to reason
+about than a formula. `=1` gives fire-and-forget, `=4` gives the perishability-only half, and
+`=8` reproduces the ~27 h budget this document originally recommended — so an operator who
+disagrees with D2 can restore it with one env var.
 
-`webhook.ping` uses attempts 1–3 only (~5 minutes). A connectivity test that takes a day to
-report failure is useless as a test.
+`webhook.ping` uses attempts 1–3 only (~5 minutes). A connectivity test that takes three days
+to report failure is useless as a test.
 
-**Why ~27 hours and not Stripe's or SendGrid's 3 days.** Argued in §4.2: the durable store
-is a JSONL file rather than a database, so the queue horizon is a real cost, and the
-marginal value of a ninth attempt on day three is near zero for mail. A day-and-a-bit also
-keeps the dead-letter window inside the operator's normal review cycle. **Why not the
-watcher's existing 10 minutes** (`SERVICE_FAILURE_MAX_MS`, `notification-watcher.ts:50`):
-a webhook consumer is an external party that may be mid-deploy, and 10 minutes covers
-neither a routine rollout nor a laptop lid closing. **Why not GitHub's model** (no automatic
-retry at all, §4.1): a failed delivery nobody retries is a silently dropped mail event,
-which is precisely what #109 forbids.
+**Two consequences of the three-day horizon, stated because they change other sections:**
+
+1. **The durable queue horizon is now three days.** §8.6 reconstructs pending retries from
+   `webhook-deliveries.jsonl` at boot, so that file must hold up to three days of
+   not-yet-final rows per endpoint. `WEBHOOK_LOG_RETENTION_DAYS = 30` covers this
+   comfortably, but the boot reconstruction is no longer a small scan on a busy instance and
+   must be indexed by `(webhookId, eventId)` rather than read linearly.
+2. **The circuit breaker counter has to change meaning, or D2 is partly self-defeating.**
+   `WEBHOOK_DISABLE_THRESHOLD = 20` counts consecutive failed *deliveries*. With 11 attempts
+   per event, a single exhausted event contributes 11, so **two** failing events disable the
+   endpoint — and once disabled, new events dead-letter immediately rather than entering the
+   queue (§8.5). On any mailbox receiving more than a couple of messages, the three-day
+   budget would therefore never actually be used: the breaker trips on day one. The fix, and
+   this RFC's recommendation, is to count **exhausted events** rather than attempts, so the
+   threshold reads as "20 events gave up" and both properties survive — the endpoint still
+   fails visibly and quickly, and an individual event still gets its full 72 hours. Flagged
+   as **D2a** in §17 for confirmation, since it changes a constant the commander approved at
+   its recommended value under the old schedule.
+
+**What survives of the original argument against three days.** §4.2 argued for ~27 hours on
+two grounds: mail is perishable, and the durable store is a JSONL file rather than a
+database, so queue horizon is a real cost. D2 overrides the conclusion, and the first ground
+is now moot because front-loading means perishable mail is served on day one regardless. The
+second ground is *not* moot — it is what consequence 1 above records — so it is carried
+forward as a design constraint on §8.6 rather than deleted. **Why not the watcher's existing
+10 minutes** (`SERVICE_FAILURE_MAX_MS`, `notification-watcher.ts:50`): a webhook consumer is
+an external party that may be mid-deploy. **Why not GitHub's model** (no automatic retry at
+all, §4.1): a failed delivery nobody retries is a silently dropped event, which is precisely
+what #109 forbids.
 
 ### 8.4 Ordering: not guaranteed
 
@@ -1048,28 +1226,53 @@ What OAE provides instead, so a consumer that *needs* order can establish it:
 A consumer requiring strict order should treat webhooks as a *wakeup signal* and read
 authoritative state through the list API, which is ordered and paginated at the IMAP layer.
 That pattern — push to wake, pull to read — is the recommended integration shape, and it is
-also what makes the payload bounding in §6.4 acceptable. It does depend on the prerequisite
+also what makes the payload bounding in §6.5 acceptable. It does depend on the prerequisite
 in §3.7: exposing `cursor` / `nextCursor` on `GET /v1/messages`. Until that lands, the
 bearer list API returns only the newest N messages with no resume token, and a consumer
 catching up after an outage has no cursor to catch up *from*.
 
-### 8.5 Circuit breaker
+### 8.5 Circuit breaker and endpoint state
 
-Per endpoint. The live counter is in memory; `state`, `disabledReason`, and
-`consecutiveFailures` are persisted in `webhooks.json` (§10.5) so a restart cannot silently
-reset a disabled endpoint back to enabled, and every attempt that contributed to the count
-is individually recorded in the delivery log (§8.6):
+An endpoint has exactly one `state`, persisted in `webhooks.json` (§10.5) so a restart cannot
+silently reset it, with every contributing attempt recorded individually in the delivery log
+(§8.6):
 
-- After `WEBHOOK_DISABLE_THRESHOLD` (default 20) consecutive non-successful deliveries,
-  the endpoint transitions to `state: "disabled"` with a `disabledReason`.
-- While disabled, OAE makes **no** delivery attempts. New events for that endpoint are
+```
+unverified ──(first successful delivery)──> enabled ──(threshold reached)──> disabled
+     ▲                                          ▲                                │
+     └──────────────(POST /:id/test)────────────┴────(POST /:id/enable)──────────┘
+```
+
+- **`unverified`** — the initial state on creation. Decision **D12** (§17) made creation
+  asynchronous, so OAE does not block `POST /v1/webhooks` on a third party's latency; instead
+  the endpoint is created, a `webhook.ping` is fired in the background, and the state stays
+  `unverified` until some delivery succeeds. **Events are still delivered while
+  `unverified`** — the state is advisory, not a gate, because a correctly configured endpoint
+  should not have to wait for a ping round-trip before receiving real mail. Its purpose is
+  operator feedback: the dashboard (§10.8) and `GET /v1/webhooks/:id` show it, so "I created
+  this and never checked it" is visible.
+- **`enabled`** — normal delivery.
+- **`disabled`** — OAE makes **no** delivery attempts. New events for that endpoint are
   dead-lettered immediately rather than queued, so a dead endpoint cannot accumulate an
-  unbounded backlog.
-- Disablement is written to the audit log, exposed on `GET /v1/webhooks/:id`, and — where
-  ntfy is enabled — pushed to the operator as an urgent notification through the existing
-  notify path. That last step is best-effort and must not itself block or throw.
-- Re-enable is **manual**: `POST /v1/webhooks/:id/enable`, which resets the counter and
-  optionally fires a `webhook.ping`.
+  unbounded backlog over the three-day retry horizon (§8.3).
+
+**Disablement threshold, counted in exhausted events.** After `WEBHOOK_DISABLE_THRESHOLD`
+(default 20) consecutive **events that exhausted their retry budget without success** — not
+20 consecutive failed attempts — the endpoint transitions to `disabled` with a
+`disabledReason`. The distinction is forced by D2 and explained in §8.3 consequence 2: with
+11 attempts per event, counting attempts would let two failing events trip the breaker on day
+one and make the three-day budget unreachable on any busy mailbox. Counting exhausted events
+preserves both properties — the endpoint still fails visibly, and each individual event still
+gets its full 72 hours. A `refused` outcome (§8.2) disables **immediately** without waiting
+for the threshold, because an SSRF refusal is a configuration or attack signal rather than a
+transient outage.
+
+- Disablement is written to the audit log, exposed on `GET /v1/webhooks/:id` and in the
+  dashboard (§10.8), and — where ntfy is enabled — pushed to the operator as an urgent
+  notification through the existing notify path. That last step is best-effort and must not
+  itself block or throw.
+- Re-enable is **manual**: `POST /v1/webhooks/:id/enable`, which resets the counter, returns
+  the endpoint to `unverified`, and fires a `webhook.ping`.
 
 Manual rather than automatic re-enable is a deliberate choice. None of the vendors surveyed
 documents automatic recovery: Resend documents auto-*disablement* plus a second
@@ -1104,15 +1307,19 @@ Each row records one delivery attempt:
   "status": 503,
   "durationMs": 412,
   "sensitive": false,
+  "replay": false,
   "nextAttemptAt": "2026-09-03T12:36:41.018Z"
 }
 ```
 
-`messageId` is the one field that makes the log *operational* rather than merely
-historical: without it, neither boot-time reconstruction nor manual redelivery (§10.3) has
-anything to send, because the payload is deliberately not stored. It is an identifier, not
-content, so including it does not weaken the no-payload rule below — the same distinction
-`audit.ts` draws when it allows `address` but forbids subjects and bodies.
+Two fields make this log *operational* rather than merely historical. `messageId` is the mail
+or task message the event refers to: without it, neither boot-time reconstruction nor manual
+redelivery (§10.3) has anything to send, because the payload is deliberately not stored. It
+is an identifier, not content, so including it does not weaken the no-payload rule below —
+the same distinction `audit.ts` draws when it allows `address` but forbids subjects and
+bodies. `replay` is `true` only on a delivery created by
+`POST /v1/webhooks/deliveries/:deliveryId/redeliver` (decision **D15**, §17), so an operator
+reading the log can tell a replay from an original.
 
 Rules:
 
@@ -1135,7 +1342,10 @@ Rules:
   `nextAttemptAt` in the future and no later successful row for the same
   **`(webhookId, eventId)` pair**. The pair matters: one event fans out to N endpoints
   (§5.1), so keying on `eventId` alone would let a success for endpoint A silently cancel
-  endpoint B's outstanding retries.
+  endpoint B's outstanding retries. Indexing by that pair is not optional polish — under the
+  72-hour budget D2 adopted (§8.3), the pending window can hold three days of rows per
+  endpoint, so a linear scan of a 30-day log at every boot would be the slowest part of
+  startup.
 - **Reconstruction re-builds the payload; it does not replay stored bytes.** No payload is
   ever written (§8.6 rules below), so boot recovery re-fetches the message from IMAP by
   `messageId`, re-serializes it at the subscription's current `contentScope`, and delivers
@@ -1240,14 +1450,25 @@ never-allowed, and the reason they matter more for webhooks than for CIMD is tha
 URLs come from an OAuth client's own metadata while **webhook URLs come from anyone
 holding a token**.
 
-**A residual gap worth closing while we are here.** The shared policy handles IPv4-mapped
-IPv6 (`::ffff:169.254.1.1`) but not the other IPv6 forms that embed an IPv4 address:
-NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), and Teredo. On a DNS64 host, a name whose A
-record would be `169.254.169.254` can resolve to `64:ff9b::a9fe:a9fe`, which the current
-policy would treat as an ordinary public address. This is a pre-existing gap rather than
-one this RFC introduces, but webhooks are the first feature that lets an arbitrary token
-holder aim the server at an arbitrary name, so §14 item 2 tests these forms and §16 Q16
-asks whether closing them belongs in PR 1 or in a separate hardening card.
+**Closing a gap in the shared policy — decision D16 (§17).** The policy as it stands today
+handles IPv4-mapped IPv6 (`::ffff:169.254.1.1`) but **not** the other IPv6 forms that embed
+an IPv4 address: NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), and Teredo. On a DNS64 host, a
+name whose A record would be `169.254.169.254` can resolve to `64:ff9b::a9fe:a9fe`, which
+`isSsrfBlockedResolvedIp()` would treat as an ordinary public address.
+
+As of **D16** these forms are refused, and they belong on the always-blocked list above
+alongside the mapped form. This is a **tightening of `lib/net.ts` beyond its current
+behavior**, not merely reuse of it, and it is the one place where this RFC asks the shared
+policy to change rather than to be called correctly. It is a pre-existing gap rather than one
+this design introduces — but webhooks are the first feature that lets an arbitrary token
+holder aim the server at an arbitrary name, so the gap stops being theoretical. D16 folded
+the fix into PR 1 (§15) rather than a separate hardening card, on the reasoning that a
+hardening card filed alongside the feature that needs it tends not to land before the
+feature. §14 item 2 tests all three forms.
+
+Note that closing this also benefits the existing CIMD consumer of the same policy, which is
+the argument for putting it in `net.ts` rather than in webhook-specific code — and
+`net.ts:1`'s no-copying mandate (§9.1) means there is nowhere else correct to put it.
 
 ### 9.3 Validation at both ends — the DNS rebinding defense
 
@@ -1311,7 +1532,7 @@ as a worked example.
 
 OAE must not be usable as a DDoS reflector or a port scanner:
 
-- Response reads capped at `WEBHOOK_RESPONSE_MAX_BYTES` (§6.5) and discarded.
+- Response reads capped at `WEBHOOK_RESPONSE_MAX_BYTES` (§6.6) and discarded.
 - Per-endpoint and instance-wide concurrency caps (§8.7), so a tarpit endpoint that
   accepts TCP and never responds cannot exhaust the process — it occupies exactly one
   slot for `WEBHOOK_DELIVERY_TIMEOUT_MS` and then fails.
@@ -1338,13 +1559,15 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_ALLOWED_PORTS` | CSV of ints | `443` | `splitCsv` convention. |
 | `WEBHOOK_MAX_SUBSCRIPTIONS` | int ≥ 0 | `16` | |
 | `WEBHOOK_MAX_PER_ADDRESS` | int ≥ 0 | `4` | |
-| `WEBHOOK_MAX_ATTEMPTS` | int ≥ 1 | `8` | Truncates the fixed schedule in §8.3. `1` = no retry. |
+| `WEBHOOK_MAX_ATTEMPTS` | int ≥ 1 | `11` | Truncates the fixed 72 h schedule in §8.3. `1` = no retry; `8` restores the original ~27 h budget. |
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | int ≥ 1000 | `10000` | Matches `CIMD_FETCH_TIMEOUT_MS` and GitHub's published 10 s. |
 | `WEBHOOK_MAX_CONCURRENT` | int ≥ 1 | `8` | Mirrors `MAX_WAITS_TOTAL`, separate pool. |
 | `WEBHOOK_PAYLOAD_MAX_BYTES` | int ≥ 1024 | `16384` | |
+| `WEBHOOK_APPROVAL_ARGS_MAX_BYTES` | int ≥ 0 | `4096` | `preview` scope only (§6.3). `0` omits `actionArguments` entirely. |
+| `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` | int ≥ 1 | `4` | Below the task API's own depth 10 (§6.6). |
 | `WEBHOOK_RESPONSE_MAX_BYTES` | int ≥ 0 | `4096` | |
 | `WEBHOOK_TIMESTAMP_TOLERANCE_SEC` | int ≥ 30 | `300` | Consumer-side value, published in docs and in `GET /v1/webhooks`. |
-| `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `20` | |
+| `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `20` | Consecutive **exhausted events**, not attempts (§8.5). |
 | `WEBHOOK_ROTATION_OVERLAP_MS` | int ≥ 0 | `86400000` | 24 h dual-signature window (§12.2). `0` = atomic swap. |
 | `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ 1 | `30` | |
 | `WEBHOOK_RATE_CREATE_PER_MIN` | int ≥ 0 | `10` | |
@@ -1388,7 +1611,7 @@ bodies.
 | `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status}`; later attempts continue in the background. |
 | `POST` | `/v1/webhooks/:id/enable` | admin | Clear `disabled` state, reset the counter (§8.5). |
 | `GET` | `/v1/webhooks/:id/deliveries` | admin | `{deliveries:[…], nextCursor}` — recent attempts and dead letters, from the JSONL log. |
-| `POST` | `/v1/webhooks/deliveries/:deliveryId/redeliver` | admin | Manual replay of one dead letter (GitHub pattern). Enqueues a fresh attempt with a **new** `deliveryId` and the **same** event `id`. |
+| `POST` | `/v1/webhooks/deliveries/:deliveryId/redeliver` | admin | Manual replay of one recorded delivery — **dead letter or success**, per decision **D15** (§17), following Resend's "replay both `failed` and `succeeded`". Enqueues a fresh attempt with a **new** `deliveryId`, the **same** event `id`, and a `replay: true` marker in the log row. Replaying a success re-sends an event the consumer already processed, so it leans on their `id` dedupe (§8.1); the marker exists so an operator reading the log can tell a replay from an original. |
 
 Create request:
 
@@ -1396,9 +1619,9 @@ Create request:
 {
   "url": "https://consumer.example.com/hooks/oae",
   "address": "postmaster@openagent.email",
-  "events": ["mail.received"],
+  "events": ["mail.received", "approval.requested"],
   "contentScope": "metadata",
-  "description": "postmaster wake-up"
+  "description": "postmaster wake-up + approval paging"
 }
 ```
 
@@ -1412,7 +1635,7 @@ Create response (`201`):
   "events": ["mail.received"],
   "contentScope": "metadata",
   "active": true,
-  "state": "enabled",
+  "state": "unverified",
   "secret": "whs_7f3a9c1e5b8d24f6a0c3e7b1d9f24a68c0e4b7d1f3a9c5e8b2d6f0a4c8e1b5d9",
   "secretPrefix": "whs_7f3a…",
   "signatureScheme": "v1",
@@ -1434,7 +1657,7 @@ Error codes, following the existing snake_case convention:
 | `unknown_event_type` | 400 | Reserved-but-unemitted or nonsense type (§5.3) |
 | `invalid_webhook_url` | 400 | Fails §9.5 static rules |
 | `webhook_target_forbidden` | 400 | Fails the SSRF policy at creation (§9.3) |
-| `content_scope_requires_admin` | 403 | Identity token requested `preview` (§6.4) |
+| `content_scope_requires_admin` | 403 | Identity token requested `preview` (§6.5) |
 | `forbidden: token is scoped to another address` | 403 | Existing `forbidUnlessAddress` message, reused verbatim |
 | `forbidden: admin key required` | 403 | Existing `requireAdmin` message, reused verbatim |
 | `not_found` | 404 | Unknown `:id` |
@@ -1560,6 +1783,54 @@ throws at registration if a tool is registered without a declared tier, so a mis
 cannot ship silently; and `TOOL_TIER_SPEC` (`tool-tiers.ts:28`) is documented as the single
 source shared by PRs and docs, so the four rows above must be added there in the same PR.
 
+### 10.8 Dashboard surface (read-only)
+
+Decision **D4** (§17) reversed this document's original "no new UI" non-goal. v1 ships a
+**read-only** panel under Configure, aligned with the Configure section ADR-0026 already
+plans, and deliberately mirroring the existing notification-log view rather than inventing a
+new idiom.
+
+**Routes.** Following the established `/ui/api/*` mirror pattern — the cookie-session
+counterpart of a bearer route, as `/ui/api/notify/messages` mirrors `/v1/notify/messages`:
+
+| Route | Mirrors | Session |
+| --- | --- | --- |
+| `GET /ui/api/webhooks` | `GET /v1/webhooks` | admin sees all; identity session sees its own address |
+| `GET /ui/api/webhooks/:id` | `GET /v1/webhooks/:id` | as above |
+| `GET /ui/api/webhooks/:id/deliveries` | `GET /v1/webhooks/:id/deliveries` | **admin only** |
+| `GET /ui/api/webhooks/summary` | — (new) | admin only; counts by state and by outcome |
+
+All four are GET, so they pass through the existing UI gate untouched: `requireUiOrigin` and
+`uiSessionBodyLimit` guard *writes* and let GET/HEAD/OPTIONS through (`app.ts` UI block).
+That is precisely why the panel is read-only — adding one mutating route would pull the
+cookie-session surface into the secret-handling paths, and §2.2 refuses that.
+
+**What it shows.** Three things, in this order, because the ordering is the diagnosis path:
+
+1. **Subscriptions**, with `state` (`unverified` / `enabled` / `disabled`), `disabledReason`,
+   `events`, `contentScope`, `address`, and `lastDelivery`. A disabled endpoint is visually
+   distinct, not a neutral row — this is the "fail visible" requirement (§13) reaching the
+   operator who is not reading logs.
+2. **Deliveries and dead letters** for one subscription: `ts`, `type`, `attempt`, `outcome`,
+   `status`, `durationMs`, `replay`. Newest first, cursor-paginated, filterable by outcome.
+   Never any payload content, because the log never stores any (§8.6).
+3. **Summary counts** — endpoints by state, deliveries by outcome over the retention window,
+   dead-letter total. One data source for both the panel and the health signal (§13), so the
+   two cannot disagree, which is the same rule ADR-0026 applies to its notification summary.
+
+**What it must not show.** The signing secret, in any form, including the derived-key
+re-display discussed in §12.1 — `secretPrefix` only. There is no rotate, delete, enable, or
+redeliver button. An operator who wants those uses the REST API with an admin key, which is
+the correct place for an action that changes what the server will connect to.
+
+**Implementation constraints inherited from `/ui`.** No build step: CSS is a template string
+in `packages/api/src/ui/assets.ts` (`UI_CSS`), so a new panel means editing that file, not
+adding a bundler. `UI_ENABLED=false` must 404 these routes exactly as it does every other
+`/ui` route. Visual tokens come from the shared `:root` set that DESIGN.md pins to the
+website repo — a new panel introduces no new colors. And the honest-status copy rule from
+DESIGN.md applies: a failed refresh says so and keeps the old rows rather than showing an
+empty table that looks like "no deliveries".
+
 ---
 
 ## 11. Coexistence with `mail_wait_for`
@@ -1672,9 +1943,46 @@ The required change, which should land **before** the webhook feature (§15):
 Item 3 is the subtle one and the most likely to be gotten wrong in implementation. It is
 called out here explicitly so a reviewer can check it.
 
-This refactor touches production code that currently works, for a feature that does not
-yet exist. That is a real risk and the owner should see it as the main cost of #109 — not
-the crypto, not the SSRF work.
+4. **Give the bus a second producer, because D1 added a non-mail event.** Everything above
+   describes refactoring the *inbound-mail* loop, and that was sufficient when v1 emitted only
+   `mail.received`. Decision **D1** (§17) added `approval.requested`, which emits from
+   `createApprovalTask()` (`tasks-internal.ts:1524`) — a request-handler call path with no
+   IMAP IDLE connection, no UID watermark, and no reconnect loop anywhere near it. So the
+   abstraction cannot be "the watcher, with sinks"; it has to be a **process-wide dispatcher**
+   with two producers feeding it:
+
+   | Producer | Source | Dedupe key | Failure semantics |
+   | --- | --- | --- | --- |
+   | inbound-mail loop | IMAP UID watermark | `(uidValidity, uid)` | per-sink watermark retention (item 3) |
+   | task path | `createApprovalTask()` return | the task `id` | no watermark exists — see below |
+
+   The asymmetry in the last column is the real content of this item. The mail producer can
+   recover across a restart because the UID watermark is durable-ish and the mailbox is still
+   there to re-walk. The task producer has **no equivalent**: if the process dies between
+   writing the approval task and dispatching the event, nothing re-observes the creation,
+   because creation is a one-shot API call rather than a state that can be rescanned. Under
+   the weak restart semantics D5 accepted (§8.6), that event is simply lost. This is
+   acceptable and is recorded as such rather than papered over — but it is a *worse* loss
+   profile than mail, because a lost `approval.requested` means a human is never paged about
+   an approval that is silently counting down to a deadline nobody will materialize (§2.2).
+   If the owner later decides that is not acceptable, the fix is a task-side sweep analogous
+   to the approval reaper that `approval.expired` already needs, and the two should be
+   designed together rather than separately.
+
+**Delivery must never block the producer.** Both producers sit on paths that already have
+their own latency contracts: the mail loop owns one shared IDLE connection, and
+`createApprovalTask()` is inside an HTTP request that returns a `201` with the task view. A
+webhook attempt takes up to `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s) and may be one of eleven.
+Dispatch is therefore **hand-off, not await**: the producer enqueues and returns, and the
+delivery pool (§8.7) owns the rest. If the queue is full, the event is written to the
+delivery log as pending and picked up by the scheduler — never dropped, and never allowed to
+turn a task-creation request into a 10-second request.
+
+This refactor touches production code that currently works, for a feature that does not yet
+exist, and D1 made it materially larger than the mail-only version this document first
+scoped. That is a real risk and the owner should see it as the main cost of #109 — not the
+crypto, not the SSRF work. Per decision **D6** (§17) the commander dispatches this PR, with
+ownership still to be assigned.
 
 ### 11.5 Migration guidance
 
@@ -1811,6 +2119,8 @@ retry — rotating twice in quick succession should produce one window, not two.
 | Dead endpoint accumulates unbounded backlog | circuit breaker + immediate dead-letter while disabled | 8.5 |
 | Slow/tarpit consumer exhausts the process | per-endpoint concurrency 1, delivery timeout, instance cap | 8.7 |
 | Subscription churn abuse | creation rate limit + subscription caps | 8.7 |
+| Approval `arguments` carrying arbitrary caller JSON to an external endpoint | `actionArguments` is `preview`-scope only, therefore admin-only, and bounded to 4 KiB at depth 4 against the 64 KiB / depth 10 the task API itself allows | 6.3, 6.6 |
+| Approval event delivered to the wrong mailbox | Subscription matching is on `reviewer` only, never `from` or `to`; an off-instance reviewer emits no event at all | 6.3 |
 | Webhooks silently disabled because ntfy is off | gate widening + sink separation (prerequisite refactor) | 11.4 |
 | Delivery log becomes a privacy leak when shipped to an aggregator | no payload content, no URL query, `sensitive` rows write nothing extra | 8.6 |
 
@@ -1832,6 +2142,13 @@ Recorded so nobody discovers it later as a surprise:
   and observe distinguishable outcomes and timings. The caps make this a poor scanning
   primitive rather than an impossible one. Accepted for v1; tightening the test rate limit
   separately from the create limit is the obvious mitigation if it matters.
+- **A lost `approval.requested` leaves a human unpaged about a deadline nobody will
+  materialize.** The task producer has no watermark, so a crash between writing the approval
+  task and dispatching the event loses it (§11.4 item 4) — and because expiry is only
+  observed when something reads the task (§2.2), nothing later notices the approval sat
+  unanswered. Accepted for v1 under the weak restart semantics D7 approved; the reaper that
+  `approval.expired` needs is also the fix for this, which is why §17 says the two should be
+  designed together.
 - **Compromise of the OAE host.** If the host is compromised, the root secret and all
   derived keys are exposed. Same as every other secret in the repo.
 
@@ -1848,7 +2165,10 @@ Recorded so nobody discovers it later as a surprise:
    `GET /healthz` (`app.ts:56`), which must stay trivial — with a count of disabled
    endpoints and of dead letters in the retention window. A deployment where every
    endpoint is disabled is a deployment that has silently stopped pushing, and that must
-   be visible without reading a JSONL file by hand.
+   be visible without reading a JSONL file by hand. Since **D4** (§17) this has a home:
+   `GET /ui/api/webhooks/summary` and the Configure panel (§10.8) are the operator-facing
+   surface, and they read **the same single data source** as the health counts so a panel
+   and an alert can never disagree — the rule ADR-0026 applies to its notification summary.
 3. **Operator notification on disablement**, via the existing ntfy urgent path where
    `NTFY_ENABLED` is true. Best-effort; must not throw or block.
 4. **Structured log lines** for `refused` and `disabled` outcomes at WARN/ERROR, using
@@ -1874,23 +2194,26 @@ than only unit tests.
    format safe for third-party implementers, and it is the highest-value test in the
    feature.
 2. **SSRF matrix.** A test per blocked range in §9.2 and per rule in §9.5, including
-   IPv4-mapped IPv6, the IPv6 embedded-IPv4 forms the shared policy does **not** yet cover
+   IPv4-mapped IPv6 and the IPv6 embedded-IPv4 forms that **D16 adds to the shared policy**
    (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, Teredo — §9.2), decimal/octal/hex IPv4
    encodings, a DNS name resolving to a blocked address, a name whose resolution *changes*
    between validation and connect (rebinding), and a redirect response. Plus the
    highest-value test in the feature: assert the §9.1 `publicEdge` composition — that
    `WEBHOOK_ALLOW_PRIVATE_TARGETS=false` blocks a private target even when
    `OAE_PUBLIC_EDGE` is unset, and that `OAE_PUBLIC_EDGE=true` blocks it even when the
-   webhook escape hatch is on.
+   webhook escape hatch is on. Because D16 tightens `lib/net.ts` itself, these tests must
+   also assert the **existing CIMD consumer still behaves correctly** — the change is shared.
 3. **Retry/outcome classification.** A local test server returning each status in §8.2,
-   asserting the retry decision and the schedule, with a fake clock so the ~27-hour budget
-   is testable in milliseconds.
+   asserting the retry decision and every one of the eleven offsets in §8.3, with a fake
+   clock so a 72-hour budget is testable in milliseconds. Include the **D2a** assertion:
+   that a single event exhausting all eleven attempts increments the breaker by one, not by
+   eleven.
 4. **Gate independence.** Assert that webhooks fire with `NTFY_ENABLED=false`, that ntfy
    publishes with `WEBHOOKS_ENABLED=false`, and — the subtle case from §11.4 item 3 —
    that a failing webhook sink does not stall the ntfy sink's watermark, or vice versa.
 5. **Storage conventions.** 0600/0700 modes, atomic rename, corrupt-file fail-closed,
    `FORBIDDEN_SECRET_KEYS` refusal, retention compaction.
-6. **Payload bounding.** Every field's cap, the ordered overflow behavior (§6.5),
+6. **Payload bounding.** Every field's cap, the ordered overflow behavior (§6.6),
    UTF-8-safety of truncation on multi-byte boundaries, and a hard assertion that no
    payload at any scope exceeds `WEBHOOK_PAYLOAD_MAX_BYTES`.
 7. **Authorization matrix.** Each route × {admin, own-address identity, other-address
@@ -1898,22 +2221,49 @@ than only unit tests.
    Plus the MCP tier assertions from §10.7: every new tool appears in `TOOL_TIER_SPEC`,
    `mail_webhook_create` is deny-by-default for an OAuth-derived token, and
    `mail_webhook_test` is permitted for one.
-8. **Idempotency of `rotate`** and correctness of the dual-signature overlap window.
+8. **Idempotency of `rotate`** and correctness of the dual-signature overlap window, and
+   that rotation increments the derivation `epoch` so the new key differs without touching
+   any other endpoint's key (§12.1).
+9. **`approval.requested` emission (D1).** That creating an approval task emits exactly one
+   event; that it is matched to subscriptions on `reviewer` and **not** on `from` or `to`;
+   that no event is emitted when the reviewer is off-instance; that `expiresInSec` is always
+   positive and never exceeds 2592000 (§6.3); and the property that makes this event stronger
+   than the mail one — that recomputing `approvalActionDigest()` over the action fetched from
+   `GET /v1/tasks/:id` equals the announced `digest`.
+10. **Non-blocking hand-off from both producers (§11.4 item 4).** That `createApprovalTask()`
+    still returns its `201` in bounded time when the webhook endpoint is a tarpit, and that
+    the mail loop's IDLE connection is not held across a delivery attempt. Assert with a
+    consumer that accepts TCP and never responds, which is the worst case for both producers.
+11. **Endpoint state machine (§8.5).** `unverified` → `enabled` on first success;
+    `enabled` → `disabled` at the threshold; `disabled` → `unverified` on manual enable;
+    that events **are** delivered while `unverified`; that events are **not** delivered while
+    `disabled`; and that `refused` disables immediately without reaching the threshold.
+12. **Read-only dashboard panel (D4).** That every `/ui/api/webhooks*` route is a GET, that
+    no mutating webhook route exists under `/ui/api`, that all of them 404 when
+    `UI_ENABLED=false`, that an identity session sees only its own address, that deliveries
+    are admin-only, and that no response contains a `secret` field — only `secretPrefix`.
 
 ---
 
 ## 15. Phasing
 
-If ratified, this is five PRs, and the ordering matters because PR 1 and PR 2 touch
+If ratified, this is six PRs, and the ordering matters because PR 1 and PR 2 touch
 working production code and should be independently revertible:
 
 | PR | Content | Risk |
 | --- | --- | --- |
-| 1 | Generalize `pinnedCimdFetcher` into a shared pinned fetcher parameterized by timeout and byte cap, **and** promote the document-fetch wrapper's redirect refusal into that shared policy (§9.1); no behavior change for CIMD | low — pure refactor, existing CIMD tests are the guard |
-| 2 | Factor the notification watcher into an inbound-mail event bus with per-sink enablement, gating, retry, and **per-sink** watermark advancement; widen the startup gate; ntfy remains the only sink | **medium** — touches a working loop; §14 item 4 is the guard |
+| 1 | Generalize `pinnedCimdFetcher` into a shared pinned fetcher parameterized by timeout and byte cap, promote the document-fetch wrapper's redirect refusal into that shared policy (§9.1), **and close the IPv6 embedded-IPv4 gap** — NAT64, 6to4, Teredo (§9.2) — per decision **D16** (§17) | low — refactor plus a tightening; existing CIMD tests are the guard |
+| 2 | Factor the notification watcher into a **process-wide event dispatcher with two producers** — the inbound-mail loop *and* the task-creation path (§11.4 item 4) — with per-sink enablement, gating, retry, and **per-sink** watermark advancement; widen the startup gate; ntfy remains the only sink | **high** — touches a working loop *and* the task creation path; enlarged by D1. Dispatched by the commander, ownership TBD (**D6**) |
 | 3 | Extend `GET /v1/messages` with `cursor` / `nextCursor`, exposing at the bearer API what `listMessagesPageWith()` already implements for the dashboard (§3.7) | low — additive query param, `{messages}` shape gains an optional key |
-| 4 | Webhook subsystem: config, `webhooks.json`, signing, delivery, retry, circuit breaker, delivery log, REST routes, the four MCP tools with their `TOOL_TIER_SPEC` entries (§10.7), audit | additive — behind `WEBHOOKS_ENABLED=false` |
-| 5 | Signature interop vectors (JS + Python verifiers), SSRF matrix, docs, `.env.example` and `compose.yaml` entries, and the consumer-facing verification guide | additive |
+| 4 | Webhook subsystem: config, `webhooks.json`, signing, delivery for **both** `mail.received` and `approval.requested`, retry, circuit breaker, delivery log, REST routes, the four MCP tools with their `TOOL_TIER_SPEC` entries (§10.7), audit | additive — behind `WEBHOOKS_ENABLED=false` |
+| 5 | Read-only dashboard panel under Configure (§10.8), per decision **D4** | additive — GET-only `/ui/api` mirrors plus `UI_CSS` edits; no write surface |
+| 6 | Signature interop vectors (JS + Python verifiers), SSRF matrix, docs, `.env.example` and `compose.yaml` entries, and the consumer-facing verification guide | additive |
+
+PR 2 is now the riskiest item in the plan and is rated **high** rather than medium, because
+D1 turned it from "refactor the watcher" into "build a dispatcher that also sits inside the
+task-creation request path". §11.4 item 4 explains why the two producers have genuinely
+different recovery semantics, and §14 item 4 is the guard. It should not be started until its
+owner is named (**D6**).
 
 PR 3 is small but load-bearing: without it the `cursor` in a webhook payload is a token the
 consumer cannot spend, and the "push to wake, pull to read" pattern in §8.4 has no pull
@@ -1922,11 +2272,42 @@ it ships.
 
 PR 4 lands dark: `WEBHOOKS_ENABLED` defaults to `'false'`, so merging it changes nothing
 for any running deployment. That is the same rollout posture as `TASK_LEASES_ENABLED` and
-`NTFY_ENABLED`.
+`NTFY_ENABLED`. PR 5 depends on PR 4's routes and is separately revertible.
 
 ---
 
 ## 16. Open questions for the owner
+
+> **All seventeen questions below were answered on 2026-09-03.** The itemized record, with
+> what each answer changed in this document, is **§17 (Decisions)**. This section is kept
+> intact rather than deleted because the reasoning attached to each question is the
+> justification for the decision, and because three of them (Q1, Q4, Q10) were decided
+> *against* this document's recommendation, which a future reader needs to be able to see.
+> Where a question's text still reads as open, treat §17 as authoritative.
+>
+> | Q | Decision | Answer in one line | Status |
+> | --- | --- | --- | --- |
+> | Q1 | **D1** (owner) | v1 = `mail.received` **+ `approval.requested`**; `approval.expired` → v1.1, blocked on a reaper | **overrode** |
+> | Q2 | D5 | `preview` scope is admin-only, no self-escalation | as recommended |
+> | Q3 | D6 | Signing key is **derived**, never stored; `SMTP_PASS` fallback refused at boot | as recommended |
+> | Q4 | **D2** (owner) | Retry budget extended to **3 days** / 11 attempts | **overrode** |
+> | Q5 | D7 | Weak restart semantics accepted | as recommended |
+> | Q6 | D8 | PR 2 dispatched by the commander, owner TBD | as recommended |
+> | Q7 | **D3** (owner) | Recorded as "must answer before hosting"; v1 does not lock it | deferred |
+> | Q8 | D9 | `mail_wait_for` cursor support → separate card | as recommended |
+> | Q9 | D10 | Inbound webhooks → separate card | as recommended |
+> | Q10 | **D4** (owner) | v1 **ships** a read-only Configure panel; "no new UI" withdrawn | **overrode** |
+> | Q11 | D11 | Circuit-breaker recovery is manual only | as recommended |
+> | Q12 | D12 | Ping is asynchronous; new `unverified` endpoint state | as recommended |
+> | Q13 | D13 | Signature encoding is **hex**; recorded as a one-way door | as recommended |
+> | Q14 | D14 | Deferred with D3 | deferred |
+> | Q15 | D15 | Redelivery covers **succeeded** deliveries too, admin-only, log marked `replay` | as recommended |
+> | Q16 | D16 | IPv6 embedded-IPv4 SSRF gap closed in **PR 1** | as recommended |
+> | Q17 | D17 | 4 MCP tools; `mail_webhook_create` is tier `critical`; parity deviation accepted | as recommended |
+>
+> One further item, **D2a**, is a consequence of D2 rather than an answer to a question, and
+> is still awaiting confirmation: whether the circuit-breaker threshold counts exhausted
+> *events* (recommended, §8.5) or failed *attempts*.
 
 These are the decisions this RFC could not make alone. Each has a recommendation where one
 is defensible.
@@ -1940,7 +2321,7 @@ complete approval trio needs a reaper. *Recommendation:* ship `mail.received` al
 prove the delivery machinery, then add `approval.requested` as the immediate follow-up —
 but decide now, because it determines whether PR 2's event bus must span the task path.
 
-**Q2 — `contentScope: preview` gating.** Admin-only (recommended, §6.4), or available to
+**Q2 — `contentScope: preview` gating.** Admin-only (recommended, §6.5), or available to
 an identity token with an explicit acknowledgement flag mirroring push tier 3's
 `confirm_risk=true`? *Trade-off:* an autonomous agent that cannot escalate its own scope
 needs a human to enable the useful case; allowing self-escalation with a flag turns a
@@ -2053,6 +2434,123 @@ one-shot outbound act like `mail_send`.
 
 ---
 
+## 17. Decisions
+
+Ratified **2026-09-03**. The owner decided four questions (D1, D2, D3, D4 below, answering
+Q1, Q4, Q7, Q10); the commander approved the remaining thirteen at the values this document
+recommended. Three decisions **overrode** a recommendation — D1 on the event catalog, D2 on
+the retry budget, and D4 on the UI — and all three are recorded as overrides rather than
+silently rewritten into the text, so a future reader can see what the design argued for and
+what was chosen instead.
+
+Each entry lists the sections it changed, because a decision that is not reflected in the
+body of the document is not a decision.
+
+### Owner decisions
+
+**D1 — v1 catalog is `mail.received` *plus* `approval.requested`.** *(Answers Q1. Overrides
+the recommendation to ship one event type first.)*
+
+The human-in-the-loop approval push is in v1, not deferred. The owner explicitly accepted the
+cost this document attached to it, and asked that one dependency be written down rather than
+left implicit:
+
+- **`approval.expired` moves to v1.1 and is blocked on a missing emitter, not on design
+  work.** Expiry is materialized lazily when something next reads the task
+  (`materializeApprovalExpiry()`, `tasks-internal.ts:1444`), and the source comment states
+  there is no scheduler and no list sweep (`:1442`). A webhook cannot fire at a moment
+  nothing observes, so `approval.expired` requires a **reaper** — new production machinery
+  that would race the existing lazy path on the same task lock. Recorded in §2.2 and §5.2.
+- **`approval.decided` stays reserved** even though `decideApprovalTask()`
+  (`tasks-internal.ts:2440`) is a clean emitter; D1 scoped v1 to the two requested events.
+
+Changed: §2.1 goal 1; §2.2 (approval non-goal rewritten, reaper dependency recorded); §5.1
+(catalog table, two producers, per-type emission granularity); §5.2 (`approval.requested`
+removed from reserved, `approval.decided` / `approval.expired` split out); **new §6.3**
+(`approval.requested` payload schema, reviewer-based subscription matching, digest-verified
+refetch); §6.6 (two new bounding constants); §10.1 (two new env vars); §10.3 (example
+subscribes to both types); §11.4 **new item 4** (the dispatcher needs a second, non-IMAP
+producer with weaker recovery semantics, and dispatch must be hand-off rather than await);
+§14 (new test items); §15 (PR 2 re-scoped and re-rated **high**, PR 4 covers both types).
+
+**D2 — retry budget extended to three days.** *(Answers Q4. Overrides the recommendation of
+~27 hours.)*
+
+Eleven attempts spanning exactly 72 h, aligning with Stripe and SendGrid rather than
+Resend's shorter published schedule. The perishability objection this document raised is
+answered by front-loading — four attempts inside 35 minutes — so urgent mail is unaffected by
+the longer tail; the queue-cost objection is **not** answered and is carried forward as a
+constraint on the durable log.
+
+Changed: §4.2 (the three-day horizon moved from Refuse to Borrow, with the override
+recorded); §4.4 (table); **§8.3 rewritten** (eleven cumulative offsets, switched from delays
+to offsets because a 72 h budget makes delay arithmetic error-prone, and two consequences
+documented); §8.5 (threshold now counts exhausted events); §8.6 (three-day queue horizon,
+indexed reconstruction); §10.1 (`WEBHOOK_MAX_ATTEMPTS` default 11).
+
+**D2a — derived consequence, flagged for confirmation.** With eleven attempts per event,
+counting the circuit-breaker threshold in *attempts* would let two failing events disable an
+endpoint on day one, making the three-day budget unreachable on any busy mailbox. §8.3
+consequence 2 and §8.5 therefore redefine `WEBHOOK_DISABLE_THRESHOLD = 20` as twenty
+consecutive **exhausted events**. This changes the meaning of a constant the commander
+approved at its recommended value under the old schedule, so it is called out separately
+rather than folded in silently.
+
+**D3 — multi-tenant hosted policy is recorded as "must answer before hosting", and v1 does
+not lock the design.** *(Answers Q7.)*
+
+The per-endpoint rate limits, subscription caps, and abuse surface all change shape on shared
+infrastructure, and `OAE_PUBLIC_EDGE=true` becomes the norm rather than the exception. v1
+ships the self-hosted design and does not pre-commit to hosted answers.
+
+Changed: §16 Q7 retained as the standing blocker; no v1 design change. `WEBHOOK_MAX_SUBSCRIPTIONS`
+and the §8.7 caps are stated as self-hosted defaults, deliberately not as a hosted quota model.
+
+**D4 — v1 ships a read-only dashboard panel; the "no new UI" non-goal is withdrawn.**
+*(Answers Q10. Overrides the recommendation to defer UI.)*
+
+A read-only view of subscriptions, deliveries, and dead letters under Configure, aligned with
+the Configure section ADR-0026 already plans and mirroring the existing notification-log
+view. Read-only is the whole scope: no create, edit, rotate, delete, enable, or redeliver from
+a browser session, which keeps the cookie-session surface out of the secret-handling paths.
+
+Changed: §2.1 **new goal 8**; §2.2 (the "no new UI" non-goal replaced by the narrower "no
+*write* operations from the dashboard"); **new §10.8** (routes, contents, prohibitions,
+inherited `/ui` constraints); §8.5 (state surfaced in the panel); §13 (health signal shares
+one data source with the panel); §14 (new test item); §15 (**new PR 5**).
+
+### Commander approvals at recommended values
+
+| # | Answers | Decision | Sections it settles |
+| --- | --- | --- | --- |
+| **D5** | Q2 | `contentScope: preview` is **admin-only**. No identity-token self-escalation, even with an acknowledgement flag — a stolen identity token must gain convenience, never a content-exfiltration channel. | §6.5, §10.4, §12.4 |
+| **D6** | Q3 | Signing key is **derived** (option B), never stored: `HMAC(root, "webhook-signing-v1\n" + webhookId + "\n" + epoch)`. No plaintext usable secret at rest, anywhere in the repo. The `epoch` is what makes per-endpoint rotation possible without rotating the root. Boot refuses the `SMTP_PASS` fallback when webhooks are enabled. | §10.2 item 1, §12.1, §12.2 |
+| **D7** | Q5 | **Weak restart semantics accepted.** Pending retries are rebuilt from the delivery log; events emitted while the process was down are not reconstructed in v1. For the task producer this is a worse loss profile than for mail, and §11.4 item 4 records it rather than hiding it. | §8.6, §11.4 item 4 |
+| **D8** | Q6 | **PR 2 is dispatched by the commander; ownership TBD.** It must not be started until an owner is named, since D1 raised its risk rating to high. | §11.4, §15 |
+| **D9** | Q8 | **`mail_wait_for` cursor support gets its own card.** The asymmetry is real — long-polling rescans the newest 20 with no watermark while webhooks have one — but it is out of scope here. | §11.5, §16 Q8 |
+| **D10** | Q9 | **Inbound webhooks are a split card.** Opposite trust direction, unrelated auth model, different abuse surface. | §2.2 |
+| **D11** | Q11 | **Circuit-breaker recovery is manual only** (`POST /v1/webhooks/:id/enable`). No automatic probe. Silently resuming would hide a dropped window. | §8.5 |
+| **D12** | Q12 | **Ping at creation is asynchronous**, and a third endpoint state `unverified` is added to the state machine until a delivery succeeds. The state is advisory — events still flow — and exists for operator feedback. | §5.1, §8.5 (new state machine), §10.3 (create response), §10.8 |
+| **D13** | Q13 | **Signature encoding is lower-case hex**, deviating from the repo's base64url stamp convention. Recorded as a **one-way door**: once an integrator ships a verifier, changing the encoding requires a `v2=`. Event ids stay UUIDv4. | §7.2 |
+| **D14** | Q14 | **Deferred with D3.** Per-identity subscription caps wait on the hosted answer. | §8.7, §16 Q14 |
+| **D15** | Q15 | **Redelivery covers succeeded deliveries as well as dead letters**, admin-only, with `replay: true` marked in the log row. Follows Resend's "replay both `failed` and `succeeded`"; it is how an integrator tests a handler against a real payload without waiting for real mail. | §8.6 (log row), §10.3, §10.8 |
+| **D16** | Q16 | **The IPv6 embedded-IPv4 SSRF gap is closed in PR 1**, not deferred to a separate hardening card. NAT64, 6to4, and Teredo forms join the §9.2 always-refused list. | §9.2, §14 item 2, §15 PR 1 |
+| **D17** | Q17 | **Four MCP tools approved** — `mail_webhook_list`, `mail_webhook_create`, `mail_webhook_delete`, `mail_webhook_test` — and **`mail_webhook_create` is tier `critical`**, so it is deny-by-default for OAuth tickets. The three non-admin routes left REST-only are an accepted deviation from CONTRIBUTING's parity rule. | §10.4, §10.7, §14 item 7, §15 PR 4 |
+
+### Still open after ratification
+
+Three items are deliberately **not** settled by the above, and should not be read as decided:
+
+1. **D2a** — the circuit-breaker counter's unit (exhausted events vs. attempts). Recommended
+   in §8.5, needs confirmation because it reinterprets an approved constant.
+2. **D3 / D14** — everything about multi-tenant hosted operation, blocked until hosting is
+   actually planned.
+3. **The approval reaper** — prerequisite for `approval.expired` (v1.1) and, if the owner
+   decides a lost `approval.requested` is unacceptable, also the fix for the task producer's
+   weak restart semantics (§11.4 item 4). Both should be designed together.
+
+---
+
 ## Appendix A: normative signature summary
 
 For an implementer who reads nothing else:
@@ -2073,8 +2571,8 @@ Fetch:   full mail content via GET /v1/messages/:id with your own API token
 
 | Card | Relationship |
 | --- | --- |
-| #109 | This RFC is the design record #109 asks for. |
+| #109 | This RFC is the design record #109 asks for, **ratified 2026-09-03** (§17). D1 pulled `approval.requested` into v1, so #109's human-in-the-loop unlock ships alongside the postmaster-agent one rather than after it. |
 | #105 | Refused in core (§2.2). Webhooks are the substrate for a userland responder; the RFC argues a core LLM responder inherits prompt injection from every inbound body. |
 | #59 | Not implemented. §7.6 keeps the signature header shape so an asymmetric `v2=` scheme is additive. Nothing else here commits to federation. |
 | #72 | Compliance auto-BCC already shipped (`9209aee`). #109 notes it becomes a userland "subscribe an archiver endpoint" pattern; §12.1 reuses its `TASK_SIGNING_SECRET` boot rule. |
-| ADR-0026 | Supplies the Configure/notification-log UI context for §16 Q10, and the fact that tasks are authoritatively IMAP mail threads — relevant to any future `task.*` event source. |
+| ADR-0026 | Supplies the Configure-section plan and the notification-log view idiom that §10.8's read-only panel deliberately mirrors (D4 made that panel a v1 deliverable), the single-data-source rule §13 reuses so the panel and health counts cannot disagree, and the fact that tasks are authoritatively IMAP mail threads — relevant to any future `task.*` event source. |
