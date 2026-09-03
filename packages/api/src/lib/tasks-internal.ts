@@ -586,6 +586,19 @@ function leaseVerifiersEqual(candidate: unknown, persisted: unknown): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/**
+ * Equivalence predicate for server lease-expiry idempotency: same lease
+ * generation and exact canonical claimedUntil timestamp.
+ */
+function isSameLeaseExpiryIdentity(
+  a: { leaseGeneration?: number; generation?: number; claimedUntil: string },
+  b: { leaseGeneration?: number; generation?: number; claimedUntil: string },
+): boolean {
+  const genA = a.leaseGeneration ?? a.generation;
+  const genB = b.leaseGeneration ?? b.generation;
+  return genA !== undefined && genA === genB && a.claimedUntil === b.claimedUntil;
+}
+
 function leaseEventStamp(
   id: string,
   state: TaskState,
@@ -1155,26 +1168,29 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   let expiredLease: ExpiredLeaseReceipt | undefined;
   let firstClaimedAt: string | undefined;
   const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt>();
-  const exactDuplicateExpiryMessages = new Set<RawTaskMessage>();
+  const duplicateExpiryMessages = new Set<RawTaskMessage>();
   for (const message of leaseEvents) {
     const lease = message.lease;
     if (lease.event === 'expired') {
-      const priorReceipt = appliedExpiryReceipts.get(lease.generation);
-      if (
-        priorReceipt?.leaseGeneration === lease.generation
-        && priorReceipt.claimedUntil === lease.claimedUntil
-        && priorReceipt.expiredAt === lease.expiredAt
-      ) {
-        exactDuplicateExpiryMessages.add(message);
-        continue;
-      }
       if (
         lease.actor !== 'server'
-        || !leaseAuthority?.claimedUntil
+        || lease.at !== lease.expiredAt
+        || !Number.isFinite(Date.parse(lease.expiredAt))
+        || !Number.isFinite(Date.parse(lease.claimedUntil))
+        || Date.parse(lease.expiredAt) < Date.parse(lease.claimedUntil)
+      ) return null;
+      const priorReceipt = appliedExpiryReceipts.get(lease.generation);
+      if (priorReceipt) {
+        if (isSameLeaseExpiryIdentity(priorReceipt, lease)) {
+          duplicateExpiryMessages.add(message);
+          continue;
+        }
+        return null;
+      }
+      if (
+        !leaseAuthority?.claimedUntil
         || lease.generation !== leaseAuthority.leaseGeneration
         || lease.claimedUntil !== leaseAuthority.claimedUntil
-        || lease.at !== lease.expiredAt
-        || Date.parse(lease.expiredAt) < Date.parse(lease.claimedUntil)
       ) return null;
       leaseAuthority = undefined;
       releasedLease = undefined;
@@ -1300,7 +1316,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // (but validly signed) submitted/working mail can appear again in IMAP, but
   // it cannot reopen the completed/failed task. Before that point normal
   // concurrent writes retain mailbox-order last-writer-wins semantics.
-  const durableOrdered = ordered.filter((message) => !exactDuplicateExpiryMessages.has(message)).map((message) => message.lease
+  const durableOrdered = ordered.filter((message) => !duplicateExpiryMessages.has(message)).map((message) => message.lease
     ? { ...message, date: message.lease.at }
     : message);
   const current = currentTaskMessage(durableOrdered);
@@ -1784,11 +1800,7 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     const authority = task.lease;
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      if (
-        receipt?.leaseGeneration === queued.lease.generation
-        && receipt.claimedUntil === queued.lease.claimedUntil
-        && receipt.expiredAt === queued.lease.expiredAt
-      ) return true;
+      if (receipt && isSameLeaseExpiryIdentity(receipt, queued.lease)) return true;
       return indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
     }
     if (queued.lease.event === 'release') {

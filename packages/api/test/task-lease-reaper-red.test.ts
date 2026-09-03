@@ -28,6 +28,7 @@ const {
   taskFromMessages,
   taskService,
   toTaskView,
+  getTask,
 } = await import('../src/lib/tasks.ts');
 const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
@@ -95,7 +96,7 @@ function expiryEvent(input: { claimedUntil: string; at?: string; actor?: string 
   };
 }
 
-function expiryDelivery(input: { claimedUntil: string; actor?: string }): SendInput {
+function expiryDelivery(input: { claimedUntil: string; actor?: string; at?: string }): SendInput {
   const event = expiryEvent(input);
   return {
     from: REQUESTER,
@@ -398,7 +399,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     expect({ afterClose: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterClose: 0, expiryDeliveries: 0 });
   });
 
-  test('a signed same-generation expiry with different timing is fail-closed rather than an exact duplicate', async () => {
+  test('a signed same-generation expiry with different claimedUntil is fail-closed rather than an exact duplicate', async () => {
     const sent: SendInput[] = [];
     setTaskNowForTests(() => START);
     setTaskGetForTests(async () => submittedTask());
@@ -808,5 +809,385 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       exitCode: 0,
       elapsedUnderFiveSeconds: true,
     });
+  });
+
+  test('issue #97: reproduce full acceptance-loss-retry path: expiry retry with later timestamp reconstructs as single logical expiry', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<retry-test-${sent.length}>` };
+    });
+
+    if (!taskService.claim) throw new Error('shipped claim service is unavailable');
+    const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim1 = await parseCaptured(sent[0]!, 2);
+    expect(claim1).not.toBeNull();
+    durable = taskFromMessages(ID, [submittedRaw(), claim1!])!;
+
+    // Move to equality boundary: attempt A
+    now = Date.parse(first.claimedUntil);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    await reapExpiredTaskLeasesOnce();
+    const expiryA = await parseCaptured(sent[1]!, 3);
+    expect(expiryA).not.toBeNull();
+    expect(expiryA?.lease?.event).toBe('expired');
+    const expiryALease = expiryA!.lease as { generation: number; claimedUntil: string; expiredAt: string };
+    expect(expiryALease.generation).toBe(1);
+    expect(expiryALease.claimedUntil).toBe(first.claimedUntil);
+    expect(expiryALease.expiredAt).toBe(first.claimedUntil);
+
+    // Simulate process restart / loss of queued overlays before IMAP indexes attempt A
+    clearQueuedEventsForTests();
+    // Advance injected clock: attempt B (retry)
+    now = Date.parse(first.claimedUntil) + 30_000;
+    setTaskGetForTests(async () => durable); // durable still only has claim1
+    setTaskListAllForTests(async () => [durable]);
+    await reapExpiredTaskLeasesOnce();
+    const expiryB = await parseCaptured(sent[2]!, 4);
+    expect(expiryB).not.toBeNull();
+    expect(expiryB?.lease?.event).toBe('expired');
+    const expiryBLease = expiryB!.lease as { generation: number; claimedUntil: string; expiredAt: string };
+    expect(expiryBLease.generation).toBe(1);
+    expect(expiryBLease.claimedUntil).toBe(first.claimedUntil);
+    expect(expiryBLease.expiredAt).not.toBe(expiryALease.expiredAt);
+    expect(expiryBLease.expiredAt).toBe(new Date(now).toISOString());
+
+    // Durable mailbox now contains both A and B: reconstruction succeeds idempotently
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1!, expiryA!, expiryB!]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.lease).toBeUndefined();
+    expect(rebuilt?.expiredLease).toEqual({
+      leaseGeneration: 1,
+      claimedUntil: first.claimedUntil,
+      expiredAt: expiryALease.expiredAt, // Preserves the first applied receipt
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    });
+    // Public messages omit duplicate expiry audit noise (only 1 expiry message, total 3 messages)
+    const publicMessages = rebuilt!.messages;
+    expect(publicMessages).toHaveLength(3);
+    expect(publicMessages.filter((m) => m.body === 'Lease expired.')).toHaveLength(1);
+  });
+
+  test('issue #97: queued indexed detection: queued retry B is recognized as indexed by durable expiry A and retired', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<queued-retry-${sent.length}>` };
+    });
+
+    if (!taskService.claim) throw new Error('shipped claim service is unavailable');
+    const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+    durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+
+    // Materialize expiry A
+    now = Date.parse(first.claimedUntil);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    await reapExpiredTaskLeasesOnce();
+    const expiryA = (await parseCaptured(sent[1]!, 3))!;
+    const expiryALease = expiryA.lease as { generation: number; claimedUntil: string; expiredAt: string };
+
+    // Clear queued events, simulate durable IMAP now having claim1 + expiryA
+    clearQueuedEventsForTests();
+    const durableWithA = taskFromMessages(ID, [submittedRaw(), claim1, expiryA])!;
+    expect(durableWithA.expiredLease?.expiredAt).toBe(expiryALease.expiredAt);
+
+    // Now suppose in a separate process retry B was materialized and queued:
+    now = Date.parse(first.claimedUntil) + 60_000;
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    await reapExpiredTaskLeasesOnce();
+    // B is now queued in queuedEvents!
+    const expiryB = (await parseCaptured(sent[2]!, 4))!;
+    const expiryBLease = expiryB.lease as { generation: number; claimedUntil: string; expiredAt: string };
+    expect(expiryBLease.expiredAt).not.toBe(expiryALease.expiredAt);
+
+    // Detail read durableWithA: mergeQueuedEvents must recognize B as already indexed
+    setTaskGetForTests(async () => durableWithA);
+    const readTask = await getTask(ID);
+    expect(readTask).not.toBeNull();
+    // It must NOT append retry B as duplicate message
+    expect(readTask!.messages).toHaveLength(3);
+    // It must NOT overwrite A's expiredAt
+    expect(readTask!.expiredLease?.expiredAt).toBe(expiryALease.expiredAt);
+  });
+
+  test('issue #97: direct reconstruction of two valid authenticated expiry events with same generation and claimedUntil but different timestamps is idempotent', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<direct-reconstruct-${sent.length}>` };
+    });
+
+    if (!taskService.claim) throw new Error('shipped claim service is unavailable');
+    const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+
+    const at1 = first.claimedUntil;
+    const at2 = new Date(Date.parse(first.claimedUntil) + 15_000).toISOString();
+    const expiry1 = (await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil, at: at1 }), 3))!;
+    const expiry2 = (await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil, at: at2 }), 4))!;
+
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, expiry1, expiry2]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.expiredLease).toEqual({
+      leaseGeneration: 1,
+      claimedUntil: first.claimedUntil,
+      expiredAt: at1,
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    });
+    expect(rebuilt?.messages).toHaveLength(3);
+    expect(toTaskView(rebuilt!).messages).toHaveLength(3);
+  });
+
+  test('issue #97: fail-closed controls: mismatched claimedUntil, forged actor, malformed time, expiredAt before claimedUntil, and unexpired stale expiry', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<controls-${sent.length}>` };
+    });
+
+    if (!taskService.claim) throw new Error('shipped claim service is unavailable');
+    const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+
+    // 1. Same generation with different claimedUntil
+    const diffUntil = new Date(Date.parse(first.claimedUntil) + 10_000).toISOString();
+    const expiryDiffUntil = await parseCaptured(expiryDelivery({ claimedUntil: diffUntil }), 3);
+    expect(expiryDiffUntil).not.toBeNull();
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, expiryDiffUntil!])).toBeNull();
+
+    // 2. Forged actor (not 'server')
+    const forgedActorDelivery: SendInput = {
+      from: REQUESTER,
+      to: [RECIPIENT],
+      subject: 'Lease this task',
+      text: 'Lease expired.',
+      headers: claimLeaseHeadersForTests({
+        id: ID,
+        state: 'working',
+        from: REQUESTER,
+        to: RECIPIENT,
+        event: {
+          version: 1,
+          event: 'expired',
+          actor: 'attacker@test.example' as unknown as 'server',
+          at: first.claimedUntil,
+          generation: 1,
+          claimedUntil: first.claimedUntil,
+          expiredAt: first.claimedUntil,
+        },
+      }),
+    };
+    const expiryForgedActor = await parseCaptured(forgedActorDelivery, 4);
+    // Intentionally rejected at parser layer (readLeaseEventPayload enforces actor === 'server')
+    expect(expiryForgedActor).toBeNull();
+    expect(expiryForgedActor === null || taskFromMessages(ID, [submittedRaw(), claim1, expiryForgedActor]) === null).toBe(true);
+    // Defense-in-depth in taskFromMessages: durable reconstruction rejects forged actor
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, {
+      uid: 4,
+      from: REQUESTER,
+      to: RECIPIENT,
+      subject: 'Lease this task',
+      date: first.claimedUntil,
+      state: 'working',
+      body: 'Lease expired.',
+      lease: {
+        version: 1,
+        event: 'expired',
+        actor: 'attacker@test.example' as unknown as 'server',
+        at: first.claimedUntil,
+        generation: 1,
+        claimedUntil: first.claimedUntil,
+        expiredAt: first.claimedUntil,
+      },
+    }])).toBeNull();
+
+    // 3. Malformed time
+    const malformedTimeDelivery: SendInput = {
+      from: REQUESTER,
+      to: [RECIPIENT],
+      subject: 'Lease this task',
+      text: 'Lease expired.',
+      headers: claimLeaseHeadersForTests({
+        id: ID,
+        state: 'working',
+        from: REQUESTER,
+        to: RECIPIENT,
+        event: {
+          version: 1,
+          event: 'expired',
+          actor: 'server',
+          at: 'not-a-valid-date',
+          generation: 1,
+          claimedUntil: first.claimedUntil,
+          expiredAt: 'not-a-valid-date',
+        },
+      }),
+    };
+    const expiryMalformedTime = await parseCaptured(malformedTimeDelivery, 5);
+    // Intentionally rejected at parser layer (readLeaseEventPayload requires finite date parsing)
+    expect(expiryMalformedTime).toBeNull();
+    expect(expiryMalformedTime === null || taskFromMessages(ID, [submittedRaw(), claim1, expiryMalformedTime]) === null).toBe(true);
+    // Defense-in-depth in taskFromMessages: durable reconstruction rejects malformed timestamps
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, {
+      uid: 5,
+      from: REQUESTER,
+      to: RECIPIENT,
+      subject: 'Lease this task',
+      date: first.claimedUntil,
+      state: 'working',
+      body: 'Lease expired.',
+      lease: {
+        version: 1,
+        event: 'expired',
+        actor: 'server',
+        at: 'not-a-valid-date',
+        generation: 1,
+        claimedUntil: first.claimedUntil,
+        expiredAt: 'not-a-valid-date',
+      },
+    }])).toBeNull();
+
+    // 4. expiredAt < claimedUntil
+    const earlyTime = new Date(Date.parse(first.claimedUntil) - 5_000).toISOString();
+    const earlyDelivery: SendInput = {
+      from: REQUESTER,
+      to: [RECIPIENT],
+      subject: 'Lease this task',
+      text: 'Lease expired.',
+      headers: claimLeaseHeadersForTests({
+        id: ID,
+        state: 'working',
+        from: REQUESTER,
+        to: RECIPIENT,
+        event: {
+          version: 1,
+          event: 'expired',
+          actor: 'server',
+          at: earlyTime,
+          generation: 1,
+          claimedUntil: first.claimedUntil,
+          expiredAt: earlyTime,
+        },
+      }),
+    };
+    const expiryEarly = await parseCaptured(earlyDelivery, 6);
+    // Intentionally rejected at parser layer (readLeaseEventPayload requires expiredAt >= claimedUntil)
+    expect(expiryEarly).toBeNull();
+    expect(expiryEarly === null || taskFromMessages(ID, [submittedRaw(), claim1, expiryEarly]) === null).toBe(true);
+    // Defense-in-depth in taskFromMessages: durable reconstruction rejects early expiredAt
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, {
+      uid: 6,
+      from: REQUESTER,
+      to: RECIPIENT,
+      subject: 'Lease this task',
+      date: earlyTime,
+      state: 'working',
+      body: 'Lease expired.',
+      lease: {
+        version: 1,
+        event: 'expired',
+        actor: 'server',
+        at: earlyTime,
+        generation: 1,
+        claimedUntil: first.claimedUntil,
+        expiredAt: earlyTime,
+      },
+    }])).toBeNull();
+
+    // 5. at !== expiredAt
+    const mismatchedAtDelivery: SendInput = {
+      from: REQUESTER,
+      to: [RECIPIENT],
+      subject: 'Lease this task',
+      text: 'Lease expired.',
+      headers: claimLeaseHeadersForTests({
+        id: ID,
+        state: 'working',
+        from: REQUESTER,
+        to: RECIPIENT,
+        event: {
+          version: 1,
+          event: 'expired',
+          actor: 'server',
+          at: first.claimedUntil,
+          generation: 1,
+          claimedUntil: first.claimedUntil,
+          expiredAt: new Date(Date.parse(first.claimedUntil) + 5_000).toISOString(),
+        },
+      }),
+    };
+    const expiryMismatchedAt = await parseCaptured(mismatchedAtDelivery, 7);
+    // Intentionally rejected at parser layer (readLeaseEventPayload requires at === expiredAt)
+    expect(expiryMismatchedAt).toBeNull();
+    expect(expiryMismatchedAt === null || taskFromMessages(ID, [submittedRaw(), claim1, expiryMismatchedAt]) === null).toBe(true);
+    // Defense-in-depth in taskFromMessages: durable reconstruction rejects at !== expiredAt
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, {
+      uid: 7,
+      from: REQUESTER,
+      to: RECIPIENT,
+      subject: 'Lease this task',
+      date: first.claimedUntil,
+      state: 'working',
+      body: 'Lease expired.',
+      lease: {
+        version: 1,
+        event: 'expired',
+        actor: 'server',
+        at: first.claimedUntil,
+        generation: 1,
+        claimedUntil: first.claimedUntil,
+        expiredAt: new Date(Date.parse(first.claimedUntil) + 5_000).toISOString(),
+      },
+    }])).toBeNull();
+
+    // 6. Stale expiry after later authority when previous generation was NEVER expired
+    const claim2Delivery: SendInput = {
+      from: RECIPIENT,
+      to: [REQUESTER],
+      subject: 'Lease this task',
+      text: 'Lease claimed.',
+      headers: claimLeaseHeadersForTests({
+        id: ID,
+        state: 'working',
+        from: RECIPIENT,
+        to: REQUESTER,
+        event: {
+          version: 1,
+          event: 'claim',
+          actor: RECIPIENT,
+          at: first.claimedUntil,
+          generation: 2,
+          claimedUntil: new Date(Date.parse(first.claimedUntil) + 300_000).toISOString(),
+          tokenVerifier: 'a'.repeat(32),
+        },
+      }),
+    };
+    const claim2 = (await parseCaptured(claim2Delivery, 8))!;
+    expect(claim2).not.toBeNull();
+    const staleGen1Expiry = await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 9);
+    expect(staleGen1Expiry).not.toBeNull();
+    // Durable thread: root, claim1, claim2, staleGen1Expiry
+    // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!])).toBeNull();
   });
 });
