@@ -82,7 +82,12 @@
     while (createDomain.firstChild) {
       createDomain.removeChild(createDomain.firstChild);
     }
-    var list = (domains && domains.length > 0) ? domains : [window.location.hostname];
+    var list = (domains && domains.length > 0) ? domains : [];
+    if (list.length === 0) {
+      createDomain.disabled = true;
+      return;
+    }
+    createDomain.disabled = false;
     for (var i = 0; i < list.length; i++) {
       var opt = document.createElement('option');
       opt.value = list[i];
@@ -103,10 +108,10 @@
         : (data && data.primary ? [data.primary] : []);
       populateCreateDomain(list);
     } catch (e) {
-      var firstAddress = state.identities[0] ? state.identities[0].address : '';
-      var separator = firstAddress.lastIndexOf('@');
-      var fallback = separator === -1 ? window.location.hostname : firstAddress.slice(separator + 1);
-      populateCreateDomain([fallback]);
+      while (createDomain.firstChild) {
+        createDomain.removeChild(createDomain.firstChild);
+      }
+      createDomain.disabled = true;
     }
     createModal.hidden = false;
     createName.focus();

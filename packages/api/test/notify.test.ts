@@ -60,8 +60,9 @@ const {
 } = await import('../src/lib/notification-log.ts');
 const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
 type NotifyService = import('../src/lib/notify.ts').NotifyService;
+type Identity = import('../src/lib/identities.ts').Identity;
 
-const published: unknown[] = [];
+const published: Record<string, any>[] = [];
 const readCalls: unknown[] = [];
 const originalFetch = globalThis.fetch;
 

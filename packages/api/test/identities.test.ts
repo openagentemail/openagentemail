@@ -567,6 +567,8 @@ describe('identity store composite cache version (F56)', () => {
 
 describe('multi-domain identities', () => {
   test('creates identities under secondary domains and preserves per-domain uniqueness', async () => {
+    const prevNtfy = config.ntfy.enabled;
+    (config.ntfy as { enabled: boolean }).enabled = false;
     (config.allDomains as Set<string>).add('secondary.example');
     (config.extraDomains as string[]).push('secondary.example');
 
@@ -626,6 +628,7 @@ describe('multi-domain identities', () => {
       expect(resDup.status).toBe(409);
       expect(await resDup.json()).toEqual({ error: 'address_exists' });
     } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       (config.allDomains as Set<string>).delete('secondary.example');
       const idx = config.extraDomains.indexOf('secondary.example');
       if (idx !== -1) config.extraDomains.splice(idx, 1);

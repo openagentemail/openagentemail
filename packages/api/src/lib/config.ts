@@ -259,8 +259,19 @@ export function normalizeUrl(value: string): string {
   return url.href;
 }
 
-const DOMAIN_LABEL_RE =
-  /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+const DOMAIN_MAX_LENGTH = 253;
+
+function isValidDomain(domain: string): boolean {
+  if (!domain || domain.length > DOMAIN_MAX_LENGTH) return false;
+  const labels = domain.split('.');
+  if (labels.length < 2) return false;
+  return labels.every(
+    (label) =>
+      label.length > 0 &&
+      Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS &&
+      SMTP_DOMAIN_LABEL_PATTERN.test(label),
+  );
+}
 
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
@@ -273,7 +284,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     const entries = rawExtra.split(',').map((s) => s.trim());
     for (const rawEntry of entries) {
       const canonical = rawEntry.toLowerCase().replace(/\.+$/, '');
-      if (!canonical || !DOMAIN_LABEL_RE.test(canonical)) {
+      if (!isValidDomain(canonical)) {
         throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
       }
       if (canonical === primaryDomain) {

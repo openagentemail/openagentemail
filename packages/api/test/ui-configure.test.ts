@@ -239,10 +239,22 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     expect(await created.json()).toMatchObject({ error: 'invalid_json' });
   });
 
-  test('GET /ui/api/domains returns configured primary, extra, and all domains', async () => {
+  test('GET /ui/api/domains is admin-only and returns configured domains', async () => {
     (config.allDomains as Set<string>).add('secondary.example');
     (config.extraDomains as string[]).push('secondary.example');
     try {
+      // Identity-scoped session is denied 403
+      const { app: identityApp, cookie: identityCookie } = authenticatedApp({
+        kind: 'identity',
+        address: 'fox@test.example',
+      });
+      const denied = await identityApp.request('http://localhost/ui/api/domains', {
+        headers: { cookie: identityCookie },
+      });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: 'forbidden: admin session required' });
+
+      // Admin session succeeds with 200
       const { app, cookie } = authenticatedApp({ kind: 'admin' });
       const res = await app.request('http://localhost/ui/api/domains', {
         headers: { cookie },

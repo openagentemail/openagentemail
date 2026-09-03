@@ -163,7 +163,7 @@
     var openedGen = modalGeneration;
     var name = createName.value.trim();
     var localpart = createLocalpart.value.trim();
-    var domain = (typeof createDomain !== 'undefined' && createDomain && createDomain.value ? createDomain.value : '').trim();
+    var domain = (typeof createDomain !== 'undefined' && createDomain && !createDomain.disabled && createDomain.value ? createDomain.value : '').trim();
     createModalSubmit.disabled = true;
     try {
       var payload = await apiJson('/ui/api/identities', {

@@ -344,7 +344,7 @@ You can configure secondary domains alongside the primary `DOMAIN` by setting `E
 
 - **Identities**: Agents can be created on the primary domain or any configured secondary domain via the API (`POST /v1/identities` with `domain`), MCP tools (`mail_new_identity`), or the Web Dashboard modal. Note that creating the same localpart across different domains is not allowed for now and will be revisited in Part 2.
 - **Inbound & Outbound**: Catch-all inbound matching and internal mail stamping (`X-OA-Mail-Stamp`) recognize all configured domains.
-- **Tasks & Alerts**: Cross-domain tasks and notifications seamlessly support agents across all configured domains.
+- **Tasks & Alerts**: Cross-domain tasks and notifications seamlessly support agents across all configured domains, with identical localparts across domains currently not allowed (409) pending a design revision, and agent-card endpoints still publishing the primary domain.
 - **Pending Deploy Automation**: Automated deploy scripts (`deploy/dns-records.sh`, `deploy/doctor.sh`, Certbot SANs, and multi-domain DKIM key generation) currently configure the primary `DOMAIN`. Automated multi-domain provisioning scripts will follow in Part 2.
 
 ### Optional compliance archive

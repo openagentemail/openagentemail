@@ -540,5 +540,26 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
         EXTRA_DOMAINS: '-bad.example',
       }),
     ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "-bad.example"');
+
+    // Label length > 63 chars
+    const longLabel = 'a'.repeat(64);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: `${longLabel}.example`,
+      }),
+    ).toThrow(`EXTRA_DOMAINS contains invalid domain entry: "${longLabel}.example"`);
+
+    // Total length > 253 chars
+    const longDomain = `${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.${'e'.repeat(60)}.com`;
+    expect(longDomain.length).toBeGreaterThan(253);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: longDomain,
+      }),
+    ).toThrow(`EXTRA_DOMAINS contains invalid domain entry: "${longDomain}"`);
   });
 });

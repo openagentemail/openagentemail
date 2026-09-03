@@ -552,6 +552,8 @@ export function createUiApiRoutes(
   });
 
   routes.get('/domains', (c) => {
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
     return c.json({
       primary: config.domain,
       extra: [...config.extraDomains],
