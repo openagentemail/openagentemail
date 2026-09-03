@@ -448,7 +448,7 @@ mechanism OAE adopts.
 - **`pending_webhooks` as a failure counter.** Stripe's Event object carries the number of
   webhooks not yet successfully delivered. It is a small, cheap, always-visible signal that
   the push subsystem is behind — precisely the "fail visible" property #109 asks for.
-  Adopted in spirit as per-endpoint `consecutiveFailures` and instance-level dead-letter
+  Adopted in spirit as per-endpoint `exhaustedEvents` and instance-level dead-letter
   counts (§13).
 - **An explicit ordering disclaimer.** *"Stripe doesn't guarantee the delivery of events in
   the order that they're generated."* One sentence, prominently documented, and it removes
@@ -928,21 +928,38 @@ fragment to the log (§8.6).
 
 Overflow behavior: if a payload still exceeds `WEBHOOK_PAYLOAD_MAX_BYTES` after field
 truncation, the delivery proceeds with fields dropped in a **defined order**, never by
-truncating mid-JSON. The order is stated per scope, because the preview-only fields do not
-exist at `metadata` scope:
+truncating mid-JSON. The order is specified **per event type**, because the two types carry
+different fields and an approval payload must not be degraded by a rule written for mail —
+review caught that the first draft's single mail-shaped order gave `approval.requested` no
+usable degradation path at all, so a 4 KiB `actionArguments` under a lower configured
+`WEBHOOK_PAYLOAD_MAX_BYTES` could fail delivery outright instead of shedding the field.
+
+`mail.received`:
 
 - `preview` scope: `links` → `securityCodes` → `textPreview`, then continue as below.
 - both scopes: `cc` → `to` → `subject`.
-- **never dropped:** `id`, `type`, `payloadVersion`, `createdAt`, `domain`,
-  `data.object`, `data.address`, `data.messageId`, `data.cursor`, `data.receivedAt`,
-  `data.from`, and the two `contains…` booleans.
+- **never dropped:** `id`, `type`, `payloadVersion`, `createdAt`, `domain`, `data.object`,
+  `data.address`, `data.messageId`, `data.cursor`, `data.receivedAt`, `data.from`, and the
+  two `contains…` booleans.
 
-The never-dropped set is exactly what a consumer needs to dedupe, order, and re-fetch, so a
-payload degraded by overflow is still actionable — it just carries less description. This
-mirrors ntfy's existing ordered-overflow approach (`notify.ts:895-932`) and is stated
-normatively because an integrator needs to know which fields can vanish. If dropping every
-droppable field still does not fit, the delivery fails closed rather than being sent
-malformed.
+`approval.requested`:
+
+- `preview` scope: `actionArguments` **first**, dropped whole — never partially truncated,
+  because a fragment of a JSON value is worse than none and the `digest` still lets the
+  consumer verify what it fetches (§6.3).
+- both scopes: `subject`.
+- **never dropped:** `id`, `type`, `payloadVersion`, `createdAt`, `domain`, `data.object`,
+  `data.taskId`, `data.taskState`, `data.reviewer`, `data.expiresAt`, `data.expiresInSec`,
+  `data.digest`, `data.actionType`, `data.actionName`.
+
+The two never-dropped sets are each exactly what that event's consumer needs to dedupe,
+order or deadline, and re-fetch — so a payload degraded by overflow is still actionable, it
+just carries less description. For approvals that set is deliberately generous: `digest`,
+`actionType`, `actionName`, and `expiresAt` are the four fields a paging decision needs, and
+none is large. This mirrors ntfy's existing ordered-overflow approach (`notify.ts:895-932`)
+and is stated normatively because an integrator needs to know which fields can vanish. If
+dropping every droppable field still does not fit, the delivery fails closed rather than
+being sent malformed.
 
 ---
 
@@ -1302,6 +1319,7 @@ Each row records one delivery attempt:
   "type": "mail.received",
   "address": "postmaster@openagent.email",
   "messageId": "9d4c2a71-3b8e-4f60-a1c5-2e7b9d04f6a8",
+  "uidValidity": 17,
   "attempt": 2,
   "outcome": "retryable",
   "status": 503,
@@ -1338,24 +1356,54 @@ Rules:
 
 - Subscription configuration survives restart (it is in `webhooks.json`, §10.5).
 - The delivery log survives restart, so the dead-letter record is durable and inspectable.
-- **Pending retries are reconstructed from the log at boot** by reading rows with a
-  `nextAttemptAt` in the future and no later successful row for the same
-  **`(webhookId, eventId)` pair**. The pair matters: one event fans out to N endpoints
-  (§5.1), so keying on `eventId` alone would let a success for endpoint A silently cancel
-  endpoint B's outstanding retries. Indexing by that pair is not optional polish — under the
-  72-hour budget D2 adopted (§8.3), the pending window can hold three days of rows per
-  endpoint, so a linear scan of a 30-day log at every boot would be the slowest part of
-  startup.
+- **Pending retries are reconstructed from the log at boot**, by this algorithm. It is
+  stated as steps because two plausible-sounding shortcuts are both wrong, and review caught
+  both:
+
+  1. Group rows by **`(webhookId, eventId)`**. The pair matters: one event fans out to N
+     endpoints (§5.1), so keying on `eventId` alone would let a success for endpoint A
+     silently cancel endpoint B's outstanding retries.
+  2. Within each group take **only the row with the highest `attempt`**, tie-broken on `ts`.
+     Every earlier row is history, not work. Selecting all rows whose `nextAttemptAt` is in
+     the future — the obvious reading — enqueues one retry per past failure, because after
+     two failed attempts *both* rows still carry a future `nextAttemptAt`. That violates
+     per-endpoint concurrency 1 (§8.7) and burns the budget several times over.
+  3. Discard the group if that latest row is final: `outcome` is `success`, `permanent`, or
+     `refused`, or `attempt >= WEBHOOK_MAX_ATTEMPTS`.
+  4. Otherwise the group is pending. Schedule it at
+     **`max(nextAttemptAt, bootTime)`** — that is, a row whose `nextAttemptAt` fell *during*
+     the downtime runs **immediately**, it is not skipped. Filtering on
+     `nextAttemptAt > now` instead would silently truncate the 72-hour sequence for any
+     outage that spans a scheduled attempt, which is most outages, and would contradict the
+     restart guarantee this section states.
+  5. Rebuild the payload (§below) and hand it to the delivery pool.
+
+  Indexing by the pair is not optional polish: under the 72-hour budget D2 adopted (§8.3)
+  the pending window can hold three days of rows per endpoint, so a linear scan of a 30-day
+  log at every boot would be the slowest part of startup.
 - **Reconstruction re-builds the payload; it does not replay stored bytes.** No payload is
-  ever written (§8.6 rules below), so boot recovery re-fetches the message from IMAP by
-  `messageId`, re-serializes it at the subscription's current `contentScope`, and delivers
-  it under the **original** `eventId` — preserving the consumer's dedupe key across a
-  restart. If the message is gone (retention, manual deletion), the delivery is
-  dead-lettered with outcome `permanent` rather than resurrected or silently dropped.
-  A consequence worth stating: a rebuilt payload may differ from the original if the
-  subscription's scope or the bounding constants changed while the process was down. That
-  is correct behavior — the consumer sees current policy — but it is another reason
-  consumers must treat the payload as a snapshot and re-fetch (§4.2).
+  ever written (§8.6 rules below), so recovery must re-fetch. The two event types differ
+  here, and only one of them is easy:
+
+  - **`approval.requested`** re-fetches by task id, which has a real lookup primitive
+    (`getTaskSnapshot()`), so reconstruction is exact and survives any IMAP renumbering.
+  - **`mail.received`** has no lookup-by-UUID primitive: the OAE message id **is** the IMAP
+    UID within the inbox, and a UID is only addressable while `UIDVALIDITY` is unchanged.
+    The log row therefore also records **`uidValidity`** at emission. On reconstruction, if
+    the mailbox's current `UIDVALIDITY` matches, fetch by UID; if it does not, the UID is
+    meaningless and the delivery is dead-lettered with outcome `permanent` and reason
+    `uidvalidity_changed` — not silently dropped, and not fetched by a stale UID that now
+    addresses a different message. To make recovery survive renumbering, the row may also
+    carry the RFC 822 `Message-ID` header, which permits a header-search fallback; that is
+    an identifier rather than content, so it does not weaken the no-payload rule.
+
+  In every case the rebuilt delivery keeps the **original** `eventId`, preserving the
+  consumer's dedupe key across a restart. If the message is genuinely gone (retention,
+  manual deletion), the delivery is dead-lettered with outcome `permanent`. A consequence
+  worth stating: a rebuilt payload may differ from the original if the subscription's scope
+  or the bounding constants changed while the process was down. That is correct behavior —
+  the consumer sees current policy — and it is another reason consumers must treat the
+  payload as a snapshot and re-fetch (§4.2).
 - Events emitted while the process was **down** are not reconstructed in v1. The UID
   watermark persists, so whether a restart re-emits or skips depends on watermark
   durability, which the watcher already owns. Making post-restart catch-up authoritative
@@ -1373,9 +1421,10 @@ Reuse `slidingWindowCheck()` (`ratelimit.ts:26`) and the wait-slot pattern
 | concurrent deliveries, per endpoint | 1 | Preserves per-endpoint attempt order, and stops one slow consumer from consuming the pool. |
 | concurrent deliveries, instance-wide | `WEBHOOK_MAX_CONCURRENT = 8` | Mirrors `MAX_WAITS_TOTAL = 8`. A webhook pool must not be able to starve `mail_wait_for`, so these are **separate** pools (§11.3). |
 | delivery attempts per endpoint per minute | `WEBHOOK_RATE_DELIVER_PER_MIN` = 60 | Bounds a hot mailbox pointed at a slow endpoint. |
-| subscription creates per token per minute | 10 | Bounds endpoint-churn abuse. |
+| subscription creates per token per minute | `WEBHOOK_RATE_CREATE_PER_MIN` = 10 | Bounds endpoint-churn abuse. |
+| **`POST /:id/test` calls per token per minute** | `WEBHOOK_RATE_TEST_PER_MIN` = 3 | **Separate bucket from delivery**, because `/test` is caller-triggered and the per-endpoint delivery bucket does not bound it. Without it a stolen identity token multiplies create-rate by the subscription cap (10/min × 16 ≈ 160 connection attempts/min) against public hosts of its choosing using OAE's egress IP — the residual §12.5 names. A tight per-token bucket is the mitigation §12.5 called "obvious"; this row is where it actually lives. |
 | subscriptions per instance | `WEBHOOK_MAX_SUBSCRIPTIONS = 16` | Small by design; a mailbox does not need 200 callbacks. |
-| subscriptions per address | 4 | Allows fan-out (agent + archiver + ntfy bridge) without unbounded growth. |
+| subscriptions per address | `WEBHOOK_MAX_PER_ADDRESS` = 4 | Allows fan-out (agent + archiver + ntfy bridge) without unbounded growth. |
 
 All numeric limits follow the repo's `0 = disabled` convention.
 
@@ -1571,6 +1620,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_ROTATION_OVERLAP_MS` | int ≥ 0 | `86400000` | 24 h dual-signature window (§12.2). `0` = atomic swap. |
 | `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ 1 | `30` | |
 | `WEBHOOK_RATE_CREATE_PER_MIN` | int ≥ 0 | `10` | |
+| `WEBHOOK_RATE_TEST_PER_MIN` | int ≥ 0 | `3` | Per token, separate bucket from delivery (§8.7). Bounds caller-triggered egress. |
 | `WEBHOOK_RATE_DELIVER_PER_MIN` | int ≥ 0 | `60` | Per endpoint. `0` disables. |
 
 Note what is **absent**: no `WEBHOOK_TLS_REJECT_UNAUTHORIZED` (§9.5), and no per-event-type
@@ -1582,9 +1632,23 @@ All of these run in `parseConfig` and fail the boot, following the existing
 `ALWAYS_BCC` precedent (`config.ts:262-280`). A misconfigured webhook subsystem must not
 start and silently misbehave:
 
-1. If `WEBHOOKS_ENABLED=true` and `WEBHOOK_SIGNING_SECRET` is unset, then
-   `TASK_SIGNING_SECRET` **must be explicitly set** and ≥ 32 characters. The `SMTP_PASS`
-   fallback is refused. Rationale in §12.1.
+1. If `WEBHOOKS_ENABLED=true`, then `TASK_SIGNING_SECRET` **must be explicitly set** and
+   ≥ 32 characters — **unconditionally, whether or not `WEBHOOK_SIGNING_SECRET` is also
+   set**. The `SMTP_PASS` fallback is refused. Rationale in §12.1.
+
+   This rule was conditional in the first draft (it applied only when
+   `WEBHOOK_SIGNING_SECRET` was unset), and review caught that the condition was a hole.
+   Setting `WEBHOOK_SIGNING_SECRET` protects the *webhook signature* key, but it does
+   nothing for `data.cursor`: the cursor embedded in every `mail.received` payload is a
+   `mail-cursor-v1` HMAC keyed on `config.taskSigningSecret` (`imap.ts:765`, `:833`,
+   `mail-cursor.ts:39-45`), and its signed plaintext is
+   `mail-cursor-v1\n<folder>\n<address>\n<receivedAtMs>\n<uid>` — of which folder, address
+   and `receivedAtMs` are all visible elsewhere in the same payload, leaving only the small
+   integer `uid` to guess. That is a **known-plaintext MAC over the root key, handed to a
+   third party on every delivery**. If `taskSigningSecret` had silently fallen back to
+   `SMTP_PASS`, any webhook consumer could brute-force the SMTP password offline. This is
+   the exact oracle `mail-stamp.ts:141` exists to prevent, arriving by a second path the
+   first draft did not check.
 2. If `OAE_PUBLIC_EDGE=true`, `WEBHOOK_ALLOW_PRIVATE_TARGETS` is forced to `false`.
 3. `WEBHOOK_ALLOWED_PORTS` must be non-empty and contain only integers in 1–65535. The
    real protection against reaching an internal management panel is the address policy
@@ -1602,10 +1666,11 @@ bodies.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/v1/webhooks` | admin, or identity for own address | Create. `201` + `secret` **shown once**. |
+| `POST` | `/v1/webhooks` | admin, or identity for own address — **never OAuth** (§10.4) | Create. `201` + `secret` **shown once**. |
 | `GET` | `/v1/webhooks` | admin: all; identity: own address | `{webhooks:[…]}`. Never includes `secret`. |
 | `GET` | `/v1/webhooks/:id` | as above | Bare object incl. `state`, `lastDelivery`. |
-| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `active`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. |
+| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `active`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
+| `GET` | `/v1/webhooks/:id/secret` | **admin** | Re-display the current derived signing key (§12.3). Audited as `webhook.reveal`. Possible only because D6 chose derivation; a stored random secret could not offer it. |
 | `DELETE` | `/v1/webhooks/:id` | as above | Delete. Precedent: `routes/notify.ts:228`. |
 | `POST` | `/v1/webhooks/:id/rotate` | as above | Issue a new secret; start the overlap window (§12.2). Returns the new `secret` once. |
 | `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status}`; later attempts continue in the background. |
@@ -1659,6 +1724,7 @@ Error codes, following the existing snake_case convention:
 | `webhook_target_forbidden` | 400 | Fails the SSRF policy at creation (§9.3) |
 | `content_scope_requires_admin` | 403 | Identity token requested `preview` (§6.5) |
 | `forbidden: token is scoped to another address` | 403 | Existing `forbidUnlessAddress` message, reused verbatim |
+| `forbidden: oauth tokens may not create webhook subscriptions` | 403 | New, same prose-suffix convention. Requires token attribution, not `Auth` (§10.4) |
 | `forbidden: admin key required` | 403 | Existing `requireAdmin` message, reused verbatim |
 | `not_found` | 404 | Unknown `:id` |
 | `webhook_limit_reached` | 409 | Instance or per-address cap (§8.7) |
@@ -1672,9 +1738,29 @@ Error codes, following the existing snake_case convention:
 | --- | --- |
 | admin key | Everything, on any address: create/update/delete/rotate/test/enable, list deliveries, redeliver, set `contentScope: preview`. |
 | identity token (`oa_…`, address-scoped) | Create/update/delete/rotate/test subscriptions **for its own address only**, at `contentScope: metadata` only. Cannot list deliveries or redeliver. |
-| oauth token | Maps to the identity scope it was issued for — reads, and deleting own subscriptions. **Creation is deny-by-default** via the `critical` MCP tier (§10.7), not allowed merely because the token is identity-scoped. Never admin (`auth.ts`). |
+| oauth token | Reads, and deleting its own subscriptions. **Creation is refused on every surface** — see the enforcement note below. Never admin (`auth.ts`). |
 
-Enforcement reuses `forbidUnlessAddress()` and `requireAdmin()` — no new auth primitive.
+Enforcement reuses `forbidUnlessAddress()` and `requireAdmin()` — no new auth primitive for
+address scoping. **But OAuth restriction does need one, and this is worth being precise
+about because the obvious mechanism does not work.**
+
+`bearerAuth` deliberately collapses an OAuth access token to an identity-scoped
+`Auth` (`{kind:'identity', address}`), so a route calling `getAuth(c)` **cannot tell an
+OAuth token from a native identity token**. The `critical` MCP tier (§10.7) is enforced on
+the MCP path only; it has no effect on a direct `POST /v1/webhooks`. Relying on the tier to
+make creation deny-by-default for OAuth would therefore leave the REST route granting the
+persistent egress capability the tier was chosen to withhold.
+
+The distinction is available one level up: `TokenAttribution` (`auth.ts:45-48`) carries
+`{kind:'oauth', address, grantId, clientId}` alongside `Auth`, and the resolver returns both
+(`auth.ts:67`). So the normative rule is:
+
+> `POST /v1/webhooks` and `POST /v1/webhooks/:id/rotate` must consult **token attribution**,
+> not `Auth`, and reject `kind === 'oauth'` with
+> `403 {error:'forbidden: oauth tokens may not create webhook subscriptions'}`. The MCP tier
+> is a second, independent gate on the MCP path — not the mechanism that makes REST safe.
+
+Everything else in the table is enforceable with the existing primitives.
 
 **Why an identity token may subscribe at all.** This is the capability that makes #109's
 flagship use case work: an agent can wire up its own wake-up endpoint without a human
@@ -1696,10 +1782,34 @@ fsync, corrupt-fails-closed, and a `FORBIDDEN_SECRET_KEYS`-style guard
 or `previousSecret`.
 
 Per subscription the file holds: `id`, `url`, `address`, `events`, `contentScope`,
-`active`, `state`, `disabledReason`, `secretPrefix`, `createdAt`, `updatedAt`,
-`rotatedAt`, `consecutiveFailures`, `createdBy` (`admin` or the address).
+`active`, `state`, `disabledReason`, `secretPrefix`, **`epoch`**, **`overlapUntil`**,
+`createdAt`, `updatedAt`, `rotatedAt`, **`exhaustedEvents`**, `createdBy` (`admin` or the
+address).
 
-Note what it does **not** hold: the signing secret (§12.1), any payload content, or the
+Three of those fields exist only because of decisions made elsewhere in this document, and
+omitting any of them breaks something non-obvious:
+
+- **`epoch`** (integer, starts at 0) is the derivation input §12.1 requires. Without it
+  persisted, the signing key cannot be re-derived after a rotation *and* a restart, so a
+  rotated endpoint would silently revert to its pre-rotation key and every consumer that had
+  migrated would start failing verification. This is the field review caught missing from the
+  first draft of this list.
+- **`overlapUntil`** (timestamp or null) is what tells the signer to emit two signatures
+  (§12.2). It is derived state, but it must survive a restart or a rotation in progress would
+  end early and cut consumers off mid-window.
+- **`exhaustedEvents`** is the circuit-breaker counter, in the units D2a requires (§8.5) —
+  events that ran out of attempts, not failed attempts.
+
+Rotation idempotency keys (§12.2) are stored alongside, keyed by `(webhookId,
+idempotencyKey)` with the resulting `epoch` and response body, retained for
+`WEBHOOK_LOG_RETENTION_DAYS`. They contain no secret: the response body they cache does
+include the revealed key, so this entry is subject to the same `FORBIDDEN_SECRET_KEYS`
+guard as everything else in the file — which means the **stored response must redact the
+secret** and a replayed rotation returns `200` with `secret: null` plus the `epoch`, forcing
+the operator to use the admin re-display path (§12.3) if they lost it. Trading a little
+convenience for not persisting a plaintext secret is the right side of §12.1's argument.
+
+Note what the file does **not** hold: the signing secret (§12.1), any payload content, or the
 delivery history (that is the JSONL log, §8.6).
 
 `identities.ts:12` observes that the JSON-store approach should be swapped for SQLite
@@ -1717,6 +1827,7 @@ likely to ship elsewhere.
 | --- | --- |
 | `webhook.create` / `webhook.update` / `webhook.delete` | `ok`, `denied`, `rate_limited`, `error` |
 | `webhook.rotate` | `ok`, `denied`, `error` |
+| `webhook.reveal` | `ok`, `denied` — admin-only secret re-display (§12.3). Audited because it is the one route that returns keying material |
 | `webhook.disabled` | `ok` (the disablement itself succeeded) |
 | `webhook.deliver` | `ok`, `error` (retryable/permanent/refused folded into `error`, with the detail in the JSONL log) |
 | `webhook.ssrf_refused` | `denied` |
@@ -2072,26 +2183,51 @@ Multi-signature headers, as documented by both Svix/Standard Webhooks and Stripe
 (SHA-1) and `X-Hub-Signature-256` is migration between *algorithms*, not between *secrets*,
 and is the weaker cousin of what is adopted here.
 
-1. `POST /v1/webhooks/:id/rotate` generates the new key (or, under (B), rotates the root
-   or switches to an explicit `WEBHOOK_SIGNING_SECRET`).
+1. `POST /v1/webhooks/:id/rotate` **increments that subscription's persisted `epoch`**
+   (§10.5), which changes the derived key for this endpoint and no other (§12.1). It does
+   **not** rotate the root secret — that would invalidate every endpoint on the instance —
+   and it is not the same operation as setting `WEBHOOK_SIGNING_SECRET`, which is an
+   instance configuration change made by restarting with a different environment, not an
+   endpoint rotation. The first draft of this step conflated all three; review caught it.
 2. For `WEBHOOK_ROTATION_OVERLAP_MS` (default 24 h), every delivery carries **both**
-   signatures: `X-OAE-Signature: t=…,v1=<new>,v1=<old>`.
+   signatures: `X-OAE-Signature: t=…,v1=<new>,v1=<old>`. Both are computed from the same
+   root, at `epoch` and `epoch - 1`, so the overlap needs no secret storage — only the
+   knowledge that a rotation is in progress and when it ends (§10.5).
 3. The consumer migrates to the new key at its own pace within the window. Verification
    tries every `v1=` value (§7.3 step 2), so no consumer-side coordination is needed to
    survive the window.
-4. After the window, only the new signature is sent. The old key is discarded.
+4. After the window, only the new signature is sent. `epoch - 1` is no longer used to sign.
 5. `WEBHOOK_ROTATION_OVERLAP_MS=0` gives an atomic swap for operators who prefer it.
 
-The response body of `rotate` includes `overlapUntil` so the operator knows the deadline.
-Rotation writes an audit event and is the one operation that must be idempotent under
-retry — rotating twice in quick succession should produce one window, not two.
+**Idempotency needs a mechanism, not an instruction.** The response body of `rotate`
+includes `overlapUntil` and the new `epoch` so the operator knows the deadline. But a client
+that times out after a *successful* rotation and retries the POST cannot be distinguished
+from an operator intentionally rotating twice, and "the operation must be idempotent" does
+not by itself prevent a second epoch increment and a second, different secret being returned
+— which would leave the consumer holding a key OAE no longer signs with. So the contract is
+concrete:
+
+> `POST /v1/webhooks/:id/rotate` accepts an optional `Idempotency-Key` header (opaque
+> string, ≤ 200 chars). The key, the resulting `epoch`, and the response body are persisted
+> for `WEBHOOK_LOG_RETENTION_DAYS`. A retry presenting a key already seen returns the
+> **stored** response with `200` and does not increment the epoch. A request with no key is
+> treated as an intentional rotation and always increments.
+
+This mirrors how the repo already treats caller-supplied dedupe identifiers
+(`X-OA-Task-Idempotency-Key`, `tasks-internal.ts`) rather than inventing a new convention.
+Rotation writes an audit event in all cases.
 
 ### 12.3 Secret handling
 
-- Shown exactly once, in the `201` create response and the `rotate` response. Under
-  design (B) an admin-only re-display endpoint is possible; whether to expose it is
-  §16, Q3.
-- Never returned by any `GET`.
+- Shown in the `201` create response and the `rotate` response. Because D6 chose derived
+  keys (§12.1), the key is **re-derivable**, so an **admin-only re-display** is specified
+  rather than left as an open question: `GET /v1/webhooks/:id/secret`, admin key required,
+  audited as `webhook.reveal`. This is a genuine advantage of derivation over stored random
+  secrets — a lost secret costs an API call instead of a rotation and a consumer-side
+  cutover — and §10.5 depends on it, since a replayed rotation returns `secret: null`
+  rather than persisting plaintext.
+- Never returned by any `GET` **except** `GET /v1/webhooks/:id/secret`, which is admin-only
+  and audited. Every list and detail response carries `secretPrefix` alone.
 - Never written to `webhooks.json`, the delivery log, the audit log, or application
   output. Enforced structurally by a `FORBIDDEN_SECRET_KEYS` guard, following
   `notification-devices.ts:112`.
@@ -2136,12 +2272,14 @@ Recorded so nobody discovers it later as a surprise:
   cursor + list API to catch up (§8.4). This RFC does not make webhooks a reliable queue.
 - **Use of OAE's egress IP to probe *public* hosts.** The SSRF policy (§9) keeps internal
   addresses out of reach, and creation-time validation is DNS-only, so there is no
-  connect-result oracle at registration. But `POST /v1/webhooks/:id/test` plus
-  `WEBHOOK_RATE_CREATE_PER_MIN = 10` and `WEBHOOK_MAX_SUBSCRIPTIONS = 16` still lets a
-  stolen identity token make OAE originate a bounded number of connections to public hosts
-  and observe distinguishable outcomes and timings. The caps make this a poor scanning
-  primitive rather than an impossible one. Accepted for v1; tightening the test rate limit
-  separately from the create limit is the obvious mitigation if it matters.
+  connect-result oracle at registration. But `POST /v1/webhooks/:id/test` still lets a
+  stolen identity token make OAE originate connections to public hosts and observe
+  distinguishable outcomes and timings. The first draft accepted this with the mitigation
+  named but unspecified; **it is now specified** — `WEBHOOK_RATE_TEST_PER_MIN = 3`, per
+  token, in a bucket separate from delivery (§8.7) — which caps a stolen token at roughly
+  three probes a minute no matter how many subscriptions it created. What remains accepted
+  is those three: OAE cannot distinguish an operator legitimately testing an endpoint from a
+  token holder probing one.
 - **A lost `approval.requested` leaves a human unpaged about a deadline nobody will
   materialize.** The task producer has no watermark, so a crash between writing the approval
   task and dispatching the event loses it (§11.4 item 4) — and because expiry is only
@@ -2158,8 +2296,8 @@ Recorded so nobody discovers it later as a surprise:
 
 #109: *"Outbound failures fail visible (health signal), never silent."* Concretely:
 
-1. **Per-endpoint state** on `GET /v1/webhooks/:id`: `state` (`enabled` / `disabled`),
-   `disabledReason`, `consecutiveFailures`, and
+1. **Per-endpoint state** on `GET /v1/webhooks/:id`: `state` (`unverified` / `enabled` /
+   `disabled`), `disabledReason`, `exhaustedEvents`, and
    `lastDelivery: {at, outcome, status, durationMs, attempt}`.
 2. **Instance health.** Extend the admin surface — not the unauthenticated
    `GET /healthz` (`app.ts:56`), which must stay trivial — with a count of disabled
@@ -2242,6 +2380,25 @@ than only unit tests.
     no mutating webhook route exists under `/ui/api`, that all of them 404 when
     `UI_ENABLED=false`, that an identity session sees only its own address, that deliveries
     are admin-only, and that no response contains a `secret` field — only `secretPrefix`.
+13. **Unconditional boot rule (R1).** That `WEBHOOKS_ENABLED=true` with no explicit
+    `TASK_SIGNING_SECRET` fails the boot **even when `WEBHOOK_SIGNING_SECRET` is set**, and
+    that no webhook payload can be produced while `taskSigningSecret` equals `SMTP_PASS`.
+    This is the highest-value configuration test in the feature, because the failure mode is
+    a leaked MAC oracle rather than a crash.
+14. **OAuth refusal on the REST path (R2).** That `POST /v1/webhooks` with an OAuth access
+    token returns the 403 even though `getAuth(c)` reports `kind: 'identity'` — i.e. assert
+    the route consults attribution, not `Auth`. A test that only exercises the MCP tool would
+    pass while the hole stayed open, which is exactly how the first draft shipped it.
+15. **Boot reconstruction (R3, R4, R9).** With a log containing two failed attempts for one
+    `(webhookId, eventId)` pair, assert exactly **one** retry is enqueued; with a
+    `nextAttemptAt` in the past, assert it runs rather than being dropped; with a
+    success for the same event under a *different* `webhookId`, assert the first endpoint's
+    retry still runs; and with a changed `UIDVALIDITY`, assert a `uidvalidity_changed`
+    dead letter rather than a fetch by stale UID.
+16. **Rotation idempotency (R7).** That a repeated `POST …/rotate` with the same
+    `Idempotency-Key` returns the stored `epoch` without incrementing, that a request with no
+    key always increments, and that a replayed response never contains the plaintext secret
+    (§10.5).
 
 ---
 
@@ -2548,6 +2705,38 @@ Three items are deliberately **not** settled by the above, and should not be rea
 3. **The approval reaper** — prerequisite for `approval.expired` (v1.1) and, if the owner
    decides a lost `approval.requested` is unacceptable, also the fix for the task producer's
    weak restart semantics (§11.4 item 4). Both should be designed together.
+
+### Post-ratification amendments from independent review
+
+After ratification, two independent review gates read the document against the source and
+found **eleven defects**, all in normative text. None changes a ratified *decision*; all
+change the specification of one. They are recorded here rather than folded in silently,
+because they amend text the commander approved and a reviewer comparing against the ratified
+version needs to know what moved.
+
+| # | Defect | Severity | Fixed in |
+| --- | --- | --- | --- |
+| R1 | Boot rule only required an explicit `TASK_SIGNING_SECRET` when `WEBHOOK_SIGNING_SECRET` was unset — but `data.cursor` is a **second** known-plaintext MAC keyed on `taskSigningSecret`, so the `SMTP_PASS` fallback leaked an offline-cracking oracle to every consumer regardless. Contradicted §12.1's own unconditional statement. | **P1 security** | §10.2 item 1 (now unconditional, with the cursor path explained) |
+| R2 | The `critical` MCP tier does **not** gate a direct REST call: `bearerAuth` collapses an OAuth token to identity scope, so `POST /v1/webhooks` would have granted the persistent egress capability the tier exists to withhold. | **P1 security** | §10.4 (route must consult `TokenAttribution`), §10.3 (new 403) |
+| R3 | Boot reconstruction selected *every* row with a future `nextAttemptAt`, so after two failures a restart enqueued one retry per past failure, violating per-endpoint concurrency and burning the budget repeatedly. | P1 | §8.6 (latest-row-per-pair algorithm) |
+| R4 | Boot reconstruction filtered on `nextAttemptAt > now`, so any outage spanning a scheduled attempt **silently truncated** the remaining 72-hour sequence. | P1 | §8.6 (step 4, `max(nextAttemptAt, bootTime)`) |
+| R5 | §12.2 step 1 said rotation "rotates the root" — which would invalidate every other endpoint, contradicting the per-endpoint epoch design in §12.1. | P1 | §12.2 step 1 |
+| R6 | `webhooks.json` omitted `epoch` and `overlapUntil`, so a rotated endpoint could not re-derive its key after restart and would silently revert. | P1 | §10.5 |
+| R7 | "Rotation must be idempotent" was an instruction with no mechanism; a client retrying after a timeout was indistinguishable from an intentional second rotation. | P1 | §12.2 (`Idempotency-Key` contract) |
+| R8 | §6.6's overflow drop order and never-dropped set were mail-only, leaving `approval.requested` — added by D1 — with no degradation path, so a 4 KiB `actionArguments` could fail delivery outright. | P1 | §6.6 (per-type orders) |
+| R9 | §8.6 said "re-fetch by `messageId`" but IMAP has no lookup-by-UUID; the id **is** a UID and stops being addressable when `UIDVALIDITY` changes. | P2 | §8.6 (`uidValidity` recorded, `uidvalidity_changed` dead-letter, header-search fallback) |
+| R10 | §12.5 named a separate `/test` rate limit as "the obvious mitigation" but §8.7 never specified one, leaving the egress-probing residual unmitigated. | P2 | §8.7 + §10.1 (`WEBHOOK_RATE_TEST_PER_MIN`), §12.5 narrowed |
+| R11 | `POST /v1/webhooks/:id` could change `url` without re-running static validation, letting a forbidden URL persist until delivery time. | P2 | §10.3 |
+
+Two follow-ons were resolved rather than left open, because R1 and D6 made them answerable:
+the admin secret re-display route is now specified (§12.3, §10.3, audited as
+`webhook.reveal`), and §13's state list carries all three states from D12.
+
+**Still awaiting confirmation: D2a** — whether `WEBHOOK_DISABLE_THRESHOLD` counts exhausted
+events (as §8.5 now specifies) or failed attempts (as approved under the old schedule). R3
+and R4 make the difference more consequential, not less: with correct reconstruction an
+endpoint now genuinely exercises its full 72-hour budget, so a threshold counted in attempts
+would trip even faster than §8.3 estimated.
 
 ---
 
