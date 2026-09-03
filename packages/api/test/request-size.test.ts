@@ -15,12 +15,14 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-request-size-'));
 process.env.RETENTION_DAYS = '0';
 
 const server = (await import('../src/main.ts')).default;
+const { config } = await import('../src/lib/config.ts');
+const adminKey = [...config.apiKeys][0]!;
 
 function sendRequest(text: string) {
   return server.fetch(
     new Request('http://localhost/v1/send', {
       method: 'POST',
-      headers: { authorization: 'Bearer admin-key', 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${adminKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         from: 'sender@test.example',
         to: 'recipient@example.net',

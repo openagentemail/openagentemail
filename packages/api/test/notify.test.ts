@@ -448,8 +448,9 @@ describe('phone device ACL', () => {
       const health = await app.request('/healthz');
       expect(health.status).toBe(200);
       expect(await health.json()).toEqual({ ok: true });
+      const adminKey = [...config.apiKeys][0]!;
       const devices = await app.request('/v1/notify/devices', {
-        headers: { authorization: 'Bearer admin-key' },
+        headers: { authorization: `Bearer ${adminKey}` },
       });
       expect(devices.status).toBe(500);
       expect(await devices.json()).toEqual({ error: 'device_registry_corrupt' });
