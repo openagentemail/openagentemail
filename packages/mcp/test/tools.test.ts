@@ -292,6 +292,9 @@ test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
     pushContentTier: 1 as const,
   };
   expect(listOut!.safeParse([row]).success).toBe(true);
+  expect(listOut!.safeParse([{ ...row, address: "bot@localhost" }]).success).toBe(true);
+  expect(listOut!.safeParse([{ ...row, address: "bot@example.com." }]).success).toBe(true);
+  expect(listOut!.safeParse([{ ...row, address: "not-an-email" }]).success).toBe(false);
 });
 
 test("mail_send 输出含可选审计 id，缺省仍通过", () => {

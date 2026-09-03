@@ -18,6 +18,8 @@
       });
     } catch (e) {
       if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;
+      // Session expired already transitioned to login; skip fallback rendering.
+      if (e && e.message === 'session_expired') return;
       renderEmptyState(configureDomainsState, {
         title: 'Configured instance domains',
         purpose: 'Primary domain: ' + (window.location.hostname || 'configured via environment')

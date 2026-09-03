@@ -276,7 +276,10 @@ function isValidDomain(domain: string): boolean {
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
   const primaryDomain = raw.DOMAIN.toLowerCase();
-  const canonicalPrimary = primaryDomain.replace(/\.+$/, '');
+  if (primaryDomain.endsWith('..')) {
+    throw new Error(`DOMAIN contains invalid domain: "${raw.DOMAIN}"`);
+  }
+  const canonicalPrimary = primaryDomain.replace(/\.$/, '');
   if (!isValidDomain(canonicalPrimary)) {
     throw new Error(`DOMAIN contains invalid domain: "${raw.DOMAIN}"`);
   }
@@ -287,7 +290,11 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     const entries = rawExtra.split(',').map((s) => s.trim());
     for (const rawEntry of entries) {
       if (!rawEntry) continue;
-      const canonical = rawEntry.toLowerCase().replace(/\.+$/, '');
+      const lowerEntry = rawEntry.toLowerCase();
+      if (lowerEntry.endsWith('..')) {
+        throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
+      }
+      const canonical = lowerEntry.replace(/\.$/, '');
       if (!isValidDomain(canonical)) {
         throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
       }

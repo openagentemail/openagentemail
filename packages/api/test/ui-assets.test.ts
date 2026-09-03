@@ -1649,12 +1649,17 @@ describe('UI static asset contract', () => {
     expect(PLAN_PAGE_JS).toContain('var configureDomainsGen = 0;');
     expect(PLAN_PAGE_JS).toContain('var gen = ++configureDomainsGen;');
     expect(PLAN_PAGE_JS).toContain("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;");
+    expect(PLAN_PAGE_JS).toContain("if (e && e.message === 'session_expired') return;");
     const enter = PLAN_PAGE_JS.slice(
       PLAN_PAGE_JS.indexOf('async function enterConfigureDomains('),
       PLAN_PAGE_JS.indexOf('function enterPlan('),
     );
     expect(enter.indexOf("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;")).toBeLessThan(
       enter.indexOf('renderEmptyState(configureDomainsState,'),
+    );
+    const catchBlock = enter.slice(enter.indexOf('} catch (e) {'));
+    expect(catchBlock.indexOf("if (e && e.message === 'session_expired') return;")).toBeLessThan(
+      catchBlock.indexOf('renderEmptyState(configureDomainsState,'),
     );
   });
 

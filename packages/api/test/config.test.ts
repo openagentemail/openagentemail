@@ -189,7 +189,7 @@ describe('ALWAYS_BCC configuration', () => {
   });
 
   test('rejects same-domain archives case-insensitively, including DNS root dots', () => {
-    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.', 'EXAMPLE.COM..']) {
+    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.']) {
       expect(() =>
         parseConfig({
           ...requiredEnv,
@@ -507,6 +507,28 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
       DOMAIN: 'example.com.',
     });
     expect(dotted.domain).toBe('example.com.');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com..',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "example.com.."');
+
+    const dottedExtra = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com',
+      EXTRA_DOMAINS: 'sec.example.',
+    });
+    expect(dottedExtra.extraDomains).toEqual(['sec.example']);
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com',
+        EXTRA_DOMAINS: 'sec.example..',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "sec.example.."');
   });
 
   test('rejects EXTRA_DOMAINS containing the primary DOMAIN (case-insensitive)', () => {
