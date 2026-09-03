@@ -631,6 +631,11 @@
       showInbox();
       await startSession();
       clearLinkLoginMarker();
+      if (linkLoginNotice) {
+        linkLoginNotice.hidden = true;
+        linkLoginNotice.textContent = '';
+      }
+      setLinkBannerActive(false);
     } catch {
       if (gen !== loginGeneration) return;
       loginError.textContent = 'Could not reach the server.';
@@ -647,6 +652,7 @@
       });
     } finally {
       clearLinkLoginMarker();
+      setLinkBannerActive(false);
       state.me = null;
       state.identities = [];
       state.messages = [];
@@ -858,8 +864,6 @@
       state.me = loginPayload;
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
-      showInbox();
-      await startSession();
       setLinkLoginMarker();
       var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
       var noticeText = 'Signed in via link as ' + label;
@@ -868,6 +872,9 @@
         linkLoginNotice.hidden = false;
       }
       announce(noticeText);
+      setLinkBannerActive(true);
+      showInbox();
+      await startSession();
     } catch {
       if (gen !== loginGeneration) return;
       showLogin('Could not reach the server.');
@@ -903,6 +910,20 @@
     }
   }
 
+  function setLinkBannerActive(active) {
+    try {
+      if (typeof document !== 'undefined' && document.body && document.body.classList) {
+        if (active) {
+          document.body.classList.add('link-login-active');
+        } else {
+          document.body.classList.remove('link-login-active');
+        }
+      }
+    } catch (_err) {
+      /* ignore DOM errors in restricted contexts */
+    }
+  }
+
   /**
    * Initializes the application UI, consumes any URL query token,
    * and verifies or establishes the user session.
@@ -915,6 +936,7 @@
       var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
       if (response.status === 401) {
         clearLinkLoginMarker();
+        setLinkBannerActive(false);
         if (queryToken !== null) {
           if (gen !== loginGeneration) return;
           await loginWithToken(queryToken);
@@ -929,15 +951,16 @@
       if (gen !== loginGeneration) return;
       state.me = mePayload;
       if (consumeReturnTo(mePayload)) return;
-      showInbox();
-      await startSession();
       if (hasLinkLoginMarker()) {
         var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
         if (linkLoginNotice) {
           linkLoginNotice.textContent = 'Signed in via link as ' + existingLabel;
           linkLoginNotice.hidden = false;
         }
+        setLinkBannerActive(true);
       }
+      showInbox();
+      await startSession();
     } catch {
       if (gen !== loginGeneration) return;
       showLogin('Could not reach the server.');

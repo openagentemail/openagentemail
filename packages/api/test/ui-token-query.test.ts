@@ -63,6 +63,7 @@ interface HarnessOptions {
   isSecure?: boolean;
   hasReplaceState?: boolean;
   storageThrows?: boolean;
+  hangStartSession?: Promise<void>;
   initialStorage?: Record<string, string>;
   meResponse?: { status: number; body?: unknown; error?: Error };
   sessionResponse?: { status: number; body?: unknown; error?: Error };
@@ -81,9 +82,20 @@ function createClientHarness(options: HarnessOptions) {
 
   let currentUrl = options.initialUrl;
   const historyState = { count: 0 };
+  const bodyClassSet = new Set<string>();
+  const mockDocument = {
+    body: {
+      classList: {
+        add: (c: string) => bodyClassSet.add(c),
+        remove: (c: string) => bodyClassSet.delete(c),
+        contains: (c: string) => bodyClassSet.has(c),
+      },
+    },
+  };
 
   const mockWindow = {
     isSecureContext: options.isSecure !== false,
+    document: mockDocument,
     location: {
       get href() {
         return currentUrl;
@@ -157,6 +169,7 @@ function createClientHarness(options: HarnessOptions) {
     loginError.textContent = msg || '';
     linkLoginNotice.hidden = true;
     linkLoginNotice.textContent = '';
+    bodyClassSet.delete('link-login-active');
     configureLoginGate();
   };
 
@@ -165,12 +178,13 @@ function createClientHarness(options: HarnessOptions) {
     loginView.hidden = true;
     inboxView.hidden = false;
     loginError.textContent = '';
-    linkLoginNotice.hidden = true;
-    linkLoginNotice.textContent = '';
   };
 
   const startSession = async () => {
     calls.startSessionCount += 1;
+    if (options.hangStartSession) {
+      await options.hangStartSession;
+    }
   };
 
   const consumeReturnTo = (_payload: unknown) => false;
@@ -249,6 +263,7 @@ function createClientHarness(options: HarnessOptions) {
 
   const runner = new Function(
     'window',
+    'document',
     'fetch',
     'loginToken',
     'loginError',
@@ -292,6 +307,7 @@ function createClientHarness(options: HarnessOptions) {
 
   const instance = runner(
     mockWindow,
+    mockDocument,
     mockFetch,
     loginToken,
     loginError,
@@ -322,6 +338,7 @@ function createClientHarness(options: HarnessOptions) {
 
   return {
     mockWindow,
+    mockDocument,
     loginToken,
     loginError,
     loginSubmit,
@@ -377,9 +394,10 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     // 断言 4: 登录输入框被清空，不留 token
     expect(harness.loginToken.value).toBe('');
 
-    // 断言 5: 链接登录成功展示 visible notice banner
+    // 断言 5: 链接登录成功展示 visible notice banner 且激活 body class
     expect(harness.linkLoginNotice.hidden).toBe(false);
     expect(harness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
   });
 
   // 2. 无会话 + ?token=<invalid> → 登录表单显示、错误文案正确、token 不回显、参数已剥离。
@@ -621,9 +639,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.linkLoginNotice.textContent).toBe('');
   });
 
-  // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1) & R5: query 链接登录成功展示 visible banner 与 announcement 提示并设置 sessionStorage marker，粘贴表单登录不展示且清除 marker
+  // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1) & R5 & R8: query 链接登录成功展示 visible banner 与 announcement 提示并设置 sessionStorage marker 与 body class，粘贴表单登录不展示且清除 marker 与 class
   test('10. Visible notice appears on query-login success and does NOT appear on paste-form login success', async () => {
-    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session" 并写入 sessionStorage marker
+    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session" 并写入 sessionStorage marker 与 body class
     const adminLinkHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui?token=admin-query-token',
       meResponse: { status: 401 },
@@ -635,8 +653,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(adminLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
     expect(adminLinkHarness.calls.announced).toEqual(['Signed in via link as Admin session']);
     expect(adminLinkHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(adminLinkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
 
-    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>" 并写入 marker
+    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>" 并写入 marker 与 class
     const identityLinkHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui?token=identity-query-token',
       meResponse: { status: 401 },
@@ -648,8 +667,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(identityLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as agent-bot@example.com');
     expect(identityLinkHarness.calls.announced).toEqual(['Signed in via link as agent-bot@example.com']);
     expect(identityLinkHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(identityLinkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
 
-    // 场景 C: 表单粘贴输入登录成功 → 不展示 visible banner 与 announcement，且清除 marker
+    // 场景 C: 表单粘贴输入登录成功 → 不展示 visible banner 与 announcement，且清除 marker 与 class
     const formHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui',
       initialStorage: { 'oae-link-login': '1' },
@@ -674,6 +694,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(formHarness.linkLoginNotice.hidden).toBe(true);
     expect(formHarness.linkLoginNotice.textContent).toBe('');
     expect(formHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
+    expect(formHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
     const formSessionFetch = formHarness.calls.fetches.find(
       (f) => f.url === '/ui/api/session' && f.init?.method === 'POST',
     );
@@ -700,6 +721,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(adminReloadHarness.linkLoginNotice.hidden).toBe(false);
     expect(adminReloadHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
     expect(adminReloadHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(adminReloadHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
     // 刷新不重复播报 aria-live
     expect(adminReloadHarness.calls.announced).toHaveLength(0);
 
@@ -714,6 +736,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(identityReloadHarness.linkLoginNotice.hidden).toBe(false);
     expect(identityReloadHarness.linkLoginNotice.textContent).toBe('Signed in via link as alice@test.example');
     expect(identityReloadHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(identityReloadHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
     expect(identityReloadHarness.calls.announced).toHaveLength(0);
 
     // 场景 C: 普通会话（无 marker），刷新时不展示 banner
@@ -727,6 +750,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(normalReloadHarness.linkLoginNotice.hidden).toBe(true);
     expect(normalReloadHarness.linkLoginNotice.textContent).toBe('');
     expect(normalReloadHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
+    expect(normalReloadHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
   });
 
   // 12. R5: Logout clears sessionStorage marker and resets notice
@@ -740,6 +764,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     await harness.instance.runStart();
     expect(harness.linkLoginNotice.hidden).toBe(false);
     expect(harness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
 
     // 用户点击登出
     await harness.instance.runLogout();
@@ -747,6 +772,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.sessionStorage.getItem('oae-link-login')).toBeNull();
     expect(harness.linkLoginNotice.hidden).toBe(true);
     expect(harness.linkLoginNotice.textContent).toBe('');
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
   });
 
   // 13. R5: Storage-throws case: login succeeds even if sessionStorage throws (fail-open try/catch)
@@ -845,5 +871,63 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.state.me).toEqual({ kind: 'identity', address: 'manual-user@manual.example' });
     expect(harness.linkLoginNotice.hidden).toBe(true);
     expect(harness.sessionStorage.getItem('oae-link-login')).toBeNull();
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
+  });
+
+  // 15. R8 Fix 1 (Thread 6): Link-login banner is visible immediately after session POST, BEFORE startup awaits finish
+  test('15. Link-login banner is visible immediately after session POST, BEFORE startup awaits finish', async () => {
+    let resolveHang: () => void;
+    const hangPromise = new Promise<void>((resolve) => {
+      resolveHang = resolve;
+    });
+
+    const harness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=early-banner-token',
+      hangStartSession: hangPromise,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+
+    const runPromise = harness.instance.runStart();
+
+    // 等待微任务让 fetch(/ui/api/me) 和 POST /ui/api/session 完成，但在 startSession 挂起
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 断言 1: POST /ui/api/session 已返回，startSession 正在执行中（挂起）
+    expect(harness.calls.startSessionCount).toBe(1);
+
+    // 断言 2: 横幅在 startup 挂起期间就已经立即可见且激活 body class（Thread 6 核心修复）
+    expect(harness.linkLoginNotice.hidden).toBe(false);
+    expect(harness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
+    expect(harness.calls.announced).toEqual(['Signed in via link as Admin session']);
+    expect(harness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+
+    // 释放挂起，流程正常结束
+    resolveHang!();
+    await runPromise;
+
+    expect(harness.linkLoginNotice.hidden).toBe(false);
+    expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+  });
+
+  // 16. R8 Fix 2 (Thread 7): document.body.classList manages link-login-active in sync with link-login notice
+  test('16. document.body.classList manages link-login-active in sync with link-login notice', async () => {
+    // 场景 A: query login 成功 → 添加 link-login-active
+    const linkHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=link-token',
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await linkHarness.instance.runStart();
+    expect(linkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+
+    // 场景 B: 登出 → 移除 link-login-active
+    await linkHarness.instance.runLogout();
+    expect(linkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
+
+    // 场景 C: 随后表单登录 → 保持无 link-login-active
+    await linkHarness.instance.runPasteLogin('paste-token');
+    expect(linkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
   });
 });
