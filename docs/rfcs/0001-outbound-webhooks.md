@@ -6,8 +6,9 @@
 - **Date:** 2026-09-03 (drafted and ratified the same day)
 - **Decisions:** all seventeen open questions are answered itemized in **§17**. Four were
   decided by the owner (D1–D4), thirteen approved by the commander at recommended values
-  (D5–D17), and one derived consequence (**D2a**) is flagged for confirmation. Where §16
-  still reads as open, §17 is authoritative.
+  (D5–D17), and one derived consequence (**D2a**) was ruled on separately, overriding this
+  document's proposal. Two new questions (**Q18**, **Q19**) were opened by review fixes and
+  remain for the owner. Where §16 still reads as open, §17 is authoritative.
 - **Issue:** [#109](https://github.com/openagentemail/openagentemail/issues/109)
 - **Decision scope:** event catalog, payload schema, signing and verification, delivery
   semantics (retry, ordering, dead letters), SSRF and egress safety, configuration
@@ -460,7 +461,7 @@ mechanism OAE adopts.
 - **`pending_webhooks` as a failure counter.** Stripe's Event object carries the number of
   webhooks not yet successfully delivered. It is a small, cheap, always-visible signal that
   the push subsystem is behind — precisely the "fail visible" property #109 asks for.
-  Adopted in spirit as per-endpoint `exhaustedEvents` and instance-level dead-letter
+  Adopted in spirit as per-endpoint `consecutiveFailures` and instance-level dead-letter
   counts (§13).
 - **An explicit ordering disclaimer.** *"Stripe doesn't guarantee the delivery of events in
   the order that they're generated."* One sentence, prominently documented, and it removes
@@ -631,6 +632,27 @@ and logging machinery, but with a reduced retry budget (§8.3) — there is no p
 connectivity test for three days. Per decision **D12** (§17) the ping at creation is fired
 **asynchronously**, and the endpoint starts in state `unverified` until one succeeds
 (§8.5), so create latency is never coupled to a third party.
+
+**The ordering consequence, stated explicitly because it looks like a bug and is not.** The
+`201` response is the *first* moment the operator possesses the signing secret (§12.3), and the
+creation ping is fired asynchronously — so the ping can easily reach the consumer **before**
+the operator has copied that secret into the consumer's config, and will then fail signature
+verification on the consumer side. That is expected and benign:
+
+- The ping is **retried** on the §8.3 schedule (attempts 1–3, ~5 minutes), so a later attempt
+  normally lands after configuration is complete.
+- A failed creation ping does **not** disable the endpoint. Only `refused` disables immediately
+  (§8.5); a consumer rejecting the signature typically returns `401`/`400`, i.e. `permanent`,
+  and a `permanent` outcome on a **ping** is deliberately not counted toward the circuit
+  breaker — precisely because this race is routine. Real events are unaffected.
+- `unverified` is advisory (§8.5), so delivery is not gated on the ping succeeding.
+- `POST /v1/webhooks/:id/test` is the intended way to re-check on demand once configuration is
+  done, and reaching `enabled` deliberately rather than by race.
+
+The alternative — withholding the ping until the operator confirms the secret is configured —
+would need a confirmation step that does not exist and would reintroduce the create-latency
+coupling D12 removed. An operator who wants a verified-first flow configures the consumer,
+then calls `/test`, and ignores the creation ping.
 
 **Emission granularity.**
 
@@ -1011,7 +1033,7 @@ signature should not be reading payload fields yet.
 
 | Header | Value | Purpose |
 | --- | --- | --- |
-| `X-OAE-Event` | `mail.received` | Route before parsing (GitHub). |
+| `X-OAE-Event` | the event type — `mail.received`, `approval.requested`, or `webhook.ping` | Route before parsing (GitHub). **Always byte-identical to the body's `type` field**, so a consumer may use either; the header exists so it need not parse first. |
 | `X-OAE-Delivery` | `dlv_` + UUIDv4 | One **attempt**. Distinct from `id`, which is per **event**. Support and redelivery vocabulary. |
 | `X-OAE-Signature` | `t=<unix-seconds>,v1=<hex>[,v1=<hex>]` | Timestamp + one or more signatures. Uniformly comma-delimited (Stripe's grammar); `v1` may repeat during rotation. |
 | `User-Agent` | `openagentemail-webhooks/1` | Egress identification; lets a consumer's WAF allowlist OAE. |
@@ -1170,7 +1192,7 @@ suggestion, and it belongs in the first paragraph of the user-facing docs.
 A healthy address that receives more than `WEBHOOK_RATE_DELIVER_PER_MIN` deliverable events in
 a minute will have attempts denied *by OAE*, and charging those against the endpoint would
 mean a busy mailbox disables its own healthy endpoint. So a `deferred` attempt: consumes no
-slot in the §8.3 schedule, does not increment `exhaustedEvents` (§8.5), is not dead-lettered,
+slot in the §8.3 schedule, does not increment `consecutiveFailures` (§8.5), is not dead-lettered,
 and is rescheduled at the earlier of the limiter's `retryAfterSec` and the next schedule
 offset. Rescheduling is **bounded** — a `deferred` row still carries `nextAttemptAt` and is
 subject to the same 72-hour horizon, so backpressure delays delivery rather than creating an
@@ -1261,17 +1283,17 @@ to report failure is useless as a test.
    not-yet-final rows per endpoint. `WEBHOOK_LOG_RETENTION_DAYS = 30` covers this
    comfortably, but the boot reconstruction is no longer a small scan on a busy instance and
    must be indexed by `(webhookId, eventId)` rather than read linearly.
-2. **The circuit breaker counter has to change meaning, or D2 is partly self-defeating.**
-   `WEBHOOK_DISABLE_THRESHOLD = 20` counts consecutive failed *deliveries*. With 11 attempts
-   per event, a single exhausted event contributes 11, so **two** failing events disable the
-   endpoint — and once disabled, new events dead-letter immediately rather than entering the
-   queue (§8.5). On any mailbox receiving more than a couple of messages, the three-day
-   budget would therefore never actually be used: the breaker trips on day one. The fix, and
-   this RFC's recommendation, is to count **exhausted events** rather than attempts, so the
-   threshold reads as "20 events gave up" and both properties survive — the endpoint still
-   fails visibly and quickly, and an individual event still gets its full 72 hours. Flagged
-   as **D2a** in §17 for confirmation, since it changes a constant the commander approved at
-   its recommended value under the old schedule.
+2. **The circuit-breaker counter interacts with the longer schedule, and D2a settled how.**
+   Extending to 11 attempts per event raised the question of what `WEBHOOK_DISABLE_THRESHOLD`
+   counts. This document proposed counting *exhausted events*, worried that counting attempts
+   would let two failing events trip the breaker on day one and make the three-day budget
+   unreachable. Decision **D2a** (§17) overruled that and kept **consecutive failed attempts,
+   per endpoint, reset to zero on any success, threshold 10** — correctly, because an event
+   only exhausts after its full 72 hours, so a breaker waiting for exhaustion cannot fire
+   until two days after the endpoint broke. The original worry is answered by reset-on-success
+   instead: a flaky endpoint that mostly works is never disabled, while a genuinely dead one
+   trips as fast as failures accumulate. See §8.5 for the full rule, including which outcomes
+   count and the volume dependence of wall-clock trip time.
 
 **What survives of the original argument against three days.** §4.2 argued for ~27 hours on
 two grounds: mail is perishable, and the durable store is a JSONL file rather than a
@@ -1330,10 +1352,17 @@ silently reset it, with every contributing attempt recorded individually in the 
 (§8.6):
 
 ```
-unverified ──(first successful delivery)──> enabled ──(threshold reached)──> disabled
-     ▲                                          ▲                                │
-     └──────────────(POST /:id/test)────────────┴────(POST /:id/enable)──────────┘
+unverified ──(first successful delivery)──> enabled ──(threshold / refused / manual)──> disabled
+     ▲                                          ▲                                            │
+     └──────────(POST /:id/test)────────────────┴────────(POST /:id/enable, admin)───────────┘
 ```
+
+`disabled` always carries a `disabledReason` of `"threshold"` (circuit breaker), `"refused"`
+(SSRF, §9.3), or `"manual"` (operator pause via `POST …/disable`). The reason matters because
+recovery differs: a manual pause is resumed without investigation, while `threshold` and
+`refused` mean something is actually wrong and §8.5's manual-re-enable rule exists to make
+somebody look. This is why there is no separate `active` boolean (§10.5) — one state field
+plus a reason expresses strictly more than two overlapping on/off switches.
 
 - **`unverified`** — the initial state on creation. Decision **D12** (§17) made creation
   asynchronous, so OAE does not block `POST /v1/webhooks` on a third party's latency; instead
@@ -1348,16 +1377,44 @@ unverified ──(first successful delivery)──> enabled ──(threshold rea
   dead-lettered immediately rather than queued, so a dead endpoint cannot accumulate an
   unbounded backlog over the three-day retry horizon (§8.3).
 
-**Disablement threshold, counted in exhausted events.** After `WEBHOOK_DISABLE_THRESHOLD`
-(default 20) consecutive **events that exhausted their retry budget without success** — not
-20 consecutive failed attempts — the endpoint transitions to `disabled` with a
-`disabledReason`. The distinction is forced by D2 and explained in §8.3 consequence 2: with
-11 attempts per event, counting attempts would let two failing events trip the breaker on day
-one and make the three-day budget unreachable on any busy mailbox. Counting exhausted events
-preserves both properties — the endpoint still fails visibly, and each individual event still
-gets its full 72 hours. A `refused` outcome (§8.2) disables **immediately** without waiting
-for the threshold, because an SSRF refusal is a configuration or attack signal rather than a
-transient outage.
+**Disablement threshold: consecutive failed *attempts*, reset on any success.** Per decision
+**D2a** (§17), which overrode this document's proposal:
+
+- The counter is **per endpoint** and increments on every delivery attempt whose outcome is
+  `retryable` or `permanent` (§8.2).
+- **Any successful delivery resets it to zero.** This is what makes attempt-counting safe, and
+  it is the whole reason the ruling works: an endpoint that fails once and recovers is never
+  disabled, no matter how busy it is.
+- `deferred` does **not** count (§8.2). That outcome means OAE's own limiter refused the
+  attempt, so the endpoint is healthy and charging it would let a busy mailbox disable itself.
+- `refused` disables **immediately**, without waiting for the threshold — an SSRF refusal is a
+  configuration or attack signal, not a transient outage.
+- At `WEBHOOK_DISABLE_THRESHOLD` (default **10**) consecutive counted failures, the endpoint
+  transitions to `disabled` with a `disabledReason`.
+
+**Why attempts rather than exhausted events.** This document originally proposed counting
+events that had run out of retries, on the reasoning that 11 attempts per event would let two
+failing events trip the breaker on day one. The commander overruled it, correctly: an event
+only *exhausts* after its full 72-hour schedule, so a breaker that waits for exhaustion cannot
+fire until two days after the endpoint broke — by which point it has stopped being a breaker
+and become a post-mortem. The concern that motivated the original proposal is handled instead
+by reset-on-success, which preserves exactly the case the long retry budget exists for (a
+flaky endpoint that mostly works) while killing a genuinely dead one quickly.
+
+Threshold 10 follows the common consecutive-failure breaker convention rather than a
+request-volume-plus-error-rate window (Hystrix-style), because per-endpoint concurrency is 1
+(§8.7) and there is no meaningful rate to window over.
+
+**One honest property, since it affects operator expectations: wall-clock trip time depends on
+event volume.** A single event's attempts are spread across the 72-hour schedule (§8.3), so on
+a *quiet* mailbox one dead endpoint accrues its 10th consecutive failure at roughly +48 h —
+the offset of attempt 10. On a *busy* mailbox, attempts from successive events interleave by
+due time, so 10 consecutive failures arrive within the first ~35 minutes (attempts 1–4 of the
+first few events all land inside that window). Both behaviors are correct: a dead endpoint is
+disabled as fast as the evidence accumulates, and the evidence accumulates as fast as mail
+arrives. Operators who want faster trip on quiet mailboxes lower `WEBHOOK_DISABLE_THRESHOLD`;
+there is no separate volume knob, and adding one would make the breaker's behavior hard to
+reason about.
 
 - Disablement is written to the audit log, exposed on `GET /v1/webhooks/:id` and in the
   dashboard (§10.8), and — where ntfy is enabled — pushed to the operator as an urgent
@@ -1750,7 +1807,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` | int ≥ 1 | `4` | Below the task API's own depth 10 (§6.6). |
 | `WEBHOOK_RESPONSE_MAX_BYTES` | int ≥ 1 | `4096` | **Cannot be disabled** (§8.7) — `0` would mean an unlimited read. |
 | `WEBHOOK_TIMESTAMP_TOLERANCE_SEC` | int ≥ 30 | `300` | Consumer-side value, published in docs and in `GET /v1/webhooks`. |
-| `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `20` | Consecutive **exhausted events**, not attempts (§8.5). |
+| `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `10` | Consecutive **failed attempts** per endpoint, reset to 0 on any success (**D2a**, §8.5). `deferred` does not count. |
 | `WEBHOOK_ROTATION_OVERLAP_MS` | int ≥ 0 | `86400000` | 24 h dual-signature window (§12.2). `0` = atomic swap. |
 | `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ 1 | `30` | |
 | `WEBHOOK_RATE_CREATE_PER_MIN` | int ≥ 0 | `10` | |
@@ -1803,11 +1860,12 @@ bodies.
 | `POST` | `/v1/webhooks` | admin, or identity for own address — **never OAuth** (§10.4) | Create. `201` + `secret` **shown once**. |
 | `GET` | `/v1/webhooks` | admin: all; identity: own address | `{webhooks:[…]}`. Never includes `secret`. |
 | `GET` | `/v1/webhooks/:id` | as above | Bare object incl. `state`, `lastDelivery`. |
-| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `active`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
+| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `description`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
 | `GET` | `/v1/webhooks/:id/secret` | **admin** | Re-display the current derived signing key (§12.3). Audited as `webhook.reveal`. Possible only because D6 chose derivation; a stored random secret could not offer it. |
 | `DELETE` | `/v1/webhooks/:id` | as above | Delete. Precedent: `routes/notify.ts:228`. |
 | `POST` | `/v1/webhooks/:id/rotate` | as above | Issue a new secret; start the overlap window (§12.2). Returns the new `secret` once. |
-| `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status}`; later attempts continue in the background. |
+| `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status, reason}`. Later attempts continue in the background. **`status` is `null` whenever no HTTP response was received** — DNS failure, connection refused, TLS handshake error, and timeout all produce an `outcome` with no status code, so the field must be nullable and `reason` carries the machine-readable cause (`dns_error`, `connection_refused`, `tls_error`, `timeout`, `ssrf_refused`, or `null` on success). Promising a `status` unconditionally, as an earlier draft did, would force an implementation to invent one. |
+| `POST` | `/v1/webhooks/:id/disable` | as above (own address) | Manual pause. Sets `state: "disabled"`, `disabledReason: "manual"`. Reversible by `/enable` without investigation. |
 | `POST` | `/v1/webhooks/:id/enable` | admin | Clear `disabled` state, reset the counter (§8.5). |
 | `GET` | `/v1/webhooks/:id/deliveries` | admin | `{deliveries:[…], nextCursor}` — recent attempts and dead letters, from the JSONL log. |
 | `POST` | `/v1/webhooks/deliveries/:deliveryId/redeliver` | admin | Manual replay of one recorded delivery — **dead letter or success**, per decision **D15** (§17), following Resend's "replay both `failed` and `succeeded`". Enqueues a fresh attempt with a **new** `deliveryId`, the **same** event `id`, and a `replay: true` marker in the log row. Replaying a success re-sends an event the consumer already processed, so it leans on their `id` dedupe (§8.1); the marker exists so an operator reading the log can tell a replay from an original. |
@@ -1834,7 +1892,6 @@ Create response (`201`):
   "events": ["mail.received", "approval.requested"],
   "contentScope": "metadata",
   "description": "postmaster wake-up + approval paging",
-  "active": true,
   "state": "unverified",
   "secret": "whs_7f3a9c1e5b8d24f6a0c3e7b1d9f24a68c0e4b7d1f3a9c5e8b2d6f0a4c8e1b5d9",
   "secretPrefix": "whs_7f3a…",
@@ -1942,9 +1999,18 @@ fsync, corrupt-fails-closed, and a `FORBIDDEN_SECRET_KEYS`-style guard
 or `previousSecret`.
 
 Per subscription the file holds: `id`, `url`, `address`, `events`, `contentScope`,
-`description`, `active`, `state`, `disabledReason`, `secretPrefix`, **`epoch`**,
-**`overlapUntil`**, `createdAt`, `updatedAt`, `rotatedAt`, **`exhaustedEvents`**, `createdBy`
-(`admin` or the address).
+`description`, `state`, `disabledReason`, `secretPrefix`, **`epoch`**, **`overlapUntil`**,
+`createdAt`, `updatedAt`, `rotatedAt`, **`consecutiveFailures`**, `createdBy` (`admin` or the
+address).
+
+**There is deliberately no `active` boolean.** An earlier draft carried one alongside `state`,
+and review correctly noted it had no defined semantics: with a three-value `state` (§8.5) whose
+`disabled` already suppresses delivery, a second on/off flag has no answer for
+`active: false, state: "enabled"`, and two overlapping suppression switches guarantee that an
+implementer picks one and an operator reads the other. One field, with `disabledReason`
+recording *why*, expresses everything: `"manual"` (operator pause via `POST …/disable`),
+`"threshold"` (circuit breaker, §8.5), or `"refused"` (SSRF, §9.3). Recovery differs by
+reason, which is exactly the information a boolean would have thrown away.
 
 `description` is persisted because the create contract accepts it (§10.3); a field the API
 takes and then discards is worse than one it refuses, since the operator's label silently
@@ -1970,8 +2036,10 @@ omitting any of them breaks something non-obvious:
 - **`overlapUntil`** (timestamp or null) is what tells the signer to emit two signatures
   (§12.2). It is derived state, but it must survive a restart or a rotation in progress would
   end early and cut consumers off mid-window.
-- **`exhaustedEvents`** is the circuit-breaker counter, in the units D2a requires (§8.5) —
-  events that ran out of attempts, not failed attempts.
+- **`consecutiveFailures`** is the circuit-breaker counter — consecutive failed attempts,
+  reset to 0 on any success, per **D2a** (§8.5). It must survive a restart, or a crash would
+  silently clear a disabled endpoint's counter and a restart would resume hammering an
+  endpoint the breaker had already condemned.
 
 Rotation idempotency keys (§12.2) are stored alongside, keyed by `(webhookId,
 idempotencyKey)` with the resulting `epoch` and response body, retained for
@@ -1995,6 +2063,16 @@ Written through `recordAuditEvent()` (never throws), using the existing whitelis
 means **no URLs, no payloads, no secrets, no subjects can appear in the audit log by
 construction**. That is a feature: the audit log is the one artifact an operator is most
 likely to ship elsewhere.
+
+**One extension to the whitelist is required.** `AuditEvent` (`audit.ts:38-50`) has no field
+identifying *which* subscription a management mutation targeted — it carries `address`, but
+§8.7 permits up to four subscriptions per address, so a `webhook.delete` against one of four
+would be indistinguishable from the other three. Add an optional **`webhookId`** to the
+whitelist, populated on every `webhook.*` event. It is an opaque identifier rather than
+content, so it does not weaken the property that makes the whitelist valuable, and it turns
+the log from "someone changed a webhook on this address" into something an incident review can
+use. It is also the join key against the delivery log (§8.6). `scrubAuditField()` applies to it
+as to every other field, and `recordAuditEvent()` still never throws.
 
 | `event` | `outcome` values |
 | --- | --- |
@@ -2029,7 +2107,7 @@ Applying that line to §10.3:
 | `POST /v1/webhooks` | `mail_webhook_create` | **`critical`** |
 | `DELETE /v1/webhooks/:id` | `mail_webhook_delete` | `minimal` |
 | `POST /v1/webhooks/:id/test` | `mail_webhook_test` | `contained` |
-| `GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate` | **none in v1** — see below | — |
+| `GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate`, `POST …/disable` | **none in v1** — see below | — |
 | `POST …/enable`, `GET …/deliveries`, `POST …/redeliver` | none — admin-only, existing exception | — |
 
 Tiers use the existing four-level vocabulary in `lib/tool-tiers.ts` (`read` / `minimal` /
@@ -2532,7 +2610,7 @@ Recorded so nobody discovers it later as a surprise:
 #109: *"Outbound failures fail visible (health signal), never silent."* Concretely:
 
 1. **Per-endpoint state** on `GET /v1/webhooks/:id`: `state` (`unverified` / `enabled` /
-   `disabled`), `disabledReason`, `exhaustedEvents`, and
+   `disabled`), `disabledReason`, `consecutiveFailures`, and
    `lastDelivery: {at, outcome, status, durationMs, attempt}`.
 2. **Instance health.** Extend the admin surface — not the unauthenticated
    `GET /healthz` (`app.ts:56`), which must stay trivial — with a count of disabled
@@ -2578,9 +2656,10 @@ than only unit tests.
    also assert the **existing CIMD consumer still behaves correctly** — the change is shared.
 3. **Retry/outcome classification.** A local test server returning each status in §8.2,
    asserting the retry decision and every one of the eleven offsets in §8.3, with a fake
-   clock so a 72-hour budget is testable in milliseconds. Include the **D2a** assertion:
-   that a single event exhausting all eleven attempts increments the breaker by one, not by
-   eleven.
+   clock so a 72-hour budget is testable in milliseconds. Include the **D2a** assertions:
+   that each `retryable` and `permanent` failure increments `consecutiveFailures` by one, that
+   a single success resets it to zero, that `deferred` leaves it unchanged, that `refused`
+   disables without reaching the threshold, and that the counter survives a restart.
 4. **Gate independence.** Assert that webhooks fire with `NTFY_ENABLED=false`, that ntfy
    publishes with `WEBHOOKS_ENABLED=false`, and — the subtle case from §11.4 item 3 —
    that a failing webhook sink does not stall the ntfy sink's watermark, or vice versa.
@@ -2700,9 +2779,10 @@ for any running deployment. That is the same rollout posture as `TASK_LEASES_ENA
 > | Q16 | D16 | IPv6 embedded-IPv4 SSRF gap closed in **PR 1** | as recommended |
 > | Q17 | D17 | 4 MCP tools; `mail_webhook_create` is tier `critical`; parity deviation accepted | as recommended |
 >
-> One further item, **D2a**, is a consequence of D2 rather than an answer to a question, and
-> is still awaiting confirmation: whether the circuit-breaker threshold counts exhausted
-> *events* (recommended, §8.5) or failed *attempts*.
+> One further item, **D2a**, was a consequence of D2 rather than an answer to a question: what
+> the circuit-breaker threshold counts. It has been **ruled on** — consecutive failed attempts,
+> per endpoint, reset on any success, threshold 10 — overriding this document's
+> exhausted-events proposal. See §8.5 and §17.
 
 These are the decisions this RFC could not make alone. Each has a recommendation where one
 is defensible.
@@ -2899,16 +2979,34 @@ constraint on the durable log.
 Changed: §4.2 (the three-day horizon moved from Refuse to Borrow, with the override
 recorded); §4.4 (table); **§8.3 rewritten** (eleven cumulative offsets, switched from delays
 to offsets because a 72 h budget makes delay arithmetic error-prone, and two consequences
-documented); §8.5 (threshold now counts exhausted events); §8.6 (three-day queue horizon,
-indexed reconstruction); §10.1 (`WEBHOOK_MAX_ATTEMPTS` default 11).
+documented); §8.5 (circuit-breaker unit, settled separately as D2a below); §8.6 (three-day
+queue horizon, indexed reconstruction); §10.1 (`WEBHOOK_MAX_ATTEMPTS` default 11).
 
-**D2a — derived consequence, flagged for confirmation.** With eleven attempts per event,
-counting the circuit-breaker threshold in *attempts* would let two failing events disable an
-endpoint on day one, making the three-day budget unreachable on any busy mailbox. §8.3
-consequence 2 and §8.5 therefore redefine `WEBHOOK_DISABLE_THRESHOLD = 20` as twenty
-consecutive **exhausted events**. This changes the meaning of a constant the commander
-approved at its recommended value under the old schedule, so it is called out separately
-rather than folded in silently.
+**D2a — circuit-breaker unit: consecutive failed *attempts*, reset on any success.**
+*(A consequence of D2 rather than an answer to a numbered question. Ruled by the commander,
+**overriding** this document's proposal to count exhausted events.)*
+
+The counter is per endpoint, increments on each `retryable` or `permanent` attempt, ignores
+`deferred`, resets to zero on any success, and disables at `WEBHOOK_DISABLE_THRESHOLD = 10`.
+`refused` still disables immediately, without reaching the threshold.
+
+The ruling's reasoning is better than the proposal it replaced: an event only *exhausts* after
+its full 72-hour schedule, so a breaker that waited for exhaustion could not fire until two
+days after the endpoint broke — at which point it is a post-mortem, not a breaker. This
+document's original worry (that counting attempts would let two failing events disable a busy
+but healthy endpoint) is answered by **reset-on-success** rather than by changing the unit: a
+flaky endpoint that mostly works is never disabled, while a dead one trips as fast as evidence
+accumulates. Threshold 10 follows the ordinary consecutive-failure convention; a
+volume-plus-error-rate window would be meaningless at per-endpoint concurrency 1 (§8.7).
+
+One property is documented rather than hidden (§8.5): because a single event's attempts are
+spread across 72 hours, wall-clock trip time depends on mail volume — roughly +48 h for a
+quiet mailbox with one dead event, minutes for a busy one.
+
+Changed: §8.3 consequence 2; **§8.5 rewritten** (rule, which outcomes count, reset semantics,
+rationale, volume dependence); §8.2 (`deferred` explicitly excluded); §10.1 (default 10 plus
+semantics); §10.5 (`consecutiveFailures` persisted, and why it must survive restart); §13;
+§14 item 3.
 
 **D3 — multi-tenant hosted policy is recorded as "must answer before hosting", and v1 does
 not lock the design.** *(Answers Q7.)*
@@ -2947,21 +3045,48 @@ one data source with the panel); §14 (new test item); §15 (**new PR 5**).
 | **D12** | Q12 | **Ping at creation is asynchronous**, and a third endpoint state `unverified` is added to the state machine until a delivery succeeds. The state is advisory — events still flow — and exists for operator feedback. | §5.1, §8.5 (new state machine), §10.3 (create response), §10.8 |
 | **D13** | Q13 | **Signature encoding is lower-case hex**, deviating from the repo's base64url stamp convention. Recorded as a **one-way door**: once an integrator ships a verifier, changing the encoding requires a `v2=`. Event ids stay UUIDv4. | §7.2 |
 | **D14** | Q14 | **Deferred with D3.** Per-identity subscription caps wait on the hosted answer. | §8.7, §16 Q14 |
-| **D15** | Q15 | **Redelivery covers succeeded deliveries as well as dead letters**, admin-only, with `replay: true` marked in the log row. Follows Resend's "replay both `failed` and `succeeded`"; it is how an integrator tests a handler against a real payload without waiting for real mail. | §8.6 (log row), §10.3, §10.8 |
+| **D15** | Q15 | **Redelivery covers succeeded deliveries as well as dead letters**, admin-only, with `replay: true` marked in the log row. Follows Resend's "replay both `failed` and `succeeded`". **Its purpose is narrower than the first draft claimed** — see the correction below this table. | §8.6 (log row), §10.3, §10.8 |
 | **D16** | Q16 | **The IPv6 embedded-IPv4 SSRF gap is closed in PR 1**, not deferred to a separate hardening card. NAT64, 6to4, and Teredo forms join the §9.2 always-refused list. | §9.2, §14 item 2, §15 PR 1 |
 | **D17** | Q17 | **Four MCP tools approved** — `mail_webhook_list`, `mail_webhook_create`, `mail_webhook_delete`, `mail_webhook_test` — and **`mail_webhook_create` is tier `critical`**, so it is deny-by-default for OAuth tickets. The three non-admin routes left REST-only are an accepted deviation from CONTRIBUTING's parity rule. | §10.4, §10.7, §14 item 7, §15 PR 4 |
 
+**D15 correction.** This document originally justified replaying a *succeeded* delivery as "how
+an integrator tests their handler against a real payload without waiting for real mail". That
+contradicts §8.1, which normatively requires consumers to dedupe on the event `id` — and a
+replay deliberately reuses the same `id` (§10.3). A **compliant** consumer therefore ignores
+the replay, so it cannot be a handler-testing mechanism. What replaying a success is actually
+for:
+
+1. **Verifying the OAE side end-to-end** — that the endpoint is still reachable, still
+   verifying signatures, and still returning 2xx — without waiting for new mail. The operator
+   learns the outcome from the log and `lastDelivery`, which is the real deliverable.
+2. **Re-driving a consumer that acknowledged but did not finish.** A handler that returned 200
+   and then crashed before persisting has, from OAE's perspective, succeeded. Replay is the
+   operator's tool for pushing it again; whether the consumer reprocesses is *its* dedupe
+   policy's decision, and a consumer that wants to reprocess on replay must key on
+   `X-OAE-Delivery` (per attempt) rather than `id` (per event) — which is exactly why §7.1 keeps
+   the two identifiers distinct.
+3. **Not** for making a correctly-deduping consumer run its handler twice. An integrator who
+   wants that should point a *second, throwaway* subscription at a test endpoint instead, which
+   is cheaper and does not involve lying to a production consumer.
+
+§10.3's wording ("leans on their `id` dedupe") and this entry now agree; previously they did
+not.
+
 ### Still open after ratification
 
-Three items are deliberately **not** settled by the above, and should not be read as decided:
+Two items are deliberately **not** settled, and should not be read as decided:
 
-1. **D2a** — the circuit-breaker counter's unit (exhausted events vs. attempts). Recommended
-   in §8.5, needs confirmation because it reinterprets an approved constant.
-2. **D3 / D14** — everything about multi-tenant hosted operation, blocked until hosting is
+1. **D3 / D14** — everything about multi-tenant hosted operation, blocked until hosting is
    actually planned.
-3. **The approval reaper** — prerequisite for `approval.expired` (v1.1) and, if the owner
+2. **The approval reaper** — prerequisite for `approval.expired` (v1.1) and, if the owner
    decides a lost `approval.requested` is unacceptable, also the fix for the task producer's
    weak restart semantics (§11.4 item 4). Both should be designed together.
+
+Everything else is settled, including **D2a**, which the commander ruled on after the first
+ratification pass: the circuit breaker counts consecutive failed attempts, per endpoint, reset
+on any success, threshold 10 (§8.5). Two further questions were *opened* by the review fixes
+rather than closed — **Q18** (private-host allowlist) and **Q19** (minimum approval lifetime)
+— and remain for the owner.
 
 ### Post-ratification amendments from independent review
 
@@ -2990,8 +3115,10 @@ the admin secret re-display route is now specified (§12.3, §10.3, audited as
 `webhook.reveal`), and §13's state list carries all three states from D12.
 
 **A second review round on the ratified commit found twenty-two more defects**, including one
-outright factual error about existing code and five security holes. They are recorded here on
-the same terms: none changes a ratified decision, all change the specification of one.
+outright factual error about existing code and five security holes, and the commander's final
+review then caught **six more** (R34–R39, all P2 wording and contract gaps). Twenty-eight in
+total. They are recorded here on the same terms: none changes a ratified decision, all change
+the specification of one.
 
 | # | Defect | Severity | Fixed in |
 | --- | --- | --- | --- |
@@ -3017,6 +3144,12 @@ the same terms: none changes a ratified decision, all change the specification o
 | R31 | `WEBHOOK_RESPONSE_MAX_BYTES=0` under the repo's `0 = disabled` convention meant an unlimited response read — the exact amplification §9.7 prevents. | P2 | §8.7, §10.1 |
 | R32 | `description` was accepted by the create contract but dropped from storage and response. | P2 | §10.3, §10.5 |
 | R33 | `/ui/api/webhooks/summary` listed after `/:id`, which Hono would match as `id = "summary"`. | P2 | §10.8 |
+| R34 | §7.1 hardcoded `X-OAE-Event: mail.received`, but D1 added two more emitted types. | P2 | §7.1 (value is now the event type, byte-identical to the body's `type`) |
+| R35 | An `active` boolean existed in the update route and storage with **no defined semantics** anywhere, overlapping §8.5's three-value `state`. | P2 | §10.3, §10.5, §8.5 (field removed; pause expressed as `state: disabled` + `disabledReason: manual`, with a new `/disable` route) |
+| R36 | D15 justified replaying a success as a handler-testing mechanism, contradicting §8.1's mandatory dedupe on `id` — a compliant consumer ignores the replay. | P2 | §17 D15 correction, §10.3 |
+| R37 | The audit whitelist has no field identifying *which* subscription was mutated, and §8.7 allows four per address. | P2 | §10.6 (adds optional `webhookId`) |
+| R38 | `POST /:id/test` promised `{deliveryId, outcome, status}` unconditionally, but DNS failure, connection refused, TLS error, and timeout have no HTTP status. | P2 | §10.3 (`status` nullable, new `reason` field) |
+| R39 | The creation ping can reach the consumer **before** the operator has the secret from the `201`, so it fails verification; the mitigations were implicit and undocumented. | P2 | §5.1 (ordering stated; ping failures excluded from the breaker) |
 
 R12 is the one that matters most, and it is worth being blunt about: it was a **factual error
 about existing code**, in the section the first draft introduced as "the single most useful
@@ -3026,11 +3159,11 @@ whether the cursor *existed* and was signed, not which direction it traversed. �
 the direction explicitly and §15 PR 3 is re-scoped from a thin route change to new IMAP query
 semantics.
 
-**Still awaiting confirmation: D2a** — whether `WEBHOOK_DISABLE_THRESHOLD` counts exhausted
-events (as §8.5 now specifies) or failed attempts (as approved under the old schedule). R3, R4
-and R25 make the difference more consequential, not less: with correct reconstruction an
-endpoint now genuinely exercises its full 72-hour budget, so a threshold counted in attempts
-would trip even faster than §8.3 estimated.
+**D2a has since been ruled on** (§17): consecutive failed attempts, per endpoint, reset on any
+success, threshold 10 — overriding this document's exhausted-events proposal. The review fixes
+above make that ruling *more* effective, not less: R3, R4 and R25 mean an endpoint now
+genuinely exercises its retry schedule instead of losing or duplicating attempts, so the
+attempt counter reflects real evidence rather than reconstruction artifacts.
 
 ---
 
