@@ -1630,11 +1630,15 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(res5.status).toBe(400);
     });
 
-    test('6. Fail-closed: real corrupt-store path returns 401 unauthorized on app request for OAuth tokens', async () => {
+    test('6. Fail-closed: real corrupt-store path distinguishes credential classes (OAuth vs oa_/garbage)', async () => {
       const user = createIdentity({ localpart: 'failclosed-user', scopes: ['read:messages'] })!;
-      const oauthToken = 'oauth_valid_failclosed_token_11111';
+      const oaToken = user.token; // valid oa_ token
+      const validOAuthToken = 'oauth_valid_failclosed_token_11111';
+      const expiredOAuthToken = 'oauth_expired_failclosed_token_22222';
+      const garbageToken = 'some_garbage_non_oauth_token_xyz';
+
       putAccessTokenForTests({
-        token: oauthToken,
+        token: validOAuthToken,
         grantId: 'grant-failclosed-4',
         address: user.identity.address,
         aud: resource,
@@ -1642,33 +1646,49 @@ describe('Issue #114: read-only API token scopes', () => {
         ensureGrant: { clientId: 'client-failclosed', clientName: 'Client Failclosed' },
       });
 
+      const now = Date.now();
+      putAccessTokenForTests({
+        token: expiredOAuthToken,
+        grantId: 'grant-failclosed-5',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: now + 10_000,
+        ensureGrant: { clientId: 'client-failclosed-exp', clientName: 'Client Failclosed Exp' },
+      });
+
       const storePath = join(config.dataDir, 'identities.json');
       const goodData = readFileSync(storePath, 'utf8');
 
       try {
         // Write malformed JSON to identities store file on disk.
-        // Both findIdentityByToken probe and findIdentity OAuth lookup encounter this error.
         writeFileSync(storePath, '[{ malformed json');
 
-        // 1. resolveAccessToken directly fails-closed with unauthorized (not 500 error)
-        const resolved = resolveAccessToken(oauthToken, { resource });
-        expect(resolved.status).toBe('unauthorized');
+        // 1. oa_ identity token + malformed store -> 500 internal_error (error propagates per integrity contract)
+        const resOa = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${oaToken}` },
+        });
+        expect(resOa.status).toBe(500);
+        expect(await resOa.json()).toEqual({ error: 'internal_error' });
 
-        // 2. Real HTTP app.request with valid OAuth token returns 401 unauthorized (not 500 internal_error)
+        // 2. Garbage token + malformed store -> 500 internal_error (pre-existing behavior preserved)
+        const resGarbage = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${garbageToken}` },
+        });
+        expect(resGarbage.status).toBe(500);
+        expect(await resGarbage.json()).toEqual({ error: 'internal_error' });
+
+        // 3. Valid OAuth token + malformed store -> 401 unauthorized (Issue #127 fail-closed path)
         const resOAuth = await app.request(`/v1/messages?address=${user.identity.address}`, {
-          headers: { authorization: `Bearer ${oauthToken}` },
+          headers: { authorization: `Bearer ${validOAuthToken}` },
         });
         expect(resOAuth.status).toBe(401);
         expect(await resOAuth.json()).toEqual({ error: 'unauthorized' });
 
-        // 3. Real HTTP app.request with non-OAuth token also returns 401 unauthorized (not 500 internal_error)
-        const resOther = await app.request(`/v1/messages?address=${user.identity.address}`, {
-          headers: { authorization: 'Bearer some_non_oauth_token' },
-        });
-        expect(resOther.status).toBe(401);
-        expect(await resOther.json()).toEqual({ error: 'unauthorized' });
+        // 4. Expired OAuth token + malformed store -> 401 unauthorized (not 500)
+        const resExpiredOAuth = resolveAccessToken(expiredOAuthToken, { resource, now: now + 20_000 });
+        expect(resExpiredOAuth.status).toBe('unauthorized');
 
-        // 4. Admin requests remain completely unaffected (never read identity store)
+        // 5. Admin key + malformed store -> fully functional (200 on admin endpoint)
         const resAdmin = await app.request(`/v1/audit/events?limit=1`, {
           headers: { authorization: `Bearer ${adminKey}` },
         });
@@ -1679,12 +1699,12 @@ describe('Issue #114: read-only API token scopes', () => {
       }
     });
 
-    test('6b. Fail-closed: findIdentityByToken probe throw falls through to OAuth branch and fails closed (401)', async () => {
+    test('6b. Fail-closed: findIdentityByToken probe throw falls through for OAuth credentials and fails closed (401)', async () => {
       const user = createIdentity({ localpart: 'probe-throw-user', scopes: ['read:messages'] })!;
-      const oauthToken = 'oauth_probe_throw_token_22222';
+      const oauthToken = 'oauth_probe_throw_token_33333';
       putAccessTokenForTests({
         token: oauthToken,
-        grantId: 'grant-probe-5',
+        grantId: 'grant-probe-6',
         address: user.identity.address,
         aud: resource,
         expiresAt: Date.now() + 3600_000,

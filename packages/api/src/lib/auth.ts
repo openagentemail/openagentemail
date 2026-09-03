@@ -88,7 +88,15 @@ export function resolveAccessToken(
   let identity: ReturnType<typeof findIdentityByToken>;
   try {
     identity = findIdentityByToken(token);
-  } catch {
+  } catch (err) {
+    // If the identity store is damaged, distinguish credential classes:
+    // Only OAuth credentials (present in oauth-store) take the fail-closed 401 path.
+    // Non-OAuth credentials (oa_ identity tokens or garbage) must rethrow to surface 500
+    // and log the storage outage per the integrity contract.
+    const oauthProbe = lookupAccessToken(token, options.now);
+    if (oauthProbe.status === 'missing') {
+      throw err;
+    }
     identity = undefined;
   }
   if (identity) {
