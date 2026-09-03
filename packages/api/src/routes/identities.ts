@@ -17,6 +17,29 @@ import {
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
 import { getAuth } from '../lib/auth.ts';
+import { recordAuditEvent } from '../lib/audit.ts';
+import { clientIp } from '../lib/net.ts';
+
+function classifyScopeChange(
+  prev: string[] | undefined,
+  next: string[] | undefined,
+): 'identity.scopes.set' | 'identity.scopes.narrow' | 'identity.scopes.widen' | 'identity.scopes.clear' | null {
+  if (prev === undefined && next === undefined) return null;
+  if (prev === undefined && next !== undefined) return 'identity.scopes.set';
+  if (prev !== undefined && next === undefined) return 'identity.scopes.clear';
+  const prevSet = new Set(prev);
+  const nextSet = new Set(next);
+  if (prevSet.size === nextSet.size && [...prevSet].every((s) => nextSet.has(s))) {
+    return null;
+  }
+  if ([...nextSet].every((s) => prevSet.has(s))) {
+    return 'identity.scopes.narrow';
+  }
+  if ([...prevSet].every((s) => nextSet.has(s))) {
+    return 'identity.scopes.widen';
+  }
+  return next.length > prev.length ? 'identity.scopes.widen' : 'identity.scopes.narrow';
+}
 
 const createSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -118,6 +141,15 @@ export const identitiesRoute = new Hono()
         }
         throw err;
       }
+      if (requestedScopes !== undefined) {
+        recordAuditEvent({
+          event: 'identity.scopes.create',
+          address: identity.address,
+          outcome: 'ok',
+          scopes: requestedScopes,
+          ip: clientIp(c),
+        });
+      }
       return c.json(
         {
           address: identity.address,
@@ -188,11 +220,11 @@ export const identitiesRoute = new Hono()
     const address = c.req.param('address').toLowerCase();
     const existing = findIdentity(address);
     if (!existing) return c.json({ error: 'not_found' }, 404);
+    const prevScopes = existing.scopes !== undefined ? [...existing.scopes] : undefined;
 
-    // A bodyless REST rotation is the explicit compatibility escape hatch
-    // back to a legacy full-permission token. Internal callers that omit the
-    // second argument preserve scopes instead.
-    let requestedScopes: string[] | null = null;
+    // Empty body preserves existing scopes (aligned with UI rotate).
+    // Explicit {"scopes": null} resets to an unscoped full-permission token.
+    let requestedScopes: string[] | null | undefined = undefined;
     const text = await c.req.text();
     if (text.trim().length > 0) {
       let body: unknown;
@@ -205,16 +237,32 @@ export const identitiesRoute = new Hono()
       if (!parsed.success) {
         return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       }
-      const validated = validateScopesInput(parsed.data.scopes);
-      if (!validated.ok) {
-        return c.json({ error: validated.error, details: validated.details }, 400);
+      if (parsed.data.scopes === null) {
+        requestedScopes = null;
+      } else {
+        const validated = validateScopesInput(parsed.data.scopes);
+        if (!validated.ok) {
+          return c.json({ error: validated.error, details: validated.details }, 400);
+        }
+        requestedScopes = validated.scopes;
       }
-      requestedScopes = validated.scopes;
     }
 
     const token = rotateIdentityToken(address, requestedScopes);
     if (!token) return c.json({ error: 'not_found' }, 404);
     const updated = findIdentity(address);
+
+    const scopeEvent = classifyScopeChange(prevScopes, updated?.scopes);
+    if (scopeEvent) {
+      recordAuditEvent({
+        event: scopeEvent,
+        address,
+        outcome: 'ok',
+        ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+        ip: clientIp(c),
+      });
+    }
+
     return c.json({
       address,
       token,

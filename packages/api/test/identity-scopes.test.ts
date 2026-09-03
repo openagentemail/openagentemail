@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,9 +9,10 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+process.env.MCP_PUBLIC_URL = 'http://localhost';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-scopes-test-'));
 
-const { beforeAll, describe, expect, mock, test } = await import('bun:test');
+const { beforeAll, describe, expect, mock, spyOn, test } = await import('bun:test');
 
 let fakeMessages: any[] = [
   {
@@ -61,6 +62,7 @@ mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 
 const { config } = await import('../src/lib/config.ts');
 const { createApp } = await import('../src/app.ts');
+const identitiesModule = await import('../src/lib/identities.ts');
 const {
   createIdentity,
   findIdentity,
@@ -78,6 +80,8 @@ const {
 } = await import('../src/lib/auth.ts');
 const { createHash } = await import('node:crypto');
 const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+const { putAccessTokenForTests } = await import('../src/lib/oauth-store.ts');
+const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
 
 const sha256Hex = (val: string) => createHash('sha256').update(val).digest('hex');
 const adminKey = [...config.apiKeys][0]!;
@@ -303,10 +307,32 @@ describe('Issue #114: read-only API token scopes', () => {
       })!;
       const addr = created.identity.address;
 
-      // 1. Rotation with absent body -> resets to unscoped token
-      const resReset = await app.request(`/v1/identities/${addr}/token`, {
+      // 1. Rotation with absent body -> preserves existing scopes
+      const resPreserve = await app.request(`/v1/identities/${addr}/token`, {
         method: 'POST',
         headers: { authorization: `Bearer ${adminKey}` },
+      });
+      expect(resPreserve.status).toBe(200);
+      const dataPreserve = (await resPreserve.json()) as { token: string; scopes?: string[] };
+      expect(dataPreserve.token).toBeTruthy();
+      expect(dataPreserve.scopes).toEqual(['read:messages']);
+      expect(findIdentity(addr)!.scopes).toEqual(['read:messages']);
+
+      // Verify the new token has preserved scopes
+      const resAuthPreserve = resolveAccessToken(dataPreserve.token);
+      expect(resAuthPreserve.status).toBe('ok');
+      if (resAuthPreserve.status === 'ok') {
+        expect((resAuthPreserve.auth as any).scopes).toEqual(['read:messages']);
+      }
+
+      // 2. Rotation with explicit {"scopes": null} -> resets to unscoped full-permission token
+      const resReset = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: null }),
       });
       expect(resReset.status).toBe(200);
       const dataReset = (await resReset.json()) as { token: string; scopes?: string[] };
@@ -321,7 +347,7 @@ describe('Issue #114: read-only API token scopes', () => {
         expect((resAuthReset.auth as any).scopes).toBeUndefined();
       }
 
-      // 2. Rotation with explicit read:messages
+      // 3. Rotation with explicit read:messages
       const resScoped = await app.request(`/v1/identities/${addr}/token`, {
         method: 'POST',
         headers: {
@@ -1247,6 +1273,365 @@ describe('Issue #114: read-only API token scopes', () => {
       });
       expect(res.status).toBe(413);
       expect(await res.json()).toEqual({ error: 'request_too_large' });
+    });
+  });
+
+  describe('Issue #127: OAuth channel inherits identity scopes and audit events', () => {
+    const resource = resolveResourceUri('http://localhost');
+
+    function getAuditLogs(): any[] {
+      const p = join(config.dataDir, 'audit.jsonl');
+      if (!existsSync(p)) return [];
+      return readFileSync(p, 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    }
+
+    test('1. OAuth access token inherits scoped identity scopes and is intercepted by scope policy', async () => {
+      const created = createIdentity({
+        localpart: 'oauth-scoped-user',
+        scopes: ['read:messages'],
+      })!;
+      const oauthToken = 'oa_oauth_scoped_token_12345';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-oauth-scoped-1',
+        address: created.identity.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-1', clientName: 'Client 1' },
+      });
+
+      // Verification: resolveAccessToken inherits scopes
+      const authRes = resolveAccessToken(oauthToken, { resource });
+      expect(authRes.status).toBe('ok');
+      if (authRes.status === 'ok') {
+        expect(authRes.auth.kind).toBe('identity');
+        expect((authRes.auth as any).scopes).toEqual(['read:messages']);
+      }
+
+      // Read operation allowed
+      const resRead = await app.request(`/v1/messages?address=${created.identity.address}`, {
+        headers: { authorization: `Bearer ${oauthToken}` },
+      });
+      expect(resRead.status).toBe(200);
+
+      // Write operation denied 403 forbidden: insufficient_scope
+      const resSend = await app.request('/v1/send', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${oauthToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: created.identity.address,
+          to: 'recipient@example.net',
+          subject: 'OAuth write attempt',
+          text: 'Should be denied',
+        }),
+      });
+      expect(resSend.status).toBe(403);
+      expect(await resSend.json()).toEqual({ error: 'forbidden: insufficient_scope' });
+
+      // Seen status update denied 403
+      const resSeen = await app.request(`/v1/messages/101/seen`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${oauthToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ address: created.identity.address, seen: true }),
+      });
+      expect(resSeen.status).toBe(403);
+      expect(await resSeen.json()).toEqual({ error: 'forbidden: insufficient_scope' });
+    });
+
+    test('2. Revocation sync: rotating identity scopes immediately affects OAuth access token resolution', async () => {
+      const created = createIdentity({
+        localpart: 'oauth-sync-user',
+        scopes: ['read:messages'],
+      })!;
+      const oauthToken = 'oa_oauth_sync_token_54321';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-oauth-sync-2',
+        address: created.identity.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-sync', clientName: 'Client Sync' },
+      });
+
+      // Before rotation: can read messages
+      const beforeRes = await app.request(`/v1/messages?address=${created.identity.address}`, {
+        headers: { authorization: `Bearer ${oauthToken}` },
+      });
+      expect(beforeRes.status).toBe(200);
+
+      // Rotate identity token to narrow scopes to empty array []
+      const rotateRes = await app.request(`/v1/identities/${created.identity.address}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: [] }),
+      });
+      expect(rotateRes.status).toBe(200);
+
+      // Now OAuth token immediately inherits [] on resolution and is denied on reads!
+      const afterRes = await app.request(`/v1/messages?address=${created.identity.address}`, {
+        headers: { authorization: `Bearer ${oauthToken}` },
+      });
+      expect(afterRes.status).toBe(403);
+      expect(await afterRes.json()).toEqual({ error: 'forbidden: insufficient_scope' });
+    });
+
+    test('3. Old data: identity record without scopes field in store yields full power for both OAuth and oa_ tokens', async () => {
+      const storePath = join(config.dataDir, 'identities.json');
+      const raw = JSON.parse(readFileSync(storePath, 'utf8'));
+      const legacyToken = 'oa_legacy_unscoped_token_999999999999';
+      const legacyAddr = `legacy-user@${config.domain}`;
+      raw.push({
+        address: legacyAddr,
+        createdAt: new Date().toISOString(),
+        tokenHash: sha256Hex(legacyToken),
+      });
+      writeFileSync(storePath, JSON.stringify(raw, null, 2));
+
+      // 1. oa_ token has no scopes attached -> full power
+      const authOa = resolveAccessToken(legacyToken);
+      expect(authOa.status).toBe('ok');
+      if (authOa.status === 'ok') {
+        expect((authOa.auth as any).scopes).toBeUndefined();
+      }
+
+      // 2. OAuth token also has no scopes attached -> full power
+      const oauthLegacyToken = 'oa_oauth_legacy_token_88888';
+      putAccessTokenForTests({
+        token: oauthLegacyToken,
+        grantId: 'grant-legacy-3',
+        address: legacyAddr,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-legacy', clientName: 'Client Legacy' },
+      });
+
+      const authOauth = resolveAccessToken(oauthLegacyToken, { resource });
+      expect(authOauth.status).toBe('ok');
+      if (authOauth.status === 'ok') {
+        expect((authOauth.auth as any).scopes).toBeUndefined();
+      }
+
+      // Send mail with OAuth token succeeds (does not hit 403 scope check)
+      const resSend = await app.request('/v1/send', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${oauthLegacyToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: legacyAddr,
+          to: 'recipient@example.net',
+          subject: 'Legacy full power send',
+          text: 'Allowed',
+        }),
+      });
+      expect(resSend.status).toBe(200);
+    });
+
+    test('4. Audit events: scope set/changed paths append expected recordAuditEvent rows', async () => {
+      // (a) Creation with scopes
+      const resCreate = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          localpart: 'audit-user',
+          scopes: ['read:messages'],
+        }),
+      });
+      expect(resCreate.status).toBe(201);
+      const auditAddr = `audit-user@${config.domain}`;
+
+      let logs = getAuditLogs();
+      const createEvent = logs.find((l) => l.address === auditAddr && l.event === 'identity.scopes.create');
+      expect(createEvent).toBeDefined();
+      expect(createEvent.outcome).toBe('ok');
+      expect(createEvent.scopes).toEqual(['read:messages']);
+
+      // (b) Rotation narrowing scopes: ['read:messages'] -> []
+      const resNarrow = await app.request(`/v1/identities/${auditAddr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: [] }),
+      });
+      expect(resNarrow.status).toBe(200);
+
+      logs = getAuditLogs();
+      const narrowEvent = logs.find((l) => l.address === auditAddr && l.event === 'identity.scopes.narrow');
+      expect(narrowEvent).toBeDefined();
+      expect(narrowEvent.outcome).toBe('ok');
+      expect(narrowEvent.scopes).toEqual([]);
+
+      // (c) Rotation widening scopes: [] -> ['read:messages']
+      const resWiden = await app.request(`/v1/identities/${auditAddr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(resWiden.status).toBe(200);
+
+      logs = getAuditLogs();
+      const widenEvent = logs.find((l) => l.address === auditAddr && l.event === 'identity.scopes.widen');
+      expect(widenEvent).toBeDefined();
+      expect(widenEvent.outcome).toBe('ok');
+      expect(widenEvent.scopes).toEqual(['read:messages']);
+
+      // (d) Rotation clearing scopes: ['read:messages'] -> {"scopes": null}
+      const resClear = await app.request(`/v1/identities/${auditAddr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: null }),
+      });
+      expect(resClear.status).toBe(200);
+
+      logs = getAuditLogs();
+      const clearEvent = logs.find((l) => l.address === auditAddr && l.event === 'identity.scopes.clear');
+      expect(clearEvent).toBeDefined();
+      expect(clearEvent.outcome).toBe('ok');
+      expect(clearEvent.scopes).toBeUndefined();
+
+      // (e) Rotation setting scopes on previously cleared (unscoped) identity: undefined -> ['read:messages']
+      const resSet = await app.request(`/v1/identities/${auditAddr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(resSet.status).toBe(200);
+
+      logs = getAuditLogs();
+      const setEvent = logs.find((l) => l.address === auditAddr && l.event === 'identity.scopes.set');
+      expect(setEvent).toBeDefined();
+      expect(setEvent.outcome).toBe('ok');
+      expect(setEvent.scopes).toEqual(['read:messages']);
+
+      // (f) Rotation with empty body (preserving scopes) does NOT append a new scope event
+      const logsCountBefore = getAuditLogs().length;
+      const resEmptyBody = await app.request(`/v1/identities/${auditAddr}/token`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      expect(resEmptyBody.status).toBe(200);
+      expect(getAuditLogs().length).toBe(logsCountBefore);
+    });
+
+    test('5. Rotation semantics: empty body preserves, {"scopes": null} resets full power, invalid scopes 400', async () => {
+      const ident = createIdentity({
+        localpart: 'semantics-user',
+        scopes: ['read:messages'],
+      })!;
+      const addr = ident.identity.address;
+
+      // Empty body preserves
+      const res1 = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      expect(res1.status).toBe(200);
+      expect(((await res1.json()) as any).scopes).toEqual(['read:messages']);
+      expect(findIdentity(addr)?.scopes).toEqual(['read:messages']);
+
+      // Explicit {"scopes": null} resets full power
+      const res2 = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: null }),
+      });
+      expect(res2.status).toBe(200);
+      expect(((await res2.json()) as any).scopes).toBeUndefined();
+      expect(findIdentity(addr)?.scopes).toBeUndefined();
+
+      // Empty body on unscoped preserves unscoped
+      const res3 = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      expect(res3.status).toBe(200);
+      expect(((await res3.json()) as any).scopes).toBeUndefined();
+      expect(findIdentity(addr)?.scopes).toBeUndefined();
+
+      // Invalid scopes: string instead of array or null -> 400
+      const res4 = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: 'read:messages' }),
+      });
+      expect(res4.status).toBe(400);
+
+      // Unknown scope -> 400
+      const res5 = await app.request(`/v1/identities/${addr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: ['unsupported:scope'] }),
+      });
+      expect(res5.status).toBe(400);
+    });
+
+    test('6. Fail-closed: identity-store read error during OAuth exchange returns unauthorized', async () => {
+      const user = createIdentity({ localpart: 'failclosed-user', scopes: ['read:messages'] })!;
+      const oauthToken = 'oa_oauth_failclosed_token_11111';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-failclosed-4',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-failclosed', clientName: 'Client Failclosed' },
+      });
+
+      const spy = spyOn(identitiesModule, 'findIdentity').mockImplementation(() => {
+        throw new Error('identity_store_corrupt');
+      });
+
+      try {
+        // resolveAccessToken directly fails-closed with unauthorized
+        const resolved = resolveAccessToken(oauthToken, { resource });
+        expect(resolved.status).toBe('unauthorized');
+
+        // API request with OAuth token fails with 401 unauthorized
+        const res = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${oauthToken}` },
+        });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({ error: 'unauthorized' });
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

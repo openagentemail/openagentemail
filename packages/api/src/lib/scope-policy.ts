@@ -36,8 +36,8 @@ export const OPERATION_POLICIES: readonly OperationPolicy[] = [
  * Centralized scope policy enforcement middleware for all /v1/* REST routes.
  *
  * Evaluates after bearer authentication:
- * - Admin keys, OAuth tokens, and legacy unscoped identity tokens (scopes === undefined) pass through.
- * - Scoped identity tokens are subject to default-deny scope evaluation.
+ * - Admin keys and legacy unscoped identity/OAuth tokens (scopes === undefined) pass through.
+ * - Scoped identity and OAuth tokens are subject to default-deny scope evaluation.
  * - If stored scope metadata contains any unknown/unsupported scope, fails closed (403) on all routes.
  * - If the operation is not granted by the token's scopes, rejects with 403 forbidden: insufficient_scope.
  */
