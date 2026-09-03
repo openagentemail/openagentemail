@@ -82,6 +82,34 @@ type StoreCache = {
 };
 
 let storeCache: StoreCache | undefined;
+let rawCache: StoreCache | undefined;
+
+/** Bounded in-process tombstone set for pruned OAuth access-token hashes. */
+export const PRUNED_ACCESS_HASHES_CAP = 10_000;
+const prunedAccessHashes = new Set<string>();
+
+export function recordPrunedAccessHash(hash: string): void {
+  if (prunedAccessHashes.has(hash)) {
+    prunedAccessHashes.delete(hash);
+    prunedAccessHashes.add(hash);
+    return;
+  }
+  if (prunedAccessHashes.size >= PRUNED_ACCESS_HASHES_CAP) {
+    const oldest = prunedAccessHashes.values().next().value;
+    if (oldest !== undefined) {
+      prunedAccessHashes.delete(oldest);
+    }
+  }
+  prunedAccessHashes.add(hash);
+}
+
+export function getPrunedAccessHashesCountForTests(): number {
+  return prunedAccessHashes.size;
+}
+
+export function clearPrunedAccessHashesForTests(): void {
+  prunedAccessHashes.clear();
+}
 
 function storePath(): string {
   return join(config.dataDir, 'oauth.json');
@@ -91,8 +119,9 @@ function emptyStore(): OAuthStoreFile {
   return { grants: {}, codes: {}, access: {}, refresh: {} };
 }
 
-function invalidateStoreCache(): void {
+export function invalidateStoreCache(): void {
   storeCache = undefined;
+  rawCache = undefined;
 }
 
 function fileVersionFromStat(st: {
@@ -190,6 +219,7 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
   for (const [hash, row] of Object.entries(data.access)) {
     if (row.expiresAt <= now) {
       delete data.access[hash];
+      recordPrunedAccessHash(hash);
       changed = true;
     }
   }
@@ -200,6 +230,52 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
     }
   }
   return changed;
+}
+
+function loadRaw(): OAuthStoreFile {
+  const path = storePath();
+  if (!existsSync(path)) {
+    if (rawCache && storeVersionsEqual(rawCache.version, MISSING_STORE_VERSION)) {
+      return rawCache.data;
+    }
+    rawCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
+    return rawCache.data;
+  }
+  try {
+    const version = fileVersionFromStat(statSync(path));
+    if (rawCache && storeVersionsEqual(rawCache.version, version)) {
+      return rawCache.data;
+    }
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isStoreShape(parsed)) {
+      throw new Error('invalid oauth store shape');
+    }
+    rawCache = { version, data: parsed };
+    return rawCache.data;
+  } catch (err) {
+    rawCache = undefined;
+    if ((err as Error).message === 'oauth_store_corrupt') throw err;
+    throw new Error('oauth_store_corrupt');
+  }
+}
+
+/**
+ * Non-destructive existence check in access table without pruning and without
+ * expiry evaluation. Used exclusively by auth credential discrimination when
+ * the identity store is damaged. Returns true if the token exists in the access
+ * table OR has been recorded in the bounded prunedAccessHashes tombstone set.
+ */
+export function peekAccessToken(token: string): boolean {
+  try {
+    const hash = hashSecret(token);
+    if (prunedAccessHashes.has(hash)) {
+      return true;
+    }
+    const data = loadRaw();
+    return Boolean(data.access[hash]);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -264,7 +340,8 @@ function save(data: OAuthStoreFile): void {
   pruneExpired(data);
   invalidateStoreCache();
   const version = writeStoreFile(data);
-  storeCache = { version, data };
+  storeCache = { version, data: structuredClone(data) };
+  rawCache = { version, data: structuredClone(data) };
 }
 
 export function hashSecret(value: string): string {
@@ -318,7 +395,10 @@ export function revokeGrantsForAddress(address: string): number {
       if (row.grantId === grantId) delete data.codes[hash];
     }
     for (const [hash, row] of Object.entries(data.access)) {
-      if (row.grantId === grantId) delete data.access[hash];
+      if (row.grantId === grantId) {
+        delete data.access[hash];
+        recordPrunedAccessHash(hash);
+      }
     }
     for (const [hash, row] of Object.entries(data.refresh)) {
       if (row.grantId === grantId) delete data.refresh[hash];
@@ -344,7 +424,10 @@ export function revokeGrant(grantId: string): boolean {
     if (row.grantId === grantId) delete data.codes[hash];
   }
   for (const [hash, row] of Object.entries(data.access)) {
-    if (row.grantId === grantId) delete data.access[hash];
+    if (row.grantId === grantId) {
+      delete data.access[hash];
+      recordPrunedAccessHash(hash);
+    }
   }
   for (const [hash, row] of Object.entries(data.refresh)) {
     if (row.grantId === grantId) delete data.refresh[hash];
@@ -607,6 +690,7 @@ export function revokeToken(token: string, clientId?: string): boolean {
   let changed = false;
   if (access) {
     delete data.access[hash];
+    recordPrunedAccessHash(hash);
     changed = true;
   }
   if (refresh) {
@@ -651,8 +735,9 @@ export function putAccessTokenForTests(input: {
   aud: string;
   expiresAt: number;
   ensureGrant?: { clientId: string; clientName: string };
+  runSave?: boolean;
 }): void {
-  const data = load();
+  const data = loadRaw();
   if (input.ensureGrant && !data.grants[input.grantId]) {
     const nowIso = new Date().toISOString();
     data.grants[input.grantId] = {
@@ -670,5 +755,17 @@ export function putAccessTokenForTests(input: {
     aud: input.aud,
     expiresAt: input.expiresAt,
   };
+  if (input.runSave) {
+    save(data);
+  } else {
+    invalidateStoreCache();
+    const version = writeStoreFile(data);
+    rawCache = { version, data: structuredClone(data) };
+    storeCache = { version, data: structuredClone(data) };
+  }
+}
+
+export function saveStoreForTests(): void {
+  const data = loadRaw();
   save(data);
 }

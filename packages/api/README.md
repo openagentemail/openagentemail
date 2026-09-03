@@ -51,7 +51,7 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
 - `GET /v1/audit/events?limit=&event=` → `{events:[…]}`（**admin only**；scrubbed JSONL `DATA_DIR/audit.jsonl`；见 docs/security.md）
 - `POST /v1/identities` `{name?, localpart?, canNotifyUser?, scopes?: string[]}` → `201 {address, name?, pushContentTier, token, scopes?}` (admin only; 409 if taken). Optional `scopes` restricts the token (e.g. `['read:messages']`); absent means legacy full power. Unknown or misspelled fields are rejected rather than silently minting a full token.
 - `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,scopes?...}]}` (admin only; includes `scopes` when present, including `[]`)
-- `POST /v1/identities/:address/token` optional `{scopes?: string[]}` → `{address, token, scopes?}` (admin only). A truly empty body mints an unscoped/full token; any non-empty body must be a strict JSON object with `scopes` (e.g. `scopes: []` mints a token with no permissions; unknown or misspelled fields are rejected with 400).
+- `POST /v1/identities/:address/token` optional `{scopes?: string[] | null}` → `{address, token, scopes?}` (admin only). A truly empty body preserves existing scopes; `{"scopes": null}` resets to an unscoped/full token; any non-empty body must be a strict JSON object with `scopes` (e.g. `scopes: []` mints a token with no permissions; unknown or misspelled fields are rejected with 400).
 - `GET /v1/identities/:address/push-tier` → `{address, pushContentTier, warning?}` (admin any; identity own only)
 - `PUT /v1/identities/:address/push-tier` `{pushContentTier:1|2|3, confirm_risk?}` → admin only; tier 3 requires `confirm_risk: true`
 - **Identity Token Scopes**:

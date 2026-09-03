@@ -18,7 +18,7 @@ import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { config } from './config.ts';
 import { findIdentity, findIdentityByToken, findIdentityByTokenHash } from './identities.ts';
-import { getGrant, lookupAccessToken } from './oauth-store.ts';
+import { getGrant, lookupAccessToken, peekAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
 
 function sha256Hex(value: string): string {
@@ -85,7 +85,20 @@ export function resolveAccessToken(
     };
   }
 
-  const identity = findIdentityByToken(token);
+  let identity: ReturnType<typeof findIdentityByToken>;
+  try {
+    identity = findIdentityByToken(token);
+  } catch (err) {
+    // If the identity store is damaged, distinguish credential classes:
+    // Only OAuth credentials (present in oauth-store access table, even if expired)
+    // take the fail-closed 401 path.
+    // Non-OAuth credentials (oa_ identity tokens or garbage) must rethrow to surface 500
+    // and log the storage outage per the integrity contract.
+    if (!peekAccessToken(token)) {
+      throw err;
+    }
+    identity = undefined;
+  }
   if (identity) {
     return {
       status: 'ok',
@@ -122,7 +135,14 @@ export function resolveAccessToken(
   }
 
   // 身份已删：票作废（与级联吊销互补；防竞态/旧库残留）
-  if (!findIdentity(oauth.address)) {
+  // 读库抛错时 fail-closed 拒认（401），不回退到无 scope 全权票
+  let oauthIdentity: ReturnType<typeof findIdentity>;
+  try {
+    oauthIdentity = findIdentity(oauth.address);
+  } catch {
+    return { status: 'unauthorized' };
+  }
+  if (!oauthIdentity) {
     return { status: 'unauthorized' };
   }
 
@@ -132,8 +152,12 @@ export function resolveAccessToken(
 
   return {
     status: 'ok',
-    // /v1 行为：仍是 identity scope，不含 grant 字段
-    auth: { kind: 'identity', address: oauth.address },
+    // /v1 行为：仍是 identity scope，不含 grant 字段；继承身份当前落盘的 scopes
+    auth: {
+      kind: 'identity',
+      address: oauth.address,
+      ...(oauthIdentity.scopes !== undefined ? { scopes: oauthIdentity.scopes } : {}),
+    },
     attribution: {
       kind: 'oauth',
       address: oauth.address,

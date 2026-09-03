@@ -321,7 +321,7 @@ export class OpenAgentEmailClient {
 
   rotateIdentityToken(
     address: string,
-    opts?: { scopes?: string[] },
+    opts?: { scopes?: string[] | null },
   ): Promise<{
     address: string;
     token: string;
