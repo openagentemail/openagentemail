@@ -273,6 +273,8 @@ describe('Configure UI APIs (#26 PR 5)', () => {
   });
 
   test('POST /ui/api/identities validates domain and creates on secondary domain', async () => {
+    const prevNtfy = config.ntfy.enabled;
+    (config.ntfy as { enabled: boolean }).enabled = false;
     (config.allDomains as Set<string>).add('secondary.example');
     (config.extraDomains as string[]).push('secondary.example');
     try {
@@ -298,6 +300,7 @@ describe('Configure UI APIs (#26 PR 5)', () => {
       expect(created.address).toBe('ui-agent@secondary.example');
       expect(created.token).toBeDefined();
     } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       (config.allDomains as Set<string>).delete('secondary.example');
       const idx = config.extraDomains.indexOf('secondary.example');
       if (idx !== -1) config.extraDomains.splice(idx, 1);
