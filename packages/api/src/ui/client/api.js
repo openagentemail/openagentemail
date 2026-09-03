@@ -90,6 +90,10 @@
     loginView.hidden = false;
     loginError.textContent = message || '';
     configureLoginGate();
+    if (linkLoginNotice) {
+      linkLoginNotice.hidden = true;
+      linkLoginNotice.textContent = '';
+    }
     if (!loginToken.disabled) loginToken.focus();
   }
 
@@ -97,6 +101,10 @@
     loginView.hidden = true;
     inboxView.hidden = false;
     loginError.textContent = '';
+    if (linkLoginNotice) {
+      linkLoginNotice.hidden = true;
+      linkLoginNotice.textContent = '';
+    }
   }
 
   /* OAuth 同意页回跳：路径由服务端会话接口 JSON 下发（cookie），不读地址栏查询串。 */

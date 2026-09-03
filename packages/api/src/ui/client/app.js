@@ -849,7 +849,13 @@
       if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
-      announce('Signed in via link as ' + (state.me.kind === 'admin' ? 'Admin session' : state.me.address));
+      var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+      var noticeText = 'Signed in via link as ' + label;
+      if (linkLoginNotice) {
+        linkLoginNotice.textContent = noticeText;
+        linkLoginNotice.hidden = false;
+      }
+      announce(noticeText);
     } catch {
       showLogin('Could not reach the server.');
     } finally {

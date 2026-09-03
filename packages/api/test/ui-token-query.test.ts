@@ -113,6 +113,7 @@ function createClientHarness(options: HarnessOptions) {
   const loginView = { hidden: false };
   const inboxView = { hidden: true };
   const insecureWarning = { hidden: true };
+  const linkLoginNotice = { textContent: '', hidden: true };
   const state = { me: null as unknown };
 
   const loginForm = {
@@ -146,6 +147,8 @@ function createClientHarness(options: HarnessOptions) {
     inboxView.hidden = true;
     loginView.hidden = false;
     loginError.textContent = msg || '';
+    linkLoginNotice.hidden = true;
+    linkLoginNotice.textContent = '';
     configureLoginGate();
   };
 
@@ -154,6 +157,8 @@ function createClientHarness(options: HarnessOptions) {
     loginView.hidden = true;
     inboxView.hidden = false;
     loginError.textContent = '';
+    linkLoginNotice.hidden = true;
+    linkLoginNotice.textContent = '';
   };
 
   const startSession = async () => {
@@ -206,6 +211,7 @@ function createClientHarness(options: HarnessOptions) {
     'loginView',
     'inboxView',
     'insecureWarning',
+    'linkLoginNotice',
     'state',
     'isLoginContextSafe',
     'configureLoginGate',
@@ -245,6 +251,7 @@ function createClientHarness(options: HarnessOptions) {
     loginView,
     inboxView,
     insecureWarning,
+    linkLoginNotice,
     state,
     isLoginContextSafe,
     configureLoginGate,
@@ -265,6 +272,7 @@ function createClientHarness(options: HarnessOptions) {
     loginView,
     inboxView,
     insecureWarning,
+    linkLoginNotice,
     state,
     calls,
     getCurrentUrl: () => currentUrl,
@@ -304,6 +312,10 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
 
     // 断言 4: 登录输入框被清空，不留 token
     expect(harness.loginToken.value).toBe('');
+
+    // 断言 5: 链接登录成功展示 visible notice banner
+    expect(harness.linkLoginNotice.hidden).toBe(false);
+    expect(harness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
   });
 
   // 2. 无会话 + ?token=<invalid> → 登录表单显示、错误文案正确、token 不回显、参数已剥离。
@@ -537,13 +549,15 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.calls.showInboxCount).toBe(0);
     expect(harness.calls.showLogin).toEqual(['']);
 
-    // 断言 3: token 永不回显进输入框
+    // 断言 3: token 永不回显进输入框，也不展示链接登录提示
     expect(harness.loginToken.value).toBe('');
     expect(harness.loginError.textContent).toBe('');
     expect(harness.calls.announced).toHaveLength(0);
+    expect(harness.linkLoginNotice.hidden).toBe(true);
+    expect(harness.linkLoginNotice.textContent).toBe('');
   });
 
-  // 10. Fix 2 (ZCode P2-3): query 链接登录成功展示 announcement 提示，粘贴表单登录不展示
+  // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1): query 链接登录成功展示 visible banner 与 announcement 提示，粘贴表单登录不展示
   test('10. Visible notice appears on query-login success and does NOT appear on paste-form login success', async () => {
     // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session"
     const adminLinkHarness = createClientHarness({
@@ -553,6 +567,8 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
     await adminLinkHarness.instance.runStart();
     expect(adminLinkHarness.calls.showInboxCount).toBe(1);
+    expect(adminLinkHarness.linkLoginNotice.hidden).toBe(false);
+    expect(adminLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
     expect(adminLinkHarness.calls.announced).toEqual(['Signed in via link as Admin session']);
 
     // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>"
@@ -563,9 +579,11 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
     await identityLinkHarness.instance.runStart();
     expect(identityLinkHarness.calls.showInboxCount).toBe(1);
+    expect(identityLinkHarness.linkLoginNotice.hidden).toBe(false);
+    expect(identityLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as agent-bot@example.com');
     expect(identityLinkHarness.calls.announced).toEqual(['Signed in via link as agent-bot@example.com']);
 
-    // 场景 C: 表单粘贴输入登录成功 → 不展示 "Signed in via link" 提示
+    // 场景 C: 表单粘贴输入登录成功 → 不展示 visible banner 与 announcement
     const formHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui',
       meResponse: { status: 401 },
@@ -575,10 +593,13 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     await formHarness.instance.runStart();
     expect(formHarness.calls.showLogin).toEqual(['']);
     expect(formHarness.calls.announced).toHaveLength(0);
+    expect(formHarness.linkLoginNotice.hidden).toBe(true);
 
     // 用户在表单粘贴 token 提交
     await formHarness.instance.runPasteLogin('admin-paste-token');
     expect(formHarness.calls.showInboxCount).toBe(1);
+    expect(formHarness.linkLoginNotice.hidden).toBe(true);
+    expect(formHarness.linkLoginNotice.textContent).toBe('');
     // 验证：表单登录完全不触发链接登录提示
     const linkAnnouncements = formHarness.calls.announced.filter((m) =>
       m.includes('Signed in via link'),

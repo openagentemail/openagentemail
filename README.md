@@ -191,8 +191,8 @@ immediately stripped from the address bar via `history.replaceState` on load,
 though tokens passed in URLs can linger in browser history and server access logs.
 Only open `?token=` links you generated yourself; if you suspect a link has leaked,
 rotate the token from the UI immediately. Do not open `?token=` links sent by
-others — the link silently signs you into the sender's session (the on-screen
-"Signed in via link" notice is the tell).
+others — the link signs you into the sender's session (the app displays a
+visible "Signed in via link" banner across the interface for the session as the tell).
 Sessions live only in API process memory, so restarting the API signs every
 browser out. They expire after 12 idle hours or 24 hours total — or tick **Trust
 this device** at login to keep a sliding 30-day session on that browser. Each
