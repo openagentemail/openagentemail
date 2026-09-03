@@ -1646,6 +1646,15 @@ describe('Issue #114: read-only API token scopes', () => {
         ensureGrant: { clientId: 'client-failclosed', clientName: 'Client Failclosed' },
       });
 
+      putAccessTokenForTests({
+        token: expiredOAuthToken,
+        grantId: 'grant-failclosed-5',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() - 1000, // real wall-clock expiry in the past
+        ensureGrant: { clientId: 'client-failclosed-exp', clientName: 'Client Failclosed Exp' },
+      });
+
       const storePath = join(config.dataDir, 'identities.json');
       const goodData = readFileSync(storePath, 'utf8');
 
@@ -1675,15 +1684,6 @@ describe('Issue #114: read-only API token scopes', () => {
         expect(await resOAuth.json()).toEqual({ error: 'unauthorized' });
 
         // 4. Real wall-clock expired OAuth token + malformed store -> 401 unauthorized (not 500)
-        putAccessTokenForTests({
-          token: expiredOAuthToken,
-          grantId: 'grant-failclosed-5',
-          address: user.identity.address,
-          aud: resource,
-          expiresAt: Date.now() - 1000, // real wall-clock expiry in the past
-          ensureGrant: { clientId: 'client-failclosed-exp', clientName: 'Client Failclosed Exp' },
-        });
-
         const resExpiredOAuth = await app.request(`/v1/messages?address=${user.identity.address}`, {
           headers: { authorization: `Bearer ${expiredOAuthToken}` },
         });
@@ -1753,6 +1753,48 @@ describe('Issue #114: read-only API token scopes', () => {
 
       // 3. Peek returns false for tokens never in the access table
       expect(peekAccessToken('non_existent_token_abc')).toBe(false);
+    });
+
+    test('6d. Shared-mutable-cache isolation: normal lookup drives prune on storeCache, peekAccessToken on rawCache still retains expired OAuth credential (401, not 500)', async () => {
+      const user = createIdentity({ localpart: 'prune-iso-user', scopes: ['read:messages'] })!;
+      const expiredToken = 'prune_iso_expired_oauth_token_77777';
+
+      // 1. Seed an OAuth token with past expiresAt
+      putAccessTokenForTests({
+        token: expiredToken,
+        grantId: 'grant-prune-iso',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() - 1000,
+        ensureGrant: { clientId: 'client-prune-iso', clientName: 'Client Prune Iso' },
+      });
+
+      // 2. Perform a NORMAL resolution first (healthy identity store).
+      // This drives lookupAccessToken -> load() -> pruneExpired() on storeCache.
+      const normalRes = resolveAccessToken(expiredToken, { resource });
+      expect(normalRes.status).toBe('unauthorized');
+
+      // 3. THEN corrupt the identity store
+      const storePath = join(config.dataDir, 'identities.json');
+      const goodData = readFileSync(storePath, 'utf8');
+
+      try {
+        writeFileSync(storePath, '[{ malformed json');
+
+        // 4. resolveAccessToken / real HTTP request with that expired token:
+        // peekAccessToken uses rawCache (isolated from storeCache prune),
+        // so it recognizes the expired token as an OAuth credential and returns 401, NOT 500.
+        const res = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${expiredToken}` },
+        });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({ error: 'unauthorized' });
+
+        const direct = resolveAccessToken(expiredToken, { resource });
+        expect(direct.status).toBe('unauthorized');
+      } finally {
+        writeFileSync(storePath, goodData);
+      }
     });
   });
 });

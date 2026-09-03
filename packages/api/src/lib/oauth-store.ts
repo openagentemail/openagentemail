@@ -82,6 +82,7 @@ type StoreCache = {
 };
 
 let storeCache: StoreCache | undefined;
+let rawCache: StoreCache | undefined;
 
 function storePath(): string {
   return join(config.dataDir, 'oauth.json');
@@ -93,6 +94,7 @@ function emptyStore(): OAuthStoreFile {
 
 function invalidateStoreCache(): void {
   storeCache = undefined;
+  rawCache = undefined;
 }
 
 function fileVersionFromStat(st: {
@@ -205,25 +207,25 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
 function loadRaw(): OAuthStoreFile {
   const path = storePath();
   if (!existsSync(path)) {
-    if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
-      return storeCache.data;
+    if (rawCache && storeVersionsEqual(rawCache.version, MISSING_STORE_VERSION)) {
+      return rawCache.data;
     }
-    storeCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
-    return storeCache.data;
+    rawCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
+    return rawCache.data;
   }
   try {
     const version = fileVersionFromStat(statSync(path));
-    if (storeCache && storeVersionsEqual(storeCache.version, version)) {
-      return storeCache.data;
+    if (rawCache && storeVersionsEqual(rawCache.version, version)) {
+      return rawCache.data;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isStoreShape(parsed)) {
       throw new Error('invalid oauth store shape');
     }
-    storeCache = { version, data: parsed };
-    return storeCache.data;
+    rawCache = { version, data: parsed };
+    return rawCache.data;
   } catch (err) {
-    invalidateStoreCache();
+    rawCache = undefined;
     if ((err as Error).message === 'oauth_store_corrupt') throw err;
     throw new Error('oauth_store_corrupt');
   }
@@ -306,7 +308,8 @@ function save(data: OAuthStoreFile): void {
   pruneExpired(data);
   invalidateStoreCache();
   const version = writeStoreFile(data);
-  storeCache = { version, data };
+  storeCache = { version, data: structuredClone(data) };
+  rawCache = { version, data: structuredClone(data) };
 }
 
 export function hashSecret(value: string): string {
@@ -714,5 +717,6 @@ export function putAccessTokenForTests(input: {
   };
   invalidateStoreCache();
   const version = writeStoreFile(data);
-  storeCache = { version, data };
+  rawCache = { version, data: structuredClone(data) };
+  storeCache = { version, data: structuredClone(data) };
 }
