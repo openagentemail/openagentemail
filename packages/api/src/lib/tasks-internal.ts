@@ -5,7 +5,7 @@
  */
 
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { simpleParser } from 'mailparser';
+import { simpleParser, type ParsedMail } from 'mailparser';
 import type { FetchMessageObject } from 'imapflow';
 import { config } from './config.ts';
 import { findIdentity } from './identities.ts';
@@ -917,14 +917,18 @@ function isStampedTaskMessage(
   return !!stamp && stamp === taskStamp(id, state, from, to);
 }
 
-async function parseTaskMessage(message: FetchMessageObject, id: string): Promise<RawTaskMessage | null> {
+async function parseTaskMessage(
+  message: FetchMessageObject,
+  id: string,
+  preParsed?: ParsedMail,
+): Promise<RawTaskMessage | null> {
   if (!message.source || !message.envelope) return null;
   const from = firstAddress(message.envelope.from);
   // A task response has a single peer recipient. Reject ambiguous external
   // mail rather than letting a copied header invent a participant set.
   const to = firstAddress(message.envelope.to);
   if (!from || !to) return null;
-  const parsed = await simpleParser(message.source);
+  const parsed = preParsed ?? await simpleParser(message.source);
   const headerId = parsed.headers.get('x-oa-task');
   const headerState = parsed.headers.get('x-oa-task-state');
   const stamp = parsed.headers.get('x-oa-task-stamp');
@@ -1081,10 +1085,11 @@ function isRelationshipIntegrityFailure(value: ParsedTaskMessage): value is Task
 async function relationshipIntegrityFailureFor(
   message: FetchMessageObject,
   id: string,
+  preParsed?: ParsedMail,
 ): Promise<TaskRelationshipIntegrityFailure | null> {
   if (!message.source) return null;
   try {
-    const parsed = await simpleParser(message.source);
+    const parsed = preParsed ?? await simpleParser(message.source);
     if (parsed.headers.get('x-oa-task') !== id) return null;
     const hasRootWitness = hasValidTaskRootWitness(
       message,
@@ -1099,12 +1104,16 @@ async function relationshipIntegrityFailureFor(
   }
 }
 
-async function parseTaskMessageWithIntegrity(message: FetchMessageObject, id: string): Promise<ParsedTaskMessage> {
+async function parseTaskMessageWithIntegrity(
+  message: FetchMessageObject,
+  id: string,
+  preParsed?: ParsedMail,
+): Promise<ParsedTaskMessage> {
   try {
-    const parsed = await parseTaskMessage(message, id);
-    return parsed ?? await relationshipIntegrityFailureFor(message, id);
+    const parsed = await parseTaskMessage(message, id, preParsed);
+    return parsed ?? await relationshipIntegrityFailureFor(message, id, preParsed);
   } catch (err) {
-    const failure = await relationshipIntegrityFailureFor(message, id);
+    const failure = await relationshipIntegrityFailureFor(message, id, preParsed);
     if (failure) return failure;
     throw err;
   }
@@ -1502,7 +1511,9 @@ type TaskListSnapshot = {
   hadMatchingRowsIds: Set<string>;
 };
 
-async function scanDurableTasks(): Promise<TaskListSnapshot> {
+async function scanDurableTasks(
+  parser: (source: Buffer | string) => Promise<ParsedMail> = simpleParser,
+): Promise<TaskListSnapshot> {
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': true } }, { uid: true });
     if (!uids || uids.length === 0) return { tasks: [], hadMatchingRowsIds: new Set() };
@@ -1514,11 +1525,11 @@ async function scanDurableTasks(): Promise<TaskListSnapshot> {
       { uid: true },
     )) {
       if (!message.source) continue;
-      const parsed = await simpleParser(message.source);
+      const parsed = await parser(message.source);
       const id = parsed.headers.get('x-oa-task');
       if (typeof id !== 'string' || !isTaskId(id)) continue;
       hadMatchingRowsIds.add(id);
-      const taskMessage = await parseTaskMessageWithIntegrity(message, id);
+      const taskMessage = await parseTaskMessageWithIntegrity(message, id, parsed);
       if (!taskMessage) continue;
       const entries = grouped.get(id) ?? [];
       entries.push(taskMessage);
@@ -3008,7 +3019,14 @@ export async function parseTaskMessageWithIntegrityForTests(input: {
       subject: parsed.subject ?? undefined,
     },
     internalDate: new Date(input.internalDate),
-  } as FetchMessageObject, input.id);
+  } as FetchMessageObject, input.id, parsed);
+}
+
+/** @internal Test-only access to durable scan path with custom parser injection. */
+export async function scanDurableTasksForTests(
+  parser?: (source: Buffer | string) => Promise<ParsedMail>,
+): Promise<TaskListSnapshot> {
+  return scanDurableTasks(parser);
 }
 
 /** @internal Test-only reconstruction entry used by both IMAP read pipelines. */

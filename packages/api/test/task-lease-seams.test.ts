@@ -49,12 +49,52 @@ test('#92: production task facade and bundle exclude dependency-injection test s
   for (const seam of taskSeams) {
     expect(typeof (support as Record<string, unknown>)[seam]).toBe('function');
   }
+  expect(Object.hasOwn(tasks, 'scanDurableTasksForTests')).toBe(false);
+  expect(tasksSource).not.toContain('scanDurableTasksForTests');
+  expect(typeof (support as Record<string, unknown>).scanDurableTasksForTests).toBe('function');
 });
 
-test('#89 / #92 GREEN: canonical production bundle and final Docker stage exclude every test seam', () => {
+function assertSubprocessSuccess(
+  result: { exitCode: number | null; stdout?: Uint8Array | string | Buffer | null; stderr?: Uint8Array | string | Buffer | null },
+  cmd: string[] = ['bun', 'run', 'build'],
+): void {
+  if (result.exitCode === 0) return;
+  const stdout = typeof result.stdout === 'string'
+    ? result.stdout
+    : (result.stdout ? Buffer.from(result.stdout).toString('utf8') : '');
+  const stderr = typeof result.stderr === 'string'
+    ? result.stderr
+    : (result.stderr ? Buffer.from(result.stderr).toString('utf8') : '');
+  throw new Error(
+    `Subprocess failed: ${cmd.join(' ')}\n`
+    + `Exit code: ${result.exitCode}\n`
+    + `stdout:\n${stdout}\n`
+    + `stderr:\n${stderr}`,
+  );
+}
+
+test('#94: build diagnostic helper formats exit code, stdout, and stderr on failure', () => {
+  const fakeResult = {
+    exitCode: 42,
+    stdout: Buffer.from('build stdout details: out of memory'),
+    stderr: Buffer.from('build stderr details: syntax error on line 12'),
+  };
+  expect(() => assertSubprocessSuccess(fakeResult, ['fake', 'build', 'command'])).toThrow(
+    /Subprocess failed: fake build command[\s\S]*Exit code: 42[\s\S]*build stdout details: out of memory[\s\S]*build stderr details: syntax error on line 12/,
+  );
+
+  const fakeSuccess = {
+    exitCode: 0,
+    stdout: Buffer.from('success output'),
+    stderr: Buffer.from(''),
+  };
+  expect(() => assertSubprocessSuccess(fakeSuccess)).not.toThrow();
+});
+
+test('#89 / #92 / #94 GREEN: canonical production bundle and final Docker stage exclude every test seam', () => {
   const pkgDir = join(import.meta.dir, '..');
   const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
-  expect(build.exitCode).toBe(0);
+  assertSubprocessSuccess(build, ['bun', 'run', 'build']);
   const bundle = readFileSync(join(pkgDir, 'dist', 'main.js'), 'utf8');
   for (const seam of [
     'claimLeaseHeadersForTests',
@@ -68,6 +108,7 @@ test('#89 / #92 GREEN: canonical production bundle and final Docker stage exclud
     'setTaskGetForTests',
     'setTaskSendMailForTests',
     'clearQueuedEventsForTests',
+    'scanDurableTasksForTests',
   ]) expect(bundle).not.toContain(seam);
 
   const runtimeStage = readFileSync(join(pkgDir, 'Dockerfile'), 'utf8').split('FROM oven/bun:1 AS runtime', 2)[1]!;
