@@ -454,41 +454,41 @@ div.push-tier-card { cursor: default; }
 
 /* ---- 链接登录横幅视口高度适配（R8 Fix 2） ---- */
 .link-login-active .inbox-layout {
-  min-height: calc(100vh - 74px - 36px);
+  min-height: calc(100vh - 74px - 37.5px);
 }
 .link-login-active .identity-panel {
-  max-height: calc(100vh - 74px - 36px);
+  max-height: calc(100vh - 74px - 37.5px);
 }
 .link-login-active .app-shell {
-  min-height: calc(100vh - 74px - 36px);
+  min-height: calc(100vh - 74px - 37.5px);
 }
 .link-login-active .app-shell > .inbox-layout {
-  min-height: calc(100vh - 74px - 36px);
+  min-height: calc(100vh - 74px - 37.5px);
 }
 
 @media (max-width: 820px) {
   .link-login-active .app-shell {
-    min-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
   }
   .link-login-active .app-shell > .inbox-layout {
-    min-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
   }
   .link-login-active .configure-panel,
   .link-login-active .plan-panel {
-    min-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
   }
   .link-login-active .inbox-layout {
-    min-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
   }
   .link-login-active .message-panel,
   .link-login-active .detail-panel,
   .link-login-active .overview-panel,
   .link-login-active .notify-panel,
   .link-login-active .tasks-panel {
-    min-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
   }
   .link-login-active .inbox-view[data-scope="inbox"][data-mobile-view="folders"] .identity-panel {
-    min-height: calc(100vh - 66px - 36px);
-    max-height: calc(100vh - 66px - 36px);
+    min-height: calc(100vh - 66px - 37.5px);
+    max-height: calc(100vh - 66px - 37.5px);
   }
 }

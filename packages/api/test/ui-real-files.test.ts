@@ -100,6 +100,6 @@ describe('UI real-file manifest (#520-A)', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
     expect(sha256(UI_JS)).toBe('020b2d8f1083acc0b85ce2b3dd3d087a15e72309ead252b22afa3a52dce70da5');
-    expect(sha256(UI_CSS)).toBe('e8bfdf49b458c550cb6cb9f5316642545d6cff4fb4197bf66b3207afefe39d26');
+    expect(sha256(UI_CSS)).toBe('112997e670a3b28edb2c65c003bd3e148e3ff54813f1b80025a9a982664cc4ed');
   });
 });
