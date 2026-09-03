@@ -1950,4 +1950,71 @@ describe('multi-domain notify target resolution', () => {
     expect(body).toEqual({ error: 'not_found' });
     expect(body.domains).toBeUndefined();
   });
+
+  test('rejects over-long adversarial target with 400 invalid_request and includes no-store', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // 10k-character adversarial domain target
+    const overlongTarget = 'agent:test@' + 'a'.repeat(10000) + '.com';
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: overlongTarget,
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('POST /notify carries Cache-Control: no-store on all responses', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // Success response carries no-store
+    const resSuccess = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'user',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resSuccess.status).toBe(200);
+    expect(resSuccess.headers.get('cache-control')).toBe('no-store');
+
+    // 404 response carries no-store
+    const resNotFound = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:nonexistent',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resNotFound.status).toBe(404);
+    expect(resNotFound.headers.get('cache-control')).toBe('no-store');
+
+    // 400 ambiguous_agent carries no-store
+    const resAmbiguous = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resAmbiguous.status).toBe(400);
+    expect(resAmbiguous.headers.get('cache-control')).toBe('no-store');
+  });
 });

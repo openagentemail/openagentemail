@@ -104,6 +104,7 @@ function publicIdentity(identity: Identity) {
 
 export const identitiesRoute = new Hono()
   .post('/', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const denied = requireAdmin(c);
     if (denied) return denied;
     let body: unknown = {};

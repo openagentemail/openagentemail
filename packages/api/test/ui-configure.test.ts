@@ -240,8 +240,12 @@ describe('Configure UI APIs (#26 PR 5)', () => {
   });
 
   test('GET /ui/api/domains is admin-only and returns configured domains', async () => {
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
     (config.allDomains as Set<string>).add('secondary.example');
-    (config.extraDomains as string[]).push('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
     try {
       // Identity-scoped session is denied 403
       const { app: identityApp, cookie: identityCookie } = authenticatedApp({
@@ -252,6 +256,7 @@ describe('Configure UI APIs (#26 PR 5)', () => {
         headers: { cookie: identityCookie },
       });
       expect(denied.status).toBe(403);
+      expect(denied.headers.get('cache-control')).toBe('no-store');
       expect(await denied.json()).toEqual({ error: 'forbidden: admin session required' });
 
       // Admin session succeeds with 200
@@ -267,17 +272,25 @@ describe('Configure UI APIs (#26 PR 5)', () => {
       expect(data.all).toContain('secondary.example');
       expect(data.all).toContain(config.domain);
     } finally {
-      (config.allDomains as Set<string>).delete('secondary.example');
-      const idx = config.extraDomains.indexOf('secondary.example');
-      if (idx !== -1) config.extraDomains.splice(idx, 1);
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
     }
   });
 
   test('POST /ui/api/identities validates domain and creates on secondary domain', async () => {
     const prevNtfy = config.ntfy.enabled;
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
     (config.ntfy as { enabled: boolean }).enabled = false;
     (config.allDomains as Set<string>).add('secondary.example');
-    (config.extraDomains as string[]).push('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
     try {
       const { app, cookie } = authenticatedApp({ kind: 'admin' });
 
@@ -298,9 +311,20 @@ describe('Configure UI APIs (#26 PR 5)', () => {
         body: JSON.stringify({ localpart: 'ui-agent', domain: 'secondary.example' }),
       });
       expect(ok.status).toBe(201);
+      expect(ok.headers.get('cache-control')).toBe('no-store');
       const created = (await ok.json()) as any;
       expect(created.address).toBe('ui-agent@secondary.example');
       expect(created.token).toBeDefined();
+
+      // Reject duplicate within same domain (409 address_exists carries no-store)
+      const dup = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'secondary.example' }),
+      });
+      expect(dup.status).toBe(409);
+      expect(dup.headers.get('cache-control')).toBe('no-store');
+      expect(await dup.json()).toEqual({ error: 'address_exists' });
 
       // Reject cross-domain localpart conflict
       const conflict = await app.request('http://localhost/ui/api/identities', {
@@ -317,9 +341,13 @@ describe('Configure UI APIs (#26 PR 5)', () => {
       });
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
-      (config.allDomains as Set<string>).delete('secondary.example');
-      const idx = config.extraDomains.indexOf('secondary.example');
-      if (idx !== -1) config.extraDomains.splice(idx, 1);
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
     }
   });
 });

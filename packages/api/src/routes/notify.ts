@@ -33,7 +33,7 @@ const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const notifySchema = z.object({
   target: z.union([
     z.literal('user'),
-    z.string().regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)?$/i),
+    z.string().max(320).regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/i),
   ]),
   title: z.string().min(1).max(256),
   message: z.string().min(1).max(4_000),
@@ -125,6 +125,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
 
   return new Hono()
     .post('/', async (c) => {
+      c.header('Cache-Control', 'no-store');
       let body: unknown;
       try {
         body = await c.req.json();

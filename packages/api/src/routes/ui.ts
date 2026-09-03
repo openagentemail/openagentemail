@@ -552,9 +552,9 @@ export function createUiApiRoutes(
   });
 
   routes.get('/domains', (c) => {
+    c.header('Cache-Control', 'no-store');
     const denied = requireUiAdmin(c);
     if (denied) return denied;
-    c.header('Cache-Control', 'no-store');
     return c.json({
       primary: config.domain,
       extra: [...config.extraDomains],
@@ -573,6 +573,7 @@ export function createUiApiRoutes(
   });
 
   routes.post('/identities', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const denied = requireUiAdmin(c);
     if (denied) return denied;
     let body: unknown;

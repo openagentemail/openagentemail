@@ -631,6 +631,7 @@ describe('multi-domain identities', () => {
         body: JSON.stringify({ localpart: 'shared-name', domain: 'test.example' }),
       });
       expect(resDup.status).toBe(409);
+      expect(resDup.headers.get('cache-control')).toBe('no-store');
       expect(await resDup.json()).toEqual({ error: 'address_exists' });
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
