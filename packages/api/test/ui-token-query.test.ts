@@ -65,6 +65,7 @@ interface HarnessOptions {
   storageThrows?: boolean;
   hangStartSession?: Promise<void>;
   initialStorage?: Record<string, string>;
+  sharedStorage?: Map<string, string>;
   meResponse?: { status: number; body?: unknown; error?: Error };
   sessionResponse?: { status: number; body?: unknown; error?: Error };
   customFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -111,6 +112,10 @@ function createClientHarness(options: HarnessOptions) {
       },
       get hash() {
         return new URL(currentUrl).hash;
+      },
+      replace: (path: string) => {
+        calls.replacedUrls.push(path);
+        currentUrl = new URL(path, currentUrl).href;
       },
     },
     history: {
@@ -187,7 +192,14 @@ function createClientHarness(options: HarnessOptions) {
     }
   };
 
-  const consumeReturnTo = (_payload: unknown) => false;
+  const consumeReturnTo = (payload: any) => {
+    const path = payload && typeof payload.returnTo === 'string' ? payload.returnTo : '';
+    if (!path || path.charAt(0) !== '/') return false;
+    if (path.length >= 2 && path.charAt(1) === '/') return false;
+    if (path.indexOf('/ui/') !== 0 && path !== '/ui') return false;
+    mockWindow.location.replace(path);
+    return true;
+  };
 
   const announce = (msg: string) => {
     calls.announced.push(msg);
@@ -223,7 +235,7 @@ function createClientHarness(options: HarnessOptions) {
     throw new Error(`Unexpected fetch ${url}`);
   };
 
-  const storageMap = new Map<string, string>();
+  const storageMap = options.sharedStorage ?? new Map<string, string>();
   if (options.initialStorage) {
     for (const [k, v] of Object.entries(options.initialStorage)) {
       storageMap.set(k, v);
@@ -929,5 +941,47 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     // 场景 C: 随后表单登录 → 保持无 link-login-active
     await linkHarness.instance.runPasteLogin('paste-token');
     expect(linkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(false);
+  });
+
+  // 17. R9 Fix (Codex Local P1-1): query login + returnTo sets marker before OAuth redirect, banner restored on subsequent load
+  test('17. Query login with returnTo sets marker before redirect, and banner is restored on subsequent load', async () => {
+    const sharedTabStorage = new Map<string, string>();
+
+    // 步骤 1: 首次访问带 ?token=query-token，POST /ui/api/session 返回带 returnTo 的响应
+    const oauthLoginHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=query-oauth-token',
+      sharedStorage: sharedTabStorage,
+      meResponse: { status: 401 },
+      sessionResponse: {
+        status: 200,
+        body: { kind: 'identity', address: 'oauth-agent@example.com', returnTo: '/ui/oauth/consent' },
+      },
+    });
+
+    await oauthLoginHarness.instance.runStart();
+
+    // 断言 1: consumeReturnTo 触发跳转，当前页面未执行 showInbox 或在当前 DOM 展示 banner
+    expect(oauthLoginHarness.calls.showInboxCount).toBe(0);
+    expect(oauthLoginHarness.linkLoginNotice.hidden).toBe(true);
+    expect(oauthLoginHarness.calls.replacedUrls).toContain('/ui/oauth/consent');
+
+    // 断言 2 (R9 核心修复): marker 在重定向之前已经写入 sessionStorage!
+    expect(sharedTabStorage.get('oae-link-login')).toBe('1');
+
+    // 步骤 2: 同一个 tab 在同意页重定向之后重新加载 /ui，session 已建立 (/ui/api/me 返回 200)
+    const afterRedirectHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      sharedStorage: sharedTabStorage,
+      meResponse: { status: 200, body: { kind: 'identity', address: 'oauth-agent@example.com' } },
+    });
+
+    await afterRedirectHarness.instance.runStart();
+
+    // 断言 3: 后续页面加载识别到 marker，恢复链接登录横幅与 active class
+    expect(afterRedirectHarness.calls.showInboxCount).toBe(1);
+    expect(afterRedirectHarness.linkLoginNotice.hidden).toBe(false);
+    expect(afterRedirectHarness.linkLoginNotice.textContent).toBe('Signed in via link as oauth-agent@example.com');
+    expect(afterRedirectHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
+    expect(sharedTabStorage.get('oae-link-login')).toBe('1');
   });
 });

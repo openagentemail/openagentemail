@@ -626,16 +626,16 @@
       var loginPayload = await response.json();
       if (gen !== loginGeneration) return;
       state.me = loginPayload;
-      /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
-      if (consumeReturnTo(loginPayload)) return;
-      showInbox();
-      await startSession();
       clearLinkLoginMarker();
       if (linkLoginNotice) {
         linkLoginNotice.hidden = true;
         linkLoginNotice.textContent = '';
       }
       setLinkBannerActive(false);
+      /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
+      if (consumeReturnTo(loginPayload)) return;
+      showInbox();
+      await startSession();
     } catch {
       if (gen !== loginGeneration) return;
       loginError.textContent = 'Could not reach the server.';
@@ -862,9 +862,9 @@
       var loginPayload = await response.json();
       if (gen !== loginGeneration) return;
       state.me = loginPayload;
+      setLinkLoginMarker();
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
-      setLinkLoginMarker();
       var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
       var noticeText = 'Signed in via link as ' + label;
       if (linkLoginNotice) {
