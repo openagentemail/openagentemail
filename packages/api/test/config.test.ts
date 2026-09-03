@@ -499,4 +499,46 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
       }),
     ).toThrow('ALWAYS_BCC must be an external compliance archive');
   });
+
+  test('canonicalizes trailing dots off EXTRA_DOMAINS and primary DOMAIN', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'primary.example.',
+      EXTRA_DOMAINS: 'secondary.example., other.org.',
+    });
+    expect(config.domain).toBe('primary.example');
+    expect(config.extraDomains).toEqual(['secondary.example', 'other.org']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example', 'secondary.example', 'other.org']),
+    );
+  });
+
+  test('rejects empty or invalid domain format entries in EXTRA_DOMAINS at startup', () => {
+    // Empty entry in comma-separated list
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'sec1.example, , sec2.example',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: ""');
+
+    // Invalid characters (underscore in DNS hostname)
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'invalid_domain.example',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "invalid_domain.example"');
+
+    // Invalid characters (leading hyphen)
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: '-bad.example',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "-bad.example"');
+  });
 });

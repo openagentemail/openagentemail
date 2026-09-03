@@ -342,7 +342,7 @@ low-latency waits.
 
 You can configure secondary domains alongside the primary `DOMAIN` by setting `EXTRA_DOMAINS=domain2.com,domain3.org` in `.env`.
 
-- **Identities**: Agents can be created on the primary domain or any configured secondary domain via the API (`POST /v1/identities` with `domain`), MCP tools (`mail_new_identity`), or the Web Dashboard modal.
+- **Identities**: Agents can be created on the primary domain or any configured secondary domain via the API (`POST /v1/identities` with `domain`), MCP tools (`mail_new_identity`), or the Web Dashboard modal. Note that creating the same localpart across different domains is not allowed for now and will be revisited in Part 2.
 - **Inbound & Outbound**: Catch-all inbound matching and internal mail stamping (`X-OA-Mail-Stamp`) recognize all configured domains.
 - **Tasks & Alerts**: Cross-domain tasks and notifications seamlessly support agents across all configured domains.
 - **Pending Deploy Automation**: Automated deploy scripts (`deploy/dns-records.sh`, `deploy/doctor.sh`, Certbot SANs, and multi-domain DKIM key generation) currently configure the primary `DOMAIN`. Automated multi-domain provisioning scripts will follow in Part 2.

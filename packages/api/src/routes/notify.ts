@@ -138,31 +138,55 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       let addressed: Identity | undefined;
       if (input.target.startsWith('agent:')) {
         const agentTarget = input.target.slice('agent:'.length).trim().toLowerCase();
-        if (agentTarget.includes('@')) {
-          addressed = find(agentTarget);
-          if (!addressed) return c.json({ error: 'not_found' }, 404);
-        } else {
-          const matches = list().filter(
-            (i) => i.address.split('@')[0].toLowerCase() === agentTarget,
-          );
-          if (matches.length === 0) return c.json({ error: 'not_found' }, 404);
-          if (matches.length > 1) {
-            const domains = matches.map((m) => m.address.split('@')[1].toLowerCase());
-            return c.json(
-              {
-                error: 'ambiguous_agent',
-                message: `Agent localpart is ambiguous across multiple domains: ${domains.join(', ')}`,
-                domains,
-              },
-              400,
-            );
-          }
-          addressed = matches[0];
-        }
         const auth = getAuth(c);
-        // Scoped identity tokens never become a sideways command channel.
-        if (auth.kind === 'identity' && auth.address.toLowerCase() !== addressed.address.toLowerCase()) {
-          return c.json({ error: 'forbidden: token is scoped to another agent' }, 403);
+
+        if (auth.kind === 'identity') {
+          // Identity-token scope check happens before ambiguity resolution.
+          // An identity token is strictly scoped to itself.
+          const callerAddress = auth.address.toLowerCase();
+          const callerLocalpart = callerAddress.split('@')[0];
+          if (agentTarget.includes('@')) {
+            if (agentTarget !== callerAddress) {
+              return c.json({ error: 'forbidden: token is scoped to another agent' }, 403);
+            }
+            addressed = find(agentTarget);
+            if (!addressed) return c.json({ error: 'not_found' }, 404);
+          } else {
+            if (agentTarget !== callerLocalpart) {
+              return c.json({ error: 'forbidden: token is scoped to another agent' }, 403);
+            }
+            const matches = list().filter(
+              (i) => i.address.split('@')[0].toLowerCase() === agentTarget,
+            );
+            // Non-admin callers unify not-found and ambiguous outcomes to a single 404
+            if (matches.length !== 1 || matches[0].address.toLowerCase() !== callerAddress) {
+              return c.json({ error: 'not_found' }, 404);
+            }
+            addressed = matches[0];
+          }
+        } else {
+          // Admin caller: full ambiguity resolution with candidate domains list
+          if (agentTarget.includes('@')) {
+            addressed = find(agentTarget);
+            if (!addressed) return c.json({ error: 'not_found' }, 404);
+          } else {
+            const matches = list().filter(
+              (i) => i.address.split('@')[0].toLowerCase() === agentTarget,
+            );
+            if (matches.length === 0) return c.json({ error: 'not_found' }, 404);
+            if (matches.length > 1) {
+              const domains = matches.map((m) => m.address.split('@')[1].toLowerCase());
+              return c.json(
+                {
+                  error: 'ambiguous_agent',
+                  message: `Agent localpart is ambiguous across multiple domains: ${domains.join(', ')}`,
+                  domains,
+                },
+                400,
+              );
+            }
+            addressed = matches[0];
+          }
         }
       }
 
@@ -188,9 +212,12 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
           : input.target.startsWith('agent:')
             ? input.target.slice('agent:'.length).split('@')[0]
             : undefined;
+        const publishTarget: NotifyTarget =
+          input.target === 'user' ? 'user' : (`agent:${agentLocalpart}` as const);
         return c.json(
           await service.publish({
             ...input,
+            target: publishTarget,
             source: 'manual',
             logicalChannel:
               input.target === 'user'

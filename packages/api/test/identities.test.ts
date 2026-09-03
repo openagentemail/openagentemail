@@ -592,25 +592,36 @@ describe('multi-domain identities', () => {
       const dataPrimary = (await resPrimary.json()) as any;
       expect(dataPrimary.address).toBe('shared-name@test.example');
 
-      // Create same localpart on secondary domain
-      const resSecondary = await app.request('/v1/identities', {
+      // Attempting same localpart on secondary domain is rejected with 409 localpart_conflict
+      const resConflict = await app.request('/v1/identities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
       });
+      expect(resConflict.status).toBe(409);
+      const dataConflict = (await resConflict.json()) as any;
+      expect(dataConflict.error).toBe('localpart_conflict');
+      expect(dataConflict.domains).toContain('test.example');
+
+      // Distinct localpart on secondary domain succeeds
+      const resSecondary = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'other-name', domain: 'secondary.example' }),
+      });
       expect(resSecondary.status).toBe(201);
       const dataSecondary = (await resSecondary.json()) as any;
-      expect(dataSecondary.address).toBe('shared-name@secondary.example');
+      expect(dataSecondary.address).toBe('other-name@secondary.example');
 
       // Both identities exist simultaneously
       expect(findIdentity('shared-name@test.example')).toBeDefined();
-      expect(findIdentity('shared-name@secondary.example')).toBeDefined();
+      expect(findIdentity('other-name@secondary.example')).toBeDefined();
 
-      // Duplicate within same secondary domain returns 409
+      // Duplicate within same primary domain returns 409 address_exists
       const resDup = await app.request('/v1/identities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'test.example' }),
       });
       expect(resDup.status).toBe(409);
       expect(await resDup.json()).toEqual({ error: 'address_exists' });

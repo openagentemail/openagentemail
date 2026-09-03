@@ -44,6 +44,16 @@ export function isSupportedScope(scope: string): scope is SupportedScope {
   return SUPPORTED_SCOPES_SET.has(scope);
 }
 
+export class LocalpartConflictError extends Error {
+  readonly code = 'localpart_conflict';
+  readonly domains: string[];
+  constructor(domains: string[]) {
+    super(`localpart already exists on domain(s): ${domains.join(', ')}`);
+    this.name = 'LocalpartConflictError';
+    this.domains = domains;
+  }
+}
+
 export const MAX_SCOPES_COUNT = 10;
 export const MAX_SCOPE_LENGTH = 64;
 
@@ -387,7 +397,7 @@ export function createIdentity(input: {
     // Retry a few times on the off chance of a random collision.
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = randomLocalpart();
-      if (!identities.some((i) => i.address === `${candidate}@${targetDomain}`)) {
+      if (!identities.some((i) => i.address.split('@')[0].toLowerCase() === candidate)) {
         localpart = candidate;
         break;
       }
@@ -397,6 +407,18 @@ export function createIdentity(input: {
 
   const address = `${localpart}@${targetDomain}`;
   if (identities.some((i) => i.address === address)) return null;
+
+  const conflictingDomains = identities
+    .filter(
+      (i) =>
+        i.address.split('@')[0].toLowerCase() === localpart &&
+        i.address.split('@')[1].toLowerCase() !== targetDomain,
+    )
+    .map((i) => i.address.split('@')[1].toLowerCase());
+
+  if (conflictingDomains.length > 0) {
+    throw new LocalpartConflictError([...new Set(conflictingDomains)]);
+  }
 
   const issueToken = input.issueToken !== false;
   let token = '';

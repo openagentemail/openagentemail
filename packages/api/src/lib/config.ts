@@ -259,23 +259,32 @@ export function normalizeUrl(value: string): string {
   return url.href;
 }
 
+const DOMAIN_LABEL_RE =
+  /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
-  const primaryDomain = raw.DOMAIN.toLowerCase().trim();
-  const extraDomains = raw.EXTRA_DOMAINS
-    ? splitCsv(raw.EXTRA_DOMAINS).map((d) => d.toLowerCase())
-    : [];
-
+  const primaryDomain = raw.DOMAIN.toLowerCase().trim().replace(/\.+$/, '');
+  const extraDomains: string[] = [];
   const seenExtra = new Set<string>();
-  for (const d of extraDomains) {
-    if (d === primaryDomain) {
-      throw new Error('EXTRA_DOMAINS must not contain the primary DOMAIN');
+  const rawExtra = raw.EXTRA_DOMAINS?.trim();
+  if (rawExtra) {
+    const entries = rawExtra.split(',').map((s) => s.trim());
+    for (const rawEntry of entries) {
+      const canonical = rawEntry.toLowerCase().replace(/\.+$/, '');
+      if (!canonical || !DOMAIN_LABEL_RE.test(canonical)) {
+        throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
+      }
+      if (canonical === primaryDomain) {
+        throw new Error('EXTRA_DOMAINS must not contain the primary DOMAIN');
+      }
+      if (seenExtra.has(canonical)) {
+        throw new Error('EXTRA_DOMAINS contains duplicate entries');
+      }
+      seenExtra.add(canonical);
+      extraDomains.push(canonical);
     }
-    if (seenExtra.has(d)) {
-      throw new Error('EXTRA_DOMAINS contains duplicate entries');
-    }
-    seenExtra.add(d);
   }
 
   const allDomains = new Set<string>([primaryDomain, ...extraDomains]);

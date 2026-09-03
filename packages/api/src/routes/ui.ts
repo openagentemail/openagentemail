@@ -8,6 +8,7 @@ import {
   findIdentity,
   listIdentities,
   LOCALPART_RE,
+  LocalpartConflictError,
   PUSH_TIER3_WARNING,
   resolvePushContentTier,
   rotateIdentityToken,
@@ -609,6 +610,17 @@ export function createUiApiRoutes(
         201,
       );
     } catch (err) {
+      if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+        const domains = (err as any).domains ?? [];
+        return c.json(
+          {
+            error: 'localpart_conflict',
+            message: `localpart already exists on domain(s): ${domains.join(', ')}`,
+            domains,
+          },
+          409,
+        );
+      }
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
       }

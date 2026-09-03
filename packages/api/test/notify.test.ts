@@ -37,6 +37,7 @@ const {
   NtfyNotificationService,
   physicalAgentTopic,
   revokeNotificationDevice,
+  setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
@@ -1782,6 +1783,7 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(res.status).toBe(200);
     expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:shared');
     expect(published[0].identityAddress).toBe('shared@secondary.example');
     expect(published[0].logicalChannel).toBe('agent:shared');
   });
@@ -1800,11 +1802,12 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(res.status).toBe(200);
     expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:unique');
     expect(published[0].identityAddress).toBe('unique@secondary.example');
     expect(published[0].logicalChannel).toBe('agent:unique');
   });
 
-  test('returns 400 ambiguous_agent when bare target exists in multiple domains', async () => {
+  test('returns 400 ambiguous_agent when bare target exists in multiple domains for admin caller', async () => {
     const app = mockNotifyApp({ kind: 'admin' });
     const res = await app.request('/v1/notify', {
       method: 'POST',
@@ -1836,5 +1839,114 @@ describe('multi-domain notify target resolution', () => {
       }),
     });
     expect(res.status).toBe(404);
+  });
+
+  test('real NtfyNotificationService publishes FQ agent target without 500 error', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const calls: { url: string; body: any }[] = [];
+    globalThis.fetch = (async (input: any, init: any) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response('{"id":"msg-real"}', { status: 200 });
+    }) as typeof fetch;
+
+    setNotificationAgentRouteForTests('shared', {
+      topic: 'agent-shared-test',
+      reader: { username: 'reader-shared', token: 'tk_test1234567890123456789012345' },
+    });
+    try {
+      const realService = new NtfyNotificationService();
+      const realApp = new Hono();
+      realApp.use('*', async (c, next) => {
+        c.set('auth', { kind: 'admin' });
+        await next();
+      });
+      realApp.route(
+        '/v1/notify',
+        createNotifyRoutes({
+          service: realService,
+          findIdentity: (addr) =>
+            mockIdentities.find((i) => i.address.toLowerCase() === addr.toLowerCase()),
+          listIdentities: () => mockIdentities,
+          publicUrl: 'https://notify.test',
+        }),
+      );
+
+      // Publish with FQ agent target
+      const res = await realApp.request('/v1/notify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          target: 'agent:shared@secondary.example',
+          title: 'FQ Delivery',
+          message: 'testing real physicalTopic path',
+          level: 'normal',
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(calls.length).toBeGreaterThan(0);
+      // The physical topic in ntfy must be derived from the bare localpart, not containing '@'
+      expect(calls[0].body?.topic).toBe('agent-shared-test');
+      expect(calls[0].body?.topic).not.toContain('@');
+    } finally {
+      setNotificationAgentRouteForTests('shared', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('identity token scope check runs before ambiguity resolution', async () => {
+    // Identity token is for other@secondary.example
+    const app = mockNotifyApp({ kind: 'identity', address: 'other@secondary.example' });
+
+    // Targeting another agent's localpart (even if ambiguous) returns 403, NOT 400 ambiguous_agent
+    const resBare = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resBare.status).toBe(403);
+    expect(await resBare.json()).toEqual({ error: 'forbidden: token is scoped to another agent' });
+
+    // Targeting another agent's FQ address returns 403, NOT 404
+    const resFq = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resFq.status).toBe(403);
+    expect(await resFq.json()).toEqual({ error: 'forbidden: token is scoped to another agent' });
+  });
+
+  test('non-admin callers receive 404 without candidate domains on ambiguity', async () => {
+    // Identity token matching localpart 'shared' on primary domain
+    const app = mockNotifyApp({ kind: 'identity', address: 'shared@primary.example' });
+
+    // When ambiguous across domains, non-admin gets 404 without domains list
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as any;
+    expect(body).toEqual({ error: 'not_found' });
+    expect(body.domains).toBeUndefined();
   });
 });
