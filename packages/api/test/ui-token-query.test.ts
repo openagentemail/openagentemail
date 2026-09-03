@@ -52,10 +52,18 @@ const endFormSubmit = APP_JS.indexOf("byId('logout-button').addEventListener('cl
 expect(endFormSubmit).toBeGreaterThan(startFormSubmit);
 const formSubmitSrc = APP_JS.slice(startFormSubmit, endFormSubmit);
 
+const startLogout = APP_JS.indexOf("byId('logout-button').addEventListener('click',");
+expect(startLogout).toBeGreaterThan(-1);
+const endLogout = APP_JS.indexOf("identitySearch.addEventListener('input',", startLogout);
+expect(endLogout).toBeGreaterThan(startLogout);
+const logoutSrc = APP_JS.slice(startLogout, endLogout);
+
 interface HarnessOptions {
   initialUrl: string;
   isSecure?: boolean;
   hasReplaceState?: boolean;
+  storageThrows?: boolean;
+  initialStorage?: Record<string, string>;
   meResponse?: { status: number; body?: unknown; error?: Error };
   sessionResponse?: { status: number; body?: unknown; error?: Error };
   customFetch?: (url: string, init?: RequestInit) => Promise<Response>;
@@ -201,6 +209,44 @@ function createClientHarness(options: HarnessOptions) {
     throw new Error(`Unexpected fetch ${url}`);
   };
 
+  const storageMap = new Map<string, string>();
+  if (options.initialStorage) {
+    for (const [k, v] of Object.entries(options.initialStorage)) {
+      storageMap.set(k, v);
+    }
+  }
+
+  const sessionStorageMock = {
+    getItem: (key: string) => {
+      if (options.storageThrows) throw new Error('sessionStorage access denied');
+      return storageMap.get(key) ?? null;
+    },
+    setItem: (key: string, value: string) => {
+      if (options.storageThrows) throw new Error('sessionStorage access denied');
+      storageMap.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      if (options.storageThrows) throw new Error('sessionStorage access denied');
+      storageMap.delete(key);
+    },
+    clear: () => {
+      if (options.storageThrows) throw new Error('sessionStorage access denied');
+      storageMap.clear();
+    },
+  };
+
+  let logoutClickHandler: any = null;
+  const byId = (id: string) => {
+    if (id === 'logout-button') {
+      return {
+        addEventListener: (event: string, fn: any) => {
+          if (event === 'click') logoutClickHandler = fn;
+        },
+      };
+    }
+    return null;
+  };
+
   const runner = new Function(
     'window',
     'fetch',
@@ -221,10 +267,13 @@ function createClientHarness(options: HarnessOptions) {
     'consumeReturnTo',
     'announce',
     'loginForm',
+    'byId',
+    'sessionStorage',
     `
       ${consumeQueryTokenSrc}
       ${loginWithTokenSrc}
       ${formSubmitSrc}
+      ${logoutSrc}
       return {
         consumeQueryToken: consumeQueryToken,
         loginWithToken: loginWithToken,
@@ -261,7 +310,15 @@ function createClientHarness(options: HarnessOptions) {
     consumeReturnTo,
     announce,
     loginForm,
+    byId,
+    sessionStorageMock,
   );
+
+  const runLogout = async () => {
+    if (logoutClickHandler) {
+      await logoutClickHandler();
+    }
+  };
 
   return {
     mockWindow,
@@ -273,10 +330,14 @@ function createClientHarness(options: HarnessOptions) {
     inboxView,
     insecureWarning,
     linkLoginNotice,
+    sessionStorage: sessionStorageMock,
     state,
     calls,
     getCurrentUrl: () => currentUrl,
-    instance,
+    instance: {
+      ...instance,
+      runLogout,
+    },
   };
 }
 
@@ -557,9 +618,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.linkLoginNotice.textContent).toBe('');
   });
 
-  // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1): query 链接登录成功展示 visible banner 与 announcement 提示，粘贴表单登录不展示
+  // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1) & R5: query 链接登录成功展示 visible banner 与 announcement 提示并设置 sessionStorage marker，粘贴表单登录不展示且清除 marker
   test('10. Visible notice appears on query-login success and does NOT appear on paste-form login success', async () => {
-    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session"
+    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session" 并写入 sessionStorage marker
     const adminLinkHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui?token=admin-query-token',
       meResponse: { status: 401 },
@@ -570,8 +631,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(adminLinkHarness.linkLoginNotice.hidden).toBe(false);
     expect(adminLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
     expect(adminLinkHarness.calls.announced).toEqual(['Signed in via link as Admin session']);
+    expect(adminLinkHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
 
-    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>"
+    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>" 并写入 marker
     const identityLinkHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui?token=identity-query-token',
       meResponse: { status: 401 },
@@ -582,10 +644,12 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(identityLinkHarness.linkLoginNotice.hidden).toBe(false);
     expect(identityLinkHarness.linkLoginNotice.textContent).toBe('Signed in via link as agent-bot@example.com');
     expect(identityLinkHarness.calls.announced).toEqual(['Signed in via link as agent-bot@example.com']);
+    expect(identityLinkHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
 
-    // 场景 C: 表单粘贴输入登录成功 → 不展示 visible banner 与 announcement
+    // 场景 C: 表单粘贴输入登录成功 → 不展示 visible banner 与 announcement，且清除 marker
     const formHarness = createClientHarness({
       initialUrl: 'https://admin.example/ui',
+      initialStorage: { 'oae-link-login': '1' },
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
@@ -594,16 +658,120 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(formHarness.calls.showLogin).toEqual(['']);
     expect(formHarness.calls.announced).toHaveLength(0);
     expect(formHarness.linkLoginNotice.hidden).toBe(true);
+    // 401 流程清理 marker
+    expect(formHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
+
+    // 假设在此期间重新设置了脏 marker
+    formHarness.sessionStorage.setItem('oae-link-login', '1');
 
     // 用户在表单粘贴 token 提交
     await formHarness.instance.runPasteLogin('admin-paste-token');
     expect(formHarness.calls.showInboxCount).toBe(1);
     expect(formHarness.linkLoginNotice.hidden).toBe(true);
     expect(formHarness.linkLoginNotice.textContent).toBe('');
+    expect(formHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
     // 验证：表单登录完全不触发链接登录提示
     const linkAnnouncements = formHarness.calls.announced.filter((m) =>
       m.includes('Signed in via link'),
     );
     expect(linkAnnouncements).toHaveLength(0);
+  });
+
+  // 11. R5: Reload simulation — sessionStorage 标记在刷新时持久化展示 link-login notice，无标记不展示
+  test('11. Reload simulation: sessionStorage marker persists link-login notice across reloads with correct label, marker absent shows no banner', async () => {
+    // 场景 A: Admin 身份会话，刷新时带 sessionStorage marker '1'
+    const adminReloadHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      initialStorage: { 'oae-link-login': '1' },
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await adminReloadHarness.instance.runStart();
+    expect(adminReloadHarness.calls.showInboxCount).toBe(1);
+    expect(adminReloadHarness.linkLoginNotice.hidden).toBe(false);
+    expect(adminReloadHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
+    expect(adminReloadHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    // 刷新不重复播报 aria-live
+    expect(adminReloadHarness.calls.announced).toHaveLength(0);
+
+    // 场景 B: Identity 身份会话，刷新时带 sessionStorage marker '1'
+    const identityReloadHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      initialStorage: { 'oae-link-login': '1' },
+      meResponse: { status: 200, body: { kind: 'identity', address: 'alice@test.example' } },
+    });
+    await identityReloadHarness.instance.runStart();
+    expect(identityReloadHarness.calls.showInboxCount).toBe(1);
+    expect(identityReloadHarness.linkLoginNotice.hidden).toBe(false);
+    expect(identityReloadHarness.linkLoginNotice.textContent).toBe('Signed in via link as alice@test.example');
+    expect(identityReloadHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
+    expect(identityReloadHarness.calls.announced).toHaveLength(0);
+
+    // 场景 C: 普通会话（无 marker），刷新时不展示 banner
+    const normalReloadHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      initialStorage: {},
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await normalReloadHarness.instance.runStart();
+    expect(normalReloadHarness.calls.showInboxCount).toBe(1);
+    expect(normalReloadHarness.linkLoginNotice.hidden).toBe(true);
+    expect(normalReloadHarness.linkLoginNotice.textContent).toBe('');
+    expect(normalReloadHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
+  });
+
+  // 12. R5: Logout clears sessionStorage marker and resets notice
+  test('12. Logout clears sessionStorage marker and resets link-login notice', async () => {
+    const harness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      initialStorage: { 'oae-link-login': '1' },
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    // 首次进入现有会话，展示 banner
+    await harness.instance.runStart();
+    expect(harness.linkLoginNotice.hidden).toBe(false);
+    expect(harness.sessionStorage.getItem('oae-link-login')).toBe('1');
+
+    // 用户点击登出
+    await harness.instance.runLogout();
+    expect(harness.calls.showLogin).toContain('');
+    expect(harness.sessionStorage.getItem('oae-link-login')).toBeNull();
+    expect(harness.linkLoginNotice.hidden).toBe(true);
+    expect(harness.linkLoginNotice.textContent).toBe('');
+  });
+
+  // 13. R5: Storage-throws case: login succeeds even if sessionStorage throws (fail-open try/catch)
+  test('13. Storage-throws case: login succeeds even if sessionStorage throws (fail-open try/catch)', async () => {
+    // 场景 A: query link 登录在 sessionStorage 抛出异常时仍顺利进入应用
+    const queryHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=safe-query-token',
+      storageThrows: true,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await queryHarness.instance.runStart();
+    expect(queryHarness.calls.showInboxCount).toBe(1);
+    expect(queryHarness.linkLoginNotice.hidden).toBe(false);
+    expect(queryHarness.linkLoginNotice.textContent).toBe('Signed in via link as Admin session');
+
+    // 场景 B: 表单登录在 sessionStorage 抛出异常时仍顺利进入应用
+    const formHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      storageThrows: true,
+      meResponse: { status: 401 },
+      sessionResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await formHarness.instance.runStart();
+    await formHarness.instance.runPasteLogin('paste-token-xyz');
+    expect(formHarness.calls.showInboxCount).toBe(1);
+    expect(formHarness.linkLoginNotice.hidden).toBe(true);
+
+    // 场景 C: 刷新在 sessionStorage 抛出异常时不崩溃
+    const reloadHarness = createClientHarness({
+      initialUrl: 'https://admin.example/ui',
+      storageThrows: true,
+      meResponse: { status: 200, body: { kind: 'admin' } },
+    });
+    await reloadHarness.instance.runStart();
+    expect(reloadHarness.calls.showInboxCount).toBe(1);
   });
 });

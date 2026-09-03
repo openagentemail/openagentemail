@@ -625,6 +625,7 @@
       if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
+      clearLinkLoginMarker();
     } catch {
       loginError.textContent = 'Could not reach the server.';
     } finally {
@@ -639,6 +640,7 @@
         credentials: 'same-origin'
       });
     } finally {
+      clearLinkLoginMarker();
       state.me = null;
       state.identities = [];
       state.messages = [];
@@ -849,6 +851,7 @@
       if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
+      setLinkLoginMarker();
       var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
       var noticeText = 'Signed in via link as ' + label;
       if (linkLoginNotice) {
@@ -863,6 +866,33 @@
     }
   }
 
+  function setLinkLoginMarker() {
+    try {
+      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
+      if (storage) storage.setItem('oae-link-login', '1');
+    } catch (_err) {
+      /* storage unavailable or restricted */
+    }
+  }
+
+  function clearLinkLoginMarker() {
+    try {
+      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
+      if (storage) storage.removeItem('oae-link-login');
+    } catch (_err) {
+      /* storage unavailable or restricted */
+    }
+  }
+
+  function hasLinkLoginMarker() {
+    try {
+      var storage = typeof sessionStorage !== 'undefined' ? sessionStorage : window.sessionStorage;
+      return storage ? storage.getItem('oae-link-login') === '1' : false;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   /**
    * Initializes the application UI, consumes any URL query token,
    * and verifies or establishes the user session.
@@ -873,6 +903,7 @@
     try {
       var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
       if (response.status === 401) {
+        clearLinkLoginMarker();
         if (queryToken !== null) {
           await loginWithToken(queryToken);
           return;
@@ -886,6 +917,13 @@
       if (consumeReturnTo(mePayload)) return;
       showInbox();
       await startSession();
+      if (hasLinkLoginMarker()) {
+        var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+        if (linkLoginNotice) {
+          linkLoginNotice.textContent = 'Signed in via link as ' + existingLabel;
+          linkLoginNotice.hidden = false;
+        }
+      }
     } catch {
       showLogin('Could not reach the server.');
     }
