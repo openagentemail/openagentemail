@@ -156,6 +156,7 @@
 
   async function handleCreateSubmit() {
     if (!isAdmin()) return;
+    if (createModalSubmit.disabled || (typeof createDomain !== 'undefined' && createDomain && createDomain.disabled)) return;
     if (!createLocalpart.checkValidity()) {
       createLocalpart.reportValidity();
       return;
@@ -194,7 +195,9 @@
       }
     } finally {
       /* 仅当前代际才复位：stale 请求不得复活新 dialog 的共享钮；新窗由 beginModal 复位。 */
-      if (openedGen === modalGeneration) createModalSubmit.disabled = false;
+      if (openedGen === modalGeneration && (typeof createDomain === 'undefined' || !createDomain || !createDomain.disabled)) {
+        createModalSubmit.disabled = false;
+      }
     }
   }
 

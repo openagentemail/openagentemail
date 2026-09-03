@@ -31,6 +31,10 @@
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = 'Confirm';
     confirmModalConfirm.onclick = null;
+    if (createModalError) {
+      createModalError.textContent = '';
+      createModalError.hidden = true;
+    }
     // F107: an indirect close (background action opening another modal) must
     // still run the pending cancel side-effect (restore tier select) — the
     // callback is consumed exactly once either way.
@@ -85,9 +89,19 @@
     var list = (domains && domains.length > 0) ? domains : [];
     if (list.length === 0) {
       createDomain.disabled = true;
+      createModalSubmit.disabled = true;
+      if (createModalError) {
+        createModalError.textContent = 'Could not load domains — try again';
+        createModalError.hidden = false;
+      }
       return;
     }
     createDomain.disabled = false;
+    createModalSubmit.disabled = false;
+    if (createModalError) {
+      createModalError.textContent = '';
+      createModalError.hidden = true;
+    }
     for (var i = 0; i < list.length; i++) {
       var opt = document.createElement('option');
       opt.value = list[i];
@@ -101,12 +115,19 @@
     var openedGen = beginModal();
     createName.value = '';
     createLocalpart.value = '';
+    if (createModalError) {
+      createModalError.textContent = '';
+      createModalError.hidden = true;
+    }
     try {
       var data = await apiJson('/ui/api/domains');
       if (openedGen !== modalGeneration) return;
       var list = (data && data.all && data.all.length > 0)
         ? data.all
         : (data && data.primary ? [data.primary] : []);
+      if (list.length === 0) {
+        throw new Error('no_domains');
+      }
       populateCreateDomain(list);
     } catch (e) {
       if (openedGen !== modalGeneration) return;
@@ -114,6 +135,12 @@
         createDomain.removeChild(createDomain.firstChild);
       }
       createDomain.disabled = true;
+      createModalSubmit.disabled = true;
+      if (createModalError) {
+        createModalError.textContent = 'Could not load domains — try again';
+        createModalError.hidden = false;
+      }
+      announce('Could not load domains — try again');
     }
     if (openedGen !== modalGeneration) return;
     createModal.hidden = false;

@@ -2017,4 +2017,81 @@ describe('multi-domain notify target resolution', () => {
     expect(resAmbiguous.status).toBe(400);
     expect(resAmbiguous.headers.get('cache-control')).toBe('no-store');
   });
+
+  test('resolves fully-qualified agent target with trailing dot', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // Target with trailing dot resolves against mockIdentities ('shared@secondary.example')
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example.',
+        title: 'Task update',
+        message: 'hello with trailing dot',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:shared');
+    expect(published[0].identityAddress).toBe('shared@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:shared');
+  });
+
+  test('identity token caller resolves FQ target with trailing dot', async () => {
+    const app = mockNotifyApp({ kind: 'identity', address: 'shared@secondary.example' });
+
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example.',
+        title: 'Task update',
+        message: 'self notify with dot',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+  });
+
+  test('rejects over-long adversarial target with trailing dot with 400 invalid_request', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // 10k-character adversarial domain target with trailing dot
+    const overlongTarget = 'agent:test@' + 'a'.repeat(10000) + '.com.';
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: overlongTarget,
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('rejects multiple trailing dots in target with 400 invalid_request', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example..',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
 });

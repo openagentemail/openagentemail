@@ -33,7 +33,7 @@ const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const notifySchema = z.object({
   target: z.union([
     z.literal('user'),
-    z.string().max(320).regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/i),
+    z.string().max(320).regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?)?$/i),
   ]),
   title: z.string().min(1).max(256),
   message: z.string().min(1).max(4_000),
@@ -147,10 +147,12 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
           const callerAddress = auth.address.toLowerCase();
           const callerLocalpart = callerAddress.split('@')[0];
           if (agentTarget.includes('@')) {
-            if (agentTarget !== callerAddress) {
+            const canonicalTarget = agentTarget.replace(/\.+$/, '');
+            const canonicalCaller = callerAddress.replace(/\.+$/, '');
+            if (canonicalTarget !== canonicalCaller) {
               return c.json({ error: 'forbidden: token is scoped to another agent' }, 403);
             }
-            addressed = find(agentTarget);
+            addressed = find(agentTarget) ?? find(callerAddress) ?? (agentTarget.endsWith('.') ? find(canonicalTarget) : find(canonicalTarget + '.'));
             if (!addressed) return c.json({ error: 'not_found' }, 404);
           } else {
             if (agentTarget !== callerLocalpart) {
@@ -168,7 +170,8 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
         } else {
           // Admin caller: full ambiguity resolution with candidate domains list
           if (agentTarget.includes('@')) {
-            addressed = find(agentTarget);
+            const canonicalTarget = agentTarget.replace(/\.+$/, '');
+            addressed = find(agentTarget) ?? (agentTarget.endsWith('.') ? find(canonicalTarget) : find(canonicalTarget + '.'));
             if (!addressed) return c.json({ error: 'not_found' }, 404);
           } else {
             const matches = list().filter(

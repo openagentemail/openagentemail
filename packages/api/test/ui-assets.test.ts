@@ -1658,6 +1658,71 @@ describe('UI static asset contract', () => {
     );
   });
 
+  test('domains fetch failure disables Create submit and displays inline error', async () => {
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(MODAL_JS).toContain('function populateCreateDomain(');
+    expect(MODAL_JS).toContain('createModalSubmit.disabled = true;');
+    expect(MODAL_JS).toContain("createModalError.textContent = 'Could not load domains — try again';");
+
+    // Execute showCreateModal in mock DOM environment when apiJson rejects
+    const runner = new Function(`
+      var document = {
+        activeElement: null,
+        addEventListener: function() {},
+        contains: function() { return true; }
+      };
+      var confirmModalConfirm = { disabled: false };
+      var confirmModalCancel = { disabled: false };
+      var createModalSubmit = { disabled: false };
+      var deviceAddSubmit = { disabled: false };
+      var tokenModal = { hidden: true };
+      var confirmModal = { hidden: true };
+      var createModal = { hidden: true };
+      var deviceAddModal = { hidden: true };
+      var devicePairModal = { hidden: true };
+      var devicePairPassword = { textContent: '' };
+      var devicePairQr = { replaceChildren: function() {} };
+      var devicePairServer = { textContent: '' };
+      var devicePairUser = { textContent: '' };
+      var devicePairTopics = { textContent: '' };
+      var devicePairName = { textContent: '' };
+      var tokenValue = { textContent: '' };
+      var tokenModalTitle = { textContent: '' };
+      var tokenCopyButton = { classList: { remove: function() {} }, focus: function() {} };
+      var confirmModalTitle = { textContent: '' };
+      var confirmModalText = { textContent: '' };
+      var confirmModalRisk = { textContent: '', hidden: true };
+      var createName = { value: '', focus: function() {} };
+      var createLocalpart = { value: '' };
+      var createDomain = { disabled: false, firstChild: null, removeChild: function() {}, appendChild: function() {} };
+      var createModalError = { textContent: '', hidden: true };
+      var announcements = [];
+      function announce(msg) { announcements.push(msg); }
+      function isAdmin() { return true; }
+      var apiJson = function() { return Promise.reject(new Error('network error')); };
+
+      ${MODAL_JS}
+
+      return async function() {
+        await showCreateModal();
+        return {
+          submitDisabled: createModalSubmit.disabled,
+          domainDisabled: createDomain.disabled,
+          errorText: createModalError.textContent,
+          errorHidden: createModalError.hidden,
+          announcements: announcements
+        };
+      };
+    `)();
+
+    const result = await runner();
+    expect(result.submitDisabled).toBe(true);
+    expect(result.domainDisabled).toBe(true);
+    expect(result.errorText).toBe('Could not load domains — try again');
+    expect(result.errorHidden).toBe(false);
+    expect(result.announcements).toContain('Could not load domains — try again');
+  });
+
   test('identity session CSS hides admin-only create controls', () => {
     expect(UI_CSS).toContain(
       '.inbox-view[data-session="identity"] #configure-identities-create',
