@@ -2094,4 +2094,40 @@ describe('multi-domain notify target resolution', () => {
     const body = (await res.json()) as any;
     expect(body.error).toBe('invalid_request');
   });
+
+  test('normalizes uppercase AGENT: prefix and enforces identity scope check without bypass', async () => {
+    // Identity token scoped to unique@secondary.example
+    const appSelf = mockNotifyApp({ kind: 'identity', address: 'unique@secondary.example' });
+
+    // Own agent with uppercase prefix delivers 200 to agent:unique
+    const resOwn = await appSelf.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'AGENT:unique',
+        title: 'Task update',
+        message: 'hello uppercase self',
+        level: 'normal',
+      }),
+    });
+    expect(resOwn.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:unique');
+    expect(published[0].identityAddress).toBe('unique@secondary.example');
+
+    // Different agent with uppercase prefix is rejected with 403 scope error, not bypassed
+    const resOther = await appSelf.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'AGENT:shared',
+        title: 'Task update',
+        message: 'hello uppercase bypass attempt',
+        level: 'normal',
+      }),
+    });
+    expect(resOther.status).toBe(403);
+    const bodyOther = (await resOther.json()) as any;
+    expect(bodyOther.error).toBe('forbidden: token is scoped to another agent');
+  });
 });

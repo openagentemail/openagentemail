@@ -135,6 +135,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       const parsed = notifySchema.safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const input = parsed.data as { target: NotifyTarget; title: string; message: string; level: NotifyLevel; tags?: string[] };
+      input.target = input.target.toLowerCase() as NotifyTarget;
 
       let addressed: Identity | undefined;
       if (input.target.startsWith('agent:')) {
