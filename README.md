@@ -189,6 +189,8 @@ pasted tokens never enter the URL or browser storage. You can also bookmark
 `https://myinstance:3100/ui?token=<admin-token>` for direct login; the token is
 immediately stripped from the address bar via `history.replaceState` on load,
 though tokens passed in URLs can linger in browser history and server access logs.
+Percent-encode the token if it contains URL-reserved characters like `+`, `&`, or `#`
+(e.g. `a+b` → `a%2Bb`), as `+` decodes to a space and `&` truncates the value.
 Only open `?token=` links you generated yourself; if you suspect a link has leaked,
 rotate the token from the UI immediately. Do not open `?token=` links sent by
 others — the link signs you into the sender's session (the app displays a

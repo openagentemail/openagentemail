@@ -46,7 +46,7 @@ const endStart = APP_JS.lastIndexOf('})();') + 5;
 expect(endStart).toBeGreaterThan(startStart);
 const startSrc = APP_JS.slice(startStart, endStart);
 
-const startFormSubmit = APP_JS.indexOf("loginForm.addEventListener('submit', async function (event) {");
+const startFormSubmit = APP_JS.indexOf('var loginGeneration = 0;');
 expect(startFormSubmit).toBeGreaterThan(-1);
 const endFormSubmit = APP_JS.indexOf("byId('logout-button').addEventListener('click',", startFormSubmit);
 expect(endFormSubmit).toBeGreaterThan(startFormSubmit);
@@ -783,5 +783,67 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
     await reloadHarness.instance.runStart();
     expect(reloadHarness.calls.showInboxCount).toBe(1);
+  });
+
+  // 14. R7 Fix 2: Prevent stale /ui/api/me 401 from overriding manual form login (login-generation guard)
+  test('14. Slow /ui/api/me 401 does not override a manual form login that arrived first', async () => {
+    let resolveMe: (resp: Response) => void;
+    const mePromise = new Promise<Response>((resolve) => {
+      resolveMe = resolve;
+    });
+
+    const harness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=query-link-token',
+      customFetch: async (url, init) => {
+        if (url === '/ui/api/me') {
+          return mePromise;
+        }
+        if (url === '/ui/api/session') {
+          const body = JSON.parse(init?.body as string);
+          return {
+            status: 200,
+            ok: true,
+            json: async () => ({ kind: 'identity', address: `${body.token}@manual.example` }),
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch ${url}`);
+      },
+    });
+
+    // 1. start() 启动，consumeQueryToken() 剥离参数，发送 /ui/api/me（此时请求挂起未返回）
+    const startPromise = harness.instance.runStart();
+
+    // 2. 在 /ui/api/me 挂起期间，用户手动在登录表单输入 token 并提交
+    await harness.instance.runPasteLogin('manual-user');
+
+    // 断言：手动登录成功，进入收件箱
+    expect(harness.calls.showInboxCount).toBe(1);
+    expect(harness.state.me).toEqual({ kind: 'identity', address: 'manual-user@manual.example' });
+    const postCallsBeforeMe = harness.calls.fetches.filter(
+      (f) => f.url === '/ui/api/session' && f.init?.method === 'POST',
+    );
+    expect(postCallsBeforeMe).toHaveLength(1);
+    expect(JSON.parse(postCallsBeforeMe[0].init?.body as string)).toEqual({
+      token: 'manual-user',
+      remember: false,
+    });
+
+    // 3. 迟到的慢 /ui/api/me 返回 401
+    resolveMe!({
+      status: 401,
+      ok: false,
+      json: async () => ({ error: 'unauthorized' }),
+    } as unknown as Response);
+
+    await startPromise;
+
+    // 4. 断言：stale 401 被 login-generation 守卫拦截，没有发起第二次 POST /ui/api/session，手动会话未被覆盖
+    const postCallsAfterMe = harness.calls.fetches.filter(
+      (f) => f.url === '/ui/api/session' && f.init?.method === 'POST',
+    );
+    expect(postCallsAfterMe).toHaveLength(1); // 仍然只有 1 次 POST，没有为 query token 发送 POST
+    expect(harness.state.me).toEqual({ kind: 'identity', address: 'manual-user@manual.example' });
+    expect(harness.linkLoginNotice.hidden).toBe(true);
+    expect(harness.sessionStorage.getItem('oae-link-login')).toBeNull();
   });
 });

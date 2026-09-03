@@ -599,8 +599,11 @@
     await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
   }
 
+  var loginGeneration = 0;
+
   loginForm.addEventListener('submit', async function (event) {
     event.preventDefault();
+    var gen = ++loginGeneration;
     if (!configureLoginGate()) return;
     loginError.textContent = '';
     loginSubmit.disabled = true;
@@ -613,6 +616,7 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ token: credential, remember: loginRemember.checked })
       });
+      if (gen !== loginGeneration) return;
       if (!response.ok) {
         loginError.textContent = response.status === 401
           ? 'That token is not valid.'
@@ -620,6 +624,7 @@
         return;
       }
       var loginPayload = await response.json();
+      if (gen !== loginGeneration) return;
       state.me = loginPayload;
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
@@ -627,6 +632,7 @@
       await startSession();
       clearLinkLoginMarker();
     } catch {
+      if (gen !== loginGeneration) return;
       loginError.textContent = 'Could not reach the server.';
     } finally {
       loginSubmit.disabled = !isLoginContextSafe();
@@ -824,6 +830,7 @@
    * matching standard form submission semantics without echoing the credential on failure.
    */
   async function loginWithToken(credential) {
+    var gen = ++loginGeneration;
     if (!configureLoginGate()) {
       showLogin('');
       return;
@@ -838,6 +845,7 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ token: credential, remember: false })
       });
+      if (gen !== loginGeneration) return;
       if (!response.ok) {
         var msg = response.status === 401 || response.status === 400
           ? 'That token is not valid.'
@@ -846,6 +854,7 @@
         return;
       }
       var loginPayload = await response.json();
+      if (gen !== loginGeneration) return;
       state.me = loginPayload;
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
@@ -860,6 +869,7 @@
       }
       announce(noticeText);
     } catch {
+      if (gen !== loginGeneration) return;
       showLogin('Could not reach the server.');
     } finally {
       loginSubmit.disabled = !isLoginContextSafe();
@@ -900,19 +910,23 @@
   (async function start() {
     configureLoginGate();
     var queryToken = consumeQueryToken();
+    var gen = ++loginGeneration;
     try {
       var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
       if (response.status === 401) {
         clearLinkLoginMarker();
         if (queryToken !== null) {
+          if (gen !== loginGeneration) return;
           await loginWithToken(queryToken);
           return;
         }
+        if (gen !== loginGeneration) return;
         showLogin('');
         return;
       }
       if (!response.ok) throw new Error('request_failed');
       var mePayload = await response.json();
+      if (gen !== loginGeneration) return;
       state.me = mePayload;
       if (consumeReturnTo(mePayload)) return;
       showInbox();
@@ -925,6 +939,7 @@
         }
       }
     } catch {
+      if (gen !== loginGeneration) return;
       showLogin('Could not reach the server.');
     }
   })();
