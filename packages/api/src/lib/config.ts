@@ -276,7 +276,7 @@ function isValidDomain(domain: string): boolean {
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
-  const primaryDomain = raw.DOMAIN.toLowerCase().trim().replace(/\.+$/, '');
+  const primaryDomain = raw.DOMAIN.toLowerCase();
   const extraDomains: string[] = [];
   const seenExtra = new Set<string>();
   const rawExtra = raw.EXTRA_DOMAINS?.trim();
@@ -288,7 +288,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       if (!isValidDomain(canonical)) {
         throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
       }
-      if (canonical === primaryDomain) {
+      if (canonical === primaryDomain.replace(/\.+$/, '')) {
         throw new Error('EXTRA_DOMAINS must not contain the primary DOMAIN');
       }
       if (seenExtra.has(canonical)) {

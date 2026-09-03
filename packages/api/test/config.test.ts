@@ -462,7 +462,7 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     expect(() =>
       parseConfig({
         ...requiredEnv,
-        DOMAIN: 'primary.example',
+        DOMAIN: 'primary.example.',
         EXTRA_DOMAINS: 'other.example, PRIMARY.EXAMPLE',
       }),
     ).toThrow('EXTRA_DOMAINS must not contain the primary DOMAIN');
@@ -500,16 +500,16 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     ).toThrow('ALWAYS_BCC must be an external compliance archive');
   });
 
-  test('canonicalizes trailing dots off EXTRA_DOMAINS and primary DOMAIN', () => {
+  test('canonicalizes trailing dots off EXTRA_DOMAINS while retaining primary DOMAIN raw-lowercase', () => {
     const config = parseConfig({
       ...requiredEnv,
-      DOMAIN: 'primary.example.',
+      DOMAIN: 'Primary.Example.',
       EXTRA_DOMAINS: 'secondary.example., other.org.',
     });
-    expect(config.domain).toBe('primary.example');
+    expect(config.domain).toBe('primary.example.');
     expect(config.extraDomains).toEqual(['secondary.example', 'other.org']);
     expect(config.allDomains).toEqual(
-      new Set(['primary.example', 'secondary.example', 'other.org']),
+      new Set(['primary.example.', 'secondary.example', 'other.org']),
     );
   });
 
