@@ -84,6 +84,33 @@ type StoreCache = {
 let storeCache: StoreCache | undefined;
 let rawCache: StoreCache | undefined;
 
+/** Bounded in-process tombstone set for pruned OAuth access-token hashes. */
+export const PRUNED_ACCESS_HASHES_CAP = 10_000;
+const prunedAccessHashes = new Set<string>();
+
+export function recordPrunedAccessHash(hash: string): void {
+  if (prunedAccessHashes.has(hash)) {
+    prunedAccessHashes.delete(hash);
+    prunedAccessHashes.add(hash);
+    return;
+  }
+  if (prunedAccessHashes.size >= PRUNED_ACCESS_HASHES_CAP) {
+    const oldest = prunedAccessHashes.values().next().value;
+    if (oldest !== undefined) {
+      prunedAccessHashes.delete(oldest);
+    }
+  }
+  prunedAccessHashes.add(hash);
+}
+
+export function getPrunedAccessHashesCountForTests(): number {
+  return prunedAccessHashes.size;
+}
+
+export function clearPrunedAccessHashesForTests(): void {
+  prunedAccessHashes.clear();
+}
+
 function storePath(): string {
   return join(config.dataDir, 'oauth.json');
 }
@@ -92,7 +119,7 @@ function emptyStore(): OAuthStoreFile {
   return { grants: {}, codes: {}, access: {}, refresh: {} };
 }
 
-function invalidateStoreCache(): void {
+export function invalidateStoreCache(): void {
   storeCache = undefined;
   rawCache = undefined;
 }
@@ -192,6 +219,7 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
   for (const [hash, row] of Object.entries(data.access)) {
     if (row.expiresAt <= now) {
       delete data.access[hash];
+      recordPrunedAccessHash(hash);
       changed = true;
     }
   }
@@ -234,12 +262,16 @@ function loadRaw(): OAuthStoreFile {
 /**
  * Non-destructive existence check in access table without pruning and without
  * expiry evaluation. Used exclusively by auth credential discrimination when
- * the identity store is damaged.
+ * the identity store is damaged. Returns true if the token exists in the access
+ * table OR has been recorded in the bounded prunedAccessHashes tombstone set.
  */
 export function peekAccessToken(token: string): boolean {
   try {
-    const data = loadRaw();
     const hash = hashSecret(token);
+    if (prunedAccessHashes.has(hash)) {
+      return true;
+    }
+    const data = loadRaw();
     return Boolean(data.access[hash]);
   } catch {
     return false;
@@ -363,7 +395,10 @@ export function revokeGrantsForAddress(address: string): number {
       if (row.grantId === grantId) delete data.codes[hash];
     }
     for (const [hash, row] of Object.entries(data.access)) {
-      if (row.grantId === grantId) delete data.access[hash];
+      if (row.grantId === grantId) {
+        delete data.access[hash];
+        recordPrunedAccessHash(hash);
+      }
     }
     for (const [hash, row] of Object.entries(data.refresh)) {
       if (row.grantId === grantId) delete data.refresh[hash];
@@ -389,7 +424,10 @@ export function revokeGrant(grantId: string): boolean {
     if (row.grantId === grantId) delete data.codes[hash];
   }
   for (const [hash, row] of Object.entries(data.access)) {
-    if (row.grantId === grantId) delete data.access[hash];
+    if (row.grantId === grantId) {
+      delete data.access[hash];
+      recordPrunedAccessHash(hash);
+    }
   }
   for (const [hash, row] of Object.entries(data.refresh)) {
     if (row.grantId === grantId) delete data.refresh[hash];
@@ -652,6 +690,7 @@ export function revokeToken(token: string, clientId?: string): boolean {
   let changed = false;
   if (access) {
     delete data.access[hash];
+    recordPrunedAccessHash(hash);
     changed = true;
   }
   if (refresh) {
@@ -715,8 +754,17 @@ export function putAccessTokenForTests(input: {
     aud: input.aud,
     expiresAt: input.expiresAt,
   };
-  invalidateStoreCache();
-  const version = writeStoreFile(data);
-  rawCache = { version, data: structuredClone(data) };
-  storeCache = { version, data: structuredClone(data) };
+  if (input.runSave) {
+    save(data);
+  } else {
+    invalidateStoreCache();
+    const version = writeStoreFile(data);
+    rawCache = { version, data: structuredClone(data) };
+    storeCache = { version, data: structuredClone(data) };
+  }
+}
+
+export function saveStoreForTests(): void {
+  const data = loadRaw();
+  save(data);
 }

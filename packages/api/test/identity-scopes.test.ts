@@ -80,7 +80,15 @@ const {
 } = await import('../src/lib/auth.ts');
 const { createHash } = await import('node:crypto');
 const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
-const { putAccessTokenForTests, peekAccessToken } = await import('../src/lib/oauth-store.ts');
+const {
+  putAccessTokenForTests,
+  peekAccessToken,
+  invalidateStoreCache,
+  recordPrunedAccessHash,
+  getPrunedAccessHashesCountForTests,
+  clearPrunedAccessHashesForTests,
+  PRUNED_ACCESS_HASHES_CAP,
+} = await import('../src/lib/oauth-store.ts');
 const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
 
 const sha256Hex = (val: string) => createHash('sha256').update(val).digest('hex');
@@ -1795,6 +1803,87 @@ describe('Issue #114: read-only API token scopes', () => {
       } finally {
         writeFileSync(storePath, goodData);
       }
+    });
+
+    test('6e. Real save-path prune + disk persistence + cache invalidation + corrupt store -> 401 unauthorized (not 500)', async () => {
+      const user = createIdentity({ localpart: 'tombstone-user', scopes: ['read:messages'] })!;
+      const expiredToken = 'tombstone_expired_oauth_token_88888';
+      const newToken = 'tombstone_new_oauth_token_99999';
+
+      // 1. Seed an OAuth token with past expiresAt
+      putAccessTokenForTests({
+        token: expiredToken,
+        grantId: 'grant-tombstone-1',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() - 1000,
+        ensureGrant: { clientId: 'client-tombstone', clientName: 'Client Tombstone' },
+      });
+
+      // 2. Perform a REAL save-path mutation (seed another access token via save-path).
+      // This drives pruneExpired() which deletes expiredToken from access table, records its hash
+      // into prunedAccessHashes tombstone set, and writes the pruned state to disk.
+      putAccessTokenForTests({
+        token: newToken,
+        grantId: 'grant-tombstone-2',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-tombstone', clientName: 'Client Tombstone' },
+        runSave: true,
+      });
+
+      // 3. Invalidate caches to force disk reload (rawCache and storeCache both cleared)
+      invalidateStoreCache();
+
+      // Verify that expiredToken is indeed gone from disk raw store
+      const { readFileSync } = await import('node:fs');
+      const oauthDisk = JSON.parse(readFileSync(join(config.dataDir, 'oauth.json'), 'utf8'));
+      expect(oauthDisk.access[sha256Hex(expiredToken)]).toBeUndefined();
+
+      // 4. Corrupt identity store
+      const storePath = join(config.dataDir, 'identities.json');
+      const goodData = readFileSync(storePath, 'utf8');
+
+      try {
+        writeFileSync(storePath, '[{ malformed json');
+
+        // 5. Real HTTP request with the expired token:
+        // Although gone from disk and cache, the in-process tombstone set remembers it as an OAuth credential.
+        // peekAccessToken returns true, so resolveAccessToken fails closed with 401, NOT 500.
+        const res = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${expiredToken}` },
+        });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({ error: 'unauthorized' });
+
+        const direct = resolveAccessToken(expiredToken, { resource });
+        expect(direct.status).toBe('unauthorized');
+      } finally {
+        writeFileSync(storePath, goodData);
+      }
+    });
+
+    test('6f. Tombstone boundedness: prunedAccessHashes respects capacity limit with FIFO eviction', () => {
+      clearPrunedAccessHashesForTests();
+      expect(getPrunedAccessHashesCountForTests()).toBe(0);
+
+      // Record entries up to cap
+      for (let i = 0; i < PRUNED_ACCESS_HASHES_CAP; i++) {
+        recordPrunedAccessHash(`hash_${i}`);
+      }
+      expect(getPrunedAccessHashesCountForTests()).toBe(PRUNED_ACCESS_HASHES_CAP);
+
+      // Add 10 more entries beyond cap
+      for (let i = 0; i < 10; i++) {
+        recordPrunedAccessHash(`overflow_hash_${i}`);
+      }
+      // Capacity must be strictly bounded at PRUNED_ACCESS_HASHES_CAP
+      expect(getPrunedAccessHashesCountForTests()).toBe(PRUNED_ACCESS_HASHES_CAP);
+
+      // Re-recording an existing entry refreshes position without expanding size
+      recordPrunedAccessHash('overflow_hash_0');
+      expect(getPrunedAccessHashesCountForTests()).toBe(PRUNED_ACCESS_HASHES_CAP);
     });
   });
 });
