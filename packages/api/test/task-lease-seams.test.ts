@@ -27,7 +27,31 @@ test('#89 RED: production lease modules expose neither signing/parser helpers no
   }
 });
 
-test('#89 GREEN: canonical production bundle and final Docker stage exclude every lease test seam', () => {
+test('#92: production task facade and bundle exclude dependency-injection test seams', async () => {
+  const tasks = await import('../src/lib/tasks.ts');
+  const taskSeams = [
+    'setTaskNowForTests',
+    'setTaskListAllForTests',
+    'setTaskGetForTests',
+    'setTaskSendMailForTests',
+    'clearQueuedEventsForTests',
+  ];
+  for (const seam of taskSeams) {
+    expect(Object.hasOwn(tasks, seam)).toBe(false);
+  }
+
+  const tasksSource = readFileSync(new URL('../src/lib/tasks.ts', import.meta.url), 'utf8');
+  for (const seam of taskSeams) {
+    expect(tasksSource).not.toContain(seam);
+  }
+
+  const support = await import('./support/task-test-seams.ts');
+  for (const seam of taskSeams) {
+    expect(typeof (support as Record<string, unknown>)[seam]).toBe('function');
+  }
+});
+
+test('#89 / #92 GREEN: canonical production bundle and final Docker stage exclude every test seam', () => {
   const pkgDir = join(import.meta.dir, '..');
   const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
   expect(build.exitCode).toBe(0);
@@ -39,6 +63,11 @@ test('#89 GREEN: canonical production bundle and final Docker stage exclude ever
     'withTaskLeasesEnabledForTests',
     'parseStampedTaskMessageForTests',
     'taskLeaseTestRegistry',
+    'setTaskNowForTests',
+    'setTaskListAllForTests',
+    'setTaskGetForTests',
+    'setTaskSendMailForTests',
+    'clearQueuedEventsForTests',
   ]) expect(bundle).not.toContain(seam);
 
   const runtimeStage = readFileSync(join(pkgDir, 'Dockerfile'), 'utf8').split('FROM oven/bun:1 AS runtime', 2)[1]!;

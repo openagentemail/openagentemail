@@ -18,14 +18,16 @@ const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const {
   listTaskBoard,
+  taskService,
+  toUiTaskView,
+} = await import('../src/lib/tasks.ts');
+const {
   clearQueuedEventsForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskSendMailForTests,
   setTaskNowForTests,
-  taskService,
-  toUiTaskView,
-} = await import('../src/lib/tasks.ts');
+} = await import('./support/task-test-seams.ts');
 const { taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 
 for (const localpart of ['fox', 'owl']) {

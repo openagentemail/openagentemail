@@ -23,14 +23,16 @@ const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const {
-  clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
-  setTaskGetForTests,
-  setTaskNowForTests,
-  setTaskSendMailForTests,
   taskService,
   taskFromMessages,
 } = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
+  setTaskNowForTests,
+  setTaskSendMailForTests,
+} = await import('./support/task-test-seams.ts');
 const { parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 

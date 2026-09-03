@@ -16,6 +16,7 @@ process.env.NODE_ENV = 'test';
 
 const { afterEach, beforeEach, expect, test } = await import('bun:test');
 const tasks = await import('../src/lib/tasks.ts');
+const taskSeams = await import('./support/task-test-seams.ts');
 const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { parseStampedTaskMessageForTests } = await import('./support/task-lease-seams.ts');
@@ -46,23 +47,23 @@ for (const localpart of ['root-from', 'root-to']) {
 }
 
 beforeEach(() => {
-  tasks.setTaskGetForTests(async (id) => id === PARENT ? authenticatedTask(PARENT) : null);
-  tasks.setTaskListAllForTests(async () => [await authenticatedTask(PARENT)]);
+  taskSeams.setTaskGetForTests(async (id) => id === PARENT ? authenticatedTask(PARENT) : null);
+  taskSeams.setTaskListAllForTests(async () => [await authenticatedTask(PARENT)]);
 });
 
 afterEach(() => {
-  tasks.setTaskGetForTests(null);
-  tasks.setTaskListAllForTests(null);
-  tasks.setTaskSendMailForTests(null);
-  tasks.clearQueuedEventsForTests();
-  tasks.setTaskNowForTests(null);
+  taskSeams.setTaskGetForTests(null);
+  taskSeams.setTaskListAllForTests(null);
+  taskSeams.setTaskSendMailForTests(null);
+  taskSeams.clearQueuedEventsForTests();
+  taskSeams.setTaskNowForTests(null);
   integrity.setTaskIdForTests?.(null);
   integrity.clearTaskSideEffectObserverForTests?.();
 });
 
 function capture(): SendInput[] {
   const sent: SendInput[] = [];
-  tasks.setTaskSendMailForTests(async (input) => {
+  taskSeams.setTaskSendMailForTests(async (input) => {
     sent.push(input);
     return { messageId: `<parent-root-${sent.length}@test.example>` };
   });
@@ -128,7 +129,7 @@ async function parse(id: string, source: string, uid = 1) {
 }
 
 test('R1 RED: parented approval root uses the frozen v2 domain and deterministic signed envelope', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const created = await tasks.createApprovalTask({
     from: FROM,
@@ -150,7 +151,7 @@ test('R1 RED: parented approval root uses the frozen v2 domain and deterministic
 });
 
 test('parentless ordinary and approval creates retain their exact v1 header shapes', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   await tasks.createTask({ from: FROM, to: TO, subject: 'Legacy ordinary', body: 'body' });
   await tasks.createApprovalTask({
@@ -169,7 +170,7 @@ test('parentless ordinary and approval creates retain their exact v1 header shap
 });
 
 test('ordinary and approval parented roots rebuild through production parser, including folded raw mail', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const ordinary = await tasks.createTask({ from: FROM, to: TO, subject: 'Parented ordinary', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
   const approval = await tasks.createApprovalTask({
@@ -185,7 +186,7 @@ test('ordinary and approval parented roots rebuild through production parser, in
 });
 
 test('parser rejects tampered, noncanonical, naked, and later relationship-bearing records', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const created = await tasks.createTask({ from: FROM, to: TO, subject: 'Tamper root', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
   const source = rfc822(sent[0]!);
@@ -215,7 +216,7 @@ test('parser rejects tampered, noncanonical, naked, and later relationship-beari
 });
 
 test('root pointer survives later v1 state events, conflicting second roots fail closed, and creation adds no root overlay', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const created = await tasks.createTask({ from: FROM, to: TO, subject: 'Independent state', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
   const root = await parse(created.id, rfc822(sent[0]!));
@@ -241,14 +242,14 @@ test('root pointer survives later v1 state events, conflicting second roots fail
   const decisionRaw = await parse(approval.id, decision, 2);
   expect(tasks.taskFromMessages(approval.id, [approvalRoot!, decisionRaw!])).toMatchObject({ parentTaskId: PARENT, state: 'completed' });
 
-  tasks.setTaskGetForTests(async () => null);
+  taskSeams.setTaskGetForTests(async () => null);
   expect(await tasks.getTask(created.id)).toMatchObject({ id: created.id, state: 'submitted' });
-  tasks.clearQueuedEventsForTests();
+  taskSeams.clearQueuedEventsForTests();
   expect(await tasks.getTask(created.id)).toBeNull();
 });
 
 test('R1a RED: production public projections exclude the internal root pointer at every level', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const created = await tasks.createTask({
     from: FROM, to: TO, subject: 'Projection fence', body: 'body', parentTaskId: PARENT,
@@ -332,7 +333,7 @@ test('R5g an intact authenticated root survives injected tampered and stripped r
 });
 
 test('R5a: deleting a v2 root header cannot downgrade ordinary or approval history to parentless', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
 
   const ordinary = await tasks.createTask({
@@ -433,7 +434,7 @@ test('real independently signed roots reject changed parents, accept exact dupli
 });
 
 test('parentless approval keeps its full v1 stamp and reconstructed approval history', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   const created = await tasks.createApprovalTask({
     from: FROM, to: TO, subject: 'Legacy approval history', action: { type: 'change', name: 'review', arguments: {} }, expiresAt: EXPIRES,
@@ -472,12 +473,12 @@ function chainId(index: number): string {
 }
 
 test('R2 parent validation rejects unavailable/nonparticipant chains before delivery and shares accepted ordinary/approval behavior', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
   expect(integrity.observeTaskSideEffectsForTests).toBeFunction();
   const effects = integrity.observeTaskSideEffectsForTests!();
   const parents = new Map<string, Task>();
-  const useParents = () => tasks.setTaskListAllForTests(async () => [...parents.values()].filter((task): task is Task => !!task));
+  const useParents = () => taskSeams.setTaskListAllForTests(async () => [...parents.values()].filter((task): task is Task => !!task));
   useParents();
   let unknownChild: Task | undefined;
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'no parent', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]).then((task) => { unknownChild = task; }))
@@ -508,7 +509,7 @@ test('R2 parent validation rejects unavailable/nonparticipant chains before deli
 test('R2 rejects a just-created synthetic parent until its authenticated root is durably reconstructed', async () => {
   const sent = capture();
   const effects = integrity.observeTaskSideEffectsForTests!();
-  tasks.setTaskListAllForTests(async () => []);
+  taskSeams.setTaskListAllForTests(async () => []);
   const syntheticParent = await tasks.createTask({ from: FROM, to: TO, subject: 'not indexed', body: 'body' });
   await expect(tasks.createTask({ from: FROM, to: TO, subject: 'child', body: 'body', parentTaskId: syntheticParent.id } as Parameters<typeof tasks.createTask>[0]))
     .rejects.toThrow('parent_task_not_found');
@@ -525,7 +526,7 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
   parents.set(PARENT, await authenticatedTask(PARENT, FROM, TO, OTHER_PARENT));
   parents.set(OTHER_PARENT, await authenticatedTask(OTHER_PARENT, FROM, TO, PARENT));
   let snapshotReads = 0;
-  const useParents = () => tasks.setTaskListAllForTests(async () => {
+  const useParents = () => taskSeams.setTaskListAllForTests(async () => {
     snapshotReads += 1;
     return [...parents.values()].filter((task): task is Task => !!task);
   });
@@ -583,12 +584,12 @@ test('R2 parent validation fails closed on self, repeated, malformed, missing, a
 });
 
 test('R5f parent validation uses one snapshot under the immediate-parent lock and delivers outside it', async () => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent: SendInput[] = [];
   let releaseLookup!: () => void;
   const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
   let lookups = 0;
-  tasks.setTaskListAllForTests(async () => {
+  taskSeams.setTaskListAllForTests(async () => {
     lookups += 1;
     await lookupGate;
     return [await authenticatedTask(PARENT)];
@@ -596,7 +597,7 @@ test('R5f parent validation uses one snapshot under the immediate-parent lock an
   let releaseFirstDelivery!: () => void;
   const firstDeliveryGate = new Promise<void>((resolve) => { releaseFirstDelivery = resolve; });
   let deliveries = 0;
-  tasks.setTaskSendMailForTests(async (input) => {
+  taskSeams.setTaskSendMailForTests(async (input) => {
     sent.push(input);
     deliveries += 1;
     if (deliveries === 1) await firstDeliveryGate;
@@ -615,7 +616,7 @@ test('R5f parent validation uses one snapshot under the immediate-parent lock an
   await Promise.all([first, second]);
   expect(sent).toHaveLength(2);
 
-  tasks.setTaskListAllForTests(async () => [await authenticatedTask(PARENT, 'other@test.example', TO)]);
+  taskSeams.setTaskListAllForTests(async () => [await authenticatedTask(PARENT, 'other@test.example', TO)]);
   const rejected = await Promise.allSettled([
     tasks.createTask({ from: FROM, to: TO, subject: 'reject ordinary', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]),
     tasks.createApprovalTask({ from: FROM, to: TO, subject: 'reject approval', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]),

@@ -56,16 +56,18 @@ class FakeImapFlow extends EventEmitter {
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
 const {
-  clearQueuedEventsForTests,
   createTask,
   listTasks,
   replyTask,
+  invalidateTaskListCache,
+} = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
-  invalidateTaskListCache,
-} = await import('../src/lib/tasks.ts');
+} = await import('./support/task-test-seams.ts');
 const { config } = await import('../src/lib/config.ts');
 
 const NOW = Date.parse('2026-08-12T12:00:00.000Z');

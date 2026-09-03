@@ -19,7 +19,7 @@ process.env.TASK_LEASES_ENABLED = 'true';
 const { describe, expect, test: bunTest } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
-const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
+const { setTaskNowForTests } = await import('./support/task-test-seams.ts');
 const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 // bun 共享模块注册表下 config 可能被其他测试文件先冻结；取当前进程里已生效的合法 admin 凭证，

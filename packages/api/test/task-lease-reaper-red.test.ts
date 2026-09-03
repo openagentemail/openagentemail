@@ -18,18 +18,20 @@ process.env.NODE_ENV = 'test';
 
 const { afterEach, describe, expect, test: bunTest } = await import('bun:test');
 const {
-  clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
   reapExpiredTaskLeasesOnce,
-  setTaskGetForTests,
-  setTaskListAllForTests,
-  setTaskNowForTests,
-  setTaskSendMailForTests,
   taskFromMessages,
   taskService,
   toTaskView,
   getTask,
 } = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
+  setTaskListAllForTests,
+  setTaskNowForTests,
+  setTaskSendMailForTests,
+} = await import('./support/task-test-seams.ts');
 const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { startTaskLeaseReaper, TASK_LEASE_REAPER_INTERVAL_MS } = await import('../src/lib/task-lease-reaper.ts');

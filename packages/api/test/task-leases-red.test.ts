@@ -16,7 +16,7 @@ process.env.NODE_ENV = 'test';
 
 const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
-const { setTaskNowForTests } = await import('../src/lib/tasks.ts');
+const { setTaskNowForTests } = await import('./support/task-test-seams.ts');
 const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 

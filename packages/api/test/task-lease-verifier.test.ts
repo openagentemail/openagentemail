@@ -16,14 +16,16 @@ process.env.TASK_LEASES_ENABLED = 'true';
 const { expect, test: bunTest } = await import('bun:test');
 const {
   claimTask,
-  clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
   releaseTask,
   renewTask,
+} = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
   setTaskGetForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
-} = await import('../src/lib/tasks.ts');
+} = await import('./support/task-test-seams.ts');
 const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 
