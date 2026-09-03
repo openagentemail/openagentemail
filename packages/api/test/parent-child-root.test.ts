@@ -20,6 +20,7 @@ const taskSeams = await import('./support/task-test-seams.ts');
 const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { parseStampedTaskMessageForTests } = await import('./support/task-lease-seams.ts');
+const { ConcurrentWaitHelper } = await import('./support/concurrent-wait.ts');
 type IntegritySeams = {
   parseTaskMessageWithIntegrityForTests?: (input: {
     id: string; uid: number; source: string; internalDate: string;
@@ -603,13 +604,18 @@ test('R5f parent validation uses one snapshot under the immediate-parent lock an
     if (deliveries === 1) await firstDeliveryGate;
     return { messageId: `<parent-root-${deliveries}@test.example>` };
   });
-  const first = tasks.createTask({ from: FROM, to: TO, subject: 'first', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]);
-  while (lookups === 0) await Promise.resolve();
-  const second = tasks.createApprovalTask({ from: FROM, to: TO, subject: 'second', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]);
+  const waitHelper = new ConcurrentWaitHelper();
+  const first = waitHelper.observe(
+    tasks.createTask({ from: FROM, to: TO, subject: 'first', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]),
+  );
+  await waitHelper.waitUntil(() => lookups > 0, 5000, 'Timed out waiting for first lookup');
+  const second = waitHelper.observe(
+    tasks.createApprovalTask({ from: FROM, to: TO, subject: 'second', action: { type: 'x', name: 'y', arguments: {} }, expiresAt: EXPIRES, parentTaskId: PARENT } as Parameters<typeof tasks.createApprovalTask>[0]),
+  );
   await Promise.resolve();
   expect(lookups).toBe(1);
   releaseLookup();
-  while (deliveries < 2) await Bun.sleep(1);
+  await waitHelper.waitUntil(() => deliveries >= 2, 5000, 'Timed out waiting for concurrent deliveries');
   expect(lookups).toBe(2);
   expect(deliveries).toBe(2);
   releaseFirstDelivery();
@@ -623,4 +629,100 @@ test('R5f parent validation uses one snapshot under the immediate-parent lock an
   ]);
   expect(rejected.every((result) => result.status === 'rejected' && String(result.reason).includes('parent_task_sender_not_participant'))).toBeTrue();
   expect(sent).toHaveLength(2);
+});
+
+test('R5f wait helper immediately rejects without hanging when concurrent operation rejects during parent lookup', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskListAllForTests(async () => {
+    throw new Error('simulated_lookup_failure');
+  });
+  taskSeams.setTaskSendMailForTests(async () => ({ messageId: '<never-reached@test.example>' }));
+
+  const waitHelper = new ConcurrentWaitHelper();
+  const failingOp = waitHelper.observe(
+    tasks.createTask({ from: FROM, to: TO, subject: 'failing lookup', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]),
+  );
+
+  let lookups = 0;
+  await expect(
+    waitHelper.waitUntil(() => lookups > 0, 5000, 'Timed out waiting for lookups'),
+  ).rejects.toThrow('simulated_lookup_failure');
+
+  await expect(failingOp).rejects.toThrow('simulated_lookup_failure');
+});
+
+test('R5f wait helper immediately rejects without hanging when concurrent operation rejects during delivery', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  taskSeams.setTaskListAllForTests(async () => [await authenticatedTask(PARENT)]);
+  taskSeams.setTaskSendMailForTests(async () => {
+    throw new Error('simulated_delivery_failure');
+  });
+
+  const waitHelper = new ConcurrentWaitHelper();
+  const failingOp = waitHelper.observe(
+    tasks.createTask({ from: FROM, to: TO, subject: 'failing delivery', body: 'body', parentTaskId: PARENT } as Parameters<typeof tasks.createTask>[0]),
+  );
+
+  let deliveries = 0;
+  await expect(
+    waitHelper.waitUntil(() => deliveries >= 2, 5000, 'Timed out waiting for deliveries'),
+  ).rejects.toThrow('simulated_delivery_failure');
+
+  await expect(failingOp).rejects.toThrow('simulated_delivery_failure');
+});
+
+test('R5f wait helper times out with descriptive error when condition is never met', async () => {
+  const waitHelper = new ConcurrentWaitHelper();
+  let satisfied = false;
+  await expect(
+    waitHelper.waitUntil(() => satisfied, 30, 'Timed out waiting for mock condition'),
+  ).rejects.toThrow(/Timed out waiting for mock condition \(waited 30ms\)/);
+});
+
+test('R5f isolated subprocess regression: rejected concurrent operation cleanly settles wait helper and exits promptly', async () => {
+  const childScript = `
+    import { ConcurrentWaitHelper } from './test/support/concurrent-wait.ts';
+    const helper = new ConcurrentWaitHelper();
+    helper.observe(new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('child_concurrent_failure')), 10);
+    }));
+    let condition = false;
+    let caughtError: unknown = null;
+    try {
+      await helper.waitUntil(() => condition, 10000, 'Should not time out');
+    } catch (err) {
+      caughtError = err;
+    }
+    if (!(caughtError instanceof Error) || caughtError.message !== 'child_concurrent_failure') {
+      throw new Error('Expected child_concurrent_failure but got: ' + String(caughtError));
+    }
+  `;
+  const pkgDir = join(import.meta.dir, '..');
+  const proc = Bun.spawn(['bun', '-e', childScript], { cwd: pkgDir, stdout: 'pipe', stderr: 'pipe' });
+  let exited = false;
+  proc.exited.then(() => {
+    exited = true;
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('Child process timed out waiting to settle'));
+    }, 5000);
+    timer?.unref?.();
+  });
+
+  try {
+    const exitCode = await Promise.race([proc.exited, timeoutPromise]);
+    expect(exitCode).toBe(0);
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (!exited || proc.exitCode === null) {
+      proc.kill();
+      await proc.exited;
+    }
+  }
 });
