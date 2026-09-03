@@ -1644,6 +1644,20 @@ describe('UI static asset contract', () => {
     expect(beginModal).toContain('deviceAddSubmit.disabled = false');
   });
 
+  test('stale configure-domains response does not update DOM or steal focus after navigation', async () => {
+    const { PLAN_PAGE_JS } = await import('../src/ui/client/pages/plan.ts');
+    expect(PLAN_PAGE_JS).toContain('var configureDomainsGen = 0;');
+    expect(PLAN_PAGE_JS).toContain('var gen = ++configureDomainsGen;');
+    expect(PLAN_PAGE_JS).toContain("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;");
+    const enter = PLAN_PAGE_JS.slice(
+      PLAN_PAGE_JS.indexOf('async function enterConfigureDomains('),
+      PLAN_PAGE_JS.indexOf('function enterPlan('),
+    );
+    expect(enter.indexOf("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;")).toBeLessThan(
+      enter.indexOf('renderEmptyState(configureDomainsState,'),
+    );
+  });
+
   test('identity session CSS hides admin-only create controls', () => {
     expect(UI_CSS).toContain(
       '.inbox-view[data-session="identity"] #configure-identities-create',
