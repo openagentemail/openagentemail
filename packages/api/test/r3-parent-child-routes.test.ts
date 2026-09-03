@@ -16,6 +16,7 @@ const { Hono } = await import('hono');
 const tasks = await import('../src/lib/tasks.ts');
 const core = await import('../src/lib/tasks-internal.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
+const { setTaskListAllForTests } = await import('./support/task-test-seams.ts');
 
 const PARENT = 'f0c4a8e6-1e22-4c66-8c2f-0955a20d81bf';
 const CHILD = '4a9d58b5-7c2e-4ca0-819a-4c36243695a1';
@@ -29,7 +30,7 @@ function app(service: TaskService, address = A) {
   const out = new Hono(); out.use('*', async (c, next) => { c.set('auth', { kind: 'identity', address }); await next(); });
   out.route('/v1/tasks', createTaskRoutes({ service, findIdentity: (value) => [A, B, C].includes(value) ? { address: value, createdAt: '' } : undefined })); return out;
 }
-afterEach(() => core.setTaskListAllForTests(null));
+afterEach(() => setTaskListAllForTests(null));
 
 test('R3 RED: route state filtering uses one snapshot and keeps a readable parent edge', async () => {
   const parent = task(PARENT, A, B, 'completed'); const child = task(CHILD, A, B, 'submitted', PARENT);
@@ -42,7 +43,7 @@ test('R3 RED: route state filtering uses one snapshot and keeps a readable paren
 
 test('R3 RED: shared children ACL, filtering, page cursor, and REST invalid parent are behaviorally enforced', async () => {
   const parent = task(PARENT, A, B); const visible = task(CHILD, A, B, 'submitted', PARENT); const hidden = task(HIDDEN, C, B, 'submitted', PARENT);
-  core.setTaskListAllForTests(async () => [parent, hidden, visible]);
+  setTaskListAllForTests(async () => [parent, hidden, visible]);
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A })).resolves.toMatchObject({ children: [visible], nextCursor: null });
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: C })).rejects.toThrow('forbidden');
   await expect(core.listTaskChildren({ parentTaskId: '61d1105a-4fbd-4e19-b682-754c3ef0f1bc', limit: 20 }, { kind: 'identity', address: A })).rejects.toThrow('not_found');
@@ -54,7 +55,7 @@ test('R3 RED: shared children ACL, filtering, page cursor, and REST invalid pare
 
 test('R3 children default page is 20 and continuation is deterministic', async () => {
   const parent = task(PARENT, A, B); const rows = Array.from({ length: 22 }, (_, i) => task(`10000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT));
-  core.setTaskListAllForTests(async () => [parent, ...rows]);
+  setTaskListAllForTests(async () => [parent, ...rows]);
   const first = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A });
   expect(first.children).toHaveLength(20); expect(first.nextCursor).toBeString(); expect(first.children.map((row) => row.id)).toEqual(rows.slice(2).reverse().map((row) => row.id));
   const second = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20, cursor: first.nextCursor! }, { kind: 'identity', address: A });
@@ -63,12 +64,12 @@ test('R3 children default page is 20 and continuation is deterministic', async (
 
 test('R3 children cursor is bound to parent viewer and limit and rejects tampering', async () => {
   const parent = task(PARENT, A, B); const rows = Array.from({ length: 21 }, (_, i) => task(`20000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT));
-  core.setTaskListAllForTests(async () => [parent, ...rows]);
+  setTaskListAllForTests(async () => [parent, ...rows]);
   const page = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A }); const cursor = page.nextCursor!;
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 50, cursor }, { kind: 'identity', address: A })).rejects.toThrow('invalid_cursor');
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 20, cursor: `${cursor}x` }, { kind: 'identity', address: A })).rejects.toThrow('invalid_cursor');
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 20, cursor }, { kind: 'admin' })).rejects.toThrow('invalid_cursor');
-  const otherParent = task('40000000-0000-4000-8000-000000000001', A, B); core.setTaskListAllForTests(async () => [parent, otherParent, ...rows]);
+  const otherParent = task('40000000-0000-4000-8000-000000000001', A, B); setTaskListAllForTests(async () => [parent, otherParent, ...rows]);
   await expect(core.listTaskChildren({ parentTaskId: otherParent.id, limit: 20, cursor }, { kind: 'identity', address: A })).rejects.toThrow('invalid_cursor');
   await expect(core.listTaskChildren({ parentTaskId: PARENT, limit: 20, cursor }, { kind: 'identity', address: B })).rejects.toThrow('invalid_cursor');
   const parts = cursor.split('.'); const body = parts[1]!; parts[1] = `${body.slice(0, -1)}${body.endsWith('A') ? 'B' : 'A'}`;
@@ -78,7 +79,7 @@ test('R3 children cursor is bound to parent viewer and limit and rejects tamperi
 test('R5a: children cursor rejects every noncanonical body representation with the original MAC', async () => {
   const parent = task(PARENT, A, B);
   const rows = Array.from({ length: 21 }, (_, i) => task(`21000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT));
-  core.setTaskListAllForTests(async () => [parent, ...rows]);
+  setTaskListAllForTests(async () => [parent, ...rows]);
   const cursor = (await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A })).nextCursor!;
   const [prefix, body, mac] = cursor.split('.') as [string, string, string];
   const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as { fp: string; t: number; id: string };
@@ -96,19 +97,19 @@ test('R5a: children cursor rejects every noncanonical body representation with t
 
 test('R3 direct children omit descendants and hidden rows before page fill', async () => {
   const parent = task(PARENT, A, B); const visible = task(CHILD, A, B, 'submitted', PARENT); const descendant = task(HIDDEN, A, B, 'submitted', CHILD); const hidden = task('30000000-0000-4000-8000-000000000001', C, C, 'submitted', PARENT);
-  core.setTaskListAllForTests(async () => [parent, visible, descendant, hidden]);
+  setTaskListAllForTests(async () => [parent, visible, descendant, hidden]);
   const page = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A });
   expect(page.children).toEqual([visible]); expect(page.nextCursor).toBeNull(); expect(JSON.stringify(page)).not.toContain(HIDDEN);
 });
 
 test('R3 core children exercises 50 100 empty and hidden cursor invariance', async () => {
   const parent = task(PARENT, A, B); const rows = Array.from({ length: 101 }, (_, i) => task(`50000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT));
-  core.setTaskListAllForTests(async () => [parent, ...rows]);
+  setTaskListAllForTests(async () => [parent, ...rows]);
   const fifty = await core.listTaskChildren({ parentTaskId: PARENT, limit: 50 }, { kind: 'identity', address: A }); const hundred = await core.listTaskChildren({ parentTaskId: PARENT, limit: 100 }, { kind: 'identity', address: A });
   expect(fifty.children).toHaveLength(50); expect(fifty.nextCursor).toBeString(); expect(hundred.children).toHaveLength(100); expect(hundred.nextCursor).toBeString();
-  const hidden = task('60000000-0000-4000-8000-000000000001', C, C, 'submitted', PARENT); core.setTaskListAllForTests(async () => [parent, hidden, ...rows]);
+  const hidden = task('60000000-0000-4000-8000-000000000001', C, C, 'submitted', PARENT); setTaskListAllForTests(async () => [parent, hidden, ...rows]);
   const withHidden = await core.listTaskChildren({ parentTaskId: PARENT, limit: 50 }, { kind: 'identity', address: A }); expect(withHidden.children.map((row) => row.id)).toEqual(fifty.children.map((row) => row.id)); expect(withHidden.nextCursor).toBe(fifty.nextCursor);
-  core.setTaskListAllForTests(async () => [parent]); const empty = await core.listTaskChildren({ parentTaskId: PARENT, limit: 100 }, { kind: 'identity', address: A }); expect(empty.children).toEqual([]); expect(empty.nextCursor).toBeNull(); expect((empty as any).total).toBeUndefined();
+  setTaskListAllForTests(async () => [parent]); const empty = await core.listTaskChildren({ parentTaskId: PARENT, limit: 100 }, { kind: 'identity', address: A }); expect(empty.children).toEqual([]); expect(empty.nextCursor).toBeNull(); expect((empty as any).total).toBeUndefined();
 });
 
 test('R3 REST ordinary create derives identity sender and reads its parent for projection', async () => {
@@ -167,7 +168,7 @@ test('R3 core mixed updatedAt/id ordering continues exactly across the 20-row bo
   ];
   const rows = timestamps.map((updatedAt, index) => ({ ...task(`80000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT), updatedAt }));
   const expected = [...rows].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id));
-  core.setTaskListAllForTests(async () => [parent, ...rows]);
+  setTaskListAllForTests(async () => [parent, ...rows]);
   const first = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A });
   const second = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20, cursor: first.nextCursor! }, { kind: 'identity', address: A });
   expect(first.children.map((row) => row.id)).toEqual(expected.slice(0, 20).map((row) => row.id)); expect(first.children.at(-1)?.updatedAt).toBe('2026-08-02T00:00:00.000Z'); expect(first.nextCursor).toBeString();
@@ -250,7 +251,7 @@ test('R3 REST list omits unavailable parent in both unfiltered and state-filtere
 test('R3 filter-before-page fills visible page despite interleaved hidden children', async () => {
   const parent = task(PARENT, A, B); const visible = Array.from({ length: 21 }, (_, i) => task(`70000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, A, B, 'submitted', PARENT));
   const hidden = Array.from({ length: 25 }, (_, i) => task(`71000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`, C, C, 'submitted', PARENT));
-  core.setTaskListAllForTests(async () => [parent, ...visible.flatMap((row, i) => [hidden[i]!, row]), ...hidden.slice(21)]);
+  setTaskListAllForTests(async () => [parent, ...visible.flatMap((row, i) => [hidden[i]!, row]), ...hidden.slice(21)]);
   const page = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A });
   expect(page.children).toHaveLength(20); expect(page.nextCursor).toBeString(); expect(page.children.every((row) => row.from === A)).toBe(true);
 });

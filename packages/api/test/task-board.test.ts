@@ -60,7 +60,6 @@ const {
   TASK_BOARD_LIMITS,
   TASK_BOARD_PERIODS,
   TASK_REMIND_COOLDOWN_MS,
-  clearQueuedEventsForTests,
   createApprovalTask,
   createTask,
   currentTaskMessage,
@@ -71,14 +70,17 @@ const {
   closeTask,
   remindTask,
   replyTask,
-  setTaskGetForTests,
-  setTaskListAllForTests,
-  setTaskNowForTests,
-  setTaskSendMailForTests,
   taskFromMessages,
   taskOverdue,
   taskService,
 } = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
+  setTaskListAllForTests,
+  setTaskNowForTests,
+  setTaskSendMailForTests,
+} = await import('./support/task-test-seams.ts');
 const { encodeTaskBoardCursor, InvalidTaskCursorError } = await import('../src/lib/task-cursor.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { config } = await import('../src/lib/config.ts');

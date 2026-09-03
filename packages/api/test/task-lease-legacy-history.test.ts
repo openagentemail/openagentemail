@@ -17,13 +17,15 @@ process.env.NODE_ENV = 'test';
 const { afterEach, expect, test: bunTest } = await import('bun:test');
 const {
   claimTask,
-  clearQueuedEventsForTests,
   renewTask,
+  taskFromMessages,
+} = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
   setTaskGetForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
-  taskFromMessages,
-} = await import('../src/lib/tasks.ts');
+} = await import('./support/task-test-seams.ts');
 const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));

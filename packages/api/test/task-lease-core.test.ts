@@ -28,19 +28,21 @@ const {
   TASK_LEASE_REASON_MAX_CHARS,
   claimTask,
   createApprovalTask,
-  clearQueuedEventsForTests,
   isTaskLeaseTokenCurrent,
   releaseTask,
   replyTask,
   renewTask,
-  setTaskGetForTests,
-  setTaskNowForTests,
-  setTaskSendMailForTests,
   taskService,
   taskFromMessages,
   toTaskView,
   updateTask,
 } = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
+  setTaskNowForTests,
+  setTaskSendMailForTests,
+} = await import('./support/task-test-seams.ts');
 const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { createIdentity } = await import('../src/lib/identities.ts');

@@ -22,16 +22,18 @@ const {
   claimTask,
   approvalActionDigest,
   canonicalApprovalAction,
-  clearQueuedEventsForTests,
   createApprovalTask,
   renewTask,
-  setTaskGetForTests,
-  setTaskNowForTests,
-  setTaskSendMailForTests,
   taskService,
   toTaskView,
   toUiTaskView,
 } = await import('../src/lib/tasks.ts');
+const {
+  clearQueuedEventsForTests,
+  setTaskGetForTests,
+  setTaskNowForTests,
+  setTaskSendMailForTests,
+} = await import('./support/task-test-seams.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const { createApp } = await import('../src/app.ts');

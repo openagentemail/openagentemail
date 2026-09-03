@@ -13,6 +13,7 @@ process.env.NODE_ENV = 'test';
 
 const { afterEach, expect, test } = await import('bun:test');
 const tasks = await import('../src/lib/tasks.ts');
+const taskSeams = await import('./support/task-test-seams.ts');
 const { parseStampedTaskMessageForTests } = await import('./support/task-lease-seams.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 
@@ -26,10 +27,10 @@ for (const localpart of ['legacy-requester', 'legacy-reviewer']) {
 }
 
 afterEach(() => {
-  tasks.setTaskNowForTests(null);
-  tasks.setTaskGetForTests(null);
-  tasks.setTaskSendMailForTests(null);
-  tasks.clearQueuedEventsForTests();
+  taskSeams.setTaskNowForTests(null);
+  taskSeams.setTaskGetForTests(null);
+  taskSeams.setTaskSendMailForTests(null);
+  taskSeams.clearQueuedEventsForTests();
 });
 
 function actionAtCanonicalBytes(bytes: number) {
@@ -72,8 +73,8 @@ test('R12 legacy >64KiB signed approval digest/read/rebuild remains readable whi
   });
 
   const sent: unknown[] = [];
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
-  tasks.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-legacy-large>' }; });
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+  taskSeams.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-legacy-large>' }; });
   await expect(tasks.createApprovalTask({
     from: REQUESTER, to: REVIEWER, subject: 'new large', action, expiresAt: '2026-08-25T00:00:00.000Z',
   })).rejects.toThrow('approval_action_too_large');
@@ -91,8 +92,8 @@ test('R12 legacy depth-11 signed approval digest/read/rebuild remains readable w
   });
 
   const sent: unknown[] = [];
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
-  tasks.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-legacy-deep>' }; });
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+  taskSeams.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-legacy-deep>' }; });
   await expect(tasks.createApprovalTask({
     from: REQUESTER, to: REVIEWER, subject: 'new deep', action, expiresAt: '2026-08-25T00:00:00.000Z',
   })).rejects.toThrow('approval_action_too_deep');
@@ -101,8 +102,8 @@ test('R12 legacy depth-11 signed approval digest/read/rebuild remains readable w
 
 test('R12 malformed extra-field input remains invalid before bounds or delivery', async () => {
   const sent: unknown[] = [];
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
-  tasks.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-malformed>' }; });
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+  taskSeams.setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: '<unexpected-malformed>' }; });
   await expect(tasks.createApprovalTask({
     from: REQUESTER,
     to: REVIEWER,

@@ -15,6 +15,7 @@ process.env.SMTP_PASS = 'test-only';
 process.env.DATA_DIR = '/tmp/oae-approval-red';
 
 const tasks = await import('../src/lib/tasks.ts');
+const taskSeams = await import('./support/task-test-seams.ts');
 const { parseStampedTaskMessageForTests } = await import('./support/task-lease-seams.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const { processWatchedMessage } = await import('../src/lib/notification-watcher.ts');
@@ -70,7 +71,7 @@ function rfc822(sent: SendInput): string {
 
 function installSentCapture() {
   const sent: SendInput[] = [];
-  tasks.setTaskSendMailForTests(async (input) => {
+  taskSeams.setTaskSendMailForTests(async (input) => {
     sent.push(input);
     return { messageId: `<approval-red-${sent.length}@test.example>` };
   });
@@ -108,14 +109,14 @@ function appFor(
 }
 
 beforeEach(() => {
-  tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
 });
 
 afterEach(() => {
-  tasks.setTaskGetForTests(null);
-  tasks.setTaskSendMailForTests(null);
-  tasks.clearQueuedEventsForTests();
-  tasks.setTaskNowForTests(null);
+  taskSeams.setTaskGetForTests(null);
+  taskSeams.setTaskSendMailForTests(null);
+  taskSeams.clearQueuedEventsForTests();
+  taskSeams.setTaskNowForTests(null);
 });
 
 describe('#55 R1b: canonical request behavior', () => {
@@ -235,7 +236,7 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
     const decide = api().decideApprovalTask;
     expect(decide, 'lock-protected decision behavior is missing').toBeFunction();
     const { task, sent } = await requestFixture();
-    tasks.setTaskGetForTests(async () => task);
+    taskSeams.setTaskGetForTests(async () => task);
     await expect(tasks.updateTask({
       id: task.id, from: REVIEWER, state: 'completed', result: { decision: 'approved' },
     })).rejects.toThrow('approval_decision_required');
@@ -249,10 +250,10 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
     expect(sent).toHaveLength(2); // request + exactly one terminal decision
     await expect(decide!({ id: task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_already_decided');
 
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const expired = await requestFixture('2026-08-24T00:00:00.000Z');
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
-    tasks.setTaskGetForTests(async () => expired.task);
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+    taskSeams.setTaskGetForTests(async () => expired.task);
     await expect(decide!({ id: expired.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
   });
 
@@ -261,16 +262,16 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
     expect(decide, 'lock-protected expiry materializer is missing').toBeFunction();
     const boundary = '2026-08-24T00:00:00.000Z';
 
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const before = await requestFixture(boundary);
-    tasks.setTaskGetForTests(async () => before.task);
+    taskSeams.setTaskGetForTests(async () => before.task);
     await expect(decide!({ id: before.task.id, from: REVIEWER, decision: 'approved' })).resolves.toMatchObject({ state: 'completed' });
     expect(before.sent).toHaveLength(2);
-    tasks.clearQueuedEventsForTests();
+    taskSeams.clearQueuedEventsForTests();
 
     const noClick = await requestFixture(boundary);
-    tasks.setTaskNowForTests(() => Date.parse(boundary));
-    tasks.setTaskGetForTests(async () => noClick.task);
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary));
+    taskSeams.setTaskGetForTests(async () => noClick.task);
     let noClickTicks = 0;
     const [detail, waited] = await Promise.all([
       tasks.getTask(noClick.task.id),
@@ -282,12 +283,12 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
     expect(detail).toMatchObject({ state: 'failed', result: { decision: 'expired', digest: noClick.task.approval.digest, expiredAt: boundary } });
     expect(waited).toMatchObject({ state: 'failed', result: { decision: 'expired', digest: noClick.task.approval.digest, expiredAt: boundary } });
     expect(noClick.sent).toHaveLength(2); // request + one lazy signed expiry
-    tasks.clearQueuedEventsForTests();
+    taskSeams.clearQueuedEventsForTests();
 
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const raced = await requestFixture(boundary);
-    tasks.setTaskNowForTests(() => Date.parse(boundary));
-    tasks.setTaskGetForTests(async () => raced.task);
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary));
+    taskSeams.setTaskGetForTests(async () => raced.task);
     let raceTicks = 0;
     const [racedDetail, racedWaited, racedDecision] = await Promise.all([
       tasks.getTask(raced.task.id),
@@ -310,12 +311,12 @@ describe('#55 R1b: one decision, terminal result, and ACL', () => {
     expect(decide, 'decision result behavior is missing').toBeFunction();
     for (const decision of ['approved', 'rejected'] as const) {
       const { task } = await requestFixture();
-      tasks.setTaskGetForTests(async () => task);
+      taskSeams.setTaskGetForTests(async () => task);
       const completed = await decide!({ id: task.id, from: REVIEWER, decision });
       const waited = await tasks.waitForTaskTerminal(task.id, REQUESTER, 1);
       expect(completed).toMatchObject({ state: 'completed', result: { decision, digest: task.approval.digest, reviewer: REVIEWER } });
       expect(waited).toMatchObject({ state: 'completed', result: { decision, digest: task.approval.digest, reviewer: REVIEWER } });
-      tasks.clearQueuedEventsForTests();
+      taskSeams.clearQueuedEventsForTests();
     }
   });
 
@@ -381,7 +382,7 @@ describe('#55 R5: approval reminder integrity', () => {
     const { task, sent } = await requestFixture();
     const parse = parseStampedTaskMessageForTests;
     expect(parse, 'production parser seam is missing').toBeFunction();
-    tasks.setTaskGetForTests(async () => task);
+    taskSeams.setTaskGetForTests(async () => task);
     await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'This must not become an approval reminder.' }))
       .rejects.toThrow('approval_decision_required');
     expect(sent).toHaveLength(1);
@@ -394,7 +395,7 @@ describe('#55 R5: approval reminder integrity', () => {
     const { task, sent } = await requestFixture();
     const parse = parseStampedTaskMessageForTests;
     expect(parse, 'production parser seam is missing').toBeFunction();
-    tasks.setTaskGetForTests(async () => task);
+    taskSeams.setTaskGetForTests(async () => task);
     await expect(tasks.remindTask({ id: task.id, from: REQUESTER, body: 'Do not send this.' }))
       .rejects.toThrow('approval_decision_required');
     expect(sent).toHaveLength(1);
@@ -408,10 +409,10 @@ describe('#55 R1b: signed IMAP rebuild', () => {
   test('R9 RED: REST authorizes outsider detail and mutations before lazy expiry materialization', async () => {
     const boundary = '2026-08-24T00:00:00.000Z';
     const expiredApproval = async () => {
-      tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+      taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
       const fixture = await requestFixture(boundary);
-      tasks.setTaskGetForTests(async () => fixture.task);
-      tasks.setTaskNowForTests(() => Date.parse(boundary));
+      taskSeams.setTaskGetForTests(async () => fixture.task);
+      taskSeams.setTaskNowForTests(() => Date.parse(boundary));
       return fixture;
     };
     const outsider = appFor({ kind: 'identity', address: OUTSIDER });
@@ -445,10 +446,10 @@ describe('#55 R1b: signed IMAP rebuild', () => {
 
   test('R9 control: REST participant detail materializes expiry once and reviewer decision remains task_expired', async () => {
     const boundary = '2026-08-24T00:00:00.000Z';
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const { task, sent } = await requestFixture(boundary);
-    tasks.setTaskGetForTests(async () => task);
-    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    taskSeams.setTaskGetForTests(async () => task);
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary));
     const reviewer = appFor({ kind: 'identity', address: REVIEWER });
     const firstDetail = await reviewer.request(`/v1/tasks/${task.id}`);
     const repeatedDetail = await reviewer.request(`/v1/tasks/${task.id}`);
@@ -516,13 +517,13 @@ describe('#55 R1b: signed IMAP rebuild', () => {
   test('R8-B RED: a signed decision overlay survives durable IMAP lag beyond the ordinary TTL', async () => {
     const decide = api().decideApprovalTask!;
     const before = '2026-08-24T00:00:00.000Z';
-    tasks.setTaskNowForTests(() => Date.parse(before));
+    taskSeams.setTaskNowForTests(() => Date.parse(before));
     const { task, sent } = await requestFixture();
-    tasks.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
+    taskSeams.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
     const sentAt = '2026-08-24T00:00:02.000Z';
-    tasks.setTaskNowForTests(() => Date.parse(sentAt));
+    taskSeams.setTaskNowForTests(() => Date.parse(sentAt));
     await decide({ id: task.id, from: REVIEWER, decision: 'approved' });
-    tasks.setTaskNowForTests(() => Date.parse(sentAt) + 60_001);
+    taskSeams.setTaskNowForTests(() => Date.parse(sentAt) + 60_001);
     const opposite = await decide({ id: task.id, from: REVIEWER, decision: 'rejected' }).then(
       () => 'resolved', (error: Error) => error.message,
     );
@@ -533,7 +534,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
     expect(request).not.toBeNull();
     expect(terminal).not.toBeNull();
     const indexed = tasks.taskFromMessages(task.id, [request!, terminal!] as Parameters<typeof tasks.taskFromMessages>[1])!;
-    tasks.setTaskGetForTests(async () => indexed);
+    taskSeams.setTaskGetForTests(async () => indexed);
     const stable = await tasks.getTask(task.id);
     expect(stable).toMatchObject({ state: 'completed', result: { decision: 'approved', digest: task.approval.digest } });
     expect(stable?.messages).toHaveLength(indexed.messages.length);
@@ -542,12 +543,12 @@ describe('#55 R1b: signed IMAP rebuild', () => {
 
   test('R8-B RED: a signed expiry overlay survives durable IMAP lag beyond the ordinary TTL', async () => {
     const boundary = '2026-08-24T00:00:00.000Z';
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const { task, sent } = await requestFixture(boundary);
-    tasks.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
-    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    taskSeams.setTaskGetForTests(async () => task); // durable store deliberately remains request-only
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary));
     await tasks.getTask(task.id); // lazy materializer writes the first signed expiry
-    tasks.setTaskNowForTests(() => Date.parse(boundary) + 60_001);
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary) + 60_001);
     const repeated = await api().decideApprovalTask!({ id: task.id, from: REVIEWER, decision: 'approved' }).then(
       () => 'resolved', (error: Error) => error.message,
     );
@@ -558,7 +559,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
     expect(request).not.toBeNull();
     expect(terminal).not.toBeNull();
     const indexed = tasks.taskFromMessages(task.id, [request!, terminal!] as Parameters<typeof tasks.taskFromMessages>[1])!;
-    tasks.setTaskGetForTests(async () => indexed);
+    taskSeams.setTaskGetForTests(async () => indexed);
     const stable = await tasks.getTask(task.id);
     expect(stable).toMatchObject({ state: 'failed', result: { decision: 'expired', digest: task.approval.digest } });
     expect(stable?.messages).toHaveLength(indexed.messages.length);
@@ -567,10 +568,10 @@ describe('#55 R1b: signed IMAP rebuild', () => {
 
   test('R8-D RED: REST preserves task_expired after a detail read materializes the signed failure', async () => {
     const boundary = '2026-08-24T00:00:00.000Z';
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const { task, sent } = await requestFixture(boundary);
-    tasks.setTaskGetForTests(async () => task);
-    tasks.setTaskNowForTests(() => Date.parse(boundary));
+    taskSeams.setTaskGetForTests(async () => task);
+    taskSeams.setTaskNowForTests(() => Date.parse(boundary));
     const app = appFor({ kind: 'identity', address: REVIEWER });
     expect((await app.request(`/v1/tasks/${task.id}`)).status).toBe(200);
     const calls = await Promise.all([0, 1].map(async () => {
@@ -596,7 +597,7 @@ describe('#55 R1b: signed IMAP rebuild', () => {
       get: async () => pending,
     } as unknown as typeof tasks.taskService;
     const sent = installSentCapture();
-    tasks.setTaskGetForTests(async () => pending);
+    taskSeams.setTaskGetForTests(async () => pending);
     const [create, decision] = await Promise.all([
       appFor({ kind: 'identity', address: REQUESTER }, injected).request('/v1/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: REVIEWER, subject: 'Injected approval', body: 'record only', kind: 'approval', approval: { action: ACTION, expiresAt: EXPIRES } }) }),
       appFor({ kind: 'identity', address: REVIEWER }, injected).request(`/v1/tasks/${pending.id}/decision`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approved' }) }),
@@ -618,8 +619,8 @@ describe('#55 R1b: signed IMAP rebuild', () => {
     expect(await parse!({ id: task.id, uid: 2, source: requestSource.replace(task.approval.digest, 'b'.repeat(64)), internalDate: '2026-08-24T00:00:01.000Z' })).toBeNull();
     expect(await parse!({ id: task.id, uid: 3, source: requestSource.replace('"retries":2', '"retries":3'), internalDate: '2026-08-24T00:00:02.000Z' })).toBeNull();
     expect(await parse!({ id: task.id, uid: 4, source: requestSource.replace(EXPIRES, '2030-08-25T00:00:01.000Z'), internalDate: '2026-08-24T00:00:03.000Z' })).toBeNull();
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:01:00.000Z'));
-    tasks.setTaskGetForTests(async () => task);
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:01:00.000Z'));
+    taskSeams.setTaskGetForTests(async () => task);
     await decide!({ id: task.id, from: REVIEWER, decision: 'approved' });
     const approvedSource = rfc822(sent[1]!);
     const approved = await parse!({
@@ -628,8 +629,8 @@ describe('#55 R1b: signed IMAP rebuild', () => {
     });
     expect(await parse!({ id: task.id, uid: 6, source: approvedSource.replace('2026-08-24T00:01:00.000Z', '2026-08-24T00:01:01.000Z'), internalDate: '2026-08-24T00:01:01.000Z' })).toBeNull();
     const expired = await requestFixture();
-    tasks.setTaskNowForTests(() => Date.parse(EXPIRES));
-    tasks.setTaskGetForTests(async () => expired.task);
+    taskSeams.setTaskNowForTests(() => Date.parse(EXPIRES));
+    taskSeams.setTaskGetForTests(async () => expired.task);
     await expect(decide!({ id: expired.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
     const expiredSource = rfc822(expired.sent[1]!);
     const expiryRequest = await parse!({ id: expired.task.id, uid: 7, source: rfc822(expired.sent[0]!), internalDate: '2026-08-24T00:00:00.000Z' });
@@ -653,10 +654,10 @@ describe('#55 R1b: actual UI/watcher seams and compatibility controls', () => {
   test('R8-C RED: parser-authenticated request, decision, and expiry previews pass default otp policy without content escalation', async () => {
     const request = api().encodeStampedApprovalRequestForTests!({ id: ID, from: REQUESTER, to: REVIEWER, subject: 'Approval no OTP', body: 'inert body', action: ACTION, expiresAt: EXPIRES });
     const decision = api().encodeStampedApprovalDecisionForTests!({ id: ID, from: REVIEWER, to: REQUESTER, subject: 'Approval no OTP', digest: api().approvalActionDigest!(ACTION), decision: 'approved', decidedAt: '2026-08-24T00:01:00.000Z' });
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
     const expiryFixture = await requestFixture('2026-08-24T00:00:00.000Z');
-    tasks.setTaskGetForTests(async () => expiryFixture.task);
-    tasks.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
+    taskSeams.setTaskGetForTests(async () => expiryFixture.task);
+    taskSeams.setTaskNowForTests(() => Date.parse('2026-08-24T00:00:00.000Z'));
     await expect(api().decideApprovalTask!({ id: expiryFixture.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
     const deliveries: Array<Array<{ level: string; message: string }>> = [];
     const cases = [
@@ -731,10 +732,10 @@ describe('#55 R1b: actual UI/watcher seams and compatibility controls', () => {
     });
     expect(decisionCalls[0]!.message).toContain('Preview: Approval decision recorded: approved.');
 
-    tasks.setTaskNowForTests(() => Date.parse('2030-08-24T23:59:59.999Z'));
+    taskSeams.setTaskNowForTests(() => Date.parse('2030-08-24T23:59:59.999Z'));
     const expired = await requestFixture(WATCHER_EXPIRES);
-    tasks.setTaskNowForTests(() => Date.parse(WATCHER_EXPIRES));
-    tasks.setTaskGetForTests(async () => expired.task);
+    taskSeams.setTaskNowForTests(() => Date.parse(WATCHER_EXPIRES));
+    taskSeams.setTaskGetForTests(async () => expired.task);
     await expect(api().decideApprovalTask!({ id: expired.task.id, from: REVIEWER, decision: 'approved' })).rejects.toThrow('task_expired');
     const expiryCalls: Array<{ message: string }> = [];
     await processWatchedMessage({
