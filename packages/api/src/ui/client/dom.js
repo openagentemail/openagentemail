@@ -135,5 +135,6 @@
   var createName = byId('create-name');
   var createLocalpart = byId('create-localpart');
   var createDomain = byId('create-domain');
+  var createModalError = byId('create-modal-error');
   var createModalCancel = byId('create-modal-cancel');
   var createModalSubmit = byId('create-modal-submit');

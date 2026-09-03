@@ -390,8 +390,6 @@ export async function scanMailboxWindow(opts: {
   const perMessageMax = opts.perMessageMax ?? PER_MSG_MAX;
   const totalKeyMax = opts.totalKeyMax ?? TOTAL_KEY_MAX;
   const identitySet = new Set(opts.identityAddresses.map((a) => a.toLowerCase()));
-  const domainSuffix = `@${config.domain}`;
-
   return withInboxAbortable(
     opts.signal,
     async (client) => {
@@ -437,8 +435,15 @@ export async function scanMailboxWindow(opts: {
         const idHits: string[] = [];
         const domainOnly: string[] = [];
         for (const address of messageRecipients(msg)) {
-          if (identitySet.has(address)) idHits.push(address);
-          else if (address.endsWith(domainSuffix)) domainOnly.push(address);
+          if (identitySet.has(address)) {
+            idHits.push(address);
+          } else {
+            const at = address.lastIndexOf('@');
+            const domain = at === -1 ? '' : address.slice(at + 1);
+            if (config.allDomains.has(domain)) {
+              domainOnly.push(address);
+            }
+          }
         }
 
         // ② 单封上限：身份先进，剩余预算才给投机地址

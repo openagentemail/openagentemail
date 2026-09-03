@@ -26,6 +26,7 @@ const { createUiApiRoutes } = await import('../src/routes/ui.ts');
 const { createUiOAuthApiRoutes, createUiOAuthPageRoutes } = await import(
   '../src/routes/ui-oauth.ts'
 );
+const { config } = await import('../src/lib/config.ts');
 const { PUSH_TIER3_WARNING } = await import('../src/lib/identities.ts');
 const { createGrantAndCode, getGrant, listGrantsForAuth } = await import(
   '../src/lib/oauth-store.ts'
@@ -236,5 +237,117 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     });
     expect(created.status).toBe(400);
     expect(await created.json()).toMatchObject({ error: 'invalid_json' });
+  });
+
+  test('GET /ui/api/domains is admin-only and returns configured domains', async () => {
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
+    (config.allDomains as Set<string>).add('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
+    try {
+      // Identity-scoped session is denied 403
+      const { app: identityApp, cookie: identityCookie } = authenticatedApp({
+        kind: 'identity',
+        address: 'fox@test.example',
+      });
+      const denied = await identityApp.request('http://localhost/ui/api/domains', {
+        headers: { cookie: identityCookie },
+      });
+      expect(denied.status).toBe(403);
+      expect(denied.headers.get('cache-control')).toBe('no-store');
+      expect(await denied.json()).toEqual({ error: 'forbidden: admin session required' });
+
+      // Admin session succeeds with 200
+      const { app, cookie } = authenticatedApp({ kind: 'admin' });
+      const res = await app.request('http://localhost/ui/api/domains', {
+        headers: { cookie },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const data = (await res.json()) as any;
+      expect(data.primary).toBe(config.domain);
+      expect(data.extra).toContain('secondary.example');
+      expect(data.all).toContain('secondary.example');
+      expect(data.all).toContain(config.domain);
+    } finally {
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
+    }
+  });
+
+  test('POST /ui/api/identities validates domain and creates on secondary domain', async () => {
+    const prevNtfy = config.ntfy.enabled;
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
+    (config.ntfy as { enabled: boolean }).enabled = false;
+    (config.allDomains as Set<string>).add('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
+    try {
+      const { app, cookie } = authenticatedApp({ kind: 'admin' });
+
+      // Reject unconfigured domain
+      const bad = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'unconfigured.example' }),
+      });
+      expect(bad.status).toBe(400);
+      expect(bad.headers.get('cache-control')).toBe('no-store');
+      expect(await bad.json()).toEqual({ error: 'invalid_domain' });
+
+      // Create on secondary domain
+      const ok = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'secondary.example' }),
+      });
+      expect(ok.status).toBe(201);
+      expect(ok.headers.get('cache-control')).toBe('no-store');
+      const created = (await ok.json()) as any;
+      expect(created.address).toBe('ui-agent@secondary.example');
+      expect(created.token).toBeDefined();
+
+      // Reject duplicate within same domain (409 address_exists carries no-store)
+      const dup = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'secondary.example' }),
+      });
+      expect(dup.status).toBe(409);
+      expect(dup.headers.get('cache-control')).toBe('no-store');
+      expect(await dup.json()).toEqual({ error: 'address_exists' });
+
+      // Reject cross-domain localpart conflict
+      const conflict = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: config.domain }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(conflict.headers.get('cache-control')).toBe('no-store');
+      expect(await conflict.json()).toEqual({
+        error: 'localpart_conflict',
+        message: 'localpart already exists on domain(s): secondary.example',
+        domains: ['secondary.example'],
+      });
+    } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
+    }
   });
 });

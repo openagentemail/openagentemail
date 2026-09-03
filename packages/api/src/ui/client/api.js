@@ -156,6 +156,7 @@
 
   async function handleCreateSubmit() {
     if (!isAdmin()) return;
+    if (createModalSubmit.disabled || (typeof createDomain !== 'undefined' && createDomain && createDomain.disabled)) return;
     if (!createLocalpart.checkValidity()) {
       createLocalpart.reportValidity();
       return;
@@ -163,12 +164,17 @@
     var openedGen = modalGeneration;
     var name = createName.value.trim();
     var localpart = createLocalpart.value.trim();
+    var domain = (typeof createDomain !== 'undefined' && createDomain && !createDomain.disabled && createDomain.value ? createDomain.value : '').trim();
     createModalSubmit.disabled = true;
     try {
       var payload = await apiJson('/ui/api/identities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: name || undefined, localpart: localpart || undefined })
+        body: JSON.stringify({
+          name: name || undefined,
+          localpart: localpart || undefined,
+          domain: domain || undefined
+        })
       });
       if (openedGen !== modalGeneration) return;
       showTokenModal(payload.token);
@@ -177,13 +183,21 @@
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
-        window.alert('address already exists');
+        if (error.body && error.body.error === 'localpart_conflict') {
+          window.alert(error.body.message || 'localpart already exists on another domain of this instance');
+        } else {
+          window.alert('address already exists');
+        }
+      } else if (error.status === 400) {
+        announce('Invalid identity request. Try again.');
       } else if (error.message !== 'session_expired') {
         announce('Could not create the identity. Try again.');
       }
     } finally {
       /* 仅当前代际才复位：stale 请求不得复活新 dialog 的共享钮；新窗由 beginModal 复位。 */
-      if (openedGen === modalGeneration) createModalSubmit.disabled = false;
+      if (openedGen === modalGeneration && (typeof createDomain === 'undefined' || !createDomain || !createDomain.disabled)) {
+        createModalSubmit.disabled = false;
+      }
     }
   }
 

@@ -18,6 +18,8 @@ const { beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { checkSendLimit, resetRateLimits, resetWaitSlots, MAX_WAITS_PER_ADDRESS } = await import('../src/lib/ratelimit.ts');
 const { canAdvanceTask, currentTaskMessage, taskFromMessages, waitForTaskTerminalWith } = await import('../src/lib/tasks.ts');
+const { knownManagedIdentity } = await import('../src/lib/tasks-internal.ts');
+const { config } = await import('../src/lib/config.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
@@ -224,3 +226,75 @@ describe('task route ACL and state machine', () => {
     expect(reads).toBe(2);
   });
 });
+
+describe('multi-domain task routing and known managed identity', () => {
+  test('knownManagedIdentity accepts identities across all configured domains', () => {
+    const prevHadDomain = config.allDomains.has('secondary.example');
+    (config.allDomains as Set<string>).add('secondary.example');
+    try {
+      const mockFind = (addr: string) =>
+        ['alpha@test.example', 'sec@secondary.example'].includes(addr.toLowerCase())
+          ? ({ address: addr } as any)
+          : undefined;
+
+      expect(knownManagedIdentity('alpha@test.example', mockFind)).toBe(true);
+      expect(knownManagedIdentity('sec@secondary.example', mockFind)).toBe(true);
+      expect(knownManagedIdentity('ext@outside.example', mockFind)).toBe(false);
+      expect(knownManagedIdentity('ghost@secondary.example', mockFind)).toBe(false);
+    } finally {
+      if (!prevHadDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+    }
+  });
+
+  test('task creation works across different configured domains and rejects unconfigured domains', async () => {
+    const prevHadDomain = config.allDomains.has('secondary.example');
+    (config.allDomains as Set<string>).add('secondary.example');
+    try {
+      const SEC = 'agent@secondary.example';
+      const multiApp = new Hono();
+      multiApp.use('*', async (c, next) => {
+        c.set('auth', { kind: 'identity', address: A });
+        await next();
+      });
+      multiApp.route(
+        '/v1/tasks',
+        createTaskRoutes({
+          service,
+          findIdentity: (address) =>
+            [A, B, C, SEC].includes(address.toLowerCase())
+              ? { address, createdAt: '2026-08-04T00:00:00.000Z' }
+              : undefined,
+        }),
+      );
+
+      // Create task from primary domain (A) to secondary domain (SEC)
+      const res = await multiApp.request('/v1/tasks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ to: SEC, subject: 'Cross-domain job', body: 'Please run this' }),
+      });
+      expect(res.status).toBe(201);
+      expect(calls).toContainEqual({
+        operation: 'create',
+        input: { from: A, to: SEC, subject: 'Cross-domain job', body: 'Please run this' },
+      });
+
+      // Target to unconfigured domain is rejected
+      const resBad = await multiApp.request('/v1/tasks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ to: 'user@unconfigured.example', subject: 'Outside', body: 'hello' }),
+      });
+      expect(resBad.status).toBe(403);
+      const dataBad = (await resBad.json()) as any;
+      expect(dataBad.error).toBe('forbidden: task participants must be known identities');
+    } finally {
+      if (!prevHadDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+    }
+  });
+});
+

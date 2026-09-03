@@ -222,6 +222,8 @@ services:
     environment:
       # --- shared API contract env ---
       DOMAIN: ${DOMAIN}
+      EXTRA_DOMAINS: ${EXTRA_DOMAINS:-}
+      ALLOWED_SEND_DOMAINS: ${ALLOWED_SEND_DOMAINS:-}
       API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}
       PORT: 3100
       UI_ENABLED: ${UI_ENABLED:-true}

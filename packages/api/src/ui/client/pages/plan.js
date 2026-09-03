@@ -1,13 +1,31 @@
-  function enterConfigureDomains(options) {
+  var configureDomainsGen = 0;
+
+  async function enterConfigureDomains(options) {
     var opts = options || {};
     cancelOverview();
     cancelNotifyLoad();
     cancelTasksLoad();
     applyScope('configure-domains', { announce: opts.announce });
-    renderEmptyState(configureDomainsState, {
-      title: 'Custom domains are on the roadmap',
-      purpose: 'This instance keeps using the configured primary domain. Multi-suffix routing and certificates are not available yet, so this page has no controls to click.'
-    });
+    var gen = ++configureDomainsGen;
+    try {
+      var data = await apiJson('/ui/api/domains');
+      if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;
+      var primary = (data && data.primary) || window.location.hostname;
+      var extra = (data && data.extra && data.extra.length > 0) ? data.extra.join(', ') : 'None';
+      renderEmptyState(configureDomainsState, {
+        title: 'Configured instance domains',
+        purpose: 'Primary domain: ' + primary + (data && data.extra && data.extra.length > 0 ? ' | Secondary domains: ' + extra : ' | No secondary domains configured (set EXTRA_DOMAINS in .env to add more).')
+      });
+    } catch (e) {
+      if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;
+      // Session expired already transitioned to login; skip fallback rendering.
+      if (e && e.message === 'session_expired') return;
+      renderEmptyState(configureDomainsState, {
+        title: 'Configured instance domains',
+        purpose: 'Primary domain: ' + (window.location.hostname || 'configured via environment')
+      });
+    }
+    if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;
     configureDomainsPanel.focus({ preventScroll: true });
   }
 

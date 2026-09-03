@@ -189,7 +189,7 @@ describe('ALWAYS_BCC configuration', () => {
   });
 
   test('rejects same-domain archives case-insensitively, including DNS root dots', () => {
-    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.', 'EXAMPLE.COM..']) {
+    for (const domain of ['EXAMPLE.COM', 'EXAMPLE.COM.']) {
       expect(() =>
         parseConfig({
           ...requiredEnv,
@@ -435,5 +435,207 @@ describe('notification URL configuration', () => {
         NOTIFY_PUBLIC_URL: 'https://NTFY.EXAMPLE.COM/',
       }).ntfy.publicUrl,
     ).toBe('https://ntfy.example.com');
+  });
+});
+
+describe('EXTRA_DOMAINS multi-domain configuration', () => {
+  test('parses EXTRA_DOMAINS into extraDomains and allDomains, lowercased and trimmed', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'Primary.Example',
+      EXTRA_DOMAINS: ' Sec1.Example , sec2.example ',
+    });
+
+    expect(config.domain).toBe('primary.example');
+    expect(config.extraDomains).toEqual(['sec1.example', 'sec2.example']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example', 'sec1.example', 'sec2.example']),
+    );
+    expect(config.allowedSendDomains).toEqual([
+      'primary.example',
+      'sec1.example',
+      'sec2.example',
+    ]);
+  });
+
+  test('validates primary DOMAIN format allowing single-label and preserving dotted-legacy while rejecting malformed domains', () => {
+    const localhost = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'localhost',
+    });
+    expect(localhost.domain).toBe('localhost');
+
+    const extraIntranet = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com',
+      EXTRA_DOMAINS: 'intranet',
+    });
+    expect(extraIntranet.extraDomains).toEqual(['intranet']);
+    expect(extraIntranet.allDomains).toContain('intranet');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: '.',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "."');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'not a domain',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "not a domain"');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: '-invalid',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "-invalid"');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com',
+        EXTRA_DOMAINS: 'not a domain',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "not a domain"');
+
+    const dotted = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com.',
+    });
+    expect(dotted.domain).toBe('example.com.');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com..',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "example.com.."');
+
+    const dottedExtra = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com',
+      EXTRA_DOMAINS: 'sec.example.',
+    });
+    expect(dottedExtra.extraDomains).toEqual(['sec.example']);
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com',
+        EXTRA_DOMAINS: 'sec.example..',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "sec.example.."');
+  });
+
+  test('rejects EXTRA_DOMAINS containing the primary DOMAIN (case-insensitive)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example.',
+        EXTRA_DOMAINS: 'other.example, PRIMARY.EXAMPLE',
+      }),
+    ).toThrow('EXTRA_DOMAINS must not contain the primary DOMAIN');
+  });
+
+  test('rejects duplicate entries within EXTRA_DOMAINS', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'dup.example, other.example, DUP.EXAMPLE',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains duplicate entries');
+  });
+
+  test('ALLOWED_SEND_DOMAINS overrides the default allDomains when specified', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'primary.example',
+      EXTRA_DOMAINS: 'sec.example',
+      ALLOWED_SEND_DOMAINS: 'primary.example',
+    });
+    expect(config.allowedSendDomains).toEqual(['primary.example']);
+  });
+
+  test('ALWAYS_BCC rejects secondary domains in allDomains case-insensitively', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'SECONDARY.EXAMPLE.',
+        ALWAYS_BCC: 'archive@secondary.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }),
+    ).toThrow('ALWAYS_BCC must be an external compliance archive');
+  });
+
+  test('canonicalizes trailing dots off EXTRA_DOMAINS while retaining primary DOMAIN raw-lowercase', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'Primary.Example.',
+      EXTRA_DOMAINS: 'secondary.example., other.org.',
+    });
+    expect(config.domain).toBe('primary.example.');
+    expect(config.extraDomains).toEqual(['secondary.example', 'other.org']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example.', 'secondary.example', 'other.org']),
+    );
+  });
+
+  test('tolerates trailing commas and empty entries in EXTRA_DOMAINS', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'primary.example',
+      EXTRA_DOMAINS: 'sec1.example, , sec2.example,',
+    });
+    expect(config.extraDomains).toEqual(['sec1.example', 'sec2.example']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example', 'sec1.example', 'sec2.example']),
+    );
+  });
+
+  test('rejects invalid domain format entries in EXTRA_DOMAINS at startup', () => {
+    // Invalid characters (underscore in DNS hostname)
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'invalid_domain.example',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "invalid_domain.example"');
+
+    // Invalid characters (leading hyphen)
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: '-bad.example',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "-bad.example"');
+
+    // Label length > 63 chars
+    const longLabel = 'a'.repeat(64);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: `${longLabel}.example`,
+      }),
+    ).toThrow(`EXTRA_DOMAINS contains invalid domain entry: "${longLabel}.example"`);
+
+    // Total length > 253 chars
+    const longDomain = `${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.${'e'.repeat(60)}.com`;
+    expect(longDomain.length).toBeGreaterThan(253);
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: longDomain,
+      }),
+    ).toThrow(`EXTRA_DOMAINS contains invalid domain entry: "${longDomain}"`);
   });
 });

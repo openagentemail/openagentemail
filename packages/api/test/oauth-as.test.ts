@@ -17,7 +17,7 @@ process.env.UI_ENABLED = 'true';
 
 const { describe, expect, test, beforeEach } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
-const { createIdentity } = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
 const { s256Challenge } = await import('../src/lib/oauth-pkce.ts');
 const {
   putAccessTokenForTests,
@@ -889,5 +889,65 @@ describe('Dashboard 授权管理吊销', () => {
     });
     expect(clients.status).toBe(200);
     expect(await clients.text()).toContain('Connected apps');
+  });
+
+  test('consent form identity creation returns 409 on cross-domain localpart conflict', async () => {
+    (config.allDomains as Set<string>).add('secondary.example');
+    (config.extraDomains as string[]).push('secondary.example');
+
+    // Create an identity on secondary domain first
+    createIdentity({ localpart: 'oauth-conflict', domain: 'secondary.example' });
+
+    const app = makeApp();
+    const cookie = await loginCookie(app);
+    const v = verifier();
+    const challenge = s256Challenge(v);
+    const q = new URLSearchParams({
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      response_type: 'code',
+      state: 'st-conflict',
+    }).toString();
+
+    // GET /authorize sets up pre-authorization state
+    await app.request(`http://localhost/authorize?${q}`, {
+      headers: { cookie },
+      redirect: 'manual',
+    });
+
+    // POST /ui/oauth/authorize attempting to create identity with same localpart (on primary domain)
+    const body = new URLSearchParams({
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT,
+      code_challenge: challenge,
+      resource: RESOURCE,
+      state: 'st-conflict',
+      identity_mode: 'create',
+      localpart: 'oauth-conflict',
+      decision: 'approve',
+    });
+
+    const res = await app.request('http://localhost/ui/oauth/authorize', {
+      method: 'POST',
+      headers: {
+        cookie,
+        origin: 'http://localhost',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body,
+      redirect: 'manual',
+    });
+
+    expect(res.status).toBe(409);
+    const html = await res.text();
+    expect(html).toContain('That name is already in use on domain(s): secondary.example.');
+
+    // Clean up
+    deleteIdentity('oauth-conflict@secondary.example');
+    (config.allDomains as Set<string>).delete('secondary.example');
+    const idx = config.extraDomains.indexOf('secondary.example');
+    if (idx !== -1) config.extraDomains.splice(idx, 1);
   });
 });

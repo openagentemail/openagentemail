@@ -392,6 +392,13 @@ export function resetNotificationStateForTests(): void {
   cachedState = undefined;
 }
 
+/** @internal Test seam for injecting agent routes in memory for testing. */
+export function setNotificationAgentRouteForTests(agent: string, route: Route | null): void {
+  if (!cachedState) cachedState = loadState();
+  if (route) cachedState.agents[agent] = route;
+  else delete cachedState.agents[agent];
+}
+
 async function state(): Promise<NotifyState> {
   if (!cachedState) cachedState = loadState();
   return cachedState;

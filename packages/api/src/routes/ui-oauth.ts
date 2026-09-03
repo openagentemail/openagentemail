@@ -13,6 +13,7 @@ import {
   deleteIdentity,
   listIdentities,
   LOCALPART_RE,
+  LocalpartConflictError,
 } from '../lib/identities.ts';
 import { clientIp } from '../lib/net.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
@@ -98,7 +99,7 @@ ${body}
 </main></body></html>`;
 }
 
-function htmlResponse(c: Context, html: string, status: 200 | 400 | 401 | 403 = 200) {
+function htmlResponse(c: Context, html: string, status: 200 | 400 | 401 | 403 | 409 = 200) {
   c.header('Content-Type', 'text/html; charset=utf-8');
   c.header('Cache-Control', 'no-store');
   c.header('X-Content-Type-Options', 'nosniff');
@@ -377,7 +378,30 @@ export function createUiOAuthPageRoutes(
         );
       }
       // 同意页新建：不发 oa_ 幽灵票；失败时回滚身份
-      const created = createIdentity({ localpart, issueToken: false });
+      let created: ReturnType<typeof createIdentity>;
+      try {
+        created = createIdentity({ localpart, issueToken: false });
+      } catch (err) {
+        if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+          const domains = (err as any).domains ?? [];
+          return htmlResponse(
+            c,
+            consentFormHtml({
+              clientName: pre.doc.client_name,
+              clientId: pre.clientId,
+              redirectUri: pre.redirectUri,
+              codeChallenge: pre.codeChallenge,
+              state: pre.state,
+              resource: pre.resource,
+              loopbackWarning: pre.loopbackWarning,
+              identities: listIdentities(),
+              error: `That name is already in use on domain(s): ${domains.join(', ')}.`,
+            }),
+            409,
+          );
+        }
+        throw err;
+      }
       if (!created) {
         return htmlResponse(
           c,

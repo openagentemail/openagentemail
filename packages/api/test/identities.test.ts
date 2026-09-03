@@ -564,3 +564,101 @@ describe('identity store composite cache version (F56)', () => {
     );
   });
 });
+
+describe('multi-domain identities', () => {
+  test('creates identities under secondary domains and preserves per-domain uniqueness', async () => {
+    const prevNtfy = config.ntfy.enabled;
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
+    (config.ntfy as { enabled: boolean }).enabled = false;
+    (config.allDomains as Set<string>).add('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
+
+    try {
+      const app = appFor({ kind: 'admin' });
+
+      // Rejects invalid unconfigured domain with 400
+      const resBad = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'not-configured.example' }),
+      });
+      expect(resBad.status).toBe(400);
+      expect(await resBad.json()).toEqual({ error: 'invalid_domain' });
+
+      // Rejects over-long domain (> 253 chars) with 400 invalid_request
+      const overlongDomain = 'a'.repeat(250) + '.example.com';
+      const resOverlong = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: overlongDomain }),
+      });
+      expect(resOverlong.status).toBe(400);
+      const dataOverlong = (await resOverlong.json()) as any;
+      expect(dataOverlong.error).toBe('invalid_request');
+
+      // Direct createIdentity with over-long domain throws invalid_domain
+      expect(() =>
+        createIdentity({ localpart: 'direct-test', domain: 'a'.repeat(254) }),
+      ).toThrow('invalid_domain');
+
+      // Create shared-name on primary domain
+      const resPrimary = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'test.example' }),
+      });
+      expect(resPrimary.status).toBe(201);
+      const dataPrimary = (await resPrimary.json()) as any;
+      expect(dataPrimary.address).toBe('shared-name@test.example');
+
+      // Attempting same localpart on secondary domain is rejected with 409 localpart_conflict
+      const resConflict = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
+      });
+      expect(resConflict.status).toBe(409);
+      expect(resConflict.headers.get('cache-control')).toBe('no-store');
+      const dataConflict = (await resConflict.json()) as any;
+      expect(dataConflict.error).toBe('localpart_conflict');
+      expect(dataConflict.domains).toContain('test.example');
+
+      // Distinct localpart on secondary domain succeeds
+      const resSecondary = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'other-name', domain: 'secondary.example' }),
+      });
+      expect(resSecondary.status).toBe(201);
+      const dataSecondary = (await resSecondary.json()) as any;
+      expect(dataSecondary.address).toBe('other-name@secondary.example');
+
+      // Both identities exist simultaneously
+      expect(findIdentity('shared-name@test.example')).toBeDefined();
+      expect(findIdentity('other-name@secondary.example')).toBeDefined();
+
+      // Duplicate within same primary domain returns 409 address_exists
+      const resDup = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'test.example' }),
+      });
+      expect(resDup.status).toBe(409);
+      expect(resDup.headers.get('cache-control')).toBe('no-store');
+      expect(await resDup.json()).toEqual({ error: 'address_exists' });
+    } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
+    }
+  });
+});
+

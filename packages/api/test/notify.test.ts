@@ -37,6 +37,7 @@ const {
   NtfyNotificationService,
   physicalAgentTopic,
   revokeNotificationDevice,
+  setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
   userRouteKey,
 } = await import('../src/lib/notify.ts');
@@ -59,8 +60,9 @@ const {
 } = await import('../src/lib/notification-log.ts');
 const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
 type NotifyService = import('../src/lib/notify.ts').NotifyService;
+type Identity = import('../src/lib/identities.ts').Identity;
 
-const published: unknown[] = [];
+const published: Record<string, any>[] = [];
 const readCalls: unknown[] = [];
 const originalFetch = globalThis.fetch;
 
@@ -1727,5 +1729,405 @@ describe('NtfyNotificationService.messages timeout (#9)', () => {
     } finally {
       Object.assign(config.ntfy, previousNtfy);
     }
+  });
+});
+
+describe('multi-domain notify target resolution', () => {
+  const mockIdentities: Identity[] = [
+    {
+      address: 'shared@primary.example',
+      tokenHash: 'h1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      address: 'shared@secondary.example',
+      tokenHash: 'h2',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      address: 'unique@secondary.example',
+      tokenHash: 'h3',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+  ];
+
+  function mockNotifyApp(auth: { kind: 'admin' } | { kind: 'identity'; address: string }) {
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', auth);
+      await next();
+    });
+    app.route(
+      '/v1/notify',
+      createNotifyRoutes({
+        service,
+        findIdentity: (addr) =>
+          mockIdentities.find((i) => i.address.toLowerCase() === addr.toLowerCase()),
+        listIdentities: () => mockIdentities,
+        publicUrl: 'https://notify.test',
+      }),
+    );
+    return app;
+  }
+
+  test('resolves fully-qualified agent target agent:<localpart@domain>', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example',
+        title: 'Task update',
+        message: 'hello secondary',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:shared');
+    expect(published[0].identityAddress).toBe('shared@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:shared');
+  });
+
+  test('resolves unambiguous bare agent target agent:<localpart>', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:unique',
+        title: 'Task update',
+        message: 'hello unique',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:unique');
+    expect(published[0].identityAddress).toBe('unique@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:unique');
+  });
+
+  test('returns 400 ambiguous_agent when bare target exists in multiple domains for admin caller', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello shared',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as any;
+    expect(data.error).toBe('ambiguous_agent');
+    expect(data.domains).toEqual(['primary.example', 'secondary.example']);
+    expect(published).toHaveLength(0);
+  });
+
+  test('returns 404 when agent target is not found', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:unknown@secondary.example',
+        title: 'Task update',
+        message: 'hello unknown',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test('real NtfyNotificationService publishes FQ agent target without 500 error', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const calls: { url: string; body: any }[] = [];
+    globalThis.fetch = (async (input: any, init: any) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response('{"id":"msg-real"}', { status: 200 });
+    }) as typeof fetch;
+
+    setNotificationAgentRouteForTests('shared', {
+      topic: 'agent-shared-test',
+      reader: { username: 'reader-shared', token: 'tk_test1234567890123456789012345' },
+    });
+    try {
+      const realService = new NtfyNotificationService();
+      const realApp = new Hono();
+      realApp.use('*', async (c, next) => {
+        c.set('auth', { kind: 'admin' });
+        await next();
+      });
+      realApp.route(
+        '/v1/notify',
+        createNotifyRoutes({
+          service: realService,
+          findIdentity: (addr) =>
+            mockIdentities.find((i) => i.address.toLowerCase() === addr.toLowerCase()),
+          listIdentities: () => mockIdentities,
+          publicUrl: 'https://notify.test',
+        }),
+      );
+
+      // Publish with FQ agent target
+      const res = await realApp.request('/v1/notify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          target: 'agent:shared@secondary.example',
+          title: 'FQ Delivery',
+          message: 'testing real physicalTopic path',
+          level: 'normal',
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(calls.length).toBeGreaterThan(0);
+      // The physical topic in ntfy must be derived from the bare localpart, not containing '@'
+      expect(calls[0].body?.topic).toBe('agent-shared-test');
+      expect(calls[0].body?.topic).not.toContain('@');
+    } finally {
+      setNotificationAgentRouteForTests('shared', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('identity token scope check runs before ambiguity resolution', async () => {
+    // Identity token is for other@secondary.example
+    const app = mockNotifyApp({ kind: 'identity', address: 'other@secondary.example' });
+
+    // Targeting another agent's localpart (even if ambiguous) returns 403, NOT 400 ambiguous_agent
+    const resBare = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resBare.status).toBe(403);
+    expect(await resBare.json()).toEqual({ error: 'forbidden: token is scoped to another agent' });
+
+    // Targeting another agent's FQ address returns 403, NOT 404
+    const resFq = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resFq.status).toBe(403);
+    expect(await resFq.json()).toEqual({ error: 'forbidden: token is scoped to another agent' });
+  });
+
+  test('non-admin callers receive 404 without candidate domains on ambiguity', async () => {
+    // Identity token matching localpart 'shared' on primary domain
+    const app = mockNotifyApp({ kind: 'identity', address: 'shared@primary.example' });
+
+    // When ambiguous across domains, non-admin gets 404 without domains list
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as any;
+    expect(body).toEqual({ error: 'not_found' });
+    expect(body.domains).toBeUndefined();
+  });
+
+  test('rejects over-long adversarial target with 400 invalid_request and includes no-store', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // 10k-character adversarial domain target
+    const overlongTarget = 'agent:test@' + 'a'.repeat(10000) + '.com';
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: overlongTarget,
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('POST /notify carries Cache-Control: no-store on all responses', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // Success response carries no-store
+    const resSuccess = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'user',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resSuccess.status).toBe(200);
+    expect(resSuccess.headers.get('cache-control')).toBe('no-store');
+
+    // 404 response carries no-store
+    const resNotFound = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:nonexistent',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resNotFound.status).toBe(404);
+    expect(resNotFound.headers.get('cache-control')).toBe('no-store');
+
+    // 400 ambiguous_agent carries no-store
+    const resAmbiguous = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(resAmbiguous.status).toBe(400);
+    expect(resAmbiguous.headers.get('cache-control')).toBe('no-store');
+  });
+
+  test('resolves fully-qualified agent target with trailing dot', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // Target with trailing dot resolves against mockIdentities ('shared@secondary.example')
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example.',
+        title: 'Task update',
+        message: 'hello with trailing dot',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:shared');
+    expect(published[0].identityAddress).toBe('shared@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:shared');
+  });
+
+  test('identity token caller resolves FQ target with trailing dot', async () => {
+    const app = mockNotifyApp({ kind: 'identity', address: 'shared@secondary.example' });
+
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example.',
+        title: 'Task update',
+        message: 'self notify with dot',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+  });
+
+  test('rejects over-long adversarial target with trailing dot with 400 invalid_request', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    // 10k-character adversarial domain target with trailing dot
+    const overlongTarget = 'agent:test@' + 'a'.repeat(10000) + '.com.';
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: overlongTarget,
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('rejects multiple trailing dots in target with 400 invalid_request', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example..',
+        title: 'Task update',
+        message: 'hello',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('normalizes uppercase AGENT: prefix and enforces identity scope check without bypass', async () => {
+    // Identity token scoped to unique@secondary.example
+    const appSelf = mockNotifyApp({ kind: 'identity', address: 'unique@secondary.example' });
+
+    // Own agent with uppercase prefix delivers 200 to agent:unique
+    const resOwn = await appSelf.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'AGENT:unique',
+        title: 'Task update',
+        message: 'hello uppercase self',
+        level: 'normal',
+      }),
+    });
+    expect(resOwn.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].target).toBe('agent:unique');
+    expect(published[0].identityAddress).toBe('unique@secondary.example');
+
+    // Different agent with uppercase prefix is rejected with 403 scope error, not bypassed
+    const resOther = await appSelf.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'AGENT:shared',
+        title: 'Task update',
+        message: 'hello uppercase bypass attempt',
+        level: 'normal',
+      }),
+    });
+    expect(resOther.status).toBe(403);
+    const bodyOther = (await resOther.json()) as any;
+    expect(bodyOther.error).toBe('forbidden: token is scoped to another agent');
   });
 });

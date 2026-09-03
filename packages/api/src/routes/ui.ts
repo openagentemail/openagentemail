@@ -8,6 +8,7 @@ import {
   findIdentity,
   listIdentities,
   LOCALPART_RE,
+  LocalpartConflictError,
   PUSH_TIER3_WARNING,
   resolvePushContentTier,
   rotateIdentityToken,
@@ -550,6 +551,17 @@ export function createUiApiRoutes(
     return c.json(returnTo ? { ...auth, returnTo } : auth);
   });
 
+  routes.get('/domains', (c) => {
+    c.header('Cache-Control', 'no-store');
+    const denied = requireUiAdmin(c);
+    if (denied) return denied;
+    return c.json({
+      primary: config.domain,
+      extra: [...config.extraDomains],
+      all: [...config.allDomains],
+    });
+  });
+
   routes.get('/identities', (c) => {
     const auth = getAuth(c);
     const all = dependencies.listIdentities();
@@ -561,6 +573,7 @@ export function createUiApiRoutes(
   });
 
   routes.post('/identities', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const denied = requireUiAdmin(c);
     if (denied) return denied;
     let body: unknown;
@@ -571,12 +584,16 @@ export function createUiApiRoutes(
     }
     const name = (body as any)?.name;
     const localpart = (body as any)?.localpart;
-    const input: { name?: string; localpart?: string } = {};
+    const domain = (body as any)?.domain;
+    const input: { name?: string; localpart?: string; domain?: string } = {};
     if (typeof name === 'string' && name.length >= 1 && name.length <= 100) {
       input.name = name;
     }
     if (typeof localpart === 'string' && LOCALPART_RE.test(localpart)) {
       input.localpart = localpart.toLowerCase();
+    }
+    if (typeof domain === 'string' && domain.trim().length > 0) {
+      input.domain = domain.toLowerCase().trim();
     }
     try {
       const created = createIdentity(input);
@@ -597,8 +614,24 @@ export function createUiApiRoutes(
         201,
       );
     } catch (err) {
+      if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+        c.header('Cache-Control', 'no-store');
+        const domains = (err as any).domains ?? [];
+        return c.json(
+          {
+            error: 'localpart_conflict',
+            message: `localpart already exists on domain(s): ${domains.join(', ')}`,
+            domains,
+          },
+          409,
+        );
+      }
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
+      }
+      if ((err as Error).message === 'invalid_domain') {
+        c.header('Cache-Control', 'no-store');
+        return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;
     }

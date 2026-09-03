@@ -11,6 +11,7 @@ import {
   setIdentityPushContentTier,
   validateScopesInput,
   LOCALPART_RE,
+  LocalpartConflictError,
   PUSH_TIER3_WARNING,
   type Identity,
   type PushContentTier,
@@ -50,6 +51,7 @@ function classifyScopeChange(
 const createSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   localpart: z.string().regex(LOCALPART_RE, 'invalid localpart').optional(),
+  domain: z.string().min(1).max(253).optional(),
   // This is intentionally opt-in and admin-only: it authorizes an identity
   // to interrupt the human notification channel.
   canNotifyUser: z.boolean().optional(),
@@ -102,6 +104,7 @@ function publicIdentity(identity: Identity) {
 
 export const identitiesRoute = new Hono()
   .post('/', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const denied = requireAdmin(c);
     if (denied) return denied;
     let body: unknown = {};
@@ -129,6 +132,7 @@ export const identitiesRoute = new Hono()
       const created = createIdentity({
         name: parsed.data.name,
         localpart: parsed.data.localpart,
+        domain: parsed.data.domain,
         canNotifyUser: parsed.data.canNotifyUser,
         scopes: requestedScopes,
       });
@@ -169,8 +173,24 @@ export const identitiesRoute = new Hono()
         201,
       );
     } catch (err) {
+      if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+        c.header('Cache-Control', 'no-store');
+        const domains = (err as any).domains ?? [];
+        return c.json(
+          {
+            error: 'localpart_conflict',
+            message: `localpart already exists on domain(s): ${domains.join(', ')}`,
+            domains,
+          },
+          409,
+        );
+      }
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
+      }
+      if ((err as Error).message === 'invalid_domain') {
+        c.header('Cache-Control', 'no-store');
+        return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;
     }

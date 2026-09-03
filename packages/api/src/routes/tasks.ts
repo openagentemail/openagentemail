@@ -155,7 +155,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
 
   function known(c: Context, address: string): Response | null {
     const domain = address.split('@')[1]?.toLowerCase();
-    if (domain !== config.domain || !find(address)) {
+    if (!domain || !config.allDomains.has(domain) || !find(address)) {
       return c.json({ error: 'forbidden: task participants must be known identities' }, 403);
     }
     return null;

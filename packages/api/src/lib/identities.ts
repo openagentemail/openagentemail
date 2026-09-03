@@ -44,6 +44,16 @@ export function isSupportedScope(scope: string): scope is SupportedScope {
   return SUPPORTED_SCOPES_SET.has(scope);
 }
 
+export class LocalpartConflictError extends Error {
+  readonly code = 'localpart_conflict';
+  readonly domains: string[];
+  constructor(domains: string[]) {
+    super(`localpart already exists on domain(s): ${domains.join(', ')}`);
+    this.name = 'LocalpartConflictError';
+    this.domains = domains;
+  }
+}
+
 export const MAX_SCOPES_COUNT = 10;
 export const MAX_SCOPE_LENGTH = 64;
 
@@ -362,6 +372,7 @@ export function findIdentityByTokenHash(tokenHash: string): Identity | undefined
 export function createIdentity(input: {
   name?: string;
   localpart?: string;
+  domain?: string;
   canNotifyUser?: boolean;
   /**
    * 默认 true。同意页新建身份传 false：不发 oa_ 票，避免幽灵 token 落库。
@@ -372,6 +383,11 @@ export function createIdentity(input: {
   scopes?: string[];
 }): { identity: Identity; token: string } | null {
   const identities = load();
+  const targetDomain = (input.domain ?? config.domain).toLowerCase().trim();
+  if (targetDomain.length > 253 || !config.allDomains.has(targetDomain)) {
+    throw new Error('invalid_domain');
+  }
+
   let localpart = input.localpart?.toLowerCase();
   if (localpart) {
     if (!LOCALPART_RE.test(localpart)) {
@@ -381,7 +397,7 @@ export function createIdentity(input: {
     // Retry a few times on the off chance of a random collision.
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = randomLocalpart();
-      if (!identities.some((i) => i.address === `${candidate}@${config.domain}`)) {
+      if (!identities.some((i) => i.address.split('@')[0].toLowerCase() === candidate)) {
         localpart = candidate;
         break;
       }
@@ -389,8 +405,20 @@ export function createIdentity(input: {
     if (!localpart) throw new Error('localpart_collision');
   }
 
-  const address = `${localpart}@${config.domain}`;
+  const address = `${localpart}@${targetDomain}`;
   if (identities.some((i) => i.address === address)) return null;
+
+  const conflictingDomains = identities
+    .filter(
+      (i) =>
+        i.address.split('@')[0].toLowerCase() === localpart &&
+        i.address.split('@')[1].toLowerCase() !== targetDomain,
+    )
+    .map((i) => i.address.split('@')[1].toLowerCase());
+
+  if (conflictingDomains.length > 0) {
+    throw new LocalpartConflictError([...new Set(conflictingDomains)]);
+  }
 
   const issueToken = input.issueToken !== false;
   let token = '';

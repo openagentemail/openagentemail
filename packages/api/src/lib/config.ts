@@ -157,6 +157,9 @@ const envSchema = z.object({
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
 
+  // Optional comma-separated secondary domains (e.g. "domain-b.com,domain-c.org").
+  EXTRA_DOMAINS: z.string().optional(),
+
   // Directory for the identity store JSON file. Single-writer process only
   // (Compose runs one API); multi-process shared DATA_DIR is unsupported.
   DATA_DIR: z.string().default('./data'),
@@ -256,16 +259,68 @@ export function normalizeUrl(value: string): string {
   return url.href;
 }
 
+const DOMAIN_MAX_LENGTH = 253;
+
+function isValidDomain(domain: string): boolean {
+  if (!domain || domain.length > DOMAIN_MAX_LENGTH) return false;
+  const labels = domain.split('.');
+  return labels.every(
+    (label) =>
+      label.length > 0 &&
+      Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS &&
+      SMTP_DOMAIN_LABEL_PATTERN.test(label),
+  );
+}
+
 /** Parse an environment object so TLS defaults and validation stay testable. */
 export function parseConfig(env: NodeJS.ProcessEnv) {
   const raw = envSchema.parse(env);
+  const primaryDomain = raw.DOMAIN.toLowerCase();
+  if (primaryDomain.endsWith('..')) {
+    throw new Error(`DOMAIN contains invalid domain: "${raw.DOMAIN}"`);
+  }
+  const canonicalPrimary = primaryDomain.replace(/\.$/, '');
+  if (!isValidDomain(canonicalPrimary)) {
+    throw new Error(`DOMAIN contains invalid domain: "${raw.DOMAIN}"`);
+  }
+  const extraDomains: string[] = [];
+  const seenExtra = new Set<string>();
+  const rawExtra = raw.EXTRA_DOMAINS?.trim();
+  if (rawExtra) {
+    const entries = rawExtra.split(',').map((s) => s.trim());
+    for (const rawEntry of entries) {
+      if (!rawEntry) continue;
+      const lowerEntry = rawEntry.toLowerCase();
+      if (lowerEntry.endsWith('..')) {
+        throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
+      }
+      const canonical = lowerEntry.replace(/\.$/, '');
+      if (!isValidDomain(canonical)) {
+        throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);
+      }
+      if (canonical === canonicalPrimary) {
+        throw new Error('EXTRA_DOMAINS must not contain the primary DOMAIN');
+      }
+      if (seenExtra.has(canonical)) {
+        throw new Error('EXTRA_DOMAINS contains duplicate entries');
+      }
+      seenExtra.add(canonical);
+      extraDomains.push(canonical);
+    }
+  }
+
+  const allDomains = new Set<string>([primaryDomain, ...extraDomains]);
+
   const archiveDomain = raw.ALWAYS_BCC
     ?.slice(raw.ALWAYS_BCC.lastIndexOf('@') + 1)
     .toLowerCase();
   const canonicalArchiveDomain = archiveDomain?.replace(/\.+$/, '');
-  const canonicalConfiguredDomain = raw.DOMAIN.toLowerCase().replace(/\.+$/, '');
-  if (raw.ALWAYS_BCC && canonicalArchiveDomain === canonicalConfiguredDomain) {
-    throw new Error('ALWAYS_BCC must be an external compliance archive');
+  if (raw.ALWAYS_BCC && canonicalArchiveDomain) {
+    for (const d of allDomains) {
+      if (canonicalArchiveDomain === d.replace(/\.+$/, '')) {
+        throw new Error('ALWAYS_BCC must be an external compliance archive');
+      }
+    }
   }
   if (raw.ALWAYS_BCC) {
     const externalArchiveSigningSecret = raw.TASK_SIGNING_SECRET;
@@ -282,7 +337,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
 
   return {
     port: raw.PORT,
-    domain: raw.DOMAIN.toLowerCase(),
+    domain: primaryDomain,
+    extraDomains,
+    allDomains,
     apiKeys: new Set(splitCsv(raw.API_KEYS)),
     imap: {
       host: raw.IMAP_HOST,
@@ -311,7 +368,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       .digest(),
     allowedSendDomains: raw.ALLOWED_SEND_DOMAINS
       ? splitCsv(raw.ALLOWED_SEND_DOMAINS).map((d) => d.toLowerCase())
-      : [raw.DOMAIN.toLowerCase()],
+      : [...allDomains],
     dataDir: raw.DATA_DIR,
     uiEnabled: raw.UI_ENABLED === 'true',
     ntfy: {

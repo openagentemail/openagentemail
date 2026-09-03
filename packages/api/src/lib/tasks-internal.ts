@@ -1596,8 +1596,12 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return task;
 }
 
-function knownManagedIdentity(address: string): boolean {
-  return address.split('@')[1]?.toLowerCase() === config.domain && !!findIdentity(address);
+export function knownManagedIdentity(
+  address: string,
+  find: (address: string) => any = findIdentity,
+): boolean {
+  const domain = address.split('@')[1]?.toLowerCase();
+  return !!domain && config.allDomains.has(domain) && !!find(address);
 }
 
 /** Creates the only mutable approval request event. The action is recorded,

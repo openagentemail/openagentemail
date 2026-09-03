@@ -362,6 +362,58 @@ describe('MCP HTTP 工具', () => {
     const text = body.result?.content?.[0]?.text ?? '';
     expect(text.toLowerCase()).toMatch(/forbidden|403|scoped/);
   });
+
+  test('MCP create/read roundtrip for bot@localhost and bot@example.com. succeeds', async () => {
+    const prevNtfy = config.ntfy.enabled;
+    const prevHadLocalhost = config.allDomains.has('localhost');
+    const prevHadDotted = config.allDomains.has('example.com.');
+    (config.ntfy as { enabled: boolean }).enabled = false;
+    (config.allDomains as Set<string>).add('localhost');
+    (config.allDomains as Set<string>).add('example.com.');
+    try {
+      // 1. Create bot@localhost via MCP
+      const resLocal = await mcpRequest(adminKey, 'tools/call', {
+        name: 'mail_new_identity',
+        arguments: { localpart: 'bot-lh', domain: 'localhost' },
+      });
+      expect(resLocal.status).toBe(200);
+      const bLocal = (await readMcpJson(resLocal)) as {
+        result?: { structuredContent?: { address: string }; isError?: boolean };
+      };
+      expect(bLocal.result?.isError).toBeFalsy();
+      expect(bLocal.result?.structuredContent?.address).toBe('bot-lh@localhost');
+
+      // 2. Create bot@example.com. via MCP
+      const resDotted = await mcpRequest(adminKey, 'tools/call', {
+        name: 'mail_new_identity',
+        arguments: { localpart: 'bot-dot', domain: 'example.com.' },
+      });
+      expect(resDotted.status).toBe(200);
+      const bDotted = (await readMcpJson(resDotted)) as {
+        result?: { structuredContent?: { address: string }; isError?: boolean };
+      };
+      expect(bDotted.result?.isError).toBeFalsy();
+      expect(bDotted.result?.structuredContent?.address).toBe('bot-dot@example.com.');
+
+      // 3. Read identities via MCP and verify both are present
+      const resList = await mcpRequest(adminKey, 'tools/call', {
+        name: 'mail_list_identities',
+        arguments: {},
+      });
+      expect(resList.status).toBe(200);
+      const bList = (await readMcpJson(resList)) as {
+        result?: { structuredContent?: { identities?: { address: string }[] }; isError?: boolean };
+      };
+      expect(bList.result?.isError).toBeFalsy();
+      const addresses = bList.result?.structuredContent?.identities?.map((i) => i.address) ?? [];
+      expect(addresses).toContain('bot-lh@localhost');
+      expect(addresses).toContain('bot-dot@example.com.');
+    } finally {
+      (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
+      if (!prevHadLocalhost) (config.allDomains as Set<string>).delete('localhost');
+      if (!prevHadDotted) (config.allDomains as Set<string>).delete('example.com.');
+    }
+  });
 });
 
 /**

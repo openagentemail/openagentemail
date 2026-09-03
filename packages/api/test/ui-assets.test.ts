@@ -1454,8 +1454,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Self-hosted instance'");
     expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
     expect(UI_JS).toContain("docsHref: 'https://openagent.email/docs/reference/api/'");
-    expect(UI_JS).toContain("'Custom domains are on the roadmap'");
-    expect(UI_JS).toContain('this page has no controls to click.');
+    expect(UI_JS).toContain("'Configured instance domains'");
     expect(UI_CSS).toContain('.empty-state-docs');
   });
 
@@ -1534,7 +1533,8 @@ describe('UI static asset contract', () => {
     const showCreate = MODAL_JS.slice(
       MODAL_JS.indexOf('function showCreateModal('),
     );
-    expect(showCreate).toContain('beginModal();');
+    expect(showCreate).toContain('var openedGen = beginModal();');
+    expect(showCreate).toContain('if (openedGen !== modalGeneration) return;');
     expect(MODAL_JS).toContain("event.key !== 'Escape'");
     expect(MODAL_JS).toContain('closeAllModals();');
     expect(UI_JS).toContain('tokenModalClose.addEventListener(\'click\', closeAllModals)');
@@ -1642,6 +1642,90 @@ describe('UI static asset contract', () => {
     expect(beginModal).toContain('confirmModalCancel.disabled = false');
     expect(beginModal).toContain('createModalSubmit.disabled = false');
     expect(beginModal).toContain('deviceAddSubmit.disabled = false');
+  });
+
+  test('stale configure-domains response does not update DOM or steal focus after navigation', async () => {
+    const { PLAN_PAGE_JS } = await import('../src/ui/client/pages/plan.ts');
+    expect(PLAN_PAGE_JS).toContain('var configureDomainsGen = 0;');
+    expect(PLAN_PAGE_JS).toContain('var gen = ++configureDomainsGen;');
+    expect(PLAN_PAGE_JS).toContain("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;");
+    expect(PLAN_PAGE_JS).toContain("if (e && e.message === 'session_expired') return;");
+    const enter = PLAN_PAGE_JS.slice(
+      PLAN_PAGE_JS.indexOf('async function enterConfigureDomains('),
+      PLAN_PAGE_JS.indexOf('function enterPlan('),
+    );
+    expect(enter.indexOf("if (gen !== configureDomainsGen || state.scope !== 'configure-domains') return;")).toBeLessThan(
+      enter.indexOf('renderEmptyState(configureDomainsState,'),
+    );
+    const catchBlock = enter.slice(enter.indexOf('} catch (e) {'));
+    expect(catchBlock.indexOf("if (e && e.message === 'session_expired') return;")).toBeLessThan(
+      catchBlock.indexOf('renderEmptyState(configureDomainsState,'),
+    );
+  });
+
+  test('domains fetch failure disables Create submit and displays inline error', async () => {
+    const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
+    expect(MODAL_JS).toContain('function populateCreateDomain(');
+    expect(MODAL_JS).toContain('createModalSubmit.disabled = true;');
+    expect(MODAL_JS).toContain("createModalError.textContent = 'Could not load domains — try again';");
+
+    // Execute showCreateModal in mock DOM environment when apiJson rejects
+    const runner = new Function(`
+      var document = {
+        activeElement: null,
+        addEventListener: function() {},
+        contains: function() { return true; }
+      };
+      var confirmModalConfirm = { disabled: false };
+      var confirmModalCancel = { disabled: false };
+      var createModalSubmit = { disabled: false };
+      var deviceAddSubmit = { disabled: false };
+      var tokenModal = { hidden: true };
+      var confirmModal = { hidden: true };
+      var createModal = { hidden: true };
+      var deviceAddModal = { hidden: true };
+      var devicePairModal = { hidden: true };
+      var devicePairPassword = { textContent: '' };
+      var devicePairQr = { replaceChildren: function() {} };
+      var devicePairServer = { textContent: '' };
+      var devicePairUser = { textContent: '' };
+      var devicePairTopics = { textContent: '' };
+      var devicePairName = { textContent: '' };
+      var tokenValue = { textContent: '' };
+      var tokenModalTitle = { textContent: '' };
+      var tokenCopyButton = { classList: { remove: function() {} }, focus: function() {} };
+      var confirmModalTitle = { textContent: '' };
+      var confirmModalText = { textContent: '' };
+      var confirmModalRisk = { textContent: '', hidden: true };
+      var createName = { value: '', focus: function() {} };
+      var createLocalpart = { value: '' };
+      var createDomain = { disabled: false, firstChild: null, removeChild: function() {}, appendChild: function() {} };
+      var createModalError = { textContent: '', hidden: true };
+      var announcements = [];
+      function announce(msg) { announcements.push(msg); }
+      function isAdmin() { return true; }
+      var apiJson = function() { return Promise.reject(new Error('network error')); };
+
+      ${MODAL_JS}
+
+      return async function() {
+        await showCreateModal();
+        return {
+          submitDisabled: createModalSubmit.disabled,
+          domainDisabled: createDomain.disabled,
+          errorText: createModalError.textContent,
+          errorHidden: createModalError.hidden,
+          announcements: announcements
+        };
+      };
+    `)();
+
+    const result = await runner();
+    expect(result.submitDisabled).toBe(true);
+    expect(result.domainDisabled).toBe(true);
+    expect(result.errorText).toBe('Could not load domains — try again');
+    expect(result.errorHidden).toBe(false);
+    expect(result.announcements).toContain('Could not load domains — try again');
   });
 
   test('identity session CSS hides admin-only create controls', () => {
