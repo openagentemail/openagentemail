@@ -163,12 +163,17 @@
     var openedGen = modalGeneration;
     var name = createName.value.trim();
     var localpart = createLocalpart.value.trim();
+    var domain = (typeof createDomain !== 'undefined' && createDomain && createDomain.value ? createDomain.value : '').trim();
     createModalSubmit.disabled = true;
     try {
       var payload = await apiJson('/ui/api/identities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: name || undefined, localpart: localpart || undefined })
+        body: JSON.stringify({
+          name: name || undefined,
+          localpart: localpart || undefined,
+          domain: domain || undefined
+        })
       });
       if (openedGen !== modalGeneration) return;
       showTokenModal(payload.token);
@@ -178,6 +183,8 @@
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
         window.alert('address already exists');
+      } else if (error.status === 400) {
+        announce('Invalid identity request. Try again.');
       } else if (error.message !== 'session_expired') {
         announce('Could not create the identity. Try again.');
       }

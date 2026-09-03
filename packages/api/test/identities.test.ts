@@ -564,3 +564,61 @@ describe('identity store composite cache version (F56)', () => {
     );
   });
 });
+
+describe('multi-domain identities', () => {
+  test('creates identities under secondary domains and preserves per-domain uniqueness', async () => {
+    (config.allDomains as Set<string>).add('secondary.example');
+    (config.extraDomains as string[]).push('secondary.example');
+
+    try {
+      const app = appFor({ kind: 'admin' });
+
+      // Rejects invalid unconfigured domain with 400
+      const resBad = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'not-configured.example' }),
+      });
+      expect(resBad.status).toBe(400);
+      expect(await resBad.json()).toEqual({ error: 'invalid_domain' });
+
+      // Create shared-name on primary domain
+      const resPrimary = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'test.example' }),
+      });
+      expect(resPrimary.status).toBe(201);
+      const dataPrimary = (await resPrimary.json()) as any;
+      expect(dataPrimary.address).toBe('shared-name@test.example');
+
+      // Create same localpart on secondary domain
+      const resSecondary = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
+      });
+      expect(resSecondary.status).toBe(201);
+      const dataSecondary = (await resSecondary.json()) as any;
+      expect(dataSecondary.address).toBe('shared-name@secondary.example');
+
+      // Both identities exist simultaneously
+      expect(findIdentity('shared-name@test.example')).toBeDefined();
+      expect(findIdentity('shared-name@secondary.example')).toBeDefined();
+
+      // Duplicate within same secondary domain returns 409
+      const resDup = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
+      });
+      expect(resDup.status).toBe(409);
+      expect(await resDup.json()).toEqual({ error: 'address_exists' });
+    } finally {
+      (config.allDomains as Set<string>).delete('secondary.example');
+      const idx = config.extraDomains.indexOf('secondary.example');
+      if (idx !== -1) config.extraDomains.splice(idx, 1);
+    }
+  });
+});
+

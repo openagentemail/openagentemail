@@ -1454,8 +1454,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Self-hosted instance'");
     expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
     expect(UI_JS).toContain("docsHref: 'https://openagent.email/docs/reference/api/'");
-    expect(UI_JS).toContain("'Custom domains are on the roadmap'");
-    expect(UI_JS).toContain('this page has no controls to click.');
+    expect(UI_JS).toContain("'Configured instance domains'");
     expect(UI_CSS).toContain('.empty-state-docs');
   });
 

@@ -70,9 +70,9 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   const date = stampDate();
   const text = coerceOutboundText(input.text, input.html);
   const outbound = { ...input, text };
-  // 仅当全部 To 均在本域时写 stamp（防 HMAC 预言机随外发信泄漏）。
+  // 仅当全部 To 均在配置的域内时写 stamp（防 HMAC 预言机随外发信泄漏）。
   const headers = stripBccHeaders(
-    buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.domain),
+    buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.allDomains),
   );
   const { envelope, archiveRecipient } = buildSmtpEnvelopePlan(
     input.from,

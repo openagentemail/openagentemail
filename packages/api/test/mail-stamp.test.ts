@@ -2,8 +2,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   MAIL_BODY_HASH_PREFIX,
+  MAIL_STAMP_HEADER,
   MAIL_STAMP_PREFIX,
+  allRecipientsInDomains,
   allRecipientsOnDomain,
+  buildOutboundStampHeaders,
   classifyMailSource,
   createMailStamp,
   hashMailBody,
@@ -102,5 +105,47 @@ describe('mail-stamp create / verify', () => {
     const stamp = createMailStamp(base, KEY);
     expect(verifyMailStamp(stamp, base, KEY + '-other')).toBe(false);
     expect(MAIL_STAMP_PREFIX).toBe('mail-stamp-v1');
+  });
+
+  test('allRecipientsInDomains：跨配置域 / 混合外部 / 空', () => {
+    const domains = new Set(['dom1.example', 'dom2.example']);
+    expect(
+      allRecipientsInDomains(['a@DOM1.example', 'b@dom2.EXAMPLE'], domains),
+    ).toBe(true);
+    expect(
+      allRecipientsInDomains(['a@dom1.example', 'c@external.example'], domains),
+    ).toBe(false);
+    expect(allRecipientsInDomains([], domains)).toBe(false);
+    expect(allRecipientsInDomains(['invalid-email'], domains)).toBe(false);
+  });
+
+  test('buildOutboundStampHeaders：跨配置域收件人盖 stamp，含外部收件人不盖', () => {
+    const domains = new Set(['dom1.example', 'dom2.example']);
+    const date = new Date('2026-08-09T12:00:00.000Z');
+    const headersCross = buildOutboundStampHeaders(
+      {
+        from: 'alice@dom1.example',
+        to: ['bob@dom2.example'],
+        subject: 'Multi-domain test',
+        text: 'hello',
+      },
+      date,
+      KEY,
+      domains,
+    );
+    expect(headersCross[MAIL_STAMP_HEADER]).toBeDefined();
+
+    const headersExternal = buildOutboundStampHeaders(
+      {
+        from: 'alice@dom1.example',
+        to: ['bob@dom2.example', 'eve@external.example'],
+        subject: 'External leak test',
+        text: 'hello',
+      },
+      date,
+      KEY,
+      domains,
+    );
+    expect(headersExternal[MAIL_STAMP_HEADER]).toBeUndefined();
   });
 });

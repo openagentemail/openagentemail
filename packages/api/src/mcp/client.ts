@@ -300,6 +300,7 @@ export class OpenAgentEmailClient {
   createIdentity(opts: {
     name?: string;
     localpart?: string;
+    domain?: string;
     canNotifyUser?: boolean;
     scopes?: string[];
   }): Promise<{
@@ -314,6 +315,7 @@ export class OpenAgentEmailClient {
     const body: Record<string, unknown> = {};
     if (opts.name) body.name = opts.name;
     if (opts.localpart) body.localpart = opts.localpart;
+    if (opts.domain) body.domain = opts.domain;
     if (opts.canNotifyUser) body.canNotifyUser = true;
     if (opts.scopes !== undefined) body.scopes = opts.scopes;
     return this.request("POST", "/v1/identities", body);

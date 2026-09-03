@@ -283,6 +283,13 @@ export function registerOpenAgentEmailTools(
           .describe(
             "Custom email localpart (e.g. 'my-bot' for my-bot@domain). If omitted, a random one is generated.",
           ),
+        domain: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Optional domain for the address. Must be one of the server's configured domains. Defaults to primary DOMAIN.",
+          ),
         canNotifyUser: z
           .boolean()
           .optional()
@@ -297,8 +304,8 @@ export function registerOpenAgentEmailTools(
       outputSchema: identitySchema,
       annotations: mutatingAnnotations,
     },
-    ({ name, localpart, canNotifyUser, scopes }) =>
-      callApi(() => client.createIdentity({ name, localpart, canNotifyUser, scopes })),
+    ({ name, localpart, domain, canNotifyUser, scopes }) =>
+      callApi(() => client.createIdentity({ name, localpart, domain, canNotifyUser, scopes })),
   );
 
   tier("mail_list_identities", "read");

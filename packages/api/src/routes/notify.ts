@@ -3,7 +3,7 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config, normalizeUrl } from '../lib/config.ts';
-import { findIdentity } from '../lib/identities.ts';
+import { findIdentity, listIdentities, type Identity } from '../lib/identities.ts';
 import {
   NotifyError,
   NTFY_REQUEST_MAX_BYTES,
@@ -31,7 +31,10 @@ import {
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
 const notifySchema = z.object({
-  target: z.union([z.literal('user'), z.string().regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}$/)]),
+  target: z.union([
+    z.literal('user'),
+    z.string().regex(/^agent:[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)?$/i),
+  ]),
   title: z.string().min(1).max(256),
   message: z.string().min(1).max(4_000),
   level: z.enum(['urgent', 'normal', 'low']).default('normal'),
@@ -106,6 +109,7 @@ function requireUserNotifyPermission(c: Context, find = findIdentity) {
 export type NotifyRouteOptions = {
   service?: NotifyService;
   findIdentity?: typeof findIdentity;
+  listIdentities?: typeof listIdentities;
   createDevice?: (options?: { displayName?: string }) => Promise<NotificationDevice>;
   /** Test seam; production always uses the active ntfy configuration. */
   publicUrl?: string;
@@ -114,6 +118,7 @@ export type NotifyRouteOptions = {
 export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
   const service = options.service ?? notificationService();
   const find = options.findIdentity ?? findIdentity;
+  const list = options.listIdentities ?? listIdentities;
   const createDevice = options.createDevice ?? createNotificationDevice;
   // Same normalizer as config (pathname trailing slash, not string-end slash).
   const activePublicUrl = normalizeUrl(options.publicUrl ?? config.ntfy.publicUrl);
@@ -130,13 +135,33 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const input = parsed.data as { target: NotifyTarget; title: string; message: string; level: NotifyLevel; tags?: string[] };
 
+      let addressed: Identity | undefined;
       if (input.target.startsWith('agent:')) {
-        const agent = input.target.slice('agent:'.length);
-        const addressed = find(`${agent}@${config.domain}`);
-        if (!addressed) return c.json({ error: 'not_found' }, 404);
+        const agentTarget = input.target.slice('agent:'.length).trim().toLowerCase();
+        if (agentTarget.includes('@')) {
+          addressed = find(agentTarget);
+          if (!addressed) return c.json({ error: 'not_found' }, 404);
+        } else {
+          const matches = list().filter(
+            (i) => i.address.split('@')[0].toLowerCase() === agentTarget,
+          );
+          if (matches.length === 0) return c.json({ error: 'not_found' }, 404);
+          if (matches.length > 1) {
+            const domains = matches.map((m) => m.address.split('@')[1].toLowerCase());
+            return c.json(
+              {
+                error: 'ambiguous_agent',
+                message: `Agent localpart is ambiguous across multiple domains: ${domains.join(', ')}`,
+                domains,
+              },
+              400,
+            );
+          }
+          addressed = matches[0];
+        }
         const auth = getAuth(c);
         // Scoped identity tokens never become a sideways command channel.
-        if (auth.kind === 'identity' && auth.address !== addressed.address) {
+        if (auth.kind === 'identity' && auth.address.toLowerCase() !== addressed.address.toLowerCase()) {
           return c.json({ error: 'forbidden: token is scoped to another agent' }, 403);
         }
       }
@@ -158,9 +183,11 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       }
 
       try {
-        const agent = input.target.startsWith('agent:')
-          ? input.target.slice('agent:'.length)
-          : undefined;
+        const agentLocalpart = addressed
+          ? addressed.address.split('@')[0]
+          : input.target.startsWith('agent:')
+            ? input.target.slice('agent:'.length).split('@')[0]
+            : undefined;
         return c.json(
           await service.publish({
             ...input,
@@ -170,9 +197,9 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
                 ? input.level === 'low'
                   ? 'user-low'
                   : 'user-alerts'
-                : (`agent:${agent}` as const),
+                : (`agent:${agentLocalpart}` as const),
             sensitive: false,
-            ...(agent ? { identityAddress: `${agent}@${config.domain}` } : {}),
+            ...(addressed ? { identityAddress: addressed.address } : {}),
           }),
           200,
         );

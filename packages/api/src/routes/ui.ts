@@ -550,6 +550,14 @@ export function createUiApiRoutes(
     return c.json(returnTo ? { ...auth, returnTo } : auth);
   });
 
+  routes.get('/domains', (c) => {
+    return c.json({
+      primary: config.domain,
+      extra: [...config.extraDomains],
+      all: [...config.allDomains],
+    });
+  });
+
   routes.get('/identities', (c) => {
     const auth = getAuth(c);
     const all = dependencies.listIdentities();
@@ -571,12 +579,16 @@ export function createUiApiRoutes(
     }
     const name = (body as any)?.name;
     const localpart = (body as any)?.localpart;
-    const input: { name?: string; localpart?: string } = {};
+    const domain = (body as any)?.domain;
+    const input: { name?: string; localpart?: string; domain?: string } = {};
     if (typeof name === 'string' && name.length >= 1 && name.length <= 100) {
       input.name = name;
     }
     if (typeof localpart === 'string' && LOCALPART_RE.test(localpart)) {
       input.localpart = localpart.toLowerCase();
+    }
+    if (typeof domain === 'string' && domain.trim().length > 0) {
+      input.domain = domain.toLowerCase().trim();
     }
     try {
       const created = createIdentity(input);
@@ -599,6 +611,9 @@ export function createUiApiRoutes(
     } catch (err) {
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
+      }
+      if ((err as Error).message === 'invalid_domain') {
+        return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;
     }

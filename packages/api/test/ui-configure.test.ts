@@ -26,6 +26,7 @@ const { createUiApiRoutes } = await import('../src/routes/ui.ts');
 const { createUiOAuthApiRoutes, createUiOAuthPageRoutes } = await import(
   '../src/routes/ui-oauth.ts'
 );
+const { config } = await import('../src/lib/config.ts');
 const { PUSH_TIER3_WARNING } = await import('../src/lib/identities.ts');
 const { createGrantAndCode, getGrant, listGrantsForAuth } = await import(
   '../src/lib/oauth-store.ts'
@@ -236,5 +237,58 @@ describe('Configure UI APIs (#26 PR 5)', () => {
     });
     expect(created.status).toBe(400);
     expect(await created.json()).toMatchObject({ error: 'invalid_json' });
+  });
+
+  test('GET /ui/api/domains returns configured primary, extra, and all domains', async () => {
+    (config.allDomains as Set<string>).add('secondary.example');
+    (config.extraDomains as string[]).push('secondary.example');
+    try {
+      const { app, cookie } = authenticatedApp({ kind: 'admin' });
+      const res = await app.request('http://localhost/ui/api/domains', {
+        headers: { cookie },
+      });
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.primary).toBe(config.domain);
+      expect(data.extra).toContain('secondary.example');
+      expect(data.all).toContain('secondary.example');
+      expect(data.all).toContain(config.domain);
+    } finally {
+      (config.allDomains as Set<string>).delete('secondary.example');
+      const idx = config.extraDomains.indexOf('secondary.example');
+      if (idx !== -1) config.extraDomains.splice(idx, 1);
+    }
+  });
+
+  test('POST /ui/api/identities validates domain and creates on secondary domain', async () => {
+    (config.allDomains as Set<string>).add('secondary.example');
+    (config.extraDomains as string[]).push('secondary.example');
+    try {
+      const { app, cookie } = authenticatedApp({ kind: 'admin' });
+
+      // Reject unconfigured domain
+      const bad = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'unconfigured.example' }),
+      });
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toEqual({ error: 'invalid_domain' });
+
+      // Create on secondary domain
+      const ok = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: 'secondary.example' }),
+      });
+      expect(ok.status).toBe(201);
+      const created = (await ok.json()) as any;
+      expect(created.address).toBe('ui-agent@secondary.example');
+      expect(created.token).toBeDefined();
+    } finally {
+      (config.allDomains as Set<string>).delete('secondary.example');
+      const idx = config.extraDomains.indexOf('secondary.example');
+      if (idx !== -1) config.extraDomains.splice(idx, 1);
+    }
   });
 });

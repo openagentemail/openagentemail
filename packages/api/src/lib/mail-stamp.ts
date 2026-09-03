@@ -65,14 +65,24 @@ export function stampDate(now: Date = new Date()): Date {
 }
 
 /**
- * 全部收件人是否都在本域（小写比对）。空列表 / 无法解析 → false（fail-closed）。
+ * 全部收件人是否都在配置的域名集合内（小写比对）。空列表 / 无法解析 → false（fail-closed）。
  */
-export function allRecipientsOnDomain(to: string[], domain: string): boolean {
-  const d = domain.toLowerCase();
+export function allRecipientsInDomains(to: string[], domains: Iterable<string>): boolean {
+  const domainSet = new Set([...domains].map((d) => d.toLowerCase()));
   const addrs = to.map(normalizeMailbox).filter(Boolean);
   if (addrs.length === 0) return false;
-  const suffix = `@${d}`;
-  return addrs.every((address) => address.endsWith(suffix));
+  return addrs.every((address) => {
+    const at = address.lastIndexOf('@');
+    if (at === -1) return false;
+    return domainSet.has(address.slice(at + 1));
+  });
+}
+
+/**
+ * 全部收件人是否都在本域（小写比对）。保留单域名兼容。
+ */
+export function allRecipientsOnDomain(to: string[], domain: string): boolean {
+  return allRecipientsInDomains(to, [domain]);
 }
 
 /**
@@ -153,11 +163,12 @@ export function buildOutboundStampHeaders(
   },
   date: Date,
   key: string,
-  domain: string,
+  domains: Iterable<string> | string,
 ): Record<string, string> {
   const base = withoutStampHeaders(input.headers ?? {});
+  const domainList = typeof domains === 'string' ? [domains] : domains;
   // 任一外部收件人 → 不贴 stamp（本地那封读回会 external，可接受）。
-  if (!allRecipientsOnDomain(input.to, domain)) return base;
+  if (!allRecipientsInDomains(input.to, domainList)) return base;
 
   const stamp = createMailStamp(
     {

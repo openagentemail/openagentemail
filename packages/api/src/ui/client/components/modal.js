@@ -78,16 +78,36 @@
     tokenCopyButton.focus();
   }
 
-  function showCreateModal() {
+  function populateCreateDomain(domains) {
+    while (createDomain.firstChild) {
+      createDomain.removeChild(createDomain.firstChild);
+    }
+    var list = (domains && domains.length > 0) ? domains : [window.location.hostname];
+    for (var i = 0; i < list.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = list[i];
+      opt.textContent = list[i];
+      createDomain.appendChild(opt);
+    }
+  }
+
+  async function showCreateModal() {
     if (!isAdmin()) return;
     beginModal();
     createName.value = '';
     createLocalpart.value = '';
-    var firstAddress = state.identities[0] ? state.identities[0].address : '';
-    var separator = firstAddress.lastIndexOf('@');
-    createDomain.textContent = separator === -1
-      ? window.location.hostname
-      : firstAddress.slice(separator + 1);
+    try {
+      var data = await apiJson('/ui/api/domains');
+      var list = (data && data.all && data.all.length > 0)
+        ? data.all
+        : (data && data.primary ? [data.primary] : []);
+      populateCreateDomain(list);
+    } catch (e) {
+      var firstAddress = state.identities[0] ? state.identities[0].address : '';
+      var separator = firstAddress.lastIndexOf('@');
+      var fallback = separator === -1 ? window.location.hostname : firstAddress.slice(separator + 1);
+      populateCreateDomain([fallback]);
+    }
     createModal.hidden = false;
     createName.focus();
   }

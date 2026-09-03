@@ -1729,3 +1729,112 @@ describe('NtfyNotificationService.messages timeout (#9)', () => {
     }
   });
 });
+
+describe('multi-domain notify target resolution', () => {
+  const mockIdentities: Identity[] = [
+    {
+      address: 'shared@primary.example',
+      tokenHash: 'h1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      address: 'shared@secondary.example',
+      tokenHash: 'h2',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      address: 'unique@secondary.example',
+      tokenHash: 'h3',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+  ];
+
+  function mockNotifyApp(auth: { kind: 'admin' } | { kind: 'identity'; address: string }) {
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', auth);
+      await next();
+    });
+    app.route(
+      '/v1/notify',
+      createNotifyRoutes({
+        service,
+        findIdentity: (addr) =>
+          mockIdentities.find((i) => i.address.toLowerCase() === addr.toLowerCase()),
+        listIdentities: () => mockIdentities,
+        publicUrl: 'https://notify.test',
+      }),
+    );
+    return app;
+  }
+
+  test('resolves fully-qualified agent target agent:<localpart@domain>', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared@secondary.example',
+        title: 'Task update',
+        message: 'hello secondary',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].identityAddress).toBe('shared@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:shared');
+  });
+
+  test('resolves unambiguous bare agent target agent:<localpart>', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:unique',
+        title: 'Task update',
+        message: 'hello unique',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0].identityAddress).toBe('unique@secondary.example');
+    expect(published[0].logicalChannel).toBe('agent:unique');
+  });
+
+  test('returns 400 ambiguous_agent when bare target exists in multiple domains', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:shared',
+        title: 'Task update',
+        message: 'hello shared',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as any;
+    expect(data.error).toBe('ambiguous_agent');
+    expect(data.domains).toEqual(['primary.example', 'secondary.example']);
+    expect(published).toHaveLength(0);
+  });
+
+  test('returns 404 when agent target is not found', async () => {
+    const app = mockNotifyApp({ kind: 'admin' });
+    const res = await app.request('/v1/notify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: 'agent:unknown@secondary.example',
+        title: 'Task update',
+        message: 'hello unknown',
+        level: 'normal',
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+});

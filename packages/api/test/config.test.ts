@@ -437,3 +437,66 @@ describe('notification URL configuration', () => {
     ).toBe('https://ntfy.example.com');
   });
 });
+
+describe('EXTRA_DOMAINS multi-domain configuration', () => {
+  test('parses EXTRA_DOMAINS into extraDomains and allDomains, lowercased and trimmed', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'Primary.Example',
+      EXTRA_DOMAINS: ' Sec1.Example , sec2.example ',
+    });
+
+    expect(config.domain).toBe('primary.example');
+    expect(config.extraDomains).toEqual(['sec1.example', 'sec2.example']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example', 'sec1.example', 'sec2.example']),
+    );
+    expect(config.allowedSendDomains).toEqual([
+      'primary.example',
+      'sec1.example',
+      'sec2.example',
+    ]);
+  });
+
+  test('rejects EXTRA_DOMAINS containing the primary DOMAIN (case-insensitive)', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'other.example, PRIMARY.EXAMPLE',
+      }),
+    ).toThrow('EXTRA_DOMAINS must not contain the primary DOMAIN');
+  });
+
+  test('rejects duplicate entries within EXTRA_DOMAINS', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'dup.example, other.example, DUP.EXAMPLE',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains duplicate entries');
+  });
+
+  test('ALLOWED_SEND_DOMAINS overrides the default allDomains when specified', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'primary.example',
+      EXTRA_DOMAINS: 'sec.example',
+      ALLOWED_SEND_DOMAINS: 'primary.example',
+    });
+    expect(config.allowedSendDomains).toEqual(['primary.example']);
+  });
+
+  test('ALWAYS_BCC rejects secondary domains in allDomains case-insensitively', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'primary.example',
+        EXTRA_DOMAINS: 'SECONDARY.EXAMPLE.',
+        ALWAYS_BCC: 'archive@secondary.example',
+        TASK_SIGNING_SECRET: 'a'.repeat(32),
+      }),
+    ).toThrow('ALWAYS_BCC must be an external compliance archive');
+  });
+});

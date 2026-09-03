@@ -50,6 +50,7 @@ function classifyScopeChange(
 const createSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   localpart: z.string().regex(LOCALPART_RE, 'invalid localpart').optional(),
+  domain: z.string().min(1).optional(),
   // This is intentionally opt-in and admin-only: it authorizes an identity
   // to interrupt the human notification channel.
   canNotifyUser: z.boolean().optional(),
@@ -129,6 +130,7 @@ export const identitiesRoute = new Hono()
       const created = createIdentity({
         name: parsed.data.name,
         localpart: parsed.data.localpart,
+        domain: parsed.data.domain,
         canNotifyUser: parsed.data.canNotifyUser,
         scopes: requestedScopes,
       });
@@ -171,6 +173,9 @@ export const identitiesRoute = new Hono()
     } catch (err) {
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
+      }
+      if ((err as Error).message === 'invalid_domain') {
+        return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;
     }

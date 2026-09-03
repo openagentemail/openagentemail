@@ -362,6 +362,7 @@ export function findIdentityByTokenHash(tokenHash: string): Identity | undefined
 export function createIdentity(input: {
   name?: string;
   localpart?: string;
+  domain?: string;
   canNotifyUser?: boolean;
   /**
    * 默认 true。同意页新建身份传 false：不发 oa_ 票，避免幽灵 token 落库。
@@ -372,6 +373,11 @@ export function createIdentity(input: {
   scopes?: string[];
 }): { identity: Identity; token: string } | null {
   const identities = load();
+  const targetDomain = (input.domain ?? config.domain).toLowerCase().trim();
+  if (!config.allDomains.has(targetDomain)) {
+    throw new Error('invalid_domain');
+  }
+
   let localpart = input.localpart?.toLowerCase();
   if (localpart) {
     if (!LOCALPART_RE.test(localpart)) {
@@ -381,7 +387,7 @@ export function createIdentity(input: {
     // Retry a few times on the off chance of a random collision.
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = randomLocalpart();
-      if (!identities.some((i) => i.address === `${candidate}@${config.domain}`)) {
+      if (!identities.some((i) => i.address === `${candidate}@${targetDomain}`)) {
         localpart = candidate;
         break;
       }
@@ -389,7 +395,7 @@ export function createIdentity(input: {
     if (!localpart) throw new Error('localpart_collision');
   }
 
-  const address = `${localpart}@${config.domain}`;
+  const address = `${localpart}@${targetDomain}`;
   if (identities.some((i) => i.address === address)) return null;
 
   const issueToken = input.issueToken !== false;
