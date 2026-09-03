@@ -588,6 +588,22 @@ describe('multi-domain identities', () => {
       expect(resBad.status).toBe(400);
       expect(await resBad.json()).toEqual({ error: 'invalid_domain' });
 
+      // Rejects over-long domain (> 253 chars) with 400 invalid_request
+      const overlongDomain = 'a'.repeat(250) + '.example.com';
+      const resOverlong = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ localpart: 'shared-name', domain: overlongDomain }),
+      });
+      expect(resOverlong.status).toBe(400);
+      const dataOverlong = (await resOverlong.json()) as any;
+      expect(dataOverlong.error).toBe('invalid_request');
+
+      // Direct createIdentity with over-long domain throws invalid_domain
+      expect(() =>
+        createIdentity({ localpart: 'direct-test', domain: 'a'.repeat(254) }),
+      ).toThrow('invalid_domain');
+
       // Create shared-name on primary domain
       const resPrimary = await app.request('/v1/identities', {
         method: 'POST',

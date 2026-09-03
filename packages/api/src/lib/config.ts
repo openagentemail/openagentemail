@@ -264,7 +264,6 @@ const DOMAIN_MAX_LENGTH = 253;
 function isValidDomain(domain: string): boolean {
   if (!domain || domain.length > DOMAIN_MAX_LENGTH) return false;
   const labels = domain.split('.');
-  if (labels.length < 2) return false;
   return labels.every(
     (label) =>
       label.length > 0 &&

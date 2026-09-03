@@ -51,7 +51,7 @@ function classifyScopeChange(
 const createSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   localpart: z.string().regex(LOCALPART_RE, 'invalid localpart').optional(),
-  domain: z.string().min(1).optional(),
+  domain: z.string().min(1).max(253).optional(),
   // This is intentionally opt-in and admin-only: it authorizes an identity
   // to interrupt the human notification channel.
   canNotifyUser: z.boolean().optional(),

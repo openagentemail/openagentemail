@@ -384,7 +384,7 @@ export function createIdentity(input: {
 }): { identity: Identity; token: string } | null {
   const identities = load();
   const targetDomain = (input.domain ?? config.domain).toLowerCase().trim();
-  if (!config.allDomains.has(targetDomain)) {
+  if (targetDomain.length > 253 || !config.allDomains.has(targetDomain)) {
     throw new Error('invalid_domain');
   }
 

@@ -286,6 +286,7 @@ export function registerOpenAgentEmailTools(
         domain: z
           .string()
           .min(1)
+          .max(253)
           .optional()
           .describe(
             "Optional domain for the address. Must be one of the server's configured domains. Defaults to primary DOMAIN.",

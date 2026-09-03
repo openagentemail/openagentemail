@@ -458,7 +458,21 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     ]);
   });
 
-  test('validates primary DOMAIN format rejecting empty/dot and malformed domains while preserving dotted-legacy', () => {
+  test('validates primary DOMAIN format allowing single-label and preserving dotted-legacy while rejecting malformed domains', () => {
+    const localhost = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'localhost',
+    });
+    expect(localhost.domain).toBe('localhost');
+
+    const extraIntranet = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com',
+      EXTRA_DOMAINS: 'intranet',
+    });
+    expect(extraIntranet.extraDomains).toEqual(['intranet']);
+    expect(extraIntranet.allDomains).toContain('intranet');
+
     expect(() =>
       parseConfig({
         ...requiredEnv,
@@ -472,6 +486,21 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
         DOMAIN: 'not a domain',
       }),
     ).toThrow('DOMAIN contains invalid domain: "not a domain"');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: '-invalid',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "-invalid"');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'example.com',
+        EXTRA_DOMAINS: 'not a domain',
+      }),
+    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: "not a domain"');
 
     const dotted = parseConfig({
       ...requiredEnv,
