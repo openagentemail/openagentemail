@@ -344,10 +344,25 @@ What is actually reusable, therefore, is the cursor's **construction and signing
 the address binding that prevents cross-mailbox reuse — not its traversal direction. Making
 catch-up work needs a genuinely new query: a forward `since` parameter (or a
 `mail-cursor-forward-v1` variant) selecting messages **newer** than the cursor, with the same
-signature discipline. That is more than a thin route change, and §15 PR 3 is scoped
-accordingly. Until it lands, the `cursor` in a payload is a precise *position marker* a
-consumer can record and reason about, but not a token they can spend to resume — and §8.4's
-catch-up guidance is written to say so rather than promising a path that does not exist.
+signature discipline.
+
+**The forward cursor must also bind `uidValidity`, which the existing one does not.**
+`MailCursorPayload` is `(folder, address, t, uid)` (`mail-cursor.ts:22-28`) with no mailbox
+generation, which is acceptable for backward pagination within one request but not for a token
+a consumer stores across an outage. After an INBOX recreation UIDs restart from scratch
+(`notification-watcher.ts:190` records exactly this hazard for the watcher), so a stale
+forward cursor would silently select *different* messages that happen to share a UID — the
+consumer would believe it had caught up from position X and actually receive unrelated mail,
+with no error. The forward cursor therefore carries `uidValidity` in its signed payload, and
+**a cursor whose `uidValidity` does not match the current mailbox generation is rejected**
+(`400 {error:'invalid_cursor'}`, the code `imap.ts` already folds cursor failures into) rather
+than reinterpreted. A consumer hitting that must fall back to a full re-sync, which is the
+correct and visible outcome.
+
+That is more than a thin route change, and §15 PR 3 is scoped accordingly. Until it lands, the
+`cursor` in a payload is a precise *position marker* a consumer can record and reason about,
+but not a token they can spend to resume — and §8.4's catch-up guidance is written to say so
+rather than promising a path that does not exist.
 
 ---
 
@@ -654,6 +669,34 @@ would need a confirmation step that does not exist and would reintroduce the cre
 coupling D12 removed. An operator who wants a verified-first flow configures the consumer,
 then calls `/test`, and ignores the creation ping.
 
+**`webhook.ping` payload.** The envelope (§6.1) always carries a `data` object with an
+`object` discriminator, and ping is no exception — an empty or omitted `data` would force
+consumers to special-case the one type that has no fields. It carries the minimum needed to
+act on it:
+
+```json
+{
+  "id": "evt_5a9c1e73-2b84-4d06-9f31-8c7e2a40b1d6",
+  "type": "webhook.ping",
+  "payloadVersion": "v1",
+  "createdAt": "2026-09-03T12:20:01.104Z",
+  "domain": "openagent.email",
+  "data": {
+    "object": "webhook",
+    "webhookId": "whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "trigger": "creation"
+  }
+}
+```
+
+`trigger` is `"creation"` (fired asynchronously by `POST /v1/webhooks`, per D12) or `"test"`
+(fired by `POST /v1/webhooks/:id/test`). `webhookId` lets a consumer that hosts several
+subscriptions on one URL tell which one is being validated — without it, a ping against a
+shared endpoint is unattributable. There is deliberately **no** `address`, `secret`, or
+`secretPrefix`: a ping proves reachability and signature correctness, and carrying the address
+would make it a way to enumerate which mailboxes an endpoint is subscribed to from anyone who
+can trigger a test.
+
 **Emission granularity.**
 
 - `mail.received`: one event per **(message, address)** pair, not one per message. A message
@@ -662,9 +705,11 @@ then calls `/test`, and ignores the creation ping.
   receive metadata about a mailbox it did not subscribe to. This mirrors how
   `messageAccessibleToAddress()` already scopes reads.
 - `approval.requested`: **one event per approval task, with no fan-out**, matched to
-  subscriptions on the `reviewer` address (§6.3). An approval has exactly one reviewer, so
-  there is nothing to fan out to; if the reviewer is not an address on this instance, no
-  event is emitted at all.
+  subscriptions on the `reviewer` address — which in v1 is **always the task's `to`**, since
+  `createApprovalTask()` hardcodes `reviewer: to` and rejects any snapshot where they differ
+  (§6.3). Exactly one address is the reviewer, so exactly one event is emitted. Both parties
+  are required to be managed identities on the instance (`tasks-internal.ts:1529`), so there
+  is no off-instance case to handle.
 
 ### 5.2 Reserved names
 
@@ -776,13 +821,13 @@ from the approval digest rules already documented normatively in `docs/approval-
 | `object` | `"approval"` | metadata | Discriminator, so `data` stays self-describing across event types. |
 | `taskId` | string | metadata | UUID. Usable directly against `GET /v1/tasks/:id`. |
 | `taskState` | `"input-required"` | metadata | Approvals are created in this state (`tasks-internal.ts:1556`); always literal at emission. |
-| `from` | string | metadata | Requesting address. |
-| `to` | string | metadata | Task assignee. |
-| `reviewer` | string | metadata | **The party who must act.** Lower-cased, as stored. Subscription matching key — see below. |
+| `from` | string | metadata | Requesting address. Always a managed identity on this instance (§6.3 note). |
+| `to` | string | metadata | Task assignee — and, in v1, **the reviewer**. Always a managed identity, and never equal to `from`. |
+| `reviewer` | string | metadata | **The party who must act.** Subscription matching key. In v1 this is **always byte-identical to `to`** — see the note below. Carried as its own field because it is the semantically correct matching key and because `ApprovalSnapshot` already names it (`tasks-internal.ts:78`). |
 | `subject` | string | metadata | Truncated to `WEBHOOK_META_FIELD_MAX_BYTES`. |
 | `createdAt` | string | metadata | RFC 3339 UTC task creation time. |
 | `expiresAt` | string | metadata | RFC 3339 UTC approval deadline, from the snapshot. |
-| `expiresInSec` | integer | metadata | `expiresAt - createdAt` in whole seconds, **computed at emission from the same clock reading used for `createdAt`**, not derived later from stored fields. Always ≤ 2592000, since `assertApprovalExpiryBound()` (`tasks-internal.ts:446`) enforces `APPROVAL_MAX_LIFETIME_MS` = 30 days (`:101`). Positivity needs care: that validator only requires the deadline to be later than the moment validation *begins*, while `createApprovalTask()` performs the durable mail write before assigning `createdAt` (`tasks-internal.ts:1550`), so a sub-second deadline can round to `0` and a slow write can make the difference negative. Emission therefore **clamps to a minimum of 0 and drops the field to `null` if the deadline has already passed**, rather than publishing a negative number that contradicts the stated invariant. Whether to instead enforce a minimum approval lifetime at creation is §16 Q19. |
+| `expiresInSec` | integer \| `null` | metadata | `expiresAt - createdAt` in whole seconds, **computed at emission from the same clock reading used for `createdAt`**, not derived later from stored fields. Always ≤ 2592000, since `assertApprovalExpiryBound()` (`tasks-internal.ts:446`) enforces `APPROVAL_MAX_LIFETIME_MS` = 30 days (`:101`). Never negative: that validator only requires the deadline to be later than the moment validation *begins*, while `createApprovalTask()` performs the durable mail write before assigning `createdAt` (`tasks-internal.ts:1550`), so a sub-second deadline can round to `0` and a slow write can make the difference negative. Emission therefore **clamps to `0`, and emits `null` if the deadline has already passed** — a `null` is an explicit "already expired at emission" signal, which is more honest than publishing `0` or a negative number. Whether to instead enforce a minimum approval lifetime at creation is §16 Q19. |
 | `digest` | string | metadata | Lower-case hex SHA-256 of the canonical action JSON (`approvalActionDigest()`, `tasks-internal.ts:442`). 64 characters. |
 | `actionType` | string | metadata | `action.type` — a non-empty string per `docs/approval-digest.md`. |
 | `actionName` | string | metadata | `action.name` — a non-empty string, truncated to `WEBHOOK_META_FIELD_MAX_BYTES`. |
@@ -814,21 +859,45 @@ rules are already written down normatively for third-party implementers, with co
 interop vectors verified by an independent Python implementation — so a non-JavaScript
 consumer can do this. That is a real security property, and it is free.
 
-**Subscription matching for approval events.** An `approval.requested` event is delivered to
-subscriptions whose `address` equals the **`reviewer`**, not `from` or `to`. The reviewer is
-the party who must act, which is who #109's human-in-the-loop case is about; `from` and `to`
-are carried as context. Consequences, stated explicitly because they differ from mail:
+**Subscription matching for approval events — and a correction.** An `approval.requested`
+event is delivered to subscriptions whose `address` equals **`reviewer`**. That is the
+semantically correct key, and it is what `ApprovalSnapshot` calls it.
 
-- One event per approval task, with **no per-address fan-out**. `mail.received` fans out per
-  recipient (§5.1) because several mailboxes legitimately own one message; an approval has
-  exactly one reviewer.
-- If the reviewer is not an address on this instance, **no event is emitted**. There is no
-  matching subscription and no fallback. This fails closed, consistent with the rule that a
-  consumer never receives metadata about a mailbox it did not subscribe to.
-- An agent whose own address is the reviewer can subscribe to its own approval requests with
-  an identity token, which is the autonomous-agent half of the use case. A push to a *human*
-  channel (ntfy, Telegram) is an operator-configured endpoint and needs an admin key, since
-  it typically wants `preview` scope.
+But an earlier draft of this section described `reviewer` and `to` as *different* parties and
+instructed that matching must use `reviewer` "**not** `from` or `to`". That is false against
+the code, and implementing it literally would have suppressed **every** approval webhook:
+
+- `createApprovalTask()` builds the snapshot as
+  `{ action, reviewer: to, expiresAt, digest }` (`tasks-internal.ts:1535`). There is no
+  independent reviewer input — `CreateApprovalTaskInput` (`:257-266`) has only `from`, `to`,
+  `subject`, `body`, `action`, `expiresAt`, and `parentTaskId`.
+- The reconstruction path *enforces* the identity: a parsed snapshot with
+  `snapshot.reviewer !== to` is rejected outright (`:992`), as is `reviewer === from` (`:993`).
+- `from === to` throws `approval_participants_must_differ` (`:1528`).
+
+So in v1 **the assignee is the reviewer**, always. Matching on `reviewer` and matching on `to`
+are the same operation, and the field is kept separate only so the payload names the right
+concept and so a future independent reviewer is an additive change rather than a rename. The
+example in §6.4 accordingly uses one address for both.
+
+Two further corrections that follow from the same reading:
+
+- **The off-instance case cannot arise.** An earlier draft said "if the reviewer is not an
+  address on this instance, no event is emitted". `createApprovalTask()` throws
+  `approval_identity_required` unless **both** `from` and `to` are known managed identities
+  (`:1529`), so every approval task already has an on-instance reviewer by construction. The
+  fail-closed rule is still worth stating for the reconstruction path, but it is not a live
+  branch at creation.
+- **There is no fan-out**, and now for a precise reason: exactly one address is the reviewer,
+  so exactly one event is emitted. This differs from `mail.received` (§5.1), which fans out
+  per recipient because several mailboxes legitimately own one message.
+
+The practical consequence for #109's human-in-the-loop case is worth stating plainly, because
+it constrains the feature: **v1 cannot page a reviewer who is not the task's assignee.** An
+agent that wants a human paged must create the approval *addressed to the human*. Routing an
+approval to one party while paging another needs a real `reviewer` input on
+`CreateApprovalTaskInput`, which is a task-API change outside this RFC's scope and is
+§16 Q20.
 
 **Emission site.** `createApprovalTask()` (`tasks-internal.ts:1524`), after the task is
 durably written. This is **not** the IMAP inbound-mail loop, which is the ripple D1 causes
@@ -903,7 +972,7 @@ An `approval.requested` delivery at `metadata` scope (§6.3):
     "taskId": "3f8a1c62-9d4e-4b07-a5f1-6c2e8d904b73",
     "taskState": "input-required",
     "from": "researcher@openagent.email",
-    "to": "postmaster@openagent.email",
+    "to": "owner@openagent.email",
     "reviewer": "owner@openagent.email",
     "subject": "Approve outbound send to press@example.com",
     "createdAt": "2026-09-03T12:31:07.512Z",
@@ -1193,8 +1262,12 @@ A healthy address that receives more than `WEBHOOK_RATE_DELIVER_PER_MIN` deliver
 a minute will have attempts denied *by OAE*, and charging those against the endpoint would
 mean a busy mailbox disables its own healthy endpoint. So a `deferred` attempt: consumes no
 slot in the §8.3 schedule, does not increment `consecutiveFailures` (§8.5), is not dead-lettered,
-and is rescheduled at the earlier of the limiter's `retryAfterSec` and the next schedule
-offset. Rescheduling is **bounded** — a `deferred` row still carries `nextAttemptAt` and is
+and is rescheduled at the **later** of the limiter's `retryAfterSec` and the next schedule
+offset. Taking the *earlier* of the two — as a first draft specified — hot-loops: if the next
+offset is already past, the retry fires immediately, the limiter denies it again, and the
+delivery spins until the window opens, burning CPU and log rows without making progress.
+`max()` guarantees forward progress at whichever of the two constraints is actually binding.
+Rescheduling is **bounded** — a `deferred` row still carries `nextAttemptAt` and is
 subject to the same 72-hour horizon, so backpressure delays delivery rather than creating an
 unbounded queue. This is the classification the first draft left empty.
 
@@ -1416,6 +1489,17 @@ arrives. Operators who want faster trip on quiet mailboxes lower `WEBHOOK_DISABL
 there is no separate volume knob, and adding one would make the breaker's behavior hard to
 reason about.
 
+**The interaction with D2, stated rather than left to be discovered.** Threshold 10 against an
+11-attempt schedule means a quiet mailbox with a single dead event trips at attempt 10 (+48 h),
+so **attempt 11 — the one §8.3 pins to exactly +72 h — never runs** for that event. The
+published 72-hour horizon is therefore a property of the *schedule*, not a guarantee that every
+event on a dead endpoint receives eleven attempts; on a dead endpoint the breaker is supposed
+to cut the sequence short, and that is the point of D2a. The two sections are consistent once
+read this way: §8.3 describes how far an attempt sequence *can* go, §8.5 describes when the
+endpoint stops being tried at all. Neither is changed here — this paragraph exists so nobody
+files it as a contradiction later. An endpoint that is merely *flaky* still gets the full
+horizon, because each success resets the counter.
+
 - Disablement is written to the audit log, exposed on `GET /v1/webhooks/:id` and in the
   dashboard (§10.8), and — where ntfy is enabled — pushed to the operator as an urgent
   notification through the existing notify path. That last step is best-effort and must not
@@ -1453,6 +1537,7 @@ Each row records one delivery attempt:
   "address": "postmaster@openagent.email",
   "messageId": "4821",
   "uidValidity": 17,
+  "taskId": null,
   "eventCreatedAt": "2026-09-03T12:26:40.412Z",
   "attempt": 1,
   "outcome": "pending",
@@ -1484,9 +1569,15 @@ Six of those fields exist because something breaks without them:
   would be lost precisely under burst load.
 - **`uidValidity`** guards `messageId`, which is a UID and stops being addressable when the
   mailbox generation changes (§8.6 reconstruction rules).
-- **`messageId`** is what makes re-fetch possible at all, since the payload is deliberately
-  not stored. It is an identifier, not content — the distinction `audit.ts` draws when it
-  allows `address` but forbids subjects and bodies.
+- **`messageId`** is what makes re-fetch possible at all for mail, since the payload is
+  deliberately not stored. It is an identifier, not content — the distinction `audit.ts` draws
+  when it allows `address` but forbids subjects and bodies.
+- **`taskId`** is the equivalent for `approval.requested`, and omitting it was a real bug: the
+  reconstruction text below says approvals re-fetch "by task id", but no such field existed in
+  the row, so a pending approval event could not be rebuilt after a restart and would have been
+  silently dropped — losing exactly the human-paging event D1 put into v1 for. Per event type:
+  `mail.received` populates `messageId` + `uidValidity` and leaves `taskId` null;
+  `approval.requested` populates `taskId` and leaves both mail fields null.
 - **`replay`** is `true` only on a delivery created by
   `POST /v1/webhooks/deliveries/:deliveryId/redeliver` (decision **D15**, §17), so an operator
   reading the log can tell a replay from an original.
@@ -1494,15 +1585,29 @@ Six of those fields exist because something breaks without them:
 Rules:
 
 - Retention `WEBHOOK_LOG_RETENTION_DAYS` (default 30), matching
-  `NOTIFICATION_LOG_RETENTION_MS` and `RETENTION_DAYS`. Daily and boot-time compaction.
-- **No payload content is ever written**, and no URL query string. The row carries the
-  event id, type, address, and outcome — the same field-whitelist discipline
-  `audit.ts:38-50` applies, extended with delivery-specific fields. `sensitive: true`
-  rows write nothing beyond that. This keeps the log safe to expose through an
-  inspection API and safe to ship to a log aggregator.
+  `NOTIFICATION_LOG_RETENTION_MS` and `RETENTION_DAYS`. Daily and boot-time compaction. The
+  minimum is tied to the retry horizon — see §10.1, since a retention window shorter than the
+  72-hour schedule would delete the only durable record of a pending attempt before that
+  attempt is due.
+- **No payload content is ever written**, and no URL query string. The same field-whitelist
+  discipline `audit.ts:38-50` applies, extended with delivery-specific identifiers. This keeps
+  the log safe to expose through an inspection API and safe to ship to a log aggregator.
+- **`sensitive` is a marker, not a reducer.** An earlier draft said a `sensitive: true` row
+  "writes nothing beyond" the event id, type, address, and outcome. That was wrong and the
+  consequence was severe: it dropped `webhookId`, `runId`, `attempt`, and `nextAttemptAt`, so
+  **every pending `preview`-scope delivery would be silently lost at restart** — the rows the
+  reconstruction algorithm needs would not contain the fields it groups and schedules by. Since
+  the row already contains no payload content by the rule above, there is nothing further to
+  strip. `sensitive` exists so an operator or an aggregator can filter or mask these rows
+  externally, and so the inspection API can label them; it never changes what is written.
+- **Minimum reconstructable field set.** No reduction, masking, or retention rule may remove
+  these from a non-final row, because boot reconstruction cannot work without them:
+  `webhookId`, `eventId`, `runId`, `attempt`, `outcome`, `nextAttemptAt`, `type`, `address`,
+  `eventCreatedAt`, and the resource identifier for the event type (`messageId` +
+  `uidValidity` for mail, `taskId` for approvals). Everything else in the row is diagnostic.
 - The file doubles as the **dead-letter store**: a row with `outcome: "permanent"` or
-  `"refused"`, or `attempt == WEBHOOK_MAX_ATTEMPTS` without success, *is* the dead
-  letter. One artifact, two purposes, no separate queue file.
+  `"refused"`, or a *completed* attempt at `WEBHOOK_MAX_ATTEMPTS` without success, *is* the
+  dead letter. One artifact, two purposes, no separate queue file.
 
 **Restart behavior, stated honestly:**
 
@@ -1524,8 +1629,18 @@ Rules:
      per-endpoint concurrency 1 (§8.7) and burns the budget several times over. A `pending`
      row has `attempt` equal to the attempt it is scheduled to make, so it participates in
      this comparison normally.
-  3. Discard the group if that latest row is final: `outcome` is `success`, `permanent`, or
-     `refused`, or `attempt >= WEBHOOK_MAX_ATTEMPTS` with a non-success outcome.
+  3. Discard the group if that latest row is **final**, meaning either (a) its `outcome` is
+     `success`, `permanent`, or `refused`, or (b) its `outcome` is a *completed* failure
+     (`retryable`) **and** `attempt >= WEBHOOK_MAX_ATTEMPTS`.
+
+     Condition (b) carries the qualification deliberately, and omitting it loses the last
+     attempt. The row for attempt N is written as `pending` *before* the attempt is made, so a
+     crash between writing attempt 11's `pending` row and sending it leaves a latest row with
+     `attempt == WEBHOOK_MAX_ATTEMPTS` and a non-success outcome. A rule keyed only on
+     `attempt >= MAX` would classify that as final and discard it — the eleventh attempt, the
+     one pinned to +72 h, would never be made, and the event would vanish without a
+     dead-letter row saying so. A `pending` row always means "not yet attempted", at whatever
+     attempt number, and is therefore never final.
   4. Otherwise the group is pending. Schedule it at
      **`max(nextAttemptAt, bootTime)`** — that is, a row whose `nextAttemptAt` fell *during*
      the downtime runs **immediately**, it is not skipped. Filtering on
@@ -1560,12 +1675,26 @@ Rules:
   or the bounding constants changed while the process was down. That is correct behavior —
   the consumer sees current policy — and it is another reason consumers must treat the
   payload as a snapshot and re-fetch (§4.2).
-- Events emitted while the process was **down** are not reconstructed in v1. The UID
-  watermark persists, so whether a restart re-emits or skips depends on watermark
-  durability, which the watcher already owns. Making post-restart catch-up authoritative
-  (re-walk the mailbox from the last successfully delivered cursor and re-emit) is
-  possible and is §16, Q5 — it is the strongest argument for the cursor being in the
-  payload.
+- **Events emitted while the process was down are lost, and this is a certainty rather than a
+  risk.** An earlier draft said the outcome "depends on watermark durability, which the
+  watcher already owns". Reading the source shows there is no durability to depend on:
+  `WatcherWatermark` is documented as *"In-memory watermark survives a dropped IMAP connection
+  in this process"* (`notification-watcher.ts:138`), `runWatcher()` starts each run with a
+  fresh `const watermark: WatcherWatermark = {}` (`:1555`), and on first sight of a mailbox
+  generation it **anchors to the current high-water UID and returns an empty list**
+  (`:216-218`, `:223-226`). So after a restart the watcher emits nothing for mail that
+  arrived while it was down and picks up only from whatever is newest at that moment. The
+  in-memory watermark buys resilience across a *dropped connection*, which is what it was
+  built for — not across a *process restart*.
+
+  This is the concrete content of the weak restart semantics D7 accepted, and it is worse than
+  "some events may be missed": a restart during a busy period silently skips every message
+  that landed in the gap. Boot reconstruction (§8.6) recovers **pending retries** from the
+  delivery log, but it cannot recover an event that was never emitted, because nothing was
+  ever written. Making post-restart catch-up authoritative — re-walk the mailbox from the last
+  successfully delivered position and re-emit — therefore requires persisting a watermark that
+  does not exist today, and is §16 Q5. It is also the strongest argument for the forward
+  cursor in §3.7: without one, there is no "last delivered position" to re-walk *from*.
 
 ### 8.7 Concurrency and rate limits
 
@@ -1677,6 +1806,22 @@ holder aim the server at an arbitrary name, so the gap stops being theoretical. 
 the fix into PR 1 (§15) rather than a separate hardening card, on the reasoning that a
 hardening card filed alongside the feature that needs it tends not to land before the
 feature. §14 item 2 tests all three forms.
+
+**The functional cost, recorded because D16 is a decision and this is its price.** Blanket
+refusal of `64:ff9b::/96` is not free. On a **DNS64 / IPv6-only** deployment, *every* IPv4
+destination is synthesized into that prefix — there is no native IPv4 route at all — so
+refusing the whole prefix blocks legitimate public IPv4 webhook targets, not merely internal
+ones. An operator on IPv6-only infrastructure would find that no IPv4-hosted consumer can be
+subscribed, with a `refused` outcome that looks like an attack rather than a topology.
+
+The narrower alternative is to **extract the embedded IPv4 address and evaluate that** against
+the same policy, instead of refusing the prefix outright: `64:ff9b::a9fe:a9fe` yields
+`169.254.169.254` and is correctly refused, while `64:ff9b::5db8:d822` yields a public address
+and is correctly allowed. The same extraction handles 6to4 (`2002::/16`) and Teredo. That is
+strictly better security-wise *and* functionally, at the cost of more parsing code in the one
+place `net.ts:1` forbids duplicating. D16 stands as ratified; this paragraph records the cost
+so the owner can choose extraction over blanket refusal when PR 1 is written, and §16 Q21 asks
+the question explicitly.
 
 Note that closing this also benefits the existing CIMD consumer of the same policy, which is
 the argument for putting it in `net.ts` rather than in webhook-specific code — and
@@ -1799,7 +1944,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_ALLOWED_PORTS` | CSV of ints | `443` | `splitCsv` convention. |
 | `WEBHOOK_MAX_SUBSCRIPTIONS` | int ≥ 0 | `16` | |
 | `WEBHOOK_MAX_PER_ADDRESS` | int ≥ 0 | `4` | |
-| `WEBHOOK_MAX_ATTEMPTS` | int ≥ 1 | `11` | Truncates the fixed 72 h schedule in §8.3. `1` = no retry; `8` restores the original ~27 h budget. |
+| `WEBHOOK_MAX_ATTEMPTS` | int 1–**11** | `11` | Truncates the fixed 72 h schedule in §8.3. `1` = no retry; `8` restores the original ~27 h budget. **Upper-bounded at 11** because §8.3 defines exactly eleven offsets; a larger value would have no defined attempt times, so it is a schema error rather than something to extrapolate. |
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | int ≥ 1000 | `10000` | Matches `CIMD_FETCH_TIMEOUT_MS` and GitHub's published 10 s. |
 | `WEBHOOK_MAX_CONCURRENT` | int ≥ 1 | `8` | Mirrors `MAX_WAITS_TOTAL`, separate pool. |
 | `WEBHOOK_PAYLOAD_MAX_BYTES` | int ≥ 2048 | `16384` | **Cannot be disabled** (§8.7). |
@@ -1809,7 +1954,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_TIMESTAMP_TOLERANCE_SEC` | int ≥ 30 | `300` | Consumer-side value, published in docs and in `GET /v1/webhooks`. |
 | `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `10` | Consecutive **failed attempts** per endpoint, reset to 0 on any success (**D2a**, §8.5). `deferred` does not count. |
 | `WEBHOOK_ROTATION_OVERLAP_MS` | int ≥ 0 | `86400000` | 24 h dual-signature window (§12.2). `0` = atomic swap. |
-| `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ 1 | `30` | |
+| `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ **4** | `30` | **Floor is tied to the retry horizon, not to taste.** D2's schedule runs to +72 h, so a retention window under 4 days would let daily compaction delete the only durable record of a pending attempt *before that attempt is due* — silently dropping attempts 9–11 and with them the whole tail the extension bought. Enforced in the schema, and it must be re-checked if the schedule is ever lengthened. |
 | `WEBHOOK_RATE_CREATE_PER_MIN` | int ≥ 0 | `10` | |
 | `WEBHOOK_RATE_TEST_PER_MIN` | int ≥ 0 | `3` | Per token, separate bucket from delivery (§8.7). Bounds caller-triggered egress. |
 | `WEBHOOK_RATE_DELIVER_PER_MIN` | int ≥ 0 | `60` | Per endpoint. `0` disables. |
@@ -1857,12 +2002,12 @@ bodies.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/v1/webhooks` | admin, or identity for own address — **never OAuth** (§10.4) | Create. `201` + `secret` **shown once**. |
+| `POST` | `/v1/webhooks` | admin, or identity for own address — **never OAuth** (§10.4) | Create. `201` + `secret`. Accepts the same optional `Idempotency-Key` header as `rotate` (§12.2): a retry with a seen key returns the stored `201` response with `secret: null` plus the `id`, and does **not** create a second subscription. Without this, losing the `201` — a network drop, a client crash — left an identity caller with no recoverable key *and* made its natural retry consume another slot of the per-address cap (§8.7), so two lost responses could exhaust the cap with orphaned subscriptions. Recovery of the key itself is `GET …/secret` (§12.3). |
 | `GET` | `/v1/webhooks` | admin: all; identity: own address | `{webhooks:[…]}`. Never includes `secret`. |
 | `GET` | `/v1/webhooks/:id` | as above | Bare object incl. `state`, `lastDelivery`. |
 | `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `description`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
-| `GET` | `/v1/webhooks/:id/secret` | **admin** | Re-display the current derived signing key (§12.3). Audited as `webhook.reveal`. Possible only because D6 chose derivation; a stored random secret could not offer it. |
-| `DELETE` | `/v1/webhooks/:id` | as above | Delete. Precedent: `routes/notify.ts:228`. |
+| `GET` | `/v1/webhooks/:id/secret` | admin, or identity for its own `metadata` subscriptions (§12.3) | Re-display the current derived signing key. Audited as `webhook.reveal`. Possible only because D6 chose derivation. **Must return `Cache-Control: no-store`** (and no `ETag`): the body is long-lived key material, and a shared cache, browser history, or intermediary log retaining it would undo the entire secret-handling model. |
+| `DELETE` | `/v1/webhooks/:id` | as above (own `metadata` subscriptions; `preview` requires admin, §10.4 Rule B) | Delete the subscription **and cancel its pending retries**, marking any not-yet-attempted rows `permanent` with reason `subscription_deleted` so the log still accounts for them. Precedent: `routes/notify.ts:228`. Identity deletion cascades the same way (§10.5). |
 | `POST` | `/v1/webhooks/:id/rotate` | as above | Issue a new secret; start the overlap window (§12.2). Returns the new `secret` once. |
 | `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status, reason}`. Later attempts continue in the background. **`status` is `null` whenever no HTTP response was received** — DNS failure, connection refused, TLS handshake error, and timeout all produce an `outcome` with no status code, so the field must be nullable and `reason` carries the machine-readable cause (`dns_error`, `connection_refused`, `tls_error`, `timeout`, `ssrf_refused`, or `null` on success). Promising a `status` unconditionally, as an earlier draft did, would force an implementation to invent one. |
 | `POST` | `/v1/webhooks/:id/disable` | as above (own address) | Manual pause. Sets `state: "disabled"`, `disabledReason: "manual"`. Reversible by `/enable` without investigation. |
@@ -1948,13 +2093,25 @@ The distinction is available one level up: `TokenAttribution` (`auth.ts:45-48`) 
 (`auth.ts:67`). So the normative rule is:
 
 > **Rule A — OAuth exclusion covers every mutation, not just create.**
-> `POST /v1/webhooks`, `POST /v1/webhooks/:id`, `POST /v1/webhooks/:id/rotate`, and
-> `POST /v1/webhooks/:id/test` must all consult **token attribution**, not `Auth`, and reject
-> `kind === 'oauth'`. The MCP tier is a second, independent gate on the MCP path — not the
-> mechanism that makes REST safe. Covering only create and rotate (as the first draft did)
-> would let an OAuth token still redirect an existing subscription via update, or originate
-> probe connections via `test`, which is exactly what the row above excludes.
+> Every mutating webhook route must consult **token attribution**, not `Auth`, and reject
+> `kind === 'oauth'`. In v1 that set is: `POST /v1/webhooks`, `POST /v1/webhooks/:id`,
+> `POST /v1/webhooks/:id/rotate`, `POST /v1/webhooks/:id/test`, and
+> `POST /v1/webhooks/:id/disable`. Stated as "every mutation" rather than as that list,
+> because enumerating is exactly how `/disable` was omitted when R35 added it — a new
+> mutating route inherits this rule by default and must be explicitly exempted if it ever
+> should be. The MCP tier is a second, independent gate on the MCP path — not the mechanism
+> that makes REST safe. Covering only create and rotate (as the first draft did) would let an
+> OAuth token still redirect an existing subscription via update, pause or resume it, or
+> originate probe connections via `test`, which is precisely what the row above excludes.
 > Error: `403 {error:'forbidden: oauth tokens may not mutate webhook subscriptions'}`.
+>
+> **This rule also settles the MCP side, and §14 item 7 previously contradicted it.** An
+> earlier draft of the test list required `mail_webhook_test` to be *permitted* for an
+> OAuth-derived token while Rule A forbade the same operation over REST. Since the MCP tool
+> and the REST route perform the identical action, that was an OAuth bypass through the MCP
+> door. `mail_webhook_test` is tier `contained` (§10.7), which is not deny-by-default for
+> OAuth, so the tool must apply the same attribution check the route does. Corrected in
+> §14 item 7.
 
 > **Rule B — validate the *resulting* subscription, not just the requested fields.**
 > An identity token may update a subscription it owns, but the update must be evaluated
@@ -1966,16 +2123,43 @@ The distinction is available one level up: `TokenAttribution` (`auth.ts:45-48`) 
 > admin-only rule completely. The alternatives are to reject the update
 > (`403 {error:'content_scope_requires_admin'}`) or to force a downgrade to `metadata` when an
 > identity token changes `url`; **rejecting is recommended**, because a silent downgrade would
-> break the operator's integration without telling them. The same rule applies to `DELETE`:
-> an identity token may delete its own `metadata` subscriptions but not an admin's `preview`
-> one.
+> break the operator's integration without telling them.
+>
+> **The same rule covers `rotate` and `DELETE`, which the first version of this rule missed.**
+> Rotating an admin-created `preview` subscription hands the identity caller a *fresh signing
+> key* for an endpoint whose scope it was never permitted to set, and simultaneously
+> invalidates the key the admin's consumer is verifying with — key material it should not
+> hold, plus a denial of service on an integration it does not own. Deleting it removes an
+> admin's paging path. Therefore an identity token may rotate and delete only subscriptions
+> whose `contentScope` is `metadata`; on a `preview` subscription both require an admin key.
+> The general form of the rule is what matters: **authorization is a function of the
+> subscription's stored state, not only of the fields the request names.**
 
-> **Rule C — private targets are admin-only.** When `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`
-> (§9.5), creating or updating a subscription whose target resolves to a private, loopback,
-> CGNAT, or ULA address requires an **admin key**. Without this, an operator enabling one
-> legitimate same-host callback would simultaneously hand every identity token on the instance
-> a signed-request and connectivity oracle against internal services. An operator-controlled
-> host allowlist is the stronger alternative and is §16 Q18.
+> **Rule C — private targets are admin-only, and the grant must be persisted and re-checked at
+> delivery.** When `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` (§9.5), creating or updating a
+> subscription whose target resolves to a private, loopback, CGNAT, or ULA address requires an
+> **admin key**. Without this, an operator enabling one legitimate same-host callback would
+> simultaneously hand every identity token on the instance a signed-request and connectivity
+> oracle against internal services. An operator-controlled host allowlist is the stronger
+> alternative and is §16 Q18.
+>
+> **A creation-time check alone is not sufficient, and this is the subtle part.** An identity
+> token can create a subscription while its hostname honestly resolves to a *public* address —
+> which Rule C permits, correctly — and the DNS record can then be changed to an internal
+> address before the first delivery. At delivery time, §9.1's composition rule consults the
+> **global** `WEBHOOK_ALLOW_PRIVATE_TARGETS` setting, which knows nothing about *who created
+> this subscription*. With the escape hatch on for one legitimate admin endpoint, the rebound
+> identity-created subscription would be waved through into the internal network.
+>
+> So the grant is per-subscription and durable: `webhooks.json` records
+> **`privateTargetGranted: true`** only when an admin created or updated the subscription *and*
+> its target resolved private at that moment (§10.5). Delivery then requires, for any resolved
+> private address, **both** the global escape hatch **and** this subscription's grant. A
+> private address without the grant is `refused` — dead-letter, disable, audit as
+> `webhook.ssrf_refused` (§8.2, §9.3 step 3). The rule reduces to: *the global setting says
+> private targets may exist on this instance; the per-subscription grant says this particular
+> subscription was authorized for one.* Neither alone is sufficient, and §14 item 2 tests the
+> rebind-without-grant case specifically.
 
 Everything else in the table is enforceable with the existing primitives.
 
@@ -2000,8 +2184,14 @@ or `previousSecret`.
 
 Per subscription the file holds: `id`, `url`, `address`, `events`, `contentScope`,
 `description`, `state`, `disabledReason`, `secretPrefix`, **`epoch`**, **`overlapUntil`**,
-`createdAt`, `updatedAt`, `rotatedAt`, **`consecutiveFailures`**, `createdBy` (`admin` or the
-address).
+`createdAt`, `updatedAt`, `rotatedAt`, **`consecutiveFailures`**, **`privateTargetGranted`**,
+`createdBy` (`admin` or the address).
+
+`privateTargetGranted` is set only when an admin created or updated the subscription and its
+target resolved private at that moment; delivery requires it, in addition to the global escape
+hatch, before connecting to any private address (§10.4 Rule C). It is what stops a DNS rebind
+on an identity-created subscription from riding an admin's escape hatch into the internal
+network.
 
 **There is deliberately no `active` boolean.** An earlier draft carried one alongside `state`,
 and review correctly noted it had no defined semantics: with a three-value `state` (§8.5) whose
@@ -2278,10 +2468,12 @@ counters with the wait pool would let a burst of outbound deliveries starve
 
 ### 11.4 The prerequisite refactor (the real cost of this RFC)
 
-The only place that observes each new message exactly once, with a durable-ish UID
-watermark and reconnect handling, is the notification watcher (§3.1). Webhooks should
-emit from there — `processWatchedMessage()` already parses the message and applies gating,
-so a webhook dispatch is a sibling of the existing ntfy publish.
+The only place that observes each new message exactly once, with a UID watermark and
+reconnect handling, is the notification watcher (§3.1). That watermark is **in-memory** — it
+survives a dropped IMAP connection but not a process restart (`notification-watcher.ts:138`,
+`:1555`; see §8.6). Webhooks should still emit from there: `processWatchedMessage()` already
+parses the message and applies gating, so a webhook dispatch is a sibling of the existing ntfy
+publish.
 
 But that loop is gated on ntfy at **two** levels:
 
@@ -2325,17 +2517,28 @@ called out here explicitly so a reviewer can check it.
 
    | Producer | Source | Dedupe key | Failure semantics |
    | --- | --- | --- | --- |
-   | inbound-mail loop | IMAP UID watermark | `(uidValidity, uid)` | per-sink watermark retention (item 3) |
-   | task path | `createApprovalTask()` return | the task `id` | no watermark exists — see below |
+   | inbound-mail loop | IMAP UID watermark (**in-memory**) | `(uidValidity, uid)` | per-sink watermark retention (item 3) |
+   | task path | `createApprovalTask()` return | the task `id` | no watermark at all — see below |
 
-   The asymmetry in the last column is the real content of this item. The mail producer can
-   recover across a restart because the UID watermark is durable-ish and the mailbox is still
-   there to re-walk. The task producer has **no equivalent**: if the process dies between
-   writing the approval task and dispatching the event, nothing re-observes the creation,
-   because creation is a one-shot API call rather than a state that can be rescanned. Under
-   the weak restart semantics D5 accepted (§8.6), that event is simply lost. This is
-   acceptable and is recorded as such rather than papered over — but it is a *worse* loss
-   profile than mail, because a lost `approval.requested` means a human is never paged about
+   **Both producers lose events across a restart, and an earlier draft of this section claimed
+   otherwise.** It asserted the mail producer "can recover across a restart because the UID
+   watermark is durable-ish". It is not durable at all: the watermark lives in process memory
+   (`notification-watcher.ts:138`), is recreated empty on every run (`:1555`), and first sight
+   of a mailbox generation anchors to the current high-water UID and **emits nothing**
+   (`:216-218`). So a restart skips every message that arrived during the gap. The task
+   producer behaves the same way for a different reason: creation is a one-shot API call
+   rather than a rescannable state, so if the process dies between writing the approval task
+   and dispatching the event, nothing re-observes it.
+
+   The real difference is **latent**, not actual. The mailbox is still there after a restart,
+   so the mail producer *could* be made recoverable by persisting a watermark and re-walking —
+   which is §16 Q5 and needs the forward cursor from §3.7. The task producer has no equivalent
+   path short of the approval reaper that `approval.expired` already needs (§2.2). Under the
+   weak restart semantics **D7** accepted (§8.6), both events are simply lost today.
+
+   That makes the approval case the more serious of the two, and it is recorded as such rather
+   than papered over: a lost `mail.received` means an agent polls a little longer, while a lost
+   `approval.requested` means a human is never paged about
    an approval that is silently counting down to a deadline nobody will materialize (§2.2).
    If the owner later decides that is not acceptable, the fix is a task-side sweep analogous
    to the approval reaper that `approval.expired` already needs, and the two should be
@@ -2365,11 +2568,23 @@ ownership still to be assigned.
   is an `evt_` UUID; the `id` in a `mail_wait_for` response is the numeric IMAP UID (the same
   value the webhook carries as `data.messageId`, §6.2). So idempotency on `id` — correct for
   deduping repeated *webhook attempts* (§8.1) — cannot recognize the same mail arriving once
-  through each channel. A consumer running both must dedupe on **`data.messageId`** (plus
-  `uidValidity`, since UIDs are only comparable within one mailbox generation), and treat the
-  event UUID as scoped to webhook delivery only. Documenting this is not optional: the
-  combined pattern is the one §11.5 actively recommends, so getting it wrong is the default
-  outcome unless the docs say otherwise.
+  through each channel. The cross-channel dedupe key is **`data.messageId` on the webhook side
+  matched against `id` on the wait side**, and the event UUID is scoped to webhook delivery
+  only.
+
+  **The limit of that key, stated because it cannot be fixed from the consumer side.** UIDs are
+  unique only within a mailbox generation. The webhook payload does carry `data.uidValidity`
+  (§6.2), but `mail_wait_for` returns a `MessageDetail` (`imap.ts:58-74`) that has **no
+  `uidValidity` field** — so a consumer using both channels cannot build a
+  generation-qualified key, and after an INBOX recreation a reused UID could cause it to
+  wrongly suppress a genuinely new message. The practical mitigation is to **bound the dedupe
+  window** rather than keep it forever: expire entries after something like
+  `RETENTION_DAYS`, since a message older than the retention window cannot reappear anyway.
+  Adding `uidValidity` to `MessageDetail` would remove the limitation and is a small,
+  independent improvement — §16 Q22.
+
+  Documenting this is not optional: the combined pattern is the one §11.5 actively recommends,
+  so getting it wrong is the default outcome unless the docs say otherwise.
 - Documented anti-pattern: running both a webhook subscription *and* a tight
   `mail_wait_for` loop for the same address. It doubles the load and guarantees duplicates.
   Deduping on `data.messageId` (previous bullet) makes it *correct*, but not sensible — the
@@ -2526,21 +2741,56 @@ concrete:
 > **stored** response with `200` and does not increment the epoch. A request with no key is
 > treated as an intentional rotation and always increments.
 
+**Rotating again while an overlap window is open.** The signer emits `v1=` under `epoch` and
+`epoch - 1` only (§12.2 step 2), so a second rotation inside the first's 24-hour window would
+advance to `epoch + 1` and sign with `(epoch+1, epoch)` — **immediately dropping `epoch - 1`**,
+the key a consumer from the first rotation may still be migrating off. The overlap guarantee
+would silently stop being one. The behavior is therefore explicit:
+
+- **Default: reject with `409 {error:'rotation_window_open'}`,** including `overlapUntil` in
+  the response so the caller knows when to retry. Rotation is rare and deliberate; silently
+  breaking an in-flight migration to satisfy a second request is the wrong default.
+- **Explicit override: `{"force": true}`** in the request body truncates the open window and
+  proceeds. This is the correct choice when rotating *because a key leaked* — continuing to
+  honor the compromised generation is then worse than cutting off a slow consumer. The
+  truncation is recorded in the audit event so the operator can see why deliveries started
+  failing.
+- Retaining three generations instead was considered and rejected: it makes the verification
+  contract ("try every `v1=`") unbounded in a way consumers cannot predict, and the only
+  scenario needing it is two overlapping *planned* rotations, which the 409 already
+  discourages.
+
 This mirrors how the repo already treats caller-supplied dedupe identifiers
-(`X-OA-Task-Idempotency-Key`, `tasks-internal.ts`) rather than inventing a new convention.
-Rotation writes an audit event in all cases.
+(`X-OA-Task-Idempotency-Key`, `tasks-internal.ts:923`) rather than inventing a new convention.
+Rotation writes an audit event in all cases, including the 409.
 
 ### 12.3 Secret handling
 
 - Shown in the `201` create response and the `rotate` response. Because D6 chose derived
-  keys (§12.1), the key is **re-derivable**, so an **admin-only re-display** is specified
-  rather than left as an open question: `GET /v1/webhooks/:id/secret`, admin key required,
-  audited as `webhook.reveal`. This is a genuine advantage of derivation over stored random
-  secrets — a lost secret costs an API call instead of a rotation and a consumer-side
-  cutover — and §10.5 depends on it, since a replayed rotation returns `secret: null`
-  rather than persisting plaintext.
-- Never returned by any `GET` **except** `GET /v1/webhooks/:id/secret`, which is admin-only
-  and audited. Every list and detail response carries `secretPrefix` alone.
+  keys (§12.1), the key is **re-derivable**, so a re-display route is specified rather than
+  left as an open question: `GET /v1/webhooks/:id/secret`, audited as `webhook.reveal`.
+
+  **Authorization for re-display follows Rule B, and admin-only would have been a hole.** The
+  first draft made this route admin-only. Combined with the idempotent-replay rule in §12.2 —
+  a replayed `rotate` returns `secret: null` rather than persisting plaintext — that left an
+  **identity** caller who lost the original `rotate` response with no way ever to recover the
+  key for a subscription it legitimately owns: it could not re-display (admin-only) and could
+  not re-rotate idempotently (returns null), so its only option was a non-idempotent rotation
+  that invalidates whatever the consumer had. So:
+
+  | Caller | May re-display |
+  | --- | --- |
+  | admin | any subscription |
+  | identity token | subscriptions it owns **at `contentScope: metadata`** |
+  | identity token | **not** `preview` subscriptions — those stay admin-only, per Rule B |
+  | oauth token | none (Rule A excludes it from secret-bearing operations) |
+
+  This is safe for the same reason Rule B is: a `metadata` subscription carries no mail
+  content, so its signing key is not a content credential (§4.2), and the identity token could
+  already create and rotate that subscription. `preview` stays with admin because that key
+  *does* unlock content-bearing deliveries.
+- Never returned by any `GET` **except** `GET /v1/webhooks/:id/secret`, which is audited and
+  restricted per the table above. Every list and detail response carries `secretPrefix` alone.
 - Never written to `webhooks.json`, the delivery log, the audit log, or application
   output. Enforced structurally by a `FORBIDDEN_SECRET_KEYS` guard, following
   `notification-devices.ts:112`.
@@ -2569,7 +2819,7 @@ Rotation writes an audit event in all cases.
 | Slow/tarpit consumer exhausts the process | per-endpoint concurrency 1, delivery timeout, instance cap | 8.7 |
 | Subscription churn abuse | creation rate limit + subscription caps | 8.7 |
 | Approval `arguments` carrying arbitrary caller JSON to an external endpoint | `actionArguments` is `preview`-scope only, therefore admin-only, and bounded to 4 KiB at depth 4 against the 64 KiB / depth 10 the task API itself allows | 6.3, 6.6 |
-| Approval event delivered to the wrong mailbox | Subscription matching is on `reviewer` only, never `from` or `to`; an off-instance reviewer emits no event at all | 6.3 |
+| Approval event delivered to the wrong mailbox | Matching is on `reviewer`, which in v1 is always the task's `to`; `createApprovalTask()` already requires both parties to be managed identities and distinct (`tasks-internal.ts:1528-1529`), so an off-instance reviewer cannot exist | 6.3 |
 | Webhooks silently disabled because ntfy is off | gate widening + sink separation (prerequisite refactor) | 11.4 |
 | Delivery log becomes a privacy leak when shipped to an aggregator | no payload content, no URL query, `sensitive` rows write nothing extra | 8.6 |
 
@@ -2652,7 +2902,10 @@ than only unit tests.
    highest-value test in the feature: assert the §9.1 `publicEdge` composition — that
    `WEBHOOK_ALLOW_PRIVATE_TARGETS=false` blocks a private target even when
    `OAE_PUBLIC_EDGE` is unset, and that `OAE_PUBLIC_EDGE=true` blocks it even when the
-   webhook escape hatch is on. Because D16 tightens `lib/net.ts` itself, these tests must
+   webhook escape hatch is on. And the **Rule C rebind case** (§10.4): an identity-created
+   subscription whose host resolved publicly at creation, then resolves privately at delivery,
+   must be `refused` even though the global escape hatch is on — because it carries no
+   `privateTargetGranted`. Because D16 tightens `lib/net.ts` itself, these tests must
    also assert the **existing CIMD consumer still behaves correctly** — the change is shared.
 3. **Retry/outcome classification.** A local test server returning each status in §8.2,
    asserting the retry decision and every one of the eleven offsets in §8.3, with a fake
@@ -2671,17 +2924,28 @@ than only unit tests.
 7. **Authorization matrix.** Each route × {admin, own-address identity, other-address
    identity, oauth}, asserting `content_scope_requires_admin` and the address-scoping 403.
    Plus the MCP tier assertions from §10.7: every new tool appears in `TOOL_TIER_SPEC`,
-   `mail_webhook_create` is deny-by-default for an OAuth-derived token, and
-   `mail_webhook_test` is permitted for one.
-8. **Idempotency of `rotate`** and correctness of the dual-signature overlap window, and
-   that rotation increments the derivation `epoch` so the new key differs without touching
-   any other endpoint's key (§12.1).
+   `mail_webhook_create` is deny-by-default for an OAuth-derived token, **and so is
+   `mail_webhook_test`** — its `contained` tier does not make it OAuth-safe on its own, and
+   §10.4 Rule A applies to the tool as well as the route, since they perform the identical
+   action. An earlier draft asserted the opposite for `test`, which would have left an OAuth
+   bypass through the MCP door.
+8. **Rotation and creation idempotency.** That rotation increments the derivation `epoch` so
+   the new key differs without touching any other endpoint's key (§12.1); that a repeated
+   `rotate` with the same `Idempotency-Key` returns the stored `epoch` without incrementing
+   and returns `secret: null`; that a **second rotation inside an open window** returns
+   `409 rotation_window_open` unless `force` is set, and that `force` truncates the window and
+   audits it (R49); that `POST /v1/webhooks` with a seen `Idempotency-Key` returns the stored
+   id without creating a second subscription (R60); and the re-display matrix from §12.3 —
+   admin any, identity its own `metadata` only, never `preview`, never OAuth (R48).
 9. **`approval.requested` emission (D1).** That creating an approval task emits exactly one
-   event; that it is matched to subscriptions on `reviewer` and **not** on `from` or `to`;
-   that no event is emitted when the reviewer is off-instance; that `expiresInSec` is always
-   positive and never exceeds 2592000 (§6.3); and the property that makes this event stronger
-   than the mail one — that recomputing `approvalActionDigest()` over the action fetched from
-   `GET /v1/tasks/:id` equals the announced `digest`.
+   event; that it is matched to subscriptions on `reviewer`, which in v1 is **always** the
+   task's `to` (§6.3) — so a test asserting "matches reviewer but not `to`" would be asserting
+   an impossible state and must not be written; that `reviewer`, `to`, and `from` are all
+   managed identities and `from !== to`, as `createApprovalTask()` already enforces
+   (`tasks-internal.ts:1528-1529`); that `expiresInSec` never exceeds 2592000 and is never
+   negative (§6.3); and the property that makes this event stronger than the mail one — that
+   recomputing `approvalActionDigest()` over the action fetched from `GET /v1/tasks/:id` equals
+   the announced `digest`.
 10. **Non-blocking hand-off from both producers (§11.4 item 4).** That `createApprovalTask()`
     still returns its `201` in bounded time when the webhook endpoint is a tarpit, and that
     the mail loop's IDLE connection is not held across a delivery attempt. Assert with a
@@ -2926,6 +3190,29 @@ root cause — but it changes task-API validation, which is outside this RFC's s
 affect callers who never use webhooks. *Recommendation:* clamp in v1 as specified, and file the
 minimum-lifetime question against the task API separately.
 
+**Q20 — Should `CreateApprovalTaskInput` gain a real `reviewer` field?** Today
+`createApprovalTask()` hardcodes `reviewer: to` (`tasks-internal.ts:1535`) and the
+reconstruction path rejects any snapshot where they differ (`:992`), so in v1 **the assignee
+is always the reviewer** (§6.3). The consequence for #109's flagship human-in-the-loop case is
+that an agent cannot route an approval to itself while paging a human — it must address the
+approval *to* the human. Adding a distinct reviewer is a task-API change affecting the stamp,
+the digest inputs, and the ACL checks at `:990-993`, so it is out of scope here. *Recommendation:*
+leave v1 as-is; revisit if real deployments show agents wanting to keep assignment and paging
+separate.
+
+**Q21 — Extract embedded IPv4, or blanket-refuse the NAT64 / 6to4 / Teredo prefixes?** D16
+ratified closing the gap in PR 1 but not *how*. Blanket refusal is simpler and blocks
+`64:ff9b::a9fe:a9fe` correctly, but on a DNS64 IPv6-only deployment it also blocks every
+legitimate public IPv4 target, since all of them are synthesized into that prefix (§9.2).
+Extraction is strictly better on both axes and costs more parsing in the one module `net.ts:1`
+forbids duplicating. *Recommendation:* extraction, decided now so PR 1 is written once.
+
+**Q22 — Should `MessageDetail` carry `uidValidity`?** It does not today (`imap.ts:58-74`),
+which is why the cross-channel dedupe key in §11.5 cannot be generation-qualified and a
+consumer using both webhooks and `mail_wait_for` can wrongly suppress a message after an INBOX
+recreation. Small, independent of this feature, and it also strengthens `mail_wait_for` on its
+own terms. *Recommendation:* yes, as a separate small card.
+
 ---
 
 ## 17. Decisions
@@ -3158,6 +3445,51 @@ catch-up story rested on it. It survived the first review round because that rou
 whether the cursor *existed* and was signed, not which direction it traversed. §3.7 now states
 the direction explicitly and §15 PR 3 is re-scoped from a thin route change to new IMAP query
 semantics.
+
+**A third round — the commander's second final review against head `d86cc3a` plus local source
+verification — found twenty-two more**, including a second factual error about existing code
+and a security hole introduced by the previous round's own fix. Recorded as R40–R61.
+
+| # | Defect | Severity | Fixed in |
+| --- | --- | --- | --- |
+| R40 | **Second factual error about existing code.** The RFC called the UID watermark "durable-ish" and said restart behavior "depends on watermark durability". It is **in-memory only**: `notification-watcher.ts:138` says so, `runWatcher()` recreates it empty (`:1555`), and first sight anchors to the high-water UID and **emits nothing** (`:216-218`). Events during downtime are *guaranteed* lost. | **P1 factual** | §8.6, §11.4 intro, §11.4 item 4 |
+| R41 | **`reviewer` is always exactly `to`.** `createApprovalTask()` hardcodes `reviewer: to` (`tasks-internal.ts:1535`), `CreateApprovalTaskInput` has no reviewer field (`:257-266`), and `:992` rejects any snapshot where they differ. The RFC treated them as distinct parties, the §6.4 example used two different addresses (an impossible state), and §14 required a test asserting they differ — implementing it literally would have suppressed **every** approval webhook. | **P1 factual** | §6.3, §6.4, §5.1, §12.4, §14 item 9, §16 Q20 |
+| R42 | Rule B blocked `update(url)` and `DELETE` but not `rotate`, so an identity token could rotate an admin's `preview` subscription and be handed a fresh signing key for a scope it may not set — plus a denial of service on the admin's consumer. | **P1 security** | §10.4 Rule B |
+| R43 | **R35's own fix opened a hole:** the new `/disable` route was not in Rule A's OAuth list. Separately, §14 item 7 required `mail_webhook_test` to be *permitted* for OAuth while Rule A forbade the identical REST operation — an OAuth bypass through the MCP door. | **P1 security** | §10.4 Rule A (now "every mutation", not an enumeration), §14 item 7 |
+| R44 | Rule C judged privacy only against the **creation-time** resolution. An identity could create while the host resolved publicly, then rebind DNS inward; §9.1's delivery-time rule consults only the *global* escape hatch and so would wave it through. | **P1 security** | §10.4 Rule C, §10.5 (`privateTargetGranted`), §14 item 2 |
+| R45 | §8.6 said approvals re-fetch "by task id" but the log row had **no `taskId` field**, so pending approval events were unreconstructable after restart — losing exactly the human-paging event D1 added. | P1 | §8.6 (row + per-type population) |
+| R46 | Reconstruction step 3 discarded any group with `attempt >= MAX` and a non-success outcome. Since the `pending` row is written *before* the attempt, a crash there lost the eleventh attempt — the one §8.3 pins to +72 h — with no dead-letter row to show it. | P1 | §8.6 step 3 (`pending` is never final) |
+| R47 | `sensitive: true` rows "wrote nothing beyond" four fields, dropping `webhookId`, `runId`, `attempt`, `nextAttemptAt` — so **every pending `preview` delivery was silently lost at restart**. | P1 | §8.6 (`sensitive` is a marker, not a reducer; explicit minimum reconstructable set) |
+| R48 | Admin-only secret re-display plus an idempotent-replay rule returning `secret: null` left an **identity** caller who lost a `rotate` response with no way ever to recover its own key. | P1 | §12.3 (re-display follows Rule B), §10.3 |
+| R49 | A second rotation inside the 24 h overlap window advanced to `epoch+1` and signed `(epoch+1, epoch)`, **immediately dropping `epoch-1`** — the overlap guarantee silently stopped being one. | P1 | §12.2 (`409 rotation_window_open`, explicit `force`) |
+| R50 | `deferred` rescheduling took the **earlier** of `retryAfterSec` and the next offset, which hot-loops when the offset is already past. | P2 | §8.2 (`max()`, with the reasoning) |
+| R51 | The D2a ruling's interaction with D2 was unstated: threshold 10 against 11 attempts means a quiet mailbox trips at +48 h and attempt 11 never runs, which reads as contradicting §8.3's pinned horizon. | P2 | §8.5 (interaction paragraph; neither decision changed) |
+| R52 | §10.3's `DELETE` did not say it cancels queued retries, while §10.5's identity cascade did. | P2 | §10.3 (`subscription_deleted` dead-letter reason) |
+| R53 | `WEBHOOK_MAX_ATTEMPTS` had no upper bound, but §8.3 defines exactly eleven offsets. | P2 | §10.1 (bounded 1–11) |
+| R54 | The proposed forward cursor did not bind `uidValidity`; after an INBOX recreation a stale cursor would silently select *different* messages sharing a UID. | P2 | §3.7 (bind and reject on mismatch) |
+| R55 | `WEBHOOK_LOG_RETENTION_DAYS` allowed ≥ 1 day, so compaction could delete the only durable record of a pending attempt **before it was due**, dropping attempts 9–11. | P2 | §8.6, §10.1 (floor 4, tied to the horizon) |
+| R56 | D16's blanket refusal of `64:ff9b::/96` also blocks every legitimate IPv4 target on a **DNS64 IPv6-only** deployment. The cost was unrecorded. | P2 | §9.2 (cost recorded, extraction alternative named), §16 Q21 |
+| R57 | `expiresInSec` was typed `integer` in the table while the prose allowed `0`/`null` and §14 asserted "always positive" — three-way disagreement. | P2 | §6.3 (`integer \| null`), §14 item 9 |
+| R58 | The cross-channel dedupe key included `uidValidity`, which **cannot be constructed** from a `mail_wait_for` response — `MessageDetail` (`imap.ts:58-74`) has no such field. | P2 | §11.5 (key corrected, limitation and bounded-window mitigation documented), §16 Q22 |
+| R59 | `GET /:id/secret` returns long-lived key material with no cache directive. | P2 | §10.3 (`Cache-Control: no-store`, no `ETag`) |
+| R60 | Create was non-idempotent: losing the `201` lost the secret permanently, and the natural retry consumed another per-address slot, so two lost responses could exhaust the cap with orphans. | P2 | §10.3 (`Idempotency-Key` on create), §12.3 |
+| R61 | `webhook.ping`'s `data` shape was never defined, though §6.1 requires a `data` object with a discriminator. | P2 | §5.1 (`{object, webhookId, trigger}`, with the reason `address` is excluded) |
+
+R43 deserves particular note: it was introduced **by the previous round's fix** for R35.
+Adding a route without adding it to the authorization rule that enumerates routes is exactly
+the failure mode Rule A now avoids by being stated as "every mutation" rather than as a list.
+R40 and R41 are the second and third factual errors about existing code in this document's
+history (after R12's cursor direction), and both were caught only by reading source rather
+than by reasoning about the design — which is the argument for §14's verification list being
+as long as it is.
+
+**Running total: 61 recorded defects across four review passes** (R1–R11 pre-ratification,
+R12–R33 and R34–R39 post-ratification, R40–R61 final). Three were factual errors about
+existing code (R12 cursor direction, R40 watermark durability, R41 reviewer identity) and
+eight were security holes in the design itself (R1, R2, R15–R20, R42–R44). That ratio is the
+reason this document keeps a per-defect record instead of silently converging: a design doc
+that has been wrong about its own codebase three times should not ask a reader to trust the
+parts nobody has checked yet.
 
 **D2a has since been ruled on** (§17): consecutive failed attempts, per endpoint, reset on any
 success, threshold 10 — overriding this document's exhausted-events proposal. The review fixes
