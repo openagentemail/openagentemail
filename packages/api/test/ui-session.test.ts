@@ -502,19 +502,23 @@ describe('UI session persistence', () => {
   });
 
   test('生产 resolveUiSessionTokenByHash：identity 命中；OAuth access hash 永不命中', async () => {
+    const { config } = await import('../src/lib/config.ts');
     const { createIdentity } = await import('../src/lib/identities.ts');
     const { resolveUiSessionToken, resolveUiSessionTokenByHash } = await import(
       '../src/lib/auth.ts'
     );
     const { putAccessTokenForTests } = await import('../src/lib/oauth-store.ts');
 
+    // config is a process singleton and may have been frozen by an earlier test file;
+    // select an active configured admin key from the live singleton.
+    const configuredAdminKey = [...config.apiKeys][0]!;
     const issued = createIdentity({ localpart: 'ui-sess-hash' })!;
     const idHash = sha256Hex(issued.token);
     expect(resolveUiSessionTokenByHash(idHash)).toEqual({
       kind: 'identity',
       address: 'ui-sess-hash@test.example',
     });
-    expect(resolveUiSessionTokenByHash(sha256Hex('admin-key'))).toEqual({ kind: 'admin' });
+    expect(resolveUiSessionTokenByHash(sha256Hex(configuredAdminKey))).toEqual({ kind: 'admin' });
 
     const oauthTok = 'ui-sess-byhash-must-reject-oauth!!!!';
     putAccessTokenForTests({
