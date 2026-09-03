@@ -9,6 +9,7 @@ import {
   rotateIdentityToken,
   resolvePushContentTier,
   setIdentityPushContentTier,
+  validateScopesInput,
   LOCALPART_RE,
   PUSH_TIER3_WARNING,
   type Identity,
@@ -23,13 +24,20 @@ const createSchema = z.object({
   // This is intentionally opt-in and admin-only: it authorizes an identity
   // to interrupt the human notification channel.
   canNotifyUser: z.boolean().optional(),
-});
+  scopes: z.unknown().optional(),
+}).strict();
 
 const pushTierSchema = z
   .object({
     pushContentTier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     // Tier 3 ships body/OTP off-box via ntfy; require an explicit ack.
     confirm_risk: z.boolean().optional(),
+  })
+  .strict();
+
+const rotateTokenSchema = z
+  .object({
+    scopes: z.unknown(),
   })
   .strict();
 
@@ -59,6 +67,7 @@ function publicIdentity(identity: Identity) {
     ...(identity.canNotifyUser ? { canNotifyUser: true } : {}),
     pushContentTier: tier,
     ...(tier === 3 ? { pushContentTierWarning: PUSH_TIER3_WARNING } : {}),
+    ...(identity.scopes !== undefined ? { scopes: identity.scopes } : {}),
   };
 }
 
@@ -66,18 +75,34 @@ export const identitiesRoute = new Hono()
   .post('/', async (c) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      body = {};
+    let body: unknown = {};
+    const text = await c.req.text();
+    if (text.trim().length > 0) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return c.json({ error: 'invalid_json' }, 400);
+      }
     }
     const parsed = createSchema.safeParse(body ?? {});
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
+    let requestedScopes: string[] | undefined = undefined;
+    if (body && typeof body === 'object' && 'scopes' in body) {
+      const validated = validateScopesInput((body as Record<string, unknown>).scopes);
+      if (!validated.ok) {
+        return c.json({ error: validated.error, details: validated.details }, 400);
+      }
+      requestedScopes = validated.scopes;
+    }
     try {
-      const created = createIdentity(parsed.data);
+      const created = createIdentity({
+        name: parsed.data.name,
+        localpart: parsed.data.localpart,
+        canNotifyUser: parsed.data.canNotifyUser,
+        scopes: requestedScopes,
+      });
       if (!created) {
         return c.json({ error: 'address_exists' }, 409);
       }
@@ -99,6 +124,7 @@ export const identitiesRoute = new Hono()
           ...(identity.name ? { name: identity.name } : {}),
           ...(identity.canNotifyUser ? { canNotifyUser: true } : {}),
           pushContentTier: resolvePushContentTier(identity),
+          ...(identity.scopes !== undefined ? { scopes: identity.scopes } : {}),
           // Shown exactly once — store it now. Only its hash persists.
           token,
         },
@@ -156,12 +182,44 @@ export const identitiesRoute = new Hono()
     if (!updated) return c.json({ error: 'not_found' }, 404);
     return c.json(pushTierResponse(updated.address, resolvePushContentTier(updated)));
   })
-  .post('/:address/token', (c) => {
+  .post('/:address/token', async (c) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
-    const token = rotateIdentityToken(c.req.param('address'));
+    const address = c.req.param('address').toLowerCase();
+    const existing = findIdentity(address);
+    if (!existing) return c.json({ error: 'not_found' }, 404);
+
+    // A bodyless REST rotation is the explicit compatibility escape hatch
+    // back to a legacy full-permission token. Internal callers that omit the
+    // second argument preserve scopes instead.
+    let requestedScopes: string[] | null = null;
+    const text = await c.req.text();
+    if (text.trim().length > 0) {
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return c.json({ error: 'invalid_json' }, 400);
+      }
+      const parsed = rotateTokenSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+      }
+      const validated = validateScopesInput(parsed.data.scopes);
+      if (!validated.ok) {
+        return c.json({ error: validated.error, details: validated.details }, 400);
+      }
+      requestedScopes = validated.scopes;
+    }
+
+    const token = rotateIdentityToken(address, requestedScopes);
     if (!token) return c.json({ error: 'not_found' }, 404);
-    return c.json({ address: c.req.param('address').toLowerCase(), token });
+    const updated = findIdentity(address);
+    return c.json({
+      address,
+      token,
+      ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+    });
   })
   .delete('/:address', (c) => {
     const denied = requireAdmin(c);

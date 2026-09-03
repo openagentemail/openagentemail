@@ -49,10 +49,21 @@ All `/v1/*` require `Authorization: Bearer <key>`.
 Task REST creation accepts optional `parentTaskId` for ordinary and approval roots; the authenticated caller remains the sender. The pointer is immutable after creation: it is authenticated inside the signed creation root and survives IMAP reconstruction. `GET /v1/tasks/:id/children?limit=20|50|100&cursor=` lists only direct readable children after ACL filtering, with a parent/viewer/limit-bound opaque cursor and no hidden or global totals or descendants. Parent and child state remain independent. This backend/API change adds no automatic completion or failure propagation, scheduling, agent selection, result sharing, or descendant automation; dashboard ancestry and rollup are deliberately not included (the UI remains frozen).
 - OAuth 存储：`DATA_DIR/oauth.json`（只存哈希；与 identities.json 同模式）
 - `GET /v1/audit/events?limit=&event=` → `{events:[…]}`（**admin only**；scrubbed JSONL `DATA_DIR/audit.jsonl`；见 docs/security.md）
-- `POST /v1/identities` `{name?, localpart?}` → `201 {address, name?, pushContentTier, token}` (409 if taken)
-- `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,...}]}`
+- `POST /v1/identities` `{name?, localpart?, canNotifyUser?, scopes?: string[]}` → `201 {address, name?, pushContentTier, token, scopes?}` (admin only; 409 if taken). Optional `scopes` restricts the token (e.g. `['read:messages']`); absent means legacy full power. Unknown or misspelled fields are rejected rather than silently minting a full token.
+- `GET /v1/identities` → `{identities:[{address,name?,createdAt,pushContentTier,scopes?...}]}` (admin only; includes `scopes` when present, including `[]`)
+- `POST /v1/identities/:address/token` optional `{scopes?: string[]}` → `{address, token, scopes?}` (admin only). A truly empty body mints an unscoped/full token; any non-empty body must be a strict JSON object with `scopes` (e.g. `scopes: []` mints a token with no permissions; unknown or misspelled fields are rejected with 400).
 - `GET /v1/identities/:address/push-tier` → `{address, pushContentTier, warning?}` (admin any; identity own only)
 - `PUT /v1/identities/:address/push-tier` `{pushContentTier:1|2|3, confirm_risk?}` → admin only; tier 3 requires `confirm_risk: true`
+- **Identity Token Scopes**:
+  - Subtractive permission model: `scopes === undefined` retains legacy full-power identity access. Supplying `scopes` restricts privileges to only the explicitly granted capabilities (default deny for all other routes).
+  - Supported scopes:
+    - `read:messages`: Grants read-only access to messages for the token's own identity:
+      - REST: `GET /v1/messages`, `GET /v1/messages/:id`, `POST /v1/messages/wait` (long-poll read).
+      - MCP: `mail_list_messages`, `mail_read_message`, `mail_wait_for`.
+      - Denied: All mutations (`POST /v1/send`, `POST /v1/messages/:id/seen`, tasks, identities, notifications) and unrelated reads (`GET /v1/identities`, `GET /v1/send/history`, etc.) return 403 `forbidden: insufficient_scope`.
+    - `[]` (empty scopes): No `/v1` operation permissions; MCP protocol discovery may authenticate, but every MCP tool execution fails at its `/v1` operation.
+  - Scoped identity tokens are rejected from UI session creation and cannot access the web dashboard.
+  - Per-mailbox cross-identity delegation is not included in this batch and is tracked by #125.
 - `GET /v1/messages?address=&limit=50` → `{messages:[{id,from,to,subject,date,seen,snippet}]}`. Only the **newest 500 messages in the shared catch-all** are scanned for a match, so on a very busy instance an identity's older mail can fall outside that window and stop being listed even though retention has not deleted it yet
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO `address` **or** a server-trusted Sent item (From match **and** Message-ID in the outbound registry) — #26 PR 2 / 返工第2轮；reading never sets `\Seen` by itself — agents mark messages processed through here)

@@ -35,6 +35,50 @@ export const DEFAULT_PUSH_CONTENT_TIER: PushContentTier = 1;
 export const PUSH_TIER3_WARNING =
   'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
 
+/** First-class supported identity token scopes. */
+export const SUPPORTED_SCOPES = ['read:messages'] as const;
+export type SupportedScope = (typeof SUPPORTED_SCOPES)[number];
+export const SUPPORTED_SCOPES_SET = new Set<string>(SUPPORTED_SCOPES);
+
+export function isSupportedScope(scope: string): scope is SupportedScope {
+  return SUPPORTED_SCOPES_SET.has(scope);
+}
+
+export const MAX_SCOPES_COUNT = 10;
+export const MAX_SCOPE_LENGTH = 64;
+
+export type ScopeValidationResult =
+  | { ok: true; scopes: string[] }
+  | { ok: false; error: string; details?: unknown };
+
+/**
+ * Validate scopes input on identity creation and token rotation.
+ * Enforces string array type, bounded count and item lengths, duplicate rejection,
+ * and known supported scope check.
+ */
+export function validateScopesInput(scopes: unknown): ScopeValidationResult {
+  if (!Array.isArray(scopes)) {
+    return { ok: false, error: 'invalid_request', details: 'scopes must be an array of strings' };
+  }
+  if (scopes.length > MAX_SCOPES_COUNT) {
+    return { ok: false, error: 'invalid_request', details: 'too_many_scopes' };
+  }
+  const seen = new Set<string>();
+  for (const item of scopes) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > MAX_SCOPE_LENGTH) {
+      return { ok: false, error: 'invalid_request', details: 'invalid_scope_format' };
+    }
+    if (seen.has(item)) {
+      return { ok: false, error: 'invalid_request', details: 'duplicate_scope' };
+    }
+    seen.add(item);
+    if (!isSupportedScope(item)) {
+      return { ok: false, error: 'unsupported_scope', details: `Unsupported scope: ${item}` };
+    }
+  }
+  return { ok: true, scopes: [...scopes] };
+}
+
 export interface Identity {
   address: string;
   name?: string;
@@ -48,6 +92,12 @@ export interface Identity {
   pushContentTier?: PushContentTier;
   /** SHA-256 hex of the identity's API token. Absent on pre-token stores. */
   tokenHash?: string;
+  /**
+   * Optional token scopes.
+   * When undefined/absent, the token has legacy unscoped/full identity permissions.
+   * When present (including empty array []), privileges are subtractively restricted.
+   */
+  scopes?: string[];
 }
 
 export function resolvePushContentTier(identity: Pick<Identity, 'pushContentTier'>): PushContentTier {
@@ -85,7 +135,9 @@ function isIdentityShape(value: unknown): value is Record<string, unknown> {
     typeof identity.createdAt === 'string' &&
     (identity.name === undefined || typeof identity.name === 'string') &&
     (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
-    (identity.tokenHash === undefined || typeof identity.tokenHash === 'string')
+    (identity.tokenHash === undefined || typeof identity.tokenHash === 'string') &&
+    (identity.scopes === undefined ||
+      (Array.isArray(identity.scopes) && identity.scopes.every((s) => typeof s === 'string')))
   );
 }
 
@@ -316,6 +368,8 @@ export function createIdentity(input: {
    * 此时返回的 token 为空串。
    */
   issueToken?: boolean;
+  /** Optional token scopes; undefined means full-power identity token. */
+  scopes?: string[];
 }): { identity: Identity; token: string } | null {
   const identities = load();
   let localpart = input.localpart?.toLowerCase();
@@ -352,6 +406,7 @@ export function createIdentity(input: {
     ...(input.canNotifyUser ? { canNotifyUser: true } : {}),
     createdAt: new Date().toISOString(),
     ...(tokenHash ? { tokenHash } : {}),
+    ...(input.scopes !== undefined ? { scopes: [...input.scopes] } : {}),
   };
   identities.push(identity);
   save(identities);
@@ -360,15 +415,22 @@ export function createIdentity(input: {
 
 /**
  * Replace an identity's token (the old one stops working immediately).
+ * If `scopes` is provided (including empty array), the rotated token is scoped.
+ * If `scopes` is omitted/undefined, existing scope restrictions are preserved.
+ * Pass null only for an explicit reset to a legacy unscoped/full token.
  * Returns the new plaintext token, or null if the address doesn't exist.
  */
-export function rotateIdentityToken(address: string): string | null {
+export function rotateIdentityToken(address: string, scopes?: string[] | null): string | null {
   const identities = load();
   const needle = address.toLowerCase();
   const identity = identities.find((i) => i.address === needle);
   if (!identity) return null;
   const { token, tokenHash } = generateToken();
   identity.tokenHash = tokenHash;
+  if (scopes !== undefined) {
+    if (scopes === null) delete identity.scopes;
+    else identity.scopes = [...scopes];
+  }
   save(identities);
   return token;
 }

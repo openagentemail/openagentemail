@@ -121,8 +121,8 @@ Create an identity and hand your agent its scoped token (shown once):
 ```bash
 curl -X POST http://localhost:3100/v1/identities \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-  -d '{"name":"signup-bot"}'
-# → 201 {"address":"fox-k7d2@example.com","name":"signup-bot","token":"oa_…"}
+  -d '{"name":"signup-bot","scopes":["read:messages"]}'
+# → 201 {"address":"fox-k7d2@example.com","name":"signup-bot","token":"oa_…","scopes":["read:messages"]}
 ```
 
 The API binds to `127.0.0.1` by default — reach it from other hosts over an
@@ -402,7 +402,7 @@ Or the raw JSON config (Claude Desktop, Cursor, Kimi Code):
 
 | Tool | Description |
 | --- | --- |
-| `mail_new_identity(name?, localpart?)` | Create an identity; pass `localpart` for a custom address (e.g. `qa-bot`), or omit for a random one like `fox-k7d2` |
+| `mail_new_identity(name?, localpart?, scopes?)` | Admin only: create an identity and one-time token; pass `scopes: ["read:messages"]` for read-only own-mailbox access, `scopes: []` for no API operation permissions, or omit for legacy full identity permissions |
 | `mail_list_identities()` | List all identities |
 | `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet) |
 | `mail_read_message(address, id)` | Full message: text, html?, and `otp:{codes:[],links:[]}` |

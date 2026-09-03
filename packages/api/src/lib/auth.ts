@@ -34,7 +34,7 @@ function hashEquals(a: string, b: string): boolean {
 
 export type Auth =
   | { kind: 'admin' }
-  | { kind: 'identity'; address: string };
+  | { kind: 'identity'; address: string; scopes?: readonly string[] };
 
 /**
  * /mcp 审计与限量用的窄路身份（与 Auth 解耦：/v1 仍只读 auth，行为不变）。
@@ -89,7 +89,11 @@ export function resolveAccessToken(
   if (identity) {
     return {
       status: 'ok',
-      auth: { kind: 'identity', address: identity.address },
+      auth: {
+        kind: 'identity',
+        address: identity.address,
+        ...(identity.scopes !== undefined ? { scopes: identity.scopes } : {}),
+      },
       attribution: { kind: 'identity', address: identity.address },
     };
   }
@@ -155,26 +159,28 @@ export function resolveToken(
 }
 
 /**
- * Dashboard UI 会话交换专用：只认 admin API_KEYS 与 oa_ identity 票。
- * **永不**查 OAuth access 表——即使 MCP_PUBLIC_URL 已配置、aud 可解析，
- * OAuth 票也不能换浏览器会话（防注入邮件诱导的持久化 UI 入口）。
+ * Dashboard UI session exchange: recognizes only admin API_KEYS and unscoped oa_ identity tokens.
+ * Scoped tokens are rejected from UI session creation to prevent creating unrestricted UI sessions.
+ * Never checks the OAuth access table.
  */
 export function resolveUiSessionToken(token: string): Auth | null {
   if (config.apiKeys.has(token)) return { kind: 'admin' };
   const identity = findIdentityByToken(token);
-  return identity ? { kind: 'identity', address: identity.address } : null;
+  if (!identity || identity.scopes !== undefined) return null;
+  return { kind: 'identity', address: identity.address };
 }
 
 /**
- * UI session 持久化路径：仅凭 tokenHash 反解 principal（与 resolveUiSessionToken 同范围）。
- * 重启后内存里不再有明文 token，authenticate 走此入口。
+ * UI session persistence path: resolves principal by tokenHash only.
+ * Scoped identity tokens are rejected from UI session hash resolution.
  */
 export function resolveUiSessionTokenByHash(tokenHash: string): Auth | null {
   for (const key of config.apiKeys) {
     if (hashEquals(sha256Hex(key), tokenHash)) return { kind: 'admin' };
   }
   const identity = findIdentityByTokenHash(tokenHash);
-  return identity ? { kind: 'identity', address: identity.address } : null;
+  if (!identity || identity.scopes !== undefined) return null;
+  return { kind: 'identity', address: identity.address };
 }
 
 export const bearerAuth = createMiddleware(async (c, next) => {
