@@ -90,6 +90,13 @@
     loginView.hidden = false;
     loginError.textContent = message || '';
     configureLoginGate();
+    if (linkLoginNotice) {
+      linkLoginNotice.hidden = true;
+      linkLoginNotice.textContent = '';
+    }
+    if (typeof document !== 'undefined' && document.body && document.body.classList) {
+      document.body.classList.remove('link-login-active');
+    }
     if (!loginToken.disabled) loginToken.focus();
   }
 

@@ -599,8 +599,11 @@
     await applyRoute(route, { replaceUrl: true, announce: '', seedMobileStack: true });
   }
 
+  var loginGeneration = 0;
+
   loginForm.addEventListener('submit', async function (event) {
     event.preventDefault();
+    var gen = ++loginGeneration;
     if (!configureLoginGate()) return;
     loginError.textContent = '';
     loginSubmit.disabled = true;
@@ -613,6 +616,7 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ token: credential, remember: loginRemember.checked })
       });
+      if (gen !== loginGeneration) return;
       if (!response.ok) {
         loginError.textContent = response.status === 401
           ? 'That token is not valid.'
@@ -620,12 +624,20 @@
         return;
       }
       var loginPayload = await response.json();
+      if (gen !== loginGeneration) return;
       state.me = loginPayload;
+      clearLinkLoginMarker();
+      if (linkLoginNotice) {
+        linkLoginNotice.hidden = true;
+        linkLoginNotice.textContent = '';
+      }
+      setLinkBannerActive(false);
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
       showInbox();
       await startSession();
     } catch {
+      if (gen !== loginGeneration) return;
       loginError.textContent = 'Could not reach the server.';
     } finally {
       loginSubmit.disabled = !isLoginContextSafe();
@@ -639,6 +651,8 @@
         credentials: 'same-origin'
       });
     } finally {
+      clearLinkLoginMarker();
+      setLinkBannerActive(false);
       state.me = null;
       state.identities = [];
       state.messages = [];
@@ -795,18 +809,167 @@
   });
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
 
-  (async function start() {
-    configureLoginGate();
+  /**
+   * Consumes and strips the ?token= query parameter from window.location via history.replaceState.
+   * Returns the token if present and successfully stripped, or null if absent or if stripping is unavailable.
+   */
+  function consumeQueryToken() {
     try {
-      var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
-      if (response.status === 401) { showLogin(''); return; }
-      if (!response.ok) throw new Error('request_failed');
-      var mePayload = await response.json();
-      state.me = mePayload;
-      if (consumeReturnTo(mePayload)) return;
+      var url = new URL(window.location.href);
+      if (!url.searchParams.has('token')) return null;
+      if (!window.history || typeof window.history.replaceState !== 'function') {
+        return null;
+      }
+      var token = url.searchParams.get('token');
+      url.searchParams.delete('token');
+      var cleanSearch = url.searchParams.toString();
+      var cleanUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
+      window.history.replaceState(window.history.state, '', cleanUrl);
+      return token;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  /**
+   * Performs automated session login using a credential from a query parameter,
+   * matching standard form submission semantics without echoing the credential on failure.
+   */
+  async function loginWithToken(credential) {
+    var gen = ++loginGeneration;
+    if (!configureLoginGate()) {
+      showLogin('');
+      return;
+    }
+    loginError.textContent = '';
+    loginSubmit.disabled = true;
+    loginToken.value = '';
+    try {
+      var response = await fetch('/ui/api/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: credential, remember: false })
+      });
+      if (gen !== loginGeneration) return;
+      if (!response.ok) {
+        var msg = response.status === 401 || response.status === 400
+          ? 'That token is not valid.'
+          : 'Sign-in is temporarily unavailable. Try again.';
+        showLogin(msg);
+        return;
+      }
+      var loginPayload = await response.json();
+      if (gen !== loginGeneration) return;
+      state.me = loginPayload;
+      setLinkLoginMarker();
+      /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
+      if (consumeReturnTo(loginPayload)) return;
+      var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+      var noticeText = 'Signed in via link as ' + label;
+      if (linkLoginNotice) {
+        linkLoginNotice.textContent = noticeText;
+        linkLoginNotice.hidden = false;
+      }
+      announce(noticeText);
+      setLinkBannerActive(true);
       showInbox();
       await startSession();
     } catch {
+      if (gen !== loginGeneration) return;
+      showLogin('Could not reach the server.');
+    } finally {
+      loginSubmit.disabled = !isLoginContextSafe();
+    }
+  }
+
+  function setLinkLoginMarker() {
+    try {
+      if (typeof document !== 'undefined') {
+        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+      }
+    } catch (_err) {
+      /* cookie unavailable or restricted */
+    }
+  }
+
+  function clearLinkLoginMarker() {
+    try {
+      if (typeof document !== 'undefined') {
+        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0';
+      }
+    } catch (_err) {
+      /* cookie unavailable or restricted */
+    }
+  }
+
+  function hasLinkLoginMarker() {
+    try {
+      if (typeof document === 'undefined' || !document.cookie) return false;
+      var parts = document.cookie.split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var part = parts[i].trim();
+        if (part === 'oae-link-login=1') return true;
+      }
+      return false;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function setLinkBannerActive(active) {
+    try {
+      if (typeof document !== 'undefined' && document.body && document.body.classList) {
+        if (active) {
+          document.body.classList.add('link-login-active');
+        } else {
+          document.body.classList.remove('link-login-active');
+        }
+      }
+    } catch (_err) {
+      /* ignore DOM errors in restricted contexts */
+    }
+  }
+
+  /**
+   * Initializes the application UI, consumes any URL query token,
+   * and verifies or establishes the user session.
+   */
+  (async function start() {
+    configureLoginGate();
+    var queryToken = consumeQueryToken();
+    var gen = ++loginGeneration;
+    try {
+      var response = await fetch('/ui/api/me', { credentials: 'same-origin' });
+      if (response.status === 401) {
+        clearLinkLoginMarker();
+        setLinkBannerActive(false);
+        if (queryToken !== null) {
+          if (gen !== loginGeneration) return;
+          await loginWithToken(queryToken);
+          return;
+        }
+        if (gen !== loginGeneration) return;
+        showLogin('');
+        return;
+      }
+      if (!response.ok) throw new Error('request_failed');
+      var mePayload = await response.json();
+      if (gen !== loginGeneration) return;
+      state.me = mePayload;
+      if (consumeReturnTo(mePayload)) return;
+      if (hasLinkLoginMarker()) {
+        var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+        if (linkLoginNotice) {
+          linkLoginNotice.textContent = 'Signed in via link as ' + existingLabel;
+          linkLoginNotice.hidden = false;
+        }
+        setLinkBannerActive(true);
+      }
+      showInbox();
+      await startSession();
+    } catch {
+      if (gen !== loginGeneration) return;
       showLogin('Could not reach the server.');
     }
   })();

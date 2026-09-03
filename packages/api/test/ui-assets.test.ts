@@ -132,17 +132,31 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'Could not revoke that client.'");
   });
 
-  test('front-end code contains no HTML parser sinks or URL-token reader', () => {
+  test('front-end code contains no HTML parser sinks and confines searchParams strictly to consumeQueryToken', () => {
     expect(UI_JS).not.toMatch(
       /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b|\beval\s*\(|new\s+Function\b/,
     );
-    expect(UI_JS).not.toMatch(/URLSearchParams|location\.search|searchParams/);
-    expect(UI_JS).toContain('history.replaceState');
+    expect(UI_JS).not.toMatch(/location\.search/);
+
+    // searchParams / URLSearchParams 必须受控，仅允许出现在 consumeQueryToken 函数内部
+    // Assumption: The exemption region is delimited by `function consumeQueryToken()` up to `async function loginWithToken(` — inserting new code between these two functions shifts the boundary, so the slicing anchors must move with them.
+    const consumeQueryTokenStart = UI_JS.indexOf('function consumeQueryToken()');
+    expect(consumeQueryTokenStart).toBeGreaterThan(-1);
+    const consumeQueryTokenEnd = UI_JS.indexOf('async function loginWithToken(', consumeQueryTokenStart);
+    expect(consumeQueryTokenEnd).toBeGreaterThan(consumeQueryTokenStart);
+    const consumeQueryTokenBody = UI_JS.slice(consumeQueryTokenStart, consumeQueryTokenEnd);
+    const outsideConsumeQueryToken =
+      UI_JS.slice(0, consumeQueryTokenStart) + UI_JS.slice(consumeQueryTokenEnd);
+
+    expect(consumeQueryTokenBody).toContain('searchParams');
+    expect(consumeQueryTokenBody).toContain('window.history.replaceState');
+    expect(outsideConsumeQueryToken).not.toMatch(/URLSearchParams|searchParams/);
     expect(UI_JS).toContain('window.isSecureContext');
   });
 
   test('a first visit is not mislabeled as an expired session', () => {
-    expect(UI_JS).toContain("if (response.status === 401) { showLogin(''); return; }");
+    expect(UI_JS).toContain('if (response.status === 401)');
+    expect(UI_JS).toContain("showLogin('');");
   });
 
   test('link and frame creation retain both execution-point defenses', () => {

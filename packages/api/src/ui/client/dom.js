@@ -10,6 +10,7 @@
   var loginSubmit = byId('login-submit');
   var loginError = byId('login-error');
   var insecureWarning = byId('insecure-warning');
+  var linkLoginNotice = byId('link-login-notice');
   var identityList = byId('identity-list');
   var identitySearch = byId('identity-search');
   var identityCount = byId('identity-count');
