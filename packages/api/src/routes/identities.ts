@@ -173,6 +173,7 @@ export const identitiesRoute = new Hono()
       );
     } catch (err) {
       if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+        c.header('Cache-Control', 'no-store');
         const domains = (err as any).domains ?? [];
         return c.json(
           {
@@ -187,6 +188,7 @@ export const identitiesRoute = new Hono()
         return c.json({ error: 'invalid_localpart' }, 400);
       }
       if ((err as Error).message === 'invalid_domain') {
+        c.header('Cache-Control', 'no-store');
         return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;

@@ -601,6 +601,7 @@ describe('multi-domain identities', () => {
         body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
       });
       expect(resConflict.status).toBe(409);
+      expect(resConflict.headers.get('cache-control')).toBe('no-store');
       const dataConflict = (await resConflict.json()) as any;
       expect(dataConflict.error).toBe('localpart_conflict');
       expect(dataConflict.domains).toContain('test.example');

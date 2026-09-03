@@ -182,7 +182,11 @@
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
-        window.alert('address already exists');
+        if (error.body && error.body.error === 'localpart_conflict') {
+          window.alert(error.body.message || 'localpart already exists on another domain of this instance');
+        } else {
+          window.alert('address already exists');
+        }
       } else if (error.status === 400) {
         announce('Invalid identity request. Try again.');
       } else if (error.message !== 'session_expired') {

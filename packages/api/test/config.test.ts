@@ -513,16 +513,19 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     );
   });
 
-  test('rejects empty or invalid domain format entries in EXTRA_DOMAINS at startup', () => {
-    // Empty entry in comma-separated list
-    expect(() =>
-      parseConfig({
-        ...requiredEnv,
-        DOMAIN: 'primary.example',
-        EXTRA_DOMAINS: 'sec1.example, , sec2.example',
-      }),
-    ).toThrow('EXTRA_DOMAINS contains invalid domain entry: ""');
+  test('tolerates trailing commas and empty entries in EXTRA_DOMAINS', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'primary.example',
+      EXTRA_DOMAINS: 'sec1.example, , sec2.example,',
+    });
+    expect(config.extraDomains).toEqual(['sec1.example', 'sec2.example']);
+    expect(config.allDomains).toEqual(
+      new Set(['primary.example', 'sec1.example', 'sec2.example']),
+    );
+  });
 
+  test('rejects invalid domain format entries in EXTRA_DOMAINS at startup', () => {
     // Invalid characters (underscore in DNS hostname)
     expect(() =>
       parseConfig({

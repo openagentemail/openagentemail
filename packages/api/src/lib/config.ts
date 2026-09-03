@@ -283,6 +283,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
   if (rawExtra) {
     const entries = rawExtra.split(',').map((s) => s.trim());
     for (const rawEntry of entries) {
+      if (!rawEntry) continue;
       const canonical = rawEntry.toLowerCase().replace(/\.+$/, '');
       if (!isValidDomain(canonical)) {
         throw new Error(`EXTRA_DOMAINS contains invalid domain entry: "${rawEntry}"`);

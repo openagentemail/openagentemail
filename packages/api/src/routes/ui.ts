@@ -554,6 +554,7 @@ export function createUiApiRoutes(
   routes.get('/domains', (c) => {
     const denied = requireUiAdmin(c);
     if (denied) return denied;
+    c.header('Cache-Control', 'no-store');
     return c.json({
       primary: config.domain,
       extra: [...config.extraDomains],
@@ -613,6 +614,7 @@ export function createUiApiRoutes(
       );
     } catch (err) {
       if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
+        c.header('Cache-Control', 'no-store');
         const domains = (err as any).domains ?? [];
         return c.json(
           {
@@ -627,6 +629,7 @@ export function createUiApiRoutes(
         return c.json({ error: 'invalid_localpart' }, 400);
       }
       if ((err as Error).message === 'invalid_domain') {
+        c.header('Cache-Control', 'no-store');
         return c.json({ error: 'invalid_domain' }, 400);
       }
       throw err;

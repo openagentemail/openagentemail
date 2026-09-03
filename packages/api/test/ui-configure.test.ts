@@ -260,6 +260,7 @@ describe('Configure UI APIs (#26 PR 5)', () => {
         headers: { cookie },
       });
       expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('no-store');
       const data = (await res.json()) as any;
       expect(data.primary).toBe(config.domain);
       expect(data.extra).toContain('secondary.example');
@@ -287,6 +288,7 @@ describe('Configure UI APIs (#26 PR 5)', () => {
         body: JSON.stringify({ localpart: 'ui-agent', domain: 'unconfigured.example' }),
       });
       expect(bad.status).toBe(400);
+      expect(bad.headers.get('cache-control')).toBe('no-store');
       expect(await bad.json()).toEqual({ error: 'invalid_domain' });
 
       // Create on secondary domain
@@ -299,6 +301,20 @@ describe('Configure UI APIs (#26 PR 5)', () => {
       const created = (await ok.json()) as any;
       expect(created.address).toBe('ui-agent@secondary.example');
       expect(created.token).toBeDefined();
+
+      // Reject cross-domain localpart conflict
+      const conflict = await app.request('http://localhost/ui/api/identities', {
+        method: 'POST',
+        headers: jsonHeaders(cookie),
+        body: JSON.stringify({ localpart: 'ui-agent', domain: config.domain }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(conflict.headers.get('cache-control')).toBe('no-store');
+      expect(await conflict.json()).toEqual({
+        error: 'localpart_conflict',
+        message: 'localpart already exists on domain(s): secondary.example',
+        domains: ['secondary.example'],
+      });
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       (config.allDomains as Set<string>).delete('secondary.example');
