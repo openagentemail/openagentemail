@@ -568,9 +568,13 @@ describe('identity store composite cache version (F56)', () => {
 describe('multi-domain identities', () => {
   test('creates identities under secondary domains and preserves per-domain uniqueness', async () => {
     const prevNtfy = config.ntfy.enabled;
+    const prevHadAllDomain = config.allDomains.has('secondary.example');
+    const prevHadExtraDomain = config.extraDomains.includes('secondary.example');
     (config.ntfy as { enabled: boolean }).enabled = false;
     (config.allDomains as Set<string>).add('secondary.example');
-    (config.extraDomains as string[]).push('secondary.example');
+    if (!prevHadExtraDomain) {
+      (config.extraDomains as string[]).push('secondary.example');
+    }
 
     try {
       const app = appFor({ kind: 'admin' });
@@ -630,9 +634,13 @@ describe('multi-domain identities', () => {
       expect(await resDup.json()).toEqual({ error: 'address_exists' });
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
-      (config.allDomains as Set<string>).delete('secondary.example');
-      const idx = config.extraDomains.indexOf('secondary.example');
-      if (idx !== -1) config.extraDomains.splice(idx, 1);
+      if (!prevHadAllDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
+      if (!prevHadExtraDomain) {
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
     }
   });
 });

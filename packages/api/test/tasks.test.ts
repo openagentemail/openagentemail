@@ -229,6 +229,7 @@ describe('task route ACL and state machine', () => {
 
 describe('multi-domain task routing and known managed identity', () => {
   test('knownManagedIdentity accepts identities across all configured domains', () => {
+    const prevHadDomain = config.allDomains.has('secondary.example');
     (config.allDomains as Set<string>).add('secondary.example');
     try {
       const mockFind = (addr: string) =>
@@ -241,11 +242,14 @@ describe('multi-domain task routing and known managed identity', () => {
       expect(knownManagedIdentity('ext@outside.example', mockFind)).toBe(false);
       expect(knownManagedIdentity('ghost@secondary.example', mockFind)).toBe(false);
     } finally {
-      (config.allDomains as Set<string>).delete('secondary.example');
+      if (!prevHadDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
     }
   });
 
   test('task creation works across different configured domains and rejects unconfigured domains', async () => {
+    const prevHadDomain = config.allDomains.has('secondary.example');
     (config.allDomains as Set<string>).add('secondary.example');
     try {
       const SEC = 'agent@secondary.example';
@@ -287,7 +291,9 @@ describe('multi-domain task routing and known managed identity', () => {
       const dataBad = (await resBad.json()) as any;
       expect(dataBad.error).toBe('forbidden: task participants must be known identities');
     } finally {
-      (config.allDomains as Set<string>).delete('secondary.example');
+      if (!prevHadDomain) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+      }
     }
   });
 });

@@ -458,6 +458,28 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     ]);
   });
 
+  test('validates primary DOMAIN format rejecting empty/dot and malformed domains while preserving dotted-legacy', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: '.',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "."');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        DOMAIN: 'not a domain',
+      }),
+    ).toThrow('DOMAIN contains invalid domain: "not a domain"');
+
+    const dotted = parseConfig({
+      ...requiredEnv,
+      DOMAIN: 'example.com.',
+    });
+    expect(dotted.domain).toBe('example.com.');
+  });
+
   test('rejects EXTRA_DOMAINS containing the primary DOMAIN (case-insensitive)', () => {
     expect(() =>
       parseConfig({

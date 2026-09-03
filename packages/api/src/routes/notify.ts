@@ -207,11 +207,7 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       }
 
       try {
-        const agentLocalpart = addressed
-          ? addressed.address.split('@')[0]
-          : input.target.startsWith('agent:')
-            ? input.target.slice('agent:'.length).split('@')[0]
-            : undefined;
+        const agentLocalpart = addressed ? addressed.address.split('@')[0] : undefined;
         const publishTarget: NotifyTarget =
           input.target === 'user' ? 'user' : (`agent:${agentLocalpart}` as const);
         return c.json(
