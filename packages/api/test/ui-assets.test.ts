@@ -1533,7 +1533,8 @@ describe('UI static asset contract', () => {
     const showCreate = MODAL_JS.slice(
       MODAL_JS.indexOf('function showCreateModal('),
     );
-    expect(showCreate).toContain('beginModal();');
+    expect(showCreate).toContain('var openedGen = beginModal();');
+    expect(showCreate).toContain('if (openedGen !== modalGeneration) return;');
     expect(MODAL_JS).toContain("event.key !== 'Escape'");
     expect(MODAL_JS).toContain('closeAllModals();');
     expect(UI_JS).toContain('tokenModalClose.addEventListener(\'click\', closeAllModals)');

@@ -98,21 +98,24 @@
 
   async function showCreateModal() {
     if (!isAdmin()) return;
-    beginModal();
+    var openedGen = beginModal();
     createName.value = '';
     createLocalpart.value = '';
     try {
       var data = await apiJson('/ui/api/domains');
+      if (openedGen !== modalGeneration) return;
       var list = (data && data.all && data.all.length > 0)
         ? data.all
         : (data && data.primary ? [data.primary] : []);
       populateCreateDomain(list);
     } catch (e) {
+      if (openedGen !== modalGeneration) return;
       while (createDomain.firstChild) {
         createDomain.removeChild(createDomain.firstChild);
       }
       createDomain.disabled = true;
     }
+    if (openedGen !== modalGeneration) return;
     createModal.hidden = false;
     createName.focus();
   }
