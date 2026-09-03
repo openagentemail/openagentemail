@@ -18,7 +18,7 @@ import { createMiddleware } from 'hono/factory';
 import type { Context } from 'hono';
 import { config } from './config.ts';
 import { findIdentity, findIdentityByToken, findIdentityByTokenHash } from './identities.ts';
-import { getGrant, lookupAccessToken } from './oauth-store.ts';
+import { getGrant, lookupAccessToken, peekAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
 
 function sha256Hex(value: string): string {
@@ -90,11 +90,11 @@ export function resolveAccessToken(
     identity = findIdentityByToken(token);
   } catch (err) {
     // If the identity store is damaged, distinguish credential classes:
-    // Only OAuth credentials (present in oauth-store) take the fail-closed 401 path.
+    // Only OAuth credentials (present in oauth-store access table, even if expired)
+    // take the fail-closed 401 path.
     // Non-OAuth credentials (oa_ identity tokens or garbage) must rethrow to surface 500
     // and log the storage outage per the integrity contract.
-    const oauthProbe = lookupAccessToken(token, options.now);
-    if (oauthProbe.status === 'missing') {
+    if (!peekAccessToken(token)) {
       throw err;
     }
     identity = undefined;

@@ -202,6 +202,48 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
   return changed;
 }
 
+function loadRaw(): OAuthStoreFile {
+  const path = storePath();
+  if (!existsSync(path)) {
+    if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
+      return storeCache.data;
+    }
+    storeCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
+    return storeCache.data;
+  }
+  try {
+    const version = fileVersionFromStat(statSync(path));
+    if (storeCache && storeVersionsEqual(storeCache.version, version)) {
+      return storeCache.data;
+    }
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isStoreShape(parsed)) {
+      throw new Error('invalid oauth store shape');
+    }
+    storeCache = { version, data: parsed };
+    return storeCache.data;
+  } catch (err) {
+    invalidateStoreCache();
+    if ((err as Error).message === 'oauth_store_corrupt') throw err;
+    throw new Error('oauth_store_corrupt');
+  }
+}
+
+/**
+ * Non-destructive existence check in access table without pruning and without
+ * expiry evaluation. Used exclusively by auth credential discrimination when
+ * the identity store is damaged.
+ */
+export function peekAccessToken(token: string): boolean {
+  try {
+    const data = loadRaw();
+    const hash = hashSecret(token);
+    return Boolean(data.access[hash]);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * @param persistPrune 冷读发现过期行时是否写回磁盘。
  * 公开 /oauth/revoke 用 false：未知 token 路径必须零磁盘写（防未鉴权写放大）。
@@ -652,7 +694,7 @@ export function putAccessTokenForTests(input: {
   expiresAt: number;
   ensureGrant?: { clientId: string; clientName: string };
 }): void {
-  const data = load();
+  const data = loadRaw();
   if (input.ensureGrant && !data.grants[input.grantId]) {
     const nowIso = new Date().toISOString();
     data.grants[input.grantId] = {
@@ -670,5 +712,7 @@ export function putAccessTokenForTests(input: {
     aud: input.aud,
     expiresAt: input.expiresAt,
   };
-  save(data);
+  invalidateStoreCache();
+  const version = writeStoreFile(data);
+  storeCache = { version, data };
 }

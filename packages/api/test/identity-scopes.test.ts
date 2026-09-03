@@ -80,7 +80,7 @@ const {
 } = await import('../src/lib/auth.ts');
 const { createHash } = await import('node:crypto');
 const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
-const { putAccessTokenForTests } = await import('../src/lib/oauth-store.ts');
+const { putAccessTokenForTests, peekAccessToken } = await import('../src/lib/oauth-store.ts');
 const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
 
 const sha256Hex = (val: string) => createHash('sha256').update(val).digest('hex');
@@ -1646,16 +1646,6 @@ describe('Issue #114: read-only API token scopes', () => {
         ensureGrant: { clientId: 'client-failclosed', clientName: 'Client Failclosed' },
       });
 
-      const now = Date.now();
-      putAccessTokenForTests({
-        token: expiredOAuthToken,
-        grantId: 'grant-failclosed-5',
-        address: user.identity.address,
-        aud: resource,
-        expiresAt: now + 10_000,
-        ensureGrant: { clientId: 'client-failclosed-exp', clientName: 'Client Failclosed Exp' },
-      });
-
       const storePath = join(config.dataDir, 'identities.json');
       const goodData = readFileSync(storePath, 'utf8');
 
@@ -1684,9 +1674,21 @@ describe('Issue #114: read-only API token scopes', () => {
         expect(resOAuth.status).toBe(401);
         expect(await resOAuth.json()).toEqual({ error: 'unauthorized' });
 
-        // 4. Expired OAuth token + malformed store -> 401 unauthorized (not 500)
-        const resExpiredOAuth = resolveAccessToken(expiredOAuthToken, { resource, now: now + 20_000 });
-        expect(resExpiredOAuth.status).toBe('unauthorized');
+        // 4. Real wall-clock expired OAuth token + malformed store -> 401 unauthorized (not 500)
+        putAccessTokenForTests({
+          token: expiredOAuthToken,
+          grantId: 'grant-failclosed-5',
+          address: user.identity.address,
+          aud: resource,
+          expiresAt: Date.now() - 1000, // real wall-clock expiry in the past
+          ensureGrant: { clientId: 'client-failclosed-exp', clientName: 'Client Failclosed Exp' },
+        });
+
+        const resExpiredOAuth = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${expiredOAuthToken}` },
+        });
+        expect(resExpiredOAuth.status).toBe(401);
+        expect(await resExpiredOAuth.json()).toEqual({ error: 'unauthorized' });
 
         // 5. Admin key + malformed store -> fully functional (200 on admin endpoint)
         const resAdmin = await app.request(`/v1/audit/events?limit=1`, {
@@ -1730,6 +1732,27 @@ describe('Issue #114: read-only API token scopes', () => {
         spyProbe.mockRestore();
         spyFind.mockRestore();
       }
+    });
+
+    test('6c. peekAccessToken is non-destructive and does not prune expired tokens', () => {
+      const expiredToken = 'peek_test_expired_oauth_token_99999';
+      putAccessTokenForTests({
+        token: expiredToken,
+        grantId: 'grant-peek-test',
+        address: 'peek@test.example',
+        aud: resource,
+        expiresAt: Date.now() - 5000, // expired in the past
+        ensureGrant: { clientId: 'client-peek', clientName: 'Client Peek' },
+      });
+
+      // 1. Peek detects the token exists in the access table
+      expect(peekAccessToken(expiredToken)).toBe(true);
+
+      // 2. Token is STILL present after peek (peek does not prune)
+      expect(peekAccessToken(expiredToken)).toBe(true);
+
+      // 3. Peek returns false for tokens never in the access table
+      expect(peekAccessToken('non_existent_token_abc')).toBe(false);
     });
   });
 });
