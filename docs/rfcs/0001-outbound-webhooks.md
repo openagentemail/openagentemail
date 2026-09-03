@@ -786,7 +786,7 @@ from the event id and not from the opaque cursor. Whether to move to UUIDv7/ULID
 | --- | --- | --- | --- |
 | `object` | `"mail"` | metadata | Stripe-style discriminator, so `data` is self-describing. |
 | `address` | string | metadata | The mailbox this event is scoped to. Always a single address (§5.1). |
-| `messageId` | string | metadata | OAE message id — a **decimal IMAP UID as a string**, not a UUID (`toDetail()` emits `String(uid)`; `getMessageWith()` parses the parameter as a positive integer, `imap.ts:732-733`, `:897-905`). Usable directly against `GET /v1/messages/:id`. Only meaningful within the mailbox generation that produced it — see `uidValidity` in §8.6. |
+| `messageId` | string | metadata | OAE message id — a **decimal IMAP UID as a string**, not a UUID (`toDetail()` emits `String(uid)`; `getMessageWith()` parses the parameter as a positive integer, `imap.ts:903-905`). Usable against `GET /v1/messages/:id` **only together with `uidValidity`** — see the warning below. |
 | `cursor` | string | metadata | Signed `mail-cursor-v1` token (§3.7). **Opaque — never string-compare or sort on it** (§8.4). A resume token to hand back to the list API once `GET /v1/messages` accepts one (§3.7, §15). |
 | `uid` | integer | metadata | The IMAP UID as a number. With `receivedAt`, the **supported ordering key** (§8.4). |
 | `uidValidity` | integer | metadata | The mailbox generation that produced `uid` and `messageId`. UIDs from different `uidValidity` values are not comparable. |
@@ -802,13 +802,50 @@ from the event id and not from the opaque cursor. Whether to move to UUIDv7/ULID
 | `containsLink` | boolean | metadata | A verification-style link was detected. Presence only. |
 | `textPreview` | string | `preview` | Body preview, ≤ `WEBHOOK_BODY_PREVIEW_CHARS`. |
 | `securityCodes` | `string[]` | `preview` | ≤ `WEBHOOK_MAX_CODE_ITEMS` entries, each ≤ `WEBHOOK_CODE_ENTRY_CHARS`. |
-| `links` | `string[]` | `preview` | Same bounds. |
+| `links` | `string[]` | `preview` | ≤ `WEBHOOK_MAX_CODE_ITEMS` entries. **An over-long link is dropped whole, never truncated** — see the note below. |
+
+**Links are dropped whole, never truncated.** `securityCodes` are truncated at
+`WEBHOOK_CODE_ENTRY_CHARS` because a partial code is at worst useless, but a URL truncated at
+200 characters is actively harmful: verification and signed links routinely exceed that, and
+a consumer that fetches a truncated URL gets a 404 or — worse — a valid response for a
+*different* resource whose signature happens to verify against the truncated path. The repo
+already settled this question for push notifications: `packPushLinkLines()` is documented as
+*"Never mid-truncates a URL; drops the tail and appends a +N note"*
+(`notification-watcher.ts:266-268`). Webhooks follow the same rule — a link over
+`WEBHOOK_CODE_ENTRY_CHARS` is omitted entirely and counted in the dropped tally, and
+`containsLink` (§6.2) remains `true` so the consumer still knows to fetch the message and look
+for itself. Truncating codes but not links is a deliberate asymmetry, not an oversight.
 
 The `containsSecurityCode` / `containsLink` booleans at metadata scope are a direct lift
 from push tier 1, which already communicates *"(contains OTP or verification link)"*
 without the value. They are the most valuable two bytes in the payload for the flagship
 use case in #109 — waking a postmaster agent only for mail that actually needs action —
 and they leak almost nothing.
+
+**`messageId` alone is not a safe refetch key, and the API has to change for it to become
+one.** The refetch pattern this RFC adopts from Stripe (§4.2) says: act on the event, then
+fetch authoritative content via `GET /v1/messages/:id`. But `getMessageWith()` validates only
+that the id parses to a positive integer and then calls `fetchOne(uid, …)`
+(`imap.ts:898-909`) — and `lib/imap.ts` contains **no reference to `uidValidity` at all**. A
+UID is unique only within a mailbox generation, and D2's retry horizon means a delivery can
+legitimately arrive **up to 72 hours** after emission. An INBOX rebuilt in that window
+restarts UIDs from scratch, so the consumer's refetch would return a *different, unrelated*
+message with a `200` and no indication anything was wrong. For a webhook whose whole purpose
+is waking an agent to act on mail, silently acting on the wrong mail is the worst available
+failure mode.
+
+So PR 3 (§15) must add a generation precondition to the detail route, not merely a forward
+cursor:
+
+> `GET /v1/messages/:id` accepts an optional `uidValidity` integer query parameter. When
+> supplied and it does not match the mailbox's current generation, the route returns
+> **`404 {error:'stale_message_generation'}`** — never a different message. Webhook consumers
+> MUST pass `data.uidValidity` from the event when refetching; the payload carries it (§6.2)
+> for exactly this reason.
+
+The parameter is optional so existing callers are unaffected, but the webhook documentation
+states it as mandatory for event-driven refetch, and §14 tests the mismatch path. Without it
+the `uidValidity` field in the payload is decorative.
 
 ### 6.3 `approval.requested` data object
 
@@ -1058,7 +1095,11 @@ usable degradation path at all, so a 4 KiB `actionArguments` under a lower confi
 - both scopes: `cc` → `to` → `subject` → **`from.name`**.
 - **never dropped:** `id`, `type`, `payloadVersion`, `createdAt`, `domain`, `data.object`,
   `data.address`, `data.messageId`, `data.cursor`, `data.uid`, `data.uidValidity`,
-  `data.receivedAt`, `data.from.address`, and the two `contains…` booleans.
+  `data.receivedAt`, `data.from.address`, the two `contains…` booleans, and the three
+  fixed-size scalars `data.sizeBytes`, `data.hasAttachments`, `data.unread`. Every field in
+  §6.2 is now accounted for: it is either in a drop order or in this set, with none left
+  undefined. The three scalars are never dropped because they cost at most a few dozen bytes
+  and `unread` in particular is what a postmaster agent routes on.
 
 **Every field in a never-dropped set is itself byte-capped**, because "never dropped" and
 "unbounded" together are a self-inflicted denial of service. `data.from` is attacker-controlled
@@ -1267,6 +1308,20 @@ offset. Taking the *earlier* of the two — as a first draft specified — hot-l
 offset is already past, the retry fires immediately, the limiter denies it again, and the
 delivery spins until the window opens, burning CPU and log rows without making progress.
 `max()` guarantees forward progress at whichever of the two constraints is actually binding.
+
+The two causes of `deferred` need different delays, and only one of them produces a
+`retryAfterSec`:
+
+| Cause | Reschedule at |
+| --- | --- |
+| per-endpoint rate limit denied | `max(limiter retryAfterSec, next schedule offset)` |
+| instance concurrency pool full (§8.7) | `now + WEBHOOK_POOL_RETRY_MS` (default **5000**), since a full pool yields no `retryAfterSec` at all |
+
+Without a defined delay for pool saturation, the second case has nothing to schedule on and
+would either spin or fall through to the next 72-hour offset — a five-second capacity blip
+costing two hours of latency. `WEBHOOK_POOL_RETRY_MS` is bounded below at 1000 ms so it cannot
+be configured into a spin.
+
 Rescheduling is **bounded** — a `deferred` row still carries `nextAttemptAt` and is
 subject to the same 72-hour horizon, so backpressure delays delivery rather than creating an
 unbounded queue. This is the classification the first draft left empty.
@@ -1340,11 +1395,14 @@ exactly the weekend-outage coverage the tail was extended to buy. So:
 The §8.3 table is therefore the **actual** schedule within ±10%, not a set of upper bounds —
 which is what makes it safe for an integrator to plan a catch-up job against.
 
-`WEBHOOK_MAX_ATTEMPTS` (default **11**, minimum 1) **truncates this table**; there is no base
-or multiplier knob, because a fixed published schedule is easier for an integrator to reason
-about than a formula. `=1` gives fire-and-forget, `=4` gives the perishability-only half, and
-`=8` reproduces the ~27 h budget this document originally recommended — so an operator who
-disagrees with D2 can restore it with one env var.
+`WEBHOOK_MAX_ATTEMPTS` (default **11**, minimum 1, maximum 11) **truncates this table**; there
+is no base or multiplier knob, because a fixed published schedule is easier for an integrator
+to reason about than a formula. `=1` gives fire-and-forget, `=4` gives the perishability-only
+front half (~35 minutes), and `=8` gives a **+20 h** horizon. Note that `=8` is *not* the
+~27 h budget this document originally recommended: that figure came from summing eight
+inter-attempt *delays*, whereas this table lists cumulative *offsets*, and attempt 8 sits at
++20 h. The upper bound of 11 is enforced in the schema because the table defines exactly
+eleven offsets — a larger value would have no defined attempt times.
 
 `webhook.ping` uses attempts 1–3 only (~5 minutes). A connectivity test that takes three days
 to report failure is useless as a test.
@@ -1537,6 +1595,7 @@ Each row records one delivery attempt:
   "address": "postmaster@openagent.email",
   "messageId": "4821",
   "uidValidity": 17,
+  "rfc822MessageId": "<20260903122639.4821@mail.openagent.email>",
   "taskId": null,
   "eventCreatedAt": "2026-09-03T12:26:40.412Z",
   "attempt": 1,
@@ -1578,6 +1637,11 @@ Six of those fields exist because something breaks without them:
   silently dropped — losing exactly the human-paging event D1 put into v1 for. Per event type:
   `mail.received` populates `messageId` + `uidValidity` and leaves `taskId` null;
   `approval.requested` populates `taskId` and leaves both mail fields null.
+- **`rfc822MessageId`** is the message's RFC 822 `Message-ID` header when it has one, and
+  exists solely to enable the cross-generation fallback in the reconstruction rules below.
+  Like `messageId` it is an identifier rather than content, so it does not weaken the
+  no-payload rule. Null when the message had no such header, which is why that branch
+  dead-letters instead of guessing.
 - **`replay`** is `true` only on a delivery created by
   `POST /v1/webhooks/deliveries/:deliveryId/redeliver` (decision **D15**, §17), so an operator
   reading the log can tell a replay from an original.
@@ -1660,13 +1724,30 @@ Rules:
     (`getTaskSnapshot()`), so reconstruction is exact and survives any IMAP renumbering.
   - **`mail.received`** has no lookup-by-UUID primitive: the OAE message id **is** the IMAP
     UID within the inbox, and a UID is only addressable while `UIDVALIDITY` is unchanged.
-    The log row therefore also records **`uidValidity`** at emission. On reconstruction, if
-    the mailbox's current `UIDVALIDITY` matches, fetch by UID; if it does not, the UID is
-    meaningless and the delivery is dead-lettered with outcome `permanent` and reason
-    `uidvalidity_changed` — not silently dropped, and not fetched by a stale UID that now
-    addresses a different message. To make recovery survive renumbering, the row may also
-    carry the RFC 822 `Message-ID` header, which permits a header-search fallback; that is
-    an identifier rather than content, so it does not weaken the no-payload rule.
+    `lib/imap.ts` never mentions `uidValidity` at all, so nothing today detects the mismatch.
+    The log row therefore records **`uidValidity`** at emission, and reconstruction proceeds
+    in exactly two cases:
+
+    1. **Generation matches** — fetch by UID. This is the normal path.
+    2. **Generation differs** — fall back to an RFC 822 `Message-ID` header search, which the
+       row also records when the message had one. This is the *only* recovery path, and it is
+       deliberately narrow:
+       - **No `Message-ID` recorded** (the header is optional in practice) → dead-letter with
+         outcome `permanent`, reason `uidvalidity_changed`.
+       - **The header search returns zero or more than one match** → same dead-letter. A
+         non-unique match is not guessed at, because delivering the wrong message's content
+         under the original `eventId` is the exact failure §6.2's refetch warning exists to
+         prevent.
+       - **Exactly one match** → rebuild, and the rebuilt payload's `messageId`, `uid`, and
+         `uidValidity` are set from the **newly fetched** message, not copied from the log
+         row; `data.cursor` is regenerated against the current generation. The `eventId` and
+         `eventCreatedAt` are preserved, so the consumer's dedupe key is stable while the
+         identifiers that describe *where the message now lives* are honest about the new
+         generation.
+
+    An earlier draft said both "dead-letter on mismatch" and "a Message-ID fallback may be
+    used", which is not a specification. The rule above is ordered and total: every branch
+    terminates in either a rebuilt delivery or a dead letter with a reason.
 
   In every case the rebuilt delivery keeps the **original** `eventId`, preserving the
   consumer's dedupe key across a restart. If the message is genuinely gone (retention,
@@ -1707,7 +1788,7 @@ Reuse `slidingWindowCheck()` (`ratelimit.ts:26`) and the wait-slot pattern
 | concurrent deliveries, instance-wide | `WEBHOOK_MAX_CONCURRENT = 8` | Mirrors `MAX_WAITS_TOTAL = 8`. A webhook pool must not be able to starve `mail_wait_for`, so these are **separate** pools (§11.3). |
 | delivery attempts per endpoint per minute | `WEBHOOK_RATE_DELIVER_PER_MIN` = 60 | Bounds a hot mailbox pointed at a slow endpoint. |
 | subscription creates per token per minute | `WEBHOOK_RATE_CREATE_PER_MIN` = 10 | Bounds endpoint-churn abuse. |
-| **`POST /:id/test` calls *and* creation-triggered pings, per token per minute** | `WEBHOOK_RATE_TEST_PER_MIN` = 3 | **One shared probe bucket for both**, because both originate an outbound connection on demand. Bounding only `/test` leaves the create path as an equivalent channel: each successful create fires an asynchronous `webhook.ping` (§5.1), and creation is allowed 10/min, so delete-and-recreate yields 10+ probes/min with observable `state` / `lastDelivery` feedback. Separate from the delivery bucket, which is per endpoint and not caller-triggered. This is the mitigation §12.5 called "obvious"; this row is where it actually lives. |
+| **`POST /:id/test` calls *and* creation-triggered pings, per token per minute** | `WEBHOOK_RATE_TEST_PER_MIN` = 3 **triggers** | **One shared probe bucket for both**, because both originate outbound connections on demand. Bounding only `/test` leaves the create path as an equivalent channel: each successful create fires an asynchronous `webhook.ping` (§5.1), and creation is allowed 10/min, so delete-and-recreate yields 10+ triggers/min with observable `state` / `lastDelivery` feedback. Separate from the delivery bucket, which is per endpoint and not caller-triggered. **The bucket counts triggers, not connections, and the honest ceiling is 3× higher:** each accepted ping runs attempts 1–3 (§8.3), so 3 triggers/min is up to **9 connection attempts/min per token** spread over ~5 minutes. Retries are not charged to the caller's bucket because they are not caller-initiated and fire long after the request returns — charging them would need the bucket key persisted onto the delivery row for no security gain, since the total is already bounded by (trigger limit × ping attempts). What matters is that the *stated* bound is the real one: 9/min, not 3/min. This is the mitigation §12.5 called "obvious"; this row is where it actually lives. |
 | subscriptions per instance | `WEBHOOK_MAX_SUBSCRIPTIONS = 16` | Small by design; a mailbox does not need 200 callbacks. |
 | subscriptions per address | `WEBHOOK_MAX_PER_ADDRESS` = 4 | Allows fan-out (agent + archiver + ntfy bridge) without unbounded growth. |
 
@@ -1920,9 +2001,10 @@ OAE must not be usable as a DDoS reflector or a port scanner:
 - Registration rate limited, **and creation-triggered pings charged to the same per-token
   probe bucket as `POST /:id/test`** (§8.7). Otherwise the create rate becomes the probe rate:
   a stolen identity token deletes and recreates subscriptions 10× a minute, each firing an
-  asynchronous `webhook.ping` (§5.1), and obtains at least ten connection probes a minute plus
-  ping retries — while reading `state` and `lastDelivery` to observe the outcome. Bounding
-  only `/test` and not the ping it triggers bounds nothing.
+  asynchronous `webhook.ping` (§5.1), and obtains at least ten triggers a minute — while
+  reading `state` and `lastDelivery` to observe the outcome. Bounding only `/test` and not the
+  ping it triggers bounds nothing. The bucket counts **triggers**, and since each ping runs up
+  to three attempts the honest egress ceiling is ~9 connections/minute per token (§8.7, §12.5).
 - Delivery attempts to a `refused` target are never retried (§8.2).
 
 ---
@@ -1944,9 +2026,10 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_ALLOWED_PORTS` | CSV of ints | `443` | `splitCsv` convention. |
 | `WEBHOOK_MAX_SUBSCRIPTIONS` | int ≥ 0 | `16` | |
 | `WEBHOOK_MAX_PER_ADDRESS` | int ≥ 0 | `4` | |
-| `WEBHOOK_MAX_ATTEMPTS` | int 1–**11** | `11` | Truncates the fixed 72 h schedule in §8.3. `1` = no retry; `8` restores the original ~27 h budget. **Upper-bounded at 11** because §8.3 defines exactly eleven offsets; a larger value would have no defined attempt times, so it is a schema error rather than something to extrapolate. |
+| `WEBHOOK_MAX_ATTEMPTS` | int 1–**11** | `11` | Truncates the fixed 72 h schedule in §8.3. `1` = no retry; `4` = the perishability-only front half; `8` gives a **+20 h** horizon — note this is *not* the ~27 h budget this document originally recommended, because §8.3 now lists cumulative offsets and attempt 8 sits at +20 h. **Upper-bounded at 11** because §8.3 defines exactly eleven offsets; a larger value would have no defined attempt times, so it is a schema error rather than something to extrapolate. |
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | int ≥ 1000 | `10000` | Matches `CIMD_FETCH_TIMEOUT_MS` and GitHub's published 10 s. |
 | `WEBHOOK_MAX_CONCURRENT` | int ≥ 1 | `8` | Mirrors `MAX_WAITS_TOTAL`, separate pool. |
+| `WEBHOOK_POOL_RETRY_MS` | int ≥ 1000 | `5000` | Reschedule delay when the concurrency pool is full, which yields no `retryAfterSec` (§8.2). Floored so it cannot be configured into a spin. |
 | `WEBHOOK_PAYLOAD_MAX_BYTES` | int ≥ 2048 | `16384` | **Cannot be disabled** (§8.7). |
 | `WEBHOOK_APPROVAL_ARGS_MAX_BYTES` | int ≥ 0 | `4096` | `preview` scope only (§6.3). `0` omits `actionArguments` entirely. |
 | `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` | int ≥ 1 | `4` | Below the task API's own depth 10 (§6.6). |
@@ -2006,10 +2089,10 @@ bodies.
 | `GET` | `/v1/webhooks` | admin: all; identity: own address | `{webhooks:[…]}`. Never includes `secret`. |
 | `GET` | `/v1/webhooks/:id` | as above | Bare object incl. `state`, `lastDelivery`. |
 | `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `description`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
-| `GET` | `/v1/webhooks/:id/secret` | admin, or identity for its own `metadata` subscriptions (§12.3) | Re-display the current derived signing key. Audited as `webhook.reveal`. Possible only because D6 chose derivation. **Must return `Cache-Control: no-store`** (and no `ETag`): the body is long-lived key material, and a shared cache, browser history, or intermediary log retaining it would undo the entire secret-handling model. |
-| `DELETE` | `/v1/webhooks/:id` | as above (own `metadata` subscriptions; `preview` requires admin, §10.4 Rule B) | Delete the subscription **and cancel its pending retries**, marking any not-yet-attempted rows `permanent` with reason `subscription_deleted` so the log still accounts for them. Precedent: `routes/notify.ts:228`. Identity deletion cascades the same way (§10.5). |
-| `POST` | `/v1/webhooks/:id/rotate` | as above | Issue a new secret; start the overlap window (§12.2). Returns the new `secret` once. |
-| `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status, reason}`. Later attempts continue in the background. **`status` is `null` whenever no HTTP response was received** — DNS failure, connection refused, TLS handshake error, and timeout all produce an `outcome` with no status code, so the field must be nullable and `reason` carries the machine-readable cause (`dns_error`, `connection_refused`, `tls_error`, `timeout`, `ssrf_refused`, or `null` on success). Promising a `status` unconditionally, as an earlier draft did, would force an implementation to invent one. |
+| `GET` | `/v1/webhooks/:id/secret` | admin, or the identity that **created** it, `metadata` scope only (§10.4 Rule D, §12.3) | Re-display the current derived signing key. Audited as `webhook.reveal`. Possible only because D6 chose derivation. **Must return `Cache-Control: no-store`** (and no `ETag`): the body is long-lived key material, and a shared cache, browser history, or intermediary log retaining it would undo the entire secret-handling model. |
+| `DELETE` | `/v1/webhooks/:id` | admin, or the identity that **created** it and only at `metadata` scope (§10.4 Rules B + D) | Delete the subscription **and cancel its pending retries**, marking any not-yet-attempted rows `permanent` with reason `subscription_deleted` so the log still accounts for them. Precedent: `routes/notify.ts:228`. Identity deletion cascades the same way (§10.5). |
+| `POST` | `/v1/webhooks/:id/rotate` | admin, or the identity that **created** it and only at `metadata` scope (§10.4 Rules B + D) | Increment the derivation `epoch`; start the overlap window (§12.2). Returns the new `secret`. `409 rotation_window_open` if a window is already open, unless `force`. |
+| `POST` | `/v1/webhooks/:id/test` | as above | Fire `webhook.ping` and return once the first attempt settles, bounded by `WEBHOOK_DELIVERY_TIMEOUT_MS` (10 s). Responds `{deliveryId, outcome, status, reason}`. Later attempts continue in the background. **`status` is `null` whenever no HTTP response was received** — DNS failure, connection refused, TLS handshake error, and timeout all produce an `outcome` with no status code, so the field must be nullable and `reason` carries the machine-readable cause (`dns_error`, `connection_refused`, `tls_error`, `timeout`, `ssrf_refused`, or `null` on success). Promising a `status` unconditionally, as an earlier draft did, would force an implementation to invent one. **On a `disabled` endpoint this returns `409 {error:'webhook_disabled', disabledReason}` and fires nothing** — §8.5 suppresses all delivery while disabled, so a route that promised to deliver and await would either contradict the state machine or silently dead-letter a ping the caller is waiting on. Note the asymmetry this creates and accept it deliberately: an identity token may call `/test` but **not** `/enable` (admin-only), so an identity that disabled its own subscription cannot probe it back to life without an admin. That is correct — `/enable` after a `threshold` or `refused` disablement is meant to require a human look (§8.5) — but it must be documented, since the obvious client flow "pause, fix, test, resume" needs an admin for the resume step. |
 | `POST` | `/v1/webhooks/:id/disable` | as above (own address) | Manual pause. Sets `state: "disabled"`, `disabledReason: "manual"`. Reversible by `/enable` without investigation. |
 | `POST` | `/v1/webhooks/:id/enable` | admin | Clear `disabled` state, reset the counter (§8.5). |
 | `GET` | `/v1/webhooks/:id/deliveries` | admin | `{deliveries:[…], nextCursor}` — recent attempts and dead letters, from the JSONL log. |
@@ -2161,6 +2244,26 @@ The distinction is available one level up: `TokenAttribution` (`auth.ts:45-48`) 
 > subscription was authorized for one.* Neither alone is sufficient, and §14 item 2 tests the
 > rebind-without-grant case specifically.
 
+> **Rule D — secret-bearing and destructive operations are scoped by *creator*, not by
+> address.** `createdBy` (§10.5) is an authorization input, not merely a record. An identity
+> token may re-display the signing key (§12.3), rotate, or delete a subscription **only if it
+> created it**. Subscriptions an admin created for that address remain admin-only for all
+> three, at any `contentScope`.
+>
+> This is the axis R48's fix got wrong, and the reason is worth stating because it generalizes:
+> scoping by address plus `contentScope` bounds **confidentiality** — what OAE will disclose
+> about a mailbox. It says nothing about **integrity** — who may act on a delivery channel
+> pointed at a third party. An admin creating a `metadata` subscription for an agent's address
+> is the ordinary postmaster setup, and the agent's token can already read that subscription's
+> `url` from the detail route; handing it the key too means it can forge deliveries the
+> consumer will verify as authentic. Rule B's scope-based test is still correct for what it
+> covers (`preview` content), but it is not sufficient on its own, and Rule D is the missing
+> half. Where the two overlap, **both must pass**.
+>
+> Reads are unaffected: an identity token may still list and read subscriptions for its own
+> address regardless of creator, because reading metadata about your own mailbox is exactly
+> what the token is for. It is key material, rotation, and deletion that follow the creator.
+
 Everything else in the table is enforceable with the existing primitives.
 
 **Why an identity token may subscribe at all.** This is the capability that makes #109's
@@ -2268,10 +2371,33 @@ as to every other field, and `recordAuditEvent()` still never throws.
 | --- | --- |
 | `webhook.create` / `webhook.update` / `webhook.delete` | `ok`, `denied`, `rate_limited`, `error` |
 | `webhook.rotate` | `ok`, `denied`, `error` |
-| `webhook.reveal` | `ok`, `denied` — admin-only secret re-display (§12.3). Audited because it is the one route that returns keying material |
-| `webhook.disabled` | `ok` (the disablement itself succeeded) |
-| `webhook.deliver` | `ok`, `error` (retryable/permanent/refused folded into `error`, with the detail in the JSONL log) |
+| `webhook.reveal` | `ok`, `denied` — secret re-display (§12.3), creator-scoped per Rule D. Audited because it is the one route that returns keying material, and because a `denied` here is an attempted privilege escalation worth seeing |
+| `webhook.disabled` / `webhook.enabled` | `ok` — **state transitions only** |
+| `webhook.deliver` | **not audited** — see below |
 | `webhook.ssrf_refused` | `denied` |
+
+**Per-attempt delivery outcomes must not go to the audit log.** An earlier draft listed
+`webhook.deliver` here, and the arithmetic makes that untenable: `audit.jsonl` rotates at
+`AUDIT_ROTATE_BYTES = 10 MiB` into a **single** `.1` backup (`audit.ts:29`, `:80-97`), so the
+whole audit history is about 20 MiB. At the configured ceilings — 16 endpoints
+(`WEBHOOK_MAX_SUBSCRIPTIONS`) × 60 deliveries/minute (`WEBHOOK_RATE_DELIVER_PER_MIN`) — one
+row per attempt is up to ~960 rows a minute, or on the order of 100 MB a day. That evicts the
+authentication denials, grant revocations, and admin mutations the audit log exists to
+preserve, within hours, and it does so precisely on a busy instance where that history matters
+most. Turning a security log into a delivery log is a self-inflicted loss of evidence.
+
+So the split is explicit:
+
+- **Delivery attempts** — every outcome, including `success`, `retryable`, `permanent`,
+  `deferred` — go **only** to `webhook-deliveries.jsonl` (§8.6), which has its own 30-day
+  retention and its own inspection API. That file is *designed* for this volume.
+- **The audit log** keeps only what an auditor needs: management mutations (create, update,
+  delete, rotate, reveal, disable, enable), disablement transitions, and SSRF refusals. All
+  are low-frequency and operator-initiated.
+
+`webhook.ssrf_refused` stays in the audit log even though it originates in the delivery path,
+because it is a security event rather than a delivery outcome, and it is rare by construction —
+it disables the endpoint immediately (§8.5), so it cannot recur at volume for one subscription.
 
 `webhook.ssrf_refused` is the one that matters for security review: it is the signal that
 someone tried to point OAE at an internal address. It carries `address` and `ip` (the
@@ -2297,8 +2423,31 @@ Applying that line to §10.3:
 | `POST /v1/webhooks` | `mail_webhook_create` | **`critical`** |
 | `DELETE /v1/webhooks/:id` | `mail_webhook_delete` | `minimal` |
 | `POST /v1/webhooks/:id/test` | `mail_webhook_test` | `contained` |
-| `GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate`, `POST …/disable` | **none in v1** — see below | — |
+| `POST /v1/webhooks/:id/disable` | `mail_webhook_disable` | `minimal` |
+| `GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate`, `GET …/secret` | **none in v1** — see below | — |
 | `POST …/enable`, `GET …/deliveries`, `POST …/redeliver` | none — admin-only, existing exception | — |
+
+Two of these rows were added after D17 was approved and needed re-deciding rather than
+inheriting:
+
+- **`mail_webhook_disable` is added, tier `minimal`.** An agent that can create and delete its
+  own subscription can coherently pause it, and pausing is strictly less capable than deleting
+  — refusing it would push agents toward delete-and-recreate, which is worse (it burns the
+  per-address cap, loses the derivation `epoch`, and triggers a fresh creation ping against the
+  §8.7 probe budget). `minimal` matches `mail_mark_seen` and `task_create`: a lightweight state
+  change with no external effect. It is subject to Rule D — an identity may pause only what it
+  created.
+- **`GET /v1/webhooks/:id/secret` deliberately gets no tool.** This is the one identity-reachable
+  operation left REST-only, and the reason is blast radius rather than parity: an MCP tool that
+  returns signing-key material puts that key into an agent's context, where it can be echoed
+  into a model transcript, a tool-call log, or a prompt-injected response. The REST route
+  requires a caller to deliberately fetch and handle a secret; a tool makes it available to
+  anything the agent can be persuaded to call. Recovery from a lost `rotate` response (§12.3)
+  is rare and operator-shaped, so keeping it off the agent surface costs little. This extends
+  D17's accepted deviation list from three routes to four, and §16 Q17 records it.
+
+That makes **five** MCP tools rather than the four D17 approved — a change to a ratified
+decision, flagged here and in §17 rather than made silently.
 
 Tiers use the existing four-level vocabulary in `lib/tool-tiers.ts` (`read` / `minimal` /
 `contained` / `critical`), whose definitions are quoted here in translation: `contained` is
@@ -2498,6 +2647,26 @@ The required change, which should land **before** the webhook feature (§15):
 2. Factor the loop into a neutral **inbound-mail event bus**: the IMAP IDLE connection,
    UID watermark, `UIDVALIDITY` re-anchoring, and reconnect backoff stay where they are;
    the per-message fan-out becomes a list of sinks.
+
+   **The bus's IMAP fetch must be widened, and this is a hard requirement rather than an
+   implementation detail.** The watcher today fetches
+   `{ envelope: true, headers: ['delivered-to'], source: true }`
+   (`notification-watcher.ts:1457-1461`) — which is enough for ntfy's tiers but is missing two
+   things the webhook payload needs:
+
+   - **`flags`**, without which `data.unread` (§6.2) cannot be populated at all. There is no
+     `\Seen` state in the current fetch.
+   - **`internalDate`**, which must be the source of `data.receivedAt`. Using the envelope
+     `date` instead would take the arrival time from the sender-supplied `Date:` header, which
+     any external sender can set arbitrarily — so a consumer ordering or windowing on
+     `receivedAt` (§8.4) would be ordering on attacker-controlled data, and a future spam or
+     triage rule built on it would be trivially evaded. `internalDate` is server-assigned and
+     is also what `mail-cursor.ts` sorts on, so using it keeps the payload, the cursor, and the
+     list API on one clock.
+
+   Widening the fetch touches the ntfy path too, since both sinks share it; that is acceptable
+   (it is strictly more data, and ntfy ignores what it does not use) but it must be called out
+   in PR 2's review because it changes a hot loop's per-message cost.
 3. Make ntfy and webhooks two independent sinks, each with its own enablement, its own
    gating, its own retry policy, and its own failure accounting. **A failure in one sink
    must not affect the other's watermark advancement.** Today a publish failure can retain
@@ -2781,14 +2950,27 @@ Rotation writes an audit event in all cases, including the 409.
   | Caller | May re-display |
   | --- | --- |
   | admin | any subscription |
-  | identity token | subscriptions it owns **at `contentScope: metadata`** |
-  | identity token | **not** `preview` subscriptions — those stay admin-only, per Rule B |
+  | identity token | subscriptions **it created** (`createdBy` = its own address) **and** whose `contentScope` is `metadata` |
+  | identity token | **not** subscriptions an admin created for its address, at any scope |
   | oauth token | none (Rule A excludes it from secret-bearing operations) |
 
-  This is safe for the same reason Rule B is: a `metadata` subscription carries no mail
-  content, so its signing key is not a content credential (§4.2), and the identity token could
-  already create and rotate that subscription. `preview` stays with admin because that key
-  *does* unlock content-bearing deliveries.
+  **The `createdBy` condition is the important one, and its absence was a hole this document
+  introduced.** R48 fixed a recovery gap by letting identity tokens re-display their own
+  subscriptions, but scoped that by *address* and *content scope* only. An admin routinely
+  creates a `metadata` subscription **for** an agent's address — that is the ordinary
+  postmaster-wake-up setup — and under the address-only rule the agent's own identity token
+  could then re-display that subscription's live signing key. It can already read the
+  subscription's `url` from `GET /v1/webhooks/:id` (§10.3). Key plus URL is enough to **forge
+  deliveries the consumer will verify as authentic**: `metadata` scope limits what OAE will
+  *disclose*, but it does nothing to protect the *integrity* of what the consumer receives.
+  Confidentiality scoping was the wrong axis; ownership is the right one.
+
+  So the rule is creator-scoped: an identity token may re-display only what it created. An
+  admin-created subscription is admin-only to re-display, which is also symmetric with Rule B
+  — the party that chose the endpoint and the scope is the party that holds its key material.
+  The recovery concern R48 raised is still fully served, because the caller who loses a
+  `rotate` response is the same caller that performed the rotation, and Rule B already
+  restricts rotation on admin-created `preview` subscriptions to admin.
 - Never returned by any `GET` **except** `GET /v1/webhooks/:id/secret`, which is audited and
   restricted per the table above. Every list and detail response carries `secretPrefix` alone.
 - Never written to `webhooks.json`, the delivery log, the audit log, or application
@@ -2818,10 +3000,12 @@ Rotation writes an audit event in all cases, including the 409.
 | Dead endpoint accumulates unbounded backlog | circuit breaker + immediate dead-letter while disabled | 8.5 |
 | Slow/tarpit consumer exhausts the process | per-endpoint concurrency 1, delivery timeout, instance cap | 8.7 |
 | Subscription churn abuse | creation rate limit + subscription caps | 8.7 |
+| Identity token forging deliveries a consumer will accept | Rule D: re-display, rotate, and delete are **creator-scoped**, so an identity cannot obtain the key of a subscription an admin created for its address (§10.4) | 10.4, 12.3 |
+| Refetch returning an unrelated message after an INBOX rebuild | `uidValidity` precondition on `GET /v1/messages/:id`, returning `404 stale_message_generation` rather than a different message; mandatory for event-driven refetch (§6.2) | 6.2, 15 |
 | Approval `arguments` carrying arbitrary caller JSON to an external endpoint | `actionArguments` is `preview`-scope only, therefore admin-only, and bounded to 4 KiB at depth 4 against the 64 KiB / depth 10 the task API itself allows | 6.3, 6.6 |
 | Approval event delivered to the wrong mailbox | Matching is on `reviewer`, which in v1 is always the task's `to`; `createApprovalTask()` already requires both parties to be managed identities and distinct (`tasks-internal.ts:1528-1529`), so an off-instance reviewer cannot exist | 6.3 |
 | Webhooks silently disabled because ntfy is off | gate widening + sink separation (prerequisite refactor) | 11.4 |
-| Delivery log becomes a privacy leak when shipped to an aggregator | no payload content, no URL query, `sensitive` rows write nothing extra | 8.6 |
+| Delivery log becomes a privacy leak when shipped to an aggregator | no payload content and no URL query in any row; `sensitive` is a **marker** for external filtering, not a reducer (§8.6) | 8.6 |
 
 ### 12.5 What is explicitly *not* defended
 
@@ -2838,11 +3022,14 @@ Recorded so nobody discovers it later as a surprise:
   connect-result oracle at registration. But `POST /v1/webhooks/:id/test` still lets a
   stolen identity token make OAE originate connections to public hosts and observe
   distinguishable outcomes and timings. The first draft accepted this with the mitigation
-  named but unspecified; **it is now specified** — `WEBHOOK_RATE_TEST_PER_MIN = 3`, per
-  token, in a bucket separate from delivery (§8.7) — which caps a stolen token at roughly
-  three probes a minute no matter how many subscriptions it created. What remains accepted
-  is those three: OAE cannot distinguish an operator legitimately testing an endpoint from a
-  token holder probing one.
+  named but unspecified; **it is now specified** — `WEBHOOK_RATE_TEST_PER_MIN = 3` triggers,
+  per token, in a bucket separate from delivery and shared with creation-triggered pings
+  (§8.7). Because each accepted ping runs up to three attempts, the real ceiling is
+  **~9 connection attempts a minute per token**, not 3, and that is the number to reason
+  about. It remains a poor scanning primitive — under 13 000 a day, public hosts only, with
+  the SSRF policy keeping internal addresses out of reach. What is accepted is those nine:
+  OAE cannot distinguish an operator legitimately testing an endpoint from a token holder
+  probing one.
 - **A lost `approval.requested` leaves a human unpaged about a deadline nobody will
   materialize.** The task producer has no watermark, so a crash between writing the approval
   task and dispatching the event loses it (§11.4 item 4) — and because expiry is only
@@ -2928,7 +3115,10 @@ than only unit tests.
    `mail_webhook_test`** — its `contained` tier does not make it OAuth-safe on its own, and
    §10.4 Rule A applies to the tool as well as the route, since they perform the identical
    action. An earlier draft asserted the opposite for `test`, which would have left an OAuth
-   bypass through the MCP door.
+   bypass through the MCP door. **Plus Rule D's creator-scoping**: an identity token must be
+   refused re-display, `rotate`, and `delete` on a subscription an *admin* created for its
+   address, at `metadata` scope as well as `preview` — the R62 case, which an address-scoped
+   test would pass while the hole stayed open.
 8. **Rotation and creation idempotency.** That rotation increments the derivation `epoch` so
    the new key differs without touching any other endpoint's key (§12.1); that a repeated
    `rotate` with the same `Idempotency-Key` returns the stored `epoch` without incrementing
@@ -2977,6 +3167,25 @@ than only unit tests.
     `Idempotency-Key` returns the stored `epoch` without incrementing, that a request with no
     key always increments, and that a replayed response never contains the plaintext secret
     (§10.5).
+17. **Generation-preconditioned refetch (R63).** That `GET /v1/messages/:id` with a
+    `uidValidity` that does not match the current mailbox generation returns
+    `404 stale_message_generation` and **not** a different message; that omitting the parameter
+    preserves today's behavior for existing callers; and that the webhook docs' refetch example
+    includes the parameter. This is the test that keeps §6.2's `uidValidity` field from being
+    decorative.
+18. **`/test` against a disabled endpoint (R64).** That it returns `409 webhook_disabled` with
+    the reason, fires no ping, writes no delivery row, and does not change `state` — for each of
+    the three `disabledReason` values.
+19. **The two deferral paths (R69).** That a rate-limit denial reschedules at
+    `max(retryAfterSec, next offset)` and a pool-saturation denial at
+    `now + WEBHOOK_POOL_RETRY_MS`; that neither consumes an attempt, increments
+    `consecutiveFailures`, nor dead-letters; and that `WEBHOOK_POOL_RETRY_MS` cannot be
+    configured below its 1000 ms floor.
+20. **Audit / delivery-log separation (R70).** That a run of N deliveries writes N rows to
+    `webhook-deliveries.jsonl` and **zero** `webhook.deliver` rows to `audit.jsonl`, while
+    create / rotate / reveal / disable / enable / `ssrf_refused` each write exactly one audit
+    row. The point of the test is the volume property, so it should assert the audit file's
+    size is unchanged across a large delivery run.
 
 ---
 
@@ -2987,12 +3196,19 @@ working production code and should be independently revertible:
 
 | PR | Content | Risk |
 | --- | --- | --- |
-| 1 | Generalize `pinnedCimdFetcher` into a shared pinned fetcher parameterized by timeout and byte cap, **add an absolute wall-clock deadline** alongside its inactivity-based `req.setTimeout()` (§9.7), promote the document-fetch wrapper's redirect refusal into that shared policy (§9.1), **and close the IPv6 embedded-IPv4 gap** — NAT64, 6to4, Teredo (§9.2) — per decision **D16** (§17) | low–medium — refactor plus two tightenings; existing CIMD tests are the guard, and the new deadline changes CIMD behavior so it needs its own test |
+| 1 | Generalize `pinnedCimdFetcher` into a shared pinned fetcher parameterized by timeout and byte cap, **add an absolute wall-clock deadline** alongside its inactivity-based `req.setTimeout()` (§9.7), promote the document-fetch wrapper's redirect refusal into that shared policy (§9.1), **and close the IPv6 embedded-IPv4 gap** — NAT64, 6to4, Teredo (§9.2) — per decision **D16** (§17). **Ships with the §14 item 2 SSRF matrix**, including the rebinding, redirect, IPv6-form and slowloris cases and the CIMD regression guard | low–medium — refactor plus two tightenings; the tests land in the same PR, so the change cannot merge unguarded |
 | 2 | Factor the notification watcher into a **process-wide event dispatcher with two producers** — the inbound-mail loop *and* the task-creation path (§11.4 item 4) — with per-sink enablement, gating, retry, and **per-sink** watermark advancement; widen the startup gate; ntfy remains the only sink | **high** — touches a working loop *and* the task creation path; enlarged by D1. Dispatched by the commander, ownership TBD (**D6**) |
-| 3 | Add a **forward** `since` query to `GET /v1/messages` (new IMAP selection, plus a signed forward cursor reusing `mail-cursor-v1`'s construction and address binding). The existing cursor paginates *backwards* and cannot express catch-up (§3.7) | **medium** — new IMAP query semantics, not a route-only change |
-| 4 | Webhook subsystem: config, `webhooks.json`, signing, delivery for **both** `mail.received` and `approval.requested`, retry, circuit breaker, delivery log, REST routes, the four MCP tools with their `TOOL_TIER_SPEC` entries (§10.7), audit | additive — behind `WEBHOOKS_ENABLED=false` |
-| 5 | Read-only dashboard panel under Configure (§10.8), per decision **D4** | additive — GET-only `/ui/api` mirrors plus `UI_CSS` edits; no write surface |
-| 6 | Signature interop vectors (JS + Python verifiers), SSRF matrix, docs, `.env.example` and `compose.yaml` entries, and the consumer-facing verification guide | additive |
+| 3 | Add a **forward** `since` query to `GET /v1/messages` (new IMAP selection, plus a signed forward cursor reusing `mail-cursor-v1`'s construction and address binding, itself bound to `uidValidity`), **and** add the `uidValidity` precondition to `GET /v1/messages/:id` so a stale generation returns `404 stale_message_generation` instead of an unrelated message (§6.2). The existing cursor paginates *backwards* and the detail route has no generation check at all (`imap.ts` never mentions `uidValidity`) | **medium** — new IMAP query semantics plus a contract change on an existing route |
+| 4 | Webhook subsystem: config, `webhooks.json`, signing, delivery for **both** `mail.received` and `approval.requested`, retry, circuit breaker, delivery log, REST routes, the five MCP tools with their `TOOL_TIER_SPEC` entries (§10.7), audit. **Ships with the §14 item 1 signature interop vectors** (JS + independent Python verifiers) and items 3, 5–16 | additive — behind `WEBHOOKS_ENABLED=false` |
+| 5 | Read-only dashboard panel under Configure (§10.8), per decision **D4**. Ships with §14 item 12 | additive — GET-only `/ui/api` mirrors plus `UI_CSS` edits; no write surface |
+| 6 | Docs and packaging only: `.env.example` and `compose.yaml` entries, the consumer-facing verification guide, and the website-repo docs handoff | additive — no code |
+
+**Every security test ships in the PR that makes the change it protects.** An earlier phasing
+put the SSRF matrix and the signature vectors in a final "tests and docs" PR, which would have
+merged a modification to the shared SSRF policy (PR 1) and the entire signing scheme (PR 4)
+with their guards still unwritten — and a guard added later can only reject a change that has
+already landed. Tests are not a phase. PR 6 is left with documentation and packaging, which is
+the only content that genuinely has no code to guard.
 
 PR 2 is now the riskiest item in the plan and is rated **high** rather than medium, because
 D1 turned it from "refactor the watcher" into "build a dispatcher that also sits inside the
@@ -3161,10 +3377,11 @@ that PR 1 stays a pure no-behavior-change refactor. *Recommendation:* PR 1 — a
 card filed alongside a feature that needs it tends not to happen before the feature.
 
 **Q17 — Ratify the MCP parity deviation (§10.7)?** `CONTRIBUTING.md` requires every REST
-operation to have a `mail_*` tool. v1 ships four tools and leaves three non-admin routes
-(`GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate`) REST-only, on the
+operation to have a `mail_*` tool. v1 ships **five** tools (four as originally approved by D17,
+plus `mail_webhook_disable` added by R71) and leaves **four** non-admin routes
+(`GET /v1/webhooks/:id`, `POST /v1/webhooks/:id`, `POST …/rotate`, `GET …/secret`) REST-only, on the
 argument that MCP tools are effectively permanent and an agent does not need to rotate
-signing keys from inside its own loop. The owner may prefer strict parity — seven tools
+signing keys from inside its own loop. The owner may prefer strict parity — nine tools
 from day one — since deviating from a stated CONTRIBUTING rule is a maintainer decision,
 not an author's. Related and worth deciding at the same time: is `mail_webhook_create`
 correctly tiered `critical` (deny-by-default for OAuth tickets), or is `contained` enough?
@@ -3334,7 +3551,7 @@ one data source with the panel); §14 (new test item); §15 (**new PR 5**).
 | **D14** | Q14 | **Deferred with D3.** Per-identity subscription caps wait on the hosted answer. | §8.7, §16 Q14 |
 | **D15** | Q15 | **Redelivery covers succeeded deliveries as well as dead letters**, admin-only, with `replay: true` marked in the log row. Follows Resend's "replay both `failed` and `succeeded`". **Its purpose is narrower than the first draft claimed** — see the correction below this table. | §8.6 (log row), §10.3, §10.8 |
 | **D16** | Q16 | **The IPv6 embedded-IPv4 SSRF gap is closed in PR 1**, not deferred to a separate hardening card. NAT64, 6to4, and Teredo forms join the §9.2 always-refused list. | §9.2, §14 item 2, §15 PR 1 |
-| **D17** | Q17 | **Four MCP tools approved** — `mail_webhook_list`, `mail_webhook_create`, `mail_webhook_delete`, `mail_webhook_test` — and **`mail_webhook_create` is tier `critical`**, so it is deny-by-default for OAuth tickets. The three non-admin routes left REST-only are an accepted deviation from CONTRIBUTING's parity rule. | §10.4, §10.7, §14 item 7, §15 PR 4 |
+| **D17** | Q17 | **MCP tools approved** — as ratified: four (`mail_webhook_list`, `mail_webhook_create`, `mail_webhook_delete`, `mail_webhook_test`), with **`mail_webhook_create` at tier `critical`** so it is deny-by-default for OAuth tickets. **Amended by R71 to five**, adding `mail_webhook_disable` (`minimal`); the REST-only deviation list correspondingly grows from three routes to four, `GET …/secret` being deliberately excluded from the agent surface on blast-radius grounds (§10.7). | §10.4, §10.7, §14 item 7, §15 PR 4 |
 
 **D15 correction.** This document originally justified replaying a *succeeded* delivery as "how
 an integrator tests their handler against a real payload without waiting for real mail". That
@@ -3490,6 +3707,42 @@ eight were security holes in the design itself (R1, R2, R15–R20, R42–R44). T
 reason this document keeps a per-defect record instead of silently converging: a design doc
 that has been wrong about its own codebase three times should not ask a reader to trust the
 parts nobody has checked yet.
+
+**A fourth round — the commander's third final review, the last before merge — found thirteen
+more** (2 P1, 11 P2), recorded as R62–R74. Anything raised after this point goes to
+implementation PR cards rather than back into this document.
+
+| # | Defect | Severity | Fixed in |
+| --- | --- | --- | --- |
+| R62 | **Introduced by R48's own fix.** Re-display was scoped by *address* plus `contentScope`, so an identity token could re-display the live signing key of a `metadata` subscription an **admin** created for its address. Combined with the `url` it can already read from the detail route, that is enough to **forge deliveries the consumer verifies as authentic** — confidentiality scoping does not protect integrity. | **P1 security** | §10.4 **new Rule D** (creator-scoped), §12.3, §10.3, §12.4, §14 item 7 |
+| R63 | **Refetch does not validate the mailbox generation.** `getMessageWith()` checks only that the id is a positive integer (`imap.ts:898-909`) and `lib/imap.ts` never mentions `uidValidity`. With a 72-hour delivery horizon, an INBOX rebuilt mid-window reassigns UIDs, so the documented refetch returns a *different* message with a `200` and no signal — an agent acts on the wrong mail. | **P1 security** | §6.2 (warning + required `uidValidity` precondition, `404 stale_message_generation`), §15 PR 3 |
+| R64 | `POST /:id/test` against a `disabled` endpoint was undefined: §8.5 suppresses all delivery while disabled, but the route promised to fire a ping and await the first attempt. | P2 | §10.3 (`409 webhook_disabled`, plus the `/test`-without-`/enable` asymmetry documented) |
+| R65 | The overflow spec covered most but not all fields — `sizeBytes`, `hasAttachments`, `unread` were in neither the drop order nor the never-dropped set. | P2 | §6.6 (all three never-dropped; every §6.2 field now accounted for) |
+| R66 | Reconstruction on a `UIDVALIDITY` mismatch said both "dead-letter unconditionally" and "a Message-ID fallback may be used" — not a specification. | P2 | §8.6 (ordered and total: match → fetch by UID; mismatch → header search; absent, zero, or ambiguous match → dead-letter; unique match → rebuild with fresh `uid`/`uidValidity`/`cursor`, preserved `eventId`) |
+| R67 | Claimed `WEBHOOK_MAX_ATTEMPTS=8` restores the original ~27 h budget. Under the cumulative-offset table attempt 8 is at **+20 h**; the ~27 h figure came from summing the old inter-attempt delays. | P2 | §8.3, §10.1 |
+| R68 | The event bus's IMAP fetch was never specified, and the existing one (`notification-watcher.ts:1457-1461`, `envelope` + `delivered-to` + `source`) lacks **`flags`** — so `unread` cannot be populated — and lacks **`internalDate`**, the only non-forgeable source for `receivedAt`. Using the envelope `Date:` would order on sender-controlled data. | P2 | §11.4 item 2 (mandatory fetch widening) |
+| R69 | Pool-saturation `deferred` had no reschedule delay, because `retryAfterSec` exists only for the rate limiter. | P2 | §8.2 (per-cause table, new `WEBHOOK_POOL_RETRY_MS`), §10.1 |
+| R70 | Auditing every delivery attempt would rotate `audit.jsonl` past its 10 MiB + single `.1` budget in hours at configured ceilings (~960 rows/min), evicting the authentication and administration history the log exists to keep. | P2 | §10.6 (`webhook.deliver` not audited; attempts live only in the delivery log) |
+| R71 | The MCP parity table omitted `/disable` and `GET /:id/secret`, both identity-reachable. | P2 | §10.7 (adds `mail_webhook_disable` at `minimal`; secret re-display deliberately REST-only on blast-radius grounds — **this raises the tool count from D17's four to five**, flagged as a change to a ratified decision) |
+| R72 | Security tests were phased into PR 6 while the changes they guard landed in PR 1 (SSRF policy) and PR 4 (signing) — so both would merge unguarded, and a guard added later can only reject a change already landed. | P2 | §15 (each test moved into the PR it protects; PR 6 reduced to docs and packaging) |
+| R73 | The probe budget counted only triggers, so the stated "3 probes/min" was really **~9 connections/min** once each ping's three attempts are included. | P2 | §8.7, §9.7, §12.5 (honest ceiling stated; retries deliberately not charged to the caller's bucket, with the reasoning) |
+| R74 | `links` were truncated at `WEBHOOK_CODE_ENTRY_CHARS`, which corrupts signed verification URLs — and the repo already settled this: `packPushLinkLines()` is documented as *"Never mid-truncates a URL; drops the tail"* (`notification-watcher.ts:266-268`). | P2 | §6.2, §6.6 (over-long links dropped whole; `containsLink` stays `true`) |
+
+R62 and R63 are the two that matter most, and they are different kinds of failure. R62 is a
+**regression introduced by a fix** — the second time in this document's history (after R43),
+and both times the cause was the same: adding or widening a capability without re-reading the
+authorization rule that governs it. Rule D is now stated as a principle ("authorization is a
+function of the subscription's stored state *and its creator*") rather than a route list, for
+the same reason Rule A was restated that way. R63 is a **cross-section gap**: §4.2 borrowed
+Stripe's refetch pattern, §6.2 added `uidValidity` to the payload, and §8.3 extended the
+delivery horizon to 72 hours — each reasonable alone, and together they made the refetch path
+unsafe, because nothing connected the horizon to the fact that `imap.ts` has no generation
+check. No single section was wrong; the composition was.
+
+**Running total after this round: 74 recorded defects across five review passes** (R1–R74).
+Four were factual errors about existing code (R12, R40, R41, R63) and eleven were security
+holes in the design itself (R1, R2, R15–R20, R42–R44, R62, R63). Two were regressions
+introduced by the previous round's own fixes (R43, R62).
 
 **D2a has since been ruled on** (§17): consecutive failed attempts, per endpoint, reset on any
 success, threshold 10 — overriding this document's exhausted-events proposal. The review fixes
