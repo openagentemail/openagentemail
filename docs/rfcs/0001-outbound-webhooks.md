@@ -7,8 +7,8 @@
 - **Decisions:** all seventeen open questions are answered itemized in **§17**. Four were
   decided by the owner (D1–D4), thirteen approved by the commander at recommended values
   (D5–D17), and one derived consequence (**D2a**) was ruled on separately, overriding this
-  document's proposal. Two new questions (**Q18**, **Q19**) were opened by review fixes and
-  remain for the owner. Where §16 still reads as open, §17 is authoritative.
+  document's proposal. Five new questions (**Q18**–**Q22**) were opened by the review rounds
+  and remain for the owner. Where §16 still reads as open, §17 is authoritative.
 - **Issue:** [#109](https://github.com/openagentemail/openagentemail/issues/109)
 - **Decision scope:** event catalog, payload schema, signing and verification, delivery
   semantics (retry, ordering, dead letters), SSRF and egress safety, configuration
@@ -2061,7 +2061,7 @@ Error codes, following the existing snake_case convention:
 | `webhook_target_forbidden` | 400 | Fails the SSRF policy at creation (§9.3) |
 | `content_scope_requires_admin` | 403 | Identity token requested `preview` (§6.5) |
 | `forbidden: token is scoped to another address` | 403 | Existing `forbidUnlessAddress` message, reused verbatim |
-| `forbidden: oauth tokens may not create webhook subscriptions` | 403 | New, same prose-suffix convention. Requires token attribution, not `Auth` (§10.4) |
+| `forbidden: oauth tokens may not mutate webhook subscriptions` | 403 | New, same prose-suffix convention. Covers **every** mutation per Rule A, and requires token attribution, not `Auth` (§10.4) |
 | `forbidden: admin key required` | 403 | Existing `requireAdmin` message, reused verbatim |
 | `not_found` | 404 | Unknown `:id` |
 | `webhook_limit_reached` | 409 | Instance or per-address cap (§8.7) |
