@@ -85,7 +85,12 @@ export function resolveAccessToken(
     };
   }
 
-  const identity = findIdentityByToken(token);
+  let identity: ReturnType<typeof findIdentityByToken>;
+  try {
+    identity = findIdentityByToken(token);
+  } catch {
+    identity = undefined;
+  }
   if (identity) {
     return {
       status: 'ok',

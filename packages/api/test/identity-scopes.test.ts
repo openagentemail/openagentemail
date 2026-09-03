@@ -1539,6 +1539,34 @@ describe('Issue #114: read-only API token scopes', () => {
       });
       expect(resEmptyBody.status).toBe(200);
       expect(getAuditLogs().length).toBe(logsCountBefore);
+
+      // (g) Rotation replacing incomparable scopes: ['future:scope'] -> ['read:messages']
+      const storePath = join(config.dataDir, 'identities.json');
+      const raw = JSON.parse(readFileSync(storePath, 'utf8'));
+      const incompAddr = `incomp-user@${config.domain}`;
+      raw.push({
+        address: incompAddr,
+        createdAt: new Date().toISOString(),
+        tokenHash: sha256Hex('oa_incomp_initial_token_12345'),
+        scopes: ['future:scope'],
+      });
+      writeFileSync(storePath, JSON.stringify(raw, null, 2));
+
+      const resReplace = await app.request(`/v1/identities/${incompAddr}/token`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(resReplace.status).toBe(200);
+
+      logs = getAuditLogs();
+      const replaceEvent = logs.find((l) => l.address === incompAddr && l.event === 'identity.scopes.replace');
+      expect(replaceEvent).toBeDefined();
+      expect(replaceEvent.outcome).toBe('ok');
+      expect(replaceEvent.scopes).toEqual(['read:messages']);
     });
 
     test('5. Rotation semantics: empty body preserves, {"scopes": null} resets full power, invalid scopes 400', async () => {
@@ -1602,9 +1630,9 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(res5.status).toBe(400);
     });
 
-    test('6. Fail-closed: identity-store read error during OAuth exchange returns unauthorized', async () => {
+    test('6. Fail-closed: real corrupt-store path returns 401 unauthorized on app request for OAuth tokens', async () => {
       const user = createIdentity({ localpart: 'failclosed-user', scopes: ['read:messages'] })!;
-      const oauthToken = 'oa_oauth_failclosed_token_11111';
+      const oauthToken = 'oauth_valid_failclosed_token_11111';
       putAccessTokenForTests({
         token: oauthToken,
         grantId: 'grant-failclosed-4',
@@ -1614,23 +1642,73 @@ describe('Issue #114: read-only API token scopes', () => {
         ensureGrant: { clientId: 'client-failclosed', clientName: 'Client Failclosed' },
       });
 
-      const spy = spyOn(identitiesModule, 'findIdentity').mockImplementation(() => {
+      const storePath = join(config.dataDir, 'identities.json');
+      const goodData = readFileSync(storePath, 'utf8');
+
+      try {
+        // Write malformed JSON to identities store file on disk.
+        // Both findIdentityByToken probe and findIdentity OAuth lookup encounter this error.
+        writeFileSync(storePath, '[{ malformed json');
+
+        // 1. resolveAccessToken directly fails-closed with unauthorized (not 500 error)
+        const resolved = resolveAccessToken(oauthToken, { resource });
+        expect(resolved.status).toBe('unauthorized');
+
+        // 2. Real HTTP app.request with valid OAuth token returns 401 unauthorized (not 500 internal_error)
+        const resOAuth = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: `Bearer ${oauthToken}` },
+        });
+        expect(resOAuth.status).toBe(401);
+        expect(await resOAuth.json()).toEqual({ error: 'unauthorized' });
+
+        // 3. Real HTTP app.request with non-OAuth token also returns 401 unauthorized (not 500 internal_error)
+        const resOther = await app.request(`/v1/messages?address=${user.identity.address}`, {
+          headers: { authorization: 'Bearer some_non_oauth_token' },
+        });
+        expect(resOther.status).toBe(401);
+        expect(await resOther.json()).toEqual({ error: 'unauthorized' });
+
+        // 4. Admin requests remain completely unaffected (never read identity store)
+        const resAdmin = await app.request(`/v1/audit/events?limit=1`, {
+          headers: { authorization: `Bearer ${adminKey}` },
+        });
+        expect(resAdmin.status).toBe(200);
+      } finally {
+        // Restore good data
+        writeFileSync(storePath, goodData);
+      }
+    });
+
+    test('6b. Fail-closed: findIdentityByToken probe throw falls through to OAuth branch and fails closed (401)', async () => {
+      const user = createIdentity({ localpart: 'probe-throw-user', scopes: ['read:messages'] })!;
+      const oauthToken = 'oauth_probe_throw_token_22222';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-probe-5',
+        address: user.identity.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-probe', clientName: 'Client Probe' },
+      });
+
+      // Force findIdentityByToken probe to throw
+      const spyProbe = spyOn(identitiesModule, 'findIdentityByToken').mockImplementation(() => {
+        throw new Error('identity_store_corrupt');
+      });
+      // Force findIdentity in OAuth branch to also throw
+      const spyFind = spyOn(identitiesModule, 'findIdentity').mockImplementation(() => {
         throw new Error('identity_store_corrupt');
       });
 
       try {
-        // resolveAccessToken directly fails-closed with unauthorized
-        const resolved = resolveAccessToken(oauthToken, { resource });
-        expect(resolved.status).toBe('unauthorized');
-
-        // API request with OAuth token fails with 401 unauthorized
         const res = await app.request(`/v1/messages?address=${user.identity.address}`, {
           headers: { authorization: `Bearer ${oauthToken}` },
         });
         expect(res.status).toBe(401);
         expect(await res.json()).toEqual({ error: 'unauthorized' });
       } finally {
-        spy.mockRestore();
+        spyProbe.mockRestore();
+        spyFind.mockRestore();
       }
     });
   });

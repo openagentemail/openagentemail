@@ -23,7 +23,13 @@ import { clientIp } from '../lib/net.ts';
 function classifyScopeChange(
   prev: string[] | undefined,
   next: string[] | undefined,
-): 'identity.scopes.set' | 'identity.scopes.narrow' | 'identity.scopes.widen' | 'identity.scopes.clear' | null {
+):
+  | 'identity.scopes.set'
+  | 'identity.scopes.narrow'
+  | 'identity.scopes.widen'
+  | 'identity.scopes.clear'
+  | 'identity.scopes.replace'
+  | null {
   if (prev === undefined && next === undefined) return null;
   if (prev === undefined && next !== undefined) return 'identity.scopes.set';
   if (prev !== undefined && next === undefined) return 'identity.scopes.clear';
@@ -38,7 +44,7 @@ function classifyScopeChange(
   if ([...prevSet].every((s) => nextSet.has(s))) {
     return 'identity.scopes.widen';
   }
-  return next.length > prev.length ? 'identity.scopes.widen' : 'identity.scopes.narrow';
+  return 'identity.scopes.replace';
 }
 
 const createSchema = z.object({
@@ -220,7 +226,6 @@ export const identitiesRoute = new Hono()
     const address = c.req.param('address').toLowerCase();
     const existing = findIdentity(address);
     if (!existing) return c.json({ error: 'not_found' }, 404);
-    const prevScopes = existing.scopes !== undefined ? [...existing.scopes] : undefined;
 
     // Empty body preserves existing scopes (aligned with UI rotate).
     // Explicit {"scopes": null} resets to an unscoped full-permission token.
@@ -247,6 +252,12 @@ export const identitiesRoute = new Hono()
         requestedScopes = validated.scopes;
       }
     }
+
+    // Re-read and snapshot scopes immediately before rotation (no intervening await)
+    // to avoid comparing against a stale snapshot if a concurrent rotation landed.
+    const current = findIdentity(address);
+    if (!current) return c.json({ error: 'not_found' }, 404);
+    const prevScopes = current.scopes !== undefined ? [...current.scopes] : undefined;
 
     const token = rotateIdentityToken(address, requestedScopes);
     if (!token) return c.json({ error: 'not_found' }, 404);
