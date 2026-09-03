@@ -349,6 +349,8 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
+    // R6 (ZCode P2-4): 即使前序遗留复选框勾选，链接登录也硬编码 remember: false，绝不继承该复选框
+    harness.loginRemember.checked = true;
 
     await harness.instance.runStart();
 
@@ -356,13 +358,14 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.getCurrentUrl()).toBe('https://admin.example/ui');
     expect(harness.calls.replacedUrls).toEqual(['/ui']);
 
-    // 断言 2: 请求了 /ui/api/me 后再请求 /ui/api/session
+    // 断言 2: 请求了 /ui/api/me 后再请求 /ui/api/session，且 remember 始终为 false（复选框自身不被重置）
     expect(harness.calls.fetches.length).toBe(2);
     expect(harness.calls.fetches[0].url).toBe('/ui/api/me');
     expect(harness.calls.fetches[1].url).toBe('/ui/api/session');
     expect(harness.calls.fetches[1].init?.method).toBe('POST');
     const sentBody = JSON.parse(harness.calls.fetches[1].init?.body as string);
     expect(sentBody).toEqual({ token: 'secret-token-123', remember: false });
+    expect(harness.loginRemember.checked).toBe(true);
 
     // 断言 3: 进入应用
     expect(harness.calls.showInboxCount).toBe(1);
@@ -664,12 +667,19 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     // 假设在此期间重新设置了脏 marker
     formHarness.sessionStorage.setItem('oae-link-login', '1');
 
-    // 用户在表单粘贴 token 提交
+    // 用户在表单勾选 remember 并粘贴 token 提交（R6: 表单登录路径依然如实传递 checkbox）
+    formHarness.loginRemember.checked = true;
     await formHarness.instance.runPasteLogin('admin-paste-token');
     expect(formHarness.calls.showInboxCount).toBe(1);
     expect(formHarness.linkLoginNotice.hidden).toBe(true);
     expect(formHarness.linkLoginNotice.textContent).toBe('');
     expect(formHarness.sessionStorage.getItem('oae-link-login')).toBeNull();
+    const formSessionFetch = formHarness.calls.fetches.find(
+      (f) => f.url === '/ui/api/session' && f.init?.method === 'POST',
+    );
+    expect(formSessionFetch).toBeDefined();
+    const formSentBody = JSON.parse(formSessionFetch!.init?.body as string);
+    expect(formSentBody).toEqual({ token: 'admin-paste-token', remember: true });
     // 验证：表单登录完全不触发链接登录提示
     const linkAnnouncements = formHarness.calls.announced.filter((m) =>
       m.includes('Signed in via link'),

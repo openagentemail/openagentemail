@@ -836,7 +836,7 @@
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token: credential, remember: loginRemember.checked })
+        body: JSON.stringify({ token: credential, remember: false })
       });
       if (!response.ok) {
         var msg = response.status === 401 || response.status === 400
