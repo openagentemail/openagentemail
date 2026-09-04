@@ -23,6 +23,7 @@ const {
   isBlockedSsrfIp,
   isSsrfBlockedResolvedIp,
   matchRedirectUri,
+  pinnedCimdFetcher,
   validateClientIdUrl,
 } = await import('../src/lib/oauth-cimd.ts');
 
@@ -343,3 +344,43 @@ describe('CIMD auth_method none 回退（ChatGPT 连接器）', () => {
     if (!missingNone.ok) expect(missingNone.reason).toBe('auth_method_unsupported');
   });
 });
+
+describe('CIMD 回归守卫与共享 fetcher 收紧验证 (#128 PR1)', () => {
+  test('pinnedCimdFetcher 对等性：保留原有签名与 IP 字面量/lookup 校验', async () => {
+    // IP 字面量预检
+    await expect(pinnedCimdFetcher('https://169.254.169.254/cimd.json')).rejects.toThrow('ssrf_blocked_ip');
+    await expect(pinnedCimdFetcher('https://[64:ff9b::a9fe:a9fe]/cimd.json')).rejects.toThrow('ssrf_blocked_ip');
+    await expect(pinnedCimdFetcher('https://[2002:a9fe:a9fe::1]/cimd.json')).rejects.toThrow('ssrf_blocked_ip');
+
+    // 注入 lookup
+    const badLookup = async () => [{ address: '64:ff9b::a9fe:a9fe', family: 6 }];
+    await expect(
+      pinnedCimdFetcher('https://client.example/cimd.json', {}, badLookup),
+    ).rejects.toThrow('ssrf_blocked_ip');
+  });
+
+  test('fetchClientMetadata 受益于 IPv6-embedded-IPv4 收紧', async () => {
+    // NAT64 unsafe
+    const r1 = await fetchClientMetadata('https://[64:ff9b::a9fe:a9fe]/oauth/client.json', {
+      dnsLookup: async () => [{ address: '64:ff9b::a9fe:a9fe', family: 6 }],
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.reason).toBe('ssrf_blocked_ip');
+
+    // 6to4 unsafe
+    const r2 = await fetchClientMetadata('https://[2002:a9fe:a9fe::1]/oauth/client.json', {
+      dnsLookup: async () => [{ address: '2002:a9fe:a9fe::1', family: 6 }],
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.reason).toBe('ssrf_blocked_ip');
+
+    // assertClientIdHostSafe 也同步受益
+    const safe1 = await assertClientIdHostSafe('64:ff9b::a9fe:a9fe');
+    expect(safe1.ok).toBe(false);
+    if (!safe1.ok) expect(safe1.reason).toBe('ssrf_blocked_ip');
+
+    const safe2 = await assertClientIdHostSafe('64:ff9b::5db8:d822');
+    expect(safe2.ok).toBe(true);
+  });
+});
+
