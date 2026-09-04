@@ -254,8 +254,59 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
     ).rejects.toThrow('dns_empty');
   });
 
+  function startTrackedHttpServer(handler: http.RequestListener) {
+    const sockets = new Set<net.Socket>();
+    const server = http.createServer(handler);
+    server.on('connection', (socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+    });
+    const close = async () => {
+      for (const socket of sockets) {
+        try {
+          socket.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      sockets.clear();
+      if (typeof (server as any).closeAllConnections === 'function') {
+        try {
+          (server as any).closeAllConnections();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.unref();
+    };
+    return { server, close, sockets };
+  }
+
+  function startTrackedNetServer(handler: (socket: net.Socket) => void) {
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+      handler(socket);
+    });
+    const close = async () => {
+      for (const socket of sockets) {
+        try {
+          socket.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      sockets.clear();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.unref();
+    };
+    return { server, close, sockets };
+  }
+
   test('redirect 拒绝上移：3xx 响应内置失败且不跟随（RFC-0001 §9.1/§9.4）', async () => {
-    const server = http.createServer((req, res) => {
+    const { server, close } = startTrackedHttpServer((_req, res) => {
       res.writeHead(302, {
         Location: 'http://127.0.0.1:9999/other',
         'Content-Type': 'text/plain',
@@ -275,12 +326,12 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
         }),
       ).rejects.toThrow('redirect_forbidden');
     } finally {
-      server.close();
+      await close();
     }
   });
 
   test('maxBytes 字节上限截断：超出抛 response_too_large', async () => {
-    const server = http.createServer((req, res) => {
+    const { server, close } = startTrackedHttpServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       // 发送 4KB 数据
       res.end('x'.repeat(4096));
@@ -311,24 +362,34 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       const text = await res.text();
       expect(text.length).toBe(4096);
     } finally {
-      server.close();
+      await close();
     }
   });
 
   test('绝对墙钟死线（RFC-0001 §9.7）：slowloris 慢滴响应独立于空闲超时销毁', async () => {
-    const server = http.createServer((req, res) => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const { server, close } = startTrackedHttpServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.write('first');
       // 每 20ms 发送一次数据，导致 socket 从不处于空闲状态
-      const interval = setInterval(() => {
+      interval = setInterval(() => {
         try {
           res.write(' chunk');
         } catch {
-          clearInterval(interval);
+          if (interval) clearInterval(interval);
         }
       }, 20);
+      if (interval && typeof interval.unref === 'function') {
+        interval.unref();
+      }
+      res.on('error', () => {
+        if (interval) clearInterval(interval);
+      });
+      res.on('close', () => {
+        if (interval) clearInterval(interval);
+      });
       req.on('close', () => {
-        clearInterval(interval);
+        if (interval) clearInterval(interval);
       });
     });
 
@@ -354,12 +415,13 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       // 保证在死线附近被杀，而非等待 500ms
       expect(elapsed).toBeLessThan(400);
     } finally {
-      server.close();
+      if (interval) clearInterval(interval);
+      await close();
     }
   });
 
   test('绝对墙钟死线（RFC-0001 §9.7）：TCP tarpit 接受握手但不发数据时到期销毁', async () => {
-    const tarpitServer = net.createServer((socket) => {
+    const { server: tarpitServer, close } = startTrackedNetServer((_socket) => {
       // 接受 TCP 连接但不写入任何响应
     });
 
@@ -382,12 +444,12 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       const elapsed = Date.now() - startedAt;
       expect(elapsed).toBeLessThan(400);
     } finally {
-      tarpitServer.close();
+      await close();
     }
   });
 
   test('正常成功请求：透传请求头与响应体', async () => {
-    const server = http.createServer((req, res) => {
+    const { server, close } = startTrackedHttpServer((req, res) => {
       const customHeader = req.headers['x-custom-test'];
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -417,12 +479,12 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       const body = await res.json();
       expect(body).toEqual({ status: 'ok', received: 'my-secret-val' });
     } finally {
-      server.close();
+      await close();
     }
   });
 
   test('HTTP 204 No Content：正确构建 null body 响应而不抛出 TypeError', async () => {
-    const server = http.createServer((_req, res) => {
+    const { server, close } = startTrackedHttpServer((_req, res) => {
       res.writeHead(204, { 'X-Status-Note': 'no-content-ack' });
       res.end();
     });
@@ -444,7 +506,7 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       const text = await res.text();
       expect(text).toBe('');
     } finally {
-      server.close();
+      await close();
     }
   });
 
@@ -467,11 +529,19 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
   });
 
   test('AbortController signal 支持与监听器注销', async () => {
-    const server = http.createServer((_req, res) => {
-      setTimeout(() => {
-        res.writeHead(200);
-        res.end('done');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const { server, close } = startTrackedHttpServer((_req, res) => {
+      timer = setTimeout(() => {
+        try {
+          res.writeHead(200);
+          res.end('done');
+        } catch {
+          // ignore
+        }
       }, 200);
+      if (timer && typeof timer.unref === 'function') {
+        timer.unref();
+      }
     });
 
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -490,7 +560,64 @@ describe('pinnedFetch: 传输层核心防护与行为', () => {
       setTimeout(() => ac.abort(), 30);
       await expect(fetchPromise).rejects.toThrow('aborted');
     } finally {
-      server.close();
+      if (timer) clearTimeout(timer);
+      await close();
+    }
+  });
+
+  test('options.body 归一化与早拒：不支持类型同步抛出 TypeError，支持类型正常透传', async () => {
+    // 1. 不支持类型早拒：在创建连接前直接抛出 TypeError（CodeRabbit Major 守护）
+    await expect(
+      pinnedFetch('http://127.0.0.1:8080/body', {
+        body: { foo: 'bar' } as unknown as BodyInit,
+      }),
+    ).rejects.toThrow(TypeError);
+
+    // 2. 支持类型（string, Uint8Array, URLSearchParams）正常透传
+    const { server, close } = startTrackedHttpServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const received = Buffer.concat(chunks).toString('utf8');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ received }));
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as net.AddressInfo).port;
+
+    try {
+      const dnsLookup: DnsLookup = async () => [{ address: '127.0.0.1', family: 4 }];
+
+      // string
+      const r1 = await pinnedFetch(`http://body.example:${port}/str`, {
+        dnsLookup,
+        method: 'POST',
+        body: 'hello-world',
+        ssrfOptions: { publicEdge: false },
+      });
+      expect(await r1.json()).toEqual({ received: 'hello-world' });
+
+      // Uint8Array
+      const r2 = await pinnedFetch(`http://body.example:${port}/u8`, {
+        dnsLookup,
+        method: 'POST',
+        body: new Uint8Array([104, 101, 121]), // 'hey'
+        ssrfOptions: { publicEdge: false },
+      });
+      expect(await r2.json()).toEqual({ received: 'hey' });
+
+      // URLSearchParams
+      const r3 = await pinnedFetch(`http://body.example:${port}/usp`, {
+        dnsLookup,
+        method: 'POST',
+        body: new URLSearchParams({ a: '1', b: '2' }),
+        ssrfOptions: { publicEdge: false },
+      });
+      expect(await r3.json()).toEqual({ received: 'a=1&b=2' });
+    } finally {
+      await close();
     }
   });
 });

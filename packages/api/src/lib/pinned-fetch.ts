@@ -75,6 +75,26 @@ export type PinnedFetchOptions = RequestInit & {
 };
 
 /**
+ * 归一化请求体或早拒不支持的类型（CodeRabbit Major 修复）。
+ * 必须在创建连接和死线定时器前同步完成。
+ */
+function normalizeRequestBody(body: unknown): Buffer | undefined {
+  if (body === null || body === undefined) return undefined;
+  if (typeof body === 'string') return Buffer.from(body, 'utf8');
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (body instanceof ArrayBuffer) {
+    return Buffer.from(body);
+  }
+  if (body instanceof URLSearchParams) {
+    return Buffer.from(body.toString(), 'utf8');
+  }
+  throw new TypeError('unsupported_request_body_type');
+}
+
+/**
  * 默认通用 pinned fetcher：node:http(s) + 连接时 lookup 钉死 SSRF。
  * Host / SNI 仍用原始 hostname；实际 TCP 目标由 lookup 结果决定。
  */
@@ -93,6 +113,9 @@ export async function pinnedFetch(
   if (isIP(literal) && isSsrfBlockedResolvedIp(literal, options.ssrfOptions)) {
     throw new Error('ssrf_blocked_ip');
   }
+
+  // 请求体早拒/归一化（CodeRabbit Major：在创建底层请求与定时器前完成）
+  const normalizedBody = normalizeRequestBody(options.body);
 
   const headers: Record<string, string> = {
     host: url.host,
@@ -132,6 +155,21 @@ export async function pinnedFetch(
       if (settled) return;
       settled = true;
       cleanup();
+      try {
+        req.destroy(err);
+      } catch {
+        // ignore
+      }
+      try {
+        if (req.socket) req.socket.destroy(err);
+      } catch {
+        // ignore
+      }
+      try {
+        if (activeRes) activeRes.destroy(err);
+      } catch {
+        // ignore
+      }
       reject(err);
     };
 
@@ -150,6 +188,7 @@ export async function pinnedFetch(
         path: `${url.pathname}${url.search}`,
         method: (options.method as string) || 'GET',
         headers,
+        agent: false,
         servername: isHttps && !isIP(literal) ? literal : undefined,
         // 连接时解析并对每个结果跑 SSRF（钉死，消灭校验/fetch 间 TOCTOU）
         lookup: ((hostname, lookupOpts, callback) => {
@@ -246,20 +285,14 @@ export async function pinnedFetch(
     // 空闲超时（inactivity timeout）
     if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
       req.setTimeout(timeoutMs, () => {
-        const timeoutErr = new Error('timeout');
-        req.destroy(timeoutErr);
-        if (activeRes) activeRes.destroy(timeoutErr);
-        doReject(timeoutErr);
+        doReject(new Error('timeout'));
       });
     }
 
     // 绝对墙钟死线（wall-clock deadline，§9.7）
     if (deadlineMs > 0 && Number.isFinite(deadlineMs)) {
       deadlineTimer = setTimeout(() => {
-        const deadlineErr = new Error('deadline_exceeded');
-        req.destroy(deadlineErr);
-        if (activeRes) activeRes.destroy(deadlineErr);
-        doReject(deadlineErr);
+        doReject(new Error('deadline_exceeded'));
       }, deadlineMs);
       if (typeof deadlineTimer.unref === 'function') {
         deadlineTimer.unref();
@@ -272,21 +305,14 @@ export async function pinnedFetch(
 
     if (options.signal) {
       abortListener = () => {
-        const abortErr = new Error('aborted');
-        req.destroy(abortErr);
-        if (activeRes) activeRes.destroy(abortErr);
-        doReject(abortErr);
+        doReject(new Error('aborted'));
       };
       if (options.signal.aborted) abortListener();
       else options.signal.addEventListener('abort', abortListener, { once: true });
     }
 
-    if (options.body) {
-      if (typeof options.body === 'string' || Buffer.isBuffer(options.body)) {
-        req.write(options.body);
-      } else {
-        req.write(Buffer.from(options.body as ArrayBuffer));
-      }
+    if (normalizedBody && normalizedBody.length > 0) {
+      req.write(normalizedBody);
     }
 
     req.end();
