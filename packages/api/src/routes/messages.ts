@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getMessage, listMessages, setMessageSeen, waitForMessage } from '../lib/imap.ts';
-import { forbidUnlessAddress } from '../lib/auth.ts';
+import { forbidUnlessAddress, forbidUnlessMailboxAccess } from '../lib/auth.ts';
 import { clampWaitSeconds } from '../lib/config.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 
@@ -34,7 +34,7 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
-    const denied = forbidUnlessAddress(c, parsed.data.address);
+    const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
     const messages = await listMessages(parsed.data.address, parsed.data.limit);
     return c.json({ messages });
@@ -44,7 +44,7 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
-    const denied = forbidUnlessAddress(c, parsed.data.address);
+    const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
     const message = await getMessage(parsed.data.address, c.req.param('id'));
     if (!message) {
@@ -87,7 +87,7 @@ export const messagesRoute = new Hono()
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
     const { address, fromContains, subjectContains, timeoutSec } = parsed.data;
-    const denied = forbidUnlessAddress(c, address);
+    const denied = forbidUnlessMailboxAccess(c, address);
     if (denied) return denied;
     // schema 仍允许 ≤600（历史客户端）；服务端静默钳到 MCP_MAX_WAIT_SECONDS
     const effectiveTimeout = clampWaitSeconds(timeoutSec);

@@ -25,6 +25,10 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
 import { revokeGrantsForAddress } from './oauth-store.ts';
+import {
+  revokeDelegationsForAddress,
+  revokeDelegationsOnGranteeTokenRotate,
+} from './delegations.ts';
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -453,6 +457,7 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
   const needle = address.toLowerCase();
   const identity = identities.find((i) => i.address === needle);
   if (!identity) return null;
+  revokeDelegationsOnGranteeTokenRotate(needle);
   const { token, tokenHash } = generateToken();
   identity.tokenHash = tokenHash;
   if (scopes !== undefined) {
@@ -466,15 +471,16 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
 /**
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
- * 同步级联吊销该身份下全部 OAuth grant + access/refresh。
+ * 同步级联吊销该身份下全部 OAuth grant + access/refresh 与 Delegation grants。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
   const needle = address.toLowerCase();
   const kept = identities.filter((i) => i.address !== needle);
   if (kept.length === identities.length) return false;
-  save(kept);
+  revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
+  save(kept);
   return true;
 }
 

@@ -41,6 +41,9 @@ export type AuditEvent = {
   clientId?: string;
   grantId?: string;
   address?: string;
+  actor?: string;
+  mailbox?: string;
+  grantee?: string;
   tool?: string;
   tier?: string;
   outcome: AuditOutcome;
@@ -116,6 +119,15 @@ export function recordAuditEvent(
       : {}),
     ...(partial.address !== undefined
       ? { address: scrubAuditField(partial.address) }
+      : {}),
+    ...(partial.actor !== undefined
+      ? { actor: scrubAuditField(partial.actor) }
+      : {}),
+    ...(partial.mailbox !== undefined
+      ? { mailbox: scrubAuditField(partial.mailbox) }
+      : {}),
+    ...(partial.grantee !== undefined
+      ? { grantee: scrubAuditField(partial.grantee) }
       : {}),
     ...(partial.tool !== undefined
       ? { tool: scrubAuditField(partial.tool, 128) }

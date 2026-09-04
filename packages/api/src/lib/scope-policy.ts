@@ -30,7 +30,20 @@ export const OPERATION_POLICIES: readonly OperationPolicy[] = [
     requiredScope: 'read:messages',
     matches: (method, path) => method === 'GET' && /^\/v1\/messages\/[^/]+$/.test(path),
   },
+  {
+    id: 'delegations:list',
+    requiredScope: 'read:messages',
+    matches: (method, path) => method === 'GET' && path === '/v1/delegations',
+  },
+  {
+    id: 'delegations:get',
+    requiredScope: 'read:messages',
+    matches: (method, path) => method === 'GET' && /^\/v1\/delegations\/[^/]+$/.test(path),
+  },
 ];
+
+// Note on future expansion: If SUPPORTED_SCOPES is extended beyond 'read:messages',
+// audit all forbidUnlessMailboxAccess call sites to ensure delegation remains strictly read-only.
 
 /**
  * Centralized scope policy enforcement middleware for all /v1/* REST routes.

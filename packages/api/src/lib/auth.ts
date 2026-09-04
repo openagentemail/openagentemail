@@ -20,6 +20,7 @@ import { config } from './config.ts';
 import { findIdentity, findIdentityByToken, findIdentityByTokenHash } from './identities.ts';
 import { getGrant, lookupAccessToken, peekAccessToken } from './oauth-store.ts';
 import { resolveResourceUri } from './oauth-url.ts';
+import { hasActiveDelegation } from './delegations.ts';
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -50,6 +51,7 @@ export type TokenAttribution =
 declare module 'hono' {
   interface ContextVariableMap {
     auth: Auth;
+    attribution?: TokenAttribution;
   }
 }
 
@@ -223,6 +225,7 @@ export const bearerAuth = createMiddleware(async (c, next) => {
   const result = resolveAccessToken(token, { resource });
   if (result.status === 'ok') {
     c.set('auth', result.auth);
+    c.set('attribution', result.attribution);
     await next();
     return;
   }
@@ -236,6 +239,10 @@ export function getAuth(c: Context): Auth {
   return c.get('auth');
 }
 
+export function getAttribution(c: Context): TokenAttribution | undefined {
+  return c.get('attribution');
+}
+
 /**
  * Check that the caller may act as `address`. Admins may act as anyone;
  * identity tokens only as themselves. Returns the error response to send,
@@ -247,3 +254,26 @@ export function forbidUnlessAddress(c: Context, address: string) {
   if (auth.address === address.toLowerCase()) return null;
   return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
 }
+
+/**
+ * Check that the caller may access `mailbox` (for read operations):
+ * 1. Admin may access any mailbox;
+ * 2. Identity may access its own mailbox;
+ * 3. Identity may access a mailbox with an active, unrevoked delegation grant.
+ * Returns null if allowed, or 403 Response if denied.
+ */
+export function forbidUnlessMailboxAccess(
+  c: Context,
+  mailbox: string,
+  requiredScope: string = 'read:messages',
+) {
+  const auth = getAuth(c);
+  if (auth.kind === 'admin') return null;
+  const targetMailbox = mailbox.trim().toLowerCase();
+  if (auth.address.toLowerCase() === targetMailbox) return null;
+  if (hasActiveDelegation(targetMailbox, auth.address, requiredScope)) {
+    return null;
+  }
+  return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+}
+

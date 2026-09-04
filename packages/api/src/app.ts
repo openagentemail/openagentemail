@@ -20,6 +20,7 @@ import { getMcpLoopbackBase } from './lib/mcp-loopback.ts';
 import { registerMcpHttpRoutes } from './mcp/http.ts';
 import { auditRoute } from './routes/audit.ts';
 import { identitiesRoute } from './routes/identities.ts';
+import { delegationsRoute } from './routes/delegations.ts';
 import { messagesRoute } from './routes/messages.ts';
 import { sendRoute } from './routes/send.ts';
 import { notifyRoute } from './routes/notify.ts';
@@ -104,6 +105,7 @@ export function createApp(options: AppOptions = {}): Hono {
   app.use('/v1/*', bearerAuth);
   app.use('/v1/*', scopePolicyMiddleware);
   app.route('/v1/identities', identitiesRoute);
+  app.route('/v1/delegations', delegationsRoute);
   app.route('/v1/messages', messagesRoute);
   app.route('/v1/send', sendRoute);
   app.route('/v1/notify', notifyRoute);
