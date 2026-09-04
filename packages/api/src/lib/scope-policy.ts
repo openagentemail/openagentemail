@@ -30,6 +30,11 @@ export const OPERATION_POLICIES: readonly OperationPolicy[] = [
     requiredScope: 'read:messages',
     matches: (method, path) => method === 'GET' && /^\/v1\/messages\/[^/]+$/.test(path),
   },
+  {
+    id: 'delegations:list',
+    requiredScope: 'read:messages',
+    matches: (method, path) => method === 'GET' && path === '/v1/delegations',
+  },
 ];
 
 /**

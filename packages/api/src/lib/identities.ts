@@ -25,6 +25,10 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
 import { revokeGrantsForAddress } from './oauth-store.ts';
+import {
+  revokeDelegationsForAddress,
+  revokeDelegationsOnGranteeTokenRotate,
+} from './delegations.ts';
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -460,13 +464,14 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
     else identity.scopes = [...scopes];
   }
   save(identities);
+  revokeDelegationsOnGranteeTokenRotate(needle);
   return token;
 }
 
 /**
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
- * 同步级联吊销该身份下全部 OAuth grant + access/refresh。
+ * 同步级联吊销该身份下全部 OAuth grant + access/refresh 与 Delegation grants。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
@@ -475,6 +480,7 @@ export function deleteIdentity(address: string): boolean {
   if (kept.length === identities.length) return false;
   save(kept);
   revokeGrantsForAddress(needle);
+  revokeDelegationsForAddress(needle);
   return true;
 }
 
