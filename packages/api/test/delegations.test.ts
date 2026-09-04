@@ -82,6 +82,8 @@ const {
   DELEGATION_STORE_SCHEMA_VERSION,
 } = await import('../src/lib/delegations.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
+const { putAccessTokenForTests } = await import('../src/lib/oauth-store.ts');
+const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
 
 const adminKey = [...config.apiKeys][0]!;
 let app = createApp({ uiEnabled: true });
@@ -217,7 +219,6 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
         headers: {
           Authorization: `Bearer ${aliceToken}`,
           'Content-Type': 'application/json',
-          'x-audit-ts': '2026-09-04T12:00:00.000Z',
         },
         body: JSON.stringify({
           mailbox: 'alice@test.example',
@@ -230,6 +231,8 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       expect(ownerBody.mailbox).toBe('alice@test.example');
       expect(ownerBody.grantee).toBe('bob@test.example');
       expect(ownerBody.scopes).toEqual(['read:messages']);
+      expect(typeof ownerBody.createdAt).toBe('string');
+      expect(Date.parse(ownerBody.createdAt)).not.toBeNaN();
 
       // 2. Admin can grant for any mailbox
       const adminRes = await app.request('/v1/delegations', {
@@ -252,7 +255,6 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
         headers: {
           Authorization: `Bearer ${carolToken}`,
           'Content-Type': 'application/json',
-          'x-audit-ts': '2026-09-04T12:01:00.000Z',
         },
         body: JSON.stringify({
           mailbox: 'alice@test.example',
@@ -285,82 +287,246 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       expect(grantAudit).toBeDefined();
       expect(grantAudit?.actor).toBe('alice@test.example');
       expect(grantAudit?.outcome).toBe('ok');
-      expect(grantAudit?.ts).toBe('2026-09-04T12:00:00.000Z');
+      expect(typeof grantAudit?.ts).toBe('string');
+      expect(Math.abs(Date.now() - new Date(grantAudit?.ts!).getTime())).toBeLessThan(10000);
 
       const deniedAudit = audits.find((e) => e.event === 'delegation.grant.denied');
       expect(deniedAudit).toBeDefined();
       expect(deniedAudit?.actor).toBe('carol@test.example');
       expect(deniedAudit?.outcome).toBe('denied');
       expect(deniedAudit?.mailbox).toBe('alice@test.example');
+      expect(typeof deniedAudit?.ts).toBe('string');
+      expect(Math.abs(Date.now() - new Date(deniedAudit?.ts!).getTime())).toBeLessThan(10000);
     });
 
-    test('GET /v1/delegations filtering, owner/grantee authorization, and non-disclosure 403', async () => {
+    test('Item A: POST /v1/delegations enforces server-generated ts and ignores client x-audit-ts and body ts', async () => {
+      const spoofedTs = '1999-01-01T00:00:00.000Z';
+      const res = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+          'x-audit-ts': spoofedTs,
+        },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+          ts: spoofedTs,
+        }),
+      });
+      expect(res.status).toBe(201);
+      const data = (await res.json()) as any;
+      expect(data.createdAt).not.toBe(spoofedTs);
+      expect(Math.abs(Date.now() - new Date(data.createdAt).getTime())).toBeLessThan(10000);
+
+      const audits = readAuditEvents();
+      const audit = audits.find((e) => e.event === 'delegation.grant' && e.grantId === data.id);
+      expect(audit).toBeDefined();
+      expect(audit?.ts).not.toBe(spoofedTs);
+      expect(Math.abs(Date.now() - new Date(audit?.ts!).getTime())).toBeLessThan(10000);
+    });
+
+    test('Item C: POST /v1/delegations rejects explicit empty scopes [] with 400 and defaults omitted scopes', async () => {
+      // 1. Explicit empty scopes array -> 400 invalid_request
+      const emptyRes = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+          scopes: [],
+        }),
+      });
+      expect(emptyRes.status).toBe(400);
+      const emptyJson = (await emptyRes.json()) as any;
+      expect(emptyJson.error).toBe('invalid_request');
+      expect(emptyJson.details).toBe('scopes cannot be empty');
+
+      // 2. Omitted scopes -> defaults to ['read:messages'] with 201
+      const defaultRes = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+        }),
+      });
+      expect(defaultRes.status).toBe(201);
+      const defaultJson = (await defaultRes.json()) as any;
+      expect(defaultJson.scopes).toEqual(['read:messages']);
+    });
+
+    test('Item F: POST /v1/delegations is idempotent on active grant (returns 200) and creates new after revoke', async () => {
+      // 1. Initial creation -> 201 Created
+      const res1 = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'bob@test.example' }),
+      });
+      expect(res1.status).toBe(201);
+      const grant1 = (await res1.json()) as any;
+      expect(grant1.id.startsWith('delg_')).toBe(true);
+
+      // Verify store has 1 grant and 1 audit event
+      expect(listDelegations({ mailbox: 'alice@test.example' }).length).toBe(1);
+      let grantAudits = readAuditEvents().filter((e) => e.event === 'delegation.grant');
+      expect(grantAudits.length).toBe(1);
+
+      // 2. Retry creation with same (mailbox, grantee) -> 200 OK with existing grant, no duplicate in store or audit
+      const res2 = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'bob@test.example' }),
+      });
+      expect(res2.status).toBe(200);
+      const grant2 = (await res2.json()) as any;
+      expect(grant2.id).toBe(grant1.id);
+      expect(grant2.createdAt).toBe(grant1.createdAt);
+
+      // Verify store STILL has only 1 grant and only 1 audit event
+      expect(listDelegations({ mailbox: 'alice@test.example' }).length).toBe(1);
+      grantAudits = readAuditEvents().filter((e) => e.event === 'delegation.grant');
+      expect(grantAudits.length).toBe(1);
+
+      // 3. Revoke the active grant
+      const delRes = await app.request(`/v1/delegations/${grant1.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(delRes.status).toBe(200);
+
+      // 4. Create again after revoke -> creates new active grant with 201 Created
+      const res3 = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'bob@test.example' }),
+      });
+      expect(res3.status).toBe(201);
+      const grant3 = (await res3.json()) as any;
+      expect(grant3.id).not.toBe(grant1.id);
+
+      // Verify store now has 2 total grants (1 tombstone + 1 active)
+      expect(listDelegations({ mailbox: 'alice@test.example' }).length).toBe(2);
+      grantAudits = readAuditEvents().filter((e) => e.event === 'delegation.grant');
+      expect(grantAudits.length).toBe(2);
+    });
+
+    test('Item E & H1: GET /v1/delegations grantee combined filtering, owner query, and Cache-Control: no-store', async () => {
       // Alice grants to Bob
       await app.request('/v1/delegations', {
         method: 'POST',
         headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'bob@test.example' }),
       });
-
-      // 1. Owner queries own mailbox grants: allowed
-      const ownerList = await app.request('/v1/delegations?mailbox=alice@test.example', {
-        headers: { Authorization: `Bearer ${aliceToken}` },
+      // Carol grants to Bob
+      await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${carolToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mailbox: 'carol@test.example', grantee: 'bob@test.example' }),
       });
-      expect(ownerList.status).toBe(200);
-      const ownerJson = (await ownerList.json()) as any;
-      expect(ownerJson.delegations.length).toBe(1);
-
-      // 2. Grantee queries own received grants: allowed
-      const granteeList = await app.request('/v1/delegations?grantee=bob@test.example', {
-        headers: { Authorization: `Bearer ${bobToken}` },
-      });
-      expect(granteeList.status).toBe(200);
-      const granteeJson = (await granteeList.json()) as any;
-      expect(granteeJson.delegations.length).toBe(1);
-
-      // 3. Grantee with scoped read token queries own received grants: allowed via delegations:list policy
-      const scopedGrantee = createIdentity({ localpart: 'scoped-bob', scopes: ['read:messages'] })!;
+      // Alice grants to Carol
       await app.request('/v1/delegations', {
         method: 'POST',
         headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'scoped-bob@test.example' }),
+        body: JSON.stringify({ mailbox: 'alice@test.example', grantee: 'carol@test.example' }),
       });
-      const scopedList = await app.request('/v1/delegations?grantee=scoped-bob@test.example', {
-        headers: { Authorization: `Bearer ${scopedGrantee.token}` },
-      });
-      expect(scopedList.status).toBe(200);
 
-      // 4. Carol queries Alice's mailbox: 403 forbidden without disclosure
-      const carolCheckAlice = await app.request('/v1/delegations?mailbox=alice@test.example', {
+      // 1. Grantee (Bob) queries combined ?mailbox=alice@test.example&grantee=bob@test.example -> 200 with Alice's grant only
+      const combinedRes = await app.request(
+        '/v1/delegations?mailbox=alice@test.example&grantee=bob@test.example',
+        { headers: { Authorization: `Bearer ${bobToken}` } },
+      );
+      expect(combinedRes.status).toBe(200);
+      expect(combinedRes.headers.get('cache-control')).toBe('no-store');
+      const combinedJson = (await combinedRes.json()) as any;
+      expect(combinedJson.delegations.length).toBe(1);
+      expect(combinedJson.delegations[0].mailbox).toBe('alice@test.example');
+      expect(combinedJson.delegations[0].grantee).toBe('bob@test.example');
+
+      // 2. Grantee (Bob) queries all incoming ?grantee=bob@test.example -> 200 with 2 grants
+      const bobAllRes = await app.request('/v1/delegations?grantee=bob@test.example', {
+        headers: { Authorization: `Bearer ${bobToken}` },
+      });
+      expect(bobAllRes.status).toBe(200);
+      const bobAllJson = (await bobAllRes.json()) as any;
+      expect(bobAllJson.delegations.length).toBe(2);
+
+      // 3. Grantee (Bob) queries ?mailbox=alice@test.example WITHOUT grantee=self -> 403 (non-disclosure)
+      const bobOnlyMailboxRes = await app.request('/v1/delegations?mailbox=alice@test.example', {
+        headers: { Authorization: `Bearer ${bobToken}` },
+      });
+      expect(bobOnlyMailboxRes.status).toBe(403);
+
+      // 4. Bob queries someone else's grantee filter ?grantee=carol@test.example -> 403
+      const bobOtherGranteeRes = await app.request('/v1/delegations?grantee=carol@test.example', {
+        headers: { Authorization: `Bearer ${bobToken}` },
+      });
+      expect(bobOtherGranteeRes.status).toBe(403);
+
+      // 5. Carol queries ?mailbox=alice@test.example&grantee=bob@test.example (neither is self) -> 403
+      const carolProbeRes = await app.request(
+        '/v1/delegations?mailbox=alice@test.example&grantee=bob@test.example',
+        { headers: { Authorization: `Bearer ${carolToken}` } },
+      );
+      expect(carolProbeRes.status).toBe(403);
+
+      // 6. Owner (Alice) queries ?mailbox=alice@test.example -> 200 (outgoing grants)
+      const aliceOutRes = await app.request('/v1/delegations?mailbox=alice@test.example', {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(aliceOutRes.status).toBe(200);
+      const aliceOutJson = (await aliceOutRes.json()) as any;
+      expect(aliceOutJson.delegations.length).toBe(2);
+    });
+
+    test('Item D & H1: GET /v1/delegations/:id scope policy read:messages, grantee/owner authorization, Cache-Control: no-store', async () => {
+      const grant = createDelegation({
+        mailbox: 'alice@test.example',
+        grantee: 'bob-scoped@test.example',
+        createdBy: 'alice@test.example',
+      });
+
+      // 1. Scoped grantee with read:messages can GET /v1/delegations/:id -> 200
+      const scopedGetRes = await app.request(`/v1/delegations/${grant.id}`, {
+        headers: { Authorization: `Bearer ${bobScopedToken}` },
+      });
+      expect(scopedGetRes.status).toBe(200);
+      expect(scopedGetRes.headers.get('cache-control')).toBe('no-store');
+      const scopedGetJson = (await scopedGetRes.json()) as any;
+      expect(scopedGetJson.id).toBe(grant.id);
+      expect(scopedGetJson.mailbox).toBe('alice@test.example');
+
+      // 2. Owner can GET /v1/delegations/:id -> 200
+      const ownerGetRes = await app.request(`/v1/delegations/${grant.id}`, {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(ownerGetRes.status).toBe(200);
+
+      // 3. Third-party (Carol) gets 403
+      const thirdPartyRes = await app.request(`/v1/delegations/${grant.id}`, {
         headers: { Authorization: `Bearer ${carolToken}` },
       });
-      expect(carolCheckAlice.status).toBe(403);
-      expect(await carolCheckAlice.json()).toEqual({
+      expect(thirdPartyRes.status).toBe(403);
+      expect(await thirdPartyRes.json()).toEqual({
         error: 'forbidden: token is scoped to another address',
       });
 
-      // 5. Carol queries Bob's received grants: 403
-      const carolCheckBob = await app.request('/v1/delegations?grantee=bob@test.example', {
-        headers: { Authorization: `Bearer ${carolToken}` },
+      // 4. Token without read:messages scope (e.g. empty scopes []) gets 403 insufficient_scope
+      const noScopeUser = createIdentity({ localpart: 'no-scope-user', scopes: [] })!;
+      createDelegation({
+        mailbox: 'alice@test.example',
+        grantee: 'no-scope-user@test.example',
+        createdBy: 'alice@test.example',
       });
-      expect(carolCheckBob.status).toBe(403);
-
-      // 6. Identity caller queries without filter: 403
-      const noFilter = await app.request('/v1/delegations', {
-        headers: { Authorization: `Bearer ${aliceToken}` },
+      const noScopeGrant = listDelegations({ grantee: 'no-scope-user@test.example' })[0]!;
+      const noScopeRes = await app.request(`/v1/delegations/${noScopeGrant.id}`, {
+        headers: { Authorization: `Bearer ${noScopeUser.token}` },
       });
-      expect(noFilter.status).toBe(403);
-
-      // 7. Admin queries without filter: returns all
-      const adminList = await app.request('/v1/delegations', {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
-      expect(adminList.status).toBe(200);
-      const adminJson = (await adminList.json()) as any;
-      expect(adminJson.delegations.length).toBe(2);
+      expect(noScopeRes.status).toBe(403);
+      expect(await noScopeRes.json()).toEqual({ error: 'forbidden: insufficient_scope' });
     });
 
-    test('DELETE /v1/delegations/:id authorizes owner/admin, forbids third-party, idempotent tombstone', async () => {
+    test('DELETE /v1/delegations/:id authorizes owner/admin, forbids third-party, idempotent tombstone with server ts', async () => {
       const grant = createDelegation({
         mailbox: 'alice@test.example',
         grantee: 'bob@test.example',
@@ -370,38 +536,31 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       // 1. Third party (Carol) tries to revoke -> 403
       const deniedRevoke = await app.request(`/v1/delegations/${grant.id}`, {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${carolToken}`,
-          'x-audit-ts': '2026-09-04T13:00:00.000Z',
-        },
+        headers: { Authorization: `Bearer ${carolToken}` },
       });
       expect(deniedRevoke.status).toBe(403);
 
       // 2. Owner revokes -> 200 + audit
       const okRevoke = await app.request(`/v1/delegations/${grant.id}`, {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${aliceToken}`,
-          'x-audit-ts': '2026-09-04T13:01:00.000Z',
-        },
+        headers: { Authorization: `Bearer ${aliceToken}` },
       });
       expect(okRevoke.status).toBe(200);
       const okJson = (await okRevoke.json()) as any;
       expect(okJson.revoked).toBe(true);
-      expect(okJson.revokedAt).toBe('2026-09-04T13:01:00.000Z');
+      expect(typeof okJson.revokedAt).toBe('string');
+      expect(Date.parse(okJson.revokedAt)).not.toBeNaN();
+      const initialRevokedAt = okJson.revokedAt;
 
       // 3. Repeat revoke is idempotent and returns 200 with original revokedAt
       const repeatRevoke = await app.request(`/v1/delegations/${grant.id}`, {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${aliceToken}`,
-          'x-audit-ts': '2026-09-04T13:05:00.000Z',
-        },
+        headers: { Authorization: `Bearer ${aliceToken}` },
       });
       expect(repeatRevoke.status).toBe(200);
       const repeatJson = (await repeatRevoke.json()) as any;
       expect(repeatJson.revoked).toBe(true);
-      expect(repeatJson.revokedAt).toBe('2026-09-04T13:01:00.000Z');
+      expect(repeatJson.revokedAt).toBe(initialRevokedAt);
 
       // Check audit trail
       const audits = readAuditEvents();
@@ -411,8 +570,72 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
 
       const okAudits = audits.filter((e) => e.event === 'delegation.revoke' && e.outcome === 'ok');
       expect(okAudits.length).toBeGreaterThanOrEqual(1);
-      expect(okAudits.some((e) => e.actor === 'alice@test.example' && e.ts === '2026-09-04T13:01:00.000Z')).toBe(true);
-      expect(okAudits.some((e) => e.actor === 'alice@test.example' && e.ts === '2026-09-04T13:05:00.000Z')).toBe(true);
+      expect(okAudits.some((e) => e.actor === 'alice@test.example')).toBe(true);
+    });
+
+    test('Item G: POST and DELETE /v1/delegations reject OAuth-attributed credentials with 403', async () => {
+      const resource = resolveResourceUri('http://localhost');
+      const oauthToken = 'oa_oauth_token_delg_test';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-oauth-delg-1',
+        address: 'alice@test.example',
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-delg-1', clientName: 'Client Delg 1' },
+      });
+
+      // 1. OAuth token calling POST /v1/delegations -> 403 forbidden
+      const postRes = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${oauthToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+        }),
+      });
+      expect(postRes.status).toBe(403);
+      expect(await postRes.json()).toEqual({
+        error: 'forbidden: delegation management requires direct identity credentials',
+      });
+
+      // Verify audit event delegation.grant.denied was logged
+      const audits = readAuditEvents();
+      const grantDeniedAudit = audits.find(
+        (e) => e.event === 'delegation.grant.denied' && e.grantee === 'bob@test.example',
+      );
+      expect(grantDeniedAudit).toBeDefined();
+      expect(grantDeniedAudit?.outcome).toBe('denied');
+
+      // 2. Direct identity token creates grant
+      const validGrant = createDelegation({
+        mailbox: 'alice@test.example',
+        grantee: 'bob@test.example',
+        createdBy: 'alice@test.example',
+      });
+
+      // 3. OAuth token calling DELETE /v1/delegations/:id -> 403 forbidden
+      const deleteRes = await app.request(`/v1/delegations/${validGrant.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${oauthToken}` },
+      });
+      expect(deleteRes.status).toBe(403);
+      expect(await deleteRes.json()).toEqual({
+        error: 'forbidden: delegation management requires direct identity credentials',
+      });
+
+      // Verify grant was NOT revoked
+      const storedGrant = getDelegation(validGrant.id);
+      expect(storedGrant?.revokedAt).toBeNull();
+
+      // Verify audit event delegation.revoke denied was logged
+      const deleteDeniedAudit = readAuditEvents().find(
+        (e) => e.event === 'delegation.revoke' && e.outcome === 'denied' && e.grantId === validGrant.id,
+      );
+      expect(deleteDeniedAudit).toBeDefined();
     });
   });
 
@@ -621,6 +844,56 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       const cascades = audits.filter((e) => e.event === 'delegation.revoke.cascade');
       expect(cascades.some((c) => c.grantId === g1.id)).toBe(true);
       expect(cascades.some((c) => c.grantId === g2.id)).toBe(true);
+    });
+
+    test('Item B1: deleteIdentity fail-closed: corrupted delegations.json throws error and leaves identity intact', () => {
+      const alice = createIdentity({ localpart: 'alice-fail' })!;
+      createDelegation({
+        mailbox: 'alice-fail@test.example',
+        grantee: 'bob@test.example',
+        createdBy: 'alice-fail@test.example',
+      });
+
+      // Inject failure: corrupt delegations.json
+      const filePath = join(config.dataDir, 'delegations.json');
+      writeFileSync(filePath, 'CORRUPTED_JSON{', { mode: 0o600 });
+      invalidateDelegationStoreCache();
+
+      // deleteIdentity must throw error and fail closed
+      expect(() => deleteIdentity('alice-fail@test.example')).toThrow('delegation_store_corrupt');
+
+      // Verify Alice is STILL present in identities.json
+      const identitiesRaw = JSON.parse(readFileSync(join(config.dataDir, 'identities.json'), 'utf8'));
+      const found = identitiesRaw.find((i: any) => i.address === 'alice-fail@test.example');
+      expect(found).toBeDefined();
+      expect(found.address).toBe('alice-fail@test.example');
+    });
+
+    test('Item B1: rotateIdentityToken fail-closed: corrupted delegations.json throws error and leaves tokenHash unchanged', () => {
+      const bob = createIdentity({ localpart: 'bob-fail' })!;
+      createDelegation({
+        mailbox: 'alice@test.example',
+        grantee: 'bob-fail@test.example',
+        createdBy: 'alice@test.example',
+      });
+
+      // Record original tokenHash from identities.json
+      const identitiesBefore = JSON.parse(readFileSync(join(config.dataDir, 'identities.json'), 'utf8'));
+      const bobBefore = identitiesBefore.find((i: any) => i.address === 'bob-fail@test.example');
+      const originalTokenHash = bobBefore.tokenHash;
+
+      // Inject failure: corrupt delegations.json
+      const filePath = join(config.dataDir, 'delegations.json');
+      writeFileSync(filePath, 'CORRUPTED_JSON{', { mode: 0o600 });
+      invalidateDelegationStoreCache();
+
+      // rotateIdentityToken must throw error and fail closed
+      expect(() => rotateIdentityToken('bob-fail@test.example')).toThrow('delegation_store_corrupt');
+
+      // Verify Bob's tokenHash is UNCHANGED in identities.json
+      const identitiesAfter = JSON.parse(readFileSync(join(config.dataDir, 'identities.json'), 'utf8'));
+      const bobAfter = identitiesAfter.find((i: any) => i.address === 'bob-fail@test.example');
+      expect(bobAfter.tokenHash).toBe(originalTokenHash);
     });
   });
 

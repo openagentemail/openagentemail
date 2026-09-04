@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { getAuth } from '../lib/auth.ts';
+import { getAuth, getAttribution } from '../lib/auth.ts';
 import { validateScopesInput } from '../lib/identities.ts';
 import {
   createDelegation,
+  findActiveDelegation,
   getDelegation,
   listDelegations,
   revokeDelegation,
@@ -14,7 +15,6 @@ const postDelegationSchema = z.object({
   mailbox: z.string().email().max(320),
   grantee: z.string().email().max(320),
   scopes: z.unknown().optional(),
-  ts: z.string().optional(),
 });
 
 const listQuerySchema = z.object({
@@ -38,6 +38,9 @@ export const delegationsRoute = new Hono()
     let requestedScopes: string[] = ['read:messages'];
     if (body && typeof body === 'object' && 'scopes' in body) {
       const rawScopes = (body as Record<string, unknown>).scopes;
+      if (Array.isArray(rawScopes) && rawScopes.length === 0) {
+        return c.json({ error: 'invalid_request', details: 'scopes cannot be empty' }, 400);
+      }
       const validated = validateScopesInput(rawScopes);
       if (validated.ok) {
         requestedScopes = validated.scopes;
@@ -49,11 +52,25 @@ export const delegationsRoute = new Hono()
     const mailbox = parsed.data.mailbox.trim().toLowerCase();
     const grantee = parsed.data.grantee.trim().toLowerCase();
     const auth = getAuth(c);
+    const attribution = getAttribution(c);
     const actor = auth.kind === 'admin' ? 'admin' : auth.address.toLowerCase();
     const isAdmin = auth.kind === 'admin';
     const isOwner = auth.kind === 'identity' && auth.address.toLowerCase() === mailbox;
 
-    const auditTs = c.req.header('x-audit-ts') ?? parsed.data.ts;
+    if (attribution?.kind === 'oauth') {
+      recordAuditEvent({
+        event: 'delegation.grant.denied',
+        outcome: 'denied',
+        actor,
+        mailbox,
+        grantee,
+        scopes: requestedScopes,
+      });
+      return c.json(
+        { error: 'forbidden: delegation management requires direct identity credentials' },
+        403,
+      );
+    }
 
     if (!isAdmin && !isOwner) {
       recordAuditEvent({
@@ -63,9 +80,13 @@ export const delegationsRoute = new Hono()
         mailbox,
         grantee,
         scopes: requestedScopes,
-        ...(auditTs ? { ts: auditTs } : {}),
       });
       return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+    }
+
+    const existing = findActiveDelegation(mailbox, grantee);
+    if (existing) {
+      return c.json(existing, 200);
     }
 
     const grant = createDelegation({
@@ -73,7 +94,6 @@ export const delegationsRoute = new Hono()
       grantee,
       scopes: requestedScopes,
       createdBy: actor,
-      createdAt: auditTs,
     });
 
     recordAuditEvent({
@@ -84,12 +104,12 @@ export const delegationsRoute = new Hono()
       mailbox,
       grantee,
       scopes: grant.scopes,
-      ...(auditTs ? { ts: auditTs } : {}),
     });
 
     return c.json(grant, 201);
   })
   .get('/', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const query = c.req.query();
     const parsed = listQuerySchema.safeParse(query);
     if (!parsed.success) {
@@ -109,15 +129,10 @@ export const delegationsRoute = new Hono()
     }
 
     // Non-admin identity caller
-    if (!mailboxParam && !granteeParam) {
-      return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
-    }
+    const isGranteeSelf = granteeParam === callerAddress;
+    const isOwnerSelf = mailboxParam === callerAddress;
 
-    if (mailboxParam && mailboxParam !== callerAddress) {
-      return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
-    }
-
-    if (granteeParam && granteeParam !== callerAddress && mailboxParam !== callerAddress) {
+    if (!isGranteeSelf && !isOwnerSelf) {
       return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
     }
 
@@ -125,6 +140,7 @@ export const delegationsRoute = new Hono()
     return c.json({ delegations });
   })
   .get('/:id', async (c) => {
+    c.header('Cache-Control', 'no-store');
     const id = c.req.param('id');
     if (!id || typeof id !== 'string' || !id.startsWith('delg_')) {
       return c.json({ error: 'invalid_request' }, 400);
@@ -156,11 +172,26 @@ export const delegationsRoute = new Hono()
     }
 
     const auth = getAuth(c);
+    const attribution = getAttribution(c);
     const actor = auth.kind === 'admin' ? 'admin' : auth.address.toLowerCase();
     const isAdmin = auth.kind === 'admin';
     const isOwner = auth.kind === 'identity' && auth.address.toLowerCase() === grant.mailbox.toLowerCase();
 
-    const auditTs = c.req.header('x-audit-ts');
+    if (attribution?.kind === 'oauth') {
+      recordAuditEvent({
+        event: 'delegation.revoke',
+        outcome: 'denied',
+        grantId: grant.id,
+        actor,
+        mailbox: grant.mailbox,
+        grantee: grant.grantee,
+        scopes: grant.scopes,
+      });
+      return c.json(
+        { error: 'forbidden: delegation management requires direct identity credentials' },
+        403,
+      );
+    }
 
     if (!isAdmin && !isOwner) {
       recordAuditEvent({
@@ -171,12 +202,11 @@ export const delegationsRoute = new Hono()
         mailbox: grant.mailbox,
         grantee: grant.grantee,
         scopes: grant.scopes,
-        ...(auditTs ? { ts: auditTs } : {}),
       });
       return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
     }
 
-    const revokedGrant = revokeDelegation(id, actor, auditTs);
+    const revokedGrant = revokeDelegation(id, actor);
 
     recordAuditEvent({
       event: 'delegation.revoke',
@@ -186,7 +216,6 @@ export const delegationsRoute = new Hono()
       mailbox: grant.mailbox,
       grantee: grant.grantee,
       scopes: grant.scopes,
-      ...(auditTs ? { ts: auditTs } : {}),
     });
 
     return c.json({

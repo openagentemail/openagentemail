@@ -457,6 +457,7 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
   const needle = address.toLowerCase();
   const identity = identities.find((i) => i.address === needle);
   if (!identity) return null;
+  revokeDelegationsOnGranteeTokenRotate(needle);
   const { token, tokenHash } = generateToken();
   identity.tokenHash = tokenHash;
   if (scopes !== undefined) {
@@ -464,7 +465,6 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
     else identity.scopes = [...scopes];
   }
   save(identities);
-  revokeDelegationsOnGranteeTokenRotate(needle);
   return token;
 }
 
@@ -478,9 +478,9 @@ export function deleteIdentity(address: string): boolean {
   const needle = address.toLowerCase();
   const kept = identities.filter((i) => i.address !== needle);
   if (kept.length === identities.length) return false;
-  save(kept);
-  revokeGrantsForAddress(needle);
   revokeDelegationsForAddress(needle);
+  revokeGrantsForAddress(needle);
+  save(kept);
   return true;
 }
 

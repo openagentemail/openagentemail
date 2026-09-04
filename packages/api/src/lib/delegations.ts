@@ -1,3 +1,9 @@
+// Single-writer process assumption: Like identities.json, delegations.json assumes a
+// single-writer process and does not support multi-process concurrent mutations on the same DATA_DIR.
+// Scope note: Currently delegations only support 'read:messages'. If additional scopes are
+// introduced in the future, all forbidUnlessMailboxAccess call sites must be audited to ensure
+// delegations do not unintentionally grant write or admin capabilities.
+
 import {
   existsSync,
   mkdirSync,
@@ -201,6 +207,12 @@ export function createDelegation(params: {
   const store = load();
   const mailbox = params.mailbox.trim().toLowerCase();
   const grantee = params.grantee.trim().toLowerCase();
+  const existing = store.grants.find(
+    (g) => g.revokedAt === null && g.mailbox === mailbox && g.grantee === grantee,
+  );
+  if (existing) {
+    return existing;
+  }
   const grant: DelegationGrant = {
     id: params.id ?? `delg_${randomBytes(12).toString('hex')}`,
     mailbox,
@@ -280,18 +292,12 @@ export function revokeDelegation(
   return grant;
 }
 
-/**
- * 级联撤销：当某一身份被删除时，双向级联撤销（作为 owner 授出 + 作为 grantee 被授）。
- */
-export function revokeDelegationsForAddress(
-  address: string,
+function cascadeRevokeGrants(
+  predicate: (grant: DelegationGrant) => boolean,
   opts?: { actor?: string; ts?: string },
 ): number {
   const store = load();
-  const needle = address.trim().toLowerCase();
-  const toRevoke = store.grants.filter(
-    (g) => g.revokedAt === null && (g.mailbox === needle || g.grantee === needle),
-  );
+  const toRevoke = store.grants.filter((g) => g.revokedAt === null && predicate(g));
   if (toRevoke.length === 0) return 0;
 
   const now = opts?.ts ?? new Date().toISOString();
@@ -300,6 +306,11 @@ export function revokeDelegationsForAddress(
   for (const grant of toRevoke) {
     grant.revokedAt = now;
     grant.revokedBy = actor;
+  }
+
+  save(store);
+
+  for (const grant of toRevoke) {
     recordAuditEvent({
       event: 'delegation.revoke.cascade',
       outcome: 'ok',
@@ -311,8 +322,19 @@ export function revokeDelegationsForAddress(
       ...(opts?.ts ? { ts: opts.ts } : {}),
     });
   }
-  save(store);
+
   return toRevoke.length;
+}
+
+/**
+ * 级联撤销：当某一身份被删除时，双向级联撤销（作为 owner 授出 + 作为 grantee 被授）。
+ */
+export function revokeDelegationsForAddress(
+  address: string,
+  opts?: { actor?: string; ts?: string },
+): number {
+  const needle = address.trim().toLowerCase();
+  return cascadeRevokeGrants((g) => g.mailbox === needle || g.grantee === needle, opts);
 }
 
 /**
@@ -322,32 +344,8 @@ export function revokeDelegationsOnGranteeTokenRotate(
   granteeAddress: string,
   opts?: { actor?: string; ts?: string },
 ): number {
-  const store = load();
   const needle = granteeAddress.trim().toLowerCase();
-  const toRevoke = store.grants.filter(
-    (g) => g.revokedAt === null && g.grantee === needle,
-  );
-  if (toRevoke.length === 0) return 0;
-
-  const now = opts?.ts ?? new Date().toISOString();
-  const actor = opts?.actor ?? 'cascade';
-
-  for (const grant of toRevoke) {
-    grant.revokedAt = now;
-    grant.revokedBy = actor;
-    recordAuditEvent({
-      event: 'delegation.revoke.cascade',
-      outcome: 'ok',
-      grantId: grant.id,
-      actor,
-      mailbox: grant.mailbox,
-      grantee: grant.grantee,
-      scopes: grant.scopes,
-      ...(opts?.ts ? { ts: opts.ts } : {}),
-    });
-  }
-  save(store);
-  return toRevoke.length;
+  return cascadeRevokeGrants((g) => g.grantee === needle, opts);
 }
 
 /** 测试辅助：清空存储与缓存 */

@@ -51,6 +51,7 @@ export type TokenAttribution =
 declare module 'hono' {
   interface ContextVariableMap {
     auth: Auth;
+    attribution?: TokenAttribution;
   }
 }
 
@@ -224,6 +225,7 @@ export const bearerAuth = createMiddleware(async (c, next) => {
   const result = resolveAccessToken(token, { resource });
   if (result.status === 'ok') {
     c.set('auth', result.auth);
+    c.set('attribution', result.attribution);
     await next();
     return;
   }
@@ -235,6 +237,10 @@ export const bearerAuth = createMiddleware(async (c, next) => {
 
 export function getAuth(c: Context): Auth {
   return c.get('auth');
+}
+
+export function getAttribution(c: Context): TokenAttribution | undefined {
+  return c.get('attribution');
 }
 
 /**
