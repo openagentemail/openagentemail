@@ -3768,7 +3768,7 @@ Reject:  otherwise, always, with no unsigned fallback
 Dedupe:  on the body's "id" field; deliveries are at-least-once
 Order:   not guaranteed; sort by data.receivedAt then data.uid within one
          data.uidValidity. data.cursor is OPAQUE — never sort or string-compare it
-Fetch:   full mail content via GET /v1/messages/:id with your own API token
+Fetch:   full mail content via GET /v1/messages/:id?uidValidity=<data.uidValidity> with your own API token
 ```
 
 ## Appendix B: relationship to other cards

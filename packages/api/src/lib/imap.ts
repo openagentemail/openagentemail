@@ -17,9 +17,12 @@ import type { AddressObject } from 'mailparser';
 import { config } from './config.ts';
 import {
   decodeMailCursor,
+  decodeMailForwardCursor,
   encodeMailCursor,
+  encodeMailForwardCursor,
   InvalidMailCursorError,
   type MailFolder,
+  type MailForwardCursorPayload,
 } from './mail-cursor.ts';
 import {
   classifyMailSource,
@@ -121,6 +124,15 @@ export interface MessageSourcePayload {
   source: string;
   truncated: boolean;
   byteLength: number;
+}
+
+/** 消息代际（uidValidity）不匹配。路由折成 404 stale_message_generation。 */
+export class StaleMessageGenerationError extends Error {
+  readonly code = 'stale_message_generation';
+  constructor() {
+    super('stale_message_generation');
+    this.name = 'StaleMessageGenerationError';
+  }
 }
 
 /** How far back listMessages scans for address matches. */
@@ -641,6 +653,21 @@ function isAfterCursor(msg: FetchMessageObject, t: number, uid: number): boolean
   return msg.uid < uid;
 }
 
+/** oldest-first：(receivedAtMs asc, uid asc)，保证前向追补顺序无损递进。 */
+export function compareOldestFirst(a: FetchMessageObject, b: FetchMessageObject): number {
+  const dt = receivedAtMs(a) - receivedAtMs(b);
+  if (dt !== 0) return dt;
+  return a.uid - b.uid;
+}
+
+/** 严格大于前向游标键，保证追补不重复、不跳过同毫秒条目。 */
+export function isAfterForwardCursor(msg: FetchMessageObject, t: number, uid: number): boolean {
+  const received = receivedAtMs(msg);
+  if (received > t) return true;
+  if (received < t) return false;
+  return msg.uid > uid;
+}
+
 /**
  * 这条消息按可信收件人头都投给了谁。无 envelope 一律空集合（保留 fail-closed）。
  *
@@ -796,6 +823,28 @@ async function listMessagesPageWith(
   const page = afterCursor.slice(0, limit);
   const hasMore = afterCursor.length > limit;
 
+  const summaries = await buildMessageSummaries(client, page);
+
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeMailCursor(
+          {
+            folder,
+            address: normalized,
+            t: receivedAtMs(last),
+            uid: last.uid,
+          },
+          config.taskSigningSecret,
+        )
+      : null;
+  return { messages: summaries, nextCursor };
+}
+
+async function buildMessageSummaries(
+  client: ImapFlow,
+  page: FetchMessageObject[],
+): Promise<MessageSummary[]> {
   const summaries: MessageSummary[] = [];
   for (const msg of page) {
     let snippet = '';
@@ -831,33 +880,144 @@ async function listMessagesPageWith(
       source,
     });
   }
+  return summaries;
+}
 
-  const last = page[page.length - 1];
-  const nextCursor =
-    hasMore && last
-      ? encodeMailCursor(
-          {
-            folder,
-            address: normalized,
-            t: receivedAtMs(last),
-            uid: last.uid,
-          },
-          config.taskSigningSecret,
-        )
-      : null;
+/**
+ * 前向 since 查询：从指定前向游标之后 oldest-first 遍历邮件（保证无损追补）。
+ * 候选集由服务端 SEARCH SINCE 收窄（按 cursor.t 往前退 1 天防日粒度与时区边角）。
+ * 过滤锚点 (cursor.t, cursor.uid) 永不推进，保证非单调 internalDate 邮件（如 IMAP APPEND/COPY）无损遍历。
+ * UID 扫描进度通过单调递增的 scanUid 推进（u > cursor.scanUid），防重扫与死循环。
+ * 每请求预算 scanBudget（默认 SCAN_BACK = 500）条候选。
+ * 检视过程中一旦收集到第 limit 条匹配信立即停下，scanUid 设为停下时那封信的 UID（已检视全返回，无截断遗漏）。
+ * 单页内按 (receivedAtMs asc, uid asc) 元组升序返回；跨页不承诺全局元组序，承诺完整性与代际 fail-closed。
+ * 若单批扫描完毕未达 limit 但超出预算，或达到 limit，产生带新 scanUid 的 nextCursor；
+ * 即使全部候选集已扫尽，nextCursor 仍返回携带当前 scanUid 水位的 checkpoint 游标（永不返回 null），供下次轮询续用，杜绝重复投递。
+ */
+async function listMessagesSinceWith(
+  client: ImapFlow,
+  address: string,
+  sinceCursor: string,
+  opts: { limit: number; folder?: MailFolder; scanBudget?: number },
+): Promise<MessageListPage> {
+  const folder = opts.folder ?? 'inbox';
+  const limit = opts.limit;
+  const scanBudget = Math.max(1, opts.scanBudget ?? SCAN_BACK);
+  const normalized = address.toLowerCase();
+
+  const cursor = decodeMailForwardCursor(sinceCursor, config.taskSigningSecret);
+  if (cursor.folder !== folder || cursor.address !== normalized) {
+    throw new InvalidMailCursorError();
+  }
+
+  const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
+  if (
+    currentUidValidity === undefined ||
+    String(cursor.uidValidity) !== String(currentUidValidity)
+  ) {
+    throw new InvalidMailCursorError();
+  }
+
+  const startScanUid = cursor.scanUid ?? 0;
+  const makeCheckpointCursor = (scanUid: number) =>
+    encodeMailForwardCursor(
+      {
+        folder,
+        address: normalized,
+        t: cursor.t,
+        uid: cursor.uid,
+        uidValidity: String(currentUidValidity),
+        scanUid,
+      },
+      config.taskSigningSecret,
+    );
+
+  // 1. 服务端 SEARCH SINCE 收窄：按 cursor.t 往前退 1 天（86400000ms），防时区/日粒度边角
+  const sinceDate = new Date(Math.max(0, cursor.t - 24 * 60 * 60 * 1000));
+  const uids = await client.search({ since: sinceDate }, { uid: true });
+  if (!uids || uids.length === 0) {
+    return { messages: [], nextCursor: makeCheckpointCursor(startScanUid) };
+  }
+
+  // 2. 候选集过滤：按 UID 升序检视 uid > scanUid 的候选
+  const candidateUids = uids
+    .filter((u) => u > startScanUid)
+    .sort((a, b) => a - b);
+  if (candidateUids.length === 0) {
+    return { messages: [], nextCursor: makeCheckpointCursor(startScanUid) };
+  }
+
+  // 3. 每请求预算 scanBudget (默认 SCAN_BACK = 500) 条
+  const batchUids = candidateUids.slice(0, scanBudget);
+
+  const fetched = new Map<number, FetchMessageObject>();
+  for await (const msg of client.fetch(
+    batchUids,
+    { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
+    { uid: true },
+  )) {
+    fetched.set(msg.uid, msg);
+  }
+
+  const matched: FetchMessageObject[] = [];
+  let lastScannedUid = startScanUid;
+
+  for (const uid of batchUids) {
+    lastScannedUid = uid;
+    const msg = fetched.get(uid);
+    if (!msg) continue;
+    if (
+      messageBelongsToFolder(msg, normalized, folder) &&
+      isAfterForwardCursor(msg, cursor.t, cursor.uid)
+    ) {
+      matched.push(msg);
+      if (matched.length >= limit) {
+        break;
+      }
+    }
+  }
+
+  // 4. 响应内按 (receivedAtMs asc, uid asc) 元组序排序
+  matched.sort(compareOldestFirst);
+  const summaries = await buildMessageSummaries(client, matched);
+
+  // 5. 游标推进规则（FC 终裁定稿，R5 收口）：
+  // since 查询的 nextCursor 永不返回 null：
+  // 保持 (t_c, u_c 原始过滤锚点, 永不推进) + scanUid + uidValidity。
+  // - 收集到 limit 条立即停下，scanUid = 停下时那封的 UID（已检视全返回，无截断遗漏）
+  // - 若扫完全批预算仍未达 limit（含 0 命中），scanUid 推到已检视最大 UID
+  // - 即使候选集已扫尽，仍返回 checkpoint 游标供后续轮询续用，彻底杜绝重用旧游标导致的重复投递
+  const nextCursor = makeCheckpointCursor(lastScannedUid);
+
   return { messages: summaries, nextCursor };
 }
 
 export async function listMessagesPage(
   address: string,
-  opts: { limit?: number; folder?: MailFolder; cursor?: string } = {},
+  opts: { limit?: number; folder?: MailFolder; cursor?: string; since?: string; scanBudget?: number } = {},
 ): Promise<MessageListPage> {
+  if (opts.since) {
+    return listMessagesSince(address, opts.since, opts.limit, opts.folder, { scanBudget: opts.scanBudget });
+  }
   return withInbox((client) =>
     listMessagesPageWith(client, address, {
       limit: opts.limit ?? 50,
       folder: opts.folder ?? 'inbox',
       cursor: opts.cursor,
     }),
+  );
+}
+
+/** 前向 since 查询对外接口：从指定游标向后 oldest-first 追补。 */
+export async function listMessagesSince(
+  address: string,
+  sinceCursor: string,
+  limit = 50,
+  folder: MailFolder = 'inbox',
+  opts?: { scanBudget?: number },
+): Promise<MessageListPage> {
+  return withInbox((client) =>
+    listMessagesSinceWith(client, address, sinceCursor, { limit, folder, scanBudget: opts?.scanBudget }),
   );
 }
 
@@ -904,7 +1064,17 @@ async function getMessageWith(
   client: ImapFlow,
   address: string,
   id: string,
+  opts?: { uidValidity?: string | number | bigint },
 ): Promise<MessageDetail | null> {
+  const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
+  if (opts?.uidValidity !== undefined) {
+    if (
+      currentUidValidity === undefined ||
+      String(opts.uidValidity) !== String(currentUidValidity)
+    ) {
+      throw new StaleMessageGenerationError();
+    }
+  }
   const uid = Number(id);
   if (!Number.isInteger(uid) || uid <= 0) return null;
   const msg = await client.fetchOne(uid, { source: true, envelope: true, headers: ['delivered-to'] }, { uid: true });
@@ -913,8 +1083,12 @@ async function getMessageWith(
   return toDetail(msg.uid, parsed);
 }
 
-export async function getMessage(address: string, id: string): Promise<MessageDetail | null> {
-  return withInbox((client) => getMessageWith(client, address, id));
+export async function getMessage(
+  address: string,
+  id: string,
+  opts?: { uidValidity?: string | number | bigint },
+): Promise<MessageDetail | null> {
+  return withInbox((client) => getMessageWith(client, address, id, opts));
 }
 
 /**
