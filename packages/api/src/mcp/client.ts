@@ -542,7 +542,7 @@ export interface WebhookSubscriptionDetail {
   events: string[];
   contentScope: 'metadata' | 'preview';
   description: string;
-  state: 'unverified' | 'active' | 'failing' | 'disabled';
+  state: 'unverified' | 'enabled' | 'disabled';
   disabledReason: string | null;
   secretPrefix: string;
   signatureScheme: string;

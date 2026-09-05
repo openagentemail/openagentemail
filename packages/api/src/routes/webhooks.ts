@@ -34,9 +34,12 @@ import {
   executeWebhookTestProbe,
   fireCreationPing,
   getLatestDeliveryForWebhook,
+  latestDeliveryByWebhookId,
+  readAllDeliveryLogRows,
   readDeliveryLogRows,
   redeliverWebhookDelivery,
   validateWebhookUrlResolution,
+  type WebhookDeliveryLogRow,
 } from '../lib/webhook-delivery.ts';
 
 function requireAdmin(c: Context) {
@@ -105,8 +108,38 @@ const updateSchema = z
   })
   .strict();
 
-function formatSubscriptionDetail(sub: WebhookRecord) {
-  const lastDelivery = getLatestDeliveryForWebhook(sub.id);
+const IDEMPOTENCY_KEY_MAX = 128;
+
+function callerRateKey(c: Context): string {
+  const auth = getAuth(c);
+  return auth.kind === 'admin' ? 'admin' : auth.address;
+}
+
+function rejectIfReadRateLimited(c: Context) {
+  const rateRes = deliveryLimiter.checkReadRate(callerRateKey(c));
+  if (!rateRes.allowed) {
+    c.header('Retry-After', String(rateRes.retryAfterSec));
+    return c.json({ error: 'rate_limited', retryAfterSec: rateRes.retryAfterSec }, 429);
+  }
+  return null;
+}
+
+function parseIdempotencyKey(c: Context): { ok: true; key?: string } | { ok: false; response: Response } {
+  const raw = c.req.header('idempotency-key');
+  if (raw === undefined) return { ok: true };
+  const key = raw.trim();
+  if (!key) return { ok: true };
+  if (key.length > IDEMPOTENCY_KEY_MAX) {
+    return { ok: false, response: c.json({ error: 'invalid_request' }, 400) };
+  }
+  return { ok: true, key };
+}
+
+function formatSubscriptionDetail(
+  sub: WebhookRecord,
+  lastDelivery: WebhookDeliveryLogRow | null | undefined = undefined,
+) {
+  const latest = lastDelivery !== undefined ? lastDelivery : getLatestDeliveryForWebhook(sub.id);
   return {
     id: sub.id,
     url: sub.url,
@@ -124,15 +157,15 @@ function formatSubscriptionDetail(sub: WebhookRecord) {
     rotatedAt: sub.rotatedAt,
     consecutiveFailures: sub.consecutiveFailures,
     privateTargetGranted: sub.privateTargetGranted,
-    lastDelivery: lastDelivery
+    lastDelivery: latest
       ? {
-          deliveryId: lastDelivery.deliveryId,
-          ts: lastDelivery.ts,
-          attempt: lastDelivery.attempt,
-          outcome: lastDelivery.outcome,
-          status: lastDelivery.status,
-          durationMs: lastDelivery.durationMs,
-          reason: lastDelivery.reason,
+          deliveryId: latest.deliveryId,
+          ts: latest.ts,
+          attempt: latest.attempt,
+          outcome: latest.outcome,
+          status: latest.status,
+          durationMs: latest.durationMs,
+          reason: latest.reason,
         }
       : null,
   };
@@ -188,7 +221,9 @@ export const webhooksRoute = new Hono()
     }
 
     // Idempotency check
-    const idempotencyKey = c.req.header('idempotency-key')?.trim();
+    const idempotency = parseIdempotencyKey(c);
+    if (!idempotency.ok) return idempotency.response;
+    const idempotencyKey = idempotency.key;
     const compositeKey = idempotencyKey ? `${idempotencyKey}:${targetAddress}` : null;
     if (idempotencyKey && compositeKey) {
       const pending = inFlightCreateIdempotency.get(compositeKey);
@@ -313,6 +348,9 @@ export const webhooksRoute = new Hono()
 
   // GET /v1/webhooks - List subscriptions
   .get('/', async (c) => {
+    const deniedRead = rejectIfReadRateLimited(c);
+    if (deniedRead) return deniedRead;
+
     const auth = getAuth(c);
     const addressParam = c.req.query('address')?.trim()?.toLowerCase();
     if (addressParam && auth.kind !== 'admin') {
@@ -327,8 +365,11 @@ export const webhooksRoute = new Hono()
       filtered = all.filter((s) => s.address === auth.address);
     }
 
+    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
     return c.json({
-      webhooks: filtered.map((sub) => formatSubscriptionDetail(sub)),
+      webhooks: filtered.map((sub) =>
+        formatSubscriptionDetail(sub, latestByWebhook.get(sub.id) ?? null),
+      ),
     });
   })
 
@@ -386,6 +427,9 @@ export const webhooksRoute = new Hono()
 
   // GET /v1/webhooks/:id - Get subscription detail
   .get('/:id', async (c) => {
+    const deniedRead = rejectIfReadRateLimited(c);
+    if (deniedRead) return deniedRead;
+
     const sub = getWebhookSubscription(c.req.param('id'));
     if (!sub) {
       return c.json({ error: 'not_found' }, 404);
@@ -394,7 +438,8 @@ export const webhooksRoute = new Hono()
     const denied = forbidUnlessAddress(c, sub.address);
     if (denied) return denied;
 
-    return c.json(formatSubscriptionDetail(sub));
+    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    return c.json(formatSubscriptionDetail(sub, latestByWebhook.get(sub.id) ?? null));
   })
 
   // POST /v1/webhooks/:id - Update subscription
@@ -497,7 +542,8 @@ export const webhooksRoute = new Hono()
       webhookId: sub.id,
     });
 
-    return c.json(formatSubscriptionDetail(updated));
+    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    return c.json(formatSubscriptionDetail(updated, latestByWebhook.get(updated.id) ?? null));
   })
 
   // GET /v1/webhooks/:id/secret - Reveal signing secret
@@ -613,7 +659,9 @@ export const webhooksRoute = new Hono()
     }
 
     // Idempotency check (cached hits skip the write-amplification limiter)
-    const idempotencyKey = c.req.header('idempotency-key')?.trim();
+    const idempotency = parseIdempotencyKey(c);
+    if (!idempotency.ok) return idempotency.response;
+    const idempotencyKey = idempotency.key;
     if (idempotencyKey) {
       const found = findRotateIdempotency(sub.id, idempotencyKey);
       if (found) {

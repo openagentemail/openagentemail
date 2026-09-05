@@ -27,7 +27,18 @@ import {
   type MailEventInput,
   type WebhookEnvelopeBase,
 } from './webhook-delivery.ts';
-import { listWebhookSubscriptions, type WebhookSubscription } from './webhook-store.ts';
+import {
+  listWebhookSubscriptions,
+  WebhookStoreCorruptError,
+  type WebhookSubscription,
+} from './webhook-store.ts';
+
+function rethrowStoreCorrupt(err: unknown): never {
+  if (err instanceof WebhookStoreCorruptError) {
+    throw Object.assign(err, { failureKind: 'service' as const });
+  }
+  throw err;
+}
 
 export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
   return {
@@ -44,7 +55,12 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
       const reviewer = task.approval.reviewer;
       if (!reviewer) return;
 
-      const allSubs = listWebhookSubscriptions();
+      let allSubs: WebhookSubscription[];
+      try {
+        allSubs = listWebhookSubscriptions();
+      } catch (err) {
+        rethrowStoreCorrupt(err);
+      }
       const matchedSubs = allSubs.filter(
         (sub) =>
           sub.state !== 'disabled' &&
@@ -112,7 +128,12 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
       const recipients = messageRecipients(message as FetchMessageObject);
       if (recipients.size === 0) return;
 
-      const allSubs = listWebhookSubscriptions();
+      let allSubs: WebhookSubscription[];
+      try {
+        allSubs = listWebhookSubscriptions();
+      } catch (err) {
+        rethrowStoreCorrupt(err);
+      }
       const activeMailSubs = allSubs.filter(
         (s) => s.state !== 'disabled' && s.events.includes('mail.received'),
       );

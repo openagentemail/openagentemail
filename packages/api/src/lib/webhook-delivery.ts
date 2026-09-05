@@ -466,19 +466,29 @@ export function readDeliveryLogRows(options?: {
   return { deliveries: paged, nextCursor };
 }
 
+/** Latest attempt per webhook from an already-read log (one parse per request). */
+export function latestDeliveryByWebhookId(
+  rows: WebhookDeliveryLogRow[],
+): Map<string, WebhookDeliveryLogRow> {
+  const latest = new Map<string, WebhookDeliveryLogRow>();
+  for (const row of rows) {
+    const prev = latest.get(row.webhookId);
+    if (!prev) {
+      latest.set(row.webhookId, row);
+      continue;
+    }
+    const ts = new Date(row.ts).getTime();
+    const prevTs = new Date(prev.ts).getTime();
+    if (ts > prevTs || (ts === prevTs && row.attempt > prev.attempt)) {
+      latest.set(row.webhookId, row);
+    }
+  }
+  return latest;
+}
+
 /** Returns the latest delivery attempt for an endpoint, if any. */
 export function getLatestDeliveryForWebhook(webhookId: string): WebhookDeliveryLogRow | null {
-  const rows = readAllDeliveryLogRows().filter((r) => r.webhookId === webhookId);
-  if (rows.length === 0) return null;
-
-  rows.sort((a, b) => {
-    const tA = new Date(a.ts).getTime();
-    const tB = new Date(b.ts).getTime();
-    if (tA !== tB) return tB - tA;
-    return b.attempt - a.attempt;
-  });
-
-  return rows[0] ?? null;
+  return latestDeliveryByWebhookId(readAllDeliveryLogRows()).get(webhookId) ?? null;
 }
 
 /**
@@ -535,7 +545,7 @@ export function compactDeliveryLog(
     let offset = 0;
     while (offset < buf.length) {
       const written = writeSync(fd, buf, offset, buf.length - offset);
-      if (written <= 0) break;
+      if (written <= 0) throw new Error('short_write');
       offset += written;
     }
     fsyncSync(fd);
@@ -1147,6 +1157,7 @@ class WebhookDeliveryLimiter {
   private testProbeLimiters = new Map<string, number[]>();
   private createLimiters = new Map<string, number[]>();
   private rotateLimiters = new Map<string, number[]>();
+  private readLimiters = new Map<string, number[]>();
 
   getActiveTotal(): number {
     return this.activeTotal;
@@ -1229,6 +1240,17 @@ class WebhookDeliveryLimiter {
     );
   }
 
+  /** Independent GET bucket, sized like create. */
+  checkReadRate(tokenKey: string, now = Date.now()): { allowed: boolean; retryAfterSec: number } {
+    return slidingWindowCheck(
+      this.readLimiters,
+      tokenKey,
+      config.webhooks.rateCreatePerMin,
+      60_000,
+      now,
+    );
+  }
+
   reset(): void {
     this.activePerEndpoint.clear();
     this.activeTotal = 0;
@@ -1236,6 +1258,7 @@ class WebhookDeliveryLimiter {
     this.testProbeLimiters.clear();
     this.createLimiters.clear();
     this.rotateLimiters.clear();
+    this.readLimiters.clear();
   }
 }
 

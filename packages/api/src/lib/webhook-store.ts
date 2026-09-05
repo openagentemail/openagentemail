@@ -82,6 +82,7 @@ export type WebhooksFile = {
 
 export class WebhookStoreCorruptError extends Error {
   readonly code = 'store_corrupt';
+  readonly failureKind = 'service' as const;
   constructor(message = 'webhooks store is corrupt') {
     super(message);
     this.name = 'WebhookStoreCorruptError';

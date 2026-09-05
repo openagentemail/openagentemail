@@ -334,6 +334,83 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(adminBody.webhooks[1].secret).toBeUndefined();
   });
 
+  test('R7: GET /v1/webhooks is rate-limited and lastDelivery is filled from one log pass', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://alice.example/hook-last',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_last_1',
+      runId: 'run_0',
+      deliveryId: 'dlv_last_1',
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+
+    const listRes = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listBody: any = await listRes.json();
+    expect(listBody.webhooks[0].lastDelivery.deliveryId).toBe('dlv_last_1');
+
+    const oldCreate = config.webhooks.rateCreatePerMin;
+    (config.webhooks as any).rateCreatePerMin = 1;
+    deliveryLimiter.reset();
+    try {
+      const first = await app.request('/v1/webhooks', {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(first.status).toBe(200);
+      const second = await app.request('/v1/webhooks', {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(second.status).toBe(429);
+      expect(((await second.json()) as any).error).toBe('rate_limited');
+      expect(second.headers.get('Retry-After')).toBeTruthy();
+    } finally {
+      (config.webhooks as any).rateCreatePerMin = oldCreate;
+      deliveryLimiter.reset();
+    }
+  });
+
+  test('R7: Idempotency-Key longer than 128 is rejected', async () => {
+    const res = await app.request('/v1/webhooks', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'k'.repeat(129),
+      },
+      body: JSON.stringify({
+        url: 'https://consumer.example/hook-idemp-len',
+        address: 'alice@test.example',
+        events: ['mail.received'],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error).toBe('invalid_request');
+  });
+
   test('POST /v1/webhooks/:id: Item 7: url change resets consecutiveFailures to 0 and state to unverified', async () => {
     const sub = createWebhookSubscription({
       url: 'https://consumer.example/v1',

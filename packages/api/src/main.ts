@@ -49,11 +49,9 @@ if ((config.ntfy.enabled && config.ntfy.pushPolicy !== 'none') || config.webhook
 }
 if (config.webhooks.enabled) {
   startWebhookMaintenance();
-  try {
-    await reconstructPendingDeliveriesAtBoot();
-  } catch (err) {
-    console.error('[webhooks] boot reconstruction failed, proceeding with startup:', err);
-  }
+  void reconstructPendingDeliveriesAtBoot().catch((err) => {
+    console.error('[webhooks] boot reconstruction failed:', err);
+  });
 }
 
 console.log(`[api] listening on :${config.port} (domain ${config.domain})`);

@@ -19,7 +19,9 @@ const {
 } = await import('../src/lib/webhook-delivery.ts');
 const {
   createWebhookSubscription,
+  setWebhooksFailClosedForTests,
 } = await import('../src/lib/webhook-store.ts');
+const { isSinkServiceFailure } = await import('../src/lib/event-dispatcher.ts');
 import type { ApprovalTask } from '../src/lib/tasks-internal.ts';
 import type { MailReceivedEvent } from '../src/lib/event-dispatcher.ts';
 
@@ -33,6 +35,7 @@ function setupTestDir(): void {
   (config.webhooks as any).enabled = true;
   (config as any).taskSigningSecret = '01234567890123456789012345678901';
   (config.webhooks as any).signingSecret = '01234567890123456789012345678901';
+  setWebhooksFailClosedForTests(false);
   deliveryQueue.cancelAll();
 }
 
@@ -142,6 +145,34 @@ describe('webhook-sink: Dispatcher Sink Wiring (§11.4, §6.2, §6.3, Item 9)', 
     expect(row.uidValidity).toBe(42);
     expect(row.rfc822MessageId).toBe('<msg-123@external.example>');
     expect(row.outcome).toBe('pending');
+  });
+
+  test('R7: handleMail wraps store-corrupt as a service failure', async () => {
+    const sink = createWebhookSink();
+    setWebhooksFailClosedForTests(true);
+    const mailEvent: MailReceivedEvent = {
+      type: 'mail.received',
+      message: {
+        uid: 202,
+        internalDate: new Date(),
+        flags: new Set(),
+        envelope: {
+          from: [{ address: 'sender@external.example' }],
+          to: [{ address: 'agent@test.example' }],
+          subject: 'x',
+        },
+        source: Buffer.from('From: sender@external.example\r\nTo: agent@test.example\r\n\r\nbody\r\n'),
+      },
+    };
+    try {
+      await sink.handleMail!(mailEvent);
+      expect().fail('should have thrown');
+    } catch (err) {
+      expect(isSinkServiceFailure(err)).toBe(true);
+      expect((err as { failureKind?: string }).failureKind).toBe('service');
+    } finally {
+      setWebhooksFailClosedForTests(false);
+    }
   });
 
   test('handleMail treats overlong rfc822MessageId (>512 bytes) as null (Item 5)', async () => {

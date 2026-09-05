@@ -25,6 +25,7 @@ const {
   formatMailPayload,
   formatPingPayload,
   isTerminalDeliveryRow,
+  latestDeliveryByWebhookId,
   parseRetryAfterSeconds,
   readAllDeliveryLogRows,
   readDeliveryLogRows,
@@ -191,6 +192,14 @@ describe('webhook-delivery: Durable Logging & Compaction (§8.6, §14 item 5)', 
     expect(rows.length).toBe(1);
     expect(rows[0].webhookId).toBe('whk_test_1');
     expect(rows[0].status).toBe(200);
+
+    const latest = latestDeliveryByWebhookId([
+      { ...row, webhookId: 'whk_a', deliveryId: 'dlv_old', ts: '2026-01-01T00:00:00.000Z', attempt: 2 },
+      { ...row, webhookId: 'whk_a', deliveryId: 'dlv_new', ts: '2026-01-02T00:00:00.000Z', attempt: 1 },
+      { ...row, webhookId: 'whk_b', deliveryId: 'dlv_b', ts: '2026-01-01T00:00:00.000Z', attempt: 1 },
+    ]);
+    expect(latest.get('whk_a')?.deliveryId).toBe('dlv_new');
+    expect(latest.get('whk_b')?.deliveryId).toBe('dlv_b');
 
     // Asserts no forbidden payload fields
     const raw = readFileSync(logFile, 'utf8');
