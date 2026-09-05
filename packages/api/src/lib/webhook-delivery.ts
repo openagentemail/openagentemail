@@ -1160,7 +1160,7 @@ export function formatPingPayload(
   const payload = {
     ...envelope,
     data: {
-      object: 'ping',
+      object: 'webhook',
       webhookId,
       trigger,
     },
@@ -1438,6 +1438,7 @@ export type ScheduledDeliveryJob = {
   webhookId: string;
   eventId: string;
   runId: string;
+  deliveryId: string;
   type: WebhookEventType;
   payloadBuilder: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
   firstAttemptAt: number;
@@ -1513,7 +1514,7 @@ class WebhookDeliveryQueue {
           webhookId: job.webhookId,
           eventId: job.eventId,
           runId: job.runId,
-          deliveryId: `dlv_${randomUUID()}`,
+          deliveryId: job.deliveryId,
           type: job.type,
           address: job.address,
           messageId: job.messageId,
@@ -1601,7 +1602,7 @@ class WebhookDeliveryQueue {
           webhookId: job.webhookId,
           eventId: job.eventId,
           runId: job.runId,
-          deliveryId: `dlv_${randomUUID()}`,
+          deliveryId: job.deliveryId,
           type: job.type,
           address: job.address,
           messageId: job.messageId,
@@ -1636,7 +1637,7 @@ class WebhookDeliveryQueue {
         webhookId: job.webhookId,
         eventId: job.eventId,
         runId: job.runId,
-        deliveryId: `dlv_${randomUUID()}`,
+        deliveryId: job.deliveryId,
         type: job.type,
         address: job.address,
         messageId: job.messageId,
@@ -1668,7 +1669,7 @@ class WebhookDeliveryQueue {
         webhookId: job.webhookId,
         eventId: job.eventId,
         runId: job.runId,
-        deliveryId: `dlv_${randomUUID()}`,
+        deliveryId: job.deliveryId,
         type: job.type,
         address: job.address,
         messageId: job.messageId,
@@ -1710,7 +1711,7 @@ class WebhookDeliveryQueue {
           webhookId: job.webhookId,
           eventId: job.eventId,
           runId: job.runId,
-          deliveryId: `dlv_${randomUUID()}`,
+          deliveryId: job.deliveryId,
           type: job.type,
           address: job.address,
           messageId: job.messageId,
@@ -1753,7 +1754,7 @@ class WebhookDeliveryQueue {
           webhookId: job.webhookId,
           eventId: job.eventId,
           runId: job.runId,
-          deliveryId: `dlv_${randomUUID()}`,
+          deliveryId: job.deliveryId,
           type: job.type,
           address: job.address,
           messageId: job.messageId,
@@ -1780,8 +1781,8 @@ class WebhookDeliveryQueue {
       return;
     }
 
-    // Build payload and execute attempt
-    const deliveryId = `dlv_${randomUUID()}`;
+    // Build payload and execute attempt — reuse the pending row's deliveryId
+    const deliveryId = job.deliveryId;
     let body: string;
     let sensitive = false;
 
@@ -2041,6 +2042,7 @@ export function enqueueWebhookDelivery(params: {
     webhookId: sub.id,
     eventId: params.eventId,
     runId,
+    deliveryId,
     type: params.type,
     payloadBuilder: params.payloadBuilder,
     firstAttemptAt: now,
@@ -2068,9 +2070,9 @@ export function fireCreationPing(
 ): void {
   const tokenKey = callerTokenKey ?? subscription.createdBy ?? subscription.address;
   const probeCheck = deliveryLimiter.checkTestProbeRate(tokenKey);
-  if (!probeCheck.allowed) {
-    return;
-  }
+  // Probe-full: still enqueue a delayed ping (deferred: no attempt consumed).
+  // Dropping here left the subscription stuck unverified.
+  const delayMs = probeCheck.allowed ? 0 : Math.max(config.webhooks.poolRetryMs, 1);
 
   const eventId = `evt_${randomUUID()}`;
   const envelope: WebhookEnvelopeBase = {
@@ -2087,6 +2089,7 @@ export function fireCreationPing(
     type: 'webhook.ping',
     payloadBuilder: (currentSub) => formatPingPayload(envelope, currentSub.id, trigger),
     address: null,
+    delayMs,
   });
 }
 
@@ -2261,6 +2264,7 @@ export async function executeWebhookTestProbe(
         webhookId: subscription.id,
         eventId,
         runId: 'run_0',
+        deliveryId,
         type: 'webhook.ping',
         payloadBuilder,
         firstAttemptAt: Date.now(),
@@ -2629,7 +2633,7 @@ export async function reconstructPendingDeliveriesAtBoot(
         webhookId: latest.webhookId,
         eventId: latest.eventId,
         runId: latest.runId,
-        deliveryId: `dlv_${randomUUID()}`,
+        deliveryId: latest.deliveryId,
         type: latest.type,
         address: latest.address,
         messageId: latest.messageId,
@@ -2660,7 +2664,7 @@ export async function reconstructPendingDeliveriesAtBoot(
         webhookId: latest.webhookId,
         eventId: latest.eventId,
         runId: latest.runId,
-        deliveryId: `dlv_${randomUUID()}`,
+        deliveryId: latest.deliveryId,
         type: latest.type,
         address: latest.address,
         messageId: latest.messageId,
@@ -2882,6 +2886,7 @@ export async function reconstructPendingDeliveriesAtBoot(
         webhookId: sub.id,
         eventId: latest.eventId,
         runId: latest.runId,
+        deliveryId: latest.deliveryId,
         type: latest.type,
         payloadBuilder,
         firstAttemptAt: new Date(latest.eventCreatedAt).getTime(),
@@ -2916,7 +2921,7 @@ export async function reconstructPendingDeliveriesAtBoot(
         webhookId: latest.webhookId,
         eventId: latest.eventId,
         runId: latest.runId,
-        deliveryId: `dlv_${randomUUID()}`,
+        deliveryId: latest.deliveryId,
         type: latest.type,
         address: latest.address,
         messageId: latest.messageId,

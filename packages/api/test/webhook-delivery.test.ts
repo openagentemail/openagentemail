@@ -21,6 +21,7 @@ const {
   enqueueWebhookDelivery,
   executeWebhookAttempt,
   executeWebhookTestProbe,
+  fireCreationPing,
   formatApprovalPayload,
   formatMailPayload,
   formatPingPayload,
@@ -690,6 +691,150 @@ describe('webhook-delivery: Payload Bounding & Drop Order (§6.6, §14 item 8)',
     expect(parsed.data.actionArguments).toBeUndefined(); // dropped whole
     expect(parsed.data.digest).toBeDefined(); // never dropped
     expect(Buffer.byteLength(formatted.body, 'utf8')).toBeLessThanOrEqual(700);
+  });
+});
+
+describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
+  beforeEach(setupTestDir);
+  afterEach(() => {
+    deliveryQueue.cancelAll();
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+
+  test('R10: webhook.ping data.object is webhook and carries trigger', () => {
+    const envelope = {
+      id: 'evt_ping_schema',
+      type: 'webhook.ping' as const,
+      payloadVersion: 'v1' as const,
+      createdAt: '2026-09-05T12:00:00.000Z',
+      domain: 'test.example',
+    };
+    const creation = JSON.parse(formatPingPayload(envelope, 'whk_schema', 'creation').body);
+    expect(creation).toEqual({
+      id: 'evt_ping_schema',
+      type: 'webhook.ping',
+      payloadVersion: 'v1',
+      createdAt: '2026-09-05T12:00:00.000Z',
+      domain: 'test.example',
+      data: { object: 'webhook', webhookId: 'whk_schema', trigger: 'creation' },
+    });
+    const testPing = JSON.parse(formatPingPayload(envelope, 'whk_schema', 'test').body);
+    expect(testPing.data.trigger).toBe('test');
+    expect(testPing.data.object).toBe('webhook');
+  });
+
+  test('R10: pending, attempt row, and X-OAE-Delivery share one deliveryId', async () => {
+    const seen: { deliveryId: string | null; body: any } = { deliveryId: null, body: null };
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async (req) => {
+        seen.deliveryId = req.headers.get('X-OAE-Delivery');
+        seen.body = await req.json();
+        return new Response('ok', { status: 200 });
+      },
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    (config as any).oaePublicEdge = false;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId: 'evt_r10_dlv',
+        type: 'webhook.ping',
+        payloadBuilder: (current) =>
+          formatPingPayload(
+            {
+              id: 'evt_r10_dlv',
+              type: 'webhook.ping',
+              payloadVersion: 'v1',
+              createdAt: new Date().toISOString(),
+              domain: 'test.example',
+            },
+            current.id,
+            'test',
+          ),
+      });
+      const pending = readAllDeliveryLogRows().find((r) => r.eventId === 'evt_r10_dlv');
+      expect(pending?.outcome).toBe('pending');
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === 'evt_r10_dlv' && r.outcome === 'success',
+          ),
+        2000,
+      );
+      const success = readAllDeliveryLogRows().find(
+        (r) => r.eventId === 'evt_r10_dlv' && r.outcome === 'success',
+      );
+      expect(success?.deliveryId).toBe(pending?.deliveryId);
+      expect(seen.deliveryId).toBe(pending?.deliveryId);
+      expect(seen.body?.data?.object).toBe('webhook');
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('R10: probe-full creation ping is delayed, not dropped, and can verify', async () => {
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => new Response('ok', { status: 200 }),
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    const prevProbe = config.webhooks.rateTestPerMin;
+    const prevPool = config.webhooks.poolRetryMs;
+    (config.webhooks as any).allowPrivateTargets = true;
+    (config as any).oaePublicEdge = false;
+    (config.webhooks as any).rateTestPerMin = 1;
+    (config.webhooks as any).poolRetryMs = 25;
+    deliveryLimiter.reset();
+    try {
+      const mk = (label: string) =>
+        createWebhookSubscription({
+          url: `http://127.0.0.1:${server.port}/hook`,
+          address: 'owner@openagent.email',
+          events: ['mail.received'],
+          contentScope: 'metadata',
+          privateTargetGranted: true,
+          createdBy: 'admin',
+        });
+      const first = mk('a');
+      fireCreationPing(first, 'creation', 'r10-probe');
+      await waitUntil(() => getWebhookSubscription(first.id)?.state === 'enabled', 2000);
+
+      const second = mk('b');
+      fireCreationPing(second, 'creation', 'r10-probe');
+      const pending = readAllDeliveryLogRows().find(
+        (r) => r.webhookId === second.id && r.outcome === 'pending',
+      );
+      expect(pending).toBeDefined();
+      expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThan(Date.now() - 50);
+      expect(getWebhookSubscription(second.id)?.state).toBe('unverified');
+      await waitUntil(() => getWebhookSubscription(second.id)?.state === 'enabled', 2000);
+      expect(
+        readAllDeliveryLogRows().some(
+          (r) => r.webhookId === second.id && r.outcome === 'success',
+        ),
+      ).toBe(true);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      (config.webhooks as any).rateTestPerMin = prevProbe;
+      (config.webhooks as any).poolRetryMs = prevPool;
+      deliveryLimiter.reset();
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
   });
 });
 
