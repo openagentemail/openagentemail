@@ -34,6 +34,7 @@ const {
   putAccessTokenForTests,
   resetOAuthStoreCacheForTests,
 } = await import('../src/lib/oauth-store.ts');
+const { readAuditEvents } = await import('../src/lib/audit.ts');
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhooks-route');
 const originalDataDir = config.dataDir;
@@ -705,6 +706,128 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(userFilterRes.status).toBe(403);
     const userBody: any = await userFilterRes.json();
     expect(userBody.error).toBe('forbidden: admin key required');
+  });
+
+  test('P2-7a: GET /v1/webhooks/:id/deliveries returns 400 on invalid ?limit query parameter', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-limit-test',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+
+    // NaN limit
+    const resAbc = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=abc`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(resAbc.status).toBe(400);
+    const bodyAbc: any = await resAbc.json();
+    expect(bodyAbc.error).toBe('invalid_request');
+
+    // Negative limit
+    const resNeg = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=-5`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(resNeg.status).toBe(400);
+
+    // Zero limit
+    const resZero = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=0`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(resZero.status).toBe(400);
+
+    // Float limit
+    const resFloat = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=2.5`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(resFloat.status).toBe(400);
+
+    // Valid positive integer limit
+    const resValid = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=5`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(resValid.status).toBe(200);
+    const bodyValid: any = await resValid.json();
+    expect(Array.isArray(bodyValid.deliveries)).toBe(true);
+  });
+
+  test('P2-2: POST /v1/webhooks/deliveries/:id/redeliver refuses redelivery when uidValidity is null', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-drift-test',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+
+    // Seed a mail.received delivery with uidValidity === null
+    const deliveryId = `dlv_drift_${Date.now()}`;
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_drift_1',
+      runId: 'run_0',
+      deliveryId,
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '555',
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'permanent',
+      status: 500,
+      durationMs: 50,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: 'test_seed',
+    });
+
+    // Attempting redelivery must fail closed with 409 uidvalidity_required
+    const res = await app.request(`/v1/webhooks/deliveries/${deliveryId}/redeliver`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(res.status).toBe(409);
+    const body: any = await res.json();
+    expect(body.error).toBe('uidvalidity_required');
+  });
+
+  test('P2-7b: POST /v1/webhooks/:id/test records audit outcome error (not denied) on non-auth failure', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-probe-fail',
+      address: 'alice@test.example',
+      events: ['webhook.ping'],
+      createdBy: 'admin',
+    });
+
+    // Simulate network/dns failure for probe
+    setWebhookDnsLookupForTests(async () => {
+      const err: any = new Error('getaddrinfo ENOTFOUND');
+      err.code = 'ENOTFOUND';
+      throw err;
+    });
+
+    const probeRes = await app.request(`/v1/webhooks/${sub.id}/test`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(probeRes.status).toBe(200);
+    const body: any = await probeRes.json();
+    expect(body.outcome).toBe('retryable');
+    expect(body.reason).toBe('dns_error');
+
+    // Audit event must record outcome: 'error', NOT 'denied'
+    const auditEvents = readAuditEvents({ event: 'webhook.test', limit: 5 });
+    const latestEvent = auditEvents.find((e) => e.webhookId === sub.id);
+    expect(latestEvent).toBeDefined();
+    expect(latestEvent?.outcome).toBe('error');
+
+    // Reset DNS lookup for next tests
+    setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
   });
 
   afterAll(async () => {

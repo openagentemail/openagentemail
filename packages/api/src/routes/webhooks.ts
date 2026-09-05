@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { config } from '../lib/config.ts';
+import { StaleMessageGenerationError } from '../lib/imap.ts';
 import {
   forbidUnlessAddress,
   getAttribution,
@@ -344,8 +345,25 @@ export const webhooksRoute = new Hono()
       if (err.code === 'delivery_not_found') {
         return c.json({ error: 'delivery_not_found' }, 404);
       }
-      if (err.code === 'not_found') {
+      if (err.code === 'not_found' || err.code === 'webhook_not_found') {
         return c.json({ error: 'webhook_not_found' }, 404);
+      }
+      if (err.code === 'message_not_found' || err.reason === 'message_not_found') {
+        return c.json({ error: 'message_not_found' }, 404);
+      }
+      if (err.code === 'task_not_found' || err.reason === 'task_not_found') {
+        return c.json({ error: 'task_not_found' }, 404);
+      }
+      if (
+        err instanceof StaleMessageGenerationError ||
+        err?.name === 'StaleMessageGenerationError' ||
+        err.code === 'stale_message_generation' ||
+        err.reason === 'stale_message_generation'
+      ) {
+        return c.json({ error: 'stale_message_generation' }, 409);
+      }
+      if (err.code === 'uidvalidity_required' || err.reason === 'uidvalidity_required') {
+        return c.json({ error: 'uidvalidity_required' }, 409);
       }
       if (err.code === 'webhook_disabled') {
         return c.json({ error: 'webhook_disabled', disabledReason: err.disabledReason }, 409);
@@ -678,9 +696,16 @@ export const webhooksRoute = new Hono()
     try {
       const probeRes = await executeWebhookTestProbe(sub, tokenKey);
 
+      let auditOutcome: 'ok' | 'denied' | 'error' = 'ok';
+      if (probeRes.outcome === 'refused') {
+        auditOutcome = 'denied';
+      } else if (probeRes.outcome !== 'success') {
+        auditOutcome = 'error';
+      }
+
       recordAuditEvent({
         event: 'webhook.test',
-        outcome: probeRes.outcome === 'success' ? 'ok' : 'denied',
+        outcome: auditOutcome,
         address: sub.address,
         webhookId: sub.id,
       });
@@ -783,7 +808,18 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'not_found' }, 404);
     }
 
-    const limit = c.req.query('limit') ? Number(c.req.query('limit')) : 20;
+    const rawLimit = c.req.query('limit');
+    let limit = 20;
+    if (rawLimit !== undefined && rawLimit !== '') {
+      const n = Number(rawLimit);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+        return c.json(
+          { error: 'invalid_request', error_description: 'limit must be a positive integer' },
+          400,
+        );
+      }
+      limit = Math.min(n, 100);
+    }
     const cursor = c.req.query('cursor');
 
     const res = readDeliveryLogRows({

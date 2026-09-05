@@ -594,6 +594,192 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     expect(deadLetterRow?.expiresInSec).toBe(86400);
   });
 
+  test('P1: readAllDeliveryLogRows and boot reconstruction tolerate corrupted log lines', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://corrupt-test.example/hook',
+      address: 'owner@openagent.email',
+      events: ['webhook.ping'],
+      contentScope: 'metadata',
+      description: 'corrupt log test',
+      createdBy: 'admin',
+    });
+
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10000).toISOString();
+
+    // 1. Valid pending row
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_corrupt_valid_1',
+      runId: 'run_0',
+      deliveryId: 'dlv_c1',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 10000).toISOString(),
+      reason: null,
+    });
+
+    // 2. Corrupted lines directly appended to JSONL file
+    const logPath = join(TEST_DATA_DIR, 'webhook-deliveries.jsonl');
+    const corruptSnippet =
+      '{"ts":"2026-09-05T00:00:00Z","corrupted_unclosed_json\n' +
+      'INVALID TRUNCATED GARBAGE BYTES <<>>\n' +
+      '{"ts":"2026-09-05T00:00:00Z","deliveryId":"dlv_bad", incomplete\n';
+    const { appendFileSync } = await import('node:fs');
+    appendFileSync(logPath, corruptSnippet);
+
+    // 3. Second valid pending row
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 8000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_corrupt_valid_2',
+      runId: 'run_0',
+      deliveryId: 'dlv_c2',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 20000).toISOString(),
+      reason: null,
+    });
+
+    // readAllDeliveryLogRows must fail open: skip corrupt lines, return the 2 valid rows
+    const rows = readAllDeliveryLogRows();
+    expect(rows.length).toBe(2);
+    expect(rows[0]?.deliveryId).toBe('dlv_c1');
+    expect(rows[1]?.deliveryId).toBe('dlv_c2');
+
+    // reconstructPendingDeliveriesAtBoot must succeed without throwing
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+    expect(result.reconstructed).toBe(2);
+    expect(result.deadLettered).toBe(0);
+  });
+
+  test('P2-6: boot reconstruction does NOT dead-letter pending deliveries on transient IMAP errors', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://transient-test.example/hook',
+      address: 'bob@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      description: 'transient error test',
+      createdBy: 'admin',
+    });
+
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10000).toISOString();
+
+    // Append a pending mail delivery row
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_transient_mail',
+      runId: 'run_0',
+      deliveryId: 'dlv_transient_1',
+      type: 'mail.received',
+      address: 'bob@test.example',
+      messageId: '1001',
+      uidValidity: 99999,
+      rfc822MessageId: '<test-msg-id@example.com>',
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 10000).toISOString(),
+      reason: null,
+    });
+
+    // Boot reconstruction runs while IMAP server is not reachable (transient backend failure)
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+
+    // It must NOT increment deadLettered
+    expect(result.deadLettered).toBe(0);
+
+    // It must NOT have written an outcome: 'permanent' row to the delivery log
+    const rows = readAllDeliveryLogRows();
+    const deadLetterRows = rows.filter(
+      (r) => r.eventId === 'evt_transient_mail' && r.outcome === 'permanent',
+    );
+    expect(deadLetterRows.length).toBe(0);
+
+    // The original pending row remains intact for subsequent retry/boot
+    const pendingRows = rows.filter(
+      (r) => r.eventId === 'evt_transient_mail' && r.outcome === 'pending',
+    );
+    expect(pendingRows.length).toBe(1);
+  });
+
+  test('P2-1: test probe slot acquisition timeout writes terminal row preventing orphan pending', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://probe-timeout.example/hook',
+      address: 'alice@test.example',
+      events: ['webhook.ping'],
+      contentScope: 'metadata',
+      description: 'probe timeout test',
+      createdBy: 'admin',
+    });
+
+    // Fill concurrency limiter to capacity
+    const oldMax = config.webhooks.maxConcurrent;
+    const oldTimeout = config.webhooks.deliveryTimeoutMs;
+    (config.webhooks as any).maxConcurrent = 1;
+    (config.webhooks as any).deliveryTimeoutMs = 100; // fast timeout for test
+
+    expect(deliveryLimiter.acquireSlot('blocking_slot')).toBe(true);
+
+    try {
+      await executeWebhookTestProbe(sub, 'test-caller');
+      expect().fail('should have thrown rate_limited');
+    } catch (err: any) {
+      expect(err.code).toBe('rate_limited');
+    } finally {
+      deliveryLimiter.releaseSlot('blocking_slot');
+      (config.webhooks as any).maxConcurrent = oldMax;
+      (config.webhooks as any).deliveryTimeoutMs = oldTimeout;
+    }
+
+    // Check delivery log: a terminal permanent row was written, preventing orphan pending
+    const rows = readAllDeliveryLogRows().filter((r) => r.webhookId === sub.id);
+    expect(rows.length).toBe(2);
+    expect(rows[0]?.outcome).toBe('pending');
+    expect(rows[1]?.outcome).toBe('permanent');
+    expect(rows[1]?.reason).toBe('concurrency_pool_full');
+
+    // Boot reconstruction must see terminal state and NOT reconstruct it
+    const bootRes = await reconstructPendingDeliveriesAtBoot();
+    expect(bootRes.reconstructed).toBe(0);
+  });
+
   afterAll(async () => {
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;

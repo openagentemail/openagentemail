@@ -11,12 +11,16 @@ import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -55,7 +59,7 @@ export function truncateUtf8String(str: string, maxBytes: number): string {
   return truncateUtf8Bytes(buf, maxBytes).toString('utf8');
 }
 
-import { getMessage, withInbox } from './imap.ts';
+import { getMessage, withInbox, StaleMessageGenerationError } from './imap.ts';
 import { getTaskSnapshot } from './tasks-internal.ts';
 import { registerWebhookCancelCallback } from './identities.ts';
 import { simpleParser } from 'mailparser';
@@ -306,19 +310,39 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
   };
 
   const line = `${JSON.stringify(sanitizedRow)}\n`;
-  if (!existsSync(path)) {
-    writeFileSync(path, line, { mode: 0o600 });
+  const fd = openSync(path, 'a', 0o600);
+  try {
     try {
       chmodSync(path, 0o600);
     } catch {
       // best effort
     }
-  } else {
-    appendFileSync(path, line);
+    const buf = Buffer.from(line, 'utf8');
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = writeSync(fd, buf, offset, buf.length - offset);
+      if (written <= 0) break;
+      offset += written;
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
-/** Reads all delivery log rows from disk, failing closed if corrupt. */
+/**
+ * Reads all delivery log rows from disk, with per-line fault tolerance.
+ *
+ * Semantic distinction:
+ * - Webhook configuration store (`webhooks.json`): fail-closed on read.
+ *   If the subscription store is corrupt, serving state is unsafe so we must halt
+ *   and refuse mutations to protect customer secrets and invariants.
+ * - Webhook delivery log (`webhook-deliveries.jsonl`): append-only event log.
+ *   Writes are fail-closed (atomic fsync append), but reads fail open:
+ *   corrupted or partial lines (e.g. from power loss before fsync or dirty disk writes)
+ *   are skipped and logged as errors so that a single bad line does not crash the entire
+ *   API on startup or cause 500s across read endpoints.
+ */
 export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
   const path = deliveryLogPath();
   if (!existsSync(path)) return [];
@@ -326,6 +350,7 @@ export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
   const content = readFileSync(path, 'utf8');
   const lines = content.split('\n');
   const rows: WebhookDeliveryLogRow[] = [];
+  let corruptCount = 0;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim();
@@ -333,9 +358,20 @@ export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
     try {
       const parsed = JSON.parse(line);
       rows.push(parsed);
-    } catch {
-      throw new Error(`Corrupted delivery log at line ${i + 1}`);
+    } catch (err) {
+      corruptCount++;
+      console.error(
+        `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
+        line.slice(0, 100),
+        err,
+      );
     }
+  }
+
+  if (corruptCount > 0) {
+    console.error(
+      `[webhooks] readAllDeliveryLogRows skipped ${corruptCount} corrupted line(s) in delivery log`,
+    );
   }
 
   return rows;
@@ -447,8 +483,40 @@ export function compactDeliveryLog(
 
   const tmpPath = `${path}.tmp.${Date.now()}`;
   const lines = retainedRows.map((r) => JSON.stringify(r)).join('\n') + (retainedRows.length ? '\n' : '');
-  writeFileSync(tmpPath, lines, { mode: 0o600 });
+
+  const fd = openSync(tmpPath, 'w', 0o600);
+  try {
+    const buf = Buffer.from(lines, 'utf8');
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = writeSync(fd, buf, offset, buf.length - offset);
+      if (written <= 0) break;
+      offset += written;
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+
+  try {
+    chmodSync(tmpPath, 0o600);
+  } catch {
+    // best effort
+  }
+
   renameSync(tmpPath, path);
+
+  // fsync parent directory (matching webhook-store.ts writeStore)
+  try {
+    const dirFd = openSync(config.dataDir, 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // best effort
+  }
 }
 
 export function startWebhookMaintenance(): void {
@@ -1830,10 +1898,35 @@ export async function executeWebhookTestProbe(
   while (!deliveryLimiter.acquireSlot(subscription.id)) {
     if (Date.now() - startWait >= waitTimeout) {
       const isPoolFull = deliveryLimiter.getActiveTotal() >= config.webhooks.maxConcurrent;
+      const reason = isPoolFull ? 'concurrency_pool_full' : 'endpoint_busy';
+      appendDeliveryLogRow({
+        ts: new Date().toISOString(),
+        webhookId: subscription.id,
+        eventId,
+        runId: 'run_0',
+        deliveryId,
+        type: 'webhook.ping',
+        address: null,
+        messageId: null,
+        uidValidity: null,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt,
+        attempt: 1,
+        outcome: 'permanent',
+        status: null,
+        durationMs: Date.now() - startWait,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: null,
+        reason,
+      });
       const err: any = new Error('rate_limited');
       err.code = 'rate_limited';
       err.retryAfterSec = 5;
-      err.reason = isPoolFull ? 'concurrency_pool_full' : 'endpoint_busy';
+      err.reason = reason;
       throw err;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -2036,13 +2129,35 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
       });
   } else if (original.type === 'mail.received') {
     if (!original.address || !original.messageId) {
-      throw new Error('missing_mail_identifiers');
+      const err: any = new Error('missing_mail_identifiers');
+      err.code = 'missing_mail_identifiers';
+      throw err;
     }
-    const detail = await getMessage(original.address, original.messageId, {
-      uidValidity: original.uidValidity ?? undefined,
-    });
+    // Fail-closed against generation drift: refuse redelivery if uidValidity is absent (P2-2)
+    if (original.uidValidity === null || original.uidValidity === undefined) {
+      const err: any = new Error('uidvalidity_required');
+      err.code = 'uidvalidity_required';
+      err.reason = 'uidvalidity_required';
+      throw err;
+    }
+    let detail: any;
+    try {
+      detail = await getMessage(original.address, original.messageId, {
+        uidValidity: original.uidValidity,
+      });
+    } catch (err: any) {
+      if (err instanceof StaleMessageGenerationError || err?.name === 'StaleMessageGenerationError') {
+        const staleErr: any = new Error('stale_message_generation');
+        staleErr.code = 'stale_message_generation';
+        staleErr.reason = 'stale_message_generation';
+        throw staleErr;
+      }
+      throw err;
+    }
     if (!detail) {
-      throw new Error('message_not_found');
+      const err: any = new Error('message_not_found');
+      err.code = 'message_not_found';
+      throw err;
     }
 
     let unread = true;
@@ -2260,7 +2375,10 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
           });
       } else if (latest.type === 'mail.received') {
         if (!latest.address || !latest.messageId) {
-          throw Object.assign(new Error('missing_mail_identifiers'), { reason: 'message_not_found' });
+          throw Object.assign(new Error('missing_mail_identifiers'), {
+            reason: 'message_not_found',
+            isPermanent: true,
+          });
         }
 
         // Mail reconstruction (§8.6): Generation check & fallback to rfc822MessageId
@@ -2284,6 +2402,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
               if (!latest.rfc822MessageId) {
                 throw Object.assign(new Error('uidvalidity_changed'), {
                   reason: 'uidvalidity_changed',
+                  isPermanent: true,
                 });
               }
               const foundUids = await client.search(
@@ -2293,6 +2412,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
               if (!foundUids || foundUids.length !== 1) {
                 throw Object.assign(new Error('uidvalidity_changed'), {
                   reason: 'uidvalidity_changed',
+                  isPermanent: true,
                 });
               }
               const newUid = foundUids[0]!;
@@ -2329,12 +2449,31 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
             });
           });
         } catch (err: any) {
-          if (err?.reason === 'uidvalidity_changed') throw err;
-          throw Object.assign(new Error('message_not_found'), { reason: 'message_not_found' });
+          if (err?.isPermanent) throw err;
+          if (
+            err instanceof StaleMessageGenerationError ||
+            err?.name === 'StaleMessageGenerationError' ||
+            err?.reason === 'uidvalidity_changed'
+          ) {
+            throw Object.assign(new Error('uidvalidity_changed'), {
+              reason: 'uidvalidity_changed',
+              isPermanent: true,
+            });
+          }
+          // Backend temporarily unreachable (e.g. Dovecot not started yet in container orchestration)
+          // P2-6: Do NOT prematurely dead-letter transient errors.
+          throw Object.assign(new Error(err?.message || 'backend_unreachable'), {
+            reason: 'transient_backend_unreachable',
+            isTransient: true,
+            cause: err,
+          });
         }
 
         if (!mailDetail) {
-          throw Object.assign(new Error('message_not_found'), { reason: 'message_not_found' });
+          throw Object.assign(new Error('message_not_found'), {
+            reason: 'message_not_found',
+            isPermanent: true,
+          });
         }
 
         const envelope: WebhookEnvelopeBase = {
@@ -2366,7 +2505,10 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
             links: mailDetail.otp.links,
           });
       } else {
-        throw new Error('unsupported_type');
+        throw Object.assign(new Error('unsupported_type'), {
+          reason: 'unsupported_type',
+          isPermanent: true,
+        });
       }
 
       // Reconstructed successfully, enqueue to delivery queue
@@ -2392,6 +2534,16 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
 
       reconstructed++;
     } catch (err: any) {
+      if (err?.isTransient) {
+        console.warn(
+          `[webhooks] boot reconstruction transient failure for delivery ${latest.eventId} / webhook ${latest.webhookId}, retaining pending state:`,
+          err?.message,
+        );
+        // Do NOT append a permanent dead-letter row!
+        // Leave the pending row intact in the delivery log for next boot/retry.
+        continue;
+      }
+
       deadLettered++;
       appendDeliveryLogRow({
         ts: new Date().toISOString(),
