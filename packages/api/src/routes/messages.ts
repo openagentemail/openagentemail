@@ -23,8 +23,14 @@ const getQuerySchema = z.object({
   address: z.string().email(),
   uidValidity: z
     .string()
-    .regex(/^\d+$/)
-    .refine((v) => BigInt(v) > 0n)
+    .refine((v) => {
+      if (!/^\d+$/.test(v)) return false;
+      try {
+        return BigInt(v) > 0n;
+      } catch {
+        return false;
+      }
+    })
     .optional(),
 });
 

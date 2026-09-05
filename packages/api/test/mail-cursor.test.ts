@@ -206,5 +206,51 @@ describe('mail-cursor', () => {
       expect(decoded.t).toBe(payload.t);
       expect(decoded.uid).toBe(payload.uid);
     });
+
+    test('R5 CR Minor (Item C): encodeMailForwardCursor 签名前将 address 归一为小写，避免大小写混合 token 自毁', () => {
+      const payload = {
+        folder: 'inbox' as const,
+        address: 'Fox.Agent+Tag@Test.EXAMPLE',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: '17',
+        scanUid: 88,
+      };
+
+      const token = encodeMailForwardCursor(payload, KEY);
+      const decoded = decodeMailForwardCursor(token, KEY);
+
+      expect(decoded.address).toBe('fox.agent+tag@test.example');
+      expect(decoded.scanUid).toBe(88);
+      expect(decoded.uidValidity).toBe('17');
+    });
+
+    test('R5 ZCode P2-2 (Item E): decodeMailForwardCursor 严格校验 t 为非负整数（>=0 且 isInteger）', () => {
+      const basePayload = {
+        folder: 'inbox' as const,
+        address: 'fox@test.example',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: '17',
+      };
+      const validToken = encodeMailForwardCursor(basePayload, KEY);
+      const [prefix, , sig] = validToken.split('.');
+
+      // t = 0 合法
+      const tZeroToken = encodeMailForwardCursor({ ...basePayload, t: 0 }, KEY);
+      expect(decodeMailForwardCursor(tZeroToken, KEY).t).toBe(0);
+
+      // t 为小数（非整数）拒
+      const floatBody = Buffer.from(JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 1234.56, u: 42, v: '17' })).toString('base64url');
+      expect(() => decodeMailForwardCursor(`${prefix}.${floatBody}.${sig}`, KEY)).toThrow(InvalidMailCursorError);
+
+      // t 为负数拒
+      const negBody = Buffer.from(JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: -1, u: 42, v: '17' })).toString('base64url');
+      expect(() => decodeMailForwardCursor(`${prefix}.${negBody}.${sig}`, KEY)).toThrow(InvalidMailCursorError);
+
+      // t 为非数值拒
+      const strBody = Buffer.from(JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: '1752000000000', u: 42, v: '17' })).toString('base64url');
+      expect(() => decodeMailForwardCursor(`${prefix}.${strBody}.${sig}`, KEY)).toThrow(InvalidMailCursorError);
+    });
   });
 });

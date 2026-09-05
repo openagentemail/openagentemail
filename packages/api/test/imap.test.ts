@@ -528,7 +528,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     app.route('/v1/messages', messagesRoute);
   });
 
-  test('前向查询单页：按 oldest-first 排序返回，所有信均在单页中时 nextCursor 为 null', async () => {
+  test('前向查询单页：按 oldest-first 排序返回，所有信均在单页中时 nextCursor 为 checkpoint 游标（不为 null）', async () => {
     const m1 = inboxMessage(10, 'victim@test.example', 'victim@test.example');
     m1.internalDate = new Date('2026-08-01T10:00:00Z');
     m1.envelope.subject = 'Message 10';
@@ -561,7 +561,10 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.messages.map((m: any) => m.id)).toEqual(['10', '11', '12']);
-    expect(json.nextCursor).toBeNull();
+    expect(json.nextCursor).not.toBeNull();
+    const dec = decodeMailForwardCursor(json.nextCursor, config.taskSigningSecret);
+    expect(dec.scanUid).toBe(12);
+    expect(dec.uidValidity).toBe('17');
   });
 
   test('多页追补无损：逐页翻页逐封核对，每封邮件严格可达且不重不漏', async () => {
@@ -604,6 +607,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
         collectedIds.push(m.id);
       }
       currentCursor = data.nextCursor;
+      if (data.messages.length < limit) break;
     }
 
     // 10 封信按 limit=3 翻页：3 + 3 + 3 + 1 = 4 页
@@ -612,6 +616,10 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(collectedIds).toEqual([
       '100', '101', '102', '103', '104', '105', '106', '107', '108', '109',
     ]);
+    // 终批 nextCursor 依然有效，携带 scanUid = 109
+    expect(currentCursor).not.toBeNull();
+    const lastDec = decodeMailForwardCursor(currentCursor!, config.taskSigningSecret);
+    expect(lastDec.scanUid).toBe(109);
   });
 
   test('代际不匹配拒：游标 uidValidity 与信箱代际不符 → 400 invalid_cursor', async () => {
@@ -712,7 +720,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(await res.json()).toEqual({ error: 'invalid_cursor' });
   });
 
-  test('游标后无新邮件 → 返回空列表且 nextCursor 为 null', async () => {
+  test('游标后无新邮件 → 返回空列表且 nextCursor 为 checkpoint 游标（永不为 null）', async () => {
     const m1 = inboxMessage(10, 'victim@test.example', 'victim@test.example');
     m1.internalDate = new Date('2026-08-01T10:00:00Z');
     fakeMessages = [m1];
@@ -732,7 +740,11 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
       `/v1/messages?address=victim@test.example&since=${encodeURIComponent(upToDateCursor)}`,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ messages: [], nextCursor: null });
+    const json = (await res.json()) as any;
+    expect(json.messages).toEqual([]);
+    expect(json.nextCursor).not.toBeNull();
+    const dec = decodeMailForwardCursor(json.nextCursor, config.taskSigningSecret);
+    expect(dec.scanUid).toBe(10);
   });
 
   test('P2-D: v1 列表路由已移除 cursor 别名，仅作为普通参数忽略，不触发前向翻页', async () => {
@@ -821,14 +833,16 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(body2.messages.map((m: any) => m.id)).toEqual(['150']);
     expect(body2.nextCursor).not.toBeNull();
 
-    // 第 3 页：检视剩余的 UID 200（时间 09:30 早于游标 10:00，不命中），候选集扫尽，nextCursor 为 null
+    // 第 3 页：检视剩余的 UID 200（时间 09:30 早于游标 10:00，不命中），候选集扫尽，返回 checkpoint 游标
     const res3 = await app.request(
       `/v1/messages?address=victim@test.example&since=${encodeURIComponent(body2.nextCursor)}&limit=1`,
     );
     expect(res3.status).toBe(200);
     const body3 = (await res3.json()) as any;
     expect(body3.messages).toEqual([]);
-    expect(body3.nextCursor).toBeNull();
+    expect(body3.nextCursor).not.toBeNull();
+    const dec3 = decodeMailForwardCursor(body3.nextCursor, config.taskSigningSecret);
+    expect(dec3.scanUid).toBe(200);
   });
 
   test('ZCode P1 回归：扫描预算耗尽时 0 命中产出带 scanUid 续扫游标，后续分页不重扫最终可达每一封信', async () => {
@@ -886,7 +900,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     const decoded2 = decodeMailForwardCursor(page2.nextCursor!, config.taskSigningSecret);
     expect(decoded2.scanUid).toBe(6);
 
-    // 第 3 批（扫 UID 7..8）：命中 victim 的两封邮件，且扫完全部候选集，分页结束 nextCursor 为 null
+    // 第 3 批（扫 UID 7..8）：命中 victim 的两封邮件，且扫完全部候选集，返回 checkpoint 游标
     const page3 = await listMessagesSince(
       'victim@test.example',
       page2.nextCursor!,
@@ -895,7 +909,9 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
       { scanBudget: 3 },
     );
     expect(page3.messages.map((m) => m.id)).toEqual(['7', '8']);
-    expect(page3.nextCursor).toBeNull();
+    expect(page3.nextCursor).not.toBeNull();
+    const decoded3 = decodeMailForwardCursor(page3.nextCursor!, config.taskSigningSecret);
+    expect(decoded3.scanUid).toBe(8);
   });
 
   test('端到端 550 封邮件在默认 500 预算下分批续扫无损到达', async () => {
@@ -935,7 +951,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     const dec1 = decodeMailForwardCursor(body1.nextCursor, config.taskSigningSecret);
     expect(dec1.scanUid).toBe(500);
 
-    // 请求 2：从 scanUid=500 继续，扫描剩余 50 封（UID 501..550），返回属于 victim 的 30 封信，全部完成 nextCursor 为 null
+    // 请求 2：从 scanUid=500 继续，扫描剩余 50 封（UID 501..550），返回属于 victim 的 30 封信，返回 checkpoint 游标
     const res2 = await app.request(
       `/v1/messages?address=victim@test.example&since=${encodeURIComponent(body1.nextCursor)}`,
     );
@@ -944,7 +960,9 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(body2.messages.length).toBe(30);
     expect(body2.messages[0].id).toBe('521');
     expect(body2.messages[29].id).toBe('550');
-    expect(body2.nextCursor).toBeNull();
+    expect(body2.nextCursor).not.toBeNull();
+    const dec2 = decodeMailForwardCursor(body2.nextCursor, config.taskSigningSecret);
+    expect(dec2.scanUid).toBe(550);
   });
 
   test('回归测试 1 (ZCode 丢信实例)：超限截断 + 未扫描区藏非单调信 → 后续请求必须送达', async () => {
@@ -1003,10 +1021,12 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     const dec3 = decodeMailForwardCursor(page3.nextCursor!, config.taskSigningSecret);
     expect(dec3.scanUid).toBe(600);
 
-    // 请求 4：从 scanUid = 600 继续，命中 m4 (700)，候选集扫尽，nextCursor 为 null
+    // 请求 4：从 scanUid = 600 继续，命中 m4 (700)，候选集扫尽，返回 checkpoint 游标
     const page4 = await listMessagesSince('victim@test.example', page3.nextCursor!, 1, 'inbox');
     expect(page4.messages.map((m) => m.id)).toEqual(['700']);
-    expect(page4.nextCursor).toBeNull();
+    expect(page4.nextCursor).not.toBeNull();
+    const dec4 = decodeMailForwardCursor(page4.nextCursor!, config.taskSigningSecret);
+    expect(dec4.scanUid).toBe(700);
   });
 
   test('回归测试 2：截断与补齐（同一条信不重投、被截的匹配信下请求补齐，完整送达）', async () => {
@@ -1044,10 +1064,12 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     const dec2 = decodeMailForwardCursor(page2.nextCursor!, config.taskSigningSecret);
     expect(dec2.scanUid).toBe(50);
 
-    // 请求 3 (limit=2)：返回最后一封 (UID 60)，全候选集扫完，nextCursor 为 null
+    // 请求 3 (limit=2)：返回最后一封 (UID 60)，全候选集扫完，返回 checkpoint 游标
     const page3 = await listMessagesSince('victim@test.example', page2.nextCursor!, 2, 'inbox');
     expect(page3.messages.map((m) => m.id)).toEqual(['60']);
-    expect(page3.nextCursor).toBeNull();
+    expect(page3.nextCursor).not.toBeNull();
+    const dec3 = decodeMailForwardCursor(page3.nextCursor!, config.taskSigningSecret);
+    expect(dec3.scanUid).toBe(60);
 
     // 验证完整性与不重不漏
     const allDelivered = [...page1.messages, ...page2.messages, ...page3.messages].map((m) => m.id);
@@ -1117,10 +1139,12 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
       config.taskSigningSecret,
     );
 
-    // 轮询 1：没有比 UID 200 更大的信，返回空且不发起 FETCH
+    // 轮询 1：没有比 UID 200 更大的信，返回空且不发起 FETCH，nextCursor 仍为 checkpoint 游标
     const poll1 = await listMessagesSince('victim@test.example', caughtUpCursor, 10, 'inbox');
     expect(poll1.messages).toEqual([]);
-    expect(poll1.nextCursor).toBeNull();
+    expect(poll1.nextCursor).not.toBeNull();
+    const decPoll1 = decodeMailForwardCursor(poll1.nextCursor!, config.taskSigningSecret);
+    expect(decPoll1.scanUid).toBe(200);
     expect(fetchedUidBatches).toEqual([]);
 
     // 新信件到来：UID 300
@@ -1131,7 +1155,9 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     // 轮询 2：使用相同的 caughtUpCursor 轮询，只检视 UID 300，绝不重扫 100 和 200
     const poll2 = await listMessagesSince('victim@test.example', caughtUpCursor, 10, 'inbox');
     expect(poll2.messages.map((m) => m.id)).toEqual(['300']);
-    expect(poll2.nextCursor).toBeNull();
+    expect(poll2.nextCursor).not.toBeNull();
+    const decPoll2 = decodeMailForwardCursor(poll2.nextCursor!, config.taskSigningSecret);
+    expect(decPoll2.scanUid).toBe(300);
     // 验证只 fetch 了 [300]
     expect(fetchedUidBatches).toEqual([[300]]);
   });
@@ -1165,5 +1191,85 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     // nextCursor.t 至少为 cursor.t，且非负数
     expect(dec.t).toBeGreaterThanOrEqual(0);
     expect(dec.t).toBe(Math.max(0, 0));
+  });
+
+  test('Codex P1 回归 (R5 Item A): GET /v1/messages/:id 带非法 uidValidity=abc 不抛 500，返回 400 invalid_request', async () => {
+    const res1 = await app.request('/v1/messages/100?address=victim@test.example&uidValidity=abc');
+    expect(res1.status).toBe(400);
+    const json1 = (await res1.json()) as any;
+    expect(json1.error).toBe('invalid_request');
+
+    const res2 = await app.request('/v1/messages/100?address=victim@test.example&uidValidity=0');
+    expect(res2.status).toBe(400);
+    const json2 = (await res2.json()) as any;
+    expect(json2.error).toBe('invalid_request');
+
+    const res3 = await app.request('/v1/messages/100?address=victim@test.example&uidValidity=-5');
+    expect(res3.status).toBe(400);
+    const json3 = (await res3.json()) as any;
+    expect(json3.error).toBe('invalid_request');
+  });
+
+  test('CR Major 回归 (R5 Item B): 终批返回 checkpoint nextCursor 永不为 null，追平后拿 checkpoint 游标再轮询 → 空页且不重投', async () => {
+    const m1 = inboxMessage(100, 'victim@test.example', 'victim@test.example');
+    m1.internalDate = new Date('2026-08-01T10:00:00Z');
+    const m2 = inboxMessage(200, 'victim@test.example', 'victim@test.example');
+    m2.internalDate = new Date('2026-08-01T10:30:00Z');
+
+    fakeMessages = [m1, m2];
+    fetchedUidBatches = [];
+
+    const startCursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: new Date('2026-08-01T09:00:00Z').getTime(),
+        uid: 10,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // 第一批查询（limit=10）：扫完全部 2 封信
+    const page1 = await listMessagesSince('victim@test.example', startCursor, 10, 'inbox');
+    expect(page1.messages.map((m) => m.id)).toEqual(['100', '200']);
+    expect(page1.nextCursor).not.toBeNull();
+    const dec1 = decodeMailForwardCursor(page1.nextCursor!, config.taskSigningSecret);
+    expect(dec1.scanUid).toBe(200);
+    expect(dec1.t).toBe(new Date('2026-08-01T09:00:00Z').getTime());
+    expect(dec1.uid).toBe(10);
+    expect(dec1.uidValidity).toBe('17');
+
+    // 追平后拿 checkpoint 游标继续轮询：返回空页且不重投，nextCursor 依然有效并保持 scanUid=200
+    const pollAgain = await listMessagesSince('victim@test.example', page1.nextCursor!, 10, 'inbox');
+    expect(pollAgain.messages).toEqual([]);
+    expect(pollAgain.nextCursor).not.toBeNull();
+    const decPoll = decodeMailForwardCursor(pollAgain.nextCursor!, config.taskSigningSecret);
+    expect(decPoll.scanUid).toBe(200);
+    expect(decPoll.t).toBe(dec1.t);
+    expect(decPoll.uid).toBe(dec1.uid);
+  });
+
+  test('ZCode P2-4 回归 (R5 Item F): scanBudget 传 0 或负数被 Math.max(1, ...) 兜底，正常步进', async () => {
+    const m1 = inboxMessage(100, 'victim@test.example', 'victim@test.example');
+    m1.internalDate = new Date('2026-08-01T10:00:00Z');
+    fakeMessages = [m1];
+
+    const cursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: new Date('2026-08-01T09:00:00Z').getTime(),
+        uid: 10,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    const res = await listMessagesSince('victim@test.example', cursor, 10, 'inbox', { scanBudget: 0 });
+    expect(res.messages.map((m) => m.id)).toEqual(['100']);
+    expect(res.nextCursor).not.toBeNull();
+    const dec = decodeMailForwardCursor(res.nextCursor!, config.taskSigningSecret);
+    expect(dec.scanUid).toBe(100);
   });
 });

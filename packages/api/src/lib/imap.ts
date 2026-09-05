@@ -891,8 +891,8 @@ async function buildMessageSummaries(
  * 每请求预算 scanBudget（默认 SCAN_BACK = 500）条候选。
  * 检视过程中一旦收集到第 limit 条匹配信立即停下，scanUid 设为停下时那封信的 UID（已检视全返回，无截断遗漏）。
  * 单页内按 (receivedAtMs asc, uid asc) 元组升序返回；跨页不承诺全局元组序，承诺完整性与代际 fail-closed。
- * 若单批扫描完毕未达 limit 但超出预算（hasMoreBeyondBudget），或达到 limit，产生带新 scanUid 的 nextCursor；
- * 仅当未达 limit 且全信箱候选集已扫尽时，nextCursor 为 null。
+ * 若单批扫描完毕未达 limit 但超出预算，或达到 limit，产生带新 scanUid 的 nextCursor；
+ * 即使全部候选集已扫尽，nextCursor 仍返回携带当前 scanUid 水位的 checkpoint 游标（永不返回 null），供下次轮询续用，杜绝重复投递。
  */
 async function listMessagesSinceWith(
   client: ImapFlow,
@@ -902,7 +902,7 @@ async function listMessagesSinceWith(
 ): Promise<MessageListPage> {
   const folder = opts.folder ?? 'inbox';
   const limit = opts.limit;
-  const scanBudget = opts.scanBudget ?? SCAN_BACK;
+  const scanBudget = Math.max(1, opts.scanBudget ?? SCAN_BACK);
   const normalized = address.toLowerCase();
 
   const cursor = decodeMailForwardCursor(sinceCursor, config.taskSigningSecret);
@@ -918,21 +918,37 @@ async function listMessagesSinceWith(
     throw new InvalidMailCursorError();
   }
 
+  const startScanUid = cursor.scanUid ?? 0;
+  const makeCheckpointCursor = (scanUid: number) =>
+    encodeMailForwardCursor(
+      {
+        folder,
+        address: normalized,
+        t: cursor.t,
+        uid: cursor.uid,
+        uidValidity: String(currentUidValidity),
+        scanUid,
+      },
+      config.taskSigningSecret,
+    );
+
   // 1. 服务端 SEARCH SINCE 收窄：按 cursor.t 往前退 1 天（86400000ms），防时区/日粒度边角
   const sinceDate = new Date(Math.max(0, cursor.t - 24 * 60 * 60 * 1000));
   const uids = await client.search({ since: sinceDate }, { uid: true });
-  if (!uids || uids.length === 0) return { messages: [], nextCursor: null };
+  if (!uids || uids.length === 0) {
+    return { messages: [], nextCursor: makeCheckpointCursor(startScanUid) };
+  }
 
   // 2. 候选集过滤：按 UID 升序检视 uid > scanUid 的候选
-  const startScanUid = cursor.scanUid ?? 0;
   const candidateUids = uids
     .filter((u) => u > startScanUid)
     .sort((a, b) => a - b);
-  if (candidateUids.length === 0) return { messages: [], nextCursor: null };
+  if (candidateUids.length === 0) {
+    return { messages: [], nextCursor: makeCheckpointCursor(startScanUid) };
+  }
 
   // 3. 每请求预算 scanBudget (默认 SCAN_BACK = 500) 条
   const batchUids = candidateUids.slice(0, scanBudget);
-  const hasMoreBeyondBudget = candidateUids.length > scanBudget;
 
   const fetched = new Map<number, FetchMessageObject>();
   for await (const msg of client.fetch(
@@ -945,7 +961,6 @@ async function listMessagesSinceWith(
 
   const matched: FetchMessageObject[] = [];
   let lastScannedUid = startScanUid;
-  let reachedLimit = false;
 
   for (const uid of batchUids) {
     lastScannedUid = uid;
@@ -957,7 +972,6 @@ async function listMessagesSinceWith(
     ) {
       matched.push(msg);
       if (matched.length >= limit) {
-        reachedLimit = true;
         break;
       }
     }
@@ -967,26 +981,13 @@ async function listMessagesSinceWith(
   matched.sort(compareOldestFirst);
   const summaries = await buildMessageSummaries(client, matched);
 
-  // 5. 游标推进规则（FC 终裁定稿）：
-  // 游标保持 (t_c, u_c 原始过滤锚点, 永不推进) + scanUid + uidValidity
+  // 5. 游标推进规则（FC 终裁定稿，R5 收口）：
+  // since 查询的 nextCursor 永不返回 null：
+  // 保持 (t_c, u_c 原始过滤锚点, 永不推进) + scanUid + uidValidity。
   // - 收集到 limit 条立即停下，scanUid = 停下时那封的 UID（已检视全返回，无截断遗漏）
   // - 若扫完全批预算仍未达 limit（含 0 命中），scanUid 推到已检视最大 UID
-  // - 仅当未达到 limit 且全部候选集已扫尽时，nextCursor 为 null
-  const hasMore = hasMoreBeyondBudget || lastScannedUid < candidateUids[candidateUids.length - 1];
-  let nextCursor: string | null = null;
-  if (hasMore) {
-    nextCursor = encodeMailForwardCursor(
-      {
-        folder,
-        address: normalized,
-        t: cursor.t,
-        uid: cursor.uid,
-        uidValidity: String(currentUidValidity),
-        scanUid: lastScannedUid,
-      },
-      config.taskSigningSecret,
-    );
-  }
+  // - 即使候选集已扫尽，仍返回 checkpoint 游标供后续轮询续用，彻底杜绝重用旧游标导致的重复投递
+  const nextCursor = makeCheckpointCursor(lastScannedUid);
 
   return { messages: summaries, nextCursor };
 }

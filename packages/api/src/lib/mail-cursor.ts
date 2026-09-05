@@ -109,33 +109,43 @@ export function decodeMailCursor(token: string, key: string): MailCursorPayload 
 }
 
 function forwardCursorMac(payload: MailForwardCursorPayload, key: string): string {
-  const scanSuffix = payload.scanUid !== undefined ? `\n${payload.scanUid}` : '';
   const vStr = String(payload.uidValidity);
-  return createHmac('sha256', key)
-    .update(
-      `${MAIL_FORWARD_CURSOR_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}\n${vStr}${scanSuffix}`,
-    )
-    .digest('base64url');
+  const parts: string[] = [
+    MAIL_FORWARD_CURSOR_PREFIX,
+    payload.folder,
+    payload.address,
+    String(payload.t),
+    String(payload.uid),
+    vStr,
+    ...(payload.scanUid !== undefined ? [String(payload.scanUid)] : []),
+  ];
+  const input = parts.map((p) => `${Buffer.byteLength(p, 'utf8')}:${p}`).join('');
+  return createHmac('sha256', key).update(input).digest('base64url');
 }
 
-/** 编码不透明前向游标。address 必须已小写，含代际 uidValidity 与可选 scanUid。 */
+/** 编码不透明前向游标。address 自动小写归一，含代际 uidValidity 与可选 scanUid。 */
 export function encodeMailForwardCursor(
   payload: MailForwardCursorPayload,
   key: string,
 ): string {
-  const vStr = String(payload.uidValidity);
+  const normalizedAddress = payload.address.toLowerCase();
+  const normalizedPayload: MailForwardCursorPayload = {
+    ...payload,
+    address: normalizedAddress,
+  };
+  const vStr = String(normalizedPayload.uidValidity);
   const bodyObj: Record<string, unknown> = {
-    f: payload.folder,
-    a: payload.address,
-    t: payload.t,
-    u: payload.uid,
+    f: normalizedPayload.folder,
+    a: normalizedPayload.address,
+    t: normalizedPayload.t,
+    u: normalizedPayload.uid,
     v: vStr,
   };
-  if (payload.scanUid !== undefined) {
-    bodyObj.s = payload.scanUid;
+  if (normalizedPayload.scanUid !== undefined) {
+    bodyObj.s = normalizedPayload.scanUid;
   }
   const body = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
-  return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.${forwardCursorMac(payload, key)}`;
+  return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.${forwardCursorMac(normalizedPayload, key)}`;
 }
 
 /** 解码并校验前向 HMAC。任何失败一律 InvalidMailCursorError（fail-closed）。 */
@@ -173,7 +183,7 @@ export function decodeMailForwardCursor(
   if (typeof raw.a !== 'string' || !raw.a.includes('@')) {
     throw new InvalidMailCursorError();
   }
-  if (typeof raw.t !== 'number' || !Number.isFinite(raw.t)) {
+  if (typeof raw.t !== 'number' || !Number.isInteger(raw.t) || raw.t < 0) {
     throw new InvalidMailCursorError();
   }
   if (typeof raw.u !== 'number' || !Number.isInteger(raw.u) || raw.u <= 0) {
