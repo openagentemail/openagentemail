@@ -235,6 +235,73 @@ export function registerOpenAgentEmailTools(
     leaseGeneration: z.number().int(),
   };
 
+  const webhookListItemSchema = {
+    id: z.string(),
+    url: z.string(),
+    address: z.string(),
+    events: z.array(z.string()),
+    contentScope: z.string().optional(),
+    description: z.string().optional(),
+    state: z.string(),
+    disabledReason: z.string().nullable().optional(),
+    secretPrefix: z.string().optional(),
+    signatureScheme: z.string().optional(),
+    timestampToleranceSec: z.number().optional(),
+    createdAt: z.string().optional(),
+    updatedAt: z.string().optional(),
+    rotatedAt: z.string().nullable().optional(),
+    consecutiveFailures: z.number().optional(),
+    privateTargetGranted: z.boolean().optional(),
+    lastDelivery: z
+      .object({
+        deliveryId: z.string(),
+        ts: z.string(),
+        attempt: z.number(),
+        outcome: z.string(),
+        status: z.number().nullable().optional(),
+        durationMs: z.number().nullable().optional(),
+        reason: z.string().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  };
+
+  const webhookListOutputSchema = {
+    webhooks: z.array(z.object(webhookListItemSchema)),
+  };
+
+  const webhookCreateOutputSchema = {
+    id: z.string(),
+    url: z.string(),
+    address: z.string(),
+    events: z.array(z.string()),
+    contentScope: z.string().optional(),
+    description: z.string().optional(),
+    state: z.string(),
+    secret: z.string().nullable().optional(),
+    secretPrefix: z.string().optional(),
+    signatureScheme: z.string().optional(),
+    timestampToleranceSec: z.number().optional(),
+    createdAt: z.string().optional(),
+  };
+
+  const webhookDeleteOutputSchema = {
+    ok: z.boolean(),
+  };
+
+  const webhookTestOutputSchema = {
+    deliveryId: z.string().optional(),
+    outcome: z.string().optional(),
+    status: z.number().nullable().optional(),
+    reason: z.string().nullable().optional(),
+  };
+
+  const webhookDisableOutputSchema = {
+    ok: z.boolean(),
+    state: z.string(),
+    disabledReason: z.string().nullable().optional(),
+  };
+
   function ok(data: unknown): CallToolResult {
     if (typeof data !== "object" || data === null || Array.isArray(data)) {
       throw new TypeError("Tool output must be a JSON object");
@@ -729,6 +796,7 @@ export function registerOpenAgentEmailTools(
       inputSchema: {
         address: z.string().regex(IDENTITY_ADDRESS_PATTERN).optional().describe("Optional identity email address to filter by (admin only)"),
       },
+      outputSchema: webhookListOutputSchema,
       annotations: readOnlyAnnotations,
     },
     ({ address }) => callApi(async () => ({ webhooks: await client.listWebhooks(address) })),
@@ -760,6 +828,7 @@ export function registerOpenAgentEmailTools(
           .optional()
           .describe("Optional human-readable description (max 1000 characters)"),
       },
+      outputSchema: webhookCreateOutputSchema,
       annotations: mutatingAnnotations,
     },
     (params) => callApi(() => client.createWebhook(params)),
@@ -774,6 +843,7 @@ export function registerOpenAgentEmailTools(
       inputSchema: {
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
       },
+      outputSchema: webhookDeleteOutputSchema,
       annotations: { ...mutatingAnnotations, destructiveHint: true },
     },
     ({ id }) => callApi(() => client.deleteWebhook(id)),
@@ -788,6 +858,7 @@ export function registerOpenAgentEmailTools(
       inputSchema: {
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
       },
+      outputSchema: webhookTestOutputSchema,
       annotations: mutatingAnnotations,
     },
     ({ id }) => callApi(() => client.testWebhook(id)),
@@ -802,6 +873,7 @@ export function registerOpenAgentEmailTools(
       inputSchema: {
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
       },
+      outputSchema: webhookDisableOutputSchema,
       annotations: mutatingAnnotations,
     },
     ({ id }) => callApi(() => client.disableWebhook(id)),

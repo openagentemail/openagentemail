@@ -56,7 +56,7 @@ export function truncateUtf8String(str: string, maxBytes: number): string {
 
 import { getMessage, withInbox } from './imap.ts';
 import { getTaskSnapshot } from './tasks-internal.ts';
-import { notificationService } from './notify.ts';
+import { registerWebhookCancelCallback } from './identities.ts';
 
 let customDnsLookupForTests: DnsLookup | undefined;
 export function setWebhookDnsLookupForTests(fn?: DnsLookup): void {
@@ -1442,19 +1442,6 @@ class WebhookDeliveryQueue {
         address: sub.address,
         webhookId: sub.id,
       });
-
-      // Best effort notify
-      const localpart = sub.address.split('@')[0];
-      void notificationService()
-        .publish({
-          target: localpart ? `agent:${localpart}` : 'user',
-          title: 'Webhook Disabled: SSRF Refused',
-          message: `Webhook ${sub.id} disabled due to SSRF policy violation.`,
-          level: 'urgent',
-          tags: ['webhook', 'disabled'],
-          identityAddress: sub.address,
-        })
-        .catch(() => {});
     } else if (result.outcome === 'permanent') {
       this.jobs.delete(key);
       updateWebhookSubscription(sub.id, (s) => {
@@ -1473,17 +1460,6 @@ class WebhookDeliveryQueue {
           address: sub.address,
           webhookId: sub.id,
         });
-        const localpart = sub.address.split('@')[0];
-        void notificationService()
-          .publish({
-            target: localpart ? `agent:${localpart}` : 'user',
-            title: 'Webhook Disabled: Threshold Reached',
-            message: `Webhook ${sub.id} disabled after ${config.webhooks.disableThreshold} consecutive failures.`,
-            level: 'urgent',
-            tags: ['webhook', 'disabled'],
-            identityAddress: sub.address,
-          })
-          .catch(() => {});
       }
     } else if (result.outcome === 'retryable') {
       updateWebhookSubscription(sub.id, (s) => {
@@ -1502,17 +1478,6 @@ class WebhookDeliveryQueue {
           address: sub.address,
           webhookId: sub.id,
         });
-        const localpart = sub.address.split('@')[0];
-        void notificationService()
-          .publish({
-            target: localpart ? `agent:${localpart}` : 'user',
-            title: 'Webhook Disabled: Threshold Reached',
-            message: `Webhook ${sub.id} disabled after ${config.webhooks.disableThreshold} consecutive failures.`,
-            level: 'urgent',
-            tags: ['webhook', 'disabled'],
-            identityAddress: sub.address,
-          })
-          .catch(() => {});
       }
 
       // Check if breaker tripped; if so, dead-letter and stop retrying
@@ -1570,6 +1535,11 @@ class WebhookDeliveryQueue {
 }
 
 export const deliveryQueue = new WebhookDeliveryQueue();
+
+// Register cascade cancellation hook for deleted identities
+registerWebhookCancelCallback((webhookId, reason) => {
+  deliveryQueue.cancelForWebhook(webhookId, reason);
+});
 
 // ---------------------------------------------------------------------------
 // Public Dispatch APIs

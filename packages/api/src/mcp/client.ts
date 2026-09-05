@@ -530,8 +530,8 @@ export class OpenAgentEmailClient {
     return this.request<WebhookTestResult>('POST', `/v1/webhooks/${encodeURIComponent(id)}/test`);
   }
 
-  disableWebhook(id: string): Promise<WebhookSubscriptionDetail> {
-    return this.request<WebhookSubscriptionDetail>('POST', `/v1/webhooks/${encodeURIComponent(id)}/disable`);
+  disableWebhook(id: string): Promise<{ ok: boolean; state: string; disabledReason: string }> {
+    return this.request<{ ok: boolean; state: string; disabledReason: string }>('POST', `/v1/webhooks/${encodeURIComponent(id)}/disable`);
   }
 }
 

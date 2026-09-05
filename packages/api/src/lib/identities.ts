@@ -30,8 +30,14 @@ import {
   revokeDelegationsOnGranteeTokenRotate,
 } from './delegations.ts';
 import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
-import { deliveryQueue } from './webhook-delivery.ts';
 import { recordAuditEvent } from './audit.ts';
+
+export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
+let webhookCancelCallback: WebhookCancelCallback | undefined;
+
+export function registerWebhookCancelCallback(cb: WebhookCancelCallback): void {
+  webhookCancelCallback = cb;
+}
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -485,7 +491,9 @@ export function deleteIdentity(address: string): boolean {
   revokeGrantsForAddress(needle);
   const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
   for (const wh of deletedWebhooks) {
-    deliveryQueue.cancelForWebhook(wh.id, 'subscription_deleted');
+    if (webhookCancelCallback) {
+      webhookCancelCallback(wh.id, 'subscription_deleted');
+    }
     recordAuditEvent({
       event: 'webhook.delete',
       outcome: 'ok',
