@@ -28,6 +28,10 @@ import { startNotificationLogMaintenance } from './lib/notification-log.ts';
 import { startSendLogMaintenance } from './lib/send-log.ts';
 import { startRetentionLoop } from './lib/retention.ts';
 import { startTaskLeaseReaper } from './lib/task-lease-reaper.ts';
+import {
+  reconstructPendingDeliveriesAtBoot,
+  startWebhookMaintenance,
+} from './lib/webhook-delivery.ts';
 import { createApp } from './app.ts';
 
 const app = createApp();
@@ -42,6 +46,10 @@ if (config.ntfy.enabled) {
 }
 if ((config.ntfy.enabled && config.ntfy.pushPolicy !== 'none') || config.webhooks.enabled) {
   startNotificationWatcher();
+}
+if (config.webhooks.enabled) {
+  startWebhookMaintenance();
+  await reconstructPendingDeliveriesAtBoot();
 }
 
 console.log(`[api] listening on :${config.port} (domain ${config.domain})`);

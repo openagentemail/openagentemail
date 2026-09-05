@@ -39,6 +39,7 @@ import {
   deriveWebhookKey,
 } from './webhook-signing.ts';
 import {
+  compactIdempotencyKeys,
   getWebhookSubscription,
   listWebhookSubscriptions,
   updateWebhookSubscription,
@@ -57,6 +58,7 @@ export function truncateUtf8String(str: string, maxBytes: number): string {
 import { getMessage, withInbox } from './imap.ts';
 import { getTaskSnapshot } from './tasks-internal.ts';
 import { registerWebhookCancelCallback } from './identities.ts';
+import { simpleParser } from 'mailparser';
 
 let customDnsLookupForTests: DnsLookup | undefined;
 export function setWebhookDnsLookupForTests(fn?: DnsLookup): void {
@@ -115,7 +117,7 @@ export type MailEventInput = {
   address: string;
   messageId: string;
   uid: number;
-  uidValidity: number;
+  uidValidity: number | null;
   receivedAt: string;
   rfc822MessageId?: string | null;
   from: { address: string; name?: string };
@@ -187,6 +189,7 @@ export function calculateNextAttemptTime(
   options?: {
     isPing?: boolean;
     retryAfterSec?: number;
+    receivedAtMs?: number;
     maxAttempts?: number;
     randomFn?: () => number;
   },
@@ -223,12 +226,14 @@ export function calculateNextAttemptTime(
     options.retryAfterSec >= 1 &&
     options.retryAfterSec <= 3600
   ) {
+    const arrivalTimeMs =
+      options.receivedAtMs ??
+      firstAttemptTimeMs + (RETRY_SCHEDULE_OFFSETS_SEC[currentAttempt - 1] ?? 0) * 1000;
+    const scheduledByArrival = arrivalTimeMs + options.retryAfterSec * 1000;
     const baseOffsetSec = RETRY_SCHEDULE_OFFSETS_SEC[idx]!;
-    const scheduledOffsetSec = Math.max(
-      RETRY_SCHEDULE_OFFSETS_SEC[idx - 1]! + options.retryAfterSec,
-      baseOffsetSec,
-    );
-    return firstAttemptTimeMs + scheduledOffsetSec * 1000;
+    const scheduledByOffset = firstAttemptTimeMs + baseOffsetSec * 1000;
+    const nextTime = Math.max(scheduledByArrival, scheduledByOffset);
+    return Math.min(nextTime, firstAttemptTimeMs + (RETRY_HORIZON_SEC - 1) * 1000);
   }
 
   const prevOffset = RETRY_SCHEDULE_OFFSETS_SEC[idx - 1]!;
@@ -369,8 +374,8 @@ export function readDeliveryLogRows(options?: {
   }
 
   const paged = filtered.slice(startIndex, startIndex + limit);
-  const nextItem = filtered[startIndex + limit];
-  const nextCursor = nextItem ? nextItem.deliveryId : undefined;
+  const hasMore = startIndex + limit < filtered.length;
+  const nextCursor = hasMore && paged.length > 0 ? paged[paged.length - 1]!.deliveryId : undefined;
 
   return { deliveries: paged, nextCursor };
 }
@@ -444,6 +449,29 @@ export function compactDeliveryLog(
   const lines = retainedRows.map((r) => JSON.stringify(r)).join('\n') + (retainedRows.length ? '\n' : '');
   writeFileSync(tmpPath, lines, { mode: 0o600 });
   renameSync(tmpPath, path);
+}
+
+export function startWebhookMaintenance(): void {
+  const tick = () => {
+    try {
+      compactDeliveryLog();
+      compactIdempotencyKeys(config.webhooks.logRetentionDays);
+    } catch (err) {
+      console.error('[webhooks] maintenance failed:', err);
+    }
+  };
+  tick();
+  const schedule = () => {
+    const d = new Date();
+    const next = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    const delay = Math.max(1_000, next - Date.now());
+    const timer = setTimeout(() => {
+      tick();
+      schedule();
+    }, delay);
+    timer.unref?.();
+  };
+  schedule();
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +652,7 @@ export function formatMailPayload(
         address: input.address,
         t: new Date(input.receivedAt).getTime(),
         uid: input.uid,
-        uidValidity: String(input.uidValidity),
+        uidValidity: input.uidValidity !== null ? String(input.uidValidity) : '0',
       },
       config.taskSigningSecret,
     ),
@@ -768,7 +796,7 @@ export function formatApprovalPayload(
     expiresAt: input.expiresAt,
     expiresInSec: input.expiresInSec,
     digest: input.digest,
-    actionType: input.actionType,
+    actionType: truncateUtf8String(input.actionType, metaFieldMaxBytes),
     actionName: truncateUtf8String(input.actionName, metaFieldMaxBytes),
   };
 
@@ -1015,9 +1043,23 @@ class WebhookDeliveryLimiter {
     return true;
   }
 
+  private slotReleaseListeners = new Set<(webhookId: string) => void>();
+
+  onSlotRelease(listener: (webhookId: string) => void): () => void {
+    this.slotReleaseListeners.add(listener);
+    return () => this.slotReleaseListeners.delete(listener);
+  }
+
   releaseSlot(webhookId: string): void {
     if (this.activePerEndpoint.delete(webhookId)) {
       this.activeTotal = Math.max(0, this.activeTotal - 1);
+      for (const listener of this.slotReleaseListeners) {
+        try {
+          listener(webhookId);
+        } catch {
+          // ignore listener errors
+        }
+      }
     }
   }
 
@@ -1071,7 +1113,7 @@ export type ScheduledDeliveryJob = {
   eventId: string;
   runId: string;
   type: WebhookEventType;
-  payloadBuilder: () => { body: string; sensitive: boolean };
+  payloadBuilder: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
   firstAttemptAt: number;
   attempt: number;
   nextAttemptAt: number;
@@ -1084,11 +1126,31 @@ export type ScheduledDeliveryJob = {
   taskCreatedAt: string | null;
   expiresInSec: number | null;
   eventCreatedAt: string;
+  deferredCount?: number;
 };
 
 class WebhookDeliveryQueue {
   private activeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private jobs = new Map<string, ScheduledDeliveryJob>();
+
+  constructor() {
+    deliveryLimiter.onSlotRelease((releasedWebhookId) => {
+      this.wakeUpDeferred(releasedWebhookId);
+    });
+  }
+
+  wakeUpDeferred(webhookId: string): void {
+    for (const [key, job] of this.jobs.entries()) {
+      if (job.webhookId === webhookId || deliveryLimiter.getActiveTotal() < config.webhooks.maxConcurrent) {
+        if ((job.deferredCount ?? 0) > 0) {
+          job.deferredCount = 0;
+          this.clearTimer(key);
+          job.nextAttemptAt = Date.now();
+          void this.executeJob(key);
+        }
+      }
+    }
+  }
 
   private jobKey(webhookId: string, eventId: string, runId: string): string {
     return `${webhookId}:${eventId}:${runId}`;
@@ -1234,7 +1296,11 @@ class WebhookDeliveryQueue {
     if (!deliveryLimiter.acquireSlot(job.webhookId)) {
       // Pool saturated or endpoint busy: defer! (§8.2)
       const isPoolFull = deliveryLimiter.getActiveTotal() >= config.webhooks.maxConcurrent;
-      const rescheduleAt = now + (isPoolFull ? config.webhooks.poolRetryMs : 100);
+      job.deferredCount = (job.deferredCount ?? 0) + 1;
+      const delay = isPoolFull
+        ? config.webhooks.poolRetryMs
+        : Math.min(5000, 500 * Math.pow(1.5, Math.min(job.deferredCount - 1, 6)));
+      const rescheduleAt = now + delay;
 
       // Check item 2: deferred hitting 72h horizon -> terminal outcome=permanent + reason=retry_horizon_exceeded
       if (rescheduleAt > job.firstAttemptAt + RETRY_HORIZON_SEC * 1000) {
@@ -1370,7 +1436,7 @@ class WebhookDeliveryQueue {
     let sensitive = false;
 
     try {
-      const formatted = job.payloadBuilder();
+      const formatted = job.payloadBuilder(sub);
       body = formatted.body;
       sensitive = formatted.sensitive;
     } catch (err: any) {
@@ -1412,6 +1478,7 @@ class WebhookDeliveryQueue {
 
     // Process outcome & update circuit breaker (§8.5, D2a)
     const finishedTs = new Date().toISOString();
+    const currentAttempt = job.attempt;
     let nextScheduledTime: number | null = null;
 
     if (result.outcome === 'success') {
@@ -1489,19 +1556,15 @@ class WebhookDeliveryQueue {
         // Calculate retry schedule
         const retryAfterMatch = result.reason?.match(/^rate_limited_retry_after_(\d+)$/);
         const retryAfterSec = retryAfterMatch ? Number.parseInt(retryAfterMatch[1]!, 10) : undefined;
-        nextScheduledTime = calculateNextAttemptTime(job.attempt, job.firstAttemptAt, {
+        nextScheduledTime = calculateNextAttemptTime(currentAttempt, job.firstAttemptAt, {
           isPing: job.type === 'webhook.ping',
           retryAfterSec,
+          receivedAtMs: Date.now(),
         });
 
         if (nextScheduledTime === null) {
           // Max attempts reached: dead-letter (§8.3)
           this.jobs.delete(key);
-        } else {
-          // Advance job to next attempt
-          job.attempt++;
-          job.nextAttemptAt = nextScheduledTime;
-          this.schedule(job);
         }
       }
     }
@@ -1522,7 +1585,7 @@ class WebhookDeliveryQueue {
       taskCreatedAt: job.taskCreatedAt,
       expiresInSec: job.expiresInSec,
       eventCreatedAt: job.eventCreatedAt,
-      attempt: job.attempt,
+      attempt: currentAttempt,
       outcome: result.outcome,
       status: result.status,
       durationMs: result.durationMs,
@@ -1531,6 +1594,12 @@ class WebhookDeliveryQueue {
       nextAttemptAt: nextScheduledTime ? new Date(nextScheduledTime).toISOString() : null,
       reason: result.reason,
     });
+
+    if (result.outcome === 'retryable' && nextScheduledTime !== null) {
+      job.attempt = currentAttempt + 1;
+      job.nextAttemptAt = nextScheduledTime;
+      this.schedule(job);
+    }
   }
 }
 
@@ -1552,8 +1621,9 @@ export function enqueueWebhookDelivery(params: {
   subscription: WebhookSubscription;
   eventId: string;
   runId?: string;
+  deliveryId?: string;
   type: WebhookEventType;
-  payloadBuilder: () => { body: string; sensitive: boolean };
+  payloadBuilder: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
   replay?: boolean;
   address?: string | null;
   messageId?: string | null;
@@ -1570,6 +1640,7 @@ export function enqueueWebhookDelivery(params: {
   const runId = params.runId ?? 'run_0';
   const eventCreatedAt = params.eventCreatedAt ?? new Date().toISOString();
   const nextAttemptAt = now + (params.delayMs ?? 0);
+  const deliveryId = params.deliveryId ?? `dlv_${randomUUID()}`;
 
   // If endpoint is disabled: dead-letter immediately rather than queuing (§8.5)
   if (sub.state === 'disabled') {
@@ -1578,7 +1649,7 @@ export function enqueueWebhookDelivery(params: {
       webhookId: sub.id,
       eventId: params.eventId,
       runId,
-      deliveryId: `dlv_${randomUUID()}`,
+      deliveryId,
       type: params.type,
       address: params.address ?? sub.address ?? null,
       messageId: params.messageId ?? null,
@@ -1606,7 +1677,7 @@ export function enqueueWebhookDelivery(params: {
     webhookId: sub.id,
     eventId: params.eventId,
     runId,
-    deliveryId: `dlv_${randomUUID()}`,
+    deliveryId,
     type: params.type,
     address: params.address ?? sub.address ?? null,
     messageId: params.messageId ?? null,
@@ -1653,7 +1724,14 @@ export function enqueueWebhookDelivery(params: {
 export function fireCreationPing(
   subscription: WebhookSubscription,
   trigger: 'creation' | 'test' = 'creation',
+  callerTokenKey?: string,
 ): void {
+  const tokenKey = callerTokenKey ?? subscription.createdBy ?? subscription.address;
+  const probeCheck = deliveryLimiter.checkTestProbeRate(tokenKey);
+  if (!probeCheck.allowed) {
+    return;
+  }
+
   const eventId = `evt_${randomUUID()}`;
   const envelope: WebhookEnvelopeBase = {
     id: eventId,
@@ -1667,7 +1745,7 @@ export function fireCreationPing(
     subscription,
     eventId,
     type: 'webhook.ping',
-    payloadBuilder: () => formatPingPayload(envelope, subscription.id, trigger),
+    payloadBuilder: (currentSub) => formatPingPayload(envelope, currentSub.id, trigger),
     address: null,
   });
 }
@@ -1716,8 +1794,9 @@ export async function executeWebhookTestProbe(
     domain: config.domain,
   };
 
-  const payloadBuilder = () => formatPingPayload(envelope, subscription.id, 'test');
-  const { body } = payloadBuilder();
+  const payloadBuilder = (currentSub: WebhookSubscription) =>
+    formatPingPayload(envelope, currentSub.id, 'test');
+  const { body } = payloadBuilder(subscription);
 
   // Write pending row
   appendDeliveryLogRow({
@@ -1745,13 +1824,33 @@ export async function executeWebhookTestProbe(
     reason: null,
   });
 
-  const fetchResult = await executeWebhookAttempt(
-    subscription,
-    body,
-    'webhook.ping',
-    deliveryId,
-    options,
-  );
+  // Acquire concurrency slot (Item 21)
+  const waitTimeout = config.webhooks.deliveryTimeoutMs || 10_000;
+  const startWait = Date.now();
+  while (!deliveryLimiter.acquireSlot(subscription.id)) {
+    if (Date.now() - startWait >= waitTimeout) {
+      const isPoolFull = deliveryLimiter.getActiveTotal() >= config.webhooks.maxConcurrent;
+      const err: any = new Error('rate_limited');
+      err.code = 'rate_limited';
+      err.retryAfterSec = 5;
+      err.reason = isPoolFull ? 'concurrency_pool_full' : 'endpoint_busy';
+      throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  let fetchResult: WebhookFetchResult;
+  try {
+    fetchResult = await executeWebhookAttempt(
+      subscription,
+      body,
+      'webhook.ping',
+      deliveryId,
+      options,
+    );
+  } finally {
+    deliveryLimiter.releaseSlot(subscription.id);
+  }
 
   const finishedTs = new Date().toISOString();
 
@@ -1893,7 +1992,7 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   const newDeliveryId = `dlv_${randomUUID()}`;
 
   // Rebuild payload based on event type
-  let payloadBuilder: () => { body: string; sensitive: boolean };
+  let payloadBuilder: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
 
   if (original.type === 'webhook.ping') {
     const envelope: WebhookEnvelopeBase = {
@@ -1903,7 +2002,7 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
       createdAt: original.eventCreatedAt,
       domain: config.domain,
     };
-    payloadBuilder = () => formatPingPayload(envelope, sub.id, 'test');
+    payloadBuilder = (currentSub) => formatPingPayload(envelope, currentSub.id, 'test');
   } else if (original.type === 'approval.requested') {
     if (!original.taskId) {
       throw new Error('missing_task_id');
@@ -1919,8 +2018,8 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
       createdAt: original.eventCreatedAt,
       domain: config.domain,
     };
-    payloadBuilder = () =>
-      formatApprovalPayload(sub, envelope, {
+    payloadBuilder = (currentSub) =>
+      formatApprovalPayload(currentSub, envelope, {
         taskId: task.id,
         taskState: 'input-required',
         from: task.from,
@@ -1945,6 +2044,31 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
     if (!detail) {
       throw new Error('message_not_found');
     }
+
+    let unread = true;
+    let sizeBytes = 0;
+    let hasAttachments = false;
+    try {
+      await withInbox(async (client) => {
+        const uid = Number(detail.id);
+        const msg = await client.fetchOne(uid, { source: true, flags: true }, { uid: true });
+        if (msg) {
+          unread = !msg.flags?.has('\\Seen');
+          if (msg.source) {
+            sizeBytes = msg.source.length;
+            try {
+              const parsed = await simpleParser(msg.source);
+              hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+            } catch {
+              // ignore parse failure
+            }
+          }
+        }
+      });
+    } catch {
+      // fallback to defaults
+    }
+
     const envelope: WebhookEnvelopeBase = {
       id: original.eventId,
       type: 'mail.received',
@@ -1952,20 +2076,20 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
       createdAt: original.eventCreatedAt,
       domain: config.domain,
     };
-    payloadBuilder = () =>
-      formatMailPayload(sub, envelope, {
+    payloadBuilder = (currentSub) =>
+      formatMailPayload(currentSub, envelope, {
         address: original.address!,
         messageId: detail.id,
         uid: Number(detail.id),
-        uidValidity: original.uidValidity ?? 0,
+        uidValidity: original.uidValidity ?? null,
         receivedAt: detail.date,
         from: { address: detail.from },
         to: [detail.to],
         cc: [],
         subject: detail.subject,
-        sizeBytes: 0,
-        hasAttachments: false,
-        unread: true,
+        sizeBytes,
+        hasAttachments,
+        unread,
         containsSecurityCode: detail.otp.codes.length > 0,
         containsLink: detail.otp.links.length > 0,
         textPreview: detail.text,
@@ -1980,6 +2104,7 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
     subscription: sub,
     eventId: original.eventId,
     runId: newRunId,
+    deliveryId: newDeliveryId,
     type: original.type,
     payloadBuilder,
     replay: true,
@@ -2085,7 +2210,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
 
     // 5. Rebuild payload (§8.6 step 5)
     try {
-      let payloadBuilder: () => { body: string; sensitive: boolean };
+      let payloadBuilder: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
 
       if (latest.type === 'webhook.ping') {
         const envelope: WebhookEnvelopeBase = {
@@ -2095,7 +2220,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
           createdAt: latest.eventCreatedAt,
           domain: config.domain,
         };
-        payloadBuilder = () => formatPingPayload(envelope, sub.id, 'test');
+        payloadBuilder = (currentSub) => formatPingPayload(envelope, currentSub.id, 'test');
       } else if (latest.type === 'approval.requested') {
         if (!latest.taskId) {
           throw Object.assign(new Error('missing_task_id'), { reason: 'task_not_found' });
@@ -2117,8 +2242,8 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
           domain: config.domain,
         };
         // Item 9: restore taskCreatedAt and expiresInSec from row!
-        payloadBuilder = () =>
-          formatApprovalPayload(sub, envelope, {
+        payloadBuilder = (currentSub) =>
+          formatApprovalPayload(currentSub, envelope, {
             taskId: task.id,
             taskState: 'input-required',
             from: task.from,
@@ -2143,6 +2268,9 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
         let activeUidValidity = latest.uidValidity;
 
         let mailDetail: any = null;
+        let unread = true;
+        let sizeBytes = 0;
+        let hasAttachments = false;
         try {
           mailDetail = await withInbox(async (client) => {
             const currentGen = client.mailbox ? Number(client.mailbox.uidValidity) : undefined;
@@ -2170,9 +2298,32 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
               const newUid = foundUids[0]!;
               activeUid = String(newUid);
               activeUidValidity = currentGen;
+              const msg = await client.fetchOne(newUid, { source: true, flags: true }, { uid: true });
+              if (msg) {
+                unread = !msg.flags?.has('\\Seen');
+                if (msg.source) {
+                  sizeBytes = msg.source.length;
+                  try {
+                    const parsed = await simpleParser(msg.source);
+                    hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+                  } catch {}
+                }
+              }
               return getMessage(latest.address!, activeUid, { uidValidity: currentGen });
             }
 
+            const uidNum = Number(latest.messageId);
+            const msg = await client.fetchOne(uidNum, { source: true, flags: true }, { uid: true });
+            if (msg) {
+              unread = !msg.flags?.has('\\Seen');
+              if (msg.source) {
+                sizeBytes = msg.source.length;
+                try {
+                  const parsed = await simpleParser(msg.source);
+                  hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+                } catch {}
+              }
+            }
             return getMessage(latest.address!, latest.messageId!, {
               uidValidity: latest.uidValidity ?? undefined,
             });
@@ -2194,20 +2345,20 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
           domain: config.domain,
         };
 
-        payloadBuilder = () =>
-          formatMailPayload(sub, envelope, {
+        payloadBuilder = (currentSub) =>
+          formatMailPayload(currentSub, envelope, {
             address: latest.address!,
             messageId: activeUid,
             uid: Number(activeUid),
-            uidValidity: activeUidValidity ?? 0,
+            uidValidity: activeUidValidity ?? null,
             receivedAt: mailDetail.date,
             from: { address: mailDetail.from },
             to: [mailDetail.to],
             cc: [],
             subject: mailDetail.subject,
-            sizeBytes: 0,
-            hasAttachments: false,
-            unread: true,
+            sizeBytes,
+            hasAttachments,
+            unread,
             containsSecurityCode: mailDetail.otp.codes.length > 0,
             containsLink: mailDetail.otp.links.length > 0,
             textPreview: mailDetail.text,

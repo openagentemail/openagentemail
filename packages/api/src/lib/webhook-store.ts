@@ -318,6 +318,14 @@ export function deleteWebhook(id: string): WebhookRecord | undefined {
   const idx = file.webhooks.findIndex((w) => w.id === id);
   if (idx < 0) return undefined;
   const [removed] = file.webhooks.splice(idx, 1);
+  if (file.createIdempotency) {
+    file.createIdempotency = file.createIdempotency.filter(
+      (c) => c.webhookId !== id && c.responseBody?.id !== id,
+    );
+  }
+  if (file.rotateIdempotency) {
+    file.rotateIdempotency = file.rotateIdempotency.filter((r) => r.webhookId !== id);
+  }
   writeStore(file);
   return removed;
 }
@@ -384,15 +392,28 @@ export function cascadeDeleteWebhooksForAddress(address: string): WebhookRecord[
   const file = readStore();
   const removed: WebhookRecord[] = [];
   const kept: WebhookRecord[] = [];
+  const removedIds = new Set<string>();
   for (const w of file.webhooks) {
     if (w.address.toLowerCase() === needle) {
       removed.push(w);
+      removedIds.add(w.id);
     } else {
       kept.push(w);
     }
   }
   if (removed.length === 0) return [];
   file.webhooks = kept;
+  if (file.createIdempotency) {
+    file.createIdempotency = file.createIdempotency.filter(
+      (c) =>
+        c.address.toLowerCase() !== needle &&
+        (!c.webhookId || !removedIds.has(c.webhookId)) &&
+        (!c.responseBody?.id || !removedIds.has(c.responseBody.id as string)),
+    );
+  }
+  if (file.rotateIdempotency) {
+    file.rotateIdempotency = file.rotateIdempotency.filter((r) => !removedIds.has(r.webhookId));
+  }
   writeStore(file);
   return removed;
 }
@@ -465,7 +486,9 @@ export function saveRotateIdempotency(record: RotateIdempotencyRecord): void {
   writeStore(file);
 }
 
-export function compactIdempotencyKeys(retentionDays: number): void {
+export function compactIdempotencyKeys(
+  retentionDays: number = config.webhooks.logRetentionDays,
+): void {
   const file = readStore();
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   if (file.createIdempotency) {

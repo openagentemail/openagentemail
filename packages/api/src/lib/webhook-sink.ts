@@ -57,7 +57,8 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
       const eventCreatedAt = new Date().toISOString();
       const createdAtMs = new Date(task.createdAt).getTime();
       const expiresAtMs = new Date(task.approval.expiresAt).getTime();
-      const expiresInSec = Math.max(0, Math.floor((expiresAtMs - createdAtMs) / 1000));
+      const rawExpiresInSec = Math.floor((expiresAtMs - createdAtMs) / 1000);
+      const expiresInSec = rawExpiresInSec > 0 ? rawExpiresInSec : null;
 
       const input: ApprovalEventInput = {
         taskId: task.id,
@@ -75,8 +76,8 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
         actionArguments: task.approval.action.arguments,
       };
 
+      const eventId = `evt_${randomUUID()}`;
       for (const sub of matchedSubs) {
-        const eventId = `evt_${randomUUID()}`;
         const envelope: WebhookEnvelopeBase = {
           id: eventId,
           type: 'approval.requested',
@@ -89,7 +90,7 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
           subscription: sub,
           eventId,
           type: 'approval.requested',
-          payloadBuilder: () => formatApprovalPayload(sub, envelope, input),
+          payloadBuilder: (currentSub) => formatApprovalPayload(currentSub, envelope, input),
           address: sub.address,
           taskId: task.id,
           taskCreatedAt: task.createdAt,
@@ -104,7 +105,10 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
 
       const message = event.message;
       const uid = message.uid;
-      const uidValidity = event.uidValidity !== undefined ? Number(event.uidValidity) : 0;
+      const uidValidity =
+        event.uidValidity !== undefined && event.uidValidity !== null
+          ? Number(event.uidValidity)
+          : null;
       const recipients = messageRecipients(message as FetchMessageObject);
       if (recipients.size === 0) return;
 
@@ -240,8 +244,8 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
           links,
         };
 
+        const eventId = `evt_${randomUUID()}`;
         for (const sub of subs) {
-          const eventId = `evt_${randomUUID()}`;
           const envelope: WebhookEnvelopeBase = {
             id: eventId,
             type: 'mail.received',
@@ -254,7 +258,7 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
             subscription: sub,
             eventId,
             type: 'mail.received',
-            payloadBuilder: () => formatMailPayload(sub, envelope, input),
+            payloadBuilder: (currentSub) => formatMailPayload(currentSub, envelope, input),
             address: recipient,
             messageId: String(uid),
             uidValidity,

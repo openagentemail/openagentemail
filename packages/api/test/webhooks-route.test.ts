@@ -580,6 +580,133 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(redeliverBody.eventId).toBe('evt_orig_1');
   });
 
+  test('R2 Item 1 & Item 2: OAuth tokens cannot DELETE or reveal secret', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-oauth-check',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+
+    // Item 2: GET /:id/secret rejects OAuth
+    const secretRes = await app.request(`/v1/webhooks/${sub.id}/secret`, {
+      headers: { Authorization: `Bearer ${oauthToken}` },
+    });
+    expect(secretRes.status).toBe(403);
+    const secretBody: any = await secretRes.json();
+    expect(secretBody.error).toBe('forbidden: oauth tokens may not reveal webhook secrets');
+
+    // Item 1: DELETE /:id rejects OAuth
+    const deleteRes = await app.request(`/v1/webhooks/${sub.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${oauthToken}` },
+    });
+    expect(deleteRes.status).toBe(403);
+    const deleteBody: any = await deleteRes.json();
+    expect(deleteBody.error).toBe('forbidden: oauth tokens may not mutate webhook subscriptions');
+  });
+
+  test('R2 Item 3: Identity caller cannot disable subscription created by admin', async () => {
+    const adminSub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-admin-created',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+
+    const disableRes = await app.request(`/v1/webhooks/${adminSub.id}/disable`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(disableRes.status).toBe(403);
+    const body: any = await disableRes.json();
+    expect(body.error).toBe('forbidden: admin key required');
+
+    // Admin CAN disable
+    const adminDisableRes = await app.request(`/v1/webhooks/${adminSub.id}/disable`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(adminDisableRes.status).toBe(200);
+  });
+
+  test('R2 Item 10: Concurrent duplicate create requests with Idempotency-Key are race-safe', async () => {
+    const key = `idemp_concurrent_${Date.now()}`;
+    const req = () =>
+      app.request('/v1/webhooks', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminKey}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': key,
+        },
+        body: JSON.stringify({
+          url: 'https://consumer.example/hook-concurrent',
+          address: 'bob@test.example',
+          events: ['mail.received'],
+        }),
+      });
+
+    const [res1, res2] = await Promise.all([req(), req()]);
+    expect(res1.status).toBe(201);
+    expect(res2.status).toBe(201);
+    const body1: any = await res1.json();
+    const body2: any = await res2.json();
+    expect(body1.id).toBe(body2.id);
+  });
+
+  test('R2 Item 11: POST /v1/webhooks/:id/rotate idempotency returns cached response', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-rot-idemp',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+
+    const rotKey = `rot_key_${Date.now()}`;
+    const res1 = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Idempotency-Key': rotKey,
+      },
+    });
+    expect(res1.status).toBe(200);
+    const body1: any = await res1.json();
+    expect(body1.epoch).toBe(1);
+
+    // Replay same rotation key
+    const res2 = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Idempotency-Key': rotKey,
+      },
+    });
+    expect(res2.status).toBe(200);
+    const body2: any = await res2.json();
+    expect(body2.epoch).toBe(1);
+    expect(body2.id).toBe(sub.id);
+  });
+
+  test('R2 Item 23: GET /v1/webhooks respects ?address= filter for admin and forbids identity', async () => {
+    const adminFilterRes = await app.request('/v1/webhooks?address=alice@test.example', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(adminFilterRes.status).toBe(200);
+    const adminBody: any = await adminFilterRes.json();
+    for (const w of adminBody.webhooks) {
+      expect(w.address).toBe('alice@test.example');
+    }
+
+    const userFilterRes = await app.request('/v1/webhooks?address=bob@test.example', {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(userFilterRes.status).toBe(403);
+    const userBody: any = await userFilterRes.json();
+    expect(userBody.error).toBe('forbidden: admin key required');
+  });
+
   afterAll(async () => {
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;

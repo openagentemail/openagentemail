@@ -56,6 +56,20 @@ function forbidOAuthMutation(c: Context) {
   return null;
 }
 
+function forbidOAuthRead(c: Context) {
+  const attr = getAttribution(c);
+  if (attr?.kind === 'oauth') {
+    return c.json(
+      { error: 'forbidden: oauth tokens may not reveal webhook secrets' },
+      403,
+    );
+  }
+  return null;
+}
+
+type InFlightCreateResult = { status: number; body: any };
+const inFlightCreateIdempotency = new Map<string, Promise<InFlightCreateResult>>();
+
 const createSchema = z
   .object({
     url: z.string().url(),
@@ -166,103 +180,139 @@ export const webhooksRoute = new Hono()
 
     // Idempotency check
     const idempotencyKey = c.req.header('idempotency-key')?.trim();
-    if (idempotencyKey) {
+    const compositeKey = idempotencyKey ? `${idempotencyKey}:${targetAddress}` : null;
+    if (idempotencyKey && compositeKey) {
+      const pending = inFlightCreateIdempotency.get(compositeKey);
+      if (pending) {
+        try {
+          const cached = await pending;
+          return c.json(cached.body, cached.status as any);
+        } catch {
+          // ignore failure and proceed
+        }
+      }
       const found = findCreateIdempotency(idempotencyKey, targetAddress);
       if (found) {
         return c.json(found.responseBody, 201);
       }
     }
 
-    // URL validation (static & DNS resolution)
-    const resolution = await validateWebhookUrlResolution(parsed.data.url, {
-      allowPrivateTargets: config.webhooks.allowPrivateTargets,
-    });
-    if (!resolution.valid) {
-      return c.json(
-        {
-          error:
-            resolution.code === 'webhook_target_forbidden'
-              ? 'webhook_target_forbidden'
-              : 'invalid_webhook_url',
-        },
-        400,
+    const executeCreate = async (): Promise<InFlightCreateResult> => {
+      // URL validation (static & DNS resolution)
+      const resolution = await validateWebhookUrlResolution(parsed.data.url, {
+        allowPrivateTargets: config.webhooks.allowPrivateTargets,
+      });
+      if (!resolution.valid) {
+        return {
+          status: 400,
+          body: {
+            error:
+              resolution.code === 'webhook_target_forbidden'
+                ? 'webhook_target_forbidden'
+                : 'invalid_webhook_url',
+          },
+        };
+      }
+
+      // Rule C: private target requires admin
+      if (resolution.isPrivateTarget && auth.kind !== 'admin') {
+        return { status: 400, body: { error: 'webhook_target_forbidden' } };
+      }
+
+      // Subscription limit check
+      const limits = checkSubscriptionLimits(targetAddress);
+      if (!limits.allowed) {
+        return { status: 409, body: { error: 'webhook_limit_reached' } };
+      }
+
+      const createdBy = auth.kind === 'admin' ? 'admin' : auth.address;
+      const record = createWebhookSubscription({
+        url: parsed.data.url,
+        address: targetAddress,
+        events: parsed.data.events,
+        contentScope: parsed.data.contentScope,
+        description: parsed.data.description,
+        privateTargetGranted: resolution.isPrivateTarget && auth.kind === 'admin',
+        createdBy,
+      });
+
+      const derived = deriveWebhookKey(
+        config.webhooks.signingSecret || config.taskSigningSecret,
+        record.id,
+        record.epoch,
       );
-    }
 
-    // Rule C: private target requires admin
-    if (resolution.isPrivateTarget && auth.kind !== 'admin') {
-      return c.json({ error: 'webhook_target_forbidden' }, 400);
-    }
+      // Fire asynchronous ping at creation (§5.1, D12, Item 19)
+      fireCreationPing(record, 'creation', tokenKey);
 
-    // Subscription limit check
-    const limits = checkSubscriptionLimits(targetAddress);
-    if (!limits.allowed) {
-      return c.json({ error: 'webhook_limit_reached' }, 409);
-    }
-
-    const createdBy = auth.kind === 'admin' ? 'admin' : auth.address;
-    const record = createWebhookSubscription({
-      url: parsed.data.url,
-      address: targetAddress,
-      events: parsed.data.events,
-      contentScope: parsed.data.contentScope,
-      description: parsed.data.description,
-      privateTargetGranted: resolution.isPrivateTarget && auth.kind === 'admin',
-      createdBy,
-    });
-
-    const derived = deriveWebhookKey(
-      config.webhooks.signingSecret || config.taskSigningSecret,
-      record.id,
-      record.epoch,
-    );
-
-    // Fire asynchronous ping at creation (§5.1, D12)
-    fireCreationPing(record, 'creation');
-
-    recordAuditEvent({
-      event: 'webhook.create',
-      outcome: 'ok',
-      address: record.address,
-      webhookId: record.id,
-    });
-
-    const response = {
-      id: record.id,
-      url: record.url,
-      address: record.address,
-      events: record.events,
-      contentScope: record.contentScope,
-      description: record.description,
-      state: record.state,
-      secret: derived.displayedSecret,
-      secretPrefix: record.secretPrefix,
-      signatureScheme: 'v1',
-      timestampToleranceSec: config.webhooks.timestampToleranceSec,
-      createdAt: record.createdAt,
-    };
-
-    if (idempotencyKey) {
-      saveCreateIdempotency({
-        key: idempotencyKey,
+      recordAuditEvent({
+        event: 'webhook.create',
+        outcome: 'ok',
         address: record.address,
         webhookId: record.id,
-        responseBody: { ...response, secret: null },
-        createdAt: record.createdAt,
       });
-    }
 
-    return c.json(response, 201);
+      const response = {
+        id: record.id,
+        url: record.url,
+        address: record.address,
+        events: record.events,
+        contentScope: record.contentScope,
+        description: record.description,
+        state: record.state,
+        secret: derived.displayedSecret,
+        secretPrefix: record.secretPrefix,
+        signatureScheme: 'v1',
+        timestampToleranceSec: config.webhooks.timestampToleranceSec,
+        createdAt: record.createdAt,
+      };
+
+      if (idempotencyKey) {
+        saveCreateIdempotency({
+          key: idempotencyKey,
+          address: record.address,
+          webhookId: record.id,
+          responseBody: { ...response, secret: null },
+          createdAt: record.createdAt,
+        });
+      }
+
+      return { status: 201, body: response };
+    };
+
+    if (compositeKey) {
+      let promise = inFlightCreateIdempotency.get(compositeKey);
+      if (!promise) {
+        promise = executeCreate();
+        inFlightCreateIdempotency.set(compositeKey, promise);
+      }
+      try {
+        const res = await promise;
+        return c.json(res.body, res.status as any);
+      } finally {
+        inFlightCreateIdempotency.delete(compositeKey);
+      }
+    } else {
+      const res = await executeCreate();
+      return c.json(res.body, res.status as any);
+    }
   })
 
   // GET /v1/webhooks - List subscriptions
   .get('/', async (c) => {
     const auth = getAuth(c);
+    const addressParam = c.req.query('address')?.trim()?.toLowerCase();
+    if (addressParam && auth.kind !== 'admin') {
+      return c.json({ error: 'forbidden: admin key required' }, 403);
+    }
+
     const all = listWebhookSubscriptions();
-    const filtered =
-      auth.kind === 'admin'
-        ? all
-        : all.filter((s) => s.address === auth.address);
+    let filtered: WebhookRecord[];
+    if (auth.kind === 'admin') {
+      filtered = addressParam ? all.filter((s) => s.address === addressParam) : all;
+    } else {
+      filtered = all.filter((s) => s.address === auth.address);
+    }
 
     return c.json({
       webhooks: filtered.map((sub) => formatSubscriptionDetail(sub)),
@@ -401,8 +451,13 @@ export const webhooksRoute = new Hono()
       }
     });
 
-    if (urlChanged && updated) {
-      fireCreationPing(updated, 'creation');
+    if (!updated) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+
+    if (urlChanged) {
+      const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
+      fireCreationPing(updated, 'creation', tokenKey);
     }
 
     recordAuditEvent({
@@ -412,11 +467,14 @@ export const webhooksRoute = new Hono()
       webhookId: sub.id,
     });
 
-    return c.json(formatSubscriptionDetail(updated!));
+    return c.json(formatSubscriptionDetail(updated));
   })
 
   // GET /v1/webhooks/:id/secret - Reveal signing secret
   .get('/:id/secret', async (c) => {
+    const deniedOAuth = forbidOAuthRead(c);
+    if (deniedOAuth) return deniedOAuth;
+
     c.header('Cache-Control', 'no-store');
 
     const sub = getWebhookSubscription(c.req.param('id'));
@@ -463,6 +521,9 @@ export const webhooksRoute = new Hono()
 
   // DELETE /v1/webhooks/:id - Delete subscription
   .delete('/:id', async (c) => {
+    const deniedOAuth = forbidOAuthMutation(c);
+    if (deniedOAuth) return deniedOAuth;
+
     const sub = getWebhookSubscription(c.req.param('id'));
     if (!sub) {
       return c.json({ error: 'not_found' }, 404);
@@ -524,7 +585,7 @@ export const webhooksRoute = new Hono()
     // Idempotency check
     const idempotencyKey = c.req.header('idempotency-key')?.trim();
     if (idempotencyKey) {
-      const found = findRotateIdempotency(idempotencyKey, sub.id);
+      const found = findRotateIdempotency(sub.id, idempotencyKey);
       if (found) {
         return c.json(found.responseBody, 200);
       }
@@ -613,22 +674,33 @@ export const webhooksRoute = new Hono()
 
     const auth = getAuth(c);
     const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
-    const rateRes = deliveryLimiter.checkTestProbeRate(tokenKey);
-    if (!rateRes.allowed) {
-      c.header('Retry-After', String(rateRes.retryAfterSec));
-      return c.json({ error: 'rate_limited', retryAfterSec: rateRes.retryAfterSec }, 429);
+
+    try {
+      const probeRes = await executeWebhookTestProbe(sub, tokenKey);
+
+      recordAuditEvent({
+        event: 'webhook.test',
+        outcome: probeRes.outcome === 'success' ? 'ok' : 'denied',
+        address: sub.address,
+        webhookId: sub.id,
+      });
+
+      return c.json(probeRes, 200);
+    } catch (err: any) {
+      if (err.code === 'rate_limited') {
+        if (err.retryAfterSec) {
+          c.header('Retry-After', String(err.retryAfterSec));
+        }
+        return c.json({ error: 'rate_limited', retryAfterSec: err.retryAfterSec }, 429);
+      }
+      if (err.code === 'webhook_disabled') {
+        return c.json(
+          { error: 'webhook_disabled', disabledReason: err.disabledReason },
+          409,
+        );
+      }
+      throw err;
     }
-
-    const probeRes = await executeWebhookTestProbe(sub, tokenKey);
-
-    recordAuditEvent({
-      event: 'webhook.test',
-      outcome: probeRes.outcome === 'success' ? 'ok' : 'denied',
-      address: sub.address,
-      webhookId: sub.id,
-    });
-
-    return c.json(probeRes, 200);
   })
 
   // POST /v1/webhooks/:id/disable - Manual pause
@@ -643,6 +715,13 @@ export const webhooksRoute = new Hono()
 
     const deniedAddress = forbidUnlessAddress(c, sub.address);
     if (deniedAddress) return deniedAddress;
+
+    const auth = getAuth(c);
+
+    // Rule D: Identity caller can only disable if created by itself
+    if (auth.kind === 'identity' && sub.createdBy !== auth.address) {
+      return c.json({ error: 'forbidden: admin key required' }, 403);
+    }
 
     updateWebhookSubscription(sub.id, (s) => {
       s.state = 'disabled';
@@ -681,7 +760,7 @@ export const webhooksRoute = new Hono()
     });
 
     if (updated) {
-      fireCreationPing(updated, 'creation');
+      fireCreationPing(updated, 'creation', 'admin');
     }
 
     recordAuditEvent({

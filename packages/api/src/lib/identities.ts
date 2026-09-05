@@ -489,6 +489,7 @@ export function deleteIdentity(address: string): boolean {
   if (kept.length === identities.length) return false;
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
+  save(kept);
   const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
   for (const wh of deletedWebhooks) {
     if (webhookCancelCallback) {
@@ -501,7 +502,6 @@ export function deleteIdentity(address: string): boolean {
       webhookId: wh.id,
     });
   }
-  save(kept);
   return true;
 }
 

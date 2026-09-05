@@ -110,7 +110,12 @@ export function buildWebhookSignatureHeader(
   }
 
   // 3. 根密钥轮换重叠签名 (§12.2)
-  const prevRoot = options.previousRootSecret ?? config.webhooks.signingSecretPrevious;
+  const prevRoot =
+    options.previousRootSecret !== undefined
+      ? options.previousRootSecret
+      : options.rootSecret !== undefined
+        ? undefined
+        : config.webhooks.signingSecretPrevious;
   if (prevRoot) {
     const prevRootDerived = deriveWebhookKey(prevRoot, options.webhookId, options.epoch);
     const prevRootSig = createHmac('sha256', prevRootDerived.signingKey)
