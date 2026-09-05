@@ -84,7 +84,26 @@ type StoreCache = {
 let storeCache: StoreCache | undefined;
 let rawCache: StoreCache | undefined;
 
-/** Bounded in-process tombstone set for pruned OAuth access-token hashes. */
+/**
+ * Bounded in-process tombstone set for pruned OAuth access-token hashes.
+ *
+ * Persistence evaluation & tradeoff (Issue #130 Item 7):
+ * - These tombstones exist in-process with a fixed capacity of 10,000 entries (~1MB RAM).
+ * - If the API process restarts, the tombstone set starts empty.
+ * - Under normal operations, restart has zero effect on authentication.
+ * - In the rare triple-fault edge case where:
+ *     1) an OAuth access token has expired and was pruned from disk,
+ *     2) the API process subsequently restarts (clearing this set),
+ *     3) identities.json becomes corrupted, AND
+ *     4) the client presents that old expired OAuth token,
+ *   peekAccessToken will return false, causing the resolution to fall back to 500
+ *   (re-throwing identity_store_corrupt) rather than 401.
+ * - Both 401 and 500 are strictly fail-closed (access is rejected in both).
+ * - Persisting tombstones across restarts would require separate disk files or schema
+ *   migrations, write synchronization, and disk-tombstone GC for an edge case with no
+ *   security consequences. Retaining tombstones strictly in-process with FIFO eviction
+ *   is a deliberate, bounded-memory architectural tradeoff ("documented limitation").
+ */
 export const PRUNED_ACCESS_HASHES_CAP = 10_000;
 const prunedAccessHashes = new Set<string>();
 
@@ -232,31 +251,76 @@ function pruneExpired(data: OAuthStoreFile, now = Date.now()): boolean {
   return changed;
 }
 
-function loadRaw(): OAuthStoreFile {
+type LoadStoreOptions = {
+  prune: boolean;
+  persistPrune?: boolean;
+};
+
+/**
+ * Common store loader for both pruned runtime reads (storeCache) and
+ * non-destructive raw reads (rawCache). (Issue #130 Item 4)
+ */
+function loadStore(opts: LoadStoreOptions): OAuthStoreFile {
+  const { prune, persistPrune = true } = opts;
   const path = storePath();
+  const cache = prune ? storeCache : rawCache;
+
   if (!existsSync(path)) {
-    if (rawCache && storeVersionsEqual(rawCache.version, MISSING_STORE_VERSION)) {
-      return rawCache.data;
+    if (cache && storeVersionsEqual(cache.version, MISSING_STORE_VERSION)) {
+      return cache.data;
     }
-    rawCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
-    return rawCache.data;
+    const entry = { version: MISSING_STORE_VERSION, data: emptyStore() };
+    if (prune) {
+      storeCache = entry;
+    } else {
+      rawCache = entry;
+    }
+    return entry.data;
   }
+
   try {
     const version = fileVersionFromStat(statSync(path));
-    if (rawCache && storeVersionsEqual(rawCache.version, version)) {
-      return rawCache.data;
+    if (cache && storeVersionsEqual(cache.version, version)) {
+      if (prune) {
+        // 缓存命中也做内存 prune（不强制写盘，避免热路径 IO）
+        pruneExpired(cache.data);
+      }
+      return cache.data;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isStoreShape(parsed)) {
       throw new Error('invalid oauth store shape');
     }
-    rawCache = { version, data: parsed };
-    return rawCache.data;
+    if (prune && pruneExpired(parsed)) {
+      if (persistPrune) {
+        // 读时发现过期行：就地写回，避免 save→load 递归
+        const written = writeStoreFile(parsed);
+        storeCache = { version: written, data: parsed };
+        return storeCache.data;
+      }
+      // revoke 热路径：只内存 prune，不写盘
+    }
+    const entry = { version, data: parsed };
+    if (prune) {
+      storeCache = entry;
+    } else {
+      rawCache = entry;
+    }
+    return entry.data;
   } catch (err) {
-    rawCache = undefined;
+    if (prune) {
+      invalidateStoreCache();
+    } else {
+      rawCache = undefined;
+    }
     if ((err as Error).message === 'oauth_store_corrupt') throw err;
+    // 损坏 fail-closed：绝不当空库写回，避免抹掉全部授权。
     throw new Error('oauth_store_corrupt');
   }
+}
+
+function loadRaw(): OAuthStoreFile {
+  return loadStore({ prune: false });
 }
 
 /**
@@ -264,6 +328,21 @@ function loadRaw(): OAuthStoreFile {
  * expiry evaluation. Used exclusively by auth credential discrimination when
  * the identity store is damaged. Returns true if the token exists in the access
  * table OR has been recorded in the bounded prunedAccessHashes tombstone set.
+ *
+ * Degradation & memory evaluation (Issue #130 Item 3):
+ * 1. Degradation when oauth-store is ALSO corrupt:
+ *    If oauth.json is damaged at the same time as identities.json, loadRaw() throws
+ *    'oauth_store_corrupt'. This catch block captures the error and returns false.
+ *    In auth.ts resolveAccessToken(), this causes the identity store error to be
+ *    rethrown, returning HTTP 500 instead of 401. Both responses are fail-closed
+ *    (zero unauthorized access), but under dual-store corruption the credential class
+ *    discrimination gracefully degrades to generic store outage (500).
+ * 2. rawCache memory evaluation:
+ *    rawCache maintains a cloned snapshot of oauth.json unpruned by load() mutations.
+ *    At anticipated file sizes (<1-2MB), holding both storeCache and rawCache duplicates
+ *    in-memory cache to ~tens/hundreds of KB, which is trivial compared to runtime
+ *    footprint. This memory tradeoff avoids re-reading disk during credential discrimination
+ *    while preserving strict cache isolation from mutative pruneExpired calls.
  */
 export function peekAccessToken(token: string): boolean {
   try {
@@ -283,42 +362,7 @@ export function peekAccessToken(token: string): boolean {
  * 公开 /oauth/revoke 用 false：未知 token 路径必须零磁盘写（防未鉴权写放大）。
  */
 function load(persistPrune = true): OAuthStoreFile {
-  const path = storePath();
-  if (!existsSync(path)) {
-    if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
-      return storeCache.data;
-    }
-    storeCache = { version: MISSING_STORE_VERSION, data: emptyStore() };
-    return storeCache.data;
-  }
-  try {
-    const version = fileVersionFromStat(statSync(path));
-    if (storeCache && storeVersionsEqual(storeCache.version, version)) {
-      // 缓存命中也做内存 prune（不强制写盘，避免热路径 IO）
-      pruneExpired(storeCache.data);
-      return storeCache.data;
-    }
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    if (!isStoreShape(parsed)) {
-      throw new Error('invalid oauth store shape');
-    }
-    if (pruneExpired(parsed)) {
-      if (persistPrune) {
-        // 读时发现过期行：就地写回，避免 save→load 递归
-        const written = writeStoreFile(parsed);
-        storeCache = { version: written, data: parsed };
-        return storeCache.data;
-      }
-      // revoke 热路径：只内存 prune，不写盘
-    }
-    storeCache = { version, data: parsed };
-    return storeCache.data;
-  } catch (err) {
-    invalidateStoreCache();
-    if ((err as Error).message === 'oauth_store_corrupt') throw err;
-    // 损坏 fail-closed：绝不当空库写回，避免抹掉全部授权。
-    throw new Error('oauth_store_corrupt');
-  }
+  return loadStore({ prune: true, persistPrune });
 }
 
 function writeStoreFile(data: OAuthStoreFile): StoreFileVersion {

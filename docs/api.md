@@ -22,6 +22,13 @@ The website docs are canonical — edit them in the [website repo](https://githu
 
 不做：DCR（`/oauth/register`）、OIDC discovery、admin 级 OAuth 票。
 
+## Token rotation breaking change (PR #129 / #130)
+
+- `POST /v1/identities/:address/token`:
+  - **空请求体（Empty Body）**：保留该身份当前已有 scopes 限制（安全收紧方向：避免因请求体缺失而意外重置铸造出全权票）。
+  - **显式 `{"scopes": null}`**：重置恢复为无限制的全权限身份票（legacy unscoped full power）。
+  - **显式 `{"scopes": [...]}`**：以指定 scopes 数组替换现有权限集合（传入 `{"scopes": []}` 签发无 API 操作权限的受限票）。
+
 ## Outbound webhooks
 
 Pending retries are rebuilt from the delivery log on restart; events emitted while the process was down are not reconstructed (D7, the same weak-restart semantics as ntfy).
