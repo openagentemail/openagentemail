@@ -339,7 +339,7 @@ server {
 
 #### 2. Caddy
 
-在 Caddyfile 中使用 `format filter` 屏蔽 `token` 与 `code`：
+在 Caddyfile 中使用 `format filter` 与 `request>uri query` 屏蔽 `token` 与 `code` 查询参数：
 
 ```caddy
 mail.example.com {
@@ -348,16 +348,29 @@ mail.example.com {
         format filter {
             wrap json
             fields {
-                uri replace \?token=[^&]+ ?token=[REDACTED]
-                uri replace &token=[^&]+ &token=[REDACTED]
-                uri replace \?code=[^&]+ ?code=[REDACTED]
-                uri replace &code=[^&]+ &code=[REDACTED]
+                request>uri query {
+                    replace token REDACTED
+                    replace code REDACTED
+                }
             }
         }
     }
 
     reverse_proxy 127.0.0.1:3100
 }
+```
+
+> **可选（完全删除参数）**：如果希望在日志中完全移除这两个参数而不是替换为 `REDACTED`，可将 `replace` 替换为 `delete token` 与 `delete code`。
+
+**验证方法**：
+启动 Caddy 并发送带有敏感参数的测试请求：
+```bash
+curl -ik "https://mail.example.com/ui?token=test_token_secret&code=test_code_123"
+```
+检查 `/var/log/caddy/access.log` 中的 JSON 日志行，验证 `request.uri` 中的敏感参数已被脱敏：
+```bash
+tail -n 1 /var/log/caddy/access.log | jq .request.uri
+# 输出预期类似："/ui?code=REDACTED&token=REDACTED"
 ```
 
 #### 3. Cloudflare (Rules / Logpush)
@@ -367,7 +380,34 @@ mail.example.com {
 
 #### 4. Traefik
 
-在 Traefik 中配置访问日志红线屏蔽。**注意**：Traefik 访问日志原生暂不支持针对特定 query 参数（如 `token`、`code`）进行细粒度正则脱敏。在 `fields.defaultMode: keep` 下，`RequestPath` 与 `RequestLine` 会完整记录包含 query 的原始 URL。因此反代配置必须显式将包含 query 的字段设为 `drop` 或 `redact`（若需审计访问路径，建议借助 Vector/Fluentd 等日志收集端对 JSON accessLog 进行正则脱敏）：
+Traefik 访问日志原生不支持针对特定 query 参数（如 `token`、`code`）进行字段内正则细粒度替换。在默认模式下，`RequestLine`（记录形式为 `METHOD /path?query HTTP/version`）会记录完整包含 query 的原始 URL。为确保 query 参数绝对不落盘，提供了以下两种配置方式：
+
+##### 配置方式 A：白名单模式（推荐，`defaultMode: drop`）
+默认丢弃所有访问日志字段，仅显式 `keep` 明确安全的元数据字段。在此模式下，绝不放行 `RequestLine`，从根源上杜绝 query 泄漏：
+
+```yaml
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  format: json
+  filters:
+    statusCodes:
+      - "200-599"
+  fields:
+    defaultMode: drop
+    names:
+      RequestMethod: keep
+      DownstreamStatus: keep
+      Duration: keep
+      ClientAddr: keep
+      DownstreamContentSize: keep
+      # RequestPath 在 Traefik 中仅包含请求路径（如 /ui），不含 query 参数
+      RequestPath: keep
+    headers:
+      defaultMode: drop
+```
+
+##### 配置方式 B：黑名单模式（`defaultMode: keep`）
+若需要保留默认全量访问字段，必须显式将包含 query 的字段设为 `drop`（完全不落盘）或 `redact`（替换为 `"REDACTED"`）：
 
 ```yaml
 accessLog:
@@ -379,12 +419,24 @@ accessLog:
   fields:
     defaultMode: keep
     names:
-      # RequestPath 与 RequestLine 包含原始 query 字符串（含 token/code），必须丢弃或脱敏
-      RequestPath: drop
+      # RequestLine 包含原始 query 字符串（含 token/code），必须 drop 或 redact
       RequestLine: drop
+      # RequestPath 亦可设为 drop 或 redact 消除任何潜在差异风险
+      RequestPath: drop
       ClientUsername: drop
     headers:
       defaultMode: keep
       names:
         Authorization: redact
+```
+
+**验证方法**：
+发送测试请求：
+```bash
+curl -ik "https://mail.example.com/ui?token=test_token_secret&code=test_code_123"
+```
+检查 `/var/log/traefik/access.log`，确认无论是配置方式 A 还是配置方式 B，日志中均不包含 `token=` 或 `code=`：
+```bash
+grep -E "token=|code=" /var/log/traefik/access.log
+# 退出码为 1（无任何匹配结果），确认敏感 query 均未落盘
 ```

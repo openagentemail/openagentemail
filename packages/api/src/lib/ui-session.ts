@@ -369,6 +369,9 @@ export class UiSessionStore {
     remember = false,
     provenance?: string,
   ): CreateResult {
+    // 边角 R4: exchangeCode 入口先清理会话与限流窗，防止过期 globalFailures 导致 exchange 路径被误锁
+    let removed = this.cleanup(now);
+    if (removed) this.persist();
     this.cleanupExchangeCodes(now);
     code = code.trim();
     const codeHash = sha256(code);
@@ -425,7 +428,7 @@ export class UiSessionStore {
     }
 
     // 顺清 6: 校验容量与清理，先全部校验通过再焚毁 code
-    const removed = this.cleanup(now);
+    if (this.cleanup(now)) removed = true;
 
     let principalSessions = 0;
     let oldestPrincipalHash: string | null = null;

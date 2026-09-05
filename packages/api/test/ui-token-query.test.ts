@@ -1958,4 +1958,39 @@ describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
     expect(resAuthSub.headers.get('location')).toBe('/ui/inbox?folder=sent');
     expect(store.activeCodesCountForTests()).toBe(0);
   });
+
+  // Rework R4 - Item 1: exchangeCode prunes globalFailures window at entry and does not lock out exchanges
+  test('Rework R4 (Item 1): exchangeCode prunes globalFailures window at entry and does not lock out exchanges', () => {
+    const validToken = 'admin-secret-r4';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const t0 = 1000000;
+    // Mint a valid exchange code
+    const mint = store.mintExchangeCode(validToken, '10.99.99.99', t0);
+    expect(mint.ok).toBe(true);
+    if (!mint.ok) return;
+    const validCode = mint.code;
+
+    // 60 failed exchange attempts across different IPs within 60s
+    for (let i = 0; i < 60; i++) {
+      const res = store.exchangeCode(`bad-code-${i}`, `10.0.0.${i + 1}`, t0 + i * 100);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('invalid_token');
+    }
+
+    // 61st exchange attempt within window hits global rate limit
+    const limitedRes = store.exchangeCode(validCode, '10.1.1.1', t0 + 6000);
+    expect(limitedRes.ok).toBe(false);
+    if (!limitedRes.ok) expect(limitedRes.reason).toBe('rate_limited');
+
+    // After GLOBAL_FAILURE_WINDOW_MS (60s) has elapsed (t0 + 61_000):
+    // exchangeCode entry cleanup(now) prunes expired failures and code exchange succeeds!
+    const recoveredRes = store.exchangeCode(validCode, '10.1.1.1', t0 + 61000);
+    expect(recoveredRes.ok).toBe(true);
+    if (recoveredRes.ok) {
+      expect(recoveredRes.auth).toEqual({ kind: 'admin' });
+    }
+  });
 });
