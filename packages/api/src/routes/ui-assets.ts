@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
+import { getCookie } from 'hono/cookie';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
 import { resolveUiAssetUrl } from '../ui/load-ui-asset.ts';
 import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
-import type { UiSessionStore } from '../lib/ui-session.ts';
+import { COOKIE_NAME, type UiSessionStore } from '../lib/ui-session.ts';
 import { clientIp } from '../lib/net.ts';
 
 // Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
@@ -99,12 +100,18 @@ export function registerUiShell(app: Hono, store?: UiSessionStore): void {
     app.get(path, (c) => {
       const rawToken = c.req.query('token');
       if (rawToken !== undefined && store) {
-        const ip = clientIp(c);
-        const result = store.mintExchangeCode(rawToken, ip);
         const url = new URL(c.req.url);
         url.searchParams.delete('token');
-        if (result.ok) {
-          url.searchParams.set('code', result.code);
+        url.searchParams.delete('code');
+
+        const sid = getCookie(c, COOKIE_NAME);
+        const existingSession = sid ? store.authenticate(sid) : null;
+        if (!existingSession) {
+          const ip = clientIp(c);
+          const result = store.mintExchangeCode(rawToken, ip);
+          if (result.ok) {
+            url.searchParams.set('code', result.code);
+          }
         }
         const cleanSearch = url.searchParams.toString();
         const location = `${url.pathname}${cleanSearch ? `?${cleanSearch}` : ''}`;

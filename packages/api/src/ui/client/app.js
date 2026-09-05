@@ -889,10 +889,23 @@
 
   var loginWithCode = loginWithToken;
 
+  function isCookieSecure() {
+    try {
+      var loc = typeof window !== 'undefined' && window.location ? window.location : null;
+      if (loc && loc.protocol) {
+        var host = loc.hostname || '';
+        var local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+        return !(loc.protocol === 'http:' && local);
+      }
+    } catch (_e) {}
+    return typeof window !== 'undefined' && Boolean(window.isSecureContext);
+  }
+
   function setLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */
@@ -902,7 +915,8 @@
   function clearLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0';
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */

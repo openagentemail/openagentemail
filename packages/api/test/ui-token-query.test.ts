@@ -187,6 +187,12 @@ function createClientHarness(options: HarnessOptions) {
       set href(val: string) {
         currentUrl = val;
       },
+      get protocol() {
+        return new URL(currentUrl).protocol;
+      },
+      get hostname() {
+        return new URL(currentUrl).hostname;
+      },
       get pathname() {
         return new URL(currentUrl).pathname;
       },
@@ -1112,9 +1118,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(tab1.linkLoginNotice.hidden).toBe(false);
     expect(tab1.mockDocument.body.classList.contains('link-login-active')).toBe(true);
 
-    // 断言 2: 写入的 cookie 为 session cookie：无 Max-Age，无 Expires
+    // 断言 2: 写入的 cookie 为 session cookie：无 Max-Age，无 Expires，带 Secure
     const lastWrite = sharedCookieJar.writes[sharedCookieJar.writes.length - 1];
-    expect(lastWrite).toBe('oae-link-login=1; path=/; SameSite=Strict');
+    expect(lastWrite).toBe('oae-link-login=1; path=/; SameSite=Strict; Secure');
     expect(lastWrite).not.toContain('Max-Age');
     expect(lastWrite).not.toContain('Expires');
     expect(sharedCookieJar.get('oae-link-login')).toBe('1');
@@ -1138,7 +1144,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(tab2.linkLoginNotice.hidden).toBe(true);
     expect(sharedCookieJar.get('oae-link-login')).toBeUndefined();
     const clearWrite = sharedCookieJar.writes[sharedCookieJar.writes.length - 1];
-    expect(clearWrite).toBe('oae-link-login=; path=/; SameSite=Strict; Max-Age=0');
+    expect(clearWrite).toBe('oae-link-login=; path=/; SameSite=Strict; Max-Age=0; Secure');
 
     // Tab 3: 新开或刷新标签页，此时 cookie 已被全局清理，不展示横幅
     const tab3 = createClientHarness({
@@ -1151,7 +1157,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(tab3.mockDocument.body.classList.contains('link-login-active')).toBe(false);
 
     // Tab 4 (表单登录测试): 手动表单登录也清除 origin-wide cookie
-    sharedCookieJar.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+    sharedCookieJar.cookie = 'oae-link-login=1; path=/; SameSite=Strict; Secure';
     expect(sharedCookieJar.get('oae-link-login')).toBe('1');
     const tab4 = createClientHarness({
       initialUrl: 'https://admin.example/ui',
@@ -1743,5 +1749,213 @@ describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
     const replay = store.exchangeCode(codeB, '127.0.0.1');
     expect(replay.ok).toBe(false);
     if (!replay.ok) expect(replay.reason).toBe('invalid_token');
+  });
+
+  // Rework R3 - Mandatory 1: Failure audit throttling on create() and exchangeCode() denied branches, zero audit on rate_limited
+  test('Rework R3 (Mandatory 1): failure audit throttling on create() and exchangeCode() denied branches, zero audit on rate_limited', () => {
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === 'valid-admin' ? { kind: 'admin' } : null),
+    });
+
+    resetAuditForTests();
+    const testIp1 = '198.51.100.1';
+
+    // 1. create() failure audit throttling:
+    // First failed login creates an audit event
+    const res1 = store.create('invalid-tok-1', testIp1);
+    expect(res1.ok).toBe(false);
+    let auditEvents = readAuditEvents({ event: 'ui.session.login' });
+    expect(auditEvents.length).toBe(1);
+    expect(auditEvents[0].outcome).toBe('denied');
+    expect((auditEvents[0] as any).ip).toBe(testIp1);
+
+    // Subsequent 4 failed logins from same IP within 60s throttle audit writes (still 1 event)
+    for (let i = 2; i <= 5; i++) {
+      const res = store.create(`invalid-tok-${i}`, testIp1);
+      expect(res.ok).toBe(false);
+    }
+    auditEvents = readAuditEvents({ event: 'ui.session.login' });
+    expect(auditEvents.length).toBe(1);
+
+    // Fail up to MAX_IP_FAILURES (10)
+    for (let i = 6; i <= 10; i++) {
+      store.create(`invalid-tok-${i}`, testIp1);
+    }
+
+    // 11th attempt hits rate limit -> returns rate_limited and writes ZERO audit events
+    const rateLimitedRes = store.create('invalid-tok-11', testIp1);
+    expect(rateLimitedRes.ok).toBe(false);
+    if (!rateLimitedRes.ok) expect(rateLimitedRes.reason).toBe('rate_limited');
+    auditEvents = readAuditEvents({ event: 'ui.session.login' });
+    expect(auditEvents.length).toBe(1); // Zero audit written for rate_limited!
+
+    // 2. exchangeCode() failure audit throttling & zero audit on rate_limited
+    resetAuditForTests();
+    const testIp2 = '198.51.100.2';
+
+    // First failed exchangeCode generates 1 denied audit event
+    const ex1 = store.exchangeCode('nonexistent-code-1', testIp2);
+    expect(ex1.ok).toBe(false);
+    auditEvents = readAuditEvents({ event: 'ui.session.login' });
+    expect(auditEvents.length).toBe(1);
+    expect(auditEvents[0].outcome).toBe('denied');
+    expect((auditEvents[0] as any).ip).toBe(testIp2);
+
+    // Subsequent failed attempts from same IP within 60s throttle audit writes
+    for (let i = 2; i <= 5; i++) {
+      const ex = store.exchangeCode(`nonexistent-code-${i}`, testIp2);
+      expect(ex.ok).toBe(false);
+    }
+    auditEvents = readAuditEvents({ event: 'ui.session.login' });
+    expect(auditEvents.length).toBe(1);
+  });
+
+  // Rework R3 - Mandatory 2: exchangeCode failures count towards rate limiting and entry checks rate limits
+  test('Rework R3 (Mandatory 2): exchangeCode failures increment rate limiting and entry checks rate limits with zero audit', async () => {
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === 'valid-admin' ? { kind: 'admin' } : null),
+    });
+
+    resetAuditForTests();
+    const testIp = '198.51.100.42';
+
+    // Mint a code and consume it to get a replayable code
+    const mint = store.mintExchangeCode('valid-admin', '198.51.100.99');
+    expect(mint.ok).toBe(true);
+    if (!mint.ok) return;
+    const consumedCode = mint.code;
+    const firstEx = store.exchangeCode(consumedCode, '198.51.100.99');
+    expect(firstEx.ok).toBe(true);
+
+    // 5 unknown code failures + 5 replay code failures = 10 failures for testIp
+    for (let i = 1; i <= 5; i++) {
+      const res = store.exchangeCode(`unknown-code-${i}`, testIp);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('invalid_token');
+    }
+    for (let i = 1; i <= 5; i++) {
+      const res = store.exchangeCode(consumedCode, testIp);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('invalid_token');
+    }
+
+    // 11th attempt hits rate limit
+    const rateLimitedEx = store.exchangeCode('any-code', testIp);
+    expect(rateLimitedEx.ok).toBe(false);
+    if (!rateLimitedEx.ok) expect(rateLimitedEx.reason).toBe('rate_limited');
+
+    // Verify rate_limited rejection produced zero rate_limited audit events
+    const rateLimitedAudits = readAuditEvents({ event: 'ui.session.login' }).filter(
+      (e) => e.outcome === 'rate_limited',
+    );
+    expect(rateLimitedAudits.length).toBe(0);
+
+    // Verify via HTTP route /ui/api/session that rate_limited returns 429
+    const app = new Hono();
+    app.route('/ui/api/session', createUiSessionRoutes(store));
+
+    // Exhaust 'unknown' (clientIp fallback in app.request)
+    for (let i = 1; i <= 10; i++) {
+      store.exchangeCode(`local-unknown-${i}`, 'unknown');
+    }
+    const httpRateLimited = await app.request('/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost:3100',
+      },
+      body: JSON.stringify({ code: 'any-code' }),
+    });
+    expect(httpRateLimited.status).toBe(429);
+    const body = (await httpRateLimited.json()) as any;
+    expect(body.error).toBe('rate_limited');
+  });
+
+  // Rework R3 - Cleanup 3: 302 redirect strips incoming code parameter on invalid/valid tokens and loginSchema ignores dead provenance input
+  test('Rework R3 (Cleanup 3): 302 redirect strips incoming code parameter and loginSchema ignores dead provenance input', async () => {
+    const validToken = 'valid-token-r3';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const app = new Hono();
+    registerUiShell(app, store);
+    app.route('/ui/api/session', createUiSessionRoutes(store));
+
+    // 1. Invalid token with pre-existing code parameter: code MUST be stripped!
+    const resInvalid = await app.request('/ui?token=bad-token&code=attacker-pre-set-code');
+    expect(resInvalid.status).toBe(302);
+    expect(resInvalid.headers.get('location')).toBe('/ui');
+    expect(resInvalid.headers.get('cache-control')).toBe('no-store');
+    expect(resInvalid.headers.get('referrer-policy')).toBe('no-referrer');
+
+    // 2. Valid token with pre-existing code parameter: old code stripped, replaced by fresh code
+    const resValid = await app.request(`/ui?token=${validToken}&code=stale-code&extra=keep`);
+    expect(resValid.status).toBe(302);
+    const validLocation = resValid.headers.get('location')!;
+    expect(validLocation).not.toContain('stale-code');
+    expect(validLocation).toContain('extra=keep');
+    expect(validLocation).toMatch(/\/ui\?extra=keep&code=[A-Za-z0-9_-]+/);
+
+    // 3. loginSchema ignores dead provenance input
+    resetAuditForTests();
+    const sessionRes = await app.request('/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost:3100',
+      },
+      body: JSON.stringify({
+        token: validToken,
+        provenance: 'attacker-client-provenance', // dead input surface
+      }),
+    });
+    expect(sessionRes.status).toBe(200);
+    const auditLogs = readAuditEvents({ event: 'ui.session.login' });
+    const successAudit = auditLogs.find((e) => e.outcome === 'ok');
+    expect(successAudit).toBeDefined();
+    // Server derives provenance as undefined for token logins, ignoring client value
+    expect((successAudit as any).provenance).toBeUndefined();
+  });
+
+  // Rework R3 - Cleanup 5: Authenticated session accessing GET /ui?token= does NOT mint a new code
+  test('Rework R3 (Cleanup 5): authenticated session GET /ui?token= redirects to sanitized URL without minting code', async () => {
+    const validToken = 'valid-token-r3-clean5';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const app = new Hono();
+    registerUiShell(app, store);
+
+    // Create an authenticated session
+    const session = store.create(validToken, '127.0.0.1');
+    expect(session.ok).toBe(true);
+    if (!session.ok) return;
+
+    expect(store.activeCodesCountForTests()).toBe(0);
+
+    // Request GET /ui?token=validToken while authenticated
+    const resAuth = await app.request(`/ui?token=${validToken}`, {
+      headers: {
+        cookie: `oae_ui=${session.sid}`,
+      },
+    });
+
+    expect(resAuth.status).toBe(302);
+    expect(resAuth.headers.get('location')).toBe('/ui');
+    // Crucial: No exchange code was minted!
+    expect(store.activeCodesCountForTests()).toBe(0);
+
+    // Request with sub-path and extra params while authenticated
+    const resAuthSub = await app.request(`/ui/inbox?token=${validToken}&folder=sent&code=stale`, {
+      headers: {
+        cookie: `oae_ui=${session.sid}`,
+      },
+    });
+
+    expect(resAuthSub.status).toBe(302);
+    expect(resAuthSub.headers.get('location')).toBe('/ui/inbox?folder=sent');
+    expect(store.activeCodesCountForTests()).toBe(0);
   });
 });

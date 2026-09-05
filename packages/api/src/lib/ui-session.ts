@@ -20,7 +20,7 @@ import { clientIp } from './net.ts';
 import { consumeOAuthReturnCookie } from './oauth-return.ts';
 import { recordAuditEvent } from './audit.ts';
 
-const COOKIE_NAME = 'oae_ui';
+export const COOKIE_NAME = 'oae_ui';
 const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const ABSOLUTE_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const REMEMBER_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -30,7 +30,8 @@ const GLOBAL_FAILURE_WINDOW_MS = 60 * 1000;
 const MAX_IP_FAILURES = 10;
 const MAX_GLOBAL_FAILURES = 60;
 const MAX_TRACKED_IPS = 1000;
-const MINT_DENIED_AUDIT_THROTTLE_MS = 60 * 1000;
+export const DENIED_AUDIT_THROTTLE_MS = 60 * 1000;
+const MINT_DENIED_AUDIT_THROTTLE_MS = DENIED_AUDIT_THROTTLE_MS;
 /** authenticate 更新 lastSeenAt 的落盘节流：默认 5 分钟内不重复写盘。 */
 export const LAST_SEEN_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
 /** ?token= 换取的一次性交换码默认 TTL：硬约束 ≤10 分钟。 */
@@ -149,6 +150,7 @@ export class UiSessionStore {
   private readonly exchangeCodes = new Map<string, ExchangeCodeRecord>();
   private readonly consumedCodes = new Map<string, ConsumedCodeRecord>();
   private readonly lastMintDeniedAuditAt = new Map<string, number>();
+  private readonly lastSessionDeniedAuditAt = new Map<string, number>();
   private readonly resolve: (token: string) => Auth | null;
   private readonly resolveHash: ((tokenHash: string) => Auth | null) | null;
   private readonly maxSessions: number;
@@ -195,12 +197,7 @@ export class UiSessionStore {
       this.globalFailures.length >= MAX_GLOBAL_FAILURES
     ) {
       if (removed) this.persist();
-      recordAuditEvent({
-        event: 'ui.session.login',
-        outcome: 'rate_limited',
-        ...(provenance !== undefined ? { provenance } : {}),
-        ip,
-      });
+      // 必修 1: create() rate_limited 分支不落审计（防写放大）
       return { ok: false, reason: 'rate_limited' };
     }
 
@@ -210,12 +207,18 @@ export class UiSessionStore {
       this.ipFailures.set(ip, ipFailures);
       this.globalFailures.push(now);
       if (removed) this.persist();
-      recordAuditEvent({
-        event: 'ui.session.login',
-        outcome: 'denied',
-        ...(provenance !== undefined ? { provenance } : {}),
-        ip,
-      });
+
+      // 必修 1: create() denied 分支按 IP 节流（每 IP 每分钟至多 1 条）
+      const lastDenied = this.lastSessionDeniedAuditAt.get(ip) ?? 0;
+      if (now - lastDenied >= DENIED_AUDIT_THROTTLE_MS) {
+        this.lastSessionDeniedAuditAt.set(ip, now);
+        recordAuditEvent({
+          event: 'ui.session.login',
+          outcome: 'denied',
+          ...(provenance !== undefined ? { provenance } : {}),
+          ip,
+        });
+      }
       return { ok: false, reason: 'invalid_token' };
     }
 
@@ -370,40 +373,54 @@ export class UiSessionStore {
     code = code.trim();
     const codeHash = sha256(code);
 
+    // 必修 2: exchangeCode 失败计入限流，入口先检查限流桶；超限不落审计（防放大）
+    const ipFailures = this.recentIpFailures(ip, now);
+    if (
+      ipFailures.length >= MAX_IP_FAILURES ||
+      this.globalFailures.length >= MAX_GLOBAL_FAILURES
+    ) {
+      return { ok: false, reason: 'rate_limited' };
+    }
+
+    const recordFailureAndDeniedAudit = (address?: string) => {
+      // 必修 2: 重放/未知码/过期码计入限流桶
+      ipFailures.push(now);
+      this.ipFailures.set(ip, ipFailures);
+      this.globalFailures.push(now);
+
+      // 必修 1: 失败审计写盘节流（每 IP 每分钟至多 1 条）
+      const lastDenied = this.lastSessionDeniedAuditAt.get(ip) ?? 0;
+      if (now - lastDenied >= DENIED_AUDIT_THROTTLE_MS) {
+        this.lastSessionDeniedAuditAt.set(ip, now);
+        recordAuditEvent({
+          event: 'ui.session.login',
+          outcome: 'denied',
+          provenance: provenance ?? 'link-exchange',
+          ...(address ? { address } : {}),
+          ip,
+        });
+      }
+    };
+
     // 硬约束 1: 重放检测
     if (this.consumedCodes.has(codeHash)) {
       const consumed = this.consumedCodes.get(codeHash)!;
-      recordAuditEvent({
-        event: 'ui.session.login',
-        outcome: 'denied',
-        provenance: provenance ?? 'link-exchange',
-        address: consumed.auth.kind === 'identity' ? consumed.auth.address : 'admin',
-        ip,
-      });
+      const address = consumed.auth.kind === 'identity' ? consumed.auth.address : 'admin';
+      recordFailureAndDeniedAudit(address);
       return { ok: false, reason: 'invalid_token' };
     }
 
     const record = this.exchangeCodes.get(codeHash);
     if (!record) {
-      recordAuditEvent({
-        event: 'ui.session.login',
-        outcome: 'denied',
-        provenance: provenance ?? 'link-exchange',
-        ip,
-      });
+      recordFailureAndDeniedAudit();
       return { ok: false, reason: 'invalid_token' };
     }
 
     // 硬约束 2: TTL 检测
     if (now >= record.expiresAt) {
       this.exchangeCodes.delete(codeHash);
-      recordAuditEvent({
-        event: 'ui.session.login',
-        outcome: 'denied',
-        provenance: provenance ?? 'link-exchange',
-        address: record.auth.kind === 'identity' ? record.auth.address : 'admin',
-        ip,
-      });
+      const address = record.auth.kind === 'identity' ? record.auth.address : 'admin';
+      recordFailureAndDeniedAudit(address);
       return { ok: false, reason: 'invalid_token' };
     }
 
@@ -579,6 +596,20 @@ export class UiSessionStore {
         if (count >= excess) break;
       }
     }
+    for (const [ip, lastAt] of this.lastSessionDeniedAuditAt) {
+      if (now - lastAt > DENIED_AUDIT_THROTTLE_MS) {
+        this.lastSessionDeniedAuditAt.delete(ip);
+      }
+    }
+    if (this.lastSessionDeniedAuditAt.size > MAX_TRACKED_IPS) {
+      const excess = this.lastSessionDeniedAuditAt.size - MAX_TRACKED_IPS;
+      let count = 0;
+      for (const key of this.lastSessionDeniedAuditAt.keys()) {
+        this.lastSessionDeniedAuditAt.delete(key);
+        count++;
+        if (count >= excess) break;
+      }
+    }
     return removed;
   }
 
@@ -687,7 +718,8 @@ const loginSchema = z
     token: z.string().min(1).max(512).optional(),
     code: z.string().min(1).max(512).optional(),
     remember: z.boolean().optional(),
-    provenance: z.string().min(1).max(64).optional(),
+    /** 顺清 3: 客户端自报 provenance 标记忽略（死输入面），服务端凭证分支单向推导。 */
+    provenance: z.unknown().optional(),
   })
   .strict()
   .refine(
