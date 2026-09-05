@@ -234,6 +234,33 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       }),
     });
     expect(duplicateEvents.status).toBe(400);
+
+    const overlongUrl = `https://consumer.example/${'a'.repeat(2048)}`;
+    const overlongCreate = await app.request('/v1/webhooks', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: overlongUrl,
+        address: 'alice@test.example',
+        events: ['mail.received'],
+      }),
+    });
+    expect(overlongCreate.status).toBe(400);
+    expect(((await overlongCreate.json()) as any).error).toBe('invalid_request');
+
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    const overlongUpdate = await app.request(`/v1/webhooks/${sub.id}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: overlongUrl }),
+    });
+    expect(overlongUpdate.status).toBe(400);
+    expect(((await overlongUpdate.json()) as any).error).toBe('invalid_request');
   });
 
   test('POST /v1/webhooks: idempotency key returns stored 201 response with secret: null', async () => {

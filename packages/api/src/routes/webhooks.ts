@@ -81,7 +81,7 @@ function redactWebhookSecret(body: unknown): unknown {
 
 const createSchema = z
   .object({
-    url: z.string().url(),
+    url: z.string().url().max(2048),
     address: z.string().email(),
     events: z
       .array(z.enum(['mail.received', 'approval.requested']))
@@ -94,7 +94,7 @@ const createSchema = z
 
 const updateSchema = z
   .object({
-    url: z.string().url().optional(),
+    url: z.string().url().max(2048).optional(),
     events: z
       .array(z.enum(['mail.received', 'approval.requested']))
       .min(1, 'events must be non-empty')

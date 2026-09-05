@@ -809,7 +809,7 @@ export function registerOpenAgentEmailTools(
       title: "Create Webhook Subscription",
       description: "Create an outbound webhook subscription. Returns subscription metadata and the displayed signing secret (whs_...). Deny-by-default for OAuth tokens.",
       inputSchema: {
-        url: z.string().url().describe("Webhook target URL (https:// required unless private target granted)"),
+        url: z.string().url().max(2048).describe("Webhook target URL (https:// required unless private target granted)"),
         address: z.string().regex(IDENTITY_ADDRESS_PATTERN).describe("Identity email address to receive events for"),
         events: z
           .array(z.enum(['mail.received', 'approval.requested']))

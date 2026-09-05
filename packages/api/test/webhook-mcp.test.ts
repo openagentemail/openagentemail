@@ -218,6 +218,15 @@ describe('Webhook MCP Tools & Tool Tiers (§10.7, D17)', () => {
     expect(longDescRes.status).toBe(200);
     const longDescBody = await readMcpJson(longDescRes);
     expect(longDescBody.error || longDescBody.result?.isError).toBeTruthy();
+
+    const longUrlRes = await mcpCall(aliceToken, 'mail_webhook_create', {
+      url: `https://consumer.example/${'a'.repeat(2048)}`,
+      address: aliceAddress,
+      events: ['mail.received'],
+    });
+    expect(longUrlRes.status).toBe(200);
+    const longUrlBody = await readMcpJson(longUrlRes);
+    expect(longUrlBody.error || longUrlBody.result?.isError).toBeTruthy();
   });
 
   afterAll(async () => {

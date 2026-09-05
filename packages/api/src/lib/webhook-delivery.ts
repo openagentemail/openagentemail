@@ -371,7 +371,7 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
     let offset = 0;
     while (offset < buf.length) {
       const written = writeSync(fd, buf, offset, buf.length - offset);
-      if (written <= 0) break;
+      if (written <= 0) throw new Error('short_write');
       offset += written;
     }
     fsyncSync(fd);
@@ -656,12 +656,32 @@ export function validateWebhookUrlStatic(
 /**
  * Resolution validation of webhook URL before persistence or on update (§9.3, §9.5, §10.4 Rule C).
  */
+export const WEBHOOK_URL_DNS_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('dns_lookup_timeout')), timeoutMs);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export async function validateWebhookUrlResolution(
   urlStr: string,
   opts: {
     allowPrivateTargets: boolean;
     dnsLookup?: DnsLookup;
     allowedPorts?: number[];
+    dnsLookupTimeoutMs?: number;
   },
 ): Promise<
   | { valid: true; isPrivateTarget: boolean; parsedUrl: URL }
@@ -686,7 +706,10 @@ export async function validateWebhookUrlResolution(
     resolvedAddresses = [literal];
   } else {
     try {
-      const list = await dnsLookup(literal);
+      const list = await withTimeout(
+        dnsLookup(literal),
+        opts.dnsLookupTimeoutMs ?? WEBHOOK_URL_DNS_TIMEOUT_MS,
+      );
       if (list.length === 0) {
         return { valid: false, code: 'invalid_webhook_url', error: 'dns_empty' };
       }

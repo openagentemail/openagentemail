@@ -428,6 +428,20 @@ describe('webhook-delivery: URL Validation & SSRF Safety (§9.1, §9.3, §9.5, �
     });
     expect(explicit.valid).toBe(true);
   });
+
+  test('R6: DNS resolution lookup times out instead of hanging', async () => {
+    const started = Date.now();
+    const res = await validateWebhookUrlResolution('https://slow-dns.example/hook', {
+      allowPrivateTargets: false,
+      dnsLookupTimeoutMs: 50,
+      dnsLookup: () => new Promise(() => {}),
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(res.valid).toBe(false);
+    if (!res.valid) {
+      expect(res.error).toBe('dns_lookup_failed');
+    }
+  });
 });
 
 describe('webhook-delivery: Payload Bounding & Drop Order (§6.6, §14 item 8)', () => {
