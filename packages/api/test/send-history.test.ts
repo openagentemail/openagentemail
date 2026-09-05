@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,14 +11,27 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-sendhist-'));
-process.env.TASK_SIGNING_SECRET = 'send-history-test-secret';
-process.env.UI_ENABLED = 'true';
+const originalEnvDataDir = process.env.DATA_DIR;
+const originalEnvTaskSecret = process.env.TASK_SIGNING_SECRET;
+const originalEnvUiEnabled = process.env.UI_ENABLED;
 
 const sendMail = mock(async () => ({ messageId: '<hist@test.example>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail }));
 
-const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, test } = await import('bun:test');
+const { config } = await import('../src/lib/config.ts');
+const originalDataDir = config.dataDir;
+const originalTaskSigningSecret = config.taskSigningSecret;
+const originalUiEnabled = config.uiEnabled;
+
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-sendhist-'));
+process.env.DATA_DIR = TEST_DATA_DIR;
+process.env.TASK_SIGNING_SECRET = 'send-history-test-secret';
+process.env.UI_ENABLED = 'true';
+(config as any).dataDir = TEST_DATA_DIR;
+(config as any).taskSigningSecret = 'send-history-test-secret';
+(config as any).uiEnabled = true;
+
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -27,7 +40,6 @@ const { resetSendLogForTests, sendLogAlertsForTests, sendLogPathForTests } =
   await import('../src/lib/send-log.ts');
 const { macForMcpSendSource, SEND_SOURCE_MAC_HEADER } = await import('../src/lib/send-source.ts');
 const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
-const { config } = await import('../src/lib/config.ts');
 const { resetRateLimits } = await import('../src/lib/ratelimit.ts');
 const { readFileSync: readSrc } = await import('node:fs');
 
@@ -70,6 +82,38 @@ beforeEach(() => {
 
 afterEach(() => {
   resetSendLogForTests();
+});
+
+afterAll(() => {
+  if (originalDataDir && originalDataDir !== TEST_DATA_DIR) {
+    (config as any).dataDir = originalDataDir;
+  } else {
+    (config as any).dataDir = './data';
+  }
+  (config as any).taskSigningSecret = originalTaskSigningSecret;
+  (config as any).uiEnabled = originalUiEnabled;
+
+  if (originalEnvDataDir !== undefined) {
+    process.env.DATA_DIR = originalEnvDataDir;
+  } else {
+    delete process.env.DATA_DIR;
+  }
+  if (originalEnvTaskSecret !== undefined) {
+    process.env.TASK_SIGNING_SECRET = originalEnvTaskSecret;
+  } else {
+    delete process.env.TASK_SIGNING_SECRET;
+  }
+  if (originalEnvUiEnabled !== undefined) {
+    process.env.UI_ENABLED = originalEnvUiEnabled;
+  } else {
+    delete process.env.UI_ENABLED;
+  }
+
+  try {
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
 });
 
 describe('send history ACL and audit', () => {
@@ -206,6 +250,9 @@ describe('send history ACL and audit', () => {
     expect(good.status).toBe(200);
     expect((await app.request(`/v1/send/history?address=${fox.identity.address}`).then((r) => r.json()))
       .items[0]?.source).toBe('mcp');
+
+    // Advance clock so the second send has a strictly newer sentAt timestamp
+    await new Promise((r) => setTimeout(r, 10));
 
     await app.request('/v1/send', {
       method: 'POST',

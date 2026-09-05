@@ -24,6 +24,8 @@ const {
   createWebhookSubscription,
   getWebhookSubscription,
   listWebhookSubscriptions,
+  resetWebhooksStoreForTests,
+  setWebhooksFailClosedForTests,
   updateWebhookSubscription,
 } = await import('../src/lib/webhook-store.ts');
 const {
@@ -60,6 +62,8 @@ function setupTestDir(): void {
   (config.webhooks as any).maxPerAddress = 4;
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
+  resetWebhooksStoreForTests();
+  setWebhooksFailClosedForTests(false);
   setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
 
   // Create test identities
@@ -88,6 +92,7 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
   afterEach(() => {
     setWebhookDnsLookupForTests(undefined);
     deliveryQueue.cancelAll();
+    resetWebhooksStoreForTests();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
@@ -1336,6 +1341,7 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
   });
 
   afterAll(async () => {
+    resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;
     delete process.env.WEBHOOKS_ENABLED;

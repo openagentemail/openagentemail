@@ -39,6 +39,7 @@ const {
   setWebhookDnsLookupForTests,
   pendingReconstructionRetryCount,
   countsTowardCircuitBreaker,
+  stopWebhookMaintenance,
   validateWebhookUrlResolution,
   validateWebhookUrlStatic,
 } = await import('../src/lib/webhook-delivery.ts');
@@ -48,6 +49,7 @@ const {
   createWebhookSubscription,
   deleteWebhookSubscription,
   getWebhookSubscription,
+  resetWebhooksStoreForTests,
   setWebhooksFailClosedForTests,
   updateWebhookSubscription,
 } = await import('../src/lib/webhook-store.ts');
@@ -71,11 +73,13 @@ function setupTestDir(): void {
   (config.webhooks as any).payloadMaxBytes = 16384;
   (config.webhooks as any).codeEntryChars = 200;
   (config as any).oaePublicEdge = false;
+  resetWebhooksStoreForTests();
   setWebhooksFailClosedForTests(false);
   setReconstructRetryDelaysForTests();
   resetDeliveryLogIndexForTests();
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
+  stopWebhookMaintenance();
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
@@ -1824,10 +1828,12 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
   });
 
   afterAll(async () => {
+    resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;
     delete process.env.WEBHOOKS_ENABLED;
     deliveryQueue.cancelAll();
+    stopWebhookMaintenance();
     await new Promise((r) => setTimeout(r, 50));
     deliveryQueue.cancelAll();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
