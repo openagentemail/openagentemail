@@ -1526,7 +1526,9 @@ class WebhookDeliveryQueue {
 
     // 1. Check endpoint concurrency & global concurrency pool (§8.7)
     if (!deliveryLimiter.acquireSlot(job.webhookId)) {
-      // Pool saturated or endpoint busy: defer! (§8.2)
+      // Pool saturated or endpoint busy: memory-only reschedule (§8.2).
+      // The durable pending row already carries nextAttemptAt; do not append
+      // a deferred row per tick (that unbounded the JSONL log).
       const isPoolFull = deliveryLimiter.getActiveTotal() >= config.webhooks.maxConcurrent;
       job.deferredCount = (job.deferredCount ?? 0) + 1;
       const delay = isPoolFull
@@ -1563,31 +1565,6 @@ class WebhookDeliveryQueue {
         });
         return;
       }
-
-      appendDeliveryLogRow({
-        ts: new Date().toISOString(),
-        webhookId: job.webhookId,
-        eventId: job.eventId,
-        runId: job.runId,
-        deliveryId: `dlv_${randomUUID()}`,
-        type: job.type,
-        address: job.address,
-        messageId: job.messageId,
-        uidValidity: job.uidValidity,
-        rfc822MessageId: job.rfc822MessageId,
-        taskId: job.taskId,
-        taskCreatedAt: job.taskCreatedAt,
-        expiresInSec: job.expiresInSec,
-        eventCreatedAt: job.eventCreatedAt,
-        attempt: job.attempt,
-        outcome: 'deferred',
-        status: null,
-        durationMs: null,
-        sensitive: false,
-        replay: job.replay,
-        nextAttemptAt: new Date(rescheduleAt).toISOString(),
-        reason: isPoolFull ? 'concurrency_pool_full' : 'endpoint_busy',
-      });
 
       job.nextAttemptAt = rescheduleAt;
       this.scheduleIfStillQueued(key, job);
@@ -1631,31 +1608,6 @@ class WebhookDeliveryQueue {
         });
         return;
       }
-
-      appendDeliveryLogRow({
-        ts: new Date().toISOString(),
-        webhookId: job.webhookId,
-        eventId: job.eventId,
-        runId: job.runId,
-        deliveryId: `dlv_${randomUUID()}`,
-        type: job.type,
-        address: job.address,
-        messageId: job.messageId,
-        uidValidity: job.uidValidity,
-        rfc822MessageId: job.rfc822MessageId,
-        taskId: job.taskId,
-        taskCreatedAt: job.taskCreatedAt,
-        expiresInSec: job.expiresInSec,
-        eventCreatedAt: job.eventCreatedAt,
-        attempt: job.attempt,
-        outcome: 'deferred',
-        status: null,
-        durationMs: null,
-        sensitive: false,
-        replay: job.replay,
-        nextAttemptAt: new Date(rescheduleAt).toISOString(),
-        reason: 'rate_limited',
-      });
 
       job.nextAttemptAt = rescheduleAt;
       this.scheduleIfStillQueued(key, job);

@@ -1241,6 +1241,108 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     }
   });
 
+  test('R8: pool-full reschedule does not append deferred log rows', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://r8-pool.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const oldMax = config.webhooks.maxConcurrent;
+    const oldPoolRetry = config.webhooks.poolRetryMs;
+    (config.webhooks as any).maxConcurrent = 1;
+    (config.webhooks as any).poolRetryMs = 25;
+    expect(deliveryLimiter.acquireSlot('r8_blocker')).toBe(true);
+    const eventId = 'evt_r8_pool_defer';
+    try {
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId,
+        type: 'webhook.ping',
+        payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      });
+      const afterEnqueue = readAllDeliveryLogRows().filter((r) => r.eventId === eventId);
+      expect(afterEnqueue).toHaveLength(1);
+      expect(afterEnqueue[0]?.outcome).toBe('pending');
+
+      await waitUntil(() => deliveryQueue.hasQueuedJob(sub.id, eventId), 1000);
+      await new Promise((r) => setTimeout(r, 5 * 25 + 80));
+
+      const afterWait = readAllDeliveryLogRows().filter((r) => r.eventId === eventId);
+      expect(afterWait).toHaveLength(1);
+      expect(afterWait[0]?.outcome).toBe('pending');
+      expect(afterWait.some((r) => r.outcome === 'deferred')).toBe(false);
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(true);
+    } finally {
+      deliveryQueue.cancelAll();
+      deliveryLimiter.releaseSlot('r8_blocker');
+      (config.webhooks as any).maxConcurrent = oldMax;
+      (config.webhooks as any).poolRetryMs = oldPoolRetry;
+    }
+  });
+
+  test('R8: boot reconstructs expired pending and delivers without a deferred witness', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://r8-boot.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10_000).toISOString();
+    const eventId = 'evt_r8_expired_pending';
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9_000).toISOString(),
+      webhookId: sub.id,
+      eventId,
+      runId: 'run_0',
+      deliveryId: 'dlv_r8_expired',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime - 1_000).toISOString(),
+      reason: null,
+    });
+
+    setWebhookDnsLookupForTests(async () => {
+      const err: any = new Error('getaddrinfo ENOTFOUND');
+      err.code = 'ENOTFOUND';
+      throw err;
+    });
+    try {
+      const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+      expect(result.reconstructed).toBe(1);
+      expect(result.deadLettered).toBe(0);
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(true);
+
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some((r) => r.eventId === eventId && r.outcome === 'retryable'),
+        1500,
+      );
+      const rows = readAllDeliveryLogRows().filter((r) => r.eventId === eventId);
+      expect(rows.some((r) => r.outcome === 'pending')).toBe(true);
+      expect(rows.some((r) => r.outcome === 'deferred')).toBe(false);
+    } finally {
+      setWebhookDnsLookupForTests(undefined);
+      deliveryQueue.cancelAll();
+    }
+  });
+
   test('R4: background SSRF refusal audit omits ip', async () => {
     const sub = createWebhookSubscription({
       url: 'https://ssrf-bg.example/hook',
