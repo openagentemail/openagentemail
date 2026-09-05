@@ -16,6 +16,7 @@ import { taskLeasesEnabled } from './task-lease-gate.ts';
 import { isTaskId } from './task-id.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 import * as taskChildrenCursor from './task-cursor.ts';
+import { getEventDispatcher } from './event-dispatcher.ts';
 
 export {
   decodeTaskBoardCursor,
@@ -1656,6 +1657,7 @@ export async function createApprovalTask(input: CreateApprovalTaskInput): Promis
     approval: snapshot,
   };
   recordSyntheticTaskBase(task);
+  getEventDispatcher().dispatchApprovalRequested(task);
   return task;
 }
 
