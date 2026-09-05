@@ -52,6 +52,7 @@ const {
   updateWebhookSubscription,
 } = await import('../src/lib/webhook-store.ts');
 const { readAuditEvents } = await import('../src/lib/audit.ts');
+const { setTaskGetForTests } = await import('../src/lib/tasks-internal.ts');
 type WebhookSubscription = import('../src/lib/webhook-store.ts').WebhookSubscription;
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-delivery');
@@ -828,6 +829,8 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
       expect(pending).toBeDefined();
       expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThanOrEqual(Date.now());
       expect(getWebhookSubscription(second.id)?.state).toBe('unverified');
+      // Quota has room again before the delayed fire (window not required to stay full).
+      deliveryLimiter.reset();
       await waitUntil(() => getWebhookSubscription(second.id)?.state === 'enabled', 2000);
       expect(
         readAllDeliveryLogRows().some(
@@ -840,6 +843,58 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
       (config.webhooks as any).poolRetryMs = prevPool;
       deliveryLimiter.reset();
       server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('final: delayed ping still full at fire is audited and dropped', async () => {
+    const prevProbe = config.webhooks.rateTestPerMin;
+    const prevPool = config.webhooks.poolRetryMs;
+    (config.webhooks as any).rateTestPerMin = 1;
+    (config.webhooks as any).poolRetryMs = 25;
+    deliveryLimiter.reset();
+    try {
+      const first = createWebhookSubscription({
+        url: 'https://probe-drop-a.example/hook',
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        createdBy: 'admin',
+      });
+      fireCreationPing(first, 'creation', 'final-probe');
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.webhookId === first.id && r.outcome !== 'pending',
+          ),
+        1500,
+      );
+
+      const second = createWebhookSubscription({
+        url: 'https://probe-drop-b.example/hook',
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        createdBy: 'admin',
+      });
+      fireCreationPing(second, 'creation', 'final-probe');
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.webhookId === second.id && r.reason === 'probe_rate_limited',
+          ),
+        1500,
+      );
+      expect(getWebhookSubscription(second.id)?.state).toBe('unverified');
+      const audit = readAuditEvents({ event: 'webhook.probe_rate_limited' }).find(
+        (e) => e.webhookId === second.id,
+      );
+      expect(audit?.outcome).toBe('rate_limited');
+      expect(deliveryQueue.hasQueuedJob(second.id)).toBe(false);
+    } finally {
+      (config.webhooks as any).rateTestPerMin = prevProbe;
+      (config.webhooks as any).poolRetryMs = prevPool;
+      deliveryLimiter.reset();
       deliveryQueue.cancelAll();
     }
   });
@@ -982,6 +1037,7 @@ describe('webhook-delivery: Circuit Breaker & SSRF Immediate Disable (§8.5, D2a
 describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', () => {
   beforeEach(setupTestDir);
   afterEach(() => {
+    setTaskGetForTests(null);
     deliveryQueue.cancelAll();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
@@ -1051,16 +1107,21 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       nextAttemptAt: new Date(bootTime + 60000).toISOString(),
     });
 
-    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
-    // Task does not exist in mock storage so it dead-letters gracefully with task_not_found
-    expect(result.deadLettered).toBe(1);
+    setTaskGetForTests(async () => null);
+    try {
+      const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+      // Task does not exist so it dead-letters gracefully with task_not_found
+      expect(result.deadLettered).toBe(1);
 
-    const rows = readAllDeliveryLogRows();
-    const deadLetterRow = rows.find((r) => r.outcome === 'permanent');
-    expect(deadLetterRow).toBeDefined();
-    expect(deadLetterRow?.reason).toBe('task_not_found');
-    expect(deadLetterRow?.taskCreatedAt).toBe(taskCreatedAt);
-    expect(deadLetterRow?.expiresInSec).toBe(86400);
+      const rows = readAllDeliveryLogRows();
+      const deadLetterRow = rows.find((r) => r.outcome === 'permanent');
+      expect(deadLetterRow).toBeDefined();
+      expect(deadLetterRow?.reason).toBe('task_not_found');
+      expect(deadLetterRow?.taskCreatedAt).toBe(taskCreatedAt);
+      expect(deadLetterRow?.expiresInSec).toBe(86400);
+    } finally {
+      setTaskGetForTests(null);
+    }
   });
 
   test('P1: readAllDeliveryLogRows and boot reconstruction tolerate corrupted log lines', async () => {
@@ -1258,6 +1319,60 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     expect(dead.length).toBe(0);
     deliveryQueue.cancelAll();
     expect(pendingReconstructionRetryCount()).toBe(0);
+  });
+
+  test('final: approval reconstruction retries transient getTaskSnapshot like mail', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://approval-transient.example/hook',
+      address: 'owner@openagent.email',
+      events: ['approval.requested'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10_000).toISOString();
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9_000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_approval_transient',
+      runId: 'run_0',
+      deliveryId: 'dlv_approval_transient',
+      type: 'approval.requested',
+      address: 'owner@openagent.email',
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: '3f8a1c62-9d4e-4b07-a5f1-6c2e8d904b73',
+      taskCreatedAt: eventCreatedAt,
+      expiresInSec: 86400,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 10_000).toISOString(),
+      reason: null,
+    });
+
+    setTaskGetForTests(async () => {
+      throw new Error('imap temporarily unavailable');
+    });
+    setReconstructRetryDelaysForTests(20, 80);
+    try {
+      const first = await reconstructPendingDeliveriesAtBoot(bootTime);
+      expect(first.deadLettered).toBe(0);
+      expect(first.reconstructed).toBe(0);
+      expect(pendingReconstructionRetryCount()).toBe(1);
+      const dead = readAllDeliveryLogRows().filter(
+        (r) => r.eventId === 'evt_approval_transient' && r.outcome === 'permanent',
+      );
+      expect(dead.length).toBe(0);
+    } finally {
+      setTaskGetForTests(null);
+      deliveryQueue.cancelAll();
+    }
   });
 
   test('P2-1: test probe slot acquisition timeout writes terminal row preventing orphan pending', async () => {

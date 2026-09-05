@@ -492,6 +492,13 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'content_scope_requires_admin' }, 403);
     }
 
+    const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
+    const rateRes = deliveryLimiter.checkCreateRate(tokenKey);
+    if (!rateRes.allowed) {
+      c.header('Retry-After', String(rateRes.retryAfterSec));
+      return c.json({ error: 'rate_limited', retryAfterSec: rateRes.retryAfterSec }, 429);
+    }
+
     let urlChanged = false;
     let isPrivateTarget = sub.privateTargetGranted;
 
@@ -538,7 +545,6 @@ export const webhooksRoute = new Hono()
     }
 
     if (urlChanged && updated.state !== 'disabled') {
-      const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
       fireCreationPing(updated, 'creation', tokenKey);
     }
 

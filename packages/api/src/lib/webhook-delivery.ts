@@ -1471,6 +1471,8 @@ export type ScheduledDeliveryJob = {
   expiresInSec: number | null;
   eventCreatedAt: string;
   deferredCount?: number;
+  /** When set, executeJob re-checks the shared probe bucket before sending. */
+  probeTokenKey?: string;
 };
 
 class WebhookDeliveryQueue {
@@ -1677,6 +1679,44 @@ class WebhookDeliveryQueue {
     }
 
     const now = Date.now();
+
+    if (job.probeTokenKey) {
+      const probeCheck = deliveryLimiter.checkTestProbeRate(job.probeTokenKey, now);
+      if (!probeCheck.allowed) {
+        this.jobs.delete(key);
+        recordAuditEvent({
+          event: 'webhook.probe_rate_limited',
+          outcome: 'rate_limited',
+          address: sub.address,
+          webhookId: sub.id,
+        });
+        appendDeliveryLogRow({
+          ts: new Date().toISOString(),
+          webhookId: job.webhookId,
+          eventId: job.eventId,
+          runId: job.runId,
+          deliveryId: job.deliveryId,
+          type: job.type,
+          address: job.address,
+          messageId: job.messageId,
+          uidValidity: job.uidValidity,
+          rfc822MessageId: job.rfc822MessageId,
+          taskId: job.taskId,
+          taskCreatedAt: job.taskCreatedAt,
+          expiresInSec: job.expiresInSec,
+          eventCreatedAt: job.eventCreatedAt,
+          attempt: job.attempt,
+          outcome: 'permanent',
+          status: null,
+          durationMs: null,
+          sensitive: false,
+          replay: job.replay,
+          nextAttemptAt: null,
+          reason: 'probe_rate_limited',
+        });
+        return;
+      }
+    }
 
     // Check item 2: 72h horizon check for job
     if (now > job.firstAttemptAt + RETRY_HORIZON_SEC * 1000) {
@@ -1992,6 +2032,7 @@ export function enqueueWebhookDelivery(params: {
   expiresInSec?: number | null;
   eventCreatedAt?: string;
   delayMs?: number;
+  probeTokenKey?: string;
 }): void {
   const sub = params.subscription;
   const now = Date.now();
@@ -2074,6 +2115,7 @@ export function enqueueWebhookDelivery(params: {
     taskCreatedAt: params.taskCreatedAt ?? null,
     expiresInSec: params.expiresInSec ?? null,
     eventCreatedAt,
+    probeTokenKey: params.probeTokenKey,
   });
 }
 
@@ -2087,8 +2129,8 @@ export function fireCreationPing(
 ): void {
   const tokenKey = callerTokenKey ?? subscription.createdBy ?? subscription.address;
   const probeCheck = deliveryLimiter.checkTestProbeRate(tokenKey);
-  // Probe-full: still enqueue a delayed ping (deferred: no attempt consumed).
-  // Dropping here left the subscription stuck unverified.
+  // Probe-full: enqueue delayed; executeJob re-checks the shared bucket and
+  // audits+drops if still full (create+retarget must not bypass the quota).
   const delayMs = probeCheck.allowed ? 0 : Math.max(config.webhooks.poolRetryMs, 1);
 
   const eventId = `evt_${randomUUID()}`;
@@ -2107,6 +2149,7 @@ export function fireCreationPing(
     payloadBuilder: (currentSub) => formatPingPayload(envelope, currentSub.id, trigger),
     address: null,
     delayMs,
+    probeTokenKey: probeCheck.allowed ? undefined : tokenKey,
   });
 }
 
@@ -2730,8 +2773,12 @@ export async function reconstructPendingDeliveriesAtBoot(
         let task: any = null;
         try {
           task = await getTaskSnapshot(latest.taskId);
-        } catch {
-          throw Object.assign(new Error('task_not_found'), { reason: 'task_not_found' });
+        } catch (err: any) {
+          throw Object.assign(new Error(err?.message || 'backend_unreachable'), {
+            reason: 'transient_backend_unreachable',
+            isTransient: true,
+            cause: err,
+          });
         }
         if (!task || task.kind !== 'approval' || !task.approval) {
           throw Object.assign(new Error('task_not_found'), { reason: 'task_not_found' });

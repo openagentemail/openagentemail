@@ -487,6 +487,43 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(body.state).toBe('unverified');
   });
 
+  test('final: POST /v1/webhooks/:id is rate-limited on the create bucket', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/update-limit',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    const oldCreate = config.webhooks.rateCreatePerMin;
+    (config.webhooks as any).rateCreatePerMin = 1;
+    deliveryLimiter.reset();
+    try {
+      const first = await app.request(`/v1/webhooks/${sub.id}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ description: 'once' }),
+      });
+      expect(first.status).toBe(200);
+      const second = await app.request(`/v1/webhooks/${sub.id}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ description: 'twice' }),
+      });
+      expect(second.status).toBe(429);
+      expect(((await second.json()) as any).error).toBe('rate_limited');
+      expect(second.headers.get('Retry-After')).toBeTruthy();
+    } finally {
+      (config.webhooks as any).rateCreatePerMin = oldCreate;
+      deliveryLimiter.reset();
+    }
+  });
+
   test('R9: url change resurrects threshold/refused disablement but keeps manual pause', async () => {
     const threshold = createWebhookSubscription({
       url: 'https://consumer.example/threshold-v1',
