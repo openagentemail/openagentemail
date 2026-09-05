@@ -885,10 +885,14 @@ async function buildMessageSummaries(
 
 /**
  * 前向 since 查询：从指定前向游标之后 oldest-first 遍历邮件（保证无损追补）。
- * 候选集由服务端 SEARCH SINCE 收窄（按 cursor.t 往前退 1 天），绝不用 UID 范围粗暴过滤原始游标（保护非单调信件）。
- * 扫描按 UID 升序，每请求预算 SCAN_BACK (500) 条。
- * 预算耗尽时返回已匹配部分 + 续扫游标（保留原始 (t_c, u_c) 与已扫 UID 水印 scanUid）。
- * 扫完全部候选集才产出正式 nextCursor。
+ * 候选集由服务端 SEARCH SINCE 收窄（按 cursor.t 往前退 1 天防日粒度与时区边角）。
+ * 过滤锚点 (cursor.t, cursor.uid) 永不推进，保证非单调 internalDate 邮件（如 IMAP APPEND/COPY）无损遍历。
+ * UID 扫描进度通过单调递增的 scanUid 推进（u > cursor.scanUid），防重扫与死循环。
+ * 每请求预算 scanBudget（默认 SCAN_BACK = 500）条候选。
+ * 检视过程中一旦收集到第 limit 条匹配信立即停下，scanUid 设为停下时那封信的 UID（已检视全返回，无截断遗漏）。
+ * 单页内按 (receivedAtMs asc, uid asc) 元组升序返回；跨页不承诺全局元组序，承诺完整性与代际 fail-closed。
+ * 若单批扫描完毕未达 limit 但超出预算（hasMoreBeyondBudget），或达到 limit，产生带新 scanUid 的 nextCursor；
+ * 仅当未达 limit 且全信箱候选集已扫尽时，nextCursor 为 null。
  */
 async function listMessagesSinceWith(
   client: ImapFlow,
@@ -909,7 +913,7 @@ async function listMessagesSinceWith(
   const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
   if (
     currentUidValidity === undefined ||
-    BigInt(cursor.uidValidity) !== BigInt(currentUidValidity)
+    String(cursor.uidValidity) !== String(currentUidValidity)
   ) {
     throw new InvalidMailCursorError();
   }
@@ -919,62 +923,66 @@ async function listMessagesSinceWith(
   const uids = await client.search({ since: sinceDate }, { uid: true });
   if (!uids || uids.length === 0) return { messages: [], nextCursor: null };
 
-  // 2. 候选集过滤：若存在续扫水印 scanUid，过滤掉已扫过的 UID（u > cursor.scanUid）
+  // 2. 候选集过滤：按 UID 升序检视 uid > scanUid 的候选
+  const startScanUid = cursor.scanUid ?? 0;
   const candidateUids = uids
-    .filter((u) => cursor.scanUid === undefined || u > cursor.scanUid)
+    .filter((u) => u > startScanUid)
     .sort((a, b) => a - b);
   if (candidateUids.length === 0) return { messages: [], nextCursor: null };
 
   // 3. 每请求预算 scanBudget (默认 SCAN_BACK = 500) 条
   const batchUids = candidateUids.slice(0, scanBudget);
-  const hasMoreCandidates = candidateUids.length > scanBudget;
-  const maxScannedUid = batchUids[batchUids.length - 1];
+  const hasMoreBeyondBudget = candidateUids.length > scanBudget;
 
-  const matched: FetchMessageObject[] = [];
+  const fetched = new Map<number, FetchMessageObject>();
   for await (const msg of client.fetch(
     batchUids,
     { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
     { uid: true },
   )) {
+    fetched.set(msg.uid, msg);
+  }
+
+  const matched: FetchMessageObject[] = [];
+  let lastScannedUid = startScanUid;
+  let reachedLimit = false;
+
+  for (const uid of batchUids) {
+    lastScannedUid = uid;
+    const msg = fetched.get(uid);
+    if (!msg) continue;
     if (
       messageBelongsToFolder(msg, normalized, folder) &&
       isAfterForwardCursor(msg, cursor.t, cursor.uid)
     ) {
       matched.push(msg);
+      if (matched.length >= limit) {
+        reachedLimit = true;
+        break;
+      }
     }
   }
 
-  // 4. 命中集全按 (receivedAtMs asc, uid asc) 元组序排序
+  // 4. 响应内按 (receivedAtMs asc, uid asc) 元组序排序
   matched.sort(compareOldestFirst);
+  const summaries = await buildMessageSummaries(client, matched);
 
-  // 5. 分页截断与续扫游标构造：扫完候选集才产出正式元组游标
-  const page = matched.slice(0, limit);
-  const summaries = await buildMessageSummaries(client, page);
-
+  // 5. 游标推进规则（FC 终裁定稿）：
+  // 游标保持 (t_c, u_c 原始过滤锚点, 永不推进) + scanUid + uidValidity
+  // - 收集到 limit 条立即停下，scanUid = 停下时那封的 UID（已检视全返回，无截断遗漏）
+  // - 若扫完全批预算仍未达 limit（含 0 命中），scanUid 推到已检视最大 UID
+  // - 仅当未达到 limit 且全部候选集已扫尽时，nextCursor 为 null
+  const hasMore = hasMoreBeyondBudget || lastScannedUid < candidateUids[candidateUids.length - 1];
   let nextCursor: string | null = null;
-  if (hasMoreCandidates) {
-    // 只要候选集未扫尽（无论命中几条、是否超 limit），均保留原始 (t_c, u_c) 与 scanUid 续扫状态
+  if (hasMore) {
     nextCursor = encodeMailForwardCursor(
       {
         folder,
         address: normalized,
         t: cursor.t,
         uid: cursor.uid,
-        uidValidity: Number(currentUidValidity),
-        scanUid: maxScannedUid,
-      },
-      config.taskSigningSecret,
-    );
-  } else if (matched.length > limit) {
-    // 候选集已扫尽且超页：塌缩为页尾条目的纯元组游标；对 t 做下限 clamp（防 t=0 污染回退到 epoch）
-    const last = page[page.length - 1];
-    nextCursor = encodeMailForwardCursor(
-      {
-        folder,
-        address: normalized,
-        t: Math.max(receivedAtMs(last), cursor.t),
-        uid: last.uid,
-        uidValidity: Number(currentUidValidity),
+        uidValidity: String(currentUidValidity),
+        scanUid: lastScannedUid,
       },
       config.taskSigningSecret,
     );
@@ -1055,13 +1063,13 @@ async function getMessageWith(
   client: ImapFlow,
   address: string,
   id: string,
-  opts?: { uidValidity?: number },
+  opts?: { uidValidity?: string | number | bigint },
 ): Promise<MessageDetail | null> {
   const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
   if (opts?.uidValidity !== undefined) {
     if (
       currentUidValidity === undefined ||
-      BigInt(opts.uidValidity) !== BigInt(currentUidValidity)
+      String(opts.uidValidity) !== String(currentUidValidity)
     ) {
       throw new StaleMessageGenerationError();
     }
@@ -1077,7 +1085,7 @@ async function getMessageWith(
 export async function getMessage(
   address: string,
   id: string,
-  opts?: { uidValidity?: number },
+  opts?: { uidValidity?: string | number | bigint },
 ): Promise<MessageDetail | null> {
   return withInbox((client) => getMessageWith(client, address, id, opts));
 }

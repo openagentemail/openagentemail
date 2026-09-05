@@ -21,7 +21,11 @@ const listQuerySchema = z.object({
 
 const getQuerySchema = z.object({
   address: z.string().email(),
-  uidValidity: z.coerce.number().int().positive().optional(),
+  uidValidity: z
+    .string()
+    .regex(/^\d+$/)
+    .refine((v) => BigInt(v) > 0n)
+    .optional(),
 });
 
 const seenSchema = z

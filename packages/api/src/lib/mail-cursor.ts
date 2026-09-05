@@ -36,7 +36,7 @@ export type MailForwardCursorPayload = {
   address: string;
   t: number;
   uid: number;
-  uidValidity: number;
+  uidValidity: string | number | bigint;
   scanUid?: number;
 };
 
@@ -110,9 +110,10 @@ export function decodeMailCursor(token: string, key: string): MailCursorPayload 
 
 function forwardCursorMac(payload: MailForwardCursorPayload, key: string): string {
   const scanSuffix = payload.scanUid !== undefined ? `\n${payload.scanUid}` : '';
+  const vStr = String(payload.uidValidity);
   return createHmac('sha256', key)
     .update(
-      `${MAIL_FORWARD_CURSOR_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}\n${payload.uidValidity}${scanSuffix}`,
+      `${MAIL_FORWARD_CURSOR_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}\n${vStr}${scanSuffix}`,
     )
     .digest('base64url');
 }
@@ -122,12 +123,13 @@ export function encodeMailForwardCursor(
   payload: MailForwardCursorPayload,
   key: string,
 ): string {
+  const vStr = String(payload.uidValidity);
   const bodyObj: Record<string, unknown> = {
     f: payload.folder,
     a: payload.address,
     t: payload.t,
     u: payload.uid,
-    v: payload.uidValidity,
+    v: vStr,
   };
   if (payload.scanUid !== undefined) {
     bodyObj.s = payload.scanUid;
@@ -177,12 +179,17 @@ export function decodeMailForwardCursor(
   if (typeof raw.u !== 'number' || !Number.isInteger(raw.u) || raw.u <= 0) {
     throw new InvalidMailCursorError();
   }
-  if (typeof raw.v !== 'number' || !Number.isInteger(raw.v) || raw.v <= 0) {
+  let validV: string;
+  if (typeof raw.v === 'string' && /^\d+$/.test(raw.v) && BigInt(raw.v) > 0n) {
+    validV = raw.v;
+  } else if (typeof raw.v === 'number' && Number.isInteger(raw.v) && raw.v > 0) {
+    validV = String(raw.v);
+  } else {
     throw new InvalidMailCursorError();
   }
   if (
     raw.s !== undefined &&
-    (typeof raw.s !== 'number' || !Number.isInteger(raw.s) || raw.s <= 0)
+    (typeof raw.s !== 'number' || !Number.isInteger(raw.s) || raw.s < 0)
   ) {
     throw new InvalidMailCursorError();
   }
@@ -191,7 +198,7 @@ export function decodeMailForwardCursor(
     address: raw.a.toLowerCase(),
     t: raw.t,
     uid: raw.u,
-    uidValidity: raw.v,
+    uidValidity: validV,
     ...(raw.s !== undefined ? { scanUid: raw.s } : {}),
   };
   const expected = forwardCursorMac(payload, key);

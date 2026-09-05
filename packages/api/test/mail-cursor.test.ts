@@ -57,7 +57,10 @@ describe('mail-cursor', () => {
       };
       const token = encodeMailForwardCursor(payload, KEY);
       expect(token.startsWith(`${MAIL_FORWARD_CURSOR_PREFIX}.`)).toBe(true);
-      expect(decodeMailForwardCursor(token, KEY)).toEqual(payload);
+      expect(decodeMailForwardCursor(token, KEY)).toEqual({
+        ...payload,
+        uidValidity: '17',
+      });
     });
 
     test('后向与前向游标互不通用（域隔离）', () => {
@@ -109,11 +112,11 @@ describe('mail-cursor', () => {
 
       // 篡改载荷字段（HMAC 未重签必挂）
       const tamperPayload = (mod: Record<string, unknown>) => {
-        const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: 17, ...mod };
+        const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: '17', ...mod };
         const body = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
         return `${parts[0]}.${body}.${parts[2]}`;
       };
-      expect(() => decodeMailForwardCursor(tamperPayload({ v: 18 }), KEY)).toThrow(
+      expect(() => decodeMailForwardCursor(tamperPayload({ v: '18' }), KEY)).toThrow(
         InvalidMailCursorError,
       );
       expect(() => decodeMailForwardCursor(tamperPayload({ a: 'owl@test.example' }), KEY)).toThrow(
@@ -128,7 +131,6 @@ describe('mail-cursor', () => {
         const body = Buffer.from(
           JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v }),
         ).toString('base64url');
-        // 构造带有该 body 的 token
         return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.invalidmac`;
       };
       expect(() => decodeMailForwardCursor(forgedWithBadV(0), KEY)).toThrow(
@@ -137,19 +139,19 @@ describe('mail-cursor', () => {
       expect(() => decodeMailForwardCursor(forgedWithBadV(-1), KEY)).toThrow(
         InvalidMailCursorError,
       );
-      expect(() => decodeMailForwardCursor(forgedWithBadV('17'), KEY)).toThrow(
+      expect(() => decodeMailForwardCursor(forgedWithBadV('abc'), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadV('0'), KEY)).toThrow(
         InvalidMailCursorError,
       );
       // 非法 scanUid 格式（即使签名有效也要拒）
       const forgedWithBadS = (s: unknown) => {
         const body = Buffer.from(
-          JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: 17, s }),
+          JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: '17', s }),
         ).toString('base64url');
         return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.invalidmac`;
       };
-      expect(() => decodeMailForwardCursor(forgedWithBadS(0), KEY)).toThrow(
-        InvalidMailCursorError,
-      );
       expect(() => decodeMailForwardCursor(forgedWithBadS(-1), KEY)).toThrow(
         InvalidMailCursorError,
       );
@@ -169,15 +171,40 @@ describe('mail-cursor', () => {
       };
       const token = encodeMailForwardCursor(payload, KEY);
       expect(token.startsWith(`${MAIL_FORWARD_CURSOR_PREFIX}.`)).toBe(true);
-      expect(decodeMailForwardCursor(token, KEY)).toEqual(payload);
+      expect(decodeMailForwardCursor(token, KEY)).toEqual({
+        ...payload,
+        uidValidity: '17',
+      });
 
       // 篡改 scanUid 签名失效拒
       const parts = token.split('.');
-      const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 1_752_000_000_000, u: 42, v: 17, s: 501 };
+      const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 1_752_000_000_000, u: 42, v: '17', s: 501 };
       const tamperedBody = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
       expect(() => decodeMailForwardCursor(`${parts[0]}.${tamperedBody}.${parts[2]}`, KEY)).toThrow(
         InvalidMailCursorError,
       );
+    });
+
+    test('回归测试 5 (ZCode P2-1): uidValidity > 2^53 的编解码往返一致，无 Number 精度损失', () => {
+      // 9007199254740993n 是 2^53 + 1；若用 Number(9007199254740993n) 会截断为 9007199254740992
+      const hugeUidValidity = 9007199254740993n;
+      const payload = {
+        folder: 'inbox' as const,
+        address: 'fox@test.example',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: hugeUidValidity,
+        scanUid: 123,
+      };
+
+      const token = encodeMailForwardCursor(payload, KEY);
+      const decoded = decodeMailForwardCursor(token, KEY);
+
+      expect(decoded.uidValidity).toBe('9007199254740993');
+      expect(BigInt(decoded.uidValidity)).toBe(hugeUidValidity);
+      expect(decoded.scanUid).toBe(123);
+      expect(decoded.t).toBe(payload.t);
+      expect(decoded.uid).toBe(payload.uid);
     });
   });
 });
