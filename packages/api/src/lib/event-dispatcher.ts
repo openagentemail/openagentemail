@@ -105,14 +105,36 @@ export class EventDispatcher {
    * Enqueue and return immediately so the task creation 201 response is never blocked.
    */
   dispatchApprovalRequested(task: ApprovalTask): void {
-    const sinks = this.getApprovalSinks().filter((s) => s.isEnabled());
-    if (sinks.length === 0) return;
+    let candidateSinks: EventSink[];
+    try {
+      candidateSinks = this.getApprovalSinks();
+    } catch (err) {
+      this.errorLogger(
+        '[dispatcher] Failed retrieving approval sinks:',
+        err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+    if (candidateSinks.length === 0) return;
+
     const event: ApprovalRequestedEvent = {
       type: 'approval.requested',
       task,
     };
     queueMicrotask(() => {
-      for (const sink of sinks) {
+      for (const sink of candidateSinks) {
+        let enabled = false;
+        try {
+          enabled = sink.isEnabled();
+        } catch (err) {
+          this.errorLogger(
+            `[dispatcher] Sink ${sink.id} threw checking isEnabled:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          continue;
+        }
+        if (!enabled) continue;
+
         try {
           sink.handleApproval?.(event).catch((err) => {
             this.errorLogger(

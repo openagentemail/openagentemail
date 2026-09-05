@@ -729,6 +729,50 @@ describe('Second producer hand-off (§11.4 item 4 & §14 item 10)', () => {
 
     setEventDispatcherForTests(null);
   });
+
+  test('sink throwing in isEnabled does not throw or corrupt createApprovalTask return (Codex P1 R3)', async () => {
+    const loggedErrors: string[] = [];
+    const dispatcher = new EventDispatcher({
+      error: (msg, detail) => {
+        loggedErrors.push(`${msg} ${detail ?? ''}`);
+      },
+    });
+    setEventDispatcherForTests(dispatcher);
+
+    let handleApprovalCalled = false;
+    dispatcher.registerSink({
+      id: 'throwing-isenabled-sink',
+      isEnabled: () => {
+        throw new Error('Config lookup failed');
+      },
+      handleApproval: async () => {
+        handleApprovalCalled = true;
+      },
+    });
+
+    const task = await createApprovalTask({
+      from: 'requester@test.example',
+      to: 'approver@test.example',
+      subject: 'isEnabled failure resilience test',
+      body: 'Should succeed and return 201 regardless of isEnabled throw',
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      action: {
+        type: 'action',
+        name: 'test',
+        arguments: {},
+      },
+    });
+
+    expect(task.id).toBeDefined();
+    expect(task.state).toBe('input-required');
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(handleApprovalCalled).toBe(false);
+    expect(loggedErrors.some((e) => e.includes('Sink throwing-isenabled-sink threw checking isEnabled'))).toBe(true);
+
+    setEventDispatcherForTests(null);
+  });
 });
 
 describe('EventDispatcher abstractions and sink contracts', () => {

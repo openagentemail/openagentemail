@@ -1489,7 +1489,17 @@ export async function watchConnection(
 
     if (isEventDispatcher(dispatch)) {
       const getActiveMailSinks = (): EventSink[] => {
-        const sinks = dispatch.getMailSinks().filter((s) => s.isEnabled());
+        const sinks = dispatch.getMailSinks().filter((s) => {
+          try {
+            return s.isEnabled();
+          } catch (err) {
+            runtime.error(
+              `[${s.id}] IMAP watcher skipped sink after isEnabled threw:`,
+              watcherErrorLogMessage(err),
+            );
+            return false;
+          }
+        });
         for (const sink of sinks) {
           if (!sink.watermark) sink.watermark = {};
         }
