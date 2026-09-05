@@ -5,7 +5,6 @@ process.env.IMAP_PASS = 'test-only';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'test-only';
 process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
-process.env.WEBHOOKS_ENABLED = 'true';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.UI_ENABLED = 'false';
 
@@ -223,6 +222,8 @@ describe('Webhook MCP Tools & Tool Tiers (§10.7, D17)', () => {
 
   afterAll(async () => {
     (config as any).dataDir = originalDataDir;
+    (config.webhooks as any).enabled = false;
+    delete process.env.WEBHOOKS_ENABLED;
     deliveryQueue.cancelAll();
     await new Promise((r) => setTimeout(r, 50));
     deliveryQueue.cancelAll();

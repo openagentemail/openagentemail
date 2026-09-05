@@ -5,7 +5,6 @@ process.env.IMAP_PASS = 'test-only';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'test-only';
 process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
-process.env.WEBHOOKS_ENABLED = 'true';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -583,6 +582,8 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
 
   afterAll(async () => {
     (config as any).dataDir = originalDataDir;
+    (config.webhooks as any).enabled = false;
+    delete process.env.WEBHOOKS_ENABLED;
     setWebhookDnsLookupForTests(undefined);
     deliveryQueue.cancelAll();
     await new Promise((r) => setTimeout(r, 50));
