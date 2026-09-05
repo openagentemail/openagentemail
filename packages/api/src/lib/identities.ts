@@ -29,6 +29,15 @@ import {
   revokeDelegationsForAddress,
   revokeDelegationsOnGranteeTokenRotate,
 } from './delegations.ts';
+import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
+import { recordAuditEvent } from './audit.ts';
+
+export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
+let webhookCancelCallback: WebhookCancelCallback | undefined;
+
+export function registerWebhookCancelCallback(cb: WebhookCancelCallback): void {
+  webhookCancelCallback = cb;
+}
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -478,6 +487,21 @@ export function deleteIdentity(address: string): boolean {
   const needle = address.toLowerCase();
   const kept = identities.filter((i) => i.address !== needle);
   if (kept.length === identities.length) return false;
+  // Webhook cascade first (delete + cancel in-flight + audit). Identity save
+  // after that: a failed identity write is retryable, a live subscription after
+  // the identity is gone is an exfil channel (§10.5).
+  const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
+  for (const wh of deletedWebhooks) {
+    if (webhookCancelCallback) {
+      webhookCancelCallback(wh.id, 'subscription_deleted');
+    }
+    recordAuditEvent({
+      event: 'webhook.delete',
+      outcome: 'ok',
+      address: needle,
+      webhookId: wh.id,
+    });
+  }
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
   save(kept);

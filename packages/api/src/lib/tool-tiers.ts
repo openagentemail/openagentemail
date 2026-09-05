@@ -31,15 +31,19 @@ export const TOOL_TIER_SPEC = {
   mail_read_message: 'read',
   mail_wait_for: 'read',
   mail_list_identities: 'read',
+  mail_webhook_list: 'read',
   notify_check: 'read',
   task_list: 'read',
   task_get: 'read',
   task_list_children: 'read',
   // minimal
   mail_mark_seen: 'minimal',
+  mail_webhook_delete: 'minimal',
+  mail_webhook_disable: 'minimal',
   task_create: 'minimal',
   // contained
   mail_send: 'contained',
+  mail_webhook_test: 'contained',
   task_update: 'contained',
   task_decide: 'contained',
   task_claim: 'contained',
@@ -49,6 +53,7 @@ export const TOOL_TIER_SPEC = {
   notify_user: 'contained',
   // critical：OAuth deny-by-default
   mail_new_identity: 'critical',
+  mail_webhook_create: 'critical',
   notify_verify: 'critical',
 } as const satisfies Record<string, ToolTier>;
 

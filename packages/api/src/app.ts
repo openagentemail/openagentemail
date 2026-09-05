@@ -19,6 +19,7 @@ import {
 import { getMcpLoopbackBase } from './lib/mcp-loopback.ts';
 import { registerMcpHttpRoutes } from './mcp/http.ts';
 import { auditRoute } from './routes/audit.ts';
+import { webhooksRoute } from './routes/webhooks.ts';
 import { identitiesRoute } from './routes/identities.ts';
 import { delegationsRoute } from './routes/delegations.ts';
 import { messagesRoute } from './routes/messages.ts';
@@ -118,6 +119,7 @@ export function createApp(options: AppOptions = {}): Hono {
       : tasksRoute,
   );
   app.route('/v1/audit', auditRoute);
+  app.route('/v1/webhooks', webhooksRoute);
 
   if (options.uiEnabled ?? config.uiEnabled) {
     const uiSessions = new UiSessionStore({

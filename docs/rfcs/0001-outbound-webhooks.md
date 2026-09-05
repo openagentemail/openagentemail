@@ -1324,7 +1324,7 @@ be configured into a spin.
 
 Rescheduling is **bounded** — a `deferred` row still carries `nextAttemptAt` and is
 subject to the same 72-hour horizon, so backpressure delays delivery rather than creating an
-unbounded queue. This is the classification the first draft left empty.
+unbounded queue. If backpressure or pool saturation delays the attempt past the 72-hour horizon from `eventCreatedAt`, the attempt is terminated with dead-letter row `outcome: "permanent"` and `reason: "retry_horizon_exceeded"`. This is the classification the first draft left empty.
 
 `429` honours a consumer's `Retry-After` header when it is a sane integer
 (1 s … 1 h), clamped into the schedule; otherwise the normal backoff applies. Honoring
@@ -1597,6 +1597,8 @@ Each row records one delivery attempt:
   "uidValidity": 17,
   "rfc822MessageId": "<20260903122639.4821@mail.openagent.email>",
   "taskId": null,
+  "taskCreatedAt": null,
+  "expiresInSec": null,
   "eventCreatedAt": "2026-09-03T12:26:40.412Z",
   "attempt": 1,
   "outcome": "pending",
@@ -1608,7 +1610,7 @@ Each row records one delivery attempt:
 }
 ```
 
-Six of those fields exist because something breaks without them:
+Eight of those fields exist because something breaks without them:
 
 - **`runId`** (`run_0` for the original sequence, `run_1`, `run_2`, … for each manual
   redelivery) separates independent attempt sequences. Redelivery deliberately preserves the
@@ -1637,8 +1639,13 @@ Six of those fields exist because something breaks without them:
   silently dropped — losing exactly the human-paging event D1 put into v1 for. Per event type:
   `mail.received` populates `messageId` + `uidValidity` and leaves `taskId` null;
   `approval.requested` populates `taskId` and leaves both mail fields null.
+- **`taskCreatedAt`** and **`expiresInSec`** are persisted for `approval.requested` rows so that
+  boot reconstruction preserves the exact task creation instant and original relative expiration
+  rather than drifting timestamps or re-evaluating remaining seconds upon restart (Item 9).
 - **`rfc822MessageId`** is the message's RFC 822 `Message-ID` header when it has one, and
   exists solely to enable the cross-generation fallback in the reconstruction rules below.
+  It is bounded to at most 512 bytes (UTF-8); overlong values are treated as null and dead-lettered
+  upon generation rolls rather than persisting unbounded identifier bytes.
   Like `messageId` it is an identifier rather than content, so it does not weaken the
   no-payload rule. Null when the message had no such header, which is why that branch
   dead-letters instead of guessing.
@@ -2088,7 +2095,7 @@ bodies.
 | `POST` | `/v1/webhooks` | admin, or identity for own address — **never OAuth** (§10.4) | Create. `201` + `secret`. Accepts the same optional `Idempotency-Key` header as `rotate` (§12.2): a retry with a seen key returns the stored `201` response with `secret: null` plus the `id`, and does **not** create a second subscription. Without this, losing the `201` — a network drop, a client crash — left an identity caller with no recoverable key *and* made its natural retry consume another slot of the per-address cap (§8.7), so two lost responses could exhaust the cap with orphaned subscriptions. Recovery of the key itself is `GET …/secret` (§12.3). |
 | `GET` | `/v1/webhooks` | admin: all; identity: own address | `{webhooks:[…]}`. Never includes `secret`. |
 | `GET` | `/v1/webhooks/:id` | as above | Bare object incl. `state`, `lastDelivery`. |
-| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `description`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden` — not merely failing closed later at delivery time, which would let a forbidden URL sit in `webhooks.json` until something tried to connect to it. |
+| `POST` | `/v1/webhooks/:id` | as above | Update `url` / `events` / `contentScope` / `description`. POST, not PUT/PATCH, matching `POST /v1/tasks/:id/state`. **A `url` change re-runs the full §9.5 static validation and §9.3 resolution check before persisting**, returning `invalid_webhook_url` or `webhook_target_forbidden`. When `url` changes, `consecutiveFailures` is reset to 0, `state` transitions to `unverified` (except when manually `disabled`, which remains `disabled`), and a new asynchronous creation ping probe is fired to test the new target endpoint (Item 7). |
 | `GET` | `/v1/webhooks/:id/secret` | admin, or the identity that **created** it, `metadata` scope only (§10.4 Rule D, §12.3) | Re-display the current derived signing key. Audited as `webhook.reveal`. Possible only because D6 chose derivation. **Must return `Cache-Control: no-store`** (and no `ETag`): the body is long-lived key material, and a shared cache, browser history, or intermediary log retaining it would undo the entire secret-handling model. |
 | `DELETE` | `/v1/webhooks/:id` | admin, or the identity that **created** it and only at `metadata` scope (§10.4 Rules B + D) | Delete the subscription **and cancel its pending retries**, marking any not-yet-attempted rows `permanent` with reason `subscription_deleted` so the log still accounts for them. Precedent: `routes/notify.ts:228`. Identity deletion cascades the same way (§10.5). |
 | `POST` | `/v1/webhooks/:id/rotate` | admin, or the identity that **created** it and only at `metadata` scope (§10.4 Rules B + D) | Increment the derivation `epoch`; start the overlap window (§12.2). Returns the new `secret`. `409 rotation_window_open` if a window is already open, unless `force`. |
@@ -2097,6 +2104,11 @@ bodies.
 | `POST` | `/v1/webhooks/:id/enable` | admin | Clear `disabled` state, reset the counter (§8.5). |
 | `GET` | `/v1/webhooks/:id/deliveries` | admin | `{deliveries:[…], nextCursor}` — recent attempts and dead letters, from the JSONL log. |
 | `POST` | `/v1/webhooks/deliveries/:deliveryId/redeliver` | admin | Manual replay of one recorded delivery — **dead letter or success**, per decision **D15** (§17), following Resend's "replay both `failed` and `succeeded`". Enqueues a fresh attempt with a **new** `deliveryId`, the **same** event `id`, and a `replay: true` marker in the log row. Replaying a success re-sends an event the consumer already processed, so it leans on their `id` dedupe (§8.1); the marker exists so an operator reading the log can tell a replay from an original. |
+
+Create and update request validation rules:
+- `events`: must be a non-empty array of unique event types (`events.length >= 1`, duplicate entries rejected with `invalid_request`, Item 8).
+- `description`: optional human-readable string up to 1000 characters (`<= 1000 chars`, Item 4).
+- `contentScope`: `'metadata'` (default) or `'preview'` (admin-only).
 
 Create request:
 
@@ -2310,9 +2322,10 @@ takes and then discards is worse than one it refuses, since the operator's label
 vanishes on the next restart and multiple endpoints become indistinguishable.
 
 **Deleting an identity must cascade to its subscriptions.** `deleteIdentity()` today removes
-the identity and cascades OAuth grants (`identities.ts:381-388`), and this design adds webhook
-cleanup to that cascade: deleting an address removes or permanently disables **all**
-subscriptions owned by it and cancels their pending deliveries. Without this, subscriptions
+the identity and cascades OAuth grants (`identities.ts`), and this design adds webhook
+cleanup to that cascade: deleting an address hard-deletes **all** subscriptions owned by it
+from `webhooks.json`, writes a `webhook.delete` audit event for each, and cancels their pending retry
+attempts in `deliveryQueue` with reason `subscription_deleted` (Item 6). Without this, subscriptions
 keyed by address survive the identity, and if the same address is later recreated the old
 callback silently resumes receiving the *new* identity's mail — a durable exfiltration channel
 that outlives the credential it was created under, and one nobody would think to look for.
@@ -2400,9 +2413,10 @@ because it is a security event rather than a delivery outcome, and it is rare by
 it disables the endpoint immediately (§8.5), so it cannot recur at volume for one subscription.
 
 `webhook.ssrf_refused` is the one that matters for security review: it is the signal that
-someone tried to point OAE at an internal address. It carries `address` and `ip` (the
-*client* IP, via the existing `clientIp()` single implementation) and nothing about the
-target.
+someone tried to point OAE at an internal address. When triggered in the context of an HTTP request
+(such as `POST /v1/webhooks/:id/test`), it carries `address` and `ip` (client IP via `clientIp(c)`).
+For asynchronous background deliveries where there is no HTTP client context, `ip` is omitted (`null`/undefined, Item 3),
+and target internals are never leaked.
 
 ### 10.7 MCP surface parity
 

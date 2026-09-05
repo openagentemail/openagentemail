@@ -1,0 +1,58 @@
+{
+  "format": "openagentemail.webhook-signature-vectors",
+  "version": 1,
+  "signatureScheme": "v1",
+  "vectors": [
+    {
+      "id": "simple-mail-v1",
+      "description": "Standard mail.received delivery with epoch 0 key",
+      "rootSecret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "webhookId": "whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "epoch": 0,
+      "displayedSecret": "whs_2b0932ba2d72c1d53d07da69a8ad7843c70f09d24800e3b3828dca20b594127b",
+      "timestampSec": 1725366000,
+      "rawBody": "{\"id\":\"evt_11111111-2222-3333-4444-555555555555\",\"type\":\"mail.received\",\"payloadVersion\":\"v1\",\"createdAt\":\"2026-09-03T12:20:00.000Z\",\"domain\":\"openagent.email\",\"data\":{\"object\":\"mail\",\"address\":\"alice@openagent.email\",\"messageId\":\"123\",\"uid\":123,\"uidValidity\":1,\"receivedAt\":\"2026-09-03T12:20:00.000Z\"}}",
+      "expectedSignature": "6420c5b360e8c7b62d2d55ef34d43a9fd55d37349b6e42e26c8bfdca8c0f7f6d",
+      "expectedHeader": "t=1725366000,v1=6420c5b360e8c7b62d2d55ef34d43a9fd55d37349b6e42e26c8bfdca8c0f7f6d"
+    },
+    {
+      "id": "unicode-cjk-v1",
+      "description": "Payload containing multi-byte UTF-8 CJK text and emoji",
+      "rootSecret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "webhookId": "whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "epoch": 0,
+      "displayedSecret": "whs_2b0932ba2d72c1d53d07da69a8ad7843c70f09d24800e3b3828dca20b594127b",
+      "timestampSec": 1725366300,
+      "rawBody": "{\"id\":\"evt_22222222-3333-4444-5555-666666666666\",\"type\":\"mail.received\",\"payloadVersion\":\"v1\",\"createdAt\":\"2026-09-03T12:25:00.000Z\",\"domain\":\"openagent.email\",\"data\":{\"object\":\"mail\",\"address\":\"bob@openagent.email\",\"messageId\":\"456\",\"subject\":\"你好，世界！🚀 Verify code: 849201\",\"from\":{\"address\":\"sender@example.com\",\"name\":\"张三 (Zhang San)\"}}}",
+      "expectedSignature": "6fcd141f33452357269bdcd3dffe85a5ac1e4053874c6f186e073f87b08dda3c",
+      "expectedHeader": "t=1725366300,v1=6fcd141f33452357269bdcd3dffe85a5ac1e4053874c6f186e073f87b08dda3c"
+    },
+    {
+      "id": "approval-requested-v1",
+      "description": "approval.requested delivery with epoch 1 rotated key",
+      "rootSecret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "webhookId": "whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "epoch": 1,
+      "displayedSecret": "whs_22d6bef2a2b2c1d3b7af6646f2896c5eaf790dde79740f293eba5d8eb82437f9",
+      "timestampSec": 1725366600,
+      "rawBody": "{\"id\":\"evt_33333333-4444-5555-6666-777777777777\",\"type\":\"approval.requested\",\"payloadVersion\":\"v1\",\"createdAt\":\"2026-09-03T12:30:00.000Z\",\"domain\":\"openagent.email\",\"data\":{\"object\":\"approval\",\"taskId\":\"task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"taskState\":\"input-required\",\"from\":\"agent@openagent.email\",\"to\":\"owner@openagent.email\",\"reviewer\":\"owner@openagent.email\",\"subject\":\"Approve deployment to production\",\"digest\":\"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90\",\"actionType\":\"tool_call\",\"actionName\":\"deploy_service\"}}",
+      "expectedSignature": "9ce0dbe1a9db845de7ca2553073e0de0fb77c4830c1018516ea064ceaaf16930",
+      "expectedHeader": "t=1725366600,v1=9ce0dbe1a9db845de7ca2553073e0de0fb77c4830c1018516ea064ceaaf16930"
+    },
+    {
+      "id": "overlap-rotation-v1",
+      "description": "Dual v1 signatures emitted during overlap window between epoch 1 and epoch 0",
+      "rootSecret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "webhookId": "whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "epoch": 1,
+      "previousEpoch": 0,
+      "displayedSecret": "whs_22d6bef2a2b2c1d3b7af6646f2896c5eaf790dde79740f293eba5d8eb82437f9",
+      "previousDisplayedSecret": "whs_2b0932ba2d72c1d53d07da69a8ad7843c70f09d24800e3b3828dca20b594127b",
+      "timestampSec": 1725366600,
+      "rawBody": "{\"id\":\"evt_33333333-4444-5555-6666-777777777777\",\"type\":\"approval.requested\",\"payloadVersion\":\"v1\",\"createdAt\":\"2026-09-03T12:30:00.000Z\",\"domain\":\"openagent.email\",\"data\":{\"object\":\"approval\",\"taskId\":\"task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"taskState\":\"input-required\",\"from\":\"agent@openagent.email\",\"to\":\"owner@openagent.email\",\"reviewer\":\"owner@openagent.email\",\"subject\":\"Approve deployment to production\",\"digest\":\"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90\",\"actionType\":\"tool_call\",\"actionName\":\"deploy_service\"}}",
+      "expectedPrimarySignature": "9ce0dbe1a9db845de7ca2553073e0de0fb77c4830c1018516ea064ceaaf16930",
+      "expectedPreviousSignature": "4b87fe580cd9394a4b91a106a902e7a457ef65e2746d11b73e2a21af730a4afa",
+      "expectedHeader": "t=1725366600,v1=9ce0dbe1a9db845de7ca2553073e0de0fb77c4830c1018516ea064ceaaf16930,v1=4b87fe580cd9394a4b91a106a902e7a457ef65e2746d11b73e2a21af730a4afa"
+    }
+  ]
+}

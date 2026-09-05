@@ -245,8 +245,8 @@ describe('attribution：三种 caller 落三种行', () => {
 });
 
 describe('工具分层', () => {
-  test('规格表 20 工具均有 tier；注册冲突会 throw', () => {
-    expect(Object.keys(TOOL_TIER_SPEC).length).toBe(20);
+  test('规格表 25 工具均有 tier；注册冲突会 throw', () => {
+    expect(Object.keys(TOOL_TIER_SPEC).length).toBe(25);
     // SPEC 回落：即使 declared 空也能预检
     resetToolTiersForTests();
     expect(isToolTierDeclared('mail_new_identity')).toBe(false);

@@ -503,4 +503,74 @@ export class OpenAgentEmailClient {
       ...(reason === undefined ? {} : { reason }),
     });
   }
+
+  async listWebhooks(address?: string): Promise<WebhookSubscriptionDetail[]> {
+    const params = new URLSearchParams();
+    if (address) params.set('address', address);
+    const suffix = params.size ? `?${params.toString()}` : '';
+    const res = await this.request<{ webhooks: WebhookSubscriptionDetail[] }>('GET', `/v1/webhooks${suffix}`);
+    return res.webhooks;
+  }
+
+  createWebhook(params: {
+    url: string;
+    address: string;
+    events: string[];
+    contentScope?: 'metadata' | 'preview';
+    description?: string;
+  }): Promise<WebhookCreateResult> {
+    return this.request<WebhookCreateResult>('POST', '/v1/webhooks', params);
+  }
+
+  deleteWebhook(id: string): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>('DELETE', `/v1/webhooks/${encodeURIComponent(id)}`);
+  }
+
+  testWebhook(id: string): Promise<WebhookTestResult> {
+    return this.request<WebhookTestResult>('POST', `/v1/webhooks/${encodeURIComponent(id)}/test`);
+  }
+
+  disableWebhook(id: string): Promise<{ ok: boolean; state: string; disabledReason: string }> {
+    return this.request<{ ok: boolean; state: string; disabledReason: string }>('POST', `/v1/webhooks/${encodeURIComponent(id)}/disable`);
+  }
 }
+
+export interface WebhookSubscriptionDetail {
+  id: string;
+  url: string;
+  address: string;
+  events: string[];
+  contentScope: 'metadata' | 'preview';
+  description: string;
+  state: 'unverified' | 'enabled' | 'disabled';
+  disabledReason: string | null;
+  secretPrefix: string;
+  signatureScheme: string;
+  timestampToleranceSec: number;
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt: string | null;
+  consecutiveFailures: number;
+  privateTargetGranted: boolean;
+  lastDelivery: {
+    deliveryId: string;
+    ts: string;
+    attempt: number;
+    outcome: string;
+    status: number | null;
+    durationMs: number | null;
+    reason: string | null;
+  } | null;
+}
+
+export interface WebhookCreateResult extends WebhookSubscriptionDetail {
+  secret: string | null;
+}
+
+export interface WebhookTestResult {
+  ok: boolean;
+  status: number | null;
+  durationMs: number;
+  reason: string | null;
+}
+

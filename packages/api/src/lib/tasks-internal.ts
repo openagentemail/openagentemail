@@ -1424,7 +1424,7 @@ async function findTaskMessages(id: string): Promise<TaskLookupResult> {
 
 /** Raw durable/queued snapshot. Lock-holding writers must use this rather
  * than public getTask(), whose approval read path may itself materialize. */
-async function getTaskSnapshot(id: string): Promise<Task | null> {
+export async function getTaskSnapshot(id: string): Promise<Task | null> {
   if (!isTaskId(id)) return null;
   let raw: Task | null;
   let hadMatchingRows: boolean;
@@ -1468,7 +1468,7 @@ function validateParentChain(snapshot: Task[], parentTaskId: string, childId: st
   for (let depth = 0; current; depth += 1) {
     if (current.id === childId || seen.has(current.id)) throw new Error('parent_task_invalid_chain');
     seen.add(current.id);
-    const next = current.parentTaskId;
+    const next: string | undefined = current.parentTaskId;
     if (next === undefined) return;
     if (!isTaskId(next) || seen.size >= PARENT_CHAIN_MAX) throw new Error('parent_task_invalid_chain');
     current = byId.get(next) ?? null;

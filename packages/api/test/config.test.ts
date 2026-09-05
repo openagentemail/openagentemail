@@ -646,12 +646,85 @@ describe('WEBHOOKS_ENABLED configuration (#128 PR2)', () => {
     expect(config.webhooks.enabled).toBe(false);
   });
 
-  test('enables webhooks when set to true', () => {
+  test('enables webhooks when set to true and TASK_SIGNING_SECRET is valid', () => {
     const config = parseConfig({
       ...requiredEnv,
+      TASK_SIGNING_SECRET: '12345678901234567890123456789012',
       WEBHOOKS_ENABLED: 'true',
     });
     expect(config.webhooks.enabled).toBe(true);
+  });
+
+  test('R1: refuses boot when WEBHOOKS_ENABLED=true without explicit TASK_SIGNING_SECRET >= 32 chars', () => {
+    // Unset TASK_SIGNING_SECRET
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOKS_ENABLED: 'true',
+      }),
+    ).toThrow('TASK_SIGNING_SECRET is required when WEBHOOKS_ENABLED is true');
+
+    // Too short TASK_SIGNING_SECRET (< 32 chars)
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        TASK_SIGNING_SECRET: 'a'.repeat(20),
+        WEBHOOKS_ENABLED: 'true',
+      }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters when WEBHOOKS_ENABLED is true');
+
+    // Even when WEBHOOK_SIGNING_SECRET is set, TASK_SIGNING_SECRET is unconditionally required
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOK_SIGNING_SECRET: '12345678901234567890123456789012',
+        WEBHOOKS_ENABLED: 'true',
+      }),
+    ).toThrow('TASK_SIGNING_SECRET is required when WEBHOOKS_ENABLED is true');
+  });
+
+  test('forces WEBHOOK_ALLOW_PRIVATE_TARGETS to false when OAE_PUBLIC_EDGE=true', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      TASK_SIGNING_SECRET: '12345678901234567890123456789012',
+      WEBHOOKS_ENABLED: 'true',
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
+      OAE_PUBLIC_EDGE: 'true',
+    });
+    expect(config.webhooks.allowPrivateTargets).toBe(false);
+  });
+
+  test('parses and validates WEBHOOK_ALLOWED_PORTS', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      TASK_SIGNING_SECRET: '12345678901234567890123456789012',
+      WEBHOOKS_ENABLED: 'true',
+      WEBHOOK_ALLOWED_PORTS: '443, 8443',
+    });
+    expect(config.webhooks.allowedPorts).toEqual([443, 8443]);
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOK_ALLOWED_PORTS: '',
+      }),
+    ).toThrow('WEBHOOK_ALLOWED_PORTS must be non-empty');
+
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOK_ALLOWED_PORTS: '443, not-a-port',
+      }),
+    ).toThrow('WEBHOOK_ALLOWED_PORTS contains invalid port');
+  });
+
+  test('rejects WEBHOOK_PAYLOAD_MAX_BYTES greater than JSON_BODY_LIMIT_BYTES', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOK_PAYLOAD_MAX_BYTES: '20000000', // > 16MiB
+      }),
+    ).toThrow('WEBHOOK_PAYLOAD_MAX_BYTES must be <= JSON_BODY_LIMIT_BYTES');
   });
 
   test('rejects non-boolean string values', () => {

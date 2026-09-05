@@ -64,6 +64,11 @@ test("#56/#58 tools registry/schema metadata", () => {
     "task_claim",
     "task_renew",
     "task_release",
+    "mail_webhook_list",
+    "mail_webhook_create",
+    "mail_webhook_delete",
+    "mail_webhook_test",
+    "mail_webhook_disable",
   ];
   const missingLeaseTools = ["task_claim", "task_renew", "task_release"].filter(
     (name) => !toolConfigs.has(name),

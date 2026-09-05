@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { truncateUtf8Bytes } from '../src/lib/utf8-truncate.ts';
+import { truncateUtf8Bytes, truncateUtf8Codepoints } from '../src/lib/utf8-truncate.ts';
 
 describe('truncateUtf8Bytes', () => {
   test('短于上限原样返回', () => {
@@ -31,5 +31,17 @@ describe('truncateUtf8Bytes', () => {
     const buf = Buffer.from('A😀B', 'utf8');
     const cut = truncateUtf8Bytes(buf, 3);
     expect(cut.toString('utf8')).toBe('A');
+  });
+});
+
+describe('truncateUtf8Codepoints', () => {
+  test('counts Unicode code points, not UTF-8 bytes', () => {
+    const han = '字'.repeat(10);
+    expect(truncateUtf8Codepoints(han, 3)).toBe('字字字');
+    expect([...truncateUtf8Codepoints(han, 3)].length).toBe(3);
+  });
+
+  test('leaves a short string unchanged', () => {
+    expect(truncateUtf8Codepoints('abc', 10)).toBe('abc');
   });
 });
