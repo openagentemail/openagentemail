@@ -450,6 +450,155 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       ),
     ).rejects.toThrow();
   });
+
+  test('expunged detained UID does not stall sink, subsequent mail is delivered, and CRITICAL abandonment is logged (Codex P1-1)', async () => {
+    const loggedErrors: string[] = [];
+    const controller = new AbortController();
+
+    // Mail 41 was expunged, mailbox now only has mail 42!
+    const messages = [
+      {
+        uid: 42,
+        envelope: { from: [{ address: 'sender@example.com' }], subject: 'Mail 42' },
+        headers: Buffer.from('Delivered-To: approver@test.example\r\n\r\n'),
+        source: Buffer.from('From: sender@example.com\r\n\r\nMail 42 body'),
+      },
+    ];
+    const client = makeMockClient(messages, controller);
+
+    const webhookDelivered: number[] = [];
+    // Webhook sink had previously failed on UID 41 and recorded serviceFailure
+    const webhookWatermark: SinkWatermark = {
+      uid: 40,
+      uidValidity: 1n,
+      serviceFailure: { uid: 41, sinceMs: 1000 },
+    };
+
+    const dispatcher = new EventDispatcher();
+    dispatcher.registerSink({
+      id: 'webhook',
+      isEnabled: () => true,
+      watermark: webhookWatermark,
+      handleMail: async (event) => {
+        webhookDelivered.push(event.message.uid);
+      },
+    });
+
+    await watchConnection(
+      controller.signal,
+      client,
+      dispatcher,
+      { uid: 40, uidValidity: 1n },
+      {
+        identities: () => baseIdentities as any,
+        identity: (addr) => baseIdentities.find((i) => i.address === addr) as any,
+        wait: async () => {},
+        error: (msg) => { loggedErrors.push(String(msg)); },
+        now: () => 2000,
+      },
+    );
+
+    // Expunged UID 41 must be abandoned with CRITICAL error log
+    expect(loggedErrors.some((e) => e.includes('CRITICAL IMAP watcher abandoned expunged UID 41'))).toBe(true);
+    expect(webhookWatermark.serviceFailure).toBeUndefined();
+
+    // Subsequent mail 42 MUST NOT be stalled - delivered successfully!
+    expect(webhookDelivered).toEqual([42]);
+    expect(webhookWatermark.uid).toBe(42);
+  });
+
+  test('dynamically registered and disabled sinks take effect during active IMAP connection (Codex P1-2)', async () => {
+    let round = 1;
+    let sinkAEnabled = true;
+    const sinkADelivered: number[] = [];
+    const sinkBDelivered: number[] = [];
+
+    const controller = new AbortController();
+    const dispatcher = new EventDispatcher();
+
+    const sinkA: EventSink = {
+      id: 'sink-a',
+      isEnabled: () => sinkAEnabled,
+      watermark: { uid: 40, uidValidity: 1n },
+      handleMail: async (event) => {
+        sinkADelivered.push(event.message.uid);
+      },
+    };
+    dispatcher.registerSink(sinkA);
+
+    const sinkB: EventSink = {
+      id: 'sink-b',
+      isEnabled: () => true,
+      watermark: { uid: 41, uidValidity: 1n },
+      handleMail: async (event) => {
+        sinkBDelivered.push(event.message.uid);
+      },
+    };
+
+    const allMessages: Record<number, any> = {
+      41: {
+        uid: 41,
+        envelope: { from: [{ address: 'sender@example.com' }], subject: 'Mail 41' },
+        headers: Buffer.from('Delivered-To: approver@test.example\r\n\r\n'),
+        source: Buffer.from('From: sender@example.com\r\n\r\nMail 41'),
+      },
+      42: {
+        uid: 42,
+        envelope: { from: [{ address: 'sender@example.com' }], subject: 'Mail 42' },
+        headers: Buffer.from('Delivered-To: approver@test.example\r\n\r\n'),
+        source: Buffer.from('From: sender@example.com\r\n\r\nMail 42'),
+      },
+    };
+
+    const client = {
+      mailbox: { uidValidity: 1n },
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => {
+        if (round === 1) return [41];
+        return [41, 42];
+      },
+      fetch: async function* (uids: number[]) {
+        for (const uid of uids) {
+          if (allMessages[uid]) yield allMessages[uid];
+        }
+      },
+      idle: async () => {
+        if (round === 1) {
+          round = 2;
+          // Dynamically disable sinkA
+          sinkAEnabled = false;
+          // Dynamically register sinkB
+          dispatcher.registerSink(sinkB);
+        } else {
+          controller.abort();
+        }
+      },
+      logout: async () => {},
+      close() {},
+    } as any;
+
+    await watchConnection(
+      controller.signal,
+      client,
+      dispatcher,
+      { uid: 40, uidValidity: 1n },
+      {
+        identities: () => baseIdentities as any,
+        identity: (addr) => baseIdentities.find((i) => i.address === addr) as any,
+        wait: async () => {},
+        error: () => {},
+        now: () => 1000,
+      },
+    );
+
+    // Sink A only received 41; after being dynamically disabled, it did not receive 42 and its watermark froze at 41
+    expect(sinkADelivered).toEqual([41]);
+    expect(sinkA.watermark!.uid).toBe(41);
+
+    // Sink B was dynamically registered in round 2, received 42, and its watermark advanced to 42
+    expect(sinkBDelivered).toEqual([42]);
+    expect(sinkB.watermark!.uid).toBe(42);
+  });
 });
 
 describe('Second producer hand-off (§11.4 item 4 & §14 item 10)', () => {

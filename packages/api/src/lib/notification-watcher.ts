@@ -1488,14 +1488,48 @@ export async function watchConnection(
     const uidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
 
     if (isEventDispatcher(dispatch)) {
-      const mailSinks = dispatch.getMailSinks().filter((s) => s.isEnabled());
-      for (const sink of mailSinks) {
-        if (!sink.watermark) sink.watermark = {};
-      }
+      const getActiveMailSinks = (): EventSink[] => {
+        const sinks = dispatch.getMailSinks().filter((s) => s.isEnabled());
+        for (const sink of sinks) {
+          if (!sink.watermark) sink.watermark = {};
+        }
+        return sinks;
+      };
 
-      const getUnionPending = (allUids: number[]): number[] => {
+      const reconcileServiceFailures = (sinks: EventSink[], currentUids: number[]): void => {
+        const now = runtime.now();
+        for (const sink of sinks) {
+          const wm = sink.watermark!;
+          if (!wm.serviceFailure) continue;
+          const failedUid = wm.serviceFailure.uid;
+          const isExpunged = !currentUids.includes(failedUid);
+          const unavailableMs = Math.max(0, now - wm.serviceFailure.sinceMs);
+          const isTimedOut = unavailableMs >= SERVICE_FAILURE_MAX_MS;
+
+          if (isExpunged) {
+            runtime.error(
+              `[${sink.id}] CRITICAL IMAP watcher abandoned expunged UID ${failedUid} ` +
+                `(deleted from mailbox before service recovery):`,
+              watcherErrorLogMessage('message expunged during service failure'),
+            );
+            wm.uid = Math.max(wm.uid ?? 0, failedUid);
+            wm.serviceFailure = undefined;
+          } else if (isTimedOut) {
+            runtime.error(
+              `[${sink.id}] CRITICAL IMAP watcher abandoned UID ${failedUid} after service ` +
+                `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
+              watcherErrorLogMessage('service failure timeout'),
+            );
+            wm.uid = Math.max(wm.uid ?? 0, failedUid);
+            wm.serviceFailure = undefined;
+          }
+        }
+      };
+
+      const getUnionPending = (sinks: EventSink[], allUids: number[]): number[] => {
+        reconcileServiceFailures(sinks, allUids);
         const pendingSet = new Set<number>();
-        for (const sink of mailSinks) {
+        for (const sink of sinks) {
           const unseen = unseenWatcherUids(allUids, sink.watermark!, uidValidity);
           for (const uid of unseen) {
             pendingSet.add(uid);
@@ -1506,7 +1540,7 @@ export async function watchConnection(
 
       const initial = await client.search({ all: true }, { uid: true });
       const initialUids = Array.isArray(initial) ? initial : [];
-      let pending = getUnionPending(initialUids);
+      let pending = getUnionPending(getActiveMailSinks(), initialUids);
       if (watermark) {
         unseenWatcherUids(initialUids, watermark, uidValidity);
       }
@@ -1524,10 +1558,11 @@ export async function watchConnection(
             },
             { uid: true },
           )) {
-            let allFailedWithServiceFailure = mailSinks.length > 0;
+            const currentMailSinks = getActiveMailSinks();
+            let allFailedWithServiceFailure = currentMailSinks.length > 0;
             let lastServiceError: unknown = null;
 
-            for (const sink of mailSinks) {
+            for (const sink of currentMailSinks) {
               const wm = sink.watermark!;
               if (wm.uid !== undefined && message.uid <= wm.uid && wm.serviceFailure?.uid !== message.uid) {
                 allFailedWithServiceFailure = false;
@@ -1594,7 +1629,7 @@ export async function watchConnection(
 
             if (watermark) {
               watermark.uidValidity = uidValidity;
-              const maxSinkUid = Math.max(0, ...mailSinks.map((s) => s.watermark?.uid ?? 0));
+              const maxSinkUid = Math.max(0, ...currentMailSinks.map((s) => s.watermark?.uid ?? 0));
               watermark.uid = Math.max(watermark.uid ?? 0, maxSinkUid);
             }
           }
@@ -1605,7 +1640,7 @@ export async function watchConnection(
         if (signal.aborted) break;
         const found = await client.search({ all: true }, { uid: true });
         const currentUids = Array.isArray(found) ? found : [];
-        pending = getUnionPending(currentUids);
+        pending = getUnionPending(getActiveMailSinks(), currentUids);
       }
     } else {
       // Legacy single-sink dispatch path (100% backward compatible for tests)
@@ -1771,6 +1806,7 @@ export function startNotificationWatcher(cfg = config): () => void {
   if (!watcherAbort) {
     watcherAbort = new AbortController();
     const dispatcher = getEventDispatcher();
+    // webhook sink 随 PR 4 注册；PR 2 中 WEBHOOKS_ENABLED 仅作启动门输入
     if (!dispatcher.getSink('ntfy')) {
       dispatcher.registerSink(createNtfySink());
     }
