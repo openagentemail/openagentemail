@@ -639,3 +639,34 @@ describe('EXTRA_DOMAINS multi-domain configuration', () => {
     ).toThrow(`EXTRA_DOMAINS contains invalid domain entry: "${longDomain}"`);
   });
 });
+
+describe('WEBHOOKS_ENABLED configuration (#128 PR2)', () => {
+  test('defaults to false when unset', () => {
+    const config = parseConfig(requiredEnv);
+    expect(config.webhooks.enabled).toBe(false);
+  });
+
+  test('enables webhooks when set to true', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      WEBHOOKS_ENABLED: 'true',
+    });
+    expect(config.webhooks.enabled).toBe(true);
+  });
+
+  test('rejects non-boolean string values', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOKS_ENABLED: '1',
+      }),
+    ).toThrow();
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        WEBHOOKS_ENABLED: 'yes',
+      }),
+    ).toThrow();
+  });
+});
+

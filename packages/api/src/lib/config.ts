@@ -170,6 +170,8 @@ const envSchema = z.object({
   // Notification transport. Docker Compose enables ntfy by default; keeping
   // the bare-process default off preserves the lightweight API test/runtime.
   NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
+  // Outbound webhooks. Off by default (§10.1).
+  WEBHOOKS_ENABLED: z.enum(['true', 'false']).default('false'),
   NTFY_INTERNAL_URL: envUrl('http://ntfy'),
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
@@ -381,6 +383,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       configPath: join(raw.DATA_DIR, 'ntfy', 'server.yml'),
       pushPolicy: raw.PUSH_POLICY,
       notifyRateLimit: raw.NOTIFY_RATE_LIMIT,
+    },
+    webhooks: {
+      enabled: raw.WEBHOOKS_ENABLED === 'true',
     },
     dashboardPublicUrl: raw.DASHBOARD_PUBLIC_URL
       ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)

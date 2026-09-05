@@ -39,6 +39,8 @@ startSendLogMaintenance();
 await inspectDeviceRegistryAtBoot();
 if (config.ntfy.enabled) {
   await initializeNotifications();
+}
+if ((config.ntfy.enabled && config.ntfy.pushPolicy !== 'none') || config.webhooks.enabled) {
   startNotificationWatcher();
 }
 

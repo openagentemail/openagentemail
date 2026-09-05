@@ -40,6 +40,18 @@ import {
 import { MAX_EMAIL_HTML_LENGTH } from './sanitize-email-html.ts';
 import { approvalEventForWatcher } from './tasks.ts';
 import { truncateUtf8Bytes } from './utf8-truncate.ts';
+import {
+  EventDispatcher,
+  getEventDispatcher,
+  isEventDispatcher,
+  isSinkServiceFailure,
+  type EventSink,
+  type MailReceivedEvent,
+  type SinkWatermark,
+  type WatchedMessage,
+} from './event-dispatcher.ts';
+
+export type { WatchedMessage } from './event-dispatcher.ts';
 
 const RECONNECT_INITIAL_MS = 2_000;
 const RECONNECT_MAX_MS = 120_000;
@@ -111,8 +123,6 @@ async function waitForReconnect(
     signal.removeEventListener('abort', onAbort);
   }
 }
-
-export type WatchedMessage = Pick<FetchMessageObject, 'envelope' | 'headers' | 'source'>;
 
 export type WatcherDispatch = {
   /** May carry NotifyInput.beforeSend for final tier/delete checks at fetch boundary. */
@@ -1429,10 +1439,36 @@ type WatchConnectionRuntime = {
 };
 
 /** @internal Exported so poison-message batch progression can be regression-tested. */
+export function createNtfySink(
+  publish: NotifyService['publish'] = notificationService().publish.bind(notificationService()),
+  watermark: SinkWatermark = {},
+): EventSink {
+  return {
+    id: 'ntfy',
+    isEnabled: () => config.ntfy.enabled && config.ntfy.pushPolicy !== 'none',
+    watermark,
+    async handleMail(event, context) {
+      await processWatchedMessage(
+        event.message,
+        context?.identities ?? listIdentities(),
+        config.ntfy.pushPolicy,
+        { publish },
+        {
+          clickUrl: context?.clickUrl ?? config.dashboardPublicUrl,
+          refreshIdentity: context?.refreshIdentity ?? findIdentity,
+          wait: context?.wait ?? sleep,
+          error: context?.error ?? console.error,
+        },
+      );
+    },
+  };
+}
+
+/** @internal Exported so poison-message batch progression can be regression-tested. */
 export async function watchConnection(
   signal: AbortSignal,
   client: ImapFlow,
-  dispatch: WatcherDispatch,
+  dispatch: WatcherDispatch | EventDispatcher,
   watermark: WatcherWatermark,
   runtime: WatchConnectionRuntime = {
     identities: listIdentities,
@@ -1450,71 +1486,242 @@ export async function watchConnection(
     // re-anchors the watermark instead of starving notifications.
     // (client.mailbox is `false | MailboxObject` before/without selection.)
     const uidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
-    const initial = await client.search({ all: true }, { uid: true });
-    let pending = unseenWatcherUids(Array.isArray(initial) ? initial : [], watermark, uidValidity);
 
-    while (!signal.aborted) {
-      if (pending.length > 0) {
-        for await (const message of client.fetch(
-          pending,
-          { envelope: true, headers: ['delivered-to'], source: true },
-          { uid: true },
-        )) {
+    if (isEventDispatcher(dispatch)) {
+      const getActiveMailSinks = (): EventSink[] => {
+        const sinks = dispatch.getMailSinks().filter((s) => {
           try {
-            await processWatchedMessage(
-              message,
-              runtime.identities(),
-              config.ntfy.pushPolicy,
-              dispatch,
-              {
-                clickUrl: config.dashboardPublicUrl,
-                // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
-                refreshIdentity: (address) => runtime.identity(address),
-                wait: runtime.wait,
-                error: runtime.error,
-              },
-            );
-            consecutivePublishSkips = 0;
-            watermark.serviceFailure = undefined;
+            return s.isEnabled();
           } catch (err) {
-            if (!(err instanceof WatcherPublishError)) throw err;
-            if (isNotifyServiceFailure(err.reason)) {
-              const now = runtime.now();
-              const observed = watermark.serviceFailure;
-              if (!observed || observed.uid !== message.uid) {
-                watermark.serviceFailure = { uid: message.uid, sinceMs: now };
-                throw err;
-              }
-              const unavailableMs = Math.max(0, now - observed.sinceMs);
-              if (unavailableMs < SERVICE_FAILURE_MAX_MS) throw err;
-              runtime.error(
-                `[notify] CRITICAL IMAP watcher abandoned UID ${message.uid} after notification service ` +
-                  `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
-                watcherErrorLogMessage(err.reason),
-              );
-            } else {
-              consecutivePublishSkips += 1;
-              runtime.error(
-                `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
-                  `(consecutive skips: ${consecutivePublishSkips}):`,
-                watcherErrorLogMessage(err.reason),
-              );
-            }
-            watermark.serviceFailure = undefined;
+            runtime.error(
+              `[${s.id}] IMAP watcher skipped sink after isEnabled threw:`,
+              watcherErrorLogMessage(err),
+            );
+            return false;
           }
-          watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
+        });
+        for (const sink of sinks) {
+          if (!sink.watermark) sink.watermark = {};
         }
-      }
-      pending = [];
+        return sinks;
+      };
 
-      // IDLE gives prompt delivery where the server reports EXISTS, while the
-      // heartbeat keeps this watcher correct on servers that occasionally keep
-      // an IDLE command open after mail arrives. Socket errors still escape to
-      // the outer reconnect loop instead of leaving a stale watcher forever.
-      await Promise.race([client.idle(), runtime.wait(3_000)]);
-      if (signal.aborted) break;
-      const found = await client.search({ all: true }, { uid: true });
-      pending = unseenWatcherUids(Array.isArray(found) ? found : [], watermark, uidValidity);
+      const reconcileServiceFailures = (sinks: EventSink[], currentUids: number[]): void => {
+        const now = runtime.now();
+        for (const sink of sinks) {
+          const wm = sink.watermark!;
+          if (!wm.serviceFailure) continue;
+          const failedUid = wm.serviceFailure.uid;
+          const isExpunged = !currentUids.includes(failedUid);
+          const unavailableMs = Math.max(0, now - wm.serviceFailure.sinceMs);
+          const isTimedOut = unavailableMs >= SERVICE_FAILURE_MAX_MS;
+
+          if (isExpunged) {
+            runtime.error(
+              `[${sink.id}] CRITICAL IMAP watcher abandoned expunged UID ${failedUid} ` +
+                `(deleted from mailbox before service recovery):`,
+              watcherErrorLogMessage('message expunged during service failure'),
+            );
+            wm.uid = Math.max(wm.uid ?? 0, failedUid);
+            wm.serviceFailure = undefined;
+          } else if (isTimedOut) {
+            runtime.error(
+              `[${sink.id}] CRITICAL IMAP watcher abandoned UID ${failedUid} after service ` +
+                `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
+              watcherErrorLogMessage('service failure timeout'),
+            );
+            wm.uid = Math.max(wm.uid ?? 0, failedUid);
+            wm.serviceFailure = undefined;
+          }
+        }
+      };
+
+      const getUnionPending = (sinks: EventSink[], allUids: number[]): number[] => {
+        reconcileServiceFailures(sinks, allUids);
+        const pendingSet = new Set<number>();
+        for (const sink of sinks) {
+          const unseen = unseenWatcherUids(allUids, sink.watermark!, uidValidity);
+          for (const uid of unseen) {
+            pendingSet.add(uid);
+          }
+        }
+        return Array.from(pendingSet).sort((a, b) => a - b);
+      };
+
+      const initial = await client.search({ all: true }, { uid: true });
+      const initialUids = Array.isArray(initial) ? initial : [];
+      let pending = getUnionPending(getActiveMailSinks(), initialUids);
+      if (watermark) {
+        unseenWatcherUids(initialUids, watermark, uidValidity);
+      }
+
+      while (!signal.aborted) {
+        if (pending.length > 0) {
+          for await (const message of client.fetch(
+            pending,
+            {
+              envelope: true,
+              headers: ['delivered-to'],
+              source: true,
+              flags: true,
+              internalDate: true,
+            },
+            { uid: true },
+          )) {
+            const currentMailSinks = getActiveMailSinks();
+            let allFailedWithServiceFailure = currentMailSinks.length > 0;
+            let lastServiceError: unknown = null;
+
+            for (const sink of currentMailSinks) {
+              const wm = sink.watermark!;
+              if (wm.uid !== undefined && message.uid <= wm.uid && wm.serviceFailure?.uid !== message.uid) {
+                allFailedWithServiceFailure = false;
+                continue;
+              }
+              if (wm.serviceFailure && wm.serviceFailure.uid < message.uid) {
+                continue;
+              }
+
+              try {
+                await sink.handleMail!(
+                  { type: 'mail.received', message, uidValidity },
+                  {
+                    clickUrl: config.dashboardPublicUrl,
+                    refreshIdentity: (address) => runtime.identity(address),
+                    wait: runtime.wait,
+                    error: runtime.error,
+                    identities: runtime.identities(),
+                  },
+                );
+                wm.uid = Math.max(wm.uid ?? 0, message.uid);
+                wm.serviceFailure = undefined;
+                wm.consecutivePublishSkips = 0;
+                allFailedWithServiceFailure = false;
+              } catch (err) {
+                const reason = err instanceof WatcherPublishError ? err.reason : err;
+                if (isSinkServiceFailure(reason)) {
+                  lastServiceError = reason;
+                  const now = runtime.now();
+                  const observed = wm.serviceFailure;
+                  if (!observed || observed.uid !== message.uid) {
+                    wm.serviceFailure = { uid: message.uid, sinceMs: now };
+                  } else {
+                    const unavailableMs = Math.max(0, now - observed.sinceMs);
+                    if (unavailableMs >= SERVICE_FAILURE_MAX_MS) {
+                      runtime.error(
+                        `[${sink.id}] CRITICAL IMAP watcher abandoned UID ${message.uid} after service ` +
+                          `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
+                        watcherErrorLogMessage(reason),
+                      );
+                      wm.serviceFailure = undefined;
+                      wm.uid = Math.max(wm.uid ?? 0, message.uid);
+                      allFailedWithServiceFailure = false;
+                    }
+                  }
+                } else {
+                  allFailedWithServiceFailure = false;
+                  wm.consecutivePublishSkips = (wm.consecutivePublishSkips ?? 0) + 1;
+                  const attempts = err instanceof WatcherPublishError ? err.attempts : 1;
+                  runtime.error(
+                    `[${sink.id}] IMAP watcher skipped UID ${message.uid} after ${attempts} publish attempts ` +
+                      `(consecutive skips: ${wm.consecutivePublishSkips}):`,
+                    watcherErrorLogMessage(reason),
+                  );
+                  wm.serviceFailure = undefined;
+                  wm.uid = Math.max(wm.uid ?? 0, message.uid);
+                }
+              }
+            }
+
+            if (allFailedWithServiceFailure && lastServiceError) {
+              throw lastServiceError instanceof Error ? lastServiceError : new Error(String(lastServiceError));
+            }
+
+            if (watermark) {
+              watermark.uidValidity = uidValidity;
+              const maxSinkUid = Math.max(0, ...currentMailSinks.map((s) => s.watermark?.uid ?? 0));
+              watermark.uid = Math.max(watermark.uid ?? 0, maxSinkUid);
+            }
+          }
+        }
+        pending = [];
+
+        await Promise.race([client.idle(), runtime.wait(3_000)]);
+        if (signal.aborted) break;
+        const found = await client.search({ all: true }, { uid: true });
+        const currentUids = Array.isArray(found) ? found : [];
+        pending = getUnionPending(getActiveMailSinks(), currentUids);
+      }
+    } else {
+      // Legacy single-sink dispatch path (100% backward compatible for tests)
+      const initial = await client.search({ all: true }, { uid: true });
+      let pending = unseenWatcherUids(Array.isArray(initial) ? initial : [], watermark, uidValidity);
+
+      while (!signal.aborted) {
+        if (pending.length > 0) {
+          for await (const message of client.fetch(
+            pending,
+            {
+              envelope: true,
+              headers: ['delivered-to'],
+              source: true,
+              flags: true,
+              internalDate: true,
+            },
+            { uid: true },
+          )) {
+            try {
+              await processWatchedMessage(
+                message,
+                runtime.identities(),
+                config.ntfy.pushPolicy,
+                dispatch,
+                {
+                  clickUrl: config.dashboardPublicUrl,
+                  // O(1) indexed lookup; mtime/invalidate cache still sees tier PUTs.
+                  refreshIdentity: (address) => runtime.identity(address),
+                  wait: runtime.wait,
+                  error: runtime.error,
+                },
+              );
+              consecutivePublishSkips = 0;
+              watermark.serviceFailure = undefined;
+            } catch (err) {
+              if (!(err instanceof WatcherPublishError)) throw err;
+              if (isNotifyServiceFailure(err.reason)) {
+                const now = runtime.now();
+                const observed = watermark.serviceFailure;
+                if (!observed || observed.uid !== message.uid) {
+                  watermark.serviceFailure = { uid: message.uid, sinceMs: now };
+                  throw err;
+                }
+                const unavailableMs = Math.max(0, now - observed.sinceMs);
+                if (unavailableMs < SERVICE_FAILURE_MAX_MS) throw err;
+                runtime.error(
+                  `[notify] CRITICAL IMAP watcher abandoned UID ${message.uid} after notification service ` +
+                    `failure persisted for ${unavailableMs}ms (hard limit: ${SERVICE_FAILURE_MAX_MS}ms):`,
+                  watcherErrorLogMessage(err.reason),
+                );
+              } else {
+                consecutivePublishSkips += 1;
+                runtime.error(
+                  `[notify] IMAP watcher skipped UID ${message.uid} after ${err.attempts} publish attempts ` +
+                    `(consecutive skips: ${consecutivePublishSkips}):`,
+                  watcherErrorLogMessage(err.reason),
+                );
+              }
+              watermark.serviceFailure = undefined;
+            }
+            watermark.uid = Math.max(watermark.uid ?? 0, message.uid);
+          }
+        }
+        pending = [];
+
+        await Promise.race([client.idle(), runtime.wait(3_000)]);
+        if (signal.aborted) break;
+        const found = await client.search({ all: true }, { uid: true });
+        pending = unseenWatcherUids(Array.isArray(found) ? found : [], watermark, uidValidity);
+      }
     }
   } finally {
     lock?.release();
@@ -1542,7 +1749,7 @@ type WatcherRuntime = {
 /** @internal Exported so the reconnect/error boundary can be regression-tested. */
 export async function runWatcher(
   signal: AbortSignal,
-  dispatch: WatcherDispatch,
+  dispatch: WatcherDispatch | EventDispatcher,
   runtime: WatcherRuntime = {
     connect: connectImap,
     watch: watchConnection,
@@ -1598,15 +1805,26 @@ export async function runWatcher(
 
 let watcherAbort: AbortController | undefined;
 
+/** Checks whether the notification watcher should run under the broadened startup gate (§11.4 item 1). */
+export function isNotificationWatcherEnabled(cfg = config): boolean {
+  return (cfg.ntfy.enabled && cfg.ntfy.pushPolicy !== 'none') || cfg.webhooks.enabled;
+}
+
 /** Start one process-wide watcher; calling it again returns the same stopper. */
-export function startNotificationWatcher(): () => void {
-  if (!config.ntfy.enabled || config.ntfy.pushPolicy === 'none') return () => {};
+export function startNotificationWatcher(cfg = config): () => void {
+  if (!isNotificationWatcherEnabled(cfg)) return () => {};
   if (!watcherAbort) {
     watcherAbort = new AbortController();
-    void runWatcher(watcherAbort.signal, { publish: notificationService().publish.bind(notificationService()) });
+    const dispatcher = getEventDispatcher();
+    // webhook sink 随 PR 4 注册；PR 2 中 WEBHOOKS_ENABLED 仅作启动门输入
+    if (!dispatcher.getSink('ntfy')) {
+      dispatcher.registerSink(createNtfySink());
+    }
+    void runWatcher(watcherAbort.signal, dispatcher);
   }
   return () => {
     watcherAbort?.abort();
     watcherAbort = undefined;
   };
 }
+
