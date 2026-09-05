@@ -30,7 +30,10 @@ const {
   readDeliveryLogRows,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
+  setReconstructRetryDelaysForTests,
   setWebhookDnsLookupForTests,
+  pendingReconstructionRetryCount,
+  countsTowardCircuitBreaker,
   validateWebhookUrlResolution,
   validateWebhookUrlStatic,
 } = await import('../src/lib/webhook-delivery.ts');
@@ -63,6 +66,7 @@ function setupTestDir(): void {
   (config.webhooks as any).codeEntryChars = 200;
   (config as any).oaePublicEdge = false;
   setWebhooksFailClosedForTests(false);
+  setReconstructRetryDelaysForTests();
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
 }
@@ -254,6 +258,90 @@ describe('webhook-delivery: Durable Logging & Compaction (§8.6, §14 item 5)', 
     const remaining = readAllDeliveryLogRows();
     expect(remaining.length).toBe(1);
     expect(remaining[0].eventId).toBe('evt_active');
+  });
+
+  test('R5: compactDeliveryLog prunes per-type terminal retryable sequences', () => {
+    const now = Date.now();
+    const oldTs = new Date(now - 40 * 86400000).toISOString();
+    const prev = config.webhooks.maxAttempts;
+    (config.webhooks as any).maxAttempts = 4;
+    try {
+      appendDeliveryLogRow({
+        ts: oldTs,
+        webhookId: 'whk_ping_done',
+        eventId: 'evt_ping_done',
+        runId: 'run_0',
+        deliveryId: 'dlv_ping_done',
+        type: 'webhook.ping',
+        address: null,
+        messageId: null,
+        uidValidity: null,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt: oldTs,
+        attempt: 3,
+        outcome: 'retryable',
+        status: 500,
+        durationMs: 20,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: null,
+      });
+      appendDeliveryLogRow({
+        ts: oldTs,
+        webhookId: 'whk_mail_done',
+        eventId: 'evt_mail_done',
+        runId: 'run_0',
+        deliveryId: 'dlv_mail_done',
+        type: 'mail.received',
+        address: 'alice@example.com',
+        messageId: '9',
+        uidValidity: 1,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt: oldTs,
+        attempt: 4,
+        outcome: 'retryable',
+        status: 500,
+        durationMs: 20,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: null,
+      });
+      appendDeliveryLogRow({
+        ts: oldTs,
+        webhookId: 'whk_mail_live',
+        eventId: 'evt_mail_live',
+        runId: 'run_0',
+        deliveryId: 'dlv_mail_live',
+        type: 'mail.received',
+        address: 'alice@example.com',
+        messageId: '10',
+        uidValidity: 1,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt: oldTs,
+        attempt: 3,
+        outcome: 'retryable',
+        status: 500,
+        durationMs: 20,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: new Date(now + 1000).toISOString(),
+      });
+
+      compactDeliveryLog(now, 30);
+      const remaining = readAllDeliveryLogRows();
+      expect(remaining.map((r) => r.eventId)).toEqual(['evt_mail_live']);
+    } finally {
+      (config.webhooks as any).maxAttempts = prev;
+    }
   });
 });
 
@@ -530,6 +618,57 @@ describe('webhook-delivery: Circuit Breaker & SSRF Immediate Disable (§8.5, D2a
     expect(disabledSub?.disabledReason).toBe('threshold');
   });
 
+  test('R5: unverified ping failures are exempt from the circuit breaker (§5.1)', () => {
+    const unverified = { state: 'unverified' as const };
+    const enabled = { state: 'enabled' as const };
+    expect(countsTowardCircuitBreaker('webhook.ping', 'permanent', unverified)).toBe(false);
+    expect(countsTowardCircuitBreaker('webhook.ping', 'retryable', unverified)).toBe(false);
+    expect(countsTowardCircuitBreaker('webhook.ping', 'permanent', enabled)).toBe(false);
+    expect(countsTowardCircuitBreaker('webhook.ping', 'retryable', enabled)).toBe(true);
+    expect(countsTowardCircuitBreaker('mail.received', 'permanent', unverified)).toBe(true);
+    expect(countsTowardCircuitBreaker('mail.received', 'retryable', unverified)).toBe(true);
+    expect(countsTowardCircuitBreaker('webhook.ping', 'refused', unverified)).toBe(false);
+  });
+
+  test('R5: creation ping retryable failure does not increment consecutiveFailures', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://setup-race.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    expect(sub.state).toBe('unverified');
+    (config.webhooks as any).disableThreshold = 1;
+    setWebhookDnsLookupForTests(async () => {
+      const err: any = new Error('getaddrinfo ENOTFOUND');
+      err.code = 'ENOTFOUND';
+      throw err;
+    });
+    try {
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId: 'evt_setup_ping',
+        type: 'webhook.ping',
+        payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === 'evt_setup_ping' && r.outcome === 'retryable',
+          ),
+        1500,
+      );
+      const after = getWebhookSubscription(sub.id);
+      expect(after?.consecutiveFailures).toBe(0);
+      expect(after?.state).toBe('unverified');
+    } finally {
+      setWebhookDnsLookupForTests(undefined);
+      (config.webhooks as any).disableThreshold = 10;
+      deliveryQueue.cancelAll();
+    }
+  });
+
   test('SSRF refusal disables endpoint immediately without waiting for threshold', async () => {
     const sub = createWebhookSubscription({
       url: 'https://ssrf.consumer.example/hook',
@@ -784,6 +923,58 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       (r) => r.eventId === 'evt_transient_mail' && r.outcome === 'pending',
     );
     expect(pendingRows.length).toBe(1);
+    expect(pendingReconstructionRetryCount()).toBe(1);
+  });
+
+  test('R5: transient reconstruction retries with bounded backoff and does not dead-letter', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://transient-retry.example/hook',
+      address: 'bob@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10_000).toISOString();
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9_000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_transient_retry',
+      runId: 'run_0',
+      deliveryId: 'dlv_transient_retry',
+      type: 'mail.received',
+      address: 'bob@test.example',
+      messageId: '1002',
+      uidValidity: 99999,
+      rfc822MessageId: '<retry-msg@example.com>',
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 10_000).toISOString(),
+      reason: null,
+    });
+
+    setReconstructRetryDelaysForTests(20, 80);
+    const first = await reconstructPendingDeliveriesAtBoot(bootTime);
+    expect(first.deadLettered).toBe(0);
+    expect(first.reconstructed).toBe(0);
+    expect(pendingReconstructionRetryCount()).toBe(1);
+
+    await new Promise((r) => setTimeout(r, 90));
+    expect(pendingReconstructionRetryCount()).toBe(1);
+    const dead = readAllDeliveryLogRows().filter(
+      (r) => r.eventId === 'evt_transient_retry' && r.outcome === 'permanent',
+    );
+    expect(dead.length).toBe(0);
+    deliveryQueue.cancelAll();
+    expect(pendingReconstructionRetryCount()).toBe(0);
   });
 
   test('P2-1: test probe slot acquisition timeout writes terminal row preventing orphan pending', async () => {

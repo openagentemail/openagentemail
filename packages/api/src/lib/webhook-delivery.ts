@@ -203,6 +203,23 @@ export function isTerminalDeliveryRow(
 }
 
 /**
+ * §5.1 / §8.5: creation-ping (and any ping while unverified) is the setup race.
+ * A permanent ping (typically 400/401 signature reject) is never counted.
+ */
+export function countsTowardCircuitBreaker(
+  type: WebhookEventType,
+  outcome: WebhookDeliveryOutcome,
+  sub: Pick<WebhookSubscription, 'state'>,
+): boolean {
+  if (outcome !== 'retryable' && outcome !== 'permanent') return false;
+  if (type === 'webhook.ping') {
+    if (sub.state === 'unverified') return false;
+    if (outcome === 'permanent') return false;
+  }
+  return true;
+}
+
+/**
  * Parse HTTP Retry-After as delay-seconds. The entire trimmed value must be a
  * base-10 integer in 1..3600; strings like "3600junk" are rejected.
  */
@@ -496,12 +513,7 @@ export function compactDeliveryLog(
       return new Date(b.ts).getTime() - new Date(a.ts).getTime();
     });
     const latest = groupRows[0]!;
-    const isFinal =
-      latest.outcome === 'success' ||
-      latest.outcome === 'permanent' ||
-      latest.outcome === 'refused' ||
-      (latest.outcome === 'retryable' && latest.attempt >= MAX_RETRY_SCHEDULE_ATTEMPTS);
-    if (!isFinal) {
+    if (!isTerminalDeliveryRow(latest)) {
       activeGroupKeys.add(key);
     }
   }
@@ -1318,6 +1330,11 @@ class WebhookDeliveryQueue {
     }
     this.activeTimers.clear();
     this.jobs.clear();
+    cancelReconstructionRetries();
+  }
+
+  isJobQueued(webhookId: string, eventId: string, runId: string): boolean {
+    return this.jobs.has(`${webhookId}:${eventId}:${runId}`);
   }
 
   hasQueuedJob(webhookId: string, eventId?: string): boolean {
@@ -1683,51 +1700,37 @@ class WebhookDeliveryQueue {
         address: sub.address,
         webhookId: sub.id,
       });
-    } else if (result.outcome === 'permanent') {
-      this.jobs.delete(key);
-      updateWebhookSubscription(sub.id, (s) => {
-        s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
-        if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
-          s.state = 'disabled';
-          s.disabledReason = 'threshold';
-        }
-      });
-
-      const updated = getWebhookSubscription(sub.id);
-      if (updated?.state === 'disabled') {
-        recordAuditEvent({
-          event: 'webhook.disabled',
-          outcome: 'ok',
-          address: sub.address,
-          webhookId: sub.id,
-        });
-      }
-    } else if (result.outcome === 'retryable') {
-      updateWebhookSubscription(sub.id, (s) => {
-        s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
-        if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
-          s.state = 'disabled';
-          s.disabledReason = 'threshold';
-        }
-      });
-
-      const updated = getWebhookSubscription(sub.id);
-      if (updated?.state === 'disabled') {
-        recordAuditEvent({
-          event: 'webhook.disabled',
-          outcome: 'ok',
-          address: sub.address,
-          webhookId: sub.id,
-        });
-      }
-
-      // Check if breaker tripped; if so, dead-letter and stop retrying
-      if (updated?.state === 'disabled') {
+    } else if (result.outcome === 'permanent' || result.outcome === 'retryable') {
+      if (result.outcome === 'permanent') {
         this.jobs.delete(key);
-        result.outcome = 'permanent';
-        result.reason = 'webhook_disabled';
-      } else {
-        // Calculate retry schedule
+      }
+
+      if (countsTowardCircuitBreaker(job.type, result.outcome, sub)) {
+        updateWebhookSubscription(sub.id, (s) => {
+          s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
+          if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
+            s.state = 'disabled';
+            s.disabledReason = 'threshold';
+          }
+        });
+
+        const updated = getWebhookSubscription(sub.id);
+        if (updated?.state === 'disabled') {
+          recordAuditEvent({
+            event: 'webhook.disabled',
+            outcome: 'ok',
+            address: sub.address,
+            webhookId: sub.id,
+          });
+          if (result.outcome === 'retryable') {
+            this.jobs.delete(key);
+            result.outcome = 'permanent';
+            result.reason = 'webhook_disabled';
+          }
+        }
+      }
+
+      if (result.outcome === 'retryable') {
         const retryAfterMatch = result.reason?.match(/^rate_limited_retry_after_(\d+)$/);
         const retryAfterSec = retryAfterMatch ? Number.parseInt(retryAfterMatch[1]!, 10) : undefined;
         nextScheduledTime = calculateNextAttemptTime(currentAttempt, job.firstAttemptAt, {
@@ -1737,7 +1740,6 @@ class WebhookDeliveryQueue {
         });
 
         if (nextScheduledTime === null) {
-          // Max attempts reached: dead-letter (§8.3)
           this.jobs.delete(key);
         }
       }
@@ -2077,7 +2079,7 @@ export async function executeWebhookTestProbe(
       address: subscription.address,
       webhookId: subscription.id,
     });
-  } else {
+  } else if (countsTowardCircuitBreaker('webhook.ping', fetchResult.outcome, subscription)) {
     updateWebhookSubscription(subscription.id, (s) => {
       s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
       if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
@@ -2349,11 +2351,62 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   };
 }
 
+export const RECONSTRUCT_RETRY_INITIAL_MS = 30_000;
+export const RECONSTRUCT_RETRY_MAX_MS = 600_000;
+
+let reconstructRetryInitialMs = RECONSTRUCT_RETRY_INITIAL_MS;
+let reconstructRetryMaxMs = RECONSTRUCT_RETRY_MAX_MS;
+const reconstructRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const reconstructRetryDelays = new Map<string, number>();
+
+export function setReconstructRetryDelaysForTests(initialMs?: number, maxMs?: number): void {
+  cancelReconstructionRetries();
+  reconstructRetryInitialMs = initialMs ?? RECONSTRUCT_RETRY_INITIAL_MS;
+  reconstructRetryMaxMs = maxMs ?? RECONSTRUCT_RETRY_MAX_MS;
+}
+
+export function pendingReconstructionRetryCount(): number {
+  return reconstructRetryTimers.size;
+}
+
+function cancelReconstructionRetries(): void {
+  for (const timer of reconstructRetryTimers.values()) {
+    clearTimeout(timer);
+  }
+  reconstructRetryTimers.clear();
+  reconstructRetryDelays.clear();
+}
+
+function nextReconstructRetryDelay(key: string): number {
+  const prev = reconstructRetryDelays.get(key);
+  const next =
+    prev === undefined
+      ? reconstructRetryInitialMs
+      : Math.min(prev * 2, reconstructRetryMaxMs);
+  reconstructRetryDelays.set(key, next);
+  return next;
+}
+
+function scheduleReconstructionRetry(key: string): void {
+  const existing = reconstructRetryTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const delay = nextReconstructRetryDelay(key);
+  const timer = setTimeout(() => {
+    reconstructRetryTimers.delete(key);
+    void reconstructPendingDeliveriesAtBoot(Date.now(), { onlyKeys: new Set([key]) });
+  }, delay);
+  timer.unref?.();
+  reconstructRetryTimers.set(key, timer);
+}
+
 /**
  * Boot reconstruction algorithm (§8.6).
  * Reconstructs pending delivery attempts from webhook-deliveries.jsonl.
  */
-export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()): Promise<{
+export async function reconstructPendingDeliveriesAtBoot(
+  bootTime = Date.now(),
+  options?: { onlyKeys?: Set<string> },
+): Promise<{
   reconstructed: number;
   deadLettered: number;
 }> {
@@ -2376,6 +2429,8 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
   let deadLettered = 0;
 
   for (const [key, groupRows] of groups.entries()) {
+    if (options?.onlyKeys && !options.onlyKeys.has(key)) continue;
+
     // 2. Take only the row with highest attempt, tie-broken on ts
     groupRows.sort((a, b) => {
       if (a.attempt !== b.attempt) return b.attempt - a.attempt;
@@ -2386,6 +2441,43 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
     // 3. Discard group if latest row is final (§8.6 step 3) using the
     // event type's actual cap (ping=3, others=WEBHOOK_MAX_ATTEMPTS).
     if (isTerminalDeliveryRow(latest)) {
+      reconstructRetryDelays.delete(key);
+      continue;
+    }
+
+    if (deliveryQueue.isJobQueued(latest.webhookId, latest.eventId, latest.runId)) {
+      reconstructRetryDelays.delete(key);
+      continue;
+    }
+
+    const createdMs = Date.parse(latest.eventCreatedAt);
+    if (Number.isFinite(createdMs) && bootTime > createdMs + RETRY_HORIZON_SEC * 1000) {
+      deadLettered++;
+      reconstructRetryDelays.delete(key);
+      appendDeliveryLogRow({
+        ts: new Date().toISOString(),
+        webhookId: latest.webhookId,
+        eventId: latest.eventId,
+        runId: latest.runId,
+        deliveryId: `dlv_${randomUUID()}`,
+        type: latest.type,
+        address: latest.address,
+        messageId: latest.messageId,
+        uidValidity: latest.uidValidity,
+        rfc822MessageId: latest.rfc822MessageId,
+        taskId: latest.taskId,
+        taskCreatedAt: latest.taskCreatedAt,
+        expiresInSec: latest.expiresInSec,
+        eventCreatedAt: latest.eventCreatedAt,
+        attempt: latest.attempt,
+        outcome: 'permanent',
+        status: null,
+        durationMs: null,
+        sensitive: false,
+        replay: latest.replay,
+        nextAttemptAt: null,
+        reason: 'retry_horizon_exceeded',
+      });
       continue;
     }
 
@@ -2417,6 +2509,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
         nextAttemptAt: null,
         reason: !sub ? 'subscription_deleted' : 'webhook_disabled',
       });
+      reconstructRetryDelays.delete(key);
       continue;
     }
 
@@ -2636,14 +2729,14 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
       });
 
       reconstructed++;
+      reconstructRetryDelays.delete(key);
     } catch (err: any) {
       if (err?.isTransient) {
         console.warn(
-          `[webhooks] boot reconstruction transient failure for delivery ${latest.eventId} / webhook ${latest.webhookId}, retaining pending state:`,
+          `[webhooks] boot reconstruction transient failure for delivery ${latest.eventId} / webhook ${latest.webhookId}, retrying with bounded backoff:`,
           err?.message,
         );
-        // Do NOT append a permanent dead-letter row!
-        // Leave the pending row intact in the delivery log for next boot/retry.
+        scheduleReconstructionRetry(key);
         continue;
       }
 
@@ -2672,6 +2765,7 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
         nextAttemptAt: null,
         reason: err?.reason || err?.message || 'reconstruction_failed',
       });
+      reconstructRetryDelays.delete(key);
     }
   }
 
