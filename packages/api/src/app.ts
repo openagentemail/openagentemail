@@ -143,7 +143,7 @@ export function createApp(options: AppOptions = {}): Hono {
     app.route('/ui/oauth', createUiOAuthPageRoutes(uiSessions, options.oauth ?? {}));
     app.route('/ui/frame', createUiFrameRoutes(uiSessions));
     // ADR #26：shell 深链必须在 API / OAuth / frame 之后，防止吞专用路由。
-    registerUiShell(app);
+    registerUiShell(app, uiSessions);
   }
 
   app.onError((err, c) => {

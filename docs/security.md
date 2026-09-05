@@ -274,3 +274,112 @@ confirm with the user when the trigger was not from a verified internal message.
 
 建议将 **发信、建任务、对外通知** 等有副作用的工具置于人工确认之后；
 仅依赖围栏文案不足以阻断被注入后的工具调用链。
+
+## UI Query-Token 登录与反向代理净化 (Issue #132)
+
+OpenAgentEmail 支持通过 `GET /ui?token=<admin-token>` 或深链 `GET /ui/tasks/123?token=...` 实现免密书签直达。为了防止长期有效的主凭据滞留在浏览器历史、Referer 头或反向代理日志中，系统采用了**服务端 302 净化 + 一次性交换码 + Provenance 审计**的三层纵深防御架构（Decision C）。
+
+### 架构与核心硬约束
+
+1. **服务端 302 净化与一次性交换码（Exchange Code）：**
+   - 当收到带有 `?token=` 的 UI 页面请求时，服务端立即在进入 UI Shell 路由时拦截并校验令牌有效性。
+   - 验证通过后，在服务端签发一个高熵随机的 32-byte base64url 一次性交换码，并返回 `302 Found` 重定向至 `${pathname}?code=${exchangeCode}`（保留其他 query 参数与 deep-link path）。
+   - 重定向响应中强制注入 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`，防止下游反向代理/CDN 缓存重定向页面以及跨站 Referer 泄露。
+   - 令牌无效时，同样返回 302 重定向至无参干净路径（如 `/ui`），并记录审计拒绝日志，绝不把无效令牌回显或滞留在客户端。
+2. **硬约束 1：换过即焚（One-Time Use & Replay Prevention）：**
+   - 交换码在客户端通过 `POST /ui/api/session` 兑换成功后立即销毁并记录至已消费墓碑表。
+   - 任何对已消费交换码的重放请求立即拒绝（401 Unauthorized），并在审计日志记录 `event: "ui.session.login"`, `outcome: "denied"`。
+3. **硬约束 2：TTL ≤ 10 分钟（Strict Expiration）：**
+   - 交换码的有效期限严格限制在 10 分钟以内（服务端内部默认 10 分钟，且通过配置参数初始化时硬性 clamp 至最大 10 分钟）。
+   - 超时未消费的交换码立即失效作废，兑换时返回 401 Unauthorized。
+4. **硬约束 3：绑定签发对象（Recipient Binding）：**
+   - 交换码在签发时严格绑定原始令牌解析到的身份对象（Admin 或特定 Identity 地址），不可跨身份冒领或降权/越权换取他人会话。
+5. **客户端纵深防御：**
+   - 前端脚本消费 `?code=` 后立即调用 `history.replaceState` 从浏览器地址栏清除参数。
+   - 若客户端直接遇到 `?token=`，前端亦直接剥离参数并返回 null，绝不直接消费令牌本体，而是引导用户通过正常流程登录。
+6. **Provenance 来源审计：**
+   - 兑换请求显式携带 `provenance: "link-exchange"`，在审计事件 `ui.session.login` 中与普通表单粘贴登录严格区分。
+   - 链接登录建立的会话会标记 `oae-link-login` 状态，并在 UI 顶部和 OAuth 同意页醒目展示「Signed in via link as Admin session」警示横幅。
+
+### 反向代理日志净化建议 (Reverse-Proxy Query-String Scrubbing)
+
+虽然服务端的 302 重定向在首个网络往返中即可将长效 `?token=` 替换为短效一次性码，但在最外层反向代理或 CDN 的访问日志中，首个请求的 URL 查询参数仍可能被默认记录。
+
+强烈建议生产环境运维人员在接入层反向代理中配置查询参数过滤或日志屏蔽：
+
+#### 1. Nginx
+
+使用 `map` 指令在日志中过滤敏感 query 参数：
+
+```nginx
+# 过滤日志中的 URI 查询参数
+map $request_uri $scrubbed_request_uri {
+    ~^(?P<path>[^?]*)\?.*$  $path;
+    default                 $request_uri;
+}
+
+log_format scrubbed '$remote_addr - $remote_user [$time_local] '
+                    '"$request_method $scrubbed_request_uri $server_protocol" '
+                    '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+server {
+    listen 443 ssl http2;
+    server_name mail.example.com;
+
+    access_log /var/log/nginx/access.log scrubbed;
+
+    location / {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### 2. Caddy
+
+在 Caddyfile 中使用 `format filter` 屏蔽 `token` 与 `code`：
+
+```caddy
+mail.example.com {
+    log {
+        output file /var/log/caddy/access.log
+        format filter {
+            wrap json
+            fields {
+                uri replace \?token=[^&]+ ?token=[REDACTED]
+                uri replace &token=[^&]+ &token=[REDACTED]
+                uri replace \?code=[^&]+ ?code=[REDACTED]
+                uri replace &code=[^&]+ &code=[REDACTED]
+            }
+        }
+    }
+
+    reverse_proxy 127.0.0.1:3100
+}
+```
+
+#### 3. Cloudflare (Rules / Logpush)
+
+- 在 **Logpush** 中开启敏感参数屏蔽：针对 `ClientRequestURI` 配置 Log Redaction 规则，过滤 `token` 与 `code` 查询参数。
+- 注意：请勿在 Cloudflare Transform Rules 中剥离向源站转发的 `token` 参数，否则服务端无法完成初次 302 交换码签发。
+
+#### 4. Traefik
+
+在 Traefik 中配置访问日志红线屏蔽：
+
+```yaml
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  format: json
+  filters:
+    statusCodes:
+      - "200-599"
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: keep
+      names:
+        Authorization: redact
+```

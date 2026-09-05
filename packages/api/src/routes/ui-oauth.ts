@@ -175,6 +175,7 @@ function consentFormHtml(input: {
   loopbackWarning: boolean;
   identities: { address: string }[];
   error?: string;
+  hasLinkLoginMarker?: boolean;
 }): string {
   const host = clientHostname(input.clientId);
   const redirectHost = redirectHostname(input.redirectUri);
@@ -189,11 +190,16 @@ function consentFormHtml(input: {
     ? `<p class="warn">This client redirects to a loopback address (<strong>${escapeHtml(redirectHost)}</strong>). Only continue if you started this authorization yourself.</p>`
     : '';
 
+  const linkLoginNotice = input.hasLinkLoginMarker
+    ? `<p class="warn" id="link-login-notice" role="status" aria-live="polite">Signed in via link as Admin session</p>`
+    : '';
+
   return shell(
     'Authorize',
     `<section class="card">
       <h1>Authorize application</h1>
       <p class="muted"><strong>${escapeHtml(input.clientName)}</strong> wants access to an OpenAgent identity via MCP.</p>
+      ${linkLoginNotice}
       <dl class="meta">
         <dt>Client</dt><dd>${escapeHtml(input.clientName)}</dd>
         <dt>Client ID host</dt><dd>${escapeHtml(host)}</dd>
@@ -266,6 +272,8 @@ export function createUiOAuthPageRoutes(
       );
     }
 
+    const hasLinkLoginMarker = getCookie(c, 'oae-link-login') === '1';
+
     return htmlResponse(
       c,
       consentFormHtml({
@@ -277,6 +285,7 @@ export function createUiOAuthPageRoutes(
         resource: pre.resource,
         loopbackWarning: pre.loopbackWarning,
         identities: listIdentities(),
+        hasLinkLoginMarker,
       }),
     );
   });

@@ -18,6 +18,7 @@ import { z } from 'zod';
 import type { Auth } from './auth.ts';
 import { clientIp } from './net.ts';
 import { consumeOAuthReturnCookie } from './oauth-return.ts';
+import { recordAuditEvent } from './audit.ts';
 
 const COOKIE_NAME = 'oae_ui';
 const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
@@ -30,6 +31,8 @@ const MAX_IP_FAILURES = 10;
 const MAX_GLOBAL_FAILURES = 60;
 /** authenticate 更新 lastSeenAt 的落盘节流：默认 5 分钟内不重复写盘。 */
 export const LAST_SEEN_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
+/** ?token= 换取的一次性交换码默认 TTL：硬约束 ≤10 分钟。 */
+export const EXCHANGE_CODE_TTL_MS = 10 * 60 * 1000;
 
 type Session = {
   /** 仅进程内持有；落盘绝不写明文 token。重启后靠 tokenHash 反解。 */
@@ -38,6 +41,20 @@ type Session = {
   createdAt: number;
   lastSeenAt: number;
   remembered: boolean;
+};
+
+type ExchangeCodeRecord = {
+  auth: Auth;
+  tokenHash: string;
+  createdAt: number;
+  expiresAt: number;
+  ip: string;
+};
+
+type ConsumedCodeRecord = {
+  auth: Auth;
+  consumedAt: number;
+  expiresAt: number;
 };
 
 /** 落盘条目：仅 sidHash → 哈希与时间戳，无 sid/token 原文。 */
@@ -76,6 +93,10 @@ type SessionStoreOptions = {
   persistPath?: string;
   /** lastSeenAt 落盘节流间隔；默认 LAST_SEEN_PERSIST_INTERVAL_MS。 */
   lastSeenPersistIntervalMs?: number;
+  /**
+   * 一次性交换码 TTL（毫秒）。硬约束 ≤ 10 分钟；测试可注入更短值加速验证。
+   */
+  exchangeCodeTtlMs?: number;
 };
 
 function sha256(value: string): string {
@@ -115,12 +136,15 @@ export class UiSessionStore {
   private readonly sessions = new Map<string, Session>();
   private readonly ipFailures = new Map<string, number[]>();
   private globalFailures: number[] = [];
+  private readonly exchangeCodes = new Map<string, ExchangeCodeRecord>();
+  private readonly consumedCodes = new Map<string, ConsumedCodeRecord>();
   private readonly resolve: (token: string) => Auth | null;
   private readonly resolveHash: ((tokenHash: string) => Auth | null) | null;
   private readonly maxSessions: number;
   private readonly maxSessionsPerToken: number;
   private readonly persistPath: string | null;
   private readonly lastSeenPersistIntervalMs: number;
+  private readonly exchangeCodeTtlMs: number;
   /** 上次因 lastSeenAt 滑动而落盘的时间（按墙钟；节流用）。 */
   private lastSeenPersistedAt = 0;
 
@@ -132,10 +156,20 @@ export class UiSessionStore {
     this.persistPath = options.persistPath ?? null;
     this.lastSeenPersistIntervalMs =
       options.lastSeenPersistIntervalMs ?? LAST_SEEN_PERSIST_INTERVAL_MS;
+    this.exchangeCodeTtlMs = Math.min(
+      options.exchangeCodeTtlMs ?? EXCHANGE_CODE_TTL_MS,
+      EXCHANGE_CODE_TTL_MS,
+    );
     if (this.persistPath) this.loadFromDisk(Date.now());
   }
 
-  create(token: string, ip: string, now = Date.now(), remember = false): CreateResult {
+  create(
+    token: string,
+    ip: string,
+    now = Date.now(),
+    remember = false,
+    provenance?: string,
+  ): CreateResult {
     const removed = this.cleanup(now);
     token = token.trim();
 
@@ -145,6 +179,12 @@ export class UiSessionStore {
       this.globalFailures.length >= MAX_GLOBAL_FAILURES
     ) {
       if (removed) this.persist();
+      recordAuditEvent({
+        event: 'ui.session.login',
+        outcome: 'rate_limited',
+        ...(provenance !== undefined ? { provenance } : {}),
+        ip,
+      });
       return { ok: false, reason: 'rate_limited' };
     }
 
@@ -154,6 +194,12 @@ export class UiSessionStore {
       this.ipFailures.set(ip, ipFailures);
       this.globalFailures.push(now);
       if (removed) this.persist();
+      recordAuditEvent({
+        event: 'ui.session.login',
+        outcome: 'denied',
+        ...(provenance !== undefined ? { provenance } : {}),
+        ip,
+      });
       return { ok: false, reason: 'invalid_token' };
     }
 
@@ -194,7 +240,199 @@ export class UiSessionStore {
     // create / 驱逐 / 过期清理 → 必落盘；同时重置节流时钟避免紧随的 authenticate 再写一次
     this.persist();
     this.lastSeenPersistedAt = now;
+
+    recordAuditEvent({
+      event: 'ui.session.login',
+      outcome: 'ok',
+      ...(provenance !== undefined ? { provenance } : {}),
+      address: auth.kind === 'identity' ? auth.address : 'admin',
+      ip,
+    });
+
     return { ok: true, sid, auth };
+  }
+
+  /**
+   * 服务端验令牌并签发一次性交换码（GET /ui?token= 净化流核心）。
+   * 签发时刻落审计；硬约束 TTL ≤ 10 分钟。
+   */
+  mintExchangeCode(
+    token: string,
+    ip: string,
+    now = Date.now(),
+  ): { ok: true; code: string; auth: Auth } | { ok: false; reason: 'invalid_token' | 'rate_limited' } {
+    this.cleanupExchangeCodes(now);
+    token = token.trim();
+
+    const ipFailures = this.recentIpFailures(ip, now);
+    if (
+      ipFailures.length >= MAX_IP_FAILURES ||
+      this.globalFailures.length >= MAX_GLOBAL_FAILURES
+    ) {
+      recordAuditEvent({
+        event: 'ui.token.exchange_mint',
+        outcome: 'rate_limited',
+        ip,
+      });
+      return { ok: false, reason: 'rate_limited' };
+    }
+
+    const auth = this.resolve(token);
+    if (!auth) {
+      ipFailures.push(now);
+      this.ipFailures.set(ip, ipFailures);
+      this.globalFailures.push(now);
+      recordAuditEvent({
+        event: 'ui.token.exchange_mint',
+        outcome: 'denied',
+        ip,
+      });
+      return { ok: false, reason: 'invalid_token' };
+    }
+
+    const code = randomBytes(32).toString('base64url');
+    const codeHash = sha256(code);
+    const tokenHash = sha256(token);
+    const expiresAt = now + this.exchangeCodeTtlMs;
+
+    this.exchangeCodes.set(codeHash, {
+      auth,
+      tokenHash,
+      createdAt: now,
+      expiresAt,
+      ip,
+    });
+
+    recordAuditEvent({
+      event: 'ui.token.exchange_mint',
+      outcome: 'ok',
+      address: auth.kind === 'identity' ? auth.address : 'admin',
+      ip,
+    });
+
+    return { ok: true, code, auth };
+  }
+
+  /**
+   * 客户端消费一次性交换码换取会话（POST /ui/api/session { code, provenance: 'link-exchange' }）。
+   * 硬约束 1: 换过即焚，重放 → 401 + 审计 denied。
+   * 硬约束 2: TTL ≤ 10 分钟，过期即废。
+   * 硬约束 3: 严格绑定签发对象（身份地址+签发上下文），不可换他人会话。
+   */
+  exchangeCode(
+    code: string,
+    ip: string,
+    now = Date.now(),
+    remember = false,
+    provenance?: string,
+  ): CreateResult {
+    this.cleanupExchangeCodes(now);
+    code = code.trim();
+    const codeHash = sha256(code);
+
+    // 硬约束 1: 重放检测
+    if (this.consumedCodes.has(codeHash)) {
+      const consumed = this.consumedCodes.get(codeHash)!;
+      recordAuditEvent({
+        event: 'ui.session.login',
+        outcome: 'denied',
+        provenance: provenance ?? 'link-exchange',
+        address: consumed.auth.kind === 'identity' ? consumed.auth.address : 'admin',
+        ip,
+      });
+      return { ok: false, reason: 'invalid_token' };
+    }
+
+    const record = this.exchangeCodes.get(codeHash);
+    if (!record) {
+      recordAuditEvent({
+        event: 'ui.session.login',
+        outcome: 'denied',
+        provenance: provenance ?? 'link-exchange',
+        ip,
+      });
+      return { ok: false, reason: 'invalid_token' };
+    }
+
+    // 硬约束 2: TTL 检测
+    if (now >= record.expiresAt) {
+      this.exchangeCodes.delete(codeHash);
+      recordAuditEvent({
+        event: 'ui.session.login',
+        outcome: 'denied',
+        provenance: provenance ?? 'link-exchange',
+        address: record.auth.kind === 'identity' ? record.auth.address : 'admin',
+        ip,
+      });
+      return { ok: false, reason: 'invalid_token' };
+    }
+
+    // 硬约束 1: 换过即焚，进入已消费墓碑表
+    this.exchangeCodes.delete(codeHash);
+    this.consumedCodes.set(codeHash, {
+      auth: record.auth,
+      consumedAt: now,
+      expiresAt: record.expiresAt,
+    });
+
+    // 硬约束 3: 会话严格绑定签发对象身份（record.auth + record.tokenHash）
+    const removed = this.cleanup(now);
+
+    let principalSessions = 0;
+    let oldestPrincipalHash: string | null = null;
+    let oldestPrincipalSeen = Infinity;
+    for (const [sidHash, session] of this.sessions) {
+      if (session.tokenHash !== record.tokenHash) continue;
+      principalSessions += 1;
+      if (session.lastSeenAt < oldestPrincipalSeen) {
+        oldestPrincipalSeen = session.lastSeenAt;
+        oldestPrincipalHash = sidHash;
+      }
+    }
+    let evicted = false;
+    if (principalSessions >= this.maxSessionsPerToken) {
+      if (oldestPrincipalHash) {
+        this.sessions.delete(oldestPrincipalHash);
+        evicted = true;
+      }
+    }
+    if (this.sessions.size >= this.maxSessions) {
+      if (removed || evicted) this.persist();
+      return { ok: false, reason: 'capacity' };
+    }
+
+    const sid = randomBytes(32).toString('base64url');
+    this.sessions.set(sha256(sid), {
+      tokenHash: record.tokenHash,
+      createdAt: now,
+      lastSeenAt: now,
+      remembered: remember,
+    });
+    this.persist();
+    this.lastSeenPersistedAt = now;
+
+    recordAuditEvent({
+      event: 'ui.session.login',
+      outcome: 'ok',
+      provenance: provenance ?? 'link-exchange',
+      address: record.auth.kind === 'identity' ? record.auth.address : 'admin',
+      ip,
+    });
+
+    return { ok: true, sid, auth: record.auth };
+  }
+
+  private cleanupExchangeCodes(now: number): void {
+    for (const [hash, record] of this.exchangeCodes) {
+      if (now >= record.expiresAt) {
+        this.exchangeCodes.delete(hash);
+      }
+    }
+    for (const [hash, record] of this.consumedCodes) {
+      if (now >= record.expiresAt) {
+        this.consumedCodes.delete(hash);
+      }
+    }
   }
 
   authenticate(sid: string, now = Date.now()): { auth: Auth } | null {
@@ -234,6 +472,16 @@ export class UiSessionStore {
   /** 测试辅助：当前内存会话数。 */
   sizeForTests(): number {
     return this.sessions.size;
+  }
+
+  /** 测试辅助：当前活动一次性交换码数。 */
+  activeCodesCountForTests(): number {
+    return this.exchangeCodes.size;
+  }
+
+  /** 测试辅助：当前已消费交换码墓碑数。 */
+  consumedCodesCountForTests(): number {
+    return this.consumedCodes.size;
   }
 
   /** 测试辅助：lastSeen 落盘节流时钟（墙钟 ms）。 */
@@ -371,8 +619,17 @@ declare module 'hono' {
 }
 
 const loginSchema = z
-  .object({ token: z.string().min(1).max(512), remember: z.boolean().optional() })
-  .strict();
+  .object({
+    token: z.string().min(1).max(512).optional(),
+    code: z.string().min(1).max(512).optional(),
+    remember: z.boolean().optional(),
+    provenance: z.string().min(1).max(64).optional(),
+  })
+  .strict()
+  .refine(
+    (data) => (data.token !== undefined) !== (data.code !== undefined),
+    { message: 'Either token or code must be provided, but not both' },
+  );
 
 function cookieSecure(url: string): boolean {
   const parsed = new URL(url);
@@ -490,7 +747,10 @@ export function createUiSessionRoutes(store: UiSessionStore): Hono {
       if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
 
       const remember = parsed.data.remember === true;
-      const result = store.create(parsed.data.token, connectionIp(c), undefined, remember);
+      const provenance = parsed.data.provenance;
+      const result = parsed.data.code !== undefined
+        ? store.exchangeCode(parsed.data.code, connectionIp(c), undefined, remember, provenance)
+        : store.create(parsed.data.token!, connectionIp(c), undefined, remember, provenance);
       if (!result.ok) {
         if (result.reason === 'invalid_token') {
           return c.json({ error: 'invalid_token' }, 401);

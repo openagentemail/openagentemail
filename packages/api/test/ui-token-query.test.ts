@@ -12,7 +12,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'x';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-ui-token-query-'));
 
-const { describe, expect, test } = await import('bun:test');
+const { describe, expect, test, beforeEach } = await import('bun:test');
 const { Hono } = await import('hono');
 const {
   UiSessionStore,
@@ -21,6 +21,9 @@ const {
   uiSessionBodyLimit,
   requireUiOrigin,
 } = await import('../src/lib/ui-session.ts');
+const { registerUiShell } = await import('../src/routes/ui-assets.ts');
+const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
+const { createUiOAuthPageRoutes } = await import('../src/routes/ui-oauth.ts');
 
 const APP_JS = readFileSync(
   resolve(import.meta.dir, '../src/ui/client/app.js'),
@@ -456,10 +459,10 @@ function createClientHarness(options: HarnessOptions) {
 }
 
 describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
-  // 1. 无会话 + ?token=<valid> → 自动登录成功，进入应用，URL 中 token 已剥离（断言 replaceState 后的 location）。
-  test('1. Unauthenticated + ?token=<valid> auto-logins successfully and strips token from URL', async () => {
+  // 1. 无会话 + ?code=<valid> → 自动登录成功，进入应用，URL 中 code 已剥离（断言 replaceState 后的 location）。
+  test('1. Unauthenticated + ?code=<valid> auto-logins successfully and strips code from URL', async () => {
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=secret-token-123',
+      initialUrl: 'https://admin.example/ui?code=secret-code-123',
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
@@ -468,17 +471,17 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
 
     await harness.instance.runStart();
 
-    // 断言 1: URL 中 token 已被 replaceState 剥离
+    // 断言 1: URL 中 code 已被 replaceState 剥离
     expect(harness.getCurrentUrl()).toBe('https://admin.example/ui');
     expect(harness.calls.replacedUrls).toEqual(['/ui']);
 
-    // 断言 2: 请求了 /ui/api/me 后再请求 /ui/api/session，且 remember 始终为 false（复选框自身不被重置）
+    // 断言 2: 请求了 /ui/api/me 后再请求 /ui/api/session，且 remember 始终为 false（复选框自身不被重置），带 provenance
     expect(harness.calls.fetches.length).toBe(2);
     expect(harness.calls.fetches[0].url).toBe('/ui/api/me');
     expect(harness.calls.fetches[1].url).toBe('/ui/api/session');
     expect(harness.calls.fetches[1].init?.method).toBe('POST');
     const sentBody = JSON.parse(harness.calls.fetches[1].init?.body as string);
-    expect(sentBody).toEqual({ token: 'secret-token-123', remember: false });
+    expect(sentBody).toEqual({ code: 'secret-code-123', provenance: 'link-exchange', remember: false });
     expect(harness.loginRemember.checked).toBe(true);
 
     // 断言 3: 进入应用
@@ -488,7 +491,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.loginView.hidden).toBe(true);
     expect(harness.state.me).toEqual({ kind: 'admin' });
 
-    // 断言 4: 登录输入框被清空，不留 token
+    // 断言 4: 登录输入框被清空，不留 token / code
     expect(harness.loginToken.value).toBe('');
 
     // 断言 5: 链接登录成功展示 visible notice banner 且激活 body class
@@ -497,12 +500,12 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
   });
 
-  // 2. 无会话 + ?token=<invalid> → 登录表单显示、错误文案正确、token 不回显、参数已剥离。
-  test('2. Unauthenticated + ?token=<invalid> shows login error, strips token from URL, and never echoes token', async () => {
+  // 2. 无会话 + ?code=<invalid> → 登录表单显示、错误文案正确、credential 不回显、参数已剥离。
+  test('2. Unauthenticated + ?code=<invalid> shows login error, strips code from URL, and never echoes credential', async () => {
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=bad-token-xyz',
+      initialUrl: 'https://admin.example/ui?code=bad-code-xyz',
       meResponse: { status: 401 },
-      sessionResponse: { status: 401, body: { error: 'invalid_token' } },
+      sessionResponse: { status: 401, body: { error: 'invalid_exchange_code' } },
     });
 
     await harness.instance.runStart();
@@ -520,16 +523,16 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.loginError.textContent).toBe('That token is not valid.');
     expect(harness.calls.showLogin).toContain('That token is not valid.');
 
-    // 断言 4: token 不得回显到输入框或错误文案中
+    // 断言 4: credential 不得回显到输入框或错误文案中
     expect(harness.loginToken.value).toBe('');
-    expect(harness.loginError.textContent).not.toContain('bad-token-xyz');
+    expect(harness.loginError.textContent).not.toContain('bad-code-xyz');
   });
 
-  // 3. 有会话 + ?token=<anything> → 直接进应用、不发起第二个 session POST、参数剥离、原会话保持。
-  test('3. Authenticated (200 on /ui/api/me) + ?token=<anything> enters app directly, strips parameter, and skips session POST', async () => {
+  // 3. 有会话 + ?code=<anything> → 直接进应用、不发起第二个 session POST、参数剥离、原会话保持。
+  test('3. Authenticated (200 on /ui/api/me) + ?code=<anything> enters app directly, strips parameter, and skips session POST', async () => {
     const existingSession = { kind: 'admin', email: 'existing@test.example' };
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=ignored-token-override',
+      initialUrl: 'https://admin.example/ui?code=ignored-code-override',
       meResponse: { status: 200, body: existingSession },
     });
 
@@ -551,11 +554,11 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.loginView.hidden).toBe(true);
   });
 
-  // 4. 剥离后刷新/重进不再用旧 token 重放（参数不在 location）。
-  test('4. Reload after parameter stripping has clean location and does not replay old token', async () => {
-    // 第一次访问：带 token
+  // 4. 剥离后刷新/重进不再用旧 code 重放（参数不在 location）。
+  test('4. Reload after parameter stripping has clean location and does not replay old code', async () => {
+    // 第一次访问：带 code
     const firstHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=one-time-token',
+      initialUrl: 'https://admin.example/ui?code=one-time-code',
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
@@ -567,7 +570,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
 
     // 用户刷新页面（模拟浏览器用当前的 cleanUrl 重新初始化加载）
     const reloadHarness = createClientHarness({
-      initialUrl: cleanUrl, // 刷新时已无 token query 参数
+      initialUrl: cleanUrl, // 刷新时已无 code query 参数
       meResponse: { status: 401 }, // 假定 session 此时已失效
     });
 
@@ -585,7 +588,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   // 5. 参数剥离应保留其余 query 参数和 URL hash
   test('5. Parameter stripping preserves other query parameters and URL hash', () => {
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?foo=bar&token=secret123&page=2#tab-settings',
+      initialUrl: 'https://admin.example/ui?foo=bar&code=secret123&page=2#tab-settings',
     });
 
     const consumed = harness.instance.consumeQueryToken();
@@ -594,17 +597,17 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.calls.replacedUrls).toEqual(['/ui?foo=bar&page=2#tab-settings']);
   });
 
-  // 6. 不安全 HTTP 环境（非 loopback）剥离 token，且拒绝发送 session POST
-  test('6. Insecure HTTP context strips token parameter but refuses to submit token over network', async () => {
+  // 6. 不安全 HTTP 环境（非 loopback）剥离 code，且拒绝发送 session POST
+  test('6. Insecure HTTP context strips code parameter but refuses to submit code over network', async () => {
     const harness = createClientHarness({
-      initialUrl: 'http://remote.example.com/ui?token=secret123',
+      initialUrl: 'http://remote.example.com/ui?code=secret123',
       isSecure: false,
       meResponse: { status: 401 },
     });
 
     await harness.instance.runStart();
 
-    // URL token 仍被剥离以防残留
+    // URL code 仍被剥离以防残留
     expect(harness.getCurrentUrl()).toBe('http://remote.example.com/ui');
 
     // 绝对不向服务端 POST session 凭据
@@ -618,10 +621,10 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.loginToken.value).toBe('');
   });
 
-  // 7. 深链深层路径（如 /ui/tasks/task-42?token=...）剥离参数时保持路由路径
-  test('7. Deep link path is preserved during token consumption', () => {
+  // 7. 深链深层路径（如 /ui/tasks/task-42?code=...）剥离参数时保持路由路径
+  test('7. Deep link path is preserved during code consumption', () => {
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui/tasks/task-42?token=secret123',
+      initialUrl: 'https://admin.example/ui/tasks/task-42?code=secret123',
     });
 
     const consumed = harness.instance.consumeQueryToken();
@@ -630,8 +633,20 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.calls.replacedUrls).toEqual(['/ui/tasks/task-42']);
   });
 
-  // 8. 与真实服务端 UiSessionStore 端到端集成测试
-  test('8. End-to-end integration with real UiSessionStore', async () => {
+  // 7b. 纵深防御：客户端遇到直接传递的 ?token=，剥离 URL 参数并返回 null，绝不直接消费令牌本体
+  test('7b. Defense-in-depth: client encountering direct ?token= strips it via replaceState and returns null', () => {
+    const harness = createClientHarness({
+      initialUrl: 'https://admin.example/ui?token=secret123',
+    });
+
+    const consumed = harness.instance.consumeQueryToken();
+    expect(consumed).toBeNull();
+    expect(harness.getCurrentUrl()).toBe('https://admin.example/ui');
+    expect(harness.calls.replacedUrls).toEqual(['/ui']);
+  });
+
+  // 8. 与真实服务端 UiSessionStore 及 registerUiShell 302 交换码重定向端到端集成测试
+  test('8. End-to-end integration with real UiSessionStore and 302 exchange-code redirection', async () => {
     const validAdminToken = 'admin-secret-token';
     const validTokenHash = createHash('sha256').update(validAdminToken).digest('hex');
 
@@ -641,6 +656,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
 
     const app = new Hono();
+    registerUiShell(app, store);
     app.use('/ui/api/session', uiSessionBodyLimit);
     app.use('/ui/api/session', requireUiOrigin);
     app.route('/ui/api/session', createUiSessionRoutes(store));
@@ -674,8 +690,17 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     };
 
     // 场景 A: 无会话访问 http://localhost:3100/ui?token=admin-secret-token
+    // 服务端拦截返回 302 重定向至 /ui?code=...
+    const initialGet = await app.request('http://localhost:3100/ui?token=admin-secret-token');
+    expect(initialGet.status).toBe(302);
+    const redirectLocation = initialGet.headers.get('location')!;
+    expect(redirectLocation).toMatch(/^\/ui\?code=[A-Za-z0-9_-]+/);
+    expect(initialGet.headers.get('cache-control')).toBe('no-store');
+    expect(initialGet.headers.get('referrer-policy')).toBe('no-referrer');
+
+    // 客户端随后在重定向后的 URL 加载并启动
     const clientA = createClientHarness({
-      initialUrl: 'http://localhost:3100/ui?token=admin-secret-token',
+      initialUrl: `http://localhost:3100${redirectLocation}`,
       customFetch: e2eFetch,
     });
 
@@ -708,9 +733,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   });
 
   // 9. Fix 1 (ZCode P2-2): history.replaceState 不可用时 fail-closed：拒绝 query 自动登录，退回表单登录，token 不回显
-  test('9. Unavailable history.replaceState fails closed: refuses query auto-login, shows form, does not echo token', async () => {
+  test('9. Unavailable history.replaceState fails closed: refuses query auto-login, shows form, does not echo code', async () => {
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=super-secret-token',
+      initialUrl: 'https://admin.example/ui?code=super-secret-code',
       hasReplaceState: false,
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
@@ -718,7 +743,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
 
     await harness.instance.runStart();
 
-    // 断言 1: 没有发起 POST /ui/api/session 发送 token（硬性拒绝，避免凭据残留在地址栏）
+    // 断言 1: 没有发起 POST /ui/api/session 发送 code（硬性拒绝，避免凭据残留在地址栏）
     expect(harness.calls.fetches.length).toBe(1);
     expect(harness.calls.fetches[0].url).toBe('/ui/api/me');
 
@@ -728,7 +753,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(harness.calls.showInboxCount).toBe(0);
     expect(harness.calls.showLogin).toEqual(['']);
 
-    // 断言 3: token 永不回显进输入框，也不展示链接登录提示
+    // 断言 3: code 永不回显进输入框，也不展示链接登录提示
     expect(harness.loginToken.value).toBe('');
     expect(harness.loginError.textContent).toBe('');
     expect(harness.calls.announced).toHaveLength(0);
@@ -738,9 +763,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
 
   // 10. Fix 2 (ZCode P2-3) & R4 Fix 1 (ZCode P1-1) & R5 & R8: query 链接登录成功展示 visible banner 与 announcement 提示并设置 sessionStorage marker 与 body class，粘贴表单登录不展示且清除 marker 与 class
   test('10. Visible notice appears on query-login success and does NOT appear on paste-form login success', async () => {
-    // 场景 A: Admin 身份 query token 登录成功 → 提示 "Signed in via link as Admin session" 并写入 sessionStorage marker 与 body class
+    // 场景 A: Admin 身份 query code 登录成功 → 提示 "Signed in via link as Admin session" 并写入 sessionStorage marker 与 body class
     const adminLinkHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=admin-query-token',
+      initialUrl: 'https://admin.example/ui?code=admin-query-code',
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
@@ -752,9 +777,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(adminLinkHarness.sessionStorage.getItem('oae-link-login')).toBe('1');
     expect(adminLinkHarness.mockDocument.body.classList.contains('link-login-active')).toBe(true);
 
-    // 场景 B: Identity 身份 query token 登录成功 → 提示 "Signed in via link as <address>" 并写入 marker 与 class
+    // 场景 B: Identity 身份 query code 登录成功 → 提示 "Signed in via link as <address>" 并写入 marker 与 class
     const identityLinkHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=identity-query-token',
+      initialUrl: 'https://admin.example/ui?code=identity-query-code',
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'identity', address: 'agent-bot@example.com' } },
     });
@@ -876,7 +901,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   test('13. Storage-throws case: login succeeds even if sessionStorage throws (fail-open try/catch)', async () => {
     // 场景 A: query link 登录在 sessionStorage 抛出异常时仍顺利进入应用
     const queryHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=safe-query-token',
+      initialUrl: 'https://admin.example/ui?code=safe-query-code',
       storageThrows: true,
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
@@ -916,7 +941,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
 
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=query-link-token',
+      initialUrl: 'https://admin.example/ui?code=query-link-code',
       customFetch: async (url, init) => {
         if (url === '/ui/api/me') {
           return mePromise;
@@ -926,7 +951,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
           return {
             status: 200,
             ok: true,
-            json: async () => ({ kind: 'identity', address: `${body.token}@manual.example` }),
+            json: async () => ({ kind: 'identity', address: `${body.token || body.code}@manual.example` }),
           } as unknown as Response;
         }
         throw new Error(`Unexpected fetch ${url}`);
@@ -964,7 +989,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     const postCallsAfterMe = harness.calls.fetches.filter(
       (f) => f.url === '/ui/api/session' && f.init?.method === 'POST',
     );
-    expect(postCallsAfterMe).toHaveLength(1); // 仍然只有 1 次 POST，没有为 query token 发送 POST
+    expect(postCallsAfterMe).toHaveLength(1); // 仍然只有 1 次 POST，没有为 query code 发送 POST
     expect(harness.state.me).toEqual({ kind: 'identity', address: 'manual-user@manual.example' });
     expect(harness.linkLoginNotice.hidden).toBe(true);
     expect(harness.sessionStorage.getItem('oae-link-login')).toBeNull();
@@ -979,7 +1004,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     });
 
     const harness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=early-banner-token',
+      initialUrl: 'https://admin.example/ui?code=early-banner-code',
       hangStartSession: hangPromise,
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
@@ -1012,7 +1037,7 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   test('16. document.body.classList manages link-login-active in sync with link-login notice', async () => {
     // 场景 A: query login 成功 → 添加 link-login-active
     const linkHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=link-token',
+      initialUrl: 'https://admin.example/ui?code=link-code',
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
     });
@@ -1032,9 +1057,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   test('17. Query login with returnTo sets marker before redirect, and banner is restored on subsequent load', async () => {
     const sharedCookieJar = new CookieJar();
 
-    // 步骤 1: 首次访问带 ?token=query-token，POST /ui/api/session 返回带 returnTo 的响应
+    // 步骤 1: 首次访问带 ?code=query-oauth-code，POST /ui/api/session 返回带 returnTo 的响应
     const oauthLoginHarness = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=query-oauth-token',
+      initialUrl: 'https://admin.example/ui?code=query-oauth-code',
       sharedCookieJar,
       meResponse: { status: 401 },
       sessionResponse: {
@@ -1074,9 +1099,9 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
   test('18. Origin-wide JS session cookie shares provenance across tabs and clears on logout or form login', async () => {
     const sharedCookieJar = new CookieJar();
 
-    // Tab 1: 通过 ?token= 链接登录
+    // Tab 1: 通过 ?code= 链接登录
     const tab1 = createClientHarness({
-      initialUrl: 'https://admin.example/ui?token=tab1-link-token',
+      initialUrl: 'https://admin.example/ui?code=tab1-link-code',
       sharedCookieJar,
       meResponse: { status: 401 },
       sessionResponse: { status: 200, body: { kind: 'admin' } },
@@ -1139,5 +1164,338 @@ describe('Issue #60: bookmarkable ?token= query parameter direct login', () => {
     expect(sharedCookieJar.get('oae-link-login')).toBeUndefined();
     expect(tab4.linkLoginNotice.hidden).toBe(true);
     expect(tab4.mockDocument.body.classList.contains('link-login-active')).toBe(false);
+  });
+});
+
+describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
+  beforeEach(() => {
+    resetAuditForTests();
+  });
+
+  // Hard Constraint 1: One-time exchange code burned immediately; replay returns 401 and logs outcome denied
+  test('Hard Constraint 1: Exchange code is one-time; replay is rejected with 401 and logged as denied', async () => {
+    const validToken = 'test-admin-token';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    // 1. Mint exchange code
+    const mintResult = store.mintExchangeCode(validToken, '192.168.1.100');
+    expect(mintResult.ok).toBe(true);
+    if (!mintResult.ok) return;
+    const code = mintResult.code;
+
+    // Verify mint audit event
+    const mintEvents = readAuditEvents({ event: 'ui.token.exchange_mint' });
+    expect(mintEvents.length).toBeGreaterThan(0);
+    expect(mintEvents[0].outcome).toBe('ok');
+
+    // 2. First exchange succeeds
+    const firstExchange = store.exchangeCode(code, '192.168.1.100', Date.now(), false, 'link-exchange');
+    expect(firstExchange.ok).toBe(true);
+    if (firstExchange.ok) {
+      expect(firstExchange.auth).toEqual({ kind: 'admin' });
+    }
+
+    // 3. Replay exchange fails immediately
+    const replayExchange = store.exchangeCode(code, '192.168.1.100', Date.now(), false, 'link-exchange');
+    expect(replayExchange.ok).toBe(false);
+
+    // Verify replay audit event has outcome: 'denied'
+    const loginEvents = readAuditEvents({ event: 'ui.session.login' });
+    const deniedEvent = loginEvents.find(
+      (e) => e.outcome === 'denied' && (e as any).provenance === 'link-exchange',
+    );
+    expect(deniedEvent).toBeDefined();
+
+    // 4. Also verify via HTTP API route
+    const app = new Hono();
+    app.use('/ui/api/session', uiSessionBodyLimit);
+    app.use('/ui/api/session', requireUiOrigin);
+    app.route('/ui/api/session', createUiSessionRoutes(store));
+
+    const mint2 = store.mintExchangeCode(validToken, '127.0.0.1');
+    expect(mint2.ok).toBe(true);
+    if (!mint2.ok) return;
+
+    // HTTP first exchange -> 200
+    const res1 = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ code: mint2.code, provenance: 'link-exchange' }),
+    });
+    expect(res1.status).toBe(200);
+
+    // HTTP replay -> 401
+    const res2 = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ code: mint2.code, provenance: 'link-exchange' }),
+    });
+    expect(res2.status).toBe(401);
+    const body2 = await res2.json();
+    expect(body2.error).toBe('invalid_token');
+  });
+
+  // Hard Constraint 2: Code TTL <= 10 min; expired exchange codes are rejected (401 + denied audit)
+  test('Hard Constraint 2: Exchange code TTL <= 10 min; expired codes return 401 and are logged as denied', async () => {
+    const validToken = 'test-admin-token';
+    // Test that store clamps exchangeCodeTtlMs to max 10 min (600,000 ms)
+    const storeOverClamped = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+      exchangeCodeTtlMs: 30 * 60 * 1000, // 30 min requested -> clamped to 10 min
+    });
+    const t0 = 1000000;
+    const mintClamped = storeOverClamped.mintExchangeCode(validToken, '127.0.0.1', t0);
+    expect(mintClamped.ok).toBe(true);
+    if (!mintClamped.ok) return;
+
+    // At t0 + 10 min - 1 ms -> still valid
+    const validJustBefore = storeOverClamped.exchangeCode(
+      mintClamped.code,
+      '127.0.0.1',
+      t0 + 10 * 60 * 1000 - 1,
+    );
+    expect(validJustBefore.ok).toBe(true);
+
+    // Test with another code that expires at t0 + 10 min + 1 ms
+    const mintExpired = storeOverClamped.mintExchangeCode(validToken, '127.0.0.1', t0);
+    expect(mintExpired.ok).toBe(true);
+    if (!mintExpired.ok) return;
+
+    const expiredRes = storeOverClamped.exchangeCode(
+      mintExpired.code,
+      '127.0.0.1',
+      t0 + 10 * 60 * 1000 + 1,
+    );
+    expect(expiredRes.ok).toBe(false);
+
+    // Verify expired audit event has outcome: 'denied'
+    const loginEvents = readAuditEvents({ event: 'ui.session.login' });
+    const expiredEvent = loginEvents.find(
+      (e) => e.outcome === 'denied' && (e as any).provenance === 'link-exchange',
+    );
+    expect(expiredEvent).toBeDefined();
+
+    // Also verify via HTTP route with short TTL
+    const storeShort = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+      exchangeCodeTtlMs: 50, // 50 ms
+    });
+    const app = new Hono();
+    app.use('/ui/api/session', uiSessionBodyLimit);
+    app.use('/ui/api/session', requireUiOrigin);
+    app.route('/ui/api/session', createUiSessionRoutes(storeShort));
+
+    const mintShort = storeShort.mintExchangeCode(validToken, '127.0.0.1');
+    expect(mintShort.ok).toBe(true);
+    if (!mintShort.ok) return;
+
+    // Wait 60 ms for expiry
+    await new Promise((r) => setTimeout(r, 60));
+
+    const resExpired = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ code: mintShort.code, provenance: 'link-exchange' }),
+    });
+    expect(resExpired.status).toBe(401);
+    const bodyExpired = await resExpired.json();
+    expect(bodyExpired.error).toBe('invalid_token');
+  });
+
+  // Hard Constraint 3: Exchange code is bound to recipient identity
+  test('Hard Constraint 3: Exchange code is strictly bound to original auth and cannot create session for another principal', async () => {
+    const adminToken = 'admin-secret';
+    const identityToken = 'identity-secret';
+
+    const store = new UiSessionStore({
+      resolveToken: (tok) => {
+        if (tok === adminToken) return { kind: 'admin' };
+        if (tok === identityToken) return { kind: 'identity', address: 'alice@test.example' };
+        return null;
+      },
+    });
+
+    // Mint code for admin
+    const mintAdmin = store.mintExchangeCode(adminToken, '127.0.0.1');
+    expect(mintAdmin.ok).toBe(true);
+    if (!mintAdmin.ok) return;
+
+    // Mint code for identity
+    const mintIdentity = store.mintExchangeCode(identityToken, '127.0.0.1');
+    expect(mintIdentity.ok).toBe(true);
+    if (!mintIdentity.ok) return;
+
+    // Exchanging admin code yields admin auth
+    const sessionAdmin = store.exchangeCode(mintAdmin.code, '127.0.0.1');
+    expect(sessionAdmin.ok).toBe(true);
+    if (sessionAdmin.ok) {
+      expect(sessionAdmin.auth).toEqual({ kind: 'admin' });
+    }
+
+    // Exchanging identity code yields identity auth
+    const sessionIdentity = store.exchangeCode(mintIdentity.code, '127.0.0.1');
+    expect(sessionIdentity.ok).toBe(true);
+    if (sessionIdentity.ok) {
+      expect(sessionIdentity.auth).toEqual({ kind: 'identity', address: 'alice@test.example' });
+    }
+  });
+
+  // Provenance audit logging: differentiates link-exchange from paste login
+  test('Provenance audit: differentiates link-exchange from direct paste login', async () => {
+    const validToken = 'test-audit-token';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const app = new Hono();
+    app.use('/ui/api/session', uiSessionBodyLimit);
+    app.use('/ui/api/session', requireUiOrigin);
+    app.route('/ui/api/session', createUiSessionRoutes(store));
+
+    // 1. Link exchange login
+    const mint = store.mintExchangeCode(validToken, '127.0.0.1');
+    expect(mint.ok).toBe(true);
+    if (!mint.ok) return;
+
+    const resExchange = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ code: mint.code, provenance: 'link-exchange' }),
+    });
+    expect(resExchange.status).toBe(200);
+
+    // 2. Direct form paste login (no code, no provenance)
+    const resPaste = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ token: validToken }),
+    });
+    expect(resPaste.status).toBe(200);
+
+    // Check audit events
+    const loginAudits = readAuditEvents({ event: 'ui.session.login' });
+    const exchangeAudit = loginAudits.find((e) => (e as any).provenance === 'link-exchange');
+    expect(exchangeAudit).toBeDefined();
+    expect(exchangeAudit?.outcome).toBe('ok');
+
+    const pasteAudit = loginAudits.find(
+      (e) => (e as any).provenance === undefined && e.outcome === 'ok',
+    );
+    expect(pasteAudit).toBeDefined();
+  });
+
+  // Server 302 Redirection & URL Sanitization
+  test('Server 302: valid ?token= redirects to ?code=... with no-store and no-referrer', async () => {
+    const validToken = 'admin-pass';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const app = new Hono();
+    registerUiShell(app, store);
+
+    // Valid token on /ui
+    const resValid = await app.request('http://localhost/ui?token=admin-pass');
+    expect(resValid.status).toBe(302);
+    const locValid = resValid.headers.get('location')!;
+    expect(locValid).toMatch(/^\/ui\?code=[A-Za-z0-9_-]+/);
+    expect(locValid).not.toContain('admin-pass');
+    expect(resValid.headers.get('cache-control')).toBe('no-store');
+    expect(resValid.headers.get('referrer-policy')).toBe('no-referrer');
+
+    // Valid token on deep path /ui/tasks/10 with extra params
+    const resDeep = await app.request('http://localhost/ui/tasks/10?token=admin-pass&filter=unread');
+    expect(resDeep.status).toBe(302);
+    const locDeep = resDeep.headers.get('location')!;
+    expect(locDeep).toContain('/ui/tasks/10');
+    expect(locDeep).toContain('filter=unread');
+    expect(locDeep).toMatch(/code=[A-Za-z0-9_-]+/);
+    expect(locDeep).not.toContain('admin-pass');
+
+    // Invalid token on /ui -> sanitized 302 to /ui without token
+    const resInvalid = await app.request('http://localhost/ui?token=bad-token-xyz');
+    expect(resInvalid.status).toBe(302);
+    expect(resInvalid.headers.get('location')).toBe('/ui');
+    expect(resInvalid.headers.get('cache-control')).toBe('no-store');
+    expect(resInvalid.headers.get('referrer-policy')).toBe('no-referrer');
+
+    // Verify invalid mint recorded denied audit event
+    const mintEvents = readAuditEvents({ event: 'ui.token.exchange_mint' });
+    const deniedMint = mintEvents.find((e) => e.outcome === 'denied');
+    expect(deniedMint).toBeDefined();
+  });
+
+  // OAuth Consent Page: link login notice banner rendered when oae-link-login cookie is present
+  test('OAuth Consent Page: renders link-login-notice banner when oae-link-login=1 cookie is present', async () => {
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === 'admin-token' ? { kind: 'admin' } : null),
+    });
+    const created = store.create('admin-token', '127.0.0.1', Date.now());
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const options = {
+      cimdFetcher: async () =>
+        new Response(
+          JSON.stringify({
+            client_name: 'Test OAuth App',
+            client_id: 'https://client.example/metadata.json',
+            redirect_uris: ['https://client.example/cb'],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    };
+
+    const app = new Hono();
+    app.route('/ui/oauth', createUiOAuthPageRoutes(store, options as any));
+
+    const q = new URLSearchParams({
+      response_type: 'code',
+      client_id: 'https://client.example/metadata.json',
+      redirect_uri: 'https://client.example/cb',
+      code_challenge: 'E9Melhoa2OwvFrGMTJguCH5rtx64NetqiSTUUcfDcUI',
+      code_challenge_method: 'S256',
+      resource: 'http://localhost/mcp',
+    });
+
+    // 场景 A: 带 oae-link-login=1 cookie 访问同意页
+    const resWithLinkCookie = await app.request(`http://localhost/ui/oauth/authorize?${q}`, {
+      headers: { cookie: `oae_ui=${created.sid}; oae-link-login=1` },
+    });
+    expect(resWithLinkCookie.status).toBe(200);
+    const htmlWithLink = await resWithLinkCookie.text();
+    expect(htmlWithLink).toContain('Signed in via link as Admin session');
+    expect(htmlWithLink).toContain('id="link-login-notice"');
+
+    // 场景 B: 不带 oae-link-login cookie 访问同意页
+    const resWithout = await app.request(`http://localhost/ui/oauth/authorize?${q}`, {
+      headers: { cookie: `oae_ui=${created.sid}` },
+    });
+    expect(resWithout.status).toBe(200);
+    const htmlWithout = await resWithout.text();
+    expect(htmlWithout).not.toContain('Signed in via link as Admin session');
+    expect(htmlWithout).not.toContain('id="link-login-notice"');
   });
 });
