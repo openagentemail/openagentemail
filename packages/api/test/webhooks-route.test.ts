@@ -637,6 +637,34 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(aliceRes.status).toBe(403);
     expect(((await aliceRes.json()) as any).error).toBe('forbidden: admin key required');
 
+    // 验证 403 分支 1 记录 webhook.reveal outcome=denied 审计 (§10.6)
+    const audit1 = readAuditEvents({ event: 'webhook.reveal', limit: 10 }).find(
+      (e) => e.webhookId === adminCreated.id && e.outcome === 'denied',
+    );
+    expect(audit1).toBeDefined();
+    expect(audit1?.address).toBe('alice@test.example');
+
+    // Preview 订阅（contentScope: 'preview'），即使 createdBy 匹配，身份令牌重显也必须 403 并记审计
+    const previewSub = createWebhookSubscription({
+      url: 'https://consumer.example/preview-hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'preview',
+      createdBy: 'alice@test.example',
+    });
+    const alicePreviewRes = await app.request(`/v1/webhooks/${previewSub.id}/secret`, {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(alicePreviewRes.status).toBe(403);
+    expect(((await alicePreviewRes.json()) as any).error).toBe('content_scope_requires_admin');
+
+    // 验证 403 分支 2 记录 webhook.reveal outcome=denied 审计 (§10.6)
+    const audit2 = readAuditEvents({ event: 'webhook.reveal', limit: 10 }).find(
+      (e) => e.webhookId === previewSub.id && e.outcome === 'denied',
+    );
+    expect(audit2).toBeDefined();
+    expect(audit2?.address).toBe('alice@test.example');
+
     // Admin can reveal
     const adminRes = await app.request(`/v1/webhooks/${adminCreated.id}/secret`, {
       headers: { Authorization: `Bearer ${adminKey}` },

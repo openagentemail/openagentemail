@@ -1716,6 +1716,9 @@ class WebhookDeliveryQueue {
         });
         return;
       }
+      // Once admitted, clear probeTokenKey so background retries never re-deduct
+      // or re-check the caller's probe rate bucket (§8.7).
+      delete job.probeTokenKey;
     }
 
     // Check item 2: 72h horizon check for job

@@ -822,12 +822,13 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
       await waitUntil(() => getWebhookSubscription(first.id)?.state === 'enabled', 2000);
 
       const second = mk('b');
+      const beforeSecond = Date.now();
       fireCreationPing(second, 'creation', 'r10-probe');
       const pending = readAllDeliveryLogRows().find(
         (r) => r.webhookId === second.id && r.outcome === 'pending',
       );
       expect(pending).toBeDefined();
-      expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThanOrEqual(Date.now());
+      expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThanOrEqual(beforeSecond);
       expect(getWebhookSubscription(second.id)?.state).toBe('unverified');
       // Quota has room again before the delayed fire (window not required to stay full).
       deliveryLimiter.reset();
@@ -898,6 +899,79 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
       deliveryQueue.cancelAll();
     }
   });
+
+  test(
+    'final2: delayed ping admitted to execution does not re-deduct probe bucket on retries',
+    async () => {
+    let callCount = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) => {
+        const url = new URL(req.url);
+        if (url.pathname === '/first') {
+          return new Response('ok', { status: 200 });
+        }
+        callCount++;
+        if (callCount === 1) {
+          // First attempt of second ping fails with retryable 429 (Retry-After: 1s)
+          return new Response('rate limited', { status: 429, headers: { 'Retry-After': '1' } });
+        }
+        // Retry attempt succeeds
+        return new Response('ok', { status: 200 });
+      },
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    const prevProbe = config.webhooks.rateTestPerMin;
+    const prevPool = config.webhooks.poolRetryMs;
+    (config.webhooks as any).allowPrivateTargets = true;
+    (config as any).oaePublicEdge = false;
+    (config.webhooks as any).rateTestPerMin = 1;
+    (config.webhooks as any).poolRetryMs = 25;
+    deliveryLimiter.reset();
+    try {
+      const mk = (path: string) =>
+        createWebhookSubscription({
+          url: `http://127.0.0.1:${server.port}${path}`,
+          address: 'owner@openagent.email',
+          events: ['mail.received'],
+          contentScope: 'metadata',
+          privateTargetGranted: true,
+          createdBy: 'admin',
+        });
+      // First ping consumes the 1 probe slot
+      const first = mk('/first');
+      fireCreationPing(first, 'creation', 'final2-probe');
+      await waitUntil(() => getWebhookSubscription(first.id)?.state === 'enabled', 2000);
+
+      // Second ping delayed due to full bucket
+      const second = mk('/second');
+      fireCreationPing(second, 'creation', 'final2-probe');
+      const pending = readAllDeliveryLogRows().find(
+        (r) => r.webhookId === second.id && r.outcome === 'pending',
+      );
+      expect(pending).toBeDefined();
+
+      // Clear quota once so delayed ping can pass initial admission
+      deliveryLimiter.reset();
+
+      // Wait until attempt 1 runs and retry (attempt 2) runs and succeeds (200)
+      // If probeTokenKey were not cleared, attempt 2 would check the probe bucket
+      // (which was filled by attempt 1) and be killed with probe_rate_limited!
+      await waitUntil(() => getWebhookSubscription(second.id)?.state === 'enabled', 7000);
+
+      expect(callCount).toBeGreaterThanOrEqual(2);
+      const rows = readAllDeliveryLogRows().filter((r) => r.webhookId === second.id);
+      expect(rows.some((r) => r.reason === 'probe_rate_limited')).toBe(false);
+      expect(rows.some((r) => r.outcome === 'success')).toBe(true);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      (config.webhooks as any).rateTestPerMin = prevProbe;
+      (config.webhooks as any).poolRetryMs = prevPool;
+      deliveryLimiter.reset();
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  }, 12000);
 });
 
 describe('webhook-delivery: Circuit Breaker & SSRF Immediate Disable (§8.5, D2a, §14 item 9)', () => {

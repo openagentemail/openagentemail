@@ -578,11 +578,23 @@ export const webhooksRoute = new Hono()
 
     // Rule D: Identity caller can only reveal if created by itself
     if (auth.kind === 'identity' && sub.createdBy !== auth.address) {
+      recordAuditEvent({
+        event: 'webhook.reveal',
+        outcome: 'denied',
+        address: sub.address,
+        webhookId: sub.id,
+      });
       return c.json({ error: 'forbidden: admin key required' }, 403);
     }
 
     // Rule D / §12.3: Identity caller requires metadata scope
     if (auth.kind === 'identity' && sub.contentScope !== 'metadata') {
+      recordAuditEvent({
+        event: 'webhook.reveal',
+        outcome: 'denied',
+        address: sub.address,
+        webhookId: sub.id,
+      });
       return c.json({ error: 'content_scope_requires_admin' }, 403);
     }
 
