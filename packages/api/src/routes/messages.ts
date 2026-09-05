@@ -1,6 +1,14 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { getMessage, listMessages, setMessageSeen, waitForMessage } from '../lib/imap.ts';
+import {
+  getMessage,
+  InvalidMailCursorError,
+  listMessages,
+  listMessagesSince,
+  setMessageSeen,
+  StaleMessageGenerationError,
+  waitForMessage,
+} from '../lib/imap.ts';
 import { forbidUnlessAddress, forbidUnlessMailboxAccess } from '../lib/auth.ts';
 import { clampWaitSeconds } from '../lib/config.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
@@ -8,10 +16,13 @@ import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 const listQuerySchema = z.object({
   address: z.string().email(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+  since: z.string().optional(),
+  cursor: z.string().optional(),
 });
 
 const getQuerySchema = z.object({
   address: z.string().email(),
+  uidValidity: z.coerce.number().int().positive().optional(),
 });
 
 const seenSchema = z
@@ -34,8 +45,23 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
+    if (parsed.data.since && parsed.data.cursor && parsed.data.since !== parsed.data.cursor) {
+      return c.json({ error: 'invalid_request' }, 400);
+    }
     const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
+    const sinceToken = parsed.data.since ?? parsed.data.cursor;
+    if (sinceToken !== undefined) {
+      try {
+        const page = await listMessagesSince(parsed.data.address, sinceToken, parsed.data.limit);
+        return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+      } catch (err) {
+        if (err instanceof InvalidMailCursorError) {
+          return c.json({ error: 'invalid_cursor' }, 400);
+        }
+        throw err;
+      }
+    }
     const messages = await listMessages(parsed.data.address, parsed.data.limit);
     return c.json({ messages });
   })
@@ -46,11 +72,20 @@ export const messagesRoute = new Hono()
     }
     const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
-    const message = await getMessage(parsed.data.address, c.req.param('id'));
-    if (!message) {
-      return c.json({ error: 'not_found' }, 404);
+    try {
+      const message = await getMessage(parsed.data.address, c.req.param('id'), {
+        uidValidity: parsed.data.uidValidity,
+      });
+      if (!message) {
+        return c.json({ error: 'not_found' }, 404);
+      }
+      return c.json(message);
+    } catch (err) {
+      if (err instanceof StaleMessageGenerationError) {
+        return c.json({ error: 'stale_message_generation' }, 404);
+      }
+      throw err;
     }
-    return c.json(message);
   })
   .post('/:id/seen', async (c) => {
     let body: unknown;

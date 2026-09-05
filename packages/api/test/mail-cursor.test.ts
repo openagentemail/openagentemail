@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import {
   MAIL_CURSOR_PREFIX,
+  MAIL_FORWARD_CURSOR_PREFIX,
   InvalidMailCursorError,
   decodeMailCursor,
+  decodeMailForwardCursor,
   encodeMailCursor,
+  encodeMailForwardCursor,
   isMailFolder,
 } from '../src/lib/mail-cursor.ts';
 
@@ -41,5 +44,105 @@ describe('mail-cursor', () => {
     expect(isMailFolder('all')).toBe(true);
     expect(isMailFolder('trash')).toBe(false);
     expect(isMailFolder('scheduled')).toBe(false);
+  });
+
+  describe('forward cursor (mail-fcursor-v1)', () => {
+    test('往返编码保持 folder/address/t/uid/uidValidity', () => {
+      const payload = {
+        folder: 'inbox' as const,
+        address: 'fox@test.example',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: 17,
+      };
+      const token = encodeMailForwardCursor(payload, KEY);
+      expect(token.startsWith(`${MAIL_FORWARD_CURSOR_PREFIX}.`)).toBe(true);
+      expect(decodeMailForwardCursor(token, KEY)).toEqual(payload);
+    });
+
+    test('后向与前向游标互不通用（域隔离）', () => {
+      const backwardToken = encodeMailCursor(
+        { folder: 'inbox', address: 'fox@test.example', t: 1000, uid: 10 },
+        KEY,
+      );
+      const forwardToken = encodeMailForwardCursor(
+        { folder: 'inbox', address: 'fox@test.example', t: 1000, uid: 10, uidValidity: 17 },
+        KEY,
+      );
+
+      // 前向解码器拒后向游标
+      expect(() => decodeMailForwardCursor(backwardToken, KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      // 后向解码器拒前向游标
+      expect(() => decodeMailCursor(forwardToken, KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+    });
+
+    test('前向游标篡改 HMAC、载荷或 key 一律失败', () => {
+      const payload = {
+        folder: 'inbox' as const,
+        address: 'fox@test.example',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: 17,
+      };
+      const token = encodeMailForwardCursor(payload, KEY);
+      const parts = token.split('.');
+
+      // 坏 MAC
+      expect(() => decodeMailForwardCursor(`${parts[0]}.${parts[1]}.aaaa`, KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      // 坏 key
+      expect(() => decodeMailForwardCursor(token, 'wrong-key')).toThrow(
+        InvalidMailCursorError,
+      );
+      // 非法 token
+      expect(() => decodeMailForwardCursor('not-a-token', KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(`${parts[0]}.badjson.${parts[2]}`, KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+
+      // 篡改载荷字段（HMAC 未重签必挂）
+      const tamperPayload = (mod: Record<string, unknown>) => {
+        const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: 17, ...mod };
+        const body = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
+        return `${parts[0]}.${body}.${parts[2]}`;
+      };
+      expect(() => decodeMailForwardCursor(tamperPayload({ v: 18 }), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(tamperPayload({ a: 'owl@test.example' }), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(tamperPayload({ f: 'sent' }), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+
+      // 非法 uidValidity 格式（即使签名有效也要拒）
+      const forgedWithBadV = (v: unknown) => {
+        const body = Buffer.from(
+          JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v }),
+        ).toString('base64url');
+        // 构造带有该 body 的 token
+        return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.invalidmac`;
+      };
+      expect(() => decodeMailForwardCursor(forgedWithBadV(0), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadV(-1), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadV('17'), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadV(undefined), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+    });
   });
 });

@@ -17,9 +17,12 @@ import type { AddressObject } from 'mailparser';
 import { config } from './config.ts';
 import {
   decodeMailCursor,
+  decodeMailForwardCursor,
   encodeMailCursor,
+  encodeMailForwardCursor,
   InvalidMailCursorError,
   type MailFolder,
+  type MailForwardCursorPayload,
 } from './mail-cursor.ts';
 import {
   classifyMailSource,
@@ -121,6 +124,15 @@ export interface MessageSourcePayload {
   source: string;
   truncated: boolean;
   byteLength: number;
+}
+
+/** 消息代际（uidValidity）不匹配。路由折成 404 stale_message_generation。 */
+export class StaleMessageGenerationError extends Error {
+  readonly code = 'stale_message_generation';
+  constructor() {
+    super('stale_message_generation');
+    this.name = 'StaleMessageGenerationError';
+  }
 }
 
 /** How far back listMessages scans for address matches. */
@@ -641,6 +653,21 @@ function isAfterCursor(msg: FetchMessageObject, t: number, uid: number): boolean
   return msg.uid < uid;
 }
 
+/** oldest-first：(receivedAtMs asc, uid asc)，保证前向追补顺序无损递进。 */
+export function compareOldestFirst(a: FetchMessageObject, b: FetchMessageObject): number {
+  const dt = receivedAtMs(a) - receivedAtMs(b);
+  if (dt !== 0) return dt;
+  return a.uid - b.uid;
+}
+
+/** 严格大于前向游标键，保证追补不重复、不跳过同毫秒条目。 */
+export function isAfterForwardCursor(msg: FetchMessageObject, t: number, uid: number): boolean {
+  const received = receivedAtMs(msg);
+  if (received > t) return true;
+  if (received < t) return false;
+  return msg.uid > uid;
+}
+
 /**
  * 这条消息按可信收件人头都投给了谁。无 envelope 一律空集合（保留 fail-closed）。
  *
@@ -796,6 +823,28 @@ async function listMessagesPageWith(
   const page = afterCursor.slice(0, limit);
   const hasMore = afterCursor.length > limit;
 
+  const summaries = await buildMessageSummaries(client, page);
+
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeMailCursor(
+          {
+            folder,
+            address: normalized,
+            t: receivedAtMs(last),
+            uid: last.uid,
+          },
+          config.taskSigningSecret,
+        )
+      : null;
+  return { messages: summaries, nextCursor };
+}
+
+async function buildMessageSummaries(
+  client: ImapFlow,
+  page: FetchMessageObject[],
+): Promise<MessageSummary[]> {
   const summaries: MessageSummary[] = [];
   for (const msg of page) {
     let snippet = '';
@@ -831,33 +880,110 @@ async function listMessagesPageWith(
       source,
     });
   }
+  return summaries;
+}
+
+/**
+ * 前向 since 查询：从指定前向游标之后 oldest-first 遍历邮件（保证无损追补）。
+ * 载荷绑定 uidValidity，当前代际不匹配则 fail-closed 抛 InvalidMailCursorError。
+ */
+async function listMessagesSinceWith(
+  client: ImapFlow,
+  address: string,
+  sinceCursor: string,
+  opts: { limit: number; folder?: MailFolder },
+): Promise<MessageListPage> {
+  const folder = opts.folder ?? 'inbox';
+  const limit = opts.limit;
+  const normalized = address.toLowerCase();
+
+  const cursor = decodeMailForwardCursor(sinceCursor, config.taskSigningSecret);
+  if (cursor.folder !== folder || cursor.address !== normalized) {
+    throw new InvalidMailCursorError();
+  }
+
+  const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
+  if (
+    currentUidValidity === undefined ||
+    BigInt(cursor.uidValidity) !== BigInt(currentUidValidity)
+  ) {
+    throw new InvalidMailCursorError();
+  }
+
+  const uids = await client.search({ all: true }, { uid: true });
+  if (!uids || uids.length === 0) return { messages: [], nextCursor: null };
+
+  const candidateUids = uids.filter((u) => u > cursor.uid).sort((a, b) => a - b);
+  if (candidateUids.length === 0) return { messages: [], nextCursor: null };
+
+  const matched: FetchMessageObject[] = [];
+  let chunkStart = 0;
+  while (chunkStart < candidateUids.length && matched.length <= limit) {
+    const chunk = candidateUids.slice(chunkStart, chunkStart + SCAN_BACK);
+    chunkStart += SCAN_BACK;
+    for await (const msg of client.fetch(
+      chunk,
+      { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
+      { uid: true },
+    )) {
+      if (
+        messageBelongsToFolder(msg, normalized, folder) &&
+        isAfterForwardCursor(msg, cursor.t, cursor.uid)
+      ) {
+        matched.push(msg);
+      }
+    }
+  }
+
+  matched.sort(compareOldestFirst);
+  const page = matched.slice(0, limit);
+  const hasMore = matched.length > limit;
+
+  const summaries = await buildMessageSummaries(client, page);
 
   const last = page[page.length - 1];
   const nextCursor =
     hasMore && last
-      ? encodeMailCursor(
+      ? encodeMailForwardCursor(
           {
             folder,
             address: normalized,
             t: receivedAtMs(last),
             uid: last.uid,
+            uidValidity: Number(currentUidValidity),
           },
           config.taskSigningSecret,
         )
       : null;
+
   return { messages: summaries, nextCursor };
 }
 
 export async function listMessagesPage(
   address: string,
-  opts: { limit?: number; folder?: MailFolder; cursor?: string } = {},
+  opts: { limit?: number; folder?: MailFolder; cursor?: string; since?: string } = {},
 ): Promise<MessageListPage> {
+  if (opts.since) {
+    return listMessagesSince(address, opts.since, opts.limit, opts.folder);
+  }
   return withInbox((client) =>
     listMessagesPageWith(client, address, {
       limit: opts.limit ?? 50,
       folder: opts.folder ?? 'inbox',
       cursor: opts.cursor,
     }),
+  );
+}
+
+/** 前向 since 查询对外接口：从指定游标向后 oldest-first 追补。 */
+export async function listMessagesSince(
+  address: string,
+  sinceCursor: string,
+  limit = 50,
+  folder: MailFolder = 'inbox',
+): Promise<MessageListPage> {
+  return withInbox((client) =>
+    listMessagesSinceWith(client, address, sinceCursor, { limit, folder }),
   );
 }
 
@@ -904,7 +1030,17 @@ async function getMessageWith(
   client: ImapFlow,
   address: string,
   id: string,
+  opts?: { uidValidity?: number },
 ): Promise<MessageDetail | null> {
+  const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
+  if (opts?.uidValidity !== undefined) {
+    if (
+      currentUidValidity === undefined ||
+      BigInt(opts.uidValidity) !== BigInt(currentUidValidity)
+    ) {
+      throw new StaleMessageGenerationError();
+    }
+  }
   const uid = Number(id);
   if (!Number.isInteger(uid) || uid <= 0) return null;
   const msg = await client.fetchOne(uid, { source: true, envelope: true, headers: ['delivered-to'] }, { uid: true });
@@ -913,8 +1049,12 @@ async function getMessageWith(
   return toDetail(msg.uid, parsed);
 }
 
-export async function getMessage(address: string, id: string): Promise<MessageDetail | null> {
-  return withInbox((client) => getMessageWith(client, address, id));
+export async function getMessage(
+  address: string,
+  id: string,
+  opts?: { uidValidity?: number },
+): Promise<MessageDetail | null> {
+  return withInbox((client) => getMessageWith(client, address, id, opts));
 }
 
 /**
