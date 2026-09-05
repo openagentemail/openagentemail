@@ -108,6 +108,8 @@ const updateSchema = z
   })
   .strict();
 
+const rotateSchema = z.object({ force: z.boolean().optional() }).strict();
+
 const IDEMPOTENCY_KEY_MAX = 128;
 
 function callerRateKey(c: Context): string {
@@ -212,15 +214,8 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'content_scope_requires_admin' }, 403);
     }
 
-    // Rate limiting
-    const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
-    const rateRes = deliveryLimiter.checkCreateRate(tokenKey);
-    if (!rateRes.allowed) {
-      c.header('Retry-After', String(rateRes.retryAfterSec));
-      return c.json({ error: 'rate_limited', retryAfterSec: rateRes.retryAfterSec }, 429);
-    }
-
-    // Idempotency check
+    // Idempotency hits must skip the create limiter: a lost 201 retry
+    // with a seen key would otherwise 429 and never recover the cache.
     const idempotency = parseIdempotencyKey(c);
     if (!idempotency.ok) return idempotency.response;
     const idempotencyKey = idempotency.key;
@@ -239,6 +234,13 @@ export const webhooksRoute = new Hono()
       if (found) {
         return c.json(found.responseBody, 201);
       }
+    }
+
+    const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
+    const rateRes = deliveryLimiter.checkCreateRate(tokenKey);
+    if (!rateRes.allowed) {
+      c.header('Retry-After', String(rateRes.retryAfterSec));
+      return c.json({ error: 'rate_limited', retryAfterSec: rateRes.retryAfterSec }, 429);
     }
 
     const executeCreate = async (): Promise<InFlightCreateResult> => {
@@ -421,6 +423,9 @@ export const webhooksRoute = new Hono()
       if (err.code === 'webhook_disabled') {
         return c.json({ error: 'webhook_disabled', disabledReason: err.disabledReason }, 409);
       }
+      if (err.code === 'delivery_not_replayable') {
+        return c.json({ error: 'delivery_not_replayable' }, 409);
+      }
       throw err;
     }
   })
@@ -519,8 +524,10 @@ export const webhooksRoute = new Hono()
       if (parsed.data.description !== undefined) s.description = parsed.data.description;
       if (urlChanged) {
         s.consecutiveFailures = 0;
-        if (s.state !== 'disabled') {
+        const keepManualDisabled = s.state === 'disabled' && s.disabledReason === 'manual';
+        if (!keepManualDisabled) {
           s.state = 'unverified';
+          s.disabledReason = null;
         }
         s.privateTargetGranted = isPrivateTarget;
       }
@@ -530,7 +537,7 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'not_found' }, 404);
     }
 
-    if (urlChanged) {
+    if (urlChanged && updated.state !== 'disabled') {
       const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
       fireCreationPing(updated, 'creation', tokenKey);
     }
@@ -669,8 +676,22 @@ export const webhooksRoute = new Hono()
       }
     }
 
-    // Overlap window check
-    const force = c.req.query('force') === 'true';
+    let force = false;
+    const rotateText = await c.req.text();
+    if (rotateText.trim().length > 0) {
+      let rotateBody: unknown;
+      try {
+        rotateBody = JSON.parse(rotateText);
+      } catch {
+        return c.json({ error: 'invalid_json' }, 400);
+      }
+      const parsedForce = rotateSchema.safeParse(rotateBody);
+      if (!parsedForce.success) {
+        return c.json({ error: 'invalid_request', details: parsedForce.error.issues }, 400);
+      }
+      force = parsedForce.data.force === true;
+    }
+
     if (
       sub.overlapUntil &&
       new Date(sub.overlapUntil).getTime() > Date.now() &&

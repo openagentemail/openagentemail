@@ -25,3 +25,11 @@ export function truncateUtf8Bytes(buf: Buffer, maxBytes: number): Buffer {
   }
   return buf.subarray(0, maxBytes);
 }
+
+/** Truncate to at most `maxChars` Unicode code points (`[...str]`). */
+export function truncateUtf8Codepoints(str: string, maxChars: number): string {
+  if (maxChars <= 0) return '';
+  const units = [...str];
+  if (units.length <= maxChars) return str;
+  return units.slice(0, maxChars).join('');
+}

@@ -9,7 +9,6 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -17,7 +16,9 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -52,7 +53,7 @@ import {
   type WebhookState,
 } from './webhook-store.ts';
 import { encodeMailForwardCursor } from './mail-cursor.ts';
-import { truncateUtf8Bytes } from './utf8-truncate.ts';
+import { truncateUtf8Bytes, truncateUtf8Codepoints } from './utf8-truncate.ts';
 
 export function truncateUtf8String(str: string, maxBytes: number): string {
   const buf = Buffer.from(str, 'utf8');
@@ -327,13 +328,201 @@ function ensureDataDir(): void {
   }
 }
 
-/** Append a single row to DATA_DIR/webhook-deliveries.jsonl (0600 mode). */
-export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
-  ensureDataDir();
-  const path = deliveryLogPath();
+type DeliveryLogIndex = {
+  path: string;
+  ino: number | null;
+  mtimeMs: number;
+  size: number;
+  rows: WebhookDeliveryLogRow[];
+  latestByWebhook: Map<string, WebhookDeliveryLogRow>;
+  latestByGroup: Map<string, WebhookDeliveryLogRow>;
+};
 
-  // Normalize row fields, ensuring forbidden keys or arbitrary payload never land in log
-  const sanitizedRow: WebhookDeliveryLogRow = {
+function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
+  return {
+    path,
+    ino: null,
+    mtimeMs: 0,
+    size: 0,
+    rows: [],
+    latestByWebhook: new Map(),
+    latestByGroup: new Map(),
+  };
+}
+
+let deliveryLogIndex: DeliveryLogIndex = emptyDeliveryLogIndex();
+
+function groupKeyForRow(row: WebhookDeliveryLogRow): string {
+  return `${row.webhookId}:${row.eventId}:${row.runId}`;
+}
+
+function isNewerDeliveryRow(a: WebhookDeliveryLogRow, b: WebhookDeliveryLogRow): boolean {
+  const tsA = new Date(a.ts).getTime();
+  const tsB = new Date(b.ts).getTime();
+  if (tsA !== tsB) return tsA > tsB;
+  return a.attempt > b.attempt;
+}
+
+function upsertLatestRow(
+  map: Map<string, WebhookDeliveryLogRow>,
+  key: string,
+  row: WebhookDeliveryLogRow,
+): void {
+  const prev = map.get(key);
+  if (!prev || isNewerDeliveryRow(row, prev)) map.set(key, row);
+}
+
+function applyRowToIndex(index: DeliveryLogIndex, row: WebhookDeliveryLogRow): void {
+  index.rows.push(row);
+  upsertLatestRow(index.latestByWebhook, row.webhookId, row);
+  upsertLatestRow(index.latestByGroup, groupKeyForRow(row), row);
+}
+
+function parseDeliveryLogText(content: string): WebhookDeliveryLogRow[] {
+  const lines = content.split('\n');
+  const rows: WebhookDeliveryLogRow[] = [];
+  let corruptCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch (err) {
+      corruptCount++;
+      console.error(
+        `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
+        line.slice(0, 100),
+        err,
+      );
+    }
+  }
+
+  if (corruptCount > 0) {
+    console.error(
+      `[webhooks] readAllDeliveryLogRows skipped ${corruptCount} corrupted line(s) in delivery log`,
+    );
+  }
+
+  return rows;
+}
+
+function captureIndexCursor(index: DeliveryLogIndex, path: string): void {
+  if (!existsSync(path)) {
+    index.path = path;
+    index.ino = null;
+    index.mtimeMs = 0;
+    index.size = 0;
+    return;
+  }
+  const st = statSync(path);
+  index.path = path;
+  index.ino = st.ino;
+  index.mtimeMs = st.mtimeMs;
+  index.size = st.size;
+}
+
+function adoptDeliveryLogIndex(rows: WebhookDeliveryLogRow[]): void {
+  const path = deliveryLogPath();
+  const index = emptyDeliveryLogIndex(path);
+  for (const row of rows) applyRowToIndex(index, row);
+  captureIndexCursor(index, path);
+  deliveryLogIndex = index;
+}
+
+function rebuildDeliveryLogIndexFromDisk(): DeliveryLogIndex {
+  adoptDeliveryLogIndex(readAllDeliveryLogRowsFromDisk());
+  return deliveryLogIndex;
+}
+
+function ingestIncrementalBytes(index: DeliveryLogIndex, chunk: Buffer): number {
+  if (chunk.length === 0) return 0;
+  const text = chunk.toString('utf8');
+  const lastNl = text.lastIndexOf('\n');
+  if (lastNl < 0) return 0;
+  const complete = text.slice(0, lastNl + 1);
+  for (const line of complete.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      applyRowToIndex(index, JSON.parse(trimmed));
+    } catch (err) {
+      console.error(
+        '[webhooks] corrupted delivery log line skipped during incremental read:',
+        trimmed.slice(0, 100),
+        err,
+      );
+    }
+  }
+  return Buffer.byteLength(complete, 'utf8');
+}
+
+function refreshDeliveryLogIndex(): DeliveryLogIndex {
+  const path = deliveryLogPath();
+  if (!existsSync(path)) {
+    deliveryLogIndex = emptyDeliveryLogIndex(path);
+    return deliveryLogIndex;
+  }
+  const st = statSync(path);
+  const pathChanged = deliveryLogIndex.path !== path;
+  const inodeChanged = deliveryLogIndex.ino !== st.ino;
+  const truncated = st.size < deliveryLogIndex.size;
+  const rewrittenInPlace =
+    st.size === deliveryLogIndex.size &&
+    st.mtimeMs !== deliveryLogIndex.mtimeMs &&
+    deliveryLogIndex.ino !== null;
+  if (pathChanged || inodeChanged || truncated || rewrittenInPlace || deliveryLogIndex.ino === null) {
+    return rebuildDeliveryLogIndexFromDisk();
+  }
+  if (st.size === deliveryLogIndex.size) {
+    return deliveryLogIndex;
+  }
+
+  const length = st.size - deliveryLogIndex.size;
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(length);
+    const n = readSync(fd, buf, 0, length, deliveryLogIndex.size);
+    const consumed = ingestIncrementalBytes(deliveryLogIndex, buf.subarray(0, n));
+    deliveryLogIndex.size += consumed;
+    deliveryLogIndex.mtimeMs = st.mtimeMs;
+    deliveryLogIndex.ino = st.ino;
+  } finally {
+    closeSync(fd);
+  }
+  return deliveryLogIndex;
+}
+
+function syncIndexAfterAppend(row: WebhookDeliveryLogRow, lineBytes: number): void {
+  const path = deliveryLogPath();
+  if (!existsSync(path)) return;
+  const st = statSync(path);
+  if (
+    deliveryLogIndex.path === path &&
+    deliveryLogIndex.ino === st.ino &&
+    deliveryLogIndex.size + lineBytes === st.size
+  ) {
+    applyRowToIndex(deliveryLogIndex, row);
+    deliveryLogIndex.size = st.size;
+    deliveryLogIndex.mtimeMs = st.mtimeMs;
+    return;
+  }
+  deliveryLogIndex.ino = null;
+}
+
+export function resetDeliveryLogIndexForTests(): void {
+  deliveryLogIndex = emptyDeliveryLogIndex();
+}
+
+/** Full-file parse used by boot reconstruction and compaction. */
+export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
+  const path = deliveryLogPath();
+  if (!existsSync(path)) return [];
+  return parseDeliveryLogText(readFileSync(path, 'utf8'));
+}
+
+function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {
+  return {
     ts: row.ts,
     webhookId: row.webhookId,
     eventId: row.eventId,
@@ -358,7 +547,13 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
     nextAttemptAt: row.nextAttemptAt,
     reason: row.reason ?? null,
   };
+}
 
+/** Append a single row to DATA_DIR/webhook-deliveries.jsonl (0600 mode). */
+export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
+  ensureDataDir();
+  const path = deliveryLogPath();
+  const sanitizedRow = sanitizeDeliveryLogRow(row);
   const line = `${JSON.stringify(sanitizedRow)}\n`;
   const fd = openSync(path, 'a', 0o600);
   try {
@@ -378,53 +573,22 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
   } finally {
     closeSync(fd);
   }
+  syncIndexAfterAppend(sanitizedRow, Buffer.byteLength(line, 'utf8'));
 }
 
 /**
- * Reads all delivery log rows from disk, with per-line fault tolerance.
+ * Reads all delivery log rows, parsing only bytes appended since the last
+ * cursor (offset + mtime/inode). Compaction rename rebuilds the index.
  *
  * Semantic distinction:
  * - Webhook configuration store (`webhooks.json`): fail-closed on read.
- *   If the subscription store is corrupt, serving state is unsafe so we must halt
- *   and refuse mutations to protect customer secrets and invariants.
  * - Webhook delivery log (`webhook-deliveries.jsonl`): append-only event log.
  *   Writes are fail-closed (atomic fsync append), but reads fail open:
- *   corrupted or partial lines (e.g. from power loss before fsync or dirty disk writes)
- *   are skipped and logged as errors so that a single bad line does not crash the entire
- *   API on startup or cause 500s across read endpoints.
+ *   corrupted or partial lines are skipped so a single bad line does not crash
+ *   the API on startup or cause 500s across read endpoints.
  */
 export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
-  const path = deliveryLogPath();
-  if (!existsSync(path)) return [];
-
-  const content = readFileSync(path, 'utf8');
-  const lines = content.split('\n');
-  const rows: WebhookDeliveryLogRow[] = [];
-  let corruptCount = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    try {
-      const parsed = JSON.parse(line);
-      rows.push(parsed);
-    } catch (err) {
-      corruptCount++;
-      console.error(
-        `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
-        line.slice(0, 100),
-        err,
-      );
-    }
-  }
-
-  if (corruptCount > 0) {
-    console.error(
-      `[webhooks] readAllDeliveryLogRows skipped ${corruptCount} corrupted line(s) in delivery log`,
-    );
-  }
-
-  return rows;
+  return refreshDeliveryLogIndex().rows.slice();
 }
 
 /**
@@ -488,7 +652,7 @@ export function latestDeliveryByWebhookId(
 
 /** Returns the latest delivery attempt for an endpoint, if any. */
 export function getLatestDeliveryForWebhook(webhookId: string): WebhookDeliveryLogRow | null {
-  return latestDeliveryByWebhookId(readAllDeliveryLogRows()).get(webhookId) ?? null;
+  return refreshDeliveryLogIndex().latestByWebhook.get(webhookId) ?? null;
 }
 
 /**
@@ -501,7 +665,7 @@ export function compactDeliveryLog(
   const path = deliveryLogPath();
   if (!existsSync(path)) return;
 
-  const rows = readAllDeliveryLogRows();
+  const rows = readAllDeliveryLogRowsFromDisk();
   const retentionCutoff = now - retentionDays * 86400000;
 
   // Identify groups with pending retries so we never prune them
@@ -572,6 +736,8 @@ export function compactDeliveryLog(
   } catch {
     // best effort
   }
+
+  adoptDeliveryLogIndex(retainedRows);
 }
 
 export function startWebhookMaintenance(): void {
@@ -839,7 +1005,7 @@ export function formatMailPayload(
 
   if (isPreview) {
     if (input.textPreview !== undefined) {
-      data.textPreview = truncateUtf8String(
+      data.textPreview = truncateUtf8Codepoints(
         input.textPreview,
         (config.webhooks as any)?.bodyPreviewChars ?? WEBHOOK_BODY_PREVIEW_CHARS,
       );
@@ -848,7 +1014,7 @@ export function formatMailPayload(
       data.securityCodes = input.securityCodes
         .slice(0, (config.webhooks as any)?.maxCodeItems ?? WEBHOOK_MAX_CODE_ITEMS)
         .map((c) =>
-          truncateUtf8String(
+          truncateUtf8Codepoints(
             c,
             (config.webhooks as any)?.codeEntryChars ?? WEBHOOK_CODE_ENTRY_CHARS,
           ),
@@ -858,7 +1024,7 @@ export function formatMailPayload(
       // Over-long links (> webhookCodeEntryChars) are dropped whole, never truncated (§6.2, §6.6)
       const codeChars = (config.webhooks as any)?.codeEntryChars ?? WEBHOOK_CODE_ENTRY_CHARS;
       data.links = input.links
-        .filter((l) => Buffer.byteLength(l, 'utf8') <= codeChars)
+        .filter((l) => [...l].length <= codeChars)
         .slice(0, (config.webhooks as any)?.maxCodeItems ?? WEBHOOK_MAX_CODE_ITEMS);
     }
   }
@@ -2163,6 +2329,11 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
     err.code = 'delivery_not_found';
     throw err;
   }
+  if (!isTerminalDeliveryRow(original)) {
+    const err: any = new Error('delivery_not_replayable');
+    err.code = 'delivery_not_replayable';
+    throw err;
+  }
 
   const sub = getWebhookSubscription(original.webhookId);
   if (!sub) {
@@ -2408,7 +2579,8 @@ export async function reconstructPendingDeliveriesAtBoot(
   reconstructed: number;
   deadLettered: number;
 }> {
-  const rows = readAllDeliveryLogRows();
+  const rows = readAllDeliveryLogRowsFromDisk();
+  adoptDeliveryLogIndex(rows);
   if (rows.length === 0) return { reconstructed: 0, deadLettered: 0 };
 
   // 1. Group rows by (webhookId, eventId, runId)

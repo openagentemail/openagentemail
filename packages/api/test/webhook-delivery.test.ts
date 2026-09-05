@@ -8,7 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { config } = await import('../src/lib/config.ts');
@@ -25,10 +25,13 @@ const {
   formatMailPayload,
   formatPingPayload,
   isTerminalDeliveryRow,
+  getLatestDeliveryForWebhook,
   latestDeliveryByWebhookId,
   parseRetryAfterSeconds,
   readAllDeliveryLogRows,
+  readAllDeliveryLogRowsFromDisk,
   readDeliveryLogRows,
+  resetDeliveryLogIndexForTests,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
   setReconstructRetryDelaysForTests,
@@ -68,6 +71,7 @@ function setupTestDir(): void {
   (config as any).oaePublicEdge = false;
   setWebhooksFailClosedForTests(false);
   setReconstructRetryDelaysForTests();
+  resetDeliveryLogIndexForTests();
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
 }
@@ -267,6 +271,63 @@ describe('webhook-delivery: Durable Logging & Compaction (§8.6, §14 item 5)', 
     const remaining = readAllDeliveryLogRows();
     expect(remaining.length).toBe(1);
     expect(remaining[0].eventId).toBe('evt_active');
+    expect(readAllDeliveryLogRowsFromDisk().map((r) => r.deliveryId)).toEqual(
+      remaining.map((r) => r.deliveryId),
+    );
+  });
+
+  test('R9: delivery log index matches full scan, sees appended lines, rebuilds after compact', () => {
+    const row = (id: string, webhookId: string, ts: string, outcome: 'success' | 'pending' = 'success') => ({
+      ts,
+      webhookId,
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping' as const,
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome,
+      status: outcome === 'success' ? 200 : null,
+      durationMs: outcome === 'success' ? 10 : null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+
+    const now = Date.now();
+    const t1 = new Date(now - 2000).toISOString();
+    const t2 = new Date(now - 1000).toISOString();
+    appendDeliveryLogRow(row('a', 'whk_idx_a', t1));
+    appendDeliveryLogRow(row('b', 'whk_idx_b', t1));
+    const first = readAllDeliveryLogRows();
+    expect(first.map((r) => r.deliveryId)).toEqual(['dlv_a', 'dlv_b']);
+    expect(readAllDeliveryLogRowsFromDisk()).toEqual(first);
+    expect(getLatestDeliveryForWebhook('whk_idx_a')?.deliveryId).toBe('dlv_a');
+
+    const extra = row('c', 'whk_idx_a', t2);
+    appendFileSync(join(TEST_DATA_DIR, 'webhook-deliveries.jsonl'), `${JSON.stringify(extra)}\n`);
+    const afterAppend = readAllDeliveryLogRows();
+    expect(afterAppend.map((r) => r.deliveryId)).toEqual(['dlv_a', 'dlv_b', 'dlv_c']);
+    expect(readAllDeliveryLogRowsFromDisk()).toEqual(afterAppend);
+    expect(getLatestDeliveryForWebhook('whk_idx_a')?.deliveryId).toBe('dlv_c');
+
+    const oldTs = new Date(now - 40 * 86400000).toISOString();
+    appendDeliveryLogRow(row('old', 'whk_idx_old', oldTs));
+    compactDeliveryLog(now, 30);
+    const afterCompact = readAllDeliveryLogRows();
+    expect(afterCompact.some((r) => r.deliveryId === 'dlv_old')).toBe(false);
+    expect(afterCompact.map((r) => r.deliveryId).sort()).toEqual(['dlv_a', 'dlv_b', 'dlv_c']);
+    expect(readAllDeliveryLogRowsFromDisk().map((r) => r.deliveryId).sort()).toEqual(
+      afterCompact.map((r) => r.deliveryId).sort(),
+    );
   });
 
   test('R5: compactDeliveryLog prunes per-type terminal retryable sequences', () => {
@@ -512,6 +573,53 @@ describe('webhook-delivery: Payload Bounding & Drop Order (§6.6, §14 item 8)',
     expect(parsed.data.containsLink).toBe(true);
     expect(parsed.data.links).toEqual([]); // dropped whole!
     expect(parsed.data.securityCodes).toEqual(['123456']);
+  });
+
+  test('R9: preview fields truncate by character count, not UTF-8 bytes', () => {
+    const prevPayload = config.webhooks.payloadMaxBytes;
+    const prevPreview = (config.webhooks as any).bodyPreviewChars;
+    const prevCode = (config.webhooks as any).codeEntryChars;
+    (config.webhooks as any).payloadMaxBytes = 64_000;
+    (config.webhooks as any).bodyPreviewChars = 280;
+    (config.webhooks as any).codeEntryChars = 200;
+
+    const subPreview: WebhookSubscription = { ...dummySub, contentScope: 'preview' };
+    const envelope = {
+      id: 'evt_chars',
+      type: 'mail.received' as const,
+      payloadVersion: 'v1' as const,
+      createdAt: new Date().toISOString(),
+      domain: 'openagent.email',
+    };
+
+    const formatted = formatMailPayload(subPreview, envelope, {
+      address: 'postmaster@openagent.email',
+      messageId: '100',
+      uid: 100,
+      uidValidity: 1,
+      receivedAt: new Date().toISOString(),
+      from: { address: 'sender@example.com' },
+      to: ['postmaster@openagent.email'],
+      cc: [],
+      subject: '预览',
+      sizeBytes: 1024,
+      hasAttachments: false,
+      unread: true,
+      containsSecurityCode: true,
+      containsLink: true,
+      textPreview: '字'.repeat(300),
+      securityCodes: ['码'.repeat(250)],
+      links: ['链'.repeat(200), '链'.repeat(201)],
+    });
+
+    const parsed = JSON.parse(formatted.body);
+    expect([...parsed.data.textPreview].length).toBe(280);
+    expect(parsed.data.textPreview).toBe('字'.repeat(280));
+    expect([...parsed.data.securityCodes[0]].length).toBe(200);
+    expect(parsed.data.links).toEqual(['链'.repeat(200)]);
+    (config.webhooks as any).payloadMaxBytes = prevPayload;
+    (config.webhooks as any).bodyPreviewChars = prevPreview;
+    (config.webhooks as any).codeEntryChars = prevCode;
   });
 
   test('mail.received overflow drop order: cc -> to -> subject -> from.name', () => {

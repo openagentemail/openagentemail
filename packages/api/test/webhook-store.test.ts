@@ -131,6 +131,18 @@ describe('webhook-store storage conventions (§10.5, §14 item 5)', () => {
     expect(() => listWebhooks()).toThrow(WebhookStoreCorruptError);
   });
 
+  test('R9: missing webhooks.json is first boot; existing empty file fail-closes', () => {
+    expect(readStore().webhooks).toEqual([]);
+    const storeFile = join(config.dataDir, WEBHOOK_STORE_FILE);
+    writeFileSync(storeFile, '', { mode: 0o600 });
+    expect(() => readStore()).toThrow(WebhookStoreCorruptError);
+    expect(() => listWebhooks()).toThrow(WebhookStoreCorruptError);
+
+    resetWebhooksStoreForTests();
+    writeFileSync(join(config.dataDir, WEBHOOK_STORE_FILE), ' \n\t', { mode: 0o600 });
+    expect(() => readStore()).toThrow(WebhookStoreCorruptError);
+  });
+
   test('cascadeDeleteWebhooksForAddress: removes all subscriptions for that address and keeps others', () => {
     saveWebhook({
       id: 'whk_alice_1',

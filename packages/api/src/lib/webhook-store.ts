@@ -240,12 +240,8 @@ export function readStore(): WebhooksFile {
 
   const text = readFileSync(file, 'utf8');
   if (!text.trim()) {
-    return {
-      schemaVersion: WEBHOOK_STORE_SCHEMA_VERSION,
-      webhooks: [],
-      createIdempotency: [],
-      rotateIdempotency: [],
-    };
+    markStoreFailClosed('empty_file');
+    throw new WebhookStoreCorruptError('webhooks.json exists but is empty');
   }
 
   return parseFile(text);

@@ -301,6 +301,52 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(body2.secret).toBeNull(); // Secret redacted on idempotency replay!
   });
 
+  test('R9: create idempotency replay is served before the create rate limiter', async () => {
+    const oldRate = config.webhooks.rateCreatePerMin;
+    (config.webhooks as any).rateCreatePerMin = 1;
+    deliveryLimiter.reset();
+    try {
+      const headers = {
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idem-create-rate',
+      };
+      const body = JSON.stringify({
+        url: 'https://consumer.example/hook-idemp-rate',
+        address: 'alice@test.example',
+        events: ['mail.received'],
+      });
+      const res1 = await app.request('/v1/webhooks', { method: 'POST', headers, body });
+      expect(res1.status).toBe(201);
+      const created: any = await res1.json();
+
+      const replay = await app.request('/v1/webhooks', { method: 'POST', headers, body });
+      expect(replay.status).toBe(201);
+      const replayed: any = await replay.json();
+      expect(replayed.id).toBe(created.id);
+      expect(replayed.secret).toBeNull();
+
+      const other = await app.request('/v1/webhooks', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'idem-create-rate-other',
+        },
+        body: JSON.stringify({
+          url: 'https://consumer.example/hook-idemp-rate-2',
+          address: 'alice@test.example',
+          events: ['mail.received'],
+        }),
+      });
+      expect(other.status).toBe(429);
+      expect(((await other.json()) as any).error).toBe('rate_limited');
+    } finally {
+      (config.webhooks as any).rateCreatePerMin = oldRate;
+      deliveryLimiter.reset();
+    }
+  });
+
   test('GET /v1/webhooks: admin lists all; identity lists only own; never leaks secret', async () => {
     createWebhookSubscription({
       url: 'https://alice.example/hook',
@@ -441,6 +487,78 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(body.state).toBe('unverified');
   });
 
+  test('R9: url change resurrects threshold/refused disablement but keeps manual pause', async () => {
+    const threshold = createWebhookSubscription({
+      url: 'https://consumer.example/threshold-v1',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    updateWebhookSubscription(threshold.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'threshold';
+      s.consecutiveFailures = 10;
+    });
+    const thresholdRes = await app.request(`/v1/webhooks/${threshold.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: 'https://consumer.example/threshold-v2' }),
+    });
+    expect(thresholdRes.status).toBe(200);
+    const thresholdBody: any = await thresholdRes.json();
+    expect(thresholdBody.state).toBe('unverified');
+    expect(thresholdBody.disabledReason).toBeNull();
+    expect(thresholdBody.consecutiveFailures).toBe(0);
+
+    const refused = createWebhookSubscription({
+      url: 'https://consumer.example/refused-v1',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    updateWebhookSubscription(refused.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'refused';
+    });
+    const refusedRes = await app.request(`/v1/webhooks/${refused.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: 'https://consumer.example/refused-v2' }),
+    });
+    expect(refusedRes.status).toBe(200);
+    expect(((await refusedRes.json()) as any).state).toBe('unverified');
+
+    const manual = createWebhookSubscription({
+      url: 'https://consumer.example/manual-v1',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    updateWebhookSubscription(manual.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'manual';
+    });
+    const manualRes = await app.request(`/v1/webhooks/${manual.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: 'https://consumer.example/manual-v2' }),
+    });
+    expect(manualRes.status).toBe(200);
+    const manualBody: any = await manualRes.json();
+    expect(manualBody.state).toBe('disabled');
+    expect(manualBody.disabledReason).toBe('manual');
+    expect(getWebhookSubscription(manual.id)?.url).toBe('https://consumer.example/manual-v2');
+  });
+
   test('POST /v1/webhooks/:id: Rule B: identity cannot change url if contentScope is preview', async () => {
     const sub = createWebhookSubscription({
       url: 'https://consumer.example/hook',
@@ -551,10 +669,19 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(res2.status).toBe(409);
     expect(((await res2.json()) as any).error).toBe('rotation_window_open');
 
-    // Force rotation succeeds
-    const res3 = await app.request(`/v1/webhooks/${sub.id}/rotate?force=true`, {
+    const queryForce = await app.request(`/v1/webhooks/${sub.id}/rotate?force=true`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(queryForce.status).toBe(409);
+
+    const res3 = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ force: true }),
     });
     expect(res3.status).toBe(200);
     expect(((await res3.json()) as any).epoch).toBe(2);
@@ -683,6 +810,108 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(redeliverBody.ok).toBe(true);
     expect(redeliverBody.deliveryId).toMatch(/^dlv_/);
     expect(redeliverBody.eventId).toBe('evt_orig_1');
+  });
+
+  test('R9: redeliver rejects non-terminal rows with 409', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-redeliver',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_pending_replay',
+      runId: 'run_0',
+      deliveryId: 'dlv_pending_replay',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(Date.now() + 5000).toISOString(),
+      reason: null,
+    });
+    const pendingRes = await app.request('/v1/webhooks/deliveries/dlv_pending_replay/redeliver', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(pendingRes.status).toBe(409);
+    expect(((await pendingRes.json()) as any).error).toBe('delivery_not_replayable');
+
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_retryable_replay',
+      runId: 'run_0',
+      deliveryId: 'dlv_retryable_replay',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(Date.now() + 5000).toISOString(),
+      reason: 'server_error',
+    });
+    const retryableRes = await app.request(
+      '/v1/webhooks/deliveries/dlv_retryable_replay/redeliver',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminKey}` },
+      },
+    );
+    expect(retryableRes.status).toBe(409);
+
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_ping_cap_replay',
+      runId: 'run_0',
+      deliveryId: 'dlv_ping_cap_replay',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 3,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: 'server_error',
+    });
+    const capRes = await app.request('/v1/webhooks/deliveries/dlv_ping_cap_replay/redeliver', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(capRes.status).toBe(200);
   });
 
   test('R2 Item 1 & Item 2: OAuth tokens cannot DELETE or reveal secret', async () => {
@@ -829,9 +1058,13 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       });
       expect(replay.status).toBe(200);
 
-      const res2 = await app.request(`/v1/webhooks/${sub.id}/rotate?force=true`, {
+      const res2 = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${aliceToken}` },
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ force: true }),
       });
       expect(res2.status).toBe(429);
       expect(((await res2.json()) as any).error).toBe('rate_limited');
