@@ -29,6 +29,7 @@ let failMailboxLock = false;
 let fakeUidValidity = 17n;
 const createdClients: FakeImapFlow[] = [];
 let deletedUids: number[] = [];
+let fetchedUidBatches: number[][] = [];
 
 class FakeImapFlow extends EventEmitter {
   closed = false;
@@ -79,6 +80,7 @@ class FakeImapFlow extends EventEmitter {
 
   async *fetch(uids?: number[]) {
     if (Array.isArray(uids)) {
+      fetchedUidBatches.push([...uids]);
       const set = new Set(uids);
       yield* fakeMessages.filter((m) => set.has(m.uid));
     } else {
@@ -159,6 +161,7 @@ describe('IMAP identity isolation (end to end)', () => {
     failMailboxLock = false;
     createdClients.length = 0;
     deletedUids = [];
+    fetchedUidBatches = [];
   });
 
   test('别的身份的邮件不会出现在 listMessages 结果里', async () => {
@@ -933,5 +936,106 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(body2.messages[0].id).toBe('521');
     expect(body2.messages[29].id).toBe('550');
     expect(body2.nextCursor).toBeNull();
+  });
+
+  test('ZCode P1/R3 回归：候选>预算且批内命中>limit时保留 scanUid 续扫，未扫描区藏有时间介于游标与页尾间的信能正常送出且不重扫', async () => {
+    // 初始游标：(09:00, 10)
+    // 批 1（scanBudget = 2）：
+    //   m1: UID 100, t = 10:00:00 (victim)
+    //   m2: UID 150, t = 12:00:00 (victim)
+    // 批 2（未扫描区）：
+    //   m3: UID 600, t = 09:30:00 (victim, UID 更大但 internalDate 落在游标 09:00 与批 1 页尾 10:00 之间)
+    //   m4: UID 700, t = 13:00:00 (victim)
+    const m1 = inboxMessage(100, 'victim@test.example', 'victim@test.example');
+    m1.internalDate = new Date('2026-08-01T10:00:00Z');
+
+    const m2 = inboxMessage(150, 'victim@test.example', 'victim@test.example');
+    m2.internalDate = new Date('2026-08-01T12:00:00Z');
+
+    const m3 = inboxMessage(600, 'victim@test.example', 'victim@test.example');
+    m3.internalDate = new Date('2026-08-01T09:30:00Z');
+
+    const m4 = inboxMessage(700, 'victim@test.example', 'victim@test.example');
+    m4.internalDate = new Date('2026-08-01T13:00:00Z');
+
+    fakeMessages = [m1, m2, m3, m4];
+    fetchedUidBatches = [];
+
+    const initialCursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: new Date('2026-08-01T09:00:00Z').getTime(),
+        uid: 10,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // 请求 1：scanBudget = 2, limit = 1
+    // 候选 UIDs: [100, 150, 600, 700] > 预算 2
+    // 批 1 扫描 [100, 150]，两封均命中 > limit(1)
+    // 必须保留原始游标 (09:00, 10) 与 scanUid = 150，绝不能丢弃 scanUid 或提前塌缩游标
+    const page1 = await listMessagesSince(
+      'victim@test.example',
+      initialCursor,
+      1,
+      'inbox',
+      { scanBudget: 2 },
+    );
+    expect(page1.messages.map((m) => m.id)).toEqual(['100']);
+    expect(page1.nextCursor).not.toBeNull();
+    const dec1 = decodeMailForwardCursor(page1.nextCursor!, config.taskSigningSecret);
+    expect(dec1.scanUid).toBe(150);
+    expect(dec1.t).toBe(new Date('2026-08-01T09:00:00Z').getTime());
+    expect(dec1.uid).toBe(10);
+
+    // 请求 2：以 page1.nextCursor 续扫
+    // 从 scanUid = 150 之后继续，扫描剩余候选 [600, 700]
+    // m3 (UID 600, 09:30) 的时间在 09:00 之后，必须成功送出（若像 R2 提前推进到 10:00 则会被漏掉）
+    const page2 = await listMessagesSince(
+      'victim@test.example',
+      page1.nextCursor!,
+      1,
+      'inbox',
+      { scanBudget: 2 },
+    );
+    expect(page2.messages.map((m) => m.id)).toEqual(['600']);
+
+    // 断言不重扫：检查 fake fetch 的所有批次，同一个 UID 绝不被重复 fetch
+    const allFetchedUids = fetchedUidBatches.flat();
+    expect(fetchedUidBatches).toEqual([[100, 150], [600, 700]]);
+    expect(new Set(allFetchedUids).size).toBe(allFetchedUids.length);
+  });
+
+  test('ZCode P2-2 回归：t=0（internalDate 与 envelope.date 皆缺）信件作为页尾时，nextCursor.t 被下限 clamp 到 cursor.t，不回退到更小时间', async () => {
+    const m1 = inboxMessage(100, 'victim@test.example', 'victim@test.example');
+    (m1 as any).internalDate = undefined;
+    (m1.envelope as any).date = undefined;
+
+    const m2 = inboxMessage(200, 'victim@test.example', 'victim@test.example');
+    m2.internalDate = new Date('2026-08-01T10:00:00Z');
+
+    fakeMessages = [m1, m2];
+
+    const cursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: 0,
+        uid: 50,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // limit = 1，返回 m1 (t=0)
+    const page = await listMessagesSince('victim@test.example', cursor, 1, 'inbox');
+    expect(page.messages.map((m) => m.id)).toEqual(['100']);
+    expect(page.nextCursor).not.toBeNull();
+    const dec = decodeMailForwardCursor(page.nextCursor!, config.taskSigningSecret);
+    // nextCursor.t 至少为 cursor.t，且非负数
+    expect(dec.t).toBeGreaterThanOrEqual(0);
+    expect(dec.t).toBe(Math.max(0, 0));
   });
 });

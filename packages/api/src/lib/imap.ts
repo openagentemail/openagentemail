@@ -947,39 +947,38 @@ async function listMessagesSinceWith(
   // 4. 命中集全按 (receivedAtMs asc, uid asc) 元组序排序
   matched.sort(compareOldestFirst);
 
-  // 5. 分页截断与续扫游标构造
-  if (matched.length > limit) {
-    const page = matched.slice(0, limit);
-    const summaries = await buildMessageSummaries(client, page);
-    const last = page[page.length - 1];
-    const nextCursor = encodeMailForwardCursor(
+  // 5. 分页截断与续扫游标构造：扫完候选集才产出正式元组游标
+  const page = matched.slice(0, limit);
+  const summaries = await buildMessageSummaries(client, page);
+
+  let nextCursor: string | null = null;
+  if (hasMoreCandidates) {
+    // 只要候选集未扫尽（无论命中几条、是否超 limit），均保留原始 (t_c, u_c) 与 scanUid 续扫状态
+    nextCursor = encodeMailForwardCursor(
       {
         folder,
         address: normalized,
-        t: receivedAtMs(last),
+        t: cursor.t,
+        uid: cursor.uid,
+        uidValidity: Number(currentUidValidity),
+        scanUid: maxScannedUid,
+      },
+      config.taskSigningSecret,
+    );
+  } else if (matched.length > limit) {
+    // 候选集已扫尽且超页：塌缩为页尾条目的纯元组游标；对 t 做下限 clamp（防 t=0 污染回退到 epoch）
+    const last = page[page.length - 1];
+    nextCursor = encodeMailForwardCursor(
+      {
+        folder,
+        address: normalized,
+        t: Math.max(receivedAtMs(last), cursor.t),
         uid: last.uid,
         uidValidity: Number(currentUidValidity),
       },
       config.taskSigningSecret,
     );
-    return { messages: summaries, nextCursor };
   }
-
-  const summaries = await buildMessageSummaries(client, matched);
-
-  const nextCursor = hasMoreCandidates
-    ? encodeMailForwardCursor(
-        {
-          folder,
-          address: normalized,
-          t: cursor.t,
-          uid: cursor.uid,
-          uidValidity: Number(currentUidValidity),
-          scanUid: maxScannedUid,
-        },
-        config.taskSigningSecret,
-      )
-    : null;
 
   return { messages: summaries, nextCursor };
 }
