@@ -24,6 +24,10 @@ const {
   deleteIdentity,
 } = await import('../src/lib/identities.ts');
 const {
+  resetWebhooksStoreForTests,
+  setWebhooksFailClosedForTests,
+} = await import('../src/lib/webhook-store.ts');
+const {
   putAccessTokenForTests,
   resetOAuthStoreCacheForTests,
 } = await import('../src/lib/oauth-store.ts');
@@ -56,6 +60,8 @@ function setupTestDir(): void {
   (config.webhooks as any).rateTestPerMin = 3;
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
+  resetWebhooksStoreForTests();
+  setWebhooksFailClosedForTests(false);
   setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
 
   const alice = createIdentity({ localpart: 'alice', domain: 'test.example' });
@@ -110,6 +116,7 @@ describe('Webhook MCP Tools & Tool Tiers (§10.7, D17)', () => {
   afterEach(() => {
     setWebhookDnsLookupForTests(undefined);
     deliveryQueue.cancelAll();
+    resetWebhooksStoreForTests();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
@@ -230,6 +237,7 @@ describe('Webhook MCP Tools & Tool Tiers (§10.7, D17)', () => {
   });
 
   afterAll(async () => {
+    resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;
     delete process.env.WEBHOOKS_ENABLED;

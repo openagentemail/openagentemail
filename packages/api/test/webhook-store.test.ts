@@ -7,8 +7,8 @@ process.env.SMTP_PASS = 'test-only';
 process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { config } = await import('../src/lib/config.ts');
@@ -34,13 +34,28 @@ const {
   WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
 } = await import('../src/lib/webhook-store.ts');
 
+const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-store');
+const originalDataDir = config.dataDir;
+
+function setupTestDir(): void {
+  rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  mkdirSync(TEST_DATA_DIR, { recursive: true, mode: 0o700 });
+  (config as any).dataDir = TEST_DATA_DIR;
+  resetWebhooksStoreForTests();
+}
+
 describe('webhook-store storage conventions (§10.5, §14 item 5)', () => {
-  beforeEach(() => {
-    resetWebhooksStoreForTests();
-  });
+  beforeEach(setupTestDir);
 
   afterEach(() => {
     resetWebhooksStoreForTests();
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    resetWebhooksStoreForTests();
+    (config as any).dataDir = originalDataDir;
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
   test('creates 0600 file in 0700 dir, stores and retrieves subscriptions', () => {

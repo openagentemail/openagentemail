@@ -757,7 +757,10 @@ export function compactDeliveryLog(
   adoptDeliveryLogIndex(retainedRows);
 }
 
+let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
+
 export function startWebhookMaintenance(): void {
+  stopWebhookMaintenance();
   const tick = () => {
     try {
       compactDeliveryLog();
@@ -771,13 +774,20 @@ export function startWebhookMaintenance(): void {
     const d = new Date();
     const next = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
     const delay = Math.max(1_000, next - Date.now());
-    const timer = setTimeout(() => {
+    maintenanceTimer = setTimeout(() => {
       tick();
       schedule();
     }, delay);
-    timer.unref?.();
+    maintenanceTimer.unref?.();
   };
   schedule();
+}
+
+export function stopWebhookMaintenance(): void {
+  if (maintenanceTimer) {
+    clearTimeout(maintenanceTimer);
+    maintenanceTimer = undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,6 +1573,7 @@ class WebhookDeliveryQueue {
     this.activeTimers.clear();
     this.jobs.clear();
     cancelReconstructionRetries();
+    stopWebhookMaintenance();
   }
 
   isJobQueued(webhookId: string, eventId: string, runId: string): boolean {
@@ -2605,7 +2616,7 @@ export function pendingReconstructionRetryCount(): number {
   return reconstructRetryTimers.size;
 }
 
-function cancelReconstructionRetries(): void {
+export function cancelReconstructionRetries(): void {
   for (const timer of reconstructRetryTimers.values()) {
     clearTimeout(timer);
   }

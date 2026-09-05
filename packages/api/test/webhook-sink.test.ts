@@ -19,6 +19,7 @@ const {
 } = await import('../src/lib/webhook-delivery.ts');
 const {
   createWebhookSubscription,
+  resetWebhooksStoreForTests,
   setWebhooksFailClosedForTests,
 } = await import('../src/lib/webhook-store.ts');
 const { isSinkServiceFailure } = await import('../src/lib/event-dispatcher.ts');
@@ -35,6 +36,7 @@ function setupTestDir(): void {
   (config.webhooks as any).enabled = true;
   (config as any).taskSigningSecret = '01234567890123456789012345678901';
   (config.webhooks as any).signingSecret = '01234567890123456789012345678901';
+  resetWebhooksStoreForTests();
   setWebhooksFailClosedForTests(false);
   deliveryQueue.cancelAll();
 }
@@ -43,6 +45,7 @@ describe('webhook-sink: Dispatcher Sink Wiring (§11.4, §6.2, §6.3, Item 9)', 
   beforeEach(setupTestDir);
   afterEach(() => {
     deliveryQueue.cancelAll();
+    resetWebhooksStoreForTests();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
@@ -211,6 +214,7 @@ describe('webhook-sink: Dispatcher Sink Wiring (§11.4, §6.2, §6.3, Item 9)', 
   });
 
   afterAll(async () => {
+    resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
     (config.webhooks as any).enabled = false;
     delete process.env.WEBHOOKS_ENABLED;
