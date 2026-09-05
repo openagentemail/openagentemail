@@ -140,7 +140,42 @@ describe('mail-cursor', () => {
       expect(() => decodeMailForwardCursor(forgedWithBadV('17'), KEY)).toThrow(
         InvalidMailCursorError,
       );
-      expect(() => decodeMailForwardCursor(forgedWithBadV(undefined), KEY)).toThrow(
+      // 非法 scanUid 格式（即使签名有效也要拒）
+      const forgedWithBadS = (s: unknown) => {
+        const body = Buffer.from(
+          JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: 17, s }),
+        ).toString('base64url');
+        return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.invalidmac`;
+      };
+      expect(() => decodeMailForwardCursor(forgedWithBadS(0), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadS(-1), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+      expect(() => decodeMailForwardCursor(forgedWithBadS('500'), KEY)).toThrow(
+        InvalidMailCursorError,
+      );
+    });
+
+    test('带 scanUid 续扫游标往返编码与防篡改', () => {
+      const payload = {
+        folder: 'inbox' as const,
+        address: 'fox@test.example',
+        t: 1_752_000_000_000,
+        uid: 42,
+        uidValidity: 17,
+        scanUid: 500,
+      };
+      const token = encodeMailForwardCursor(payload, KEY);
+      expect(token.startsWith(`${MAIL_FORWARD_CURSOR_PREFIX}.`)).toBe(true);
+      expect(decodeMailForwardCursor(token, KEY)).toEqual(payload);
+
+      // 篡改 scanUid 签名失效拒
+      const parts = token.split('.');
+      const bodyObj = { f: 'inbox', a: 'fox@test.example', t: 1_752_000_000_000, u: 42, v: 17, s: 501 };
+      const tamperedBody = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
+      expect(() => decodeMailForwardCursor(`${parts[0]}.${tamperedBody}.${parts[2]}`, KEY)).toThrow(
         InvalidMailCursorError,
       );
     });

@@ -16,8 +16,7 @@ import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 const listQuerySchema = z.object({
   address: z.string().email(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  since: z.string().optional(),
-  cursor: z.string().optional(),
+  since: z.string().max(2048).optional(),
 });
 
 const getQuerySchema = z.object({
@@ -45,15 +44,11 @@ export const messagesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
-    if (parsed.data.since && parsed.data.cursor && parsed.data.since !== parsed.data.cursor) {
-      return c.json({ error: 'invalid_request' }, 400);
-    }
     const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
-    const sinceToken = parsed.data.since ?? parsed.data.cursor;
-    if (sinceToken !== undefined) {
+    if (parsed.data.since !== undefined) {
       try {
-        const page = await listMessagesSince(parsed.data.address, sinceToken, parsed.data.limit);
+        const page = await listMessagesSince(parsed.data.address, parsed.data.since, parsed.data.limit);
         return c.json({ messages: page.messages, nextCursor: page.nextCursor });
       } catch (err) {
         if (err instanceof InvalidMailCursorError) {

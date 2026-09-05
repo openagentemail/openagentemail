@@ -885,16 +885,20 @@ async function buildMessageSummaries(
 
 /**
  * 前向 since 查询：从指定前向游标之后 oldest-first 遍历邮件（保证无损追补）。
- * 载荷绑定 uidValidity，当前代际不匹配则 fail-closed 抛 InvalidMailCursorError。
+ * 候选集由服务端 SEARCH SINCE 收窄（按 cursor.t 往前退 1 天），绝不用 UID 范围粗暴过滤原始游标（保护非单调信件）。
+ * 扫描按 UID 升序，每请求预算 SCAN_BACK (500) 条。
+ * 预算耗尽时返回已匹配部分 + 续扫游标（保留原始 (t_c, u_c) 与已扫 UID 水印 scanUid）。
+ * 扫完全部候选集才产出正式 nextCursor。
  */
 async function listMessagesSinceWith(
   client: ImapFlow,
   address: string,
   sinceCursor: string,
-  opts: { limit: number; folder?: MailFolder },
+  opts: { limit: number; folder?: MailFolder; scanBudget?: number },
 ): Promise<MessageListPage> {
   const folder = opts.folder ?? 'inbox';
   const limit = opts.limit;
+  const scanBudget = opts.scanBudget ?? SCAN_BACK;
   const normalized = address.toLowerCase();
 
   const cursor = decodeMailForwardCursor(sinceCursor, config.taskSigningSecret);
@@ -910,61 +914,82 @@ async function listMessagesSinceWith(
     throw new InvalidMailCursorError();
   }
 
-  const uids = await client.search({ all: true }, { uid: true });
+  // 1. 服务端 SEARCH SINCE 收窄：按 cursor.t 往前退 1 天（86400000ms），防时区/日粒度边角
+  const sinceDate = new Date(Math.max(0, cursor.t - 24 * 60 * 60 * 1000));
+  const uids = await client.search({ since: sinceDate }, { uid: true });
   if (!uids || uids.length === 0) return { messages: [], nextCursor: null };
 
-  const candidateUids = uids.filter((u) => u > cursor.uid).sort((a, b) => a - b);
+  // 2. 候选集过滤：若存在续扫水印 scanUid，过滤掉已扫过的 UID（u > cursor.scanUid）
+  const candidateUids = uids
+    .filter((u) => cursor.scanUid === undefined || u > cursor.scanUid)
+    .sort((a, b) => a - b);
   if (candidateUids.length === 0) return { messages: [], nextCursor: null };
 
+  // 3. 每请求预算 scanBudget (默认 SCAN_BACK = 500) 条
+  const batchUids = candidateUids.slice(0, scanBudget);
+  const hasMoreCandidates = candidateUids.length > scanBudget;
+  const maxScannedUid = batchUids[batchUids.length - 1];
+
   const matched: FetchMessageObject[] = [];
-  let chunkStart = 0;
-  while (chunkStart < candidateUids.length && matched.length <= limit) {
-    const chunk = candidateUids.slice(chunkStart, chunkStart + SCAN_BACK);
-    chunkStart += SCAN_BACK;
-    for await (const msg of client.fetch(
-      chunk,
-      { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
-      { uid: true },
-    )) {
-      if (
-        messageBelongsToFolder(msg, normalized, folder) &&
-        isAfterForwardCursor(msg, cursor.t, cursor.uid)
-      ) {
-        matched.push(msg);
-      }
+  for await (const msg of client.fetch(
+    batchUids,
+    { envelope: true, flags: true, internalDate: true, headers: ['delivered-to'] },
+    { uid: true },
+  )) {
+    if (
+      messageBelongsToFolder(msg, normalized, folder) &&
+      isAfterForwardCursor(msg, cursor.t, cursor.uid)
+    ) {
+      matched.push(msg);
     }
   }
 
+  // 4. 命中集全按 (receivedAtMs asc, uid asc) 元组序排序
   matched.sort(compareOldestFirst);
-  const page = matched.slice(0, limit);
-  const hasMore = matched.length > limit;
 
-  const summaries = await buildMessageSummaries(client, page);
+  // 5. 分页截断与续扫游标构造
+  if (matched.length > limit) {
+    const page = matched.slice(0, limit);
+    const summaries = await buildMessageSummaries(client, page);
+    const last = page[page.length - 1];
+    const nextCursor = encodeMailForwardCursor(
+      {
+        folder,
+        address: normalized,
+        t: receivedAtMs(last),
+        uid: last.uid,
+        uidValidity: Number(currentUidValidity),
+      },
+      config.taskSigningSecret,
+    );
+    return { messages: summaries, nextCursor };
+  }
 
-  const last = page[page.length - 1];
-  const nextCursor =
-    hasMore && last
-      ? encodeMailForwardCursor(
-          {
-            folder,
-            address: normalized,
-            t: receivedAtMs(last),
-            uid: last.uid,
-            uidValidity: Number(currentUidValidity),
-          },
-          config.taskSigningSecret,
-        )
-      : null;
+  const summaries = await buildMessageSummaries(client, matched);
+
+  const nextCursor = hasMoreCandidates
+    ? encodeMailForwardCursor(
+        {
+          folder,
+          address: normalized,
+          t: cursor.t,
+          uid: cursor.uid,
+          uidValidity: Number(currentUidValidity),
+          scanUid: maxScannedUid,
+        },
+        config.taskSigningSecret,
+      )
+    : null;
 
   return { messages: summaries, nextCursor };
 }
 
 export async function listMessagesPage(
   address: string,
-  opts: { limit?: number; folder?: MailFolder; cursor?: string; since?: string } = {},
+  opts: { limit?: number; folder?: MailFolder; cursor?: string; since?: string; scanBudget?: number } = {},
 ): Promise<MessageListPage> {
   if (opts.since) {
-    return listMessagesSince(address, opts.since, opts.limit, opts.folder);
+    return listMessagesSince(address, opts.since, opts.limit, opts.folder, { scanBudget: opts.scanBudget });
   }
   return withInbox((client) =>
     listMessagesPageWith(client, address, {
@@ -981,9 +1006,10 @@ export async function listMessagesSince(
   sinceCursor: string,
   limit = 50,
   folder: MailFolder = 'inbox',
+  opts?: { scanBudget?: number },
 ): Promise<MessageListPage> {
   return withInbox((client) =>
-    listMessagesSinceWith(client, address, sinceCursor, { limit, folder }),
+    listMessagesSinceWith(client, address, sinceCursor, { limit, folder, scanBudget: opts?.scanBudget }),
   );
 }
 

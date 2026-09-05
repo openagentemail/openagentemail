@@ -59,7 +59,21 @@ class FakeImapFlow extends EventEmitter {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 
-  async search() {
+  async search(query?: any) {
+    if (query?.since instanceof Date) {
+      const sinceMs = query.since.getTime();
+      return fakeMessages
+        .filter((m) => {
+          const t = m.internalDate instanceof Date
+            ? m.internalDate.getTime()
+            : m.envelope?.date instanceof Date
+              ? m.envelope.date.getTime()
+              : 0;
+          return t >= sinceMs;
+        })
+        .map((message) => message.uid)
+        .sort((a, b) => a - b);
+    }
     return fakeMessages.map((message) => message.uid).sort((a, b) => a - b);
   }
 
@@ -111,6 +125,7 @@ const {
 } = await import('../src/lib/imap.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
+  decodeMailForwardCursor,
   encodeMailCursor,
   encodeMailForwardCursor,
 } = await import('../src/lib/mail-cursor.ts');
@@ -717,7 +732,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(await res.json()).toEqual({ messages: [], nextCursor: null });
   });
 
-  test('cursor 参数作为 since 的等价别名亦可正常工作', async () => {
+  test('P2-D: v1 列表路由已移除 cursor 别名，仅作为普通参数忽略，不触发前向翻页', async () => {
     const m1 = inboxMessage(20, 'victim@test.example', 'victim@test.example');
     m1.internalDate = new Date('2026-08-01T10:00:00Z');
     fakeMessages = [m1];
@@ -733,11 +748,190 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
       config.taskSigningSecret,
     );
 
+    // 传 cursor 而不传 since，不触发 since 追补，返回标准 listMessages 结果（无 nextCursor 字段）
     const res = await app.request(
       `/v1/messages?address=victim@test.example&cursor=${encodeURIComponent(cursor)}`,
     );
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.messages.map((m: any) => m.id)).toEqual(['20']);
+    expect(json.nextCursor).toBeUndefined();
+  });
+
+  test('P2-C: since 参数超过 2048 字符拒 → 400 invalid_request', async () => {
+    const tooLongSince = 'a'.repeat(2049);
+    const res = await app.request(
+      `/v1/messages?address=victim@test.example&since=${tooLongSince}`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toBe('invalid_request');
+  });
+
+  test('Codex P1 回归：非单调 internalDate 场景不丢信，严格按 (receivedAtMs, uid) 元组序遍历', async () => {
+    // 构造非单调场景：
+    // mCursor: UID 100, t=10:00:00
+    // m1 (UID 50,  t=11:00:00): 较小 UID 但较晚收信（如 IMAP COPY/APPEND 导致）
+    // m2 (UID 200, t=09:30:00): 较大 UID 但较早收信（元组小于游标，应被跳过）
+    // m3 (UID 150, t=12:00:00): 较晚收信
+    const mCursor = inboxMessage(100, 'victim@test.example', 'victim@test.example');
+    mCursor.internalDate = new Date('2026-08-01T10:00:00Z');
+
+    const m1 = inboxMessage(50, 'victim@test.example', 'victim@test.example');
+    m1.internalDate = new Date('2026-08-01T11:00:00Z');
+
+    const m2 = inboxMessage(200, 'victim@test.example', 'victim@test.example');
+    m2.internalDate = new Date('2026-08-01T09:30:00Z');
+
+    const m3 = inboxMessage(150, 'victim@test.example', 'victim@test.example');
+    m3.internalDate = new Date('2026-08-01T12:00:00Z');
+
+    fakeMessages = [mCursor, m1, m2, m3];
+
+    const cursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: mCursor.internalDate.getTime(),
+        uid: 100,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // 逐页获取（limit=1）：严格按元组序前进，UID 50 绝不能因 50 < 100 被丢弃
+    // 第 1 页：应命中 m1 (UID 50, t=11:00)
+    const res1 = await app.request(
+      `/v1/messages?address=victim@test.example&since=${encodeURIComponent(cursor)}&limit=1`,
+    );
+    expect(res1.status).toBe(200);
+    const body1 = (await res1.json()) as any;
+    expect(body1.messages.map((m: any) => m.id)).toEqual(['50']);
+    expect(body1.nextCursor).not.toBeNull();
+
+    // 第 2 页：应命中 m3 (UID 150, t=12:00)；所有信件均已返回完毕，nextCursor 为 null
+    const res2 = await app.request(
+      `/v1/messages?address=victim@test.example&since=${encodeURIComponent(body1.nextCursor)}&limit=1`,
+    );
+    expect(res2.status).toBe(200);
+    const body2 = (await res2.json()) as any;
+    expect(body2.messages.map((m: any) => m.id)).toEqual(['150']);
+    expect(body2.nextCursor).toBeNull();
+  });
+
+  test('ZCode P1 回归：扫描预算耗尽时 0 命中产出带 scanUid 续扫游标，后续分页不重扫最终可达每一封信', async () => {
+    // 构造跨越预算的大量邮件：前 6 封属于其他收件人，第 7、8 封属于 victim
+    const otherMsgs = Array.from({ length: 6 }, (_, i) => {
+      const m = inboxMessage(i + 1, 'other@test.example', 'other@test.example');
+      m.internalDate = new Date('2026-08-01T10:00:00Z');
+      return m;
+    });
+
+    const v1 = inboxMessage(7, 'victim@test.example', 'victim@test.example');
+    v1.internalDate = new Date('2026-08-01T10:15:00Z');
+
+    const v2 = inboxMessage(8, 'victim@test.example', 'victim@test.example');
+    v2.internalDate = new Date('2026-08-01T10:30:00Z');
+
+    fakeMessages = [...otherMsgs, v1, v2];
+
+    const initialCursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: new Date('2026-08-01T09:00:00Z').getTime(),
+        uid: 1, // u_c 为 1
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // 采用自定义单次扫描预算 scanBudget = 3
+    // 第 1 批（扫 UID 1..3）：本身份 0 命中，预算耗尽，返回空列表 + scanUid=3 续扫游标
+    const page1 = await listMessagesSince(
+      'victim@test.example',
+      initialCursor,
+      10,
+      'inbox',
+      { scanBudget: 3 },
+    );
+    expect(page1.messages).toEqual([]);
+    expect(page1.nextCursor).not.toBeNull();
+    const decoded1 = decodeMailForwardCursor(page1.nextCursor!, config.taskSigningSecret);
+    expect(decoded1.scanUid).toBe(3);
+    expect(decoded1.uid).toBe(1); // 保持原始 u_c，不污染元组
+
+    // 第 2 批（扫 UID 4..6）：本身份仍 0 命中，从 scanUid=3 之后续扫，预算耗尽返回空列表 + scanUid=6 续扫游标
+    const page2 = await listMessagesSince(
+      'victim@test.example',
+      page1.nextCursor!,
+      10,
+      'inbox',
+      { scanBudget: 3 },
+    );
+    expect(page2.messages).toEqual([]);
+    expect(page2.nextCursor).not.toBeNull();
+    const decoded2 = decodeMailForwardCursor(page2.nextCursor!, config.taskSigningSecret);
+    expect(decoded2.scanUid).toBe(6);
+
+    // 第 3 批（扫 UID 7..8）：命中 victim 的两封邮件，且扫完全部候选集，分页结束 nextCursor 为 null
+    const page3 = await listMessagesSince(
+      'victim@test.example',
+      page2.nextCursor!,
+      10,
+      'inbox',
+      { scanBudget: 3 },
+    );
+    expect(page3.messages.map((m) => m.id)).toEqual(['7', '8']);
+    expect(page3.nextCursor).toBeNull();
+  });
+
+  test('端到端 550 封邮件在默认 500 预算下分批续扫无损到达', async () => {
+    // 构造 550 封信：前 520 封属于 other，后 30 封属于 victim
+    const msgs: any[] = [];
+    for (let i = 1; i <= 520; i++) {
+      const m = inboxMessage(i, 'other@test.example', 'other@test.example');
+      m.internalDate = new Date('2026-08-01T10:00:00Z');
+      msgs.push(m);
+    }
+    for (let i = 521; i <= 550; i++) {
+      const m = inboxMessage(i, 'victim@test.example', 'victim@test.example');
+      m.internalDate = new Date('2026-08-01T10:00:00Z');
+      msgs.push(m);
+    }
+    fakeMessages = msgs;
+
+    const startCursor = encodeMailForwardCursor(
+      {
+        folder: 'inbox',
+        address: 'victim@test.example',
+        t: new Date('2026-08-01T09:00:00Z').getTime(),
+        uid: 1,
+        uidValidity: 17,
+      },
+      config.taskSigningSecret,
+    );
+
+    // 请求 1（默认预算 500）：前 500 封全部为 other，返回 0 命中与 scanUid=500 续扫游标
+    const res1 = await app.request(
+      `/v1/messages?address=victim@test.example&since=${encodeURIComponent(startCursor)}`,
+    );
+    expect(res1.status).toBe(200);
+    const body1 = (await res1.json()) as any;
+    expect(body1.messages).toEqual([]);
+    expect(body1.nextCursor).not.toBeNull();
+    const dec1 = decodeMailForwardCursor(body1.nextCursor, config.taskSigningSecret);
+    expect(dec1.scanUid).toBe(500);
+
+    // 请求 2：从 scanUid=500 继续，扫描剩余 50 封（UID 501..550），返回属于 victim 的 30 封信，全部完成 nextCursor 为 null
+    const res2 = await app.request(
+      `/v1/messages?address=victim@test.example&since=${encodeURIComponent(body1.nextCursor)}`,
+    );
+    expect(res2.status).toBe(200);
+    const body2 = (await res2.json()) as any;
+    expect(body2.messages.length).toBe(30);
+    expect(body2.messages[0].id).toBe('521');
+    expect(body2.messages[29].id).toBe('550');
+    expect(body2.nextCursor).toBeNull();
   });
 });

@@ -30,13 +30,14 @@ export type MailCursorPayload = {
   uid: number;
 };
 
-/** 前向游标载荷：绑定 uidValidity 代际，语义为 (t asc, uid asc) 之后的条目。 */
+/** 前向游标载荷：绑定 uidValidity 代际，语义为 (t asc, uid asc) 之后的条目；可选 scanUid 为扫描预算水印。 */
 export type MailForwardCursorPayload = {
   folder: MailFolder;
   address: string;
   t: number;
   uid: number;
   uidValidity: number;
+  scanUid?: number;
 };
 
 /** 非法 / 篡改 / 跨 folder 错用游标。路由折成 400。 */
@@ -108,27 +109,30 @@ export function decodeMailCursor(token: string, key: string): MailCursorPayload 
 }
 
 function forwardCursorMac(payload: MailForwardCursorPayload, key: string): string {
+  const scanSuffix = payload.scanUid !== undefined ? `\n${payload.scanUid}` : '';
   return createHmac('sha256', key)
     .update(
-      `${MAIL_FORWARD_CURSOR_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}\n${payload.uidValidity}`,
+      `${MAIL_FORWARD_CURSOR_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}\n${payload.uidValidity}${scanSuffix}`,
     )
     .digest('base64url');
 }
 
-/** 编码不透明前向游标。address 必须已小写，含代际 uidValidity。 */
+/** 编码不透明前向游标。address 必须已小写，含代际 uidValidity 与可选 scanUid。 */
 export function encodeMailForwardCursor(
   payload: MailForwardCursorPayload,
   key: string,
 ): string {
-  const body = Buffer.from(
-    JSON.stringify({
-      f: payload.folder,
-      a: payload.address,
-      t: payload.t,
-      u: payload.uid,
-      v: payload.uidValidity,
-    }),
-  ).toString('base64url');
+  const bodyObj: Record<string, unknown> = {
+    f: payload.folder,
+    a: payload.address,
+    t: payload.t,
+    u: payload.uid,
+    v: payload.uidValidity,
+  };
+  if (payload.scanUid !== undefined) {
+    bodyObj.s = payload.scanUid;
+  }
+  const body = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
   return `${MAIL_FORWARD_CURSOR_PREFIX}.${body}.${forwardCursorMac(payload, key)}`;
 }
 
@@ -159,6 +163,7 @@ export function decodeMailForwardCursor(
     t?: unknown;
     u?: unknown;
     v?: unknown;
+    s?: unknown;
   };
   if (typeof raw.f !== 'string' || !isMailFolder(raw.f)) {
     throw new InvalidMailCursorError();
@@ -175,12 +180,19 @@ export function decodeMailForwardCursor(
   if (typeof raw.v !== 'number' || !Number.isInteger(raw.v) || raw.v <= 0) {
     throw new InvalidMailCursorError();
   }
+  if (
+    raw.s !== undefined &&
+    (typeof raw.s !== 'number' || !Number.isInteger(raw.s) || raw.s <= 0)
+  ) {
+    throw new InvalidMailCursorError();
+  }
   const payload: MailForwardCursorPayload = {
     folder: raw.f,
     address: raw.a.toLowerCase(),
     t: raw.t,
     uid: raw.u,
     uidValidity: raw.v,
+    ...(raw.s !== undefined ? { scanUid: raw.s } : {}),
   };
   const expected = forwardCursorMac(payload, key);
   try {
