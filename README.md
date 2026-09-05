@@ -186,9 +186,12 @@ rotate tokens, and delete identities directly from the overview table.
 
 The browser exchanges the token once for an `HttpOnly` session cookie; manually
 pasted tokens never enter the URL or browser storage. You can also bookmark
-`https://myinstance:3100/ui?token=<admin-token>` for direct login; the token is
-immediately stripped from the address bar via `history.replaceState` on load,
-though tokens passed in URLs can linger in browser history and server access logs.
+`https://myinstance:3100/ui?token=<admin-token>` for direct login. The server
+automatically issues a single-use exchange code (TTL ≤ 10 min) via a 302 redirect
+and sanitizes the URL with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`,
+followed by client `history.replaceState` cleanup. Tokens passed in URLs can still linger
+in upstream reverse proxy access logs before redirection — see `docs/security.md` for
+reverse-proxy scrubbing guidance.
 Percent-encode the token if it contains URL-reserved characters like `+`, `&`, or `#`
 (e.g. `a+b` → `a%2Bb`), as `+` decodes to a space and `&` truncates the value.
 Only open `?token=` links you generated yourself; if you suspect a link has leaked,

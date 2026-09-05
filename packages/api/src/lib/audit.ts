@@ -56,6 +56,8 @@ export type AuditEvent = {
   prevScopes?: string[];
   /** 关联的 Webhook 订阅 ID（RFC-0001 §10.6）。 */
   webhookId?: string;
+  /** 登录/操作来源渠道（如 link-exchange）。 */
+  provenance?: string;
 };
 
 function auditPath(): string {
@@ -150,6 +152,9 @@ export function recordAuditEvent(
       : {}),
     ...(partial.webhookId !== undefined
       ? { webhookId: scrubAuditField(partial.webhookId, 64) }
+      : {}),
+    ...(partial.provenance !== undefined
+      ? { provenance: scrubAuditField(partial.provenance, 64) }
       : {}),
   };
 

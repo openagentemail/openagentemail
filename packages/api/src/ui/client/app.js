@@ -810,29 +810,33 @@
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
 
   /**
-   * Consumes and strips the ?token= query parameter from window.location via history.replaceState.
-   * Returns the token if present and successfully stripped, or null if absent or if stripping is unavailable.
+   * Consumes and strips the one-time exchange ?code= query parameter from window.location via history.replaceState.
+   * Under #132 hardening, the server redirects ?token= to ?code=<one-time-code>.
+   * Returns the code if present and successfully stripped, or null if absent or if stripping is unavailable.
    */
   function consumeQueryToken() {
     try {
       var url = new URL(window.location.href);
-      if (!url.searchParams.has('token')) return null;
+      if (!url.searchParams.has('code') && !url.searchParams.has('token')) return null;
       if (!window.history || typeof window.history.replaceState !== 'function') {
         return null;
       }
-      var token = url.searchParams.get('token');
+      var code = url.searchParams.get('code');
       url.searchParams.delete('token');
+      url.searchParams.delete('code');
       var cleanSearch = url.searchParams.toString();
       var cleanUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
       window.history.replaceState(window.history.state, '', cleanUrl);
-      return token;
+      return code;
     } catch (_err) {
       return null;
     }
   }
 
+  var consumeQueryCode = consumeQueryToken;
+
   /**
-   * Performs automated session login using a credential from a query parameter,
+   * Performs automated session login using an exchange code from a query parameter,
    * matching standard form submission semantics without echoing the credential on failure.
    */
   async function loginWithToken(credential) {
@@ -849,7 +853,7 @@
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token: credential, remember: false })
+        body: JSON.stringify({ code: credential, provenance: 'link-exchange', remember: false })
       });
       if (gen !== loginGeneration) return;
       if (!response.ok) {
@@ -883,10 +887,25 @@
     }
   }
 
+  var loginWithCode = loginWithToken;
+
+  function isCookieSecure() {
+    try {
+      var loc = typeof window !== 'undefined' && window.location ? window.location : null;
+      if (loc && loc.protocol) {
+        var host = loc.hostname || '';
+        var local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+        return !(loc.protocol === 'http:' && local);
+      }
+    } catch (_e) {}
+    return typeof window !== 'undefined' && Boolean(window.isSecureContext);
+  }
+
   function setLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict';
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */
@@ -896,7 +915,8 @@
   function clearLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0';
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */

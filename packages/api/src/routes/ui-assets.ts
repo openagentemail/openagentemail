@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
+import { getCookie } from 'hono/cookie';
 import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
 import { resolveUiAssetUrl } from '../ui/load-ui-asset.ts';
 import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
+import { COOKIE_NAME, type UiSessionStore } from '../lib/ui-session.ts';
+import { clientIp } from '../lib/net.ts';
 
 // Satoshi 字体与官网（website/public/fonts/）同源同文件；缺失时启动即报错，不半死不活。
 // 双布局与 JS/CSS loader 共用 resolveUiAssetUrl：源码树相邻（../ui/fonts/）；
@@ -87,12 +90,36 @@ export function registerUiAssets(app: Hono): void {
 /**
  * Dashboard shell 深链：必须在 /ui/api、/ui/frame、/ui/oauth 之后注册（ADR #26）。
  * 路径与 API 前缀无交集，但后挂才能保证后续加宽匹配时不吞专用路由。
+ * #132 加固：GET /ui?token= 经服务端验令牌后 302 净化到 /ui?code=（长期令牌不进客户端 JS）。
  */
-export function registerUiShell(app: Hono): void {
+export function registerUiShell(app: Hono, store?: UiSessionStore): void {
   // B6 0 期：旧 Overview 书签只做永久兼容跳转，不再返回旧 shell。
   app.get('/ui/overview', legacyOverviewRedirect);
   app.get('/ui/overview/', legacyOverviewRedirect);
   for (const path of UI_SHELL_PATHS) {
-    app.get(path, shell);
+    app.get(path, (c) => {
+      const rawToken = c.req.query('token');
+      if (rawToken !== undefined && store) {
+        const url = new URL(c.req.url);
+        url.searchParams.delete('token');
+        url.searchParams.delete('code');
+
+        const sid = getCookie(c, COOKIE_NAME);
+        const existingSession = sid ? store.authenticate(sid) : null;
+        if (!existingSession) {
+          const ip = clientIp(c);
+          const result = store.mintExchangeCode(rawToken, ip);
+          if (result.ok) {
+            url.searchParams.set('code', result.code);
+          }
+        }
+        const cleanSearch = url.searchParams.toString();
+        const location = `${url.pathname}${cleanSearch ? `?${cleanSearch}` : ''}`;
+        c.header('Cache-Control', 'no-store');
+        c.header('Referrer-Policy', 'no-referrer');
+        return c.redirect(location, 302);
+      }
+      return shell(c);
+    });
   }
 }
