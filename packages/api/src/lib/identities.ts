@@ -29,6 +29,9 @@ import {
   revokeDelegationsForAddress,
   revokeDelegationsOnGranteeTokenRotate,
 } from './delegations.ts';
+import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
+import { deliveryQueue } from './webhook-delivery.ts';
+import { recordAuditEvent } from './audit.ts';
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
 export type PushContentTier = 1 | 2 | 3;
@@ -480,6 +483,16 @@ export function deleteIdentity(address: string): boolean {
   if (kept.length === identities.length) return false;
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
+  const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
+  for (const wh of deletedWebhooks) {
+    deliveryQueue.cancelForWebhook(wh.id, 'subscription_deleted');
+    recordAuditEvent({
+      event: 'webhook.delete',
+      outcome: 'ok',
+      address: needle,
+      webhookId: wh.id,
+    });
+  }
   save(kept);
   return true;
 }

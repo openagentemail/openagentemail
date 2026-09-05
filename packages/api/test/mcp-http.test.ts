@@ -249,6 +249,11 @@ describe('MCP HTTP 工具', () => {
       'mail_read_message',
       'mail_send',
       'mail_wait_for',
+      'mail_webhook_create',
+      'mail_webhook_delete',
+      'mail_webhook_disable',
+      'mail_webhook_list',
+      'mail_webhook_test',
       'notify_agent',
       'notify_check',
       'notify_user',
@@ -315,7 +320,7 @@ describe('MCP HTTP 工具', () => {
     const body = (await readMcpJson(res)) as {
       result?: { tools?: unknown[] };
     };
-    expect(body.result?.tools?.length).toBe(20);
+    expect(body.result?.tools?.length).toBe(25);
   });
 
   test('mail_list_identities 无状态直连：连续两请求无 session 头各自成功', async () => {

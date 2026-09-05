@@ -7,6 +7,7 @@
 import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { JSON_BODY_LIMIT_BYTES } from './limits.ts';
 
 /**
  * Compose `${VAR:-}` injects "" when the var is unset. Treat empty/whitespace
@@ -170,8 +171,29 @@ const envSchema = z.object({
   // Notification transport. Docker Compose enables ntfy by default; keeping
   // the bare-process default off preserves the lightweight API test/runtime.
   NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
-  // Outbound webhooks. Off by default (§10.1).
+  // Outbound webhooks (§10.1).
   WEBHOOKS_ENABLED: z.enum(['true', 'false']).default('false'),
+  WEBHOOK_SIGNING_SECRET: z.string().min(32).optional(),
+  WEBHOOK_SIGNING_SECRET_PREVIOUS: z.string().min(32).optional(),
+  WEBHOOK_ALLOW_PRIVATE_TARGETS: z.enum(['true', 'false']).default('false'),
+  WEBHOOK_ALLOWED_PORTS: z.string().default('443'),
+  WEBHOOK_MAX_SUBSCRIPTIONS: z.coerce.number().int().min(0).default(16),
+  WEBHOOK_MAX_PER_ADDRESS: z.coerce.number().int().min(0).default(4),
+  WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(11).default(11),
+  WEBHOOK_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(1000).default(10000),
+  WEBHOOK_MAX_CONCURRENT: z.coerce.number().int().min(1).default(8),
+  WEBHOOK_POOL_RETRY_MS: z.coerce.number().int().min(1000).default(5000),
+  WEBHOOK_PAYLOAD_MAX_BYTES: z.coerce.number().int().min(2048).default(16384),
+  WEBHOOK_APPROVAL_ARGS_MAX_BYTES: z.coerce.number().int().min(0).default(4096),
+  WEBHOOK_APPROVAL_ARGS_MAX_DEPTH: z.coerce.number().int().min(1).default(4),
+  WEBHOOK_RESPONSE_MAX_BYTES: z.coerce.number().int().min(1).default(4096),
+  WEBHOOK_TIMESTAMP_TOLERANCE_SEC: z.coerce.number().int().min(30).default(300),
+  WEBHOOK_DISABLE_THRESHOLD: z.coerce.number().int().min(1).default(10),
+  WEBHOOK_ROTATION_OVERLAP_MS: z.coerce.number().int().min(0).default(86400000),
+  WEBHOOK_LOG_RETENTION_DAYS: z.coerce.number().int().min(4).default(30),
+  WEBHOOK_RATE_CREATE_PER_MIN: z.coerce.number().int().min(0).default(10),
+  WEBHOOK_RATE_TEST_PER_MIN: z.coerce.number().int().min(0).default(3),
+  WEBHOOK_RATE_DELIVER_PER_MIN: z.coerce.number().int().min(0).default(60),
   NTFY_INTERNAL_URL: envUrl('http://ntfy'),
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
@@ -239,6 +261,22 @@ function splitCsv(value: string): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function parseAllowedPorts(rawPorts: string): number[] {
+  const parts = splitCsv(rawPorts);
+  if (parts.length === 0) {
+    throw new Error('WEBHOOK_ALLOWED_PORTS must be non-empty');
+  }
+  const ports: number[] = [];
+  for (const p of parts) {
+    const port = Number(p);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`WEBHOOK_ALLOWED_PORTS contains invalid port: "${p}"`);
+    }
+    ports.push(port);
+  }
+  return ports;
 }
 
 /**
@@ -335,6 +373,27 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       );
     }
   }
+
+  if (raw.WEBHOOKS_ENABLED === 'true') {
+    const explicitTaskSecret = raw.TASK_SIGNING_SECRET;
+    if (!explicitTaskSecret) {
+      throw new Error('TASK_SIGNING_SECRET is required when WEBHOOKS_ENABLED is true');
+    }
+    if (explicitTaskSecret.length < 32) {
+      throw new Error(
+        'TASK_SIGNING_SECRET must be at least 32 characters when WEBHOOKS_ENABLED is true',
+      );
+    }
+  }
+
+  if (raw.WEBHOOK_PAYLOAD_MAX_BYTES > JSON_BODY_LIMIT_BYTES) {
+    throw new Error('WEBHOOK_PAYLOAD_MAX_BYTES must be <= JSON_BODY_LIMIT_BYTES');
+  }
+
+  const webhookAllowedPorts = parseAllowedPorts(raw.WEBHOOK_ALLOWED_PORTS);
+  const webhookAllowPrivateTargets =
+    raw.OAE_PUBLIC_EDGE === 'true' ? false : raw.WEBHOOK_ALLOW_PRIVATE_TARGETS === 'true';
+
   const taskSigningSecret = raw.TASK_SIGNING_SECRET ?? raw.SMTP_PASS;
 
   return {
@@ -386,6 +445,27 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     },
     webhooks: {
       enabled: raw.WEBHOOKS_ENABLED === 'true',
+      signingSecret: raw.WEBHOOK_SIGNING_SECRET,
+      signingSecretPrevious: raw.WEBHOOK_SIGNING_SECRET_PREVIOUS,
+      allowPrivateTargets: webhookAllowPrivateTargets,
+      allowedPorts: webhookAllowedPorts,
+      maxSubscriptions: raw.WEBHOOK_MAX_SUBSCRIPTIONS,
+      maxPerAddress: raw.WEBHOOK_MAX_PER_ADDRESS,
+      maxAttempts: raw.WEBHOOK_MAX_ATTEMPTS,
+      deliveryTimeoutMs: raw.WEBHOOK_DELIVERY_TIMEOUT_MS,
+      maxConcurrent: raw.WEBHOOK_MAX_CONCURRENT,
+      poolRetryMs: raw.WEBHOOK_POOL_RETRY_MS,
+      payloadMaxBytes: raw.WEBHOOK_PAYLOAD_MAX_BYTES,
+      approvalArgsMaxBytes: raw.WEBHOOK_APPROVAL_ARGS_MAX_BYTES,
+      approvalArgsMaxDepth: raw.WEBHOOK_APPROVAL_ARGS_MAX_DEPTH,
+      responseMaxBytes: raw.WEBHOOK_RESPONSE_MAX_BYTES,
+      timestampToleranceSec: raw.WEBHOOK_TIMESTAMP_TOLERANCE_SEC,
+      disableThreshold: raw.WEBHOOK_DISABLE_THRESHOLD,
+      rotationOverlapMs: raw.WEBHOOK_ROTATION_OVERLAP_MS,
+      logRetentionDays: raw.WEBHOOK_LOG_RETENTION_DAYS,
+      rateCreatePerMin: raw.WEBHOOK_RATE_CREATE_PER_MIN,
+      rateTestPerMin: raw.WEBHOOK_RATE_TEST_PER_MIN,
+      rateDeliverPerMin: raw.WEBHOOK_RATE_DELIVER_PER_MIN,
     },
     dashboardPublicUrl: raw.DASHBOARD_PUBLIC_URL
       ? normalizeUrl(raw.DASHBOARD_PUBLIC_URL)

@@ -720,6 +720,93 @@ export function registerOpenAgentEmailTools(
     ({ id, leaseToken, reason }) => callApi(() => client.releaseTask(id, leaseToken, reason)),
   );
 
-  // 收尾：规格表内全部 19 工具均须已在本次注册中 declare。
+  tier("mail_webhook_list", "read");
+  server.registerTool(
+    "mail_webhook_list",
+    {
+      title: "List Webhook Subscriptions",
+      description: "List outbound webhook subscriptions. Identity callers see only their own subscriptions; admin callers may see all or filter by address.",
+      inputSchema: {
+        address: z.string().regex(IDENTITY_ADDRESS_PATTERN).optional().describe("Optional identity email address to filter by (admin only)"),
+      },
+      annotations: readOnlyAnnotations,
+    },
+    ({ address }) => callApi(async () => ({ webhooks: await client.listWebhooks(address) })),
+  );
+
+  tier("mail_webhook_create", "critical");
+  server.registerTool(
+    "mail_webhook_create",
+    {
+      title: "Create Webhook Subscription",
+      description: "Create an outbound webhook subscription. Returns subscription metadata and the displayed signing secret (whs_...). Deny-by-default for OAuth tokens.",
+      inputSchema: {
+        url: z.string().url().describe("Webhook target URL (https:// required unless private target granted)"),
+        address: z.string().regex(IDENTITY_ADDRESS_PATTERN).describe("Identity email address to receive events for"),
+        events: z
+          .array(z.enum(['mail.received', 'approval.requested']))
+          .min(1)
+          .refine((items) => new Set(items).size === items.length, {
+            message: 'events must be unique',
+          })
+          .describe("Events to subscribe to ('mail.received', 'approval.requested')"),
+        contentScope: z
+          .enum(['metadata', 'preview'])
+          .optional()
+          .describe("Payload content scope: 'metadata' (default) or 'preview' (admin only)"),
+        description: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe("Optional human-readable description (max 1000 characters)"),
+      },
+      annotations: mutatingAnnotations,
+    },
+    (params) => callApi(() => client.createWebhook(params)),
+  );
+
+  tier("mail_webhook_delete", "minimal");
+  server.registerTool(
+    "mail_webhook_delete",
+    {
+      title: "Delete Webhook Subscription",
+      description: "Permanently delete an outbound webhook subscription and cancel any pending retries.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      annotations: { ...mutatingAnnotations, destructiveHint: true },
+    },
+    ({ id }) => callApi(() => client.deleteWebhook(id)),
+  );
+
+  tier("mail_webhook_test", "contained");
+  server.registerTool(
+    "mail_webhook_test",
+    {
+      title: "Test Webhook Subscription",
+      description: "Send an immediate probe ping to test webhook connectivity.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      annotations: mutatingAnnotations,
+    },
+    ({ id }) => callApi(() => client.testWebhook(id)),
+  );
+
+  tier("mail_webhook_disable", "minimal");
+  server.registerTool(
+    "mail_webhook_disable",
+    {
+      title: "Disable Webhook Subscription",
+      description: "Pause an active webhook subscription by marking it disabled.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      annotations: mutatingAnnotations,
+    },
+    ({ id }) => callApi(() => client.disableWebhook(id)),
+  );
+
+  // 收尾：规格表内全部 25 工具均须已在本次注册中 declare。
   assertAllSpecTiersDeclared();
 }

@@ -50,6 +50,7 @@ import {
   type SinkWatermark,
   type WatchedMessage,
 } from './event-dispatcher.ts';
+import { createWebhookSink } from './webhook-sink.ts';
 
 export type { WatchedMessage } from './event-dispatcher.ts';
 
@@ -1816,9 +1817,11 @@ export function startNotificationWatcher(cfg = config): () => void {
   if (!watcherAbort) {
     watcherAbort = new AbortController();
     const dispatcher = getEventDispatcher();
-    // webhook sink 随 PR 4 注册；PR 2 中 WEBHOOKS_ENABLED 仅作启动门输入
     if (!dispatcher.getSink('ntfy')) {
       dispatcher.registerSink(createNtfySink());
+    }
+    if (!dispatcher.getSink('webhook')) {
+      dispatcher.registerSink(createWebhookSink());
     }
     void runWatcher(watcherAbort.signal, dispatcher);
   }
