@@ -8,7 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { createApp } = await import('../src/app.ts');
@@ -654,6 +654,11 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     const body1: any = await res1.json();
     const body2: any = await res2.json();
     expect(body1.id).toBe(body2.id);
+    const secrets = [body1.secret, body2.secret];
+    const revealed = secrets.filter((s) => typeof s === 'string' && /^whs_[a-f0-9]{64}$/.test(s));
+    const redacted = secrets.filter((s) => s === null);
+    expect(revealed).toHaveLength(1);
+    expect(redacted).toHaveLength(1);
   });
 
   test('R2 Item 11: POST /v1/webhooks/:id/rotate idempotency returns cached response', async () => {
@@ -688,6 +693,49 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     const body2: any = await res2.json();
     expect(body2.epoch).toBe(1);
     expect(body2.id).toBe(sub.id);
+    expect(body2.secret).toBeNull();
+  });
+
+  test('R4: POST /v1/webhooks/:id/rotate is rate-limited independently of cached idempotent hits', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-rot-limit',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    const oldRate = config.webhooks.rateTestPerMin;
+    (config.webhooks as any).rateTestPerMin = 1;
+    deliveryLimiter.reset();
+    try {
+      const key = `rot_limit_${Date.now()}`;
+      const res1 = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Idempotency-Key': key,
+        },
+      });
+      expect(res1.status).toBe(200);
+      const replay = await app.request(`/v1/webhooks/${sub.id}/rotate`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Idempotency-Key': key,
+        },
+      });
+      expect(replay.status).toBe(200);
+
+      const res2 = await app.request(`/v1/webhooks/${sub.id}/rotate?force=true`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(res2.status).toBe(429);
+      expect(((await res2.json()) as any).error).toBe('rate_limited');
+      expect(res2.headers.get('Retry-After')).toBeTruthy();
+    } finally {
+      (config.webhooks as any).rateTestPerMin = oldRate;
+      deliveryLimiter.reset();
+    }
   });
 
   test('R2 Item 23: GET /v1/webhooks respects ?address= filter for admin and forbids identity', async () => {
@@ -828,6 +876,61 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
 
     // Reset DNS lookup for next tests
     setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
+  });
+
+  test('R4: POST /v1/webhooks/:id/test ssrf_refused audit includes clientIp', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://ssrf-test.example/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    setWebhookDnsLookupForTests(async () => [{ address: '169.254.169.254', family: 4 }]);
+    try {
+      const probeRes = await app.request(`/v1/webhooks/${sub.id}/test`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminKey}` },
+      });
+      expect(probeRes.status).toBe(200);
+      const body: any = await probeRes.json();
+      expect(body.outcome).toBe('refused');
+      expect(body.reason).toBe('ssrf_refused');
+
+      const ssrf = readAuditEvents({ event: 'webhook.ssrf_refused' }).find(
+        (e) => e.webhookId === sub.id,
+      );
+      expect(ssrf).toBeDefined();
+      expect(ssrf?.ip).toEqual(expect.any(String));
+      expect(ssrf?.ip).toBeTruthy();
+    } finally {
+      setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
+    }
+  });
+
+  test('R4: identity delete cascades webhooks before persisting identity removal', async () => {
+    const { createDelegation, invalidateDelegationStoreCache } = await import(
+      '../src/lib/delegations.ts'
+    );
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-cascade-order',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    createDelegation({
+      mailbox: 'alice@test.example',
+      grantee: 'bob@test.example',
+      createdBy: 'alice@test.example',
+    });
+    writeFileSync(join(TEST_DATA_DIR, 'delegations.json'), 'CORRUPTED_JSON{', { mode: 0o600 });
+    invalidateDelegationStoreCache();
+
+    expect(() => deleteIdentity('alice@test.example')).toThrow('delegation_store_corrupt');
+    expect(getWebhookSubscription(sub.id)).toBeUndefined();
+    const identitiesRaw = JSON.parse(
+      readFileSync(join(TEST_DATA_DIR, 'identities.json'), 'utf8'),
+    ) as Array<{ address: string }>;
+    expect(identitiesRaw.find((i) => i.address === 'alice@test.example')).toBeDefined();
   });
 
   afterAll(async () => {

@@ -47,6 +47,7 @@ import {
   getWebhookSubscription,
   listWebhookSubscriptions,
   updateWebhookSubscription,
+  WebhookStoreCorruptError,
   type WebhookSubscription,
   type WebhookState,
 } from './webhook-store.ts';
@@ -181,6 +182,38 @@ export const RETRY_SCHEDULE_OFFSETS_SEC = [
 export const MAX_RETRY_SCHEDULE_ATTEMPTS = 11;
 export const MAX_PING_ATTEMPTS = 3;
 export const RETRY_HORIZON_SEC = 259200; // 72 hours in seconds
+
+/** Effective attempt cap for this event type: ping is 3, others follow WEBHOOK_MAX_ATTEMPTS. */
+export function maxAttemptsForEventType(type: WebhookEventType): number {
+  if (type === 'webhook.ping') return MAX_PING_ATTEMPTS;
+  return Math.min(config.webhooks.maxAttempts, MAX_RETRY_SCHEDULE_ATTEMPTS);
+}
+
+/**
+ * §8.6 step 3: a latest row is final if success/permanent/refused, or a *completed*
+ * retryable at the event type's actual cap. A pending row is never final.
+ */
+export function isTerminalDeliveryRow(
+  row: Pick<WebhookDeliveryLogRow, 'outcome' | 'attempt' | 'type'>,
+): boolean {
+  if (row.outcome === 'success' || row.outcome === 'permanent' || row.outcome === 'refused') {
+    return true;
+  }
+  return row.outcome === 'retryable' && row.attempt >= maxAttemptsForEventType(row.type);
+}
+
+/**
+ * Parse HTTP Retry-After as delay-seconds. The entire trimmed value must be a
+ * base-10 integer in 1..3600; strings like "3600junk" are rejected.
+ */
+export function parseRetryAfterSeconds(header: string | null | undefined): number | undefined {
+  if (header == null) return undefined;
+  const trimmed = header.trim();
+  if (!/^[0-9]+$/.test(trimmed)) return undefined;
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 3600) return undefined;
+  return n;
+}
 
 /**
  * Calculates next attempt scheduled time with ±10% non-cumulative gap jitter (§8.3).
@@ -588,18 +621,13 @@ export function validateWebhookUrlStatic(
     return { valid: false, code: 'invalid_webhook_url', error: 'fragment_forbidden' };
   }
 
-  // Port in WEBHOOK_ALLOWED_PORTS
+  // Port in WEBHOOK_ALLOWED_PORTS — no implicit 80 for private http (§9.5)
   const port = url.port
     ? Number(url.port)
     : url.protocol === 'https:'
       ? 443
       : 80;
-  const configuredPorts = opts?.allowedPorts ?? config.webhooks.allowedPorts;
-  const allowedPorts =
-    opts?.allowedPorts ??
-    (allowPrivate && url.protocol === 'http:' && !configuredPorts.includes(80)
-      ? [...configuredPorts, 80]
-      : configuredPorts);
+  const allowedPorts = opts?.allowedPorts ?? config.webhooks.allowedPorts;
   if (!allowedPorts.includes(port)) {
     return { valid: false, code: 'invalid_webhook_url', error: 'port_not_allowed' };
   }
@@ -1032,14 +1060,7 @@ export async function executeWebhookAttempt(
     }
 
     if (status === 408 || status === 429 || status >= 500) {
-      let retryAfter: number | undefined;
-      const retryHeader = response.headers.get('retry-after');
-      if (retryHeader) {
-        const parsedSec = Number.parseInt(retryHeader, 10);
-        if (Number.isInteger(parsedSec) && parsedSec >= 1 && parsedSec <= 3600) {
-          retryAfter = parsedSec;
-        }
-      }
+      const retryAfter = parseRetryAfterSeconds(response.headers.get('retry-after'));
       return {
         status,
         outcome: 'retryable',
@@ -1090,6 +1111,7 @@ class WebhookDeliveryLimiter {
   private deliverLimiters = new Map<string, number[]>();
   private testProbeLimiters = new Map<string, number[]>();
   private createLimiters = new Map<string, number[]>();
+  private rotateLimiters = new Map<string, number[]>();
 
   getActiveTotal(): number {
     return this.activeTotal;
@@ -1161,12 +1183,24 @@ class WebhookDeliveryLimiter {
     );
   }
 
+  /** Independent rotate bucket, sized like the test-probe limit. */
+  checkRotateRate(tokenKey: string, now = Date.now()): { allowed: boolean; retryAfterSec: number } {
+    return slidingWindowCheck(
+      this.rotateLimiters,
+      tokenKey,
+      config.webhooks.rateTestPerMin,
+      60_000,
+      now,
+    );
+  }
+
   reset(): void {
     this.activePerEndpoint.clear();
     this.activeTotal = 0;
     this.deliverLimiters.clear();
     this.testProbeLimiters.clear();
     this.createLimiters.clear();
+    this.rotateLimiters.clear();
   }
 }
 
@@ -1286,6 +1320,15 @@ class WebhookDeliveryQueue {
     this.jobs.clear();
   }
 
+  hasQueuedJob(webhookId: string, eventId?: string): boolean {
+    for (const job of this.jobs.values()) {
+      if (job.webhookId !== webhookId) continue;
+      if (eventId !== undefined && job.eventId !== eventId) continue;
+      return true;
+    }
+    return false;
+  }
+
   private clearTimer(key: string): void {
     const t = this.activeTimers.get(key);
     if (t) {
@@ -1294,9 +1337,67 @@ class WebhookDeliveryQueue {
     }
   }
 
+  private scheduleIfStillQueued(key: string, job: ScheduledDeliveryJob): void {
+    if (this.jobs.get(key) !== job) return;
+    this.schedule(job);
+  }
+
   private async executeJob(key: string): Promise<void> {
     const job = this.jobs.get(key);
     if (!job) return;
+    try {
+      await this.runExecuteJob(key, job);
+    } catch (err: unknown) {
+      this.clearTimer(key);
+      this.jobs.delete(key);
+      try {
+        deliveryLimiter.releaseSlot(job.webhookId);
+      } catch {
+        // ignore double-release
+      }
+      const storeCorrupt =
+        err instanceof WebhookStoreCorruptError ||
+        (err !== null &&
+          typeof err === 'object' &&
+          'code' in err &&
+          (err as { code?: string }).code === 'store_corrupt');
+      if (storeCorrupt) {
+        console.error('[webhooks] store corrupt during delivery:', err);
+      } else {
+        console.error('[webhooks] executeJob failed:', err);
+      }
+      try {
+        appendDeliveryLogRow({
+          ts: new Date().toISOString(),
+          webhookId: job.webhookId,
+          eventId: job.eventId,
+          runId: job.runId,
+          deliveryId: `dlv_${randomUUID()}`,
+          type: job.type,
+          address: job.address,
+          messageId: job.messageId,
+          uidValidity: job.uidValidity,
+          rfc822MessageId: job.rfc822MessageId,
+          taskId: job.taskId,
+          taskCreatedAt: job.taskCreatedAt,
+          expiresInSec: job.expiresInSec,
+          eventCreatedAt: job.eventCreatedAt,
+          attempt: job.attempt,
+          outcome: 'permanent',
+          status: null,
+          durationMs: null,
+          sensitive: false,
+          replay: job.replay,
+          nextAttemptAt: null,
+          reason: storeCorrupt ? 'store_corrupt' : 'execute_error',
+        });
+      } catch (logErr) {
+        console.error('[webhooks] failed to write executeJob dead letter:', logErr);
+      }
+    }
+  }
+
+  private async runExecuteJob(key: string, job: ScheduledDeliveryJob): Promise<void> {
 
     const sub = getWebhookSubscription(job.webhookId);
     if (!sub || sub.state === 'disabled') {
@@ -1426,7 +1527,7 @@ class WebhookDeliveryQueue {
       });
 
       job.nextAttemptAt = rescheduleAt;
-      this.schedule(job);
+      this.scheduleIfStillQueued(key, job);
       return;
     }
 
@@ -1494,7 +1595,7 @@ class WebhookDeliveryQueue {
       });
 
       job.nextAttemptAt = rescheduleAt;
-      this.schedule(job);
+      this.scheduleIfStillQueued(key, job);
       return;
     }
 
@@ -1542,6 +1643,11 @@ class WebhookDeliveryQueue {
       result = await executeWebhookAttempt(sub, body, job.type, deliveryId);
     } finally {
       deliveryLimiter.releaseSlot(job.webhookId);
+    }
+
+    // cancelForWebhook may have removed this job while the attempt was in flight.
+    if (this.jobs.get(key) !== job) {
+      return;
     }
 
     // Process outcome & update circuit breaker (§8.5, D2a)
@@ -1666,7 +1772,7 @@ class WebhookDeliveryQueue {
     if (result.outcome === 'retryable' && nextScheduledTime !== null) {
       job.attempt = currentAttempt + 1;
       job.nextAttemptAt = nextScheduledTime;
-      this.schedule(job);
+      this.scheduleIfStillQueued(key, job);
     }
   }
 }
@@ -1826,7 +1932,7 @@ export function fireCreationPing(
 export async function executeWebhookTestProbe(
   subscription: WebhookSubscription,
   callerTokenKey: string,
-  options?: { dnsLookup?: DnsLookup },
+  options?: { dnsLookup?: DnsLookup; clientIp?: string },
 ): Promise<{
   deliveryId: string;
   outcome: WebhookDeliveryOutcome;
@@ -1963,6 +2069,7 @@ export async function executeWebhookTestProbe(
       outcome: 'denied',
       address: subscription.address,
       webhookId: subscription.id,
+      ...(options?.clientIp ? { ip: options.clientIp } : {}),
     });
     recordAuditEvent({
       event: 'webhook.disabled',
@@ -2276,13 +2383,9 @@ export async function reconstructPendingDeliveriesAtBoot(bootTime = Date.now()):
     });
     const latest = groupRows[0]!;
 
-    // 3. Discard group if latest row is final (§8.6 step 3)
-    const isSuccessOrRefused = latest.outcome === 'success' || latest.outcome === 'refused';
-    const isPermanent = latest.outcome === 'permanent';
-    const isCompletedMaxRetryable =
-      latest.outcome === 'retryable' && latest.attempt >= MAX_RETRY_SCHEDULE_ATTEMPTS;
-
-    if (isSuccessOrRefused || isPermanent || isCompletedMaxRetryable) {
+    // 3. Discard group if latest row is final (§8.6 step 3) using the
+    // event type's actual cap (ping=3, others=WEBHOOK_MAX_ATTEMPTS).
+    if (isTerminalDeliveryRow(latest)) {
       continue;
     }
 

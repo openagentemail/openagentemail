@@ -31,6 +31,7 @@ const {
   WebhookForbiddenSecretError,
   WebhookStoreCorruptError,
   WEBHOOK_STORE_FILE,
+  WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
 } = await import('../src/lib/webhook-store.ts');
 
 describe('webhook-store storage conventions (§10.5, §14 item 5)', () => {
@@ -227,6 +228,25 @@ describe('webhook-store storage conventions (§10.5, §14 item 5)', () => {
     compactIdempotencyKeys(30);
     expect(findRotateIdempotency('whk_created_1', 'idem-rot-1')).toBeUndefined();
     expect(findCreateIdempotency('idem-create-1', 'alice@test.example')).toBeDefined();
+  });
+
+  test('R4: compactIdempotencyKeys enforces a max record count keeping newest', () => {
+    const now = Date.now();
+    for (let i = 0; i < 8; i++) {
+      saveRotateIdempotency({
+        key: `rot-cap-${i}`,
+        webhookId: 'whk_cap',
+        epoch: i,
+        responseBody: { epoch: i, secret: null },
+        createdAt: new Date(now + i * 1000).toISOString(),
+      });
+    }
+    compactIdempotencyKeys(30, 3);
+    expect(findRotateIdempotency('whk_cap', 'rot-cap-7')).toBeDefined();
+    expect(findRotateIdempotency('whk_cap', 'rot-cap-6')).toBeDefined();
+    expect(findRotateIdempotency('whk_cap', 'rot-cap-5')).toBeDefined();
+    expect(findRotateIdempotency('whk_cap', 'rot-cap-0')).toBeUndefined();
+    expect(WEBHOOK_IDEMPOTENCY_MAX_RECORDS).toBeGreaterThanOrEqual(8);
   });
 
   test('checkSubscriptionLimits: limits instance-wide and per-address subscriptions', () => {

@@ -30,6 +30,8 @@ import { deriveWebhookKey } from './webhook-signing.ts';
 
 export const WEBHOOK_STORE_SCHEMA_VERSION = 1;
 export const WEBHOOK_STORE_FILE = 'webhooks.json';
+/** Cap on persisted create/rotate idempotency records per list (newest kept). */
+export const WEBHOOK_IDEMPOTENCY_MAX_RECORDS = 256;
 
 export type WebhookContentScope = 'metadata' | 'preview';
 export type WebhookState = 'unverified' | 'enabled' | 'disabled';
@@ -448,6 +450,30 @@ export function findCreateIdempotency(
   );
 }
 
+function createdAtMs(value: string): number {
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : 0;
+}
+
+function trimIdempotencyList<T extends { createdAt: string }>(
+  list: T[] | undefined,
+  retentionDays: number,
+  maxRecords: number,
+): T[] {
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const kept = (list ?? []).filter((r) => createdAtMs(r.createdAt) >= cutoff);
+  if (kept.length <= maxRecords) return kept;
+  kept.sort((a, b) => createdAtMs(b.createdAt) - createdAtMs(a.createdAt));
+  return kept.slice(0, maxRecords);
+}
+
+function capIdempotencyList<T extends { createdAt: string }>(list: T[], maxRecords: number): T[] {
+  if (list.length <= maxRecords) return list;
+  return [...list]
+    .sort((a, b) => createdAtMs(b.createdAt) - createdAtMs(a.createdAt))
+    .slice(0, maxRecords);
+}
+
 export function saveCreateIdempotency(record: CreateIdempotencyRecord): void {
   const file = readStore();
   file.createIdempotency = file.createIdempotency ?? [];
@@ -459,6 +485,10 @@ export function saveCreateIdempotency(record: CreateIdempotencyRecord): void {
   } else {
     file.createIdempotency.push(record);
   }
+  file.createIdempotency = capIdempotencyList(
+    file.createIdempotency,
+    WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
+  );
   writeStore(file);
 }
 
@@ -483,24 +513,28 @@ export function saveRotateIdempotency(record: RotateIdempotencyRecord): void {
   } else {
     file.rotateIdempotency.push(record);
   }
+  file.rotateIdempotency = capIdempotencyList(
+    file.rotateIdempotency,
+    WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
+  );
   writeStore(file);
 }
 
 export function compactIdempotencyKeys(
   retentionDays: number = config.webhooks.logRetentionDays,
+  maxRecords: number = WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
 ): void {
   const file = readStore();
-  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  if (file.createIdempotency) {
-    file.createIdempotency = file.createIdempotency.filter(
-      (c) => new Date(c.createdAt).getTime() >= cutoff,
-    );
-  }
-  if (file.rotateIdempotency) {
-    file.rotateIdempotency = file.rotateIdempotency.filter(
-      (r) => new Date(r.createdAt).getTime() >= cutoff,
-    );
-  }
+  file.createIdempotency = trimIdempotencyList(
+    file.createIdempotency,
+    retentionDays,
+    maxRecords,
+  );
+  file.rotateIdempotency = trimIdempotencyList(
+    file.rotateIdempotency,
+    retentionDays,
+    maxRecords,
+  );
   writeStore(file);
 }
 

@@ -24,10 +24,13 @@ const {
   formatApprovalPayload,
   formatMailPayload,
   formatPingPayload,
+  isTerminalDeliveryRow,
+  parseRetryAfterSeconds,
   readAllDeliveryLogRows,
   readDeliveryLogRows,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
+  setWebhookDnsLookupForTests,
   validateWebhookUrlResolution,
   validateWebhookUrlStatic,
 } = await import('../src/lib/webhook-delivery.ts');
@@ -37,8 +40,10 @@ const {
   createWebhookSubscription,
   deleteWebhookSubscription,
   getWebhookSubscription,
+  setWebhooksFailClosedForTests,
   updateWebhookSubscription,
 } = await import('../src/lib/webhook-store.ts');
+const { readAuditEvents } = await import('../src/lib/audit.ts');
 type WebhookSubscription = import('../src/lib/webhook-store.ts').WebhookSubscription;
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-delivery');
@@ -57,8 +62,17 @@ function setupTestDir(): void {
   (config.webhooks as any).payloadMaxBytes = 16384;
   (config.webhooks as any).codeEntryChars = 200;
   (config as any).oaePublicEdge = false;
+  setWebhooksFailClosedForTests(false);
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitUntil timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe('webhook-delivery: Retry Schedule & Jitter (§8.3)', () => {
@@ -114,6 +128,20 @@ describe('webhook-delivery: Retry Schedule & Jitter (§8.3)', () => {
     const next = calculateNextAttemptTime(1, start, { retryAfterSec: 60 });
     // Offset 2 was 5s; with Retry-After 60s from attempt 1 (0s), it schedules at >= 60s
     expect(next).toBe(start + 60000);
+  });
+
+  test('R4: parseRetryAfterSeconds requires the whole string to be a 1..3600 integer', () => {
+    expect(parseRetryAfterSeconds('60')).toBe(60);
+    expect(parseRetryAfterSeconds('3600')).toBe(3600);
+    expect(parseRetryAfterSeconds('1')).toBe(1);
+    expect(parseRetryAfterSeconds('3600junk')).toBeUndefined();
+    expect(parseRetryAfterSeconds('60.0')).toBeUndefined();
+    expect(parseRetryAfterSeconds(' 60')).toBe(60);
+    expect(parseRetryAfterSeconds('0')).toBeUndefined();
+    expect(parseRetryAfterSeconds('3601')).toBeUndefined();
+    expect(parseRetryAfterSeconds('-1')).toBeUndefined();
+    expect(parseRetryAfterSeconds('')).toBeUndefined();
+    expect(parseRetryAfterSeconds(null)).toBeUndefined();
   });
 });
 
@@ -276,6 +304,7 @@ describe('webhook-delivery: URL Validation & SSRF Safety (§9.1, §9.3, §9.5, �
     // HTTP target resolving to public IP must fail §9.3 step 5
     const httpPublicRes = await validateWebhookUrlResolution('http://public.example.com/hook', {
       allowPrivateTargets: true,
+      allowedPorts: [80, 443],
       dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }],
     });
     expect(httpPublicRes.valid).toBe(false);
@@ -283,15 +312,33 @@ describe('webhook-delivery: URL Validation & SSRF Safety (§9.1, §9.3, §9.5, �
       expect(httpPublicRes.error).toBe('http_target_must_be_private');
     }
 
-    // HTTP target resolving to private IP succeeds with isPrivateTarget=true
+    // HTTP target resolving to private IP succeeds only when 80 is on the port whitelist
     const httpPrivateRes = await validateWebhookUrlResolution('http://local.internal/hook', {
       allowPrivateTargets: true,
+      allowedPorts: [80, 443],
       dnsLookup: async () => [{ address: '192.168.1.50', family: 4 }],
     });
     expect(httpPrivateRes.valid).toBe(true);
     if (httpPrivateRes.valid) {
       expect(httpPrivateRes.isPrivateTarget).toBe(true);
     }
+  });
+
+  test('R4: private http targets do not implicitly allow port 80', () => {
+    const implicit = validateWebhookUrlStatic('http://192.168.1.50/hook', {
+      allowPrivateTargets: true,
+      allowedPorts: [443],
+    });
+    expect(implicit.valid).toBe(false);
+    if (!implicit.valid) {
+      expect(implicit.error).toBe('port_not_allowed');
+    }
+
+    const explicit = validateWebhookUrlStatic('http://192.168.1.50/hook', {
+      allowPrivateTargets: true,
+      allowedPorts: [80, 443],
+    });
+    expect(explicit.valid).toBe(true);
   });
 });
 
@@ -778,6 +825,237 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     // Boot reconstruction must see terminal state and NOT reconstruct it
     const bootRes = await reconstructPendingDeliveriesAtBoot();
     expect(bootRes.reconstructed).toBe(0);
+  });
+
+  test('R4: isTerminalDeliveryRow uses ping=3 and WEBHOOK_MAX_ATTEMPTS, never pending', () => {
+    expect(
+      isTerminalDeliveryRow({ type: 'webhook.ping', outcome: 'retryable', attempt: 3 }),
+    ).toBe(true);
+    expect(
+      isTerminalDeliveryRow({ type: 'webhook.ping', outcome: 'retryable', attempt: 2 }),
+    ).toBe(false);
+    expect(
+      isTerminalDeliveryRow({ type: 'webhook.ping', outcome: 'pending', attempt: 3 }),
+    ).toBe(false);
+
+    const prev = config.webhooks.maxAttempts;
+    (config.webhooks as any).maxAttempts = 4;
+    try {
+      expect(
+        isTerminalDeliveryRow({ type: 'mail.received', outcome: 'retryable', attempt: 4 }),
+      ).toBe(true);
+      expect(
+        isTerminalDeliveryRow({ type: 'mail.received', outcome: 'retryable', attempt: 3 }),
+      ).toBe(false);
+      expect(
+        isTerminalDeliveryRow({ type: 'mail.received', outcome: 'pending', attempt: 4 }),
+      ).toBe(false);
+    } finally {
+      (config.webhooks as any).maxAttempts = prev;
+    }
+  });
+
+  test('R4: boot reconstruction does not resurrect a completed last ping retryable', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://recon-ping.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 10_000).toISOString();
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9_000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_ping_cap',
+      runId: 'run_0',
+      deliveryId: 'dlv_ping_cap',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 3,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 20,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 5_000).toISOString(),
+      reason: 'server_error',
+    });
+
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+    expect(result.reconstructed).toBe(0);
+    expect(result.deadLettered).toBe(0);
+    expect(deliveryQueue.hasQueuedJob(sub.id, 'evt_ping_cap')).toBe(false);
+  });
+
+  test('R4: boot reconstruction does not resurrect retryable at WEBHOOK_MAX_ATTEMPTS', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://recon-max.example/hook',
+      address: 'owner@openagent.email',
+      events: ['approval.requested'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const prev = config.webhooks.maxAttempts;
+    (config.webhooks as any).maxAttempts = 4;
+    const bootTime = Date.now();
+    const eventCreatedAt = new Date(bootTime - 3_600_000).toISOString();
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 1_000).toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_max_cap',
+      runId: 'run_0',
+      deliveryId: 'dlv_max_cap',
+      type: 'approval.requested',
+      address: 'owner@openagent.email',
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: '3f8a1c62-9d4e-4b07-a5f1-6c2e8d904b73',
+      taskCreatedAt: eventCreatedAt,
+      expiresInSec: 86400,
+      eventCreatedAt,
+      attempt: 4,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 20,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(bootTime + 5_000).toISOString(),
+      reason: 'server_error',
+    });
+
+    try {
+      const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+      expect(result.reconstructed).toBe(0);
+      expect(result.deadLettered).toBe(0);
+    } finally {
+      (config.webhooks as any).maxAttempts = prev;
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('R4: store-corrupt executeJob writes store_corrupt dead letter without rejecting', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://corrupt-job.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const rejections: unknown[] = [];
+    const onRej = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onRej);
+    setWebhooksFailClosedForTests(true);
+    try {
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId: 'evt_store_corrupt_job',
+        type: 'webhook.ping',
+        payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === 'evt_store_corrupt_job' && r.reason === 'store_corrupt',
+          ),
+        1500,
+      );
+      const row = readAllDeliveryLogRows().find(
+        (r) => r.eventId === 'evt_store_corrupt_job' && r.reason === 'store_corrupt',
+      );
+      expect(row?.outcome).toBe('permanent');
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRej);
+      setWebhooksFailClosedForTests(false);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('R4: cancelForWebhook during in-flight executeJob does not reschedule', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://cancel-inflight.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    let rejectDns!: (err: unknown) => void;
+    setWebhookDnsLookupForTests(
+      () =>
+        new Promise((_, reject) => {
+          rejectDns = reject;
+        }),
+    );
+    const eventId = 'evt_cancel_inflight';
+    try {
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId,
+        type: 'webhook.ping',
+        payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      });
+      await waitUntil(() => deliveryLimiter.isEndpointActive(sub.id), 1500);
+      deliveryQueue.cancelForWebhook(sub.id, 'subscription_deleted');
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+
+      const err: any = new Error('getaddrinfo ENOTFOUND');
+      err.code = 'ENOTFOUND';
+      rejectDns(err);
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+      const rows = readAllDeliveryLogRows().filter((r) => r.eventId === eventId);
+      expect(rows.some((r) => r.outcome === 'permanent' && r.reason === 'subscription_deleted')).toBe(
+        true,
+      );
+      expect(rows.some((r) => r.outcome === 'retryable')).toBe(false);
+    } finally {
+      setWebhookDnsLookupForTests(undefined);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('R4: background SSRF refusal audit omits ip', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://ssrf-bg.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    setWebhookDnsLookupForTests(async () => [{ address: '169.254.169.254', family: 4 }]);
+    try {
+      enqueueWebhookDelivery({
+        subscription: sub,
+        eventId: 'evt_ssrf_bg',
+        type: 'webhook.ping',
+        payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      });
+      await waitUntil(
+        () => readAuditEvents({ event: 'webhook.ssrf_refused' }).some((e) => e.webhookId === sub.id),
+        1500,
+      );
+      const row = readAuditEvents({ event: 'webhook.ssrf_refused' }).find(
+        (e) => e.webhookId === sub.id,
+      );
+      expect(row).toBeDefined();
+      expect(row?.ip).toBeUndefined();
+    } finally {
+      setWebhookDnsLookupForTests(undefined);
+      deliveryQueue.cancelAll();
+    }
   });
 
   afterAll(async () => {

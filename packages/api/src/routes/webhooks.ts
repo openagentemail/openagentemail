@@ -13,6 +13,7 @@ import {
   getAuth,
 } from '../lib/auth.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
+import { clientIp } from '../lib/net.ts';
 import {
   checkSubscriptionLimits,
   createWebhookSubscription,
@@ -70,6 +71,13 @@ function forbidOAuthRead(c: Context) {
 
 type InFlightCreateResult = { status: number; body: any };
 const inFlightCreateIdempotency = new Map<string, Promise<InFlightCreateResult>>();
+
+function redactWebhookSecret(body: unknown): unknown {
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    return { ...(body as Record<string, unknown>), secret: null };
+  }
+  return body;
+}
 
 const createSchema = z
   .object({
@@ -187,7 +195,7 @@ export const webhooksRoute = new Hono()
       if (pending) {
         try {
           const cached = await pending;
-          return c.json(cached.body, cached.status as any);
+          return c.json(redactWebhookSecret(cached.body), cached.status as any);
         } catch {
           // ignore failure and proceed
         }
@@ -283,12 +291,16 @@ export const webhooksRoute = new Hono()
 
     if (compositeKey) {
       let promise = inFlightCreateIdempotency.get(compositeKey);
+      const waiter = Boolean(promise);
       if (!promise) {
         promise = executeCreate();
         inFlightCreateIdempotency.set(compositeKey, promise);
       }
       try {
         const res = await promise;
+        if (waiter) {
+          return c.json(redactWebhookSecret(res.body), res.status as any);
+        }
         return c.json(res.body, res.status as any);
       } finally {
         inFlightCreateIdempotency.delete(compositeKey);
@@ -600,7 +612,7 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'content_scope_requires_admin' }, 403);
     }
 
-    // Idempotency check
+    // Idempotency check (cached hits skip the write-amplification limiter)
     const idempotencyKey = c.req.header('idempotency-key')?.trim();
     if (idempotencyKey) {
       const found = findRotateIdempotency(sub.id, idempotencyKey);
@@ -620,6 +632,13 @@ export const webhooksRoute = new Hono()
         { error: 'rotation_window_open', overlapUntil: sub.overlapUntil },
         409,
       );
+    }
+
+    const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
+    const rotateRate = deliveryLimiter.checkRotateRate(tokenKey);
+    if (!rotateRate.allowed) {
+      c.header('Retry-After', String(rotateRate.retryAfterSec));
+      return c.json({ error: 'rate_limited', retryAfterSec: rotateRate.retryAfterSec }, 429);
     }
 
     const nextEpoch = sub.epoch + 1;
@@ -694,7 +713,9 @@ export const webhooksRoute = new Hono()
     const tokenKey = auth.kind === 'admin' ? 'admin' : auth.address;
 
     try {
-      const probeRes = await executeWebhookTestProbe(sub, tokenKey);
+      const probeRes = await executeWebhookTestProbe(sub, tokenKey, {
+        clientIp: clientIp(c),
+      });
 
       let auditOutcome: 'ok' | 'denied' | 'error' = 'ok';
       if (probeRes.outcome === 'refused') {

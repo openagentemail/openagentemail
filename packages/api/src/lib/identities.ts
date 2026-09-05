@@ -487,9 +487,9 @@ export function deleteIdentity(address: string): boolean {
   const needle = address.toLowerCase();
   const kept = identities.filter((i) => i.address !== needle);
   if (kept.length === identities.length) return false;
-  revokeDelegationsForAddress(needle);
-  revokeGrantsForAddress(needle);
-  save(kept);
+  // Webhook cascade first (delete + cancel in-flight + audit). Identity save
+  // after that: a failed identity write is retryable, a live subscription after
+  // the identity is gone is an exfil channel (§10.5).
   const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
   for (const wh of deletedWebhooks) {
     if (webhookCancelCallback) {
@@ -502,6 +502,9 @@ export function deleteIdentity(address: string): boolean {
       webhookId: wh.id,
     });
   }
+  revokeDelegationsForAddress(needle);
+  revokeGrantsForAddress(needle);
+  save(kept);
   return true;
 }
 
