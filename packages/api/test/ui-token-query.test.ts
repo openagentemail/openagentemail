@@ -1241,7 +1241,7 @@ describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
       body: JSON.stringify({ code: mint2.code, provenance: 'link-exchange' }),
     });
     expect(res2.status).toBe(401);
-    const body2 = await res2.json();
+    const body2 = (await res2.json()) as any;
     expect(body2.error).toBe('invalid_token');
   });
 
@@ -1312,7 +1312,7 @@ describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
       body: JSON.stringify({ code: mintShort.code, provenance: 'link-exchange' }),
     });
     expect(resExpired.status).toBe(401);
-    const bodyExpired = await resExpired.json();
+    const bodyExpired = (await resExpired.json()) as any;
     expect(bodyExpired.error).toBe('invalid_token');
   });
 
@@ -1497,5 +1497,251 @@ describe('Issue #132: one-time exchange code hardening (Decision C)', () => {
     const htmlWithout = await resWithout.text();
     expect(htmlWithout).not.toContain('Signed in via link as Admin session');
     expect(htmlWithout).not.toContain('id="link-login-notice"');
+  });
+
+  // Rework R2 - Mandatory Item 1: mint rate-limit window pruning
+  test('Rework R2 (Mandatory 1): mintExchangeCode prunes globalFailures window and does not permanently lock out link logins', () => {
+    const validToken = 'admin-secret';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const t0 = 1000000;
+    // 60 failures across different IPs within 60s
+    for (let i = 0; i < 60; i++) {
+      const res = store.mintExchangeCode(`bad-token-${i}`, `10.0.0.${i + 1}`, t0 + i * 100);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('invalid_token');
+    }
+
+    // 61st attempt within window hits global rate limit
+    const limitedRes = store.mintExchangeCode(validToken, '10.1.1.1', t0 + 6000);
+    expect(limitedRes.ok).toBe(false);
+    if (!limitedRes.ok) expect(limitedRes.reason).toBe('rate_limited');
+
+    // After GLOBAL_FAILURE_WINDOW_MS (60s) has elapsed (e.g. t0 + 61_000):
+    // mintExchangeCode entry cleanup(now) prunes expired failures and minting succeeds
+    const recoveredRes = store.mintExchangeCode(validToken, '10.1.1.1', t0 + 61000);
+    expect(recoveredRes.ok).toBe(true);
+    if (recoveredRes.ok) {
+      expect(recoveredRes.auth).toEqual({ kind: 'admin' });
+      expect(recoveredRes.code).toBeDefined();
+    }
+  });
+
+  // Rework R2 - Mandatory Item 2: unauthenticated GET audit write amplification prevention
+  test('Rework R2 (Mandatory 2): unauthenticated GET mint does not write audit on rate_limited and throttles denied events to 1/min per IP', () => {
+    const validToken = 'admin-secret';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const t0 = 2000000;
+    const attackerIp = '198.51.100.42';
+
+    // 1. Send 5 invalid requests within 10s (under MAX_IP_FAILURES = 10)
+    for (let i = 0; i < 5; i++) {
+      const res = store.mintExchangeCode(`invalid-${i}`, attackerIp, t0 + i * 1000);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toBe('invalid_token');
+    }
+
+    // Check denied audit throttle: exactly 1 event recorded within the 60s window
+    const auditsT0 = readAuditEvents({ event: 'ui.token.exchange_mint' }).filter(
+      (e) => e.outcome === 'denied' && (e as any).ip === attackerIp,
+    );
+    expect(auditsT0).toHaveLength(1);
+
+    // 2. After 60s cooldown from t0 (t0 + 60_001), send 6th invalid request (still under 10 failures)
+    const resAfterCooldown = store.mintExchangeCode('invalid-after-cooldown', attackerIp, t0 + 60001);
+    expect(resAfterCooldown.ok).toBe(false);
+    if (!resAfterCooldown.ok) expect(resAfterCooldown.reason).toBe('invalid_token');
+
+    // Denied audit count increases to 2
+    const auditsT60 = readAuditEvents({ event: 'ui.token.exchange_mint' }).filter(
+      (e) => e.outcome === 'denied' && (e as any).ip === attackerIp,
+    );
+    expect(auditsT60).toHaveLength(2);
+
+    // 3. Now send 5 more invalid requests to push over MAX_IP_FAILURES (10)
+    for (let i = 0; i < 4; i++) {
+      store.mintExchangeCode(`invalid-fill-${i}`, attackerIp, t0 + 60002 + i);
+    }
+    // 11th total failure triggers rate_limited
+    const rlRes = store.mintExchangeCode(`invalid-over-limit`, attackerIp, t0 + 60010);
+    expect(rlRes.ok).toBe(false);
+    if (!rlRes.ok) expect(rlRes.reason).toBe('rate_limited');
+
+    // Verify rate_limited NEVER writes an audit event (zero write amplification on flood)
+    const allMintAudits = readAuditEvents({ event: 'ui.token.exchange_mint' });
+    const rateLimitedAudits = allMintAudits.filter((e) => e.outcome === 'rate_limited');
+    expect(rateLimitedAudits).toHaveLength(0);
+  });
+
+  // Rework R2 - Cleanup Item 3: exchange code upper bounds (global and per-token)
+  test('Rework R2 (Cleanup 3): exchange code upper bounds (per-token <= 5, global <= 1000)', () => {
+    const adminToken = 'admin-secret';
+    const otherToken = 'other-secret';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => {
+        if (tok === adminToken) return { kind: 'admin' };
+        if (tok === otherToken) return { kind: 'identity', address: 'bob@example.com' };
+        return null;
+      },
+      maxExchangeCodes: 4,
+      maxExchangeCodesPerToken: 2,
+    });
+
+    // Per-token limit: mint 2 codes for adminToken
+    const mint1 = store.mintExchangeCode(adminToken, '127.0.0.1');
+    const mint2 = store.mintExchangeCode(adminToken, '127.0.0.1');
+    expect(mint1.ok).toBe(true);
+    expect(mint2.ok).toBe(true);
+    expect(store.activeCodesCountForTests()).toBe(2);
+
+    // 3rd code for adminToken exceeds maxExchangeCodesPerToken (2)
+    const mint3 = store.mintExchangeCode(adminToken, '127.0.0.1');
+    expect(mint3.ok).toBe(false);
+    if (!mint3.ok) expect(mint3.reason).toBe('capacity');
+
+    // otherToken can still mint up to 2
+    const mintBob1 = store.mintExchangeCode(otherToken, '127.0.0.1');
+    const mintBob2 = store.mintExchangeCode(otherToken, '127.0.0.1');
+    expect(mintBob1.ok).toBe(true);
+    expect(mintBob2.ok).toBe(true);
+    expect(store.activeCodesCountForTests()).toBe(4); // Global capacity reached (4)
+
+    // Exchanging one code frees up token capacity
+    if (mint1.ok) {
+      const ex1 = store.exchangeCode(mint1.code, '127.0.0.1');
+      expect(ex1.ok).toBe(true);
+    }
+    expect(store.activeCodesCountForTests()).toBe(3);
+
+    // Now adminToken has only 1 active code and global is 3 < 4, so adminToken can mint again
+    const mintAdminRecovered = store.mintExchangeCode(adminToken, '127.0.0.1');
+    expect(mintAdminRecovered.ok).toBe(true);
+    expect(store.activeCodesCountForTests()).toBe(4);
+
+    // Now global is 4 >= 4, any mint is rejected on capacity
+    const mintGlobalExceeded = store.mintExchangeCode(otherToken, '127.0.0.1');
+    expect(mintGlobalExceeded.ok).toBe(false);
+    if (!mintGlobalExceeded.ok) expect(mintGlobalExceeded.reason).toBe('capacity');
+  });
+
+  // Rework R2 - Cleanup Items 4 & 5: Server-derived provenance and enforced remember: false
+  test('Rework R2 (Cleanup 4 & 5): provenance strictly server-derived and code exchange forces remember: false', async () => {
+    const validToken = 'test-audit-token-r2';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => (tok === validToken ? { kind: 'admin' } : null),
+    });
+
+    const app = new Hono();
+    app.use('/ui/api/session', uiSessionBodyLimit);
+    app.use('/ui/api/session', requireUiOrigin);
+    app.route('/ui/api/session', createUiSessionRoutes(store));
+
+    // 1. Client tries to forge provenance on token paste login
+    const resPaste = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ token: validToken, provenance: 'link-exchange', remember: true }),
+    });
+    expect(resPaste.status).toBe(200);
+    // Token paste with remember: true gets persistent cookie (max-age set)
+    const pasteSetCookie = resPaste.headers.get('set-cookie');
+    expect(pasteSetCookie).toContain('Max-Age=');
+
+    // 2. Client tries to send remember: true and malicious provenance on code exchange
+    const mint = store.mintExchangeCode(validToken, '127.0.0.1');
+    expect(mint.ok).toBe(true);
+    if (!mint.ok) return;
+
+    const resCode = await app.request('http://localhost/ui/api/session', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ code: mint.code, remember: true, provenance: 'attacker-injected' }),
+    });
+    expect(resCode.status).toBe(200);
+    // Code exchange forces remember: false -> cookie does NOT have Max-Age
+    const codeSetCookie = resCode.headers.get('set-cookie');
+    expect(codeSetCookie).not.toContain('Max-Age=');
+
+    // Check audit logs
+    const logins = readAuditEvents({ event: 'ui.session.login' });
+    // Paste audit must have provenance === undefined (client-supplied 'link-exchange' was ignored)
+    const pasteAudit = logins.find(
+      (e) => e.outcome === 'ok' && (e as any).address === 'admin' && (e as any).provenance === undefined,
+    );
+    expect(pasteAudit).toBeDefined();
+
+    // Code exchange audit must have provenance === 'link-exchange' (client-supplied 'attacker-injected' was ignored)
+    const codeAudit = logins.find((e) => e.outcome === 'ok' && (e as any).provenance === 'link-exchange');
+    expect(codeAudit).toBeDefined();
+  });
+
+  // Rework R2 - Cleanup Item 6: exchangeCode checks capacity before burning code
+  test('Rework R2 (Cleanup 6): exchangeCode checks capacity before burning code (unburnt code can retry)', () => {
+    const tokenA = 'token-a';
+    const tokenB = 'token-b';
+    const store = new UiSessionStore({
+      resolveToken: (tok) => {
+        if (tok === tokenA) return { kind: 'admin' };
+        if (tok === tokenB) return { kind: 'identity', address: 'b@example.com' };
+        return null;
+      },
+      maxSessions: 1,
+    });
+
+    // Fill capacity with session for tokenA
+    const sessionA = store.create(tokenA, '127.0.0.1');
+    expect(sessionA.ok).toBe(true);
+    expect(store.sizeForTests()).toBe(1);
+
+    // Mint exchange code for tokenB
+    const mintB = store.mintExchangeCode(tokenB, '127.0.0.1');
+    expect(mintB.ok).toBe(true);
+    if (!mintB.ok) return;
+    const codeB = mintB.code;
+    expect(store.activeCodesCountForTests()).toBe(1);
+
+    // Attempt exchange when store is at capacity
+    const exResult = store.exchangeCode(codeB, '127.0.0.1');
+    expect(exResult.ok).toBe(false);
+    if (!exResult.ok) expect(exResult.reason).toBe('capacity');
+
+    // Verify code is NOT burned (still active, not consumed)
+    expect(store.activeCodesCountForTests()).toBe(1);
+    expect(store.consumedCodesCountForTests()).toBe(0);
+
+    // Free up session capacity by destroying sessionA
+    if (sessionA.ok) {
+      store.destroy(sessionA.sid);
+    }
+    expect(store.sizeForTests()).toBe(0);
+
+    // Retry exchange with the exact same codeB -> succeeds!
+    const retryResult = store.exchangeCode(codeB, '127.0.0.1');
+    expect(retryResult.ok).toBe(true);
+    if (retryResult.ok) {
+      expect(retryResult.auth).toEqual({ kind: 'identity', address: 'b@example.com' });
+    }
+
+    // Now codeB is burned
+    expect(store.activeCodesCountForTests()).toBe(0);
+    expect(store.consumedCodesCountForTests()).toBe(1);
+
+    // Replay is rejected as invalid_token
+    const replay = store.exchangeCode(codeB, '127.0.0.1');
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.reason).toBe('invalid_token');
   });
 });

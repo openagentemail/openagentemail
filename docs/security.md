@@ -367,7 +367,7 @@ mail.example.com {
 
 #### 4. Traefik
 
-在 Traefik 中配置访问日志红线屏蔽：
+在 Traefik 中配置访问日志红线屏蔽。**注意**：Traefik 访问日志原生暂不支持针对特定 query 参数（如 `token`、`code`）进行细粒度正则脱敏。在 `fields.defaultMode: keep` 下，`RequestPath` 与 `RequestLine` 会完整记录包含 query 的原始 URL。因此反代配置必须显式将包含 query 的字段设为 `drop` 或 `redact`（若需审计访问路径，建议借助 Vector/Fluentd 等日志收集端对 JSON accessLog 进行正则脱敏）：
 
 ```yaml
 accessLog:
@@ -378,6 +378,11 @@ accessLog:
       - "200-599"
   fields:
     defaultMode: keep
+    names:
+      # RequestPath 与 RequestLine 包含原始 query 字符串（含 token/code），必须丢弃或脱敏
+      RequestPath: drop
+      RequestLine: drop
+      ClientUsername: drop
     headers:
       defaultMode: keep
       names:
