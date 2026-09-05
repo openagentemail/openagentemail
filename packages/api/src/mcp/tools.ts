@@ -235,6 +235,73 @@ export function registerOpenAgentEmailTools(
     leaseGeneration: z.number().int(),
   };
 
+  const webhookListItemSchema = {
+    id: z.string(),
+    url: z.string(),
+    address: z.string(),
+    events: z.array(z.string()),
+    contentScope: z.string().optional(),
+    description: z.string().optional(),
+    state: z.string(),
+    disabledReason: z.string().nullable().optional(),
+    secretPrefix: z.string().optional(),
+    signatureScheme: z.string().optional(),
+    timestampToleranceSec: z.number().optional(),
+    createdAt: z.string().optional(),
+    updatedAt: z.string().optional(),
+    rotatedAt: z.string().nullable().optional(),
+    consecutiveFailures: z.number().optional(),
+    privateTargetGranted: z.boolean().optional(),
+    lastDelivery: z
+      .object({
+        deliveryId: z.string(),
+        ts: z.string(),
+        attempt: z.number(),
+        outcome: z.string(),
+        status: z.number().nullable().optional(),
+        durationMs: z.number().nullable().optional(),
+        reason: z.string().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  };
+
+  const webhookListOutputSchema = {
+    webhooks: z.array(z.object(webhookListItemSchema)),
+  };
+
+  const webhookCreateOutputSchema = {
+    id: z.string(),
+    url: z.string(),
+    address: z.string(),
+    events: z.array(z.string()),
+    contentScope: z.string().optional(),
+    description: z.string().optional(),
+    state: z.string(),
+    secret: z.string().nullable().optional(),
+    secretPrefix: z.string().optional(),
+    signatureScheme: z.string().optional(),
+    timestampToleranceSec: z.number().optional(),
+    createdAt: z.string().optional(),
+  };
+
+  const webhookDeleteOutputSchema = {
+    ok: z.boolean(),
+  };
+
+  const webhookTestOutputSchema = {
+    deliveryId: z.string().optional(),
+    outcome: z.string().optional(),
+    status: z.number().nullable().optional(),
+    reason: z.string().nullable().optional(),
+  };
+
+  const webhookDisableOutputSchema = {
+    ok: z.boolean(),
+    state: z.string(),
+    disabledReason: z.string().nullable().optional(),
+  };
+
   function ok(data: unknown): CallToolResult {
     if (typeof data !== "object" || data === null || Array.isArray(data)) {
       throw new TypeError("Tool output must be a JSON object");
@@ -720,6 +787,98 @@ export function registerOpenAgentEmailTools(
     ({ id, leaseToken, reason }) => callApi(() => client.releaseTask(id, leaseToken, reason)),
   );
 
-  // 收尾：规格表内全部 19 工具均须已在本次注册中 declare。
+  tier("mail_webhook_list", "read");
+  server.registerTool(
+    "mail_webhook_list",
+    {
+      title: "List Webhook Subscriptions",
+      description: "List outbound webhook subscriptions. Identity callers see only their own subscriptions; admin callers may see all or filter by address.",
+      inputSchema: {
+        address: z.string().regex(IDENTITY_ADDRESS_PATTERN).optional().describe("Optional identity email address to filter by (admin only)"),
+      },
+      outputSchema: webhookListOutputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    ({ address }) => callApi(async () => ({ webhooks: await client.listWebhooks(address) })),
+  );
+
+  tier("mail_webhook_create", "critical");
+  server.registerTool(
+    "mail_webhook_create",
+    {
+      title: "Create Webhook Subscription",
+      description: "Create an outbound webhook subscription. Returns subscription metadata and the displayed signing secret (whs_...). Deny-by-default for OAuth tokens.",
+      inputSchema: {
+        url: z.string().url().max(2048).describe("Webhook target URL (https:// required unless private target granted)"),
+        address: z.string().regex(IDENTITY_ADDRESS_PATTERN).describe("Identity email address to receive events for"),
+        events: z
+          .array(z.enum(['mail.received', 'approval.requested']))
+          .min(1)
+          .refine((items) => new Set(items).size === items.length, {
+            message: 'events must be unique',
+          })
+          .describe("Events to subscribe to ('mail.received', 'approval.requested')"),
+        contentScope: z
+          .enum(['metadata', 'preview'])
+          .optional()
+          .describe("Payload content scope: 'metadata' (default) or 'preview' (admin only)"),
+        description: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe("Optional human-readable description (max 1000 characters)"),
+      },
+      outputSchema: webhookCreateOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    (params) => callApi(() => client.createWebhook(params)),
+  );
+
+  tier("mail_webhook_delete", "minimal");
+  server.registerTool(
+    "mail_webhook_delete",
+    {
+      title: "Delete Webhook Subscription",
+      description: "Permanently delete an outbound webhook subscription and cancel any pending retries.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      outputSchema: webhookDeleteOutputSchema,
+      annotations: { ...mutatingAnnotations, destructiveHint: true },
+    },
+    ({ id }) => callApi(() => client.deleteWebhook(id)),
+  );
+
+  tier("mail_webhook_test", "contained");
+  server.registerTool(
+    "mail_webhook_test",
+    {
+      title: "Test Webhook Subscription",
+      description: "Send an immediate probe ping to test webhook connectivity.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      outputSchema: webhookTestOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id }) => callApi(() => client.testWebhook(id)),
+  );
+
+  tier("mail_webhook_disable", "minimal");
+  server.registerTool(
+    "mail_webhook_disable",
+    {
+      title: "Disable Webhook Subscription",
+      description: "Pause an active webhook subscription by marking it disabled.",
+      inputSchema: {
+        id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
+      },
+      outputSchema: webhookDisableOutputSchema,
+      annotations: mutatingAnnotations,
+    },
+    ({ id }) => callApi(() => client.disableWebhook(id)),
+  );
+
+  // 收尾：规格表内全部 25 工具均须已在本次注册中 declare。
   assertAllSpecTiersDeclared();
 }

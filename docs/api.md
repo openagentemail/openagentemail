@@ -22,6 +22,10 @@ The website docs are canonical — edit them in the [website repo](https://githu
 
 不做：DCR（`/oauth/register`）、OIDC discovery、admin 级 OAuth 票。
 
+## Outbound webhooks
+
+Pending retries are rebuilt from the delivery log on restart; events emitted while the process was down are not reconstructed (D7, the same weak-restart semantics as ntfy).
+
 ## Messages API (`GET /v1/messages`) 前向追补合同
 
 ### 排序与完整性契约

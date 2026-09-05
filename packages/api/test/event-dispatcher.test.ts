@@ -67,7 +67,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
       isNotificationWatcherEnabled({
         ...config,
         ntfy: { ...config.ntfy, enabled: false, pushPolicy: 'otp' },
-        webhooks: { enabled: true },
+        webhooks: { ...config.webhooks, enabled: true },
       }),
     ).toBe(true);
 
@@ -76,7 +76,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
       isNotificationWatcherEnabled({
         ...config,
         ntfy: { ...config.ntfy, enabled: true, pushPolicy: 'otp' },
-        webhooks: { enabled: false },
+        webhooks: { ...config.webhooks, enabled: false },
       }),
     ).toBe(true);
 
@@ -85,7 +85,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
       isNotificationWatcherEnabled({
         ...config,
         ntfy: { ...config.ntfy, enabled: true, pushPolicy: 'none' },
-        webhooks: { enabled: false },
+        webhooks: { ...config.webhooks, enabled: false },
       }),
     ).toBe(false);
 
@@ -94,7 +94,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
       isNotificationWatcherEnabled({
         ...config,
         ntfy: { ...config.ntfy, enabled: true, pushPolicy: 'none' },
-        webhooks: { enabled: true },
+        webhooks: { ...config.webhooks, enabled: true },
       }),
     ).toBe(true);
 
@@ -103,7 +103,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
       isNotificationWatcherEnabled({
         ...config,
         ntfy: { ...config.ntfy, enabled: false, pushPolicy: 'none' },
-        webhooks: { enabled: false },
+        webhooks: { ...config.webhooks, enabled: false },
       }),
     ).toBe(false);
   });
@@ -112,7 +112,7 @@ describe('Startup gate widening (§11.4 item 1 & §14 item 4)', () => {
     const stopper = startNotificationWatcher({
       ...config,
       ntfy: { ...config.ntfy, enabled: false },
-      webhooks: { enabled: false },
+      webhooks: { ...config.webhooks, enabled: false },
     });
     expect(stopper).toBeFunction();
     stopper();
@@ -242,7 +242,7 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       watermark: webhookWatermark,
       handleMail: async (event) => {
         // Webhook sink fails with service outage on message 41
-        throw new NotifyError('webhook_unavailable', undefined, { failureKind: 'service' });
+        throw new NotifyError('webhook_unavailable' as any, undefined, { failureKind: 'service' });
       },
     });
 
@@ -299,7 +299,7 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       isEnabled: () => true,
       watermark: ntfyWatermark,
       handleMail: async () => {
-        throw new NotifyError('ntfy_503_service_down', undefined, { failureKind: 'service' });
+        throw new NotifyError('ntfy_503_service_down' as any, undefined, { failureKind: 'service' });
       },
     });
 
@@ -363,7 +363,7 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       isEnabled: () => true,
       watermark: webhookWatermark,
       handleMail: async () => {
-        throw new NotifyError('endpoint_down', undefined, { failureKind: 'service' });
+        throw new NotifyError('endpoint_down' as any, undefined, { failureKind: 'service' });
       },
     });
 
@@ -421,7 +421,7 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       isEnabled: () => true,
       watermark: { uid: 40, uidValidity: 1n },
       handleMail: async () => {
-        throw new NotifyError('outage_a', undefined, { failureKind: 'service' });
+        throw new NotifyError('outage_a' as any, undefined, { failureKind: 'service' });
       },
     });
 
@@ -430,7 +430,7 @@ describe('Per-sink watermark isolation (§11.4 item 3 & §14 item 4)', () => {
       isEnabled: () => true,
       watermark: { uid: 40, uidValidity: 1n },
       handleMail: async () => {
-        throw new NotifyError('outage_b', undefined, { failureKind: 'service' });
+        throw new NotifyError('outage_b' as any, undefined, { failureKind: 'service' });
       },
     });
 
@@ -660,7 +660,7 @@ describe('Second producer hand-off (§11.4 item 4 & §14 item 10)', () => {
     const dispatcher = new EventDispatcher();
     setEventDispatcherForTests(dispatcher);
 
-    let resolveTarpit: (() => void) | null = null;
+    let resolveTarpit!: () => void;
     const tarpitPromise = new Promise<void>((r) => {
       resolveTarpit = r;
     });
@@ -695,7 +695,7 @@ describe('Second producer hand-off (§11.4 item 4 & §14 item 10)', () => {
     expect(task.state).toBe('input-required');
 
     // Clean up tarpit to avoid lingering promises
-    resolveTarpit?.();
+    resolveTarpit();
     setEventDispatcherForTests(null);
   });
 
