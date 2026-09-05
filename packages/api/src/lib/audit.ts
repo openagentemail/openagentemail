@@ -52,6 +52,8 @@ export type AuditEvent = {
   ip?: string;
   /** 变更后的 scope 集合（scrubbed 字符串数组）。 */
   scopes?: string[];
+  /** 变更前的 scope 集合（scrubbed 字符串数组）。 */
+  prevScopes?: string[];
   /** 关联的 Webhook 订阅 ID（RFC-0001 §10.6）。 */
   webhookId?: string;
 };
@@ -142,6 +144,9 @@ export function recordAuditEvent(
     ...(partial.ip !== undefined ? { ip: scrubAuditField(partial.ip, 64) } : {}),
     ...(partial.scopes !== undefined
       ? { scopes: partial.scopes.map((s) => scrubAuditField(s, 64)) }
+      : {}),
+    ...(partial.prevScopes !== undefined
+      ? { prevScopes: partial.prevScopes.map((s) => scrubAuditField(s, 64)) }
       : {}),
     ...(partial.webhookId !== undefined
       ? { webhookId: scrubAuditField(partial.webhookId, 64) }

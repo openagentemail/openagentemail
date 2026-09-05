@@ -296,6 +296,17 @@ function load(): Identity[] {
     // Fail closed. Treating a damaged store as empty looks harmless until the
     // next create/rotate saves over it: every existing identity and token is
     // gone. The message carries no file content on purpose.
+    //
+    // Threat modeling & evaluation note (Issue #130 Item 6):
+    // 1. Read amplification: Dropping the cache on error means subsequent reads
+    //    re-attempt statSync/readFileSync against the corrupt file. This is
+    //    intentional and bounded: as soon as operators repair or restore the file,
+    //    the service self-heals on the very next read without requiring process restart.
+    // 2. 401 vs 500 split: Non-OAuth tokens (oa_ identity tokens or invalid tokens)
+    //    surface 500 via rethrow, while recognizable OAuth tokens fail-closed as 401.
+    //    While this response code difference is theoretically a membership oracle,
+    //    the 256-bit entropy of tokens makes enumeration impossible, and corruption
+    //    cannot be remotely induced (single writer with atomic rename and 0600 mode).
     throw new Error('identity_store_corrupt');
   }
 }
@@ -454,6 +465,46 @@ export function createIdentity(input: {
   return { identity, token };
 }
 
+export interface RotateIdentityTokenResult {
+  token: string;
+  prevScopes?: string[];
+  scopes?: string[];
+  identity: Identity;
+}
+
+/**
+ * Atomically snapshot existing scopes, rotate token, optionally update scopes,
+ * and persist. Returns the new plaintext token alongside previous and updated scopes,
+ * or null if the address does not exist.
+ *
+ * All state mutation and snapshotting happen synchronously in the store layer,
+ * eliminating any reliance on caller-level snapshot timing ("no intervening await").
+ */
+export function rotateIdentityTokenDetailed(
+  address: string,
+  scopes?: string[] | null,
+): RotateIdentityTokenResult | null {
+  const identities = load();
+  const needle = address.toLowerCase();
+  const identity = identities.find((i) => i.address === needle);
+  if (!identity) return null;
+  revokeDelegationsOnGranteeTokenRotate(needle);
+  const prevScopes = identity.scopes !== undefined ? [...identity.scopes] : undefined;
+  const { token, tokenHash } = generateToken();
+  identity.tokenHash = tokenHash;
+  if (scopes !== undefined) {
+    if (scopes === null) delete identity.scopes;
+    else identity.scopes = [...scopes];
+  }
+  save(identities);
+  return {
+    token,
+    prevScopes,
+    scopes: identity.scopes !== undefined ? [...identity.scopes] : undefined,
+    identity: { ...identity },
+  };
+}
+
 /**
  * Replace an identity's token (the old one stops working immediately).
  * If `scopes` is provided (including empty array), the rotated token is scoped.
@@ -462,19 +513,7 @@ export function createIdentity(input: {
  * Returns the new plaintext token, or null if the address doesn't exist.
  */
 export function rotateIdentityToken(address: string, scopes?: string[] | null): string | null {
-  const identities = load();
-  const needle = address.toLowerCase();
-  const identity = identities.find((i) => i.address === needle);
-  if (!identity) return null;
-  revokeDelegationsOnGranteeTokenRotate(needle);
-  const { token, tokenHash } = generateToken();
-  identity.tokenHash = tokenHash;
-  if (scopes !== undefined) {
-    if (scopes === null) delete identity.scopes;
-    else identity.scopes = [...scopes];
-  }
-  save(identities);
-  return token;
+  return rotateIdentityTokenDetailed(address, scopes)?.token ?? null;
 }
 
 /**

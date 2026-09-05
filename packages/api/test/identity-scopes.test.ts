@@ -69,6 +69,7 @@ const {
   findIdentityByToken,
   listIdentities,
   rotateIdentityToken,
+  rotateIdentityTokenDetailed,
   validateScopesInput,
   SUPPORTED_SCOPES,
 } = await import('../src/lib/identities.ts');
@@ -1470,6 +1471,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(createEvent).toBeDefined();
       expect(createEvent.outcome).toBe('ok');
       expect(createEvent.scopes).toEqual(['read:messages']);
+      expect(createEvent.prevScopes).toBeUndefined();
 
       // (b) Rotation narrowing scopes: ['read:messages'] -> []
       const resNarrow = await app.request(`/v1/identities/${auditAddr}/token`, {
@@ -1487,6 +1489,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(narrowEvent).toBeDefined();
       expect(narrowEvent.outcome).toBe('ok');
       expect(narrowEvent.scopes).toEqual([]);
+      expect(narrowEvent.prevScopes).toEqual(['read:messages']);
 
       // (c) Rotation widening scopes: [] -> ['read:messages']
       const resWiden = await app.request(`/v1/identities/${auditAddr}/token`, {
@@ -1504,6 +1507,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(widenEvent).toBeDefined();
       expect(widenEvent.outcome).toBe('ok');
       expect(widenEvent.scopes).toEqual(['read:messages']);
+      expect(widenEvent.prevScopes).toEqual([]);
 
       // (d) Rotation clearing scopes: ['read:messages'] -> {"scopes": null}
       const resClear = await app.request(`/v1/identities/${auditAddr}/token`, {
@@ -1521,6 +1525,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(clearEvent).toBeDefined();
       expect(clearEvent.outcome).toBe('ok');
       expect(clearEvent.scopes).toBeUndefined();
+      expect(clearEvent.prevScopes).toEqual(['read:messages']);
 
       // (e) Rotation setting scopes on previously cleared (unscoped) identity: undefined -> ['read:messages']
       const resSet = await app.request(`/v1/identities/${auditAddr}/token`, {
@@ -1538,6 +1543,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(setEvent).toBeDefined();
       expect(setEvent.outcome).toBe('ok');
       expect(setEvent.scopes).toEqual(['read:messages']);
+      expect(setEvent.prevScopes).toBeUndefined();
 
       // (f) Rotation with empty body (preserving scopes) does NOT append a new scope event
       const logsCountBefore = getAuditLogs().length;
@@ -1575,6 +1581,70 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(replaceEvent).toBeDefined();
       expect(replaceEvent.outcome).toBe('ok');
       expect(replaceEvent.scopes).toEqual(['read:messages']);
+      expect(replaceEvent.prevScopes).toEqual(['future:scope']);
+
+      // (h) Unscoped (full-power) identity creation via REST appends identity.create audit event
+      const resUnscoped = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ localpart: 'unscoped-audit' }),
+      });
+      expect(resUnscoped.status).toBe(201);
+      const unscopedAddr = `unscoped-audit@${config.domain}`;
+
+      logs = getAuditLogs();
+      const unscopedCreateEvent = logs.find((l) => l.address === unscopedAddr && l.event === 'identity.create');
+      expect(unscopedCreateEvent).toBeDefined();
+      expect(unscopedCreateEvent.outcome).toBe('ok');
+      expect(unscopedCreateEvent.scopes).toBeUndefined();
+      expect(unscopedCreateEvent.prevScopes).toBeUndefined();
+
+      // (i) UI unscoped identity creation & rotation append identity.create and identity.token.rotate
+      const login = await app.request('/ui/api/session', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'http://localhost',
+        },
+        body: JSON.stringify({ token: adminKey }),
+      });
+      expect(login.status).toBe(200);
+      const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
+      expect(cookie).toBeTruthy();
+
+      const uiCreate = await app.request('/ui/api/identities', {
+        method: 'POST',
+        headers: {
+          cookie: cookie!,
+          origin: 'http://localhost',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ localpart: 'ui-audit-user' }),
+      });
+      expect(uiCreate.status).toBe(201);
+      const uiAddr = `ui-audit-user@${config.domain}`;
+
+      logs = getAuditLogs();
+      const uiCreateEvent = logs.find((l) => l.address === uiAddr && l.event === 'identity.create');
+      expect(uiCreateEvent).toBeDefined();
+      expect(uiCreateEvent.outcome).toBe('ok');
+
+      const uiRotate = await app.request(`/ui/api/identities/${encodeURIComponent(uiAddr)}/token`, {
+        method: 'POST',
+        headers: {
+          cookie: cookie!,
+          origin: 'http://localhost',
+        },
+      });
+      expect(uiRotate.status).toBe(200);
+
+      logs = getAuditLogs();
+      const uiRotateEvent = logs.find((l) => l.address === uiAddr && l.event === 'identity.token.rotate');
+      expect(uiRotateEvent).toBeDefined();
+      expect(uiRotateEvent.outcome).toBe('ok');
     });
 
     test('5. Rotation semantics: empty body preserves, {"scopes": null} resets full power, invalid scopes 400', async () => {
@@ -1884,6 +1954,46 @@ describe('Issue #114: read-only API token scopes', () => {
       // Re-recording an existing entry refreshes position without expanding size
       recordPrunedAccessHash('overflow_hash_0');
       expect(getPrunedAccessHashesCountForTests()).toBe(PRUNED_ACCESS_HASHES_CAP);
+    });
+
+    test('7. Atomic store rotation: rotateIdentityTokenDetailed captures snapshot and state transition atomically', () => {
+      const ident = createIdentity({
+        localpart: 'atomic-rot',
+        scopes: ['read:messages'],
+      })!;
+      const addr = ident.identity.address;
+
+      // 1. Narrow scopes atomically
+      const res1 = rotateIdentityTokenDetailed(addr, []);
+      expect(res1).not.toBeNull();
+      expect(res1!.prevScopes).toEqual(['read:messages']);
+      expect(res1!.scopes).toEqual([]);
+      expect(res1!.token.startsWith('oa_')).toBe(true);
+      expect(findIdentityByToken(res1!.token)?.scopes).toEqual([]);
+
+      // 2. Widen scopes atomically
+      const res2 = rotateIdentityTokenDetailed(addr, ['read:messages']);
+      expect(res2).not.toBeNull();
+      expect(res2!.prevScopes).toEqual([]);
+      expect(res2!.scopes).toEqual(['read:messages']);
+      expect(findIdentityByToken(res2!.token)?.scopes).toEqual(['read:messages']);
+
+      // 3. Clear scopes atomically (explicit null)
+      const res3 = rotateIdentityTokenDetailed(addr, null);
+      expect(res3).not.toBeNull();
+      expect(res3!.prevScopes).toEqual(['read:messages']);
+      expect(res3!.scopes).toBeUndefined();
+      expect(findIdentityByToken(res3!.token)?.scopes).toBeUndefined();
+
+      // 4. Preserve scopes atomically (undefined)
+      const res4 = rotateIdentityTokenDetailed(addr, undefined);
+      expect(res4).not.toBeNull();
+      expect(res4!.prevScopes).toBeUndefined();
+      expect(res4!.scopes).toBeUndefined();
+
+      // 5. Non-existent identity returns null
+      expect(rotateIdentityTokenDetailed('ghost@test.example', [])).toBeNull();
+      expect(rotateIdentityToken('ghost@test.example', [])).toBeNull();
     });
   });
 });

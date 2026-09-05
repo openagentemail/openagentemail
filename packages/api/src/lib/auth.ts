@@ -96,6 +96,18 @@ export function resolveAccessToken(
     // take the fail-closed 401 path.
     // Non-OAuth credentials (oa_ identity tokens or garbage) must rethrow to surface 500
     // and log the storage outage per the integrity contract.
+    //
+    // Threat modeling & evaluation note (Issue #130 Item 6):
+    // 1. Membership oracle: The 401 vs 500 response status splits OAuth tokens (401)
+    //    from non-OAuth/garbage tokens (500). Theoretically this provides a membership
+    //    oracle for OAuth token hashes. In practice, tokens are cryptographically random
+    //    256-bit strings and cannot be enumerated. Moreover, identity-store corruption
+    //    cannot be induced remotely (the store file is written atomically by a single
+    //    writer process with tmp+rename and mode 0600).
+    // 2. Read amplification: When identities.json is corrupt, load() invalidates the cache,
+    //    causing each request to attempt re-reading from disk. This is intentional: once the
+    //    damaged file is repaired or restored by operators, the system immediately resumes
+    //    without requiring an API server restart.
     if (!peekAccessToken(token)) {
       throw err;
     }

@@ -12,10 +12,13 @@ import {
   PUSH_TIER3_WARNING,
   resolvePushContentTier,
   rotateIdentityToken,
+  rotateIdentityTokenDetailed,
   setIdentityPushContentTier,
   type Identity,
   type PushContentTier,
 } from '../lib/identities.ts';
+import { recordAuditEvent } from '../lib/audit.ts';
+import { clientIp } from '../lib/net.ts';
 import {
   NotifyError,
   createNotificationDevice,
@@ -605,6 +608,12 @@ export function createUiApiRoutes(
         if (err instanceof NotifyError) return c.json({ error: err.code }, 503);
         throw err;
       }
+      recordAuditEvent({
+        event: 'identity.create',
+        address: created.identity.address,
+        outcome: 'ok',
+        ip: clientIp(c),
+      });
       return c.json(
         {
           address: created.identity.address,
@@ -641,13 +650,21 @@ export function createUiApiRoutes(
     const denied = requireUiAdmin(c);
     if (denied) return denied;
     const address = c.req.param('address').toLowerCase();
-    const token = rotateIdentityToken(address);
-    if (!token) return c.json({ error: 'not_found' }, 404);
-    const updated = findIdentity(address);
+    const rotated = rotateIdentityTokenDetailed(address);
+    if (!rotated) return c.json({ error: 'not_found' }, 404);
+    const { token, prevScopes, scopes: updatedScopes } = rotated;
+    recordAuditEvent({
+      event: 'identity.token.rotate',
+      address,
+      outcome: 'ok',
+      ...(updatedScopes !== undefined ? { scopes: updatedScopes } : {}),
+      ...(prevScopes !== undefined ? { prevScopes } : {}),
+      ip: clientIp(c),
+    });
     return c.json({
       address,
       token,
-      ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+      ...(updatedScopes !== undefined ? { scopes: updatedScopes } : {}),
     });
   });
 

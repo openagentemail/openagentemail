@@ -7,6 +7,7 @@ import {
   findIdentity,
   listIdentities,
   rotateIdentityToken,
+  rotateIdentityTokenDetailed,
   resolvePushContentTier,
   setIdentityPushContentTier,
   validateScopesInput,
@@ -159,6 +160,13 @@ export const identitiesRoute = new Hono()
           scopes: requestedScopes,
           ip: clientIp(c),
         });
+      } else {
+        recordAuditEvent({
+          event: 'identity.create',
+          address: identity.address,
+          outcome: 'ok',
+          ip: clientIp(c),
+        });
       }
       return c.json(
         {
@@ -273,23 +281,20 @@ export const identitiesRoute = new Hono()
       }
     }
 
-    // Re-read and snapshot scopes immediately before rotation (no intervening await)
-    // to avoid comparing against a stale snapshot if a concurrent rotation landed.
-    const current = findIdentity(address);
-    if (!current) return c.json({ error: 'not_found' }, 404);
-    const prevScopes = current.scopes !== undefined ? [...current.scopes] : undefined;
+    // Atomic read-modify-write in the store layer snapshots prevScopes, updates token/scopes,
+    // and saves in a single operation, eliminating the implicit "no intervening await" assumption.
+    const rotated = rotateIdentityTokenDetailed(address, requestedScopes);
+    if (!rotated) return c.json({ error: 'not_found' }, 404);
+    const { token, prevScopes, scopes: updatedScopes } = rotated;
 
-    const token = rotateIdentityToken(address, requestedScopes);
-    if (!token) return c.json({ error: 'not_found' }, 404);
-    const updated = findIdentity(address);
-
-    const scopeEvent = classifyScopeChange(prevScopes, updated?.scopes);
+    const scopeEvent = classifyScopeChange(prevScopes, updatedScopes);
     if (scopeEvent) {
       recordAuditEvent({
         event: scopeEvent,
         address,
         outcome: 'ok',
-        ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+        ...(updatedScopes !== undefined ? { scopes: updatedScopes } : {}),
+        ...(prevScopes !== undefined ? { prevScopes } : {}),
         ip: clientIp(c),
       });
     }
@@ -297,7 +302,7 @@ export const identitiesRoute = new Hono()
     return c.json({
       address,
       token,
-      ...(updated?.scopes !== undefined ? { scopes: updated.scopes } : {}),
+      ...(updatedScopes !== undefined ? { scopes: updatedScopes } : {}),
     });
   })
   .delete('/:address', (c) => {
