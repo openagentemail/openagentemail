@@ -617,7 +617,7 @@ export function readDeliveryLogRows(options?: {
   let startIndex = 0;
 
   if (options?.cursor) {
-    const idx = filtered.findIndex((r) => r.deliveryId === options.cursor);
+    const idx = filtered.findIndex((r) => deliveryRowCursor(r) === options.cursor || r.deliveryId === options.cursor);
     if (idx >= 0) {
       startIndex = idx + 1;
     }
@@ -625,9 +625,26 @@ export function readDeliveryLogRows(options?: {
 
   const paged = filtered.slice(startIndex, startIndex + limit);
   const hasMore = startIndex + limit < filtered.length;
-  const nextCursor = hasMore && paged.length > 0 ? paged[paged.length - 1]!.deliveryId : undefined;
+  const nextCursor =
+    hasMore && paged.length > 0 ? deliveryRowCursor(paged[paged.length - 1]!) : undefined;
 
   return { deliveries: paged, nextCursor };
+}
+
+function deliveryRowCursor(row: WebhookDeliveryLogRow): string {
+  return `${row.deliveryId}|${row.attempt}|${row.ts}`;
+}
+
+function latestRowForDeliveryId(
+  rows: WebhookDeliveryLogRow[],
+  deliveryId: string,
+): WebhookDeliveryLogRow | undefined {
+  let latest: WebhookDeliveryLogRow | undefined;
+  for (const row of rows) {
+    if (row.deliveryId !== deliveryId) continue;
+    if (!latest || isNewerDeliveryRow(row, latest)) latest = row;
+  }
+  return latest;
 }
 
 /** Latest attempt per webhook from an already-read log (one parse per request). */
@@ -2327,7 +2344,7 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   webhookId: string;
 }> {
   const rows = readAllDeliveryLogRows();
-  const original = rows.find((r) => r.deliveryId === deliveryId);
+  const original = latestRowForDeliveryId(rows, deliveryId);
   if (!original) {
     const err: any = new Error('delivery_not_found');
     err.code = 'delivery_not_found';

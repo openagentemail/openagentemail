@@ -778,6 +778,13 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
       expect(success?.deliveryId).toBe(pending?.deliveryId);
       expect(seen.deliveryId).toBe(pending?.deliveryId);
       expect(seen.body?.data?.object).toBe('webhook');
+
+      const replay = await redeliverWebhookDelivery(pending!.deliveryId);
+      expect(replay.deliveryId).not.toBe(pending!.deliveryId);
+      expect(replay.eventId).toBe('evt_r10_dlv');
+      expect(
+        readAllDeliveryLogRows().some((r) => r.deliveryId === replay.deliveryId && r.replay),
+      ).toBe(true);
     } finally {
       (config.webhooks as any).allowPrivateTargets = prevAllow;
       server.stop(true);
@@ -819,7 +826,7 @@ describe('webhook-delivery: R10 ping schema, deliveryId, probe defer', () => {
         (r) => r.webhookId === second.id && r.outcome === 'pending',
       );
       expect(pending).toBeDefined();
-      expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThan(Date.now() - 50);
+      expect(new Date(pending!.nextAttemptAt!).getTime()).toBeGreaterThanOrEqual(Date.now());
       expect(getWebhookSubscription(second.id)?.state).toBe('unverified');
       await waitUntil(() => getWebhookSubscription(second.id)?.state === 'enabled', 2000);
       expect(
