@@ -93,6 +93,7 @@ export function releaseSendLimit(address: string, reservation: number | undefine
 /** Test helper: wipe all windows. */
 export function resetRateLimits(): void {
   buckets.clear();
+  resetDelegationDeniedAuditLimits();
 }
 
 /**
@@ -188,19 +189,42 @@ export function resetMcpPreauthIpRateLimits(): void {
   mcpPreauthIpBuckets.clear();
 }
 
+/** Delegation denied audit IP 桶（防非授权 token / OAuth 凭证刷爆审计日志）。 */
+const delegationDeniedIpBuckets = new Map<string, number[]>();
+export const DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT = 10;
+
+/**
+ * 校验 delegation.grant.denied 审计写入限速（复用 slidingWindowCheck）。
+ * 键为 clientIp。超限仅抑制 audit 落盘防刷盘，不改变 403 状态码。
+ */
+export function checkDelegationDeniedAuditLimit(
+  ip: string,
+  limit: number = DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT,
+  windowMs = 60_000,
+  now = Date.now(),
+): RateLimitResult {
+  return slidingWindowCheck(delegationDeniedIpBuckets, ip, limit, windowMs, now);
+}
+
+/** 测试辅助：清空 delegation denied 审计 IP 桶。 */
+export function resetDelegationDeniedAuditLimits(): void {
+  delegationDeniedIpBuckets.clear();
+}
+
 /**
  * Concurrency slots for POST /v1/messages/wait.
  *
  * A wait holds one IMAP connection open for up to 600 s, and every identity
  * shares the single catch-all Dovecot account — so unbounded waits let one
  * caller exhaust that account's connection allowance and lock every other
- * identity out of its mail. Two ceilings: per address (stops one token from
- * doing it alone) and global (stops several tokens from doing it together).
+ * identity out of its mail. Two ceilings: per caller+address slot (stops one
+ * token from doing it alone or starving the mailbox owner) and global (stops
+ * several tokens from doing it together).
  *
  * The global ceiling stays under Dovecot's default mail_max_userip_connections
  * (10) with room to spare for the short-lived list/read connections.
- * A few concurrent waits per address are legitimate (different filters), so
- * the per-address ceiling is not 1.
+ * A few concurrent waits per caller+address are legitimate (different filters),
+ * so the per-slot ceiling is not 1.
  */
 export const MAX_WAITS_PER_ADDRESS = 3;
 export const MAX_WAITS_TOTAL = 8;
@@ -208,9 +232,16 @@ export const MAX_WAITS_TOTAL = 8;
 const waits = new Map<string, number>();
 let waitsTotal = 0;
 
+/** Build slot key: targetAddress ? `${caller}:${targetAddress}` : caller */
+export function waitSlotKey(caller: string, targetAddress?: string): string {
+  const c = caller.trim().toLowerCase();
+  if (!targetAddress) return c;
+  return `${c}:${targetAddress.trim().toLowerCase()}`;
+}
+
 /** Take a wait slot; false means the caller should be told 429. */
-export function acquireWaitSlot(address: string): boolean {
-  const key = address.toLowerCase();
+export function acquireWaitSlot(caller: string, targetAddress?: string): boolean {
+  const key = waitSlotKey(caller, targetAddress);
   const current = waits.get(key) ?? 0;
   if (current >= MAX_WAITS_PER_ADDRESS || waitsTotal >= MAX_WAITS_TOTAL) return false;
   waits.set(key, current + 1);
@@ -219,8 +250,8 @@ export function acquireWaitSlot(address: string): boolean {
 }
 
 /** Give the slot back. Safe to call for a slot that was never taken. */
-export function releaseWaitSlot(address: string): void {
-  const key = address.toLowerCase();
+export function releaseWaitSlot(caller: string, targetAddress?: string): void {
+  const key = waitSlotKey(caller, targetAddress);
   const current = waits.get(key) ?? 0;
   if (current <= 0) return;
   if (current === 1) waits.delete(key);

@@ -10,6 +10,10 @@ import {
   releaseWaitSlot,
   checkMcpPreauthIpRateLimit,
   checkOauthIpRateLimit,
+  checkDelegationDeniedAuditLimit,
+  resetDelegationDeniedAuditLimits,
+  DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT,
+  waitSlotKey,
   resetMcpPreauthIpRateLimits,
   resetMcpRateLimits,
   resetNotifyUserLimits,
@@ -182,5 +186,53 @@ describe('wait 并发槽位', () => {
       expect(acquireWaitSlot('ghost@x.com')).toBe(true);
     }
     expect(acquireWaitSlot('ghost@x.com')).toBe(false);
+  });
+
+  test('waitSlotKey 构造 caller+target 键并小写规范化', () => {
+    expect(waitSlotKey('Alice@X.com')).toBe('alice@x.com');
+    expect(waitSlotKey('Bob@X.com', 'Alice@X.com')).toBe('bob@x.com:alice@x.com');
+  });
+
+  test('delegate 占满被读地址的槽位不影响 owner 自己并发 wait（Issue #136 Item 2）', () => {
+    resetWaitSlots();
+    // Bob (delegate) fills all slots on Alice's mailbox
+    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
+      expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(true);
+    }
+    // Bob cannot acquire another slot on Alice
+    expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(false);
+
+    // Alice (owner) is NOT blocked and can acquire her own wait slot
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+
+    // Releasing Bob's slot allows Bob to acquire again
+    releaseWaitSlot('bob@x.com', 'alice@x.com');
+    expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(true);
+  });
+});
+
+describe('checkDelegationDeniedAuditLimit', () => {
+  test('同 IP 在 60s 窗口内最多允许 10 次审计写入，超限后拒绝（Issue #136 Item 7）', () => {
+    resetDelegationDeniedAuditLimits();
+    const ip = '198.51.100.1';
+
+    for (let i = 0; i < DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT; i++) {
+      const res = checkDelegationDeniedAuditLimit(ip);
+      expect(res.allowed).toBe(true);
+      expect(res.count).toBe(i + 1);
+    }
+
+    // 11th check is denied
+    const blocked = checkDelegationDeniedAuditLimit(ip);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThan(0);
+
+    // Different IP has an independent window
+    const other = checkDelegationDeniedAuditLimit('198.51.100.2');
+    expect(other.allowed).toBe(true);
+
+    // reset clears the limits
+    resetDelegationDeniedAuditLimits();
+    expect(checkDelegationDeniedAuditLimit(ip).allowed).toBe(true);
   });
 });

@@ -1,8 +1,23 @@
 // Single-writer process assumption: Like identities.json, delegations.json assumes a
 // single-writer process and does not support multi-process concurrent mutations on the same DATA_DIR.
-// Scope note: Currently delegations only support 'read:messages'. If additional scopes are
-// introduced in the future, all forbidUnlessMailboxAccess call sites must be audited to ensure
-// delegations do not unintentionally grant write or admin capabilities.
+// Scope note: Currently delegations only support 'read:messages' (see SUPPORTED_SCOPES).
+// If additional scopes are introduced in the future, all forbidUnlessMailboxAccess call sites must be
+// audited to ensure delegations do not unintentionally grant write or admin capabilities.
+//
+// OAuth cascade revocation architecture note (Issue #136 Item 8):
+// In the current architecture, OAuth credentials are strictly forbidden from creating or revoking
+// delegation grants (enforced in routes/delegations.ts via attribution.kind === 'oauth' returning 403).
+// Consequently, all active delegations are established exclusively via direct identity credentials
+// or admin authority, and no OAuth-originated delegations exist in delegations.json.
+// Token lifecycle & revocation semantics:
+// 1. Grantee token rotation: Automatically cascades revocation of all delegations received by that
+//    grantee (see revokeDelegationsOnGranteeTokenRotate in identities.ts).
+// 2. Owner token rotation: Intentionally preserves delegations granted by the owner to avoid breaking
+//    delegated agent access upon routine credential rotation.
+// 3. Identity deletion: Bidirectionally revokes all delegations (both as owner and grantee).
+// 4. Future OAuth delegation expansion: If delegations are ever allowed to be created via OAuth tokens,
+//    DelegationGrant should store an optional `oauthGrantId?: string` field, and OAuth token revocation
+//    or rotation must cascade-revoke any grants linked to that `oauthGrantId`.
 
 import {
   existsSync,
@@ -18,6 +33,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
+import { isSupportedScope } from './identities.ts';
 
 export const DELEGATION_STORE_SCHEMA_VERSION = 1;
 export const DELEGATION_STORE_FILE = 'delegations.json';
@@ -60,13 +76,18 @@ function isGrantShape(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function coerceGrant(raw: Record<string, unknown>): DelegationGrant {
+function coerceGrant(raw: Record<string, unknown>): DelegationGrant | null {
+  const rawScopes = Array.isArray(raw.scopes) ? (raw.scopes as string[]) : [];
+  const scopes = rawScopes.filter((s) => typeof s === 'string' && isSupportedScope(s));
+  if (scopes.length === 0) {
+    return null;
+  }
   return {
     ...raw,
     id: raw.id as string,
     mailbox: (raw.mailbox as string).trim().toLowerCase(),
     grantee: (raw.grantee as string).trim().toLowerCase(),
-    scopes: Array.isArray(raw.scopes) ? (raw.scopes as string[]) : [],
+    scopes,
     createdAt: raw.createdAt as string,
     createdBy: raw.createdBy as string,
     revokedAt: (raw.revokedAt as string | null) ?? null,
@@ -163,7 +184,13 @@ function load(): DelegationStoreFile {
     if (!isDelegationStoreShape(parsed)) {
       throw new Error('invalid delegation store shape');
     }
-    const grants = parsed.grants.map((entry) => coerceGrant(entry as Record<string, unknown>));
+    const grants: DelegationGrant[] = [];
+    for (const entry of parsed.grants) {
+      const coerced = coerceGrant(entry as Record<string, unknown>);
+      if (coerced) {
+        grants.push(coerced);
+      }
+    }
     const store: DelegationStoreFile = {
       ...parsed,
       schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
@@ -177,7 +204,7 @@ function load(): DelegationStoreFile {
   } catch (err) {
     invalidateDelegationStoreCache();
     if ((err as Error).message === 'delegation_store_corrupt') throw err;
-    throw new Error('delegation_store_corrupt');
+    throw new Error('delegation_store_corrupt', { cause: err });
   }
 }
 
@@ -213,11 +240,16 @@ export function createDelegation(params: {
   if (existing) {
     return existing;
   }
+  const rawScopes = params.scopes && params.scopes.length > 0 ? [...params.scopes] : ['read:messages'];
+  const scopes = rawScopes.filter((s) => typeof s === 'string' && isSupportedScope(s));
+  if (scopes.length === 0) {
+    throw new Error('invalid_scopes: no supported scopes provided');
+  }
   const grant: DelegationGrant = {
     id: params.id ?? `delg_${randomBytes(12).toString('hex')}`,
     mailbox,
     grantee,
-    scopes: params.scopes && params.scopes.length > 0 ? [...params.scopes] : ['read:messages'],
+    scopes,
     createdAt: params.createdAt ?? new Date().toISOString(),
     createdBy: params.createdBy,
     revokedAt: null,

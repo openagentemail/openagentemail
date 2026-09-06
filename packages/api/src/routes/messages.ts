@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  DelegationRevokedError,
   getMessage,
   InvalidMailCursorError,
   listMessages,
@@ -9,9 +10,10 @@ import {
   StaleMessageGenerationError,
   waitForMessage,
 } from '../lib/imap.ts';
-import { forbidUnlessAddress, forbidUnlessMailboxAccess } from '../lib/auth.ts';
+import { forbidUnlessAddress, forbidUnlessMailboxAccess, getAuth } from '../lib/auth.ts';
 import { clampWaitSeconds } from '../lib/config.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
+import { hasActiveDelegation } from '../lib/delegations.ts';
 
 const listQuerySchema = z.object({
   address: z.string().email(),
@@ -129,12 +131,21 @@ export const messagesRoute = new Hono()
     const { address, fromContains, subjectContains, timeoutSec } = parsed.data;
     const denied = forbidUnlessMailboxAccess(c, address);
     if (denied) return denied;
+
+    const auth = getAuth(c);
+    const caller = auth.kind === 'admin' ? 'admin' : auth.address.toLowerCase();
+    const isDelegate =
+      auth.kind === 'identity' && auth.address.toLowerCase() !== address.toLowerCase();
+    const shouldContinue = isDelegate
+      ? () => hasActiveDelegation(address, auth.address, 'read:messages')
+      : undefined;
+
     // schema 仍允许 ≤600（历史客户端）；服务端静默钳到 MCP_MAX_WAIT_SECONDS
     const effectiveTimeout = clampWaitSeconds(timeoutSec);
     c.header('X-OAE-Wait-Timeout-Sec', String(effectiveTimeout));
     // Each wait pins an IMAP connection for up to the configured ceiling; cap
     // how many can be in flight so one caller can't starve the whole mailbox.
-    if (!acquireWaitSlot(address)) {
+    if (!acquireWaitSlot(caller, address)) {
       return c.json({ error: 'too_many_waits', retryAfterSec: 5 }, 429);
     }
     try {
@@ -142,13 +153,19 @@ export const messagesRoute = new Hono()
         address,
         { fromContains, subjectContains },
         effectiveTimeout,
+        shouldContinue,
       );
       if (!message) {
         // 暴露有效钳制值，便于客户端对齐轮询节奏（不 400 超参）
         return c.json({ error: 'timeout', timeoutSec: effectiveTimeout }, 408);
       }
       return c.json(message);
+    } catch (err) {
+      if (err instanceof DelegationRevokedError) {
+        return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+      }
+      throw err;
     } finally {
-      releaseWaitSlot(address);
+      releaseWaitSlot(caller, address);
     }
   });

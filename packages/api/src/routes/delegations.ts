@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getAuth, getAttribution } from '../lib/auth.ts';
-import { validateScopesInput } from '../lib/identities.ts';
+import { findIdentity, validateScopesInput } from '../lib/identities.ts';
 import {
   createDelegation,
   findActiveDelegation,
@@ -10,6 +10,15 @@ import {
   revokeDelegation,
 } from '../lib/delegations.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
+import { config } from '../lib/config.ts';
+import { clientIp } from '../lib/net.ts';
+import { checkDelegationDeniedAuditLimit } from '../lib/ratelimit.ts';
+
+function scopesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const setA = new Set(a);
+  return b.every((s) => setA.has(s));
+}
 
 const postDelegationSchema = z.object({
   mailbox: z.string().email().max(320),
@@ -57,15 +66,24 @@ export const delegationsRoute = new Hono()
     const isAdmin = auth.kind === 'admin';
     const isOwner = auth.kind === 'identity' && auth.address.toLowerCase() === mailbox;
 
+    function recordDeniedAuditIfAllowed() {
+      const ip = clientIp(c);
+      const rl = checkDelegationDeniedAuditLimit(ip);
+      if (rl.allowed) {
+        recordAuditEvent({
+          event: 'delegation.grant.denied',
+          outcome: 'denied',
+          actor,
+          mailbox,
+          grantee,
+          scopes: requestedScopes,
+          ip,
+        });
+      }
+    }
+
     if (attribution?.kind === 'oauth') {
-      recordAuditEvent({
-        event: 'delegation.grant.denied',
-        outcome: 'denied',
-        actor,
-        mailbox,
-        grantee,
-        scopes: requestedScopes,
-      });
+      recordDeniedAuditIfAllowed();
       return c.json(
         { error: 'forbidden: delegation management requires direct identity credentials' },
         403,
@@ -73,19 +91,46 @@ export const delegationsRoute = new Hono()
     }
 
     if (!isAdmin && !isOwner) {
-      recordAuditEvent({
-        event: 'delegation.grant.denied',
-        outcome: 'denied',
-        actor,
-        mailbox,
-        grantee,
-        scopes: requestedScopes,
-      });
+      recordDeniedAuditIfAllowed();
       return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+    }
+
+    // Item 3 (#1451: 两拒——外部域 400，未注册 localpart 404):
+    const mailboxDomain = mailbox.split('@')[1]?.toLowerCase() ?? '';
+    if (!config.allDomains.has(mailboxDomain)) {
+      return c.json(
+        { error: 'invalid_domain', details: 'mailbox domain is not hosted by this instance' },
+        400,
+      );
+    }
+    if (!findIdentity(mailbox)) {
+      return c.json({ error: 'not_found', details: 'mailbox identity not found' }, 404);
+    }
+
+    const granteeDomain = grantee.split('@')[1]?.toLowerCase() ?? '';
+    if (!config.allDomains.has(granteeDomain)) {
+      return c.json(
+        { error: 'invalid_domain', details: 'grantee domain is not hosted by this instance' },
+        400,
+      );
+    }
+    if (!findIdentity(grantee)) {
+      return c.json({ error: 'not_found', details: 'grantee identity not found' }, 404);
     }
 
     const existing = findActiveDelegation(mailbox, grantee);
     if (existing) {
+      if (!scopesEqual(existing.scopes, requestedScopes)) {
+        return c.json(
+          {
+            error: 'conflict',
+            details: 'active delegation grant exists with different scopes',
+            existingScopes: existing.scopes,
+            requestedScopes,
+          },
+          409,
+        );
+      }
       return c.json(existing, 200);
     }
 
