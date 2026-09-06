@@ -2112,6 +2112,11 @@ function leaseOverlayStillActive(lease: LeaseEvent, now: number): boolean {
   return typeof claimedUntil === 'string' && isLeaseDeadlineActive(claimedUntil, now);
 }
 
+/** 同 generation 的 claim+renew 链里，是否还有一行自身 deadline 仍 active。 */
+function overlayGenerationStillActive(rows: readonly QueuedEvent[], generation: number, now: number): boolean {
+  return rows.some((row) => row.lease?.generation === generation && leaseOverlayStillActive(row.lease, now));
+}
+
 /** release 须保留到已索引，或其所关闭权威已不可能再 active。 */
 function leaseOverlayMustKeepApplying(lease: LeaseEvent, now: number): boolean {
   if (lease.event === 'release') return true;
@@ -2171,6 +2176,11 @@ function mergeQueuedEvents(task: Task): Task {
   const toApply = stillLagging.filter((row) => {
     if (!row.lease) return true;
     if (leaseOverlayMustKeepApplying(row.lease, now)) return true;
+    // claim 自身过期但同 generation 的 renew 仍 active 时，整链继续 fence。
+    if (
+      (row.lease.event === 'claim' || row.lease.event === 'renew')
+      && overlayGenerationStillActive(stillLagging, row.lease.generation, now)
+    ) return true;
     if (now - row.sentAt <= LEASE_OVERLAY_MAX_LIFETIME_MS) return true;
     warnStaleLeaseOverlayOnce(task.id, row);
     // 停止权威重放，但记下 generation，避免下一封 claim 从 1 重来。

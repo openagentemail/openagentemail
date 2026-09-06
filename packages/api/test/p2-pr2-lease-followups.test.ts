@@ -485,6 +485,40 @@ describe('PR-2 #80 排队 overlay 有界 fallback + 告警', () => {
     expect(second.leaseGeneration).toBeGreaterThan(first.leaseGeneration);
     expect(rebuilt).not.toBeNull();
   });
+
+  test('claim 过期但 renew 延长后 15min cutoff 不得放行新 claim、不得 brick 重建', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<p2-80-chain-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    now = START + 1_000;
+    const renewed = await renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 });
+    now = START + LEASE_OVERLAY_MAX_LIFETIME_MS + 1;
+    const live = await getTask(ID);
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_already_claimed');
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+    const renew1 = (await parseCaptured(sent[1]!, 3))!;
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, renew1]);
+    expect({
+      fencedGeneration: live?.lease?.leaseGeneration,
+      fencedUntil: live?.lease?.claimedUntil,
+      rebuiltGeneration: rebuilt?.lease?.leaseGeneration ?? null,
+      rebuiltUntil: rebuilt?.lease?.claimedUntil ?? null,
+      extraClaims: sent.filter((row) => row.headers?.['X-OA-Task-Lease-Event'] === 'claim').length,
+    }).toEqual({
+      fencedGeneration: 1,
+      fencedUntil: renewed.lease?.claimedUntil,
+      rebuiltGeneration: 1,
+      rebuiltUntil: renewed.lease?.claimedUntil,
+      extraClaims: 1,
+    });
+    expect(rebuilt).not.toBeNull();
+  });
 });
 
 describe('PR-2 #84 reclaim 与 expiry-audit 解耦', () => {
