@@ -72,6 +72,10 @@ const {
   rotateIdentityToken,
 } = await import('../src/lib/identities.ts');
 const {
+  DelegationRevokedError,
+  waitForMessage,
+} = await import('../src/lib/imap.ts');
+const {
   createDelegation,
   getDelegation,
   listDelegations,
@@ -984,6 +988,64 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
           body: JSON.stringify({ address: aliceAddr, timeoutSec: 2 }),
         });
 
+        expect(waitRes.status).toBe(403);
+        expect(await waitRes.json()).toEqual({
+          error: 'forbidden: token is scoped to another address',
+        });
+      } finally {
+        fakeMessages = origMessages;
+      }
+    });
+
+    test('Item 1: wait re-verifies revocation when message is found in idle and polling paths', async () => {
+      const alice = createIdentity({ localpart: 'alice-wait-found' })!;
+      const bob = createIdentity({ localpart: 'bob-wait-found', scopes: ['read:messages'] })!;
+      const aliceAddr = alice.identity.address;
+      const bobAddr = bob.identity.address;
+
+      const grant = createDelegation({
+        mailbox: aliceAddr,
+        grantee: bobAddr,
+        createdBy: aliceAddr,
+      });
+
+      const origMessages = fakeMessages;
+      fakeMessages = [
+        {
+          uid: 501,
+          flags: new Set(),
+          envelope: {
+            date: new Date(),
+            subject: 'Found message test',
+            from: [{ address: 'sender@example.net', name: 'Sender' }],
+            to: [{ address: aliceAddr, name: 'Alice' }],
+          },
+          internalDate: new Date(),
+          source: Buffer.from(`From: sender@example.net\r\nTo: ${aliceAddr}\r\nSubject: Found\r\n\r\nBody`),
+        },
+      ];
+
+      try {
+        // Revoke before waitForMessage executes
+        revokeDelegation(grant.id, aliceAddr);
+
+        let invoked = false;
+        const shouldContinue = () => {
+          invoked = true;
+          return hasActiveDelegation(aliceAddr, bobAddr, 'read:messages');
+        };
+
+        await expect(
+          waitForMessage(aliceAddr, {}, 2, shouldContinue),
+        ).rejects.toThrow(DelegationRevokedError);
+        expect(invoked).toBe(true);
+
+        // Also test via API endpoint: when revoked, endpoint returns 403 instead of 200 with message
+        const waitRes = await app.request('/v1/messages/wait', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${bob.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: aliceAddr, timeoutSec: 1 }),
+        });
         expect(waitRes.status).toBe(403);
         expect(await waitRes.json()).toEqual({
           error: 'forbidden: token is scoped to another address',

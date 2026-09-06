@@ -1322,6 +1322,9 @@ async function waitWithPolling(
         return found;
       }
     } catch (err) {
+      if (err instanceof DelegationRevokedError) {
+        throw err;
+      }
       console.warn('[imap] poll failed:', (err as Error).message);
     }
     const remaining = deadline - Date.now();
