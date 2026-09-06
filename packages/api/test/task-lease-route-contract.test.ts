@@ -98,14 +98,15 @@ describe('#83 lease 路由/core 契约', () => {
 
   test('admin 凭证不能直接 claim/renew/release，须 managed recipient identity', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
+      // unused stub：strict schema 须在 dispatch 前拒掉客户端 from，否则 service 会被调用。
       const app = appFor({ kind: 'admin' }, unusedService());
-      const claim = await post(app, 'claim', { leaseSec: 300 });
-      const renew = await post(app, 'lease', { leaseToken: 'opaque' });
-      const release = await post(app, 'release', { leaseToken: 'opaque' });
-      expect([claim, renew, release]).toEqual([
-        { status: 400, body: { error: 'from is required for an admin key' } },
-        { status: 400, body: { error: 'from is required for an admin key' } },
-        { status: 400, body: { error: 'from is required for an admin key' } },
+      const claim = await post(app, 'claim', { leaseSec: 300, from: RECIPIENT });
+      const renew = await post(app, 'lease', { leaseToken: 'opaque', from: RECIPIENT });
+      const release = await post(app, 'release', { leaseToken: 'opaque', from: RECIPIENT });
+      expect([claim, renew, release].map(({ status, body }) => ({ status, error: body.error }))).toEqual([
+        { status: 400, error: 'invalid_request' },
+        { status: 400, error: 'invalid_request' },
+        { status: 400, error: 'invalid_request' },
       ]);
     });
   });

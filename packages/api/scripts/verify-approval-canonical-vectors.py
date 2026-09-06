@@ -128,7 +128,7 @@ def pointer_tokens(pointer: str) -> list[str]:
 
 
 def mutated(source: Any, pointer: str, replacement: Any) -> Any:
-    # 越界 JSON Pointer 归一成结构化 ValueError，避免裸 IndexError traceback。
+    # 越界 JSON Pointer 归一成结构化 ValueError, 避免裸 IndexError traceback。
     try:
         result = copy.deepcopy(source)
         tokens = pointer_tokens(pointer)
