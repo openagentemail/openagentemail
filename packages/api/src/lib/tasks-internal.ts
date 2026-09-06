@@ -600,6 +600,11 @@ function isSameLeaseExpiryIdentity(
   return genA !== undefined && genA === genB && a.claimedUntil === b.claimedUntil;
 }
 
+/** #85：claim/renew/release 已认证事件的逐字节身份（canonical payload）。 */
+function isSameAuthenticatedLeaseEvent(a: LeaseEvent, b: LeaseEvent): boolean {
+  return canonicalLeaseEvent(a) === canonicalLeaseEvent(b);
+}
+
 function leaseEventStamp(
   id: string,
   state: TaskState,
@@ -1178,7 +1183,11 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   let expiredLease: ExpiredLeaseReceipt | undefined;
   let firstClaimedAt: string | undefined;
   const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt>();
-  const duplicateExpiryMessages = new Set<RawTaskMessage>();
+  const appliedClaims = new Map<number, ClaimLeaseEvent>();
+  const appliedRenews = new Map<number, RenewLeaseEvent[]>();
+  const appliedReleases = new Map<number, ReleaseLeaseEvent>();
+  // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
+  const duplicateLeaseMessages = new Set<RawTaskMessage>();
   for (const message of leaseEvents) {
     const lease = message.lease;
     if (lease.event === 'expired') {
@@ -1192,10 +1201,26 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       const priorReceipt = appliedExpiryReceipts.get(lease.generation);
       if (priorReceipt) {
         if (isSameLeaseExpiryIdentity(priorReceipt, lease)) {
-          duplicateExpiryMessages.add(message);
+          duplicateLeaseMessages.add(message);
           continue;
         }
         return null;
+      }
+      // #84：reclaim 已写出更新 generation 后，迟到的首次 expiry audit 不得推翻新权威。
+      const historicalClaim = appliedClaims.get(lease.generation);
+      const newerAuthority = (leaseAuthority?.leaseGeneration ?? previousGeneration) > lease.generation;
+      if (
+        historicalClaim
+        && newerAuthority
+        && lease.claimedUntil === historicalClaim.claimedUntil
+      ) {
+        duplicateLeaseMessages.add(message);
+        appliedExpiryReceipts.set(lease.generation, {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+        });
+        continue;
       }
       if (
         !leaseAuthority?.claimedUntil
@@ -1220,6 +1245,15 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       || !/^[A-Za-z0-9_-]{32,}$/.test(lease.tokenVerifier)
     ) return null;
     if (lease.event === 'claim') {
+      const priorClaim = appliedClaims.get(lease.generation);
+      if (priorClaim) {
+        // 同 generation 逐字节相同 → 幂等 no-op；任何字段差异仍 fail-closed。
+        if (isSameAuthenticatedLeaseEvent(priorClaim, lease)) {
+          duplicateLeaseMessages.add(message);
+          continue;
+        }
+        return null;
+      }
       const claimedAt = Date.parse(lease.at);
       const claimedUntil = Date.parse(lease.claimedUntil);
       const taskClaimedAt = firstClaimedAt ?? lease.at;
@@ -1244,9 +1278,15 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         generationClaimedAt: lease.at,
         firstClaimedAt,
       };
+      appliedClaims.set(lease.generation, lease);
       continue;
     }
     if (lease.event === 'renew') {
+      const priorRenews = appliedRenews.get(lease.generation) ?? [];
+      if (priorRenews.some((prior) => isSameAuthenticatedLeaseEvent(prior, lease))) {
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
       const renewedAt = Date.parse(lease.at);
       const claimedUntil = Date.parse(lease.claimedUntil);
       const generationClaimedAt = Date.parse(leaseAuthority?.generationClaimedAt ?? '');
@@ -1263,7 +1303,16 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
       ) return null;
       leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
+      appliedRenews.set(lease.generation, [...priorRenews, lease]);
       continue;
+    }
+    const priorRelease = appliedReleases.get(lease.generation);
+    if (priorRelease) {
+      if (isSameAuthenticatedLeaseEvent(priorRelease, lease)) {
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
+      return null;
     }
     if (
       !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
@@ -1279,6 +1328,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       reason: lease.reason,
       ...(firstClaimedAt ? { firstClaimedAt } : {}),
     };
+    appliedReleases.set(lease.generation, lease);
   }
   const request = first.approval;
   if (request?.type === 'request') {
@@ -1326,7 +1376,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // (but validly signed) submitted/working mail can appear again in IMAP, but
   // it cannot reopen the completed/failed task. Before that point normal
   // concurrent writes retain mailbox-order last-writer-wins semantics.
-  const durableOrdered = ordered.filter((message) => !duplicateExpiryMessages.has(message)).map((message) => message.lease
+  const durableOrdered = ordered.filter((message) => !duplicateLeaseMessages.has(message)).map((message) => message.lease
     ? { ...message, date: message.lease.at }
     : message);
   const current = currentTaskMessage(durableOrdered);
@@ -1436,6 +1486,7 @@ export async function getTaskSnapshot(id: string): Promise<Task | null> {
     const lookup = await findTaskMessages(id);
     hadMatchingRows = lookup.hadMatchingRows;
     raw = lookup.messages.length > 0 ? taskFromParsedMessages(id, lookup.messages) : null;
+    if (raw) reconcileMissingExpiryAudits(id, lookup.messages, raw);
   }
 
   if (raw) {
@@ -1537,7 +1588,11 @@ async function scanDurableTasks(
       grouped.set(id, entries);
     }
     const tasks = [...grouped.entries()]
-      .map(([id, messages]) => taskFromParsedMessages(id, messages))
+      .map(([id, messages]) => {
+        const task = taskFromParsedMessages(id, messages);
+        if (task) reconcileMissingExpiryAudits(id, messages, task);
+        return task;
+      })
       .filter((task): task is Task => !!task)
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     return { tasks, hadMatchingRowsIds };
@@ -1678,8 +1733,30 @@ let taskSideEffectObserverForTests: TaskSideEffectObserverForTests | null = null
 /** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder + lease），供后续读合并。 */
 const queuedEvents = new Map<string, QueuedEvent[]>();
 const QUEUED_EVENT_TTL_MS = 60 * 1000;
+/** #80：lease overlay 第二级最长寿命；超龄停止重放，事件本体留在 queuedEvents 取证。 */
+export const LEASE_OVERLAY_MAX_LIFETIME_MS = 15 * 60 * 1000;
+/** #84：expiry-audit 投递失败后的封顶重试次数（含退避）。 */
+export const EXPIRY_AUDIT_MAX_ATTEMPTS = 5;
 
-type QueuedEvent = {
+type PendingExpiryAudit = {
+  taskId: string;
+  from: string;
+  to: string;
+  subject: string;
+  state: TaskState;
+  lease: ExpiredLeaseEvent;
+  firstClaimedAt?: string;
+  attempts: number;
+  nextAttemptAt: number;
+  warnedLinger: boolean;
+};
+
+const pendingExpiryAudits = new Map<string, PendingExpiryAudit>();
+const warnedStaleLeaseOverlays = new Set<string>();
+let staleLeaseOverlayAlertCount = 0;
+let expiryAuditLingerAlertCount = 0;
+
+export type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
   lease?: LeaseEvent;
@@ -1796,6 +1873,37 @@ export function clearTaskSideEffectObserverForTests(): void {
 export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
   syntheticTaskBases.clear();
+  pendingExpiryAudits.clear();
+  warnedStaleLeaseOverlays.clear();
+  staleLeaseOverlayAlertCount = 0;
+  expiryAuditLingerAlertCount = 0;
+}
+
+/** 测试缝：查看某 task 仍滞留的 queued overlay（含超龄取证项）。 */
+export function getQueuedEventsForTests(taskId: string): QueuedEvent[] {
+  return [...(queuedEvents.get(taskId) ?? [])];
+}
+
+/** 测试缝：按原始 sentAt 回灌 overlay，验证重启后仍从 sentAt 起算。 */
+export function seedQueuedEventForTests(taskId: string, event: QueuedEvent): void {
+  const list = queuedEvents.get(taskId) ?? [];
+  list.push(event);
+  queuedEvents.set(taskId, list);
+}
+
+/** 测试缝：#80 超龄 overlay 告警计数。 */
+export function getStaleLeaseOverlayAlertCountForTests(): number {
+  return staleLeaseOverlayAlertCount;
+}
+
+/** 测试缝：#84 待补投 expiry-audit 条数。 */
+export function getPendingExpiryAuditCountForTests(): number {
+  return pendingExpiryAudits.size;
+}
+
+/** 测试缝：#84 封顶滞留告警计数。 */
+export function getExpiryAuditLingerAlertCountForTests(): number {
+  return expiryAuditLingerAlertCount;
 }
 
 function indexedLeaseGenerationDominates(
@@ -1957,6 +2065,22 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   return next;
 }
 
+function warnStaleLeaseOverlayOnce(taskId: string, row: QueuedEvent): void {
+  const identity = row.lease ? canonicalLeaseEvent(row.lease) : row.message.id;
+  const key = `${taskId}:${row.sentAt}:${identity}`;
+  if (warnedStaleLeaseOverlays.has(key)) return;
+  warnedStaleLeaseOverlays.add(key);
+  staleLeaseOverlayAlertCount += 1;
+  console.warn(JSON.stringify({
+    kind: 'lease_overlay_fallback_exhausted',
+    taskId,
+    event: row.lease?.event,
+    generation: row.lease?.generation,
+    sentAt: row.sentAt,
+    maxLifetimeMs: LEASE_OVERLAY_MAX_LIFETIME_MS,
+  }));
+}
+
 function mergeQueuedEvents(task: Task): Task {
   const pending = queuedEvents.get(task.id);
   if (!pending || pending.length === 0) return task;
@@ -1972,8 +2096,16 @@ function mergeQueuedEvents(task: Task): Task {
     return task;
   }
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
+  // 超龄 lease overlay 停止重放，但本体仍留在 queuedEvents 供取证。
   queuedEvents.set(task.id, stillLagging);
-  return applyOverlayMessages(task, stillLagging);
+  const toApply = stillLagging.filter((row) => {
+    if (!row.lease) return true;
+    if (now - row.sentAt <= LEASE_OVERLAY_MAX_LIFETIME_MS) return true;
+    warnStaleLeaseOverlayOnce(task.id, row);
+    return false;
+  });
+  if (toApply.length === 0) return task;
+  return applyOverlayMessages(task, toApply);
 }
 
 function queueEventUntilIndexed(taskId: string, message: TaskMessage, lease?: LeaseEvent): void {
@@ -2158,7 +2290,8 @@ export async function claimTask(input: {
     // rejected claim is a true zero-side-effect operation.
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), beforeMaterialization);
     const wasWorking = current.state === 'working';
-    current = await materializeLeaseExpiryUnlocked(current);
+    // #84：reclaim 不因 expiry-audit SMTP 失败而阻塞；token 失活由 server time 保证。
+    current = await materializeLeaseExpiryForClaimUnlocked(current);
     const now = nowMs();
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), now);
     if (current.lease?.claimedUntil && now < Date.parse(current.lease.claimedUntil)) {
@@ -2317,20 +2450,203 @@ function leaseEventMessage(input: {
   };
 }
 
-/** Must run under the existing per-task lock. It emits a server-authored,
- * durable receipt only after SMTP accepts it, so retries cannot invent an
- * in-memory success state. */
-async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
-  const active = current.lease;
+function expiryAuditKey(taskId: string, generation: number, claimedUntil: string): string {
+  return `${taskId}:${generation}:${claimedUntil}`;
+}
+
+function expiryAuditBackoffMs(failedAttempts: number): number {
+  return Math.min(60_000, 1_000 * (2 ** Math.max(0, failedAttempts - 1)));
+}
+
+function warnExpiryAuditLingerOnce(item: PendingExpiryAudit): void {
+  if (item.warnedLinger) return;
+  item.warnedLinger = true;
+  expiryAuditLingerAlertCount += 1;
+  console.warn(JSON.stringify({
+    kind: 'expiry_audit_retry_exhausted',
+    taskId: item.taskId,
+    generation: item.lease.generation,
+    claimedUntil: item.lease.claimedUntil,
+    attempts: item.attempts,
+  }));
+}
+
+function enqueuePendingExpiryAudit(input: {
+  taskId: string;
+  from: string;
+  to: string;
+  subject: string;
+  state: TaskState;
+  lease: ExpiredLeaseEvent;
+  firstClaimedAt?: string;
+  attempts?: number;
+  nextAttemptAt?: number;
+}): void {
+  const key = expiryAuditKey(input.taskId, input.lease.generation, input.lease.claimedUntil);
+  if (pendingExpiryAudits.has(key)) return;
+  pendingExpiryAudits.set(key, {
+    taskId: input.taskId,
+    from: input.from,
+    to: input.to,
+    subject: input.subject,
+    state: input.state,
+    lease: input.lease,
+    firstClaimedAt: input.firstClaimedAt,
+    attempts: input.attempts ?? 0,
+    nextAttemptAt: input.nextAttemptAt ?? nowMs(),
+    warnedLinger: false,
+  });
+}
+
+/** 从 durable 事件流找出「连续 claim 且中间无 release/expiry」的缺失 audit。 */
+function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEvent[] {
+  const leaseMessages = [...messages]
+    .filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease)
+    .sort((a, b) => a.uid - b.uid);
+  const missing: ExpiredLeaseEvent[] = [];
+  let lastClaim: ClaimLeaseEvent | null = null;
+  let lastClaimClosed = false;
+  for (const message of leaseMessages) {
+    const lease = message.lease;
+    if (lease.event === 'claim') {
+      if (lastClaim && !lastClaimClosed && Date.parse(lease.at) >= Date.parse(lastClaim.claimedUntil)) {
+        missing.push({
+          version: 1,
+          event: 'expired',
+          actor: 'server',
+          at: lastClaim.claimedUntil,
+          generation: lastClaim.generation,
+          claimedUntil: lastClaim.claimedUntil,
+          expiredAt: lastClaim.claimedUntil,
+        });
+      }
+      lastClaim = lease;
+      lastClaimClosed = false;
+    } else if (lease.event === 'expired' && lastClaim && lease.generation === lastClaim.generation) {
+      lastClaimClosed = true;
+    } else if (lease.event === 'release' && lastClaim && lease.generation === lastClaim.generation) {
+      lastClaimClosed = true;
+    }
+  }
+  return missing;
+}
+
+function reconcileMissingExpiryAudits(
+  id: string,
+  messages: readonly ParsedTaskMessage[],
+  task: Task,
+): void {
+  const authenticated = messages.filter((message): message is RawTaskMessage =>
+    !!message && !isRelationshipIntegrityFailure(message));
+  for (const lease of collectMissingExpiryAudits(authenticated)) {
+    enqueuePendingExpiryAudit({
+      taskId: id,
+      from: task.from,
+      to: task.to,
+      subject: task.subject,
+      state: task.state,
+      lease,
+      firstClaimedAt: task.lease?.firstClaimedAt ?? task.expiredLease?.firstClaimedAt ?? task.releasedLease?.firstClaimedAt,
+    });
+  }
+}
+
+/** 测试/重启缝：从 durable 消息重建缺失的 expiry-audit 重试项。 */
+export function rebuildExpiryAuditRetryQueueFromMessages(id: string, messages: RawTaskMessage[]): void {
+  const task = taskFromMessages(id, messages);
+  if (!task) return;
+  reconcileMissingExpiryAudits(id, messages, task);
+}
+
+async function deliverExpiryAuditMail(input: {
+  taskId: string;
+  from: string;
+  to: string;
+  subject: string;
+  state: TaskState;
+  lease: ExpiredLeaseEvent;
+}): Promise<void> {
+  await deliverMail({
+    from: input.from,
+    to: [input.to],
+    subject: input.subject,
+    text: 'Lease expired.',
+    headers: leaseEventHeaders(input.taskId, input.state, input.from, input.to, input.lease),
+  });
+}
+
+/** 在已持锁路径上冲刷到期的 expiry-audit 重试项；保序、封顶后滞留告警。 */
+export async function retryPendingExpiryAuditsOnce(): Promise<number> {
+  let delivered = 0;
   const now = nowMs();
+  const ordered = [...pendingExpiryAudits.values()]
+    .sort((a, b) => a.lease.generation - b.lease.generation || Date.parse(a.lease.at) - Date.parse(b.lease.at));
+  for (const item of ordered) {
+    if (item.attempts >= EXPIRY_AUDIT_MAX_ATTEMPTS) {
+      warnExpiryAuditLingerOnce(item);
+      continue;
+    }
+    if (now < item.nextAttemptAt) continue;
+    const accepted = await withTaskLock(item.taskId, async () => {
+      const key = expiryAuditKey(item.taskId, item.lease.generation, item.lease.claimedUntil);
+      const current = pendingExpiryAudits.get(key);
+      if (!current || current.attempts >= EXPIRY_AUDIT_MAX_ATTEMPTS || nowMs() < current.nextAttemptAt) return false;
+      try {
+        await deliverExpiryAuditMail(current);
+        const snapshot = await getTaskSnapshot(current.taskId);
+        const eventMessage = leaseEventMessage({
+          task: snapshot ?? {
+            id: current.taskId,
+            from: current.from,
+            to: current.to,
+            subject: current.subject,
+            state: current.state,
+            createdAt: current.lease.at,
+            updatedAt: current.lease.at,
+            messages: [],
+          },
+          from: current.from,
+          to: current.to,
+          state: current.state,
+          at: current.lease.at,
+          body: 'Lease expired.',
+        });
+        queueEventUntilIndexed(current.taskId, eventMessage, current.lease);
+        invalidateTaskListCache();
+        pendingExpiryAudits.delete(key);
+        return true;
+      } catch {
+        current.attempts += 1;
+        if (current.attempts >= EXPIRY_AUDIT_MAX_ATTEMPTS) {
+          current.nextAttemptAt = Number.POSITIVE_INFINITY;
+          warnExpiryAuditLingerOnce(current);
+        } else {
+          current.nextAttemptAt = nowMs() + expiryAuditBackoffMs(current.attempts);
+        }
+        return false;
+      }
+    });
+    if (accepted) delivered += 1;
+  }
+  return delivered;
+}
+
+/** 按 server time 失活旧权威；不投递 SMTP。必须在 per-task 锁内调用。 */
+function expireLeaseAuthorityInMemory(current: Task, expiredAt: string): {
+  lease: ExpiredLeaseEvent;
+  next: Task;
+  eventMessage: TaskMessage;
+} | null {
+  const active = current.lease;
+  const now = Date.parse(expiredAt);
   if (
     !active?.claimedUntil
+    || !Number.isFinite(now)
     || now < Date.parse(active.claimedUntil)
     || isApprovalTask(current)
     || !canAdvanceTask(current.state)
     || isClosedByAdmin(current)
-  ) return current;
-  const expiredAt = new Date(now).toISOString();
+  ) return null;
   const lease: ExpiredLeaseEvent = {
     version: 1,
     event: 'expired',
@@ -2340,35 +2656,73 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
     claimedUntil: active.claimedUntil,
     expiredAt,
   };
-  // The requester→recipient envelope is only mail transport. The signed
-  // actor above is the sole expiry authority and is intentionally not either
-  // participant.
   const from = current.from;
   const to = current.to;
   const text = 'Lease expired.';
-  const { messageId: _messageId } = await deliverMail({
-    from,
-    to: [to],
-    subject: current.subject,
-    text,
-    headers: leaseEventHeaders(current.id, current.state, from, to, lease),
-  });
-  invalidateTaskListCache();
   const eventMessage = leaseEventMessage({ task: current, from, to, state: current.state, at: expiredAt, body: text });
-  queueEventUntilIndexed(current.id, eventMessage, lease);
   return {
-    ...current,
-    updatedAt: expiredAt,
-    messages: [...current.messages, eventMessage],
-    lease: undefined,
-    releasedLease: undefined,
-    expiredLease: {
-      leaseGeneration: lease.generation,
-      claimedUntil: lease.claimedUntil,
-      expiredAt: lease.expiredAt,
-      ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
+    lease,
+    eventMessage,
+    next: {
+      ...current,
+      updatedAt: expiredAt,
+      messages: [...current.messages, eventMessage],
+      lease: undefined,
+      releasedLease: undefined,
+      expiredLease: {
+        leaseGeneration: lease.generation,
+        claimedUntil: lease.claimedUntil,
+        expiredAt: lease.expiredAt,
+        ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
+      },
     },
   };
+}
+
+/** Must run under the existing per-task lock. It emits a server-authored,
+ * durable receipt only after SMTP accepts it, so retries cannot invent an
+ * in-memory success state. */
+async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
+  const now = nowMs();
+  const prepared = expireLeaseAuthorityInMemory(current, new Date(now).toISOString());
+  if (!prepared) return current;
+  const { lease, next, eventMessage } = prepared;
+  // The requester→recipient envelope is only mail transport. The signed
+  // actor above is the sole expiry authority and is intentionally not either
+  // participant.
+  await deliverExpiryAuditMail({
+    taskId: current.id,
+    from: current.from,
+    to: current.to,
+    subject: current.subject,
+    state: current.state,
+    lease,
+  });
+  invalidateTaskListCache();
+  queueEventUntilIndexed(current.id, eventMessage, lease);
+  return next;
+}
+
+/** claim 路径：audit SMTP 失败时仍按 server time 失活并入队重试，不挡住 reclaim。 */
+async function materializeLeaseExpiryForClaimUnlocked(current: Task): Promise<Task> {
+  try {
+    return await materializeLeaseExpiryUnlocked(current);
+  } catch (err) {
+    const prepared = expireLeaseAuthorityInMemory(current, new Date(nowMs()).toISOString());
+    if (!prepared) throw err;
+    enqueuePendingExpiryAudit({
+      taskId: current.id,
+      from: current.from,
+      to: current.to,
+      subject: current.subject,
+      state: current.state,
+      lease: prepared.lease,
+      firstClaimedAt: current.lease?.firstClaimedAt,
+      attempts: 1,
+      nextAttemptAt: nowMs() + expiryAuditBackoffMs(1),
+    });
+    return prepared.next;
+  }
 }
 
 /** One bounded pass for the server reaper. All task authority remains in the
@@ -2388,6 +2742,8 @@ export async function reapExpiredTaskLeasesOnce(): Promise<number> {
     });
     if (didMaterialize) materialized += 1;
   }
+  // 与 reclaim 解耦后的 audit 补投：reaper 周期冲刷重试队列。
+  await retryPendingExpiryAuditsOnce();
   return materialized;
 }
 

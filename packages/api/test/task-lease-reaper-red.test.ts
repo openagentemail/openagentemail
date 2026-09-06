@@ -1162,7 +1162,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       },
     }])).toBeNull();
 
-    // 6. Stale expiry after later authority when previous generation was NEVER expired
+    // 6. #84：迟到的首次 expiry audit 出现在 generation 2 之后，匹配历史 claim 则 no-op，不得推翻新权威。
     const claim2Delivery: SendInput = {
       from: RECIPIENT,
       to: [REQUESTER],
@@ -1188,8 +1188,8 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     expect(claim2).not.toBeNull();
     const staleGen1Expiry = await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 9);
     expect(staleGen1Expiry).not.toBeNull();
-    // Durable thread: root, claim1, claim2, staleGen1Expiry
-    // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
-    expect(taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!])).toBeNull();
+    const lateAudit = taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!]);
+    expect(lateAudit?.lease?.leaseGeneration).toBe(2);
+    expect(toTaskView(lateAudit!).messages).toHaveLength(3);
   });
 });

@@ -5,6 +5,15 @@ import {
   setTaskSendMailForTests,
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
+  getQueuedEventsForTests,
+  seedQueuedEventForTests,
+  getStaleLeaseOverlayAlertCountForTests,
+  getPendingExpiryAuditCountForTests,
+  getExpiryAuditLingerAlertCountForTests,
+  rebuildExpiryAuditRetryQueueFromMessages,
+  retryPendingExpiryAuditsOnce,
+  LEASE_OVERLAY_MAX_LIFETIME_MS,
+  EXPIRY_AUDIT_MAX_ATTEMPTS,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -14,4 +23,13 @@ export {
   setTaskSendMailForTests,
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
+  getQueuedEventsForTests,
+  seedQueuedEventForTests,
+  getStaleLeaseOverlayAlertCountForTests,
+  getPendingExpiryAuditCountForTests,
+  getExpiryAuditLingerAlertCountForTests,
+  rebuildExpiryAuditRetryQueueFromMessages,
+  retryPendingExpiryAuditsOnce,
+  LEASE_OVERLAY_MAX_LIFETIME_MS,
+  EXPIRY_AUDIT_MAX_ATTEMPTS,
 };
