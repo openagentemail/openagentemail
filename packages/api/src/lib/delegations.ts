@@ -127,7 +127,11 @@ const MISSING_STORE_VERSION: StoreFileVersion = {
 type StoreCache = {
   version: StoreFileVersion;
   store: DelegationStoreFile;
-  /** load 时被整条剔除（无任何支持 scope）的 grant 原始视图：留痕 + 幂等撤销用。 */
+  /**
+   * load 时被整条剔除（无任何支持 scope）的 grant 原始视图。
+   * 三处消费（Issue #136 R2/R4）：留痕告警、幂等撤销、随 save() 一并写回
+   * 磁盘——dropped 记录不随全量重写消失，级联吊销也扫得到它们。
+   */
   droppedGrants: DelegationGrant[];
 };
 
@@ -229,7 +233,15 @@ function load(): DelegationStoreFile {
   return loadCache().store;
 }
 
+/**
+ * 全量原子重写存储文件。R4 语义：coerced grants 与 load 剔除的
+ * droppedGrants（原始视图，含原始 scopes/墓碑）**一并写回**——save 是整
+ * 文件 tmp+rename 重写，若只序列化 store.grants，任何一次普通写入都会把
+ * 磁盘上的 dropped 记录静默抹掉（之后 DELETE 404、级联墓碑写不出）。
+ * dropped 条目排在 coerced 之后，顺序无语义。
+ */
 function save(store: DelegationStoreFile): void {
+  const dropped = storeCache?.droppedGrants ?? [];
   invalidateDelegationStoreCache();
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
@@ -239,7 +251,11 @@ function save(store: DelegationStoreFile): void {
   }
   const path = storePath();
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  writeFileSync(
+    tmp,
+    JSON.stringify({ ...store, grants: [...store.grants, ...dropped] }, null, 2),
+    { mode: 0o600 },
+  );
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
 }
@@ -358,55 +374,40 @@ export function revokeDelegation(
 }
 
 /**
- * 撤销被 load() 剔除的 grant：coerced store 不含它（save() 不会带走），
- * 故直接在磁盘原始记录上落墓碑，保持墓碑语义可审计。幂等：已撤销则原样返回。
+ * 撤销被 load() 剔除的 grant：coerced store 不含它，故在其 dropped 原始
+ * 视图上就地落墓碑，再经 save() 把 coerced+dropped 全量写回（dropped 记
+ * 录连同原始 scopes 与墓碑一起持久化）。幂等：已撤销则原样返回。
  */
 function revokeDroppedGrant(
   id: string,
   revokedBy: string,
   revokedAt?: string,
 ): DelegationGrant | null {
-  const dropped = getDroppedDelegation(id);
+  const cache = loadCache();
+  const dropped = cache.droppedGrants.find((g) => g.id === id);
   if (!dropped) return null;
   if (dropped.revokedAt !== null) return dropped;
 
-  const path = storePath();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    throw new Error('delegation_store_corrupt', { cause: err });
-  }
-  if (!isDelegationStoreShape(parsed)) {
-    throw new Error('delegation_store_corrupt', {
-      cause: new Error('invalid delegation store shape'),
-    });
-  }
-  const entry = (parsed.grants as Record<string, unknown>[]).find((g) => g.id === id);
-  if (!entry) return null;
-  if (typeof entry.revokedAt === 'string' && entry.revokedAt) {
-    // 磁盘上已被撤销（剔除视图落后于文件）：刷新缓存后按幂等语义返回。
-    invalidateDelegationStoreCache();
-    return getDroppedDelegation(id) ?? null;
-  }
-  const ts = revokedAt ?? new Date().toISOString();
-  entry.revokedAt = ts;
-  entry.revokedBy = revokedBy;
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(parsed, null, 2), { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
-  invalidateDelegationStoreCache();
-  return { ...dropped, revokedAt: ts, revokedBy };
+  dropped.revokedAt = revokedAt ?? new Date().toISOString();
+  dropped.revokedBy = revokedBy;
+  save(cache.store);
+  return dropped;
 }
 
 function cascadeRevokeGrants(
   predicate: (grant: DelegationGrant) => boolean,
   opts?: { actor?: string; ts?: string },
 ): number {
-  const store = load();
+  const cache = loadCache();
+  const store = cache.store;
   const toRevoke = store.grants.filter((g) => g.revokedAt === null && predicate(g));
-  if (toRevoke.length === 0) return 0;
+  // R4：级联必须覆盖 load 剔除的 dropped 记录——它们对 coerce 后的世界不
+  // 可见，但在磁盘上仍是活性原始数据；不落墓碑的话，未来 scope 白名单
+  // 放开时该记录会原样复活（安全面）。
+  const droppedToRevoke = cache.droppedGrants.filter(
+    (g) => g.revokedAt === null && predicate(g),
+  );
+  if (toRevoke.length === 0 && droppedToRevoke.length === 0) return 0;
 
   const now = opts?.ts ?? new Date().toISOString();
   const actor = opts?.actor ?? 'cascade';
@@ -415,10 +416,14 @@ function cascadeRevokeGrants(
     grant.revokedAt = now;
     grant.revokedBy = actor;
   }
+  for (const grant of droppedToRevoke) {
+    grant.revokedAt = now;
+    grant.revokedBy = actor;
+  }
 
   save(store);
 
-  for (const grant of toRevoke) {
+  for (const grant of [...toRevoke, ...droppedToRevoke]) {
     recordAuditEvent({
       event: 'delegation.revoke.cascade',
       outcome: 'ok',
@@ -431,7 +436,7 @@ function cascadeRevokeGrants(
     });
   }
 
-  return toRevoke.length;
+  return toRevoke.length + droppedToRevoke.length;
 }
 
 /**

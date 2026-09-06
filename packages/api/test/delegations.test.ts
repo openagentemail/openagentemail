@@ -1262,6 +1262,93 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       expect(((await res2.json()) as any).revokedAt).toBe(body.revokedAt);
     });
 
+    test('Item 4c (R4): save() writes droppedGrants back — ordinary mutations never wipe disk residue', async () => {
+      const storeFile = join(config.dataDir, 'delegations.json');
+      writeFileSync(storeFile, JSON.stringify({
+        schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+        grants: [
+          {
+            id: 'delg_dropped_keep',
+            mailbox: 'alice@test.example',
+            grantee: 'bob@test.example',
+            scopes: ['nope:unsupported'],
+            createdAt: '2026-09-06T00:00:00Z',
+            createdBy: 'admin',
+            revokedAt: null,
+            revokedBy: null,
+          },
+        ],
+      }, null, 2), { mode: 0o600 });
+      invalidateDelegationStoreCache();
+
+      // Any ordinary mutation rewrites the WHOLE file through save().
+      createDelegation({
+        mailbox: 'carol@test.example',
+        grantee: 'dave@test.example',
+        createdBy: 'admin',
+      });
+
+      const onDisk = JSON.parse(readFileSync(storeFile, 'utf8')) as any;
+      const droppedEntry = onDisk.grants.find((g: any) => g.id === 'delg_dropped_keep');
+      // P1①: the dropped record survived the full rewrite, raw scopes intact
+      expect(droppedEntry).toBeDefined();
+      expect(droppedEntry.scopes).toEqual(['nope:unsupported']);
+      expect(droppedEntry.revokedAt).toBeNull();
+      expect(onDisk.grants.some((g: any) => g.mailbox === 'carol@test.example')).toBe(true);
+
+      // ...and it is still revocable afterwards (DELETE must not 404)
+      const alice = createIdentity({ localpart: 'alice' })!;
+      const del = await app.request('/v1/delegations/delg_dropped_keep', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${alice.token}` },
+      });
+      expect(del.status).toBe(200);
+      const tomb = (await del.json()) as any;
+      expect(tomb.revoked).toBe(true);
+      const afterDisk = JSON.parse(readFileSync(storeFile, 'utf8')) as any;
+      expect(afterDisk.grants.find((g: any) => g.id === 'delg_dropped_keep')?.revokedAt)
+        .toBe(tomb.revokedAt);
+    });
+
+    test('Item 4d (R4): cascade revocation covers load-dropped grants — no resurrection', () => {
+      const storeFile = join(config.dataDir, 'delegations.json');
+      writeFileSync(storeFile, JSON.stringify({
+        schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+        grants: [
+          {
+            id: 'delg_dropped_cascade',
+            mailbox: 'alice@test.example',
+            grantee: 'bob@test.example',
+            scopes: ['future:unsupported'],
+            createdAt: '2026-09-06T00:00:00Z',
+            createdBy: 'admin',
+            revokedAt: null,
+            revokedBy: null,
+          },
+        ],
+      }, null, 2), { mode: 0o600 });
+      invalidateDelegationStoreCache();
+
+      // Owner identity deletion cascades across BOTH coerced and dropped grants
+      const revoked = revokeDelegationsForAddress('alice@test.example');
+      expect(revoked).toBe(1);
+
+      // P1②: the dropped record carries a tombstone on disk (and in the raw view)
+      const onDisk = JSON.parse(readFileSync(storeFile, 'utf8')) as any;
+      const entry = onDisk.grants.find((g: any) => g.id === 'delg_dropped_cascade');
+      expect(entry.revokedAt).toBeTruthy();
+      expect(entry.revokedBy).toBe('cascade');
+      expect(entry.scopes).toEqual(['future:unsupported']);
+      expect(getDroppedDelegation('delg_dropped_cascade')?.revokedAt).toBeTruthy();
+
+      // ...and the cascade audit trail records it
+      const audit = readAuditEvents().find(
+        (e) => e.event === 'delegation.revoke.cascade' && e.grantId === 'delg_dropped_cascade',
+      );
+      expect(audit).toBeDefined();
+      expect(audit?.mailbox).toBe('alice@test.example');
+    });
+
     test('Item 5: load() re-wraps corruption errors preserving { cause: err } error chain', () => {
       const storeFile = join(config.dataDir, 'delegations.json');
       writeFileSync(storeFile, 'INVALID_CORRUPTED_JSON{{{', { mode: 0o600 });
