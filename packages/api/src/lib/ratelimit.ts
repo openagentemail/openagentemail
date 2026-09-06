@@ -93,6 +93,7 @@ export function releaseSendLimit(address: string, reservation: number | undefine
 /** Test helper: wipe all windows. */
 export function resetRateLimits(): void {
   buckets.clear();
+  resetDelegationDeniedAuditLimits();
 }
 
 /**
@@ -188,48 +189,115 @@ export function resetMcpPreauthIpRateLimits(): void {
   mcpPreauthIpBuckets.clear();
 }
 
+/** Delegation denied audit IP 桶（防非授权 token / OAuth 凭证刷爆审计日志）。 */
+const delegationDeniedIpBuckets = new Map<string, number[]>();
+export const DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT = 10;
+
+/**
+ * 校验 delegation.grant.denied 审计写入限速（复用 slidingWindowCheck）。
+ * 键为 clientIp。超限仅抑制 audit 落盘防刷盘，不改变 403 状态码。
+ */
+export function checkDelegationDeniedAuditLimit(
+  ip: string,
+  limit: number = DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT,
+  windowMs = 60_000,
+  now = Date.now(),
+): RateLimitResult {
+  return slidingWindowCheck(delegationDeniedIpBuckets, ip, limit, windowMs, now);
+}
+
+/** 测试辅助：清空 delegation denied 审计 IP 桶。 */
+export function resetDelegationDeniedAuditLimits(): void {
+  delegationDeniedIpBuckets.clear();
+}
+
 /**
  * Concurrency slots for POST /v1/messages/wait.
  *
  * A wait holds one IMAP connection open for up to 600 s, and every identity
  * shares the single catch-all Dovecot account — so unbounded waits let one
  * caller exhaust that account's connection allowance and lock every other
- * identity out of its mail. Two ceilings: per address (stops one token from
- * doing it alone) and global (stops several tokens from doing it together).
+ * identity out of its mail. Ceilings, checked together (Issue #136 R2/R3):
  *
- * The global ceiling stays under Dovecot's default mail_max_userip_connections
- * (10) with room to spare for the short-lived list/read connections.
- * A few concurrent waits per address are legitimate (different filters), so
- * the per-address ceiling is not 1.
+ * - per caller+address slot: one token can't monopolize a mailbox it reads.
+ *   Delegates wait on the owner's address under their OWN key, so a delegate
+ *   never spends the owner's slot budget;
+ * - per address, summed across ALL callers: N distinct delegates can't pool
+ *   their slot budgets to squeeze one mailbox either. Delegates (caller ≠
+ *   mailbox) top out at MAX_WAITS_PER_ADDRESS - 1 combined — the last slot
+ *   on a mailbox is reserved for its owner (caller === address), so a full
+ *   delegation fan-in still leaves the owner a way in (R3, CR Major);
+ * - instance-wide total: stays under Dovecot's default
+ *   mail_max_userip_connections (10) with room to spare for the short-lived
+ *   list/read connections.
+ *
+ * A few concurrent waits per caller+address are legitimate (different filters),
+ * so the per-slot ceiling is not 1; the per-address ceiling is higher still so
+ * a delegate at its own ceiling leaves the owner room to wait.
  */
-export const MAX_WAITS_PER_ADDRESS = 3;
+export const MAX_WAITS_PER_SLOT = 3;
+export const MAX_WAITS_PER_ADDRESS = 5;
 export const MAX_WAITS_TOTAL = 8;
 
 const waits = new Map<string, number>();
+const waitsPerAddress = new Map<string, number>();
 let waitsTotal = 0;
 
+/**
+ * Build slot key: `${caller}:${targetAddress}` for a delegated wait, plain
+ * caller otherwise. Omitting the target and passing target === caller MUST
+ * produce the same key — the tasks route omits while a message wait on the
+ * caller's own mailbox passes it explicitly, and two buckets for one
+ * caller+mailbox pair would let a caller bypass the per-slot ceiling by
+ * mixing the two routes (Issue #136 R5).
+ */
+export function waitSlotKey(caller: string, targetAddress?: string): string {
+  const c = caller.trim().toLowerCase();
+  const t = targetAddress?.trim().toLowerCase();
+  if (!t || t === c) return c;
+  return `${c}:${t}`;
+}
+
+/** 聚合键：被读信箱本身（无 target 时即 caller 自己的信箱）。 */
+function waitAddressKey(caller: string, targetAddress?: string): string {
+  return (targetAddress ?? caller).trim().toLowerCase();
+}
+
 /** Take a wait slot; false means the caller should be told 429. */
-export function acquireWaitSlot(address: string): boolean {
-  const key = address.toLowerCase();
-  const current = waits.get(key) ?? 0;
-  if (current >= MAX_WAITS_PER_ADDRESS || waitsTotal >= MAX_WAITS_TOTAL) return false;
-  waits.set(key, current + 1);
+export function acquireWaitSlot(caller: string, targetAddress?: string): boolean {
+  const key = waitSlotKey(caller, targetAddress);
+  const addressKey = waitAddressKey(caller, targetAddress);
+  if ((waits.get(key) ?? 0) >= MAX_WAITS_PER_SLOT) return false;
+  // R3 owner reserve: delegates share MAX_WAITS_PER_ADDRESS - 1 at most, so
+  // the mailbox's final slot is always left for the owner's own waits.
+  const isOwner = waitAddressKey(caller) === addressKey;
+  const addressCeiling = isOwner ? MAX_WAITS_PER_ADDRESS : MAX_WAITS_PER_ADDRESS - 1;
+  if ((waitsPerAddress.get(addressKey) ?? 0) >= addressCeiling) return false;
+  if (waitsTotal >= MAX_WAITS_TOTAL) return false;
+  waits.set(key, (waits.get(key) ?? 0) + 1);
+  waitsPerAddress.set(addressKey, (waitsPerAddress.get(addressKey) ?? 0) + 1);
   waitsTotal += 1;
   return true;
 }
 
 /** Give the slot back. Safe to call for a slot that was never taken. */
-export function releaseWaitSlot(address: string): void {
-  const key = address.toLowerCase();
+export function releaseWaitSlot(caller: string, targetAddress?: string): void {
+  const key = waitSlotKey(caller, targetAddress);
   const current = waits.get(key) ?? 0;
   if (current <= 0) return;
   if (current === 1) waits.delete(key);
   else waits.set(key, current - 1);
+
+  const addressKey = waitAddressKey(caller, targetAddress);
+  const addressCount = waitsPerAddress.get(addressKey) ?? 0;
+  if (addressCount <= 1) waitsPerAddress.delete(addressKey);
+  else waitsPerAddress.set(addressKey, addressCount - 1);
   waitsTotal -= 1;
 }
 
 /** Test helper: drop all wait slots. */
 export function resetWaitSlots(): void {
   waits.clear();
+  waitsPerAddress.clear();
   waitsTotal = 0;
 }

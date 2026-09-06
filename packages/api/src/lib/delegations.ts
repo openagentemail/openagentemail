@@ -1,8 +1,23 @@
 // Single-writer process assumption: Like identities.json, delegations.json assumes a
 // single-writer process and does not support multi-process concurrent mutations on the same DATA_DIR.
-// Scope note: Currently delegations only support 'read:messages'. If additional scopes are
-// introduced in the future, all forbidUnlessMailboxAccess call sites must be audited to ensure
-// delegations do not unintentionally grant write or admin capabilities.
+// Scope note: Currently delegations only support 'read:messages' (see SUPPORTED_SCOPES).
+// If additional scopes are introduced in the future, all forbidUnlessMailboxAccess call sites must be
+// audited to ensure delegations do not unintentionally grant write or admin capabilities.
+//
+// OAuth cascade revocation architecture note (Issue #136 Item 8):
+// In the current architecture, OAuth credentials are strictly forbidden from creating or revoking
+// delegation grants (enforced in routes/delegations.ts via attribution.kind === 'oauth' returning 403).
+// Consequently, all active delegations are established exclusively via direct identity credentials
+// or admin authority, and no OAuth-originated delegations exist in delegations.json.
+// Token lifecycle & revocation semantics:
+// 1. Grantee token rotation: Automatically cascades revocation of all delegations received by that
+//    grantee (see revokeDelegationsOnGranteeTokenRotate in identities.ts).
+// 2. Owner token rotation: Intentionally preserves delegations granted by the owner to avoid breaking
+//    delegated agent access upon routine credential rotation.
+// 3. Identity deletion: Bidirectionally revokes all delegations (both as owner and grantee).
+// 4. Future OAuth delegation expansion: If delegations are ever allowed to be created via OAuth tokens,
+//    DelegationGrant should store an optional `oauthGrantId?: string` field, and OAuth token revocation
+//    or rotation must cascade-revoke any grants linked to that `oauthGrantId`.
 
 import {
   existsSync,
@@ -18,6 +33,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
+import { isSupportedScope } from './identities.ts';
 
 export const DELEGATION_STORE_SCHEMA_VERSION = 1;
 export const DELEGATION_STORE_FILE = 'delegations.json';
@@ -60,13 +76,19 @@ function isGrantShape(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function coerceGrant(raw: Record<string, unknown>): DelegationGrant {
+/**
+ * 原始视图：字段规范化（小写/去空白）但**不做 scope 白名单过滤**。
+ * 仅供 load() 对收窄/剔除项留痕，以及 revoke 路径对「被剔除」的 grant
+ * 幂等落墓碑使用（Issue #136 R2）。
+ */
+function rawGrantView(raw: Record<string, unknown>): DelegationGrant {
+  const rawScopes = Array.isArray(raw.scopes) ? (raw.scopes as unknown[]) : [];
   return {
     ...raw,
     id: raw.id as string,
     mailbox: (raw.mailbox as string).trim().toLowerCase(),
     grantee: (raw.grantee as string).trim().toLowerCase(),
-    scopes: Array.isArray(raw.scopes) ? (raw.scopes as string[]) : [],
+    scopes: rawScopes.filter((s): s is string => typeof s === 'string'),
     createdAt: raw.createdAt as string,
     createdBy: raw.createdBy as string,
     revokedAt: (raw.revokedAt as string | null) ?? null,
@@ -105,6 +127,12 @@ const MISSING_STORE_VERSION: StoreFileVersion = {
 type StoreCache = {
   version: StoreFileVersion;
   store: DelegationStoreFile;
+  /**
+   * load 时被整条剔除（无任何支持 scope）的 grant 原始视图。
+   * 三处消费（Issue #136 R2/R4）：留痕告警、幂等撤销、随 save() 一并写回
+   * 磁盘——dropped 记录不随全量重写消失，级联吊销也扫得到它们。
+   */
+  droppedGrants: DelegationGrant[];
 };
 
 let storeCache: StoreCache | undefined;
@@ -139,11 +167,11 @@ function storeVersionsEqual(a: StoreFileVersion, b: StoreFileVersion): boolean {
   );
 }
 
-function load(): DelegationStoreFile {
+function loadCache(): StoreCache {
   const path = storePath();
   if (!existsSync(path)) {
     if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
-      return storeCache.store;
+      return storeCache;
     }
     storeCache = {
       version: MISSING_STORE_VERSION,
@@ -151,37 +179,69 @@ function load(): DelegationStoreFile {
         schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
         grants: [],
       },
+      droppedGrants: [],
     };
-    return storeCache.store;
+    return storeCache;
   }
   try {
     const version = fileVersionFromStat(statSync(path));
     if (storeCache && storeVersionsEqual(storeCache.version, version)) {
-      return storeCache.store;
+      return storeCache;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isDelegationStoreShape(parsed)) {
       throw new Error('invalid delegation store shape');
     }
-    const grants = parsed.grants.map((entry) => coerceGrant(entry as Record<string, unknown>));
-    const store: DelegationStoreFile = {
-      ...parsed,
-      schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
-      grants,
-    };
+    const grants: DelegationGrant[] = [];
+    const droppedGrants: DelegationGrant[] = [];
+    for (const entry of parsed.grants) {
+      const view = rawGrantView(entry as Record<string, unknown>);
+      const scopes = view.scopes.filter((s) => isSupportedScope(s));
+      if (scopes.length === 0) {
+        // Issue #136 R2：整条剔除必须留痕，不能静默吞掉磁盘上的残留。
+        console.warn(
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) dropped at load: no supported scopes in ${JSON.stringify(view.scopes)}`,
+        );
+        droppedGrants.push(view);
+        continue;
+      }
+      if (scopes.length < view.scopes.length) {
+        console.warn(
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) scopes narrowed at load: kept ${JSON.stringify(scopes)}, dropped ${JSON.stringify(view.scopes.filter((s) => !isSupportedScope(s)))}`,
+        );
+      }
+      grants.push({ ...view, scopes });
+    }
     storeCache = {
       version,
-      store,
+      store: {
+        ...parsed,
+        schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+        grants,
+      },
+      droppedGrants,
     };
-    return storeCache.store;
+    return storeCache;
   } catch (err) {
     invalidateDelegationStoreCache();
     if ((err as Error).message === 'delegation_store_corrupt') throw err;
-    throw new Error('delegation_store_corrupt');
+    throw new Error('delegation_store_corrupt', { cause: err });
   }
 }
 
+function load(): DelegationStoreFile {
+  return loadCache().store;
+}
+
+/**
+ * 全量原子重写存储文件。R4 语义：coerced grants 与 load 剔除的
+ * droppedGrants（原始视图，含原始 scopes/墓碑）**一并写回**——save 是整
+ * 文件 tmp+rename 重写，若只序列化 store.grants，任何一次普通写入都会把
+ * 磁盘上的 dropped 记录静默抹掉（之后 DELETE 404、级联墓碑写不出）。
+ * dropped 条目排在 coerced 之后，顺序无语义。
+ */
 function save(store: DelegationStoreFile): void {
+  const dropped = storeCache?.droppedGrants ?? [];
   invalidateDelegationStoreCache();
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try {
@@ -191,7 +251,11 @@ function save(store: DelegationStoreFile): void {
   }
   const path = storePath();
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  writeFileSync(
+    tmp,
+    JSON.stringify({ ...store, grants: [...store.grants, ...dropped] }, null, 2),
+    { mode: 0o600 },
+  );
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
 }
@@ -213,11 +277,16 @@ export function createDelegation(params: {
   if (existing) {
     return existing;
   }
+  const rawScopes = params.scopes && params.scopes.length > 0 ? [...params.scopes] : ['read:messages'];
+  const scopes = rawScopes.filter((s) => typeof s === 'string' && isSupportedScope(s));
+  if (scopes.length === 0) {
+    throw new Error('invalid_scopes: no supported scopes provided');
+  }
   const grant: DelegationGrant = {
     id: params.id ?? `delg_${randomBytes(12).toString('hex')}`,
     mailbox,
     grantee,
-    scopes: params.scopes && params.scopes.length > 0 ? [...params.scopes] : ['read:messages'],
+    scopes,
     createdAt: params.createdAt ?? new Date().toISOString(),
     createdBy: params.createdBy,
     revokedAt: null,
@@ -231,6 +300,15 @@ export function createDelegation(params: {
 export function getDelegation(id: string): DelegationGrant | undefined {
   const store = load();
   return store.grants.find((g) => g.id === id);
+}
+
+/**
+ * load() 整条剔除的 grant（如手工植入全不支持 scope 的脏数据）：返回其原始视图。
+ * 供 DELETE /v1/delegations/:id 做授权与幂等撤销「磁盘残留」——这类 id 对
+ * getDelegation / listDelegations 不可见（Issue #136 R2 顺清 3）。
+ */
+export function getDroppedDelegation(id: string): DelegationGrant | undefined {
+  return loadCache().droppedGrants.find((g) => g.id === id);
 }
 
 export function listDelegations(filter?: {
@@ -274,6 +352,7 @@ export function hasActiveDelegation(
 /**
  * 撤销委托：写入 revokedAt 墓碑。
  * 幂等：若已撤销，保留原 revokedAt / revokedBy 返回。
+ * 被 load() 整条剔除的 grant 同样可撤销（磁盘原始记录就地落墓碑）。
  */
 export function revokeDelegation(
   id: string,
@@ -282,7 +361,9 @@ export function revokeDelegation(
 ): DelegationGrant | null {
   const store = load();
   const grant = store.grants.find((g) => g.id === id);
-  if (!grant) return null;
+  if (!grant) {
+    return revokeDroppedGrant(id, revokedBy, revokedAt);
+  }
   if (grant.revokedAt !== null) {
     return grant;
   }
@@ -292,13 +373,41 @@ export function revokeDelegation(
   return grant;
 }
 
+/**
+ * 撤销被 load() 剔除的 grant：coerced store 不含它，故在其 dropped 原始
+ * 视图上就地落墓碑，再经 save() 把 coerced+dropped 全量写回（dropped 记
+ * 录连同原始 scopes 与墓碑一起持久化）。幂等：已撤销则原样返回。
+ */
+function revokeDroppedGrant(
+  id: string,
+  revokedBy: string,
+  revokedAt?: string,
+): DelegationGrant | null {
+  const cache = loadCache();
+  const dropped = cache.droppedGrants.find((g) => g.id === id);
+  if (!dropped) return null;
+  if (dropped.revokedAt !== null) return dropped;
+
+  dropped.revokedAt = revokedAt ?? new Date().toISOString();
+  dropped.revokedBy = revokedBy;
+  save(cache.store);
+  return dropped;
+}
+
 function cascadeRevokeGrants(
   predicate: (grant: DelegationGrant) => boolean,
   opts?: { actor?: string; ts?: string },
 ): number {
-  const store = load();
+  const cache = loadCache();
+  const store = cache.store;
   const toRevoke = store.grants.filter((g) => g.revokedAt === null && predicate(g));
-  if (toRevoke.length === 0) return 0;
+  // R4：级联必须覆盖 load 剔除的 dropped 记录——它们对 coerce 后的世界不
+  // 可见，但在磁盘上仍是活性原始数据；不落墓碑的话，未来 scope 白名单
+  // 放开时该记录会原样复活（安全面）。
+  const droppedToRevoke = cache.droppedGrants.filter(
+    (g) => g.revokedAt === null && predicate(g),
+  );
+  if (toRevoke.length === 0 && droppedToRevoke.length === 0) return 0;
 
   const now = opts?.ts ?? new Date().toISOString();
   const actor = opts?.actor ?? 'cascade';
@@ -307,10 +416,14 @@ function cascadeRevokeGrants(
     grant.revokedAt = now;
     grant.revokedBy = actor;
   }
+  for (const grant of droppedToRevoke) {
+    grant.revokedAt = now;
+    grant.revokedBy = actor;
+  }
 
   save(store);
 
-  for (const grant of toRevoke) {
+  for (const grant of [...toRevoke, ...droppedToRevoke]) {
     recordAuditEvent({
       event: 'delegation.revoke.cascade',
       outcome: 'ok',
@@ -323,7 +436,7 @@ function cascadeRevokeGrants(
     });
   }
 
-  return toRevoke.length;
+  return toRevoke.length + droppedToRevoke.length;
 }
 
 /**

@@ -1203,14 +1203,29 @@ async function findMatchWith(
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+export class DelegationRevokedError extends Error {
+  constructor(message = 'delegation_revoked') {
+    super(message);
+    this.name = 'DelegationRevokedError';
+  }
+}
+
 /**
- * Wait for a message matching `filters` to appear for `address`.
+ * Wait for a message matching `filters` to arrive in `address`'s mailbox,
+ * up to `timeoutSec`.
  *
- * Hybrid strategy on one long-lived connection: re-check the mailbox,
+ * Dovecot shares a single catch-all INBOX across every identity, so we hold
+ * ONE connection in IDLE mode per wait. We first scan for already-arrived mail,
  * then race IMAP IDLE against a 3 s heartbeat — IDLE gives instant wakeup
  * when Dovecot reports new mail, the heartbeat keeps us correct on
  * servers/connections where IDLE events get lost. If the IDLE connection
  * itself fails, fall back to plain 3 s polling with one-shot connections.
+ *
+ * When shouldContinue is provided (e.g. for delegated callers), it is invoked
+ * each iteration, prior to returning any found match, and once more right
+ * before a timeout returns null — a revocation landing in the final sleep
+ * must surface as DelegationRevokedError, not be masked by "no new mail"
+ * (Issue #136 R3).
  *
  * Returns the message detail, or null on timeout (route maps to 408).
  */
@@ -1218,13 +1233,17 @@ export async function waitForMessage(
   address: string,
   filters: WaitFilters,
   timeoutSec: number,
+  shouldContinue?: () => boolean,
 ): Promise<MessageDetail | null> {
   const deadline = Date.now() + timeoutSec * 1000;
   try {
-    return await waitWithIdle(address, filters, deadline);
+    return await waitWithIdle(address, filters, deadline, shouldContinue);
   } catch (err) {
+    if (err instanceof DelegationRevokedError) {
+      throw err;
+    }
     console.warn('[imap] IDLE wait failed, falling back to polling:', (err as Error).message);
-    return waitWithPolling(address, filters, deadline);
+    return waitWithPolling(address, filters, deadline, shouldContinue);
   }
 }
 
@@ -1232,6 +1251,7 @@ async function waitWithIdle(
   address: string,
   filters: WaitFilters,
   deadline: number,
+  shouldContinue?: () => boolean,
 ): Promise<MessageDetail | null> {
   const client = await connectImap();
   let failed = false;
@@ -1239,8 +1259,16 @@ async function waitWithIdle(
   try {
     lock = await client.getMailboxLock('INBOX');
     while (Date.now() < deadline) {
+      if (shouldContinue && !shouldContinue()) {
+        throw new DelegationRevokedError();
+      }
       const found = await findMatchWith(client, address, filters);
-      if (found) return found;
+      if (found) {
+        if (shouldContinue && !shouldContinue()) {
+          throw new DelegationRevokedError();
+        }
+        return found;
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       try {
@@ -1248,6 +1276,9 @@ async function waitWithIdle(
       } catch {
         await sleep(Math.min(3000, deadline - Date.now()));
       }
+    }
+    if (shouldContinue && !shouldContinue()) {
+      throw new DelegationRevokedError();
     }
     return null;
   } catch (err) {
@@ -1281,17 +1312,32 @@ async function waitWithPolling(
   address: string,
   filters: WaitFilters,
   deadline: number,
+  shouldContinue?: () => boolean,
 ): Promise<MessageDetail | null> {
   while (Date.now() < deadline) {
+    if (shouldContinue && !shouldContinue()) {
+      throw new DelegationRevokedError();
+    }
     try {
       const found = await withInbox((client) => findMatchWith(client, address, filters));
-      if (found) return found;
+      if (found) {
+        if (shouldContinue && !shouldContinue()) {
+          throw new DelegationRevokedError();
+        }
+        return found;
+      }
     } catch (err) {
+      if (err instanceof DelegationRevokedError) {
+        throw err;
+      }
       console.warn('[imap] poll failed:', (err as Error).message);
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(3000, remaining));
+  }
+  if (shouldContinue && !shouldContinue()) {
+    throw new DelegationRevokedError();
   }
   return null;
 }

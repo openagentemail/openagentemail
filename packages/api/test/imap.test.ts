@@ -384,10 +384,10 @@ describe('IMAP source 分类（mail stamp）', () => {
 // 路由层的并发闸门：wait 会占住 IMAP 长连接，超过上限必须直接 429，
 // 而不是再开一条连接。这里跑的是真的 waitForMessage（对着假 IMAP 服务器）。
 describe('POST /v1/messages/wait 并发上限（端到端）', () => {
-  test('同一地址第 4 个并发 wait 拿到 429，而不是第 4 条 IMAP 连接', async () => {
+  test('同一 caller 第 4 个并发 wait 拿到 429，而不是第 4 条 IMAP 连接', async () => {
     const { Hono } = await import('hono');
     const { messagesRoute } = await import('../src/routes/messages.ts');
-    const { resetWaitSlots, MAX_WAITS_PER_ADDRESS } = await import('../src/lib/ratelimit.ts');
+    const { resetWaitSlots, MAX_WAITS_PER_SLOT } = await import('../src/lib/ratelimit.ts');
     resetWaitSlots();
 
     const app = new Hono();
@@ -405,11 +405,11 @@ describe('POST /v1/messages/wait 并发上限（端到端）', () => {
       });
 
     const responses = await Promise.all(
-      Array.from({ length: MAX_WAITS_PER_ADDRESS + 1 }, () => wait()),
+      Array.from({ length: MAX_WAITS_PER_SLOT + 1 }, () => wait()),
     );
     const statuses = responses.map((r) => r.status).sort();
     expect(statuses.filter((s) => s === 429)).toHaveLength(1);
-    expect(statuses.filter((s) => s === 408)).toHaveLength(MAX_WAITS_PER_ADDRESS);
+    expect(statuses.filter((s) => s === 408)).toHaveLength(MAX_WAITS_PER_SLOT);
   });
 });
 
