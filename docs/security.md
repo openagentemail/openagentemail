@@ -114,6 +114,7 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - **催办：** admin-only。新 event kind `reminder`（头 `X-OA-Task-Event: reminder` + 独立 HMAC `reminder\\nid\\nstate\\nfrom\\nto`），**不得**伪装成 `working` 状态转移；不改变 `task.state`。幂等 key 命中已有 reminder 则原样返回；最短冷却防双击刷信。已 terminal → 409。
 - **关闭：** admin-only。写 terminal `failed` + `{closed_by_admin:true, reason}`；UI 显示 Closed。已 terminal → 409。
 - **回复：** 仅 `input-required` 可 POST `/ui/api/tasks/:id/reply` 写 `working`。identity 只能用自身地址；admin 必须显式选择任务中的本方 `from`。
+- **Lease 永久政策：** `claim` / `renew` / `release`（REST `POST /v1/tasks/:id/{claim,lease,release}` 与 MCP `task_claim` / `task_renew` / `task_release`）**只接受 managed recipient identity**。Admin 凭证不能直接 claim/renew/release——路由层不接收 admin `from` 冒充，core 仍要求 `actor === task.to`。要覆盖一条仍持有 lease 的工单，使用既有 **admin-close** 覆盖（terminal `failed` + `closed_by_admin`，并清除 lease 字段）。这不是过渡缺口，是永久授权边界。
 
 ## OAuth access tokens（P3 AS）
 

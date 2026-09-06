@@ -65,6 +65,7 @@ import {
   toUiTaskView,
 } from '../lib/tasks.ts';
 import { InvalidTaskCursorError } from '../lib/task-cursor.ts';
+import { readTaskForAuthorization, shouldMaterializeAuthorizedTask } from '../lib/task-authorization-read.ts';
 import { consumeOAuthReturnCookie } from '../lib/oauth-return.ts';
 import {
   UiSessionStore,
@@ -226,13 +227,6 @@ function canReadUiTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   // 参与者集合按小写存；identity 会话地址比较前归一化，避免大小写漂移。
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
-}
-
-function authorizationUiTask(service: Pick<TaskService, 'get' | 'getForAuthorization'>, id: string): Promise<Task | null> {
-  const read = service === taskService || service.getForAuthorization !== taskService.getForAuthorization
-    ? service.getForAuthorization
-    : undefined;
-  return (read ?? service.get)(id);
 }
 
 /** GET :id 与 reply/remind/close 成功体同一套 viewer 投影，不扩权限。 */
@@ -918,10 +912,10 @@ export function createUiApiRoutes(
     const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
     if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
     const service = dependencies.taskService ?? taskService;
-    const authorization = await authorizationUiTask(service, parsed.data);
+    const authorization = await readTaskForAuthorization(service, parsed.data);
     if (!authorization) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
-    const task = service.getForAuthorization && (service === taskService || service.getForAuthorization !== taskService.getForAuthorization)
+    const task = shouldMaterializeAuthorizedTask(service)
       ? await service.get(parsed.data)
       : authorization;
     if (!task) return c.json({ error: 'not_found' }, 404);
@@ -943,7 +937,7 @@ export function createUiApiRoutes(
     const body = taskDecisionSchema.safeParse(raw);
     if (!body.success) return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     const service = dependencies.taskService ?? taskService;
-    const task = await authorizationUiTask(service, parsed.data);
+    const task = await readTaskForAuthorization(service, parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) return c.json({ error: 'not_found' }, 404);
     if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -980,7 +974,7 @@ export function createUiApiRoutes(
       return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const task = await authorizationUiTask(service, parsed.data);
+    const task = await readTaskForAuthorization(service, parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) {
       return c.json({ error: 'forbidden: task participant required' }, 403);
@@ -1011,7 +1005,8 @@ export function createUiApiRoutes(
       return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const task = await service.get(parsed.data);
+    // 授权读不得物化 expiry：approval 拒绝必须发生在任何会发信的 get 之前。
+    const task = await readTaskForAuthorization(service, parsed.data);
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (task.kind === 'approval') return c.json({ error: 'approval_decision_required' }, 409);
     const from = taskActionFrom(c, task, body.data.from);
