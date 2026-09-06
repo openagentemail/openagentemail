@@ -1056,6 +1056,36 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       }
     });
 
+    test('Item 1b (R3): revocation landing in the final sleep surfaces as DelegationRevokedError, not a masked timeout', async () => {
+      const alice = createIdentity({ localpart: 'alice-wait-tail' })!;
+      const bob = createIdentity({ localpart: 'bob-wait-tail', scopes: ['read:messages'] })!;
+      const aliceAddr = alice.identity.address;
+      const bobAddr = bob.identity.address;
+      createDelegation({ mailbox: aliceAddr, grantee: bobAddr, createdBy: aliceAddr });
+
+      // Force the polling fallback (IDLE wait dies on mailbox lock) and make
+      // every poll fail fast, so iteration 1 is the ONLY one before its
+      // sleep spans straight to the deadline. shouldContinue therefore sees
+      // exactly one top-of-loop check (call #1, delegation live) and then
+      // only the pre-timeout re-verify (call #2, delegation "revoked") —
+      // without the R3 tail re-check this wait would resolve null (408)
+      // and mask the revocation.
+      const origLock = FakeImapFlow.prototype.getMailboxLock;
+      FakeImapFlow.prototype.getMailboxLock = async () => {
+        throw new Error('lock boom');
+      };
+      let calls = 0;
+      const shouldContinue = () => ++calls < 2;
+      try {
+        await expect(
+          waitForMessage(aliceAddr, {}, 0.2, shouldContinue),
+        ).rejects.toThrow(DelegationRevokedError);
+        expect(calls).toBe(2);
+      } finally {
+        FakeImapFlow.prototype.getMailboxLock = origLock;
+      }
+    });
+
     test('Item 2: wait slot key caller+address prevents delegate from starving owner slots', async () => {
       const alice = createIdentity({ localpart: 'alice-wait-slot' })!;
       const bob = createIdentity({ localpart: 'bob-wait-slot', scopes: ['read:messages'] })!;

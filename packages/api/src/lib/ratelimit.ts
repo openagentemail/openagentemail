@@ -217,14 +217,16 @@ export function resetDelegationDeniedAuditLimits(): void {
  * A wait holds one IMAP connection open for up to 600 s, and every identity
  * shares the single catch-all Dovecot account — so unbounded waits let one
  * caller exhaust that account's connection allowance and lock every other
- * identity out of its mail. Three ceilings, checked together (Issue #136 R2
- * dual constraint):
+ * identity out of its mail. Ceilings, checked together (Issue #136 R2/R3):
  *
  * - per caller+address slot: one token can't monopolize a mailbox it reads.
  *   Delegates wait on the owner's address under their OWN key, so a delegate
  *   never spends the owner's slot budget;
  * - per address, summed across ALL callers: N distinct delegates can't pool
- *   their slot budgets to squeeze one mailbox either;
+ *   their slot budgets to squeeze one mailbox either. Delegates (caller ≠
+ *   mailbox) top out at MAX_WAITS_PER_ADDRESS - 1 combined — the last slot
+ *   on a mailbox is reserved for its owner (caller === address), so a full
+ *   delegation fan-in still leaves the owner a way in (R3, CR Major);
  * - instance-wide total: stays under Dovecot's default
  *   mail_max_userip_connections (10) with room to spare for the short-lived
  *   list/read connections.
@@ -258,7 +260,11 @@ export function acquireWaitSlot(caller: string, targetAddress?: string): boolean
   const key = waitSlotKey(caller, targetAddress);
   const addressKey = waitAddressKey(caller, targetAddress);
   if ((waits.get(key) ?? 0) >= MAX_WAITS_PER_SLOT) return false;
-  if ((waitsPerAddress.get(addressKey) ?? 0) >= MAX_WAITS_PER_ADDRESS) return false;
+  // R3 owner reserve: delegates share MAX_WAITS_PER_ADDRESS - 1 at most, so
+  // the mailbox's final slot is always left for the owner's own waits.
+  const isOwner = waitAddressKey(caller) === addressKey;
+  const addressCeiling = isOwner ? MAX_WAITS_PER_ADDRESS : MAX_WAITS_PER_ADDRESS - 1;
+  if ((waitsPerAddress.get(addressKey) ?? 0) >= addressCeiling) return false;
   if (waitsTotal >= MAX_WAITS_TOTAL) return false;
   waits.set(key, (waits.get(key) ?? 0) + 1);
   waitsPerAddress.set(addressKey, (waitsPerAddress.get(addressKey) ?? 0) + 1);

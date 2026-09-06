@@ -1222,8 +1222,10 @@ export class DelegationRevokedError extends Error {
  * itself fails, fall back to plain 3 s polling with one-shot connections.
  *
  * When shouldContinue is provided (e.g. for delegated callers), it is invoked
- * each iteration and prior to returning any found match to eliminate TOCTOU
- * revocation windows.
+ * each iteration, prior to returning any found match, and once more right
+ * before a timeout returns null — a revocation landing in the final sleep
+ * must surface as DelegationRevokedError, not be masked by "no new mail"
+ * (Issue #136 R3).
  *
  * Returns the message detail, or null on timeout (route maps to 408).
  */
@@ -1274,6 +1276,9 @@ async function waitWithIdle(
       } catch {
         await sleep(Math.min(3000, deadline - Date.now()));
       }
+    }
+    if (shouldContinue && !shouldContinue()) {
+      throw new DelegationRevokedError();
     }
     return null;
   } catch (err) {
@@ -1330,6 +1335,9 @@ async function waitWithPolling(
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(3000, remaining));
+  }
+  if (shouldContinue && !shouldContinue()) {
+    throw new DelegationRevokedError();
   }
   return null;
 }

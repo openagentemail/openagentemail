@@ -172,23 +172,34 @@ describe('wait 并发槽位（双约束：caller+address 槽 × 每 address 全�
     expect(acquireWaitSlot('b@x.com')).toBe(true);
   });
 
-  test('每 address 全局上限：多个不同 caller 合计也不得超过（Issue #136 R2 必修）', () => {
+  test('每 address 全局上限 + owner 保留槽：受托合计最多 MAX-1，最后一槽留给 owner（Issue #136 R2/R3）', () => {
     resetWaitSlots();
     // N 个不同受托方各开 1 个 wait——谁都没碰到自己 slot=3 的上限——
-    // 合计到 MAX_WAITS_PER_ADDRESS 后，这个信箱对所有人关门。
+    // 合计到 MAX_WAITS_PER_ADDRESS - 1 后，这个信箱对受托方关门。
     let granted = 0;
     for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
       if (acquireWaitSlot(`delegate-${i}@x.com`, 'alice@x.com')) granted++;
     }
-    expect(granted).toBe(MAX_WAITS_PER_ADDRESS);
+    expect(granted).toBe(MAX_WAITS_PER_ADDRESS - 1);
 
-    // 新 caller 和老 caller（各自 slot 仍有余量）都被每 address 全局上限挡住
+    // 新老受托方都被"受托合计上限"挡住（各自 slot 仍有余量）
     expect(acquireWaitSlot('yet-another@x.com', 'alice@x.com')).toBe(false);
     expect(acquireWaitSlot('delegate-0@x.com', 'alice@x.com')).toBe(false);
+
+    // R3 必修（CR Major）：受托占满后 owner 本人仍可进——保留槽生效
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+    // owner 拿走最后一槽后（合计已到 MAX），所有人都进不来，包括 owner 自己
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(false);
+    expect(acquireWaitSlot('delegate-0@x.com', 'alice@x.com')).toBe(false);
+
     // 别的信箱不受影响
     expect(acquireWaitSlot('someone@x.com', 'bob@x.com')).toBe(true);
 
-    // 释放一个名额后，其他 caller 能补位
+    // 释放 owner 的槽（合计回到 MAX-1）后，受托方仍被挡——保留槽不因
+    // owner 不用而回收到受托方池子
+    releaseWaitSlot('alice@x.com', 'alice@x.com');
+    expect(acquireWaitSlot('yet-another@x.com', 'alice@x.com')).toBe(false);
+    // 再释放一个受托名额（合计 MAX-2）后，受托方能补位
     releaseWaitSlot('delegate-0@x.com', 'alice@x.com');
     expect(acquireWaitSlot('yet-another@x.com', 'alice@x.com')).toBe(true);
   });
@@ -236,8 +247,12 @@ describe('wait 并发槽位（双约束：caller+address 槽 × 每 address 全�
     expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
     expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(false);
 
-    // Releasing Bob's slot allows Bob to acquire again
+    // Releasing one of Bob's slots is NOT enough while Alice holds two:
+    // combined 4 ≥ MAX-1 keeps delegates out — the reserve is unconditional,
+    // owner-held slots don't fold back into the delegate budget (R3)
     releaseWaitSlot('bob@x.com', 'alice@x.com');
+    expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(false);
+    releaseWaitSlot('alice@x.com', 'alice@x.com');
     expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(true);
   });
 });
