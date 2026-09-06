@@ -2660,28 +2660,6 @@ export async function retryPendingExpiryAuditsOnce(): Promise<number> {
       if (!current || current.attempts >= EXPIRY_AUDIT_MAX_ATTEMPTS || nowMs() < current.nextAttemptAt) return false;
       try {
         await deliverExpiryAuditMail(current);
-        const snapshot = await getTaskSnapshot(current.taskId);
-        const eventMessage = leaseEventMessage({
-          task: snapshot ?? {
-            id: current.taskId,
-            from: current.from,
-            to: current.to,
-            subject: current.subject,
-            state: current.state,
-            createdAt: current.lease.at,
-            updatedAt: current.lease.at,
-            messages: [],
-          },
-          from: current.from,
-          to: current.to,
-          state: current.state,
-          at: current.lease.at,
-          body: 'Lease expired.',
-        });
-        queueEventUntilIndexed(current.taskId, eventMessage, current.lease);
-        invalidateTaskListCache();
-        pendingExpiryAudits.delete(key);
-        return true;
       } catch {
         current.attempts += 1;
         if (current.attempts >= EXPIRY_AUDIT_MAX_ATTEMPTS) {
@@ -2692,6 +2670,34 @@ export async function retryPendingExpiryAuditsOnce(): Promise<number> {
         }
         return false;
       }
+      // SMTP 已接受：先落账离队。快照失败只走 fallback，不得再重试发信。
+      let snapshot: Task | null = null;
+      try {
+        snapshot = await getTaskSnapshot(current.taskId);
+      } catch {
+        snapshot = null;
+      }
+      const eventMessage = leaseEventMessage({
+        task: snapshot ?? {
+          id: current.taskId,
+          from: current.from,
+          to: current.to,
+          subject: current.subject,
+          state: current.state,
+          createdAt: current.lease.at,
+          updatedAt: current.lease.at,
+          messages: [],
+        },
+        from: current.from,
+        to: current.to,
+        state: current.state,
+        at: current.lease.at,
+        body: 'Lease expired.',
+      });
+      queueEventUntilIndexed(current.taskId, eventMessage, current.lease);
+      invalidateTaskListCache();
+      pendingExpiryAudits.delete(key);
+      return true;
     });
     if (accepted) delivered += 1;
   }

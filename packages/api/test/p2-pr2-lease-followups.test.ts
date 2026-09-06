@@ -882,4 +882,49 @@ describe('PR-2 #84 reclaim 与 expiry-audit 解耦', () => {
     expect(await retryPendingExpiryAuditsOnce()).toBe(0);
     expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(deliveriesBeforeRebuild);
   });
+
+  test('SMTP 已接受后快照失败不重发信、不耗重试预算', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    let failExpiry = false;
+    let failSnapshot = false;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => {
+      if (failSnapshot) throw new Error('snapshot unavailable');
+      return durable;
+    });
+    setTaskSendMailForTests(async (input) => {
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('smtp rejected expiry audit');
+      }
+      sent.push(input);
+      return { messageId: `<p2-84-snapshot-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => {
+      if (failSnapshot) throw new Error('snapshot unavailable');
+      return durable;
+    });
+    now = Date.parse(first.claimedUntil);
+    failExpiry = true;
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    failExpiry = false;
+    failSnapshot = true;
+    now += 2_000;
+    expect(await retryPendingExpiryAuditsOnce()).toBe(1);
+    const expiryAfterAccept = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    expect({
+      pending: getPendingExpiryAuditCountForTests(),
+      expiryDeliveries: expiryAfterAccept.length,
+    }).toEqual({ pending: 0, expiryDeliveries: 1 });
+    now += 60_000;
+    expect(await retryPendingExpiryAuditsOnce()).toBe(0);
+    expect({
+      pendingStillGone: getPendingExpiryAuditCountForTests(),
+      expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length,
+    }).toEqual({ pendingStillGone: 0, expiryDeliveries: 1 });
+  });
 });
