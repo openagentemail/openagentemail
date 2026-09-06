@@ -243,11 +243,19 @@ const waits = new Map<string, number>();
 const waitsPerAddress = new Map<string, number>();
 let waitsTotal = 0;
 
-/** Build slot key: targetAddress ? `${caller}:${targetAddress}` : caller */
+/**
+ * Build slot key: `${caller}:${targetAddress}` for a delegated wait, plain
+ * caller otherwise. Omitting the target and passing target === caller MUST
+ * produce the same key — the tasks route omits while a message wait on the
+ * caller's own mailbox passes it explicitly, and two buckets for one
+ * caller+mailbox pair would let a caller bypass the per-slot ceiling by
+ * mixing the two routes (Issue #136 R5).
+ */
 export function waitSlotKey(caller: string, targetAddress?: string): string {
   const c = caller.trim().toLowerCase();
-  if (!targetAddress) return c;
-  return `${c}:${targetAddress.trim().toLowerCase()}`;
+  const t = targetAddress?.trim().toLowerCase();
+  if (!t || t === c) return c;
+  return `${c}:${t}`;
 }
 
 /** 聚合键：被读信箱本身（无 target 时即 caller 自己的信箱）。 */

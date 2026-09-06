@@ -227,6 +227,28 @@ describe('wait 并发槽位（双约束：caller+address 槽 × 每 address 全�
   test('waitSlotKey 构造 caller+target 键并小写规范化', () => {
     expect(waitSlotKey('Alice@X.com')).toBe('alice@x.com');
     expect(waitSlotKey('Bob@X.com', 'Alice@X.com')).toBe('bob@x.com:alice@x.com');
+    // 省略 target 与 target===caller 归一到同一个键（大小写/空白无关）
+    expect(waitSlotKey('Alice@X.com', 'alice@x.com')).toBe('alice@x.com');
+    expect(waitSlotKey(' Alice@X.com ', ' Alice@X.com ')).toBe('alice@x.com');
+  });
+
+  test('task wait 与 message wait 同 caller+mailbox 归一到同一槽桶，不拆桶绕上限（Issue #136 R5）', () => {
+    resetWaitSlots();
+    // tasks 路由形态（无 target）与 messages 路由 owner 形态（target=caller）
+    // 必须合计计入同一个 slot 桶
+    expect(acquireWaitSlot('alice@x.com')).toBe(true);
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+    // 两形态混用也封在 MAX_WAITS_PER_SLOT，而不是各得 3 个
+    expect(acquireWaitSlot('alice@x.com')).toBe(false);
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(false);
+
+    // delegate 形态（caller≠target）仍是独立桶，不受 owner 桶影响
+    expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(true);
+
+    // 释放走任一形态都能还给同一个桶
+    releaseWaitSlot('alice@x.com', 'alice@x.com');
+    expect(acquireWaitSlot('alice@x.com')).toBe(true);
   });
 
   test('delegate 占满自己的槽不占 owner 的槽（Issue #136 Item 2 / R2）', () => {
