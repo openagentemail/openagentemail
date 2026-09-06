@@ -314,7 +314,8 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     clearQueuedEventsForTests();
     now = Date.parse(first.claimedUntil);
     failExpiry = true;
-    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('temporary smtp failure');
+    // #84 返工：单 task SMTP 拒绝隔离在本轮循环内，不得饿死后续 flush。
+    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
     expect(sent).toHaveLength(1);
     failExpiry = false;
     expect(await reapExpiredTaskLeasesOnce()).toBe(1);

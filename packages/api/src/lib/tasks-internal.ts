@@ -605,6 +605,17 @@ function isSameAuthenticatedLeaseEvent(a: LeaseEvent, b: LeaseEvent): boolean {
   return canonicalLeaseEvent(a) === canonicalLeaseEvent(b);
 }
 
+/** 该 generation 最新被接受的权威 deadline：走完 renew 链，否则退回 claim。 */
+function latestAcceptedDeadlineForGeneration(
+  generation: number,
+  claim: ClaimLeaseEvent | undefined,
+  renewsByGeneration: Map<number, RenewLeaseEvent[]>,
+): string | undefined {
+  const renews = renewsByGeneration.get(generation);
+  const lastRenew = renews && renews.length > 0 ? renews[renews.length - 1] : undefined;
+  return lastRenew?.claimedUntil ?? claim?.claimedUntil;
+}
+
 function leaseEventStamp(
   id: string,
   state: TaskState,
@@ -1206,13 +1217,19 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         }
         return null;
       }
-      // #84：reclaim 已写出更新 generation 后，迟到的首次 expiry audit 不得推翻新权威。
+      // #84：迟到 audit 必须匹配该 generation 最终续约 deadline，不能只对 original claim。
       const historicalClaim = appliedClaims.get(lease.generation);
+      const historicalDeadline = latestAcceptedDeadlineForGeneration(
+        lease.generation,
+        historicalClaim,
+        appliedRenews,
+      );
       const newerAuthority = (leaseAuthority?.leaseGeneration ?? previousGeneration) > lease.generation;
       if (
         historicalClaim
         && newerAuthority
-        && lease.claimedUntil === historicalClaim.claimedUntil
+        && historicalDeadline
+        && lease.claimedUntil === historicalDeadline
       ) {
         duplicateLeaseMessages.add(message);
         appliedExpiryReceipts.set(lease.generation, {
@@ -2505,23 +2522,28 @@ function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEve
     .sort((a, b) => a.uid - b.uid);
   const missing: ExpiredLeaseEvent[] = [];
   let lastClaim: ClaimLeaseEvent | null = null;
+  let lastDeadline: string | null = null;
   let lastClaimClosed = false;
   for (const message of leaseMessages) {
     const lease = message.lease;
     if (lease.event === 'claim') {
-      if (lastClaim && !lastClaimClosed && Date.parse(lease.at) >= Date.parse(lastClaim.claimedUntil)) {
+      if (lastClaim && lastDeadline && !lastClaimClosed && Date.parse(lease.at) >= Date.parse(lastDeadline)) {
         missing.push({
           version: 1,
           event: 'expired',
           actor: 'server',
-          at: lastClaim.claimedUntil,
+          at: lastDeadline,
           generation: lastClaim.generation,
-          claimedUntil: lastClaim.claimedUntil,
-          expiredAt: lastClaim.claimedUntil,
+          claimedUntil: lastDeadline,
+          expiredAt: lastDeadline,
         });
       }
       lastClaim = lease;
+      lastDeadline = lease.claimedUntil;
       lastClaimClosed = false;
+    } else if (lease.event === 'renew' && lastClaim && lease.generation === lastClaim.generation && !lastClaimClosed) {
+      // 续约链上的最终 deadline 才是重启后应合成的 expiry 权威时刻。
+      lastDeadline = lease.claimedUntil;
     } else if (lease.event === 'expired' && lastClaim && lease.generation === lastClaim.generation) {
       lastClaimClosed = true;
     } else if (lease.event === 'release' && lastClaim && lease.generation === lastClaim.generation) {
@@ -2732,17 +2754,25 @@ export async function reapExpiredTaskLeasesOnce(): Promise<number> {
   const candidates = await loadAllTasksCached();
   let materialized = 0;
   for (const candidate of candidates) {
-    const didMaterialize = await withTaskLock(candidate.id, async () => {
-      const current = await getTaskSnapshot(candidate.id);
-      if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
-      const next = await materializeLeaseExpiryUnlocked(current);
-      return !!next.expiredLease
-        && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
-        && next.expiredLease.claimedUntil === current.lease.claimedUntil;
-    });
-    if (didMaterialize) materialized += 1;
+    try {
+      const didMaterialize = await withTaskLock(candidate.id, async () => {
+        const current = await getTaskSnapshot(candidate.id);
+        if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
+        const next = await materializeLeaseExpiryUnlocked(current);
+        return !!next.expiredLease
+          && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
+          && next.expiredLease.claimedUntil === current.lease.claimedUntil;
+      });
+      if (didMaterialize) materialized += 1;
+    } catch (err) {
+      // 单 task SMTP 拒绝不得中断本轮；pending audit flush 每轮都要被尝试。
+      console.warn(JSON.stringify({
+        kind: 'lease_reaper_task_isolated',
+        taskId: candidate.id,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
   }
-  // 与 reclaim 解耦后的 audit 补投：reaper 周期冲刷重试队列。
   await retryPendingExpiryAuditsOnce();
   return materialized;
 }
