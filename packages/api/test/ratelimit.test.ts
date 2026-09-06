@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   MAX_WAITS_PER_ADDRESS,
+  MAX_WAITS_PER_SLOT,
   MAX_WAITS_TOTAL,
   acquireWaitSlot,
   checkMcpRateLimit,
@@ -132,17 +133,20 @@ describe('预鉴权 IP 限量（oauth / mcp-preauth，复用 slidingWindow）', 
 
 // 每个 POST /v1/messages/wait 都会占住一条 IMAP 长连接，最长 600 秒。
 // 没有上限的话，一个身份令牌就能把 catch-all 账号的 Dovecot 连接名额占满，
-// 让所有身份都读不了信。
-describe('wait 并发槽位', () => {
-  test('全局上限必须留在 Dovecot 默认每 IP 连接数（10）之下', () => {
+// 让所有身份都读不了信。#136 R2 起是双约束并存：槽键 = caller+address
+// （delegate 花自己的槽，不占 owner 的），同时每个 address 跨所有 caller
+// 有全局上限（N 个受托方合伙也压不死一个信箱），外加实例级总量兜底。
+describe('wait 并发槽位（双约束：caller+address 槽 × 每 address 全局）', () => {
+  test('三层天花板满足 slot ≤ address < total ≤ 8（Dovecot 默认每 IP 10 连接）', () => {
     // 还要给 list / read 这类一次性连接留余量。
     expect(MAX_WAITS_TOTAL).toBeLessThanOrEqual(8);
     expect(MAX_WAITS_PER_ADDRESS).toBeLessThan(MAX_WAITS_TOTAL);
+    expect(MAX_WAITS_PER_SLOT).toBeLessThanOrEqual(MAX_WAITS_PER_ADDRESS);
   });
 
-  test('单个地址的并发 wait 有上限', () => {
+  test('同一 caller 对同一地址的并发 wait 有槽位上限', () => {
     resetWaitSlots();
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) {
       expect(acquireWaitSlot('a@x.com')).toBe(true);
     }
     expect(acquireWaitSlot('a@x.com')).toBe(false);
@@ -150,7 +154,7 @@ describe('wait 并发槽位', () => {
 
   test('释放一个槽位后又能拿到', () => {
     resetWaitSlots();
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) acquireWaitSlot('a@x.com');
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) acquireWaitSlot('a@x.com');
     expect(acquireWaitSlot('a@x.com')).toBe(false);
     releaseWaitSlot('a@x.com');
     expect(acquireWaitSlot('a@x.com')).toBe(true);
@@ -158,14 +162,35 @@ describe('wait 并发槽位', () => {
 
   test('地址大小写不同也算同一个身份', () => {
     resetWaitSlots();
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) acquireWaitSlot('A@X.com');
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) acquireWaitSlot('A@X.com');
     expect(acquireWaitSlot('a@x.com')).toBe(false);
   });
 
   test('一个地址占满不影响别的地址', () => {
     resetWaitSlots();
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) acquireWaitSlot('a@x.com');
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) acquireWaitSlot('a@x.com');
     expect(acquireWaitSlot('b@x.com')).toBe(true);
+  });
+
+  test('每 address 全局上限：多个不同 caller 合计也不得超过（Issue #136 R2 必修）', () => {
+    resetWaitSlots();
+    // N 个不同受托方各开 1 个 wait——谁都没碰到自己 slot=3 的上限——
+    // 合计到 MAX_WAITS_PER_ADDRESS 后，这个信箱对所有人关门。
+    let granted = 0;
+    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
+      if (acquireWaitSlot(`delegate-${i}@x.com`, 'alice@x.com')) granted++;
+    }
+    expect(granted).toBe(MAX_WAITS_PER_ADDRESS);
+
+    // 新 caller 和老 caller（各自 slot 仍有余量）都被每 address 全局上限挡住
+    expect(acquireWaitSlot('yet-another@x.com', 'alice@x.com')).toBe(false);
+    expect(acquireWaitSlot('delegate-0@x.com', 'alice@x.com')).toBe(false);
+    // 别的信箱不受影响
+    expect(acquireWaitSlot('someone@x.com', 'bob@x.com')).toBe(true);
+
+    // 释放一个名额后，其他 caller 能补位
+    releaseWaitSlot('delegate-0@x.com', 'alice@x.com');
+    expect(acquireWaitSlot('yet-another@x.com', 'alice@x.com')).toBe(true);
   });
 
   test('全局上限挡住"多身份齐上"的连接耗尽', () => {
@@ -182,7 +207,7 @@ describe('wait 并发槽位', () => {
     resetWaitSlots();
     releaseWaitSlot('ghost@x.com');
     releaseWaitSlot('ghost@x.com');
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) {
       expect(acquireWaitSlot('ghost@x.com')).toBe(true);
     }
     expect(acquireWaitSlot('ghost@x.com')).toBe(false);
@@ -193,17 +218,23 @@ describe('wait 并发槽位', () => {
     expect(waitSlotKey('Bob@X.com', 'Alice@X.com')).toBe('bob@x.com:alice@x.com');
   });
 
-  test('delegate 占满被读地址的槽位不影响 owner 自己并发 wait（Issue #136 Item 2）', () => {
+  test('delegate 占满自己的槽不占 owner 的槽（Issue #136 Item 2 / R2）', () => {
     resetWaitSlots();
-    // Bob (delegate) fills all slots on Alice's mailbox
-    for (let i = 0; i < MAX_WAITS_PER_ADDRESS; i++) {
+    // Bob (delegate) fills his OWN slot budget on Alice's mailbox
+    for (let i = 0; i < MAX_WAITS_PER_SLOT; i++) {
       expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(true);
     }
-    // Bob cannot acquire another slot on Alice
+    // Bob's next wait is blocked by his own slot ceiling
     expect(acquireWaitSlot('bob@x.com', 'alice@x.com')).toBe(false);
 
-    // Alice (owner) is NOT blocked and can acquire her own wait slot
+    // Alice (owner) waits under her own caller+address key — Bob's slots
+    // never spend HERS. Her ceiling here is the shared per-address budget
+    // Bob already ate into (MAX_WAITS_PER_ADDRESS - MAX_WAITS_PER_SLOT = 2),
+    // not her own slot budget (3): blocked by the global cap, not by Bob
+    // squatting her slot key.
     expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(true);
+    expect(acquireWaitSlot('alice@x.com', 'alice@x.com')).toBe(false);
 
     // Releasing Bob's slot allows Bob to acquire again
     releaseWaitSlot('bob@x.com', 'alice@x.com');

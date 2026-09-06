@@ -76,18 +76,19 @@ function isGrantShape(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function coerceGrant(raw: Record<string, unknown>): DelegationGrant | null {
-  const rawScopes = Array.isArray(raw.scopes) ? (raw.scopes as string[]) : [];
-  const scopes = rawScopes.filter((s) => typeof s === 'string' && isSupportedScope(s));
-  if (scopes.length === 0) {
-    return null;
-  }
+/**
+ * 原始视图：字段规范化（小写/去空白）但**不做 scope 白名单过滤**。
+ * 仅供 load() 对收窄/剔除项留痕，以及 revoke 路径对「被剔除」的 grant
+ * 幂等落墓碑使用（Issue #136 R2）。
+ */
+function rawGrantView(raw: Record<string, unknown>): DelegationGrant {
+  const rawScopes = Array.isArray(raw.scopes) ? (raw.scopes as unknown[]) : [];
   return {
     ...raw,
     id: raw.id as string,
     mailbox: (raw.mailbox as string).trim().toLowerCase(),
     grantee: (raw.grantee as string).trim().toLowerCase(),
-    scopes,
+    scopes: rawScopes.filter((s): s is string => typeof s === 'string'),
     createdAt: raw.createdAt as string,
     createdBy: raw.createdBy as string,
     revokedAt: (raw.revokedAt as string | null) ?? null,
@@ -126,6 +127,8 @@ const MISSING_STORE_VERSION: StoreFileVersion = {
 type StoreCache = {
   version: StoreFileVersion;
   store: DelegationStoreFile;
+  /** load 时被整条剔除（无任何支持 scope）的 grant 原始视图：留痕 + 幂等撤销用。 */
+  droppedGrants: DelegationGrant[];
 };
 
 let storeCache: StoreCache | undefined;
@@ -160,11 +163,11 @@ function storeVersionsEqual(a: StoreFileVersion, b: StoreFileVersion): boolean {
   );
 }
 
-function load(): DelegationStoreFile {
+function loadCache(): StoreCache {
   const path = storePath();
   if (!existsSync(path)) {
     if (storeCache && storeVersionsEqual(storeCache.version, MISSING_STORE_VERSION)) {
-      return storeCache.store;
+      return storeCache;
     }
     storeCache = {
       version: MISSING_STORE_VERSION,
@@ -172,40 +175,58 @@ function load(): DelegationStoreFile {
         schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
         grants: [],
       },
+      droppedGrants: [],
     };
-    return storeCache.store;
+    return storeCache;
   }
   try {
     const version = fileVersionFromStat(statSync(path));
     if (storeCache && storeVersionsEqual(storeCache.version, version)) {
-      return storeCache.store;
+      return storeCache;
     }
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isDelegationStoreShape(parsed)) {
       throw new Error('invalid delegation store shape');
     }
     const grants: DelegationGrant[] = [];
+    const droppedGrants: DelegationGrant[] = [];
     for (const entry of parsed.grants) {
-      const coerced = coerceGrant(entry as Record<string, unknown>);
-      if (coerced) {
-        grants.push(coerced);
+      const view = rawGrantView(entry as Record<string, unknown>);
+      const scopes = view.scopes.filter((s) => isSupportedScope(s));
+      if (scopes.length === 0) {
+        // Issue #136 R2：整条剔除必须留痕，不能静默吞掉磁盘上的残留。
+        console.warn(
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) dropped at load: no supported scopes in ${JSON.stringify(view.scopes)}`,
+        );
+        droppedGrants.push(view);
+        continue;
       }
+      if (scopes.length < view.scopes.length) {
+        console.warn(
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) scopes narrowed at load: kept ${JSON.stringify(scopes)}, dropped ${JSON.stringify(view.scopes.filter((s) => !isSupportedScope(s)))}`,
+        );
+      }
+      grants.push({ ...view, scopes });
     }
-    const store: DelegationStoreFile = {
-      ...parsed,
-      schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
-      grants,
-    };
     storeCache = {
       version,
-      store,
+      store: {
+        ...parsed,
+        schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+        grants,
+      },
+      droppedGrants,
     };
-    return storeCache.store;
+    return storeCache;
   } catch (err) {
     invalidateDelegationStoreCache();
     if ((err as Error).message === 'delegation_store_corrupt') throw err;
     throw new Error('delegation_store_corrupt', { cause: err });
   }
+}
+
+function load(): DelegationStoreFile {
+  return loadCache().store;
 }
 
 function save(store: DelegationStoreFile): void {
@@ -265,6 +286,15 @@ export function getDelegation(id: string): DelegationGrant | undefined {
   return store.grants.find((g) => g.id === id);
 }
 
+/**
+ * load() 整条剔除的 grant（如手工植入全不支持 scope 的脏数据）：返回其原始视图。
+ * 供 DELETE /v1/delegations/:id 做授权与幂等撤销「磁盘残留」——这类 id 对
+ * getDelegation / listDelegations 不可见（Issue #136 R2 顺清 3）。
+ */
+export function getDroppedDelegation(id: string): DelegationGrant | undefined {
+  return loadCache().droppedGrants.find((g) => g.id === id);
+}
+
 export function listDelegations(filter?: {
   mailbox?: string;
   grantee?: string;
@@ -306,6 +336,7 @@ export function hasActiveDelegation(
 /**
  * 撤销委托：写入 revokedAt 墓碑。
  * 幂等：若已撤销，保留原 revokedAt / revokedBy 返回。
+ * 被 load() 整条剔除的 grant 同样可撤销（磁盘原始记录就地落墓碑）。
  */
 export function revokeDelegation(
   id: string,
@@ -314,7 +345,9 @@ export function revokeDelegation(
 ): DelegationGrant | null {
   const store = load();
   const grant = store.grants.find((g) => g.id === id);
-  if (!grant) return null;
+  if (!grant) {
+    return revokeDroppedGrant(id, revokedBy, revokedAt);
+  }
   if (grant.revokedAt !== null) {
     return grant;
   }
@@ -322,6 +355,49 @@ export function revokeDelegation(
   grant.revokedBy = revokedBy;
   save(store);
   return grant;
+}
+
+/**
+ * 撤销被 load() 剔除的 grant：coerced store 不含它（save() 不会带走），
+ * 故直接在磁盘原始记录上落墓碑，保持墓碑语义可审计。幂等：已撤销则原样返回。
+ */
+function revokeDroppedGrant(
+  id: string,
+  revokedBy: string,
+  revokedAt?: string,
+): DelegationGrant | null {
+  const dropped = getDroppedDelegation(id);
+  if (!dropped) return null;
+  if (dropped.revokedAt !== null) return dropped;
+
+  const path = storePath();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    throw new Error('delegation_store_corrupt', { cause: err });
+  }
+  if (!isDelegationStoreShape(parsed)) {
+    throw new Error('delegation_store_corrupt', {
+      cause: new Error('invalid delegation store shape'),
+    });
+  }
+  const entry = (parsed.grants as Record<string, unknown>[]).find((g) => g.id === id);
+  if (!entry) return null;
+  if (typeof entry.revokedAt === 'string' && entry.revokedAt) {
+    // 磁盘上已被撤销（剔除视图落后于文件）：刷新缓存后按幂等语义返回。
+    invalidateDelegationStoreCache();
+    return getDroppedDelegation(id) ?? null;
+  }
+  const ts = revokedAt ?? new Date().toISOString();
+  entry.revokedAt = ts;
+  entry.revokedBy = revokedBy;
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(parsed, null, 2), { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+  invalidateDelegationStoreCache();
+  return { ...dropped, revokedAt: ts, revokedBy };
 }
 
 function cascadeRevokeGrants(

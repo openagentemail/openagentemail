@@ -217,19 +217,28 @@ export function resetDelegationDeniedAuditLimits(): void {
  * A wait holds one IMAP connection open for up to 600 s, and every identity
  * shares the single catch-all Dovecot account — so unbounded waits let one
  * caller exhaust that account's connection allowance and lock every other
- * identity out of its mail. Two ceilings: per caller+address slot (stops one
- * token from doing it alone or starving the mailbox owner) and global (stops
- * several tokens from doing it together).
+ * identity out of its mail. Three ceilings, checked together (Issue #136 R2
+ * dual constraint):
  *
- * The global ceiling stays under Dovecot's default mail_max_userip_connections
- * (10) with room to spare for the short-lived list/read connections.
+ * - per caller+address slot: one token can't monopolize a mailbox it reads.
+ *   Delegates wait on the owner's address under their OWN key, so a delegate
+ *   never spends the owner's slot budget;
+ * - per address, summed across ALL callers: N distinct delegates can't pool
+ *   their slot budgets to squeeze one mailbox either;
+ * - instance-wide total: stays under Dovecot's default
+ *   mail_max_userip_connections (10) with room to spare for the short-lived
+ *   list/read connections.
+ *
  * A few concurrent waits per caller+address are legitimate (different filters),
- * so the per-slot ceiling is not 1.
+ * so the per-slot ceiling is not 1; the per-address ceiling is higher still so
+ * a delegate at its own ceiling leaves the owner room to wait.
  */
-export const MAX_WAITS_PER_ADDRESS = 3;
+export const MAX_WAITS_PER_SLOT = 3;
+export const MAX_WAITS_PER_ADDRESS = 5;
 export const MAX_WAITS_TOTAL = 8;
 
 const waits = new Map<string, number>();
+const waitsPerAddress = new Map<string, number>();
 let waitsTotal = 0;
 
 /** Build slot key: targetAddress ? `${caller}:${targetAddress}` : caller */
@@ -239,12 +248,20 @@ export function waitSlotKey(caller: string, targetAddress?: string): string {
   return `${c}:${targetAddress.trim().toLowerCase()}`;
 }
 
+/** 聚合键：被读信箱本身（无 target 时即 caller 自己的信箱）。 */
+function waitAddressKey(caller: string, targetAddress?: string): string {
+  return (targetAddress ?? caller).trim().toLowerCase();
+}
+
 /** Take a wait slot; false means the caller should be told 429. */
 export function acquireWaitSlot(caller: string, targetAddress?: string): boolean {
   const key = waitSlotKey(caller, targetAddress);
-  const current = waits.get(key) ?? 0;
-  if (current >= MAX_WAITS_PER_ADDRESS || waitsTotal >= MAX_WAITS_TOTAL) return false;
-  waits.set(key, current + 1);
+  const addressKey = waitAddressKey(caller, targetAddress);
+  if ((waits.get(key) ?? 0) >= MAX_WAITS_PER_SLOT) return false;
+  if ((waitsPerAddress.get(addressKey) ?? 0) >= MAX_WAITS_PER_ADDRESS) return false;
+  if (waitsTotal >= MAX_WAITS_TOTAL) return false;
+  waits.set(key, (waits.get(key) ?? 0) + 1);
+  waitsPerAddress.set(addressKey, (waitsPerAddress.get(addressKey) ?? 0) + 1);
   waitsTotal += 1;
   return true;
 }
@@ -256,11 +273,17 @@ export function releaseWaitSlot(caller: string, targetAddress?: string): void {
   if (current <= 0) return;
   if (current === 1) waits.delete(key);
   else waits.set(key, current - 1);
+
+  const addressKey = waitAddressKey(caller, targetAddress);
+  const addressCount = waitsPerAddress.get(addressKey) ?? 0;
+  if (addressCount <= 1) waitsPerAddress.delete(addressKey);
+  else waitsPerAddress.set(addressKey, addressCount - 1);
   waitsTotal -= 1;
 }
 
 /** Test helper: drop all wait slots. */
 export function resetWaitSlots(): void {
   waits.clear();
+  waitsPerAddress.clear();
   waitsTotal = 0;
 }

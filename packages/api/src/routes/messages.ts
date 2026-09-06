@@ -143,8 +143,9 @@ export const messagesRoute = new Hono()
     // schema 仍允许 ≤600（历史客户端）；服务端静默钳到 MCP_MAX_WAIT_SECONDS
     const effectiveTimeout = clampWaitSeconds(timeoutSec);
     c.header('X-OAE-Wait-Timeout-Sec', String(effectiveTimeout));
-    // Each wait pins an IMAP connection for up to the configured ceiling; cap
-    // how many can be in flight so one caller can't starve the whole mailbox.
+    // Each wait pins an IMAP connection for up to the configured ceiling. The
+    // dual constraint (per caller+address slot, per address across all callers)
+    // keeps one caller — or a pile of delegates — from starving a mailbox.
     if (!acquireWaitSlot(caller, address)) {
       return c.json({ error: 'too_many_waits', retryAfterSec: 5 }, 429);
     }

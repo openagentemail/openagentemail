@@ -16,7 +16,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-tasks-'));
 
 const { beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
-const { checkSendLimit, resetRateLimits, resetWaitSlots, MAX_WAITS_PER_ADDRESS } = await import('../src/lib/ratelimit.ts');
+const { checkSendLimit, resetRateLimits, resetWaitSlots, MAX_WAITS_PER_SLOT } = await import('../src/lib/ratelimit.ts');
 const { canAdvanceTask, currentTaskMessage, taskFromMessages, waitForTaskTerminalWith } = await import('../src/lib/tasks.ts');
 const { knownManagedIdentity } = await import('../src/lib/tasks-internal.ts');
 const { config } = await import('../src/lib/config.ts');
@@ -202,7 +202,8 @@ describe('task route ACL and state machine', () => {
     const wait = () => appFor({ kind: 'identity', address: A }, slow)
       .request(`/v1/tasks/${ID}?wait=true`);
 
-    const pending = Array.from({ length: MAX_WAITS_PER_ADDRESS }, wait);
+    // 同一 caller 对同一信箱：被挡的是它自己的 caller+address 槽位上限
+    const pending = Array.from({ length: MAX_WAITS_PER_SLOT }, wait);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const blocked = await wait();
     expect(blocked.status).toBe(429);

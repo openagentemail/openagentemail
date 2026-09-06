@@ -6,6 +6,7 @@ import {
   createDelegation,
   findActiveDelegation,
   getDelegation,
+  getDroppedDelegation,
   listDelegations,
   revokeDelegation,
 } from '../lib/delegations.ts';
@@ -211,7 +212,8 @@ export const delegationsRoute = new Hono()
       return c.json({ error: 'invalid_request' }, 400);
     }
 
-    const grant = getDelegation(id);
+    // load() 剔除的 grant 也要能撤销（幂等墓碑磁盘残留），授权基于其原始视图。
+    const grant = getDelegation(id) ?? getDroppedDelegation(id);
     if (!grant) {
       return c.json({ error: 'not_found' }, 404);
     }
@@ -221,17 +223,26 @@ export const delegationsRoute = new Hono()
     const actor = auth.kind === 'admin' ? 'admin' : auth.address.toLowerCase();
     const isAdmin = auth.kind === 'admin';
     const isOwner = auth.kind === 'identity' && auth.address.toLowerCase() === grant.mailbox.toLowerCase();
+    // 与 POST 的 delegation.grant.denied 同款限速：超限只抑制 audit 落盘，不改变 403。
+    const ip = clientIp(c);
+    const recordDeniedAuditIfAllowed = () => {
+      const rl = checkDelegationDeniedAuditLimit(ip);
+      if (rl.allowed) {
+        recordAuditEvent({
+          event: 'delegation.revoke',
+          outcome: 'denied',
+          grantId: grant.id,
+          actor,
+          mailbox: grant.mailbox,
+          grantee: grant.grantee,
+          scopes: grant.scopes,
+          ip,
+        });
+      }
+    };
 
     if (attribution?.kind === 'oauth') {
-      recordAuditEvent({
-        event: 'delegation.revoke',
-        outcome: 'denied',
-        grantId: grant.id,
-        actor,
-        mailbox: grant.mailbox,
-        grantee: grant.grantee,
-        scopes: grant.scopes,
-      });
+      recordDeniedAuditIfAllowed();
       return c.json(
         { error: 'forbidden: delegation management requires direct identity credentials' },
         403,
@@ -239,15 +250,7 @@ export const delegationsRoute = new Hono()
     }
 
     if (!isAdmin && !isOwner) {
-      recordAuditEvent({
-        event: 'delegation.revoke',
-        outcome: 'denied',
-        grantId: grant.id,
-        actor,
-        mailbox: grant.mailbox,
-        grantee: grant.grantee,
-        scopes: grant.scopes,
-      });
+      recordDeniedAuditIfAllowed();
       return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
     }
 

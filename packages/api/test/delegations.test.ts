@@ -78,6 +78,7 @@ const {
 const {
   createDelegation,
   getDelegation,
+  getDroppedDelegation,
   listDelegations,
   hasActiveDelegation,
   findActiveDelegation,
@@ -1156,11 +1157,79 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       writeFileSync(storeFile, JSON.stringify(mockStore, null, 2), { mode: 0o600 });
       invalidateDelegationStoreCache();
 
-      const loaded = listDelegations();
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+      let loaded: ReturnType<typeof listDelegations>;
+      try {
+        loaded = listDelegations();
+      } finally {
+        console.warn = originalWarn;
+      }
       // delg_dirty_only is refused/omitted because its filtered scopes is empty
       expect(loaded.length).toBe(1);
       expect(loaded[0]!.id).toBe('delg_supported_and_dirty');
       expect(loaded[0]!.scopes).toEqual(['read:messages']);
+
+      // #136 R2 顺清 2：收窄/剔除不能静默——必须各留一条可观测警告
+      expect(
+        warnings.some((w) => w.includes('delg_dirty_only') && w.includes('dropped at load')),
+      ).toBe(true);
+      expect(
+        warnings.some((w) => w.includes('delg_supported_and_dirty') && w.includes('scopes narrowed at load')),
+      ).toBe(true);
+    });
+
+    test('Item 4b (R2 顺清 3): load-dropped grant stays revocable via DELETE with idempotent disk tombstone', async () => {
+      const owner = createIdentity({ localpart: 'dropped-owner' })!;
+      const storeFile = join(config.dataDir, 'delegations.json');
+      writeFileSync(storeFile, JSON.stringify({
+        schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+        grants: [
+          {
+            id: 'delg_dropped_revoke',
+            mailbox: owner.identity.address,
+            grantee: 'bob@test.example',
+            scopes: ['totally:unsupported'],
+            createdAt: '2026-09-06T00:00:00Z',
+            createdBy: 'admin',
+            revokedAt: null,
+            revokedBy: null,
+          },
+        ],
+      }, null, 2), { mode: 0o600 });
+      invalidateDelegationStoreCache();
+
+      // coerce 后的世界看不到它，但原始视图可查——否则磁盘残留永远删不掉
+      expect(getDelegation('delg_dropped_revoke')).toBeUndefined();
+      expect(getDroppedDelegation('delg_dropped_revoke')?.mailbox).toBe(owner.identity.address);
+
+      // owner 撤销 → 200，就地落墓碑
+      const res = await app.request('/v1/delegations/delg_dropped_revoke', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.revoked).toBe(true);
+      expect(typeof body.revokedAt).toBe('string');
+      expect(Date.parse(body.revokedAt)).not.toBeNaN();
+
+      // 磁盘原始记录（含不合规 scopes）被保留并落了墓碑，而不是被改写
+      const onDisk = JSON.parse(readFileSync(storeFile, 'utf8')) as any;
+      const entry = onDisk.grants.find((g: any) => g.id === 'delg_dropped_revoke');
+      expect(entry).toBeDefined();
+      expect(entry.revokedAt).toBe(body.revokedAt);
+      expect(entry.revokedBy).toBe(owner.identity.address);
+      expect(entry.scopes).toEqual(['totally:unsupported']);
+
+      // 重复撤销幂等：200 + 原 revokedAt（墓碑语义）
+      const res2 = await app.request('/v1/delegations/delg_dropped_revoke', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.token}` },
+      });
+      expect(res2.status).toBe(200);
+      expect(((await res2.json()) as any).revokedAt).toBe(body.revokedAt);
     });
 
     test('Item 5: load() re-wraps corruption errors preserving { cause: err } error chain', () => {
@@ -1240,6 +1309,35 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       // Exactly DEFAULT_DELEGATION_DENIED_AUDIT_LIMIT (10) audit entries recorded, 5 throttled
       const deniedAudits = readAuditEvents().filter((e) => e.event === 'delegation.grant.denied');
       expect(deniedAudits.length).toBe(10);
+    });
+
+    test('Item 7b (R2 顺清 1): delegation.revoke denied audit writes on DELETE are throttled to 10/min per IP (returning 403)', async () => {
+      resetDelegationDeniedAuditLimits();
+      resetAuditForTests();
+
+      const alice = createIdentity({ localpart: 'alice-del-throttle' })!;
+      const carol = createIdentity({ localpart: 'carol-del-throttle' })!;
+      const grant = createDelegation({
+        mailbox: alice.identity.address,
+        grantee: carol.identity.address,
+        createdBy: alice.identity.address,
+      });
+
+      // Grantee (nor anyone but owner/admin) may revoke: 15 denied DELETEs from the same IP
+      for (let i = 0; i < 15; i++) {
+        const res = await app.request(`/v1/delegations/${grant.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${carol.token}` },
+        });
+        expect(res.status).toBe(403);
+      }
+
+      // Audit flush is capped at 10; the 403 itself is unaffected by throttling
+      const deniedAudits = readAuditEvents().filter(
+        (e) => e.event === 'delegation.revoke' && e.outcome === 'denied',
+      );
+      expect(deniedAudits.length).toBe(10);
+      expect(getDelegation(grant.id)?.revokedAt).toBeNull();
     });
 
     test('Item 8: OAuth credentials remain forbidden from managing delegations (403)', async () => {
