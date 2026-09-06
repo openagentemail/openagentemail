@@ -455,6 +455,36 @@ describe('PR-2 #80 排队 overlay 有界 fallback + 告警', () => {
       warnedRetained: getWarnedStaleLeaseOverlayRetentionForTests(),
     }).toEqual({ queueRetired: 0, warnedRetained: 0 });
   });
+
+  test('TTL 丢弃未索引 claim 后再 claim：新 generation 严格大于被丢弃的，双 claim 重建不返 null', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<p2-80-hw-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(first.leaseGeneration).toBe(1);
+    now = START + LEASE_OVERLAY_MAX_LIFETIME_MS + 1;
+    expect((await getTask(ID))?.lease).toBeUndefined();
+    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+    const claim2 = (await parseCaptured(sent[1]!, 3))!;
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, claim2]);
+    expect({
+      discardedGeneration: first.leaseGeneration,
+      nextGeneration: second.leaseGeneration,
+      rebuiltGeneration: rebuilt?.lease?.leaseGeneration ?? null,
+    }).toEqual({
+      discardedGeneration: 1,
+      nextGeneration: 2,
+      rebuiltGeneration: 2,
+    });
+    expect(second.leaseGeneration).toBeGreaterThan(first.leaseGeneration);
+    expect(rebuilt).not.toBeNull();
+  });
 });
 
 describe('PR-2 #84 reclaim 与 expiry-audit 解耦', () => {

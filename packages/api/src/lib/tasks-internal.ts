@@ -1770,6 +1770,8 @@ type PendingExpiryAudit = {
 
 const pendingExpiryAudits = new Map<string, PendingExpiryAudit>();
 const warnedStaleLeaseOverlays = new Set<string>();
+/** #80：被 cutoff 的 lease overlay 不再参与权威合并，但仍推进 claim 世代号。 */
+const leaseGenerationHighWater = new Map<string, number>();
 let staleLeaseOverlayAlertCount = 0;
 let expiryAuditLingerAlertCount = 0;
 
@@ -1892,6 +1894,7 @@ export function clearQueuedEventsForTests(): void {
   syntheticTaskBases.clear();
   pendingExpiryAudits.clear();
   warnedStaleLeaseOverlays.clear();
+  leaseGenerationHighWater.clear();
   staleLeaseOverlayAlertCount = 0;
   expiryAuditLingerAlertCount = 0;
 }
@@ -2115,6 +2118,22 @@ function leaseOverlayMustKeepApplying(lease: LeaseEvent, now: number): boolean {
   return leaseOverlayStillActive(lease, now);
 }
 
+/** cutoff 丢弃 overlay 时抬高世代号；进程重启与 queuedEvents 同为内存态。 */
+function raiseLeaseGenerationHighWater(taskId: string, generation: number): void {
+  const current = leaseGenerationHighWater.get(taskId) ?? 0;
+  if (generation > current) leaseGenerationHighWater.set(taskId, generation);
+}
+
+/** 新 claim generation = max(视图 generation, 被 cutoff overlay 的高水位) + 1。 */
+function nextClaimGeneration(task: Task): number {
+  const viewGeneration = task.lease?.leaseGeneration
+    ?? task.releasedLease?.leaseGeneration
+    ?? task.expiredLease?.leaseGeneration
+    ?? 0;
+  const highWater = leaseGenerationHighWater.get(task.id) ?? 0;
+  return Math.max(viewGeneration, highWater) + 1;
+}
+
 function warnStaleLeaseOverlayOnce(taskId: string, row: QueuedEvent): void {
   const key = staleOverlayWarnKey(taskId, row);
   if (warnedStaleLeaseOverlays.has(key)) return;
@@ -2154,6 +2173,8 @@ function mergeQueuedEvents(task: Task): Task {
     if (leaseOverlayMustKeepApplying(row.lease, now)) return true;
     if (now - row.sentAt <= LEASE_OVERLAY_MAX_LIFETIME_MS) return true;
     warnStaleLeaseOverlayOnce(task.id, row);
+    // 停止权威重放，但记下 generation，避免下一封 claim 从 1 重来。
+    raiseLeaseGenerationHighWater(task.id, row.lease.generation);
     return false;
   });
   if (toApply.length === 0) return task;
@@ -2350,10 +2371,7 @@ export async function claimTask(input: {
       throw new Error('lease_already_claimed');
     }
     if (wasWorking && !current.expiredLease && !current.releasedLease) throw new Error('task_not_claimable');
-    const generation = (current.lease?.leaseGeneration
-      ?? current.releasedLease?.leaseGeneration
-      ?? current.expiredLease?.leaseGeneration
-      ?? 0) + 1;
+    const generation = nextClaimGeneration(current);
     const at = new Date(now).toISOString();
     const firstClaimedAt = taskLeaseFirstClaimedAt(current) ?? at;
     const token = randomBytes(32).toString('base64url');
