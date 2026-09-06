@@ -1923,6 +1923,11 @@ export function getExpiryAuditLingerAlertCountForTests(): number {
   return expiryAuditLingerAlertCount;
 }
 
+/** 测试缝：warnedStaleLeaseOverlays 现存键数，用于验证完结剪枝。 */
+export function getWarnedStaleLeaseOverlayRetentionForTests(): number {
+  return warnedStaleLeaseOverlays.size;
+}
+
 function indexedLeaseGenerationDominates(
   task: Task,
   queuedGeneration: number,
@@ -2082,9 +2087,30 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   return next;
 }
 
-function warnStaleLeaseOverlayOnce(taskId: string, row: QueuedEvent): void {
+function staleOverlayWarnKey(taskId: string, row: QueuedEvent): string {
   const identity = row.lease ? canonicalLeaseEvent(row.lease) : row.message.id;
-  const key = `${taskId}:${row.sentAt}:${identity}`;
+  return `${taskId}:${row.sentAt}:${identity}`;
+}
+
+function pruneWarnedStaleLeaseOverlays(taskId: string, remaining: readonly QueuedEvent[]): void {
+  const live = new Set(remaining.map((row) => staleOverlayWarnKey(taskId, row)));
+  for (const key of [...warnedStaleLeaseOverlays]) {
+    if (key.startsWith(`${taskId}:`) && !live.has(key)) warnedStaleLeaseOverlays.delete(key);
+  }
+}
+
+function leaseOverlayClaimedUntil(lease: LeaseEvent): string | undefined {
+  return 'claimedUntil' in lease ? lease.claimedUntil : undefined;
+}
+
+function leaseOverlayStillActive(lease: LeaseEvent, now: number): boolean {
+  if (lease.event !== 'claim' && lease.event !== 'renew') return false;
+  const claimedUntil = leaseOverlayClaimedUntil(lease);
+  return typeof claimedUntil === 'string' && isLeaseDeadlineActive(claimedUntil, now);
+}
+
+function warnStaleLeaseOverlayOnce(taskId: string, row: QueuedEvent): void {
+  const key = staleOverlayWarnKey(taskId, row);
   if (warnedStaleLeaseOverlays.has(key)) return;
   warnedStaleLeaseOverlays.add(key);
   staleLeaseOverlayAlertCount += 1;
@@ -2110,13 +2136,16 @@ function mergeQueuedEvents(task: Task): Task {
   if (stillLagging.length === 0) {
     if (pending.length > 0) invalidateTaskListCache();
     queuedEvents.delete(task.id);
+    pruneWarnedStaleLeaseOverlays(task.id, []);
     return task;
   }
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
-  // 超龄 lease overlay 停止重放，但本体仍留在 queuedEvents 供取证。
+  // 超龄且权威已过期的 lease overlay 停止重放；still-active 的继续 fence。
   queuedEvents.set(task.id, stillLagging);
+  pruneWarnedStaleLeaseOverlays(task.id, stillLagging);
   const toApply = stillLagging.filter((row) => {
     if (!row.lease) return true;
+    if (leaseOverlayStillActive(row.lease, now)) return true;
     if (now - row.sentAt <= LEASE_OVERLAY_MAX_LIFETIME_MS) return true;
     warnStaleLeaseOverlayOnce(task.id, row);
     return false;
@@ -2515,19 +2544,33 @@ function enqueuePendingExpiryAudit(input: {
   });
 }
 
-/** 从 durable 事件流找出「连续 claim 且中间无 release/expiry」的缺失 audit。 */
+function closedLeaseGenerations(messages: readonly RawTaskMessage[]): Set<number> {
+  const closed = new Set<number>();
+  for (const message of messages) {
+    const lease = message.lease;
+    if (lease && (lease.event === 'expired' || lease.event === 'release')) closed.add(lease.generation);
+  }
+  return closed;
+}
+
+/** 从 durable 事件流找出缺失的 expiry audit；该 generation 已有 expiry/release 则不得再入队。 */
 function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEvent[] {
   const leaseMessages = [...messages]
     .filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease)
     .sort((a, b) => a.uid - b.uid);
+  const closedGenerations = closedLeaseGenerations(leaseMessages);
   const missing: ExpiredLeaseEvent[] = [];
   let lastClaim: ClaimLeaseEvent | null = null;
   let lastDeadline: string | null = null;
-  let lastClaimClosed = false;
   for (const message of leaseMessages) {
     const lease = message.lease;
     if (lease.event === 'claim') {
-      if (lastClaim && lastDeadline && !lastClaimClosed && Date.parse(lease.at) >= Date.parse(lastDeadline)) {
+      if (
+        lastClaim
+        && lastDeadline
+        && !closedGenerations.has(lastClaim.generation)
+        && Date.parse(lease.at) >= Date.parse(lastDeadline)
+      ) {
         missing.push({
           version: 1,
           event: 'expired',
@@ -2540,17 +2583,18 @@ function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEve
       }
       lastClaim = lease;
       lastDeadline = lease.claimedUntil;
-      lastClaimClosed = false;
-    } else if (lease.event === 'renew' && lastClaim && lease.generation === lastClaim.generation && !lastClaimClosed) {
-      // 续约链上的最终 deadline 才是重启后应合成的 expiry 权威时刻。
+    } else if (lease.event === 'renew' && lastClaim && lease.generation === lastClaim.generation) {
       lastDeadline = lease.claimedUntil;
-    } else if (lease.event === 'expired' && lastClaim && lease.generation === lastClaim.generation) {
-      lastClaimClosed = true;
-    } else if (lease.event === 'release' && lastClaim && lease.generation === lastClaim.generation) {
-      lastClaimClosed = true;
     }
   }
   return missing;
+}
+
+function pruneCompletedExpiryAudits(taskId: string, messages: readonly RawTaskMessage[]): void {
+  const closed = closedLeaseGenerations(messages);
+  for (const [key, item] of pendingExpiryAudits) {
+    if (item.taskId === taskId && closed.has(item.lease.generation)) pendingExpiryAudits.delete(key);
+  }
 }
 
 function reconcileMissingExpiryAudits(
@@ -2560,6 +2604,7 @@ function reconcileMissingExpiryAudits(
 ): void {
   const authenticated = messages.filter((message): message is RawTaskMessage =>
     !!message && !isRelationshipIntegrityFailure(message));
+  pruneCompletedExpiryAudits(id, authenticated);
   for (const lease of collectMissingExpiryAudits(authenticated)) {
     enqueuePendingExpiryAudit({
       taskId: id,
@@ -2597,7 +2642,7 @@ async function deliverExpiryAuditMail(input: {
   });
 }
 
-/** 在已持锁路径上冲刷到期的 expiry-audit 重试项；保序、封顶后滞留告警。 */
+/** 自行获取 per-task lock 后冲刷到期的 expiry-audit 重试项；保序、封顶后滞留告警。 */
 export async function retryPendingExpiryAuditsOnce(): Promise<number> {
   let delivered = 0;
   const now = nowMs();
