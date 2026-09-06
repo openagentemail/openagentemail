@@ -2109,6 +2109,12 @@ function leaseOverlayStillActive(lease: LeaseEvent, now: number): boolean {
   return typeof claimedUntil === 'string' && isLeaseDeadlineActive(claimedUntil, now);
 }
 
+/** release 须保留到已索引，或其所关闭权威已不可能再 active。 */
+function leaseOverlayMustKeepApplying(lease: LeaseEvent, now: number): boolean {
+  if (lease.event === 'release') return true;
+  return leaseOverlayStillActive(lease, now);
+}
+
 function warnStaleLeaseOverlayOnce(taskId: string, row: QueuedEvent): void {
   const key = staleOverlayWarnKey(taskId, row);
   if (warnedStaleLeaseOverlays.has(key)) return;
@@ -2145,7 +2151,7 @@ function mergeQueuedEvents(task: Task): Task {
   pruneWarnedStaleLeaseOverlays(task.id, stillLagging);
   const toApply = stillLagging.filter((row) => {
     if (!row.lease) return true;
-    if (leaseOverlayStillActive(row.lease, now)) return true;
+    if (leaseOverlayMustKeepApplying(row.lease, now)) return true;
     if (now - row.sentAt <= LEASE_OVERLAY_MAX_LIFETIME_MS) return true;
     warnStaleLeaseOverlayOnce(task.id, row);
     return false;
@@ -2553,13 +2559,26 @@ function closedLeaseGenerations(messages: readonly RawTaskMessage[]): Set<number
   return closed;
 }
 
+function queuedAcceptedClosureGenerations(taskId: string): Set<number> {
+  const closed = new Set<number>();
+  for (const row of queuedEvents.get(taskId) ?? []) {
+    if (row.lease?.event === 'expired' || row.lease?.event === 'release') closed.add(row.lease.generation);
+  }
+  return closed;
+}
+
 /** 从 durable 事件流找出缺失的 expiry audit；该 generation 已有 expiry/release 则不得再入队。 */
-function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEvent[] {
+function collectMissingExpiryAudits(
+  messages: RawTaskMessage[],
+  extraClosedGenerations: ReadonlySet<number> = new Set(),
+): ExpiredLeaseEvent[] {
   const leaseMessages = [...messages]
     .filter((message): message is RawTaskMessage & { lease: LeaseEvent } => !!message.lease)
     .sort((a, b) => a.uid - b.uid);
   const closedGenerations = closedLeaseGenerations(leaseMessages);
+  for (const generation of extraClosedGenerations) closedGenerations.add(generation);
   const missing: ExpiredLeaseEvent[] = [];
+  const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   let lastClaim: ClaimLeaseEvent | null = null;
   let lastDeadline: string | null = null;
   for (const message of leaseMessages) {
@@ -2584,6 +2603,11 @@ function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEve
       lastClaim = lease;
       lastDeadline = lease.claimedUntil;
     } else if (lease.event === 'renew' && lastClaim && lease.generation === lastClaim.generation) {
+      const priorRenews = appliedRenews.get(lease.generation) ?? [];
+      // 对齐 #85：canonical 重复旧 renew 不得回卷最终 deadline。
+      if (priorRenews.some((prior) => isSameAuthenticatedLeaseEvent(prior, lease))) continue;
+      if (lastDeadline && Date.parse(lease.claimedUntil) <= Date.parse(lastDeadline)) continue;
+      appliedRenews.set(lease.generation, [...priorRenews, lease]);
       lastDeadline = lease.claimedUntil;
     }
   }
@@ -2592,6 +2616,7 @@ function collectMissingExpiryAudits(messages: RawTaskMessage[]): ExpiredLeaseEve
 
 function pruneCompletedExpiryAudits(taskId: string, messages: readonly RawTaskMessage[]): void {
   const closed = closedLeaseGenerations(messages);
+  for (const generation of queuedAcceptedClosureGenerations(taskId)) closed.add(generation);
   for (const [key, item] of pendingExpiryAudits) {
     if (item.taskId === taskId && closed.has(item.lease.generation)) pendingExpiryAudits.delete(key);
   }
@@ -2605,7 +2630,7 @@ function reconcileMissingExpiryAudits(
   const authenticated = messages.filter((message): message is RawTaskMessage =>
     !!message && !isRelationshipIntegrityFailure(message));
   pruneCompletedExpiryAudits(id, authenticated);
-  for (const lease of collectMissingExpiryAudits(authenticated)) {
+  for (const lease of collectMissingExpiryAudits(authenticated, queuedAcceptedClosureGenerations(id))) {
     enqueuePendingExpiryAudit({
       taskId: id,
       from: task.from,
@@ -2802,29 +2827,37 @@ async function materializeLeaseExpiryForClaimUnlocked(current: Task): Promise<Ta
  * shared lock-held materializer, so a concurrent reclaim cannot overtake it. */
 export async function reapExpiredTaskLeasesOnce(): Promise<number> {
   assertTaskLeasesEnabled();
-  const candidates = await loadAllTasksCached();
   let materialized = 0;
-  for (const candidate of candidates) {
-    try {
-      const didMaterialize = await withTaskLock(candidate.id, async () => {
-        const current = await getTaskSnapshot(candidate.id);
-        if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
-        const next = await materializeLeaseExpiryUnlocked(current);
-        return !!next.expiredLease
-          && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
-          && next.expiredLease.claimedUntil === current.lease.claimedUntil;
-      });
-      if (didMaterialize) materialized += 1;
-    } catch (err) {
-      // 单 task SMTP 拒绝不得中断本轮；pending audit flush 每轮都要被尝试。
-      console.warn(JSON.stringify({
-        kind: 'lease_reaper_task_isolated',
-        taskId: candidate.id,
-        error: err instanceof Error ? err.message : String(err),
-      }));
+  try {
+    const candidates = await loadAllTasksCached();
+    for (const candidate of candidates) {
+      try {
+        const didMaterialize = await withTaskLock(candidate.id, async () => {
+          const current = await getTaskSnapshot(candidate.id);
+          if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
+          const next = await materializeLeaseExpiryUnlocked(current);
+          return !!next.expiredLease
+            && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
+            && next.expiredLease.claimedUntil === current.lease.claimedUntil;
+        });
+        if (didMaterialize) materialized += 1;
+      } catch (err) {
+        // 单 task SMTP 拒绝不得中断本轮；pending audit flush 每轮都要被尝试。
+        console.warn(JSON.stringify({
+          kind: 'lease_reaper_task_isolated',
+          taskId: candidate.id,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      }
     }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      kind: 'lease_reaper_scan_isolated',
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  } finally {
+    await retryPendingExpiryAuditsOnce();
   }
-  await retryPendingExpiryAuditsOnce();
   return materialized;
 }
 
