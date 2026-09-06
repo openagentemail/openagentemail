@@ -28,6 +28,12 @@ prerequisite: it runs the independent approval canonical-vector corpus check.
 CI installs Python 3.12.3 explicitly; local contributors must install it before
 running the API suite.
 
+Decision (#101): local API `bun test` stays **fail-closed** when `python3` is
+missing — the independent verifier is not skipped. A skip-with-reason path
+would let corpus drift pass on a Python-less laptop and only fail in CI. CI
+continues to install Python 3.12.3 and run both `check:approval-publication`
+and the same bun suite.
+
 ```bash
 cd packages/api   && npx -y bun test
 cd packages/mcp   && npx -y bun test && npx -y bun run build

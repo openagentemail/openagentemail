@@ -128,17 +128,21 @@ def pointer_tokens(pointer: str) -> list[str]:
 
 
 def mutated(source: Any, pointer: str, replacement: Any) -> Any:
-    result = copy.deepcopy(source)
-    tokens = pointer_tokens(pointer)
-    target = result
-    for token in tokens[:-1]:
-        target = target[int(token)] if isinstance(target, list) else target[token]
-    final = tokens[-1]
-    if isinstance(target, list):
-        target[int(final)] = replacement
-    else:
-        target[final] = replacement
-    return result
+    # 越界 JSON Pointer 归一成结构化 ValueError，避免裸 IndexError traceback。
+    try:
+        result = copy.deepcopy(source)
+        tokens = pointer_tokens(pointer)
+        target = result
+        for token in tokens[:-1]:
+            target = target[int(token)] if isinstance(target, list) else target[token]
+        final = tokens[-1]
+        if isinstance(target, list):
+            target[int(final)] = replacement
+        else:
+            target[final] = replacement
+        return result
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"JSON Pointer mutation failed ({pointer}): {error}") from error
 
 
 def digest(value: Any) -> str:
@@ -161,6 +165,12 @@ def check_pointer_regressions() -> None:
         pass
     else:
         raise AssertionError("root JSON Pointer must be rejected")
+    try:
+        mutated({"z": [1]}, "/z/99", False)
+    except ValueError as error:
+        require("JSON Pointer mutation failed" in str(error), "out-of-range pointer must be structured")
+    else:
+        raise AssertionError("out-of-range JSON Pointer must fail closed")
 
 
 def check_number_boundaries(vector: dict[str, Any]) -> None:
@@ -217,6 +227,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (AssertionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    except (AssertionError, IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(f"approval canonical vector verification failed: {error}", file=sys.stderr)
         sys.exit(1)

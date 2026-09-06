@@ -46,9 +46,9 @@ If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear
 | `task_create(to, subject, body, wait?, parentTaskId?)` or `task_create(to, subject, kind: "approval", approval: { action, expiresAt }, body?, wait?, parentTaskId?)` | Create an ordinary email-backed task (required `body`) or a typed approval (required `approval.action` and `approval.expiresAt`); `parentTaskId` must be a durable readable parent and never changes task state |
 | `task_list_children(parentTaskId, limit?, cursor?)` | List only direct readable children (20/50/100, default 20); cursor is scoped to parent and caller, with no totals or descendants |
 | `task_decide(id, decision)` | Stored reviewer approves or rejects a pending typed approval |
-| `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration |
-| `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer |
-| `task_release(id, leaseToken, reason?)` | Release a claimed task using its opaque bearer |
+| `task_claim(id, leaseSec?)` | Claim a recipient task for an optional lease duration. **Permanent policy:** admin credentials cannot claim/renew/release; the caller must be the managed recipient identity. Admin close remains the override for a live lease. |
+| `task_renew(id, leaseToken, leaseSec?)` | Renew a claimed task using its opaque bearer (managed recipient identity only; see `task_claim`) |
+| `task_release(id, leaseToken, reason?)` | Release a claimed task using its opaque bearer (managed recipient identity only; see `task_claim`) |
 | `task_list(state?)` | List this identity's task threads, optionally by current state |
 | `task_get(id, wait?)` | Read one task thread and its stamped state history; `wait:true` waits up to 10 minutes |
 | `task_update(id, state, body?, result?, leaseToken?)` | Advance a participating task; `result` is written as a JSON block in the reply body |
@@ -135,3 +135,12 @@ OPENAGENTEMAIL_API_KEY=dev-key bun run src/main.ts   # stdio; speaks JSON-RPC on
 ```
 
 The server connects to the API lazily — it starts fine even if the API isn't up yet, and reports a connection error on the first tool call if not.
+
+Publication scripts (`check:approval-publication`, `sync:approval-publication`,
+`prepack`, `prepublishOnly`) invoke
+`packages/api/scripts/sync-approval-publication.mjs` via the sibling path
+`../api/scripts/`. They must be run from this monorepo checkout; a standalone
+clone of `packages/mcp` (or the published npm tarball) cannot resolve that
+path. The published package already bundles `approval-digest.md` and
+`approval-canonical-vectors.v1.json`, so consumers of `@openagentemail/mcp`
+do not need the sibling `packages/api` directory.

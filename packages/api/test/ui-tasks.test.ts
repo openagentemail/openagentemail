@@ -894,6 +894,35 @@ describe('UI approval decision endpoint', () => {
     });
   });
 
+  test('#76: admin remind rejects an expired approval without materializing expiry or sending mail', async () => {
+    const boundary = '2026-08-24T00:00:00.000Z';
+    const sent: unknown[] = [];
+    setTaskNowForTests(() => Date.parse('2026-08-23T23:59:59.999Z'));
+    setTaskSendMailForTests(async (input) => { sent.push(input); return { messageId: `<r76-remind-${sent.length}@test.example>` }; });
+    const task = await taskService.createApproval!({
+      from: 'fox@test.example', to: 'owl@test.example', subject: 'R76 remind must not expire', body: 'record only',
+      action: { type: 'deployment', name: 'preview', arguments: {} }, expiresAt: boundary,
+    });
+    setTaskGetForTests(async () => task);
+    const { app, cookie } = makeApp({ kind: 'admin' }, { taskService }, [task]);
+    setTaskNowForTests(() => Date.parse(boundary));
+    const response = await app.request(`/ui/api/tasks/${task.id}/remind`, {
+      method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'fox@test.example', body: 'must not deliver' }),
+    });
+    expect({
+      status: response.status,
+      body: await response.json(),
+      deliveries: sent.length,
+      durable: { state: task.state, messages: task.messages.length, result: task.result ?? null },
+    }).toEqual({
+      status: 409,
+      body: { error: 'approval_decision_required' },
+      deliveries: 1,
+      durable: { state: 'input-required', messages: 1, result: null },
+    });
+  });
+
   test('R8-E RED: an injected dashboard service never falls back to global approval decisions', async () => {
     const sent: unknown[] = [];
     setTaskGetForTests(async () => APPROVAL_TASK);
