@@ -97,15 +97,19 @@ export interface DurableResumeInput { agent: Agent; stateStore: RunStateStore; r
 /** Coordinates correlation, SDK state and receipt so restart never blindly re-runs a tool. */
 export async function resumeAuthoritativeOaeRun(input: DurableResumeInput): Promise<CorrelationRecord> {
   const { agent, stateStore, receiptStore, correlationStore, task, hooks } = input;
+  // 缺 approval 身份时必须在 receiveDecision 之前失败，避免先写入 durable decision。
+  if (!input.record.approvalItemKey) {
+    throw new CorrelationSafetyError(`authoritative OAE resume lacks approval identity (phase=${input.record.phase} taskId=${input.record.taskId ?? 'none'} correlationId=${input.record.correlationId})`);
+  }
+  const approvalItemKey = input.record.approvalItemKey;
   // 先断言 framework/state-store 仍绑着未消费的 interruption，再写 durable decision。
   // resume-started/resumed 时 SDK 决策已落地，不能再要求 interruption 还在。
   if (input.record.phase === 'awaiting-input' || input.record.phase === 'decision-received') {
     const bound = await restoreRunState(agent, stateStore);
-    if (input.record.approvalItemKey) selectApproval(bound, input.record.approvalItemKey);
+    selectApproval(bound, approvalItemKey);
   }
   let record = await receiveDecision(correlationStore, input.record, task);
   const checkpoint = async (name: string) => hooks?.checkpoint?.(name);
-  if (!record.approvalItemKey) throw new CorrelationSafetyError('authoritative OAE resume lacks approval identity'); const approvalItemKey = record.approvalItemKey;
   if (record.phase === 'resumed') { await verifyFinalEvidence(agent, stateStore, receiptStore, record); return record; }
   if (record.phase === 'resume-started') {
     await checkpoint('before-restart-reconcile');

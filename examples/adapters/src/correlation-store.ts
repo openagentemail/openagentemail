@@ -274,6 +274,12 @@ function validateAdjacentChange(prior: CorrelationRecord, next: CorrelationRecor
 
 function validSafeText(value: unknown, pattern: RegExp): value is string { return typeof value === 'string' && pattern.test(value) && !isCredentialShaped(value); }
 
+/** 收集器与 validEvidence 共用：queued-* 形态且非 credential。 */
+const QUEUED_OVERLAY_ID = /^queued-[A-Za-z0-9._:-]{1,220}$/;
+export function isQueuedOverlayId(value: unknown): value is string {
+  return validSafeText(value, QUEUED_OVERLAY_ID);
+}
+
 function exactKeys(value: object, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();
   return keys.length === expected.length && keys.every((key, index) => key === expected.slice().sort()[index]);
@@ -290,7 +296,7 @@ function validEvidence(value: unknown): value is DecisionEvidence {
     && typeof row.evidenceFingerprint === 'string' && /^[0-9a-f]{64}$/i.test(row.evidenceFingerprint)
     && (overlays === undefined || (
       Array.isArray(overlays) && overlays.length >= 1 && overlays.length <= 8
-      && overlays.every((id) => validSafeText(id, /^queued-[A-Za-z0-9._:-]{1,220}$/))
+      && overlays.every((id) => isQueuedOverlayId(id))
     ));
 }
 

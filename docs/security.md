@@ -452,7 +452,8 @@ IMAP 任务重建依赖**最低 UID 的已认证 creation root** 仍然留在同
 
 **审计与管理员恢复路径**（产品外，IMAP/备份侧）：
 
-1. 用 `X-OA-Task: <id>` 在 catch-all 信箱搜该线程；确认最低 UID 是否仍是带 `X-OA-Task-Stamp`（及 v2 `X-OA-Task-Root`）的 creation root。
-2. 关系完整性失败：从备份或 `Sent` 恢复**原始未改**的 creation MIME（含 stamp/root），APPEND 回同一信箱；不要手写 root/stamp。恢复后重建应变回可见。
-3. Legacy 缺 root：同样只能恢复原始 creation 信。没有「补一条新 submitted 冒充 root」的安全路径——新信 UID 更高，仍不是 lowest-UID root。
-4. 恢复失败则保持不可见。需要新工作项时另建任务，不要在损坏历史上继续 mutation。
+1. 用 `X-OA-Task: <id>` 在 catch-all 信箱搜该线程；确认最低 UID 是否仍是带 `X-OA-Task-Stamp`（及 v2 `X-OA-Task-Root`）的 creation root。记下该线程**全部**后继信的原序备份（UID 升序）。
+2. 关系完整性失败：**不要**在后继信仍在同一信箱时只 APPEND 一封恢复的 root。IMAP APPEND 总是分配比现有更高的 UID；后继信还在时，新 root 不会成为最低 UID，重建仍 fail-closed。部分实现在 EXPUNGE/APPEND 后还会重排剩余消息的 UID，使「谁是 lowest-UID」进一步漂移。
+3. 正确恢复：先把该线程全部消息（含后继）按原 UID 序备份并 EXPUNGE 出信箱，再按**原顺序**先 APPEND 原始未改 creation MIME（含 stamp/root），随后 APPEND 后继信。不要手写 root/stamp。整线程从备份装回空信箱亦可。恢复后最低 UID 必须重新是那条 creation root，重建才变可见。
+4. Legacy 缺 root：同样没有「补一条新 submitted 冒充 root」的安全路径——单独 APPEND 的新信 UID 更高（或重排后仍不是原 lowest-UID root）。必须整线程按原序重放。
+5. 恢复失败则保持不可见。需要新工作项时另建任务，不要在损坏历史上继续 mutation。

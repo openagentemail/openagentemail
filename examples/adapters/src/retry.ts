@@ -1,4 +1,4 @@
-import { CorrelationSafetyError, canonicalDecisionEvidence, canonicalJson, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
+import { CorrelationSafetyError, canonicalDecisionEvidence, canonicalJson, isQueuedOverlayId, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
 import { type OaeClient, type OaeTask, type TaskMessage, type TaskState } from './openagentemail.js';
 
 type CorrelationWriter = Pick<CorrelationStore, 'save'>;
@@ -166,7 +166,7 @@ export function validateDecision(task: OaeTask, record: CorrelationRecord): { va
   // queued-* 是 IMAP 索引前的 synthetic ID，索引后变 UID；只放观测字段，不进权威比较。
   const transientOverlayIds = task.messages
     .map((row) => row.id)
-    .filter((id) => /^queued-[A-Za-z0-9._:-]{1,220}$/.test(id))
+    .filter(isQueuedOverlayId)
     .slice(0, 8);
   return {
     value: result,

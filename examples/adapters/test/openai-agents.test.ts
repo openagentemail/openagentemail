@@ -46,6 +46,30 @@ async function durableCompleted(directory: string, decision: 'approved' | 'rejec
   return { graph, stateStore, receiptStore, store: durable.store, record, task };
 }
 
+test('null approvalItemKey is rejected before receiveDecision writes durable evidence', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oae-r2-null-approval-'));
+  const graph = buildScriptedApprovalAgent('approved-final');
+  const paused = await pauseWithScriptedModel(graph);
+  const stateStore = new RunStateStore(directory);
+  const receiptStore = new RunStateStore(directory, 'tool-receipt.json');
+  await stateStore.save(paused.state.toString());
+  const durable = await durableAwaiting(directory, paused.approvalKey);
+  const task = authoritativeTask(durable.record);
+  const missing = { ...durable.record, approvalItemKey: null };
+  let decisionWrites = 0;
+  const store = { save: async (row: CorrelationRecord) => { if (row.phase === 'decision-received') decisionWrites += 1; await durable.store.save(row); } };
+  await assert.rejects(
+    () => resumeAuthoritativeOaeRun({ agent: graph.agent, stateStore, receiptStore, correlationStore: store, record: missing, task, executionCount: () => graph.executions.count }),
+    (error: unknown) => error instanceof CorrelationSafetyError
+      && /lacks approval identity/.test(error.message)
+      && error.message.includes('awaiting-input')
+      && error.message.includes('r2-task-1')
+      && error.message.includes(durable.record.correlationId),
+  );
+  assert.equal(decisionWrites, 0);
+  assert.equal((await durable.store.load(durable.record.correlationId)).phase, 'awaiting-input');
+});
+
 test('R2 real ScriptedModel approval restores real RunState and executes protected tool once', async () => {
   const pausedGraph = buildScriptedApprovalAgent('approved-final'); const paused = await pauseWithScriptedModel(pausedGraph);
   assert.equal(pausedGraph.executions.count, 0);

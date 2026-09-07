@@ -69,6 +69,14 @@ export interface OaeClientOptions {
   signal?: AbortSignal;
 }
 
+/** 构造后 set authorization：大小写不敏感替换，避免 Authorization 与 authorization 合并成逗号双值。 */
+export function scopedRequestHeaders(init: RequestInit | undefined, token: string): Headers {
+  const headers = new Headers(init?.headers);
+  if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+  headers.set('authorization', `Bearer ${token}`);
+  return headers;
+}
+
 /** A real client may use HTTPS, or explicit loopback HTTP for local development only. */
 export function safeOaeBaseUrl(value: string): string {
   let url: URL; try { url = new URL(value); } catch { throw new Error('OpenAgentEmail URL must be an absolute HTTPS or loopback HTTP URL'); }
@@ -110,8 +118,8 @@ export class OaeClient {
     try {
       if (signals.some((signal) => signal.aborted)) throw new OaeRequestError('aborted', operation);
       let response: Response;
-      // authorization 必须最后写入：调用方 headers 不得覆盖 scoped bearer。
-      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: { 'content-type': 'application/json', ...init?.headers, authorization: `Bearer ${this.token}` } }); }
+      // Headers.set 在构造后写入，大小写不敏感替换调用方 Authorization 变体。
+      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: scopedRequestHeaders(init, this.token) }); }
       catch { throw new OaeRequestError(timedOut ? 'timeout' : controller.signal.aborted ? 'aborted' : 'transport', operation); }
       if (!response.ok) throw new OaeHttpError(response.status, operation);
       let value: unknown; try { value = await response.json(); }
