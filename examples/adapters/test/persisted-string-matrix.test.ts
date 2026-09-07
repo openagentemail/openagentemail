@@ -88,6 +88,33 @@ test('#107 canonical emails with credential-like local-parts are not false posit
   assert.equal(isCredentialShaped('token=value'), true);
 });
 
+test('#107-3 long PascalCase identifiers are not credentials; opaque tokens still are', async () => {
+  const workflow = 'CustomerRefundApprovalWorkflowVersion2026';
+  const operationKey = `scenario/${workflow}`;
+  const framework = 'CustomerRefundApprovalWorkflowVersion2026';
+  assert.equal(isCredentialShaped(workflow), false);
+  assert.equal(isCredentialShaped(operationKey), false);
+  assert.equal(isCredentialShaped(framework), false);
+  assert.equal(isCredentialShaped('K9m2Qp7nR4tX8wZ1aC5dF3gH6jL0bY2sU4eV8nR3'), true);
+  assert.equal(isCredentialShaped('sk-proj-abcdefghijklmnopqrstuvwxyz012345'), true);
+  const store = new CorrelationStore(await mkdtemp(join(tmpdir(), 'oae-pr3-readable-id-')));
+  const row = createIntent({
+    framework,
+    correlationId: 'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+    operationKey,
+    requestFingerprint: requestFingerprint({ requester: 'a@example.test', responder: 'b@example.test', subject: 'Approve', body: 'ordinary body' }),
+    expectedParticipants: { requester: 'a@example.test', responder: 'b@example.test' },
+    frameworkStateRef: 'state.sqlite',
+    approvalItemKey: workflow,
+    now: stamp(0),
+  });
+  await store.save(row);
+  const loaded = await store.load(row.correlationId);
+  assert.equal(loaded.framework, framework);
+  assert.equal(loaded.operationKey, operationKey);
+  assert.equal(loaded.approvalItemKey, workflow);
+});
+
 test('R1g timeline retains record-level unsafe projection regression and allowed fields', () => {
   const safe = atPhase('awaiting-input');
   assert.throws(() => sanitizedTimeline({ ...safe, operationKey: 'Bearer credential-canary' }, []));

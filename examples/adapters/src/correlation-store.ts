@@ -58,8 +58,37 @@ export function isCredentialShaped(value: unknown): boolean {
   if (/(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)) return true;
   // JWT / 高熵形态是加深启发式，不是主边界。
   if (JWT_SHAPE.test(value) && value.length >= 40) return true;
-  if (value.length >= 40 && !/\s/.test(value) && !value.includes('@') && /[A-Z]/.test(value) && /[a-z]/.test(value) && /\d/.test(value)) return true;
+  if (isOpaqueTokenShaped(value)) return true;
   return false;
+}
+
+/** 长而可读的标识（PascalCase 词边界或语义分隔）不当 token。 */
+function isReadableIdentifier(value: string): boolean {
+  const words = value.match(/[A-Z][a-z]{2,}/g) ?? [];
+  if (words.length >= 2) return true;
+  if (/[/:._-]/.test(value) && (words.length >= 1 || /[A-Za-z]{6,}/.test(value))) return true;
+  return false;
+}
+
+function shannonEntropy(value: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of value) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const p = count / value.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+/** 真 opaque-token：无空格、无语义词边界、高密度字符分布。 */
+function isOpaqueTokenShaped(value: string): boolean {
+  if (value.length < 40 || /\s/.test(value) || value.includes('@')) return false;
+  if (isReadableIdentifier(value)) return false;
+  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/\d/.test(value)) return false;
+  if (new Set(value).size / value.length < 0.45) return false;
+  if (shannonEntropy(value) < 4.2) return false;
+  return true;
 }
 
 export function requestFingerprint(value: Record<string, unknown>): string {
