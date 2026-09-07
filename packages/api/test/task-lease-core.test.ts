@@ -360,7 +360,10 @@ describe('#56 R2 lease authority', () => {
 
     const sameGeneration = await parsedClaim(original, 3);
     expect(sameGeneration).not.toBeNull();
-    expect(taskFromMessages(ID, [submittedRaw(), (await parsedClaim(original, 2))!, sameGeneration!])).toBeNull();
+    // #85：逐字节相同的已认证 claim 是传输重复，幂等接受而非 fail-closed。
+    const duplicatedClaim = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(original, 2))!, sameGeneration!]);
+    expect(duplicatedClaim?.lease?.leaseGeneration).toBe(1);
+    expect(toTaskView(duplicatedClaim!).messages).toHaveLength(2);
   });
 });
 
