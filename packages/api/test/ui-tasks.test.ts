@@ -1265,6 +1265,49 @@ describe('#75 board expiryProjection presentation', () => {
     expect(leafTexts(tasksDetailContent)).not.toContain('Waiting for you');
   });
 
+  test('list poll syncs an open pre-expiry detail so labels match and Approve/Reject disappear', () => {
+    const labels = sliceTasksFn('function taskIsClosed(', 'function syncTasksFilters(');
+    const sync = sliceTasksFn('function syncActiveTaskDetailFromList(', 'function renderTasks(');
+    const state = {
+      activeTaskId: APPROVAL_TASK.id,
+      taskDetail: {
+        ...APPROVAL_TASK,
+        messages: [{ id: '1', body: 'full thread' }],
+      },
+    };
+    const listed = {
+      ...APPROVAL_TASK,
+      expiryProjection: 'past-deadline-unmaterialized' as const,
+      messages: [],
+    };
+    const helpers = new Function(
+      'state',
+      `${labels}\n${sync}\nreturn { syncActiveTaskDetailFromList: syncActiveTaskDetailFromList, taskStateLabel: taskStateLabel };`,
+    )(state) as {
+      syncActiveTaskDetailFromList: (rows: unknown[]) => void;
+      taskStateLabel: (task: { state?: string; expiryProjection?: string; result?: unknown }) => string;
+    };
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Waiting for you');
+    helpers.syncActiveTaskDetailFromList([listed]);
+    expect(state.taskDetail.expiryProjection).toBe('past-deadline-unmaterialized');
+    expect(state.taskDetail.messages).toEqual([{ id: '1', body: 'full thread' }]);
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Past deadline');
+
+    const { renderer } = makeApprovalActionHarness();
+    expect(renderer.approvalCanDecide(APPROVAL_TASK)).toBe(true);
+    expect(renderer.approvalCanDecide(state.taskDetail as Task)).toBe(false);
+    const action = renderer.renderApprovalAction(state.taskDetail as Task)!;
+    expect(leafTexts(action)).toContain('Approval expired');
+    expect(action.childNodes.some((node) => node.tagName === 'BUTTON')).toBe(false);
+
+    const rows = makeTaskRowHarness();
+    rows.state.tasks = [{ ...listed, overdueReason: null, overdueAt: null }];
+    rows.state.tasksTotalApprox = 1;
+    rows.renderTaskRows();
+    expect(leafTexts(rows.tasksRows.childNodes[0])).toContain('Past deadline');
+    expect(leafTexts(rows.tasksRows.childNodes[0])).not.toContain('Waiting for you');
+  });
+
   test('past-deadline CSS is an inset red bar; expiry flag is red text', () => {
     expect(PAGES_CSS).toContain('.task-row.is-past-deadline {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-expiry-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');

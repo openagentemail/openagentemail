@@ -607,6 +607,24 @@
     }
   }
 
+  /* list/board 只读投影：打开中的详情必须跟上匹配行，禁用决策且标签一致。 */
+  function syncActiveTaskDetailFromList(rows) {
+    var detail = state.taskDetail;
+    if (!detail || !state.activeTaskId || detail.id !== state.activeTaskId) return;
+    var row = null;
+    (Array.isArray(rows) ? rows : []).some(function (task) {
+      if (task && task.id === state.activeTaskId) {
+        row = task;
+        return true;
+      }
+      return false;
+    });
+    if (!row || !approvalPastDeadline(row) || approvalPastDeadline(detail)) return;
+    state.taskDetail = Object.assign({}, detail, {
+      expiryProjection: 'past-deadline-unmaterialized'
+    });
+  }
+
   function renderTasks() {
     renderTasksMeta();
     renderTaskRows();
@@ -654,6 +672,7 @@
       } else {
         state.tasks = incoming;
       }
+      syncActiveTaskDetailFromList(state.tasks);
       state.tasksNextCursor = payload.nextCursor || '';
       state.tasksTotalApprox = typeof payload.totalApprox === 'number' ? payload.totalApprox : state.tasks.length;
       state.tasksUpdatedAt = Date.now();

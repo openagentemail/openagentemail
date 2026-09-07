@@ -834,6 +834,7 @@ describe('UI static asset contract', () => {
     expect(load).toContain('state.tasks = []');
     expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
     expect(load).toContain('if (!stillThere && !more && !opts.poll) clearTaskDetail();');
+    expect(load).toContain('syncActiveTaskDetailFromList(state.tasks)');
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderTaskRows('),
       UI_JS.indexOf('function renderTaskDetail('),

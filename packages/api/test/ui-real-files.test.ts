@@ -100,7 +100,7 @@ describe('UI real-file manifest (#520-A)', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
     // #75 返工：board/Home 呈现 expiryProjection；更新前已用 compare 确认差异有意。
-    expect(sha256(UI_JS)).toBe('0c8be1e2dda4cf250de47c891ead46fe5857365d654c4caad5c1183302b5251c');
+    expect(sha256(UI_JS)).toBe('1485fb70a6edf4c3a1f3b2e2b2ff33ad7f7d8934db9c3ecf88b3800b092817a0');
     expect(sha256(UI_CSS)).toBe('de1732ea6cd909c377f392e5de16522858820aecf1b9b9cb55555dba093ad576');
   });
 });
