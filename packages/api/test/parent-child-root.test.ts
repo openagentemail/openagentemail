@@ -27,6 +27,10 @@ type IntegritySeams = {
   }) => Promise<unknown>;
   taskFromParsedMessagesForTests?: (id: string, messages: unknown[]) => unknown;
   setTaskIdForTests?: (fn: (() => string) | null) => void;
+  setFindTaskMessagesForTests?: (
+    fn: ((id: string) => Promise<{ messages: unknown[]; hadMatchingRows: boolean }>) | null,
+  ) => void;
+  getTaskSnapshot?: (id: string) => Promise<Task | null>;
   observeTaskSideEffectsForTests?: () => {
     notifications: string[]; cacheInvalidations: number; queuedTaskIds: string[];
   };
@@ -59,6 +63,7 @@ afterEach(() => {
   taskSeams.clearQueuedEventsForTests();
   taskSeams.setTaskNowForTests(null);
   integrity.setTaskIdForTests?.(null);
+  integrity.setFindTaskMessagesForTests?.(null);
   integrity.clearTaskSideEffectObserverForTests?.();
 });
 
@@ -669,6 +674,185 @@ test('R5f wait helper immediately rejects without hanging when concurrent operat
   ).rejects.toThrow('simulated_delivery_failure');
 
   await expect(failingOp).rejects.toThrow('simulated_delivery_failure');
+});
+
+// #161 T1：完好低 UID v2 根 + 高 UID 被剥 replay（marker）→ 重建成功且忽略 marker。
+test('#161 T1 intact low-UID v2 root ignores a higher-UID stripped replay marker', async () => {
+  const intact = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 1, source: rootSource(ID, PARENT), internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  const marker = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 9,
+    source: removeHeader(rootSource(ID, PARENT), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:09:00.000Z',
+  });
+  expect(intact).toMatchObject({ parentTaskId: PARENT, uid: 1, subject: 'Signed root' });
+  expect(marker).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID, uid: 9 });
+  const rebuilt = integrity.taskFromParsedMessagesForTests!(ID, [intact, marker]) as Task;
+  expect(rebuilt).toMatchObject({ parentTaskId: PARENT, subject: 'Signed root', state: 'submitted' });
+});
+
+// #161 T2：低 UID 根被剥（marker）+ 高 UID 认证 replay 根（同认证转录、展示字段不同）→ null。
+test('#161 T2 stripped low-UID root plus authenticated high-UID replay fails closed', async () => {
+  const marker = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 1,
+    source: removeHeader(rootSource(ID, PARENT, 'Original signed root'), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  // 同认证转录的 replay：subject/body 未签名，故意写成与被剥根不同，证明不得升格替换展示。
+  const replay = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 8,
+    source: changeHeader(rootSource(ID, PARENT, 'forged replay subject'), 'Subject', 'forged replay subject')
+      .replace(/\r\n\r\n[\s\S]*$/, '\r\n\r\nforged replay body'),
+    internalDate: '2026-08-30T00:08:00.000Z',
+  });
+  expect(marker).toMatchObject({ kind: 'relationship-integrity-failure', taskId: ID, uid: 1 });
+  expect(replay).toMatchObject({
+    parentTaskId: PARENT,
+    uid: 8,
+    subject: 'forged replay subject',
+    body: 'forged replay body',
+  });
+  expect(integrity.taskFromParsedMessagesForTests!(ID, [marker, replay])).toBeNull();
+});
+
+// #161 T3：T2 场景走 getTaskSnapshot——hadMatchingRows 路径抑制 synthetic base 并返回 null。
+test('#161 T3 getTaskSnapshot suppresses synthetic base when T2 reconstruction fails closed', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  const sent = capture();
+  const created = await tasks.createTask({
+    from: FROM, to: TO, subject: 'Synthetic then poisoned', body: 'body', parentTaskId: PARENT,
+  } as Parameters<typeof tasks.createTask>[0]);
+  // 关掉 getTask 替身，让 getTaskSnapshot 走 findTaskMessages / hadMatchingRows 真路径。
+  // 先注入空查找，避免测试环境打真实 IMAP，同时证明 synthetic base 仍可读。
+  taskSeams.setTaskGetForTests(null);
+  expect(integrity.getTaskSnapshot).toBeFunction();
+  integrity.setFindTaskMessagesForTests!(async () => ({ messages: [], hadMatchingRows: false }));
+  expect(await integrity.getTaskSnapshot!(created.id)).toMatchObject({
+    id: created.id, subject: 'Synthetic then poisoned',
+  });
+
+  const marker = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: created.id,
+    uid: 1,
+    source: removeHeader(rfc822(sent[0]!), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  const replay = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: created.id,
+    uid: 8,
+    source: changeHeader(rfc822(sent[0]!), 'Subject', 'forged replay subject')
+      .replace(/\r\n\r\n[\s\S]*$/, '\r\n\r\nforged replay body'),
+    internalDate: '2026-08-30T00:08:00.000Z',
+  });
+  expect(marker).toMatchObject({ kind: 'relationship-integrity-failure', uid: 1 });
+  expect(replay).toMatchObject({ parentTaskId: PARENT, uid: 8, subject: 'forged replay subject' });
+
+  integrity.setFindTaskMessagesForTests!(async (id) => (
+    id === created.id
+      ? { messages: [marker, replay], hadMatchingRows: true }
+      : { messages: [], hadMatchingRows: false }
+  ));
+  expect(await integrity.getTaskSnapshot!(created.id)).toBeNull();
+
+  // synthetic base 已被 hadMatchingRows 路径删除：空查找不得再回落到 synthetic。
+  integrity.setFindTaskMessagesForTests!(async () => ({ messages: [], hadMatchingRows: false }));
+  expect(await integrity.getTaskSnapshot!(created.id)).toBeNull();
+});
+
+// #161 T4：多 marker 两侧混布，按 min-vs-min 判定。
+test('#161 T4 min-vs-min with markers on both sides of the surviving root', async () => {
+  const markerLow = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 2,
+    source: removeHeader(rootSource(ID, PARENT), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:02:00.000Z',
+  });
+  const rootMid = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 5, source: rootSource(ID, PARENT), internalDate: '2026-08-30T00:05:00.000Z',
+  });
+  const markerHigh = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 9,
+    source: changeHeader(
+      rootSource(ID, PARENT),
+      'X-OA-Task-Root',
+      Buffer.from(`{"version":2,"parentTaskId":"${OTHER_PARENT}"}`, 'utf8').toString('base64url'),
+    ),
+    internalDate: '2026-08-30T00:09:00.000Z',
+  });
+  expect(markerLow).toMatchObject({ kind: 'relationship-integrity-failure', uid: 2 });
+  expect(rootMid).toMatchObject({ parentTaskId: PARENT, uid: 5 });
+  expect(markerHigh).toMatchObject({ kind: 'relationship-integrity-failure', uid: 9 });
+  // marker@2 + 根@5 + marker@9 → min(root)=5 > min(marker)=2 → 真根区被毒。
+  expect(integrity.taskFromParsedMessagesForTests!(ID, [markerLow, rootMid, markerHigh])).toBeNull();
+
+  const rootLow = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 2, source: rootSource(ID, PARENT), internalDate: '2026-08-30T00:02:00.000Z',
+  });
+  const markerMid = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 5,
+    source: removeHeader(rootSource(ID, PARENT), 'X-OA-Task-Root'),
+    internalDate: '2026-08-30T00:05:00.000Z',
+  });
+  expect(rootLow).toMatchObject({ parentTaskId: PARENT, uid: 2 });
+  expect(markerMid).toMatchObject({ kind: 'relationship-integrity-failure', uid: 5 });
+  // 根@2 + marker@5 + marker@9 → min(root)=2 < min(marker)=5 → 忽略 marker 重建。
+  expect(integrity.taskFromParsedMessagesForTests!(ID, [rootLow, markerMid, markerHigh])).toMatchObject({
+    parentTaskId: PARENT, subject: 'Signed root', state: 'submitted',
+  });
+});
+
+// #161 T5：完好根@1 + 高 UID 认证 replay 篡改 subject/body → 展示仍取根@1。
+test('#161 T5 lowest-UID-root display wins over a later authenticated replay', async () => {
+  const intact = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 1, source: rootSource(ID, PARENT, 'Signed root'), internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  const replay = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 8,
+    source: changeHeader(rootSource(ID, PARENT, 'forged unsigned subject'), 'Subject', 'forged unsigned subject')
+      .replace(/\r\n\r\n[\s\S]*$/, '\r\n\r\nforged unsigned body'),
+    internalDate: '2026-08-30T00:08:00.000Z',
+  });
+  expect(replay).toMatchObject({
+    parentTaskId: PARENT, uid: 8, subject: 'forged unsigned subject', body: 'forged unsigned body',
+  });
+  const rebuilt = integrity.taskFromParsedMessagesForTests!(ID, [intact, replay]) as Task;
+  expect(rebuilt).toMatchObject({ parentTaskId: PARENT, subject: 'Signed root' });
+  expect(rebuilt.messages[0]).toMatchObject({ subject: 'Signed root', body: 'body' });
+  expect(JSON.stringify(rebuilt)).not.toContain('forged unsigned');
+});
+
+// #161 T6：legacy 流（无 parentTaskId、无 marker）行为零变化。
+test('#161 T6 legacy parentless history without markers still reconstructs', async () => {
+  const legacy = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 1,
+    source: rfc822({
+      from: FROM, to: [TO], subject: 'Legacy ordinary', text: 'legacy body',
+      headers: { 'X-OA-Task': ID, 'X-OA-Task-State': 'submitted', 'X-OA-Task-Stamp': v1Stamp(ID, 'submitted', FROM, TO) },
+    }),
+    internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  const later = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID,
+    uid: 2,
+    source: rfc822({
+      from: TO, to: [FROM], subject: 'Legacy ordinary', text: 'working',
+      headers: { 'X-OA-Task': ID, 'X-OA-Task-State': 'working', 'X-OA-Task-Stamp': v1Stamp(ID, 'working', TO, FROM) },
+    }),
+    internalDate: '2026-08-30T00:01:00.000Z',
+  });
+  expect(legacy).toMatchObject({ uid: 1, subject: 'Legacy ordinary', state: 'submitted' });
+  expect(legacy).not.toHaveProperty('parentTaskId');
+  const rebuilt = integrity.taskFromParsedMessagesForTests!(ID, [legacy, later]) as Task;
+  expect(rebuilt).toMatchObject({ subject: 'Legacy ordinary', state: 'working' });
+  expect(rebuilt).not.toHaveProperty('parentTaskId');
 });
 
 test('R5f wait helper times out with descriptive error when condition is never met', async () => {

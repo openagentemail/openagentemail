@@ -245,10 +245,12 @@ export type RawTaskMessage = {
   parentTaskId?: string;
 };
 
-/** Private poison marker: never populated from relationship metadata itself. */
+/** 私有毒化标记：不得从关系元数据自身填充。uid 透传 IMAP UID，供抑制分支 min-vs-min 序比对。 */
 type TaskRelationshipIntegrityFailure = {
   kind: 'relationship-integrity-failure';
   taskId: string;
+  /** 与 FetchMessageObject.uid 同型（number），不得 optional——语义比较字段必须有真值。 */
+  uid: number;
 };
 type ParsedTaskMessage = RawTaskMessage | TaskRelationshipIntegrityFailure | null;
 
@@ -1135,7 +1137,8 @@ async function relationshipIntegrityFailureFor(
       parsed.headers.get('x-oa-task-stamp'),
     );
     if (!hasRootWitness) return null;
-    return { kind: 'relationship-integrity-failure', taskId: id };
+    // 透传 IMAP UID：抑制分支按 min(root.uid) vs min(marker.uid) 判定，缺 UID 会静默升格 replay。
+    return { kind: 'relationship-integrity-failure', taskId: id, uid: message.uid };
   } catch {
     return null;
   }
@@ -1158,14 +1161,21 @@ async function parseTaskMessageWithIntegrity(
 
 function taskFromParsedMessages(id: string, messages: ParsedTaskMessage[]): Task | null {
   const authenticated = messages.filter((message): message is RawTaskMessage => !!message && !isRelationshipIntegrityFailure(message));
-  // An injected stripped/tampered replay cannot suppress an intact authenticated
-  // relationship root already present in the same durable history. The marker
-  // remains fail-closed only when no such root survives, preventing downgrade
-  // after the real creation root was removed or corrupted.
-  if (
-    messages.some(isRelationshipIntegrityFailure)
-    && !authenticated.some((message) => message.parentTaskId !== undefined)
-  ) return null;
+  // 抑制分支按 min-vs-min 序敏感（#161 / lowest-UID-root 不变量）：
+  // markers = 全部 integrity-failure；roots = authenticated 中带 parentTaskId 的项。
+  // - 无 roots：与现状一致，v2 无根不可重建，return null。
+  // - min(root.uid) > min(marker.uid)：真根区被毒，幸存认证 replay 不得升格 creation root → null。
+  // - min(root.uid) < min(marker.uid)：完好认证根在噪声之下，忽略 markers 照常重建。
+  // - 相等不可能（同一 UID 不会既是 marker 又是 authenticated）；若代码上可达则 fail-closed。
+  // taskFromMessages 的 roots 循环不动：认证字段一致性与 replay-noise 语义仍由那边钉死。
+  const markers = messages.filter(isRelationshipIntegrityFailure);
+  if (markers.length > 0) {
+    const roots = authenticated.filter((message) => message.parentTaskId !== undefined);
+    if (roots.length === 0) return null;
+    const minRootUid = Math.min(...roots.map((root) => root.uid));
+    const minMarkerUid = Math.min(...markers.map((marker) => marker.uid));
+    if (minRootUid >= minMarkerUid) return null;
+  }
   return taskFromMessages(id, authenticated);
 }
 
@@ -1471,6 +1481,7 @@ type TaskLookupResult = {
 };
 
 async function findTaskMessages(id: string): Promise<TaskLookupResult> {
+  if (findTaskMessagesForTests) return findTaskMessagesForTests(id);
   return withInbox(async (client) => {
     const uids = await client.search({ header: { 'x-oa-task': id } }, { uid: true });
     if (!uids || uids.length === 0) return { messages: [], hadMatchingRows: false };
@@ -1734,6 +1745,8 @@ let nowFn: () => number = () => Date.now();
 let listCache: { at: number; snapshot: TaskListSnapshot } | null = null;
 let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
+/** 测试注入 findTaskMessages 结果，用于走 getTaskSnapshot 的 hadMatchingRows 抑制路径。 */
+let findTaskMessagesForTests: ((id: string) => Promise<TaskLookupResult>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
 /** Test-only deterministic child id; production always uses crypto.randomUUID. */
 let taskIdForTests: (() => string) | null = null;
@@ -1839,6 +1852,13 @@ export function setTaskListAllForTests(fn: (() => Promise<Task[]>) | null): void
 
 export function setTaskGetForTests(fn: ((id: string) => Promise<Task | null>) | null): void {
   getTaskForTests = fn;
+}
+
+/** 测试专用：注入 IMAP 查找结果，使 getTaskSnapshot 走真实 hadMatchingRows 分支。 */
+export function setFindTaskMessagesForTests(
+  fn: ((id: string) => Promise<{ messages: ParsedTaskMessage[]; hadMatchingRows: boolean }>) | null,
+): void {
+  findTaskMessagesForTests = fn;
 }
 
 export function setTaskSendMailForTests(
