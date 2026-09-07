@@ -229,6 +229,8 @@ services:
       UI_ENABLED: ${UI_ENABLED:-true}
       # Single API process per mailbox required when enabled.
       TASK_LEASES_ENABLED: ${TASK_LEASES_ENABLED:-false}
+      # M3 expiry-audit derivation. Default false. Single API process per mailbox required when leases are enabled.
+      TASK_LEASES_EXPIRY_AUDIT_M3: ${TASK_LEASES_EXPIRY_AUDIT_M3:-false}
       # --- catch-all mailbox access (same account for IMAP read + SMTP send) ---
       IMAP_HOST: mailserver
       IMAP_PORT: 993

@@ -6,6 +6,8 @@ import {
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
   takeApprovalWatcherParseCallsForTests,
+  expiryAuditDeliveryFailureCountForTests,
+  resetExpiryAuditDeliveryFailureCountForTests,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -16,4 +18,6 @@ export {
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
   takeApprovalWatcherParseCallsForTests,
+  expiryAuditDeliveryFailureCountForTests,
+  resetExpiryAuditDeliveryFailureCountForTests,
 };

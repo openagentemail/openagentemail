@@ -154,6 +154,10 @@ const envSchema = z.object({
   // byte-compatible unless an operator explicitly enables this authority.
   TASK_LEASES_ENABLED: z.enum(['true', 'false']).default('false'),
 
+  // M3：expired 回执派生化（默认关）。读侧迟到无害化与写侧补账/best-effort 同闸，
+  // 禁止「发射开、容忍关」。开启后 reclaim 不再被 audit SMTP 挡死。
+  TASK_LEASES_EXPIRY_AUDIT_M3: z.enum(['true', 'false']).default('false'),
+
   // Comma-separated domains allowed as the `from` domain of an identity.
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
@@ -423,6 +427,8 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     // secret, which is the supported v0.4 deployment path.
     taskSigningSecret,
     taskLeasesEnabled: raw.TASK_LEASES_ENABLED === 'true',
+    // M3 与 leases 总闸独立；默认关，灰度后再开。
+    taskLeasesExpiryAuditM3: raw.TASK_LEASES_EXPIRY_AUDIT_M3 === 'true',
     // 通知游标与 task/mail 游标域分离；不新增 env。旧 notify 游标失效可接受。
     notifyCursorSecret: createHmac('sha256', taskSigningSecret)
       .update('notify-cursor-v1')

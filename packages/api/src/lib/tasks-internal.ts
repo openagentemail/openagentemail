@@ -12,7 +12,7 @@ import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
-import { taskLeasesEnabled } from './task-lease-gate.ts';
+import { taskLeaseExpiryAuditM3Enabled, taskLeasesEnabled } from './task-lease-gate.ts';
 import { isTaskId } from './task-id.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 import * as taskChildrenCursor from './task-cursor.ts';
@@ -185,6 +185,14 @@ type ExpiredLeaseReceipt = {
   firstClaimedAt?: string;
 };
 
+/** 内部：durable claim 权威窗（续约后最终 deadline），供 M3 reaper 补账推导。 */
+type LeaseClaimWindow = {
+  generation: number;
+  claimedUntil: string;
+  hasExpiryReceipt: boolean;
+  hasRelease: boolean;
+};
+
 export type Task = {
   id: string;
   from: string;
@@ -205,9 +213,11 @@ export type Task = {
   releasedLease?: ReleasedLeaseReceipt;
   /** Durable non-secret record that an expired generation was materialized. */
   expiredLease?: ExpiredLeaseReceipt;
+  /** 内部权威窗列表；不进公开视图，只给 M3 reaper 用。 */
+  leaseClaimWindows?: readonly LeaseClaimWindow[];
 };
 
-export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'leaseClaimWindows'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -1233,6 +1243,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   const appliedReleases = new Map<number, ReleaseLeaseEvent>();
+  // 权威窗身份 = (gen, 续约后最终 claimedUntil)，供迟到回执匹配与 reaper 补账。
+  const appliedClaimWindows = new Map<number, { claimedUntil: string }>();
   // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
   const duplicateLeaseMessages = new Set<RawTaskMessage>();
   for (const message of leaseEvents) {
@@ -1253,21 +1265,38 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         }
         return null;
       }
+      const matchesCurrentAuthority = !!leaseAuthority?.claimedUntil
+        && lease.generation === leaseAuthority.leaseGeneration
+        && lease.claimedUntil === leaseAuthority.claimedUntil;
+      if (matchesCurrentAuthority) {
+        leaseAuthority = undefined;
+        releasedLease = undefined;
+        expiredLease = {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+          ...(firstClaimedAt ? { firstClaimedAt } : {}),
+        };
+        appliedExpiryReceipts.set(lease.generation, expiredLease);
+        continue;
+      }
+      // M3-3：已验签回执匹配历史权威窗 → 审计 no-op（不推进、不清权威、不进公开序列）。
+      const historicalWindow = appliedClaimWindows.get(lease.generation);
       if (
-        !leaseAuthority?.claimedUntil
-        || lease.generation !== leaseAuthority.leaseGeneration
-        || lease.claimedUntil !== leaseAuthority.claimedUntil
-      ) return null;
-      leaseAuthority = undefined;
-      releasedLease = undefined;
-      expiredLease = {
-        leaseGeneration: lease.generation,
-        claimedUntil: lease.claimedUntil,
-        expiredAt: lease.expiredAt,
-        ...(firstClaimedAt ? { firstClaimedAt } : {}),
-      };
-      appliedExpiryReceipts.set(lease.generation, expiredLease);
-      continue;
+        taskLeaseExpiryAuditM3Enabled()
+        && historicalWindow
+        && historicalWindow.claimedUntil === lease.claimedUntil
+      ) {
+        appliedExpiryReceipts.set(lease.generation, {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+          ...(firstClaimedAt ? { firstClaimedAt } : {}),
+        });
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
+      return null;
     }
     if (
       message.from !== first.to || message.to !== first.from
@@ -1310,6 +1339,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         firstClaimedAt,
       };
       appliedClaims.set(lease.generation, lease);
+      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
       continue;
     }
     if (lease.event === 'renew') {
@@ -1335,6 +1365,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       ) return null;
       leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
       appliedRenews.set(lease.generation, [...priorRenews, lease]);
+      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
       continue;
     }
     const priorRelease = appliedReleases.get(lease.generation);
@@ -1434,6 +1465,22 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     task.releasedLease = releasedLease;
   } else if (expiredLease && !TERMINAL_TASK_STATES.includes(current.state)) {
     task.expiredLease = expiredLease;
+  }
+  // 重建端带出权威窗，reaper 才能从 durable 流推导缺失回执（含已被后继 claim 取代的历史窗）。
+  if (appliedClaims.size > 0) {
+    task.leaseClaimWindows = [...appliedClaims.keys()]
+      .sort((left, right) => left - right)
+      .map((generation) => {
+        const claim = appliedClaims.get(generation)!;
+        const claimedUntil = appliedClaimWindows.get(generation)?.claimedUntil ?? claim.claimedUntil;
+        const receipt = appliedExpiryReceipts.get(generation);
+        return {
+          generation,
+          claimedUntil,
+          hasExpiryReceipt: !!receipt && receipt.claimedUntil === claimedUntil,
+          hasRelease: appliedReleases.has(generation),
+        };
+      });
   }
   return task;
 }
@@ -1912,7 +1959,12 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
       if (receipt && isSameLeaseExpiryIdentity(receipt, queued.lease)) return true;
-      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
+      // 历史窗回执：后继 generation 在场只说明权威已前进，不能证明该窗回执已入 durable。
+      // 用窗记账判断，避免 overlay 被误退休后 reaper 重发（M3-2 幂等）。
+      if (task.leaseClaimWindows?.some((window) =>
+        window.hasExpiryReceipt && isSameLeaseExpiryIdentity(window, queued.lease)
+      )) return true;
+      return false;
     }
     if (queued.lease.event === 'release') {
       return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')
@@ -1988,6 +2040,7 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   let authority = task.lease;
   let releasedLease = task.releasedLease;
   let expiredLease = task.expiredLease;
+  let leaseClaimWindows = task.leaseClaimWindows ? [...task.leaseClaimWindows] : undefined;
   for (const event of extra.map((row) => row.lease).filter((lease): lease is LeaseEvent => !!lease)) {
     if (event.event === 'expired') {
       // A stale queued receipt must never clear a later authority.
@@ -2005,6 +2058,12 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
           ...(firstClaimedAt ? { firstClaimedAt } : {}),
         };
       }
+      // 历史窗回执只记账，不推翻后继权威。
+      leaseClaimWindows = upsertLeaseClaimWindow(leaseClaimWindows, {
+        generation: event.generation,
+        claimedUntil: event.claimedUntil,
+        hasExpiryReceipt: true,
+      });
       continue;
     }
     if (event.event === 'release') {
@@ -2017,6 +2076,10 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
         reason: event.reason,
         ...(firstClaimedAt ? { firstClaimedAt } : {}),
       };
+      leaseClaimWindows = upsertLeaseClaimWindow(leaseClaimWindows, {
+        generation: event.generation,
+        hasRelease: true,
+      });
     } else if (event.event === 'claim') {
       const firstClaimedAt = authority?.firstClaimedAt ?? releasedLease?.firstClaimedAt ?? expiredLease?.firstClaimedAt ?? event.at;
       releasedLease = undefined;
@@ -2028,8 +2091,18 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
         generationClaimedAt: event.at,
         firstClaimedAt,
       };
+      leaseClaimWindows = upsertLeaseClaimWindow(leaseClaimWindows, {
+        generation: event.generation,
+        claimedUntil: event.claimedUntil,
+        hasExpiryReceipt: false,
+        hasRelease: false,
+      });
     } else if (authority) {
       authority = { ...authority, claimedUntil: event.claimedUntil };
+      leaseClaimWindows = upsertLeaseClaimWindow(leaseClaimWindows, {
+        generation: event.generation,
+        claimedUntil: event.claimedUntil,
+      });
     }
   }
   if (TERMINAL_TASK_STATES.includes(next.state)) {
@@ -2048,6 +2121,7 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
     delete next.releasedLease;
     next.expiredLease = expiredLease;
   }
+  if (leaseClaimWindows) next.leaseClaimWindows = leaseClaimWindows;
   return next;
 }
 
@@ -2252,7 +2326,15 @@ export async function claimTask(input: {
     // rejected claim is a true zero-side-effect operation.
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), beforeMaterialization);
     const wasWorking = current.state === 'working';
-    current = await materializeLeaseExpiryUnlocked(current);
+    try {
+      current = await materializeLeaseExpiryUnlocked(current);
+    } catch (error) {
+      // M3-1：回执投递降 best-effort，失败不挡新 claim。
+      if (!taskLeaseExpiryAuditM3Enabled() || !isExpiryAuditDeliveryError(error)) throw error;
+    }
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      current = deriveExpiredLeaseIfPastDeadline(current);
+    }
     const now = nowMs();
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), now);
     if (current.lease?.claimedUntil && now < Date.parse(current.lease.claimedUntil)) {
@@ -2413,6 +2495,203 @@ function leaseEventMessage(input: {
   };
 }
 
+/** M3 投递失败计数；进程内、可丢，只为可观测性。 */
+let expiryAuditDeliveryFailures = 0;
+
+/** SMTP 投递失败的标记错误，供 reaper 单候选隔离识别。 */
+class ExpiryAuditDeliveryError extends Error {
+  readonly kind = 'expiry_audit_delivery_failed' as const;
+  constructor(
+    readonly taskId: string,
+    readonly generation: number,
+    readonly claimedUntil: string,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), {
+      cause: cause instanceof Error ? cause : undefined,
+    });
+    this.name = 'ExpiryAuditDeliveryError';
+  }
+}
+
+function isExpiryAuditDeliveryError(error: unknown): error is ExpiryAuditDeliveryError {
+  return error instanceof ExpiryAuditDeliveryError;
+}
+
+function warnExpiryAuditDeliveryFailed(detail: {
+  taskId: string;
+  generation: number;
+  claimedUntil: string;
+  error: unknown;
+}): void {
+  expiryAuditDeliveryFailures += 1;
+  console.warn({
+    kind: 'expiry_audit_delivery_failed',
+    taskId: detail.taskId,
+    generation: detail.generation,
+    claimedUntil: detail.claimedUntil,
+    error: detail.error instanceof Error ? detail.error.message : String(detail.error),
+    failures: expiryAuditDeliveryFailures,
+  });
+}
+
+export function expiryAuditDeliveryFailureCountForTests(): number {
+  return expiryAuditDeliveryFailures;
+}
+
+export function resetExpiryAuditDeliveryFailureCountForTests(): void {
+  expiryAuditDeliveryFailures = 0;
+}
+
+function upsertLeaseClaimWindow(
+  windows: readonly LeaseClaimWindow[] | undefined,
+  patch: Partial<LeaseClaimWindow> & Pick<LeaseClaimWindow, 'generation'>,
+): LeaseClaimWindow[] {
+  const list = [...(windows ?? [])];
+  const index = list.findIndex((window) => window.generation === patch.generation);
+  const base = index >= 0
+    ? list[index]!
+    : { generation: patch.generation, claimedUntil: '', hasExpiryReceipt: false, hasRelease: false };
+  const next = { ...base, ...patch };
+  if (index >= 0) list[index] = next;
+  else list.push(next);
+  return list;
+}
+
+function overlayHasExpiryReceipt(taskId: string, window: { generation: number; claimedUntil: string }): boolean {
+  const pending = queuedEvents.get(taskId);
+  if (!pending) return false;
+  return pending.some((row) =>
+    row.lease?.event === 'expired' && isSameLeaseExpiryIdentity(row.lease, window));
+}
+
+/** 无重建窗时从当前快照兜底（仅覆盖最新一代）。 */
+function inferLeaseClaimWindows(task: Task): LeaseClaimWindow[] {
+  if (task.leaseClaimWindows && task.leaseClaimWindows.length > 0) return [...task.leaseClaimWindows];
+  const windows: LeaseClaimWindow[] = [];
+  if (task.lease?.claimedUntil && typeof task.lease.leaseGeneration === 'number') {
+    windows.push({
+      generation: task.lease.leaseGeneration,
+      claimedUntil: task.lease.claimedUntil,
+      hasExpiryReceipt: false,
+      hasRelease: false,
+    });
+  }
+  if (task.expiredLease) {
+    windows.push({
+      generation: task.expiredLease.leaseGeneration,
+      claimedUntil: task.expiredLease.claimedUntil,
+      hasExpiryReceipt: true,
+      hasRelease: false,
+    });
+  }
+  if (task.releasedLease) {
+    windows.push({
+      generation: task.releasedLease.leaseGeneration,
+      claimedUntil: '',
+      hasExpiryReceipt: false,
+      hasRelease: true,
+    });
+  }
+  return windows;
+}
+
+/** server-time 派生失活：不发信、不入 overlay，durable 回执仍缺。 */
+function deriveExpiredLeaseIfPastDeadline(current: Task): Task {
+  const active = current.lease;
+  const now = nowMs();
+  if (
+    !active?.claimedUntil
+    || now < Date.parse(active.claimedUntil)
+    || isApprovalTask(current)
+    || !canAdvanceTask(current.state)
+    || isClosedByAdmin(current)
+  ) return current;
+  return {
+    ...current,
+    lease: undefined,
+    releasedLease: undefined,
+    expiredLease: {
+      leaseGeneration: active.leaseGeneration,
+      claimedUntil: active.claimedUntil,
+      expiredAt: new Date(now).toISOString(),
+      ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
+    },
+  };
+}
+
+/** 发出一条 expired 回执。当前窗才清权威；历史窗只补审计。 */
+async function emitExpiryAuditUnlocked(
+  current: Task,
+  window: { generation: number; claimedUntil: string },
+): Promise<Task> {
+  const expiredAt = new Date(nowMs()).toISOString();
+  const lease: ExpiredLeaseEvent = {
+    version: 1,
+    event: 'expired',
+    actor: 'server',
+    at: expiredAt,
+    generation: window.generation,
+    claimedUntil: window.claimedUntil,
+    expiredAt,
+  };
+  const from = current.from;
+  const to = current.to;
+  const text = 'Lease expired.';
+  try {
+    await deliverMail({
+      from,
+      to: [to],
+      subject: current.subject,
+      text,
+      headers: leaseEventHeaders(current.id, current.state, from, to, lease),
+    });
+  } catch (error) {
+    if (!taskLeaseExpiryAuditM3Enabled()) throw error;
+    warnExpiryAuditDeliveryFailed({
+      taskId: current.id,
+      generation: window.generation,
+      claimedUntil: window.claimedUntil,
+      error,
+    });
+    throw new ExpiryAuditDeliveryError(current.id, window.generation, window.claimedUntil, error);
+  }
+  invalidateTaskListCache();
+  const eventMessage = leaseEventMessage({
+    task: current, from, to, state: current.state, at: expiredAt, body: text,
+  });
+  queueEventUntilIndexed(current.id, eventMessage, lease);
+  const isCurrentWindow = current.lease?.leaseGeneration === window.generation
+    && current.lease.claimedUntil === window.claimedUntil;
+  const leaseClaimWindows = upsertLeaseClaimWindow(current.leaseClaimWindows, {
+    generation: window.generation,
+    claimedUntil: window.claimedUntil,
+    hasExpiryReceipt: true,
+  });
+  if (!isCurrentWindow) {
+    return {
+      ...current,
+      updatedAt: expiredAt,
+      messages: [...current.messages, eventMessage],
+      leaseClaimWindows,
+    };
+  }
+  return {
+    ...current,
+    updatedAt: expiredAt,
+    messages: [...current.messages, eventMessage],
+    lease: undefined,
+    releasedLease: undefined,
+    expiredLease: {
+      leaseGeneration: lease.generation,
+      claimedUntil: lease.claimedUntil,
+      expiredAt: lease.expiredAt,
+      ...(current.lease?.firstClaimedAt ? { firstClaimedAt: current.lease.firstClaimedAt } : {}),
+    },
+    leaseClaimWindows,
+  };
+}
+
 /** Must run under the existing per-task lock. It emits a server-authored,
  * durable receipt only after SMTP accepts it, so retries cannot invent an
  * in-memory success state. */
@@ -2426,45 +2705,29 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
     || !canAdvanceTask(current.state)
     || isClosedByAdmin(current)
   ) return current;
-  const expiredAt = new Date(now).toISOString();
-  const lease: ExpiredLeaseEvent = {
-    version: 1,
-    event: 'expired',
-    actor: 'server',
-    at: expiredAt,
+  return emitExpiryAuditUnlocked(current, {
     generation: active.leaseGeneration,
     claimedUntil: active.claimedUntil,
-    expiredAt,
-  };
-  // The requester→recipient envelope is only mail transport. The signed
-  // actor above is the sole expiry authority and is intentionally not either
-  // participant.
-  const from = current.from;
-  const to = current.to;
-  const text = 'Lease expired.';
-  const { messageId: _messageId } = await deliverMail({
-    from,
-    to: [to],
-    subject: current.subject,
-    text,
-    headers: leaseEventHeaders(current.id, current.state, from, to, lease),
   });
-  invalidateTaskListCache();
-  const eventMessage = leaseEventMessage({ task: current, from, to, state: current.state, at: expiredAt, body: text });
-  queueEventUntilIndexed(current.id, eventMessage, lease);
-  return {
-    ...current,
-    updatedAt: expiredAt,
-    messages: [...current.messages, eventMessage],
-    lease: undefined,
-    releasedLease: undefined,
-    expiredLease: {
-      leaseGeneration: lease.generation,
-      claimedUntil: lease.claimedUntil,
-      expiredAt: lease.expiredAt,
-      ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
-    },
-  };
+}
+
+/** M3-2：从 durable 权威窗推导缺失回执；身份不可变，重跑不重发。 */
+async function reconcileMissingExpiryAuditsUnlocked(current: Task): Promise<number> {
+  if (!taskLeaseExpiryAuditM3Enabled()) return 0;
+  if (isApprovalTask(current) || !canAdvanceTask(current.state) || isClosedByAdmin(current)) return 0;
+  const now = nowMs();
+  const windows = inferLeaseClaimWindows(current);
+  let emitted = 0;
+  let snapshot = current;
+  for (const window of windows) {
+    if (window.hasRelease || window.hasExpiryReceipt) continue;
+    if (!window.claimedUntil || now < Date.parse(window.claimedUntil)) continue;
+    if (snapshot.expiredLease && isSameLeaseExpiryIdentity(snapshot.expiredLease, window)) continue;
+    if (overlayHasExpiryReceipt(snapshot.id, window)) continue;
+    snapshot = await emitExpiryAuditUnlocked(snapshot, window);
+    emitted += 1;
+  }
+  return emitted;
 }
 
 /** One bounded pass for the server reaper. All task authority remains in the
@@ -2472,17 +2735,32 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
 export async function reapExpiredTaskLeasesOnce(): Promise<number> {
   assertTaskLeasesEnabled();
   const candidates = await loadAllTasksCached();
+  const m3 = taskLeaseExpiryAuditM3Enabled();
   let materialized = 0;
   for (const candidate of candidates) {
-    const didMaterialize = await withTaskLock(candidate.id, async () => {
-      const current = await getTaskSnapshot(candidate.id);
-      if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
-      const next = await materializeLeaseExpiryUnlocked(current);
-      return !!next.expiredLease
-        && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
-        && next.expiredLease.claimedUntil === current.lease.claimedUntil;
-    });
-    if (didMaterialize) materialized += 1;
+    try {
+      const didMaterialize = await withTaskLock(candidate.id, async () => {
+        const current = await getTaskSnapshot(candidate.id);
+        if (!current) return false;
+        let snapshot = current;
+        let didCurrent = false;
+        if (snapshot.lease?.claimedUntil && nowMs() >= Date.parse(snapshot.lease.claimedUntil)) {
+          const next = await materializeLeaseExpiryUnlocked(snapshot);
+          didCurrent = !!next.expiredLease
+            && next.expiredLease.leaseGeneration === snapshot.lease.leaseGeneration
+            && next.expiredLease.claimedUntil === snapshot.lease.claimedUntil;
+          snapshot = next;
+        }
+        // M3-2 reconcile 覆盖历史窗；当前窗已物化则身份匹配后跳过。
+        const reconciled = m3 ? await reconcileMissingExpiryAuditsUnlocked(snapshot) : 0;
+        return didCurrent || reconciled > 0;
+      });
+      if (didMaterialize) materialized += 1;
+    } catch (error) {
+      // 单候选只隔离投递错误；IMAP/锁等非投递异常仍按现行语义抛出。
+      if (m3 && isExpiryAuditDeliveryError(error)) continue;
+      throw error;
+    }
   }
   return materialized;
 }
