@@ -470,6 +470,22 @@ describe('MCP task_list/task_get 广播 outputSchema 契约', () => {
     expect(get?.outputSchema?.properties).toHaveProperty('kind');
     expect(get?.outputSchema?.properties).toHaveProperty('approval');
   });
+
+  test('#75 tools/list 广播 task 层含可选 expiryProjection，且 additionalProperties=false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; outputSchema?: JsonSchema }> };
+    };
+    for (const name of ['task_list', 'task_get'] as const) {
+      const tool = body.result?.tools?.find((t) => t.name === name);
+      expect(tool, `missing tool ${name}`).toBeTruthy();
+      const root = tool?.outputSchema as JsonSchema;
+      const taskSchema = name === 'task_list' ? root.properties?.tasks?.items ?? {} : root;
+      expect(taskSchema.additionalProperties).toBe(false);
+      expect(taskSchema.properties).toHaveProperty('expiryProjection');
+    }
+  });
 });
 
 /**

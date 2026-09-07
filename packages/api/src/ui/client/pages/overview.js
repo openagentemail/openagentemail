@@ -52,6 +52,8 @@
     button.type = 'button';
     button.className = 'home-task-row';
     if (task.overdueReason) button.classList.add('is-overdue');
+    /* 过期未物化：Home 行不得再当「等你批」。 */
+    if (approvalPastDeadline(task)) button.classList.add('is-past-deadline');
     var subject = document.createElement('span');
     subject.className = 'home-task-subject';
     subject.textContent = task.subject || '(no subject)';

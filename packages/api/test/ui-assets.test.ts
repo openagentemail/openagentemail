@@ -734,6 +734,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).not.toContain("value = '__tasks__'");
     expect(UI_JS).toContain("return 'Waiting for you'");
+    expect(UI_JS).toContain("return 'Past deadline'");
+    expect(UI_JS).toContain('function approvalPastDeadline(');
+    expect(UI_JS).toContain("button.classList.add('is-past-deadline')");
     expect(UI_JS).toContain('Write a reply. This goes back to the agent as a working update.');
     expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('function clearTasksState(');

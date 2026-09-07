@@ -698,10 +698,12 @@ function makeApprovalActionHarness(apiJsonImpl?: (path: string, init: RequestIni
   let renderCount = 0;
   let loadCount = 0;
   const updated = { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved' } };
+  /* 过期投影 helper 在 label 段；decision 谓词/标题都要看见它。 */
+  const helper = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
   const source = sliceTasksFn('function approvalCanDecide(', 'function renderTaskRows(');
   const fn = new Function(
     'document', 'state', 'isAdmin', 'apiJson', 'renderTasks', 'loadTasks', 'announce',
-    `${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
+    `${helper}\n${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
   );
   const renderer = fn(
     { createElement: fakeEl }, state, () => false,
@@ -725,6 +727,7 @@ function makeAdminTaskDetailHarness(task: Task) {
     'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail', 'taskStateToken', 'taskStateLabel',
     'formatAgo', 'taskTimelineBody', 'formatDate', 'taskIsClosed', 'renderTaskResultNode', 'renderApprovalAction',
     'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+    'approvalPastDeadline',
     `${source}\nreturn renderTaskDetail;`,
   );
   const renderTaskDetail = fn(
@@ -738,6 +741,7 @@ function makeAdminTaskDetailHarness(task: Task) {
       return actions;
     },
     () => {}, () => {}, () => {}, () => {}, 100,
+    () => false,
   ) as () => void;
   return { tasksDetailContent, renderTaskDetail };
 }
@@ -1178,6 +1182,83 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     // 红条通道在 CSS，不只靠 class 名；与 PR4「左侧红条 + Overdue 文字」对齐
     expect(PAGES_CSS).toContain('.task-row.is-overdue {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+  });
+});
+
+describe('#75 board expiryProjection presentation', () => {
+  const projected = {
+    ...APPROVAL_TASK,
+    expiryProjection: 'past-deadline-unmaterialized' as const,
+  };
+
+  test('projected row is Past deadline, not Waiting for you, and carries the expiry flag', () => {
+    const { state, tasksRows, renderTaskRows } = makeTaskRowHarness();
+    state.tasks = [
+      { ...projected, overdueReason: null, overdueAt: null },
+      {
+        ...APPROVAL_TASK,
+        id: '66666666-6666-4666-8666-666666666666',
+        overdueReason: null,
+        overdueAt: null,
+      },
+    ];
+    state.tasksTotalApprox = 2;
+    renderTaskRows();
+
+    const expiredRow = tasksRows.childNodes[0];
+    const pendingRow = tasksRows.childNodes[1];
+    expect(leafTexts(expiredRow)).toContain('Past deadline');
+    expect(leafTexts(expiredRow)).not.toContain('Waiting for you');
+    expect(expiredRow.classList.contains('is-past-deadline')).toBe(true);
+    expect(
+      expiredRow.childNodes.some((cell) =>
+        cell.childNodes.some((child) => child.className === 'task-expiry-flag'),
+      ),
+    ).toBe(true);
+    expect(leafTexts(pendingRow)).toContain('Waiting for you');
+    expect(pendingRow.classList.contains('is-past-deadline')).toBe(false);
+  });
+
+  test('projected cached detail hides Approve/Reject and titles the action as expired', () => {
+    const { renderer } = makeApprovalActionHarness();
+    expect(renderer.approvalCanDecide(projected)).toBe(false);
+    expect(renderer.approvalCanDecide(APPROVAL_TASK)).toBe(true);
+    const expired = renderer.renderApprovalAction(projected)!;
+    expect(leafTexts(expired)).toContain('Approval expired');
+    expect(leafTexts(expired)).not.toContain('Approval required');
+    expect(expired.childNodes.some((node) => node.tagName === 'BUTTON')).toBe(false);
+  });
+
+  test('projected detail head shows Past deadline flag without treating it as overdue', () => {
+    const helpers = sliceTasksFn('function taskIsClosed(', 'function syncTasksFilters(');
+    const source = sliceTasksFn('function renderTaskDetail(', 'function renderTasks(');
+    const tasksDetailContent = fakeEl('div');
+    const state = { activeTaskId: projected.id, taskDetailStatus: 'ready', taskDetailMessage: '', taskDetail: projected };
+    const fn = new Function(
+      'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail',
+      'formatAgo', 'taskTimelineBody', 'formatDate', 'renderTaskResultNode', 'renderApprovalAction',
+      'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+      `${helpers}\n${source}\nreturn renderTaskDetail;`,
+    );
+    const renderTaskDetail = fn(
+      { createElement: fakeEl }, state, tasksDetailContent, () => false, () => {},
+      () => 'just now', (value: string) => value, () => '2026-08-12', () => fakeEl('pre'),
+      () => null, () => {}, () => {}, () => {}, () => {}, 100,
+    ) as () => void;
+    renderTaskDetail();
+    expect(leafTexts(tasksDetailContent)).toContain('Past deadline');
+    expect(
+      tasksDetailContent.childNodes.some((node) =>
+        node.childNodes.some((child) => child.className === 'task-expiry-flag'),
+      ),
+    ).toBe(true);
+    expect(leafTexts(tasksDetailContent)).not.toContain('Waiting for you');
+  });
+
+  test('past-deadline CSS is an inset red bar; expiry flag is red text', () => {
+    expect(PAGES_CSS).toContain('.task-row.is-past-deadline {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
+    expect(PAGES_CSS).toContain('.task-expiry-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+    expect(PAGES_CSS).toContain('.home-task-row.is-past-deadline { box-shadow: inset 3px 0 0 var(--red); }');
   });
 });
 

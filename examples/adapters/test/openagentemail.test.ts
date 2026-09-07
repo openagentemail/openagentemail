@@ -76,6 +76,23 @@ test('R5d every successful OAE task/list response family rejects malformed JSON 
   for (const route of routes) { const client = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: (async () => new Response(JSON.stringify(route.name === 'list' ? { tasks: [malformed] } : malformed), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch }); await assert.rejects(() => route.invoke(client), (error: unknown) => error instanceof OaeHttpError && error.status === 200 && !error.message.includes('credential-canary') && !error.message.includes('body-canary'), route.name); }
 });
 
+test('#75 expiryProjection optional literal is accepted on get/list; unknown values and extra keys stay rejected', async () => {
+  const approval = { action: { type: 'change', name: 'deploy', arguments: { region: 'local' } }, reviewer: 'reviewer@example.test', expiresAt: '2026-09-01T00:00:00.000Z', digest: 'a'.repeat(64) };
+  const projected = { ...task('input-required'), kind: 'approval', approval, expiryProjection: 'past-deadline-unmaterialized' };
+  const fetchOk = (async (input: string | URL | Request) => new Response(JSON.stringify(String(input).endsWith('/v1/tasks') ? { tasks: [projected, task()] } : projected), { status: 200 })) as typeof fetch;
+  const client = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: fetchOk });
+  assert.equal((await client.get('task-1')).expiryProjection, 'past-deadline-unmaterialized');
+  assert.equal((await client.list())[0]!.expiryProjection, 'past-deadline-unmaterialized');
+  assert.equal(isValidTaskView(projected), true);
+  assert.equal(isValidTaskView({ ...projected, expiryProjection: undefined }), true);
+  assert.equal(isValidTaskView({ ...projected, expiryProjection: 'materialized' }), false);
+  assert.equal(isValidTaskView({ ...projected, expiryProjection: '' }), false);
+  const bad = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: (async () => new Response(JSON.stringify({ ...projected, expiryProjection: 'materialized' }), { status: 200 })) as typeof fetch });
+  await assert.rejects(() => bad.get('task-1'), OaeHttpError);
+  const extra = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: (async () => new Response(JSON.stringify({ ...projected, unexpected: true }), { status: 200 })) as typeof fetch });
+  await assert.rejects(() => extra.get('task-1'), OaeHttpError);
+});
+
 test('R5g production TaskView compatibility accepts bounded bodies and known parent/approval/lease projections, while retaining strict rejection', async () => {
   const approval = { action: { type: 'change', name: 'deploy', arguments: { region: 'local' } }, reviewer: 'reviewer@example.test', expiresAt: '2026-09-01T00:00:00.000Z', digest: 'a'.repeat(64) }; const projected = (body: string, extra: Record<string, unknown> = {}) => ({ ...task('completed'), parentTaskId: 'parent-task', kind: 'approval', approval, claimedUntil: '2026-09-01T00:05:00.000Z', leaseGeneration: 2, leaseStatus: 'disabled', messages: [{ id: 'message-1', from: 'asker@example.test', to: 'reviewer@example.test', subject: 's', date: '2026-09-01T00:00:00.000Z', state: 'completed', body, kind: 'state', approval: { type: 'request', snapshot: approval }, result: { decision: 'approved' } }], ...extra });
   for (const length of [16_384, 1_000_000]) { const response = projected('b'.repeat(length)); const client = new OaeClient({ baseUrl: 'https://oae.example.test', token: 'opaque-token', fetch: (async (input, init) => new Response(JSON.stringify(String(input).endsWith('/v1/tasks') && init?.method !== 'POST' ? { tasks: [response, task()] } : response), { status: 200 })) as typeof fetch }); assert.equal((await client.create({ to: 'reviewer@example.test', subject: 's', body: 'b' })).messages[0]!.body.length, length); assert.equal((await client.list()).length, 2); assert.equal((await client.get('task-1')).parentTaskId, 'parent-task'); }

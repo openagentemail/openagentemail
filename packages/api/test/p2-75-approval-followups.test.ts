@@ -228,6 +228,20 @@ describe('#75 Scope B: display-only subject 不入 approval-event-v1', () => {
   });
 });
 
+describe('#75 下游 TaskView 校验器对齐（#133 additionalProperties 教训）', () => {
+  test('同一 TaskView 的全部 runtime 下游校验器都收可选 expiryProjection 字面量', () => {
+    const adapter = readFileSync(new URL('../../../examples/adapters/src/openagentemail.ts', import.meta.url), 'utf8');
+    const mcpTools = readFileSync(new URL('../src/mcp/tools.ts', import.meta.url), 'utf8');
+    const mcpClient = readFileSync(new URL('../src/mcp/client.ts', import.meta.url), 'utf8');
+    // 盘点：adapter exactKeys 白名单 + MCP outputSchema + MCP client 类型。无第三套 runtime 校验器。
+    expect(adapter).toContain("'leaseStatus', 'expiryProjection'");
+    expect(adapter).toContain("value.expiryProjection === 'past-deadline-unmaterialized'");
+    expect(mcpTools).toContain("expiryProjection: z.literal('past-deadline-unmaterialized').optional()");
+    expect(mcpClient).toContain("expiryProjection?: 'past-deadline-unmaterialized'");
+    expect(adapter).toContain('export function isValidTaskView');
+  });
+});
+
 describe('#75 Scope C: watcher 存在性预筛不得弱化 fail-closed', () => {
   const watcherIdentities = [{
     address: REVIEWER, createdAt: '2026-08-24T00:00:00.000Z', pushContentTier: 3 as const,
