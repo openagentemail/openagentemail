@@ -1,4 +1,4 @@
-import { CorrelationSafetyError, canonicalJson, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
+import { CorrelationSafetyError, canonicalDecisionEvidence, canonicalJson, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
 import { type OaeClient, type OaeTask, type TaskMessage, type TaskState } from './openagentemail.js';
 
 type CorrelationWriter = Pick<CorrelationStore, 'save'>;
@@ -163,7 +163,8 @@ export function validateDecision(task: OaeTask, record: CorrelationRecord): { va
   if (message.from !== record.expectedParticipants.responder || message.to !== record.expectedParticipants.requester || message.subject !== task.subject) throw new CorrelationSafetyError('completed message author or thread contradicts configured responder');
   const result = exactDecision(message.result);
   if (canonicalJson(task.result) !== canonicalJson(result)) throw new CorrelationSafetyError('task and terminal message result contradict each other');
-  const overlayMessageIds = task.messages
+  // queued-* 是 IMAP 索引前的 synthetic ID，索引后变 UID；只放观测字段，不进权威比较。
+  const transientOverlayIds = task.messages
     .map((row) => row.id)
     .filter((id) => /^queued-[A-Za-z0-9._:-]{1,220}$/.test(id))
     .slice(0, 8);
@@ -173,7 +174,7 @@ export function validateDecision(task: OaeTask, record: CorrelationRecord): { va
       decision: result.decision,
       messageId: message.id,
       evidenceFingerprint: requestFingerprint({ taskId: task.id, messageId: message.id, result }),
-      ...(overlayMessageIds.length > 0 ? { overlayMessageIds } : {}),
+      ...(transientOverlayIds.length > 0 ? { transientOverlayIds } : {}),
     },
   };
 }
@@ -186,13 +187,16 @@ function exactDecision(value: unknown): Decision {
 /** Stores authoritative non-secret decision evidence, accepting only its exact duplicate after restart. */
 export async function receiveDecision(store: CorrelationWriter, record: CorrelationRecord, task: OaeTask): Promise<CorrelationRecord> {
   const { evidence } = validateDecision(task, record);
+  // 落盘与重复终态对账只比 durable UID 集，忽略 transientOverlayIds / 旧 overlayMessageIds。
+  const canonical = canonicalDecisionEvidence(evidence);
+  if (!canonical) throw new CorrelationSafetyError('decision evidence is missing');
   if (record.phase === 'awaiting-input') {
-    const received = transition(record, 'decision-received', { decisionEvidence: evidence });
+    const received = transition(record, 'decision-received', { decisionEvidence: canonical });
     await store.save(received);
     return received;
   }
   if (record.phase === 'decision-received' || record.phase === 'resume-started' || record.phase === 'resumed') {
-    if (canonicalJson(record.decisionEvidence) !== canonicalJson(evidence)) throw new CorrelationSafetyError('duplicate terminal delivery contradicts consumed decision evidence');
+    if (canonicalJson(canonicalDecisionEvidence(record.decisionEvidence)) !== canonicalJson(canonical)) throw new CorrelationSafetyError('duplicate terminal delivery contradicts consumed decision evidence');
     return record;
   }
   throw new CorrelationSafetyError(`decision cannot be received in ${record.phase}`);

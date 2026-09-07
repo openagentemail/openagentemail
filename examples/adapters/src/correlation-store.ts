@@ -10,10 +10,13 @@ export type Phase = typeof PHASES[number];
 
 export interface DecisionEvidence {
   decision: 'approved' | 'rejected';
+  /** 终态 durable UID；权威比较只认这个，不认 queued-*。 */
   messageId: string;
   evidenceFingerprint: string;
-  /** 生产 queued-overlay 消息 id，有界、可选；不是主权威。 */
+  /** 旧盘可能仍有；不进权威比较。新写入不再放 queued-*。 */
   overlayMessageIds?: string[];
+  /** 瞬态 queued-*，仅内存观测，禁止写入权威 correlation 记录。 */
+  transientOverlayIds?: string[];
 }
 
 export interface CorrelationRecord {
@@ -68,6 +71,12 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const object = value as Record<string, unknown>;
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+/** 权威比较/持久化只保留 durable 终态字段，丢掉 queued-* 观测键。 */
+export function canonicalDecisionEvidence(evidence: DecisionEvidence | null): Pick<DecisionEvidence, 'decision' | 'messageId' | 'evidenceFingerprint'> | null {
+  if (!evidence) return null;
+  return { decision: evidence.decision, messageId: evidence.messageId, evidenceFingerprint: evidence.evidenceFingerprint };
 }
 
 export function createIntent(input: Omit<CorrelationRecord, 'schemaVersion' | 'correlationId' | 'taskId' | 'phase' | 'createAttemptedAt' | 'inputEvidence' | 'decisionEvidence' | 'resumeEvidence' | 'updatedAt'> & { correlationId?: string; now?: string }): CorrelationRecord {
@@ -259,7 +268,7 @@ function validateAdjacentChange(prior: CorrelationRecord, next: CorrelationRecor
   if (prior.createAttemptedAt !== null && next.createAttemptedAt !== prior.createAttemptedAt) throw new CorrelationSafetyError('create attempt timestamp cannot be rewritten');
   if (prior.taskId !== null && next.taskId !== prior.taskId) throw new CorrelationSafetyError('adopted task ID cannot be rewritten');
   if (prior.inputEvidence !== null && next.inputEvidence !== prior.inputEvidence) throw new CorrelationSafetyError('input evidence cannot be rewritten');
-  if (prior.decisionEvidence !== null && canonicalJson(next.decisionEvidence) !== canonicalJson(prior.decisionEvidence)) throw new CorrelationSafetyError('decision evidence cannot be rewritten');
+  if (prior.decisionEvidence !== null && canonicalJson(canonicalDecisionEvidence(next.decisionEvidence)) !== canonicalJson(canonicalDecisionEvidence(prior.decisionEvidence))) throw new CorrelationSafetyError('decision evidence cannot be rewritten');
   if (prior.resumeEvidence !== null && next.resumeEvidence !== prior.resumeEvidence) throw new CorrelationSafetyError('resume evidence cannot be rewritten');
 }
 

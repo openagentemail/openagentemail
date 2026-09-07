@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CorrelationSafetyError, CorrelationStore, createIntent, requestFingerprint, transition, type CorrelationRecord } from '../src/correlation-store.js';
+import { CorrelationSafetyError, CorrelationStore, canonicalDecisionEvidence, canonicalJson, createIntent, requestFingerprint, transition, type CorrelationRecord } from '../src/correlation-store.js';
 import type { OaeTask } from '../src/openagentemail.js';
 import { createOrAdopt, inputBodyFor, markerFor, pollNonTerminal, receiveDecision, requestInputOrReconcile, resumeDecision, validateDecision, withMarker } from '../src/retry.js';
 
@@ -111,6 +111,27 @@ test('crash points around decision and final resume persistence never permit a s
   const recovered = await resumeDecision(store, restarted, task, { commit: async () => { commits += 1; return 'must-not-run'; }, committedEvidence: async () => 'committed-once' });
   assert.equal(recovered.phase, 'resumed');
   assert.equal(commits, 1);
+});
+
+test('queued-reminder overlay IDs stay observational; indexed remake does not block duplicate terminal recovery', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oae-queued-reminder-evidence-'));
+  const store = new CorrelationStore(directory);
+  const row = await awaiting(store);
+  const base = completed(row);
+  const reminder = { id: 'queued-reminder-preindex', from: row.expectedParticipants.requester, to: row.expectedParticipants.responder, subject: base.subject, date: 'x', state: 'submitted' as const, body: 'nudge', kind: 'reminder' as const };
+  const beforeIndex = { ...base, messages: [...base.messages, reminder] };
+  const afterIndex = { ...base, messages: [...base.messages, { ...reminder, id: '42' }] };
+  const first = validateDecision(beforeIndex, row);
+  const second = validateDecision(afterIndex, row);
+  assert.deepEqual(first.evidence.transientOverlayIds, ['queued-reminder-preindex']);
+  assert.equal(second.evidence.transientOverlayIds, undefined);
+  assert.equal(canonicalJson(canonicalDecisionEvidence(first.evidence)), canonicalJson(canonicalDecisionEvidence(second.evidence)));
+  const received = await receiveDecision(store, row, beforeIndex);
+  assert.equal(received.phase, 'decision-received');
+  assert.equal(received.decisionEvidence?.overlayMessageIds, undefined);
+  assert.equal(received.decisionEvidence?.transientOverlayIds, undefined);
+  assert.equal((await receiveDecision(store, received, afterIndex)).phase, 'decision-received');
+  assert.deepEqual(canonicalDecisionEvidence(received.decisionEvidence), canonicalDecisionEvidence(second.evidence));
 });
 
 test('ordinary polling observes non-terminal state without terminal wait', async () => {
