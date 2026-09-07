@@ -199,15 +199,16 @@ export function registerOpenAgentEmailTools(
     ]).optional(),
   });
 
+  // 输出 task-id 与 v1–v5 输入谓词对齐，避免 MCP 把 UUID v6/v7 或非 RFC 变体说成合法 durable id。
   const taskOutputSchema = {
-    id: z.string().uuid(),
+    id: durableTaskIdSchema,
     from: identityAddressSchema,
     to: identityAddressSchema,
     subject: z.string(),
     state: taskStateSchema,
     createdAt: z.string(),
     updatedAt: z.string(),
-    parentTaskId: z.string().uuid().optional(),
+    parentTaskId: durableTaskIdSchema.optional(),
     messages: z.array(taskMessageSchema),
     result: z.unknown().optional(),
     kind: z.literal('approval').optional(),

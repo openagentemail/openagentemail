@@ -441,3 +441,19 @@ curl -ik "https://mail.example.com/ui?token=test_token_secret&code=test_code_123
 grep -E "token=|code=" /var/log/traefik/access.log
 # 退出码为 1（无任何匹配结果），确认敏感 query 均未落盘
 ```
+
+## Task relationship integrity, root retention, and fail-closed reconstruction
+
+IMAP 任务重建依赖**最低 UID 的已认证 creation root** 仍然留在同一任务线程里。Replay suppression 只在这条 root 完好时生效：同线程里后注入的剥离/篡改副本不能压过已认证的关系根。`RETENTION_DAYS`（默认 30） sweep 或人工删信若清掉这条 root，不变量即失效。
+
+**关系完整性失败（poisoned root）**：带有效 v2 witness 但 root MAC/信封被篡改或剥离时，重建返回 `null`。匹配 IMAP 行存在但重建失败时，合成 fallback 被抑制。结果是任务对 list / board / detail / 授权读**全部不可见**，而不是降级成无 parent 的普通任务。当前没有产品内「解毒」或改写 root 的管理员 API——故意 fail-closed，避免把损坏历史投影成可操作任务。
+
+**Legacy 历史缺少 creation root**：首条 durable 消息不是 ordinary `submitted` root、也不是 approval `input-required` request 时，整任务同样重建为 `null`（全不可见）。不会把后继 state / lease / reminder 提升成新的 root。
+
+**审计与管理员恢复路径**（产品外，IMAP/备份侧）：
+
+1. 用 `X-OA-Task: <id>` 在 catch-all 信箱搜该线程；确认最低 UID 是否仍是带 `X-OA-Task-Stamp`（及 v2 `X-OA-Task-Root`）的 creation root。记下该线程**全部**后继信的原序备份（UID 升序）。
+2. 关系完整性失败：**不要**在后继信仍在同一信箱时只 APPEND 一封恢复的 root。IMAP APPEND 总是分配比现有更高的 UID；后继信还在时，新 root 不会成为最低 UID，重建仍 fail-closed。部分实现在 EXPUNGE/APPEND 后还会重排剩余消息的 UID，使「谁是 lowest-UID」进一步漂移。
+3. 正确恢复：先把该线程全部消息（含后继）按原 UID 序备份并 EXPUNGE 出信箱，再按**原顺序**先 APPEND 原始未改 creation MIME（含 stamp/root），随后 APPEND 后继信。不要手写 root/stamp。整线程从备份装回空信箱亦可。恢复后最低 UID 必须重新是那条 creation root，重建才变可见。
+4. Legacy 缺 root：同样没有「补一条新 submitted 冒充 root」的安全路径——单独 APPEND 的新信 UID 更高（或重排后仍不是原 lowest-UID root）。必须整线程按原序重放。
+5. 恢复失败则保持不可见。需要新工作项时另建任务，不要在损坏历史上继续 mutation。

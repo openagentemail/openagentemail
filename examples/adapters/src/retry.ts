@@ -1,4 +1,4 @@
-import { CorrelationSafetyError, canonicalJson, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
+import { CorrelationSafetyError, canonicalDecisionEvidence, canonicalJson, isQueuedOverlayId, requestFingerprint, transition, type CorrelationRecord, type CorrelationStore, type DecisionEvidence } from './correlation-store.js';
 import { type OaeClient, type OaeTask, type TaskMessage, type TaskState } from './openagentemail.js';
 
 type CorrelationWriter = Pick<CorrelationStore, 'save'>;
@@ -27,8 +27,13 @@ export function canonicalRequest(input: CanonicalRequest): Record<string, string
   return { requester: input.requester, responder: input.responder, subject: input.subject, body: input.body };
 }
 
+function isReminder(message: TaskMessage): boolean {
+  return message.kind === 'reminder';
+}
+
 function initialSubmittedMessage(task: OaeTask): TaskMessage {
-  const roots = task.messages.filter((message) => message.state === 'submitted');
+  // reminder 不计入 root 基数。
+  const roots = task.messages.filter((message) => message.state === 'submitted' && !isReminder(message));
   if (roots.length !== 1) throw new CorrelationSafetyError(`task history has ${roots.length} submitted roots`);
   const root = roots[0]!;
   if (root.from !== task.from || root.to !== task.to || root.subject !== task.subject) throw new CorrelationSafetyError('submitted root contradicts task thread');
@@ -124,10 +129,11 @@ export async function requestInputOrReconcile(store: CorrelationWriter, client: 
 
 function validateInputResponse(task: OaeTask, record: CorrelationRecord, body: string, evidence: string): void {
   if (record.inputEvidence !== evidence) throw new CorrelationSafetyError('persisted input evidence contradicts canonical input body');
-  if (task.state !== 'input-required') throw new CorrelationSafetyError('input response task state must be input-required');
+  // 合法后继态（working）仍允许按历史里那条 exact input-transition 对账。
+  if (task.state !== 'input-required' && task.state !== 'working') throw new CorrelationSafetyError('input response task state must be input-required or a legal later state');
   validateCorrelatedTask(task, record);
-  if (task.messages.some((message) => message.state === 'completed' || message.state === 'failed')) throw new CorrelationSafetyError('input response history contains terminal contradiction');
-  const inputEvents = task.messages.filter((message) => message.state === 'input-required');
+  if (task.messages.some((message) => !isReminder(message) && (message.state === 'completed' || message.state === 'failed'))) throw new CorrelationSafetyError('input response history contains terminal contradiction');
+  const inputEvents = task.messages.filter((message) => message.state === 'input-required' && !isReminder(message));
   const stamped = inputEvents.filter((message) => message.from === record.expectedParticipants.requester && message.to === record.expectedParticipants.responder && message.subject === task.subject && message.body === body && requestFingerprint({ taskId: record.taskId, body: message.body }) === evidence);
   if (inputEvents.length !== 1 || stamped.length !== 1) throw new CorrelationSafetyError(`ambiguous input-required history: expected one exact stamped event, got ${inputEvents.length}`);
 }
@@ -157,7 +163,20 @@ export function validateDecision(task: OaeTask, record: CorrelationRecord): { va
   if (message.from !== record.expectedParticipants.responder || message.to !== record.expectedParticipants.requester || message.subject !== task.subject) throw new CorrelationSafetyError('completed message author or thread contradicts configured responder');
   const result = exactDecision(message.result);
   if (canonicalJson(task.result) !== canonicalJson(result)) throw new CorrelationSafetyError('task and terminal message result contradict each other');
-  return { value: result, evidence: { decision: result.decision, messageId: message.id, evidenceFingerprint: requestFingerprint({ taskId: task.id, messageId: message.id, result }) } };
+  // queued-* 是 IMAP 索引前的 synthetic ID，索引后变 UID；只放观测字段，不进权威比较。
+  const transientOverlayIds = task.messages
+    .map((row) => row.id)
+    .filter(isQueuedOverlayId)
+    .slice(0, 8);
+  return {
+    value: result,
+    evidence: {
+      decision: result.decision,
+      messageId: message.id,
+      evidenceFingerprint: requestFingerprint({ taskId: task.id, messageId: message.id, result }),
+      ...(transientOverlayIds.length > 0 ? { transientOverlayIds } : {}),
+    },
+  };
 }
 
 function exactDecision(value: unknown): Decision {
@@ -168,13 +187,16 @@ function exactDecision(value: unknown): Decision {
 /** Stores authoritative non-secret decision evidence, accepting only its exact duplicate after restart. */
 export async function receiveDecision(store: CorrelationWriter, record: CorrelationRecord, task: OaeTask): Promise<CorrelationRecord> {
   const { evidence } = validateDecision(task, record);
+  // 落盘与重复终态对账只比 durable UID 集，忽略 transientOverlayIds / 旧 overlayMessageIds。
+  const canonical = canonicalDecisionEvidence(evidence);
+  if (!canonical) throw new CorrelationSafetyError('decision evidence is missing');
   if (record.phase === 'awaiting-input') {
-    const received = transition(record, 'decision-received', { decisionEvidence: evidence });
+    const received = transition(record, 'decision-received', { decisionEvidence: canonical });
     await store.save(received);
     return received;
   }
   if (record.phase === 'decision-received' || record.phase === 'resume-started' || record.phase === 'resumed') {
-    if (canonicalJson(record.decisionEvidence) !== canonicalJson(evidence)) throw new CorrelationSafetyError('duplicate terminal delivery contradicts consumed decision evidence');
+    if (canonicalJson(canonicalDecisionEvidence(record.decisionEvidence)) !== canonicalJson(canonical)) throw new CorrelationSafetyError('duplicate terminal delivery contradicts consumed decision evidence');
     return record;
   }
   throw new CorrelationSafetyError(`decision cannot be received in ${record.phase}`);

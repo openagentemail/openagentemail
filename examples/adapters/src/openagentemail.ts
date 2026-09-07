@@ -69,12 +69,21 @@ export interface OaeClientOptions {
   signal?: AbortSignal;
 }
 
+/** 构造后 set authorization：大小写不敏感替换，避免 Authorization 与 authorization 合并成逗号双值。 */
+export function scopedRequestHeaders(init: RequestInit | undefined, token: string): Headers {
+  const headers = new Headers(init?.headers);
+  if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+  headers.set('authorization', `Bearer ${token}`);
+  return headers;
+}
+
 /** A real client may use HTTPS, or explicit loopback HTTP for local development only. */
 export function safeOaeBaseUrl(value: string): string {
   let url: URL; try { url = new URL(value); } catch { throw new Error('OpenAgentEmail URL must be an absolute HTTPS or loopback HTTP URL'); }
   const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error('OpenAgentEmail participant tokens require HTTPS or loopback HTTP');
-  if (url.username || url.password || url.hash || url.search) throw new Error('OpenAgentEmail URL must not contain credentials, query, or fragment');
+  // search/hash 的 truthy 检查放不过裸 `?`/`#`（URL 解析后是空串）；原始定界符也拒绝。
+  if (url.username || url.password || url.search !== '' || url.hash !== '' || /[?#]/.test(value)) throw new Error('OpenAgentEmail URL must not contain credentials, query, or fragment');
   return url.toString().replace(/\/$/, '');
 }
 
@@ -109,7 +118,8 @@ export class OaeClient {
     try {
       if (signals.some((signal) => signal.aborted)) throw new OaeRequestError('aborted', operation);
       let response: Response;
-      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...init?.headers } }); }
+      // Headers.set 在构造后写入，大小写不敏感替换调用方 Authorization 变体。
+      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: scopedRequestHeaders(init, this.token) }); }
       catch { throw new OaeRequestError(timedOut ? 'timeout' : controller.signal.aborted ? 'aborted' : 'transport', operation); }
       if (!response.ok) throw new OaeHttpError(response.status, operation);
       let value: unknown; try { value = await response.json(); }

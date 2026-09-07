@@ -725,7 +725,13 @@ describe('MCP registered task handlers execute through the production HTTP trans
     const handlerApp = createApp({ uiEnabled: false, taskService: {
       create: unused, list: unused, listBoard: unused, get: async (id) => id === parentId ? parent : null,
       getForAuthorization: async (id) => id === parentId ? (rejectParent ? hiddenParent : parent) : null,
-      listChildren: async (query, viewer) => { listChildrenCalls += 1; seen = { query, viewer }; return { children: [child], nextCursor: 'opaque-next' }; },
+      listChildren: async (query, viewer) => {
+        listChildrenCalls += 1;
+        seen = { query, viewer };
+        // parent ACL 只由这一次 listChildren 裁定，不再先读 getForAuthorization。
+        if (rejectParent) throw new Error('forbidden');
+        return { children: [child], nextCursor: 'opaque-next' };
+      },
       update: unused, reply: unused, remind: unused, close: unused, waitForTerminal: unused,
     } });
     const call = (args: Record<string, unknown>, id: number) => handlerApp.request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${requester.token}`, 'content-type': 'application/json', accept: MCP_ACCEPT }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'task_list_children', arguments: args } }) });
@@ -739,7 +745,7 @@ describe('MCP registered task handlers execute through the production HTTP trans
     const deniedText = JSON.stringify(deniedBody);
     expect(deniedBody.result?.isError).toBe(true); expect(deniedBody.result?.structuredContent).toBeUndefined();
     expect(deniedText).toContain('Forbidden (403): forbidden: task participant required');
-    expect(deniedText).not.toContain('zod'); expect(deniedText).not.toContain('schema'); expect(deniedText).not.toContain('stack'); expect(listChildrenCalls).toBe(1);
+    expect(deniedText).not.toContain('zod'); expect(deniedText).not.toContain('schema'); expect(deniedText).not.toContain('stack'); expect(listChildrenCalls).toBe(2);
     for (const [id, invalidParent] of [
       [882, '018f8d1d-4d7e-7b0a-8000-000000000000'],
       [883, '018f8d1d-4d7e-8b0a-8000-000000000000'],
@@ -747,7 +753,7 @@ describe('MCP registered task handlers execute through the production HTTP trans
       const invalid = await call({ parentTaskId: invalidParent, limit: 20 }, id);
       expect(invalid.status).toBe(200);
       expect((await readMcpJson(invalid) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
-      expect(listChildrenCalls).toBe(1);
+      expect(listChildrenCalls).toBe(2);
     }
   });
 

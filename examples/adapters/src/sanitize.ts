@@ -2,7 +2,7 @@ import { PHASES, isSafeTaskId, validateCorrelationRecord, type CorrelationRecord
 import type { TaskState } from './openagentemail.js';
 
 const STATES = new Set<TaskState>(['submitted', 'working', 'input-required', 'completed', 'failed']);
-const CODES = new Set(['create-failed', 'reconcile-failed', 'input-failed', 'decision-failed', 'resume-failed', 'timeout', 'conflict']);
+const CODES = new Set(['create-failed', 'reconcile-failed', 'input-failed', 'decision-failed', 'resume-failed', 'timeout', 'conflict', 'credential-rejected']);
 export interface TimelineEvent { at: string; phase: Phase; code: string; taskId?: string; state?: TaskState; }
 
 /** Allowlisted diagnostics reject unsafe values as well as stripping unknown keys. */

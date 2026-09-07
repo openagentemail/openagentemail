@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CorrelationStore, createIntent, requestFingerprint, transition, validateCorrelationRecord, type CorrelationRecord, type Phase } from '../src/correlation-store.js';
+import { CorrelationStore, createIntent, isCredentialShaped, requestFingerprint, transition, validateCorrelationRecord, type CorrelationRecord, type Phase } from '../src/correlation-store.js';
 import { sanitizedTimeline } from '../src/sanitize.js';
 
 const phases: Phase[] = ['intent-created', 'create-attempted', 'task-adopted', 'input-request-attempted', 'awaiting-input', 'decision-received', 'resume-started', 'resumed'];
@@ -51,8 +51,8 @@ const rows: Row[] = [
   { name: 'correlationId', phase: 'intent-created', canary: 'bad\r\nuuid', mutate: (r) => ({ ...r, correlationId: 'bad\r\nuuid' }) },
   { name: 'operationKey', phase: 'intent-created', canary: 'raw-body-canary', mutate: (r) => ({ ...r, operationKey: 'raw-body-canary' }) },
   { name: 'requestFingerprint', phase: 'intent-created', canary: 'Bearer credential-canary', mutate: (r) => ({ ...r, requestFingerprint: 'Bearer credential-canary' }) },
-  { name: 'requester', phase: 'intent-created', canary: 'token@example.test', mutate: (r) => ({ ...r, expectedParticipants: { ...r.expectedParticipants, requester: 'token@example.test' } }) },
-  { name: 'responder', phase: 'intent-created', canary: 'raw-body@example.test', mutate: (r) => ({ ...r, expectedParticipants: { ...r.expectedParticipants, responder: 'raw-body@example.test' } }) },
+  { name: 'requester', phase: 'intent-created', canary: 'token=value', mutate: (r) => ({ ...r, expectedParticipants: { ...r.expectedParticipants, requester: 'token=value' } }) },
+  { name: 'responder', phase: 'intent-created', canary: 'raw-body=canary', mutate: (r) => ({ ...r, expectedParticipants: { ...r.expectedParticipants, responder: 'raw-body=canary' } }) },
   { name: 'taskId', phase: 'task-adopted', canary: 'sk-livecredentialcanary', mutate: (r) => ({ ...r, taskId: 'sk-livecredentialcanary' }) },
   { name: 'frameworkStateRef', phase: 'intent-created', canary: '-----BEGIN PRIVATE KEY-----', mutate: (r) => ({ ...r, frameworkStateRef: '-----BEGIN PRIVATE KEY-----' }) },
   { name: 'approvalItemKey', phase: 'intent-created', canary: 'password=value', mutate: (r) => ({ ...r, approvalItemKey: 'password=value' }) },
@@ -79,6 +79,40 @@ test('R1g every schema-approved string slot rejects credential/raw/CRLF canaries
     const disk = await readFile(join(directory, `${id}.json`), 'utf8');
     assert.equal(disk.includes(row.canary), false, row.name);
   }
+});
+
+test('#107 canonical emails with credential-like local-parts are not false positives', () => {
+  assert.equal(isCredentialShaped('token@example.test'), false);
+  assert.equal(isCredentialShaped('raw-body@example.test'), false);
+  assert.equal(isCredentialShaped('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'), true);
+  assert.equal(isCredentialShaped('token=value'), true);
+});
+
+test('#107-3 long PascalCase identifiers are not credentials; opaque tokens still are', async () => {
+  const workflow = 'CustomerRefundApprovalWorkflowVersion2026';
+  const operationKey = `scenario/${workflow}`;
+  const framework = 'CustomerRefundApprovalWorkflowVersion2026';
+  assert.equal(isCredentialShaped(workflow), false);
+  assert.equal(isCredentialShaped(operationKey), false);
+  assert.equal(isCredentialShaped(framework), false);
+  assert.equal(isCredentialShaped('K9m2Qp7nR4tX8wZ1aC5dF3gH6jL0bY2sU4eV8nR3'), true);
+  assert.equal(isCredentialShaped('sk-proj-abcdefghijklmnopqrstuvwxyz012345'), true);
+  const store = new CorrelationStore(await mkdtemp(join(tmpdir(), 'oae-pr3-readable-id-')));
+  const row = createIntent({
+    framework,
+    correlationId: 'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+    operationKey,
+    requestFingerprint: requestFingerprint({ requester: 'a@example.test', responder: 'b@example.test', subject: 'Approve', body: 'ordinary body' }),
+    expectedParticipants: { requester: 'a@example.test', responder: 'b@example.test' },
+    frameworkStateRef: 'state.sqlite',
+    approvalItemKey: workflow,
+    now: stamp(0),
+  });
+  await store.save(row);
+  const loaded = await store.load(row.correlationId);
+  assert.equal(loaded.framework, framework);
+  assert.equal(loaded.operationKey, operationKey);
+  assert.equal(loaded.approvalItemKey, workflow);
 });
 
 test('R1g timeline retains record-level unsafe projection regression and allowed fields', () => {

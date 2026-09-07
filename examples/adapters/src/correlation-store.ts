@@ -10,8 +10,13 @@ export type Phase = typeof PHASES[number];
 
 export interface DecisionEvidence {
   decision: 'approved' | 'rejected';
+  /** 终态 durable UID；权威比较只认这个，不认 queued-*。 */
   messageId: string;
   evidenceFingerprint: string;
+  /** 旧盘可能仍有；不进权威比较。新写入不再放 queued-*。 */
+  overlayMessageIds?: string[];
+  /** 瞬态 queued-*，仅内存观测，禁止写入权威 correlation 记录。 */
+  transientOverlayIds?: string[];
 }
 
 export interface CorrelationRecord {
@@ -41,8 +46,50 @@ export function isCorrelationId(value: unknown): value is string { return typeof
 
 /** Shared semantic task ID boundary for persistence and public diagnostics. */
 export function isSafeTaskId(value: unknown): value is string { return validSafeText(value, /^[A-Za-z0-9._:-]{1,240}$/); }
+const CANONICAL_EMAIL = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
 /** Defense-in-depth detector; allowlisted schemas remain the primary persistence control. */
-export function isCredentialShaped(value: unknown): boolean { return typeof value === 'string' && (/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value) || /(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)); }
+export function isCredentialShaped(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  // 结构化 canonical 地址不当 credential，避免 token@host 一类关键词误报。
+  if (CANONICAL_EMAIL.test(value) && !/[\r\n\s]/.test(value)) return false;
+  if (/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value)) return true;
+  if (/(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)) return true;
+  // JWT / 高熵形态是加深启发式，不是主边界。
+  if (JWT_SHAPE.test(value) && value.length >= 40) return true;
+  if (isOpaqueTokenShaped(value)) return true;
+  return false;
+}
+
+/** 长而可读的标识（PascalCase 词边界或语义分隔）不当 token。 */
+function isReadableIdentifier(value: string): boolean {
+  const words = value.match(/[A-Z][a-z]{2,}/g) ?? [];
+  if (words.length >= 2) return true;
+  if (/[/:._-]/.test(value) && (words.length >= 1 || /[A-Za-z]{6,}/.test(value))) return true;
+  return false;
+}
+
+function shannonEntropy(value: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of value) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const p = count / value.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+/** 真 opaque-token：无空格、无语义词边界、高密度字符分布。 */
+function isOpaqueTokenShaped(value: string): boolean {
+  if (value.length < 40 || /\s/.test(value) || value.includes('@')) return false;
+  if (isReadableIdentifier(value)) return false;
+  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/\d/.test(value)) return false;
+  if (new Set(value).size / value.length < 0.45) return false;
+  if (shannonEntropy(value) < 4.2) return false;
+  return true;
+}
 
 export function requestFingerprint(value: Record<string, unknown>): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -53,6 +100,12 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const object = value as Record<string, unknown>;
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+/** 权威比较/持久化只保留 durable 终态字段，丢掉 queued-* 观测键。 */
+export function canonicalDecisionEvidence(evidence: DecisionEvidence | null): Pick<DecisionEvidence, 'decision' | 'messageId' | 'evidenceFingerprint'> | null {
+  if (!evidence) return null;
+  return { decision: evidence.decision, messageId: evidence.messageId, evidenceFingerprint: evidence.evidenceFingerprint };
 }
 
 export function createIntent(input: Omit<CorrelationRecord, 'schemaVersion' | 'correlationId' | 'taskId' | 'phase' | 'createAttemptedAt' | 'inputEvidence' | 'decisionEvidence' | 'resumeEvidence' | 'updatedAt'> & { correlationId?: string; now?: string }): CorrelationRecord {
@@ -244,11 +297,17 @@ function validateAdjacentChange(prior: CorrelationRecord, next: CorrelationRecor
   if (prior.createAttemptedAt !== null && next.createAttemptedAt !== prior.createAttemptedAt) throw new CorrelationSafetyError('create attempt timestamp cannot be rewritten');
   if (prior.taskId !== null && next.taskId !== prior.taskId) throw new CorrelationSafetyError('adopted task ID cannot be rewritten');
   if (prior.inputEvidence !== null && next.inputEvidence !== prior.inputEvidence) throw new CorrelationSafetyError('input evidence cannot be rewritten');
-  if (prior.decisionEvidence !== null && canonicalJson(next.decisionEvidence) !== canonicalJson(prior.decisionEvidence)) throw new CorrelationSafetyError('decision evidence cannot be rewritten');
+  if (prior.decisionEvidence !== null && canonicalJson(canonicalDecisionEvidence(next.decisionEvidence)) !== canonicalJson(canonicalDecisionEvidence(prior.decisionEvidence))) throw new CorrelationSafetyError('decision evidence cannot be rewritten');
   if (prior.resumeEvidence !== null && next.resumeEvidence !== prior.resumeEvidence) throw new CorrelationSafetyError('resume evidence cannot be rewritten');
 }
 
 function validSafeText(value: unknown, pattern: RegExp): value is string { return typeof value === 'string' && pattern.test(value) && !isCredentialShaped(value); }
+
+/** 收集器与 validEvidence 共用：queued-* 形态且非 credential。 */
+const QUEUED_OVERLAY_ID = /^queued-[A-Za-z0-9._:-]{1,220}$/;
+export function isQueuedOverlayId(value: unknown): value is string {
+  return validSafeText(value, QUEUED_OVERLAY_ID);
+}
 
 function exactKeys(value: object, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();
@@ -257,9 +316,17 @@ function exactKeys(value: object, expected: readonly string[]): boolean {
 
 function validEvidence(value: unknown): value is DecisionEvidence {
   const row = value as Partial<DecisionEvidence>;
-  return !!row && typeof row === 'object' && exactKeys(row, ['decision', 'messageId', 'evidenceFingerprint'])
+  const expected = row.overlayMessageIds === undefined
+    ? ['decision', 'evidenceFingerprint', 'messageId']
+    : ['decision', 'evidenceFingerprint', 'messageId', 'overlayMessageIds'];
+  const overlays = row.overlayMessageIds;
+  return !!row && typeof row === 'object' && exactKeys(row, expected)
     && (row.decision === 'approved' || row.decision === 'rejected') && validSafeText(row.messageId, /^[A-Za-z0-9._:-]{1,240}$/)
-    && typeof row.evidenceFingerprint === 'string' && /^[0-9a-f]{64}$/i.test(row.evidenceFingerprint);
+    && typeof row.evidenceFingerprint === 'string' && /^[0-9a-f]{64}$/i.test(row.evidenceFingerprint)
+    && (overlays === undefined || (
+      Array.isArray(overlays) && overlays.length >= 1 && overlays.length <= 8
+      && overlays.every((id) => isQueuedOverlayId(id))
+    ));
 }
 
 function validateRecord(value: unknown): asserts value is CorrelationRecord {
