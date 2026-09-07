@@ -1274,47 +1274,116 @@ describe('#75 board expiryProjection presentation', () => {
 
 describe('#75 Home waiting excludes expiryProjection', () => {
   const pastDeadline = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
-  const classify = new Function(
-    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, mergeHomeStuck: mergeHomeStuck };`,
-  )() as {
-    classifyHomeWaiting: (tasks: unknown, totalApprox: unknown) => {
+  const homeFlow = new Function(
+    'HOME_VISIBLE_ROWS',
+    'HOME_ACTIVE_MAX_PAGES',
+    'HOME_ACTIVE_MAX_ROWS',
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, mergeHomeStuck: mergeHomeStuck, applyHomeStuck: applyHomeStuck };`,
+  )(5, 5, 500) as {
+    classifyHomeWaiting: (tasks: unknown) => {
       waitingTasks: Array<{ id: string; subject?: string }>;
       expiredTasks: Array<{ id: string }>;
-      waitingTotal: number;
     };
+    emptyHomeWaitingAcc: () => {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    };
+    accumulateHomeWaitingPage: (acc: {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    } | null, board: unknown) => {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    };
+    homeWaitingShouldContinue: (acc: { nextCursor: string; waitingTasks: unknown[]; pages: number; scannedRows: number }) => boolean;
     mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
+    applyHomeStuck: (
+      overdue: Array<{ id: string }>,
+      overdueOk: boolean,
+      expired: Array<{ id: string }>,
+      waitingOk: boolean,
+    ) => Array<{ id: string }> | null;
   };
 
-  test('projected rows leave the Waiting list and decrement the server total', () => {
-    const pending = { id: 'wait-1', state: 'input-required', subject: 'Need you' };
-    const expired = {
-      id: 'exp-1',
-      state: 'input-required',
-      subject: 'Too late',
-      expiryProjection: 'past-deadline-unmaterialized',
-    };
-    const classified = classify.classifyHomeWaiting([expired, pending], 4);
+  const projected = (id: string) => ({
+    id,
+    state: 'input-required',
+    expiryProjection: 'past-deadline-unmaterialized',
+  });
+  const live = (id: string, subject = id) => ({ id, state: 'input-required', subject });
+
+  test('projected rows never enter waiting storage and decrement the server total', () => {
+    const classified = homeFlow.classifyHomeWaiting([projected('exp-1'), live('wait-1', 'Need you')]);
     expect(classified.waitingTasks.map((task) => task.id)).toEqual(['wait-1']);
     expect(classified.expiredTasks.map((task) => task.id)).toEqual(['exp-1']);
-    expect(classified.waitingTotal).toBe(3);
+    const acc = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [projected('exp-1'), live('wait-1', 'Need you')],
+      totalApprox: 4,
+    });
+    expect(acc.waitingTasks.map((task) => task.id)).toEqual(['wait-1']);
+    expect(acc.expiredTasks.map((task) => task.id)).toEqual(['exp-1']);
+    expect(acc.waitingTotal).toBe(3);
   });
 
   test('an all-projected page yields an empty Waiting list and a zero count', () => {
-    const classified = classify.classifyHomeWaiting(
-      [{ id: 'exp-2', expiryProjection: 'past-deadline-unmaterialized' }],
-      1,
-    );
-    expect(classified.waitingTasks).toEqual([]);
-    expect(classified.waitingTotal).toBe(0);
+    const acc = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [projected('exp-2')],
+      totalApprox: 1,
+    });
+    expect(acc.waitingTasks).toEqual([]);
+    expect(acc.waitingTotal).toBe(0);
+    expect(acc.expiredTasks.map((task) => task.id)).toEqual(['exp-2']);
   });
 
   test('expired waiting rows merge into Blocked without duplicating overdue ids', () => {
     expect(
-      classify.mergeHomeStuck(
+      homeFlow.mergeHomeStuck(
         [{ id: 'same' }],
         [{ id: 'same' }, { id: 'exp-3' }],
       ).map((task) => task.id),
     ).toEqual(['same', 'exp-3']);
+  });
+
+  test('page-1 all projected then page-2 live keeps waiting rows and an honest count', () => {
+    const first = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: Array.from({ length: 20 }, (_, index) => projected(`exp-${index}`)),
+      totalApprox: 25,
+      nextCursor: 'page-2',
+    });
+    expect(first.waitingTasks).toEqual([]);
+    expect(first.waitingTotal).toBe(5);
+    expect(homeFlow.homeWaitingShouldContinue(first)).toBe(true);
+    const second = homeFlow.accumulateHomeWaitingPage(first, {
+      tasks: [live('live-1'), live('live-2'), live('live-3'), live('live-4'), live('live-5')],
+      totalApprox: 25,
+    });
+    expect(second.waitingTasks.map((task) => task.id)).toEqual(['live-1', 'live-2', 'live-3', 'live-4', 'live-5']);
+    expect(second.waitingTotal).toBe(5);
+    expect(second.expiredTasks).toHaveLength(20);
+    expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
+  });
+
+  test('applyHomeStuck keeps projected rows when the active-overdue request fails', () => {
+    const expired = [projected('exp-keep')];
+    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], false, expired, true)?.map((task) => task.id)).toEqual(['exp-keep']);
+    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], true, expired, true)?.map((task) => task.id)).toEqual(['overdue-1', 'exp-keep']);
+    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], true, expired, false)?.map((task) => task.id)).toEqual(['overdue-1']);
+    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], false, expired, false)).toBeNull();
   });
 
   test('renderHomeWaiting does not paint a projected row even if state still holds it', () => {

@@ -1193,9 +1193,10 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain('state.homeWaitingTotal = typeof waitingPayload.totalApprox === \'number\'');
+    expect(home).toContain('state.homeWaitingTotal = typeof waitingBoard.waitingTotal === \'number\' ? waitingBoard.waitingTotal : 0');
+    expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
-    expect(home).toContain('state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];');
+    expect(home).toContain('var nextStuck = applyHomeStuck(overdue, overdueOk, expiredWaiting, waitingOk)');
     const activeOverdue = UI_JS.slice(
       UI_JS.indexOf('async function loadHomeActiveOverdue('),
       UI_JS.indexOf('function homeNumber('),
@@ -1206,9 +1207,10 @@ describe('UI static asset contract', () => {
     expect(activeOverdue).toContain('pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS');
     expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
     expect(home).not.toContain('state.homeWaitingTasks.length');
-    expect(home).toContain('classifyHomeWaiting(state.homeWaitingTasks, state.homeWaitingTotal)');
-    expect(home).toContain('mergeHomeStuck(state.homeStuckTasks, expiredWaiting)');
     expect(UI_JS).toContain('function classifyHomeWaiting(');
+    expect(UI_JS).toContain('function loadHomeWaiting(');
+    expect(UI_JS).toContain('function applyHomeStuck(');
+    expect(UI_JS).toContain('homeWaitingShouldContinue(acc)');
   });
 
   test('Notifications distinguishes today’s successful deliveries from visible failed rows', () => {
@@ -1260,7 +1262,7 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('async function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain("homeTaskUrl('input-required')");
+    expect(UI_JS).toContain("homeTaskUrl('input-required', acc.nextCursor, HOME_ACTIVE_PAGE_LIMIT)");
     expect(UI_JS).toContain("homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT)");
     expect(home).toContain("'/ui/api/notify/summary?date=today&tz='");
     expect(home).toContain("isAdmin() && !opts.poll");
