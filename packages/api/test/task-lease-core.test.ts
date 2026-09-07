@@ -140,7 +140,7 @@ describe('#56 R2 lease authority', () => {
       return {
         name,
         explicitMapping: fallback !== undefined,
-        // #78：api-only 示例在默认值句与变量之间可插一行 singleton 契约注释。
+        // #78：bundled / api-only 示例均可在默认值句与变量之间插一行 singleton 契约注释。
         exampleDefaultsFalse: /Default false = disabled\.\r?\n(?:# Single API process per mailbox required when enabled\.\r?\n)?TASK_LEASES_ENABLED=false/m.test(example),
         unsetInterpolation: interpolate(),
         trueInterpolation: interpolate('true'),
