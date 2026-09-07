@@ -624,6 +624,7 @@ describe('UI task reply / remind / close', () => {
 
 /* ---- 终审 C2：呈现层钉 overdue 红条 + Overdue 文字（PR4 双通道；不改生产码） ---- */
 const { TASKS_PAGE_JS } = await import('../src/ui/client/pages/tasks.ts');
+const { OVERVIEW_PAGE_JS } = await import('../src/ui/client/pages/overview.ts');
 const { PAGES_CSS } = await import('../src/ui/styles/pages.ts');
 
 /** 从 TASKS_PAGE_JS 抽出一段函数源码。 */
@@ -634,6 +635,15 @@ function sliceTasksFn(startNeedle: string, endNeedle: string): string {
     throw new Error('tasks.ts slice missing: ' + startNeedle);
   }
   return TASKS_PAGE_JS.slice(start, end);
+}
+
+function sliceOverviewFn(startNeedle: string, endNeedle: string): string {
+  const start = OVERVIEW_PAGE_JS.indexOf(startNeedle);
+  const end = OVERVIEW_PAGE_JS.indexOf(endNeedle);
+  if (start < 0 || end <= start) {
+    throw new Error('overview.js slice missing: ' + startNeedle);
+  }
+  return OVERVIEW_PAGE_JS.slice(start, end);
 }
 
 type FakeNode = {
@@ -1259,6 +1269,75 @@ describe('#75 board expiryProjection presentation', () => {
     expect(PAGES_CSS).toContain('.task-row.is-past-deadline {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-expiry-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
     expect(PAGES_CSS).toContain('.home-task-row.is-past-deadline { box-shadow: inset 3px 0 0 var(--red); }');
+  });
+});
+
+describe('#75 Home waiting excludes expiryProjection', () => {
+  const pastDeadline = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
+  const classify = new Function(
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, mergeHomeStuck: mergeHomeStuck };`,
+  )() as {
+    classifyHomeWaiting: (tasks: unknown, totalApprox: unknown) => {
+      waitingTasks: Array<{ id: string; subject?: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number;
+    };
+    mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
+  };
+
+  test('projected rows leave the Waiting list and decrement the server total', () => {
+    const pending = { id: 'wait-1', state: 'input-required', subject: 'Need you' };
+    const expired = {
+      id: 'exp-1',
+      state: 'input-required',
+      subject: 'Too late',
+      expiryProjection: 'past-deadline-unmaterialized',
+    };
+    const classified = classify.classifyHomeWaiting([expired, pending], 4);
+    expect(classified.waitingTasks.map((task) => task.id)).toEqual(['wait-1']);
+    expect(classified.expiredTasks.map((task) => task.id)).toEqual(['exp-1']);
+    expect(classified.waitingTotal).toBe(3);
+  });
+
+  test('an all-projected page yields an empty Waiting list and a zero count', () => {
+    const classified = classify.classifyHomeWaiting(
+      [{ id: 'exp-2', expiryProjection: 'past-deadline-unmaterialized' }],
+      1,
+    );
+    expect(classified.waitingTasks).toEqual([]);
+    expect(classified.waitingTotal).toBe(0);
+  });
+
+  test('expired waiting rows merge into Blocked without duplicating overdue ids', () => {
+    expect(
+      classify.mergeHomeStuck(
+        [{ id: 'same' }],
+        [{ id: 'same' }, { id: 'exp-3' }],
+      ).map((task) => task.id),
+    ).toEqual(['same', 'exp-3']);
+  });
+
+  test('renderHomeWaiting does not paint a projected row even if state still holds it', () => {
+    const section = fakeEl('section');
+    const state = {
+      homeStatus: 'ready',
+      homeWaitingTasks: [
+        { id: 'exp-4', subject: 'Expired approval', expiryProjection: 'past-deadline-unmaterialized', updatedAt: NOW },
+        { id: 'wait-2', subject: 'Still waiting', state: 'input-required', updatedAt: NOW },
+      ],
+    };
+    const fn = new Function(
+      'document', 'state', 'HOME_VISIBLE_ROWS', 'taskStateLabel', 'formatAgo', 'navigateTo',
+      `${pastDeadline}\n${sliceOverviewFn('function homeTaskButton(', 'function homeLinkButton(')}\n${sliceOverviewFn('function homeLinkButton(', 'function homeSection(')}\n${sliceOverviewFn('function appendHomeEmpty(', 'function renderHomeStuck(')}\nreturn renderHomeWaiting;`,
+    );
+    const renderHomeWaiting = fn(
+      { createElement: fakeEl }, state, 5, (task: { state?: string }) => task.state || '—',
+      () => 'just now', () => {},
+    ) as (host: ReturnType<typeof fakeEl>) => void;
+    renderHomeWaiting(section);
+    const texts = leafTexts(section);
+    expect(texts).toContain('Still waiting');
+    expect(texts).not.toContain('Expired approval');
   });
 });
 

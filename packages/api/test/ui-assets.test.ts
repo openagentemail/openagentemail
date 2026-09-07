@@ -1206,6 +1206,9 @@ describe('UI static asset contract', () => {
     expect(activeOverdue).toContain('pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS');
     expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
     expect(home).not.toContain('state.homeWaitingTasks.length');
+    expect(home).toContain('classifyHomeWaiting(state.homeWaitingTasks, state.homeWaitingTotal)');
+    expect(home).toContain('mergeHomeStuck(state.homeStuckTasks, expiredWaiting)');
+    expect(UI_JS).toContain('function classifyHomeWaiting(');
   });
 
   test('Notifications distinguishes today’s successful deliveries from visible failed rows', () => {

@@ -47,6 +47,39 @@
     return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : 'Unavailable';
   }
 
+  /* 过期未物化仍是 input-required，但不得再算「等你批」。徽标从 totalApprox 扣本页投影行。 */
+  function classifyHomeWaiting(tasks, totalApprox) {
+    var rows = Array.isArray(tasks) ? tasks : [];
+    var waitingTasks = [];
+    var expiredTasks = [];
+    rows.forEach(function (task) {
+      if (approvalPastDeadline(task)) expiredTasks.push(task);
+      else waitingTasks.push(task);
+    });
+    var rawTotal = typeof totalApprox === 'number' ? totalApprox : 0;
+    return {
+      waitingTasks: waitingTasks,
+      expiredTasks: expiredTasks,
+      waitingTotal: Math.max(0, rawTotal - expiredTasks.length)
+    };
+  }
+
+  /* 过期未物化并入 Blocked（与 overdue 同属卡住区），按 id 去重。 */
+  function mergeHomeStuck(stuck, expired) {
+    var merged = Array.isArray(stuck) ? stuck.slice() : [];
+    var seen = {};
+    merged.forEach(function (task) {
+      if (task && task.id) seen[task.id] = true;
+    });
+    (Array.isArray(expired) ? expired : []).forEach(function (task) {
+      if (task && task.id && !seen[task.id]) {
+        seen[task.id] = true;
+        merged.push(task);
+      }
+    });
+    return merged;
+  }
+
   function homeTaskButton(task) {
     var button = document.createElement('button');
     button.type = 'button';
@@ -110,7 +143,9 @@
   }
 
   function renderHomeWaiting(section) {
-    var rows = Array.isArray(state.homeWaitingTasks) ? state.homeWaitingTasks : [];
+    var rows = (Array.isArray(state.homeWaitingTasks) ? state.homeWaitingTasks : []).filter(function (task) {
+      return !approvalPastDeadline(task);
+    });
     if (state.homeStatus === 'loading' && !rows.length) {
       appendHomeEmpty(section, 'Loading tasks', 'Checking the tasks that need your input.');
       return;
@@ -293,17 +328,23 @@
     }
     overviewController = null;
     var issues = [];
+    var expiredWaiting = [];
     if (results[0] && results[0].ok) {
       var waitingPayload = results[0].payload || {};
       state.homeWaitingTasks = Array.isArray(waitingPayload.tasks) ? waitingPayload.tasks : [];
       state.homeWaitingTotal = typeof waitingPayload.totalApprox === 'number'
         ? waitingPayload.totalApprox
         : 0;
+      var classified = classifyHomeWaiting(state.homeWaitingTasks, state.homeWaitingTotal);
+      state.homeWaitingTasks = classified.waitingTasks;
+      state.homeWaitingTotal = classified.waitingTotal;
+      expiredWaiting = classified.expiredTasks;
     } else if (results[0] && results[0].error.message !== 'session_expired') {
       issues.push('Tasks that need you could not be loaded.');
     }
     if (results[1] && results[1].ok) {
       state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];
+      state.homeStuckTasks = mergeHomeStuck(state.homeStuckTasks, expiredWaiting);
     } else if (results[1] && results[1].error.message !== 'session_expired') {
       issues.push('Blocked tasks could not be loaded.');
     }
