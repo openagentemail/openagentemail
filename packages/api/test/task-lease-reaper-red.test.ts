@@ -436,7 +436,13 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(closable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.close({ id: ID, from: REQUESTER, reason: 'cancelled' })]);
     now = Date.parse(closable.claimedUntil);
-    expect({ afterClose: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterClose: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // R1-a：admin-closed 后当前权威不再物化，但历史窗补账仍跑。
+      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+      expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(1);
+    } else {
+      expect({ afterClose: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterClose: 0, expiryDeliveries: 0 });
+    }
   });
 
   test('a signed same-generation expiry with different claimedUntil is fail-closed rather than an exact duplicate', async () => {
@@ -1227,16 +1233,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     const staleGen1Expiry = await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 9);
     expect(staleGen1Expiry).not.toBeNull();
     const lateSequence = taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!]);
-    if (taskLeaseExpiryAuditM3Enabled()) {
-      // M3 T11：迟到回执匹配历史权威窗 → 审计 no-op，权威停在 claim2，不进公开序列。
-      expect(lateSequence).not.toBeNull();
-      expect(lateSequence?.lease?.leaseGeneration).toBe(2);
-      expect(lateSequence?.expiredLease).toBeUndefined();
-      expect(toTaskView(lateSequence!).messages).toHaveLength(3);
-    } else {
-      // Durable thread: root, claim1, claim2, staleGen1Expiry
-      // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
-      expect(lateSequence).toBeNull();
-    }
+    // R1-d：容忍无条件。迟到回执匹配历史窗 → 审计 no-op，权威停在 claim2（开关只门控发射）。
+    expect(lateSequence).not.toBeNull();
+    expect(lateSequence?.lease?.leaseGeneration).toBe(2);
+    expect(lateSequence?.expiredLease).toBeUndefined();
+    expect(toTaskView(lateSequence!).messages).toHaveLength(3);
   });
 });

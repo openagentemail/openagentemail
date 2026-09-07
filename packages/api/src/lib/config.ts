@@ -154,8 +154,8 @@ const envSchema = z.object({
   // byte-compatible unless an operator explicitly enables this authority.
   TASK_LEASES_ENABLED: z.enum(['true', 'false']).default('false'),
 
-  // M3：expired 回执派生化（默认关）。读侧迟到无害化与写侧补账/best-effort 同闸，
-  // 禁止「发射开、容忍关」。开启后 reclaim 不再被 audit SMTP 挡死。
+  // M3：expired 回执发射侧（默认关）。只门控 claim best-effort 与 reaper 补账；
+  // 迟到回执容忍规则无条件生效，避免回退开关把已补账流毒成整卡 null。
   TASK_LEASES_EXPIRY_AUDIT_M3: z.enum(['true', 'false']).default('false'),
 
   // Comma-separated domains allowed as the `from` domain of an identity.
