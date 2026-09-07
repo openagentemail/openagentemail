@@ -10,7 +10,7 @@ export {
   isApprovalExpired, taskFromMessages, currentTaskMessage, getTask, listTasks,
   createTask, createApprovalTask,
   invalidateTaskListCache, updateTask, claimTask, toTaskView, toTaskLeaseGrantView,
-  isTaskLeaseTokenCurrent, reapExpiredTaskLeasesOnce, retryPendingExpiryAuditsOnce, renewTask, releaseTask,
+  isTaskLeaseTokenCurrent, reapExpiredTaskLeasesOnce, renewTask, releaseTask,
   decideApprovalTask, taskParticipants, taskOverdue, toUiTaskView, isClosedByAdmin,
   listTaskBoard, replyTask, remindTask, closeTask, waitForTaskTerminalWith,
   waitForTaskTerminal, approvalEventForWatcher,

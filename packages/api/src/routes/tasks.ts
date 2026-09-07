@@ -301,7 +301,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
-        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted') return c.json({ error: code }, 409);
+        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'smtp_error' }, 502);

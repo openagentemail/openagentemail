@@ -263,20 +263,16 @@ describe('#56 R2 lease authority', () => {
     expect(sent).toHaveLength(1);
     expect(first.leaseGeneration).toBe(1);
 
+    // R7：未索引 claim overlay 仍在重放时，过期后的 reclaim 明示拒绝。
     now = Date.parse(first.claimedUntil);
-    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    expect(second.leaseGeneration).toBe(2);
-    expect(sent).toHaveLength(3);
-
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_overlay_pending_index');
+    expect(sent).toHaveLength(1);
     const rebuilt = taskFromMessages(ID, [
       submittedRaw(),
       (await parsedClaim(sent[0]!, 2))!,
-      (await parseCaptured(sent[1]!, 3))!,
-      (await parsedClaim(sent[2]!, 4))!,
     ])!;
-    expect(rebuilt.lease?.leaseGeneration).toBe(2);
-    expect(isTaskLeaseTokenCurrent(rebuilt, first.leaseToken)).toBe(false);
-    expect(isTaskLeaseTokenCurrent(rebuilt, second.leaseToken)).toBe(true);
+    expect(rebuilt.lease?.leaseGeneration).toBe(1);
+    expect(isTaskLeaseTokenCurrent(rebuilt, first.leaseToken, Date.parse(first.claimedUntil) - 1)).toBe(true);
   });
 
   test('production approval requests are not claimable or mutated by lease authority', async () => {
@@ -1321,7 +1317,7 @@ describe('#56 R12 remaining P1 gates', () => {
 
   test('R12 GREEN: released working task reclaims only from its authenticated release receipt', async () => {
     let now = START;
-    const durable = submittedTask();
+    let durable = submittedTask();
     const sent: SendInput[] = [];
     setTaskNowForTests(() => now);
     setTaskGetForTests(async () => durable);
@@ -1330,6 +1326,10 @@ describe('#56 R12 remaining P1 gates', () => {
       return { messageId: `<r12-release-reclaim-${sent.length}>` };
     });
     const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    // R7：未索引 claim overlay 仍在重放时不得 reclaim；先落到 durable 再 release。
+    durable = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(sent[0]!, 2))!])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
     const released = await taskService.release!({ id: ID, from: B, leaseToken: first.leaseToken });
     const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect({
