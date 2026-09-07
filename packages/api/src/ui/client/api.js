@@ -71,6 +71,8 @@
     state.homeMessage = '';
     state.homeWaitingTasks = [];
     state.homeWaitingTotal = 0;
+    state.homeOverdueTasks = [];
+    state.homeExpiredTasks = [];
     state.homeStuckTasks = [];
     state.homeFailedUrgentCount = 0;
     state.homeUrgentSentCount = null;

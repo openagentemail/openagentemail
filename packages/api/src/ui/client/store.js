@@ -95,6 +95,9 @@
     homeMessage: '',
     homeWaitingTasks: [],
     homeWaitingTotal: 0,
+    /* Blocked 双源：overdue 与过期投影分开缓存，失败源不得被成功源抹掉。 */
+    homeOverdueTasks: [],
+    homeExpiredTasks: [],
     homeStuckTasks: [],
     homeFailedUrgentCount: 0,
     homeUrgentSentCount: null,

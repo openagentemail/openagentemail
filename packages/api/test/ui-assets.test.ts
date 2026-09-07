@@ -1196,7 +1196,7 @@ describe('UI static asset contract', () => {
     expect(home).toContain('state.homeWaitingTotal = typeof waitingBoard.waitingTotal === \'number\' ? waitingBoard.waitingTotal : 0');
     expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
-    expect(home).toContain('var nextStuck = applyHomeStuck(overdue, overdueOk, expiredWaiting, waitingOk)');
+    expect(home).toContain('var nextStuck = applyHomeStuckSources(');
     const activeOverdue = UI_JS.slice(
       UI_JS.indexOf('async function loadHomeActiveOverdue('),
       UI_JS.indexOf('function homeNumber('),
@@ -1209,7 +1209,9 @@ describe('UI static asset contract', () => {
     expect(home).not.toContain('state.homeWaitingTasks.length');
     expect(UI_JS).toContain('function classifyHomeWaiting(');
     expect(UI_JS).toContain('function loadHomeWaiting(');
-    expect(UI_JS).toContain('function applyHomeStuck(');
+    expect(UI_JS).toContain('function applyHomeStuckSources(');
+    expect(UI_JS).toContain('state.homeOverdueTasks = nextStuck.overdue');
+    expect(UI_JS).toContain('state.homeExpiredTasks = nextStuck.expired');
     expect(UI_JS).toContain('homeWaitingShouldContinue(acc)');
   });
 

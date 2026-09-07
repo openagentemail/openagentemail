@@ -92,12 +92,13 @@
     return page;
   }
 
+  /* 凑够可见行后仍跟 cursor：计数要扣完全扫描窗里的投影行再发布。 */
   function homeWaitingShouldContinue(acc) {
-    return !!(acc && acc.nextCursor && acc.waitingTasks.length < HOME_VISIBLE_ROWS &&
+    return !!(acc && acc.nextCursor &&
       acc.pages < HOME_ACTIVE_MAX_PAGES && acc.scannedRows < HOME_ACTIVE_MAX_ROWS);
   }
 
-  /* 分页直到凑够可见的非过期行（与 loadHomeActiveOverdue 同口径）。 */
+  /* 分页拉完匹配窗（页/行上限内）再发布 waiting 计数。 */
   async function loadHomeWaiting(signal) {
     var acc = emptyHomeWaitingAcc();
     do {
@@ -125,11 +126,19 @@
     return merged;
   }
 
-  /* active 成败都要留下投影行：失败时不能让 expired 从所有区块消失。 */
-  function applyHomeStuck(overdue, overdueOk, expired, waitingOk) {
-    if (waitingOk) return mergeHomeStuck(overdueOk ? overdue : [], expired);
-    if (overdueOk) return Array.isArray(overdue) ? overdue.slice() : [];
-    return null;
+  /* 两源分开存：失败源留缓存，成功源覆盖，再合成 Blocked。 */
+  function applyHomeStuckSources(cachedOverdue, cachedExpired, overdue, overdueOk, expired, waitingOk) {
+    var nextOverdue = overdueOk
+      ? (Array.isArray(overdue) ? overdue.slice() : [])
+      : (Array.isArray(cachedOverdue) ? cachedOverdue.slice() : []);
+    var nextExpired = waitingOk
+      ? (Array.isArray(expired) ? expired.slice() : [])
+      : (Array.isArray(cachedExpired) ? cachedExpired.slice() : []);
+    return {
+      overdue: nextOverdue,
+      expired: nextExpired,
+      stuck: mergeHomeStuck(nextOverdue, nextExpired)
+    };
   }
 
   function homeTaskButton(task) {
@@ -398,8 +407,17 @@
     } else if (results[1] && results[1].error.message !== 'session_expired') {
       issues.push('Blocked tasks could not be loaded.');
     }
-    var nextStuck = applyHomeStuck(overdue, overdueOk, expiredWaiting, waitingOk);
-    if (nextStuck) state.homeStuckTasks = nextStuck;
+    var nextStuck = applyHomeStuckSources(
+      state.homeOverdueTasks,
+      state.homeExpiredTasks,
+      overdue,
+      overdueOk,
+      expiredWaiting,
+      waitingOk
+    );
+    state.homeOverdueTasks = nextStuck.overdue;
+    state.homeExpiredTasks = nextStuck.expired;
+    state.homeStuckTasks = nextStuck.stuck;
     if (results[2] && results[2].ok) {
       var summaryPayload = results[2].payload || {};
       state.homeUrgentSentCount = typeof summaryPayload.ringCount === 'number'

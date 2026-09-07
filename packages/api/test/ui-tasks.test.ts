@@ -1278,7 +1278,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     'HOME_VISIBLE_ROWS',
     'HOME_ACTIVE_MAX_PAGES',
     'HOME_ACTIVE_MAX_ROWS',
-    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, mergeHomeStuck: mergeHomeStuck, applyHomeStuck: applyHomeStuck };`,
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
   )(5, 5, 500) as {
     classifyHomeWaiting: (tasks: unknown) => {
       waitingTasks: Array<{ id: string; subject?: string }>;
@@ -1312,12 +1312,14 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     };
     homeWaitingShouldContinue: (acc: { nextCursor: string; waitingTasks: unknown[]; pages: number; scannedRows: number }) => boolean;
     mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
-    applyHomeStuck: (
+    applyHomeStuckSources: (
+      cachedOverdue: Array<{ id: string }>,
+      cachedExpired: Array<{ id: string }>,
       overdue: Array<{ id: string }>,
       overdueOk: boolean,
       expired: Array<{ id: string }>,
       waitingOk: boolean,
-    ) => Array<{ id: string }> | null;
+    ) => { overdue: Array<{ id: string }>; expired: Array<{ id: string }>; stuck: Array<{ id: string }> };
   };
 
   const projected = (id: string) => ({
@@ -1378,12 +1380,49 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
   });
 
-  test('applyHomeStuck keeps projected rows when the active-overdue request fails', () => {
-    const expired = [projected('exp-keep')];
-    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], false, expired, true)?.map((task) => task.id)).toEqual(['exp-keep']);
-    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], true, expired, true)?.map((task) => task.id)).toEqual(['overdue-1', 'exp-keep']);
-    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], true, expired, false)?.map((task) => task.id)).toEqual(['overdue-1']);
-    expect(homeFlow.applyHomeStuck([{ id: 'overdue-1' }], false, expired, false)).toBeNull();
+  test('waiting count keeps paging after five live rows so later projections are subtracted', () => {
+    const first = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [
+        ...Array.from({ length: 5 }, (_, index) => live(`live-${index}`)),
+        ...Array.from({ length: 95 }, (_, index) => projected(`exp-a-${index}`)),
+      ],
+      totalApprox: 200,
+      nextCursor: 'page-2',
+    });
+    expect(first.waitingTasks).toHaveLength(5);
+    expect(first.waitingTotal).toBe(105);
+    expect(homeFlow.homeWaitingShouldContinue(first)).toBe(true);
+    const second = homeFlow.accumulateHomeWaitingPage(first, {
+      tasks: Array.from({ length: 100 }, (_, index) => projected(`exp-b-${index}`)),
+      totalApprox: 200,
+    });
+    expect(second.waitingTasks).toHaveLength(5);
+    expect(second.expiredTasks).toHaveLength(195);
+    expect(second.waitingTotal).toBe(5);
+    expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
+  });
+
+  test('applyHomeStuckSources keeps the failed source cache instead of rebuilding from the winner', () => {
+    const cachedOverdue = [{ id: 'overdue-cache' }];
+    const cachedExpired = [projected('exp-cache')];
+    const freshExpired = [projected('exp-fresh')];
+    const freshOverdue = [{ id: 'overdue-fresh' }];
+    const activeFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, [{ id: 'ignored' }], false, freshExpired, true,
+    );
+    expect(activeFailed.overdue.map((task) => task.id)).toEqual(['overdue-cache']);
+    expect(activeFailed.expired.map((task) => task.id)).toEqual(['exp-fresh']);
+    expect(activeFailed.stuck.map((task) => task.id)).toEqual(['overdue-cache', 'exp-fresh']);
+    const waitingFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, freshOverdue, true, [projected('ignored')], false,
+    );
+    expect(waitingFailed.overdue.map((task) => task.id)).toEqual(['overdue-fresh']);
+    expect(waitingFailed.expired.map((task) => task.id)).toEqual(['exp-cache']);
+    expect(waitingFailed.stuck.map((task) => task.id)).toEqual(['overdue-fresh', 'exp-cache']);
+    const bothFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, freshOverdue, false, freshExpired, false,
+    );
+    expect(bothFailed.stuck.map((task) => task.id)).toEqual(['overdue-cache', 'exp-cache']);
   });
 
   test('renderHomeWaiting does not paint a projected row even if state still holds it', () => {
