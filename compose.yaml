@@ -227,6 +227,7 @@ services:
       API_KEYS: ${API_KEYS:?Set API_KEYS in .env (openssl rand -hex 32)}
       PORT: 3100
       UI_ENABLED: ${UI_ENABLED:-true}
+      # Single API process per mailbox required when enabled.
       TASK_LEASES_ENABLED: ${TASK_LEASES_ENABLED:-false}
       # --- catch-all mailbox access (same account for IMAP read + SMTP send) ---
       IMAP_HOST: mailserver
