@@ -27,8 +27,13 @@ export function canonicalRequest(input: CanonicalRequest): Record<string, string
   return { requester: input.requester, responder: input.responder, subject: input.subject, body: input.body };
 }
 
+function isReminder(message: TaskMessage): boolean {
+  return message.kind === 'reminder';
+}
+
 function initialSubmittedMessage(task: OaeTask): TaskMessage {
-  const roots = task.messages.filter((message) => message.state === 'submitted');
+  // reminder 不计入 root 基数。
+  const roots = task.messages.filter((message) => message.state === 'submitted' && !isReminder(message));
   if (roots.length !== 1) throw new CorrelationSafetyError(`task history has ${roots.length} submitted roots`);
   const root = roots[0]!;
   if (root.from !== task.from || root.to !== task.to || root.subject !== task.subject) throw new CorrelationSafetyError('submitted root contradicts task thread');
@@ -124,10 +129,11 @@ export async function requestInputOrReconcile(store: CorrelationWriter, client: 
 
 function validateInputResponse(task: OaeTask, record: CorrelationRecord, body: string, evidence: string): void {
   if (record.inputEvidence !== evidence) throw new CorrelationSafetyError('persisted input evidence contradicts canonical input body');
-  if (task.state !== 'input-required') throw new CorrelationSafetyError('input response task state must be input-required');
+  // 合法后继态（working）仍允许按历史里那条 exact input-transition 对账。
+  if (task.state !== 'input-required' && task.state !== 'working') throw new CorrelationSafetyError('input response task state must be input-required or a legal later state');
   validateCorrelatedTask(task, record);
-  if (task.messages.some((message) => message.state === 'completed' || message.state === 'failed')) throw new CorrelationSafetyError('input response history contains terminal contradiction');
-  const inputEvents = task.messages.filter((message) => message.state === 'input-required');
+  if (task.messages.some((message) => !isReminder(message) && (message.state === 'completed' || message.state === 'failed'))) throw new CorrelationSafetyError('input response history contains terminal contradiction');
+  const inputEvents = task.messages.filter((message) => message.state === 'input-required' && !isReminder(message));
   const stamped = inputEvents.filter((message) => message.from === record.expectedParticipants.requester && message.to === record.expectedParticipants.responder && message.subject === task.subject && message.body === body && requestFingerprint({ taskId: record.taskId, body: message.body }) === evidence);
   if (inputEvents.length !== 1 || stamped.length !== 1) throw new CorrelationSafetyError(`ambiguous input-required history: expected one exact stamped event, got ${inputEvents.length}`);
 }
@@ -157,7 +163,19 @@ export function validateDecision(task: OaeTask, record: CorrelationRecord): { va
   if (message.from !== record.expectedParticipants.responder || message.to !== record.expectedParticipants.requester || message.subject !== task.subject) throw new CorrelationSafetyError('completed message author or thread contradicts configured responder');
   const result = exactDecision(message.result);
   if (canonicalJson(task.result) !== canonicalJson(result)) throw new CorrelationSafetyError('task and terminal message result contradict each other');
-  return { value: result, evidence: { decision: result.decision, messageId: message.id, evidenceFingerprint: requestFingerprint({ taskId: task.id, messageId: message.id, result }) } };
+  const overlayMessageIds = task.messages
+    .map((row) => row.id)
+    .filter((id) => /^queued-[A-Za-z0-9._:-]{1,220}$/.test(id))
+    .slice(0, 8);
+  return {
+    value: result,
+    evidence: {
+      decision: result.decision,
+      messageId: message.id,
+      evidenceFingerprint: requestFingerprint({ taskId: task.id, messageId: message.id, result }),
+      ...(overlayMessageIds.length > 0 ? { overlayMessageIds } : {}),
+    },
+  };
 }
 
 function exactDecision(value: unknown): Decision {

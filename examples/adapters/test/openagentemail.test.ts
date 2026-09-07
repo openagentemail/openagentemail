@@ -28,6 +28,17 @@ test('typed REST client covers create, get, terminal wait, input, complete and f
   assert.deepEqual(calls[5]!.body, { state: 'failed', result: { reason: 'stop' } });
 });
 
+test('#107 private helper keeps scoped authorization after caller headers', async () => {
+  let authorization: string | null = null;
+  const fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get('authorization');
+    return new Response(JSON.stringify(task()), { status: 200 });
+  };
+  const client = new OaeClient({ baseUrl: 'http://127.0.0.1/', token: 'scoped-canary-token', fetch: fetch as typeof globalThis.fetch });
+  await client.get('task-1');
+  assert.equal(authorization, 'Bearer scoped-canary-token');
+});
+
 test('R5e accepted base path prefixes every operation without query ambiguity', async () => {
   let url = ''; const client = new OaeClient({ baseUrl: 'https://oae.example.test/tenant-a/', token: 'opaque-token', fetch: (async (input) => { url = String(input); return new Response(JSON.stringify(task()), { status: 200, headers: { 'content-type': 'application/json' } }); }) as typeof fetch }); await client.get('task-1'); assert.equal(url, 'https://oae.example.test/tenant-a/v1/tasks/task-1');
 });

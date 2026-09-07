@@ -12,6 +12,8 @@ export interface DecisionEvidence {
   decision: 'approved' | 'rejected';
   messageId: string;
   evidenceFingerprint: string;
+  /** 生产 queued-overlay 消息 id，有界、可选；不是主权威。 */
+  overlayMessageIds?: string[];
 }
 
 export interface CorrelationRecord {
@@ -41,8 +43,21 @@ export function isCorrelationId(value: unknown): value is string { return typeof
 
 /** Shared semantic task ID boundary for persistence and public diagnostics. */
 export function isSafeTaskId(value: unknown): value is string { return validSafeText(value, /^[A-Za-z0-9._:-]{1,240}$/); }
+const CANONICAL_EMAIL = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
 /** Defense-in-depth detector; allowlisted schemas remain the primary persistence control. */
-export function isCredentialShaped(value: unknown): boolean { return typeof value === 'string' && (/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value) || /(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)); }
+export function isCredentialShaped(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  // 结构化 canonical 地址不当 credential，避免 token@host 一类关键词误报。
+  if (CANONICAL_EMAIL.test(value) && !/[\r\n\s]/.test(value)) return false;
+  if (/(bearer|basic\s+|authorization|token|secret|password|api[_-]?key|raw[-_ ]?body|-----begin|private[ _-]?key|\r|\n)/i.test(value)) return true;
+  if (/(^|[^a-z0-9])(?:sk-|oa_)[a-z0-9_-]+/i.test(value)) return true;
+  // JWT / 高熵形态是加深启发式，不是主边界。
+  if (JWT_SHAPE.test(value) && value.length >= 40) return true;
+  if (value.length >= 40 && !/\s/.test(value) && !value.includes('@') && /[A-Z]/.test(value) && /[a-z]/.test(value) && /\d/.test(value)) return true;
+  return false;
+}
 
 export function requestFingerprint(value: Record<string, unknown>): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -257,9 +272,17 @@ function exactKeys(value: object, expected: readonly string[]): boolean {
 
 function validEvidence(value: unknown): value is DecisionEvidence {
   const row = value as Partial<DecisionEvidence>;
-  return !!row && typeof row === 'object' && exactKeys(row, ['decision', 'messageId', 'evidenceFingerprint'])
+  const expected = row.overlayMessageIds === undefined
+    ? ['decision', 'evidenceFingerprint', 'messageId']
+    : ['decision', 'evidenceFingerprint', 'messageId', 'overlayMessageIds'];
+  const overlays = row.overlayMessageIds;
+  return !!row && typeof row === 'object' && exactKeys(row, expected)
     && (row.decision === 'approved' || row.decision === 'rejected') && validSafeText(row.messageId, /^[A-Za-z0-9._:-]{1,240}$/)
-    && typeof row.evidenceFingerprint === 'string' && /^[0-9a-f]{64}$/i.test(row.evidenceFingerprint);
+    && typeof row.evidenceFingerprint === 'string' && /^[0-9a-f]{64}$/i.test(row.evidenceFingerprint)
+    && (overlays === undefined || (
+      Array.isArray(overlays) && overlays.length >= 1 && overlays.length <= 8
+      && overlays.every((id) => validSafeText(id, /^queued-[A-Za-z0-9._:-]{1,220}$/))
+    ));
 }
 
 function validateRecord(value: unknown): asserts value is CorrelationRecord {

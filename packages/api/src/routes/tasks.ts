@@ -78,7 +78,11 @@ const decisionSchema = z.object({
 
 const listSchema = z.object({ state: taskStateSchema.optional() });
 const getSchema = z.object({ wait: z.enum(['true', 'false']).optional() });
-const childrenSchema = z.object({ limit: z.coerce.number().refine((value) => value === 20 || value === 50 || value === 100).optional(), cursor: z.string().optional() });
+// children 游标与 board cursor 同口径：解码前硬限 1024，超长直接 400。
+const childrenSchema = z.object({
+  limit: z.coerce.number().refine((value) => value === 20 || value === 50 || value === 100).optional(),
+  cursor: z.string().max(1024).optional(),
+});
 
 function actorAddress(c: Context, supplied: string | undefined): string | Response {
   const auth = getAuth(c);
@@ -94,7 +98,8 @@ function actorAddress(c: Context, supplied: string | undefined): string | Respon
 
 function canReadTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
-  return auth.kind === 'admin' || taskParticipants(task).has(auth.address);
+  // 参与者比较一律小写，避免 identity token 大小写与 IMAP 地址不一致。
+  return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
 }
 
 /** Relationship edges are independently ACL-scoped; the base task stays readable. */
@@ -103,6 +108,11 @@ function taskViewFor(c: Context, task: Task, parent: Task | null | undefined) {
   return task.parentTaskId && parent && canReadTask(c, parent)
     ? { ...view, parentTaskId: task.parentTaskId }
     : view;
+}
+
+/** mutation 成功响应与 GET/create 共用独立 parent ACL 投影，不暴露内部 root。 */
+async function mutationTaskView(c: Context, service: TaskService, task: Task) {
+  return taskViewFor(c, task, await projectedParentTask(service, task.parentTaskId));
 }
 
 async function projectedParentTask(service: TaskService, parentTaskId: string | undefined): Promise<Task | null> {
@@ -231,7 +241,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         ? allTasks
         : allTasks.filter((task) => task.state === parsed.data.state);
       const auth = getAuth(c);
-      const visible = auth.kind === 'admin' ? tasks : tasks.filter((task) => taskParticipants(task).has(auth.address));
+      const visible = auth.kind === 'admin' ? tasks : tasks.filter((task) => taskParticipants(task).has(auth.address.toLowerCase()));
       const byId = new Map(allTasks.map((task) => [task.id, task]));
       return c.json({ tasks: visible.map((task) => taskViewFor(c, task, task.parentTaskId ? byId.get(task.parentTaskId) : null)) });
     })
@@ -239,14 +249,21 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       const id = taskIdSchema.safeParse(c.req.param('id'));
       const query = childrenSchema.safeParse(c.req.query());
       if (!id.success || !query.success) return c.json({ error: 'invalid_request' }, 400);
-      const parent = await readTaskForAuthorization(service, id.data);
-      if (!parent) return c.json({ error: 'not_found' }, 404);
-      if (!canReadTask(c, parent)) return c.json({ error: 'forbidden: task participant required' }, 403);
+      // 生成 id 小写、输入大小写不敏感：lookup / filter / cursor 绑定前先归一。
+      const parentTaskId = id.data.toLowerCase();
       if (!service.listChildren) return c.json({ error: 'not_found' }, 404);
       try {
         const auth = getAuth(c);
-        const page = await service.listChildren({ parentTaskId: id.data, limit: (query.data.limit ?? 20) as 20 | 50 | 100, ...(query.data.cursor ? { cursor: query.data.cursor } : {}) }, auth.kind === 'admin' ? { kind: 'admin' } : { kind: 'identity', address: auth.address });
-        return c.json({ children: page.children.map((child) => taskViewFor(c, child, parent)), nextCursor: page.nextCursor });
+        // 单次读定版：parent 存在性与 ACL 只由 listChildren 的那次快照裁定，避免 snapshot/durable 双读竞态。
+        const page = await service.listChildren({ parentTaskId, limit: (query.data.limit ?? 20) as 20 | 50 | 100, ...(query.data.cursor ? { cursor: query.data.cursor } : {}) }, auth.kind === 'admin' ? { kind: 'admin' } : { kind: 'identity', address: auth.address.toLowerCase() });
+        // listChildren 成功即 viewer 可读 parent，投影 parentTaskId，不再二次读 parent。
+        return c.json({
+          children: page.children.map((child) => {
+            const view = toTaskView(child);
+            return child.parentTaskId ? { ...view, parentTaskId: child.parentTaskId } : view;
+          }),
+          nextCursor: page.nextCursor,
+        });
       } catch (err) {
         const code = (err as Error).message;
         if (code === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
@@ -296,7 +313,9 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       try {
         const claim = service.claim;
         if (!claim) throw new Error('lease_service_unavailable');
-        return c.json(toTaskLeaseGrantView(await claim({ id: id.data, from, leaseSec: parsed.data.leaseSec })));
+        const grant = await claim({ id: id.data, from, leaseSec: parsed.data.leaseSec });
+        const leaseView = toTaskLeaseGrantView(grant);
+        return c.json({ ...leaseView, task: await mutationTaskView(c, service, grant.task) });
       } catch (err) {
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
@@ -327,7 +346,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       try {
         const renew = service.renew;
         if (!renew) throw new Error('lease_service_unavailable');
-        return c.json(toTaskView(await renew({
+        return c.json(await mutationTaskView(c, service, await renew({
           id: id.data,
           from,
           leaseToken: parsed.data.leaseToken,
@@ -367,7 +386,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       try {
         const release = service.release;
         if (!release) throw new Error('lease_service_unavailable');
-        return c.json(toTaskView(await release({
+        return c.json(await mutationTaskView(c, service, await release({
           id: id.data,
           from,
           leaseToken: parsed.data.leaseToken,
@@ -413,7 +432,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       try {
         const decideApproval = service.decideApproval;
         if (!decideApproval) throw new Error('approval_service_unavailable');
-        return c.json(toTaskView(await decideApproval({
+        return c.json(await mutationTaskView(c, service, await decideApproval({
           id: id.data,
           from,
           decision: parsed.data.decision,
@@ -446,7 +465,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!task) return c.json({ error: 'not_found' }, 404);
       // This is a hard server-side ACL boundary. A guessed task UUID alone
       // never gives another identity authority to advance its state.
-      if (!taskParticipants(task).has(from)) {
+      if (!taskParticipants(task).has(from.toLowerCase())) {
         return c.json({ error: 'forbidden: task participant required' }, 403);
       }
       try {
@@ -459,7 +478,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           ...(parsed.data.leaseToken !== undefined ? { leaseToken: parsed.data.leaseToken } : {}),
         });
         if (!updated) return c.json({ error: 'not_found' }, 404);
-        return c.json(toTaskView(updated));
+        return c.json(await mutationTaskView(c, service, updated));
       } catch (err) {
         if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'task_lease_required' || (err as Error).message === 'approval_decision_required') {
           return c.json({ error: (err as Error).message }, 409);

@@ -153,6 +153,17 @@ test('#58 R3 RED: task tools accept the authenticated parent pointer and expose 
   expect(children!.limit.safeParse(21).success).toBe(false);
 });
 
+test('#103 MCP task output ids use the same v1–v5 durable predicate as inputs', () => {
+  const output = toolConfigs.get('task_get')!.outputSchema!;
+  const ok = 'f0c4a8e6-1e22-4c66-8c2f-0955a20d81bf';
+  const v7 = '018f8d1d-4d7e-8b0a-8000-000000000000';
+  expect(output.id.safeParse(ok).success).toBe(true);
+  expect(output.id.safeParse(v7).success).toBe(false);
+  expect(output.parentTaskId.safeParse(ok).success).toBe(true);
+  expect(output.parentTaskId.safeParse(v7).success).toBe(false);
+  expect(output.parentTaskId.safeParse(undefined).success).toBe(true);
+});
+
 test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放过去", () => {
   const ok = (schema: SchemaMap, field: string, value: unknown) =>
     schema[field]!.safeParse(value).success;

@@ -88,7 +88,7 @@ test('R1g durable mismatched stored input fingerprint rejects with zero sends an
 test('R1g hostile input histories call production recovery from durable attempted state', async () => {
   type Row = { name: string; mutate: (task: OaeTask) => OaeTask };
   const rows: Row[] = [
-    ...(['submitted', 'working', 'completed', 'failed'] as TaskState[]).map((state) => ({ name: `top-level ${state}`, mutate: (task: OaeTask) => ({ ...task, state }) })),
+    ...(['submitted', 'completed', 'failed'] as TaskState[]).map((state) => ({ name: `top-level ${state}`, mutate: (task: OaeTask) => ({ ...task, state }) })),
     { name: 'exact input plus completed terminal', mutate: (task) => ({ ...task, messages: [...task.messages, { ...task.messages[1]!, id: 'completed', from: base.responder, to: base.requester, state: 'completed', result: { decision: 'approved' } }] }) },
     { name: 'exact input plus failed terminal', mutate: (task) => ({ ...task, messages: [...task.messages, { ...task.messages[1]!, id: 'failed', from: base.responder, to: base.requester, state: 'failed' }] }) },
     { name: 'both terminals', mutate: (task) => ({ ...task, messages: [...task.messages, { ...task.messages[1]!, id: 'completed', from: base.responder, to: base.requester, state: 'completed' }, { ...task.messages[1]!, id: 'failed', from: base.responder, to: base.requester, state: 'failed' }] }) },
@@ -109,4 +109,16 @@ test('R1g hostile input histories call production recovery from durable attempte
     assert.equal(sends.count, 0, row.name);
     assert.deepEqual(await store.load(attempted.correlationId), attempted, row.name);
   }
+});
+
+test('#107 exact input-transition reconciles after legal later working state', async () => {
+  const store = new CorrelationStore(await mkdtemp(join(tmpdir(), 'oae-pr3-input-later-working-')));
+  const attempted = await inputAttempted(store, 'dddddddd-dddd-4ddd-8ddd-000000000080');
+  const later = taskFor(attempted, 'working');
+  const reminder = { ...later.messages[0]!, id: 'reminder-1', kind: 'reminder' as const, state: 'submitted' as const };
+  later.messages = [later.messages[0]!, reminder, later.messages[1]!];
+  const sends = { count: 0 };
+  const result = await requestInputOrReconcile(store, recoveryClient(later, sends), attempted);
+  assert.equal(result.phase, 'awaiting-input');
+  assert.equal(sends.count, 0);
 });

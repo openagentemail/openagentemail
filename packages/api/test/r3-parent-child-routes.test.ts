@@ -204,7 +204,10 @@ test('R3 REST get emits a readable parent edge and silently omits unavailable pa
 
 test('R3 REST children maps unknown unreadable invalid limit and returns no totals', async () => {
   const parent = task(PARENT, A, B); const child = { ...task(CHILD, A, B, 'submitted', PARENT), descendantIds: ['descendant-sentinel'], childCount: 73, aggregate: { internalRelationship: 'aggregate-sentinel' }, internalRootPointer: 'root-sentinel' } as Task;
-  const service = { ...tasks.taskService, getForAuthorization: async (id: string) => id === PARENT ? parent : id === CHILD ? child : null, listChildren: async () => ({ children: [child], nextCursor: null }) } as TaskService;
+  const service = { ...tasks.taskService, listChildren: async ({ parentTaskId }: { parentTaskId: string }) => {
+    if (parentTaskId !== PARENT) throw new Error('not_found');
+    return { children: [child], nextCursor: null };
+  } } as TaskService;
   const ok = await app(service).request(`/v1/tasks/${PARENT}/children`); expect(ok.status).toBe(200); const body = await ok.json() as any; expect(body).toEqual({ children: [{ ...tasks.toTaskView(child), parentTaskId: PARENT }], nextCursor: null }); expect(Object.keys(body).sort()).toEqual(['children', 'nextCursor']); expect(JSON.stringify(body)).not.toContain('descendant-sentinel'); expect(JSON.stringify(body)).not.toContain('aggregate-sentinel'); expect(JSON.stringify(body)).not.toContain('root-sentinel'); expect(JSON.stringify(body)).not.toMatch(/total|count/i);
   expect((await app(service).request(`/v1/tasks/${PARENT}/children?limit=21`)).status).toBe(400); expect((await app(service).request(`/v1/tasks/61d1105a-4fbd-4e19-b682-754c3ef0f1bc/children`)).status).toBe(404);
 });
@@ -228,7 +231,11 @@ test('R5e REST children preserves bounded errors from the authoritative list sna
 
 test('R3 REST children enforces unreadable 403 and forwards exact 20/50/100/default pagination inputs', async () => {
   const parent = task(PARENT, A, B); const child = task(CHILD, A, B, 'submitted', PARENT); const seen: unknown[] = [];
-  const service = { ...tasks.taskService, getForAuthorization: async () => parent, listChildren: async (query: unknown) => { seen.push(query); return { children: [child], nextCursor: null }; } } as TaskService;
+  const service = { ...tasks.taskService, listChildren: async (query: { parentTaskId: string }, viewer: { kind: string; address?: string }) => {
+    seen.push(query);
+    if (viewer.kind !== 'admin' && viewer.address !== A) throw new Error('forbidden');
+    return { children: [child], nextCursor: null };
+  } } as TaskService;
   for (const suffix of ['', '?limit=20', '?limit=50', '?limit=100']) expect((await app(service).request(`/v1/tasks/${PARENT}/children${suffix}`)).status).toBe(200);
   expect(seen).toEqual([{ parentTaskId: PARENT, limit: 20 }, { parentTaskId: PARENT, limit: 20 }, { parentTaskId: PARENT, limit: 50 }, { parentTaskId: PARENT, limit: 100 }]);
   expect((await app(service, C).request(`/v1/tasks/${PARENT}/children`)).status).toBe(403);
@@ -254,4 +261,48 @@ test('R3 filter-before-page fills visible page despite interleaved hidden childr
   setTaskListAllForTests(async () => [parent, ...visible.flatMap((row, i) => [hidden[i]!, row]), ...hidden.slice(21)]);
   const page = await core.listTaskChildren({ parentTaskId: PARENT, limit: 20 }, { kind: 'identity', address: A });
   expect(page.children).toHaveLength(20); expect(page.nextCursor).toBeString(); expect(page.children.every((row) => row.from === A)).toBe(true);
+});
+
+test('#103 children cursor over 1024 is 400 before decode', async () => {
+  const service = { ...tasks.taskService, listChildren: async () => ({ children: [task(CHILD, A, B, 'submitted', PARENT)], nextCursor: null }) } as TaskService;
+  const overlong = await app(service).request(`/v1/tasks/${PARENT}/children?cursor=${'x'.repeat(1025)}`);
+  expect(overlong.status).toBe(400);
+  expect(await overlong.json()).toEqual({ error: 'invalid_request' });
+  expect((await app(service).request(`/v1/tasks/${PARENT}/children?cursor=${'x'.repeat(1024)}`)).status).toBe(200);
+});
+
+test('#103 uppercase parent UUID is lowercased before children lookup and cursor bind', async () => {
+  const parent = task(PARENT, A, B);
+  const child = task(CHILD, A, B, 'submitted', PARENT);
+  setTaskListAllForTests(async () => [parent, child]);
+  const page = await core.listTaskChildren({ parentTaskId: PARENT.toUpperCase(), limit: 20 }, { kind: 'identity', address: A });
+  expect(page.children.map((row) => row.id)).toEqual([CHILD]);
+  const seen: string[] = [];
+  const service = { ...tasks.taskService, listChildren: async ({ parentTaskId }: { parentTaskId: string }) => { seen.push(parentTaskId); return { children: [child], nextCursor: null }; } } as TaskService;
+  const res = await app(service).request(`/v1/tasks/${PARENT.toUpperCase()}/children`);
+  expect(res.status).toBe(200);
+  expect(seen).toEqual([PARENT]);
+  expect((await res.json() as { children: Array<{ parentTaskId?: string }> }).children[0]?.parentTaskId).toBe(PARENT);
+});
+
+test('#103 mutation success applies ACL-aware parent projection', async () => {
+  const parent = task(PARENT, A, B);
+  const hiddenParent = task(PARENT, C, C);
+  const child = task(CHILD, A, B, 'working', PARENT);
+  const readable = {
+    ...tasks.taskService,
+    getForAuthorization: async (id: string) => id === CHILD ? child : id === PARENT ? parent : null,
+    update: async () => child,
+  } as TaskService;
+  const ok = await app(readable).request(`/v1/tasks/${CHILD}/state`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: 'working', body: 'x' }) });
+  expect(ok.status).toBe(200);
+  expect((await ok.json() as { parentTaskId?: string }).parentTaskId).toBe(PARENT);
+  const hidden = {
+    ...tasks.taskService,
+    getForAuthorization: async (id: string) => id === CHILD ? child : id === PARENT ? hiddenParent : null,
+    update: async () => child,
+  } as TaskService;
+  const omitted = await app(hidden).request(`/v1/tasks/${CHILD}/state`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ state: 'working', body: 'x' }) });
+  expect(omitted.status).toBe(200);
+  expect(await omitted.json()).not.toHaveProperty('parentTaskId');
 });

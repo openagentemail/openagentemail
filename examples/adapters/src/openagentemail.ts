@@ -74,7 +74,8 @@ export function safeOaeBaseUrl(value: string): string {
   let url: URL; try { url = new URL(value); } catch { throw new Error('OpenAgentEmail URL must be an absolute HTTPS or loopback HTTP URL'); }
   const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error('OpenAgentEmail participant tokens require HTTPS or loopback HTTP');
-  if (url.username || url.password || url.hash || url.search) throw new Error('OpenAgentEmail URL must not contain credentials, query, or fragment');
+  // search/hash 的 truthy 检查放不过裸 `?`/`#`（URL 解析后是空串）；原始定界符也拒绝。
+  if (url.username || url.password || url.search !== '' || url.hash !== '' || /[?#]/.test(value)) throw new Error('OpenAgentEmail URL must not contain credentials, query, or fragment');
   return url.toString().replace(/\/$/, '');
 }
 
@@ -109,7 +110,8 @@ export class OaeClient {
     try {
       if (signals.some((signal) => signal.aborted)) throw new OaeRequestError('aborted', operation);
       let response: Response;
-      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json', ...init?.headers } }); }
+      // authorization 必须最后写入：调用方 headers 不得覆盖 scoped bearer。
+      try { response = await this.fetchFn(`${this.baseUrl}${path}`, { ...init, signal: controller.signal, headers: { 'content-type': 'application/json', ...init?.headers, authorization: `Bearer ${this.token}` } }); }
       catch { throw new OaeRequestError(timedOut ? 'timeout' : controller.signal.aborted ? 'aborted' : 'transport', operation); }
       if (!response.ok) throw new OaeHttpError(response.status, operation);
       let value: unknown; try { value = await response.json(); }

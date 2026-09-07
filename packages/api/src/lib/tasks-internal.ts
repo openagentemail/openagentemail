@@ -1449,7 +1449,10 @@ async function findTaskMessages(id: string): Promise<TaskLookupResult> {
       { envelope: true, internalDate: true, source: true },
       { uid: true },
     )) {
-      const parsed = await parseTaskMessageWithIntegrity(message, id);
+      // 与 list 扫描对齐：先解析一次 MIME，重建与 integrity witness 共用 preParsed，避免噪声信二次 full parse。
+      if (!message.source) continue;
+      const preParsed = await simpleParser(message.source);
+      const parsed = await parseTaskMessageWithIntegrity(message, id, preParsed);
       if (parsed) messages.push(parsed);
     }
     return { messages, hadMatchingRows: true };
@@ -2811,15 +2814,17 @@ export async function listTaskBoard(
 
 /** Direct children only; ACL filtering occurs before sorting and pagination. */
 export async function listTaskChildren(query: TaskChildrenQuery, viewer: TaskBoardViewer): Promise<TaskChildrenPage> {
+  // 单次 list 快照同时裁定 parent 存在性、ACL 与 children 过滤，避免与路由 snapshot 双读。
+  const parentTaskId = query.parentTaskId.toLowerCase();
   const all = await loadAllTasksCached();
-  const parent = all.find((task) => task.id === query.parentTaskId);
+  const parent = all.find((task) => task.id === parentTaskId);
   if (!parent) throw new Error('not_found');
   if (viewer.kind !== 'admin' && !taskParticipants(parent).has(viewer.address.toLowerCase())) throw new Error('forbidden');
   const visible = (viewer.kind === 'admin' ? all : all.filter((task) => taskParticipants(task).has(viewer.address.toLowerCase())))
-    .filter((task) => task.parentTaskId === query.parentTaskId);
+    .filter((task) => task.parentTaskId === parentTaskId);
   visible.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   const who = viewer.kind === 'admin' ? 'admin' : viewer.address.toLowerCase();
-  const fp = `children-v1|${query.parentTaskId}|${who}|${query.limit}`;
+  const fp = `children-v1|${parentTaskId}|${who}|${query.limit}`;
   let start = 0;
   if (query.cursor) {
     const cursor = taskChildrenCursor.decodeTaskChildrenCursor(query.cursor);
