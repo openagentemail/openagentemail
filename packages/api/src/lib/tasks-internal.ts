@@ -600,6 +600,11 @@ function isSameLeaseExpiryIdentity(
   return genA !== undefined && genA === genB && a.claimedUntil === b.claimedUntil;
 }
 
+/** #85：claim/renew/release 已认证事件的逐字节身份（canonical payload）。 */
+function isSameAuthenticatedLeaseEvent(a: LeaseEvent, b: LeaseEvent): boolean {
+  return canonicalLeaseEvent(a) === canonicalLeaseEvent(b);
+}
+
 function leaseEventStamp(
   id: string,
   state: TaskState,
@@ -1178,7 +1183,11 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   let expiredLease: ExpiredLeaseReceipt | undefined;
   let firstClaimedAt: string | undefined;
   const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt>();
-  const duplicateExpiryMessages = new Set<RawTaskMessage>();
+  const appliedClaims = new Map<number, ClaimLeaseEvent>();
+  const appliedRenews = new Map<number, RenewLeaseEvent[]>();
+  const appliedReleases = new Map<number, ReleaseLeaseEvent>();
+  // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
+  const duplicateLeaseMessages = new Set<RawTaskMessage>();
   for (const message of leaseEvents) {
     const lease = message.lease;
     if (lease.event === 'expired') {
@@ -1192,7 +1201,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       const priorReceipt = appliedExpiryReceipts.get(lease.generation);
       if (priorReceipt) {
         if (isSameLeaseExpiryIdentity(priorReceipt, lease)) {
-          duplicateExpiryMessages.add(message);
+          duplicateLeaseMessages.add(message);
           continue;
         }
         return null;
@@ -1220,6 +1229,15 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       || !/^[A-Za-z0-9_-]{32,}$/.test(lease.tokenVerifier)
     ) return null;
     if (lease.event === 'claim') {
+      const priorClaim = appliedClaims.get(lease.generation);
+      if (priorClaim) {
+        // 同 generation 逐字节相同 → 幂等 no-op；任何字段差异仍 fail-closed。
+        if (isSameAuthenticatedLeaseEvent(priorClaim, lease)) {
+          duplicateLeaseMessages.add(message);
+          continue;
+        }
+        return null;
+      }
       const claimedAt = Date.parse(lease.at);
       const claimedUntil = Date.parse(lease.claimedUntil);
       const taskClaimedAt = firstClaimedAt ?? lease.at;
@@ -1244,9 +1262,15 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         generationClaimedAt: lease.at,
         firstClaimedAt,
       };
+      appliedClaims.set(lease.generation, lease);
       continue;
     }
     if (lease.event === 'renew') {
+      const priorRenews = appliedRenews.get(lease.generation) ?? [];
+      if (priorRenews.some((prior) => isSameAuthenticatedLeaseEvent(prior, lease))) {
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
       const renewedAt = Date.parse(lease.at);
       const claimedUntil = Date.parse(lease.claimedUntil);
       const generationClaimedAt = Date.parse(leaseAuthority?.generationClaimedAt ?? '');
@@ -1263,7 +1287,16 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
       ) return null;
       leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
+      appliedRenews.set(lease.generation, [...priorRenews, lease]);
       continue;
+    }
+    const priorRelease = appliedReleases.get(lease.generation);
+    if (priorRelease) {
+      if (isSameAuthenticatedLeaseEvent(priorRelease, lease)) {
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
+      return null;
     }
     if (
       !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
@@ -1279,6 +1312,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       reason: lease.reason,
       ...(firstClaimedAt ? { firstClaimedAt } : {}),
     };
+    appliedReleases.set(lease.generation, lease);
   }
   const request = first.approval;
   if (request?.type === 'request') {
@@ -1326,7 +1360,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // (but validly signed) submitted/working mail can appear again in IMAP, but
   // it cannot reopen the completed/failed task. Before that point normal
   // concurrent writes retain mailbox-order last-writer-wins semantics.
-  const durableOrdered = ordered.filter((message) => !duplicateExpiryMessages.has(message)).map((message) => message.lease
+  const durableOrdered = ordered.filter((message) => !duplicateLeaseMessages.has(message)).map((message) => message.lease
     ? { ...message, date: message.lease.at }
     : message);
   const current = currentTaskMessage(durableOrdered);
