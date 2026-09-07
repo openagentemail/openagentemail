@@ -7,7 +7,8 @@ export {
   TASK_BOARD_ACTIVE_STATES, TASK_TERMINAL_VISIBLE_MS, TASK_SUBMITTED_OVERDUE_MS,
   TASK_WORKING_OVERDUE_MS, TASK_LIST_CACHE_MS, TASK_REMIND_COOLDOWN_MS,
   isTaskId, canAdvanceTask, canonicalApprovalAction, approvalActionDigest,
-  isApprovalExpired, taskFromMessages, currentTaskMessage, getTask, listTasks,
+  isApprovalExpired, approvalExpiryProjection, APPROVAL_EXPIRY_PROJECTION_PAST_DEADLINE,
+  taskFromMessages, currentTaskMessage, getTask, listTasks,
   createTask, createApprovalTask,
   invalidateTaskListCache, updateTask, claimTask, toTaskView, toTaskLeaseGrantView,
   isTaskLeaseTokenCurrent, reapExpiredTaskLeasesOnce, renewTask, releaseTask,
@@ -20,7 +21,8 @@ export {
 
 export type {
   TaskState, TaskBoardStatus, TaskBoardPeriod, TaskBoardLimit, TaskEventKind,
-  ApprovalAction, ApprovalSnapshot, ApprovalEvent, TaskMessage, Task, TaskView,
+  ApprovalAction, ApprovalSnapshot, ApprovalEvent, ApprovalExpiryProjection,
+  TaskMessage, Task, TaskView,
   TaskLeaseGrant, ApprovalTask, RawTaskMessage, CreateTaskInput,
   CreateApprovalTaskInput, UpdateTaskInput, TaskBoardViewer, TaskBoardQuery,
   TaskOverdue, TaskBoardItem, TaskBoardPage, TaskService, TaskWaitDependencies,

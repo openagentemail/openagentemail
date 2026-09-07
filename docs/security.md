@@ -116,6 +116,14 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - **回复：** 仅 `input-required` 可 POST `/ui/api/tasks/:id/reply` 写 `working`。identity 只能用自身地址；admin 必须显式选择任务中的本方 `from`。
 - **Lease 永久政策：** `claim` / `renew` / `release`（REST `POST /v1/tasks/:id/{claim,lease,release}` 与 MCP `task_claim` / `task_renew` / `task_release`）**只接受 managed recipient identity**。Admin 凭证不能直接 claim/renew/release——路由层不接收 admin `from` 冒充，core 仍要求 `actor === task.to`。要覆盖一条仍持有 lease 的工单，使用既有 **admin-close** 覆盖（terminal `failed` + `closed_by_admin`，并清除 lease 字段）。这不是过渡缺口，是永久授权边界。
 
+## Approval list/board expiry projection and event-v1 display subject (#75)
+
+**只读投影，不做后台物化器。** list / board（`toTaskView` / `toUiTaskView`）对仍停在 `input-required`、`expiresAt` 已按 server clock 到期（与 authorized detail/wait/decision 相同的 `now >= expiresAt` 边界）、且尚无 signed `expired` 事件的审批，派生只读字段 `expiryProjection: "past-deadline-unmaterialized"`。计算纯读、零写副作用：不物化 signed expiry、不发信。authorized `get` / `wait` / `decision` 物化后该字段消失。未认证与 list/board 路径不得借投影引入写副作用（#80/#84 的写面教训）。
+
+**display-only `subject` 不绑入 approval-event-v1，也不绑进未来 event/stamp 版本。** `approval-event-v1` HMAC 域固定为 `id \\n state \\n from \\n to \\n canonical-payload`；canonical payload 只有 `event` / `digest` / `reviewer` / `expiresAt`（decision 另加 `decision` / `decidedAt`；expired 另加 `expiredAt`）。Subject 是邮件/UI 展示层。把它抬进 stamp 会破坏已发出的 v1 邮件兼容，并把展示语义变成 integrity 面。action / digest / decision authority 结构不变；序列化必须逐字节保持 v1。
+
+**watcher 预筛。** 普通邮件已用 `headers.has('x-oa-task-approval-event')` 避开二次完整认证解析。任何带该头的邮件（含伪造、重复、header-array、大小写变体经 mailparser 归一后）必须到达完整签名解析器；预筛不得弱化 fail-closed。无生产 profile 证明此处是热点时，不加第二层 header-array/大小写负筛。
+
 ## OAuth access tokens（P3 AS）
 
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。

@@ -1292,8 +1292,9 @@ export async function processWatchedMessage(
         }
       }
       extras.preview = boundPreviewChars(text, PUSH_BODY_PREVIEW_CHARS);
-      // Header presence is only a cheap parser gate, never authentication: a
-      // forged approval header still reaches the full signed parser below.
+      // 存在性预筛（headers.has）只是便宜闸门，不是认证：伪造 / 重复 /
+      // header-array 形态只要带该头，必须进入下方完整签名解析器。#75 未再
+      // 加 header-array/大小写负筛——无生产 profile 证明此处是热点。
       const approval = parsed.headers.has('x-oa-task-approval-event')
         ? await approvalEventForWatcher(message as FetchMessageObject)
         : null;

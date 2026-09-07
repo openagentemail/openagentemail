@@ -219,6 +219,8 @@ export function registerOpenAgentEmailTools(
     claimedUntil: z.string().optional(),
     leaseGeneration: z.number().int().optional(),
     leaseStatus: z.literal('disabled').optional(),
+    // list/board 过期未物化只读投影；authorized 物化后缺省。
+    expiryProjection: z.literal('past-deadline-unmaterialized').optional(),
   };
 
   const taskListOutputSchema = {
