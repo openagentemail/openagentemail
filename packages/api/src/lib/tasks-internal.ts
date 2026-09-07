@@ -1172,6 +1172,12 @@ function taskFromParsedMessages(id: string, messages: ParsedTaskMessage[]): Task
   if (markers.length > 0) {
     const roots = authenticated.filter((message) => message.parentTaskId !== undefined);
     if (roots.length === 0) return null;
+    // 缺 UID / NaN / Infinity 不得进入 Math.min：否则比较全假，会静默升格 replay。
+    // 两侧任一 uid 非有限值 → fail-closed（把「缺 UID 静默升格 replay」注释不变量落成代码）。
+    if (
+      roots.some((root) => !Number.isFinite(root.uid))
+      || markers.some((marker) => !Number.isFinite(marker.uid))
+    ) return null;
     const minRootUid = Math.min(...roots.map((root) => root.uid));
     const minMarkerUid = Math.min(...markers.map((marker) => marker.uid));
     if (minRootUid >= minMarkerUid) return null;

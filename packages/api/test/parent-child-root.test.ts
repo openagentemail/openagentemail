@@ -693,6 +693,17 @@ test('#161 T1 intact low-UID v2 root ignores a higher-UID stripped replay marker
   expect(rebuilt).toMatchObject({ parentTaskId: PARENT, subject: 'Signed root', state: 'submitted' });
 });
 
+// #161 P2-1：注入 uid=NaN 的 marker + 有限 roots → fail-closed，不得静默升格 replay。
+test('#161 P2-1 non-finite marker uid with finite roots fails closed', async () => {
+  const intact = await integrity.parseTaskMessageWithIntegrityForTests!({
+    id: ID, uid: 1, source: rootSource(ID, PARENT), internalDate: '2026-08-30T00:00:00.000Z',
+  });
+  expect(intact).toMatchObject({ parentTaskId: PARENT, uid: 1 });
+  const nanMarker = { kind: 'relationship-integrity-failure' as const, taskId: ID, uid: Number.NaN };
+  expect(Number.isFinite(nanMarker.uid)).toBe(false);
+  expect(integrity.taskFromParsedMessagesForTests!(ID, [intact, nanMarker])).toBeNull();
+});
+
 // #161 T2：低 UID 根被剥（marker）+ 高 UID 认证 replay 根（同认证转录、展示字段不同）→ null。
 test('#161 T2 stripped low-UID root plus authenticated high-UID replay fails closed', async () => {
   const marker = await integrity.parseTaskMessageWithIntegrityForTests!({
