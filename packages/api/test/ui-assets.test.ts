@@ -1194,7 +1194,9 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain('state.homeWaitingTotal = typeof waitingBoard.waitingTotal === \'number\' ? waitingBoard.waitingTotal : 0');
+    expect(home).toContain("state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'");
+    expect(UI_JS).toContain("if (homeWaitingScanCapped(acc)) return '500+'");
+    expect(UI_JS).toContain('function publishHomeWaitingTotal(');
     expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
     expect(home).toContain('var nextStuck = applyHomeStuckSources(');

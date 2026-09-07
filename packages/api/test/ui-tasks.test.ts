@@ -1321,7 +1321,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     'HOME_VISIBLE_ROWS',
     'HOME_ACTIVE_MAX_PAGES',
     'HOME_ACTIVE_MAX_ROWS',
-    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, homeWaitingScanCapped: homeWaitingScanCapped, publishHomeWaitingTotal: publishHomeWaitingTotal, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
   )(5, 5, 500) as {
     classifyHomeWaiting: (tasks: unknown) => {
       waitingTasks: Array<{ id: string; subject?: string }>;
@@ -1330,7 +1330,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     emptyHomeWaitingAcc: () => {
       waitingTasks: Array<{ id: string }>;
       expiredTasks: Array<{ id: string }>;
-      waitingTotal: number;
+      waitingTotal: number | string;
       totalApprox: number;
       pages: number;
       scannedRows: number;
@@ -1339,7 +1339,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     accumulateHomeWaitingPage: (acc: {
       waitingTasks: Array<{ id: string }>;
       expiredTasks: Array<{ id: string }>;
-      waitingTotal: number;
+      waitingTotal: number | string;
       totalApprox: number;
       pages: number;
       scannedRows: number;
@@ -1347,13 +1347,15 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     } | null, board: unknown) => {
       waitingTasks: Array<{ id: string }>;
       expiredTasks: Array<{ id: string }>;
-      waitingTotal: number;
+      waitingTotal: number | string;
       totalApprox: number;
       pages: number;
       scannedRows: number;
       nextCursor: string;
     };
     homeWaitingShouldContinue: (acc: { nextCursor: string; waitingTasks: unknown[]; pages: number; scannedRows: number }) => boolean;
+    homeWaitingScanCapped: (acc: { nextCursor: string; pages: number; scannedRows: number }) => boolean;
+    publishHomeWaitingTotal: (acc: { nextCursor: string; pages: number; scannedRows: number; totalApprox: number; expiredTasks: unknown[] }) => number | string;
     mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
     applyHomeStuckSources: (
       cachedOverdue: Array<{ id: string }>,
@@ -1443,6 +1445,42 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     expect(second.expiredTasks).toHaveLength(195);
     expect(second.waitingTotal).toBe(5);
     expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
+  });
+
+  test('a 500-row hard stop with later expired rows publishes 500+ instead of an inflated exact total', () => {
+    let acc = homeFlow.emptyHomeWaitingAcc();
+    for (let page = 0; page < 5; page += 1) {
+      acc = homeFlow.accumulateHomeWaitingPage(acc, {
+        tasks: Array.from({ length: 100 }, (_, index) => live(`live-${page}-${index}`)),
+        totalApprox: 600,
+        nextCursor: page < 4 ? `page-${page + 2}` : 'page-6',
+      });
+    }
+    expect(acc.scannedRows).toBe(500);
+    expect(acc.pages).toBe(5);
+    expect(acc.nextCursor).toBe('page-6');
+    expect(homeFlow.homeWaitingShouldContinue(acc)).toBe(false);
+    expect(homeFlow.homeWaitingScanCapped(acc)).toBe(true);
+    expect(homeFlow.publishHomeWaitingTotal(acc)).toBe('500+');
+    expect(acc.waitingTotal).toBe('500+');
+    expect(acc.waitingTotal).not.toBe(600);
+
+    const finished = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: Array.from({ length: 100 }, (_, index) => live(`done-${index}`)),
+      totalApprox: 100,
+    });
+    expect(homeFlow.homeWaitingScanCapped(finished)).toBe(false);
+    expect(finished.waitingTotal).toBe(100);
+  });
+
+  test('Waiting for you badge paints 500+ when the published total is capped', () => {
+    const source = sliceOverviewFn('function homeSection(', 'function appendHomeEmpty(');
+    const section = new Function(
+      'document',
+      `${source}\nreturn homeSection('Waiting for you', '500+');`,
+    )({ createElement: fakeEl }) as ReturnType<typeof fakeEl>;
+    expect(leafTexts(section)).toContain('500+');
+    expect(leafTexts(section)).not.toContain('600');
   });
 
   test('applyHomeStuckSources keeps the failed source cache instead of rebuilding from the winner', () => {

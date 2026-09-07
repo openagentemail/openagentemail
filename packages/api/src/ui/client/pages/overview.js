@@ -88,7 +88,7 @@
     });
     page.pages += 1;
     page.nextCursor = payload.nextCursor || '';
-    page.waitingTotal = Math.max(0, page.totalApprox - page.expiredTasks.length);
+    page.waitingTotal = publishHomeWaitingTotal(page);
     return page;
   }
 
@@ -96,6 +96,23 @@
   function homeWaitingShouldContinue(acc) {
     return !!(acc && acc.nextCursor &&
       acc.pages < HOME_ACTIVE_MAX_PAGES && acc.scannedRows < HOME_ACTIVE_MAX_ROWS);
+  }
+
+  /* 硬停：还有下一页但已触达 5 页或 500 行。未扫页的投影未分类。 */
+  function homeWaitingScanCapped(acc) {
+    return !!(acc && acc.nextCursor &&
+      (acc.pages >= HOME_ACTIVE_MAX_PAGES || acc.scannedRows >= HOME_ACTIVE_MAX_ROWS));
+  }
+
+  /*
+   * 完整扫描（无 nextCursor）才发布精确数：totalApprox 扣已扫描投影行。
+   * 硬停时不得用同一公式冒充精确值（500 活 + 未扫 100 过期会虚报 600），改发 500+ 下界。
+   */
+  function publishHomeWaitingTotal(acc) {
+    if (homeWaitingScanCapped(acc)) return '500+';
+    var totalApprox = acc && typeof acc.totalApprox === 'number' ? acc.totalApprox : 0;
+    var expired = acc && acc.expiredTasks ? acc.expiredTasks.length : 0;
+    return Math.max(0, totalApprox - expired);
   }
 
   /* 分页拉完匹配窗（页/行上限内）再发布 waiting 计数。 */
@@ -180,10 +197,10 @@
     var label = document.createElement('h2');
     label.textContent = title;
     heading.append(label);
-    if (typeof count === 'number') {
+    if (typeof count === 'number' || (typeof count === 'string' && count)) {
       var badge = document.createElement('span');
       badge.className = 'count home-count';
-      /* totalApprox 是本次 query 的服务端计数；不可用数组长度代替。 */
+      /* 精确数来自完整扫描；硬停发布 500+，不可用数组长度代替。 */
       badge.textContent = String(count);
       heading.append(badge);
     }
@@ -395,7 +412,9 @@
       var waitingBoard = results[0].payload || {};
       /* 只收已分类的活审批；投影行不得进 homeWaitingTasks / Total。 */
       state.homeWaitingTasks = Array.isArray(waitingBoard.waitingTasks) ? waitingBoard.waitingTasks : [];
-      state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' ? waitingBoard.waitingTotal : 0;
+      state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'
+        ? waitingBoard.waitingTotal
+        : 0;
       expiredWaiting = Array.isArray(waitingBoard.expiredTasks) ? waitingBoard.expiredTasks : [];
     } else if (results[0] && results[0].error.message !== 'session_expired') {
       issues.push('Tasks that need you could not be loaded.');
