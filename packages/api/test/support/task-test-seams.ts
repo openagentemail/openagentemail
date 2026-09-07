@@ -5,6 +5,7 @@ import {
   setTaskSendMailForTests,
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
+  takeApprovalWatcherParseCallsForTests,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -14,4 +15,5 @@ export {
   setTaskSendMailForTests,
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
+  takeApprovalWatcherParseCallsForTests,
 };

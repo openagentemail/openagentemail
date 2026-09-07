@@ -128,6 +128,8 @@ export interface Task {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
+  /** list/board 过期未物化只读投影；authorized 物化后缺省。 */
+  expiryProjection?: 'past-deadline-unmaterialized';
 }
 
 export interface TaskLeaseGrant {

@@ -156,6 +156,7 @@
 }
 .home-task-row:hover, .home-task-row:focus-visible { border-color: var(--gold); background: var(--gold-dim); }
 .home-task-row.is-overdue { box-shadow: inset 3px 0 0 var(--red); }
+.home-task-row.is-past-deadline { box-shadow: inset 3px 0 0 var(--red); }
 .home-task-subject { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .home-task-meta, .home-health-copy, .home-empty p { color: var(--ink-dim); font-size: 13px; }
 .home-link { min-height: 38px; }
@@ -566,6 +567,9 @@
 .task-row.is-overdue {
   box-shadow: inset 3px 0 0 var(--red);
 }
+.task-row.is-past-deadline {
+  box-shadow: inset 3px 0 0 var(--red);
+}
 .task-overdue-flag {
   display: inline-block;
   margin-top: 4px;
@@ -575,7 +579,17 @@
   letter-spacing: .04em;
   text-transform: uppercase;
 }
+.task-expiry-flag {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
 .task-badge[data-state="closed"] { color: var(--ink-dim); }
+.task-badge[data-state="past-deadline"] { color: var(--red); }
 .task-badge[data-state="reminder"] { color: var(--gold-soft); }
 .notify-delivery-failed { display: block; margin-top: 4px; color: var(--red); font-size: 12px; font-weight: 800; }
 .task-original, .task-result, .task-reply, .task-admin-actions {

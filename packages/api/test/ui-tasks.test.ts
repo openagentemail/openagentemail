@@ -624,6 +624,7 @@ describe('UI task reply / remind / close', () => {
 
 /* ---- 终审 C2：呈现层钉 overdue 红条 + Overdue 文字（PR4 双通道；不改生产码） ---- */
 const { TASKS_PAGE_JS } = await import('../src/ui/client/pages/tasks.ts');
+const { OVERVIEW_PAGE_JS } = await import('../src/ui/client/pages/overview.ts');
 const { PAGES_CSS } = await import('../src/ui/styles/pages.ts');
 
 /** 从 TASKS_PAGE_JS 抽出一段函数源码。 */
@@ -634,6 +635,15 @@ function sliceTasksFn(startNeedle: string, endNeedle: string): string {
     throw new Error('tasks.ts slice missing: ' + startNeedle);
   }
   return TASKS_PAGE_JS.slice(start, end);
+}
+
+function sliceOverviewFn(startNeedle: string, endNeedle: string): string {
+  const start = OVERVIEW_PAGE_JS.indexOf(startNeedle);
+  const end = OVERVIEW_PAGE_JS.indexOf(endNeedle);
+  if (start < 0 || end <= start) {
+    throw new Error('overview.js slice missing: ' + startNeedle);
+  }
+  return OVERVIEW_PAGE_JS.slice(start, end);
 }
 
 type FakeNode = {
@@ -698,10 +708,12 @@ function makeApprovalActionHarness(apiJsonImpl?: (path: string, init: RequestIni
   let renderCount = 0;
   let loadCount = 0;
   const updated = { ...APPROVAL_TASK, state: 'completed' as const, result: { decision: 'approved' } };
+  /* 过期投影 helper 在 label 段；decision 谓词/标题都要看见它。 */
+  const helper = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
   const source = sliceTasksFn('function approvalCanDecide(', 'function renderTaskRows(');
   const fn = new Function(
     'document', 'state', 'isAdmin', 'apiJson', 'renderTasks', 'loadTasks', 'announce',
-    `${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
+    `${helper}\n${source}\nreturn { approvalCanDecide: approvalCanDecide, renderApprovalAction: renderApprovalAction };`,
   );
   const renderer = fn(
     { createElement: fakeEl }, state, () => false,
@@ -725,6 +737,7 @@ function makeAdminTaskDetailHarness(task: Task) {
     'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail', 'taskStateToken', 'taskStateLabel',
     'formatAgo', 'taskTimelineBody', 'formatDate', 'taskIsClosed', 'renderTaskResultNode', 'renderApprovalAction',
     'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+    'approvalPastDeadline',
     `${source}\nreturn renderTaskDetail;`,
   );
   const renderTaskDetail = fn(
@@ -738,6 +751,7 @@ function makeAdminTaskDetailHarness(task: Task) {
       return actions;
     },
     () => {}, () => {}, () => {}, () => {}, 100,
+    () => false,
   ) as () => void;
   return { tasksDetailContent, renderTaskDetail };
 }
@@ -1178,6 +1192,341 @@ describe('UI task overdue presentation (PR4 dual channel)', () => {
     // 红条通道在 CSS，不只靠 class 名；与 PR4「左侧红条 + Overdue 文字」对齐
     expect(PAGES_CSS).toContain('.task-row.is-overdue {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-overdue-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+  });
+});
+
+describe('#75 board expiryProjection presentation', () => {
+  const projected = {
+    ...APPROVAL_TASK,
+    expiryProjection: 'past-deadline-unmaterialized' as const,
+  };
+
+  test('projected row is Past deadline, not Waiting for you, and carries the expiry flag', () => {
+    const { state, tasksRows, renderTaskRows } = makeTaskRowHarness();
+    state.tasks = [
+      { ...projected, overdueReason: null, overdueAt: null },
+      {
+        ...APPROVAL_TASK,
+        id: '66666666-6666-4666-8666-666666666666',
+        overdueReason: null,
+        overdueAt: null,
+      },
+    ];
+    state.tasksTotalApprox = 2;
+    renderTaskRows();
+
+    const expiredRow = tasksRows.childNodes[0];
+    const pendingRow = tasksRows.childNodes[1];
+    expect(leafTexts(expiredRow)).toContain('Past deadline');
+    expect(leafTexts(expiredRow)).not.toContain('Waiting for you');
+    expect(expiredRow.classList.contains('is-past-deadline')).toBe(true);
+    expect(
+      expiredRow.childNodes.some((cell) =>
+        cell.childNodes.some((child) => child.className === 'task-expiry-flag'),
+      ),
+    ).toBe(true);
+    expect(leafTexts(pendingRow)).toContain('Waiting for you');
+    expect(pendingRow.classList.contains('is-past-deadline')).toBe(false);
+  });
+
+  test('projected cached detail hides Approve/Reject and titles the action as expired', () => {
+    const { renderer } = makeApprovalActionHarness();
+    expect(renderer.approvalCanDecide(projected)).toBe(false);
+    expect(renderer.approvalCanDecide(APPROVAL_TASK)).toBe(true);
+    const expired = renderer.renderApprovalAction(projected)!;
+    expect(leafTexts(expired)).toContain('Approval expired');
+    expect(leafTexts(expired)).not.toContain('Approval required');
+    expect(expired.childNodes.some((node) => node.tagName === 'BUTTON')).toBe(false);
+  });
+
+  test('projected detail head shows Past deadline flag without treating it as overdue', () => {
+    const helpers = sliceTasksFn('function taskIsClosed(', 'function syncTasksFilters(');
+    const source = sliceTasksFn('function renderTaskDetail(', 'function renderTasks(');
+    const tasksDetailContent = fakeEl('div');
+    const state = { activeTaskId: projected.id, taskDetailStatus: 'ready', taskDetailMessage: '', taskDetail: projected };
+    const fn = new Function(
+      'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail',
+      'formatAgo', 'taskTimelineBody', 'formatDate', 'renderTaskResultNode', 'renderApprovalAction',
+      'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
+      `${helpers}\n${source}\nreturn renderTaskDetail;`,
+    );
+    const renderTaskDetail = fn(
+      { createElement: fakeEl }, state, tasksDetailContent, () => false, () => {},
+      () => 'just now', (value: string) => value, () => '2026-08-12', () => fakeEl('pre'),
+      () => null, () => {}, () => {}, () => {}, () => {}, 100,
+    ) as () => void;
+    renderTaskDetail();
+    expect(leafTexts(tasksDetailContent)).toContain('Past deadline');
+    expect(
+      tasksDetailContent.childNodes.some((node) =>
+        node.childNodes.some((child) => child.className === 'task-expiry-flag'),
+      ),
+    ).toBe(true);
+    expect(leafTexts(tasksDetailContent)).not.toContain('Waiting for you');
+  });
+
+  test('list poll syncs an open pre-expiry detail so labels match and Approve/Reject disappear', () => {
+    const labels = sliceTasksFn('function taskIsClosed(', 'function syncTasksFilters(');
+    const sync = sliceTasksFn('function syncActiveTaskDetailFromList(', 'function renderTasks(');
+    const state = {
+      activeTaskId: APPROVAL_TASK.id,
+      taskDetail: {
+        ...APPROVAL_TASK,
+        messages: [{ id: '1', body: 'full thread' }],
+      },
+    };
+    const listed = {
+      ...APPROVAL_TASK,
+      expiryProjection: 'past-deadline-unmaterialized' as const,
+      messages: [],
+    };
+    const helpers = new Function(
+      'state',
+      `${labels}\n${sync}\nreturn { syncActiveTaskDetailFromList: syncActiveTaskDetailFromList, taskStateLabel: taskStateLabel };`,
+    )(state) as {
+      syncActiveTaskDetailFromList: (rows: unknown[]) => void;
+      taskStateLabel: (task: { state?: string; expiryProjection?: string; result?: unknown }) => string;
+    };
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Waiting for you');
+    helpers.syncActiveTaskDetailFromList([listed]);
+    expect(state.taskDetail.expiryProjection).toBe('past-deadline-unmaterialized');
+    expect(state.taskDetail.messages).toEqual([{ id: '1', body: 'full thread' }]);
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Past deadline');
+
+    const { renderer } = makeApprovalActionHarness();
+    expect(renderer.approvalCanDecide(APPROVAL_TASK)).toBe(true);
+    expect(renderer.approvalCanDecide(state.taskDetail as Task)).toBe(false);
+    const action = renderer.renderApprovalAction(state.taskDetail as Task)!;
+    expect(leafTexts(action)).toContain('Approval expired');
+    expect(action.childNodes.some((node) => node.tagName === 'BUTTON')).toBe(false);
+
+    const rows = makeTaskRowHarness();
+    rows.state.tasks = [{ ...listed, overdueReason: null, overdueAt: null }];
+    rows.state.tasksTotalApprox = 1;
+    rows.renderTaskRows();
+    expect(leafTexts(rows.tasksRows.childNodes[0])).toContain('Past deadline');
+    expect(leafTexts(rows.tasksRows.childNodes[0])).not.toContain('Waiting for you');
+  });
+
+  test('past-deadline CSS is an inset red bar; expiry flag is red text', () => {
+    expect(PAGES_CSS).toContain('.task-row.is-past-deadline {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
+    expect(PAGES_CSS).toContain('.task-expiry-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
+    expect(PAGES_CSS).toContain('.home-task-row.is-past-deadline { box-shadow: inset 3px 0 0 var(--red); }');
+  });
+});
+
+describe('#75 Home waiting excludes expiryProjection', () => {
+  const pastDeadline = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
+  const homeFlow = new Function(
+    'HOME_VISIBLE_ROWS',
+    'HOME_ACTIVE_MAX_PAGES',
+    'HOME_ACTIVE_MAX_ROWS',
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, homeWaitingScanCapped: homeWaitingScanCapped, publishHomeWaitingTotal: publishHomeWaitingTotal, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
+  )(5, 5, 500) as {
+    classifyHomeWaiting: (tasks: unknown) => {
+      waitingTasks: Array<{ id: string; subject?: string }>;
+      expiredTasks: Array<{ id: string }>;
+    };
+    emptyHomeWaitingAcc: () => {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number | string;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    };
+    accumulateHomeWaitingPage: (acc: {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number | string;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    } | null, board: unknown) => {
+      waitingTasks: Array<{ id: string }>;
+      expiredTasks: Array<{ id: string }>;
+      waitingTotal: number | string;
+      totalApprox: number;
+      pages: number;
+      scannedRows: number;
+      nextCursor: string;
+    };
+    homeWaitingShouldContinue: (acc: { nextCursor: string; waitingTasks: unknown[]; pages: number; scannedRows: number }) => boolean;
+    homeWaitingScanCapped: (acc: { nextCursor: string; pages: number; scannedRows: number }) => boolean;
+    publishHomeWaitingTotal: (acc: { nextCursor: string; pages: number; scannedRows: number; totalApprox: number; expiredTasks: unknown[] }) => number | string;
+    mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
+    applyHomeStuckSources: (
+      cachedOverdue: Array<{ id: string }>,
+      cachedExpired: Array<{ id: string }>,
+      overdue: Array<{ id: string }>,
+      overdueOk: boolean,
+      expired: Array<{ id: string }>,
+      waitingOk: boolean,
+    ) => { overdue: Array<{ id: string }>; expired: Array<{ id: string }>; stuck: Array<{ id: string }> };
+  };
+
+  const projected = (id: string) => ({
+    id,
+    state: 'input-required',
+    expiryProjection: 'past-deadline-unmaterialized',
+  });
+  const live = (id: string, subject = id) => ({ id, state: 'input-required', subject });
+
+  test('projected rows never enter waiting storage and decrement the server total', () => {
+    const classified = homeFlow.classifyHomeWaiting([projected('exp-1'), live('wait-1', 'Need you')]);
+    expect(classified.waitingTasks.map((task) => task.id)).toEqual(['wait-1']);
+    expect(classified.expiredTasks.map((task) => task.id)).toEqual(['exp-1']);
+    const acc = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [projected('exp-1'), live('wait-1', 'Need you')],
+      totalApprox: 4,
+    });
+    expect(acc.waitingTasks.map((task) => task.id)).toEqual(['wait-1']);
+    expect(acc.expiredTasks.map((task) => task.id)).toEqual(['exp-1']);
+    expect(acc.waitingTotal).toBe(3);
+  });
+
+  test('an all-projected page yields an empty Waiting list and a zero count', () => {
+    const acc = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [projected('exp-2')],
+      totalApprox: 1,
+    });
+    expect(acc.waitingTasks).toEqual([]);
+    expect(acc.waitingTotal).toBe(0);
+    expect(acc.expiredTasks.map((task) => task.id)).toEqual(['exp-2']);
+  });
+
+  test('expired waiting rows merge into Blocked without duplicating overdue ids', () => {
+    expect(
+      homeFlow.mergeHomeStuck(
+        [{ id: 'same' }],
+        [{ id: 'same' }, { id: 'exp-3' }],
+      ).map((task) => task.id),
+    ).toEqual(['same', 'exp-3']);
+  });
+
+  test('page-1 all projected then page-2 live keeps waiting rows and an honest count', () => {
+    const first = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: Array.from({ length: 20 }, (_, index) => projected(`exp-${index}`)),
+      totalApprox: 25,
+      nextCursor: 'page-2',
+    });
+    expect(first.waitingTasks).toEqual([]);
+    expect(first.waitingTotal).toBe(5);
+    expect(homeFlow.homeWaitingShouldContinue(first)).toBe(true);
+    const second = homeFlow.accumulateHomeWaitingPage(first, {
+      tasks: [live('live-1'), live('live-2'), live('live-3'), live('live-4'), live('live-5')],
+      totalApprox: 25,
+    });
+    expect(second.waitingTasks.map((task) => task.id)).toEqual(['live-1', 'live-2', 'live-3', 'live-4', 'live-5']);
+    expect(second.waitingTotal).toBe(5);
+    expect(second.expiredTasks).toHaveLength(20);
+    expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
+  });
+
+  test('waiting count keeps paging after five live rows so later projections are subtracted', () => {
+    const first = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: [
+        ...Array.from({ length: 5 }, (_, index) => live(`live-${index}`)),
+        ...Array.from({ length: 95 }, (_, index) => projected(`exp-a-${index}`)),
+      ],
+      totalApprox: 200,
+      nextCursor: 'page-2',
+    });
+    expect(first.waitingTasks).toHaveLength(5);
+    expect(first.waitingTotal).toBe(105);
+    expect(homeFlow.homeWaitingShouldContinue(first)).toBe(true);
+    const second = homeFlow.accumulateHomeWaitingPage(first, {
+      tasks: Array.from({ length: 100 }, (_, index) => projected(`exp-b-${index}`)),
+      totalApprox: 200,
+    });
+    expect(second.waitingTasks).toHaveLength(5);
+    expect(second.expiredTasks).toHaveLength(195);
+    expect(second.waitingTotal).toBe(5);
+    expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
+  });
+
+  test('a 500-row hard stop with later expired rows publishes 500+ instead of an inflated exact total', () => {
+    let acc = homeFlow.emptyHomeWaitingAcc();
+    for (let page = 0; page < 5; page += 1) {
+      acc = homeFlow.accumulateHomeWaitingPage(acc, {
+        tasks: Array.from({ length: 100 }, (_, index) => live(`live-${page}-${index}`)),
+        totalApprox: 600,
+        nextCursor: page < 4 ? `page-${page + 2}` : 'page-6',
+      });
+    }
+    expect(acc.scannedRows).toBe(500);
+    expect(acc.pages).toBe(5);
+    expect(acc.nextCursor).toBe('page-6');
+    expect(homeFlow.homeWaitingShouldContinue(acc)).toBe(false);
+    expect(homeFlow.homeWaitingScanCapped(acc)).toBe(true);
+    expect(homeFlow.publishHomeWaitingTotal(acc)).toBe('500+');
+    expect(acc.waitingTotal).toBe('500+');
+    expect(acc.waitingTotal).not.toBe(600);
+
+    const finished = homeFlow.accumulateHomeWaitingPage(null, {
+      tasks: Array.from({ length: 100 }, (_, index) => live(`done-${index}`)),
+      totalApprox: 100,
+    });
+    expect(homeFlow.homeWaitingScanCapped(finished)).toBe(false);
+    expect(finished.waitingTotal).toBe(100);
+  });
+
+  test('Waiting for you badge paints 500+ when the published total is capped', () => {
+    const source = sliceOverviewFn('function homeSection(', 'function appendHomeEmpty(');
+    const section = new Function(
+      'document',
+      `${source}\nreturn homeSection('Waiting for you', '500+');`,
+    )({ createElement: fakeEl }) as ReturnType<typeof fakeEl>;
+    expect(leafTexts(section)).toContain('500+');
+    expect(leafTexts(section)).not.toContain('600');
+  });
+
+  test('applyHomeStuckSources keeps the failed source cache instead of rebuilding from the winner', () => {
+    const cachedOverdue = [{ id: 'overdue-cache' }];
+    const cachedExpired = [projected('exp-cache')];
+    const freshExpired = [projected('exp-fresh')];
+    const freshOverdue = [{ id: 'overdue-fresh' }];
+    const activeFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, [{ id: 'ignored' }], false, freshExpired, true,
+    );
+    expect(activeFailed.overdue.map((task) => task.id)).toEqual(['overdue-cache']);
+    expect(activeFailed.expired.map((task) => task.id)).toEqual(['exp-fresh']);
+    expect(activeFailed.stuck.map((task) => task.id)).toEqual(['overdue-cache', 'exp-fresh']);
+    const waitingFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, freshOverdue, true, [projected('ignored')], false,
+    );
+    expect(waitingFailed.overdue.map((task) => task.id)).toEqual(['overdue-fresh']);
+    expect(waitingFailed.expired.map((task) => task.id)).toEqual(['exp-cache']);
+    expect(waitingFailed.stuck.map((task) => task.id)).toEqual(['overdue-fresh', 'exp-cache']);
+    const bothFailed = homeFlow.applyHomeStuckSources(
+      cachedOverdue, cachedExpired, freshOverdue, false, freshExpired, false,
+    );
+    expect(bothFailed.stuck.map((task) => task.id)).toEqual(['overdue-cache', 'exp-cache']);
+  });
+
+  test('renderHomeWaiting does not paint a projected row even if state still holds it', () => {
+    const section = fakeEl('section');
+    const state = {
+      homeStatus: 'ready',
+      homeWaitingTasks: [
+        { id: 'exp-4', subject: 'Expired approval', expiryProjection: 'past-deadline-unmaterialized', updatedAt: NOW },
+        { id: 'wait-2', subject: 'Still waiting', state: 'input-required', updatedAt: NOW },
+      ],
+    };
+    const fn = new Function(
+      'document', 'state', 'HOME_VISIBLE_ROWS', 'taskStateLabel', 'formatAgo', 'navigateTo',
+      `${pastDeadline}\n${sliceOverviewFn('function homeTaskButton(', 'function homeLinkButton(')}\n${sliceOverviewFn('function homeLinkButton(', 'function homeSection(')}\n${sliceOverviewFn('function appendHomeEmpty(', 'function renderHomeStuck(')}\nreturn renderHomeWaiting;`,
+    );
+    const renderHomeWaiting = fn(
+      { createElement: fakeEl }, state, 5, (task: { state?: string }) => task.state || '—',
+      () => 'just now', () => {},
+    ) as (host: ReturnType<typeof fakeEl>) => void;
+    renderHomeWaiting(section);
+    const texts = leafTexts(section);
+    expect(texts).toContain('Still waiting');
+    expect(texts).not.toContain('Expired approval');
   });
 });
 

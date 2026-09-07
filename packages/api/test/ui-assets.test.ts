@@ -734,6 +734,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).not.toContain("value = '__tasks__'");
     expect(UI_JS).toContain("return 'Waiting for you'");
+    expect(UI_JS).toContain("return 'Past deadline'");
+    expect(UI_JS).toContain('function approvalPastDeadline(');
+    expect(UI_JS).toContain("button.classList.add('is-past-deadline')");
     expect(UI_JS).toContain('Write a reply. This goes back to the agent as a working update.');
     expect(UI_JS).toContain('tasksPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('function clearTasksState(');
@@ -831,6 +834,7 @@ describe('UI static asset contract', () => {
     expect(load).toContain('state.tasks = []');
     expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
     expect(load).toContain('if (!stillThere && !more && !opts.poll) clearTaskDetail();');
+    expect(load).toContain('syncActiveTaskDetailFromList(state.tasks)');
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderTaskRows('),
       UI_JS.indexOf('function renderTaskDetail('),
@@ -1190,9 +1194,12 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain('state.homeWaitingTotal = typeof waitingPayload.totalApprox === \'number\'');
+    expect(home).toContain("state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'");
+    expect(UI_JS).toContain("if (homeWaitingScanCapped(acc)) return '500+'");
+    expect(UI_JS).toContain('function publishHomeWaitingTotal(');
+    expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
-    expect(home).toContain('state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];');
+    expect(home).toContain('var nextStuck = applyHomeStuckSources(');
     const activeOverdue = UI_JS.slice(
       UI_JS.indexOf('async function loadHomeActiveOverdue('),
       UI_JS.indexOf('function homeNumber('),
@@ -1203,6 +1210,12 @@ describe('UI static asset contract', () => {
     expect(activeOverdue).toContain('pages < HOME_ACTIVE_MAX_PAGES && scannedRows < HOME_ACTIVE_MAX_ROWS');
     expect(home).toContain('state.homeFailedUrgentCount = typeof summaryPayload.failedUrgentCount === \'number\'');
     expect(home).not.toContain('state.homeWaitingTasks.length');
+    expect(UI_JS).toContain('function classifyHomeWaiting(');
+    expect(UI_JS).toContain('function loadHomeWaiting(');
+    expect(UI_JS).toContain('function applyHomeStuckSources(');
+    expect(UI_JS).toContain('state.homeOverdueTasks = nextStuck.overdue');
+    expect(UI_JS).toContain('state.homeExpiredTasks = nextStuck.expired');
+    expect(UI_JS).toContain('homeWaitingShouldContinue(acc)');
   });
 
   test('Notifications distinguishes today’s successful deliveries from visible failed rows', () => {
@@ -1254,7 +1267,7 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('async function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain("homeTaskUrl('input-required')");
+    expect(UI_JS).toContain("homeTaskUrl('input-required', acc.nextCursor, HOME_ACTIVE_PAGE_LIMIT)");
     expect(UI_JS).toContain("homeTaskUrl('active', cursor, HOME_ACTIVE_PAGE_LIMIT)");
     expect(home).toContain("'/ui/api/notify/summary?date=today&tz='");
     expect(home).toContain("isAdmin() && !opts.poll");

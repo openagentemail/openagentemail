@@ -47,11 +47,124 @@
     return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : 'Unavailable';
   }
 
+  /* 过期未物化仍是 input-required，但不得进 waiting 存储。 */
+  function classifyHomeWaiting(tasks) {
+    var rows = Array.isArray(tasks) ? tasks : [];
+    var waitingTasks = [];
+    var expiredTasks = [];
+    rows.forEach(function (task) {
+      if (approvalPastDeadline(task)) expiredTasks.push(task);
+      else waitingTasks.push(task);
+    });
+    return { waitingTasks: waitingTasks, expiredTasks: expiredTasks };
+  }
+
+  function emptyHomeWaitingAcc() {
+    return {
+      waitingTasks: [],
+      expiredTasks: [],
+      waitingTotal: 0,
+      totalApprox: 0,
+      pages: 0,
+      scannedRows: 0,
+      nextCursor: ''
+    };
+  }
+
+  /* 一页 input-required：活审批进 waiting，投影行只进 expired，绝不写回 waiting 存储。 */
+  function accumulateHomeWaitingPage(acc, board) {
+    var page = acc || emptyHomeWaitingAcc();
+    var payload = board || {};
+    if (typeof payload.totalApprox === 'number') page.totalApprox = payload.totalApprox;
+    var tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    var allowedRows = tasks.slice(0, HOME_ACTIVE_MAX_ROWS - page.scannedRows);
+    page.scannedRows += allowedRows.length;
+    var classified = classifyHomeWaiting(allowedRows);
+    classified.waitingTasks.forEach(function (task) {
+      if (page.waitingTasks.length < HOME_VISIBLE_ROWS) page.waitingTasks.push(task);
+    });
+    classified.expiredTasks.forEach(function (task) {
+      page.expiredTasks.push(task);
+    });
+    page.pages += 1;
+    page.nextCursor = payload.nextCursor || '';
+    page.waitingTotal = publishHomeWaitingTotal(page);
+    return page;
+  }
+
+  /* 凑够可见行后仍跟 cursor：计数要扣完全扫描窗里的投影行再发布。 */
+  function homeWaitingShouldContinue(acc) {
+    return !!(acc && acc.nextCursor &&
+      acc.pages < HOME_ACTIVE_MAX_PAGES && acc.scannedRows < HOME_ACTIVE_MAX_ROWS);
+  }
+
+  /* 硬停：还有下一页但已触达 5 页或 500 行。未扫页的投影未分类。 */
+  function homeWaitingScanCapped(acc) {
+    return !!(acc && acc.nextCursor &&
+      (acc.pages >= HOME_ACTIVE_MAX_PAGES || acc.scannedRows >= HOME_ACTIVE_MAX_ROWS));
+  }
+
+  /*
+   * 完整扫描（无 nextCursor）才发布精确数：totalApprox 扣已扫描投影行。
+   * 硬停时不得用同一公式冒充精确值（500 活 + 未扫 100 过期会虚报 600），改发 500+ 下界。
+   */
+  function publishHomeWaitingTotal(acc) {
+    if (homeWaitingScanCapped(acc)) return '500+';
+    var totalApprox = acc && typeof acc.totalApprox === 'number' ? acc.totalApprox : 0;
+    var expired = acc && acc.expiredTasks ? acc.expiredTasks.length : 0;
+    return Math.max(0, totalApprox - expired);
+  }
+
+  /* 分页拉完匹配窗（页/行上限内）再发布 waiting 计数。 */
+  async function loadHomeWaiting(signal) {
+    var acc = emptyHomeWaitingAcc();
+    do {
+      acc = accumulateHomeWaitingPage(acc, await apiJson(
+        homeTaskUrl('input-required', acc.nextCursor, HOME_ACTIVE_PAGE_LIMIT),
+        { signal: signal },
+      ));
+    } while (homeWaitingShouldContinue(acc));
+    return acc;
+  }
+
+  /* 过期未物化并入 Blocked（与 overdue 同属卡住区），按 id 去重。 */
+  function mergeHomeStuck(stuck, expired) {
+    var merged = Array.isArray(stuck) ? stuck.slice() : [];
+    var seen = {};
+    merged.forEach(function (task) {
+      if (task && task.id) seen[task.id] = true;
+    });
+    (Array.isArray(expired) ? expired : []).forEach(function (task) {
+      if (task && task.id && !seen[task.id]) {
+        seen[task.id] = true;
+        merged.push(task);
+      }
+    });
+    return merged;
+  }
+
+  /* 两源分开存：失败源留缓存，成功源覆盖，再合成 Blocked。 */
+  function applyHomeStuckSources(cachedOverdue, cachedExpired, overdue, overdueOk, expired, waitingOk) {
+    var nextOverdue = overdueOk
+      ? (Array.isArray(overdue) ? overdue.slice() : [])
+      : (Array.isArray(cachedOverdue) ? cachedOverdue.slice() : []);
+    var nextExpired = waitingOk
+      ? (Array.isArray(expired) ? expired.slice() : [])
+      : (Array.isArray(cachedExpired) ? cachedExpired.slice() : []);
+    return {
+      overdue: nextOverdue,
+      expired: nextExpired,
+      stuck: mergeHomeStuck(nextOverdue, nextExpired)
+    };
+  }
+
   function homeTaskButton(task) {
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'home-task-row';
     if (task.overdueReason) button.classList.add('is-overdue');
+    /* 过期未物化：Home 行不得再当「等你批」。 */
+    if (approvalPastDeadline(task)) button.classList.add('is-past-deadline');
     var subject = document.createElement('span');
     subject.className = 'home-task-subject';
     subject.textContent = task.subject || '(no subject)';
@@ -84,10 +197,10 @@
     var label = document.createElement('h2');
     label.textContent = title;
     heading.append(label);
-    if (typeof count === 'number') {
+    if (typeof count === 'number' || (typeof count === 'string' && count)) {
       var badge = document.createElement('span');
       badge.className = 'count home-count';
-      /* totalApprox 是本次 query 的服务端计数；不可用数组长度代替。 */
+      /* 精确数来自完整扫描；硬停发布 500+，不可用数组长度代替。 */
       badge.textContent = String(count);
       heading.append(badge);
     }
@@ -108,7 +221,9 @@
   }
 
   function renderHomeWaiting(section) {
-    var rows = Array.isArray(state.homeWaitingTasks) ? state.homeWaitingTasks : [];
+    var rows = (Array.isArray(state.homeWaitingTasks) ? state.homeWaitingTasks : []).filter(function (task) {
+      return !approvalPastDeadline(task);
+    });
     if (state.homeStatus === 'loading' && !rows.length) {
       appendHomeEmpty(section, 'Loading tasks', 'Checking the tasks that need your input.');
       return;
@@ -129,7 +244,7 @@
     var overdue = Array.isArray(state.homeStuckTasks) ? state.homeStuckTasks : [];
     var hasFailures = typeof state.homeFailedUrgentCount === 'number' && state.homeFailedUrgentCount > 0;
     if (!overdue.length && !hasFailures) {
-      appendHomeEmpty(section, 'Nothing is blocked.', 'Overdue tasks and failed urgent pushes will be listed here.');
+      appendHomeEmpty(section, 'Nothing is blocked.', 'Overdue tasks, expired approvals, and failed urgent pushes will be listed here.');
       return;
     }
     if (overdue.length) {
@@ -272,7 +387,7 @@
     if (state.scope === 'overview') renderOverview();
 
     var signal = controller.signal;
-    var waiting = homeResult(apiJson(homeTaskUrl('input-required'), { signal: signal }));
+    var waiting = homeResult(loadHomeWaiting(signal));
     var active = homeResult(loadHomeActiveOverdue(signal));
     var summary = homeResult(apiJson(
       '/ui/api/notify/summary?date=today&tz=' + encodeURIComponent(homeTimeZone()),
@@ -291,20 +406,37 @@
     }
     overviewController = null;
     var issues = [];
-    if (results[0] && results[0].ok) {
-      var waitingPayload = results[0].payload || {};
-      state.homeWaitingTasks = Array.isArray(waitingPayload.tasks) ? waitingPayload.tasks : [];
-      state.homeWaitingTotal = typeof waitingPayload.totalApprox === 'number'
-        ? waitingPayload.totalApprox
+    var expiredWaiting = [];
+    var waitingOk = !!(results[0] && results[0].ok);
+    if (waitingOk) {
+      var waitingBoard = results[0].payload || {};
+      /* 只收已分类的活审批；投影行不得进 homeWaitingTasks / Total。 */
+      state.homeWaitingTasks = Array.isArray(waitingBoard.waitingTasks) ? waitingBoard.waitingTasks : [];
+      state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'
+        ? waitingBoard.waitingTotal
         : 0;
+      expiredWaiting = Array.isArray(waitingBoard.expiredTasks) ? waitingBoard.expiredTasks : [];
     } else if (results[0] && results[0].error.message !== 'session_expired') {
       issues.push('Tasks that need you could not be loaded.');
     }
-    if (results[1] && results[1].ok) {
-      state.homeStuckTasks = Array.isArray(results[1].payload) ? results[1].payload : [];
+    var overdue = [];
+    var overdueOk = !!(results[1] && results[1].ok);
+    if (overdueOk) {
+      overdue = Array.isArray(results[1].payload) ? results[1].payload : [];
     } else if (results[1] && results[1].error.message !== 'session_expired') {
       issues.push('Blocked tasks could not be loaded.');
     }
+    var nextStuck = applyHomeStuckSources(
+      state.homeOverdueTasks,
+      state.homeExpiredTasks,
+      overdue,
+      overdueOk,
+      expiredWaiting,
+      waitingOk
+    );
+    state.homeOverdueTasks = nextStuck.overdue;
+    state.homeExpiredTasks = nextStuck.expired;
+    state.homeStuckTasks = nextStuck.stuck;
     if (results[2] && results[2].ok) {
       var summaryPayload = results[2].payload || {};
       state.homeUrgentSentCount = typeof summaryPayload.ringCount === 'number'

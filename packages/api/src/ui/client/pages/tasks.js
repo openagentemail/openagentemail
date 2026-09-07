@@ -60,14 +60,21 @@
     return !!(task && task.result && task.result.closed_by_admin === true);
   }
 
+  /* 只读投影：过期未物化不得再标成「等你批」。 */
+  function approvalPastDeadline(task) {
+    return !!(task && task.expiryProjection === 'past-deadline-unmaterialized');
+  }
+
   function taskStateLabel(task) {
     if (taskIsClosed(task)) return 'Closed';
+    if (approvalPastDeadline(task)) return 'Past deadline';
     if (task && task.state === 'input-required') return 'Waiting for you';
     return task && task.state ? task.state : '—';
   }
 
   function taskStateToken(task) {
     if (taskIsClosed(task)) return 'closed';
+    if (approvalPastDeadline(task)) return 'past-deadline';
     return task && task.state ? task.state : '';
   }
 
@@ -170,6 +177,8 @@
 
   function approvalCanDecide(task) {
     if (!task || task.kind !== 'approval' || !task.approval || task.state !== 'input-required') return false;
+    // 过期未物化：列表/缓存详情不得再当可决策。
+    if (approvalPastDeadline(task)) return false;
     return !isAdmin() && !!state.me &&
       String(state.me.address || '').toLowerCase() === String(task.approval.reviewer || '').toLowerCase();
   }
@@ -207,7 +216,9 @@
     var section = document.createElement('section');
     section.className = 'task-approval';
     var title = document.createElement('h4');
-    title.textContent = task.state === 'input-required' ? 'Approval required' : 'Approval details';
+    title.textContent = approvalPastDeadline(task)
+      ? 'Approval expired'
+      : task.state === 'input-required' ? 'Approval required' : 'Approval details';
     var type = document.createElement('p');
     type.textContent = 'Type: ' + String(approval.action.type || '—');
     var name = document.createElement('p');
@@ -266,6 +277,7 @@
       button.type = 'button';
       button.className = 'task-row';
       if (task.overdueReason) button.classList.add('is-overdue');
+      if (approvalPastDeadline(task)) button.classList.add('is-past-deadline');
       button.setAttribute('aria-current', task.id === state.activeTaskId ? 'true' : 'false');
 
       var stateCell = document.createElement('div');
@@ -283,6 +295,12 @@
         overdue.className = 'task-overdue-flag';
         overdue.textContent = 'Overdue';
         stateCell.append(overdue);
+      }
+      if (approvalPastDeadline(task)) {
+        var expired = document.createElement('span');
+        expired.className = 'task-expiry-flag';
+        expired.textContent = 'Past deadline';
+        stateCell.append(expired);
       }
 
       var peopleCell = document.createElement('div');
@@ -432,6 +450,12 @@
         ? 'Overdue: submitted more than 4 hours ago.'
         : 'Overdue: working more than 24 hours ago.';
       head.append(overdueNote);
+    }
+    if (approvalPastDeadline(task)) {
+      var expiryNote = document.createElement('p');
+      expiryNote.className = 'task-expiry-flag';
+      expiryNote.textContent = 'Past deadline: this approval has expired and is no longer decidable.';
+      head.append(expiryNote);
     }
     if (state.taskDetailStatus === 'loading') {
       var pending = document.createElement('p');
@@ -583,6 +607,24 @@
     }
   }
 
+  /* list/board 只读投影：打开中的详情必须跟上匹配行，禁用决策且标签一致。 */
+  function syncActiveTaskDetailFromList(rows) {
+    var detail = state.taskDetail;
+    if (!detail || !state.activeTaskId || detail.id !== state.activeTaskId) return;
+    var row = null;
+    (Array.isArray(rows) ? rows : []).some(function (task) {
+      if (task && task.id === state.activeTaskId) {
+        row = task;
+        return true;
+      }
+      return false;
+    });
+    if (!row || !approvalPastDeadline(row) || approvalPastDeadline(detail)) return;
+    state.taskDetail = Object.assign({}, detail, {
+      expiryProjection: 'past-deadline-unmaterialized'
+    });
+  }
+
   function renderTasks() {
     renderTasksMeta();
     renderTaskRows();
@@ -630,6 +672,7 @@
       } else {
         state.tasks = incoming;
       }
+      syncActiveTaskDetailFromList(state.tasks);
       state.tasksNextCursor = payload.nextCursor || '';
       state.tasksTotalApprox = typeof payload.totalApprox === 'number' ? payload.totalApprox : state.tasks.length;
       state.tasksUpdatedAt = Date.now();

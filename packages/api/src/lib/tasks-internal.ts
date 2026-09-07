@@ -86,6 +86,10 @@ export type ApprovalEvent =
   | { type: 'decision'; digest: string; decision: 'approved' | 'rejected' }
   | { type: 'expired'; digest: string };
 
+/** list/board 只读投影：过期但尚未物化 signed expiry 的中间态。 */
+export const APPROVAL_EXPIRY_PROJECTION_PAST_DEADLINE = 'past-deadline-unmaterialized' as const;
+export type ApprovalExpiryProjection = typeof APPROVAL_EXPIRY_PROJECTION_PAST_DEADLINE;
+
 type ApprovalEventPayload =
   | { event: 'request'; digest: string; reviewer: string; expiresAt: string }
   | { event: 'decision'; digest: string; decision: 'approved' | 'rejected'; reviewer: string; decidedAt: string }
@@ -207,6 +211,8 @@ export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | '
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
+  /** 派生只读字段；缺省表示无需投影（未过期或已物化）。 */
+  expiryProjection?: ApprovalExpiryProjection;
 };
 
 export type TaskLeaseGrant = {
@@ -455,6 +461,26 @@ export function isApprovalExpired(expiresAt: string, now = nowMs()): boolean {
   return !Number.isFinite(time) || now >= time;
 }
 
+/** 已物化的 signed expiry：消息事件或终态 result，任一即可。 */
+function hasMaterializedApprovalExpiry(task: Task): boolean {
+  if (task.messages.some((message) => message.approval?.type === 'expired')) return true;
+  const expiry = readApprovalExpiry(task.result);
+  return !!expiry && expiry.digest === task.approval?.digest;
+}
+
+/**
+ * list/board 只读投影。与 authorized detail/wait/decision 的物化边界对齐
+ *（`isApprovalExpired`：now >= expiresAt）。纯函数，零写副作用。
+ */
+export function approvalExpiryProjection(task: Task, now = nowMs()): ApprovalExpiryProjection | undefined {
+  if (task.kind !== 'approval' || !task.approval) return undefined;
+  // 只有仍停留在 input-required 的审批才可能是「过期未物化」中间态。
+  if (task.state !== 'input-required') return undefined;
+  if (!isApprovalExpired(task.approval.expiresAt, now)) return undefined;
+  if (hasMaterializedApprovalExpiry(task)) return undefined;
+  return APPROVAL_EXPIRY_PROJECTION_PAST_DEADLINE;
+}
+
 /** A private signature makes a copied client-side task header non-authoritative. */
 function taskStamp(id: string, state: TaskState, from: string, to: string): string {
   return createHmac('sha256', config.taskSigningSecret)
@@ -660,6 +686,11 @@ export function claimLeaseHeadersForTests(input: {
   return leaseEventHeaders(input.id, input.state, input.from, input.to, input.event);
 }
 
+/**
+ * approval-event-v1 HMAC 域：id / state / from / to / canonical payload。
+ * 展示层 Subject 不进本域，也不得绑进未来 event/stamp 版本——Subject 是 UI
+ * 展示语义；绑签名会破坏 v1 兼容，并把展示抬进 integrity 面。
+ */
 function approvalStamp(
   id: string,
   state: TaskState,
@@ -2264,7 +2295,8 @@ export async function claimTask(input: {
 }
 
 /** Public task projection used by REST success responses. */
-export function toTaskView(task: Task): TaskView {
+export function toTaskView(task: Task, now = nowMs()): TaskView {
+  const expiryProjection = approvalExpiryProjection(task, now);
   return {
     id: task.id,
     from: task.from,
@@ -2276,7 +2308,8 @@ export function toTaskView(task: Task): TaskView {
     messages: task.messages,
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.kind === 'approval' && task.approval ? { kind: task.kind, approval: task.approval } : {}),
-    ...publicLeaseProjection(task),
+    ...publicLeaseProjection(task, now),
+    ...(expiryProjection ? { expiryProjection } : {}),
   };
 }
 
@@ -2700,6 +2733,7 @@ export function taskOverdue(task: Task, now = nowMs()): TaskOverdue {
  * 不扩权限，只收口服务层可能带上的附加键。
  */
 export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
+  const expiryProjection = approvalExpiryProjection(task, now);
   return {
     id: task.id,
     from: task.from,
@@ -2712,6 +2746,7 @@ export function toUiTaskView(task: Task, now = nowMs()): TaskBoardItem {
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.kind === 'approval' && task.approval ? { kind: 'approval' as const, approval: task.approval } : {}),
     ...publicLeaseProjection(task, now),
+    ...(expiryProjection ? { expiryProjection } : {}),
     ...taskOverdue(task, now),
   };
 }
@@ -3081,7 +3116,17 @@ export function taskFromParsedMessagesForTests(id: string, messages: ParsedTaskM
 
 /** Narrow watcher bridge: it deliberately returns only parser-authenticated
  * approval event kind, never an action/body snapshot. */
+let approvalWatcherParseCallsForTests = 0;
+
+/** 测试计数：完整认证解析器被调用次数（#75 预筛不得跳过带该头的邮件）。 */
+export function takeApprovalWatcherParseCallsForTests(): number {
+  const n = approvalWatcherParseCallsForTests;
+  approvalWatcherParseCallsForTests = 0;
+  return n;
+}
+
 export async function approvalEventForWatcher(message: FetchMessageObject): Promise<ApprovalEvent | null> {
+  approvalWatcherParseCallsForTests += 1;
   if (!message.source || !message.envelope) return null;
   try {
     const parsed = await simpleParser(message.source);
