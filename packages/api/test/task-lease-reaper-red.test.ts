@@ -32,7 +32,12 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const {
+  claimLeaseHeadersForTests,
+  parseTaskMessageForTests,
+  taskLeaseExpiryAuditM3Enabled,
+  withTaskLeasesEnabledForTests,
+} = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { startTaskLeaseReaper, TASK_LEASE_REAPER_INTERVAL_MS } = await import('../src/lib/task-lease-reaper.ts');
 
@@ -304,7 +309,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     setTaskGetForTests(async () => durable);
     setTaskListAllForTests(async () => [durable]);
     setTaskSendMailForTests(async (input) => {
-      if (failExpiry) throw new Error('temporary smtp failure');
+      // 只挡 audit 回执：off 态 reaper 仍会整轮抛错；on 态才能证明 reclaim 不被 audit SMTP 挡死。
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('temporary smtp failure');
+      }
       sent.push(input);
       return { messageId: `<r8c-reap-${sent.length}>` };
     });
@@ -314,20 +322,50 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     clearQueuedEventsForTests();
     now = Date.parse(first.claimedUntil);
     failExpiry = true;
-    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('temporary smtp failure');
-    expect(sent).toHaveLength(1);
-    failExpiry = false;
-    expect(await reapExpiredTaskLeasesOnce()).toBe(1);
-    const expiry = await parseCaptured(sent[1]!, 3);
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, expiry!]);
-    // IMAP still returns the old durable claim; the accepted queued expiry
-    // nevertheless dominates it so reclaim is immediate and becomes gen 2.
-    const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
-    expect({
-      rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
-      generation2: second.leaseGeneration,
-      deliveries: sent.length,
-    }).toEqual({ rebuiltOldBearerCurrent: false, generation2: 2, deliveries: 3 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3：投递失败不中断整轮；reclaim 只取决于 claim 自身 SMTP，随后 reconcile 补账。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+      expect(sent).toHaveLength(1);
+      const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+      expect(second.leaseGeneration).toBe(2);
+      failExpiry = false;
+      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+      const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+      const claim2Input = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')[1];
+      const expiry = expiryInput ? await parseCaptured(expiryInput, 4) : null;
+      const claim2 = claim2Input ? await parseCaptured(claim2Input, 3) : null;
+      const rebuilt = expiry && claim2
+        ? taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, claim2, expiry])
+        : null;
+      expect({
+        rebuilt: rebuilt !== null,
+        generation2: second.leaseGeneration,
+        authority: rebuilt?.lease?.leaseGeneration,
+        rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
+        expiryBackfilled: expiry !== null,
+      }).toEqual({
+        rebuilt: true,
+        generation2: 2,
+        authority: 2,
+        rebuiltOldBearerCurrent: false,
+        expiryBackfilled: true,
+      });
+    } else {
+      await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('temporary smtp failure');
+      expect(sent).toHaveLength(1);
+      failExpiry = false;
+      expect(await reapExpiredTaskLeasesOnce()).toBe(1);
+      const expiry = await parseCaptured(sent[1]!, 3);
+      const rebuilt = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, expiry!]);
+      // IMAP still returns the old durable claim; the accepted queued expiry
+      // nevertheless dominates it so reclaim is immediate and becomes gen 2.
+      const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+      expect({
+        rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
+        generation2: second.leaseGeneration,
+        deliveries: sent.length,
+      }).toEqual({ rebuiltOldBearerCurrent: false, generation2: 2, deliveries: 3 });
+    }
   });
 
   test('reaper races are lock-linearized with reclaim, renew, release, and admin close', async () => {
@@ -1188,8 +1226,17 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     expect(claim2).not.toBeNull();
     const staleGen1Expiry = await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 9);
     expect(staleGen1Expiry).not.toBeNull();
-    // Durable thread: root, claim1, claim2, staleGen1Expiry
-    // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
-    expect(taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!])).toBeNull();
+    const lateSequence = taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!]);
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3 T11：迟到回执匹配历史权威窗 → 审计 no-op，权威停在 claim2，不进公开序列。
+      expect(lateSequence).not.toBeNull();
+      expect(lateSequence?.lease?.leaseGeneration).toBe(2);
+      expect(lateSequence?.expiredLease).toBeUndefined();
+      expect(toTaskView(lateSequence!).messages).toHaveLength(3);
+    } else {
+      // Durable thread: root, claim1, claim2, staleGen1Expiry
+      // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
+      expect(lateSequence).toBeNull();
+    }
   });
 });
