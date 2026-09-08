@@ -1823,9 +1823,12 @@ let taskSideEffectObserverForTests: TaskSideEffectObserverForTests | null = null
 const queuedEvents = new Map<string, QueuedEvent[]>();
 const QUEUED_EVENT_TTL_MS = 60 * 1000;
 /** M1：task+generation 首次停播去重；插入序淘汰，有界 1024。 */
-const OVERLAY_REPLAY_EXPIRED_SEEN_CAP = 1024;
+export const LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP = 1024;
+/** M1：进程级 warn 发射限频——窗口内最多 1 条，计数器仍按 key 累计。 */
+export const LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS = 60 * 1000;
 const overlayReplayExpiredSeen = new Map<string, true>();
 let overlayReplayExpiredCount = 0;
+let overlayReplayExpiredLastWarnAt = 0;
 
 type QueuedEvent = {
   message: TaskMessage;
@@ -1954,6 +1957,7 @@ export function clearQueuedEventsForTests(): void {
   // 单测之间清掉停播去重与计数，避免跨用例串味。
   overlayReplayExpiredSeen.clear();
   overlayReplayExpiredCount = 0;
+  overlayReplayExpiredLastWarnAt = 0;
 }
 
 /** 测试可读：累计首次停播次数。 */
@@ -2128,16 +2132,19 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   return next;
 }
 
-/** 首次整组/整行停播：结构化 warn + 计数；同 task+generation 只报一次。 */
+/** 首次整组停播：计数按 key 累计；console.warn 进程级限频（默认 60s 一条）。 */
 function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs: number): void {
   const key = `${taskId}:${generation}`;
   if (overlayReplayExpiredSeen.has(key)) return;
-  if (overlayReplayExpiredSeen.size >= OVERLAY_REPLAY_EXPIRED_SEEN_CAP) {
+  if (overlayReplayExpiredSeen.size >= LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP) {
     const oldest = overlayReplayExpiredSeen.keys().next().value;
     if (oldest !== undefined) overlayReplayExpiredSeen.delete(oldest);
   }
   overlayReplayExpiredSeen.set(key, true);
   overlayReplayExpiredCount += 1;
+  const now = nowMs();
+  if (now - overlayReplayExpiredLastWarnAt < LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS) return;
+  overlayReplayExpiredLastWarnAt = now;
   console.warn({
     kind: 'lease_overlay_replay_expired',
     taskId,
@@ -2151,9 +2158,13 @@ function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs
  * 同一 generation 的 claim/renew/release/expired 并成一组，
  * 组锚=组内 sentAt 最大值；超龄整组停播。approval-terminal 与非 lease 行原样保留。
  */
-function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: number): QueuedEvent[] {
+function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: number): {
+  overlay: QueuedEvent[];
+  stoppedClosings: QueuedEvent[];
+} {
   const byGeneration = new Map<number, QueuedEvent[]>();
   const keep = new Set<QueuedEvent>();
+  const stoppedClosings: QueuedEvent[] = [];
   for (const row of rows) {
     if (!row.lease) {
       keep.add(row);
@@ -2169,12 +2180,22 @@ function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: numb
     const age = now - newest.sentAt;
     if (age > LEASE_OVERLAY_MAX_LIFETIME_MS) {
       noteLeaseOverlayReplayExpired(taskId, generation, age);
+      for (const row of group) {
+        if (row.lease?.event === 'release' || row.lease?.event === 'expired') stoppedClosings.push(row);
+      }
       continue;
     }
     for (const row of group) keep.add(row);
   }
   // 保持原序，避免权威叠加顺序被打乱。
-  return rows.filter((row) => keep.has(row));
+  return { overlay: rows.filter((row) => keep.has(row)), stoppedClosings };
+}
+
+/** 停播的 release/expired 若对应 durable 仍可见的同代 claim，只在返回视图上盖掉活租约。 */
+function applyStoppedClosingsToPublicView(task: Task, closings: QueuedEvent[]): Task {
+  const matching = closings.filter((row) => row.lease && task.lease?.leaseGeneration === row.lease.generation);
+  if (matching.length === 0) return task;
+  return applyOverlayMessages(task, matching);
 }
 
 function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
@@ -2194,10 +2215,11 @@ function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
   // 退休判定仍写回全量 stillLagging；有界过滤只作用于本次返回视图。
   queuedEvents.set(task.id, stillLagging);
-  const overlay = opts?.publicRead && taskLeaseOverlayBoundEnabled()
-    ? filterPublicLeaseOverlay(task.id, stillLagging, now)
-    : stillLagging;
-  return applyOverlayMessages(task, overlay);
+  if (opts?.publicRead && taskLeaseOverlayBoundEnabled()) {
+    const { overlay, stoppedClosings } = filterPublicLeaseOverlay(task.id, stillLagging, now);
+    return applyStoppedClosingsToPublicView(applyOverlayMessages(task, overlay), stoppedClosings);
+  }
+  return applyOverlayMessages(task, stillLagging);
 }
 
 function queueEventUntilIndexed(
@@ -2213,6 +2235,33 @@ function queueEventUntilIndexed(
     ...(lease ? { lease } : {}),
   });
   queuedEvents.set(taskId, list);
+}
+
+/** 测试注入未索引 lease overlay，避免为限频用例走 1025 次真实 claim。 */
+export function queueLeaseOverlayForTests(input: {
+  taskId: string;
+  sentAt: number;
+  generation?: number;
+}): void {
+  const at = new Date(input.sentAt).toISOString();
+  const generation = input.generation ?? 1;
+  queueEventUntilIndexed(input.taskId, {
+    id: `overlay-${input.taskId}-${generation}`,
+    from: 'alpha@test.example',
+    to: 'bravo@test.example',
+    subject: 'overlay',
+    date: at,
+    state: 'working',
+    body: 'overlay',
+  }, {
+    version: 1,
+    event: 'claim',
+    actor: 'bravo@test.example',
+    at,
+    generation,
+    claimedUntil: new Date(input.sentAt + 3600 * 1000).toISOString(),
+    tokenVerifier: `verifier-${input.taskId}`,
+  });
 }
 
 /** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */

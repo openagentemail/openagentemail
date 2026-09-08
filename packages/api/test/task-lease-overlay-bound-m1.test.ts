@@ -34,6 +34,8 @@ const {
   clearQueuedEventsForTests,
   getTaskSnapshot,
   LEASE_OVERLAY_MAX_LIFETIME_MS,
+  LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP,
+  queueLeaseOverlayForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -295,6 +297,49 @@ describe('M1 公共读 overlay 有界', () => {
     expect(authority?.lease).toBeUndefined();
     expect(authority?.releasedLease?.leaseGeneration).toBe(1);
     expect(takeLeaseOverlayReplayExpiredCountForTests()).toBe(0);
+  });
+
+  testOn('fix3-1 已索引 claim × 排队 release 掉龄：公共遮蔽活租约，内视图不变', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m1-fix3-1-${sent.length}>` };
+    });
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    const indexed = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
+    setTaskGetForTests(async () => indexed);
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken });
+    now = START + STALE;
+    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
+    const publicTask = await getTask(ID);
+    const authority = await getTaskSnapshot(ID);
+    const durable = await getTaskSnapshot(ID, { mergeOverlay: false });
+    warn.mockRestore();
+    expect(durable?.lease?.leaseGeneration).toBe(1);
+    expect(authority?.releasedLease?.leaseGeneration).toBe(1);
+    expect(authority?.lease).toBeUndefined();
+    expect(publicTask?.lease).toBeUndefined();
+    expect(publicTask?.releasedLease?.leaseGeneration).toBe(1);
+  });
+
+  testOn('fix3-2 >1024 个 stale key 时窗口内 warn 有界，计数仍按 key 累计', async () => {
+    let now = START + STALE;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async (id) => submittedTask(id));
+    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
+    const n = LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP + 1;
+    for (let i = 0; i < n; i += 1) {
+      const id = crypto.randomUUID();
+      queueLeaseOverlayForTests({ taskId: id, sentAt: START, generation: 1 });
+      await getTask(id);
+    }
+    const kinds = warnKinds(warn);
+    warn.mockRestore();
+    expect(kinds.length).toBe(1);
+    expect(takeLeaseOverlayReplayExpiredCountForTests()).toBe(n);
   });
 
   bunTest('T8 开关 off：超龄后公共读仍重放（现行为负控）', async () => {
