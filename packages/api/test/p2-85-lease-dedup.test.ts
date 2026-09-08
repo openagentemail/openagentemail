@@ -28,7 +28,9 @@ const {
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
+  emitDurableExpiryIfM3ForTests,
   setTaskGetForTests,
+  setTaskListAllForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
@@ -78,6 +80,7 @@ async function parseCaptured(input: SendInput, uid: number): Promise<RawTaskMess
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskGetForTests(null);
+  setTaskListAllForTests(null);
   setTaskSendMailForTests(null);
   clearQueuedEventsForTests();
 });
@@ -135,7 +138,9 @@ describe('PR-2 #85 传输层精确去重（claim/renew/release）', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     const claim1 = (await parseCaptured(sent[0]!, 2))!;
     const expiry1 = (await parseCaptured(sent[1]!, 3))!;

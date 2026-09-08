@@ -179,17 +179,19 @@ describe('M3 配置面与默认关', () => {
 });
 
 describe('M3-1 reclaim 解耦', () => {
-  testOn('T-A：前租约过期 + audit SMTP 拒绝 → 新 claim 成功，warn+计数落袋', async () => {
+  testOn('T-A：审计通道完全不可用时 reclaim 即时成功且锁内零审计 SMTP', async () => {
     let now = START;
     let durable = submittedTask();
     const sent: SendInput[] = [];
-    let failExpiry = false;
+    let expiryCalls = 0;
     const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
     setTaskNowForTests(() => now);
     setTaskGetForTests(async () => durable);
     setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('permanent smtp reject');
+      if (input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        expiryCalls += 1;
+        // 假 transport hang：若 claim 仍 await 审计，本用例不会结束。
+        await new Promise(() => undefined);
       }
       sent.push(input);
       return { messageId: `<m3-ta-${sent.length}>` };
@@ -199,27 +201,26 @@ describe('M3-1 reclaim 解耦', () => {
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
     now = Date.parse(first.claimedUntil);
-    failExpiry = true;
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     const warnKinds = warn.mock.calls
       .map((args) => args[0])
-      .filter((row): row is { kind?: string; generation?: number; claimedUntil?: string } =>
-        !!row && typeof row === 'object');
+      .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
+      .filter((row) => row.kind === 'expiry_audit_delivery_failed');
     warn.mockRestore();
     expect({
       generation: second.leaseGeneration,
+      expiryCalls,
       expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length,
       claimDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim').length,
       failures: expiryAuditDeliveryFailureCountForTests(),
-      warnKind: warnKinds.some((row) => row.kind === 'expiry_audit_delivery_failed'
-        && row.generation === 1
-        && row.claimedUntil === first.claimedUntil),
+      warns: warnKinds.length,
     }).toEqual({
       generation: 2,
+      expiryCalls: 0,
       expiryDeliveries: 0,
       claimDeliveries: 2,
-      failures: 1,
-      warnKind: true,
+      failures: 0,
+      warns: 0,
     });
   });
 
@@ -920,6 +921,21 @@ describe('M3 R2 返工', () => {
     }).toEqual({ liveExpiry: 1, keptAfterComplete: 1, state: 'completed' });
   });
 
+  testOn('R2-A：终态在 replayed claim 之前仍冻结最终窗回执', async () => {
+    const claim = await signedClaim(1, START);
+    const claimedUntil = claim.lease && 'claimedUntil' in claim.lease ? claim.lease.claimedUntil : '';
+    const completed = terminalRaw({ state: 'completed', uid: 2, body: 'done' });
+    const replayedClaim = { ...claim, uid: 3 };
+    const expiry = (await parseCaptured(expiryDelivery({ claimedUntil }), 4))!;
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), completed, replayedClaim, expiry]);
+    const view = rebuilt ? toTaskView(rebuilt) : null;
+    expect({
+      rebuilt: rebuilt !== null,
+      state: view?.state,
+      phantom: view?.messages.some((message) => message.body === 'Lease expired.') ?? true,
+    }).toEqual({ rebuilt: true, state: 'completed', phantom: false });
+  });
+
 });
 
 describe('M3 R3 返工', () => {
@@ -1085,6 +1101,28 @@ describe('M3 C 在途集合', () => {
       inFlightAfterIndex: 0,
       afterIndex: 0,
     });
+  });
+
+  testOn('C2：overlay-only claim 窗永不发射', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskListAllForTests(async () => [submittedTask()]);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m3-c2-overlay-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    // durable 仍是 submitted：claim 只在 overlay，丢失后不得当缺失窗。
+    now = Date.parse(first.claimedUntil);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskListAllForTests(async () => [submittedTask()]);
+    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    expect({
+      expiry: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length,
+      inFlight: expiryAuditInFlightCountForTests(),
+    }).toEqual({ expiry: 0, inFlight: 0 });
   });
 });
 

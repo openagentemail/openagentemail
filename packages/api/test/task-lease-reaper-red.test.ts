@@ -27,6 +27,7 @@ const {
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
+  emitDurableExpiryIfM3ForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -155,8 +156,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       // parser-authenticated durable mail is available before the reclaim.
       clearQueuedEventsForTests();
       setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
       now = Date.parse(first.claimedUntil);
       expect(isTaskLeaseTokenCurrent(durable, first.leaseToken)).toBe(false);
+      await emitDurableExpiryIfM3ForTests();
       const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
       const captured = await Promise.all(sent.map((message, index) => parseCaptured(message, index + 2)));
       const authenticated = captured.filter((message): message is RawTaskMessage => message !== null);
@@ -256,7 +259,9 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     await expect(taskService.renew({ id: ID, from: RECIPIENT, leaseToken: first.leaseToken, leaseSec: 300 })).rejects.toThrow('stale_lease');
     expect({
@@ -412,7 +417,12 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(renewable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.renew({ id: ID, from: RECIPIENT, leaseToken: renewable.leaseToken, leaseSec: 301 })]);
     now = Date.parse(renewable.claimedUntil);
-    expect({ afterRenew: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRenew: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // overlay renew 不改 durable 窗；到期按 durable 缺失补账。
+      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    } else {
+      expect({ afterRenew: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRenew: 0, expiryDeliveries: 0 });
+    }
 
     sent.length = 0;
     clearQueuedEventsForTests();
@@ -424,7 +434,11 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(releasable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.release({ id: ID, from: RECIPIENT, leaseToken: releasable.leaseToken, reason: 'done' })]);
     now = Date.parse(releasable.claimedUntil);
-    expect({ afterRelease: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRelease: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    } else {
+      expect({ afterRelease: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRelease: 0, expiryDeliveries: 0 });
+    }
 
     sent.length = 0;
     clearQueuedEventsForTests();
@@ -481,7 +495,9 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const claim1 = await parseCaptured(sent[0]!, 2);
     const expiry1 = await parseCaptured(sent[1]!, 3);
@@ -516,7 +532,9 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const rebuilt = taskFromMessages(ID, [
       submittedRaw(),
@@ -605,7 +623,9 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const claim1 = await parseCaptured(sent[0]!, 2);
     const expiry1 = await parseCaptured(sent[1]!, 3);
@@ -665,9 +685,12 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     if (!taskService.claim) throw new Error('shipped claim service is unavailable');
 
     const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim = await parseCaptured(sent[0]!, 2);
+    durable = taskFromMessages(ID, [submittedRaw(), claim!])!;
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     const firstReap = await reapExpiredTaskLeasesOnce();
-    const claim = await parseCaptured(sent[0]!, 2);
     const expiry = await parseCaptured(sent[1]!, 3);
     const expiredDurable = claim && expiry ? taskFromMessages(ID, [submittedRaw(), claim, expiry]) : null;
     if (!expiredDurable) throw new Error('R14 fixture must rebuild the authenticated expiry receipt');

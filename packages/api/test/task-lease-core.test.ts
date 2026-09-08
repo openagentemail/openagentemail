@@ -39,11 +39,13 @@ const {
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
+  emitDurableExpiryIfM3ForTests,
   setTaskGetForTests,
+  setTaskListAllForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeaseExpiryAuditM3Enabled, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
@@ -89,6 +91,7 @@ async function parsedClaim(input: SendInput, uid = 2, extra: Record<string, stri
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskGetForTests(null);
+  setTaskListAllForTests(null);
   setTaskSendMailForTests(null);
   clearQueuedEventsForTests();
 });
@@ -265,6 +268,11 @@ describe('#56 R2 lease authority', () => {
     expect(first.leaseGeneration).toBe(1);
 
     now = Date.parse(first.claimedUntil);
+    // M3-on 回执只走 durable reconcile：把 overlay claim 写入 durable 后再补账。
+    const indexed = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(sent[0]!, 2))!])!;
+    setTaskGetForTests(async () => indexed);
+    setTaskListAllForTests(async () => [indexed]);
+    await emitDurableExpiryIfM3ForTests();
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(second.leaseGeneration).toBe(2);
     expect(sent).toHaveLength(3);
@@ -487,7 +495,10 @@ describe('#81 renewal tenure', () => {
     const reclaimRaw = await parsedClaim(sent[3]!, 5);
     durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!])!;
     clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(reclaimed.claimedUntil);
+    await emitDurableExpiryIfM3ForTests();
     const afterExpiry = await claimTask({ id: ID, from: B, leaseSec: 300 });
     const expiryRaw = await parsedClaim(sent[4]!, 6);
     const afterExpiryRaw = await parsedClaim(sent[5]!, 7);
@@ -587,6 +598,8 @@ test('#86 disabled durable lease visibility survives signed rebuild, queued over
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_already_claimed');
   });
   now = Date.parse(first.claimedUntil);
+  setTaskListAllForTests(async () => [durable]);
+  await emitDurableExpiryIfM3ForTests();
   await withTaskLeasesEnabledForTests(true, async () => {
     const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(reclaimed.leaseGeneration).toBe(2);
@@ -770,6 +783,9 @@ async function leaseFixture() {
 
 async function reclaimAtEquality(fixture: Awaited<ReturnType<typeof leaseFixture>>) {
   fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
+  // M3-on：回执只走 reconcile，先补 durable 窗再 reclaim。
+  setTaskListAllForTests(async () => [fixture.durable()]);
+  await emitDurableExpiryIfM3ForTests();
   const claim = await post(fixture.app, 'claim', { leaseSec: 300 });
   const body = objectValue(claim.body) as Partial<LeaseGrantBody>;
   const grant: LeaseGrantBody = {
@@ -1040,6 +1056,8 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
       clearQueuedEventsForTests();
       setTaskGetForTests(async () => fixture.durable());
       fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
+      setTaskListAllForTests(async () => [fixture.durable()]);
+      await emitDurableExpiryIfM3ForTests();
       const reclaim = await post(fixture.app, 'claim', { leaseSec: 300 });
       const staleUpdate = await post(fixture.app, 'state', { state: 'completed', leaseToken: fixture.grant.leaseToken });
       expect({
@@ -1437,6 +1455,15 @@ describe('PR98 R14 current-head gate regressions', () => {
       return { messageId: `<r14-grant-clock-${sent.length}>` };
     });
 
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3-on：claim 不再内联物化回执，now 不会被 expiry SMTP 推到 cap。
+      const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      expect({
+        generation: grant.leaseGeneration,
+        events: sent.map((input) => input.headers?.['X-OA-Task-Lease-Event']),
+      }).toEqual({ generation: 2, events: ['claim'] });
+      return;
+    }
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_task_cap_exhausted');
     const projected = await taskService.get(ID);
     expect({
