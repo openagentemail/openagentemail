@@ -1269,6 +1269,20 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         && lease.generation === leaseAuthority.leaseGeneration
         && lease.claimedUntil === leaseAuthority.claimedUntil;
       if (matchesCurrentAuthority) {
+        // 终态公共历史冻结：该窗 claim 之后已有 completed/failed（含 admin-closed）
+        // 状态事件时，匹配最终窗的 expired 回执按历史 no-op，避免补账索引后
+        // 把 "Lease expired." 写进公开 messages。活窗过期后再终态的回执
+        // 仍走下方当前权威路径，不从已公开历史里抹掉。
+        if (terminalStateEventFreezesExpiryReceipt(ordered, message, lease.generation)) {
+          appliedExpiryReceipts.set(lease.generation, {
+            leaseGeneration: lease.generation,
+            claimedUntil: lease.claimedUntil,
+            expiredAt: lease.expiredAt,
+            ...(firstClaimedAt ? { firstClaimedAt } : {}),
+          });
+          duplicateLeaseMessages.add(message);
+          continue;
+        }
         leaseAuthority = undefined;
         releasedLease = undefined;
         expiredLease = {
@@ -1485,6 +1499,31 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       });
   }
   return task;
+}
+
+/** 终态状态事件：completed/failed（admin-closed 是带 closed_by_admin 的 failed）。
+ * expired 回执即使 stamp 了终态 state，也只是审计信，不算状态转移。 */
+function isTerminalStateEvent(message: RawTaskMessage): boolean {
+  if (message.kind === 'reminder') return false;
+  if (message.lease?.event === 'expired') return false;
+  return TERMINAL_TASK_STATES.includes(message.state);
+}
+
+/** 该窗 claim 之后、本回执之前已有终态状态事件 → 公共历史冻结，回执按历史 no-op。 */
+function terminalStateEventFreezesExpiryReceipt(
+  ordered: readonly RawTaskMessage[],
+  expiryMessage: RawTaskMessage,
+  generation: number,
+): boolean {
+  const claimIndex = ordered.findIndex((message) =>
+    message.lease?.event === 'claim' && message.lease.generation === generation);
+  if (claimIndex < 0) return false;
+  const expiryIndex = ordered.indexOf(expiryMessage);
+  const until = expiryIndex >= 0 ? expiryIndex : ordered.length;
+  for (let index = claimIndex + 1; index < until; index += 1) {
+    if (isTerminalStateEvent(ordered[index]!)) return true;
+  }
+  return false;
 }
 
 /** 列表 updatedAt：权威状态事件与 reminder 的较新者。
@@ -2137,6 +2176,8 @@ function mergeQueuedEvents(task: Task): Task {
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
     const approvalTerminal = row.message.approval?.type === 'decision' || row.message.approval?.type === 'expired';
+    // 补账 overlay 有界：接受即丢后不得靠 lease TTL 豁免永久占坑。
+    if (isExpiryAuditBackfillQueuedExpired(row, now)) return false;
     if (!row.lease && !approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
     return !eventIsIndexed(task, row);
   });
@@ -2514,6 +2555,11 @@ function leaseEventMessage(input: {
 /** 每任务每 pass 最多补这么多历史窗，余量留给下轮，避免长尾锁死全局 reaper。 */
 export const EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT = 8;
 
+/** 待索引补账标记的有界时限。lease 行默认豁免 QUEUED_EVENT_TTL，
+ * SMTP 接受但邮件丢失时会永久抑制 durable 缺失重发；仅对 hideFromPublicOverlay
+ * 的补账标记加 15min，超时后按 durable 缺失再发，窗身份幂等去重兜底重复信。 */
+export const EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS = 15 * 60 * 1000;
+
 /** M3 投递失败计数；进程内、可丢，只为可观测性。 */
 let expiryAuditDeliveryFailures = 0;
 /** 每窗每进程只 warn 一次；计数器仍每次累加。 */
@@ -2583,11 +2629,19 @@ function upsertLeaseClaimWindow(
   return list;
 }
 
+/** 补账 queued 标记是否已过有界时限（当前权威物化 overlay 不走这条）。 */
+function isExpiryAuditBackfillQueuedExpired(row: QueuedEvent, now = nowMs()): boolean {
+  return !!row.hideFromPublicOverlay && now - row.sentAt > EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS;
+}
+
 function overlayHasExpiryReceipt(taskId: string, window: { generation: number; claimedUntil: string }): boolean {
   const pending = queuedEvents.get(taskId);
   if (!pending) return false;
+  const now = nowMs();
   return pending.some((row) =>
-    row.lease?.event === 'expired' && isSameLeaseExpiryIdentity(row.lease, window));
+    row.lease?.event === 'expired'
+    && isSameLeaseExpiryIdentity(row.lease, window)
+    && !isExpiryAuditBackfillQueuedExpired(row, now));
 }
 
 /** 无重建窗时从当前快照兜底（仅覆盖最新一代）。 */

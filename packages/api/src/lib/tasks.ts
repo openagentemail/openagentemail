@@ -12,6 +12,7 @@ export {
   createTask, createApprovalTask,
   invalidateTaskListCache, updateTask, claimTask, toTaskView, toTaskLeaseGrantView,
   isTaskLeaseTokenCurrent, reapExpiredTaskLeasesOnce, EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
+  EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS,
   renewTask, releaseTask,
   decideApprovalTask, taskParticipants, taskOverdue, toUiTaskView, isClosedByAdmin,
   listTaskBoard, replyTask, remindTask, closeTask, waitForTaskTerminalWith,

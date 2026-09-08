@@ -21,6 +21,7 @@ const { afterEach, describe, expect, test: bunTest, spyOn } = await import('bun:
 const { parseConfig } = await import('../src/lib/config.ts');
 const {
   EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
+  EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS,
   claimTask,
   getTask,
   isTaskLeaseTokenCurrent,
@@ -799,6 +800,179 @@ describe('M3 R1 返工', () => {
     warn.mockRestore();
     expect({ warns: kinds.length, failures: expiryAuditDeliveryFailureCountForTests() })
       .toEqual({ warns: 1, failures: 3 });
+  });
+});
+
+describe('M3 R2 返工', () => {
+  async function signedClaim(generation: number, atMs: number, id = ID): Promise<RawTaskMessage> {
+    const at = new Date(atMs).toISOString();
+    const headers = claimLeaseHeadersForTests({
+      id, state: 'working', from: B, to: A,
+      event: {
+        version: 1, event: 'claim', actor: B, at, generation,
+        claimedUntil: new Date(atMs + 300_000).toISOString(),
+        tokenVerifier: 'a'.repeat(43),
+      },
+    });
+    return (await parseCaptured({
+      from: B, to: [A], subject: `Lease ${id}`, text: 'Lease claimed.', headers,
+    }, generation + 1, id))!;
+  }
+
+  function terminalRaw(input: {
+    state: 'completed' | 'failed';
+    uid: number;
+    body: string;
+    result?: unknown;
+  }): RawTaskMessage {
+    return {
+      uid: input.uid, from: A, to: B, subject: `Lease ${ID}`,
+      date: '2026-08-24T00:06:00.000Z', state: input.state, body: input.body,
+      ...(input.result !== undefined ? { result: input.result } : {}),
+    };
+  }
+
+  testOn('R2-A：终态最终窗补账索引后 detail messages 冻结', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m3-r2a-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    await updateTask({ id: ID, from: A, state: 'completed', body: 'done' });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+    const completed = (await parseCaptured(sent.find((mail) =>
+      mail.headers?.['X-OA-Task-State'] === 'completed')!, 3))!;
+    durable = taskFromMessages(ID, [submittedRaw(), claim1, completed])!;
+    clearQueuedEventsForTests();
+    now = Date.parse(first.claimedUntil);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    const before = toTaskView(durable);
+    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    const overlayView = toTaskView((await getTask(ID))!);
+    const expiry = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
+    const indexed = expiryMsg
+      ? taskFromMessages(ID, [submittedRaw(), claim1, completed, expiryMsg])
+      : null;
+    const indexedView = indexed ? toTaskView(indexed) : null;
+    expect({
+      state: indexed?.state,
+      overlayBodies: overlayView.messages.map((message) => message.body),
+      indexedBodies: indexedView?.messages.map((message) => message.body),
+      phantom: indexedView?.messages.some((message) => message.body === 'Lease expired.'),
+      hasReceipt: indexed?.leaseClaimWindows?.some((window) =>
+        window.generation === 1 && window.hasExpiryReceipt),
+    }).toEqual({
+      state: 'completed',
+      overlayBodies: before.messages.map((message) => message.body),
+      indexedBodies: before.messages.map((message) => message.body),
+      phantom: false,
+      hasReceipt: true,
+    });
+  });
+
+  testOn('R2-A：failed / admin-closed 最终窗回执同样不进公开历史', async () => {
+    const claim = await signedClaim(1, START);
+    const claimedUntil = claim.lease && 'claimedUntil' in claim.lease ? claim.lease.claimedUntil : '';
+    const expiry = (await parseCaptured(expiryDelivery({ claimedUntil }), 4))!;
+    const failed = terminalRaw({ state: 'failed', uid: 3, body: 'boom' });
+    const adminClosed = terminalRaw({
+      state: 'failed', uid: 3, body: 'duplicate',
+      result: { closed_by_admin: true, reason: 'duplicate' },
+    });
+    const failedView = toTaskView(taskFromMessages(ID, [submittedRaw(), claim, failed, expiry])!);
+    const closedView = toTaskView(taskFromMessages(ID, [submittedRaw(), claim, adminClosed, expiry])!);
+    expect({
+      failedState: failedView.state,
+      failedPhantom: failedView.messages.some((message) => message.body === 'Lease expired.'),
+      closedPhantom: closedView.messages.some((message) => message.body === 'Lease expired.'),
+      closedAdmin: !!(adminClosed.result as { closed_by_admin?: boolean }).closed_by_admin,
+    }).toEqual({
+      failedState: 'failed',
+      failedPhantom: false,
+      closedPhantom: false,
+      closedAdmin: true,
+    });
+  });
+
+  testOn('R2-A 负控：活窗过期回执在终态前仍进公开 messages', async () => {
+    const claim = await signedClaim(1, START);
+    const claimedUntil = claim.lease && 'claimedUntil' in claim.lease ? claim.lease.claimedUntil : '';
+    const expiry = (await parseCaptured(expiryDelivery({ claimedUntil }), 3))!;
+    const completed = terminalRaw({ state: 'completed', uid: 4, body: 'done' });
+    const live = toTaskView(taskFromMessages(ID, [submittedRaw(), claim, expiry])!);
+    const afterComplete = toTaskView(taskFromMessages(ID, [submittedRaw(), claim, expiry, completed])!);
+    expect({
+      liveExpiry: live.messages.filter((message) => message.body === 'Lease expired.').length,
+      keptAfterComplete: afterComplete.messages.filter((message) => message.body === 'Lease expired.').length,
+      state: afterComplete.state,
+    }).toEqual({ liveExpiry: 1, keptAfterComplete: 1, state: 'completed' });
+  });
+
+  testOn('R2-B：补账接受即丢，标记超时后按 durable 缺失重发并补齐', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    let failExpiry = true;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('drop claim-path audit');
+      }
+      sent.push(input);
+      return { messageId: `<m3-r2b-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
+    clearQueuedEventsForTests();
+    now = Date.parse(first.claimedUntil);
+    // gen2 活窗长于补账标记 TTL，避免时钟推进后误补后继窗。
+    await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    const claim1 = (await parseCaptured(sent[0]!, 2))!;
+    const claim2 = (await parseCaptured(sent[1]!, 3))!;
+    // 接受即丢：durable 仍无回执，只留内存 queued 标记。
+    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
+    clearQueuedEventsForTests();
+    failExpiry = false;
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    const afterAccept = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
+    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    const stillSuppressed = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
+    now += EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS + 1;
+    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    const expiries = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    const retryInput = expiries[expiries.length - 1];
+    const retry = retryInput ? await parseCaptured(retryInput, 5) : null;
+    durable = retry ? taskFromMessages(ID, [submittedRaw(), claim1, claim2, retry])! : durable;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    const afterIndex = await reapExpiredTaskLeasesOnce();
+    expect({
+      afterAccept,
+      stillSuppressed,
+      retried: expiries.length,
+      windowFilled: durable.leaseClaimWindows?.some((window) =>
+        window.generation === 1 && window.hasExpiryReceipt),
+      afterIndex,
+    }).toEqual({
+      afterAccept: 1,
+      stillSuppressed: 1,
+      retried: 2,
+      windowFilled: true,
+      afterIndex: 0,
+    });
   });
 });
 
