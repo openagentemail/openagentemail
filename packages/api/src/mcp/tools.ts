@@ -14,7 +14,8 @@ import {
   TOOL_TIER_SPEC,
   type ToolTier,
 } from "../lib/tool-tiers.ts";
-import { MAX_SCOPES_COUNT, SUPPORTED_SCOPES } from "../lib/identities.ts";
+// 只拉无 config 依赖的叶子常量，避免 stdio bundle 加载期 parse 服务端 env。
+import { MAX_SCOPES_COUNT, SUPPORTED_SCOPES } from "../lib/identity-scopes.ts";
 import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";

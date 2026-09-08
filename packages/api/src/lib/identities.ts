@@ -24,6 +24,11 @@ import {
 import { join } from 'node:path';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { config } from './config.ts';
+import {
+  MAX_SCOPE_LENGTH,
+  MAX_SCOPES_COUNT,
+  isSupportedScope,
+} from './identity-scopes.ts';
 import { revokeGrantsForAddress } from './oauth-store.ts';
 import {
   revokeDelegationsForAddress,
@@ -48,14 +53,15 @@ export const DEFAULT_PUSH_CONTENT_TIER: PushContentTier = 1;
 export const PUSH_TIER3_WARNING =
   'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
 
-/** First-class supported identity token scopes. */
-export const SUPPORTED_SCOPES = ['read:messages'] as const;
-export type SupportedScope = (typeof SUPPORTED_SCOPES)[number];
-export const SUPPORTED_SCOPES_SET = new Set<string>(SUPPORTED_SCOPES);
-
-export function isSupportedScope(scope: string): scope is SupportedScope {
-  return SUPPORTED_SCOPES_SET.has(scope);
-}
+// 叶子常量再导出，服务端既有 import 面保持不变。
+export {
+  MAX_SCOPE_LENGTH,
+  MAX_SCOPES_COUNT,
+  SUPPORTED_SCOPES,
+  SUPPORTED_SCOPES_SET,
+  isSupportedScope,
+} from './identity-scopes.ts';
+export type { SupportedScope } from './identity-scopes.ts';
 
 export class LocalpartConflictError extends Error {
   readonly code = 'localpart_conflict';
@@ -66,9 +72,6 @@ export class LocalpartConflictError extends Error {
     this.domains = domains;
   }
 }
-
-export const MAX_SCOPES_COUNT = 10;
-export const MAX_SCOPE_LENGTH = 64;
 
 export type ScopeValidationResult =
   | { ok: true; scopes: string[] }

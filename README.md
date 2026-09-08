@@ -393,7 +393,9 @@ produce two copies with a case-folding provider, so use consistent spelling.
 ## Use it from your agent (MCP)
 
 Requires Node.js 18+ on the machine running the MCP client — no install step,
-`npx` downloads and runs the package on first use.
+`npx` downloads and runs the package on first use. The stdio client only needs
+`OPENAGENTEMAIL_API_URL` and `OPENAGENTEMAIL_API_KEY`; it does not read the
+mail server's `DOMAIN` / `API_KEYS` / IMAP / SMTP variables.
 
 ```bash
 claude mcp add openagentemail \

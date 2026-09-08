@@ -38,9 +38,10 @@ jobs:
           bun test
           bun run lint:ui
 
-      - name: Typecheck + build packages/mcp
+      - name: Typecheck + build + test packages/mcp
         working-directory: packages/mcp
         run: |
           bun install
           bunx tsc --noEmit
           bun run build
+          bun test
