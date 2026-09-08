@@ -1,9 +1,8 @@
-// M3：expired 回执派生化 + reaper durable 补账 + 迟到回执无害化。
+// M3 收窄：claim 到期派生失活 + 迟到回执容忍 + 终态冻结。发射器已并入 M2。
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FetchMessageObject } from 'imapflow';
-import nodemailer from 'nodemailer';
 import type { SendInput } from '../src/lib/smtp.ts';
 import type { RawTaskMessage, Task } from '../src/lib/tasks.ts';
 
@@ -20,27 +19,14 @@ process.env.NODE_ENV = 'test';
 const { afterEach, describe, expect, test: bunTest, spyOn } = await import('bun:test');
 const { parseConfig } = await import('../src/lib/config.ts');
 const {
-  EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
-  EXPIRY_AUDIT_IN_FLIGHT_TTL_MS,
-  EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
   claimTask,
-  getTask,
   isTaskLeaseTokenCurrent,
   reapExpiredTaskLeasesOnce,
-  renewTask,
   taskFromMessages,
   toTaskView,
-  updateTask,
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
-  expiryAuditDeliveryFailureCountForTests,
-  resetExpiryAuditDeliveryFailureCountForTests,
-  warnedExpiryAuditWindowCountForTests,
-  warnExpiryAuditDeliveryFailedForTests,
-  expiryAuditInFlightCountForTests,
-  expiryAuditDurableReceiptPrefetchCountForTests,
-  queuedExpiryAuditRowCountForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -54,7 +40,6 @@ const {
 } = await import('./support/task-lease-seams.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
-const ID_B = '1a2b3c4d-056e-47c1-a65c-b29d39f66b84';
 const A = 'alpha@test.example';
 const B = 'bravo@test.example';
 const START = Date.parse('2026-08-24T00:00:00.000Z');
@@ -148,7 +133,6 @@ afterEach(() => {
   setTaskListAllForTests(null);
   setTaskSendMailForTests(null);
   clearQueuedEventsForTests();
-  resetExpiryAuditDeliveryFailureCountForTests();
 });
 
 describe('M3 配置面与默认关', () => {
@@ -161,7 +145,7 @@ describe('M3 配置面与默认关', () => {
     expect(parseConfig({ ...base, TASK_LEASES_EXPIRY_AUDIT_M3: 'true' }).taskLeasesExpiryAuditM3).toBe(true);
   });
 
-  testOn('六个配置面都带默认 false 与 singleton 注释', () => {
+  testOn('六个配置面都带默认 false，且只描述解耦+容忍', () => {
     const surfaces = [
       { name: 'bundled-compose', text: readFileSync(new URL('../../../compose.yaml', import.meta.url), 'utf8') },
       { name: 'api-only-compose', text: readFileSync(new URL('../../../compose.api-only.yaml', import.meta.url), 'utf8') },
@@ -170,14 +154,16 @@ describe('M3 配置面与默认关', () => {
       { name: 'root-readme', text: readFileSync(new URL('../../../README.md', import.meta.url), 'utf8') },
       { name: 'mcp-readme', text: readFileSync(new URL('../../mcp/README.md', import.meta.url), 'utf8') },
     ];
-    const observed = surfaces.map(({ name, text }) => ({
-      name,
-      mentionsFlag: text.includes('TASK_LEASES_EXPIRY_AUDIT_M3'),
-      defaultsFalse: /TASK_LEASES_EXPIRY_AUDIT_M3/.test(text)
-        && (/false/.test(text.match(/TASK_LEASES_EXPIRY_AUDIT_M3[\s\S]{0,120}/)?.[0] ?? '')
-          || /default false/i.test(text)),
-    }));
-    expect(observed.every((row) => row.mentionsFlag && row.defaultsFalse)).toBe(true);
+    const observed = surfaces.map(({ name, text }) => {
+      const nearby = text.match(/TASK_LEASES_EXPIRY_AUDIT_M3[\s\S]{0,280}/)?.[0] ?? '';
+      return {
+        name,
+        mentionsFlag: text.includes('TASK_LEASES_EXPIRY_AUDIT_M3'),
+        defaultsFalse: /false/.test(nearby) || /default false/i.test(nearby),
+        noBackfill: !/backfill/i.test(nearby),
+      };
+    });
+    expect(observed.every((row) => row.mentionsFlag && row.defaultsFalse && row.noBackfill)).toBe(true);
   });
 });
 
@@ -193,7 +179,6 @@ describe('M3-1 reclaim 解耦', () => {
     setTaskSendMailForTests(async (input) => {
       if (input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
         expiryCalls += 1;
-        // 假 transport hang：若 claim 仍 await 审计，本用例不会结束。
         await new Promise(() => undefined);
       }
       sent.push(input);
@@ -215,14 +200,14 @@ describe('M3-1 reclaim 解耦', () => {
       expiryCalls,
       expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length,
       claimDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim').length,
-      failures: expiryAuditDeliveryFailureCountForTests(),
+      reaper: await reapExpiredTaskLeasesOnce(),
       warns: warnKinds.length,
     }).toEqual({
       generation: 2,
       expiryCalls: 0,
       expiryDeliveries: 0,
       claimDeliveries: 2,
-      failures: 0,
+      reaper: 0,
       warns: 0,
     });
   });
@@ -250,184 +235,7 @@ describe('M3-1 reclaim 解耦', () => {
       failExpiry = true;
       await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('permanent smtp reject');
       expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')).toHaveLength(1);
-      expect(expiryAuditDeliveryFailureCountForTests()).toBe(0);
     });
-  });
-});
-
-describe('M3-2 reaper durable 补账', () => {
-  testOn('T-B/T13：SMTP 恢复后 reaper 补上缺失回执，权威不被迟到回执推翻', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = false;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('permanent smtp reject');
-      }
-      sent.push(input);
-      return { messageId: `<m3-tb-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    now = Date.parse(first.claimedUntil);
-    failExpiry = true;
-    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent.find((mail) =>
-      mail.headers?.['X-OA-Task-Lease-Event'] === 'claim' && mail !== sent[0])!, 3))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const expiry = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
-    const rebuilt = expiryMsg
-      ? taskFromMessages(ID, [submittedRaw(), claim1, claim2, expiryMsg])
-      : null;
-    expect({
-      secondGen: second.leaseGeneration,
-      expiryGen: expiryMsg?.lease && 'generation' in expiryMsg.lease ? expiryMsg.lease.generation : null,
-      expiryUntil: expiryMsg?.lease && 'claimedUntil' in expiryMsg.lease ? expiryMsg.lease.claimedUntil : null,
-      rebuilt: rebuilt !== null,
-      authority: rebuilt?.lease?.leaseGeneration,
-      gen2Current: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, second.leaseToken) : null,
-      gen1Fenced: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
-    }).toEqual({
-      secondGen: 2,
-      expiryGen: 1,
-      expiryUntil: first.claimedUntil,
-      rebuilt: true,
-      authority: 2,
-      gen2Current: true,
-      gen1Fenced: false,
-    });
-  });
-
-  testOn('T-D：同窗两轮补账只发一条；历史窗也被补', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = false;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('drop claim-path audit');
-      }
-      sent.push(input);
-      return { messageId: `<m3-td-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    setTaskGetForTests(async () => durable);
-    now = Date.parse(first.claimedUntil);
-    failExpiry = true;
-    await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent[1]!, 3))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const beforeReap = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
-    const firstPass = await reapExpiredTaskLeasesOnce();
-    const secondPass = await reapExpiredTaskLeasesOnce();
-    const expiries = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    expect({
-      beforeReap,
-      firstPass: firstPass > 0,
-      secondPass,
-      expiryCount: expiries.length,
-    }).toEqual({ beforeReap: 0, firstPass: true, secondPass: 0, expiryCount: 1 });
-  });
-
-  testOn('T-E：A 补发失败不挡 B 补发与 A 后续 pass', async () => {
-    let now = START;
-    const sent: SendInput[] = [];
-    const failIds = new Set<string>([ID]);
-    const durables = new Map<string, Task>([
-      [ID, submittedTask(ID)],
-      [ID_B, submittedTask(ID_B)],
-    ]);
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async (id) => durables.get(id) ?? null);
-    setTaskListAllForTests(async () => [...durables.values()]);
-    setTaskSendMailForTests(async (input) => {
-      const taskId = input.headers?.['X-OA-Task'];
-      if (failIds.has(taskId ?? '') && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error(`smtp fail ${taskId}`);
-      }
-      sent.push(input);
-      return { messageId: `<m3-te-${sent.length}>` };
-    });
-    const firstA = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const firstB = await claimTask({ id: ID_B, from: B, leaseSec: 300 });
-    const claimA = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID)!, 2, ID))!;
-    const claimB = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID_B)!, 2, ID_B))!;
-    durables.set(ID, taskFromMessages(ID, [submittedRaw(ID), claimA])!);
-    durables.set(ID_B, taskFromMessages(ID_B, [submittedRaw(ID_B), claimB])!);
-    clearQueuedEventsForTests();
-    now = Math.max(Date.parse(firstA.claimedUntil), Date.parse(firstB.claimedUntil));
-    setTaskGetForTests(async (id) => durables.get(id) ?? null);
-    setTaskListAllForTests(async () => [...durables.values()]);
-    await reapExpiredTaskLeasesOnce();
-    const afterFirst = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    failIds.delete(ID);
-    await reapExpiredTaskLeasesOnce();
-    const afterSecond = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    expect({
-      firstRoundBOnly: afterFirst.length === 1 && afterFirst[0]?.headers?.['X-OA-Task'] === ID_B,
-      secondRoundFilledA: afterSecond.some((mail) => mail.headers?.['X-OA-Task'] === ID)
-        && afterSecond.some((mail) => mail.headers?.['X-OA-Task'] === ID_B),
-      expiryCount: afterSecond.length,
-    }).toEqual({
-      firstRoundBOnly: true,
-      secondRoundFilledA: true,
-      expiryCount: 2,
-    });
-  });
-
-  testOn('T-G：重启后无内存队列，reaper 仍能从 durable 补账', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = true;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('smtp down');
-      }
-      sent.push(input);
-      return { messageId: `<m3-tg-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    now = Date.parse(first.claimedUntil);
-    await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent[1]!, 3))!;
-    // 模拟重启：清空 overlay，只留 durable 流。
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(1);
   });
 });
 
@@ -470,7 +278,7 @@ describe('M3-3 迟到回执无害化', () => {
     });
   });
 
-  bunTest('R1-d：off 态注入已补账迟到回执仍重建成功（容忍无条件）', async () => {
+  bunTest('R1-d：off 态注入已有迟到回执仍重建成功（容忍无条件）', async () => {
     await withM3Off(async () => {
       let now = START;
       let durable = submittedTask();
@@ -515,7 +323,7 @@ describe('M3-3 迟到回执无害化', () => {
     });
   });
 
-  bunTest('R1-d 负控：off 态无补账形态流（同 gen 错 claimedUntil）仍 null', async () => {
+  bunTest('R1-d 负控：off 态无匹配窗流（同 gen 错 claimedUntil）仍 null', async () => {
     await withM3Off(async () => {
       const sent: SendInput[] = [];
       setTaskNowForTests(() => START);
@@ -554,80 +362,11 @@ describe('M3-3 迟到回执无害化', () => {
   });
 });
 
-describe('M3 全链 e2e', () => {
-  testOn('T-H：claim→audit 拒→reclaim→reaper 补账→nodemailer 折行源重建全绿', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = false;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('nodemailer downstream reject');
-      }
-      sent.push(input);
-      return { messageId: `<m3-th-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    setTaskGetForTests(async () => durable);
-    now = Date.parse(first.claimedUntil);
-    failExpiry = true;
-    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent[1]!, 3))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    expect(expiryInput).toBeTruthy();
-    const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
-    const serialize = async (input: SendInput) => {
-      const result = await transport.sendMail({
-        from: input.from, to: input.to, subject: input.subject, text: input.text, headers: input.headers,
-      });
-      if (!Buffer.isBuffer(result.message)) throw new Error('stream transport must return buffered RFC 5322 source');
-      return result.message;
-    };
-    const asFetch = (buf: Buffer, input: SendInput, uid: number) => ({
-      uid,
-      source: buf,
-      envelope: { from: [{ address: input.from }], to: [{ address: input.to[0] }], subject: input.subject },
-      internalDate: new Date(START),
-    } as unknown as FetchMessageObject);
-    const wireClaim1 = await parseTaskMessageForTests(asFetch(await serialize(sent[0]!), sent[0]!, 2), ID);
-    const wireClaim2 = await parseTaskMessageForTests(asFetch(await serialize(sent[1]!), sent[1]!, 3), ID);
-    const wireExpiry = expiryInput
-      ? await parseTaskMessageForTests(asFetch(await serialize(expiryInput), expiryInput, 4), ID)
-      : null;
-    const rebuilt = wireClaim1 && wireClaim2 && wireExpiry
-      ? taskFromMessages(ID, [submittedRaw(), wireClaim1, wireClaim2, wireExpiry])
-      : null;
-    expect({
-      secondGen: second.leaseGeneration,
-      rebuilt: rebuilt !== null,
-      authority: rebuilt?.lease?.leaseGeneration,
-      gen2Current: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, second.leaseToken) : null,
-    }).toEqual({
-      secondGen: 2,
-      rebuilt: true,
-      authority: 2,
-      gen2Current: true,
-    });
-  });
-});
-
-describe('M3 R1 返工', () => {
-  async function signedClaim(generation: number, atMs: number, id = ID): Promise<RawTaskMessage> {
+describe('M3 终态冻结', () => {
+  async function signedClaim(generation: number, atMs: number): Promise<RawTaskMessage> {
     const at = new Date(atMs).toISOString();
     const headers = claimLeaseHeadersForTests({
-      id, state: 'working', from: B, to: A,
+      id: ID, state: 'working', from: B, to: A,
       event: {
         version: 1, event: 'claim', actor: B, at, generation,
         claimedUntil: new Date(atMs + 300_000).toISOString(),
@@ -635,196 +374,8 @@ describe('M3 R1 返工', () => {
       },
     });
     return (await parseCaptured({
-      from: B, to: [A], subject: `Lease ${id}`, text: 'Lease claimed.', headers,
-    }, generation + 1, id))!;
-  }
-
-  testOn('R1-a：terminal 任务仍补历史窗，视图保持 completed', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = false;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('smtp down');
-      }
-      sent.push(input);
-      return { messageId: `<m3-r1a-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    setTaskGetForTests(async () => durable);
-    now = Date.parse(first.claimedUntil);
-    failExpiry = true;
-    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    await updateTask({ id: ID, from: A, state: 'completed', body: 'done' });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent.find((mail) =>
-      mail.headers?.['X-OA-Task-Lease-Event'] === 'claim' && mail !== sent[0])!, 3))!;
-    const completed = (await parseCaptured(sent.find((mail) =>
-      mail.headers?.['X-OA-Task-State'] === 'completed')!, 4))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2, completed])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const before = toTaskView(durable);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const after = toTaskView((await getTask(ID))!);
-    const expiries = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    expect({
-      secondGen: second.leaseGeneration,
-      state: after.state,
-      expiryCount: expiries.length,
-      messages: after.messages.map((message) => message.body),
-      updatedAt: after.updatedAt,
-    }).toEqual({
-      secondGen: 2,
-      state: 'completed',
-      expiryCount: 1,
-      messages: before.messages.map((message) => message.body),
-      updatedAt: before.updatedAt,
-    });
-  });
-
-  testOn('R1-b：补账回执不进公共 overlay，索引前后视图稳定', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = true;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('drop audit');
-      }
-      sent.push(input);
-      return { messageId: `<m3-r1b-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent[1]!, 3))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const before = toTaskView(durable);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const overlayView = toTaskView((await getTask(ID))!);
-    const expiry = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
-    const indexed = expiryMsg
-      ? taskFromMessages(ID, [submittedRaw(), claim1, claim2, expiryMsg])
-      : null;
-    const indexedView = indexed ? toTaskView(indexed) : null;
-    expect({
-      overlayBodies: overlayView.messages.map((message) => message.body),
-      overlayUpdatedAt: overlayView.updatedAt,
-      phantomExpiry: overlayView.messages.some((message) => message.body === 'Lease expired.'),
-      indexedBodies: indexedView?.messages.map((message) => message.body),
-      indexedUpdatedAt: indexedView?.updatedAt,
-    }).toEqual({
-      overlayBodies: before.messages.map((message) => message.body),
-      overlayUpdatedAt: before.updatedAt,
-      phantomExpiry: false,
-      indexedBodies: before.messages.map((message) => message.body),
-      indexedUpdatedAt: before.updatedAt,
-    });
-  });
-
-  testOn('R1-c：单 pass 只补一批，余量下轮；B 不被 A 长尾挡住', async () => {
-    const claimCount = EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT + 2;
-    const claims: RawTaskMessage[] = [];
-    for (let generation = 1; generation <= claimCount; generation += 1) {
-      claims.push(await signedClaim(generation, START + (generation - 1) * 300_000));
-    }
-    const taskA = taskFromMessages(ID, [submittedRaw(), ...claims])!;
-    const claimB = await signedClaim(1, START, ID_B);
-    const taskB = taskFromMessages(ID_B, [submittedRaw(ID_B), claimB])!;
-    const sent: SendInput[] = [];
-    // claim A 的最后一代仍在活窗内，只补历史窗；B 的唯一窗已过期。
-    const now = START + (claimCount - 1) * 300_000;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async (id) => (id === ID_B ? taskB : taskA));
-    setTaskListAllForTests(async () => [taskA, taskB]);
-    setTaskSendMailForTests(async (input) => {
-      sent.push(input);
-      return { messageId: `<m3-r1c-${sent.length}>` };
-    });
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const firstPass = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const firstA = firstPass.filter((mail) => mail.headers?.['X-OA-Task'] === ID);
-    const firstB = firstPass.filter((mail) => mail.headers?.['X-OA-Task'] === ID_B);
-    expect({ a: firstA.length, b: firstB.length }).toEqual({
-      a: EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
-      b: 1,
-    });
-    expect(sent.findIndex((mail) => mail.headers?.['X-OA-Task'] === ID_B))
-      .toBeGreaterThan(sent.findIndex((mail) => mail.headers?.['X-OA-Task'] === ID));
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const allA = sent.filter((mail) =>
-      mail.headers?.['X-OA-Task-Lease-Event'] === 'expired' && mail.headers?.['X-OA-Task'] === ID);
-    expect(allA.length).toBe(claimCount - 1);
-  });
-
-  testOn('R1-e：同窗连续失败只 warn 一次，计数仍累加', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('smtp down');
-      }
-      sent.push(input);
-      return { messageId: `<m3-r1e-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    await reapExpiredTaskLeasesOnce();
-    await reapExpiredTaskLeasesOnce();
-    await reapExpiredTaskLeasesOnce();
-    const kinds = warn.mock.calls
-      .map((args) => args[0])
-      .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
-      .filter((row) => row.kind === 'expiry_audit_delivery_failed');
-    warn.mockRestore();
-    expect({ warns: kinds.length, failures: expiryAuditDeliveryFailureCountForTests() })
-      .toEqual({ warns: 1, failures: 3 });
-  });
-});
-
-describe('M3 R2 返工', () => {
-  async function signedClaim(generation: number, atMs: number, id = ID): Promise<RawTaskMessage> {
-    const at = new Date(atMs).toISOString();
-    const headers = claimLeaseHeadersForTests({
-      id, state: 'working', from: B, to: A,
-      event: {
-        version: 1, event: 'claim', actor: B, at, generation,
-        claimedUntil: new Date(atMs + 300_000).toISOString(),
-        tokenVerifier: 'a'.repeat(43),
-      },
-    });
-    return (await parseCaptured({
-      from: B, to: [A], subject: `Lease ${id}`, text: 'Lease claimed.', headers,
-    }, generation + 1, id))!;
+      from: B, to: [A], subject: `Lease ${ID}`, text: 'Lease claimed.', headers,
+    }, generation + 1))!;
   }
 
   function terminalRaw(input: {
@@ -840,53 +391,7 @@ describe('M3 R2 返工', () => {
     };
   }
 
-  testOn('R2-A：终态最终窗补账索引后 detail messages 冻结', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      sent.push(input);
-      return { messageId: `<m3-r2a-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    await updateTask({ id: ID, from: A, state: 'completed', body: 'done' });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const completed = (await parseCaptured(sent.find((mail) =>
-      mail.headers?.['X-OA-Task-State'] === 'completed')!, 3))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, completed])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const before = toTaskView(durable);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const overlayView = toTaskView((await getTask(ID))!);
-    const expiry = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
-    const indexed = expiryMsg
-      ? taskFromMessages(ID, [submittedRaw(), claim1, completed, expiryMsg])
-      : null;
-    const indexedView = indexed ? toTaskView(indexed) : null;
-    expect({
-      state: indexed?.state,
-      overlayBodies: overlayView.messages.map((message) => message.body),
-      indexedBodies: indexedView?.messages.map((message) => message.body),
-      phantom: indexedView?.messages.some((message) => message.body === 'Lease expired.'),
-      hasReceipt: indexed?.leaseClaimWindows?.some((window) =>
-        window.generation === 1 && window.hasExpiryReceipt),
-    }).toEqual({
-      state: 'completed',
-      overlayBodies: before.messages.map((message) => message.body),
-      indexedBodies: before.messages.map((message) => message.body),
-      phantom: false,
-      hasReceipt: true,
-    });
-  });
-
-  testOn('R2-A：failed / admin-closed 最终窗回执同样不进公开历史', async () => {
+  testOn('R2-A：failed / admin-closed 最终窗回执不进公开历史', async () => {
     const claim = await signedClaim(1, START);
     const claimedUntil = claim.lease && 'claimedUntil' in claim.lease ? claim.lease.claimedUntil : '';
     const expiry = (await parseCaptured(expiryDelivery({ claimedUntil }), 4))!;
@@ -938,336 +443,4 @@ describe('M3 R2 返工', () => {
       phantom: view?.messages.some((message) => message.body === 'Lease expired.') ?? true,
     }).toEqual({ rebuilt: true, state: 'completed', phantom: false });
   });
-
 });
-
-describe('M3 R3 返工', () => {
-  testOn('R3：失败 warn 一次，投递成功后 warned 集合清空', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = true;
-    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('smtp down');
-      }
-      sent.push(input);
-      return { messageId: `<m3-r3a-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    await reapExpiredTaskLeasesOnce();
-    await reapExpiredTaskLeasesOnce();
-    const afterFail = {
-      warns: warn.mock.calls
-        .map((args) => args[0])
-        .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
-        .filter((row) => row.kind === 'expiry_audit_delivery_failed').length,
-      warned: warnedExpiryAuditWindowCountForTests(),
-      failures: expiryAuditDeliveryFailureCountForTests(),
-    };
-    failExpiry = false;
-    await reapExpiredTaskLeasesOnce();
-    warn.mockRestore();
-    expect({
-      ...afterFail,
-      afterSuccess: warnedExpiryAuditWindowCountForTests(),
-    }).toEqual({
-      warns: 1,
-      warned: 1,
-      failures: 2,
-      afterSuccess: 0,
-    });
-  });
-
-  testOn('R3：连续失败超上限，集合大小不超 1024', () => {
-    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
-    const over = EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT + 3;
-    for (let index = 0; index < over; index += 1) {
-      warnExpiryAuditDeliveryFailedForTests({
-        taskId: ID,
-        generation: index + 1,
-        claimedUntil: new Date(START + index * 1000).toISOString(),
-        error: new Error('smtp down'),
-      });
-    }
-    const size = warnedExpiryAuditWindowCountForTests();
-    // 最旧键已被淘汰，再失败应再 warn（近似去重）。
-    warnExpiryAuditDeliveryFailedForTests({
-      taskId: ID,
-      generation: 1,
-      claimedUntil: new Date(START).toISOString(),
-      error: new Error('smtp down'),
-    });
-    const extra = warn.mock.calls
-      .map((args) => args[0])
-      .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
-      .filter((row) => row.kind === 'expiry_audit_delivery_failed').length;
-    warn.mockRestore();
-    expect({ size, extra, stillCapped: warnedExpiryAuditWindowCountForTests() })
-      .toEqual({
-        size: EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
-        extra: over + 1,
-        stillCapped: EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
-      });
-  });
-});
-
-describe('M3 C 在途集合', () => {
-  testOn('C：当前窗与 backfill 接受即丢统一走在途 TTL', async () => {
-    let now = START;
-    const sent: SendInput[] = [];
-    let failExpiry = false;
-    const durables = new Map<string, Task>([
-      [ID, submittedTask(ID)],
-      [ID_B, submittedTask(ID_B)],
-    ]);
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async (id) => durables.get(id) ?? null);
-    setTaskListAllForTests(async () => [...durables.values()]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('drop claim-path audit');
-      }
-      sent.push(input);
-      return { messageId: `<m3-c-${sent.length}>` };
-    });
-    const currentGrant = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const backfillGrant = await claimTask({ id: ID_B, from: B, leaseSec: 300 });
-    const claimCurrent = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID)!, 2, ID))!;
-    const claimBackfill1 = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID_B)!, 2, ID_B))!;
-    durables.set(ID, taskFromMessages(ID, [submittedRaw(ID), claimCurrent])!);
-    durables.set(ID_B, taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1])!);
-    clearQueuedEventsForTests();
-    now = Date.parse(backfillGrant.claimedUntil);
-    failExpiry = true;
-    await claimTask({ id: ID_B, from: B, leaseSec: 3600 });
-    const claimBackfill2 = (await parseCaptured(sent.filter((mail) =>
-      mail.headers?.['X-OA-Task'] === ID_B && mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')[1]!, 3, ID_B))!;
-    // 接受即丢：durable 不收 expiry；setup 清 overlay/在途后由 reaper 统一发射。
-    durables.set(ID, taskFromMessages(ID, [submittedRaw(ID), claimCurrent])!);
-    durables.set(ID_B, taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1, claimBackfill2])!);
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    now = Date.parse(currentGrant.claimedUntil);
-    setTaskGetForTests(async (id) => durables.get(id) ?? null);
-    setTaskListAllForTests(async () => [...durables.values()]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const afterAccept = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const inFlightAfterAccept = expiryAuditInFlightCountForTests();
-    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
-    const withinTtl = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
-    now += EXPIRY_AUDIT_IN_FLIGHT_TTL_MS + 1;
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const afterTtl = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const retryCurrent = afterTtl.filter((mail) => mail.headers?.['X-OA-Task'] === ID)[1];
-    const retryBackfill = afterTtl.filter((mail) => mail.headers?.['X-OA-Task'] === ID_B)[1];
-    const indexedCurrent = retryCurrent ? await parseCaptured(retryCurrent, 4, ID) : null;
-    const indexedBackfill = retryBackfill ? await parseCaptured(retryBackfill, 5, ID_B) : null;
-    durables.set(ID, indexedCurrent
-      ? taskFromMessages(ID, [submittedRaw(ID), claimCurrent, indexedCurrent])!
-      : durables.get(ID)!);
-    durables.set(ID_B, indexedBackfill
-      ? taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1, claimBackfill2, indexedBackfill])!
-      : durables.get(ID_B)!);
-    setTaskGetForTests(async (id) => durables.get(id) ?? null);
-    setTaskListAllForTests(async () => [...durables.values()]);
-    const afterIndex = await reapExpiredTaskLeasesOnce();
-    expect({
-      acceptCurrent: afterAccept.some((mail) => mail.headers?.['X-OA-Task'] === ID),
-      acceptBackfill: afterAccept.some((mail) => mail.headers?.['X-OA-Task'] === ID_B),
-      inFlightAfterAccept,
-      withinTtl,
-      retried: afterTtl.length,
-      currentFilled: durables.get(ID)?.leaseClaimWindows?.some((window) =>
-        window.generation === 1 && window.hasExpiryReceipt),
-      backfillFilled: durables.get(ID_B)?.leaseClaimWindows?.some((window) =>
-        window.generation === 1 && window.hasExpiryReceipt),
-      inFlightAfterIndex: expiryAuditInFlightCountForTests(),
-      afterIndex,
-    }).toEqual({
-      acceptCurrent: true,
-      acceptBackfill: true,
-      inFlightAfterAccept: 2,
-      withinTtl: 2,
-      retried: 4,
-      currentFilled: true,
-      backfillFilled: true,
-      inFlightAfterIndex: 0,
-      afterIndex: 0,
-    });
-  });
-
-  testOn('C2：overlay-only claim 窗永不发射', async () => {
-    let now = START;
-    const sent: SendInput[] = [];
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => submittedTask());
-    setTaskListAllForTests(async () => [submittedTask()]);
-    setTaskSendMailForTests(async (input) => {
-      sent.push(input);
-      return { messageId: `<m3-c2-overlay-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    // C3 保持 C2：durable 仍是 submitted，claim 只在 overlay，丢失后不得当缺失窗。
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => submittedTask());
-    setTaskListAllForTests(async () => [submittedTask()]);
-    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
-    expect({
-      expiry: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length,
-      inFlight: expiryAuditInFlightCountForTests(),
-    }).toEqual({ expiry: 0, inFlight: 0 });
-  });
-});
-
-describe('M3 C3 极性与锁外发射', () => {
-  testOn('C3：overlay renew 存续否决，索引后按新 deadline 发射', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      sent.push(input);
-      return { messageId: `<m3-c3-renew-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
-    clearQueuedEventsForTests();
-    now = START + 10_000;
-    const renewed = await renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 300 });
-    const renew1 = (await parseCaptured(sent[1]!, 3))!;
-    const renewedUntil = renewed.lease!.claimedUntil;
-    // durable 仍是旧截止；overlay renew 仍活跃 → withhold。
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
-    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(0);
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, renew1])!;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    now = Date.parse(renewedUntil);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const expiry = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
-    expect(expiryMsg?.lease && 'claimedUntil' in expiryMsg.lease
-      ? expiryMsg.lease.claimedUntil
-      : null).toBe(renewedUntil);
-  });
-
-  testOn('C3：锁外 SMTP hang 不挡住并发 reclaim', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let releaseHang!: () => void;
-    const hung = new Promise<void>((resolve) => { releaseHang = resolve; });
-    let expiryStarted = 0;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        expiryStarted += 1;
-        await hung;
-      }
-      sent.push(input);
-      return { messageId: `<m3-c3-lock-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const reapP = reapExpiredTaskLeasesOnce();
-    for (let i = 0; i < 80 && expiryStarted === 0; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(expiryStarted).toBe(1);
-    const reclaim = claimTask({ id: ID, from: B, leaseSec: 300 });
-    const blocked = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('reclaim blocked by audit SMTP')), 400);
-    });
-    const second = await Promise.race([reclaim, blocked]);
-    expect(second.leaseGeneration).toBe(2);
-    releaseHang();
-    await reapP;
-    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(1);
-  });
-
-  testOn('C3：同窗两轮发射只留一行队列，durable 可见即 retire', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      sent.push(input);
-      return { messageId: `<m3-c3-queue-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    expect(queuedExpiryAuditRowCountForTests(ID)).toBe(1);
-    now += EXPIRY_AUDIT_IN_FLIGHT_TTL_MS + 1;
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(2);
-    expect(queuedExpiryAuditRowCountForTests(ID)).toBe(1);
-    const expiry = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').at(-1);
-    const expiryMsg = expiry ? await parseCaptured(expiry, 4) : null;
-    durable = expiryMsg ? taskFromMessages(ID, [submittedRaw(), claim1, expiryMsg])! : durable;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    await getTask(ID);
-    expect(queuedExpiryAuditRowCountForTests(ID)).toBe(0);
-  });
-
-  testOn('C3：大批量窗每 pass 只预取一次 durable 回执集', async () => {
-    let now = START + 300_000;
-    const claimedUntil = new Date(START + 300_000).toISOString();
-    const windows = Array.from({ length: 32 }, (_, index) => ({
-      generation: index + 1,
-      claimedUntil,
-      hasExpiryReceipt: false,
-      hasRelease: false,
-    }));
-    const durable: Task = {
-      ...submittedTask(),
-      state: 'working',
-      lease: {
-        leaseGeneration: 32,
-        claimedUntil,
-        tokenVerifier: 'a'.repeat(43),
-        generationClaimedAt: new Date(START).toISOString(),
-        firstClaimedAt: new Date(START).toISOString(),
-      },
-      leaseClaimWindows: windows,
-    };
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async () => ({ messageId: '<m3-c3-perf>' }));
-    resetExpiryAuditDeliveryFailureCountForTests();
-    await reapExpiredTaskLeasesOnce();
-    expect(expiryAuditDurableReceiptPrefetchCountForTests()).toBe(1);
-  });
-});
-

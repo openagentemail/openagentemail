@@ -11,7 +11,7 @@ export function taskLeasesEnabled(): boolean {
   return testLeaseGate.getStore() ?? config.taskLeasesEnabled;
 }
 
-/** M3 读侧+发射侧总闸。off 时字节级走现行路径。 */
+/** M3 解耦闸：on 时 claim 到期只派生失活。容忍无条件，不随本闸。 */
 export function taskLeaseExpiryAuditM3Enabled(): boolean {
   return testExpiryAuditM3Gate.getStore() ?? config.taskLeasesExpiryAuditM3;
 }

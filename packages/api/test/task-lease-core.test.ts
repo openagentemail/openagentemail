@@ -39,7 +39,6 @@ const {
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
-  emitDurableExpiryIfM3ForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -268,13 +267,24 @@ describe('#56 R2 lease authority', () => {
     expect(first.leaseGeneration).toBe(1);
 
     now = Date.parse(first.claimedUntil);
-    // M3-on 回执只走 durable reconcile：把 overlay claim 写入 durable 后再补账。
     const indexed = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(sent[0]!, 2))!])!;
     setTaskGetForTests(async () => indexed);
     setTaskListAllForTests(async () => [indexed]);
-    await emitDurableExpiryIfM3ForTests();
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(second.leaseGeneration).toBe(2);
+    // M3-on：到期只派生，不发 expiry 回执。
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      expect(sent).toHaveLength(2);
+      const rebuiltOn = taskFromMessages(ID, [
+        submittedRaw(),
+        (await parsedClaim(sent[0]!, 2))!,
+        (await parsedClaim(sent[1]!, 3))!,
+      ])!;
+      expect(rebuiltOn.lease?.leaseGeneration).toBe(2);
+      expect(isTaskLeaseTokenCurrent(rebuiltOn, first.leaseToken)).toBe(false);
+      expect(isTaskLeaseTokenCurrent(rebuiltOn, second.leaseToken)).toBe(true);
+      return;
+    }
     expect(sent).toHaveLength(3);
 
     const rebuilt = taskFromMessages(ID, [
@@ -498,11 +508,16 @@ describe('#81 renewal tenure', () => {
     setTaskGetForTests(async () => durable);
     setTaskListAllForTests(async () => [durable]);
     now = Date.parse(reclaimed.claimedUntil);
-    await emitDurableExpiryIfM3ForTests();
     const afterExpiry = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const expiryRaw = await parsedClaim(sent[4]!, 6);
-    const afterExpiryRaw = await parsedClaim(sent[5]!, 7);
-    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!, expiryRaw!, afterExpiryRaw!])!;
+    const afterExpiryRaw = taskLeaseExpiryAuditM3Enabled()
+      ? await parsedClaim(sent[4]!, 6)
+      : await parsedClaim(sent[5]!, 7);
+    const expiryRaw = taskLeaseExpiryAuditM3Enabled() ? null : await parsedClaim(sent[4]!, 6);
+    durable = taskFromMessages(ID, [
+      submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!,
+      ...(expiryRaw ? [expiryRaw] : []),
+      afterExpiryRaw!,
+    ])!;
     clearQueuedEventsForTests();
     expect({ generation: afterExpiry.leaseGeneration, firstClaimedAt: durable.lease?.firstClaimedAt }).toEqual({
       generation: 3,
@@ -599,12 +614,11 @@ test('#86 disabled durable lease visibility survives signed rebuild, queued over
   });
   now = Date.parse(first.claimedUntil);
   setTaskListAllForTests(async () => [durable]);
-  await emitDurableExpiryIfM3ForTests();
   await withTaskLeasesEnabledForTests(true, async () => {
     const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(reclaimed.leaseGeneration).toBe(2);
   });
-  expect(sent).toHaveLength(3); // original claim, authenticated expiry, normal reclaim
+  expect(sent).toHaveLength(taskLeaseExpiryAuditM3Enabled() ? 2 : 3);
 
   // A second task source deliberately remains older than its accepted claim;
   // disabled projection must read the private anchors through the real queue.
@@ -783,9 +797,7 @@ async function leaseFixture() {
 
 async function reclaimAtEquality(fixture: Awaited<ReturnType<typeof leaseFixture>>) {
   fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
-  // M3-on：回执只走 reconcile，先补 durable 窗再 reclaim。
   setTaskListAllForTests(async () => [fixture.durable()]);
-  await emitDurableExpiryIfM3ForTests();
   const claim = await post(fixture.app, 'claim', { leaseSec: 300 });
   const body = objectValue(claim.body) as Partial<LeaseGrantBody>;
   const grant: LeaseGrantBody = {
@@ -932,7 +944,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         generation: second.grant.leaseGeneration,
         renew: renewed.status,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, generation: 2, renew: 409, sent: 3 });
+      }).toEqual({ reclaim: 200, generation: 2, renew: 409, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 release is fenced after generation-2 reclaim with no event', async () => {
@@ -944,7 +956,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         generation: second.grant.leaseGeneration,
         release: released.status,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, generation: 2, release: 409, sent: 3 });
+      }).toEqual({ reclaim: 200, generation: 2, release: 409, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 ordinary state update is fenced after generation-2 reclaim', async () => {
@@ -956,7 +968,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         update: updated.status,
         returnedState: objectValue(updated.body).state ?? null,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: 3 });
+      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 terminal completion is fenced after generation-2 reclaim', async () => {
@@ -968,7 +980,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         update: updated.status,
         returnedState: objectValue(updated.body).state ?? null,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: 3 });
+      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('current-generation token performs one nonterminal state update', async () => {
@@ -1057,7 +1069,6 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
       setTaskGetForTests(async () => fixture.durable());
       fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
       setTaskListAllForTests(async () => [fixture.durable()]);
-      await emitDurableExpiryIfM3ForTests();
       const reclaim = await post(fixture.app, 'claim', { leaseSec: 300 });
       const staleUpdate = await post(fixture.app, 'state', { state: 'completed', leaseToken: fixture.grant.leaseToken });
       expect({
@@ -1073,7 +1084,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         equalityGeneration: 2,
         staleUpdate: 409,
         staleState: null,
-        sent: 4,
+        sent: taskLeaseExpiryAuditM3Enabled() ? 3 : 4,
       });
     });
 

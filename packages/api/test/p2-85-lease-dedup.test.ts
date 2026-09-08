@@ -28,13 +28,12 @@ const {
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
-  emitDurableExpiryIfM3ForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const { parseTaskMessageForTests, taskLeaseExpiryAuditM3Enabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
@@ -140,13 +139,15 @@ describe('PR-2 #85 传输层精确去重（claim/renew/release）', () => {
     setTaskGetForTests(async () => durable);
     setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
-    await emitDurableExpiryIfM3ForTests();
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const expiry1 = (await parseCaptured(sent[1]!, 3))!;
-    const claim2 = (await parseCaptured(sent[2]!, 4))!;
+    const m3 = taskLeaseExpiryAuditM3Enabled();
+    const expiry1 = m3 ? null : (await parseCaptured(sent[1]!, 3))!;
+    const claim2 = (await parseCaptured(sent[m3 ? 1 : 2]!, m3 ? 3 : 4))!;
     const lateClaim1 = { ...claim1, uid: 6 };
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, expiry1, claim2, lateClaim1]);
+    const rebuilt = taskFromMessages(ID, [
+      submittedRaw(), claim1, ...(expiry1 ? [expiry1] : []), claim2, lateClaim1,
+    ]);
     expect({
       valid: rebuilt !== null,
       generation: rebuilt?.lease?.leaseGeneration,
@@ -158,7 +159,7 @@ describe('PR-2 #85 传输层精确去重（claim/renew/release）', () => {
       generation: 2,
       gen2Current: true,
       gen1Fenced: false,
-      messages: 4,
+      messages: m3 ? 3 : 4,
     });
   });
 
