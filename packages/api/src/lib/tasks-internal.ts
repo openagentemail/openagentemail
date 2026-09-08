@@ -12,7 +12,7 @@ import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
-import { taskLeaseExpiryAuditM3Enabled, taskLeasesEnabled } from './task-lease-gate.ts';
+import { taskLeaseExpiryAuditM3Enabled, taskLeaseOverlayBoundEnabled, taskLeasesEnabled } from './task-lease-gate.ts';
 import { isTaskId } from './task-id.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 import * as taskChildrenCursor from './task-cursor.ts';
@@ -57,6 +57,8 @@ export const TASK_SUBMITTED_OVERDUE_MS = 4 * 60 * 60 * 1000;
 export const TASK_WORKING_OVERDUE_MS = 24 * 60 * 60 * 1000;
 export const TASK_LIST_CACHE_MS = 30 * 1000;
 export const TASK_REMIND_COOLDOWN_MS = 15 * 1000;
+/** M1：公共读 lease overlay 重放寿命（自 sentAt）。只约束展示，不删 queued 行。 */
+export const LEASE_OVERLAY_MAX_LIFETIME_MS = 15 * 60 * 1000;
 
 const PERIOD_MS: Record<TaskBoardPeriod, number> = {
   '24h': 24 * 60 * 60 * 1000,
@@ -1556,10 +1558,13 @@ async function findTaskMessages(id: string): Promise<TaskLookupResult> {
 
 /** Raw durable/queued snapshot. Lock-holding writers must use this rather
  * than public getTask(), whose approval read path may itself materialize.
- * mergeOverlay=false 只给调用方要 durable 原样时用。 */
-export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolean }): Promise<Task | null> {
+ * mergeOverlay=false 只给调用方要 durable 原样时用。
+ * publicRead=true 走 M1 有界 overlay（仅展示）；默认无界，写路径零变化。 */
+export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolean; publicRead?: boolean }): Promise<Task | null> {
   if (!isTaskId(id)) return null;
   const mergeOverlay = opts?.mergeOverlay !== false;
+  // 公共读才套有界变体；写路径/reaper 默认不传，保持全量 overlay。
+  const publicRead = opts?.publicRead === true;
   let raw: Task | null;
   let hadMatchingRows: boolean;
 
@@ -1573,7 +1578,7 @@ export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolea
   }
 
   if (raw) {
-    return mergeOverlay ? mergeQueuedEvents(raw) : raw;
+    return mergeOverlay ? mergeQueuedEvents(raw, { publicRead }) : raw;
   }
 
   // Matching rows existed in IMAP but reconstruction failed (e.g. integrity failure).
@@ -1588,7 +1593,7 @@ export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolea
 
   const synthetic = getSyntheticTaskBase(id);
   if (!synthetic) return null;
-  return mergeOverlay ? mergeQueuedEvents(synthetic) : synthetic;
+  return mergeOverlay ? mergeQueuedEvents(synthetic, { publicRead }) : synthetic;
 }
 
 const PARENT_CHAIN_MAX = 64;
@@ -1639,7 +1644,8 @@ async function materializeApprovalExpiry(task: Task | null): Promise<Task | null
 }
 
 export async function getTask(id: string): Promise<Task | null> {
-  return materializeApprovalExpiry(await getTaskSnapshot(id));
+  // 详情是公共读：overlay 走有界变体。审批过期物化仍在锁内用无界快照。
+  return materializeApprovalExpiry(await getTaskSnapshot(id, { publicRead: true }));
 }
 
 type TaskListSnapshot = {
@@ -1686,7 +1692,8 @@ async function scanDurableTasks(
 function projectTaskListSnapshot(snapshot: TaskListSnapshot): Task[] {
   const unindexed = getUnindexedSyntheticTaskBases(snapshot.tasks, snapshot.hadMatchingRowsIds);
   const combined = unindexed.length === 0 ? snapshot.tasks : [...snapshot.tasks, ...unindexed];
-  return combined.map(mergeQueuedEvents);
+  // list/board/listCache 装配都是公共读，停播在读时计算，不额外失效缓存。
+  return combined.map((task) => mergeQueuedEvents(task, { publicRead: true }));
 }
 
 export async function listTasks(state?: TaskState): Promise<Task[]> {
@@ -1815,6 +1822,13 @@ let taskSideEffectObserverForTests: TaskSideEffectObserverForTests | null = null
 /** IMAP 索引滞后窗口内的已发事件（状态转移 + reminder + lease），供后续读合并。 */
 const queuedEvents = new Map<string, QueuedEvent[]>();
 const QUEUED_EVENT_TTL_MS = 60 * 1000;
+/** M1：task+generation 首次停播去重；插入序淘汰，有界 1024。 */
+export const LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP = 1024;
+/** M1：进程级 warn 发射限频——窗口内最多 1 条，计数器仍按 key 累计。 */
+export const LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS = 60 * 1000;
+const overlayReplayExpiredSeen = new Map<string, true>();
+let overlayReplayExpiredCount = 0;
+let overlayReplayExpiredLastWarnAt = 0;
 
 type QueuedEvent = {
   message: TaskMessage;
@@ -1940,6 +1954,17 @@ export function clearTaskSideEffectObserverForTests(): void {
 export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
   syntheticTaskBases.clear();
+  // 单测之间清掉停播去重与计数，避免跨用例串味。
+  overlayReplayExpiredSeen.clear();
+  overlayReplayExpiredCount = 0;
+  overlayReplayExpiredLastWarnAt = 0;
+}
+
+/** 测试可读：累计首次停播次数。 */
+export function takeLeaseOverlayReplayExpiredCountForTests(): number {
+  const n = overlayReplayExpiredCount;
+  overlayReplayExpiredCount = 0;
+  return n;
 }
 
 function indexedLeaseGenerationDominates(
@@ -2107,7 +2132,74 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
   return next;
 }
 
-function mergeQueuedEvents(task: Task): Task {
+/** 首次整组停播：计数按 key 累计；console.warn 进程级限频（默认 60s 一条）。 */
+function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs: number): void {
+  const key = `${taskId}:${generation}`;
+  if (overlayReplayExpiredSeen.has(key)) return;
+  if (overlayReplayExpiredSeen.size >= LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP) {
+    const oldest = overlayReplayExpiredSeen.keys().next().value;
+    if (oldest !== undefined) overlayReplayExpiredSeen.delete(oldest);
+  }
+  overlayReplayExpiredSeen.set(key, true);
+  overlayReplayExpiredCount += 1;
+  const now = nowMs();
+  if (now - overlayReplayExpiredLastWarnAt < LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS) return;
+  overlayReplayExpiredLastWarnAt = now;
+  console.warn({
+    kind: 'lease_overlay_replay_expired',
+    taskId,
+    generation,
+    age: ageMs,
+  });
+}
+
+/**
+ * 公共读停播过滤：只改返回视图，不删 queuedEvents。
+ * 同一 generation 的 claim/renew/release/expired 并成一组，
+ * 组锚=组内 sentAt 最大值；超龄整组停播。approval-terminal 与非 lease 行原样保留。
+ */
+function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: number): {
+  overlay: QueuedEvent[];
+  stoppedClosingGens: Set<number>;
+} {
+  const byGeneration = new Map<number, QueuedEvent[]>();
+  const keep = new Set<QueuedEvent>();
+  const stoppedClosingGens = new Set<number>();
+  for (const row of rows) {
+    if (!row.lease) {
+      keep.add(row);
+      continue;
+    }
+    // release/expired 必须进同一 generation 组，否则关账行被单独丢掉会把旧 claim 复活成活租约。
+    const group = byGeneration.get(row.lease.generation) ?? [];
+    group.push(row);
+    byGeneration.set(row.lease.generation, group);
+  }
+  for (const [generation, group] of byGeneration) {
+    const newest = group.reduce((a, b) => (a.sentAt >= b.sentAt ? a : b));
+    const age = now - newest.sentAt;
+    if (age > LEASE_OVERLAY_MAX_LIFETIME_MS) {
+      noteLeaseOverlayReplayExpired(taskId, generation, age);
+      if (group.some((row) => row.lease?.event === 'release' || row.lease?.event === 'expired')) {
+        stoppedClosingGens.add(generation);
+      }
+      continue;
+    }
+    for (const row of group) keep.add(row);
+  }
+  // 保持原序，避免权威叠加顺序被打乱。
+  return { overlay: rows.filter((row) => keep.has(row)), stoppedClosingGens };
+}
+
+/** 案 A：只压掉 durable 同代活 claim 的租约字段；不合并关账行，不动 state/消息。 */
+function suppressDurableLeaseProjection(task: Task, stoppedClosingGens: ReadonlySet<number>): Task {
+  if (!task.lease || !stoppedClosingGens.has(task.lease.leaseGeneration)) return task;
+  const next = { ...task };
+  delete next.lease;
+  return next;
+}
+
+function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
   const pending = queuedEvents.get(task.id);
   if (!pending || pending.length === 0) return task;
   const now = nowMs();
@@ -2122,7 +2214,12 @@ function mergeQueuedEvents(task: Task): Task {
     return task;
   }
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
+  // 退休判定仍写回全量 stillLagging；有界过滤只作用于本次返回视图。
   queuedEvents.set(task.id, stillLagging);
+  if (opts?.publicRead && taskLeaseOverlayBoundEnabled()) {
+    const { overlay, stoppedClosingGens } = filterPublicLeaseOverlay(task.id, stillLagging, now);
+    return suppressDurableLeaseProjection(applyOverlayMessages(task, overlay), stoppedClosingGens);
+  }
   return applyOverlayMessages(task, stillLagging);
 }
 
@@ -2139,6 +2236,33 @@ function queueEventUntilIndexed(
     ...(lease ? { lease } : {}),
   });
   queuedEvents.set(taskId, list);
+}
+
+/** 测试注入未索引 lease overlay，避免为限频用例走 1025 次真实 claim。 */
+export function queueLeaseOverlayForTests(input: {
+  taskId: string;
+  sentAt: number;
+  generation?: number;
+}): void {
+  const at = new Date(input.sentAt).toISOString();
+  const generation = input.generation ?? 1;
+  queueEventUntilIndexed(input.taskId, {
+    id: `overlay-${input.taskId}-${generation}`,
+    from: 'alpha@test.example',
+    to: 'bravo@test.example',
+    subject: 'overlay',
+    date: at,
+    state: 'working',
+    body: 'overlay',
+  }, {
+    version: 1,
+    event: 'claim',
+    actor: 'bravo@test.example',
+    at,
+    generation,
+    claimedUntil: new Date(input.sentAt + 3600 * 1000).toISOString(),
+    tokenVerifier: `verifier-${input.taskId}`,
+  });
 }
 
 /** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */
