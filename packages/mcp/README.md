@@ -28,6 +28,8 @@ The server is configured entirely via environment variables:
 
 If `OPENAGENTEMAIL_API_KEY` is missing the server exits immediately with a clear error.
 
+This stdio client does **not** read the mail server's `DOMAIN`, `API_KEYS`, `IMAP_*`, or `SMTP_*` variables. Those belong on the separately hosted API. A placeholder token may fail later on an authenticated API call; it must not crash the process at import.
+
 ## Tools
 
 | Tool | Description |

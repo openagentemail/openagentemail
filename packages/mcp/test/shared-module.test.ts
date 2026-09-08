@@ -9,6 +9,7 @@ import { registerOpenAgentEmailTools } from "../../api/src/mcp/tools.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mainSrc = readFileSync(join(here, "../src/main.ts"), "utf8");
+const toolsSrc = readFileSync(join(here, "../../api/src/mcp/tools.ts"), "utf8");
 
 test("registerOpenAgentEmailTools 从共享模块导出", () => {
   expect(typeof registerOpenAgentEmailTools).toBe("function");
@@ -21,4 +22,10 @@ test("stdio main 从 ../../api/src/mcp 导入注册函数且自身不再 registe
   // 实现文件不得再留在 mcp/src/lib（移动而非复制）
   expect(mainSrc).not.toContain("./lib/client");
   expect(mainSrc).not.toContain("./lib/fence");
+});
+
+test("stdio 工具注册不得经 identities.ts 把服务端 parseConfig 打进 bundle", () => {
+  expect(toolsSrc).toContain("../lib/identity-scopes.ts");
+  expect(toolsSrc).not.toContain("../lib/identities.ts");
+  expect(toolsSrc).not.toContain("../lib/config.ts");
 });
