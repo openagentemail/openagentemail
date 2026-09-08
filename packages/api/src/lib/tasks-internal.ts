@@ -2148,31 +2148,23 @@ function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs
 
 /**
  * 公共读停播过滤：只改返回视图，不删 queuedEvents。
- * claim/renew 按 generation 分组，组内最新行超龄才整组掉；
- * release/expired 按自身 age；approval-terminal 与非 lease 行原样保留。
+ * 同一 generation 的 claim/renew/release/expired 并成一组，
+ * 组锚=组内 sentAt 最大值；超龄整组停播。approval-terminal 与非 lease 行原样保留。
  */
 function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: number): QueuedEvent[] {
-  const claimRenewByGen = new Map<number, QueuedEvent[]>();
+  const byGeneration = new Map<number, QueuedEvent[]>();
   const keep = new Set<QueuedEvent>();
   for (const row of rows) {
     if (!row.lease) {
       keep.add(row);
       continue;
     }
-    if (row.lease.event === 'release' || row.lease.event === 'expired') {
-      const age = now - row.sentAt;
-      if (age > LEASE_OVERLAY_MAX_LIFETIME_MS) {
-        noteLeaseOverlayReplayExpired(taskId, row.lease.generation, age);
-        continue;
-      }
-      keep.add(row);
-      continue;
-    }
-    const group = claimRenewByGen.get(row.lease.generation) ?? [];
+    // release/expired 必须进同一 generation 组，否则关账行被单独丢掉会把旧 claim 复活成活租约。
+    const group = byGeneration.get(row.lease.generation) ?? [];
     group.push(row);
-    claimRenewByGen.set(row.lease.generation, group);
+    byGeneration.set(row.lease.generation, group);
   }
-  for (const [generation, group] of claimRenewByGen) {
+  for (const [generation, group] of byGeneration) {
     const newest = group.reduce((a, b) => (a.sentAt >= b.sentAt ? a : b));
     const age = now - newest.sentAt;
     if (age > LEASE_OVERLAY_MAX_LIFETIME_MS) {

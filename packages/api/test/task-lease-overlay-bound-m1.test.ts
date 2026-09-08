@@ -26,6 +26,7 @@ const {
   decideApprovalTask,
   getTask,
   listTaskBoard,
+  releaseTask,
   renewTask,
   taskFromMessages,
 } = await import('../src/lib/tasks.ts');
@@ -275,6 +276,24 @@ describe('M1 公共读 overlay 有界', () => {
     const publicTask = await getTask(ID);
     expect(publicTask?.lease?.leaseGeneration).toBe(1);
     expect(publicTask?.lease?.claimedUntil).toBeDefined();
+    expect(takeLeaseOverlayReplayExpiredCountForTests()).toBe(0);
+  });
+
+  testOn('P2-1 旧 claim + 新 release：整组保留，公共视图为已释放', async () => {
+    let now = START;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async () => ({ messageId: '<m1-p2-1>' }));
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    now = START + FRESH;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken });
+    now = START + STALE;
+    const publicTask = await getTask(ID);
+    const authority = await getTaskSnapshot(ID);
+    expect(publicTask?.lease).toBeUndefined();
+    expect(publicTask?.releasedLease?.leaseGeneration).toBe(1);
+    expect(authority?.lease).toBeUndefined();
+    expect(authority?.releasedLease?.leaseGeneration).toBe(1);
     expect(takeLeaseOverlayReplayExpiredCountForTests()).toBe(0);
   });
 
