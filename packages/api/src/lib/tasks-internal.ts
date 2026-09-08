@@ -1961,15 +1961,19 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     const authority = task.lease;
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      // 身份匹配或后继代已索引都退休：gen2 入盘后 expiredLease 被清，只认身份会让队列行永不退休并重放。
+      // 身份匹配、后继代已索引、或 durable 已终态都退休。
+      // 终态重建剥离全部 lease 回执，同代无后继可 dominates，不退休则每读重放。
       return (!!receipt && isSameLeaseExpiryIdentity(receipt, queued.lease))
-        || indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
+        || indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict')
+        || TERMINAL_TASK_STATES.includes(task.state);
     }
     if (queued.lease.event === 'release') {
+      // release 同病：终态剥离 releasedLease，dominates(exclude) 也落空。
       return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')
         || (task.releasedLease?.leaseGeneration === queued.lease.generation
         && leaseVerifiersEqual(task.releasedLease.tokenVerifier, queued.lease.tokenVerifier)
-        && task.releasedLease.reason === queued.lease.reason);
+        && task.releasedLease.reason === queued.lease.reason)
+        || TERMINAL_TASK_STATES.includes(task.state);
     }
     if (indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')) return true;
     const released = task.releasedLease;

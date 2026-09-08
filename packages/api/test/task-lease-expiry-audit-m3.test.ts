@@ -446,7 +446,7 @@ describe('M3 终态冻结', () => {
   });
 });
 
-describe('B2 队列行退休（后继代已索引）', () => {
+describe('队列行退休（后继代 / 终态）', () => {
   bunTest('M3-off 过期 reclaim 双索引后过期队列行退休，读路径不重放', async () => {
     await withM3Off(async () => {
       let now = START;
@@ -501,6 +501,73 @@ describe('B2 队列行退休（后继代已索引）', () => {
         secondExpiryBodies: 1,
         secondMessages: indexed.messages.length,
         secondLeaseGen: 2,
+      });
+    });
+  });
+
+  bunTest('B3：M3-off reaper 排队后先 completed 再索引回执，读路径不重放', async () => {
+    await withM3Off(async () => {
+      let now = START;
+      let durable = submittedTask();
+      const sent: SendInput[] = [];
+      setTaskNowForTests(() => now);
+      setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
+      setTaskSendMailForTests(async (input) => {
+        sent.push(input);
+        return { messageId: `<m3-b3-${sent.length}>` };
+      });
+      const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const claim1 = (await parseCaptured(sent[0]!, 2))!;
+      durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+      setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
+      now = Date.parse(first.claimedUntil);
+      expect(await reapExpiredTaskLeasesOnce()).toBe(1);
+      const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+      const expiry = expiryInput ? (await parseCaptured(expiryInput, 4))! : null;
+      if (!expiry) throw new Error('B3 fixture must queue a reaper expiry receipt');
+      // 任务先 completed（durable 尚无回执），同代无后继可 dominates。
+      const completed: RawTaskMessage = {
+        uid: 3, from: A, to: B, subject: `Lease ${ID}`,
+        date: '2026-08-24T00:06:00.000Z', state: 'completed', body: 'done',
+      };
+      const completedOnly = taskFromMessages(ID, [submittedRaw(), claim1, completed]);
+      if (!completedOnly) throw new Error('B3 fixture must rebuild completed before expiry index');
+      durable = completedOnly;
+      setTaskGetForTests(async () => durable);
+      const beforeIndex = await getTask(ID);
+      // 回执后索引：终态流再附上 expiry，队列行必须已退休。
+      const indexed = taskFromMessages(ID, [submittedRaw(), claim1, completed, expiry]);
+      if (!indexed) throw new Error('B3 fixture must index expiry after completed');
+      durable = indexed;
+      setTaskGetForTests(async () => durable);
+      const afterIndex = await getTask(ID);
+      const afterView = afterIndex ? toTaskView(afterIndex) : null;
+      const secondRead = await getTask(ID);
+      const secondView = secondRead ? toTaskView(secondRead) : null;
+      expect({
+        beforeState: beforeIndex?.state ?? null,
+        beforeExpiryBodies: beforeIndex
+          ? toTaskView(beforeIndex).messages.filter((message) => message.body === 'Lease expired.').length
+          : -1,
+        afterState: afterIndex?.state ?? null,
+        afterExpiryBodies: afterView?.messages.filter((message) => message.body === 'Lease expired.').length ?? -1,
+        afterMessages: afterIndex?.messages.length ?? null,
+        durableMessages: indexed.messages.length,
+        expiredStamped: afterIndex?.expiredLease !== undefined,
+        secondExpiryBodies: secondView?.messages.filter((message) => message.body === 'Lease expired.').length ?? -1,
+        secondMessages: secondRead?.messages.length ?? null,
+      }).toEqual({
+        beforeState: 'completed',
+        beforeExpiryBodies: 0,
+        afterState: 'completed',
+        afterExpiryBodies: 0,
+        afterMessages: indexed.messages.length,
+        durableMessages: indexed.messages.length,
+        expiredStamped: false,
+        secondExpiryBodies: 0,
+        secondMessages: indexed.messages.length,
       });
     });
   });
