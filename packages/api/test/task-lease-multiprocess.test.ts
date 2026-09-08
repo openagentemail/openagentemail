@@ -30,7 +30,7 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const { parseTaskMessageForTests, taskLeaseExpiryAuditM3Enabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
@@ -134,6 +134,16 @@ describe('#78 multiprocess lease contract (documented single-process boundary)',
     const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
     const claim = (await parseCaptured(sent[0]!, 2))!;
     durable = taskFromMessages(ID, [submittedRaw(), claim])!;
+
+    // M3-on：reaper 对 lease expiry 无操作，本则依赖双进程各发一条 expired 的发射路径。
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      now = Date.parse(grant.claimedUntil);
+      setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+      expect(sent.filter((m) => m.subject === 'Task expired').length).toBe(0);
+      return;
+    }
 
     now = Date.parse(grant.claimedUntil);
     setTaskGetForTests(async () => durable);

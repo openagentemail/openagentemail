@@ -12,7 +12,7 @@ import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
-import { taskLeasesEnabled } from './task-lease-gate.ts';
+import { taskLeaseExpiryAuditM3Enabled, taskLeasesEnabled } from './task-lease-gate.ts';
 import { isTaskId } from './task-id.ts';
 import * as taskBoardCursor from './task-cursor.ts';
 import * as taskChildrenCursor from './task-cursor.ts';
@@ -1233,9 +1233,17 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   const appliedReleases = new Map<number, ReleaseLeaseEvent>();
+  // 权威窗身份 = (gen, 续约后最终 claimedUntil)，供迟到回执 M3-3 匹配。
+  const appliedClaimWindows = new Map<number, { claimedUntil: string }>();
   // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
   const duplicateLeaseMessages = new Set<RawTaskMessage>();
-  for (const message of leaseEvents) {
+  // 终态前缀：回执 UID 之前任意终态即冻结（含迟到 replayed claim）。
+  let seenTerminalBefore = false;
+  for (const message of ordered) {
+    if (!message.lease) {
+      if (isTerminalStateEvent(message)) seenTerminalBefore = true;
+      continue;
+    }
     const lease = message.lease;
     if (lease.event === 'expired') {
       if (
@@ -1253,21 +1261,50 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         }
         return null;
       }
+      const matchesCurrentAuthority = !!leaseAuthority?.claimedUntil
+        && lease.generation === leaseAuthority.leaseGeneration
+        && lease.claimedUntil === leaseAuthority.claimedUntil;
+      if (matchesCurrentAuthority) {
+        // 终态公共历史冻结：本回执之前任意终态状态事件 → 历史 no-op。
+        // 不限 claim 之后，避免迟到索引的 replayed claim 把冻结窗口推到终态后面。
+        if (seenTerminalBefore) {
+          appliedExpiryReceipts.set(lease.generation, {
+            leaseGeneration: lease.generation,
+            claimedUntil: lease.claimedUntil,
+            expiredAt: lease.expiredAt,
+            ...(firstClaimedAt ? { firstClaimedAt } : {}),
+          });
+          duplicateLeaseMessages.add(message);
+          continue;
+        }
+        leaseAuthority = undefined;
+        releasedLease = undefined;
+        expiredLease = {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+          ...(firstClaimedAt ? { firstClaimedAt } : {}),
+        };
+        appliedExpiryReceipts.set(lease.generation, expiredLease);
+        continue;
+      }
+      // M3-3 容忍无条件：匹配历史权威窗的 server 签名回执一律审计 no-op。
+      // 不随解耦开关：回退 off 后，流中已有的迟到回执若再 fail-closed 会整卡消失。
+      const historicalWindow = appliedClaimWindows.get(lease.generation);
       if (
-        !leaseAuthority?.claimedUntil
-        || lease.generation !== leaseAuthority.leaseGeneration
-        || lease.claimedUntil !== leaseAuthority.claimedUntil
-      ) return null;
-      leaseAuthority = undefined;
-      releasedLease = undefined;
-      expiredLease = {
-        leaseGeneration: lease.generation,
-        claimedUntil: lease.claimedUntil,
-        expiredAt: lease.expiredAt,
-        ...(firstClaimedAt ? { firstClaimedAt } : {}),
-      };
-      appliedExpiryReceipts.set(lease.generation, expiredLease);
-      continue;
+        historicalWindow
+        && historicalWindow.claimedUntil === lease.claimedUntil
+      ) {
+        appliedExpiryReceipts.set(lease.generation, {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+          ...(firstClaimedAt ? { firstClaimedAt } : {}),
+        });
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
+      return null;
     }
     if (
       message.from !== first.to || message.to !== first.from
@@ -1310,6 +1347,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         firstClaimedAt,
       };
       appliedClaims.set(lease.generation, lease);
+      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
       continue;
     }
     if (lease.event === 'renew') {
@@ -1335,6 +1373,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       ) return null;
       leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
       appliedRenews.set(lease.generation, [...priorRenews, lease]);
+      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
       continue;
     }
     const priorRelease = appliedReleases.get(lease.generation);
@@ -1438,6 +1477,14 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   return task;
 }
 
+/** 终态状态事件：completed/failed（admin-closed 是带 closed_by_admin 的 failed）。
+ * expired 回执即使 stamp 了终态 state，也只是审计信，不算状态转移。 */
+function isTerminalStateEvent(message: RawTaskMessage): boolean {
+  if (message.kind === 'reminder') return false;
+  if (message.lease?.event === 'expired') return false;
+  return TERMINAL_TASK_STATES.includes(message.state);
+}
+
 /** 列表 updatedAt：权威状态事件与 reminder 的较新者。
  * terminal 之后的 reminder（含重放的旧 stamped 催办）不得刷新 30 天可见窗。 */
 function boardUpdatedAt<T extends { date: string; state: TaskState; kind?: TaskEventKind }>(
@@ -1508,9 +1555,11 @@ async function findTaskMessages(id: string): Promise<TaskLookupResult> {
 }
 
 /** Raw durable/queued snapshot. Lock-holding writers must use this rather
- * than public getTask(), whose approval read path may itself materialize. */
-export async function getTaskSnapshot(id: string): Promise<Task | null> {
+ * than public getTask(), whose approval read path may itself materialize.
+ * mergeOverlay=false 只给调用方要 durable 原样时用。 */
+export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolean }): Promise<Task | null> {
   if (!isTaskId(id)) return null;
+  const mergeOverlay = opts?.mergeOverlay !== false;
   let raw: Task | null;
   let hadMatchingRows: boolean;
 
@@ -1524,7 +1573,7 @@ export async function getTaskSnapshot(id: string): Promise<Task | null> {
   }
 
   if (raw) {
-    return mergeQueuedEvents(raw);
+    return mergeOverlay ? mergeQueuedEvents(raw) : raw;
   }
 
   // Matching rows existed in IMAP but reconstruction failed (e.g. integrity failure).
@@ -1538,7 +1587,8 @@ export async function getTaskSnapshot(id: string): Promise<Task | null> {
   }
 
   const synthetic = getSyntheticTaskBase(id);
-  return synthetic ? mergeQueuedEvents(synthetic) : null;
+  if (!synthetic) return null;
+  return mergeOverlay ? mergeQueuedEvents(synthetic) : synthetic;
 }
 
 const PARENT_CHAIN_MAX = 64;
@@ -1911,14 +1961,19 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     const authority = task.lease;
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      if (receipt && isSameLeaseExpiryIdentity(receipt, queued.lease)) return true;
-      return indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
+      // 身份匹配、后继代已索引、或 durable 已终态都退休。
+      // 终态重建剥离全部 lease 回执，同代无后继可 dominates，不退休则每读重放。
+      return (!!receipt && isSameLeaseExpiryIdentity(receipt, queued.lease))
+        || indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict')
+        || TERMINAL_TASK_STATES.includes(task.state);
     }
     if (queued.lease.event === 'release') {
+      // release 同病：终态剥离 releasedLease，dominates(exclude) 也落空。
       return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')
         || (task.releasedLease?.leaseGeneration === queued.lease.generation
         && leaseVerifiersEqual(task.releasedLease.tokenVerifier, queued.lease.tokenVerifier)
-        && task.releasedLease.reason === queued.lease.reason);
+        && task.releasedLease.reason === queued.lease.reason)
+        || TERMINAL_TASK_STATES.includes(task.state);
     }
     if (indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')) return true;
     const released = task.releasedLease;
@@ -1974,7 +2029,8 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
 }
 
 function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
-  const messages = [...task.messages, ...extra.map((row) => row.message)];
+  const publicExtra = extra;
+  const messages = [...task.messages, ...publicExtra.map((row) => row.message)];
   const ordered = messages.map((message, index) => ({ ...message, uid: index + 1 }));
   const current = currentTaskMessage(ordered);
   const next: Task = {
@@ -2070,10 +2126,18 @@ function mergeQueuedEvents(task: Task): Task {
   return applyOverlayMessages(task, stillLagging);
 }
 
-function queueEventUntilIndexed(taskId: string, message: TaskMessage, lease?: LeaseEvent): void {
+function queueEventUntilIndexed(
+  taskId: string,
+  message: TaskMessage,
+  lease?: LeaseEvent,
+): void {
   taskSideEffectObserverForTests?.queuedTaskIds.push(taskId);
   const list = queuedEvents.get(taskId) ?? [];
-  list.push({ message, sentAt: Date.parse(message.date) || nowMs(), ...(lease ? { lease } : {}) });
+  list.push({
+    message,
+    sentAt: Date.parse(message.date) || nowMs(),
+    ...(lease ? { lease } : {}),
+  });
   queuedEvents.set(taskId, list);
 }
 
@@ -2252,7 +2316,12 @@ export async function claimTask(input: {
     // rejected claim is a true zero-side-effect operation.
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), beforeMaterialization);
     const wasWorking = current.state === 'working';
-    current = await materializeLeaseExpiryUnlocked(current);
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3-on：锁内零审计 IO，到期只派生失活。
+      current = deriveExpiredLeaseIfPastDeadline(current);
+    } else {
+      current = await materializeLeaseExpiryUnlocked(current);
+    }
     const now = nowMs();
     assertTaskLeaseCapAvailable(taskLeaseFirstClaimedAt(current), now);
     if (current.lease?.claimedUntil && now < Date.parse(current.lease.claimedUntil)) {
@@ -2413,10 +2482,8 @@ function leaseEventMessage(input: {
   };
 }
 
-/** Must run under the existing per-task lock. It emits a server-authored,
- * durable receipt only after SMTP accepts it, so retries cannot invent an
- * in-memory success state. */
-async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
+/** server-time 派生失活：不发信、不入 overlay，durable 回执仍缺。 */
+function deriveExpiredLeaseIfPastDeadline(current: Task): Task {
   const active = current.lease;
   const now = nowMs();
   if (
@@ -2426,23 +2493,38 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
     || !canAdvanceTask(current.state)
     || isClosedByAdmin(current)
   ) return current;
-  const expiredAt = new Date(now).toISOString();
+  return {
+    ...current,
+    lease: undefined,
+    releasedLease: undefined,
+    expiredLease: {
+      leaseGeneration: active.leaseGeneration,
+      claimedUntil: active.claimedUntil,
+      expiredAt: new Date(now).toISOString(),
+      ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
+    },
+  };
+}
+
+/** M3-off 内联物化：SMTP 接受后才记 overlay。M3-on 不走这条。 */
+async function emitExpiryAuditUnlocked(
+  current: Task,
+  window: { generation: number; claimedUntil: string },
+): Promise<Task> {
+  const expiredAt = new Date(nowMs()).toISOString();
   const lease: ExpiredLeaseEvent = {
     version: 1,
     event: 'expired',
     actor: 'server',
     at: expiredAt,
-    generation: active.leaseGeneration,
-    claimedUntil: active.claimedUntil,
+    generation: window.generation,
+    claimedUntil: window.claimedUntil,
     expiredAt,
   };
-  // The requester→recipient envelope is only mail transport. The signed
-  // actor above is the sole expiry authority and is intentionally not either
-  // participant.
   const from = current.from;
   const to = current.to;
   const text = 'Lease expired.';
-  const { messageId: _messageId } = await deliverMail({
+  await deliverMail({
     from,
     to: [to],
     subject: current.subject,
@@ -2450,7 +2532,9 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
     headers: leaseEventHeaders(current.id, current.state, from, to, lease),
   });
   invalidateTaskListCache();
-  const eventMessage = leaseEventMessage({ task: current, from, to, state: current.state, at: expiredAt, body: text });
+  const eventMessage = leaseEventMessage({
+    task: current, from, to, state: current.state, at: expiredAt, body: text,
+  });
   queueEventUntilIndexed(current.id, eventMessage, lease);
   return {
     ...current,
@@ -2462,25 +2546,44 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
       leaseGeneration: lease.generation,
       claimedUntil: lease.claimedUntil,
       expiredAt: lease.expiredAt,
-      ...(active.firstClaimedAt ? { firstClaimedAt: active.firstClaimedAt } : {}),
+      ...(current.lease?.firstClaimedAt ? { firstClaimedAt: current.lease.firstClaimedAt } : {}),
     },
   };
 }
 
-/** One bounded pass for the server reaper. All task authority remains in the
- * shared lock-held materializer, so a concurrent reclaim cannot overtake it. */
+/** Must run under the existing per-task lock. M3-off legacy 路径，不动语义。 */
+async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
+  const active = current.lease;
+  const now = nowMs();
+  if (
+    !active?.claimedUntil
+    || now < Date.parse(active.claimedUntil)
+    || isApprovalTask(current)
+    || !canAdvanceTask(current.state)
+    || isClosedByAdmin(current)
+  ) return current;
+  return emitExpiryAuditUnlocked(current, {
+    generation: active.leaseGeneration,
+    claimedUntil: active.claimedUntil,
+  });
+}
+
+/** One bounded pass. M3-on 对 lease expiry 无操作；到期只在 claim 路径派生。 */
 export async function reapExpiredTaskLeasesOnce(): Promise<number> {
   assertTaskLeasesEnabled();
+  if (taskLeaseExpiryAuditM3Enabled()) return 0;
   const candidates = await loadAllTasksCached();
   let materialized = 0;
   for (const candidate of candidates) {
     const didMaterialize = await withTaskLock(candidate.id, async () => {
-      const current = await getTaskSnapshot(candidate.id);
-      if (!current?.lease?.claimedUntil || nowMs() < Date.parse(current.lease.claimedUntil)) return false;
-      const next = await materializeLeaseExpiryUnlocked(current);
+      const durable = await getTaskSnapshot(candidate.id, { mergeOverlay: false });
+      if (!durable) return false;
+      const view = mergeQueuedEvents(durable);
+      if (!view.lease?.claimedUntil || nowMs() < Date.parse(view.lease.claimedUntil)) return false;
+      const next = await materializeLeaseExpiryUnlocked(view);
       return !!next.expiredLease
-        && next.expiredLease.leaseGeneration === current.lease.leaseGeneration
-        && next.expiredLease.claimedUntil === current.lease.claimedUntil;
+        && next.expiredLease.leaseGeneration === view.lease.leaseGeneration
+        && next.expiredLease.claimedUntil === view.lease.claimedUntil;
     });
     if (didMaterialize) materialized += 1;
   }

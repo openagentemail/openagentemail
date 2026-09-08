@@ -40,10 +40,11 @@ const {
 const {
   clearQueuedEventsForTests,
   setTaskGetForTests,
+  setTaskListAllForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const { claimLeaseHeadersForTests, parseTaskMessageForTests, taskLeaseExpiryAuditM3Enabled, taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
@@ -89,6 +90,7 @@ async function parsedClaim(input: SendInput, uid = 2, extra: Record<string, stri
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskGetForTests(null);
+  setTaskListAllForTests(null);
   setTaskSendMailForTests(null);
   clearQueuedEventsForTests();
 });
@@ -265,8 +267,24 @@ describe('#56 R2 lease authority', () => {
     expect(first.leaseGeneration).toBe(1);
 
     now = Date.parse(first.claimedUntil);
+    const indexed = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(sent[0]!, 2))!])!;
+    setTaskGetForTests(async () => indexed);
+    setTaskListAllForTests(async () => [indexed]);
     const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(second.leaseGeneration).toBe(2);
+    // M3-on：到期只派生，不发 expiry 回执。
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      expect(sent).toHaveLength(2);
+      const rebuiltOn = taskFromMessages(ID, [
+        submittedRaw(),
+        (await parsedClaim(sent[0]!, 2))!,
+        (await parsedClaim(sent[1]!, 3))!,
+      ])!;
+      expect(rebuiltOn.lease?.leaseGeneration).toBe(2);
+      expect(isTaskLeaseTokenCurrent(rebuiltOn, first.leaseToken)).toBe(false);
+      expect(isTaskLeaseTokenCurrent(rebuiltOn, second.leaseToken)).toBe(true);
+      return;
+    }
     expect(sent).toHaveLength(3);
 
     const rebuilt = taskFromMessages(ID, [
@@ -487,11 +505,19 @@ describe('#81 renewal tenure', () => {
     const reclaimRaw = await parsedClaim(sent[3]!, 5);
     durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!])!;
     clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(reclaimed.claimedUntil);
     const afterExpiry = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    const expiryRaw = await parsedClaim(sent[4]!, 6);
-    const afterExpiryRaw = await parsedClaim(sent[5]!, 7);
-    durable = taskFromMessages(ID, [submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!, expiryRaw!, afterExpiryRaw!])!;
+    const afterExpiryRaw = taskLeaseExpiryAuditM3Enabled()
+      ? await parsedClaim(sent[4]!, 6)
+      : await parsedClaim(sent[5]!, 7);
+    const expiryRaw = taskLeaseExpiryAuditM3Enabled() ? null : await parsedClaim(sent[4]!, 6);
+    durable = taskFromMessages(ID, [
+      submittedRaw(), firstRaw!, renewRaw!, releaseRaw!, reclaimRaw!,
+      ...(expiryRaw ? [expiryRaw] : []),
+      afterExpiryRaw!,
+    ])!;
     clearQueuedEventsForTests();
     expect({ generation: afterExpiry.leaseGeneration, firstClaimedAt: durable.lease?.firstClaimedAt }).toEqual({
       generation: 3,
@@ -587,11 +613,12 @@ test('#86 disabled durable lease visibility survives signed rebuild, queued over
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_already_claimed');
   });
   now = Date.parse(first.claimedUntil);
+  setTaskListAllForTests(async () => [durable]);
   await withTaskLeasesEnabledForTests(true, async () => {
     const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(reclaimed.leaseGeneration).toBe(2);
   });
-  expect(sent).toHaveLength(3); // original claim, authenticated expiry, normal reclaim
+  expect(sent).toHaveLength(taskLeaseExpiryAuditM3Enabled() ? 2 : 3);
 
   // A second task source deliberately remains older than its accepted claim;
   // disabled projection must read the private anchors through the real queue.
@@ -770,6 +797,7 @@ async function leaseFixture() {
 
 async function reclaimAtEquality(fixture: Awaited<ReturnType<typeof leaseFixture>>) {
   fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
+  setTaskListAllForTests(async () => [fixture.durable()]);
   const claim = await post(fixture.app, 'claim', { leaseSec: 300 });
   const body = objectValue(claim.body) as Partial<LeaseGrantBody>;
   const grant: LeaseGrantBody = {
@@ -916,7 +944,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         generation: second.grant.leaseGeneration,
         renew: renewed.status,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, generation: 2, renew: 409, sent: 3 });
+      }).toEqual({ reclaim: 200, generation: 2, renew: 409, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 release is fenced after generation-2 reclaim with no event', async () => {
@@ -928,7 +956,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         generation: second.grant.leaseGeneration,
         release: released.status,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, generation: 2, release: 409, sent: 3 });
+      }).toEqual({ reclaim: 200, generation: 2, release: 409, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 ordinary state update is fenced after generation-2 reclaim', async () => {
@@ -940,7 +968,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         update: updated.status,
         returnedState: objectValue(updated.body).state ?? null,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: 3 });
+      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('generation-1 terminal completion is fenced after generation-2 reclaim', async () => {
@@ -952,7 +980,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         update: updated.status,
         returnedState: objectValue(updated.body).state ?? null,
         sent: fixture.sent.length,
-      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: 3 });
+      }).toEqual({ reclaim: 200, update: 409, returnedState: null, sent: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
     });
 
     test('current-generation token performs one nonterminal state update', async () => {
@@ -1040,6 +1068,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
       clearQueuedEventsForTests();
       setTaskGetForTests(async () => fixture.durable());
       fixture.clock.now = Date.parse(fixture.grant.claimedUntil);
+      setTaskListAllForTests(async () => [fixture.durable()]);
       const reclaim = await post(fixture.app, 'claim', { leaseSec: 300 });
       const staleUpdate = await post(fixture.app, 'state', { state: 'completed', leaseToken: fixture.grant.leaseToken });
       expect({
@@ -1055,7 +1084,7 @@ if (process.env.TASK_LEASES_R5B_RED === '1') {
         equalityGeneration: 2,
         staleUpdate: 409,
         staleState: null,
-        sent: 4,
+        sent: taskLeaseExpiryAuditM3Enabled() ? 3 : 4,
       });
     });
 
@@ -1437,6 +1466,15 @@ describe('PR98 R14 current-head gate regressions', () => {
       return { messageId: `<r14-grant-clock-${sent.length}>` };
     });
 
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3-on：claim 不再内联物化回执，now 不会被 expiry SMTP 推到 cap。
+      const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      expect({
+        generation: grant.leaseGeneration,
+        events: sent.map((input) => input.headers?.['X-OA-Task-Lease-Event']),
+      }).toEqual({ generation: 2, events: ['claim'] });
+      return;
+    }
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toThrow('lease_task_cap_exhausted');
     const projected = await taskService.get(ID);
     expect({

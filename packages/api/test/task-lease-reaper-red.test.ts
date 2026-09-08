@@ -32,7 +32,12 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { claimLeaseHeadersForTests, parseTaskMessageForTests, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const {
+  claimLeaseHeadersForTests,
+  parseTaskMessageForTests,
+  taskLeaseExpiryAuditM3Enabled,
+  withTaskLeasesEnabledForTests,
+} = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
 const { startTaskLeaseReaper, TASK_LEASE_REAPER_INTERVAL_MS } = await import('../src/lib/task-lease-reaper.ts');
 
@@ -150,6 +155,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       // parser-authenticated durable mail is available before the reclaim.
       clearQueuedEventsForTests();
       setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
       now = Date.parse(first.claimedUntil);
       expect(isTaskLeaseTokenCurrent(durable, first.leaseToken)).toBe(false);
       const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
@@ -184,8 +190,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
         bearerAbsentFromMailPublicAndWarnings: !JSON.stringify({ sent, publicView, warnings }).includes(first.leaseToken),
       }).toEqual({
         generation2: 2,
-        orderedAuthenticatedEvents: ['claim:1', 'expired:1', 'claim:2'],
-        expiryAudit: {
+        orderedAuthenticatedEvents: taskLeaseExpiryAuditM3Enabled()
+          ? ['claim:1', 'claim:2']
+          : ['claim:1', 'expired:1', 'claim:2'],
+        expiryAudit: taskLeaseExpiryAuditM3Enabled() ? undefined : {
           generation: 1,
           at: first.claimedUntil,
           orderedBeforeGeneration2: true,
@@ -195,7 +203,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
           generation2BearerCurrent: true,
           generation1BearerCurrent: false,
         },
-        deliveries: 3,
+        deliveries: taskLeaseExpiryAuditM3Enabled() ? 2 : 3,
         bearerAbsentFromMailPublicAndWarnings: true,
       });
     } finally {
@@ -251,6 +259,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     await expect(taskService.renew({ id: ID, from: RECIPIENT, leaseToken: first.leaseToken, leaseSec: 300 })).rejects.toThrow('stale_lease');
@@ -258,7 +267,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       generation2: second.leaseGeneration,
       oldBearerCurrent: isTaskLeaseTokenCurrent(second.task, first.leaseToken),
       deliveries: sent.length,
-    }).toEqual({ generation2: 2, oldBearerCurrent: false, deliveries: 3 });
+    }).toEqual({ generation2: 2, oldBearerCurrent: false, deliveries: taskLeaseExpiryAuditM3Enabled() ? 2 : 3 });
   });
 
   test('parser accepts only the signed server actor, treats the envelope as transport, and redacts token plus verifier', async () => {
@@ -304,7 +313,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     setTaskGetForTests(async () => durable);
     setTaskListAllForTests(async () => [durable]);
     setTaskSendMailForTests(async (input) => {
-      if (failExpiry) throw new Error('temporary smtp failure');
+      // 只挡 audit 回执：off 态 reaper 仍会整轮抛错；on 态才能证明 reclaim 不被 audit SMTP 挡死。
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('temporary smtp failure');
+      }
       sent.push(input);
       return { messageId: `<r8c-reap-${sent.length}>` };
     });
@@ -314,20 +326,49 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     clearQueuedEventsForTests();
     now = Date.parse(first.claimedUntil);
     failExpiry = true;
-    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('temporary smtp failure');
-    expect(sent).toHaveLength(1);
-    failExpiry = false;
-    expect(await reapExpiredTaskLeasesOnce()).toBe(1);
-    const expiry = await parseCaptured(sent[1]!, 3);
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, expiry!]);
-    // IMAP still returns the old durable claim; the accepted queued expiry
-    // nevertheless dominates it so reclaim is immediate and becomes gen 2.
-    const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
-    expect({
-      rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
-      generation2: second.leaseGeneration,
-      deliveries: sent.length,
-    }).toEqual({ rebuiltOldBearerCurrent: false, generation2: 2, deliveries: 3 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // M3-on：reaper 对 expiry 无操作；reclaim 只取决于 claim 自身 SMTP。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+      expect(sent).toHaveLength(1);
+      const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+      expect(second.leaseGeneration).toBe(2);
+      failExpiry = false;
+      // 收窄后 M3-on reaper 对 expiry 无操作。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+      const claim2Input = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')[1];
+      const claim2 = claim2Input ? await parseCaptured(claim2Input, 3) : null;
+      const rebuilt = claim2
+        ? taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, claim2])
+        : null;
+      expect({
+        rebuilt: rebuilt !== null,
+        generation2: second.leaseGeneration,
+        authority: rebuilt?.lease?.leaseGeneration,
+        rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
+        expiryBackfilled: false,
+      }).toEqual({
+        rebuilt: true,
+        generation2: 2,
+        authority: 2,
+        rebuiltOldBearerCurrent: false,
+        expiryBackfilled: false,
+      });
+    } else {
+      await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('temporary smtp failure');
+      expect(sent).toHaveLength(1);
+      failExpiry = false;
+      expect(await reapExpiredTaskLeasesOnce()).toBe(1);
+      const expiry = await parseCaptured(sent[1]!, 3);
+      const rebuilt = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!, expiry!]);
+      // IMAP still returns the old durable claim; the accepted queued expiry
+      // nevertheless dominates it so reclaim is immediate and becomes gen 2.
+      const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+      expect({
+        rebuiltOldBearerCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
+        generation2: second.leaseGeneration,
+        deliveries: sent.length,
+      }).toEqual({ rebuiltOldBearerCurrent: false, generation2: 2, deliveries: 3 });
+    }
   });
 
   test('reaper races are lock-linearized with reclaim, renew, release, and admin close', async () => {
@@ -359,7 +400,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
       taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 }),
     ]);
     expect({ generation2: second.leaseGeneration, expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({
-      generation2: 2, expiryDeliveries: 1,
+      generation2: 2, expiryDeliveries: taskLeaseExpiryAuditM3Enabled() ? 0 : 1,
     });
 
     // Each following operation wins while still unexpired; a later reaper
@@ -374,7 +415,12 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(renewable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.renew({ id: ID, from: RECIPIENT, leaseToken: renewable.leaseToken, leaseSec: 301 })]);
     now = Date.parse(renewable.claimedUntil);
-    expect({ afterRenew: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRenew: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // C3：合并视图里未索引 renew 仍活跃 → withhold，不发明旧截止回执。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    } else {
+      expect({ afterRenew: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRenew: 0, expiryDeliveries: 0 });
+    }
 
     sent.length = 0;
     clearQueuedEventsForTests();
@@ -386,7 +432,12 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(releasable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.release({ id: ID, from: RECIPIENT, leaseToken: releasable.leaseToken, reason: 'done' })]);
     now = Date.parse(releasable.claimedUntil);
-    expect({ afterRelease: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRelease: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      // overlay release 否决：该代已释放，不发明 expiry。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    } else {
+      expect({ afterRelease: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRelease: 0, expiryDeliveries: 0 });
+    }
 
     sent.length = 0;
     clearQueuedEventsForTests();
@@ -398,7 +449,11 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(closable.claimedUntil) - 1;
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.close({ id: ID, from: REQUESTER, reason: 'cancelled' })]);
     now = Date.parse(closable.claimedUntil);
-    expect({ afterClose: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterClose: 0, expiryDeliveries: 0 });
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    } else {
+      expect({ afterClose: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterClose: 0, expiryDeliveries: 0 });
+    }
   });
 
   test('a signed same-generation expiry with different claimedUntil is fail-closed rather than an exact duplicate', async () => {
@@ -437,11 +492,14 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const claim1 = await parseCaptured(sent[0]!, 2);
-    const expiry1 = await parseCaptured(sent[1]!, 3);
-    const duplicateExpiry1 = await parseCaptured(sent[1]!, 4);
+    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')
+      ?? expiryDelivery({ claimedUntil: first.claimedUntil });
+    const expiry1 = await parseCaptured(expiryInput, 3);
+    const duplicateExpiry1 = await parseCaptured(expiryInput, 4);
     const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1!, expiry1!, duplicateExpiry1!]);
     let reclaimGeneration: number | null = null;
     if (rebuilt) {
@@ -472,14 +530,18 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')
+      ?? expiryDelivery({ claimedUntil: first.claimedUntil });
+    const claimMails = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim');
     const rebuilt = taskFromMessages(ID, [
       submittedRaw(),
-      (await parseCaptured(sent[0]!, 2))!,
-      (await parseCaptured(sent[1]!, 3))!,
-      (await parseCaptured(sent[2]!, 4))!,
-      (await parseCaptured(sent[1]!, 5))!,
+      (await parseCaptured(claimMails[0]!, 2))!,
+      (await parseCaptured(expiryInput, 3))!,
+      (await parseCaptured(claimMails[1]!, 4))!,
+      (await parseCaptured(expiryInput, 5))!,
     ]);
     expect({
       validRebuild: rebuilt !== null,
@@ -506,8 +568,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     now = Date.parse(first.claimedUntil);
     await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const claim1 = await parseCaptured(sent[0]!, 2);
-    const expiry1 = await parseCaptured(sent[1]!, 3);
-    const duplicateExpiry1 = await parseCaptured(sent[1]!, 4);
+    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')
+      ?? expiryDelivery({ claimedUntil: first.claimedUntil });
+    const expiry1 = await parseCaptured(expiryInput, 3);
+    const duplicateExpiry1 = await parseCaptured(expiryInput, 4);
     const baseline = claim1 && expiry1
       ? taskFromMessages(ID, [submittedRaw(), claim1, expiry1])
       : null;
@@ -561,12 +625,16 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
     clearQueuedEventsForTests();
     setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     const second = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
-    const claim1 = await parseCaptured(sent[0]!, 2);
-    const expiry1 = await parseCaptured(sent[1]!, 3);
-    const claim2 = await parseCaptured(sent[2]!, 4);
-    const duplicateExpiry1 = await parseCaptured(sent[1]!, 5);
+    const claimMails = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim');
+    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')
+      ?? expiryDelivery({ claimedUntil: first.claimedUntil });
+    const claim1 = await parseCaptured(claimMails[0]!, 2);
+    const expiry1 = await parseCaptured(expiryInput, 3);
+    const claim2 = await parseCaptured(claimMails[1]!, 4);
+    const duplicateExpiry1 = await parseCaptured(expiryInput, 5);
     const baseline = claim1 && expiry1 && claim2
       ? taskFromMessages(ID, [submittedRaw(), claim1, expiry1, claim2])
       : null;
@@ -621,10 +689,15 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     if (!taskService.claim) throw new Error('shipped claim service is unavailable');
 
     const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
+    const claim = await parseCaptured(sent[0]!, 2);
+    durable = taskFromMessages(ID, [submittedRaw(), claim!])!;
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
     now = Date.parse(first.claimedUntil);
     const firstReap = await reapExpiredTaskLeasesOnce();
-    const claim = await parseCaptured(sent[0]!, 2);
-    const expiry = await parseCaptured(sent[1]!, 3);
+    const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')
+      ?? expiryDelivery({ claimedUntil: first.claimedUntil });
+    const expiry = await parseCaptured(expiryInput, 3);
     const expiredDurable = claim && expiry ? taskFromMessages(ID, [submittedRaw(), claim, expiry]) : null;
     if (!expiredDurable) throw new Error('R14 fixture must rebuild the authenticated expiry receipt');
     durable = expiredDurable;
@@ -668,7 +741,7 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
         expiredReceiptGeneration: 1,
         messageCount: 3,
         publicTiming: [null, null],
-        reaper: { first: 1, second: 0, duplicateDeliveries: 0 },
+        reaper: { first: taskLeaseExpiryAuditM3Enabled() ? 0 : 1, second: 0, duplicateDeliveries: 0 },
       },
       laterGenerationQueuedAuthority: {
         generation: 2,
@@ -710,7 +783,11 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
         staleOperation: result[1]?.status === 'rejected' && String((result[1] as PromiseRejectedResult).reason).includes('stale_lease'),
         expiryDeliveries: expiry.length,
         authorityInactive: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
-      }).toEqual({ staleOperation: true, expiryDeliveries: 1, authorityInactive: false });
+      }).toEqual({
+        staleOperation: true,
+        expiryDeliveries: taskLeaseExpiryAuditM3Enabled() ? 0 : 1,
+        authorityInactive: taskLeaseExpiryAuditM3Enabled() ? null : false,
+      });
       clearQueuedEventsForTests();
     }
   });
@@ -836,6 +913,10 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     setTaskGetForTests(async () => durable);
     setTaskListAllForTests(async () => [durable]);
     await reapExpiredTaskLeasesOnce();
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(0);
+      return;
+    }
     const expiryA = await parseCaptured(sent[1]!, 3);
     expect(expiryA).not.toBeNull();
     expect(expiryA?.lease?.event).toBe('expired');
@@ -892,6 +973,16 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     const first = await taskService.claim({ id: ID, from: RECIPIENT, leaseSec: 300 });
     const claim1 = (await parseCaptured(sent[0]!, 2))!;
     durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+
+    // M3-on：reaper 不发 expiry，本则依赖 expiry A/B 发射对排队回执做索引检测。
+    if (taskLeaseExpiryAuditM3Enabled()) {
+      now = Date.parse(first.claimedUntil);
+      setTaskGetForTests(async () => durable);
+      setTaskListAllForTests(async () => [durable]);
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+      expect(sent.filter((m) => m.subject === 'Task expired').length).toBe(0);
+      return;
+    }
 
     // Materialize expiry A
     now = Date.parse(first.claimedUntil);
@@ -1188,8 +1279,11 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     expect(claim2).not.toBeNull();
     const staleGen1Expiry = await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 9);
     expect(staleGen1Expiry).not.toBeNull();
-    // Durable thread: root, claim1, claim2, staleGen1Expiry
-    // Since Gen 1 was never expired, this is NOT a retry of an applied expiry!
-    expect(taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!])).toBeNull();
+    const lateSequence = taskFromMessages(ID, [submittedRaw(), claim1, claim2, staleGen1Expiry!]);
+    // R1-d：容忍无条件。迟到回执匹配历史窗 → 审计 no-op，权威停在 claim2（开关只门控发射）。
+    expect(lateSequence).not.toBeNull();
+    expect(lateSequence?.lease?.leaseGeneration).toBe(2);
+    expect(lateSequence?.expiredLease).toBeUndefined();
+    expect(toTaskView(lateSequence!).messages).toHaveLength(3);
   });
 });
