@@ -1961,7 +1961,9 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     const authority = task.lease;
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      return !!receipt && isSameLeaseExpiryIdentity(receipt, queued.lease);
+      // 身份匹配或后继代已索引都退休：gen2 入盘后 expiredLease 被清，只认身份会让队列行永不退休并重放。
+      return (!!receipt && isSameLeaseExpiryIdentity(receipt, queued.lease))
+        || indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict');
     }
     if (queued.lease.event === 'release') {
       return indexedLeaseGenerationDominates(task, queued.lease.generation, 'exclude')

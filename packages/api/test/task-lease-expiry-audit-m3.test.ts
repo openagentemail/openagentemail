@@ -20,6 +20,7 @@ const { afterEach, describe, expect, test: bunTest, spyOn } = await import('bun:
 const { parseConfig } = await import('../src/lib/config.ts');
 const {
   claimTask,
+  getTask,
   isTaskLeaseTokenCurrent,
   reapExpiredTaskLeasesOnce,
   taskFromMessages,
@@ -442,5 +443,65 @@ describe('M3 终态冻结', () => {
       state: view?.state,
       phantom: view?.messages.some((message) => message.body === 'Lease expired.') ?? true,
     }).toEqual({ rebuilt: true, state: 'completed', phantom: false });
+  });
+});
+
+describe('B2 队列行退休（后继代已索引）', () => {
+  bunTest('M3-off 过期 reclaim 双索引后过期队列行退休，读路径不重放', async () => {
+    await withM3Off(async () => {
+      let now = START;
+      let durable = submittedTask();
+      const sent: SendInput[] = [];
+      setTaskNowForTests(() => now);
+      setTaskGetForTests(async () => durable);
+      setTaskSendMailForTests(async (input) => {
+        sent.push(input);
+        return { messageId: `<m3-b2-${sent.length}>` };
+      });
+      const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const claim1 = (await parseCaptured(sent[0]!, 2))!;
+      durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+      // 不 clear 队列：reclaim 会排队 gen1 回执 + gen2 claim，随后双双入盘。
+      setTaskGetForTests(async () => durable);
+      now = Date.parse(first.claimedUntil);
+      const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const expiryInput = sent.find((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+      const claim2Input = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')[1];
+      const expiry = expiryInput ? (await parseCaptured(expiryInput, 3))! : null;
+      const claim2 = claim2Input ? (await parseCaptured(claim2Input, 4))! : null;
+      const indexed = claim1 && expiry && claim2
+        ? taskFromMessages(ID, [submittedRaw(), claim1, expiry, claim2])
+        : null;
+      if (!indexed) throw new Error('B2 fixture must index gen1 expiry and gen2 claim');
+      durable = indexed;
+      setTaskGetForTests(async () => durable);
+      const firstRead = await getTask(ID);
+      const firstView = firstRead ? toTaskView(firstRead) : null;
+      const secondRead = await getTask(ID);
+      const secondView = secondRead ? toTaskView(secondRead) : null;
+      expect({
+        generation: second.leaseGeneration,
+        leaseGen: firstRead?.lease?.leaseGeneration ?? null,
+        expiredStamped: firstRead?.expiredLease !== undefined,
+        state: firstRead?.state ?? null,
+        expiryBodies: firstView?.messages.filter((message) => message.body === 'Lease expired.').length ?? -1,
+        messages: firstRead?.messages.length ?? null,
+        durableMessages: indexed.messages.length,
+        secondExpiryBodies: secondView?.messages.filter((message) => message.body === 'Lease expired.').length ?? -1,
+        secondMessages: secondRead?.messages.length ?? null,
+        secondLeaseGen: secondRead?.lease?.leaseGeneration ?? null,
+      }).toEqual({
+        generation: 2,
+        leaseGen: 2,
+        expiredStamped: false,
+        state: 'working',
+        expiryBodies: 1,
+        messages: indexed.messages.length,
+        durableMessages: indexed.messages.length,
+        secondExpiryBodies: 1,
+        secondMessages: indexed.messages.length,
+        secondLeaseGen: 2,
+      });
+    });
   });
 });
