@@ -352,6 +352,19 @@ function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
 
 let deliveryLogIndex: DeliveryLogIndex = emptyDeliveryLogIndex();
 
+/** 测试用投递日志 IO 计数：全量读 vs 增量读，不含 stat。 */
+type DeliveryLogIoStats = {
+  fullReads: number;
+  incrementalReads: number;
+  bytesRead: number;
+};
+
+let deliveryLogIoForTests: DeliveryLogIoStats = {
+  fullReads: 0,
+  incrementalReads: 0,
+  bytesRead: 0,
+};
+
 function groupKeyForRow(row: WebhookDeliveryLogRow): string {
   return `${row.webhookId}:${row.eventId}:${row.runId}`;
 }
@@ -483,6 +496,9 @@ function refreshDeliveryLogIndex(): DeliveryLogIndex {
   try {
     const buf = Buffer.alloc(length);
     const n = readSync(fd, buf, 0, length, deliveryLogIndex.size);
+    // 增量读计入测试 IO，证明热路径不是按订阅数全量扫盘
+    deliveryLogIoForTests.incrementalReads += 1;
+    deliveryLogIoForTests.bytesRead += n;
     const consumed = ingestIncrementalBytes(deliveryLogIndex, buf.subarray(0, n));
     deliveryLogIndex.size += consumed;
     deliveryLogIndex.mtimeMs = st.mtimeMs;
@@ -514,11 +530,23 @@ export function resetDeliveryLogIndexForTests(): void {
   deliveryLogIndex = emptyDeliveryLogIndex();
 }
 
+export function getDeliveryLogIoForTests(): DeliveryLogIoStats {
+  return { ...deliveryLogIoForTests };
+}
+
+export function resetDeliveryLogIoForTests(): void {
+  deliveryLogIoForTests = { fullReads: 0, incrementalReads: 0, bytesRead: 0 };
+}
+
 /** Full-file parse used by boot reconstruction and compaction. */
 export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   const path = deliveryLogPath();
   if (!existsSync(path)) return [];
-  return parseDeliveryLogText(readFileSync(path, 'utf8'));
+  const text = readFileSync(path, 'utf8');
+  // 全量读计入测试 IO，list/probe 热路径不得随订阅数线性放大
+  deliveryLogIoForTests.fullReads += 1;
+  deliveryLogIoForTests.bytesRead += Buffer.byteLength(text, 'utf8');
+  return parseDeliveryLogText(text);
 }
 
 function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {
