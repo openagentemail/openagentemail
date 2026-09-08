@@ -418,8 +418,8 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.renew({ id: ID, from: RECIPIENT, leaseToken: renewable.leaseToken, leaseSec: 301 })]);
     now = Date.parse(renewable.claimedUntil);
     if (taskLeaseExpiryAuditM3Enabled()) {
-      // overlay renew 不改 durable 窗；到期按 durable 缺失补账。
-      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+      // C3：合并视图里未索引 renew 仍活跃 → withhold，不发明旧截止回执。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
     } else {
       expect({ afterRenew: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRenew: 0, expiryDeliveries: 0 });
     }
@@ -435,7 +435,8 @@ describe('#56 R8b explicit server lease expiry reaper RED', () => {
     await Promise.all([reapExpiredTaskLeasesOnce(), taskService.release({ id: ID, from: RECIPIENT, leaseToken: releasable.leaseToken, reason: 'done' })]);
     now = Date.parse(releasable.claimedUntil);
     if (taskLeaseExpiryAuditM3Enabled()) {
-      expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+      // overlay release 否决：该代已释放，不发明 expiry。
+      expect(await reapExpiredTaskLeasesOnce()).toBe(0);
     } else {
       expect({ afterRelease: await reapExpiredTaskLeasesOnce(), expiryDeliveries: sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length }).toEqual({ afterRelease: 0, expiryDeliveries: 0 });
     }

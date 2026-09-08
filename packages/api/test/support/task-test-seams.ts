@@ -11,6 +11,8 @@ import {
   warnedExpiryAuditWindowCountForTests,
   warnExpiryAuditDeliveryFailedForTests,
   expiryAuditInFlightCountForTests,
+  expiryAuditDurableReceiptPrefetchCountForTests,
+  queuedExpiryAuditRowCountForTests,
   reapExpiredTaskLeasesOnce,
 } from '../../src/lib/tasks-internal.ts';
 import { taskLeaseExpiryAuditM3Enabled } from '../../src/lib/task-lease-gate.ts';
@@ -34,4 +36,6 @@ export {
   warnedExpiryAuditWindowCountForTests,
   warnExpiryAuditDeliveryFailedForTests,
   expiryAuditInFlightCountForTests,
+  expiryAuditDurableReceiptPrefetchCountForTests,
+  queuedExpiryAuditRowCountForTests,
 };
