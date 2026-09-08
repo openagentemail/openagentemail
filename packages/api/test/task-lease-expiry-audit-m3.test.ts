@@ -22,6 +22,7 @@ const { parseConfig } = await import('../src/lib/config.ts');
 const {
   EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
   EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS,
+  EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
   claimTask,
   getTask,
   isTaskLeaseTokenCurrent,
@@ -34,6 +35,8 @@ const {
   clearQueuedEventsForTests,
   expiryAuditDeliveryFailureCountForTests,
   resetExpiryAuditDeliveryFailureCountForTests,
+  warnedExpiryAuditWindowCountForTests,
+  warnExpiryAuditDeliveryFailedForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -973,6 +976,86 @@ describe('M3 R2 返工', () => {
       windowFilled: true,
       afterIndex: 0,
     });
+  });
+});
+
+describe('M3 R3 返工', () => {
+  testOn('R3：失败 warn 一次，投递成功后 warned 集合清空', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    let failExpiry = true;
+    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    setTaskSendMailForTests(async (input) => {
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('smtp down');
+      }
+      sent.push(input);
+      return { messageId: `<m3-r3a-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
+    clearQueuedEventsForTests();
+    now = Date.parse(first.claimedUntil);
+    setTaskGetForTests(async () => durable);
+    setTaskListAllForTests(async () => [durable]);
+    await reapExpiredTaskLeasesOnce();
+    await reapExpiredTaskLeasesOnce();
+    const afterFail = {
+      warns: warn.mock.calls
+        .map((args) => args[0])
+        .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
+        .filter((row) => row.kind === 'expiry_audit_delivery_failed').length,
+      warned: warnedExpiryAuditWindowCountForTests(),
+      failures: expiryAuditDeliveryFailureCountForTests(),
+    };
+    failExpiry = false;
+    await reapExpiredTaskLeasesOnce();
+    warn.mockRestore();
+    expect({
+      ...afterFail,
+      afterSuccess: warnedExpiryAuditWindowCountForTests(),
+    }).toEqual({
+      warns: 1,
+      warned: 1,
+      failures: 2,
+      afterSuccess: 0,
+    });
+  });
+
+  testOn('R3：连续失败超上限，集合大小不超 1024', () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
+    const over = EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT + 3;
+    for (let index = 0; index < over; index += 1) {
+      warnExpiryAuditDeliveryFailedForTests({
+        taskId: ID,
+        generation: index + 1,
+        claimedUntil: new Date(START + index * 1000).toISOString(),
+        error: new Error('smtp down'),
+      });
+    }
+    const size = warnedExpiryAuditWindowCountForTests();
+    // 最旧键已被淘汰，再失败应再 warn（近似去重）。
+    warnExpiryAuditDeliveryFailedForTests({
+      taskId: ID,
+      generation: 1,
+      claimedUntil: new Date(START).toISOString(),
+      error: new Error('smtp down'),
+    });
+    const extra = warn.mock.calls
+      .map((args) => args[0])
+      .filter((row): row is { kind?: string } => !!row && typeof row === 'object')
+      .filter((row) => row.kind === 'expiry_audit_delivery_failed').length;
+    warn.mockRestore();
+    expect({ size, extra, stillCapped: warnedExpiryAuditWindowCountForTests() })
+      .toEqual({
+        size: EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
+        extra: over + 1,
+        stillCapped: EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
+      });
   });
 });
 

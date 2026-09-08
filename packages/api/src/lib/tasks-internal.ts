@@ -2001,12 +2001,18 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     const authority = task.lease;
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      if (receipt && isSameLeaseExpiryIdentity(receipt, queued.lease)) return true;
+      if (receipt && isSameLeaseExpiryIdentity(receipt, queued.lease)) {
+        noteExpiryAuditWindowResolved(task.id, queued.lease.generation, queued.lease.claimedUntil);
+        return true;
+      }
       // 历史窗回执：后继 generation 在场只说明权威已前进，不能证明该窗回执已入 durable。
       // 用窗记账判断，避免 overlay 被误退休后 reaper 重发（M3-2 幂等）。
       if (task.leaseClaimWindows?.some((window) =>
         window.hasExpiryReceipt && isSameLeaseExpiryIdentity(window, queued.lease)
-      )) return true;
+      )) {
+        noteExpiryAuditWindowResolved(task.id, queued.lease.generation, queued.lease.claimedUntil);
+        return true;
+      }
       return false;
     }
     if (queued.lease.event === 'release') {
@@ -2560,10 +2566,23 @@ export const EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT = 8;
  * 的补账标记加 15min，超时后按 durable 缺失再发，窗身份幂等去重兜底重复信。 */
 export const EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS = 15 * 60 * 1000;
 
+/** warned 集合总量兜底。按插入序淘汰最旧；去重退化为近似，warn 最多多打几条，无害。 */
+export const EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT = 1024;
+
 /** M3 投递失败计数；进程内、可丢，只为可观测性。 */
 let expiryAuditDeliveryFailures = 0;
-/** 每窗每进程只 warn 一次；计数器仍每次累加。 */
+/** 每窗每进程只 warn 一次；成功/入索引即驱逐。Set 保插入序。 */
 const warnedExpiryAuditWindows = new Set<string>();
+
+/** 窗身份键：taskId + generation + claimedUntil。 */
+function expiryAuditWindowKey(taskId: string, generation: number, claimedUntil: string): string {
+  return `${taskId}\n${generation}\n${claimedUntil}`;
+}
+
+/** 回执已投递成功或已入索引：从 warned 集合移除，恢复后内存归零。 */
+function noteExpiryAuditWindowResolved(taskId: string, generation: number, claimedUntil: string): void {
+  warnedExpiryAuditWindows.delete(expiryAuditWindowKey(taskId, generation, claimedUntil));
+}
 
 /** SMTP 投递失败的标记错误，供 reaper 单候选隔离识别。 */
 class ExpiryAuditDeliveryError extends Error {
@@ -2592,8 +2611,14 @@ function warnExpiryAuditDeliveryFailed(detail: {
   error: unknown;
 }): void {
   expiryAuditDeliveryFailures += 1;
-  const key = `${detail.taskId}\n${detail.generation}\n${detail.claimedUntil}`;
+  const key = expiryAuditWindowKey(detail.taskId, detail.generation, detail.claimedUntil);
   if (warnedExpiryAuditWindows.has(key)) return;
+  // 达上限按插入序丢最旧，避免无界增长。
+  while (warnedExpiryAuditWindows.size >= EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT) {
+    const oldest = warnedExpiryAuditWindows.keys().next().value;
+    if (oldest === undefined) break;
+    warnedExpiryAuditWindows.delete(oldest);
+  }
   warnedExpiryAuditWindows.add(key);
   console.warn({
     kind: 'expiry_audit_delivery_failed',
@@ -2612,6 +2637,20 @@ export function expiryAuditDeliveryFailureCountForTests(): number {
 export function resetExpiryAuditDeliveryFailureCountForTests(): void {
   expiryAuditDeliveryFailures = 0;
   warnedExpiryAuditWindows.clear();
+}
+
+export function warnedExpiryAuditWindowCountForTests(): number {
+  return warnedExpiryAuditWindows.size;
+}
+
+/** 测试专用：走真实限频/上限路径，避免为 1024 造整卡 IMAP 流。 */
+export function warnExpiryAuditDeliveryFailedForTests(detail: {
+  taskId: string;
+  generation: number;
+  claimedUntil: string;
+  error: unknown;
+}): void {
+  warnExpiryAuditDeliveryFailed(detail);
 }
 
 function upsertLeaseClaimWindow(
@@ -2735,6 +2774,8 @@ async function emitExpiryAuditUnlocked(
     });
     throw new ExpiryAuditDeliveryError(current.id, window.generation, window.claimedUntil, error);
   }
+  // 投递成功即驱逐，SMTP 恢复后 warned 内存归零。
+  noteExpiryAuditWindowResolved(current.id, window.generation, window.claimedUntil);
   invalidateTaskListCache();
   const eventMessage = leaseEventMessage({
     task: current, from, to, state: current.state, at: expiredAt, body: text,
@@ -2799,9 +2840,17 @@ async function reconcileMissingExpiryAuditsUnlocked(current: Task): Promise<numb
   let snapshot = current;
   for (const window of windows) {
     if (emitted >= EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT) break;
-    if (window.hasRelease || window.hasExpiryReceipt) continue;
+    if (window.hasRelease || window.hasExpiryReceipt) {
+      if (window.hasExpiryReceipt) {
+        noteExpiryAuditWindowResolved(snapshot.id, window.generation, window.claimedUntil);
+      }
+      continue;
+    }
     if (!window.claimedUntil || now < Date.parse(window.claimedUntil)) continue;
-    if (snapshot.expiredLease && isSameLeaseExpiryIdentity(snapshot.expiredLease, window)) continue;
+    if (snapshot.expiredLease && isSameLeaseExpiryIdentity(snapshot.expiredLease, window)) {
+      noteExpiryAuditWindowResolved(snapshot.id, window.generation, window.claimedUntil);
+      continue;
+    }
     if (overlayHasExpiryReceipt(snapshot.id, window)) continue;
     snapshot = await emitExpiryAuditUnlocked(snapshot, window);
     emitted += 1;

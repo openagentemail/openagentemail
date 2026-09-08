@@ -8,6 +8,8 @@ import {
   takeApprovalWatcherParseCallsForTests,
   expiryAuditDeliveryFailureCountForTests,
   resetExpiryAuditDeliveryFailureCountForTests,
+  warnedExpiryAuditWindowCountForTests,
+  warnExpiryAuditDeliveryFailedForTests,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -20,4 +22,6 @@ export {
   takeApprovalWatcherParseCallsForTests,
   expiryAuditDeliveryFailureCountForTests,
   resetExpiryAuditDeliveryFailureCountForTests,
+  warnedExpiryAuditWindowCountForTests,
+  warnExpiryAuditDeliveryFailedForTests,
 };
