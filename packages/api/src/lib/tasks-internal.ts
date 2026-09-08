@@ -2160,11 +2160,11 @@ function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs
  */
 function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: number): {
   overlay: QueuedEvent[];
-  stoppedClosings: QueuedEvent[];
+  stoppedClosingGens: Set<number>;
 } {
   const byGeneration = new Map<number, QueuedEvent[]>();
   const keep = new Set<QueuedEvent>();
-  const stoppedClosings: QueuedEvent[] = [];
+  const stoppedClosingGens = new Set<number>();
   for (const row of rows) {
     if (!row.lease) {
       keep.add(row);
@@ -2180,22 +2180,23 @@ function filterPublicLeaseOverlay(taskId: string, rows: QueuedEvent[], now: numb
     const age = now - newest.sentAt;
     if (age > LEASE_OVERLAY_MAX_LIFETIME_MS) {
       noteLeaseOverlayReplayExpired(taskId, generation, age);
-      for (const row of group) {
-        if (row.lease?.event === 'release' || row.lease?.event === 'expired') stoppedClosings.push(row);
+      if (group.some((row) => row.lease?.event === 'release' || row.lease?.event === 'expired')) {
+        stoppedClosingGens.add(generation);
       }
       continue;
     }
     for (const row of group) keep.add(row);
   }
   // 保持原序，避免权威叠加顺序被打乱。
-  return { overlay: rows.filter((row) => keep.has(row)), stoppedClosings };
+  return { overlay: rows.filter((row) => keep.has(row)), stoppedClosingGens };
 }
 
-/** 停播的 release/expired 若对应 durable 仍可见的同代 claim，只在返回视图上盖掉活租约。 */
-function applyStoppedClosingsToPublicView(task: Task, closings: QueuedEvent[]): Task {
-  const matching = closings.filter((row) => row.lease && task.lease?.leaseGeneration === row.lease.generation);
-  if (matching.length === 0) return task;
-  return applyOverlayMessages(task, matching);
+/** 案 A：只压掉 durable 同代活 claim 的租约字段；不合并关账行，不动 state/消息。 */
+function suppressDurableLeaseProjection(task: Task, stoppedClosingGens: ReadonlySet<number>): Task {
+  if (!task.lease || !stoppedClosingGens.has(task.lease.leaseGeneration)) return task;
+  const next = { ...task };
+  delete next.lease;
+  return next;
 }
 
 function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
@@ -2216,8 +2217,8 @@ function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
   // 退休判定仍写回全量 stillLagging；有界过滤只作用于本次返回视图。
   queuedEvents.set(task.id, stillLagging);
   if (opts?.publicRead && taskLeaseOverlayBoundEnabled()) {
-    const { overlay, stoppedClosings } = filterPublicLeaseOverlay(task.id, stillLagging, now);
-    return applyStoppedClosingsToPublicView(applyOverlayMessages(task, overlay), stoppedClosings);
+    const { overlay, stoppedClosingGens } = filterPublicLeaseOverlay(task.id, stillLagging, now);
+    return suppressDurableLeaseProjection(applyOverlayMessages(task, overlay), stoppedClosingGens);
   }
   return applyOverlayMessages(task, stillLagging);
 }

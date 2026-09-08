@@ -29,6 +29,7 @@ const {
   releaseTask,
   renewTask,
   taskFromMessages,
+  updateTask,
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
@@ -299,18 +300,25 @@ describe('M1 公共读 overlay 有界', () => {
     expect(takeLeaseOverlayReplayExpiredCountForTests()).toBe(0);
   });
 
-  testOn('fix3-1 已索引 claim × 排队 release 掉龄：公共遮蔽活租约，内视图不变', async () => {
+  testOn('fix4 已索引后继状态不回退，旧关账消息不进公共序列', async () => {
     let now = START;
     const sent: SendInput[] = [];
     setTaskNowForTests(() => now);
     setTaskGetForTests(async () => submittedTask());
     setTaskSendMailForTests(async (input) => {
       sent.push(input);
-      return { messageId: `<m1-fix3-1-${sent.length}>` };
+      return { messageId: `<m1-fix4-${sent.length}>` };
     });
     const grant = await claimTask({ id: ID, from: B, leaseSec: 3600 });
-    const indexed = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    setTaskGetForTests(async () => indexed);
+    now = START + 1_000;
+    await updateTask({ id: ID, from: B, state: 'working', body: 'later-progress', leaseToken: grant.leaseToken });
+    const durableIndexed = taskFromMessages(ID, [
+      submittedRaw(),
+      (await parseCaptured(sent[0]!, 2))!,
+      (await parseCaptured(sent[1]!, 3))!,
+    ])!;
+    setTaskGetForTests(async () => durableIndexed);
+    now = START + 2_000;
     await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken });
     now = START + STALE;
     const warn = spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -318,11 +326,16 @@ describe('M1 公共读 overlay 有界', () => {
     const authority = await getTaskSnapshot(ID);
     const durable = await getTaskSnapshot(ID, { mergeOverlay: false });
     warn.mockRestore();
+    expect(durable?.state).toBe('working');
     expect(durable?.lease?.leaseGeneration).toBe(1);
     expect(authority?.releasedLease?.leaseGeneration).toBe(1);
-    expect(authority?.lease).toBeUndefined();
     expect(publicTask?.lease).toBeUndefined();
-    expect(publicTask?.releasedLease?.leaseGeneration).toBe(1);
+    expect(publicTask?.releasedLease).toBeUndefined();
+    expect(publicTask?.state).toBe(durable?.state);
+    expect(publicTask?.updatedAt).toBe(durable?.updatedAt);
+    expect(publicTask?.messages.map((row) => row.body)).toEqual(durable?.messages.map((row) => row.body));
+    expect(publicTask?.messages.some((row) => row.body === 'Lease released.' || row.body === 'Lease expired.')).toBe(false);
+    expect(publicTask?.messages.some((row) => row.body.includes('later-progress'))).toBe(true);
   });
 
   testOn('fix3-2 >1024 个 stale key 时窗口内 warn 有界，计数仍按 key 累计', async () => {
