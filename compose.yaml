@@ -232,8 +232,8 @@ services:
       # M3 reclaim decoupling (default false): claim derives expiry; audit SMTP cannot block reclaim.
       # Late-receipt tolerance is always on and is not gated by this flag.
       TASK_LEASES_EXPIRY_AUDIT_M3: ${TASK_LEASES_EXPIRY_AUDIT_M3:-false}
-      # Public-read lease overlay bound (default false): list/detail stop replaying unindexed lease events after 15 minutes.
       TASK_LEASES_OVERLAY_BOUND: ${TASK_LEASES_OVERLAY_BOUND:-false}
+      # Public-read lease overlay bound (default false): list/detail stop replaying unindexed lease events after 15 minutes.
       # --- catch-all mailbox access (same account for IMAP read + SMTP send) ---
       IMAP_HOST: mailserver
       IMAP_PORT: 993

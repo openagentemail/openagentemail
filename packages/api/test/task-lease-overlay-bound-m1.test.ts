@@ -142,7 +142,7 @@ describe('M1 配置面与默认关', () => {
         publicRead: /public|list\/detail|list\/详情|公共读/i.test(nearby) || /public list\/detail/i.test(text),
       };
     });
-    expect(observed.every((row) => row.mentionsFlag && row.defaultsFalse)).toBe(true);
+    expect(observed.every((row) => row.mentionsFlag && row.defaultsFalse && row.publicRead)).toBe(true);
   });
 });
 
