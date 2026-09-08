@@ -6,6 +6,9 @@ import {
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
   takeApprovalWatcherParseCallsForTests,
+  takeLeaseOverlayReplayExpiredCountForTests,
+  getTaskSnapshot,
+  LEASE_OVERLAY_MAX_LIFETIME_MS,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -16,4 +19,7 @@ export {
   clearQueuedEventsForTests,
   scanDurableTasksForTests,
   takeApprovalWatcherParseCallsForTests,
+  takeLeaseOverlayReplayExpiredCountForTests,
+  getTaskSnapshot,
+  LEASE_OVERLAY_MAX_LIFETIME_MS,
 };

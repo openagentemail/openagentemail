@@ -6,6 +6,8 @@ import { config } from './config.ts';
 const testLeaseGate = new AsyncLocalStorage<boolean>();
 // M3 与 leases 总闸分开覆盖，避免并发单测互相污染。
 const testExpiryAuditM3Gate = new AsyncLocalStorage<boolean>();
+// M1 公共读有界闸单独覆盖，避免与总闸/M3 并发单测互相污染。
+const testOverlayBoundGate = new AsyncLocalStorage<boolean>();
 
 export function taskLeasesEnabled(): boolean {
   return testLeaseGate.getStore() ?? config.taskLeasesEnabled;
@@ -16,6 +18,11 @@ export function taskLeaseExpiryAuditM3Enabled(): boolean {
   return testExpiryAuditM3Gate.getStore() ?? config.taskLeasesExpiryAuditM3;
 }
 
+/** M1 公共读 overlay 有界闸：on 时 list/详情停播超龄 lease 重放。 */
+export function taskLeaseOverlayBoundEnabled(): boolean {
+  return testOverlayBoundGate.getStore() ?? config.taskLeasesOverlayBound;
+}
+
 /** @internal Test-only scoped gate override; do not export through tasks.ts. */
 export function withTaskLeasesEnabledForTests<T>(enabled: boolean, work: () => T): T {
   return testLeaseGate.run(enabled, work);
@@ -24,4 +31,9 @@ export function withTaskLeasesEnabledForTests<T>(enabled: boolean, work: () => T
 /** @internal M3 开关的测试覆盖；不经 tasks.ts 公开导出。 */
 export function withTaskLeaseExpiryAuditM3ForTests<T>(enabled: boolean, work: () => T): T {
   return testExpiryAuditM3Gate.run(enabled, work);
+}
+
+/** @internal M1 公共读有界闸的测试覆盖；不经 tasks.ts 公开导出。 */
+export function withTaskLeaseOverlayBoundForTests<T>(enabled: boolean, work: () => T): T {
+  return testOverlayBoundGate.run(enabled, work);
 }
