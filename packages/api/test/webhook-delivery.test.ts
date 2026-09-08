@@ -1870,21 +1870,27 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     appendDeliveryLogRow(row('c1', 'whk_c', t1, 1));
     appendDeliveryLogRow(row('c2', 'whk_c', t2, 1));
 
-    // 冷启动允许一次重建；热查询不得再全量读
+    // 无追加/替换时数据读必须为 0：次数与字节一并封顶
+    const expectNoDataReads = () => {
+      expect(getDeliveryLogIoForTests()).toEqual({
+        fullReads: 0,
+        incrementalReads: 0,
+        bytesRead: 0,
+      });
+    };
+
+    // 冷启动允许一次重建；热查询不得再读数据
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
     resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
     expect(getLatestDeliveryForWebhook('whk_b')).toBeNull();
     expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c2');
-    const afterFirst = getDeliveryLogIoForTests();
-    expect(afterFirst.fullReads).toBe(0);
+    expectNoDataReads();
 
     getLatestDeliveryForWebhook('whk_a');
     getLatestDeliveryForWebhook('whk_b');
     getLatestDeliveryForWebhook('whk_c');
-    const afterWarm = getDeliveryLogIoForTests();
-    expect(afterWarm.fullReads).toBe(afterFirst.fullReads);
-    expect(afterWarm.incrementalReads).toBe(afterFirst.incrementalReads);
+    expectNoDataReads();
 
     for (let i = 0; i < 8; i++) {
       appendDeliveryLogRow(row(`x${i}`, `whk_x${i}`, t2, 1));
@@ -1894,15 +1900,18 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       expect(getLatestDeliveryForWebhook(`whk_x${i}`)?.deliveryId).toBe(`dlv_x${i}`);
     }
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
-    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+    expectNoDataReads();
 
     const extra = row('c3', 'whk_c', new Date(now).toISOString(), 1);
-    appendFileSync(logPath, `${JSON.stringify(extra)}\n`);
+    const extraLine = `${JSON.stringify(extra)}\n`;
+    const extraBytes = Buffer.byteLength(extraLine, 'utf8');
+    appendFileSync(logPath, extraLine);
     resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c3');
     const afterAppend = getDeliveryLogIoForTests();
     expect(afterAppend.fullReads).toBe(0);
-    expect(afterAppend.incrementalReads).toBeGreaterThanOrEqual(1);
+    expect(afterAppend.incrementalReads).toBe(1);
+    expect(afterAppend.bytesRead).toBe(extraBytes);
 
     const oldTs = new Date(now - 40 * 86400000).toISOString();
     appendDeliveryLogRow(row('old', 'whk_old', oldTs, 1));
@@ -1910,16 +1919,21 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_old')).toBeNull();
     expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c3');
-    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+    expectNoDataReads();
 
     const replacement = row('rep', 'whk_a', new Date(now + 1000).toISOString(), 1);
+    const replacementLine = `${JSON.stringify(replacement)}\n`;
+    const replacementBytes = Buffer.byteLength(replacementLine, 'utf8');
     const tmp = `${logPath}.replace`;
-    writeFileSync(tmp, `${JSON.stringify(replacement)}\n`);
+    writeFileSync(tmp, replacementLine);
     renameSync(tmp, logPath);
     resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_rep');
     expect(getLatestDeliveryForWebhook('whk_c')).toBeNull();
-    expect(getDeliveryLogIoForTests().fullReads).toBe(1);
+    const afterReplace = getDeliveryLogIoForTests();
+    expect(afterReplace.fullReads).toBe(1);
+    expect(afterReplace.incrementalReads).toBe(0);
+    expect(afterReplace.bytesRead).toBe(replacementBytes);
   });
 
   afterAll(async () => {

@@ -8,7 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { createApp } = await import('../src/app.ts');
@@ -1627,7 +1627,15 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       reason: 'upstream',
     });
 
-    // 冷启动可重建一次；之后 list/probe 不得按订阅数再次全量读
+    const expectNoDataReads = () => {
+      expect(getDeliveryLogIoForTests()).toEqual({
+        fullReads: 0,
+        incrementalReads: 0,
+        bytesRead: 0,
+      });
+    };
+
+    // 冷启动可重建一次；无追加时 list/GET 数据读必须为 0
     const prime = await app.request('/v1/webhooks', {
       headers: { Authorization: `Bearer ${adminKey}` },
     });
@@ -1642,8 +1650,7 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(byId.get(empty.id).lastDelivery).toBeNull();
     expect(byId.get(older.id).lastDelivery.deliveryId).toBe('dlv_old_attempt2');
     expect(byId.get(newer.id).lastDelivery.deliveryId).toBe('dlv_new');
-    const afterList = getDeliveryLogIoForTests();
-    expect(afterList.fullReads).toBe(0);
+    expectNoDataReads();
 
     for (const sub of subs) {
       const detail = await app.request(`/v1/webhooks/${sub.id}`, {
@@ -1651,15 +1658,13 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       });
       expect(detail.status).toBe(200);
     }
-    const afterProbes = getDeliveryLogIoForTests();
-    expect(afterProbes.fullReads).toBe(afterList.fullReads);
-    expect(afterProbes.incrementalReads).toBe(afterList.incrementalReads);
+    expectNoDataReads();
 
     const warmList = await app.request('/v1/webhooks', {
       headers: { Authorization: `Bearer ${adminKey}` },
     });
     expect(warmList.status).toBe(200);
-    expect(getDeliveryLogIoForTests().fullReads).toBe(afterList.fullReads);
+    expectNoDataReads();
 
     const extraSubs = Array.from({ length: 6 }, (_, i) =>
       createWebhookSubscription({
@@ -1702,7 +1707,61 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(scaled.status).toBe(200);
     const scaledBody: any = await scaled.json();
     expect(scaledBody.webhooks.length).toBe(12);
-    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+    expectNoDataReads();
+
+    // 外部 append 必须只付追加字节，并由 list/GET 消费
+    const appended = {
+      ts: new Date(now + 1000).toISOString(),
+      webhookId: newer.id,
+      eventId: 'evt_ext_append',
+      runId: 'run_0',
+      deliveryId: 'dlv_ext_append',
+      type: 'mail.received',
+      address: newer.address,
+      messageId: '9',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date(now + 1000).toISOString(),
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 7,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    };
+    const appendedLine = `${JSON.stringify(appended)}\n`;
+    const appendedBytes = Buffer.byteLength(appendedLine, 'utf8');
+    appendFileSync(join(TEST_DATA_DIR, 'webhook-deliveries.jsonl'), appendedLine);
+    resetDeliveryLogIoForTests();
+    const appendList = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(appendList.status).toBe(200);
+    const appendListBody: any = await appendList.json();
+    const appendById = new Map<string, any>(
+      appendListBody.webhooks.map((w: any) => [w.id, w]),
+    );
+    expect(appendById.get(newer.id).lastDelivery.deliveryId).toBe('dlv_ext_append');
+    const afterAppendList = getDeliveryLogIoForTests();
+    expect(afterAppendList.fullReads).toBe(0);
+    expect(afterAppendList.incrementalReads).toBe(1);
+    expect(afterAppendList.bytesRead).toBe(appendedBytes);
+
+    const appendGet = await app.request(`/v1/webhooks/${newer.id}`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(appendGet.status).toBe(200);
+    const appendGetBody: any = await appendGet.json();
+    expect(appendGetBody.lastDelivery.deliveryId).toBe('dlv_ext_append');
+    const afterAppendGet = getDeliveryLogIoForTests();
+    expect(afterAppendGet.fullReads).toBe(0);
+    expect(afterAppendGet.incrementalReads).toBe(1);
+    expect(afterAppendGet.bytesRead).toBe(appendedBytes);
   });
 
   afterAll(async () => {

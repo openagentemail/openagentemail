@@ -352,7 +352,7 @@ function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
 
 let deliveryLogIndex: DeliveryLogIndex = emptyDeliveryLogIndex();
 
-/** 测试用投递日志 IO 计数：全量读 vs 增量读，不含 stat。 */
+/** 投递日志数据读计数（全量/增量，不含 stat）。生产读路径始终累计，供测试读取。 */
 type DeliveryLogIoStats = {
   fullReads: number;
   incrementalReads: number;
@@ -496,7 +496,7 @@ function refreshDeliveryLogIndex(): DeliveryLogIndex {
   try {
     const buf = Buffer.alloc(length);
     const n = readSync(fd, buf, 0, length, deliveryLogIndex.size);
-    // 增量读计入测试 IO，证明热路径不是按订阅数全量扫盘
+    // 增量读计入始终开启的 IO 计数，热路径不得整文件重读
     deliveryLogIoForTests.incrementalReads += 1;
     deliveryLogIoForTests.bytesRead += n;
     const consumed = ingestIncrementalBytes(deliveryLogIndex, buf.subarray(0, n));
@@ -543,7 +543,7 @@ export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   const path = deliveryLogPath();
   if (!existsSync(path)) return [];
   const text = readFileSync(path, 'utf8');
-  // 全量读计入测试 IO，list/probe 热路径不得随订阅数线性放大
+  // 全量读计入始终开启的 IO 计数，list/probe 不得随订阅数线性放大
   deliveryLogIoForTests.fullReads += 1;
   deliveryLogIoForTests.bytesRead += Buffer.byteLength(text, 'utf8');
   return parseDeliveryLogText(text);
