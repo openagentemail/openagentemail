@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## v0.7.1 — 2026-09-08
+
+### Fixed
+
+- **MCP stdio clean boot**: v0.7.0 crashed on startup in a clean client environment — an import chain pulled the mail server's env schema (`DOMAIN`/`API_KEYS`/IMAP/SMTP) into the MCP bundle before the handshake. Scope constants moved to a config-free leaf module; the stdio client now boots with only `OPENAGENTEMAIL_API_URL` + `OPENAGENTEMAIL_API_KEY` (#168, #169).
+
+### Notes
+
+- Regression guard added: `packages/mcp/test/clean-boot.test.ts` runs an initialize + tools/list handshake against the built bundle with all server-side env removed, wired into CI.
+
 ## v0.7.0 — 2026-09-07
 
 ### Added
