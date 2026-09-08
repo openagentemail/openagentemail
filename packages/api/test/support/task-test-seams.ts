@@ -10,6 +10,7 @@ import {
   resetExpiryAuditDeliveryFailureCountForTests,
   warnedExpiryAuditWindowCountForTests,
   warnExpiryAuditDeliveryFailedForTests,
+  expiryAuditInFlightCountForTests,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -24,4 +25,5 @@ export {
   resetExpiryAuditDeliveryFailureCountForTests,
   warnedExpiryAuditWindowCountForTests,
   warnExpiryAuditDeliveryFailedForTests,
+  expiryAuditInFlightCountForTests,
 };

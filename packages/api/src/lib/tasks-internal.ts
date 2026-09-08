@@ -1596,9 +1596,11 @@ async function findTaskMessages(id: string): Promise<TaskLookupResult> {
 }
 
 /** Raw durable/queued snapshot. Lock-holding writers must use this rather
- * than public getTask(), whose approval read path may itself materialize. */
-export async function getTaskSnapshot(id: string): Promise<Task | null> {
+ * than public getTask(), whose approval read path may itself materialize.
+ * mergeOverlay=false 只给 M3 reaper 算 durable 缺失窗，发射不信 overlay 标记。 */
+export async function getTaskSnapshot(id: string, opts?: { mergeOverlay?: boolean }): Promise<Task | null> {
   if (!isTaskId(id)) return null;
+  const mergeOverlay = opts?.mergeOverlay !== false;
   let raw: Task | null;
   let hadMatchingRows: boolean;
 
@@ -1612,7 +1614,7 @@ export async function getTaskSnapshot(id: string): Promise<Task | null> {
   }
 
   if (raw) {
-    return mergeQueuedEvents(raw);
+    return mergeOverlay ? mergeQueuedEvents(raw) : raw;
   }
 
   // Matching rows existed in IMAP but reconstruction failed (e.g. integrity failure).
@@ -1626,7 +1628,8 @@ export async function getTaskSnapshot(id: string): Promise<Task | null> {
   }
 
   const synthetic = getSyntheticTaskBase(id);
-  return synthetic ? mergeQueuedEvents(synthetic) : null;
+  if (!synthetic) return null;
+  return mergeOverlay ? mergeQueuedEvents(synthetic) : synthetic;
 }
 
 const PARENT_CHAIN_MAX = 64;
@@ -1858,7 +1861,7 @@ type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
   lease?: LeaseEvent;
-  /** 历史窗补账：只跟踪索引进度，不进公共 messages / updatedAt。 */
+  /** 历史窗补账：只隔离公共展示，不参与发射判定。 */
   hideFromPublicOverlay?: boolean;
 };
 
@@ -1980,6 +1983,7 @@ export function clearTaskSideEffectObserverForTests(): void {
 export function clearQueuedEventsForTests(): void {
   queuedEvents.clear();
   syntheticTaskBases.clear();
+  expiryAuditInFlight.clear();
 }
 
 function indexedLeaseGenerationDominates(
@@ -2075,7 +2079,7 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
 }
 
 function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
-  // 补账回执不进公共 overlay，避免索引前幻影 "Lease expired." 与 updatedAt 抖动。
+  // 展示隔离：补账回执不进公共 overlay。发射资格只看 durable 与在途集合。
   const publicExtra = extra.filter((row) => !row.hideFromPublicOverlay);
   const messages = [...task.messages, ...publicExtra.map((row) => row.message)];
   const ordered = messages.map((message, index) => ({ ...message, uid: index + 1 }));
@@ -2182,8 +2186,6 @@ function mergeQueuedEvents(task: Task): Task {
   const now = nowMs();
   const stillLagging = pending.filter((row) => {
     const approvalTerminal = row.message.approval?.type === 'decision' || row.message.approval?.type === 'expired';
-    // 补账 overlay 有界：接受即丢后不得靠 lease TTL 豁免永久占坑。
-    if (isExpiryAuditBackfillQueuedExpired(row, now)) return false;
     if (!row.lease && !approvalTerminal && now - row.sentAt > QUEUED_EVENT_TTL_MS) return false;
     return !eventIsIndexed(task, row);
   });
@@ -2561,10 +2563,10 @@ function leaseEventMessage(input: {
 /** 每任务每 pass 最多补这么多历史窗，余量留给下轮，避免长尾锁死全局 reaper。 */
 export const EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT = 8;
 
-/** 待索引补账标记的有界时限。lease 行默认豁免 QUEUED_EVENT_TTL，
- * SMTP 接受但邮件丢失时会永久抑制 durable 缺失重发；仅对 hideFromPublicOverlay
- * 的补账标记加 15min，超时后按 durable 缺失再发，窗身份幂等去重兜底重复信。 */
-export const EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS = 15 * 60 * 1000;
+/** 在途集合 TTL：索引滞后窗内不重发；超时视为丢信，重新获得发射资格。 */
+export const EXPIRY_AUDIT_IN_FLIGHT_TTL_MS = 15 * 60 * 1000;
+/** 在途集合上限；按插入序淘汰最旧，去重退化为近似，最多多发几封幂等回执。 */
+export const EXPIRY_AUDIT_IN_FLIGHT_LIMIT = 1024;
 
 /** warned 集合总量兜底。按插入序淘汰最旧；去重退化为近似，warn 最多多打几条，无害。 */
 export const EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT = 1024;
@@ -2573,15 +2575,46 @@ export const EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT = 1024;
 let expiryAuditDeliveryFailures = 0;
 /** 每窗每进程只 warn 一次；成功/入索引即驱逐。Set 保插入序。 */
 const warnedExpiryAuditWindows = new Set<string>();
+/** 发射闸：键=窗身份，值=最近发射时间。Map 保插入序。 */
+const expiryAuditInFlight = new Map<string, number>();
 
 /** 窗身份键：taskId + generation + claimedUntil。 */
 function expiryAuditWindowKey(taskId: string, generation: number, claimedUntil: string): string {
   return `${taskId}\n${generation}\n${claimedUntil}`;
 }
 
-/** 回执已投递成功或已入索引：从 warned 集合移除，恢复后内存归零。 */
+/** durable 已见回执：warned 与在途一并移除。 */
 function noteExpiryAuditWindowResolved(taskId: string, generation: number, claimedUntil: string): void {
-  warnedExpiryAuditWindows.delete(expiryAuditWindowKey(taskId, generation, claimedUntil));
+  const key = expiryAuditWindowKey(taskId, generation, claimedUntil);
+  warnedExpiryAuditWindows.delete(key);
+  expiryAuditInFlight.delete(key);
+}
+
+function rememberExpiryAuditInFlight(taskId: string, generation: number, claimedUntil: string): void {
+  const key = expiryAuditWindowKey(taskId, generation, claimedUntil);
+  expiryAuditInFlight.delete(key);
+  while (expiryAuditInFlight.size >= EXPIRY_AUDIT_IN_FLIGHT_LIMIT) {
+    const oldest = expiryAuditInFlight.keys().next().value;
+    if (oldest === undefined) break;
+    expiryAuditInFlight.delete(oldest);
+  }
+  expiryAuditInFlight.set(key, nowMs());
+}
+
+function isExpiryAuditInFlight(
+  taskId: string,
+  generation: number,
+  claimedUntil: string,
+  now = nowMs(),
+): boolean {
+  const key = expiryAuditWindowKey(taskId, generation, claimedUntil);
+  const sentAt = expiryAuditInFlight.get(key);
+  if (sentAt === undefined) return false;
+  if (now - sentAt > EXPIRY_AUDIT_IN_FLIGHT_TTL_MS) {
+    expiryAuditInFlight.delete(key);
+    return false;
+  }
+  return true;
 }
 
 /** SMTP 投递失败的标记错误，供 reaper 单候选隔离识别。 */
@@ -2637,6 +2670,11 @@ export function expiryAuditDeliveryFailureCountForTests(): number {
 export function resetExpiryAuditDeliveryFailureCountForTests(): void {
   expiryAuditDeliveryFailures = 0;
   warnedExpiryAuditWindows.clear();
+  expiryAuditInFlight.clear();
+}
+
+export function expiryAuditInFlightCountForTests(): number {
+  return expiryAuditInFlight.size;
 }
 
 export function warnedExpiryAuditWindowCountForTests(): number {
@@ -2666,21 +2704,6 @@ function upsertLeaseClaimWindow(
   if (index >= 0) list[index] = next;
   else list.push(next);
   return list;
-}
-
-/** 补账 queued 标记是否已过有界时限（当前权威物化 overlay 不走这条）。 */
-function isExpiryAuditBackfillQueuedExpired(row: QueuedEvent, now = nowMs()): boolean {
-  return !!row.hideFromPublicOverlay && now - row.sentAt > EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS;
-}
-
-function overlayHasExpiryReceipt(taskId: string, window: { generation: number; claimedUntil: string }): boolean {
-  const pending = queuedEvents.get(taskId);
-  if (!pending) return false;
-  const now = nowMs();
-  return pending.some((row) =>
-    row.lease?.event === 'expired'
-    && isSameLeaseExpiryIdentity(row.lease, window)
-    && !isExpiryAuditBackfillQueuedExpired(row, now));
 }
 
 /** 无重建窗时从当前快照兜底（仅覆盖最新一代）。 */
@@ -2774,8 +2797,11 @@ async function emitExpiryAuditUnlocked(
     });
     throw new ExpiryAuditDeliveryError(current.id, window.generation, window.claimedUntil, error);
   }
-  // 投递成功即驱逐，SMTP 恢复后 warned 内存归零。
-  noteExpiryAuditWindowResolved(current.id, window.generation, window.claimedUntil);
+  // 投递成功：warned 清掉；在途集合占坑，索引或 TTL 后再放行。
+  warnedExpiryAuditWindows.delete(expiryAuditWindowKey(
+    current.id, window.generation, window.claimedUntil,
+  ));
+  rememberExpiryAuditInFlight(current.id, window.generation, window.claimedUntil);
   invalidateTaskListCache();
   const eventMessage = leaseEventMessage({
     task: current, from, to, state: current.state, at: expiredAt, body: text,
@@ -2822,6 +2848,7 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
     || isApprovalTask(current)
     || !canAdvanceTask(current.state)
     || isClosedByAdmin(current)
+    || isExpiryAuditInFlight(current.id, active.leaseGeneration, active.claimedUntil)
   ) return current;
   return emitExpiryAuditUnlocked(current, {
     generation: active.leaseGeneration,
@@ -2829,29 +2856,34 @@ async function materializeLeaseExpiryUnlocked(current: Task): Promise<Task> {
   });
 }
 
-/** M3-2：从 durable 权威窗推导缺失回执；身份不可变，重跑不重发。
- * terminal 任务仍补历史窗（当前权威到期物化才跳过 terminal）。 */
-async function reconcileMissingExpiryAuditsUnlocked(current: Task): Promise<number> {
+/** durable 重建可见的回执才算真值；overlay 上的 hasExpiryReceipt 不抑制发射。 */
+function durableWindowHasExpiryReceipt(
+  durable: Task,
+  window: { generation: number; claimedUntil: string },
+): boolean {
+  if (durable.expiredLease && isSameLeaseExpiryIdentity(durable.expiredLease, window)) return true;
+  return inferLeaseClaimWindows(durable).some((row) =>
+    row.hasExpiryReceipt && row.generation === window.generation && row.claimedUntil === window.claimedUntil);
+}
+
+/** M3-2：发射资格 = durable 缺失窗 − 在途集合。overlay 标记不参与判定。
+ * view 只用来发现未索引 claim 权威窗；terminal 任务仍补历史窗。 */
+async function reconcileMissingExpiryAuditsUnlocked(view: Task, durable: Task): Promise<number> {
   if (!taskLeaseExpiryAuditM3Enabled()) return 0;
-  if (isApprovalTask(current)) return 0;
+  if (isApprovalTask(view)) return 0;
   const now = nowMs();
-  const windows = inferLeaseClaimWindows(current);
+  const windows = inferLeaseClaimWindows(view);
   let emitted = 0;
-  let snapshot = current;
+  let snapshot = view;
   for (const window of windows) {
     if (emitted >= EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT) break;
-    if (window.hasRelease || window.hasExpiryReceipt) {
-      if (window.hasExpiryReceipt) {
-        noteExpiryAuditWindowResolved(snapshot.id, window.generation, window.claimedUntil);
-      }
+    if (window.hasRelease) continue;
+    if (durableWindowHasExpiryReceipt(durable, window)) {
+      noteExpiryAuditWindowResolved(view.id, window.generation, window.claimedUntil);
       continue;
     }
     if (!window.claimedUntil || now < Date.parse(window.claimedUntil)) continue;
-    if (snapshot.expiredLease && isSameLeaseExpiryIdentity(snapshot.expiredLease, window)) {
-      noteExpiryAuditWindowResolved(snapshot.id, window.generation, window.claimedUntil);
-      continue;
-    }
-    if (overlayHasExpiryReceipt(snapshot.id, window)) continue;
+    if (isExpiryAuditInFlight(view.id, window.generation, window.claimedUntil, now)) continue;
     snapshot = await emitExpiryAuditUnlocked(snapshot, window);
     emitted += 1;
   }
@@ -2868,19 +2900,18 @@ export async function reapExpiredTaskLeasesOnce(): Promise<number> {
   for (const candidate of candidates) {
     try {
       const didMaterialize = await withTaskLock(candidate.id, async () => {
-        const current = await getTaskSnapshot(candidate.id);
-        if (!current) return false;
-        let snapshot = current;
+        // 权威窗可从 overlay 看见未索引 claim；回执是否缺失只认 durable。
+        const durable = await getTaskSnapshot(candidate.id, { mergeOverlay: false });
+        if (!durable) return false;
+        const view = mergeQueuedEvents(durable);
         let didCurrent = false;
-        if (snapshot.lease?.claimedUntil && nowMs() >= Date.parse(snapshot.lease.claimedUntil)) {
-          const next = await materializeLeaseExpiryUnlocked(snapshot);
+        if (view.lease?.claimedUntil && nowMs() >= Date.parse(view.lease.claimedUntil)) {
+          const next = await materializeLeaseExpiryUnlocked(view);
           didCurrent = !!next.expiredLease
-            && next.expiredLease.leaseGeneration === snapshot.lease.leaseGeneration
-            && next.expiredLease.claimedUntil === snapshot.lease.claimedUntil;
-          snapshot = next;
+            && next.expiredLease.leaseGeneration === view.lease.leaseGeneration
+            && next.expiredLease.claimedUntil === view.lease.claimedUntil;
         }
-        // M3-2 reconcile 覆盖历史窗；当前窗已物化则身份匹配后跳过。
-        const reconciled = m3 ? await reconcileMissingExpiryAuditsUnlocked(snapshot) : 0;
+        const reconciled = m3 ? await reconcileMissingExpiryAuditsUnlocked(view, durable) : 0;
         return didCurrent || reconciled > 0;
       });
       if (didMaterialize) materialized += 1;

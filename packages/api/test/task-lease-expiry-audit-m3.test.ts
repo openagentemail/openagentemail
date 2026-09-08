@@ -21,7 +21,7 @@ const { afterEach, describe, expect, test: bunTest, spyOn } = await import('bun:
 const { parseConfig } = await import('../src/lib/config.ts');
 const {
   EXPIRY_AUDIT_BACKFILL_BATCH_LIMIT,
-  EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS,
+  EXPIRY_AUDIT_IN_FLIGHT_TTL_MS,
   EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
   claimTask,
   getTask,
@@ -37,6 +37,7 @@ const {
   resetExpiryAuditDeliveryFailureCountForTests,
   warnedExpiryAuditWindowCountForTests,
   warnExpiryAuditDeliveryFailedForTests,
+  expiryAuditInFlightCountForTests,
   setTaskGetForTests,
   setTaskListAllForTests,
   setTaskNowForTests,
@@ -919,64 +920,6 @@ describe('M3 R2 返工', () => {
     }).toEqual({ liveExpiry: 1, keptAfterComplete: 1, state: 'completed' });
   });
 
-  testOn('R2-B：补账接受即丢，标记超时后按 durable 缺失重发并补齐', async () => {
-    let now = START;
-    let durable = submittedTask();
-    const sent: SendInput[] = [];
-    let failExpiry = true;
-    setTaskNowForTests(() => now);
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    setTaskSendMailForTests(async (input) => {
-      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
-        throw new Error('drop claim-path audit');
-      }
-      sent.push(input);
-      return { messageId: `<m3-r2b-${sent.length}>` };
-    });
-    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
-    durable = taskFromMessages(ID, [submittedRaw(), (await parseCaptured(sent[0]!, 2))!])!;
-    clearQueuedEventsForTests();
-    now = Date.parse(first.claimedUntil);
-    // gen2 活窗长于补账标记 TTL，避免时钟推进后误补后继窗。
-    await claimTask({ id: ID, from: B, leaseSec: 3600 });
-    const claim1 = (await parseCaptured(sent[0]!, 2))!;
-    const claim2 = (await parseCaptured(sent[1]!, 3))!;
-    // 接受即丢：durable 仍无回执，只留内存 queued 标记。
-    durable = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    clearQueuedEventsForTests();
-    failExpiry = false;
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const afterAccept = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
-    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
-    const stillSuppressed = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
-    now += EXPIRY_AUDIT_BACKFILL_QUEUED_TTL_MS + 1;
-    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
-    const expiries = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-    const retryInput = expiries[expiries.length - 1];
-    const retry = retryInput ? await parseCaptured(retryInput, 5) : null;
-    durable = retry ? taskFromMessages(ID, [submittedRaw(), claim1, claim2, retry])! : durable;
-    clearQueuedEventsForTests();
-    setTaskGetForTests(async () => durable);
-    setTaskListAllForTests(async () => [durable]);
-    const afterIndex = await reapExpiredTaskLeasesOnce();
-    expect({
-      afterAccept,
-      stillSuppressed,
-      retried: expiries.length,
-      windowFilled: durable.leaseClaimWindows?.some((window) =>
-        window.generation === 1 && window.hasExpiryReceipt),
-      afterIndex,
-    }).toEqual({
-      afterAccept: 1,
-      stillSuppressed: 1,
-      retried: 2,
-      windowFilled: true,
-      afterIndex: 0,
-    });
-  });
 });
 
 describe('M3 R3 返工', () => {
@@ -1056,6 +999,92 @@ describe('M3 R3 返工', () => {
         extra: over + 1,
         stillCapped: EXPIRY_AUDIT_WARNED_WINDOWS_LIMIT,
       });
+  });
+});
+
+describe('M3 C 在途集合', () => {
+  testOn('C：当前窗与 backfill 接受即丢统一走在途 TTL', async () => {
+    let now = START;
+    const sent: SendInput[] = [];
+    let failExpiry = false;
+    const durables = new Map<string, Task>([
+      [ID, submittedTask(ID)],
+      [ID_B, submittedTask(ID_B)],
+    ]);
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async (id) => durables.get(id) ?? null);
+    setTaskListAllForTests(async () => [...durables.values()]);
+    setTaskSendMailForTests(async (input) => {
+      if (failExpiry && input.headers?.['X-OA-Task-Lease-Event'] === 'expired') {
+        throw new Error('drop claim-path audit');
+      }
+      sent.push(input);
+      return { messageId: `<m3-c-${sent.length}>` };
+    });
+    const currentGrant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const backfillGrant = await claimTask({ id: ID_B, from: B, leaseSec: 300 });
+    const claimCurrent = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID)!, 2, ID))!;
+    const claimBackfill1 = (await parseCaptured(sent.find((mail) => mail.headers?.['X-OA-Task'] === ID_B)!, 2, ID_B))!;
+    durables.set(ID, taskFromMessages(ID, [submittedRaw(ID), claimCurrent])!);
+    durables.set(ID_B, taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1])!);
+    clearQueuedEventsForTests();
+    now = Date.parse(backfillGrant.claimedUntil);
+    failExpiry = true;
+    await claimTask({ id: ID_B, from: B, leaseSec: 3600 });
+    const claimBackfill2 = (await parseCaptured(sent.filter((mail) =>
+      mail.headers?.['X-OA-Task'] === ID_B && mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')[1]!, 3, ID_B))!;
+    // 接受即丢：durable 不收 expiry；setup 清 overlay/在途后由 reaper 统一发射。
+    durables.set(ID, taskFromMessages(ID, [submittedRaw(ID), claimCurrent])!);
+    durables.set(ID_B, taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1, claimBackfill2])!);
+    clearQueuedEventsForTests();
+    failExpiry = false;
+    now = Date.parse(currentGrant.claimedUntil);
+    setTaskGetForTests(async (id) => durables.get(id) ?? null);
+    setTaskListAllForTests(async () => [...durables.values()]);
+    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    const afterAccept = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    const inFlightAfterAccept = expiryAuditInFlightCountForTests();
+    expect(await reapExpiredTaskLeasesOnce()).toBe(0);
+    const withinTtl = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired').length;
+    now += EXPIRY_AUDIT_IN_FLIGHT_TTL_MS + 1;
+    expect(await reapExpiredTaskLeasesOnce()).toBeGreaterThan(0);
+    const afterTtl = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    const retryCurrent = afterTtl.filter((mail) => mail.headers?.['X-OA-Task'] === ID)[1];
+    const retryBackfill = afterTtl.filter((mail) => mail.headers?.['X-OA-Task'] === ID_B)[1];
+    const indexedCurrent = retryCurrent ? await parseCaptured(retryCurrent, 4, ID) : null;
+    const indexedBackfill = retryBackfill ? await parseCaptured(retryBackfill, 5, ID_B) : null;
+    durables.set(ID, indexedCurrent
+      ? taskFromMessages(ID, [submittedRaw(ID), claimCurrent, indexedCurrent])!
+      : durables.get(ID)!);
+    durables.set(ID_B, indexedBackfill
+      ? taskFromMessages(ID_B, [submittedRaw(ID_B), claimBackfill1, claimBackfill2, indexedBackfill])!
+      : durables.get(ID_B)!);
+    setTaskGetForTests(async (id) => durables.get(id) ?? null);
+    setTaskListAllForTests(async () => [...durables.values()]);
+    const afterIndex = await reapExpiredTaskLeasesOnce();
+    expect({
+      acceptCurrent: afterAccept.some((mail) => mail.headers?.['X-OA-Task'] === ID),
+      acceptBackfill: afterAccept.some((mail) => mail.headers?.['X-OA-Task'] === ID_B),
+      inFlightAfterAccept,
+      withinTtl,
+      retried: afterTtl.length,
+      currentFilled: durables.get(ID)?.leaseClaimWindows?.some((window) =>
+        window.generation === 1 && window.hasExpiryReceipt),
+      backfillFilled: durables.get(ID_B)?.leaseClaimWindows?.some((window) =>
+        window.generation === 1 && window.hasExpiryReceipt),
+      inFlightAfterIndex: expiryAuditInFlightCountForTests(),
+      afterIndex,
+    }).toEqual({
+      acceptCurrent: true,
+      acceptBackfill: true,
+      inFlightAfterAccept: 2,
+      withinTtl: 2,
+      retried: 4,
+      currentFilled: true,
+      backfillFilled: true,
+      inFlightAfterIndex: 0,
+      afterIndex: 0,
+    });
   });
 });
 
