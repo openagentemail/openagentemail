@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## v0.7.2 — 2026-09-09
+
+### Added
+
+- **Webhook env wiring for compose deployments**: all 22 webhook configuration keys are now wired through the API service in `compose.yaml` and `compose.api-only.yaml`, with `.env` examples — compose-based installs can enable and tune the outbound webhook subsystem without touching code. Safe defaults preserved: signing secrets stay `undefined` when unset, explicit empty/short values are rejected, and the public-edge guard keeps `private=false` (#149, #174).
+
+### Fixed
+
+- **Tasks: bound public-read lease overlay replay** (opt-in): public read projections cap lease overlay replay at 15 minutes, preventing unbounded replay on read paths. Disabled by default — enable with `TASK_LEASES_OVERLAY_BOUND=true` (#80, #84; #171).
+- **Tasks: decouple reclaim from expiry-audit SMTP** (opt-in): lease reclaim no longer depends on the expiry-audit mail path, with late-receipt tolerance. Disabled by default — enable with `TASK_LEASES_EXPIRY_AUDIT_M3=true` (#80, #84; #167).
+
+### Tests
+
+- Webhook quota and latest-delivery IO contract regression coverage: exact read/byte accounting under real compose rendering, including negative controls (#146, #173).
+
 ## v0.7.1 — 2026-09-08
 
 ### Fixed
