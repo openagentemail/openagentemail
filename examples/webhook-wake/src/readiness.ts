@@ -72,7 +72,10 @@ export function inspectReadiness(config: ReceiverConfig): ReadyReport {
   if (!stateWritable) {
     warnings.push('state_unwritable');
   }
-  const store = inspectDedupFile(config.dedup.path);
+  const store = inspectDedupFile(config.dedup.path, {
+    maxRecords: config.dedup.maxRecords,
+    nowMs: Date.now(),
+  });
   const stateHealthy = store.ok;
   if (!store.ok) {
     warnings.push(store.reason);

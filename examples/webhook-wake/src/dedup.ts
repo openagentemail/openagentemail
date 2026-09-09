@@ -46,7 +46,14 @@ type StoreFile = {
   records: Record<string, DedupRecord>;
 };
 
-export type DedupFailureKind = 'read' | 'write' | 'capacity' | 'rename' | 'dir_fsync' | 'mkdir_fsync';
+export type DedupFailureKind =
+  | 'read'
+  | 'write'
+  | 'capacity'
+  | 'rename'
+  | 'dir_fsync'
+  | 'mkdir_fsync'
+  | 'dirsync_persist';
 
 export function dedupKey(subscriptionId: string, eventId: string): string {
   return `${subscriptionId}:${eventId}`;
@@ -63,7 +70,8 @@ export type DedupInspect =
         | 'state_unacked_unreadable'
         | 'state_dirsync'
         | 'state_dirsync_unreadable'
-        | 'state_dirsync_corrupt';
+        | 'state_dirsync_corrupt'
+        | 'state_capacity';
     };
 
 function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
@@ -71,7 +79,10 @@ function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
 }
 
 /** Read-only. Does not repair `.unacked` or rewrite / drop corrupt files. */
-export function inspectDedupFile(path: string): DedupInspect {
+export function inspectDedupFile(
+  path: string,
+  options?: { maxRecords?: number; nowMs?: number },
+): DedupInspect {
   const unacked = `${path}.unacked`;
   if (existsSync(unacked)) {
     try {
@@ -112,10 +123,16 @@ export function inspectDedupFile(path: string): DedupInspect {
       return { ok: false, reason: 'state_corrupt' };
     }
     // Every persisted entry must be a real dedup record. Do not skip/repair.
+    const nowMs = options?.nowMs ?? Date.now();
+    let live = 0;
     for (const [key, value] of Object.entries(parsed.records)) {
       if (!isValidDedupRecord(key, value)) {
         return { ok: false, reason: 'state_corrupt' };
       }
+      if (value.expiresAtMs > nowMs) live += 1;
+    }
+    if (typeof options?.maxRecords === 'number' && live >= options.maxRecords) {
+      return { ok: false, reason: 'state_capacity' };
     }
     return { ok: true };
   } catch {
@@ -155,6 +172,7 @@ export class DedupStore {
   private failRename = false;
   private failDirFsync = false;
   private failMkdirFsync = false;
+  private failDirsyncPersist = false;
   private reserved = new Set<string>();
   private readonly onDirFsync?: (dir: string) => void;
 
@@ -179,6 +197,7 @@ export class DedupStore {
     if (kind === 'rename') this.failRename = true;
     if (kind === 'dir_fsync') this.failDirFsync = true;
     if (kind === 'mkdir_fsync') this.failMkdirFsync = true;
+    if (kind === 'dirsync_persist') this.failDirsyncPersist = true;
   }
 
   private withQueue<T>(fn: () => T): Promise<T> {
@@ -331,7 +350,19 @@ export class DedupStore {
   }
 
   private writeDirsync(dirs: string[]): void {
-    writeFileSync(this.dirsyncPath(), `${dirs.join('\n')}\n`, { mode: 0o600 });
+    if (this.failDirsyncPersist) {
+      this.failDirsyncPersist = false;
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_persist_failed');
+    }
+    const marker = this.dirsyncPath();
+    writeFileSync(marker, `${dirs.join('\n')}\n`, { mode: 0o600 });
+    const fd = openSync(marker, 'r+');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    fsyncDirectory(dirname(marker));
   }
 
   private readDirsync(): string[] {
@@ -354,6 +385,31 @@ export class DedupStore {
       if (!existsSync(dir)) continue;
       fsyncDirectory(dir);
       this.onDirFsync?.(dir);
+    }
+  }
+
+  /** Sync the state directory and walk parents until a permission wall. */
+  private fsyncExistingAncestors(start: string): void {
+    let cursor = start;
+    let first = true;
+    for (;;) {
+      if (existsSync(cursor)) {
+        try {
+          fsyncDirectory(cursor);
+          this.onDirFsync?.(cursor);
+        } catch (err) {
+          if (first) {
+            throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
+          }
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'EACCES' || code === 'EPERM') break;
+          throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
+        }
+      }
+      first = false;
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
     }
   }
 
@@ -388,10 +444,9 @@ export class DedupStore {
       this.failMkdirFsync = false;
       throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
     }
-    if (chain.length > 0) {
-      this.fsyncAncestorChain(chain);
-      this.clearDirsync();
-    }
+    // Marker may be missing after a crash; always sync existing ancestors before ACK.
+    this.fsyncExistingAncestors(dir);
+    this.clearDirsync();
   }
 
   private writeFile(file: StoreFile): void {

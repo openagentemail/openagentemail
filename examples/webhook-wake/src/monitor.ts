@@ -142,8 +142,12 @@ export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: b
         timeout: timeoutMs,
       },
       (res) => {
+        const ok = res.statusCode === 200;
+        // Status-only: resume is not close. Drop a never-ending chunked body.
         res.resume();
-        done(res.statusCode === 200);
+        res.destroy();
+        req.destroy();
+        done(ok);
       },
     );
     req.on('timeout', () => {

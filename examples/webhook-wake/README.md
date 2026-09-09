@@ -140,11 +140,11 @@ the recommended bands below as runtime-enforced limits.
 | `bodyLimitBytes` | 16384 | integer > 0 | 4096–65536 | Metadata events are small; too low yields 413. |
 | `timestampToleranceSec` | 300 | integer > 0 | 60–600 | Replay window. Large values accept stale signatures. |
 | `maxV1Signatures` | 8 | integer > 0 | 2–16 | Rotation candidates. Too low rejects a valid current+previous header. |
-| `maxHeaderBytes` | 2048 | integer > 0 | 2048–8192 | **UTF-8 byte** length (`Buffer.byteLength`). The parser uses this same limit (no hidden 2048-character ceiling). Raise it together with `maxV1Signatures` if rotation headers grow. Too small → 401 `invalid_header`. |
+| `maxHeaderBytes` | 2048 | integer > 0 | 2048–8192 | **UTF-8 byte** length (`Buffer.byteLength`). The parser and `createServer({ maxHeaderSize })` use `maxHeaderBytes + 4096` so other request headers fit. If that total exceeds the process `http.maxHeaderSize` (Bun default 16384), **load fails** (`config_invalid:maxHeaderBytes_exceeds_transport`). Raise the runtime (`bun --max-http-header-size=…`) before promising a larger signature. Too small → 401 `invalid_header`. |
 | `requestTimeoutMs` | 10000 | integer > 0 | 2000–30000 | Aborts an unfinished **HTTP body read** and frees the concurrent slot. Does not kill an already-spawned Orca child. |
 | `maxConcurrent` | 16 | integer > 0 | 1–64 | In-flight HTTP cap. `0` fails load. Too low → 503 `busy`. |
 | `sendTimeoutMs` | 8000 | integer > 0 | 1000–30000 | SIGKILL of the **spawned job process group** after this budget. Independent of `requestTimeoutMs`. Too small → 503 `timeout_killed`. |
-| `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Child stdout/stderr cap. Excess is `output_capped`. |
+| `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Bound on **retained** child stdout/stderr counts. Excess is drained and discarded (not pipe-destroyed) so a zero-exit send still commits. |
 | `wakeHistoryLimit` | 0 | integer ≥ 0 | 0–128 | In-memory ring only. `0` disables history. |
 | `dedup.retentionMs` | 604800000 (7d) | integer ≥ 259200000 (72h) | 72h–30d | Replay/dedup window. Below 72h fails load. |
 | `dedup.maxRecords` | 10000 | integer > 0 | 1000–100000 | Fail-closed when full (no eviction of live keys). |

@@ -77,8 +77,8 @@ describe('timeout, kill, and fake argv boundary', () => {
       text: 'x',
       argv: [fakeOrca, 'terminal', 'send', '--terminal', CANARY_TERMINAL, '--enter', '--text', 'x'],
     });
-    expect(big.reason).toBe('output_capped');
-    expect(big.stdoutBytes).toBeGreaterThan(32);
+    expect(big.ok).toBe(true);
+    expect(big.stdoutBytes).toBeLessThanOrEqual(32);
   });
 
   test('timeout kills the spawned job including a hanging grandchild, not this process', async () => {

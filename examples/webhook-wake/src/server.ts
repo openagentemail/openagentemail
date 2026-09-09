@@ -2,7 +2,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHttpAlert } from './alert.ts';
-import { canaryTerminalBound, findRoute } from './config.ts';
+import { canaryTerminalBound, findRoute, HTTP_HEADER_OVERHEAD_BYTES } from './config.ts';
 import { DedupError, DedupStore, dedupKey } from './dedup.ts';
 import { decodeRouteKey, isRouteKey, normalizeDomain, normalizeMailbox } from './ids.ts';
 import { logEvent } from './log.ts';
@@ -70,7 +70,8 @@ function readBoundedBody(req: IncomingMessage, limit: number, signal?: AbortSign
       reject(err);
     };
     const onAbort = () => {
-      fail(Object.assign(new Error('request_timeout'), { code: 'request_timeout' }), true);
+      // Drain, do not destroy: the shared socket must flush the 503 first.
+      fail(Object.assign(new Error('request_timeout'), { code: 'request_timeout' }), false);
     };
     if (signal?.aborted) {
       onAbort();
@@ -150,7 +151,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     if (COALESCE_ALERT_CODES.has(code)) {
       const last = lastAlertAt.get(code);
       const now = nowMs();
-      if (last != null && now - last < alertCooldownMs) {
+      if (last != null && now >= last && now - last < alertCooldownMs) {
         metrics.alertCoalesced += 1;
         logEvent('warn', 'alert_coalesced', { code });
         return;
@@ -460,7 +461,8 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     });
   };
 
-  const server = createServer((req, res) => {
+  const transportHeaderBytes = config.maxHeaderBytes + HTTP_HEADER_OVERHEAD_BYTES;
+  const server = createServer({ maxHeaderSize: transportHeaderBytes }, (req, res) => {
     const method = req.method ?? 'GET';
     const host = req.headers.host ?? '127.0.0.1';
     let url: URL;
@@ -497,6 +499,9 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       const ac = new AbortController();
       const timeout = setTimeout(() => {
         if (!res.headersSent) {
+          res.once('finish', () => {
+            if (!req.destroyed) req.destroy();
+          });
           writeJson(res, 503, { disposition: 'send_failed', reason: 'request_timeout' });
         }
         ac.abort();

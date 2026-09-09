@@ -1,5 +1,6 @@
 /** Static mapping loader. Request bodies cannot choose a terminal or command. */
 
+import { maxHeaderSize as runtimeMaxHeaderSize } from 'node:http';
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -18,6 +19,19 @@ export const DEFAULT_BODY_LIMIT = 16 * 1024;
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const MIN_RETENTION_MS = 72 * 60 * 60 * 1000;
 export const DEFAULT_MAX_RECORDS = 10_000;
+/** Host/Content-Type/Content-Length and other non-signature request headers. */
+export const HTTP_HEADER_OVERHEAD_BYTES = 4096;
+
+export function requiredHttpMaxHeaderSize(maxHeaderBytes: number): number {
+  return maxHeaderBytes + HTTP_HEADER_OVERHEAD_BYTES;
+}
+
+export function assertHttpHeaderTransport(maxHeaderBytes: number): void {
+  const needed = requiredHttpMaxHeaderSize(maxHeaderBytes);
+  if (typeof runtimeMaxHeaderSize === 'number' && runtimeMaxHeaderSize > 0 && needed > runtimeMaxHeaderSize) {
+    throw new Error(`config_invalid:maxHeaderBytes_exceeds_transport:${needed}>${runtimeMaxHeaderSize}`);
+  }
+}
 
 export type FileRouteSpec = {
   subscriptionId: string;
@@ -241,7 +255,11 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     bodyLimitBytes: optionalPositiveInt(raw.bodyLimitBytes, 'bodyLimitBytes', DEFAULT_BODY_LIMIT),
     timestampToleranceSec: optionalPositiveInt(raw.timestampToleranceSec, 'timestampToleranceSec', 300),
     maxV1Signatures: optionalPositiveInt(raw.maxV1Signatures, 'maxV1Signatures', 8),
-    maxHeaderBytes: optionalPositiveInt(raw.maxHeaderBytes, 'maxHeaderBytes', 2048),
+    maxHeaderBytes: (() => {
+      const value = optionalPositiveInt(raw.maxHeaderBytes, 'maxHeaderBytes', 2048);
+      assertHttpHeaderTransport(value);
+      return value;
+    })(),
     requestTimeoutMs: optionalPositiveInt(raw.requestTimeoutMs, 'requestTimeoutMs', 10_000),
     maxConcurrent: optionalPositiveInt(raw.maxConcurrent, 'maxConcurrent', 16),
     sendTimeoutMs: optionalPositiveInt(raw.sendTimeoutMs, 'sendTimeoutMs', 8_000),

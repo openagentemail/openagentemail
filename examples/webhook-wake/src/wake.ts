@@ -93,7 +93,7 @@ function takeCapped(stream: Readable | null, cap: number): { bytes: number; over
     state.bytes += chunk.length;
     if (state.bytes > cap) {
       state.overflow = true;
-      stream.destroy();
+      // Drain and discard. Destroying the pipe can EPIPE a successful child.
     }
   });
   return state;
@@ -172,24 +172,13 @@ export function createSpawnWake(options: SpawnWakeOptions): WakeFn {
 
       child.on('exit', (code) => {
         clearTimeout(timer);
-        if (stdout.overflow || stderr.overflow) {
-          finish({
-            ok: code === 0,
-            reason: 'output_capped',
-            exitCode: code,
-            argv: req.argv,
-            stdoutBytes: stdout.bytes,
-            stderrBytes: stderr.bytes,
-          });
-          return;
-        }
         finish({
           ok: code === 0,
           reason: code === 0 ? undefined : 'nonzero_exit',
           exitCode: code,
           argv: req.argv,
-          stdoutBytes: stdout.bytes,
-          stderrBytes: stderr.bytes,
+          stdoutBytes: Math.min(stdout.bytes, options.outputCapBytes),
+          stderrBytes: Math.min(stderr.bytes, options.outputCapBytes),
         });
       });
     });
