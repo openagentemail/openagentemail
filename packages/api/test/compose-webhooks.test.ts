@@ -176,7 +176,11 @@ function writeExecutable(path: string, body: string): void {
   chmodSync(path, 0o755);
 }
 
-/** Bounded probe: `config --format json` must succeed. Never download tools. */
+/**
+ * Probe `config --format json` only. This helper has no timeout option;
+ * the outer `timeout 180` on the bun test command is the bound.
+ * Never download tools.
+ */
 function probeJsonConfig(argv: string[], env: Record<string, string>): boolean {
   const work = mkdtempSync(join(tmpdir(), 'oae-149-probe-'));
   try {
@@ -244,6 +248,25 @@ function resolveComposeCommand(
 }
 
 const COMPOSE = resolveComposeCommand();
+
+/**
+ * 模块加载时选中后端所用的发现环境。A/B launcher 先校验夹具输入，
+ * 再恢复该 HOME/DOCKER_CONFIG 后 exec 真实 Compose。
+ * 原先没有 DOCKER_CONFIG 时 unset，不发明值。
+ */
+const BACKEND_DISCOVERY = cliDiscoveryEnv();
+
+/** 校验夹具后恢复选中后端发现环境，再 exec 真实 Compose（仍做真实渲染）。 */
+function selectedBackendHandoffScript(): string {
+  const restoreDockerConfig = BACKEND_DISCOVERY.DOCKER_CONFIG
+    ? `export DOCKER_CONFIG=${shQuote(BACKEND_DISCOVERY.DOCKER_CONFIG)}`
+    : 'unset DOCKER_CONFIG';
+  return [
+    `export HOME=${shQuote(BACKEND_DISCOVERY.HOME)}`,
+    restoreDockerConfig,
+    `exec ${COMPOSE.argv.map(shQuote).join(' ')} "$@"`,
+  ].join('\n');
+}
 
 /** Drop JSON-null keys (unset pass-through); keep empty strings for the parser. */
 function omitNullEnv(raw: Record<string, unknown>): Record<string, string> {
@@ -537,7 +560,7 @@ describe('#149 Compose webhook environment', () => {
 
 describe('#149 Compose CLI compatibility A/B/C', () => {
   const apiOnly = join(REPO_DIR, 'compose.api-only.yaml');
-  const realExec = COMPOSE.argv.map(shQuote).join(' ');
+  const backendHandoff = selectedBackendHandoffScript();
 
   test('A: incompatible PATH docker-compose falls through; explicit override fails', () => {
     const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-a-'));
@@ -552,7 +575,13 @@ describe('#149 Compose CLI compatibility A/B/C', () => {
       );
       writeExecutable(
         join(altDir, 'docker'),
-        `#!/bin/sh\nif [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi\nshift\nexec ${realExec} "$@"\n`,
+        [
+          '#!/bin/sh',
+          'if [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi',
+          'shift',
+          backendHandoff,
+          '',
+        ].join('\n'),
       );
 
       const path = `${legacyDir}:${altDir}:/usr/bin:/bin`;
@@ -603,7 +632,8 @@ describe('#149 Compose CLI compatibility A/B/C', () => {
           'fi',
           'if [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi',
           'shift',
-          `exec ${realExec} "$@"`,
+          // Restore selected-backend discovery after the fixture assertion.
+          backendHandoff,
           '',
         ].join('\n'),
       );
@@ -630,7 +660,7 @@ describe('#149 Compose CLI compatibility A/B/C', () => {
     const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-c-'));
     try {
       const relativeName = 'rel-compose';
-      writeExecutable(join(root, relativeName), `#!/bin/sh\nexec ${realExec} "$@"\n`);
+      writeExecutable(join(root, relativeName), `#!/bin/sh\n${backendHandoff}\n`);
       const viaRel = resolveComposeCommand({ ...process.env, OAE_COMPOSE: `./${relativeName}` }, root);
       const viaAbs = resolveComposeCommand(
         { ...process.env, OAE_COMPOSE: join(root, relativeName) },
