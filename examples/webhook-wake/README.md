@@ -69,8 +69,9 @@ tree.
   distinction is intentional and is not an authentication system.
 -   Dedup fsyncs the file and the parent directory after rename, including
   first directory creation. The commit temp file is created exclusively
-  (`O_CREAT|O_EXCL|O_NOFOLLOW`) with an unpredictable name in the same
-  parent; write loops until the whole Buffer is on that descriptor or
+  (`O_CREAT|O_EXCL|O_NOFOLLOW`) with a short independent prefix (`ww.<hex>`)
+  in the same parent so a 240-byte dest basename still fits Linux NAME_MAX;
+  write loops until the whole Buffer is on that descriptor or
   fails closed (zero-progress/short/error). This is not a complete
   shared-directory or TOCTOU defense. The `.unacked` marker is written and fsynced
   (file + parent directory) **before** rename so a crash after a failed
@@ -91,6 +92,9 @@ tree.
   is unready before any wake. A truncated or invalid `.dirsync`
   marker stays fail-closed and is never rewritten into a shorter chain;
   a missing marker still recovers by syncing existing ancestors.
+  Pending `.dirsync` is validated on `get`/`reserveCapacity` (recover
+  still happens at commit) so a persistent bad marker returns 503 with
+  zero wake.
   At-least-once, not exactly-once. A new
   event reserves a dedup slot through send+commit (released on failure)
   so a concurrent observe record cannot steal the last slot after a

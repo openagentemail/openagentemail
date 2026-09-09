@@ -23,7 +23,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DedupConfig, DedupRecord } from './types.ts';
 
 export class DedupError extends Error {
@@ -230,6 +230,10 @@ function fsyncDirectory(dir: string): void {
   }
 }
 
+/** Independent of dest basename so a 240-byte dest still fits NAME_MAX. */
+export const DEDUP_TEMP_NAME_PREFIX = 'ww';
+export const FS_NAME_MAX_BYTES = 255;
+
 /** Exclusive create in `parent`. Not a complete shared-directory / TOCTOU defense. */
 function createExclusiveTemp(parent: string, prefix: string): { fd: number; path: string } {
   let flags = constants.O_RDWR | constants.O_CREAT | constants.O_EXCL;
@@ -238,7 +242,11 @@ function createExclusiveTemp(parent: string, prefix: string): { fd: number; path
   }
   let last: NodeJS.ErrnoException | undefined;
   for (let attempt = 0; attempt < 8; attempt++) {
-    const path = join(parent, `${prefix}.${randomBytes(16).toString('hex')}`);
+    const name = `${prefix}.${randomBytes(16).toString('hex')}`;
+    if (Buffer.byteLength(name, 'utf8') > FS_NAME_MAX_BYTES) {
+      throw new DedupError('storage_failed', 'dedup_tmp_name_too_long');
+    }
+    const path = join(parent, name);
     try {
       const fd = openSync(path, flags, 0o600);
       try {
@@ -362,6 +370,7 @@ export class DedupStore {
 
   async get(key: string, nowMs: number): Promise<DedupRecord | undefined> {
     return this.withQueue(() => {
+      this.assertPendingDirsync();
       const file = this.readFile();
       this.expire(file, nowMs);
       return file.records[key];
@@ -371,6 +380,7 @@ export class DedupStore {
   /** Hold one slot until commit or releaseCapacity. Bounded by in-flight keys. */
   async reserveCapacity(key: string, nowMs: number): Promise<void> {
     return this.withQueue(() => {
+      this.assertPendingDirsync();
       const file = this.readFile();
       this.expire(file, nowMs);
       if (this.forceCapacity || this.wouldExceed(file, key)) {
@@ -627,16 +637,25 @@ export class DedupStore {
     }
   }
 
-  private mkdirDurable(dir: string): void {
+  /** Fail closed on a bad marker. Valid pending is left for commit recovery. */
+  private assertPendingDirsync(): void {
+    this.requirePendingDirsync();
+  }
+
+  /** Valid pending marker is fsynced and cleared. Corrupt/nonregular fails closed. */
+  private recoverPendingDirsync(): void {
     const pending = this.requirePendingDirsync();
-    if (pending.length > 0) {
-      if (this.failMkdirFsync) {
-        this.failMkdirFsync = false;
-        throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
-      }
-      this.fsyncAncestorChain(pending);
-      this.clearDirsync();
+    if (pending.length === 0) return;
+    if (this.failMkdirFsync) {
+      this.failMkdirFsync = false;
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
     }
+    this.fsyncAncestorChain(pending);
+    this.clearDirsync();
+  }
+
+  private mkdirDurable(dir: string): void {
+    this.recoverPendingDirsync();
 
     const missing: string[] = [];
     let cursor = dir;
@@ -673,7 +692,7 @@ export class DedupStore {
     let fd: number | null = null;
     try {
       this.mkdirDurable(parent);
-      const created = createExclusiveTemp(parent, `${basename(this.config.path)}.tmp`);
+      const created = createExclusiveTemp(parent, DEDUP_TEMP_NAME_PREFIX);
       tmp = created.path;
       fd = created.fd;
       this.writeAll(fd, Buffer.from(JSON.stringify(file), 'utf8'));

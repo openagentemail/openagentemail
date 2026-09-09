@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MIN_RETENTION_MS } from '../src/config.ts';
-import { DedupStore, inspectDedupFile } from '../src/dedup.ts';
+import { DEDUP_TEMP_NAME_PREFIX, DedupStore, inspectDedupFile } from '../src/dedup.ts';
 import { recordingWake } from '../src/wake.ts';
 import { mailBody, postHook, startReceiver, tempDir, testConfig } from './helpers.ts';
 import type { Receiver } from '../src/server.ts';
@@ -15,9 +15,9 @@ afterEach(async () => {
   while (receivers.length) await receivers.pop()!.close();
 });
 
-function exclusiveTemps(dir: string, destName: string): string[] {
-  const escaped = destName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return readdirSync(dir).filter((name) => new RegExp(`^${escaped}\\.tmp\\.[0-9a-f]{32}$`).test(name));
+function exclusiveTemps(dir: string): string[] {
+  const escaped = DEDUP_TEMP_NAME_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return readdirSync(dir).filter((name) => new RegExp(`^${escaped}\\.[0-9a-f]{32}$`).test(name));
 }
 
 const RECORD = {
@@ -66,7 +66,6 @@ describe('R17 exclusive dedup temp', () => {
   test('injected short write either finishes the payload or fails without ACK', async () => {
     const dir = tempDir();
     const path = join(dir, 'dedup.json');
-    const destName = basename(path);
     const complete = new DedupStore({ path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 });
     complete.injectFailure('write_short');
     await complete.commit(RECORD, 1);
@@ -75,14 +74,14 @@ describe('R17 exclusive dedup temp', () => {
     expect(parsed.records[RECORD.key]?.key).toBe(RECORD.key);
     expect(raw.startsWith('{')).toBe(true);
     expect(raw.endsWith('}')).toBe(true);
-    expect(exclusiveTemps(dir, destName)).toEqual([]);
+    expect(exclusiveTemps(dir)).toEqual([]);
 
     const stalled = join(dir, 'stall.json');
     const zero = new DedupStore({ path: stalled, retentionMs: MIN_RETENTION_MS, maxRecords: 8 });
     zero.injectFailure('write_zero');
     await expect(zero.commit(RECORD, 1)).rejects.toMatchObject({ message: 'dedup_write_short' });
     expect(existsSync(stalled)).toBe(false);
-    expect(exclusiveTemps(dir, basename(stalled))).toEqual([]);
+    expect(exclusiveTemps(dir)).toEqual([]);
 
     const mixed = join(dir, 'mixed.json');
     const partial = new DedupStore({ path: mixed, retentionMs: MIN_RETENTION_MS, maxRecords: 8 });
@@ -90,14 +89,14 @@ describe('R17 exclusive dedup temp', () => {
     partial.injectFailure('write_zero');
     await expect(partial.commit(RECORD, 1)).rejects.toMatchObject({ message: 'dedup_write_short' });
     expect(existsSync(mixed)).toBe(false);
-    expect(exclusiveTemps(dir, basename(mixed))).toEqual([]);
+    expect(exclusiveTemps(dir)).toEqual([]);
 
     const ioPath = join(dir, 'io.json');
     const io = new DedupStore({ path: ioPath, retentionMs: MIN_RETENTION_MS, maxRecords: 8 });
     io.injectFailure('write_io');
     await expect(io.commit(RECORD, 1)).rejects.toMatchObject({ message: 'dedup_write_failed' });
     expect(existsSync(ioPath)).toBe(false);
-    expect(exclusiveTemps(dir, basename(ioPath))).toEqual([]);
+    expect(exclusiveTemps(dir)).toEqual([]);
   });
 
   test('zero-progress write is 503 and stays retryable', async () => {
@@ -110,7 +109,7 @@ describe('R17 exclusive dedup temp', () => {
     expect(first.json.reason).toBe('storage_failed');
     expect(first.json.disposition).not.toBe('duplicate');
     expect(existsSync(receiver.dedup.config.path)).toBe(false);
-    expect(exclusiveTemps(dirname(receiver.dedup.config.path), basename(receiver.dedup.config.path))).toEqual([]);
+    expect(exclusiveTemps(dirname(receiver.dedup.config.path))).toEqual([]);
 
     const retry = await postHook(receiver, { body: mailBody() });
     expect(retry.status).toBe(200);
