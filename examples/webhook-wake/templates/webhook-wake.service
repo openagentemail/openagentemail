@@ -13,7 +13,12 @@ Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only home keeps the colocated Orca install visible; true would hide it.
+ProtectHome=read-only
+Environment=HOME=%h
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+# Optional operator file for extra runtime paths. Do not put secrets here.
+EnvironmentFile=-/etc/webhook-wake/runtime.env
 PrivateTmp=true
 ReadWritePaths=/var/lib/webhook-wake
 AmbientCapabilities=

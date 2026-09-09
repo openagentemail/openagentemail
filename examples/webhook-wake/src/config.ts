@@ -42,6 +42,7 @@ export type FileConfig = {
   maxConcurrent?: number;
   sendTimeoutMs?: number;
   outputCapBytes?: number;
+  wakeHistoryLimit?: number;
   dedup?: { path?: string; retentionMs?: number; maxRecords?: number };
   alertHook?: { url?: string | null; timeoutMs?: number };
   routes?: Record<string, FileRouteSpec>;
@@ -139,6 +140,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     maxConcurrent: raw.maxConcurrent ?? 16,
     sendTimeoutMs: raw.sendTimeoutMs ?? 8_000,
     outputCapBytes: raw.outputCapBytes ?? 4096,
+    wakeHistoryLimit: raw.wakeHistoryLimit ?? 0,
     dedup: {
       path: raw.dedup?.path ?? '/var/lib/webhook-wake/dedup.json',
       retentionMs: raw.dedup?.retentionMs ?? DEFAULT_RETENTION_MS,

@@ -38,6 +38,7 @@ export type ReceiverConfig = {
   maxConcurrent: number;
   sendTimeoutMs: number;
   outputCapBytes: number;
+  wakeHistoryLimit: number;
   dedup: DedupConfig;
   alertHook: AlertHookConfig;
   routes: RouteBinding[];
@@ -125,6 +126,7 @@ export type ReceiverHooks = {
   nowMs?: () => number;
   wake?: WakeFn;
   alert?: AlertFn;
+  onWake?: (req: WakeRequest) => void;
   crashAfterSendBeforeCommit?: boolean;
   extraWakeEnv?: Record<string, string>;
 };

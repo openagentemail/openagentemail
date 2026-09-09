@@ -30,6 +30,16 @@ tree.
 - Request path cannot choose a terminal or command. Argv is fixed:
   `orca terminal send --terminal <bound> --enter --text <neutral>` with
   `shell=false`, timeout+SIGKILL, and output caps. No `--interrupt`.
+- The child inherits a runtime allowlist (`HOME`, `USER`, `XDG_*`, `PATH`)
+  so a colocated Orca install can resolve its files. API credentials and
+  secrets are not forwarded. The systemd unit uses `ProtectHome=read-only`
+  (not `true`) plus `HOME=%h`.
+- Dedup fsyncs the file and the parent directory after rename, including
+  first directory creation. 2xx is at-least-once, not exactly-once.
+- In-memory wake history is off by default (`wakeHistoryLimit=0`).
+- The external monitor keeps durable state under
+  `/var/lib/webhook-wake-monitor` (not `/tmp`) and never sources that file
+  as shell. Recovery during cooldown is pending and emitted on a later tick.
 
 ## Local run
 

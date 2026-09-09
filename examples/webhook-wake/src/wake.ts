@@ -1,6 +1,10 @@
 /**
  * Fixed-argv Orca send. Never uses a shell. Timeout kills the child.
  * A zero exit records transport submission, not agent consumption.
+ *
+ * The child inherits a runtime-context allowlist (HOME / XDG / USER) so a
+ * colocated Orca install can resolve its files. Secrets and API credentials
+ * are never copied from the parent environment.
  */
 
 import { spawn } from 'node:child_process';
@@ -11,7 +15,56 @@ export type SpawnWakeOptions = {
   timeoutMs: number;
   outputCapBytes: number;
   extraEnv?: Record<string, string>;
+  /** Test-only parent snapshot; production uses process.env. */
+  parentEnv?: NodeJS.ProcessEnv;
 };
+
+/** Runtime keys a local Orca binary may need. Not secrets or API tokens. */
+export const ORCA_RUNTIME_ENV_KEYS = [
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'PATH',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TZ',
+  'XDG_RUNTIME_DIR',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+  'XDG_CACHE_HOME',
+  'ORCA_HOME',
+] as const;
+
+const SECRETISH_KEY = /^(.*(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_PASS|_CREDENTIAL).*|API_KEY|AUTHORIZATION|AWS_SECRET_ACCESS_KEY|SSH_AUTH_SOCK|OPENAGENTEMAIL_API_KEY)$/i;
+
+export function isDeniedChildEnvKey(key: string): boolean {
+  return SECRETISH_KEY.test(key);
+}
+
+export function buildOrcaChildEnv(
+  parent: NodeJS.ProcessEnv = process.env,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ORCA_RUNTIME_ENV_KEYS) {
+    const value = parent[key];
+    if (typeof value === 'string' && value.length > 0 && !isDeniedChildEnvKey(key)) {
+      env[key] = value;
+    }
+  }
+  if (!env.PATH) {
+    env.PATH = '/usr/bin:/bin';
+  }
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (isDeniedChildEnvKey(key)) continue;
+      env[key] = value;
+    }
+  }
+  return env;
+}
 
 function takeCapped(stream: NodeJS.ReadableStream | null, cap: number): { bytes: number; overflow: boolean } {
   const state = { bytes: 0, overflow: false };
@@ -57,10 +110,7 @@ export function createSpawnWake(options: SpawnWakeOptions): WakeFn {
         child = spawn(binary, args, {
           shell: false,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            PATH: process.env.PATH ?? '/usr/bin:/bin',
-            ...(options.extraEnv ?? {}),
-          },
+          env: buildOrcaChildEnv(options.parentEnv ?? process.env, options.extraEnv),
         });
       } catch {
         finish({

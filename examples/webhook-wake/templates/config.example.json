@@ -11,6 +11,7 @@
   "maxConcurrent": 16,
   "sendTimeoutMs": 8000,
   "outputCapBytes": 4096,
+  "wakeHistoryLimit": 0,
   "dedup": {
     "path": "/var/lib/webhook-wake/dedup.json",
     "retentionMs": 604800000,

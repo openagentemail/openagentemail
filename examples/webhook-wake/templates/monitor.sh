@@ -1,72 +1,148 @@
 #!/bin/sh
 # Independent HTTPS probe. Run on a different host than the receiver.
 # Default: every 30s, alarm after two failures, recovery notice, cooldown.
-# Override CURL_BIN / ALERT_CMD in tests. Do not interpolate probe bodies.
+# State is plain key=value in a durable file — never sourced as shell.
+# Alert is one absolute binary plus a fixed code argument, with a timeout.
 
 set -eu
 
 HEALTH_URL="${HEALTH_URL:-https://webhook-wake.example.com/health}"
-INTERVAL_SEC="${INTERVAL_SEC:-30}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-2}"
 COOLDOWN_SEC="${COOLDOWN_SEC:-300}"
 CURL_BIN="${CURL_BIN:-curl}"
-ALERT_CMD="${ALERT_CMD:-}"
-STATE_FILE="${STATE_FILE:-/tmp/webhook-wake-monitor.state}"
+ALERT_BIN="${ALERT_BIN:-${ALERT_CMD:-}}"
+ALERT_TIMEOUT_SEC="${ALERT_TIMEOUT_SEC:-2}"
+STATE_FILE="${STATE_FILE:-/var/lib/webhook-wake-monitor/state}"
+NOW_SEC="${NOW_SEC:-}"
 
 consecutive=0
 alarming=0
+pending_recovery=0
 last_alert=0
 
-if [ -f "$STATE_FILE" ]; then
-	# shellcheck disable=SC1090
-	. "$STATE_FILE"
-fi
-
-save() {
-	printf 'consecutive=%s\nalarming=%s\nlast_alert=%s\n' "$consecutive" "$alarming" "$last_alert" > "$STATE_FILE"
+is_uint() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
 }
 
-now=$(date +%s)
+load_state() {
+	[ -f "$STATE_FILE" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			consecutive=*)
+				v=${line#consecutive=}
+				if is_uint "$v"; then consecutive=$v; fi
+				;;
+			alarming=0|alarming=1) alarming=${line#alarming=} ;;
+			pending_recovery=0|pending_recovery=1) pending_recovery=${line#pending_recovery=} ;;
+			last_alert=*)
+				v=${line#last_alert=}
+				if is_uint "$v"; then last_alert=$v; fi
+				;;
+		esac
+	done < "$STATE_FILE"
+}
+
+save() {
+	dir=$(dirname "$STATE_FILE")
+	mkdir -p "$dir"
+	tmp="$STATE_FILE.tmp.$$"
+	printf 'consecutive=%s\nalarming=%s\npending_recovery=%s\nlast_alert=%s\n' \
+		"$consecutive" "$alarming" "$pending_recovery" "$last_alert" > "$tmp"
+	mv "$tmp" "$STATE_FILE"
+}
+
+in_cooldown() {
+	if [ "$last_alert" -eq 0 ]; then
+		return 1
+	fi
+	[ $((now - last_alert)) -lt "$COOLDOWN_SEC" ]
+}
+
+fixed_code() {
+	case "$1" in
+		health_failed|health_recovered|monitor_alert_failed) printf '%s' "$1" ;;
+		*) printf '%s' 'health_failed' ;;
+	esac
+}
+
+run_alert() {
+	code=$(fixed_code "$1")
+	if [ -z "$ALERT_BIN" ]; then
+		echo "ALERT $code" >&2
+		return 0
+	fi
+	case "$ALERT_BIN" in
+		/*) ;;
+		*)
+			echo "monitor_alert_failed invalid_bin" >&2
+			return 1
+			;;
+	esac
+	if command -v timeout >/dev/null 2>&1; then
+		if timeout --signal=KILL "$ALERT_TIMEOUT_SEC" "$ALERT_BIN" "$code"; then
+			return 0
+		fi
+		echo "monitor_alert_failed $code" >&2
+		return 1
+	fi
+	if ! "$ALERT_BIN" "$code"; then
+		echo "monitor_alert_failed $code" >&2
+		return 1
+	fi
+}
+
+load_state
+if [ -n "$NOW_SEC" ] && is_uint "$NOW_SEC"; then
+	now=$NOW_SEC
+else
+	now=$(date +%s)
+fi
+
 if "$CURL_BIN" -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
 	ok=1
 else
 	ok=0
 fi
 
-alert() {
-	code="$1"
-	if [ $((now - last_alert)) -lt "$COOLDOWN_SEC" ]; then
-		return 0
-	fi
-	last_alert=$now
-	if [ -n "$ALERT_CMD" ]; then
-		# Fixed argument only; never pass curl output or URL query text.
-		if ! $ALERT_CMD "$code"; then
-			echo "monitor_alert_failed $code" >&2
-			return 1
-		fi
-	else
-		echo "ALERT $code" >&2
-	fi
-}
-
 if [ "$ok" -eq 0 ]; then
+	pending_recovery=0
 	consecutive=$((consecutive + 1))
 	if [ "$consecutive" -ge "$FAIL_THRESHOLD" ]; then
-		if alert health_failed; then
+		if in_cooldown; then
+			save
+			exit 1
+		fi
+		if run_alert health_failed; then
 			alarming=1
+			last_alert=$now
 		fi
 	fi
 	save
 	exit 1
 fi
 
-if [ "$alarming" -eq 1 ] || [ "$consecutive" -gt 0 ]; then
-	if [ "$alarming" -eq 1 ]; then
-		alert health_recovered || true
+if [ "$alarming" -eq 1 ] || [ "$pending_recovery" -eq 1 ]; then
+	if in_cooldown; then
+		pending_recovery=1
+		consecutive=0
+		save
+		exit 0
 	fi
-	alarming=0
-	consecutive=0
+	if run_alert health_recovered; then
+		last_alert=$now
+		alarming=0
+		pending_recovery=0
+		consecutive=0
+	else
+		pending_recovery=1
+	fi
+	save
+	exit 0
 fi
+
+consecutive=0
 save
 exit 0

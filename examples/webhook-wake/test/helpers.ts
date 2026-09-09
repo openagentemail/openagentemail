@@ -43,6 +43,7 @@ export function testConfig(overrides: Partial<ReceiverConfig> = {}, dir?: string
     maxConcurrent: 16,
     sendTimeoutMs: 800,
     outputCapBytes: 4096,
+    wakeHistoryLimit: 0,
     dedup: {
       path: join(root, 'dedup.json'),
       retentionMs: 7 * 24 * 60 * 60 * 1000,

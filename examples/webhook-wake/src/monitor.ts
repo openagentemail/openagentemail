@@ -2,6 +2,7 @@
  * Independent external monitor state machine.
  * Probe the receiver from another host; two failures raise an alarm,
  * recovery is announced, and alerts are cooled down.
+ * Recovery during cooldown is kept pending and emitted on a later tick.
  */
 
 import type { AlertEvent } from './types.ts';
@@ -18,6 +19,7 @@ export type AlertSink = (event: AlertEvent) => Promise<{ ok: boolean; reason?: s
 export type MonitorState = {
   consecutiveFailures: number;
   alarming: boolean;
+  pendingRecovery: boolean;
   lastAlertAtMs: number | null;
   probes: number;
   alarms: number;
@@ -35,6 +37,7 @@ export function createMonitorState(): MonitorState {
   return {
     consecutiveFailures: 0,
     alarming: false,
+    pendingRecovery: false,
     lastAlertAtMs: null,
     probes: 0,
     alarms: 0,
@@ -60,6 +63,7 @@ export async function stepMonitor(options: {
   const result = await options.probe();
 
   if (!result.ok) {
+    state.pendingRecovery = false;
     state.consecutiveFailures += 1;
     if (state.consecutiveFailures >= cfg.failThreshold && !inCooldown(state, options.nowMs, cfg.cooldownMs)) {
       const sent = await options.alert({ kind: 'monitor_failure', code: 'health_failed' });
@@ -78,19 +82,27 @@ export async function stepMonitor(options: {
     return state;
   }
 
-  if (state.alarming || state.consecutiveFailures > 0) {
-    if (state.alarming && !inCooldown(state, options.nowMs, cfg.cooldownMs)) {
-      const sent = await options.alert({ kind: 'monitor_recovery', code: 'health_recovered' });
-      state.lastAlertAtMs = options.nowMs;
-      if (!sent.ok) {
-        state.alertFailures += 1;
-      } else {
-        state.recoveries += 1;
-      }
+  if (state.alarming || state.pendingRecovery) {
+    if (inCooldown(state, options.nowMs, cfg.cooldownMs)) {
+      state.pendingRecovery = true;
+      state.consecutiveFailures = 0;
+      return state;
     }
+    const sent = await options.alert({ kind: 'monitor_recovery', code: 'health_recovered' });
+    state.lastAlertAtMs = options.nowMs;
+    if (!sent.ok) {
+      state.alertFailures += 1;
+      state.pendingRecovery = true;
+      return state;
+    }
+    state.recoveries += 1;
     state.alarming = false;
+    state.pendingRecovery = false;
     state.consecutiveFailures = 0;
+    return state;
   }
+
+  state.consecutiveFailures = 0;
   return state;
 }
 

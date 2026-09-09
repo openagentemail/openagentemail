@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHttpAlert } from './alert.ts';
 import { findRoute } from './config.ts';
 import { DedupError, DedupStore, dedupKey } from './dedup.ts';
-import { isRouteKey, normalizeDomain, normalizeMailbox } from './ids.ts';
+import { decodeRouteKey, isRouteKey, normalizeDomain, normalizeMailbox } from './ids.ts';
 import { logEvent } from './log.ts';
 import { buildNeutralWakeText, buildOrcaArgv } from './notify.ts';
 import { parseVerifiedEnvelope, readMailAddress, readMailMessageId } from './parse.ts';
@@ -100,6 +100,15 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
   const dedup = new DedupStore(config.dedup);
   const seats = new SeatSerializer();
   const wakes: Receiver['wakes'] = [];
+  const historyLimit = Math.max(0, config.wakeHistoryLimit);
+  const recordWake = (entry: Receiver['wakes'][number]) => {
+    hooks.onWake?.(entry);
+    if (historyLimit <= 0) return;
+    wakes.push(entry);
+    if (wakes.length > historyLimit) {
+      wakes.splice(0, wakes.length - historyLimit);
+    }
+  };
   const nowMs = () => hooks.nowMs?.() ?? Date.now();
   const wakeFn: WakeFn =
     hooks.wake ??
@@ -234,7 +243,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           return { status: 503, disposition: 'send_failed', reason: result.reason, sends: 0 };
         }
 
-        wakes.push({ terminal: route.terminal, text, argv });
+        recordWake({ terminal: route.terminal, text, argv });
 
         if (hooks.crashAfterSendBeforeCommit) {
           return { status: 503, disposition: 'send_failed', reason: 'crash_after_send', submitted: true, sends: 1 };
@@ -389,6 +398,11 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
 
     const hookMatch = url.pathname.match(/^\/hooks\/([^/]+)$/);
     if (method === 'POST' && hookMatch) {
+      const decoded = decodeRouteKey(hookMatch[1] ?? '');
+      if (!decoded.ok) {
+        writeJson(res, 400, { disposition: 'invalid', reason: decoded.reason });
+        return;
+      }
       if (inFlightHttp >= config.maxConcurrent) {
         metrics.rejected += 1;
         writeJson(res, 503, { disposition: 'busy', reason: 'max_concurrent' });
@@ -400,7 +414,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           writeJson(res, 503, { disposition: 'send_failed', reason: 'request_timeout' });
         }
       }, config.requestTimeoutMs);
-      handleHook(req, res, decodeURIComponent(hookMatch[1] ?? ''))
+      handleHook(req, res, decoded.value)
         .catch((err) => {
           logEvent('error', 'handler_error', { reason: err instanceof Error ? err.message : 'error' });
           if (!res.headersSent) {

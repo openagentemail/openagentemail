@@ -41,6 +41,30 @@ describe('monitor outage and alert-path failure', () => {
     expect(state.recoveries).toBe(1);
   });
 
+  test('helper keeps pending recovery across cooldown and emits on a later tick', async () => {
+    const alerts: AlertEvent[] = [];
+    const state = createMonitorState();
+    let healthy = false;
+    const probe = async () => ({ ok: healthy });
+    const alert = async (event: AlertEvent) => {
+      alerts.push(event);
+      return { ok: true };
+    };
+    const cfg = { failThreshold: 2, cooldownMs: 10_000 };
+    await stepMonitor({ state, probe, alert, nowMs: 1_000, config: cfg });
+    await stepMonitor({ state, probe, alert, nowMs: 2_000, config: cfg });
+    expect(state.alarming).toBe(true);
+    healthy = true;
+    await stepMonitor({ state, probe, alert, nowMs: 3_000, config: cfg });
+    expect(alerts.filter((a) => a.kind === 'monitor_recovery')).toHaveLength(0);
+    expect(state.pendingRecovery).toBe(true);
+    expect(state.alarming).toBe(true);
+    await stepMonitor({ state, probe, alert, nowMs: 13_000, config: cfg });
+    expect(alerts.at(-1)).toEqual({ kind: 'monitor_recovery', code: 'health_recovered' });
+    expect(state.pendingRecovery).toBe(false);
+    expect(state.alarming).toBe(false);
+  });
+
   test('alert-path failure is counted and visible', async () => {
     const state = createMonitorState();
     const alert = async () => ({ ok: false, reason: 'down' });
@@ -112,17 +136,17 @@ describe('monitor outage and alert-path failure', () => {
     writeFileSync(failAlerter, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const state = join(dir, 'state');
 
-    const run = (curl: string, alertCmd: string) =>
+    const run = (curl: string, alertBin: string, extra: Record<string, string> = {}) =>
       spawnSync('sh', [script], {
         env: {
           PATH: process.env.PATH,
           HEALTH_URL: 'https://webhook-wake.example.com/health',
-          INTERVAL_SEC: '0',
           FAIL_THRESHOLD: '2',
           COOLDOWN_SEC: '0',
           CURL_BIN: curl,
-          ALERT_CMD: alertCmd,
+          ALERT_BIN: alertBin,
           STATE_FILE: state,
+          ...extra,
         },
         encoding: 'utf8',
       });
@@ -144,13 +168,97 @@ describe('monitor outage and alert-path failure', () => {
         FAIL_THRESHOLD: '1',
         COOLDOWN_SEC: '0',
         CURL_BIN: curlFail,
-        ALERT_CMD: failAlerter,
+        ALERT_BIN: failAlerter,
         STATE_FILE: state2,
       },
       encoding: 'utf8',
     });
     expect(failed.status).toBe(1);
     expect(failed.stderr).toContain('monitor_alert_failed');
+  });
+
+  test('shipped monitor.sh persists state across separate runs and emits delayed recovery', () => {
+    const script = fileURLToPath(new URL('../templates/monitor.sh', import.meta.url));
+    chmodSync(script, 0o755);
+    const dir = tempDir('monitor-persist-');
+    const curlOk = join(dir, 'curl-ok');
+    const curlFail = join(dir, 'curl-fail');
+    const alerts = join(dir, 'alerts.log');
+    writeFileSync(curlOk, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(curlFail, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const alerter = join(dir, 'alert');
+    writeFileSync(alerter, `#!/bin/sh\necho "$1" >> "${alerts}"\nexit 0\n`, { mode: 0o755 });
+    const state = join(dir, 'protected', 'state');
+
+    const run = (curl: string, now: string, cooldown = '300') =>
+      spawnSync('sh', [script], {
+        env: {
+          PATH: process.env.PATH,
+          HEALTH_URL: 'https://webhook-wake.example.com/health',
+          FAIL_THRESHOLD: '2',
+          COOLDOWN_SEC: cooldown,
+          CURL_BIN: curl,
+          ALERT_BIN: alerter,
+          STATE_FILE: state,
+          NOW_SEC: now,
+        },
+        encoding: 'utf8',
+      });
+
+    expect(run(curlFail, '100').status).toBe(1);
+    expect(run(curlFail, '100').status).toBe(1);
+    expect(readFileSync(alerts, 'utf8')).toContain('health_failed');
+    expect(readFileSync(state, 'utf8')).toContain('alarming=1');
+
+    const quick = run(curlOk, '101');
+    expect(quick.status).toBe(0);
+    expect(readFileSync(state, 'utf8')).toContain('pending_recovery=1');
+    expect(readFileSync(alerts, 'utf8')).not.toContain('health_recovered');
+
+    expect(run(curlOk, '500').status).toBe(0);
+    expect(readFileSync(alerts, 'utf8')).toContain('health_recovered');
+    expect(readFileSync(state, 'utf8')).toContain('pending_recovery=0');
+  });
+
+  test('alert binary timeout is visible and does not take a shell string', () => {
+    const script = fileURLToPath(new URL('../templates/monitor.sh', import.meta.url));
+    chmodSync(script, 0o755);
+    const dir = tempDir('monitor-timeout-');
+    const curlFail = join(dir, 'curl-fail');
+    writeFileSync(curlFail, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const hang = join(dir, 'hang');
+    writeFileSync(hang, '#!/bin/sh\nsleep 20\n', { mode: 0o755 });
+    const started = Date.now();
+    const hung = spawnSync('sh', [script], {
+      env: {
+        PATH: process.env.PATH,
+        HEALTH_URL: 'https://webhook-wake.example.com/health',
+        FAIL_THRESHOLD: '1',
+        COOLDOWN_SEC: '0',
+        CURL_BIN: curlFail,
+        ALERT_BIN: hang,
+        ALERT_TIMEOUT_SEC: '1',
+        STATE_FILE: join(dir, 'state'),
+      },
+      encoding: 'utf8',
+    });
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(hung.status).toBe(1);
+    expect(hung.stderr).toContain('monitor_alert_failed');
+
+    const relative = spawnSync('sh', [script], {
+      env: {
+        PATH: process.env.PATH,
+        HEALTH_URL: 'https://webhook-wake.example.com/health',
+        FAIL_THRESHOLD: '1',
+        COOLDOWN_SEC: '0',
+        CURL_BIN: curlFail,
+        ALERT_BIN: 'not-absolute',
+        STATE_FILE: join(dir, 'state2'),
+      },
+      encoding: 'utf8',
+    });
+    expect(relative.stderr).toContain('invalid_bin');
   });
 
   test('createHttpAlert times out without interpolating caller text', async () => {

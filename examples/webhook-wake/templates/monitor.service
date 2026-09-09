@@ -4,10 +4,19 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Environment=HEALTH_URL=https://webhook-wake.example.com/health
-ExecStart=/usr/local/bin/webhook-wake-monitor.sh
 User=nobody
 Group=nogroup
+# Durable state survives PrivateTmp and separate timer activations.
+StateDirectory=webhook-wake-monitor
+Environment=STATE_FILE=/var/lib/webhook-wake-monitor/state
+Environment=HEALTH_URL=https://webhook-wake.example.com/health
+Environment=FAIL_THRESHOLD=2
+Environment=COOLDOWN_SEC=300
+Environment=ALERT_TIMEOUT_SEC=2
+# ALERT_BIN must be an absolute executable; leave empty to log only.
+# Environment=ALERT_BIN=/usr/local/bin/webhook-wake-alert
+ExecStart=/usr/local/bin/webhook-wake-monitor.sh
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
+ReadWritePaths=/var/lib/webhook-wake-monitor

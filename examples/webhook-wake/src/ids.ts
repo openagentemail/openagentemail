@@ -52,3 +52,12 @@ export function normalizeMailbox(value: string): string {
 export function normalizeDomain(value: string): string {
   return value.trim().toLowerCase();
 }
+
+/** Decode a hook path segment; malformed percent-encoding is not thrown. */
+export function decodeRouteKey(raw: string): { ok: true; value: string } | { ok: false; reason: 'bad_route_encoding' } {
+  try {
+    return { ok: true, value: decodeURIComponent(raw) };
+  } catch {
+    return { ok: false, reason: 'bad_route_encoding' };
+  }
+}
