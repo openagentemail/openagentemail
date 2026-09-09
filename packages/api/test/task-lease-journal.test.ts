@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,58 +15,79 @@ process.env.NODE_ENV = 'test';
 const { afterEach, describe, expect, test } = await import('bun:test');
 const {
   JournalError,
+  bootstrapTaskLeaseJournal,
   deleteJournalFilesForTests,
   journalPathsForTests,
   loadLeaseJournal,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
-  setJournalDurableEvidenceForTests,
   upsertJournalRecord,
 } = await import('../src/lib/task-lease-journal.ts');
 
 function freshDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'oae-m2-j-'));
   setJournalDataDirForTests(dir);
-  setJournalDurableEvidenceForTests(() => false);
   return dir;
 }
 
 afterEach(() => {
   setJournalCrashHookForTests(null);
-  setJournalDurableEvidenceForTests(null);
   resetJournalMemoryForTests();
 });
 
-describe('M2 journal 原子落盘与丢失检测', () => {
-  test('空目录无权威证据 → init，不是 recovery', async () => {
+describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
+  test('未 bootstrap 启动 → fail-closed not_bootstrapped，不自动创建任何文件', async () => {
     freshDir();
-    const file = await loadLeaseJournal();
-    expect(file.source).toBe('init');
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_not_bootstrapped' });
+    expect(existsSync(journalPathsForTests().dir)).toBe(false);
+  });
+
+  test('首次 bootstrap → 专属目录排他性创建，写出 marker + 空表 + seal', async () => {
+    freshDir();
+    const file = bootstrapTaskLeaseJournal();
+    expect(file.source).toBe('bootstrap');
     expect(file.records).toEqual([]);
     const paths = journalPathsForTests();
-    expect(readFileSync(paths.journal, 'utf8')).toContain('"source":"init"');
+    expect(readFileSync(paths.journal, 'utf8')).toContain('"source":"bootstrap"');
     expect(readFileSync(paths.seal, 'utf8').trim().length).toBeGreaterThan(20);
+    const marker = JSON.parse(readFileSync(paths.marker, 'utf8')) as {
+      version: number;
+      activatedAt: string;
+      journalInitializedAt: string;
+      nonce: string;
+      mac: string;
+    };
+    expect(marker.version).toBe(1);
+    expect(marker.journalInitializedAt).toBe(file.initializedAt);
+    expect(marker.nonce.length).toBe(64);
+    expect(marker.mac.length).toBeGreaterThan(20);
+  });
+
+  test('二次 bootstrap → EEXIST 排他失败，fail-closed already_initialized', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    expect(() => bootstrapTaskLeaseJournal()).toThrow(/lease_journal_already_initialized/);
   });
 
   test('seal 在、journal 丢 → fail-closed lost，不装成 init', async () => {
     freshDir();
-    await loadLeaseJournal();
-    deleteJournalFilesForTests({ journal: true, seal: false });
+    bootstrapTaskLeaseJournal();
+    deleteJournalFilesForTests({ journal: true, seal: false, marker: false });
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_lost' });
   });
 
-  test('两边都丢但 IMAP 已有 lease 证据 → recovery_required，不装成 init', async () => {
+  test('marker 丢失或 MAC 伪造 → fail-closed corrupt', async () => {
     freshDir();
-    await loadLeaseJournal();
-    deleteJournalFilesForTests({ journal: true, seal: true });
-    setJournalDurableEvidenceForTests(() => true);
-    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_recovery_required' });
+    bootstrapTaskLeaseJournal();
+    writeFileSync(journalPathsForTests().marker, '{"version":1,"activatedAt":"2026-08-24T00:00:00.000Z","journalInitializedAt":"2026-08-24T00:00:00.000Z","nonce":"0000000000000000000000000000000000000000000000000000000000000000","mac":"bad"}', { mode: 0o600 });
+    resetJournalMemoryForTests();
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
   });
 
   test('截断 journal → corrupt', async () => {
     freshDir();
-    await loadLeaseJournal();
+    bootstrapTaskLeaseJournal();
     writeFileSync(journalPathsForTests().journal, '{"version":1', { mode: 0o600 });
     resetJournalMemoryForTests();
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
@@ -74,7 +95,7 @@ describe('M2 journal 原子落盘与丢失检测', () => {
 
   test('短写注入后内存重置，磁盘不得留下半套成功记录', async () => {
     freshDir();
-    await loadLeaseJournal();
+    bootstrapTaskLeaseJournal();
     setJournalCrashHookForTests('short-write');
     await expect(upsertJournalRecord({
       taskId: '0fdc3207-056e-47c1-a65c-b29d39f66b83',
@@ -90,7 +111,7 @@ describe('M2 journal 原子落盘与丢失检测', () => {
 
   test('rename 后、seal 前崩溃：重启 fail-closed，不装成空 init', async () => {
     freshDir();
-    await loadLeaseJournal();
+    bootstrapTaskLeaseJournal();
     setJournalCrashHookForTests('after-rename');
     await expect(upsertJournalRecord({
       taskId: '0fdc3207-056e-47c1-a65c-b29d39f66b83',

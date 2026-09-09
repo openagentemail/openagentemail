@@ -43,6 +43,7 @@ const {
   withTaskLeasesEnabledForTests,
 } = await import('./support/task-lease-seams.ts');
 const {
+  bootstrapTaskLeaseJournal,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
@@ -129,8 +130,9 @@ afterEach(() => {
 });
 
 function isolateJournal(): void {
-  setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-m2-iso-')));
-  setJournalDurableEvidenceForTests(() => false);
+  const dir = mkdtempSync(join(tmpdir(), 'oae-m2-iso-'));
+  setJournalDataDirForTests(dir);
+  bootstrapTaskLeaseJournal();
 }
 
 describe('M2 配置面与默认关', () => {
@@ -186,6 +188,64 @@ describe('M2-1 pending fence 跨重启', () => {
       message: 'lease_overlay_pending_index',
     });
     expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'claim')).toHaveLength(1);
+  });
+
+  testOn('SMTP 失败后重启：同 identity 重发，不新开代', async () => {
+    isolateJournal();
+    let now = START;
+    const sent: SendInput[] = [];
+    let failOnce = true;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('smtp_down');
+      }
+      sent.push(input);
+      return { messageId: `<rs-${sent.length}>` };
+    });
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({ message: 'smtp_down' });
+    resetJournalMemoryForTests();
+    clearQueuedEventsForTests();
+    now = START + 16 * 60 * 1000;
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_overlay_pending_index',
+    });
+    expect(sent).toHaveLength(1);
+    const payload = JSON.parse(Buffer.from(String(sent[0]?.headers?.['X-OA-Task-Lease-Payload']), 'base64url').toString('utf8')) as { generation: number };
+    expect(payload.generation).toBe(1);
+  });
+
+  testOn('SMTP 失败后重启：全量 signed-payload 与 stamp 字节完全一致', async () => {
+    isolateJournal();
+    let now = START;
+    let firstAttemptHeaders: Record<string, string | undefined> | undefined;
+    const sent: SendInput[] = [];
+    let failOnce = true;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      if (failOnce) {
+        failOnce = false;
+        firstAttemptHeaders = { ...input.headers };
+        throw new Error('smtp_down');
+      }
+      sent.push(input);
+      return { messageId: `<rs-${sent.length}>` };
+    });
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({ message: 'smtp_down' });
+    expect(firstAttemptHeaders).toBeDefined();
+    resetJournalMemoryForTests();
+    clearQueuedEventsForTests();
+    now = START + 16 * 60 * 1000;
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_overlay_pending_index',
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.headers?.['X-OA-Task-Lease-Payload']).toBe(firstAttemptHeaders?.['X-OA-Task-Lease-Payload']);
+    expect(sent[0]?.headers?.['X-OA-Task-Stamp']).toBe(firstAttemptHeaders?.['X-OA-Task-Stamp']);
+    expect(sent[0]?.headers?.['X-OA-Task-Lease-Event']).toBe(firstAttemptHeaders?.['X-OA-Task-Lease-Event']);
   });
 
   bunTest('负控：无 journal 时内存清空后会重分配', async () => {
@@ -300,8 +360,8 @@ describe('M2-3 claim_lost', () => {
   });
 });
 
-describe('M2-4 renew 未索引重启不发射旧截止', () => {
-  bunTest('M2+M3：renew 后重启，发射器只用最终 claimedUntil', async () => {
+describe('M2-4 emitter 硬禁不可达', () => {
+  bunTest('journal ON 时生产发射器硬禁：不发出任何 expired 审计邮件', async () => {
     await withM2M3(async () => {
       isolateJournal();
       let now = START;
@@ -326,17 +386,14 @@ describe('M2-4 renew 未索引重启不发射旧截止', () => {
       resetJournalMemoryForTests();
       now = Date.parse(first.claimedUntil);
       expect(await emitPendingExpiryAuditsOnce()).toBe(0);
-      now = Date.parse(renewed.lease!.claimedUntil);
+      now = Date.parse(renewed.lease!.claimedUntil) + 1000;
       durable = { ...durable, lease: { ...durable.lease! } };
       setTaskGetForTests(async () => durable);
       setTaskListAllForTests(async () => [durable]);
       const n = await emitPendingExpiryAuditsOnce();
+      expect(n).toBe(0);
       const expiry = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
-      expect(n).toBe(1);
-      expect(expiry).toHaveLength(1);
-      const payload = Buffer.from(String(expiry[0]?.headers?.['X-OA-Task-Lease-Payload']), 'base64url').toString('utf8');
-      expect(payload).toContain(renewed.lease!.claimedUntil);
-      expect(payload).not.toContain(`"claimedUntil":"${first.claimedUntil}"`);
+      expect(expiry).toHaveLength(0);
     });
   });
 });
@@ -367,6 +424,232 @@ describe('M2-5 reclaim 不被审计 SMTP 挡住', () => {
       expect(await reapExpiredTaskLeasesOnce()).toBe(0);
       expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired')).toHaveLength(0);
     });
+  });
+});
+
+describe('P1-B 迟到 renew / release 历史和解与负控矩阵', () => {
+  testOn('正向：claim(1) -> tombstone(1) -> claim(2) -> 迟到 renew(1) 和解历史窗，不改变代2权威', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m-${sent.length}>` };
+    });
+    const claim1 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    durable = taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg])!;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const claim2 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const expired1Msg = (await parseCaptured(sent[2]!, 4))!;
+    const claim2Msg = (await parseCaptured(sent[3]!, 5))!;
+    expect(claim2.leaseGeneration).toBe(2);
+
+    const renew1At = new Date(START + 200 * 1000).toISOString();
+    const renew1Until = new Date(START + 600 * 1000).toISOString();
+    const renew1Headers = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1,
+        event: 'renew',
+        actor: B,
+        at: renew1At,
+        generation: 1,
+        claimedUntil: renew1Until,
+        tokenVerifier: claim1.task.lease!.tokenVerifier!,
+      },
+    });
+    const renew1Msg = (await parseCaptured({ from: B, to: [A], subject: 'Lease renew', text: 'renew', headers: renew1Headers }, 6))!;
+
+    const reconstructed = taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg, expired1Msg, claim2Msg, renew1Msg]);
+    expect(reconstructed).not.toBeNull();
+    expect(reconstructed!.lease?.leaseGeneration).toBe(2);
+  });
+
+  testOn('正向：claim(1) -> claim(2) -> 迟到 release(1) 和解历史释放，不篡夺代2权威', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m-${sent.length}>` };
+    });
+    const claim1 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + 300 * 1000;
+    durable = taskFromMessages(ID, [submittedRaw(), claim1Msg])!;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const claim2 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const expired1Msg = (await parseCaptured(sent[1]!, 3))!;
+    const claim2Msg = (await parseCaptured(sent[2]!, 4))!;
+    expect(claim2.leaseGeneration).toBe(2);
+
+    const release1At = new Date(START + 250 * 1000).toISOString();
+    const release1Headers = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1,
+        event: 'release',
+        actor: B,
+        at: release1At,
+        generation: 1,
+        tokenVerifier: claim1.task.lease!.tokenVerifier!,
+        reason: 'done',
+      },
+    });
+    const release1Msg = (await parseCaptured({ from: B, to: [A], subject: 'Lease release', text: 'release', headers: release1Headers }, 5))!;
+
+    const reconstructed = taskFromMessages(ID, [submittedRaw(), claim1Msg, expired1Msg, claim2Msg, release1Msg]);
+    expect(reconstructed).not.toBeNull();
+    expect(reconstructed!.lease?.leaseGeneration).toBe(2);
+    expect(reconstructed!.releasedLease).toBeUndefined();
+  });
+
+  testOn('负控：仅 tombstone 无 durable claim 时，迟到 renew/release 必 fail-closed (return null)', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m-${sent.length}>` };
+    });
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 2))!;
+    durable = taskFromMessages(ID, [submittedRaw(), tombstoneMsg])!;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const claim2 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim2Msg = (await parseCaptured(sent[2]!, 3))!;
+
+    const renew1Headers = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1,
+        event: 'renew',
+        actor: B,
+        at: new Date(START + 200 * 1000).toISOString(),
+        generation: 1,
+        claimedUntil: new Date(START + 600 * 1000).toISOString(),
+        tokenVerifier: '0'.repeat(43),
+      },
+    });
+    const fakeRenewMsg = (await parseCaptured({ from: B, to: [A], subject: 'Lease renew', text: 'renew', headers: renew1Headers }, 4))!;
+    expect(taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim2Msg, fakeRenewMsg])).toBeNull();
+
+    const release1Headers = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1,
+        event: 'release',
+        actor: B,
+        at: new Date(START + 200 * 1000).toISOString(),
+        generation: 1,
+        tokenVerifier: '0'.repeat(43),
+        reason: 'done',
+      },
+    });
+    const fakeReleaseMsg = (await parseCaptured({ from: B, to: [A], subject: 'Lease release', text: 'release', headers: release1Headers }, 5))!;
+    expect(taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim2Msg, fakeReleaseMsg])).toBeNull();
+  });
+
+  testOn('负控：迟到 renew/release 验签错误或超出时间窗必 fail-closed (return null)', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<m-${sent.length}>` };
+    });
+    const claim1 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    durable = taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg])!;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const claim2 = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim2Msg = (await parseCaptured(sent[2]!, 4))!;
+
+    const badVerifierRenew = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1, event: 'renew', actor: B,
+        at: new Date(START + 200 * 1000).toISOString(),
+        generation: 1, claimedUntil: new Date(START + 600 * 1000).toISOString(),
+        tokenVerifier: 'wrong-verifier-length-is-valid-base64url-padding-safe',
+      },
+    });
+    const badVerifierMsg = (await parseCaptured({ from: B, to: [A], subject: 'r', text: 'r', headers: badVerifierRenew }, 5))!;
+    expect(taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg, claim2Msg, badVerifierMsg])).toBeNull();
+
+    const lateAtRenew = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1, event: 'renew', actor: B,
+        at: new Date(START + 350 * 1000).toISOString(),
+        generation: 1, claimedUntil: new Date(START + 600 * 1000).toISOString(),
+        tokenVerifier: claim1.task.lease!.tokenVerifier!,
+      },
+    });
+    const lateAtMsg = (await parseCaptured({ from: B, to: [A], subject: 'r', text: 'r', headers: lateAtRenew }, 6))!;
+    expect(taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg, claim2Msg, lateAtMsg])).toBeNull();
+
+    const lateRelease = claimLeaseHeadersForTests({
+      id: ID,
+      state: 'working',
+      from: B,
+      to: A,
+      event: {
+        version: 1, event: 'release', actor: B,
+        at: new Date(START + 350 * 1000).toISOString(),
+        generation: 1, tokenVerifier: claim1.task.lease!.tokenVerifier!,
+        reason: 'late',
+      },
+    });
+    const lateReleaseMsg = (await parseCaptured({ from: B, to: [A], subject: 'r', text: 'r', headers: lateRelease }, 7))!;
+    expect(taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg, claim2Msg, lateReleaseMsg])).toBeNull();
   });
 });
 

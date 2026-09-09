@@ -12,7 +12,13 @@ import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
 import { notifyTrustedAgentDelivery } from './notify.ts';
 import { sendMail, type SendInput } from './smtp.ts';
-import { taskLeaseExpiryAuditM3Enabled, taskLeaseOverlayBoundEnabled, taskLeasePendingJournalEnabled, taskLeasesEnabled } from './task-lease-gate.ts';
+import {
+  taskLeaseEmitterEnabled,
+  taskLeaseExpiryAuditM3Enabled,
+  taskLeaseOverlayBoundEnabled,
+  taskLeasePendingJournalEnabled,
+  taskLeasesEnabled,
+} from './task-lease-gate.ts';
 import {
   JournalError,
   TASK_LEASE_CLAIM_LOST_MS,
@@ -1476,22 +1482,45 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       }
       const renewedAt = Date.parse(lease.at);
       const claimedUntil = Date.parse(lease.claimedUntil);
-      const generationClaimedAt = Date.parse(leaseAuthority?.generationClaimedAt ?? '');
-      const taskClaimedAt = Date.parse(leaseAuthority?.firstClaimedAt ?? firstClaimedAt ?? '');
+      if (!Number.isFinite(renewedAt) || !Number.isFinite(claimedUntil)) return null;
+
+      if (leaseAuthority && lease.generation === leaseAuthority.leaseGeneration) {
+        const generationClaimedAt = Date.parse(leaseAuthority.generationClaimedAt ?? '');
+        const taskClaimedAt = Date.parse(leaseAuthority.firstClaimedAt ?? firstClaimedAt ?? '');
+        if (
+          !leaseAuthority.claimedUntil || !leaseAuthority.tokenVerifier
+          || !leaseVerifiersEqual(lease.tokenVerifier, leaseAuthority.tokenVerifier)
+          || !Number.isFinite(generationClaimedAt)
+          || !Number.isFinite(taskClaimedAt)
+          || renewedAt >= Date.parse(leaseAuthority.claimedUntil)
+          || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
+        ) return null;
+        leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
+        appliedRenews.set(lease.generation, [...priorRenews, lease]);
+        appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+        continue;
+      }
+
+      // Late renew for historical generation N (after N+1 or tombstone)
+      const historicalClaim = appliedClaims.get(lease.generation);
+      if (!historicalClaim) return null;
+      if (!leaseVerifiersEqual(lease.tokenVerifier, historicalClaim.tokenVerifier)) return null;
+      const priorWindow = appliedClaimWindows.get(lease.generation)?.claimedUntil ?? historicalClaim.claimedUntil;
+      const thenClaimedUntil = Date.parse(priorWindow);
+      const generationClaimedAt = Date.parse(historicalClaim.at);
+      const taskClaimedAt = Date.parse(firstClaimedAt ?? historicalClaim.at);
       if (
-        !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
-        || lease.generation !== leaseAuthority.leaseGeneration
-        || !leaseVerifiersEqual(lease.tokenVerifier, leaseAuthority.tokenVerifier)
-        || !Number.isFinite(renewedAt)
-        || !Number.isFinite(claimedUntil)
+        !Number.isFinite(thenClaimedUntil)
         || !Number.isFinite(generationClaimedAt)
         || !Number.isFinite(taskClaimedAt)
-        || renewedAt >= Date.parse(leaseAuthority.claimedUntil)
-        || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
+        || renewedAt >= thenClaimedUntil
+        || claimedUntil <= thenClaimedUntil
+        || claimedUntil - generationClaimedAt > TASK_LEASE_GENERATION_MAX_MS
+        || claimedUntil - taskClaimedAt > TASK_LEASE_TASK_MAX_MS
       ) return null;
-      leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
       appliedRenews.set(lease.generation, [...priorRenews, lease]);
       appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+      duplicateLeaseMessages.add(message);
       continue;
     }
     const priorRelease = appliedReleases.get(lease.generation);
@@ -1502,21 +1531,37 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       }
       return null;
     }
-    if (
-      !leaseAuthority?.claimedUntil || !leaseAuthority.tokenVerifier
-      || lease.generation !== leaseAuthority.leaseGeneration
-      || !leaseVerifiersEqual(lease.tokenVerifier, leaseAuthority.tokenVerifier)
-      || Date.parse(lease.at) >= Date.parse(leaseAuthority.claimedUntil)
-    ) return null;
-    leaseAuthority = undefined;
-    expiredLease = undefined;
-    releasedLease = {
-      leaseGeneration: lease.generation,
-      tokenVerifier: lease.tokenVerifier,
-      reason: lease.reason,
-      ...(firstClaimedAt ? { firstClaimedAt } : {}),
-    };
+    const releasedAt = Date.parse(lease.at);
+    if (!Number.isFinite(releasedAt)) return null;
+
+    if (leaseAuthority && lease.generation === leaseAuthority.leaseGeneration) {
+      if (
+        !leaseAuthority.claimedUntil || !leaseAuthority.tokenVerifier
+        || !leaseVerifiersEqual(lease.tokenVerifier, leaseAuthority.tokenVerifier)
+        || releasedAt >= Date.parse(leaseAuthority.claimedUntil)
+      ) return null;
+      leaseAuthority = undefined;
+      expiredLease = undefined;
+      releasedLease = {
+        leaseGeneration: lease.generation,
+        tokenVerifier: lease.tokenVerifier,
+        reason: lease.reason,
+        ...(firstClaimedAt ? { firstClaimedAt } : {}),
+      };
+      appliedReleases.set(lease.generation, lease);
+      continue;
+    }
+
+    // Late release for historical generation N
+    const historicalClaim = appliedClaims.get(lease.generation);
+    if (!historicalClaim) return null;
+    if (!leaseVerifiersEqual(lease.tokenVerifier, historicalClaim.tokenVerifier)) return null;
+    const priorWindow = appliedClaimWindows.get(lease.generation)?.claimedUntil ?? historicalClaim.claimedUntil;
+    const thenClaimedUntil = Date.parse(priorWindow);
+    if (!Number.isFinite(thenClaimedUntil) || releasedAt >= thenClaimedUntil) return null;
     appliedReleases.set(lease.generation, lease);
+    duplicateLeaseMessages.add(message);
+    continue;
   }
   const request = first.approval;
   if (request?.type === 'request') {
@@ -1932,6 +1977,8 @@ let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 /** 测试注入 findTaskMessages 结果，用于走 getTaskSnapshot 的 hadMatchingRows 抑制路径。 */
 let findTaskMessagesForTests: ((id: string) => Promise<TaskLookupResult>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
+let preSmtpHookForTests: ((rec: JournalRecord) => void | Promise<void>) | null = null;
+let postSmtpAcceptHookForTests: ((rec: JournalRecord) => void | Promise<void>) | null = null;
 /** Test-only deterministic child id; production always uses crypto.randomUUID. */
 let taskIdForTests: (() => string) | null = null;
 type TaskSideEffectObserverForTests = {
@@ -2056,6 +2103,18 @@ export function setTaskSendMailForTests(
   fn: ((input: SendInput) => Promise<{ messageId: string }>) | null,
 ): void {
   sendMailForTests = fn;
+}
+
+export function setPreSmtpHookForTests(
+  fn: ((rec: JournalRecord) => void | Promise<void>) | null,
+): void {
+  preSmtpHookForTests = fn;
+}
+
+export function setPostSmtpAcceptHookForTests(
+  fn: ((rec: JournalRecord) => void | Promise<void>) | null,
+): void {
+  postSmtpAcceptHookForTests = fn;
 }
 
 /** Narrow R2 seam: makes server-generated-child self-reference rejectable in tests. */
@@ -2559,7 +2618,12 @@ function assertTaskLeaseCapAvailable(firstClaimedAt: string | undefined, now: nu
   }
 }
 
-function journalRecordFromLease(taskId: string, event: LeaseEvent, fate: JournalRecord['fate']): JournalRecord {
+function journalRecordFromLease(
+  taskId: string,
+  event: LeaseEvent,
+  fate: JournalRecord['fate'],
+  signedPayload?: string,
+): JournalRecord {
   const rec: JournalRecord = {
     taskId,
     kind: event.event === 'claim_lost' ? 'tombstone' : event.event,
@@ -2568,6 +2632,7 @@ function journalRecordFromLease(taskId: string, event: LeaseEvent, fate: Journal
     at: event.at,
     fate,
   };
+  if (signedPayload) rec.signedPayload = signedPayload;
   if ('claimedUntil' in event) rec.claimedUntil = event.claimedUntil;
   if ('tokenVerifier' in event) rec.tokenVerifier = event.tokenVerifier;
   if (event.event === 'claim_lost') rec.firstClaimedAt = event.firstClaimedAt;
@@ -2663,11 +2728,19 @@ async function deliverJournalledLeaseMail(input: {
     });
     return;
   }
-  const rec = journalRecordFromLease(input.task.id, input.event, 'intent');
+  const rec = journalRecordFromLease(
+    input.task.id,
+    input.event,
+    'intent',
+    headers['X-OA-Task-Lease-Payload'],
+  );
   try {
     await upsertJournalRecord(rec);
   } catch (err) {
     throwIfJournalError(err);
+  }
+  if (preSmtpHookForTests) {
+    await preSmtpHookForTests(rec);
   }
   try {
     await deliverMail({
@@ -2676,6 +2749,9 @@ async function deliverJournalledLeaseMail(input: {
   } catch (err) {
     await upsertJournalRecord({ ...rec, fate: 'unconfirmed' }).catch(() => undefined);
     throw err;
+  }
+  if (postSmtpAcceptHookForTests) {
+    await postSmtpAcceptHookForTests(rec);
   }
   try {
     await upsertJournalRecord({ ...rec, fate: 'accepted' });
@@ -2692,12 +2768,16 @@ async function resendUnconfirmedLease(task: Task, rec: JournalRecord): Promise<v
   const from = event.event === 'expired' || event.event === 'claim_lost' ? task.from : event.actor;
   const to = event.event === 'expired' || event.event === 'claim_lost' ? task.to : task.from;
   const state: TaskState = event.event === 'claim' ? 'working' : task.state;
+  const headers = leaseEventHeaders(task.id, state, from, to, event);
+  if (rec.signedPayload) {
+    headers['X-OA-Task-Lease-Payload'] = rec.signedPayload;
+  }
   await deliverMail({
     from,
     to: [to],
     subject: task.subject,
     text: rec.kind,
-    headers: leaseEventHeaders(task.id, state, from, to, event),
+    headers,
   });
 }
 
@@ -2724,6 +2804,20 @@ export async function claimTask(input: {
     if (isApprovalTask(current)) throw new Error('task_not_claimable');
     if ((current.state !== 'submitted' && current.state !== 'working') || isClosedByAdmin(current)) {
       throw new Error('task_not_claimable');
+    }
+    if (taskLeasePendingJournalEnabled()) {
+      try {
+        await loadLeaseJournal();
+      } catch (err) {
+        throwIfJournalError(err);
+      }
+      const pending = unresolvedClaimFence(current.id);
+      if (pending) {
+        if (pending.fate === 'intent' || pending.fate === 'unconfirmed') {
+          await resendUnconfirmedLease(current, pending).catch(() => undefined);
+        }
+        throw new Error('lease_overlay_pending_index');
+      }
     }
     const beforeMaterialization = nowMs();
     // This must precede expiry materialization: at the absolute boundary a
@@ -2762,20 +2856,6 @@ export async function claimTask(input: {
       throw new Error('lease_already_claimed');
     }
     if (wasWorking && !current.expiredLease && !current.releasedLease && !current.lostLease) throw new Error('task_not_claimable');
-    if (taskLeasePendingJournalEnabled()) {
-      try {
-        await loadLeaseJournal();
-      } catch (err) {
-        throwIfJournalError(err);
-      }
-      const pending = unresolvedClaimFence(current.id);
-      if (pending) {
-        if (pending.fate === 'intent' || pending.fate === 'unconfirmed') {
-          await resendUnconfirmedLease(current, pending).catch(() => undefined);
-        }
-        throw new Error('lease_overlay_pending_index');
-      }
-    }
     const durableGen = current.lease?.leaseGeneration
       ?? current.releasedLease?.leaseGeneration
       ?? current.expiredLease?.leaseGeneration
@@ -3241,6 +3321,7 @@ const M2_EMITTER_BATCH = 20;
 /** M2 延期审计发射器：锁外 SMTP，锁内再校验身份。失败隔离。 */
 export async function emitPendingExpiryAuditsOnce(): Promise<number> {
   assertTaskLeasesEnabled();
+  if (!taskLeaseEmitterEnabled()) return 0;
   if (!taskLeasePendingJournalEnabled() || !taskLeaseExpiryAuditM3Enabled()) return 0;
   try {
     await loadLeaseJournal();

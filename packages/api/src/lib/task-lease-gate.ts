@@ -31,6 +31,11 @@ export function taskLeasePendingJournalEnabled(): boolean {
   return testPendingJournalGate.getStore() ?? config.taskLeasesPendingJournal;
 }
 
+/** M2 emitter 独立门禁：在 R2 中全生产入口硬禁（hard-disabled），任何配置不可开启。 */
+export function taskLeaseEmitterEnabled(): boolean {
+  return false;
+}
+
 /** @internal Test-only scoped gate override; do not export through tasks.ts. */
 export function withTaskLeasesEnabledForTests<T>(enabled: boolean, work: () => T): T {
   return testLeaseGate.run(enabled, work);
