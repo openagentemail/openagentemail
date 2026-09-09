@@ -71,7 +71,15 @@ tree.
   first directory creation. A failed directory fsync leaves an `.unacked`
   marker; 2xx is withheld until that fsync succeeds. A failed **mkdir**
   fsync records the ancestor chain in `.dirsync` and resyncs that chain
-  on retry/restart before ACK. At-least-once, not exactly-once. A new
+  on retry/restart before ACK. A required ancestor fsync failure
+  (including `EACCES`/`EPERM`) fails closed — a permission wall is not a
+  durability boundary. The service user must be able to open-for-read
+  every ancestor that mkdir durability syncs (typical `0750`/`0755` under
+  `/var/lib/webhook-wake`). A `0300` write+search parent cannot persist a
+  newly created child and is rejected. A truncated or invalid `.dirsync`
+  marker stays fail-closed and is never rewritten into a shorter chain;
+  a missing marker still recovers by syncing existing ancestors.
+  At-least-once, not exactly-once. A new
   event reserves a dedup slot through send+commit (released on failure)
   so a concurrent observe record cannot steal the last slot after a
   canary wake has started.

@@ -78,6 +78,15 @@ function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Absolute paths only. Empty or truncated markers are corrupt, not an empty chain. */
+function parseDirsyncLines(raw: string): string[] | null {
+  const lines = raw.split('\n').filter((line) => line.length > 0);
+  if (lines.length === 0 || !lines.every((line) => line.startsWith('/') && !line.includes('\0'))) {
+    return null;
+  }
+  return lines;
+}
+
 /** Read-only. Does not repair `.unacked` or rewrite / drop corrupt files. */
 export function inspectDedupFile(
   path: string,
@@ -100,8 +109,8 @@ export function inspectDedupFile(
       return { ok: false, reason: 'state_dirsync_unreadable' };
     }
     try {
-      const lines = readFileSync(dirsync, 'utf8').split('\n').filter((line) => line.length > 0);
-      if (lines.length === 0 || !lines.every((line) => line.startsWith('/') && !line.includes('\0'))) {
+      const lines = parseDirsyncLines(readFileSync(dirsync, 'utf8'));
+      if (!lines) {
         return { ok: false, reason: 'state_dirsync_corrupt' };
       }
       return { ok: false, reason: 'state_dirsync' };
@@ -365,9 +374,20 @@ export class DedupStore {
     fsyncDirectory(dirname(marker));
   }
 
-  private readDirsync(): string[] {
+  /** Missing marker → empty (caller recovers by walking). Corrupt marker fails closed. */
+  private requirePendingDirsync(): string[] {
     if (!existsSync(this.dirsyncPath())) return [];
-    return readFileSync(this.dirsyncPath(), 'utf8').split('\n').filter(Boolean);
+    let raw: string;
+    try {
+      raw = readFileSync(this.dirsyncPath(), 'utf8');
+    } catch {
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_unreadable');
+    }
+    const lines = parseDirsyncLines(raw);
+    if (!lines) {
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_corrupt');
+    }
+    return lines;
   }
 
   private clearDirsync(): void {
@@ -383,30 +403,29 @@ export class DedupStore {
   private fsyncAncestorChain(dirs: string[]): void {
     for (const dir of dirs) {
       if (!existsSync(dir)) continue;
-      fsyncDirectory(dir);
-      this.onDirFsync?.(dir);
+      try {
+        fsyncDirectory(dir);
+        this.onDirFsync?.(dir);
+      } catch (err) {
+        if (err instanceof DedupError) throw err;
+        throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
+      }
     }
   }
 
-  /** Sync the state directory and walk parents until a permission wall. */
+  /** Sync existing ancestors. EACCES/EPERM is a failed sync, not a durable wall. */
   private fsyncExistingAncestors(start: string): void {
     let cursor = start;
-    let first = true;
     for (;;) {
       if (existsSync(cursor)) {
         try {
           fsyncDirectory(cursor);
           this.onDirFsync?.(cursor);
         } catch (err) {
-          if (first) {
-            throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
-          }
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code === 'EACCES' || code === 'EPERM') break;
+          if (err instanceof DedupError) throw err;
           throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
         }
       }
-      first = false;
       const parent = dirname(cursor);
       if (parent === cursor) break;
       cursor = parent;
@@ -414,7 +433,7 @@ export class DedupStore {
   }
 
   private mkdirDurable(dir: string): void {
-    const pending = this.readDirsync();
+    const pending = this.requirePendingDirsync();
     if (pending.length > 0) {
       if (this.failMkdirFsync) {
         this.failMkdirFsync = false;

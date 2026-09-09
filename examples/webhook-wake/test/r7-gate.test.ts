@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createServer } from 'node:http';
 import { maxHeaderSize } from 'node:http';
 import { createConnection } from 'node:net';
-import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -176,6 +176,74 @@ describe('R7 dirsync durability and missing marker', () => {
     expect(existsSync(restarted.dirsyncPath())).toBe(false);
     expect(synced.some((dir) => dir === join(root, 'a'))).toBe(true);
     expect(synced.some((dir) => dir === join(root, 'a', 'b'))).toBe(true);
+  });
+
+  test('non-root 0300 parent EACCES fails closed; restore then a new instance syncs the chain', async () => {
+    expect(typeof process.getuid === 'function' && process.getuid() !== 0).toBe(true);
+    const root = tempDir();
+    const wall = join(root, 'wall');
+    mkdirSync(wall, { mode: 0o700 });
+    chmodSync(wall, 0o300);
+    const path = join(wall, 'new', 'dedup.json');
+    const cfg = { path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 };
+    const rec = {
+      key: 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555',
+      status: 'success' as const,
+      storedAtMs: 1,
+      expiresAtMs: 9_999_999_999_999,
+    };
+    const syncedBlocked: string[] = [];
+    try {
+      const blocked = new DedupStore(cfg, { onDirFsync: (dir) => syncedBlocked.push(dir) });
+      await expect(blocked.commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
+      expect(existsSync(path)).toBe(false);
+      await expect(blocked.get(rec.key, 1)).resolves.toBeUndefined();
+      expect(syncedBlocked.includes(wall)).toBe(false);
+      const inspect = inspectDedupFile(path);
+      expect(inspect.ok).toBe(false);
+
+      chmodSync(wall, 0o700);
+      const synced: string[] = [];
+      const retry = new DedupStore(cfg, { onDirFsync: (dir) => synced.push(dir) });
+      await retry.commit(rec, 1);
+      expect(existsSync(path)).toBe(true);
+      expect(existsSync(retry.dirsyncPath())).toBe(false);
+      expect(synced.some((dir) => dir === join(wall, 'new'))).toBe(true);
+      expect(synced.some((dir) => dir === wall)).toBe(true);
+      expect((await retry.get(rec.key, 1))?.status).toBe('success');
+    } finally {
+      try {
+        chmodSync(wall, 0o700);
+      } catch {
+        /* cleanup */
+      }
+    }
+  });
+
+  test('truncated dirsync marker stays fail-closed and is not rewritten shorter', async () => {
+    const root = tempDir();
+    const path = join(root, 'a', 'b', 'dedup.json');
+    mkdirSync(join(root, 'a', 'b'), { recursive: true });
+    const marker = `${path}.dirsync`;
+    const invalid = 'relative/shortened-chain\n';
+    writeFileSync(marker, '');
+    const cfg = { path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 };
+    const rec = {
+      key: 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555',
+      status: 'success' as const,
+      storedAtMs: 1,
+      expiresAtMs: 9_999_999_999_999,
+    };
+    const store = new DedupStore(cfg);
+    await expect(store.commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
+    expect(existsSync(path)).toBe(false);
+    expect(readFileSync(marker, 'utf8')).toBe('');
+    expect(inspectDedupFile(path)).toEqual({ ok: false, reason: 'state_dirsync_corrupt' });
+
+    writeFileSync(marker, invalid);
+    await expect(new DedupStore(cfg).commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
+    expect(existsSync(path)).toBe(false);
+    expect(readFileSync(marker, 'utf8')).toBe(invalid);
   });
 });
 
