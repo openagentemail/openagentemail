@@ -32,7 +32,7 @@ tree.
   observe record) **and** a durable dedup write. Transient send/storage/
   timeout/authenticated mapping mismatch failures return 503 so the sender
   can retry. Dedup key is `subscriptionId + signed event id`, retained 7
-  days (≥72h). Concurrent duplicates share one in-flight operation.
+  days (≥72h plus a 1h delivery margin). Concurrent duplicates share one in-flight operation.
   **Observe replay:** an `observed` record for the same subscription+event
   id suppresses a later canary send of that id. Switching to canary
   requires a **new** event id (or a new test send). This is not a live
@@ -67,9 +67,11 @@ tree.
   Unknown hook routes return **404**; a known route with a failed
   signature returns **401**. Route keys are not credentials; the
   distinction is intentional and is not an authentication system.
-- Dedup fsyncs the file and the parent directory after rename, including
-  first directory creation. A failed directory fsync leaves an `.unacked`
-  marker; 2xx is withheld until that fsync succeeds. A failed **mkdir**
+-   Dedup fsyncs the file and the parent directory after rename, including
+  first directory creation. The `.unacked` marker is written and fsynced
+  (file + parent directory) **before** rename so a crash after a failed
+  parent fsync still recovers the durable-intent signal. 2xx is withheld
+  until that parent fsync succeeds. A failed **mkdir**
   fsync records the ancestor chain in `.dirsync` and resyncs that chain
   on retry/restart before ACK. A required ancestor fsync failure
   (including `EACCES`/`EPERM`) fails closed — a permission wall is not a
@@ -126,8 +128,9 @@ tree.
   so boot probes wait for a configured online service. `ALERT_BIN` stays
   an absolute helper; this tree does not create users or deploy units.
 - Secret files on Linux must be mode `0600` (group/other bits fail load).
-  Load uses one fd: `O_NOFOLLOW` + `fstat` + read (symlink →
-  `secret_symlink`). That is a local operator-directory trust boundary,
+  Load uses one fd: `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` + `fstat` + read
+  (symlink → `secret_symlink`; FIFO/dir → `secret_not_file` without a
+  blocking open). That is a local operator-directory trust boundary,
   not a new credential policy. `templates/canary.whs.example` is
   deliberately **not** a valid `whs_` hex secret until replaced.
   `alertHook.url` is trusted-operator config; this example does not add
@@ -161,7 +164,7 @@ tree.
 These ranges describe operator defaults and current load-time constraints.
 They are **not** a new validation layer. Present values must already be
 integers of the documented sign; only `listen.port` (0–65535),
-`dedup.retentionMs` (≥72h), and `dedup.path` (absolute) have extra load
+`dedup.retentionMs` (≥72h + 1h delivery margin), and `dedup.path` (absolute) have extra load
 rules today. Do not treat the recommended bands below as runtime-enforced
 limits.
 
@@ -178,7 +181,7 @@ limits.
 | `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Bound on **retained** child stdout/stderr counts. Excess is drained and discarded (not pipe-destroyed) so a zero-exit send still commits. |
 | `wakeHistoryLimit` | 0 | integer ≥ 0 | 0–128 | In-memory ring only. `0` disables history. |
 | `dedup.path` | `/var/lib/webhook-wake/dedup.json` | absolute file path | absolute file path | Relative paths, trailing separators (`/tmp/x.json/`), and root-as-file (`/`) fail load (`config_invalid:dedup.path`) before any store I/O. Present `dedup` must be an object (`config_invalid:dedup`). |
-| `dedup.retentionMs` | 604800000 (7d) | integer ≥ 259200000 (72h) | 72h–30d | Replay/dedup window. Below 72h fails load. |
+| `dedup.retentionMs` | 604800000 (7d) | integer ≥ 262800000 (72h + 1h) | 73h–30d | Replay/dedup window. Must outlast the producer's pinned 11th attempt at +72h; exactly 72h fails load so ordinary delivery latency cannot expire the record and re-wake. |
 | `dedup.maxRecords` | 10000 | integer > 0 | 1000–100000 | Fail-closed when full (no eviction of live keys). |
 | `alertHook.timeoutMs` | 2000 | integer > 0 | 500–10000 | Receiver hook POST budget only. |
 
@@ -246,7 +249,9 @@ is allowed in preflight; a real load still fails on a missing file.
 `alertHook`, if present, must be an object (string/array/null/scalar
 fail load) so a typo cannot silently disable the sink. `alertHook.url`
 `null` disables the sink; an explicit empty string fails load
-(`config_invalid:alertHook.url`). Present `listen` must be a non-array
+(`config_invalid:alertHook.url`). The JSON document root must be a
+non-array object (`config_invalid:root`); an array, scalar, or `null`
+root does not load as empty defaults. Present `listen` must be a non-array
 object; a present invalid `host` fails (`config_invalid:listen.host`)
 instead of silently binding `127.0.0.1`. Present `dedup`
 must likewise be an object (`config_invalid:dedup`). IPv6 listen
@@ -255,7 +260,10 @@ addresses are bracketed in `receiver.url()` (`http://[::1]:port`).
 `http://[::1]:port` health URL uses host `::1`.
 Readiness `inspectDedupFile` is fail-closed on any malformed record
 (`state_corrupt`). Existing non-regular state (FIFO/dir) is
-`state_not_file` before any synchronous read. Runtime `DedupStore.readFile`
+`state_not_file` before any synchronous read. Same-family `.dirsync`
+and `.unacked` markers are inspected the same way; a FIFO marker is
+`state_dirsync_not_file` / fail-closed unacked and is never
+`readFileSync`'d. Runtime `DedupStore.readFile`
 still skips malformed
 entries so a later valid commit can recover — that split is existing
 recovery, not a new repair policy. A sticky parent that is writable

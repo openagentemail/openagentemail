@@ -17,7 +17,11 @@ import type { ReceiverConfig, ReceiverMode, RouteBinding } from './types.ts';
 
 export const DEFAULT_BODY_LIMIT = 16 * 1024;
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-export const MIN_RETENTION_MS = 72 * 60 * 60 * 1000;
+/** Producer attempt 11 is pinned at +72h from the first attempt. */
+export const PRODUCER_RETRY_HORIZON_MS = 72 * 60 * 60 * 1000;
+/** Slack so a late 11th delivery is still a duplicate (`expiresAtMs <= nowMs`). */
+export const RETENTION_DELIVERY_MARGIN_MS = 60 * 60 * 1000;
+export const MIN_RETENTION_MS = PRODUCER_RETRY_HORIZON_MS + RETENTION_DELIVERY_MARGIN_MS;
 export const DEFAULT_MAX_RECORDS = 10_000;
 /** Host/Content-Type/Content-Length and other non-signature request headers. */
 export const HTTP_HEADER_OVERHEAD_BYTES = 4096;
@@ -79,8 +83,10 @@ function assertSecretFileMode(path: string, mode: number): void {
 
 function readSecretFile(path: string): string {
   const resolved = resolve(path);
-  const nofollow = constants.O_NOFOLLOW;
-  const flags = typeof nofollow === 'number' ? constants.O_RDONLY | nofollow : constants.O_RDONLY;
+  const nofollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+  // Nonblocking so a FIFO cannot hang open before fstat rejects it.
+  const nonblock = typeof constants.O_NONBLOCK === 'number' ? constants.O_NONBLOCK : 0;
+  const flags = constants.O_RDONLY | nofollow | nonblock;
   let fd: number;
   try {
     fd = openSync(resolved, flags);
@@ -237,12 +243,20 @@ function optionalListenHost(value: unknown, fallback: string): string {
   return value.trim();
 }
 
-export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boolean }): ReceiverConfig {
-  if (raw.mode !== undefined && raw.mode !== 'observe' && raw.mode !== 'canary') {
+function requireConfigRoot(value: unknown): FileConfig {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('config_invalid:root');
+  }
+  return value as FileConfig;
+}
+
+export function parseFileConfig(raw: unknown, options?: { loadSecrets?: boolean }): ReceiverConfig {
+  const parsed = requireConfigRoot(raw);
+  if (parsed.mode !== undefined && parsed.mode !== 'observe' && parsed.mode !== 'canary') {
     throw new Error('config_invalid:mode');
   }
-  const mode: ReceiverMode = raw.mode === 'canary' ? 'canary' : 'observe';
-  const routesIn = requireRouteMap(raw.routes);
+  const mode: ReceiverMode = parsed.mode === 'canary' ? 'canary' : 'observe';
+  const routesIn = requireRouteMap(parsed.routes);
   const routes: RouteBinding[] = [];
 
   for (const [routeKey, rawSpec] of Object.entries(routesIn)) {
@@ -292,7 +306,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     });
   }
 
-  const canaryTerminal = raw.canaryTerminal ? raw.canaryTerminal.trim() : null;
+  const canaryTerminal = parsed.canaryTerminal ? parsed.canaryTerminal.trim() : null;
   if (canaryTerminal && !isTerminalHandle(canaryTerminal)) {
     throw new Error('config_invalid:canaryTerminal');
   }
@@ -303,7 +317,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     throw new Error('config_invalid:canary_terminal_unbound');
   }
 
-  const hook = requireAlertHookObject(raw.alertHook);
+  const hook = requireAlertHookObject(parsed.alertHook);
   const alertUrl = hook?.url ?? null;
   if (alertUrl != null && typeof alertUrl !== 'string') {
     throw new Error('config_invalid:alertHook.url');
@@ -311,8 +325,8 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
   if (typeof alertUrl === 'string' && !alertUrl.trim()) {
     throw new Error('config_invalid:alertHook.url');
   }
-  const dedup = requireDedupObject(raw.dedup);
-  const listen = requireListenObject(raw.listen);
+  const dedup = requireDedupObject(parsed.dedup);
+  const listen = requireListenObject(parsed.listen);
 
   return {
     listen: {
@@ -321,20 +335,20 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     },
     mode,
     canaryTerminal,
-    orcaBinary: optionalString(raw.orcaBinary, 'orcaBinary', '/usr/local/bin/orca'),
-    bodyLimitBytes: optionalPositiveInt(raw.bodyLimitBytes, 'bodyLimitBytes', DEFAULT_BODY_LIMIT),
-    timestampToleranceSec: optionalPositiveInt(raw.timestampToleranceSec, 'timestampToleranceSec', 300),
-    maxV1Signatures: optionalPositiveInt(raw.maxV1Signatures, 'maxV1Signatures', 8),
+    orcaBinary: optionalString(parsed.orcaBinary, 'orcaBinary', '/usr/local/bin/orca'),
+    bodyLimitBytes: optionalPositiveInt(parsed.bodyLimitBytes, 'bodyLimitBytes', DEFAULT_BODY_LIMIT),
+    timestampToleranceSec: optionalPositiveInt(parsed.timestampToleranceSec, 'timestampToleranceSec', 300),
+    maxV1Signatures: optionalPositiveInt(parsed.maxV1Signatures, 'maxV1Signatures', 8),
     maxHeaderBytes: (() => {
-      const value = optionalPositiveInt(raw.maxHeaderBytes, 'maxHeaderBytes', 2048);
+      const value = optionalPositiveInt(parsed.maxHeaderBytes, 'maxHeaderBytes', 2048);
       assertHttpHeaderTransport(value);
       return value;
     })(),
-    requestTimeoutMs: optionalPositiveInt(raw.requestTimeoutMs, 'requestTimeoutMs', 10_000),
-    maxConcurrent: optionalPositiveInt(raw.maxConcurrent, 'maxConcurrent', 16),
-    sendTimeoutMs: optionalPositiveInt(raw.sendTimeoutMs, 'sendTimeoutMs', 8_000),
-    outputCapBytes: optionalPositiveInt(raw.outputCapBytes, 'outputCapBytes', 4096),
-    wakeHistoryLimit: optionalNonNegInt(raw.wakeHistoryLimit, 'wakeHistoryLimit', 0),
+    requestTimeoutMs: optionalPositiveInt(parsed.requestTimeoutMs, 'requestTimeoutMs', 10_000),
+    maxConcurrent: optionalPositiveInt(parsed.maxConcurrent, 'maxConcurrent', 16),
+    sendTimeoutMs: optionalPositiveInt(parsed.sendTimeoutMs, 'sendTimeoutMs', 8_000),
+    outputCapBytes: optionalPositiveInt(parsed.outputCapBytes, 'outputCapBytes', 4096),
+    wakeHistoryLimit: optionalNonNegInt(parsed.wakeHistoryLimit, 'wakeHistoryLimit', 0),
     dedup: {
       path: optionalAbsoluteFilePath(dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
       retentionMs: optionalRetentionMs(dedup?.retentionMs, DEFAULT_RETENTION_MS),
@@ -352,7 +366,7 @@ export function loadConfigFile(path: string): ReceiverConfig {
   if (!existsSync(path)) {
     throw new Error(`config_missing:${path}`);
   }
-  const parsed = JSON.parse(readFileSync(path, 'utf8')) as FileConfig;
+  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
   return parseFileConfig(parsed, { loadSecrets: true });
 }
 

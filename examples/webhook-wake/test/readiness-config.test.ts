@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MIN_RETENTION_MS, parseFileConfig } from '../src/config.ts';
+import { MIN_RETENTION_MS, PRODUCER_RETRY_HORIZON_MS, parseFileConfig } from '../src/config.ts';
 import { inspectReadiness, isRegularExecutable } from '../src/readiness.ts';
 import { mailBody, postHook, startReceiver, tempDir, testConfig, testRoute, writeSecretFile } from './helpers.ts';
 import { recordingWake } from '../src/wake.ts';
@@ -126,7 +126,7 @@ describe('readiness and config load', () => {
     chmodSync(existing, 0o700);
   });
 
-  test('numeric bounds: zero-valid fields accepted; positive fields reject 0; retention honors 72h', () => {
+  test('numeric bounds: zero-valid fields accepted; positive fields reject 0; retention honors 72h+margin', () => {
     const dir = tempDir();
     const zeroHistory = parseFileConfig({ ...fileBase(dir), wakeHistoryLimit: 0, listen: { port: 0 } });
     expect(zeroHistory.wakeHistoryLimit).toBe(0);
@@ -136,6 +136,9 @@ describe('readiness and config load', () => {
     expect(() => parseFileConfig({ ...fileBase(dir), maxConcurrent: '8' as unknown as number })).toThrow(
       'config_invalid:maxConcurrent',
     );
+    expect(() =>
+      parseFileConfig({ ...fileBase(dir), dedup: { retentionMs: PRODUCER_RETRY_HORIZON_MS } }),
+    ).toThrow('config_invalid:dedup.retentionMs');
     expect(() =>
       parseFileConfig({ ...fileBase(dir), dedup: { retentionMs: MIN_RETENTION_MS - 1 } }),
     ).toThrow('config_invalid:dedup.retentionMs');

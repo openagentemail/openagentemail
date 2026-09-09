@@ -103,7 +103,25 @@ describe('timeout, kill, and fake argv boundary', () => {
     expect(gcPid).toBeGreaterThan(1);
     expect(gcPid).not.toBe(self);
     await Bun.sleep(100);
-    expect(() => process.kill(gcPid, 0)).toThrow();
+    expect(isTerminatedOrZombie(process.pid)).toBe(false);
+    expect(isTerminatedOrZombie(gcPid)).toBe(true);
   });
 });
+
+/** ESRCH, or a zombie left when PID 1 does not reap. Does not signal the child. */
+function isTerminatedOrZombie(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = raw.lastIndexOf(')');
+    if (close < 0) return false;
+    return raw.slice(close + 2, close + 3) === 'Z';
+  } catch {
+    return true;
+  }
+}
 

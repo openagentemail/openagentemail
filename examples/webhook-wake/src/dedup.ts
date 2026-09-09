@@ -55,7 +55,8 @@ export type DedupFailureKind =
   | 'rename'
   | 'dir_fsync'
   | 'mkdir_fsync'
-  | 'dirsync_persist';
+  | 'dirsync_persist'
+  | 'unacked_persist';
 
 export function dedupKey(subscriptionId: string, eventId: string): string {
   return `${subscriptionId}:${eventId}`;
@@ -73,6 +74,7 @@ export type DedupInspect =
         | 'state_dirsync'
         | 'state_dirsync_unreadable'
         | 'state_dirsync_corrupt'
+        | 'state_dirsync_not_file'
         | 'state_capacity'
         | 'state_not_file';
     };
@@ -123,7 +125,14 @@ export function inspectDedupFile(
   options?: { maxRecords?: number; nowMs?: number },
 ): DedupInspect {
   const unacked = `${path}.unacked`;
-  if (existsSync(unacked)) {
+  const unackedKind = inspectRegularStateFile(unacked);
+  if (unackedKind === 'not_file') {
+    return { ok: false, reason: 'state_unacked' };
+  }
+  if (unackedKind === 'unreadable') {
+    return { ok: false, reason: 'state_unacked_unreadable' };
+  }
+  if (unackedKind === 'file') {
     try {
       accessSync(unacked, constants.R_OK);
     } catch {
@@ -132,7 +141,14 @@ export function inspectDedupFile(
     return { ok: false, reason: 'state_unacked' };
   }
   const dirsync = `${path}.dirsync`;
-  if (existsSync(dirsync)) {
+  const dirsyncKind = inspectRegularStateFile(dirsync);
+  if (dirsyncKind === 'not_file') {
+    return { ok: false, reason: 'state_dirsync_not_file' };
+  }
+  if (dirsyncKind === 'unreadable') {
+    return { ok: false, reason: 'state_dirsync_unreadable' };
+  }
+  if (dirsyncKind === 'file') {
     try {
       accessSync(dirsync, constants.R_OK);
     } catch {
@@ -219,6 +235,7 @@ export class DedupStore {
   private failDirFsync = false;
   private failMkdirFsync = false;
   private failDirsyncPersist = false;
+  private failUnackedPersist = false;
   private reserved = new Set<string>();
   private readonly onDirFsync?: (dir: string) => void;
 
@@ -244,6 +261,7 @@ export class DedupStore {
     if (kind === 'dir_fsync') this.failDirFsync = true;
     if (kind === 'mkdir_fsync') this.failMkdirFsync = true;
     if (kind === 'dirsync_persist') this.failDirsyncPersist = true;
+    if (kind === 'unacked_persist') this.failUnackedPersist = true;
   }
 
   private withQueue<T>(fn: () => T): Promise<T> {
@@ -339,6 +357,23 @@ export class DedupStore {
     writeFileSync(this.unackedPath(), 'unacked\n', { mode: 0o600 });
   }
 
+  /** File + parent-dir fsync so a crash after rename still sees the marker. */
+  private persistUnacked(): void {
+    if (this.failUnackedPersist) {
+      this.failUnackedPersist = false;
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_persist_failed');
+    }
+    const marker = this.unackedPath();
+    writeFileSync(marker, 'unacked\n', { mode: 0o600 });
+    const fd = openSync(marker, 'r+');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    fsyncDirectory(dirname(marker));
+  }
+
   private clearUnacked(): void {
     try {
       unlinkSync(this.unackedPath());
@@ -431,9 +466,16 @@ export class DedupStore {
     fsyncDirectory(dirname(marker));
   }
 
-  /** Missing marker → empty (caller recovers by walking). Corrupt marker fails closed. */
+  /** Missing marker → empty (caller recovers by walking). Corrupt/nonregular marker fails closed. */
   private requirePendingDirsync(): string[] {
-    if (!existsSync(this.dirsyncPath())) return [];
+    const kind = inspectRegularStateFile(this.dirsyncPath());
+    if (kind === 'missing') return [];
+    if (kind === 'not_file') {
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_not_file');
+    }
+    if (kind === 'unreadable') {
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_unreadable');
+    }
     let raw: string;
     try {
       raw = readFileSync(this.dirsyncPath(), 'utf8');
@@ -546,7 +588,7 @@ export class DedupStore {
         this.failRename = false;
         throw new DedupError('dedup_rename_failed', 'dedup_rename_failed');
       }
-      this.markUnacked();
+      this.persistUnacked();
       renameSync(tmp, this.config.path);
       this.fsyncParentOrThrow();
       this.clearUnacked();
