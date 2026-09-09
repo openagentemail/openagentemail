@@ -93,8 +93,10 @@ tree.
   marker stays fail-closed and is never rewritten into a shorter chain;
   a missing marker still recovers by syncing existing ancestors.
   Pending `.dirsync` is validated on `get`/`reserveCapacity` (recover
-  still happens at commit) so a persistent bad marker returns 503 with
-  zero wake.
+  still happens at commit) so a persistent bad marker, or a syntactically
+  valid marker whose existing components are not openable directories
+  (FIFO/file), returns 503 with zero wake. Directory fsync opens with
+  `O_DIRECTORY|O_NONBLOCK` and does not claim a TOCTOU defense.
   At-least-once, not exactly-once. A new
   event reserves a dedup slot through send+commit (released on failure)
   so a concurrent observe record cannot steal the last slot after a

@@ -221,8 +221,49 @@ export function isValidDedupRecord(key: string, value: unknown): value is DedupR
   );
 }
 
+function directoryOpenFlags(): number {
+  let flags = constants.O_RDONLY;
+  if (typeof constants.O_DIRECTORY === 'number') flags |= constants.O_DIRECTORY;
+  if (typeof constants.O_NONBLOCK === 'number') flags |= constants.O_NONBLOCK;
+  return flags;
+}
+
+/** lstat + O_DIRECTORY|O_NONBLOCK. Missing is skipped by the caller. Not a TOCTOU defense. */
+function classifyDirsyncComponent(path: string): 'missing' | 'dir' | 'not_dir' | 'unopenable' {
+  try {
+    const link = lstatSync(path);
+    if (link.isSymbolicLink()) {
+      try {
+        if (!statSync(path).isDirectory()) return 'not_dir';
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'not_dir' : 'unopenable';
+      }
+    } else if (!link.isDirectory()) {
+      return 'not_dir';
+    }
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unopenable';
+  }
+  try {
+    const fd = openSync(path, directoryOpenFlags());
+    closeSync(fd);
+    return 'dir';
+  } catch {
+    return 'unopenable';
+  }
+}
+
 function fsyncDirectory(dir: string): void {
-  const fd = openSync(dir, 'r');
+  let fd: number;
+  try {
+    fd = openSync(dir, directoryOpenFlags());
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOTDIR' || code === 'ELOOP') {
+      throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_not_dir');
+    }
+    throw err;
+  }
   try {
     fsyncSync(fd);
   } finally {
@@ -637,15 +678,30 @@ export class DedupStore {
     }
   }
 
-  /** Fail closed on a bad marker. Valid pending is left for commit recovery. */
+  /** Existing recorded paths must be openable directories. Missing stays skipped. */
+  private assertDirsyncComponents(dirs: string[]): void {
+    for (const dir of dirs) {
+      const kind = classifyDirsyncComponent(dir);
+      if (kind === 'missing') continue;
+      if (kind === 'not_dir') {
+        throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_not_dir');
+      }
+      if (kind === 'unopenable') {
+        throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_dirsync_unopenable');
+      }
+    }
+  }
+
+  /** Fail closed on a bad marker or non-directory component. Recovery stays at commit. */
   private assertPendingDirsync(): void {
-    this.requirePendingDirsync();
+    this.assertDirsyncComponents(this.requirePendingDirsync());
   }
 
   /** Valid pending marker is fsynced and cleared. Corrupt/nonregular fails closed. */
   private recoverPendingDirsync(): void {
     const pending = this.requirePendingDirsync();
     if (pending.length === 0) return;
+    this.assertDirsyncComponents(pending);
     if (this.failMkdirFsync) {
       this.failMkdirFsync = false;
       throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');

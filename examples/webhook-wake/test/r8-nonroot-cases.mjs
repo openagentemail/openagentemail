@@ -51,7 +51,8 @@ async function durability() {
     const blocked = new DedupStore(cfg, { onDirFsync: (dir) => syncedBlocked.push(dir) });
     await assert.rejects(() => blocked.commit(rec, 1), { code: 'dedup_mkdir_fsync_failed' });
     assert.equal(existsSync(path), false);
-    assert.equal(await blocked.get(rec.key, 1), undefined);
+    // Recorded 0300 ancestor is a directory but not openable; pre-wake now fail-closes.
+    await assert.rejects(() => blocked.get(rec.key, 1), { code: 'dedup_mkdir_fsync_failed' });
     assert.equal(syncedBlocked.includes(wall), false);
     assert.equal(inspectDedupFile(path).ok, false);
 
