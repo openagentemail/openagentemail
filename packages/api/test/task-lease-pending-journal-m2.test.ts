@@ -45,11 +45,13 @@ const {
 const {
   bootstrapTaskLeaseJournal,
   journalPathsForTests,
+  loadLeaseJournal,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
   setJournalDurableEvidenceForTests,
   setJournalNowForTests,
+  unresolvedClaimFence,
 } = await import('../src/lib/task-lease-journal.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
@@ -302,6 +304,31 @@ describe('M2-2 crash 边界 fail-closed', () => {
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
       message: 'lease_journal_lost',
     });
+  });
+
+  testOn('before-write 失败后不重置内存：零 SMTP，重试成功后才发送且 intent 已落盘', async () => {
+    isolateJournal();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<retry-${sent.length}>` };
+    });
+    setJournalCrashHookForTests('before-write');
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_journal_crash_before_write',
+    });
+    expect(sent).toHaveLength(0);
+    expect(unresolvedClaimFence(ID)).toBeUndefined();
+    const empty = JSON.parse(readFileSync(journalPathsForTests().journal, 'utf8')) as { records: unknown[] };
+    expect(empty.records).toEqual([]);
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(grant.leaseGeneration).toBe(1);
+    expect(sent).toHaveLength(1);
+    const live = await loadLeaseJournal();
+    expect(live.records.some((row) => row.taskId === ID && row.generation === 1)).toBe(true);
   });
 });
 

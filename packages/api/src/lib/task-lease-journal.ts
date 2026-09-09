@@ -5,6 +5,8 @@
  * 落盘：DATA_DIR/task-lease-journal/ (activated marker + journal.json + journal.seal)
  * 首次启用：专属目录排他性创建（exclusive mkdir），写入 marker + 空表 + seal。
  * 丢失/损坏：永久 fail-closed recovery_required，绝不自动重新初始化或旁路恢复。
+ * 整段 read-modify-write（含 upsert 与 markFate）在 journal 范围串行，不按 task 分锁。
+ * 未成功 persist 的变更不得进入 cache / fence 权威。
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -88,6 +90,7 @@ let latchedError: JournalError | null = null;
 let crashHook: JournalCrashHook | null = null;
 let dataDirOverride: string | undefined;
 let nowFn: () => number = () => Date.now();
+let mutationQueue: Promise<void> = Promise.resolve();
 
 function dataDir(): string {
   return dataDirOverride ?? config.dataDir;
@@ -119,6 +122,26 @@ function tmpSealPath(): string {
 
 function nowIso(): string {
   return new Date(nowFn()).toISOString();
+}
+
+function enqueueJournal<T>(fn: () => T | Promise<T>): Promise<T> {
+  const run = mutationQueue.then(fn, fn);
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function cloneJournal(file: JournalFile): JournalFile {
+  const cloned: JournalFile = {
+    version: file.version,
+    initializedAt: file.initializedAt,
+    source: file.source,
+    records: file.records.map((row) => ({ ...row })),
+  };
+  if (file.firstTombstoneAt !== undefined) cloned.firstTombstoneAt = file.firstTombstoneAt;
+  return cloned;
 }
 
 function fireCrash(hook: JournalCrashHook): void {
@@ -319,7 +342,7 @@ function persist(file: JournalFile): void {
   }
   fireCrash('after-parent-fsync');
   writeSeal(body);
-  cache = file;
+  cache = cloneJournal(file);
   loaded = true;
 }
 
@@ -397,7 +420,7 @@ export function bootstrapTaskLeaseJournal(): JournalFile {
   return file;
 }
 
-export async function loadLeaseJournal(): Promise<JournalFile> {
+function loadLeaseJournalUnlocked(): JournalFile {
   if (latchedError) {
     throw latchedError;
   }
@@ -447,10 +470,10 @@ export async function loadLeaseJournal(): Promise<JournalFile> {
       throw new JournalError('lease_journal_corrupt');
     }
 
-    cache = file;
+    cache = cloneJournal(file);
     loaded = true;
     previouslyLoaded = true;
-    return file;
+    return cache;
   } catch (err) {
     cache = null;
     loaded = false;
@@ -461,26 +484,32 @@ export async function loadLeaseJournal(): Promise<JournalFile> {
   }
 }
 
+export async function loadLeaseJournal(): Promise<JournalFile> {
+  return enqueueJournal(() => cloneJournal(loadLeaseJournalUnlocked()));
+}
+
 function recordKey(rec: Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | 'at'>): string {
   return `${rec.taskId}\n${rec.kind}\n${rec.generation}\n${rec.at}`;
 }
 
 export async function upsertJournalRecord(next: JournalRecord): Promise<JournalRecord> {
-  if (latchedError) {
-    throw latchedError;
-  }
-  const file = await loadLeaseJournal();
-  const idx = file.records.findIndex((row) => recordKey(row) === recordKey(next));
-  if (idx >= 0) {
-    file.records[idx] = { ...file.records[idx]!, ...next };
-  } else {
-    file.records.push(next);
-  }
-  if (next.kind === 'tombstone' && next.fate === 'accepted' && !file.firstTombstoneAt) {
-    file.firstTombstoneAt = next.at;
-  }
-  persist(file);
-  return next;
+  return enqueueJournal(() => {
+    if (latchedError) {
+      throw latchedError;
+    }
+    const file = cloneJournal(loadLeaseJournalUnlocked());
+    const idx = file.records.findIndex((row) => recordKey(row) === recordKey(next));
+    if (idx >= 0) {
+      file.records[idx] = { ...file.records[idx]!, ...next };
+    } else {
+      file.records.push({ ...next });
+    }
+    if (next.kind === 'tombstone' && next.fate === 'accepted' && !file.firstTombstoneAt) {
+      file.firstTombstoneAt = next.at;
+    }
+    persist(file);
+    return next;
+  });
 }
 
 export async function markJournalFate(
@@ -488,16 +517,18 @@ export async function markJournalFate(
   fate: JournalFate,
   extra?: Partial<Pick<JournalRecord, 'supersededBy'>>,
 ): Promise<JournalRecord> {
-  if (latchedError) {
-    throw latchedError;
-  }
-  const file = await loadLeaseJournal();
-  const rec = file.records.find((row) => recordKey(row) === recordKey(match));
-  if (!rec) throw new JournalError('lease_journal_record_missing');
-  rec.fate = fate;
-  if (extra?.supersededBy !== undefined) rec.supersededBy = extra.supersededBy;
-  persist(file);
-  return rec;
+  return enqueueJournal(() => {
+    if (latchedError) {
+      throw latchedError;
+    }
+    const file = cloneJournal(loadLeaseJournalUnlocked());
+    const rec = file.records.find((row) => recordKey(row) === recordKey(match));
+    if (!rec) throw new JournalError('lease_journal_record_missing');
+    rec.fate = fate;
+    if (extra?.supersededBy !== undefined) rec.supersededBy = extra.supersededBy;
+    persist(file);
+    return { ...rec };
+  });
 }
 
 const OPEN_FATES: ReadonlySet<JournalFate> = new Set(['intent', 'unconfirmed', 'accepted']);
@@ -576,6 +607,7 @@ export function resetJournalMemoryForTests(): void {
   loaded = false;
   previouslyLoaded = false;
   latchedError = null;
+  mutationQueue = Promise.resolve();
 }
 
 export function setJournalDataDirForTests(dir: string | undefined): void {

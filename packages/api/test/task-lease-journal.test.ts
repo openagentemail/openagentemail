@@ -19,11 +19,36 @@ const {
   deleteJournalFilesForTests,
   journalPathsForTests,
   loadLeaseJournal,
+  markJournalFate,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
+  unresolvedClaimFence,
   upsertJournalRecord,
 } = await import('../src/lib/task-lease-journal.ts');
+
+const TASK_A = '0fdc3207-056e-47c1-a65c-b29d39f66b82';
+const TASK_B = '1fdc3207-056e-47c1-a65c-b29d39f66b83';
+
+function claimIntent(taskId: string, at = '2026-08-24T00:00:00.000Z', verifier = 'a'.repeat(43)) {
+  return {
+    taskId,
+    kind: 'claim' as const,
+    generation: 1,
+    actor: 'bravo@test.example',
+    at,
+    fate: 'intent' as const,
+    claimedUntil: '2026-08-24T00:05:00.000Z',
+    tokenVerifier: verifier,
+  };
+}
+
+function diskRecords(): Array<{ taskId: string; fate: string; generation: number }> {
+  const parsed = JSON.parse(readFileSync(journalPathsForTests().journal, 'utf8')) as {
+    records: Array<{ taskId: string; fate: string; generation: number }>;
+  };
+  return parsed.records;
+}
 
 function freshDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'oae-m2-j-'));
@@ -223,5 +248,77 @@ describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
     } finally {
       rmSync(customDir, { recursive: true, force: true });
     }
+  });
+
+  test('并发不同 task upsert：两次均成功，磁盘与 fresh-load 均保留两条 intent', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const recA = claimIntent(TASK_A, '2026-08-24T00:00:00.000Z', 'a'.repeat(43));
+    const recB = claimIntent(TASK_B, '2026-08-24T00:00:01.000Z', 'b'.repeat(43));
+
+    const settled = await Promise.all([
+      upsertJournalRecord(recA),
+      upsertJournalRecord(recB),
+    ]);
+    expect(settled).toHaveLength(2);
+
+    const onDisk = diskRecords();
+    expect(onDisk.map((row) => row.taskId).sort()).toEqual([TASK_A, TASK_B].sort());
+    expect(onDisk.every((row) => row.fate === 'intent' && row.generation === 1)).toBe(true);
+
+    resetJournalMemoryForTests();
+    const fresh = await loadLeaseJournal();
+    expect(fresh.records.map((row) => row.taskId).sort()).toEqual([TASK_A, TASK_B].sort());
+    expect(unresolvedClaimFence(TASK_A, fresh)?.fate).toBe('intent');
+    expect(unresolvedClaimFence(TASK_B, fresh)?.fate).toBe('intent');
+  });
+
+  test('并发 upsert 与 markFate：两条变更均持久化且 fresh-load 保留', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const recA = claimIntent(TASK_A, '2026-08-24T00:00:00.000Z', 'a'.repeat(43));
+    const recB = claimIntent(TASK_B, '2026-08-24T00:00:01.000Z', 'b'.repeat(43));
+    await upsertJournalRecord(recA);
+
+    const [fated, inserted] = await Promise.all([
+      markJournalFate(recA, 'accepted'),
+      upsertJournalRecord(recB),
+    ]);
+    expect(fated.fate).toBe('accepted');
+    expect(inserted.taskId).toBe(TASK_B);
+
+    const onDisk = diskRecords();
+    expect(onDisk).toHaveLength(2);
+    expect(onDisk.find((row) => row.taskId === TASK_A)?.fate).toBe('accepted');
+    expect(onDisk.find((row) => row.taskId === TASK_B)?.fate).toBe('intent');
+
+    resetJournalMemoryForTests();
+    const fresh = await loadLeaseJournal();
+    expect(fresh.records).toHaveLength(2);
+    expect(fresh.records.find((row) => row.taskId === TASK_A)?.fate).toBe('accepted');
+    expect(fresh.records.find((row) => row.taskId === TASK_B)?.fate).toBe('intent');
+  });
+
+  test('before-write 失败后不重置内存：fence 不得看见未提交 intent，重试成功才落盘', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const rec = claimIntent(TASK_A);
+    setJournalCrashHookForTests('before-write');
+    await expect(upsertJournalRecord(rec)).rejects.toMatchObject({
+      message: 'lease_journal_crash_before_write',
+    });
+
+    expect(unresolvedClaimFence(TASK_A)).toBeUndefined();
+    expect(diskRecords()).toEqual([]);
+
+    await upsertJournalRecord(rec);
+    expect(unresolvedClaimFence(TASK_A)?.fate).toBe('intent');
+    expect(diskRecords().map((row) => row.taskId)).toEqual([TASK_A]);
+
+    resetJournalMemoryForTests();
+    const fresh = await loadLeaseJournal();
+    expect(fresh.records).toHaveLength(1);
+    expect(fresh.records[0]?.taskId).toBe(TASK_A);
+    expect(fresh.records[0]?.fate).toBe('intent');
   });
 });
