@@ -70,6 +70,10 @@ export function buildOrcaChildEnv(
 
 /** SIGKILL the spawned job's process group only. Never pid 1 or this process. */
 export function killSpawnedJob(child: ChildProcess): void {
+  // Runtime already observed exit: do not signal. Does not close kernel PID reuse.
+  if (child.exitCode != null || child.signalCode != null) {
+    return;
+  }
   const pid = child.pid;
   if (typeof pid === 'number' && pid > 1 && pid !== process.pid) {
     try {

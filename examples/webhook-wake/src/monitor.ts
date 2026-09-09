@@ -131,30 +131,39 @@ export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: b
       done(false);
       return;
     }
-    const lib = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
-    const req = lib(
-      {
-        protocol: parsed.protocol,
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: `${parsed.pathname}${parsed.search}`,
-        method: 'GET',
-        timeout: timeoutMs,
-      },
-      (res) => {
-        const ok = res.statusCode === 200;
-        // Status-only: resume is not close. Drop a never-ending chunked body.
-        res.resume();
-        res.destroy();
-        req.destroy();
-        done(ok);
-      },
-    );
-    req.on('timeout', () => {
-      req.destroy();
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       done(false);
-    });
-    req.on('error', () => done(false));
-    req.end();
+      return;
+    }
+    try {
+      const lib = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+      const req = lib(
+        {
+          protocol: parsed.protocol,
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: `${parsed.pathname}${parsed.search}`,
+          method: 'GET',
+          timeout: timeoutMs,
+        },
+        (res) => {
+          const ok = res.statusCode === 200;
+          // Status-only: resume is not close. Drop a never-ending chunked body.
+          res.resume();
+          res.destroy();
+          req.destroy();
+          done(ok);
+        },
+      );
+      req.on('timeout', () => {
+        req.destroy();
+        done(false);
+      });
+      req.on('error', () => done(false));
+      req.end();
+    } catch {
+      // Sync constructor failures (bad protocol/host) stay a failed probe.
+      done(false);
+    }
   });
 }

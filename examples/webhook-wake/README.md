@@ -103,7 +103,11 @@ tree.
   as shell parity (`monitor.sh` stamps `last_alert` only after a
   successful `health_failed`).
   The probe requires an exact HTTP **200** (no redirect follow; 3xx/4xx/5xx
-  are failures) in **both** `templates/monitor.sh` and `httpProbe`. Alert
+  are failures) in **both** `templates/monitor.sh` and `httpProbe`.
+  `httpProbe` accepts only `http:`/`https:`; `ftp:`, `file:`, and other
+  schemes or a malformed URL return `{ ok: false }` and never throw
+  (`ERR_INVALID_PROTOCOL` is contained). That is probe correctness, not
+  an alert-URL SSRF policy. Alert
   execution requires a `timeout` binary; a missing tool fails visibly and
   never runs the alerter unbounded. `alertHook.url` POSTs with
   `redirect: manual` and accepts only HTTP 200 — redirects are not
