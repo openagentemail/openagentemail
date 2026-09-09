@@ -185,7 +185,11 @@ integers before arithmetic (`FAIL_THRESHOLD` ≥ 1, `COOLDOWN_SEC` ≥ 0,
 `ALERT_TIMEOUT_SEC` ≥ 1, at most 9 digits). Oversized all-digit strings
 are rejected the same way so POSIX `[` cannot skip the comparison.
 Malformed values print `monitor_config_invalid`
-and exit 2. Recommended: interval 15–60s, threshold 2–5,
+and exit 2. Persisted `consecutive` is at most 9 digits;
+`last_alert` and injected `NOW_SEC` are Unix seconds with at most
+**10** digits (current epoch width). Overlong all-digit state prints
+`monitor_config_invalid_state` and exit 2 — the env 9-digit cap is
+**not** applied to timestamps. Recommended: interval 15–60s, threshold 2–5,
 cooldown 60–900s, curl 2–10s, alert timeout 1–5s. A future persisted
 `last_alert` is treated as **not** in cooldown.
 

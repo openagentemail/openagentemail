@@ -29,8 +29,8 @@ is_uint() {
 }
 
 # Reject empty/signed/non-integer values before any arithmetic or cooldown math.
-# At most 9 digits: longer all-digit strings make POSIX [ return 2 and skip the
-# comparison, which would otherwise accept a threshold that never alerts.
+# Env knobs: at most 9 digits. Epochs (now / last_alert / NOW_SEC) are 10-digit
+# Unix seconds today — do not reuse the 9-digit env cap on timestamps.
 require_uint_ge() {
 	name=$1
 	value=$2
@@ -45,19 +45,35 @@ require_uint_ge FAIL_THRESHOLD "$FAIL_THRESHOLD" 1
 require_uint_ge COOLDOWN_SEC "$COOLDOWN_SEC" 0
 require_uint_ge ALERT_TIMEOUT_SEC "$ALERT_TIMEOUT_SEC" 1
 
+# Consecutive is a counter (9 digits). last_alert is an epoch (10 digits).
+# Overlong all-digit fields fail visibly so [ / $(( )) never see Illegal number.
+accept_state_uint() {
+	name=$1
+	value=$2
+	max_len=$3
+	if ! is_uint "$value"; then
+		return 1
+	fi
+	if [ "${#value}" -gt "$max_len" ]; then
+		echo "monitor_config_invalid_state $name" >&2
+		exit 2
+	fi
+	return 0
+}
+
 load_state() {
 	[ -f "$STATE_FILE" ] || return 0
 	while IFS= read -r line || [ -n "$line" ]; do
 		case "$line" in
 			consecutive=*)
 				v=${line#consecutive=}
-				if is_uint "$v"; then consecutive=$v; fi
+				if accept_state_uint consecutive "$v" 9; then consecutive=$v; fi
 				;;
 			alarming=0|alarming=1) alarming=${line#alarming=} ;;
 			pending_recovery=0|pending_recovery=1) pending_recovery=${line#pending_recovery=} ;;
 			last_alert=*)
 				v=${line#last_alert=}
-				if is_uint "$v"; then last_alert=$v; fi
+				if accept_state_uint last_alert "$v" 10; then last_alert=$v; fi
 				;;
 		esac
 	done < "$STATE_FILE"
@@ -118,7 +134,12 @@ run_alert() {
 }
 
 load_state
-if [ -n "$NOW_SEC" ] && is_uint "$NOW_SEC"; then
+if [ -n "$NOW_SEC" ]; then
+	# Same arithmetic path as last_alert. Keep 10-digit epochs; reject overflow.
+	if ! is_uint "$NOW_SEC" || [ "${#NOW_SEC}" -gt 10 ]; then
+		echo "monitor_config_invalid NOW_SEC" >&2
+		exit 2
+	fi
 	now=$NOW_SEC
 else
 	now=$(date +%s)
@@ -134,7 +155,12 @@ fi
 
 if [ "$ok" -eq 0 ]; then
 	pending_recovery=0
-	consecutive=$((consecutive + 1))
+	# Stay inside the 9-digit consecutive bound so the next tick can load state.
+	if [ "$consecutive" -ge 999999999 ]; then
+		consecutive=999999999
+	else
+		consecutive=$((consecutive + 1))
+	fi
 	if [ "$consecutive" -ge "$FAIL_THRESHOLD" ]; then
 		if in_cooldown; then
 			save
