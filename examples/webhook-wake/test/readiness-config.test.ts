@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,17 +95,34 @@ describe('readiness and config load', () => {
 
   test('existing unwritable state stays unready; missing dir may fall back', () => {
     const root = mkdtempSync(join(tmpdir(), 'webhook-wake-state-'));
+    const missing = inspectReadiness(
+      testConfig({ dedup: { path: join(root, 'not-created-yet', 'dedup.json') } }),
+    );
+    expect(missing.stateWritable).toBe(true);
+
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      const helper = fileURLToPath(new URL('./r8-nonroot-cases.mjs', import.meta.url));
+      const ran = spawnSync(process.execPath, [helper, 'readiness'], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      const text = `${ran.stdout}${ran.stderr}`;
+      if (ran.status === 77) {
+        expect(text).toContain('SKIPPED:');
+        return;
+      }
+      expect(ran.status).toBe(0);
+      expect(text).toContain('EXECUTED:uid=');
+      return;
+    }
+
     const existing = join(root, 'exists');
     mkdirSync(existing, { mode: 0o500 });
     chmodSync(existing, 0o500);
     const blocked = inspectReadiness(testConfig({ dedup: { path: join(existing, 'dedup.json') } }));
     expect(blocked.stateWritable).toBe(false);
     expect(blocked.ready).toBe(false);
-
-    const missing = inspectReadiness(
-      testConfig({ dedup: { path: join(root, 'not-created-yet', 'dedup.json') } }),
-    );
-    expect(missing.stateWritable).toBe(true);
     chmodSync(existing, 0o700);
   });
 

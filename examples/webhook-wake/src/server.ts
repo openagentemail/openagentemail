@@ -8,7 +8,7 @@ import { decodeRouteKey, isRouteKey, normalizeDomain, normalizeMailbox } from '.
 import { logEvent } from './log.ts';
 import { buildNeutralWakeText, buildOrcaArgv } from './notify.ts';
 import { parseVerifiedEnvelope, readMailAddress, readMailMessageId, readPingWebhookId, type EnvelopeBase } from './parse.ts';
-import { inspectReadiness } from './readiness.ts';
+import { inspectReadiness, inspectStateWritable } from './readiness.ts';
 import { SeatSerializer } from './serialize.ts';
 import type {
   AlertFn,
@@ -248,6 +248,16 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           terminal: route.terminal,
           text,
         });
+
+        if (!inspectStateWritable(config.dedup.path)) {
+          metrics.storageFailed += 1;
+          await emitAlert('storage_failed');
+          return {
+            status: 503,
+            disposition: 'storage_failed',
+            reason: 'state_unwritable',
+          };
+        }
 
         let reserved = false;
         try {
@@ -490,12 +500,12 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
 
     if (method === 'GET' && url.pathname === '/health') {
-      writeJson(res, 200, { status: 'ok', liveness: 'ok' });
+      endAndRelease(req, res, 200, { status: 'ok', liveness: 'ok' });
       return;
     }
     if (method === 'GET' && url.pathname === '/ready') {
       const report = inspectReadiness(config);
-      writeJson(res, report.ready ? 200 : 503, report);
+      endAndRelease(req, res, report.ready ? 200 : 503, report);
       return;
     }
 

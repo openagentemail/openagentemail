@@ -48,4 +48,15 @@ describe('systemd specifier policy', () => {
     expect(exampleSecret).toMatch(/^whs_/);
     expect(exampleSecret).not.toMatch(/^whs_[0-9a-f]{64}$/);
   });
+
+  test('monitor service uses DynamicUser, StateDirectory, and network-online Wants', () => {
+    expect(monitorService).toMatch(/^After=network-online\.target$/m);
+    expect(monitorService).toMatch(/^Wants=network-online\.target$/m);
+    expect(monitorService).toMatch(/^DynamicUser=yes$/m);
+    expect(monitorService).not.toMatch(/^User=nobody$/m);
+    expect(monitorService).toMatch(/^StateDirectory=webhook-wake-monitor$/m);
+    expect(monitorService).toMatch(/STATE_FILE=\/var\/lib\/webhook-wake-monitor\/state/);
+    expect(monitorService).toMatch(/^ExecStart=\/usr\/local\/bin\/webhook-wake-monitor\.sh$/m);
+    expect(monitorService).toMatch(/ALERT_BIN=\/usr\/local\/bin\/webhook-wake-alert/);
+  });
 });

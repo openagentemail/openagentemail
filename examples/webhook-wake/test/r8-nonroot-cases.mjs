@@ -80,6 +80,16 @@ function readiness() {
   assert.equal(inspectStateWritable(join(ok, 'dedup.json')), true);
   assert.equal(inspectReadiness(testConfig({ dedup: { path: join(ok, 'dedup.json') } }, ok)).stateWritable, true);
 
+  const state0500 = join(root, 'state500');
+  mkdirSync(state0500, { mode: 0o700 });
+  chmodSync(state0500, 0o500);
+  try {
+    assert.equal(inspectStateWritable(join(state0500, 'dedup.json')), false);
+    assert.equal(inspectReadiness(testConfig({ dedup: { path: join(state0500, 'dedup.json') } }, root)).stateWritable, false);
+  } finally {
+    chmodSync(state0500, 0o700);
+  }
+
   const state0300 = join(root, 'state300');
   mkdirSync(state0300, { mode: 0o700 });
   chmodSync(state0300, 0o300);

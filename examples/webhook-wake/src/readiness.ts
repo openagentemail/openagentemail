@@ -1,6 +1,6 @@
 /** Readiness is not liveness: mappings and state must be visible. */
 
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { accessSync, constants, lstatSync, statSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { canaryTerminalBound } from './config.ts';
 import { inspectDedupFile } from './dedup.ts';
@@ -50,31 +50,48 @@ function isDirWith(dir: string, mode: number): boolean {
   }
 }
 
+/** lstat: missing vs directory vs existing non-dir / dangling symlink. */
+function pathKind(path: string): 'dir' | 'missing' | 'blocked' {
+  try {
+    const link = lstatSync(path);
+    if (link.isSymbolicLink()) {
+      try {
+        return statSync(path).isDirectory() ? 'dir' : 'blocked';
+      } catch {
+        return 'blocked';
+      }
+    }
+    return link.isDirectory() ? 'dir' : 'blocked';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'blocked';
+  }
+}
+
 /**
  * Read-only. Mirrors commit: the creation dir needs read+write+search
  * (create + fsync), and every further ancestor needs read+search (fsync walk).
+ * Existing non-directories and dangling symlinks are not “absent dirs”.
+ * This is not a claim of complete concurrent filesystem-attack prevention.
  */
 export function inspectStateWritable(dedupPath: string): boolean {
   const stateDir = dirname(dedupPath);
   let creationDir: string | null = null;
-  if (existsSync(stateDir)) {
-    creationDir = stateDir;
-  } else {
-    let cursor = dirname(stateDir);
-    for (;;) {
-      if (existsSync(cursor)) {
-        creationDir = cursor;
-        break;
-      }
-      const parent = dirname(cursor);
-      if (parent === cursor) return false;
-      cursor = parent;
+  let cursor = stateDir;
+  for (;;) {
+    const kind = pathKind(cursor);
+    if (kind === 'blocked') return false;
+    if (kind === 'dir') {
+      creationDir = cursor;
+      break;
     }
+    const parent = dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
   }
   if (!creationDir || !isDirWith(creationDir, constants.R_OK | constants.W_OK | constants.X_OK)) {
     return false;
   }
-  let cursor = dirname(creationDir);
+  cursor = dirname(creationDir);
   for (;;) {
     if (!isDirWith(cursor, constants.R_OK | constants.X_OK)) return false;
     const parent = dirname(cursor);

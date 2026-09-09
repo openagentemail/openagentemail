@@ -121,6 +121,10 @@ tree.
   `monitor.service` → `/etc/systemd/system/webhook-wake-monitor.service`,
   `monitor.timer` → `/etc/systemd/system/webhook-wake-monitor.timer`,
   `monitor.sh` → `/usr/local/bin/webhook-wake-monitor.sh`.
+  The oneshot unit uses `DynamicUser=yes` (not shared `nobody`) with
+  `StateDirectory=webhook-wake-monitor` and `Wants=network-online.target`
+  so boot probes wait for a configured online service. `ALERT_BIN` stays
+  an absolute helper; this tree does not create users or deploy units.
 - Secret files on Linux must be mode `0600` (group/other bits fail load).
   Load uses one fd: `O_NOFOLLOW` + `fstat` + read (symlink →
   `secret_symlink`). That is a local operator-directory trust boundary,

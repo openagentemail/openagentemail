@@ -1,14 +1,16 @@
 [Unit]
 Description=webhook-wake external health probe (one shot)
 After=network-online.target
+Wants=network-online.target
 # Install filename MUST be webhook-wake-monitor.service (timer Unit=).
 #   cp templates/monitor.service /etc/systemd/system/webhook-wake-monitor.service
 
 [Service]
 Type=oneshot
-User=nobody
-Group=nogroup
+# Unique transient uid. Do not share the host nobody account with other daemons.
+DynamicUser=yes
 # Durable state survives PrivateTmp and separate timer activations.
+# DynamicUser owns this directory; STATE_FILE stays under it.
 StateDirectory=webhook-wake-monitor
 Environment=STATE_FILE=/var/lib/webhook-wake-monitor/state
 Environment=HEALTH_URL=https://webhook-wake.example.com/health
