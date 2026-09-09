@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -44,6 +44,7 @@ const {
 } = await import('./support/task-lease-seams.ts');
 const {
   bootstrapTaskLeaseJournal,
+  journalPathsForTests,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
@@ -278,6 +279,29 @@ describe('M2-2 crash 边界 fail-closed', () => {
     clearQueuedEventsForTests();
     const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(grant.leaseGeneration).toBe(1);
+  });
+
+  testOn('热进程下磁盘丢失：claimTask 抛出 lease_journal_lost，磁盘不得被重建，状态永久 latch', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    const paths = journalPathsForTests();
+
+    // 模拟热进程正在运行，外部或硬件导致磁盘 journal 被删
+    unlinkSync(paths.journal);
+    // 注意：绝不调用 resetJournalMemoryForTests()
+
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_journal_lost',
+    });
+
+    // 磁盘绝未被重新创建
+    expect(existsSync(paths.journal)).toBe(false);
+
+    // 再次调用仍然 fail-closed
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_journal_lost',
+    });
   });
 });
 

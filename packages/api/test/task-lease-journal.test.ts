@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -122,5 +122,106 @@ describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
     })).rejects.toBeInstanceOf(JournalError);
     resetJournalMemoryForTests();
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('热进程下 journal+seal 丢失：upsert 必 fail-closed lost，不得落盘重建，且永久 latch', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    // 关键：热进程不调 resetJournalMemoryForTests()
+    const paths = journalPathsForTests();
+    unlinkSync(paths.journal);
+    unlinkSync(paths.seal);
+
+    const rec = {
+      taskId: '0fdc3207-056e-47c1-a65c-b29d39f66b83',
+      kind: 'claim' as const,
+      generation: 1,
+      actor: 'bravo@test.example',
+      at: '2026-08-24T00:00:00.000Z',
+      fate: 'intent' as const,
+      claimedUntil: '2026-08-24T00:05:00.000Z',
+      tokenVerifier: 'a'.repeat(43),
+    };
+
+    // 必须拒绝，绝不能基于旧内存成功
+    await expect(upsertJournalRecord(rec)).rejects.toMatchObject({ message: 'lease_journal_lost' });
+
+    // 磁盘文件绝不能被内存重建
+    expect(existsSync(paths.journal)).toBe(false);
+    expect(existsSync(paths.seal)).toBe(false);
+
+    // 状态永久 latch fail-closed
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_lost' });
+    await expect(upsertJournalRecord(rec)).rejects.toMatchObject({ message: 'lease_journal_lost' });
+  });
+
+  test('热进程下 journal 被篡改/截断：写操作拦截并 latch corrupt，不覆写修复', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const paths = journalPathsForTests();
+    writeFileSync(paths.journal, '{"version":1', { mode: 0o600 });
+
+    const rec = {
+      taskId: '0fdc3207-056e-47c1-a65c-b29d39f66b83',
+      kind: 'claim' as const,
+      generation: 1,
+      actor: 'bravo@test.example',
+      at: '2026-08-24T00:00:00.000Z',
+      fate: 'intent' as const,
+      claimedUntil: '2026-08-24T00:05:00.000Z',
+      tokenVerifier: 'a'.repeat(43),
+    };
+
+    await expect(upsertJournalRecord(rec)).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    expect(readFileSync(paths.journal, 'utf8')).toBe('{"version":1');
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('热进程下 seal 丢失：拦截并 latch corrupt', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const paths = journalPathsForTests();
+    unlinkSync(paths.seal);
+
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('热进程下 marker 丢失：拦截并 latch corrupt', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const paths = journalPathsForTests();
+    unlinkSync(paths.marker);
+
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('显式运维命令 task-lease-provision：首次排他成功，二次执行 fail-closed 退出码 1', async () => {
+    const customDir = join(tmpdir(), `oae-test-prov-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(customDir, { recursive: true });
+    try {
+      const scriptPath = join(import.meta.dir, '../src/task-lease-provision.ts');
+      const env = { ...process.env, DATA_DIR: customDir, TASK_SIGNING_SECRET: '01234567890123456789012345678901' };
+
+      const run1 = Bun.spawnSync([process.execPath, 'run', scriptPath], { env });
+      expect(run1.exitCode).toBe(0);
+      const out1 = JSON.parse(run1.stdout.toString());
+      expect(out1.status).toBe('provisioned');
+
+      // 验证落盘三文件
+      const jDir = join(customDir, 'task-lease-journal');
+      expect(existsSync(join(jDir, 'activated'))).toBe(true);
+      expect(existsSync(join(jDir, 'journal.json'))).toBe(true);
+      expect(existsSync(join(jDir, 'journal.seal'))).toBe(true);
+
+      // 二次执行排他失败
+      const run2 = Bun.spawnSync([process.execPath, 'run', scriptPath], { env });
+      expect(run2.exitCode).toBe(1);
+      const out2 = JSON.parse(run2.stderr.toString());
+      expect(out2.code).toBe('lease_journal_already_initialized');
+    } finally {
+      rmSync(customDir, { recursive: true, force: true });
+    }
   });
 });

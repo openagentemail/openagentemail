@@ -83,6 +83,8 @@ export class JournalError extends Error {
 
 let cache: JournalFile | null = null;
 let loaded = false;
+let previouslyLoaded = false;
+let latchedError: JournalError | null = null;
 let crashHook: JournalCrashHook | null = null;
 let dataDirOverride: string | undefined;
 let nowFn: () => number = () => Date.now();
@@ -283,6 +285,9 @@ function writeSeal(body: Buffer): void {
 }
 
 function persist(file: JournalFile): void {
+  if (latchedError) {
+    throw latchedError;
+  }
   compact(file);
   if (file.records.length > TASK_LEASE_JOURNAL_MAX_RECORDS) {
     throw new JournalError('lease_journal_capacity_exhausted');
@@ -334,6 +339,9 @@ function compact(file: JournalFile): void {
 }
 
 export function bootstrapTaskLeaseJournal(): JournalFile {
+  if (latchedError) {
+    throw latchedError;
+  }
   const dir = journalDir();
   try {
     mkdirSync(dir, { mode: 0o700 });
@@ -385,54 +393,72 @@ export function bootstrapTaskLeaseJournal(): JournalFile {
   }
   cache = file;
   loaded = true;
+  previouslyLoaded = true;
   return file;
 }
 
 export async function loadLeaseJournal(): Promise<JournalFile> {
-  if (loaded && cache) return cache;
+  if (latchedError) {
+    throw latchedError;
+  }
   const dir = journalDir();
   const mPath = markerPath();
   const jPath = journalPath();
   const sPath = sealPath();
 
-  if (!existsSync(dir)) {
-    throw new JournalError('lease_journal_not_bootstrapped');
-  }
-  if (!existsSync(mPath)) {
-    throw new JournalError('lease_journal_not_bootstrapped');
-  }
-  const markerRaw = readFileSync(mPath, 'utf8');
-  const marker = parseMarker(markerRaw);
-
-  if (!existsSync(jPath)) {
-    throw new JournalError('lease_journal_lost');
-  }
-  if (!existsSync(sPath)) {
-    throw new JournalError('lease_journal_corrupt');
-  }
-
-  let raw: string;
   try {
-    raw = readFileSync(jPath, 'utf8');
-  } catch {
-    throw new JournalError('lease_journal_corrupt');
-  }
-  if (!raw.trim()) throw new JournalError('lease_journal_corrupt');
+    if (!existsSync(dir)) {
+      throw new JournalError(previouslyLoaded ? 'lease_journal_lost' : 'lease_journal_not_bootstrapped');
+    }
+    if (!existsSync(mPath)) {
+      throw new JournalError(previouslyLoaded || existsSync(jPath) ? 'lease_journal_corrupt' : 'lease_journal_not_bootstrapped');
+    }
+    let markerRaw: string;
+    try {
+      markerRaw = readFileSync(mPath, 'utf8');
+    } catch {
+      throw new JournalError('lease_journal_corrupt');
+    }
+    const marker = parseMarker(markerRaw);
 
-  const file = parseJournal(raw);
-  if (file.initializedAt !== marker.journalInitializedAt) {
-    throw new JournalError('lease_journal_corrupt');
-  }
+    if (!existsSync(jPath)) {
+      throw new JournalError('lease_journal_lost');
+    }
+    if (!existsSync(sPath)) {
+      throw new JournalError('lease_journal_corrupt');
+    }
 
-  const expectedSeal = readFileSync(sPath, 'utf8').trim();
-  const actualSeal = sealBytes(Buffer.from(raw, 'utf8'));
-  if (!safeEqual(expectedSeal, actualSeal)) {
-    throw new JournalError('lease_journal_corrupt');
-  }
+    let raw: string;
+    try {
+      raw = readFileSync(jPath, 'utf8');
+    } catch {
+      throw new JournalError('lease_journal_corrupt');
+    }
+    if (!raw.trim()) throw new JournalError('lease_journal_corrupt');
 
-  cache = file;
-  loaded = true;
-  return file;
+    const file = parseJournal(raw);
+    if (file.initializedAt !== marker.journalInitializedAt) {
+      throw new JournalError('lease_journal_corrupt');
+    }
+
+    const expectedSeal = readFileSync(sPath, 'utf8').trim();
+    const actualSeal = sealBytes(Buffer.from(raw, 'utf8'));
+    if (!safeEqual(expectedSeal, actualSeal)) {
+      throw new JournalError('lease_journal_corrupt');
+    }
+
+    cache = file;
+    loaded = true;
+    previouslyLoaded = true;
+    return file;
+  } catch (err) {
+    cache = null;
+    loaded = false;
+    if (err instanceof JournalError) {
+      latchedError = err;
+    }
+    throw err;
+  }
 }
 
 function recordKey(rec: Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | 'at'>): string {
@@ -440,6 +466,9 @@ function recordKey(rec: Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | '
 }
 
 export async function upsertJournalRecord(next: JournalRecord): Promise<JournalRecord> {
+  if (latchedError) {
+    throw latchedError;
+  }
   const file = await loadLeaseJournal();
   const idx = file.records.findIndex((row) => recordKey(row) === recordKey(next));
   if (idx >= 0) {
@@ -459,6 +488,9 @@ export async function markJournalFate(
   fate: JournalFate,
   extra?: Partial<Pick<JournalRecord, 'supersededBy'>>,
 ): Promise<JournalRecord> {
+  if (latchedError) {
+    throw latchedError;
+  }
   const file = await loadLeaseJournal();
   const rec = file.records.find((row) => recordKey(row) === recordKey(match));
   if (!rec) throw new JournalError('lease_journal_record_missing');
@@ -471,6 +503,9 @@ export async function markJournalFate(
 const OPEN_FATES: ReadonlySet<JournalFate> = new Set(['intent', 'unconfirmed', 'accepted']);
 
 export function journalRecordsFor(taskId: string, file?: JournalFile): JournalRecord[] {
+  if (!file && latchedError) {
+    throw latchedError;
+  }
   const rows = file?.records ?? cache?.records ?? [];
   return rows.filter((row) => row.taskId === taskId);
 }
@@ -539,6 +574,8 @@ export function setJournalCrashHookForTests(hook: JournalCrashHook | null): void
 export function resetJournalMemoryForTests(): void {
   cache = null;
   loaded = false;
+  previouslyLoaded = false;
+  latchedError = null;
 }
 
 export function setJournalDataDirForTests(dir: string | undefined): void {
@@ -555,13 +592,15 @@ export function setJournalNowForTests(fn: (() => number) | null): void {
   nowFn = fn ?? (() => Date.now());
 }
 
-export function deleteJournalFilesForTests(opts?: { marker?: boolean; journal?: boolean; seal?: boolean }): void {
+export function deleteJournalFilesForTests(opts?: { marker?: boolean; journal?: boolean; seal?: boolean; resetMemory?: boolean }): void {
   if (opts?.marker !== false && existsSync(markerPath())) unlinkSync(markerPath());
   if (opts?.journal !== false && existsSync(journalPath())) unlinkSync(journalPath());
   if (opts?.seal !== false && existsSync(sealPath())) unlinkSync(sealPath());
   if (existsSync(tmpJournalPath())) unlinkSync(tmpJournalPath());
   if (existsSync(tmpSealPath())) unlinkSync(tmpSealPath());
-  resetJournalMemoryForTests();
+  if (opts?.resetMemory !== false) {
+    resetJournalMemoryForTests();
+  }
 }
 
 export function journalPathsForTests(): { marker: string; journal: string; seal: string; dir: string } {
