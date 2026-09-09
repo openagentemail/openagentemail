@@ -59,7 +59,10 @@ export type DedupFailureKind =
   | 'dir_fsync'
   | 'mkdir_fsync'
   | 'dirsync_persist'
-  | 'unacked_persist';
+  | 'unacked_persist'
+  | 'write_short'
+  | 'write_zero'
+  | 'write_io';
 
 export function dedupKey(subscriptionId: string, eventId: string): string {
   return `${subscriptionId}:${eventId}`;
@@ -276,6 +279,7 @@ export class DedupStore {
   private failMkdirFsync = false;
   private failDirsyncPersist = false;
   private failUnackedPersist = false;
+  private writeInject: Array<'short' | 'zero' | 'error'> = [];
   private reserved = new Set<string>();
   private readonly onDirFsync?: (dir: string) => void;
 
@@ -302,6 +306,39 @@ export class DedupStore {
     if (kind === 'mkdir_fsync') this.failMkdirFsync = true;
     if (kind === 'dirsync_persist') this.failDirsyncPersist = true;
     if (kind === 'unacked_persist') this.failUnackedPersist = true;
+    if (kind === 'write_short') this.writeInject.push('short');
+    if (kind === 'write_zero') this.writeInject.push('zero');
+    if (kind === 'write_io') this.writeInject.push('error');
+  }
+
+  /** One writeSync. Injected short/zero/error prove full payload or fail closed. */
+  private writeOnce(fd: number, buf: Buffer): number {
+    const inj = this.writeInject.shift();
+    if (inj === 'zero') return 0;
+    if (inj === 'error') {
+      const err = new Error('dedup_write_io') as NodeJS.ErrnoException;
+      err.code = 'EIO';
+      throw err;
+    }
+    if (inj === 'short') {
+      const n = Math.min(3, buf.length);
+      return writeSync(fd, buf.subarray(0, n));
+    }
+    return writeSync(fd, buf);
+  }
+
+  private writeAll(fd: number, payload: Buffer): void {
+    let offset = 0;
+    while (offset < payload.length) {
+      const wrote = this.writeOnce(fd, payload.subarray(offset));
+      if (!Number.isInteger(wrote) || wrote <= 0) {
+        throw new DedupError('storage_failed', 'dedup_write_short');
+      }
+      offset += wrote;
+      if (offset > payload.length) {
+        throw new DedupError('storage_failed', 'dedup_write_short');
+      }
+    }
   }
 
   private withQueue<T>(fn: () => T): Promise<T> {
@@ -639,7 +676,7 @@ export class DedupStore {
       const created = createExclusiveTemp(parent, `${basename(this.config.path)}.tmp`);
       tmp = created.path;
       fd = created.fd;
-      writeSync(fd, Buffer.from(JSON.stringify(file), 'utf8'));
+      this.writeAll(fd, Buffer.from(JSON.stringify(file), 'utf8'));
       fsyncSync(fd);
       closeSync(fd);
       fd = null;

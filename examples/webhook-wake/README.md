@@ -70,7 +70,8 @@ tree.
 -   Dedup fsyncs the file and the parent directory after rename, including
   first directory creation. The commit temp file is created exclusively
   (`O_CREAT|O_EXCL|O_NOFOLLOW`) with an unpredictable name in the same
-  parent; writes and fsync use that descriptor. This is not a complete
+  parent; write loops until the whole Buffer is on that descriptor or
+  fails closed (zero-progress/short/error). This is not a complete
   shared-directory or TOCTOU defense. The `.unacked` marker is written and fsynced
   (file + parent directory) **before** rename so a crash after a failed
   parent fsync still recovers the durable-intent signal. A non-regular
