@@ -353,7 +353,18 @@ export class DedupStore {
     }
   }
 
+  /** Reject FIFO/dir/socket before a blocking writeFileSync on the marker. */
+  private assertUnackedWritable(): void {
+    const kind = inspectRegularStateFile(this.unackedPath());
+    if (kind === 'missing' || kind === 'file') return;
+    if (kind === 'unreadable') {
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_unreadable');
+    }
+    throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_not_file');
+  }
+
   private markUnacked(): void {
+    this.assertUnackedWritable();
     writeFileSync(this.unackedPath(), 'unacked\n', { mode: 0o600 });
   }
 
@@ -363,6 +374,7 @@ export class DedupStore {
       this.failUnackedPersist = false;
       throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_persist_failed');
     }
+    this.assertUnackedWritable();
     const marker = this.unackedPath();
     writeFileSync(marker, 'unacked\n', { mode: 0o600 });
     const fd = openSync(marker, 'r+');
@@ -402,7 +414,14 @@ export class DedupStore {
 
   /** A renamed file is not ACK-able until the parent directory fsync succeeds. */
   private requireDurable(): void {
-    if (!existsSync(this.unackedPath())) return;
+    const kind = inspectRegularStateFile(this.unackedPath());
+    if (kind === 'missing') return;
+    if (kind === 'not_file') {
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_not_file');
+    }
+    if (kind === 'unreadable') {
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_unacked_unreadable');
+    }
     this.fsyncParentOrThrow();
     this.clearUnacked();
   }

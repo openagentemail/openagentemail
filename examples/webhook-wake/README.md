@@ -68,9 +68,11 @@ tree.
   signature returns **401**. Route keys are not credentials; the
   distinction is intentional and is not an authentication system.
 -   Dedup fsyncs the file and the parent directory after rename, including
-  first directory creation. The `.unacked` marker is written and fsynced
+  first directory creation.   The `.unacked` marker is written and fsynced
   (file + parent directory) **before** rename so a crash after a failed
-  parent fsync still recovers the durable-intent signal. 2xx is withheld
+  parent fsync still recovers the durable-intent signal. A non-regular
+  `.unacked` (FIFO/dir) is rejected before any synchronous write, including
+  the `dir_fsync` recovery rewrite. 2xx is withheld
   until that parent fsync succeeds. A failed **mkdir**
   fsync records the ancestor chain in `.dirsync` and resyncs that chain
   on retry/restart before ACK. A required ancestor fsync failure
@@ -263,7 +265,7 @@ Readiness `inspectDedupFile` is fail-closed on any malformed record
 `state_not_file` before any synchronous read. Same-family `.dirsync`
 and `.unacked` markers are inspected the same way; a FIFO marker is
 `state_dirsync_not_file` / fail-closed unacked and is never
-`readFileSync`'d. Runtime `DedupStore.readFile`
+`readFileSync`'d or `writeFileSync`'d. Runtime `DedupStore.readFile`
 still skips malformed
 entries so a later valid commit can recover — that split is existing
 recovery, not a new repair policy. A sticky parent that is writable

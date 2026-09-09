@@ -91,6 +91,43 @@ describe('R16 dirsync marker FIFO', () => {
   });
 });
 
+describe('R16 unacked marker FIFO', () => {
+  test('FIFO .unacked plus dir_fsync fails closed; regular marker still recovers', async () => {
+    const ran = runBoundedHelper('./r16-unacked-fifo-probe.mjs');
+    expect(ran.signal).toBeNull();
+    if (ran.stdout.includes('SKIPPED:mkfifo')) {
+      expect(ran.stdout).toContain('SKIPPED:');
+    } else {
+      expect(ran.status).toBe(0);
+      const report = JSON.parse(ran.stdout.trim().split('\n').at(-1) ?? '{}') as {
+        inspect?: { ok?: boolean; reason?: string };
+        storeReason?: string;
+      };
+      expect(report.inspect).toEqual({ ok: false, reason: 'state_unacked' });
+      expect(report.storeReason).toContain('dedup_unacked_not_file');
+    }
+
+    const dir = tempDir();
+    const path = join(dir, 'dedup.json');
+    const key = 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555';
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        records: { [key]: { key, status: 'success', storedAtMs: 1, expiresAtMs: 9_999_999_999_999 } },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(`${path}.unacked`, 'unacked\n', { mode: 0o600 });
+    const store = new DedupStore({ path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 });
+    store.injectFailure('dir_fsync');
+    await expect(store.get(key, 1)).rejects.toMatchObject({ message: 'dedup_dir_fsync_failed' });
+    expect(existsSync(`${path}.unacked`)).toBe(true);
+    const hit = await store.get(key, 1);
+    expect(hit?.status).toBe('success');
+    expect(existsSync(`${path}.unacked`)).toBe(false);
+  });
+});
+
 describe('R16 durable unacked before rename', () => {
   test('unacked persist failure withholds 2xx and does not ACK the rename', async () => {
     const bucket: WakeRequest[] = [];
