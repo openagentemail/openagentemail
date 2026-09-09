@@ -178,46 +178,19 @@ describe('R7 dirsync durability and missing marker', () => {
     expect(synced.some((dir) => dir === join(root, 'a', 'b'))).toBe(true);
   });
 
-  test('non-root 0300 parent EACCES fails closed; restore then a new instance syncs the chain', async () => {
-    expect(typeof process.getuid === 'function' && process.getuid() !== 0).toBe(true);
-    const root = tempDir();
-    const wall = join(root, 'wall');
-    mkdirSync(wall, { mode: 0o700 });
-    chmodSync(wall, 0o300);
-    const path = join(wall, 'new', 'dedup.json');
-    const cfg = { path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 };
-    const rec = {
-      key: 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555',
-      status: 'success' as const,
-      storedAtMs: 1,
-      expiresAtMs: 9_999_999_999_999,
-    };
-    const syncedBlocked: string[] = [];
-    try {
-      const blocked = new DedupStore(cfg, { onDirFsync: (dir) => syncedBlocked.push(dir) });
-      await expect(blocked.commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
-      expect(existsSync(path)).toBe(false);
-      await expect(blocked.get(rec.key, 1)).resolves.toBeUndefined();
-      expect(syncedBlocked.includes(wall)).toBe(false);
-      const inspect = inspectDedupFile(path);
-      expect(inspect.ok).toBe(false);
-
-      chmodSync(wall, 0o700);
-      const synced: string[] = [];
-      const retry = new DedupStore(cfg, { onDirFsync: (dir) => synced.push(dir) });
-      await retry.commit(rec, 1);
-      expect(existsSync(path)).toBe(true);
-      expect(existsSync(retry.dirsyncPath())).toBe(false);
-      expect(synced.some((dir) => dir === join(wall, 'new'))).toBe(true);
-      expect(synced.some((dir) => dir === wall)).toBe(true);
-      expect((await retry.get(rec.key, 1))?.status).toBe('success');
-    } finally {
-      try {
-        chmodSync(wall, 0o700);
-      } catch {
-        /* cleanup */
-      }
+  test('0300 parent EACCES fails closed via portable non-root helper', () => {
+    const helper = fileURLToPath(new URL('./r8-nonroot-cases.mjs', import.meta.url));
+    const ran = spawnSync(process.execPath, [helper, 'durability'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    if (ran.status === 77) {
+      expect(ran.stdout).toContain('SKIPPED:');
+      return;
     }
+    expect(ran.status).toBe(0);
+    expect(ran.stderr + ran.stdout).toContain('EXECUTED:uid=');
   });
 
   test('truncated dirsync marker stays fail-closed and is not rewritten shorter', async () => {

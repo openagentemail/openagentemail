@@ -39,31 +39,49 @@ export function isRegularExecutable(path: string): boolean {
   }
 }
 
-function isWritableSearchableDir(dir: string): boolean {
+function isDirWith(dir: string, mode: number): boolean {
   try {
     const st = statSync(dir);
     if (!st.isDirectory()) return false;
-    accessSync(dir, constants.W_OK | constants.X_OK);
+    accessSync(dir, mode);
     return true;
   } catch {
     return false;
   }
 }
 
+/**
+ * Read-only. Mirrors commit: the creation dir needs read+write+search
+ * (create + fsync), and every further ancestor needs read+search (fsync walk).
+ */
 export function inspectStateWritable(dedupPath: string): boolean {
   const stateDir = dirname(dedupPath);
+  let creationDir: string | null = null;
   if (existsSync(stateDir)) {
-    return isWritableSearchableDir(stateDir);
-  }
-  let cursor = dirname(stateDir);
-  for (;;) {
-    if (existsSync(cursor)) {
-      return isWritableSearchableDir(cursor);
+    creationDir = stateDir;
+  } else {
+    let cursor = dirname(stateDir);
+    for (;;) {
+      if (existsSync(cursor)) {
+        creationDir = cursor;
+        break;
+      }
+      const parent = dirname(cursor);
+      if (parent === cursor) return false;
+      cursor = parent;
     }
+  }
+  if (!creationDir || !isDirWith(creationDir, constants.R_OK | constants.W_OK | constants.X_OK)) {
+    return false;
+  }
+  let cursor = dirname(creationDir);
+  for (;;) {
+    if (!isDirWith(cursor, constants.R_OK | constants.X_OK)) return false;
     const parent = dirname(cursor);
-    if (parent === cursor) return false;
+    if (parent === cursor) break;
     cursor = parent;
   }
+  return true;
 }
 
 export function inspectReadiness(config: ReceiverConfig): ReadyReport {

@@ -76,7 +76,11 @@ tree.
   durability boundary. The service user must be able to open-for-read
   every ancestor that mkdir durability syncs (typical `0750`/`0755` under
   `/var/lib/webhook-wake`). A `0300` write+search parent cannot persist a
-  newly created child and is rejected. A truncated or invalid `.dirsync`
+  newly created child and is rejected. `/ready` inspects the same
+  ancestor contract without creating or rewriting state: the creation
+  directory needs read+write+search, and every further ancestor that
+  commit would fsync needs read+search. A `0300` state dir or ancestor
+  is unready before any wake. A truncated or invalid `.dirsync`
   marker stays fail-closed and is never rewritten into a shorter chain;
   a missing marker still recovers by syncing existing ancestors.
   At-least-once, not exactly-once. A new
@@ -104,6 +108,8 @@ tree.
   never runs the alerter unbounded. `alertHook.url` POSTs with
   `redirect: manual` and accepts only HTTP 200 — redirects are not
   followed (trusted-operator URL; no extra DNS/private-network policy).
+  After status, the hook cancels the response body on both 200 and
+  non-200 so a never-ending chunked sink cannot retain sockets.
   Authenticated mapping/stale failures coalesce alerts per code (first
   fire, then cooldown) so sender retries stay 503 without flooding the
   sink.
@@ -200,7 +206,7 @@ running; a `listening` log with the bound URL; loopback
 Then POST one signed canary with the intended header size/rotation
 count and confirm `/health` from the monitor host. Check that a
 deliberate oversize header is 401 and that a write-without-search
-state directory is unready.
+state directory or a `0300` (write+search, no read) state/ancestor is unready.
 
 Config shape/numbers without starting a service (existing
 `parseFileConfig`, `loadSecrets: false`; no new CLI). Prints `config_ok`

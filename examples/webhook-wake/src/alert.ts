@@ -40,8 +40,24 @@ export function createHttpAlert(url: string | null, timeoutMs: number): AlertFn 
         signal: ac.signal,
         redirect: 'manual',
       });
+      const status = res.status;
+      // Headers are enough. Cancel 200 and non-200 bodies while the timer is live,
+      // then abort so keep-alive cannot retain the chunked socket.
+      const stream = res.body;
+      if (stream && !stream.locked) {
+        try {
+          await stream.cancel();
+        } catch {
+          /* already closed */
+        }
+      }
+      try {
+        ac.abort();
+      } catch {
+        /* already aborted */
+      }
       // Trusted-operator URL: do not follow redirects to another host.
-      if (res.status !== 200) {
+      if (status !== 200) {
         return { ok: false, reason: 'alert_http_status' };
       }
       return { ok: true };
