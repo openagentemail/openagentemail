@@ -76,7 +76,7 @@ describe('R15 sticky replacement and FIFO', () => {
     const root = tempDir();
     const sticky = join(root, 'sticky');
     mkdirSync(sticky, { mode: 0o1777 });
-    chmodSync(sticky, 0o1777);
+    expect(spawnSync('chmod', ['1777', sticky]).status).toBe(0);
     const path = join(sticky, 'dedup.json');
     writeFileSync(path, `${JSON.stringify({ records: {} })}\n`, { mode: 0o600 });
     expect(inspectStateWritable(path)).toBe(true);
@@ -92,19 +92,42 @@ describe('R15 sticky replacement and FIFO', () => {
     expect(wakes).toHaveLength(1);
   });
 
-  test('foreign-owned sticky target uses the non-root helper or names the skip', () => {
+  test('foreign-owned sticky target is skipped without root, or proved after a searchable ancestor', () => {
     const helper = fileURLToPath(new URL('./r15-sticky-replace.mjs', import.meta.url));
-    const ran = spawnSync(process.execPath, [helper], {
-      cwd: fileURLToPath(new URL('..', import.meta.url)),
-      encoding: 'utf8',
-      timeout: 20_000,
-    });
+    const cwd = fileURLToPath(new URL('..', import.meta.url));
+    const run = (cmd: string, args: string[]) =>
+      spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 20_000 });
+
+    let ran = run(process.execPath, [helper]);
+    let viaSudo = false;
+    if (ran.status === 77 && `${ran.stdout}${ran.stderr}`.includes('SKIPPED:not_root')) {
+      const sudoOk = run('sudo', ['-n', 'true']);
+      if (sudoOk.status === 0) {
+        viaSudo = true;
+        ran = run('sudo', ['-n', process.execPath, helper]);
+      }
+    }
+
+    const text = `${ran.stdout}${ran.stderr}`;
     if (ran.status === 77) {
-      expect(`${ran.stdout}${ran.stderr}`).toContain('SKIPPED:');
+      expect(text).toContain('SKIPPED:');
+      expect(text).not.toContain('EXECUTED:');
+      expect(text).not.toContain('PROOF:rename_denied');
       return;
     }
+
     expect(ran.status).toBe(0);
-    expect(ran.stdout).toContain('EXECUTED:uid=');
+    expect(text).toContain('PROOF:file_readable');
+    expect(text).toContain('PROOF:parent_rwx');
+    expect(text).toMatch(/PROOF:rename_denied:(EPERM|EACCES)/);
+    expect(text).toContain('PROOF:own_replace_ok');
+    expect(text).toContain('PROOF:ready_false');
+    expect(text).toContain('PROOF:zero_wake');
+    expect(text).toContain('EXECUTED:uid=');
+    const fixture = text.match(/^FIXTURE:(.+)$/m)?.[1];
+    if (viaSudo && fixture) {
+      run('sudo', ['-n', 'rm', '-rf', fixture]);
+    }
   });
 
   test('FIFO is rejected before read; regular files still inspect', () => {
