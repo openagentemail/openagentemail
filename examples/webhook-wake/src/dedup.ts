@@ -128,6 +128,9 @@ export class DedupStore {
   private failRename = false;
   private failDirFsync = false;
   private failMkdirFsync = false;
+  private reserved = new Set<string>();
+  /** Directories fsynced by mkdirDurable (tests assert ancestor retry). */
+  readonly mkdirSynced: string[] = [];
 
   constructor(config: DedupConfig) {
     this.config = config;
@@ -135,6 +138,10 @@ export class DedupStore {
 
   unackedPath(): string {
     return `${this.config.path}.unacked`;
+  }
+
+  dirsyncPath(): string {
+    return `${this.config.path}.dirsync`;
   }
 
   /** Test hook: next disk operation fails closed. */
@@ -174,13 +181,23 @@ export class DedupStore {
     });
   }
 
-  async ensureCapacity(key: string, nowMs: number): Promise<void> {
+  /** Hold one slot until commit or releaseCapacity. Bounded by in-flight keys. */
+  async reserveCapacity(key: string, nowMs: number): Promise<void> {
     return this.withQueue(() => {
       const file = this.readFile();
       this.expire(file, nowMs);
       if (this.forceCapacity || this.wouldExceed(file, key)) {
         throw new DedupError('storage_capacity', 'dedup_capacity');
       }
+      if (!file.records[key]) {
+        this.reserved.add(key);
+      }
+    });
+  }
+
+  async releaseCapacity(key: string): Promise<void> {
+    return this.withQueue(() => {
+      this.reserved.delete(key);
     });
   }
 
@@ -193,6 +210,7 @@ export class DedupStore {
       }
       file.records[record.key] = record;
       this.writeFile(file);
+      this.reserved.delete(record.key);
     });
   }
 
@@ -205,8 +223,8 @@ export class DedupStore {
   }
 
   private wouldExceed(file: StoreFile, key: string): boolean {
-    if (file.records[key]) return false;
-    return Object.keys(file.records).length >= this.config.maxRecords;
+    if (file.records[key] || this.reserved.has(key)) return false;
+    return Object.keys(file.records).length + this.reserved.size >= this.config.maxRecords;
   }
 
   private expire(file: StoreFile, nowMs: number): void {
@@ -285,7 +303,44 @@ export class DedupStore {
     }
   }
 
+  private writeDirsync(dirs: string[]): void {
+    writeFileSync(this.dirsyncPath(), `${dirs.join('\n')}\n`, { mode: 0o600 });
+  }
+
+  private readDirsync(): string[] {
+    if (!existsSync(this.dirsyncPath())) return [];
+    return readFileSync(this.dirsyncPath(), 'utf8').split('\n').filter(Boolean);
+  }
+
+  private clearDirsync(): void {
+    try {
+      unlinkSync(this.dirsyncPath());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new DedupError('storage_failed', 'dedup_dirsync_clear_failed');
+      }
+    }
+  }
+
+  private fsyncAncestorChain(dirs: string[]): void {
+    for (const dir of dirs) {
+      if (!existsSync(dir)) continue;
+      fsyncDirectory(dir);
+      this.mkdirSynced.push(dir);
+    }
+  }
+
   private mkdirDurable(dir: string): void {
+    const pending = this.readDirsync();
+    if (pending.length > 0) {
+      if (this.failMkdirFsync) {
+        this.failMkdirFsync = false;
+        throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
+      }
+      this.fsyncAncestorChain(pending);
+      this.clearDirsync();
+    }
+
     const missing: string[] = [];
     let cursor = dir;
     while (!existsSync(cursor)) {
@@ -295,15 +350,20 @@ export class DedupStore {
       cursor = parent;
     }
     mkdirSync(dir, { recursive: true });
+    const chain = [...missing];
+    if (existsSync(cursor) && !chain.includes(cursor)) {
+      chain.push(cursor);
+    }
+    if (chain.length > 0) {
+      this.writeDirsync(chain);
+    }
     if (this.failMkdirFsync) {
       this.failMkdirFsync = false;
       throw new DedupError('dedup_mkdir_fsync_failed', 'dedup_mkdir_fsync_failed');
     }
-    for (const created of missing) {
-      fsyncDirectory(created);
-    }
-    if (existsSync(cursor)) {
-      fsyncDirectory(cursor);
+    if (chain.length > 0) {
+      this.fsyncAncestorChain(chain);
+      this.clearDirsync();
     }
   }
 

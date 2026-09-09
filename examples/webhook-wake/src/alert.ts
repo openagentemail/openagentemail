@@ -38,8 +38,10 @@ export function createHttpAlert(url: string | null, timeoutMs: number): AlertFn 
         headers: { 'content-type': 'application/json' },
         body,
         signal: ac.signal,
+        redirect: 'manual',
       });
-      if (!res.ok) {
+      // Trusted-operator URL: do not follow redirects to another host.
+      if (res.status !== 200) {
         return { ok: false, reason: 'alert_http_status' };
       }
       return { ok: true };

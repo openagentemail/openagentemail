@@ -51,7 +51,7 @@ function emptyMetrics(): Metrics {
   };
 }
 
-function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+function readBoundedBody(req: IncomingMessage, limit: number, signal?: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -59,6 +59,7 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     const fail = (err: Error, closeSocket: boolean) => {
       if (done) return;
       done = true;
+      signal?.removeEventListener('abort', onAbort);
       req.removeAllListeners('data');
       if (closeSocket) {
         req.destroy();
@@ -68,6 +69,14 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
       }
       reject(err);
     };
+    const onAbort = () => {
+      fail(Object.assign(new Error('request_timeout'), { code: 'request_timeout' }), true);
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
     req.on('data', (chunk: Buffer) => {
       if (done) return;
       size += chunk.length;
@@ -80,6 +89,7 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     req.on('end', () => {
       if (done) return;
       done = true;
+      signal?.removeEventListener('abort', onAbort);
       resolve(Buffer.concat(chunks));
     });
     req.on('error', (err) => fail(err, true));
@@ -222,8 +232,10 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           text,
         });
 
+        let reserved = false;
         try {
-          await dedup.ensureCapacity(key, nowMs());
+          await dedup.reserveCapacity(key, nowMs());
+          reserved = true;
         } catch (err) {
           metrics.storageFailed += 1;
           await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
@@ -233,6 +245,12 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
             reason: err instanceof DedupError ? err.code : 'storage_failed',
           };
         }
+
+        const releaseIfHeld = async () => {
+          if (!reserved) return;
+          reserved = false;
+          await dedup.releaseCapacity(key);
+        };
 
         if (!shouldWake(config, route)) {
           try {
@@ -245,7 +263,9 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
               },
               nowMs(),
             );
+            reserved = false;
           } catch (err) {
+            await releaseIfHeld();
             metrics.storageFailed += 1;
             await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
             return {
@@ -269,6 +289,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           metrics.timeoutKill += 1;
         }
         if (!result.ok) {
+          await releaseIfHeld();
           metrics.sendFailed += 1;
           await emitAlert(result.reason === 'timeout_killed' ? 'timeout_killed' : 'send_failed');
           logEvent('error', 'send_failed', {
@@ -282,6 +303,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
         recordWake({ terminal: route.terminal, text, argv });
 
         if (hooks.crashAfterSendBeforeCommit) {
+          await releaseIfHeld();
           return { status: 503, disposition: 'send_failed', reason: 'crash_after_send', submitted: true, sends: 1 };
         }
 
@@ -295,7 +317,9 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
             },
             nowMs(),
           );
+          reserved = false;
         } catch (err) {
+          await releaseIfHeld();
           metrics.storageFailed += 1;
           await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
           return {
@@ -319,7 +343,12 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     });
   };
 
-  const handleHook = async (req: IncomingMessage, res: ServerResponse, routeKey: string): Promise<void> => {
+  const handleHook = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    routeKey: string,
+    signal: AbortSignal,
+  ): Promise<void> => {
     metrics.received += 1;
     if (!isRouteKey(routeKey)) {
       metrics.rejected += 1;
@@ -345,9 +374,13 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
 
     let rawBody: Buffer;
     try {
-      rawBody = await readBoundedBody(req, config.bodyLimitBytes);
+      rawBody = await readBoundedBody(req, config.bodyLimitBytes, signal);
     } catch (err) {
       const code = (err as { code?: string }).code;
+      if (code === 'request_timeout') {
+        metrics.rejected += 1;
+        return;
+      }
       if (code === 'body_too_large') {
         metrics.rejected += 1;
         res.once('finish', () => {
@@ -460,12 +493,14 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
         return;
       }
       inFlightHttp += 1;
+      const ac = new AbortController();
       const timeout = setTimeout(() => {
         if (!res.headersSent) {
           writeJson(res, 503, { disposition: 'send_failed', reason: 'request_timeout' });
         }
+        ac.abort();
       }, config.requestTimeoutMs);
-      handleHook(req, res, decoded.value)
+      handleHook(req, res, decoded.value, ac.signal)
         .catch((err) => {
           logEvent('error', 'handler_error', { reason: err instanceof Error ? err.message : 'error' });
           if (!res.headersSent) {

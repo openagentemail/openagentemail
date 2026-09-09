@@ -1,6 +1,6 @@
 /** Static mapping loader. Request bodies cannot choose a terminal or command. */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   isDisplayedSecret,
@@ -47,6 +47,7 @@ export type FileConfig = {
   wakeHistoryLimit?: number;
   dedup?: { path?: string; retentionMs?: number; maxRecords?: number };
   alertHook?: { url?: string | null; timeoutMs?: number };
+  /** Named object only. Arrays become index keys and are rejected at load. */
   routes?: Record<string, FileRouteSpec>;
 };
 
@@ -62,16 +63,47 @@ function assertSecretFileMode(path: string, mode: number): void {
 
 function readSecretFile(path: string): string {
   const resolved = resolve(path);
-  const st = statSync(resolved);
-  if (!st.isFile()) {
-    throw new Error(`secret_not_file:${path}`);
+  const nofollow = constants.O_NOFOLLOW;
+  const flags = typeof nofollow === 'number' ? constants.O_RDONLY | nofollow : constants.O_RDONLY;
+  let fd: number;
+  try {
+    fd = openSync(resolved, flags);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EPERM') {
+      throw new Error(`secret_symlink:${path}`);
+    }
+    throw err;
   }
-  assertSecretFileMode(path, st.mode);
-  const value = readFileSync(resolved, 'utf8').trim();
-  if (!isDisplayedSecret(value)) {
-    throw new Error('secret_format_invalid');
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error(`secret_not_file:${path}`);
+    }
+    assertSecretFileMode(path, st.mode);
+    const value = readFileSync(fd, 'utf8').trim();
+    if (!isDisplayedSecret(value)) {
+      throw new Error('secret_format_invalid');
+    }
+    return value;
+  } finally {
+    closeSync(fd);
   }
-  return value;
+}
+
+function requireRouteMap(value: unknown): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('config_invalid:routes');
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireRouteSpec(value: unknown, routeKey: string): FileRouteSpec {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`config_invalid:route:${routeKey}`);
+  }
+  return value as FileRouteSpec;
 }
 
 function optionalPositiveInt(value: unknown, field: string, fallback: number): number {
@@ -133,10 +165,11 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     throw new Error('config_invalid:mode');
   }
   const mode: ReceiverMode = raw.mode === 'canary' ? 'canary' : 'observe';
-  const routesIn = raw.routes ?? {};
+  const routesIn = requireRouteMap(raw.routes);
   const routes: RouteBinding[] = [];
 
-  for (const [routeKey, spec] of Object.entries(routesIn)) {
+  for (const [routeKey, rawSpec] of Object.entries(routesIn)) {
+    const spec = requireRouteSpec(rawSpec, routeKey);
     if (!isRouteKey(routeKey)) {
       throw new Error(`config_invalid_route_key:${routeKey}`);
     }

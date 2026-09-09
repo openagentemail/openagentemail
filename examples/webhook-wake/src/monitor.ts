@@ -5,6 +5,8 @@
  * Recovery during cooldown is kept pending and emitted on a later tick.
  */
 
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import type { AlertEvent } from './types.ts';
 
 export type MonitorConfig = {
@@ -106,15 +108,42 @@ export async function stepMonitor(options: {
   return state;
 }
 
+/** Direct GET: exact HTTP 200 only. Never follow redirects. */
 export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: boolean }> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { method: 'GET', signal: ac.signal });
-    return { ok: res.ok };
-  } catch {
-    return { ok: false };
-  } finally {
-    clearTimeout(timer);
-  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok });
+    };
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      done(false);
+      return;
+    }
+    const lib = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = lib(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: 'GET',
+        timeout: timeoutMs,
+      },
+      (res) => {
+        res.resume();
+        done(res.statusCode === 200);
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      done(false);
+    });
+    req.on('error', () => done(false));
+    req.end();
+  });
 }

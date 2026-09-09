@@ -62,8 +62,12 @@ tree.
   distinction is intentional and is not an authentication system.
 - Dedup fsyncs the file and the parent directory after rename, including
   first directory creation. A failed directory fsync leaves an `.unacked`
-  marker; 2xx is withheld until that fsync succeeds. At-least-once, not
-  exactly-once.
+  marker; 2xx is withheld until that fsync succeeds. A failed **mkdir**
+  fsync records the ancestor chain in `.dirsync` and resyncs that chain
+  on retry/restart before ACK. At-least-once, not exactly-once. A new
+  event reserves a dedup slot through send+commit (released on failure)
+  so a concurrent observe record cannot steal the last slot after a
+  canary wake has started.
 - In-memory wake history is off by default (`wakeHistoryLimit=0`).
 - The external monitor keeps state under `/var/lib/webhook-wake-monitor`
   (not `/tmp`) and never sources that file as shell. Across-run persistence
@@ -73,8 +77,11 @@ tree.
   the receiver 2xx durability contract; FC may confirm the disposition.
   Recovery during cooldown is pending and emitted on a later tick.
   The probe requires an exact HTTP **200** (no redirect follow; 3xx/4xx/5xx
-  are failures). Alert execution requires a `timeout` binary; a missing
-  tool fails visibly and never runs the alerter unbounded.
+  are failures) in **both** `templates/monitor.sh` and `httpProbe`. Alert
+  execution requires a `timeout` binary; a missing tool fails visibly and
+  never runs the alerter unbounded. `alertHook.url` POSTs with
+  `redirect: manual` and accepts only HTTP 200 — redirects are not
+  followed (trusted-operator URL; no extra DNS/private-network policy).
   Authenticated mapping/stale failures coalesce alerts per code (first
   fire, then cooldown) so sender retries stay 503 without flooding the
   sink.
@@ -83,11 +90,22 @@ tree.
   `monitor.timer` → `/etc/systemd/system/webhook-wake-monitor.timer`,
   `monitor.sh` → `/usr/local/bin/webhook-wake-monitor.sh`.
 - Secret files on Linux must be mode `0600` (group/other bits fail load).
-  `templates/canary.whs.example` is deliberately **not** a valid `whs_` hex
-  secret until replaced. `alertHook.url` is trusted-operator config; this
-  example does not add SSRF/network policy (upstream API already pins
-  egress). Oversized bodies return HTTP 413 on the live connection; unknown
-  unauthenticated routes never call the alert hook.
+  Load uses one fd: `O_NOFOLLOW` + `fstat` + read (symlink →
+  `secret_symlink`). That is a local operator-directory trust boundary,
+  not a new credential policy. `templates/canary.whs.example` is
+  deliberately **not** a valid `whs_` hex secret until replaced.
+  `alertHook.url` is trusted-operator config; this example does not add
+  SSRF/network policy (upstream API already pins egress). Oversized
+  bodies return HTTP 413 on the live connection; unknown unauthenticated
+  routes never call the alert hook. Request timeout aborts an unfinished
+  body read and frees the concurrent slot; a later completed wake+dedup
+  is not cancelled.
+- **Deploy checklist (guidance, not a substitute for timeout/slots):**
+  rate-limit public `/hooks` at the proxy or host filter you already
+  operate. nginx (standard `limit_req`; zone belongs in `http {}`):
+  `limit_req_zone $binary_remote_addr zone=webhook_wake:10m rate=10r/s;`
+  then `limit_req zone=webhook_wake burst=20 nodelay;` on `/hooks/`.
+  This tree does **not** invent a Caddy rate-limit module directive.
 
 ## Local run
 
