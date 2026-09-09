@@ -129,11 +129,11 @@ export class DedupStore {
   private failDirFsync = false;
   private failMkdirFsync = false;
   private reserved = new Set<string>();
-  /** Directories fsynced by mkdirDurable (tests assert ancestor retry). */
-  readonly mkdirSynced: string[] = [];
+  private readonly onDirFsync?: (dir: string) => void;
 
-  constructor(config: DedupConfig) {
+  constructor(config: DedupConfig, hooks?: { onDirFsync?: (dir: string) => void }) {
     this.config = config;
+    this.onDirFsync = hooks?.onDirFsync;
   }
 
   unackedPath(): string {
@@ -326,7 +326,7 @@ export class DedupStore {
     for (const dir of dirs) {
       if (!existsSync(dir)) continue;
       fsyncDirectory(dir);
-      this.mkdirSynced.push(dir);
+      this.onDirFsync?.(dir);
     }
   }
 

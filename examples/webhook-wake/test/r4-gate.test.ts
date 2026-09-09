@@ -205,35 +205,57 @@ describe('R4 routes object shape', () => {
     const loaded = parseFileConfig({ ...fileBase(dir), dedup: { retentionMs: MIN_RETENTION_MS } });
     expect(loaded.routes[0]?.routeKey).toBe('canary');
   });
+
+  test('orcaBinary and dedup.path reject non-strings and keep absent defaults', () => {
+    const dir = tempDir();
+    const absent = parseFileConfig(fileBase(dir));
+    expect(absent.orcaBinary).toBe('/usr/local/bin/orca');
+    expect(absent.dedup.path).toBe('/var/lib/webhook-wake/dedup.json');
+    expect(() => parseFileConfig({ ...fileBase(dir), orcaBinary: { bin: true } })).toThrow(
+      'config_invalid:orcaBinary',
+    );
+    expect(() => parseFileConfig({ ...fileBase(dir), orcaBinary: 1 })).toThrow('config_invalid:orcaBinary');
+    expect(() => parseFileConfig({ ...fileBase(dir), orcaBinary: null })).toThrow('config_invalid:orcaBinary');
+    expect(() => parseFileConfig({ ...fileBase(dir), dedup: { path: { x: 1 } } })).toThrow('config_invalid:dedup.path');
+    expect(() => parseFileConfig({ ...fileBase(dir), dedup: { path: null } })).toThrow('config_invalid:dedup.path');
+    expect(() => parseFileConfig({ ...fileBase(dir), dedup: { path: 12 } })).toThrow('config_invalid:dedup.path');
+    const ok = parseFileConfig({
+      ...fileBase(dir),
+      orcaBinary: '/usr/local/bin/orca',
+      dedup: { path: '/tmp/webhook-wake-dedup.json', retentionMs: MIN_RETENTION_MS },
+    });
+    expect(ok.orcaBinary).toBe('/usr/local/bin/orca');
+    expect(ok.dedup.path).toBe('/tmp/webhook-wake-dedup.json');
+  });
 });
 
 describe('R4 ancestor mkdir fsync retry', () => {
-  test('failed first-create fsync resyncs the ancestor chain before ACK', async () => {
+  test('failed first-create fsync resyncs the ancestor chain on a new store instance', async () => {
     const root = tempDir();
     const path = join(root, 'a', 'b', 'c', 'dedup.json');
-    const store = new DedupStore({
-      path,
-      retentionMs: MIN_RETENTION_MS,
-      maxRecords: 8,
-    });
+    const cfg = { path, retentionMs: MIN_RETENTION_MS, maxRecords: 8 };
+    const first = new DedupStore(cfg);
     const rec = {
       key: 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555',
       status: 'success' as const,
       storedAtMs: 1,
       expiresAtMs: 9_999_999_999_999,
     };
-    store.injectFailure('mkdir_fsync');
-    await expect(store.commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
-    expect(existsSync(store.dirsyncPath())).toBe(true);
-    const listed = readFileSync(store.dirsyncPath(), 'utf8');
+    first.injectFailure('mkdir_fsync');
+    await expect(first.commit(rec, 1)).rejects.toMatchObject({ code: 'dedup_mkdir_fsync_failed' });
+    expect(existsSync(first.dirsyncPath())).toBe(true);
+    const listed = readFileSync(first.dirsyncPath(), 'utf8');
     expect(listed).toContain(join(root, 'a'));
     expect(listed).toContain(join(root, 'a', 'b'));
     expect(listed).toContain(join(root, 'a', 'b', 'c'));
-    await store.commit(rec, 1);
-    expect(existsSync(store.dirsyncPath())).toBe(false);
-    expect(store.mkdirSynced.some((dir) => dir.endsWith(`${join('a')}`) || dir.endsWith('/a'))).toBe(true);
-    expect(store.mkdirSynced.some((dir) => dir.includes(`${join('a', 'b')}`))).toBe(true);
-    expect(store.mkdirSynced.some((dir) => dir.includes(`${join('a', 'b', 'c')}`))).toBe(true);
+
+    const synced: string[] = [];
+    const restarted = new DedupStore(cfg, { onDirFsync: (dir) => synced.push(dir) });
+    await restarted.commit(rec, 1);
+    expect(existsSync(restarted.dirsyncPath())).toBe(false);
+    expect(synced.some((dir) => dir === join(root, 'a'))).toBe(true);
+    expect(synced.some((dir) => dir === join(root, 'a', 'b'))).toBe(true);
+    expect(synced.some((dir) => dir === join(root, 'a', 'b', 'c'))).toBe(true);
     expect(existsSync(path)).toBe(true);
   });
 });

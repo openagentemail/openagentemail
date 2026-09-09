@@ -35,7 +35,7 @@ export type FileConfig = {
   /** Absent defaults to observe. A present invalid value fails load. */
   mode?: string;
   canaryTerminal?: string | null;
-  orcaBinary?: string;
+  orcaBinary?: unknown;
   bodyLimitBytes?: number;
   timestampToleranceSec?: number;
   maxV1Signatures?: number;
@@ -45,7 +45,7 @@ export type FileConfig = {
   sendTimeoutMs?: number;
   outputCapBytes?: number;
   wakeHistoryLimit?: number;
-  dedup?: { path?: string; retentionMs?: number; maxRecords?: number };
+  dedup?: { path?: unknown; retentionMs?: number; maxRecords?: number };
   alertHook?: { url?: string | null; timeoutMs?: number };
   /** Named object only. Arrays become index keys and are rejected at load. */
   routes?: Record<string, FileRouteSpec>;
@@ -151,6 +151,11 @@ function requireString(value: unknown, field: string): string {
   return value.trim();
 }
 
+function optionalString(value: unknown, field: string, fallback: string): string {
+  if (value === undefined) return fallback;
+  return requireString(value, field);
+}
+
 export function loadSecretFiles(spec: FileRouteSpec): { secret: string; previousSecret?: string } {
   const secret = readSecretFile(spec.secretFile);
   const previous =
@@ -232,7 +237,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     },
     mode,
     canaryTerminal,
-    orcaBinary: raw.orcaBinary ?? '/usr/local/bin/orca',
+    orcaBinary: optionalString(raw.orcaBinary, 'orcaBinary', '/usr/local/bin/orca'),
     bodyLimitBytes: optionalPositiveInt(raw.bodyLimitBytes, 'bodyLimitBytes', DEFAULT_BODY_LIMIT),
     timestampToleranceSec: optionalPositiveInt(raw.timestampToleranceSec, 'timestampToleranceSec', 300),
     maxV1Signatures: optionalPositiveInt(raw.maxV1Signatures, 'maxV1Signatures', 8),
@@ -243,7 +248,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     outputCapBytes: optionalPositiveInt(raw.outputCapBytes, 'outputCapBytes', 4096),
     wakeHistoryLimit: optionalNonNegInt(raw.wakeHistoryLimit, 'wakeHistoryLimit', 0),
     dedup: {
-      path: raw.dedup?.path ?? '/var/lib/webhook-wake/dedup.json',
+      path: optionalString(raw.dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
       retentionMs: optionalRetentionMs(raw.dedup?.retentionMs, DEFAULT_RETENTION_MS),
       maxRecords: optionalPositiveInt(raw.dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
     },
