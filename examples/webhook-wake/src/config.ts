@@ -45,6 +45,7 @@ export type FileRouteSpec = {
 };
 
 export type FileConfig = {
+  /** Absent keeps 127.0.0.1:8787. A present non-object fails load. */
   listen?: { host?: string; port?: number };
   /** Absent defaults to observe. A present invalid value fails load. */
   mode?: string;
@@ -220,6 +221,22 @@ function requireDedupObject(
   return value as { path?: unknown; retentionMs?: number; maxRecords?: number };
 }
 
+function requireListenObject(value: unknown): { host?: unknown; port?: unknown } | undefined {
+  if (value === undefined) return undefined;
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('config_invalid:listen');
+  }
+  return value as { host?: unknown; port?: unknown };
+}
+
+function optionalListenHost(value: unknown, fallback: string): string {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('config_invalid:listen.host');
+  }
+  return value.trim();
+}
+
 export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boolean }): ReceiverConfig {
   if (raw.mode !== undefined && raw.mode !== 'observe' && raw.mode !== 'canary') {
     throw new Error('config_invalid:mode');
@@ -291,12 +308,16 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
   if (alertUrl != null && typeof alertUrl !== 'string') {
     throw new Error('config_invalid:alertHook.url');
   }
+  if (typeof alertUrl === 'string' && !alertUrl.trim()) {
+    throw new Error('config_invalid:alertHook.url');
+  }
   const dedup = requireDedupObject(raw.dedup);
+  const listen = requireListenObject(raw.listen);
 
   return {
     listen: {
-      host: typeof raw.listen?.host === 'string' && raw.listen.host.trim() ? raw.listen.host : '127.0.0.1',
-      port: optionalPort(raw.listen?.port, 8787),
+      host: optionalListenHost(listen?.host, '127.0.0.1'),
+      port: optionalPort(listen?.port, 8787),
     },
     mode,
     canaryTerminal,

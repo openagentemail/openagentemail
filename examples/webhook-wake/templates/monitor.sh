@@ -28,6 +28,14 @@ is_uint() {
 	esac
 }
 
+# dash treats 08/09 as invalid octal in $(( )) and some [. Bare 0 is fine.
+has_leading_zero() {
+	case "$1" in
+		0[0-9]*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 # Reject empty/signed/non-integer values before any arithmetic or cooldown math.
 # Env knobs: at most 9 digits. Epochs (now / last_alert / NOW_SEC) are 10-digit
 # Unix seconds today — do not reuse the 9-digit env cap on timestamps.
@@ -35,7 +43,7 @@ require_uint_ge() {
 	name=$1
 	value=$2
 	min=$3
-	if ! is_uint "$value" || [ "${#value}" -gt 9 ] || [ "$value" -lt "$min" ]; then
+	if ! is_uint "$value" || has_leading_zero "$value" || [ "${#value}" -gt 9 ] || [ "$value" -lt "$min" ]; then
 		echo "monitor_config_invalid $name" >&2
 		exit 2
 	fi
@@ -54,7 +62,7 @@ accept_state_uint() {
 	if ! is_uint "$value"; then
 		return 1
 	fi
-	if [ "${#value}" -gt "$max_len" ]; then
+	if has_leading_zero "$value" || [ "${#value}" -gt "$max_len" ]; then
 		echo "monitor_config_invalid_state $name" >&2
 		exit 2
 	fi
@@ -136,7 +144,7 @@ run_alert() {
 load_state
 if [ -n "$NOW_SEC" ]; then
 	# Same arithmetic path as last_alert. Keep 10-digit epochs; reject overflow.
-	if ! is_uint "$NOW_SEC" || [ "${#NOW_SEC}" -gt 10 ]; then
+	if ! is_uint "$NOW_SEC" || has_leading_zero "$NOW_SEC" || [ "${#NOW_SEC}" -gt 10 ]; then
 		echo "monitor_config_invalid NOW_SEC" >&2
 		exit 2
 	fi

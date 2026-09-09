@@ -11,10 +11,12 @@ import {
   constants,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -71,8 +73,26 @@ export type DedupInspect =
         | 'state_dirsync'
         | 'state_dirsync_unreadable'
         | 'state_dirsync_corrupt'
-        | 'state_capacity';
+        | 'state_capacity'
+        | 'state_not_file';
     };
+
+/** Reject FIFO/dir/socket before a blocking readFileSync. Missing is ok. */
+export function inspectRegularStateFile(path: string): 'missing' | 'file' | 'not_file' | 'unreadable' {
+  try {
+    const link = lstatSync(path);
+    if (link.isSymbolicLink()) {
+      try {
+        return statSync(path).isFile() ? 'file' : 'not_file';
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'not_file' : 'unreadable';
+      }
+    }
+    return link.isFile() ? 'file' : 'not_file';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable';
+  }
+}
 
 function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -128,8 +148,15 @@ export function inspectDedupFile(
       return { ok: false, reason: 'state_dirsync_corrupt' };
     }
   }
-  if (!existsSync(path)) {
+  const kind = inspectRegularStateFile(path);
+  if (kind === 'missing') {
     return { ok: true };
+  }
+  if (kind === 'not_file') {
+    return { ok: false, reason: 'state_not_file' };
+  }
+  if (kind === 'unreadable') {
+    return { ok: false, reason: 'state_unreadable' };
   }
   try {
     accessSync(path, constants.R_OK);
@@ -352,6 +379,13 @@ export class DedupStore {
       throw new DedupError('storage_failed', 'dedup_read_failed');
     }
     try {
+      const kind = inspectRegularStateFile(this.config.path);
+      if (kind === 'not_file') {
+        throw new DedupError('storage_failed', 'dedup_not_file');
+      }
+      if (kind === 'unreadable') {
+        throw new DedupError('storage_failed', 'dedup_read_failed');
+      }
       const raw = readFileSync(this.config.path, 'utf8');
       const parsed = JSON.parse(raw) as { records?: unknown };
       if (!parsed || typeof parsed !== 'object' || parsed.records == null || typeof parsed.records !== 'object') {

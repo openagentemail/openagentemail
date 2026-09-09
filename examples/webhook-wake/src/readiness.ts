@@ -39,6 +39,30 @@ export function isRegularExecutable(path: string): boolean {
   }
 }
 
+/**
+ * Sticky parents allow directory writes but can deny replacing another UID's file.
+ * Missing targets stay allowed. Not a complete TOCTOU defense.
+ */
+function canReplaceDedupTarget(dedupPath: string): boolean {
+  let target;
+  try {
+    target = lstatSync(dedupPath);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+  let parent;
+  try {
+    parent = statSync(dirname(dedupPath));
+  } catch {
+    return false;
+  }
+  if ((parent.mode & 0o1000) === 0) return true;
+  if (typeof process.getuid !== 'function') return true;
+  const uid = process.getuid();
+  if (uid === 0) return true;
+  return target.uid === uid || parent.uid === uid;
+}
+
 function isDirWith(dir: string, mode: number): boolean {
   try {
     const st = statSync(dir);
@@ -89,6 +113,9 @@ export function inspectStateWritable(dedupPath: string): boolean {
     cursor = parent;
   }
   if (!creationDir || !isDirWith(creationDir, constants.R_OK | constants.W_OK | constants.X_OK)) {
+    return false;
+  }
+  if (!canReplaceDedupTarget(dedupPath)) {
     return false;
   }
   cursor = dirname(creationDir);

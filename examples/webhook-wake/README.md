@@ -191,7 +191,9 @@ are rejected the same way so POSIX `[` cannot skip the comparison.
 Malformed values print `monitor_config_invalid`
 and exit 2. Persisted `consecutive` is at most 9 digits;
 `last_alert` and injected `NOW_SEC` are Unix seconds with at most
-**10** digits (current epoch width). Overlong all-digit state prints
+**10** digits (current epoch width). Leading-zero decimals (`08`, `09`)
+are rejected so dash does not treat them as invalid octal. Overlong
+all-digit state prints
 `monitor_config_invalid_state` and exit 2 — the env 9-digit cap is
 **not** applied to timestamps. Recommended: interval 15–60s, threshold 2–5,
 cooldown 60–900s, curl 2–10s, alert timeout 1–5s. A future persisted
@@ -242,15 +244,23 @@ must still be a nonempty string, and a present `previousSecretFile`
 must be a nonempty string or `null`. A valid path that does not exist
 is allowed in preflight; a real load still fails on a missing file.
 `alertHook`, if present, must be an object (string/array/null/scalar
-fail load) so a typo cannot silently disable the sink. Present `dedup`
+fail load) so a typo cannot silently disable the sink. `alertHook.url`
+`null` disables the sink; an explicit empty string fails load
+(`config_invalid:alertHook.url`). Present `listen` must be a non-array
+object; a present invalid `host` fails (`config_invalid:listen.host`)
+instead of silently binding `127.0.0.1`. Present `dedup`
 must likewise be an object (`config_invalid:dedup`). IPv6 listen
 addresses are bracketed in `receiver.url()` (`http://[::1]:port`).
 `httpProbe` strips those brackets before `http.request` so a
 `http://[::1]:port` health URL uses host `::1`.
 Readiness `inspectDedupFile` is fail-closed on any malformed record
-(`state_corrupt`). Runtime `DedupStore.readFile` still skips malformed
+(`state_corrupt`). Existing non-regular state (FIFO/dir) is
+`state_not_file` before any synchronous read. Runtime `DedupStore.readFile`
+still skips malformed
 entries so a later valid commit can recover — that split is existing
-recovery, not a new repair policy.
+recovery, not a new repair policy. A sticky parent that is writable
+can still be unready when the existing target is owned by another UID;
+that check is not a complete TOCTOU defense.
 
 ```bash
 bun -e 'import { parseFileConfig } from "./src/config.ts";
