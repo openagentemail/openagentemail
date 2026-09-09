@@ -144,9 +144,10 @@ tree.
 
 These ranges describe operator defaults and current load-time constraints.
 They are **not** a new validation layer. Present values must already be
-integers of the documented sign; only `listen.port` (0–65535) and
-`dedup.retentionMs` (≥72h) have extra ceilings/floors today. Do not treat
-the recommended bands below as runtime-enforced limits.
+integers of the documented sign; only `listen.port` (0–65535),
+`dedup.retentionMs` (≥72h), and `dedup.path` (absolute) have extra load
+rules today. Do not treat the recommended bands below as runtime-enforced
+limits.
 
 | Field | Default | Current load rule | Recommended band | Runtime / misconfig note |
 | --- | --- | --- | --- | --- |
@@ -160,6 +161,7 @@ the recommended bands below as runtime-enforced limits.
 | `sendTimeoutMs` | 8000 | integer > 0 | 1000–30000 | SIGKILL of the **spawned job process group** after this budget. Independent of `requestTimeoutMs`. Too small → 503 `timeout_killed`. |
 | `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Bound on **retained** child stdout/stderr counts. Excess is drained and discarded (not pipe-destroyed) so a zero-exit send still commits. |
 | `wakeHistoryLimit` | 0 | integer ≥ 0 | 0–128 | In-memory ring only. `0` disables history. |
+| `dedup.path` | `/var/lib/webhook-wake/dedup.json` | absolute string | absolute file path | Relative `dedup.json` / `nested/dedup.json` fail load (`config_invalid:dedup.path`) before any store I/O. |
 | `dedup.retentionMs` | 604800000 (7d) | integer ≥ 259200000 (72h) | 72h–30d | Replay/dedup window. Below 72h fails load. |
 | `dedup.maxRecords` | 10000 | integer > 0 | 1000–100000 | Fail-closed when full (no eviction of live keys). |
 | `alertHook.timeoutMs` | 2000 | integer > 0 | 500–10000 | Receiver hook POST budget only. |

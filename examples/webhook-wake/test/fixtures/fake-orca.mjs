@@ -26,8 +26,12 @@ if (mode === 'hang') {
   const marker = process.env.FAKE_ORCA_SUBMIT_MARKER;
   if (marker) writeFileSync(marker, 'submitted\n');
   const n = Number(process.env.FAKE_ORCA_OUT_BYTES || 100000);
-  process.stdout.write('x'.repeat(n));
-  process.stderr.write('y'.repeat(Math.min(n, 4096)));
+  await new Promise((resolve, reject) => {
+    process.stdout.write('x'.repeat(n), (err) => (err ? reject(err) : resolve()));
+  });
+  await new Promise((resolve, reject) => {
+    process.stderr.write('y'.repeat(Math.min(n, 4096)), (err) => (err ? reject(err) : resolve()));
+  });
   process.exit(0);
 } else if (mode === 'hang-tree') {
   const marker = process.env.FAKE_ORCA_GRANDCHILD_MARKER;

@@ -2,7 +2,7 @@
 
 import { maxHeaderSize as runtimeMaxHeaderSize } from 'node:http';
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import {
   isDisplayedSecret,
   isDomain,
@@ -170,6 +170,14 @@ function optionalString(value: unknown, field: string, fallback: string): string
   return requireString(value, field);
 }
 
+function optionalAbsolutePath(value: unknown, field: string, fallback: string): string {
+  const path = optionalString(value, field, fallback);
+  if (!isAbsolute(path)) {
+    throw new Error(`config_invalid:${field}`);
+  }
+  return path;
+}
+
 export function loadSecretFiles(spec: FileRouteSpec): { secret: string; previousSecret?: string } {
   const secret = readSecretFile(spec.secretFile);
   const previous =
@@ -266,7 +274,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     outputCapBytes: optionalPositiveInt(raw.outputCapBytes, 'outputCapBytes', 4096),
     wakeHistoryLimit: optionalNonNegInt(raw.wakeHistoryLimit, 'wakeHistoryLimit', 0),
     dedup: {
-      path: optionalString(raw.dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
+      path: optionalAbsolutePath(raw.dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
       retentionMs: optionalRetentionMs(raw.dedup?.retentionMs, DEFAULT_RETENTION_MS),
       maxRecords: optionalPositiveInt(raw.dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
     },

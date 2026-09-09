@@ -78,6 +78,16 @@ function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+const UNSAFE_RECORD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function emptyRecordMap(): Record<string, DedupRecord> {
+  return Object.create(null) as Record<string, DedupRecord>;
+}
+
+export function isSafeDedupKey(key: string): boolean {
+  return typeof key === 'string' && key.length > 0 && !UNSAFE_RECORD_KEYS.has(key);
+}
+
 /** Absolute paths only. Empty or truncated markers are corrupt, not an empty chain. */
 function parseDirsyncLines(raw: string): string[] | null {
   const lines = raw.split('\n').filter((line) => line.length > 0);
@@ -150,7 +160,7 @@ export function inspectDedupFile(
 }
 
 export function isValidDedupRecord(key: string, value: unknown): value is DedupRecord {
-  if (!value || typeof value !== 'object') return false;
+  if (!isSafeDedupKey(key) || !value || typeof value !== 'object') return false;
   const rec = value as Record<string, unknown>;
   return (
     rec.key === key &&
@@ -263,7 +273,15 @@ export class DedupStore {
       if (this.forceCapacity || this.wouldExceed(file, record.key)) {
         throw new DedupError('storage_capacity', 'dedup_capacity');
       }
-      file.records[record.key] = record;
+      if (!isSafeDedupKey(record.key)) {
+        throw new DedupError('storage_failed', 'dedup_unsafe_key');
+      }
+      Object.defineProperty(file.records, record.key, {
+        value: record,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
       this.writeFile(file);
       this.reserved.delete(record.key);
     });
@@ -339,20 +357,25 @@ export class DedupStore {
       if (!parsed || typeof parsed !== 'object' || parsed.records == null || typeof parsed.records !== 'object') {
         throw new DedupError('storage_failed', 'dedup_corrupt');
       }
-      const records: Record<string, DedupRecord> = {};
+      const records = emptyRecordMap();
       for (const [key, value] of Object.entries(parsed.records as Record<string, unknown>)) {
         if (!isValidDedupRecord(key, value)) {
           // Malformed entries are not successful dedup hits.
           continue;
         }
-        records[key] = value;
+        Object.defineProperty(records, key, {
+          value,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return { records };
     } catch (err) {
       if (err instanceof DedupError) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
-        return { records: {} };
+        return { records: emptyRecordMap() };
       }
       throw new DedupError('storage_failed', 'dedup_read_failed');
     }
