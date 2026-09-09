@@ -143,12 +143,46 @@ either far below the other does not compensate: a late body can still
 complete a wake if the request already passed to send, and a tiny send
 budget kills a healthy child while the HTTP slot is still open.
 
-**Deploy verification:** after changing numbers, load the file
-(`bun src/main.ts --config …` must exit 0), `GET /ready` on loopback,
-POST one signed canary with the intended header size/rotation count, and
-confirm `/health` from the monitor host. Check that a deliberate
-oversize header is 401 and that a write-without-search state directory
-is unready.
+**Runtime timer range (not a new config ceiling):**
+`requestTimeoutMs`, `sendTimeoutMs`, and `alertHook.timeoutMs` are passed
+to `setTimeout` (and `requestTimeoutMs` also to `http.Server.requestTimeout`
+/ `headersTimeout`). Node.js timers
+(https://nodejs.org/docs/latest-v22.x/api/timers.html#settimeoutcallback-delay-args)
+keep `delay` in a signed 32-bit millisecond range. If `delay` is larger
+than **2147483647** (~24.8 days) or less than **1**, the runtime sets the
+duration to **1 ms** and emits `TimeoutOverflowWarning`. The same clamp
+was observed on this workspace's Bun 1.3.14 and Node v24.5.0
+(`_idleTimeout` becomes 1). This example does **not** add a load-time
+cap. A huge integer is **not** a reliable multi-day HTTP, send, or alert
+timer — it can fire almost immediately. Stay in the recommended
+second-to-tens-of-seconds bands, far below 2^31−1. `dedup.retentionMs`
+and `timestampToleranceSec` are wall-clock comparisons, not
+`setTimeout`, so a 7d–30d retention does not use this clamp. Monitor
+`COOLDOWN_SEC` / systemd `OnUnitActiveSec` are shell/unit seconds, not
+JS timers.
+
+**Deploy verification:** `bun src/main.ts --config <file>` starts a
+**persistent listener**. It does **not** exit 0 after a successful bind.
+`startup_not_ready` is only logged; the process still calls
+`listenReceiver` and stays up. Success is all of: the process remains
+running; a `listening` log with the bound URL; loopback
+`GET /ready` returns **HTTP 200** with `ready: true`. HTTP 503 on
+`/ready` means the socket is up but mappings/state are not ready.
+Then POST one signed canary with the intended header size/rotation
+count and confirm `/health` from the monitor host. Check that a
+deliberate oversize header is 401 and that a write-without-search
+state directory is unready.
+
+Config shape/numbers without starting a service (existing
+`parseFileConfig`, `loadSecrets: false`; no new CLI). Prints `config_ok`
+and exits; does not bind a port or load secret files:
+
+```bash
+bun -e 'import { parseFileConfig } from "./src/config.ts";
+const raw = JSON.parse(await Bun.file(process.argv[1]).text());
+parseFileConfig(raw, { loadSecrets: false });
+console.log("config_ok");' -- /path/to/config.json
+```
 
 ## Local run
 
