@@ -11,6 +11,11 @@
 #   docker compose up -d
 #   ./deploy/dns-records.sh
 #   ./deploy/doctor.sh
+#
+# Requires modern Docker Compose v2+ (`docker compose` or a compatible
+# docker-compose that supports `config --format json`). Docker Compose
+# v5.5.1 is also supported. This file does not depend on unverified
+# legacy v1-only interface details.
 
 name: openagentemail
 

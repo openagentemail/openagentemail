@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 
 const { parseConfig } = await import('../src/lib/config.ts');
 
@@ -137,7 +137,15 @@ type ComposeInput = {
   compose?: ComposeCommand;
   /** CLI discovery env for probe/render; defaults to PATH/HOME/DOCKER_CONFIG only. */
   discovery?: Record<string, string>;
+  /** Per-spawn bound for hanging-fixture tests; default is COMPOSE_RENDER_TIMEOUT_MS. */
+  timeoutMs?: number;
 };
+
+/** Probe/render bounds live in spawnSync. Outer `timeout 180` is only a safety net. */
+const COMPOSE_PROBE_TIMEOUT_MS = 15_000;
+const COMPOSE_RENDER_TIMEOUT_MS = 30_000;
+const COMPOSE_HANG_TIMEOUT_MS = 400;
+const BACKEND_PATH_HELPER = 'oae-149-backend-helper';
 
 /** Only PATH/HOME/DOCKER_CONFIG for CLI discovery. Never copy production env or read Docker auth. */
 function cliDiscoveryEnv(from: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -176,20 +184,47 @@ function writeExecutable(path: string, body: string): void {
   chmodSync(path, 0o755);
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Probe `config --format json` only. This helper has no timeout option;
- * the outer `timeout 180` on the bun test command is the bound.
- * Never download tools.
+ * Bounded Compose spawn. `timeout` + SIGKILL is the implementation (Bun 1.2.21+).
+ * Do not rely on timer callbacks around spawnSync; those cannot interrupt it.
  */
-function probeJsonConfig(argv: string[], env: Record<string, string>): boolean {
+function spawnComposeSync(
+  argv: string[],
+  options: { cwd: string; env: Record<string, string>; timeoutMs: number },
+) {
+  return Bun.spawnSync(argv, {
+    cwd: options.cwd,
+    env: options.env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: options.timeoutMs,
+    killSignal: 'SIGKILL',
+  });
+}
+
+/** Probe `config --format json` only, with an actual subprocess timeout. Never download tools. */
+function probeJsonConfig(
+  argv: string[],
+  env: Record<string, string>,
+  timeoutMs: number = COMPOSE_PROBE_TIMEOUT_MS,
+): boolean {
   const work = mkdtempSync(join(tmpdir(), 'oae-149-probe-'));
   try {
     writeFileSync(join(work, 'compose.yaml'), 'services:\n  probe:\n    image: alpine\n');
-    const spawned = Bun.spawnSync(
+    const spawned = spawnComposeSync(
       [...argv, '-f', join(work, 'compose.yaml'), 'config', '--format', 'json'],
-      { cwd: work, env, stdout: 'pipe', stderr: 'pipe' },
+      { cwd: work, env, timeoutMs },
     );
-    if (spawned.exitCode !== 0) return false;
+    if (spawned.exitedDueToTimeout || spawned.exitCode !== 0) return false;
     JSON.parse(Buffer.from(spawned.stdout).toString('utf8'));
     return true;
   } catch {
@@ -207,6 +242,7 @@ function probeJsonConfig(argv: string[], env: Record<string, string>): boolean {
 function resolveComposeCommand(
   from: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  timeoutMs: number = COMPOSE_PROBE_TIMEOUT_MS,
 ): ComposeCommand {
   const discovery = cliDiscoveryEnv(from);
   const explicit = from.OAE_COMPOSE?.trim();
@@ -220,7 +256,7 @@ function resolveComposeCommand(
       );
     }
     const command: ComposeCommand = { argv: [absolute], source: `OAE_COMPOSE=${absolute}` };
-    if (!probeJsonConfig(command.argv, discovery)) {
+    if (!probeJsonConfig(command.argv, discovery, timeoutMs)) {
       throw new Error(
         `OAE_COMPOSE=${explicit} (resolved ${absolute}) does not support Compose JSON config. ` +
           'Point it at a compatible compose executable. Tests do not silently substitute another binary.',
@@ -230,12 +266,12 @@ function resolveComposeCommand(
   }
 
   const standalone = whichOnPath('docker-compose', discovery.PATH);
-  if (standalone && probeJsonConfig([standalone], discovery)) {
+  if (standalone && probeJsonConfig([standalone], discovery, timeoutMs)) {
     return { argv: [standalone], source: `PATH docker-compose=${standalone}` };
   }
 
   const docker = whichOnPath('docker', discovery.PATH);
-  if (docker && probeJsonConfig([docker, 'compose'], discovery)) {
+  if (docker && probeJsonConfig([docker, 'compose'], discovery, timeoutMs)) {
     return { argv: [docker, 'compose'], source: `PATH docker compose (${docker})` };
   }
 
@@ -249,21 +285,35 @@ function resolveComposeCommand(
 
 const COMPOSE = resolveComposeCommand();
 
-/**
- * 模块加载时选中后端所用的发现环境。A/B launcher 先校验夹具输入，
- * 再恢复该 HOME/DOCKER_CONFIG 后 exec 真实 Compose。
- * 原先没有 DOCKER_CONFIG 时 unset，不发明值。
- */
-const BACKEND_DISCOVERY = cliDiscoveryEnv();
+/** Helper lives only on the selected-backend PATH; A/B fixture PATH does not include it. */
+const BACKEND_HELPER_DIR = mkdtempSync(join(tmpdir(), 'oae-149-backend-path-'));
+writeExecutable(join(BACKEND_HELPER_DIR, BACKEND_PATH_HELPER), '#!/bin/sh\nexit 0\n');
 
-/** 校验夹具后恢复选中后端发现环境，再 exec 真实 Compose（仍做真实渲染）。 */
+/**
+ * Discovery env that selected the module-level backend. A/B launchers validate
+ * fixture inputs first, then restore PATH/HOME/DOCKER_CONFIG before exec.
+ * Originally absent DOCKER_CONFIG is unset; never invented.
+ */
+const BACKEND_DISCOVERY = (() => {
+  const env = cliDiscoveryEnv();
+  env.PATH = `${BACKEND_HELPER_DIR}:${env.PATH}`;
+  return env;
+})();
+
+afterAll(() => {
+  rmSync(BACKEND_HELPER_DIR, { recursive: true, force: true });
+});
+
+/** Restore selected-backend discovery, require the PATH helper, then exec real Compose. */
 function selectedBackendHandoffScript(): string {
   const restoreDockerConfig = BACKEND_DISCOVERY.DOCKER_CONFIG
     ? `export DOCKER_CONFIG=${shQuote(BACKEND_DISCOVERY.DOCKER_CONFIG)}`
     : 'unset DOCKER_CONFIG';
   return [
+    `export PATH=${shQuote(BACKEND_DISCOVERY.PATH)}`,
     `export HOME=${shQuote(BACKEND_DISCOVERY.HOME)}`,
     restoreDockerConfig,
+    `command -v ${BACKEND_PATH_HELPER} >/dev/null 2>&1 || { echo "missing backend PATH helper" >&2; exit 1; }`,
     `exec ${COMPOSE.argv.map(shQuote).join(' ')} "$@"`,
   ].join('\n');
 }
@@ -326,15 +376,21 @@ function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
     expect(args).not.toContain('run');
     expect(args).not.toContain('start');
 
-    const spawned = Bun.spawnSync([command.argv[0]!, ...args], {
+    const timeoutMs = input.timeoutMs ?? COMPOSE_RENDER_TIMEOUT_MS;
+    const spawned = spawnComposeSync([command.argv[0]!, ...args], {
       cwd: work,
       env: {
         ...(input.discovery ?? cliDiscoveryEnv()),
         ...(input.mode === 'shell' ? webhookVars : {}),
       },
-      stdout: 'pipe',
-      stderr: 'pipe',
+      timeoutMs,
     });
+    if (spawned.exitedDueToTimeout) {
+      throw new Error(
+        `Compose config timed out after ${timeoutMs}ms via ${command.source}. ` +
+          'The subprocess was terminated. Tests do not hang on a stuck CLI.',
+      );
+    }
     if (spawned.exitCode !== 0) {
       const stderr = Buffer.from(spawned.stderr).toString('utf8');
       throw new Error(
@@ -423,6 +479,9 @@ describe('#149 Compose webhook environment', () => {
       expect(example).not.toMatch(/^WEBHOOK_SIGNING_SECRET_PREVIOUS=/m);
       expect(example).not.toContain('标注 min 0');
       expect(example.includes('同名已导出的 shell 变量优先于 env-file')).toBe(true);
+      expect(example.includes('MAX_ATTEMPTS<=11')).toBe(true);
+      expect(example.includes('JSON_BODY_LIMIT_BYTES')).toBe(true);
+      expect(example.includes('Docker Compose v2+')).toBe(true);
     }
   });
 
@@ -684,6 +743,149 @@ describe('#149 Compose CLI compatibility A/B/C', () => {
       expect(fromRel.WEBHOOKS_ENABLED === fromAbs.WEBHOOKS_ENABLED).toBe(true);
       expect(parseConfig(fromRel).webhooks.enabled).toBe(true);
       expect(parseConfig(fromAbs).webhooks.enabled).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('A/B handoff restores original PATH helper without bypassing B discovery', () => {
+    expect(backendHandoff.includes(`export PATH=${shQuote(BACKEND_DISCOVERY.PATH)}`)).toBe(true);
+    expect(BACKEND_DISCOVERY.PATH.includes(BACKEND_HELPER_DIR)).toBe(true);
+
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-path-'));
+    try {
+      const dockerConfig = join(root, 'docker-config');
+      mkdirSync(dockerConfig);
+      const docker = join(root, 'docker');
+      writeExecutable(
+        docker,
+        [
+          '#!/bin/sh',
+          `if [ "$DOCKER_CONFIG" != ${shQuote(dockerConfig)} ]; then`,
+          '  echo "missing discovery DOCKER_CONFIG" >&2',
+          '  exit 1',
+          'fi',
+          `if command -v ${BACKEND_PATH_HELPER} >/dev/null 2>&1; then`,
+          '  echo "helper leaked onto fixture PATH" >&2',
+          '  exit 1',
+          'fi',
+          'if [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi',
+          'shift',
+          backendHandoff,
+          '',
+        ].join('\n'),
+      );
+
+      const discovery = { PATH: `${root}:/usr/bin:/bin`, HOME: root, DOCKER_CONFIG: dockerConfig };
+      expect(discovery.PATH.includes(BACKEND_HELPER_DIR)).toBe(false);
+      const selected = resolveComposeCommand(discovery);
+      expect(selected.argv[0] === docker).toBe(true);
+
+      const rendered = renderApiServiceEnv({
+        composeFile: apiOnly,
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        compose: selected,
+        discovery,
+      });
+      expect(rendered.WEBHOOKS_ENABLED).toBe('true');
+      expect(parseConfig(rendered).webhooks.enabled).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('hanging probe times out, falls through or fails explicitly, and kills the child', () => {
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-hang-probe-'));
+    try {
+      const hangDir = join(root, 'hang');
+      const altDir = join(root, 'alt');
+      mkdirSync(hangDir);
+      mkdirSync(altDir);
+      const hangCompose = join(hangDir, 'docker-compose');
+      writeExecutable(hangCompose, '#!/bin/sh\nexec /bin/sleep 1111\n');
+      writeExecutable(
+        join(altDir, 'docker'),
+        [
+          '#!/bin/sh',
+          'if [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi',
+          'shift',
+          backendHandoff,
+          '',
+        ].join('\n'),
+      );
+
+      const hangStarted = Date.now();
+      const hangProbe = spawnComposeSync([hangCompose, 'config', '--format', 'json'], {
+        cwd: root,
+        env: cliDiscoveryEnv({ PATH: hangDir, HOME: root }),
+        timeoutMs: COMPOSE_HANG_TIMEOUT_MS,
+      });
+      expect(Date.now() - hangStarted < COMPOSE_HANG_TIMEOUT_MS + 1500).toBe(true);
+      expect(hangProbe.exitedDueToTimeout === true).toBe(true);
+      expect(processExists(hangProbe.pid)).toBe(false);
+
+      const pathStarted = Date.now();
+      const selected = resolveComposeCommand(
+        { PATH: `${hangDir}:${altDir}:/usr/bin:/bin`, HOME: root },
+        root,
+        COMPOSE_HANG_TIMEOUT_MS,
+      );
+      expect(Date.now() - pathStarted < COMPOSE_HANG_TIMEOUT_MS + 2000).toBe(true);
+      expect(selected.source.includes('docker compose')).toBe(true);
+      expect(selected.argv[0] === join(altDir, 'docker')).toBe(true);
+
+      const explicitStarted = Date.now();
+      let explicitError = '';
+      try {
+        resolveComposeCommand(
+          { PATH: `${hangDir}:/usr/bin:/bin`, HOME: root, OAE_COMPOSE: hangCompose },
+          root,
+          COMPOSE_HANG_TIMEOUT_MS,
+        );
+      } catch (error) {
+        explicitError = error instanceof Error ? error.message : String(error);
+      }
+      expect(Date.now() - explicitStarted < COMPOSE_HANG_TIMEOUT_MS + 2000).toBe(true);
+      expect(explicitError.includes('does not support Compose JSON config')).toBe(true);
+      expect(explicitError.includes('do not silently substitute')).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('hanging render times out with an explicit error and kills the child', () => {
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-hang-render-'));
+    try {
+      const hang = join(root, 'hang-compose');
+      writeExecutable(hang, '#!/bin/sh\nexec /bin/sleep 1111\n');
+
+      const hangStarted = Date.now();
+      const hangRender = spawnComposeSync([hang, 'config', '--format', 'json'], {
+        cwd: root,
+        env: cliDiscoveryEnv({ PATH: root, HOME: root }),
+        timeoutMs: COMPOSE_HANG_TIMEOUT_MS,
+      });
+      expect(Date.now() - hangStarted < COMPOSE_HANG_TIMEOUT_MS + 1500).toBe(true);
+      expect(hangRender.exitedDueToTimeout === true).toBe(true);
+      expect(processExists(hangRender.pid)).toBe(false);
+
+      const renderStarted = Date.now();
+      let renderError = '';
+      try {
+        renderApiServiceEnv({
+          composeFile: apiOnly,
+          mode: 'env-file',
+          webhookVars: { WEBHOOKS_ENABLED: 'true' },
+          compose: { argv: [hang], source: 'hanging-render' },
+          timeoutMs: COMPOSE_HANG_TIMEOUT_MS,
+        });
+      } catch (error) {
+        renderError = error instanceof Error ? error.message : String(error);
+      }
+      expect(Date.now() - renderStarted < COMPOSE_HANG_TIMEOUT_MS + 2000).toBe(true);
+      expect(renderError.includes('timed out')).toBe(true);
+      expect(renderError.includes('terminated')).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
