@@ -56,7 +56,11 @@ export type DedupInspect =
   | { ok: true }
   | { ok: false; reason: 'state_unreadable' | 'state_corrupt' | 'state_unacked' | 'state_unacked_unreadable' };
 
-/** Read-only. Does not repair `.unacked` or rewrite corrupt files. */
+function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Read-only. Does not repair `.unacked` or rewrite / drop corrupt files. */
 export function inspectDedupFile(path: string): DedupInspect {
   const unacked = `${path}.unacked`;
   if (existsSync(unacked)) {
@@ -76,9 +80,15 @@ export function inspectDedupFile(path: string): DedupInspect {
     return { ok: false, reason: 'state_unreadable' };
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { records?: unknown };
-    if (!parsed || typeof parsed !== 'object' || parsed.records == null || typeof parsed.records !== 'object') {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isPlainRecordMap(parsed) || !isPlainRecordMap(parsed.records)) {
       return { ok: false, reason: 'state_corrupt' };
+    }
+    // Every persisted entry must be a real dedup record. Do not skip/repair.
+    for (const [key, value] of Object.entries(parsed.records)) {
+      if (!isValidDedupRecord(key, value)) {
+        return { ok: false, reason: 'state_corrupt' };
+      }
     }
     return { ok: true };
   } catch {

@@ -95,9 +95,41 @@ describe('R3 readiness store inspect', () => {
     expect(readFileSync(path, 'utf8')).toBe(corruptBody);
     expect(existsSync(`${path}.unacked`)).toBe(false);
 
+    const arrayBody = JSON.stringify({ records: [] });
+    const arrayPath = join(dir, 'array.json');
+    writeFileSync(arrayPath, arrayBody, { mode: 0o600 });
+    const asArray = inspectReadiness(testConfig({ dedup: { path: arrayPath } }, dir));
+    expect(asArray.stateHealthy).toBe(false);
+    expect(asArray.ready).toBe(false);
+    expect(inspectDedupFile(arrayPath)).toEqual({ ok: false, reason: 'state_corrupt' });
+    expect(readFileSync(arrayPath, 'utf8')).toBe(arrayBody);
+
+    const badEntryBody = JSON.stringify({ records: { bad: { status: 'success' } } });
+    const badPath = join(dir, 'bad-entry.json');
+    writeFileSync(badPath, badEntryBody, { mode: 0o600 });
+    const badEntry = inspectReadiness(testConfig({ dedup: { path: badPath } }, dir));
+    expect(badEntry.stateHealthy).toBe(false);
+    expect(badEntry.ready).toBe(false);
+    expect(inspectDedupFile(badPath)).toEqual({ ok: false, reason: 'state_corrupt' });
+    expect(readFileSync(badPath, 'utf8')).toBe(badEntryBody);
+
+    const key = 'whk_4a1b8c2d-5e6f-4a7b-8c9d-0e1f2a3b4c5d:evt_11111111-2222-3333-4444-555555555555';
+    const populatedBody = JSON.stringify({
+      records: {
+        [key]: { key, status: 'success', storedAtMs: 1, expiresAtMs: 9_999_999_999_999 },
+      },
+    });
+    const populatedPath = join(dir, 'populated.json');
+    writeFileSync(populatedPath, populatedBody, { mode: 0o600 });
+    const populated = inspectReadiness(testConfig({ dedup: { path: populatedPath } }, dir));
+    expect(populated.stateHealthy).toBe(true);
+    expect(inspectDedupFile(populatedPath)).toEqual({ ok: true });
+    expect(readFileSync(populatedPath, 'utf8')).toBe(populatedBody);
+
     const good = join(dir, 'ok.json');
     const goodBody = JSON.stringify({ records: {} });
     writeFileSync(good, goodBody, { mode: 0o600 });
+    expect(inspectDedupFile(good)).toEqual({ ok: true });
     writeFileSync(`${good}.unacked`, 'unacked\n', { mode: 0o600 });
     const pending = inspectReadiness(testConfig({ dedup: { path: good } }, dir));
     expect(pending.ready).toBe(false);
@@ -250,9 +282,11 @@ describe('R3 alert coalescing and timeout response', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let wakes = 0;
     const receiver = await startReceiver(testConfig({ mode: 'canary', requestTimeoutMs: 40 }), {
       wake: async (req) => {
         await gate;
+        wakes += 1;
         return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
       },
     });
@@ -261,10 +295,17 @@ describe('R3 alert coalescing and timeout response', () => {
     expect(first.status).toBe(503);
     expect(first.json.reason).toBe('request_timeout');
     release();
-    await Bun.sleep(30);
-    const retry = await postHook(receiver, { body: mailBody({ id: 'evt_22222222-3333-4444-5555-666666666666' }) });
+    const deadline = Date.now() + 1000;
+    while (receiver.metrics.submitted < 1 && Date.now() < deadline) {
+      await Bun.sleep(5);
+    }
+    expect(receiver.metrics.submitted).toBe(1);
+    expect(wakes).toBe(1);
+    const retry = await postHook(receiver, { body: mailBody() });
     expect(retry.status).toBe(200);
-    expect(retry.json.disposition).toBe('submitted');
+    expect(retry.json.disposition).toBe('duplicate');
+    expect(wakes).toBe(1);
+    expect(receiver.metrics.duplicates).toBe(1);
   });
 });
 
