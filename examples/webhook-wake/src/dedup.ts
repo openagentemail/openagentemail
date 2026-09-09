@@ -54,7 +54,17 @@ export function dedupKey(subscriptionId: string, eventId: string): string {
 
 export type DedupInspect =
   | { ok: true }
-  | { ok: false; reason: 'state_unreadable' | 'state_corrupt' | 'state_unacked' | 'state_unacked_unreadable' };
+  | {
+      ok: false;
+      reason:
+        | 'state_unreadable'
+        | 'state_corrupt'
+        | 'state_unacked'
+        | 'state_unacked_unreadable'
+        | 'state_dirsync'
+        | 'state_dirsync_unreadable'
+        | 'state_dirsync_corrupt';
+    };
 
 function isPlainRecordMap(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -70,6 +80,23 @@ export function inspectDedupFile(path: string): DedupInspect {
       return { ok: false, reason: 'state_unacked_unreadable' };
     }
     return { ok: false, reason: 'state_unacked' };
+  }
+  const dirsync = `${path}.dirsync`;
+  if (existsSync(dirsync)) {
+    try {
+      accessSync(dirsync, constants.R_OK);
+    } catch {
+      return { ok: false, reason: 'state_dirsync_unreadable' };
+    }
+    try {
+      const lines = readFileSync(dirsync, 'utf8').split('\n').filter((line) => line.length > 0);
+      if (lines.length === 0 || !lines.every((line) => line.startsWith('/') && !line.includes('\0'))) {
+        return { ok: false, reason: 'state_dirsync_corrupt' };
+      }
+      return { ok: false, reason: 'state_dirsync' };
+    } catch {
+      return { ok: false, reason: 'state_dirsync_corrupt' };
+    }
   }
   if (!existsSync(path)) {
     return { ok: true };

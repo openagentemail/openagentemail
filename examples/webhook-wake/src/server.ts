@@ -366,7 +366,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
 
     const signatureHeader = req.headers['x-oae-signature'];
     const headerValue = Array.isArray(signatureHeader) ? signatureHeader.join(',') : signatureHeader;
-    if (headerValue && headerValue.length > config.maxHeaderBytes) {
+    if (headerValue && Buffer.byteLength(headerValue, 'utf8') > config.maxHeaderBytes) {
       metrics.unauthorized += 1;
       writeJson(res, 401, { disposition: 'unauthorized', reason: 'invalid_header' });
       return;
@@ -402,6 +402,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       nowMs: nowMs(),
       toleranceSec: config.timestampToleranceSec,
       maxV1: config.maxV1Signatures,
+      maxHeaderBytes: config.maxHeaderBytes,
     });
     if (!verified.valid) {
       metrics.unauthorized += 1;

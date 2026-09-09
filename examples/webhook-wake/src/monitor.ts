@@ -49,7 +49,9 @@ export function createMonitorState(): MonitorState {
 }
 
 function inCooldown(state: MonitorState, nowMs: number, cooldownMs: number): boolean {
-  return state.lastAlertAtMs != null && nowMs - state.lastAlertAtMs < cooldownMs;
+  if (state.lastAlertAtMs == null) return false;
+  if (nowMs < state.lastAlertAtMs) return false;
+  return nowMs - state.lastAlertAtMs < cooldownMs;
 }
 
 export async function stepMonitor(options: {

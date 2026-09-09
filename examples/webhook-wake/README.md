@@ -107,6 +107,49 @@ tree.
   then `limit_req zone=webhook_wake burst=20 nodelay;` on `/hooks/`.
   This tree does **not** invent a Caddy rate-limit module directive.
 
+## Recommended numeric ranges (guidance, not newly enforced)
+
+These ranges describe operator defaults and current load-time constraints.
+They are **not** a new validation layer. Present values must already be
+integers of the documented sign; only `listen.port` (0–65535) and
+`dedup.retentionMs` (≥72h) have extra ceilings/floors today. Do not treat
+the recommended bands below as runtime-enforced limits.
+
+| Field | Default | Current load rule | Recommended band | Runtime / misconfig note |
+| --- | --- | --- | --- | --- |
+| `listen.port` | 8787 | integer 0–65535 | 1024–65535 (0 = kernel ephemeral) | Bind failure is startup-fatal. |
+| `bodyLimitBytes` | 16384 | integer > 0 | 4096–65536 | Metadata events are small; too low yields 413. |
+| `timestampToleranceSec` | 300 | integer > 0 | 60–600 | Replay window. Large values accept stale signatures. |
+| `maxV1Signatures` | 8 | integer > 0 | 2–16 | Rotation candidates. Too low rejects a valid current+previous header. |
+| `maxHeaderBytes` | 2048 | integer > 0 | 2048–8192 | **UTF-8 byte** length (`Buffer.byteLength`). The parser uses this same limit (no hidden 2048-character ceiling). Raise it together with `maxV1Signatures` if rotation headers grow. Too small → 401 `invalid_header`. |
+| `requestTimeoutMs` | 10000 | integer > 0 | 2000–30000 | Aborts an unfinished **HTTP body read** and frees the concurrent slot. Does not kill an already-spawned Orca child. |
+| `maxConcurrent` | 16 | integer > 0 | 1–64 | In-flight HTTP cap. `0` fails load. Too low → 503 `busy`. |
+| `sendTimeoutMs` | 8000 | integer > 0 | 1000–30000 | SIGKILL of the **spawned job process group** after this budget. Independent of `requestTimeoutMs`. Too small → 503 `timeout_killed`. |
+| `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Child stdout/stderr cap. Excess is `output_capped`. |
+| `wakeHistoryLimit` | 0 | integer ≥ 0 | 0–128 | In-memory ring only. `0` disables history. |
+| `dedup.retentionMs` | 604800000 (7d) | integer ≥ 259200000 (72h) | 72h–30d | Replay/dedup window. Below 72h fails load. |
+| `dedup.maxRecords` | 10000 | integer > 0 | 1000–100000 | Fail-closed when full (no eviction of live keys). |
+| `alertHook.timeoutMs` | 2000 | integer > 0 | 500–10000 | Receiver hook POST budget only. |
+
+External monitor timers (templates, not JSON config): probe interval **30s**,
+`FAIL_THRESHOLD` **2**, `COOLDOWN_SEC` **300**, curl `--max-time` **5**,
+`ALERT_TIMEOUT_SEC` **2**. Recommended: interval 15–60s, threshold 2–5,
+cooldown 60–900s, curl 2–10s, alert timeout 1–5s. A future persisted
+`last_alert` is treated as **not** in cooldown.
+
+**Timer distinction:** `requestTimeoutMs` is the inbound HTTP deadline.
+`sendTimeoutMs` is the child-kill deadline after a wake starts. Setting
+either far below the other does not compensate: a late body can still
+complete a wake if the request already passed to send, and a tiny send
+budget kills a healthy child while the HTTP slot is still open.
+
+**Deploy verification:** after changing numbers, load the file
+(`bun src/main.ts --config …` must exit 0), `GET /ready` on loopback,
+POST one signed canary with the intended header size/rotation count, and
+confirm `/health` from the monitor host. Check that a deliberate
+oversize header is 401 and that a write-without-search state directory
+is unready.
+
 ## Local run
 
 ```bash

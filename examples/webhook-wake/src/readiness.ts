@@ -39,22 +39,30 @@ export function isRegularExecutable(path: string): boolean {
   }
 }
 
-export function inspectStateWritable(dedupPath: string): boolean {
-  const stateDir = dirname(dedupPath);
+function isWritableSearchableDir(dir: string): boolean {
   try {
-    accessSync(stateDir, constants.W_OK);
+    const st = statSync(dir);
+    if (!st.isDirectory()) return false;
+    accessSync(dir, constants.W_OK | constants.X_OK);
     return true;
   } catch {
-    // Existing but unwritable directory stays unready. Fallback only if absent.
-    if (existsSync(stateDir)) {
-      return false;
+    return false;
+  }
+}
+
+export function inspectStateWritable(dedupPath: string): boolean {
+  const stateDir = dirname(dedupPath);
+  if (existsSync(stateDir)) {
+    return isWritableSearchableDir(stateDir);
+  }
+  let cursor = dirname(stateDir);
+  for (;;) {
+    if (existsSync(cursor)) {
+      return isWritableSearchableDir(cursor);
     }
-    try {
-      accessSync(dirname(stateDir), constants.W_OK);
-      return true;
-    } catch {
-      return false;
-    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
   }
 }
 

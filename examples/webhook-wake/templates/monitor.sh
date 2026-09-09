@@ -62,6 +62,10 @@ in_cooldown() {
 	if [ "$last_alert" -eq 0 ]; then
 		return 1
 	fi
+	# Future last_alert (clock step / persisted wall-clock) must not mute alerts.
+	if [ "$now" -lt "$last_alert" ]; then
+		return 1
+	fi
 	[ $((now - last_alert)) -lt "$COOLDOWN_SEC" ]
 }
 

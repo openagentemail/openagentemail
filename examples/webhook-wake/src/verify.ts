@@ -18,6 +18,7 @@ import type { VerifyResult } from './types.ts';
 
 export const DEFAULT_TOLERANCE_SEC = 300;
 export const DEFAULT_MAX_V1 = 8;
+export const DEFAULT_MAX_HEADER_BYTES = 2048;
 
 export type ParseSignatureHeaderResult =
   | { ok: true; timestampSec: number; v1: string[] }
@@ -26,11 +27,12 @@ export type ParseSignatureHeaderResult =
 export function parseSignatureHeader(
   header: string | null | undefined,
   maxV1 = DEFAULT_MAX_V1,
+  maxHeaderBytes = DEFAULT_MAX_HEADER_BYTES,
 ): ParseSignatureHeaderResult {
   if (header == null || !header.trim()) {
     return { ok: false, reason: 'missing_header' };
   }
-  if (header.length > 2048) {
+  if (Buffer.byteLength(header, 'utf8') > maxHeaderBytes) {
     return { ok: false, reason: 'invalid_header' };
   }
 
@@ -108,8 +110,13 @@ export function verifyWebhookSignature(options: {
   nowMs?: number;
   toleranceSec?: number;
   maxV1?: number;
+  maxHeaderBytes?: number;
 }): VerifyResult {
-  const parsed = parseSignatureHeader(options.signatureHeader, options.maxV1 ?? DEFAULT_MAX_V1);
+  const parsed = parseSignatureHeader(
+    options.signatureHeader,
+    options.maxV1 ?? DEFAULT_MAX_V1,
+    options.maxHeaderBytes ?? DEFAULT_MAX_HEADER_BYTES,
+  );
   if (!parsed.ok) {
     return { valid: false, reason: parsed.reason };
   }
