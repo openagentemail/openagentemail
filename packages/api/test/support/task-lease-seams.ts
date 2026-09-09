@@ -8,9 +8,11 @@ import {
 import {
   taskLeaseExpiryAuditM3Enabled,
   taskLeaseOverlayBoundEnabled,
+  taskLeasePendingJournalEnabled,
   taskLeasesEnabled,
   withTaskLeaseExpiryAuditM3ForTests,
   withTaskLeaseOverlayBoundForTests,
+  withTaskLeasePendingJournalForTests,
   withTaskLeasesEnabledForTests,
 } from '../../src/lib/task-lease-gate.ts';
 
@@ -20,8 +22,10 @@ export {
   parseStampedTaskMessageForTests,
   taskLeaseExpiryAuditM3Enabled,
   taskLeaseOverlayBoundEnabled,
+  taskLeasePendingJournalEnabled,
   taskLeasesEnabled,
   withTaskLeaseExpiryAuditM3ForTests,
   withTaskLeaseOverlayBoundForTests,
+  withTaskLeasePendingJournalForTests,
   withTaskLeasesEnabledForTests,
 };

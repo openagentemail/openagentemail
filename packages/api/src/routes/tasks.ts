@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
-import { taskLeasesEnabled } from '../lib/task-lease-gate.ts';
+import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 import { readTaskForAuthorization, shouldMaterializeAuthorizedTask } from '../lib/task-authorization-read.ts';
 import {
@@ -320,7 +320,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
-        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted') return c.json({ error: code }, 409);
+        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
+        if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
@@ -359,9 +360,10 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
         // lease_already_released 为不可达死映射：core 对已释放 lease 发 stale_lease（错 token/reason）或 200 幂等成功。
-        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted') {
+        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
+        if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
         console.warn('[task] renew failed');
         return c.json({ error: 'smtp_error' }, 502);
       }
@@ -399,10 +401,38 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
         // 同上：不映射 core 不会发出的 lease_already_released。
-        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal') {
+        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
+        if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
         console.warn('[task] release failed');
+        return c.json({ error: 'smtp_error' }, 502);
+      }
+    })
+    .post('/:id/claim-lost', async (c) => {
+      const id = taskIdSchema.safeParse(c.req.param('id'));
+      if (!id.success) return c.json({ error: 'invalid_request' }, 400);
+      if (getAuth(c).kind !== 'admin') return c.json({ error: 'forbidden: admin key required' }, 403);
+      if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
+      if (!taskLeasePendingJournalEnabled()) return c.json({ error: 'task_leases_pending_journal_disabled' }, 409);
+      const task = await readTaskForAuthorization(service, id.data);
+      if (!task) return c.json({ error: 'not_found' }, 404);
+      try {
+        const claimLost = service.claimLost;
+        if (!claimLost) throw new Error('lease_service_unavailable');
+        return c.json(await mutationTaskView(c, service, await claimLost({ id: id.data })));
+      } catch (err) {
+        const code = (err as Error).message;
+        if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
+        if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
+        if (
+          code === 'task_not_claimable'
+          || code === 'lease_claim_lost_too_early'
+          || code === 'lease_claim_lost_not_eligible'
+          || code === 'task_leases_pending_journal_disabled'
+        ) return c.json({ error: code }, 409);
+        if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
+        console.warn('[task] claim-lost failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
       }
     })
