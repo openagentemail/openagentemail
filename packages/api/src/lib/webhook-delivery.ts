@@ -542,11 +542,11 @@ export function resetDeliveryLogIoForTests(): void {
 export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   const path = deliveryLogPath();
   if (!existsSync(path)) return [];
-  const text = readFileSync(path, 'utf8');
-  // Count a full-file read; list/probe must not scale this with subscription count.
+  // Read bytes once; record disk length without a second UTF-8 walk.
+  const buf = readFileSync(path);
   deliveryLogIoForTests.fullReads += 1;
-  deliveryLogIoForTests.bytesRead += Buffer.byteLength(text, 'utf8');
-  return parseDeliveryLogText(text);
+  deliveryLogIoForTests.bytesRead += buf.byteLength;
+  return parseDeliveryLogText(buf.toString('utf8'));
 }
 
 function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {

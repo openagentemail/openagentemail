@@ -1866,7 +1866,9 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const t1 = new Date(now - 3000).toISOString();
     const t2 = new Date(now - 1000).toISOString();
     appendDeliveryLogRow(row('a1', 'whk_a', t1, 1));
-    appendDeliveryLogRow(row('a2', 'whk_a', t1, 2));
+    const a2 = row('a2', 'whk_a', t1, 2);
+    a2.reason = 'café-测试';
+    appendDeliveryLogRow(a2);
     appendDeliveryLogRow(row('c1', 'whk_c', t1, 1));
     appendDeliveryLogRow(row('c2', 'whk_c', t2, 1));
 
@@ -1879,8 +1881,19 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       });
     };
 
-    // 冷启动允许一次重建；热查询不得再读数据
+    // 显式冷索引：一次全量读，字节按磁盘长度而非字符数
+    resetDeliveryLogIndexForTests();
+    resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
+    expect(getLatestDeliveryForWebhook('whk_b')).toBeNull();
+    expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c2');
+    const seededBuf = readFileSync(logPath);
+    const seededText = seededBuf.toString('utf8');
+    const cold = getDeliveryLogIoForTests();
+    expect(cold.fullReads).toBe(1);
+    expect(cold.incrementalReads).toBe(0);
+    expect(cold.bytesRead).toBe(seededBuf.byteLength);
+    expect(seededBuf.byteLength).toBeGreaterThan(seededText.length);
     resetDeliveryLogIoForTests();
     expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
     expect(getLatestDeliveryForWebhook('whk_b')).toBeNull();

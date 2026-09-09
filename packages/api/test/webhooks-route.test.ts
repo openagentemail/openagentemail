@@ -1635,11 +1635,8 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       });
     };
 
-    // 冷启动可重建一次；无追加时 list/GET 数据读必须为 0
-    const prime = await app.request('/v1/webhooks', {
-      headers: { Authorization: `Bearer ${adminKey}` },
-    });
-    expect(prime.status).toBe(200);
+    // 显式冷索引：list 一次全量读，字节等于已播种日志磁盘长度
+    resetDeliveryLogIndexForTests();
     resetDeliveryLogIoForTests();
     const listRes = await app.request('/v1/webhooks', {
       headers: { Authorization: `Bearer ${adminKey}` },
@@ -1650,6 +1647,16 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(byId.get(empty.id).lastDelivery).toBeNull();
     expect(byId.get(older.id).lastDelivery.deliveryId).toBe('dlv_old_attempt2');
     expect(byId.get(newer.id).lastDelivery.deliveryId).toBe('dlv_new');
+    const seededBytes = readFileSync(join(TEST_DATA_DIR, 'webhook-deliveries.jsonl')).byteLength;
+    const cold = getDeliveryLogIoForTests();
+    expect(cold.fullReads).toBe(1);
+    expect(cold.incrementalReads).toBe(0);
+    expect(cold.bytesRead).toBe(seededBytes);
+    resetDeliveryLogIoForTests();
+    const warmAfterCold = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(warmAfterCold.status).toBe(200);
     expectNoDataReads();
 
     for (const sub of subs) {
