@@ -28,6 +28,21 @@ is_uint() {
 	esac
 }
 
+# Reject empty/signed/non-integer values before any arithmetic or cooldown math.
+require_uint_ge() {
+	name=$1
+	value=$2
+	min=$3
+	if ! is_uint "$value" || [ "$value" -lt "$min" ]; then
+		echo "monitor_config_invalid $name" >&2
+		exit 2
+	fi
+}
+
+require_uint_ge FAIL_THRESHOLD "$FAIL_THRESHOLD" 1
+require_uint_ge COOLDOWN_SEC "$COOLDOWN_SEC" 0
+require_uint_ge ALERT_TIMEOUT_SEC "$ALERT_TIMEOUT_SEC" 1
+
 load_state() {
 	[ -f "$STATE_FILE" ] || return 0
 	while IFS= read -r line || [ -n "$line" ]; do

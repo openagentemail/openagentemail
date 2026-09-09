@@ -111,6 +111,22 @@ function writeJson(res: ServerResponse, status: number, body: Record<string, unk
   return true;
 }
 
+/** Flush a pre-body reject, drain leftover bytes, then close the socket. */
+function endAndRelease(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+): void {
+  res.once('finish', () => {
+    if (!req.destroyed) req.destroy();
+  });
+  writeJson(res, status, body);
+  if (!req.readableEnded && !req.destroyed) {
+    req.resume();
+  }
+}
+
 const COALESCE_ALERT_CODES = new Set(['mapping_mismatch', 'stale_mapping', 'canary_terminal_unbound']);
 const DEFAULT_ALERT_COOLDOWN_MS = 60_000;
 
@@ -353,7 +369,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     metrics.received += 1;
     if (!isRouteKey(routeKey)) {
       metrics.rejected += 1;
-      writeJson(res, 404, { disposition: 'rejected', reason: 'unknown_route' });
+      endAndRelease(req, res, 404, { disposition: 'rejected', reason: 'unknown_route' });
       return;
     }
     const route = findRoute(config, routeKey);
@@ -361,7 +377,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       // Unknown routes never invoke the external alert sink.
       metrics.rejected += 1;
       logEvent('warn', 'unknown_mapping', { routeKey });
-      writeJson(res, 404, { disposition: 'rejected', reason: 'unknown_route' });
+      endAndRelease(req, res, 404, { disposition: 'rejected', reason: 'unknown_route' });
       return;
     }
 
@@ -369,7 +385,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     const headerValue = Array.isArray(signatureHeader) ? signatureHeader.join(',') : signatureHeader;
     if (headerValue && Buffer.byteLength(headerValue, 'utf8') > config.maxHeaderBytes) {
       metrics.unauthorized += 1;
-      writeJson(res, 401, { disposition: 'unauthorized', reason: 'invalid_header' });
+      endAndRelease(req, res, 401, { disposition: 'unauthorized', reason: 'invalid_header' });
       return;
     }
 
@@ -469,7 +485,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     try {
       url = new URL(req.url ?? '/', `http://${host}`);
     } catch {
-      writeJson(res, 400, { disposition: 'invalid', reason: 'bad_url' });
+      endAndRelease(req, res, 400, { disposition: 'invalid', reason: 'bad_url' });
       return;
     }
 
@@ -487,12 +503,12 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     if (method === 'POST' && hookMatch) {
       const decoded = decodeRouteKey(hookMatch[1] ?? '');
       if (!decoded.ok) {
-        writeJson(res, 400, { disposition: 'invalid', reason: decoded.reason });
+        endAndRelease(req, res, 400, { disposition: 'invalid', reason: decoded.reason });
         return;
       }
       if (inFlightHttp >= config.maxConcurrent) {
         metrics.rejected += 1;
-        writeJson(res, 503, { disposition: 'busy', reason: 'max_concurrent' });
+        endAndRelease(req, res, 503, { disposition: 'busy', reason: 'max_concurrent' });
         return;
       }
       inFlightHttp += 1;
@@ -520,7 +536,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       return;
     }
 
-    writeJson(res, 404, { disposition: 'rejected', reason: 'not_found' });
+    endAndRelease(req, res, 404, { disposition: 'rejected', reason: 'not_found' });
   });
 
   server.requestTimeout = config.requestTimeoutMs;

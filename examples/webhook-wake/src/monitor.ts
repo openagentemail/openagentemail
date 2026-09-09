@@ -115,6 +115,14 @@ export async function stepMonitor(options: {
   return state;
 }
 
+/** Bun URL.hostname keeps IPv6 brackets (`[::1]`); http.request needs the literal. */
+export function probeRequestHostname(hostname: string): string {
+  if (hostname.startsWith('[') && hostname.endsWith(']') && hostname.length >= 2) {
+    return hostname.slice(1, -1);
+  }
+  return hostname;
+}
+
 /** Direct GET: exact HTTP 200 only. Never follow redirects. */
 export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: boolean }> {
   return new Promise((resolve) => {
@@ -140,7 +148,7 @@ export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: b
       const req = lib(
         {
           protocol: parsed.protocol,
-          hostname: parsed.hostname,
+          hostname: probeRequestHostname(parsed.hostname),
           port: parsed.port,
           path: `${parsed.pathname}${parsed.search}`,
           method: 'GET',

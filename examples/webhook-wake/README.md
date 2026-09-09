@@ -129,14 +129,22 @@ tree.
   `alertHook.url` is trusted-operator config; this example does not add
   SSRF/network policy (upstream API already pins egress). Oversized
   bodies return HTTP 413 on the live connection; unknown unauthenticated
-  routes never call the alert hook. Request timeout aborts an unfinished
+  routes never call the alert hook. Pre-body rejects (unknown route,
+  oversize signature header, busy, malformed route encoding, other/method
+  404) flush the status then drain and close so an unfinished
+  Content-Length cannot linger after the request timer is cleared.
+  Request timeout aborts an unfinished
   body read and frees the concurrent slot; a later completed wake+dedup
   is not cancelled.
+  `killSpawnedJob` skips a child whose `exitCode`/`signalCode` is already
+  set. That does **not** close kernel PID reuse; this example does not
+  add pidfd.
 - **Deploy checklist (guidance, not a substitute for timeout/slots):**
   rate-limit public `/hooks` at the proxy or host filter you already
   operate. nginx (standard `limit_req`; zone belongs in `http {}`):
   `limit_req_zone $binary_remote_addr zone=webhook_wake:10m rate=10r/s;`
-  then `limit_req zone=webhook_wake burst=20 nodelay;` on `/hooks/`.
+  then `limit_req zone=webhook_wake burst=20 nodelay;` **inside**
+  `location /hooks/` (not beside `/health`). `/health` stays unthrottled.
   This tree does **not** invent a Caddy rate-limit module directive.
   Non-loopback bind already logs `listen_not_loopback` (no new limiter).
   Route 404 vs 401 stays a documented non-secret distinction. `alertHook.url`
@@ -165,14 +173,17 @@ limits.
 | `sendTimeoutMs` | 8000 | integer > 0 | 1000–30000 | SIGKILL of the **spawned job process group** after this budget. Independent of `requestTimeoutMs`. Too small → 503 `timeout_killed`. |
 | `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Bound on **retained** child stdout/stderr counts. Excess is drained and discarded (not pipe-destroyed) so a zero-exit send still commits. |
 | `wakeHistoryLimit` | 0 | integer ≥ 0 | 0–128 | In-memory ring only. `0` disables history. |
-| `dedup.path` | `/var/lib/webhook-wake/dedup.json` | absolute string | absolute file path | Relative `dedup.json` / `nested/dedup.json` fail load (`config_invalid:dedup.path`) before any store I/O. |
+| `dedup.path` | `/var/lib/webhook-wake/dedup.json` | absolute file path | absolute file path | Relative paths, trailing separators (`/tmp/x.json/`), and root-as-file (`/`) fail load (`config_invalid:dedup.path`) before any store I/O. Present `dedup` must be an object (`config_invalid:dedup`). |
 | `dedup.retentionMs` | 604800000 (7d) | integer ≥ 259200000 (72h) | 72h–30d | Replay/dedup window. Below 72h fails load. |
 | `dedup.maxRecords` | 10000 | integer > 0 | 1000–100000 | Fail-closed when full (no eviction of live keys). |
 | `alertHook.timeoutMs` | 2000 | integer > 0 | 500–10000 | Receiver hook POST budget only. |
 
 External monitor timers (templates, not JSON config): probe interval **30s**,
 `FAIL_THRESHOLD` **2**, `COOLDOWN_SEC` **300**, curl `--max-time` **5**,
-`ALERT_TIMEOUT_SEC` **2**. Recommended: interval 15–60s, threshold 2–5,
+`ALERT_TIMEOUT_SEC` **2**. The shell validates those three as unsigned
+integers before arithmetic (`FAIL_THRESHOLD` ≥ 1, `COOLDOWN_SEC` ≥ 0,
+`ALERT_TIMEOUT_SEC` ≥ 1); malformed values print `monitor_config_invalid`
+and exit 2. Recommended: interval 15–60s, threshold 2–5,
 cooldown 60–900s, curl 2–10s, alert timeout 1–5s. A future persisted
 `last_alert` is treated as **not** in cooldown.
 
@@ -221,8 +232,15 @@ must still be a nonempty string, and a present `previousSecretFile`
 must be a nonempty string or `null`. A valid path that does not exist
 is allowed in preflight; a real load still fails on a missing file.
 `alertHook`, if present, must be an object (string/array/null/scalar
-fail load) so a typo cannot silently disable the sink. IPv6 listen
+fail load) so a typo cannot silently disable the sink. Present `dedup`
+must likewise be an object (`config_invalid:dedup`). IPv6 listen
 addresses are bracketed in `receiver.url()` (`http://[::1]:port`).
+`httpProbe` strips those brackets before `http.request` so a
+`http://[::1]:port` health URL uses host `::1`.
+Readiness `inspectDedupFile` is fail-closed on any malformed record
+(`state_corrupt`). Runtime `DedupStore.readFile` still skips malformed
+entries so a later valid commit can recover — that split is existing
+recovery, not a new repair policy.
 
 ```bash
 bun -e 'import { parseFileConfig } from "./src/config.ts";

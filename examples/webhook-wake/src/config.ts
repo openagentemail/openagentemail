@@ -170,9 +170,15 @@ function optionalString(value: unknown, field: string, fallback: string): string
   return requireString(value, field);
 }
 
-function optionalAbsolutePath(value: unknown, field: string, fallback: string): string {
+function isRootAsFile(path: string): boolean {
+  if (path === '/' || path === '\\') return true;
+  return /^[A-Za-z]:[\\/]?$/.test(path);
+}
+
+/** Absolute regular-file path. Rejects relative, trailing separators, and root-as-file. */
+function optionalAbsoluteFilePath(value: unknown, field: string, fallback: string): string {
   const path = optionalString(value, field, fallback);
-  if (!isAbsolute(path)) {
+  if (!isAbsolute(path) || path.endsWith('/') || path.endsWith('\\') || isRootAsFile(path)) {
     throw new Error(`config_invalid:${field}`);
   }
   return path;
@@ -201,6 +207,16 @@ function requireAlertHookObject(value: unknown): { url?: unknown; timeoutMs?: un
     throw new Error('config_invalid:alertHook');
   }
   return value as { url?: unknown; timeoutMs?: unknown };
+}
+
+function requireDedupObject(
+  value: unknown,
+): { path?: unknown; retentionMs?: number; maxRecords?: number } | undefined {
+  if (value === undefined) return undefined;
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('config_invalid:dedup');
+  }
+  return value as { path?: unknown; retentionMs?: number; maxRecords?: number };
 }
 
 export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boolean }): ReceiverConfig {
@@ -274,6 +290,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
   if (alertUrl != null && typeof alertUrl !== 'string') {
     throw new Error('config_invalid:alertHook.url');
   }
+  const dedup = requireDedupObject(raw.dedup);
 
   return {
     listen: {
@@ -297,9 +314,9 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     outputCapBytes: optionalPositiveInt(raw.outputCapBytes, 'outputCapBytes', 4096),
     wakeHistoryLimit: optionalNonNegInt(raw.wakeHistoryLimit, 'wakeHistoryLimit', 0),
     dedup: {
-      path: optionalAbsolutePath(raw.dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
-      retentionMs: optionalRetentionMs(raw.dedup?.retentionMs, DEFAULT_RETENTION_MS),
-      maxRecords: optionalPositiveInt(raw.dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
+      path: optionalAbsoluteFilePath(dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
+      retentionMs: optionalRetentionMs(dedup?.retentionMs, DEFAULT_RETENTION_MS),
+      maxRecords: optionalPositiveInt(dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
     },
     alertHook: {
       url: alertUrl,

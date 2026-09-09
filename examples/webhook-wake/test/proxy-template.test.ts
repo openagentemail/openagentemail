@@ -21,4 +21,18 @@ describe('public proxy route contract', () => {
     expect(nginx).not.toMatch(/location \/ready/);
     expect(nginx).not.toMatch(/location \/ \{\s*proxy_pass/);
   });
+
+  test('optional nginx limit_req is inside /hooks/ and never on /health', () => {
+    const healthIdx = nginx.indexOf('location = /health');
+    const hooksIdx = nginx.indexOf('location /hooks/');
+    const limitIdx = nginx.indexOf('limit_req zone=webhook_wake');
+    expect(healthIdx).toBeGreaterThanOrEqual(0);
+    expect(hooksIdx).toBeGreaterThan(healthIdx);
+    expect(limitIdx).toBeGreaterThan(hooksIdx);
+    const healthBlock = nginx.slice(healthIdx, hooksIdx);
+    expect(healthBlock).not.toMatch(/limit_req/);
+    const hooksBlock = nginx.slice(hooksIdx, nginx.indexOf('location / {'));
+    expect(hooksBlock).toMatch(/limit_req zone=webhook_wake burst=20 nodelay/);
+    expect(nginx).toMatch(/limit_req_zone \$binary_remote_addr zone=webhook_wake:10m rate=10r\/s;/);
+  });
 });
