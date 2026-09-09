@@ -71,6 +71,9 @@ export async function stepMonitor(options: {
     state.consecutiveFailures += 1;
     if (state.consecutiveFailures >= cfg.failThreshold && !inCooldown(state, options.nowMs, cfg.cooldownMs)) {
       const sent = await options.alert({ kind: 'monitor_failure', code: 'health_failed' });
+      // Intentional: stamp on the attempt so a down sink is not retried every
+      // interval. monitor.sh stamps last_alert only after a successful
+      // health_failed; this helper is not claimed as parity on that branch.
       state.lastAlertAtMs = options.nowMs;
       if (sent.ok) {
         state.alarming = true;
@@ -93,12 +96,14 @@ export async function stepMonitor(options: {
       return state;
     }
     const sent = await options.alert({ kind: 'monitor_recovery', code: 'health_recovered' });
-    state.lastAlertAtMs = options.nowMs;
     if (!sent.ok) {
+      // Do not advance lastAlertAtMs: next healthy tick retries without a
+      // full cooldown (same as monitor.sh last_alert-on-success only).
       state.alertFailures += 1;
       state.pendingRecovery = true;
       return state;
     }
+    state.lastAlertAtMs = options.nowMs;
     state.recoveries += 1;
     state.alarming = false;
     state.pendingRecovery = false;

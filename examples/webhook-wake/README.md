@@ -44,6 +44,13 @@ tree.
   `orca terminal send --terminal <bound> --enter --text <neutral>` with
   `shell=false`, timeout+SIGKILL of the **spawned job process group**,
   and output caps. No `--interrupt`. Ambient bun/node is never signalled.
+  Shipped `webhook-wake.service` / `webhook-wake.user.service` omit
+  `KillMode=`, so systemd default `KillMode=control-group` applies:
+  stopping the unit signals every process in the service cgroup,
+  including a `detached` orca child. Bare/manual `bun src/main.ts` has
+  no cgroup — a parent SIGKILL can leave that detached child running.
+  This example does not add a PDEATHSIG wrapper; prefer the unit (or an
+  equivalent cgroup) in deployment.
 - The child inherits a runtime allowlist (`HOME`, `USER`, `XDG_*`, `PATH`)
   so a colocated Orca install can resolve its files. API credentials and
   secrets are not forwarded. Placeholder operator identity is **ops** in
@@ -76,6 +83,13 @@ tree.
   (`last_alert` / `alarming`). That is an explicit monitor limitation, not
   the receiver 2xx durability contract; FC may confirm the disposition.
   Recovery during cooldown is pending and emitted on a later tick.
+  A failed `health_recovered` delivery does **not** advance
+  `lastAlertAtMs` / `last_alert`; the next healthy tick retries without
+  a full cooldown (`monitor.ts` matches `monitor.sh` here). A failed
+  `health_failed` in the TypeScript helper still stamps `lastAlertAtMs`
+  so a down sink is not hammered every interval — that is **not** claimed
+  as shell parity (`monitor.sh` stamps `last_alert` only after a
+  successful `health_failed`).
   The probe requires an exact HTTP **200** (no redirect follow; 3xx/4xx/5xx
   are failures) in **both** `templates/monitor.sh` and `httpProbe`. Alert
   execution requires a `timeout` binary; a missing tool fails visibly and
@@ -106,6 +120,11 @@ tree.
   `limit_req_zone $binary_remote_addr zone=webhook_wake:10m rate=10r/s;`
   then `limit_req zone=webhook_wake burst=20 nodelay;` on `/hooks/`.
   This tree does **not** invent a Caddy rate-limit module directive.
+  Non-loopback bind already logs `listen_not_loopback` (no new limiter).
+  Route 404 vs 401 stays a documented non-secret distinction. `alertHook.url`
+  remains trusted-operator config (no new scheme allowlist). Timer overflow
+  stays documented; commander 1823 accepted README ranges without new
+  load-time caps.
 
 ## Recommended numeric ranges (guidance, not newly enforced)
 
@@ -149,13 +168,15 @@ to `setTimeout` (and `requestTimeoutMs` also to `http.Server.requestTimeout`
 / `headersTimeout`). Node.js timers
 (https://nodejs.org/docs/latest-v22.x/api/timers.html#settimeoutcallback-delay-args)
 keep `delay` in a signed 32-bit millisecond range. If `delay` is larger
-than **2147483647** (~24.8 days) or less than **1**, the runtime sets the
-duration to **1 ms** and emits `TimeoutOverflowWarning`. The same clamp
-was observed on this workspace's Bun 1.3.14 and Node v24.5.0
-(`_idleTimeout` becomes 1). This example does **not** add a load-time
-cap. A huge integer is **not** a reliable multi-day HTTP, send, or alert
-timer — it can fire almost immediately. Stay in the recommended
-second-to-tens-of-seconds bands, far below 2^31−1. `dedup.retentionMs`
+than **2147483647** (~24.8 days), the runtime sets the duration to
+**1 ms** and emits `TimeoutOverflowWarning` (observed on this
+workspace's Bun 1.3.14 and Node v24.5.0; `_idleTimeout` becomes 1).
+Values below 1 (including Bun `delay=0`) are also clamped to **1 ms**;
+Bun 0 does that **without** `TimeoutOverflowWarning`. This example
+does **not** add a load-time cap. A huge integer is **not** a reliable
+multi-day HTTP, send, or alert timer — it can fire almost immediately.
+Stay in the recommended second-to-tens-of-seconds bands, far below
+2^31−1. `dedup.retentionMs`
 and `timestampToleranceSec` are wall-clock comparisons, not
 `setTimeout`, so a 7d–30d retention does not use this clamp. Monitor
 `COOLDOWN_SEC` / systemd `OnUnitActiveSec` are shell/unit seconds, not
