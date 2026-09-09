@@ -59,6 +59,7 @@ export type FileConfig = {
   sendTimeoutMs?: number;
   outputCapBytes?: number;
   wakeHistoryLimit?: number;
+  /** Absent keeps defaults. A present non-object (string/array/null/scalar) fails load. */
   dedup?: { path?: unknown; retentionMs?: number; maxRecords?: number };
   alertHook?: { url?: string | null; timeoutMs?: number };
   /** Named object only. Arrays become index keys and are rejected at load. */

@@ -182,7 +182,9 @@ External monitor timers (templates, not JSON config): probe interval **30s**,
 `FAIL_THRESHOLD` **2**, `COOLDOWN_SEC` **300**, curl `--max-time` **5**,
 `ALERT_TIMEOUT_SEC` **2**. The shell validates those three as unsigned
 integers before arithmetic (`FAIL_THRESHOLD` ≥ 1, `COOLDOWN_SEC` ≥ 0,
-`ALERT_TIMEOUT_SEC` ≥ 1); malformed values print `monitor_config_invalid`
+`ALERT_TIMEOUT_SEC` ≥ 1, at most 9 digits). Oversized all-digit strings
+are rejected the same way so POSIX `[` cannot skip the comparison.
+Malformed values print `monitor_config_invalid`
 and exit 2. Recommended: interval 15–60s, threshold 2–5,
 cooldown 60–900s, curl 2–10s, alert timeout 1–5s. A future persisted
 `last_alert` is treated as **not** in cooldown.

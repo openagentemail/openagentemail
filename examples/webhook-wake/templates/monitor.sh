@@ -29,11 +29,13 @@ is_uint() {
 }
 
 # Reject empty/signed/non-integer values before any arithmetic or cooldown math.
+# At most 9 digits: longer all-digit strings make POSIX [ return 2 and skip the
+# comparison, which would otherwise accept a threshold that never alerts.
 require_uint_ge() {
 	name=$1
 	value=$2
 	min=$3
-	if ! is_uint "$value" || [ "$value" -lt "$min" ]; then
+	if ! is_uint "$value" || [ "${#value}" -gt 9 ] || [ "$value" -lt "$min" ]; then
 		echo "monitor_config_invalid $name" >&2
 		exit 2
 	fi

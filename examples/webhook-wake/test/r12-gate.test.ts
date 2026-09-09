@@ -229,6 +229,13 @@ describe('R12 monitor.sh integer preflight', () => {
     expect(badAlert.status).toBe(2);
     expect(badAlert.stderr).toContain('monitor_config_invalid ALERT_TIMEOUT_SEC');
 
+    const huge = '9'.repeat(30);
+    for (const name of ['FAIL_THRESHOLD', 'COOLDOWN_SEC', 'ALERT_TIMEOUT_SEC'] as const) {
+      const overflow = run({ [name]: huge });
+      expect(overflow.status).toBe(2);
+      expect(overflow.stderr).toContain(`monitor_config_invalid ${name}`);
+    }
+
     expect(existsSync(alerts)).toBe(false);
 
     expect(run({ FAIL_THRESHOLD: '1', COOLDOWN_SEC: '0', CURL_BIN: curlFail }).status).toBe(1);
