@@ -187,6 +187,22 @@ export function loadSecretFiles(spec: FileRouteSpec): { secret: string; previous
   return { secret, previousSecret: previous };
 }
 
+/** Path field only. Does not open files. Relative secret paths stay allowed. */
+function requireSecretPath(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`config_invalid:${field}`);
+  }
+  return value.trim();
+}
+
+function requireAlertHookObject(value: unknown): { url?: unknown; timeoutMs?: unknown } | undefined {
+  if (value === undefined) return undefined;
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('config_invalid:alertHook');
+  }
+  return value as { url?: unknown; timeoutMs?: unknown };
+}
+
 export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boolean }): ReceiverConfig {
   if (raw.mode !== undefined && raw.mode !== 'observe' && raw.mode !== 'canary') {
     throw new Error('config_invalid:mode');
@@ -215,10 +231,16 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
       throw new Error('config_invalid:stale');
     }
 
+    const secretFile = requireSecretPath(spec.secretFile, 'secretFile');
+    let previousSecretFile: string | null | undefined = spec.previousSecretFile;
+    if (previousSecretFile !== undefined && previousSecretFile !== null) {
+      previousSecretFile = requireSecretPath(previousSecretFile, 'previousSecretFile');
+    }
+
     let secret = '';
     let previousSecret: string | undefined;
     if (options?.loadSecrets !== false) {
-      const loaded = loadSecretFiles(spec);
+      const loaded = loadSecretFiles({ ...spec, secretFile, previousSecretFile });
       secret = loaded.secret;
       previousSecret = loaded.previousSecret;
     }
@@ -247,7 +269,8 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     throw new Error('config_invalid:canary_terminal_unbound');
   }
 
-  const alertUrl = raw.alertHook?.url ?? null;
+  const hook = requireAlertHookObject(raw.alertHook);
+  const alertUrl = hook?.url ?? null;
   if (alertUrl != null && typeof alertUrl !== 'string') {
     throw new Error('config_invalid:alertHook.url');
   }
@@ -280,7 +303,7 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     },
     alertHook: {
       url: alertUrl,
-      timeoutMs: optionalPositiveInt(raw.alertHook?.timeoutMs, 'alertHook.timeoutMs', 2000),
+      timeoutMs: optionalPositiveInt(hook?.timeoutMs, 'alertHook.timeoutMs', 2000),
     },
     routes,
   };

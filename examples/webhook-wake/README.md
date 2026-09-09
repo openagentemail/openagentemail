@@ -216,7 +216,13 @@ state directory or a `0300` (write+search, no read) state/ancestor is unready.
 
 Config shape/numbers without starting a service (existing
 `parseFileConfig`, `loadSecrets: false`; no new CLI). Prints `config_ok`
-and exits; does not bind a port or load secret files:
+and exits; does not bind a port or **open** secret files. `secretFile`
+must still be a nonempty string, and a present `previousSecretFile`
+must be a nonempty string or `null`. A valid path that does not exist
+is allowed in preflight; a real load still fails on a missing file.
+`alertHook`, if present, must be an object (string/array/null/scalar
+fail load) so a typo cannot silently disable the sink. IPv6 listen
+addresses are bracketed in `receiver.url()` (`http://[::1]:port`).
 
 ```bash
 bun -e 'import { parseFileConfig } from "./src/config.ts";

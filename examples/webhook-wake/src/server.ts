@@ -542,7 +542,8 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       if (!addr || typeof addr === 'string') {
         throw new Error('not_listening');
       }
-      const host = addr.address === '::' ? '127.0.0.1' : addr.address;
+      let host = addr.address === '::' ? '127.0.0.1' : addr.address;
+      if (host.includes(':')) host = `[${host}]`;
       return `http://${host}:${addr.port}`;
     },
   };
