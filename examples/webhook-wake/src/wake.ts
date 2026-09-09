@@ -10,6 +10,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { isAbsolute } from 'node:path';
+import type { Readable } from 'node:stream';
 import type { WakeFn, WakeRequest, WakeResult } from './types.ts';
 
 export type SpawnWakeOptions = {
@@ -85,16 +86,14 @@ export function killSpawnedJob(child: ChildProcess): void {
   }
 }
 
-function takeCapped(stream: NodeJS.ReadableStream | null, cap: number): { bytes: number; overflow: boolean } {
+function takeCapped(stream: Readable | null, cap: number): { bytes: number; overflow: boolean } {
   const state = { bytes: 0, overflow: false };
   if (!stream) return state;
   stream.on('data', (chunk: Buffer) => {
     state.bytes += chunk.length;
     if (state.bytes > cap) {
       state.overflow = true;
-      if (typeof (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy === 'function') {
-        (stream as { destroy: () => void }).destroy();
-      }
+      stream.destroy();
     }
   });
   return state;

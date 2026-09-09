@@ -8,7 +8,8 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": false,
-    "types": []
+    "types": ["node"],
+    "typeRoots": ["../../packages/api/node_modules/@types"]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts"]
+  "include": ["src/**/*.ts"]
 }

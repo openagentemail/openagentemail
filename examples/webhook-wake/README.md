@@ -93,8 +93,9 @@ bun src/main.ts --config /tmp/webhook-wake-config.json
 - `POST /hooks/<routeKey>` — signed webhook.
 
 Requires Bun `>=1.2.21` (tested with the workspace Bun). Example typecheck
-uses the TypeScript already installed under `packages/api/node_modules`
-(`bun run typecheck`); no new compiler dependency is added.
+uses the TypeScript and `@types/node` already installed under
+`packages/api/node_modules` (`bun run typecheck`); no new dependency is
+added.
 
 ```bash
 bun test
