@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { createServer as createNetServer, type Socket } from 'node:net';
 import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { parseFileConfig, type FileConfig } from '../src/config.ts';
 import { httpProbe } from '../src/monitor.ts';
 import { parseVerifiedEnvelope } from '../src/parse.ts';
@@ -147,5 +149,21 @@ describe('R20 present canaryTerminal', () => {
         parseFileConfig({ ...fileBase(dir), canaryTerminal: value as never }, { loadSecrets: false }),
       ).toThrow('config_invalid:canaryTerminal');
     }
+  });
+});
+
+describe('R20 unauthenticated /ready is a private-deploy contract', () => {
+  test('README and the /ready handler state intentional no-auth plus private deploy', () => {
+    const readme = readFileSync(fileURLToPath(new URL('../README.md', import.meta.url)), 'utf8');
+    const server = readFileSync(fileURLToPath(new URL('../src/server.ts', import.meta.url)), 'utf8');
+    expect(readme).toMatch(/Unauthenticated readiness is \*\*intentional\*\*/);
+    expect(readme).toMatch(/private-deployment/);
+    expect(readme).toMatch(/does not add `\/ready` authentication/);
+    expect(readme).toMatch(/openagentemail\/issues\/177/);
+    expect(server).toMatch(/Unauthenticated \/ready is intentional/);
+    expect(server).toMatch(/does not add authentication/);
+    expect(server).toMatch(/issue #177/);
+    expect(server).not.toMatch(/Authorization/);
+    expect(server).not.toMatch(/readyAuth|ready_secret|basicAuth/);
   });
 });

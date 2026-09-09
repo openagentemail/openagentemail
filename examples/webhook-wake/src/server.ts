@@ -504,6 +504,10 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       return;
     }
     if (method === 'GET' && url.pathname === '/ready') {
+      // Unauthenticated /ready is intentional. Keep it private by deployment:
+      // loopback listen and/or a reverse proxy that does not publish /ready.
+      // This handler does not add authentication. Sync-IO and identifier
+      // exposure follow-up is issue #177, not this path.
       const report = inspectReadiness(config);
       endAndRelease(req, res, report.ready ? 200 : 503, report);
       return;

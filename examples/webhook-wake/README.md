@@ -71,6 +71,12 @@ tree.
   This tree does not create `/usr/bin/bun` or any host symlink.
 - `GET /health` is liveness only and is the public monitor target.
   `GET /ready` lists `routeKey` / `subscriptionId` and stays **private**.
+  Unauthenticated readiness is **intentional**. The private-deployment
+  prerequisite is loopback listen and/or a reverse proxy that excludes
+  public `/ready` (Caddy/nginx templates already omit it). This example
+  does not add `/ready` authentication. Synchronous IO and identifier
+  exposure on this path are deferred to issue
+  https://github.com/openagentemail/openagentemail/issues/177.
   Caddy/nginx templates proxy `/health` and `/hooks/*` only. Binding a
   non-loopback listen address logs `listen_not_loopback` (no secrets).
   Unknown hook routes return **404**; a known route with a failed
@@ -315,8 +321,9 @@ bun src/main.ts --config /tmp/webhook-wake-config.json
 ```
 
 - `GET /health` — process liveness only (public monitor probe).
-- `GET /ready` — mappings, secret/state readiness, stale/inactive visibility
-  (keep off the public proxy).
+- `GET /ready` — mappings, secret/state readiness, stale/inactive visibility.
+  Unauthenticated on purpose; keep it private by deployment (loopback
+  and/or reverse-proxy exclude). Not an authentication endpoint.
 - `POST /hooks/<routeKey>` — signed webhook.
 
 Requires Bun `>=1.2.21` (tested with the workspace Bun). Example typecheck
