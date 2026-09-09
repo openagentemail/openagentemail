@@ -5,11 +5,13 @@
  * Malformed records are never treated as a successful hit.
  */
 
+import { randomBytes } from 'node:crypto';
 import {
   accessSync,
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -19,8 +21,9 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { DedupConfig, DedupRecord } from './types.ts';
 
 export class DedupError extends Error {
@@ -222,6 +225,43 @@ function fsyncDirectory(dir: string): void {
   } finally {
     closeSync(fd);
   }
+}
+
+/** Exclusive create in `parent`. Not a complete shared-directory / TOCTOU defense. */
+function createExclusiveTemp(parent: string, prefix: string): { fd: number; path: string } {
+  let flags = constants.O_RDWR | constants.O_CREAT | constants.O_EXCL;
+  if (typeof constants.O_NOFOLLOW === 'number') {
+    flags |= constants.O_NOFOLLOW;
+  }
+  let last: NodeJS.ErrnoException | undefined;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const path = join(parent, `${prefix}.${randomBytes(16).toString('hex')}`);
+    try {
+      const fd = openSync(path, flags, 0o600);
+      try {
+        if (!fstatSync(fd).isFile()) {
+          closeSync(fd);
+          try {
+            unlinkSync(path);
+          } catch {
+            // Owned create only; ignore unlink races.
+          }
+          throw new DedupError('storage_failed', 'dedup_tmp_not_file');
+        }
+      } catch (err) {
+        if (err instanceof DedupError) throw err;
+        closeSync(fd);
+        throw err;
+      }
+      return { fd, path };
+    } catch (err) {
+      if (err instanceof DedupError) throw err;
+      last = err as NodeJS.ErrnoException;
+      if (last.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw last ?? new DedupError('storage_failed', 'dedup_tmp_create_failed');
 }
 
 export class DedupStore {
@@ -592,26 +632,42 @@ export class DedupStore {
       throw new DedupError('storage_failed', 'dedup_write_failed');
     }
     const parent = dirname(this.config.path);
+    let tmp: string | null = null;
+    let fd: number | null = null;
     try {
       this.mkdirDurable(parent);
-      const tmp = `${this.config.path}.tmp.${process.pid}`;
-      const payload = JSON.stringify(file);
-      writeFileSync(tmp, payload, { mode: 0o600 });
-      const fd = openSync(tmp, 'r+');
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      const created = createExclusiveTemp(parent, `${basename(this.config.path)}.tmp`);
+      tmp = created.path;
+      fd = created.fd;
+      writeSync(fd, Buffer.from(JSON.stringify(file), 'utf8'));
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
       if (this.failRename) {
         this.failRename = false;
         throw new DedupError('dedup_rename_failed', 'dedup_rename_failed');
       }
+      // Durable marker, then atomic rename, then parent fsync. Unchanged order.
       this.persistUnacked();
       renameSync(tmp, this.config.path);
+      tmp = null;
       this.fsyncParentOrThrow();
       this.clearUnacked();
     } catch (err) {
+      if (fd != null) {
+        try {
+          closeSync(fd);
+        } catch {
+          // Best-effort close of the owned descriptor.
+        }
+      }
+      if (tmp != null) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // Only the exclusively created temp. Never the destination or a foreign path.
+        }
+      }
       if (err instanceof DedupError) throw err;
       throw new DedupError('storage_failed', 'dedup_write_failed');
     }
