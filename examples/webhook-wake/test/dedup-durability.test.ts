@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DedupStore, isValidDedupRecord } from '../src/dedup.ts';
+import { createReceiver, listenReceiver } from '../src/server.ts';
 import { mailBody, postHook, startReceiver, tempDir, testConfig } from './helpers.ts';
 import { recordingWake } from '../src/wake.ts';
 import type { Receiver } from '../src/server.ts';
@@ -60,19 +61,37 @@ describe('dedup durability and validation', () => {
     expect(bucket).toHaveLength(2);
   });
 
-  test('parent-dir fsync failure after rename is visible; next read may see the record', async () => {
+  test('dir_fsync failure stays 503 until parent fsync is repaired, including restart', async () => {
     const bucket: WakeRequest[] = [];
-    const receiver = await startReceiver(testConfig({ mode: 'canary' }), { wake: recordingWake(bucket) });
+    const config = testConfig({ mode: 'canary' });
+    const receiver = await startReceiver(config, { wake: recordingWake(bucket) });
     receivers.push(receiver);
     receiver.dedup.injectFailure('dir_fsync');
     const first = await postHook(receiver, { body: mailBody() });
     expect(first.status).toBe(503);
     expect(first.json.reason).toBe('dedup_dir_fsync_failed');
-    const again = await postHook(receiver, { body: mailBody() });
-    expect([200, 503]).toContain(again.status);
-    if (again.status === 200) {
-      expect(['duplicate', 'submitted']).toContain(again.json.disposition);
-    }
+    expect(existsSync(receiver.dedup.unackedPath())).toBe(true);
+
+    receiver.dedup.injectFailure('dir_fsync');
+    const blocked = await postHook(receiver, { body: mailBody() });
+    expect(blocked.status).toBe(503);
+    expect(blocked.json.disposition).not.toBe('duplicate');
+    expect(existsSync(receiver.dedup.unackedPath())).toBe(true);
+
+    await receiver.close();
+    receivers.pop();
+
+    const restarted = createReceiver(config, { wake: recordingWake(bucket) });
+    await listenReceiver(restarted);
+    receivers.push(restarted);
+    restarted.dedup.injectFailure('dir_fsync');
+    const stillBlocked = await postHook(restarted, { body: mailBody() });
+    expect(stillBlocked.status).toBe(503);
+
+    const recovered = await postHook(restarted, { body: mailBody() });
+    expect(recovered.status).toBe(200);
+    expect(recovered.json.disposition).toBe('duplicate');
+    expect(existsSync(restarted.dedup.unackedPath())).toBe(false);
   });
 
   test('first-directory fsync failure fails closed', async () => {

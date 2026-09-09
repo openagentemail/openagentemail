@@ -5,7 +5,17 @@
  * Malformed records are never treated as a successful hit.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import type { DedupConfig, DedupRecord } from './types.ts';
 
@@ -75,6 +85,10 @@ export class DedupStore {
 
   constructor(config: DedupConfig) {
     this.config = config;
+  }
+
+  unackedPath(): string {
+    return `${this.config.path}.unacked`;
   }
 
   /** Test hook: next disk operation fails closed. */
@@ -157,7 +171,45 @@ export class DedupStore {
     }
   }
 
+  private markUnacked(): void {
+    writeFileSync(this.unackedPath(), 'unacked\n', { mode: 0o600 });
+  }
+
+  private clearUnacked(): void {
+    try {
+      unlinkSync(this.unackedPath());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new DedupError('storage_failed', 'dedup_unacked_clear_failed');
+      }
+    }
+  }
+
+  private fsyncParentOrThrow(): void {
+    const parent = dirname(this.config.path);
+    if (this.failDirFsync) {
+      this.failDirFsync = false;
+      this.markUnacked();
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_dir_fsync_failed');
+    }
+    try {
+      fsyncDirectory(parent);
+    } catch (err) {
+      if (err instanceof DedupError) throw err;
+      this.markUnacked();
+      throw new DedupError('dedup_dir_fsync_failed', 'dedup_dir_fsync_failed');
+    }
+  }
+
+  /** A renamed file is not ACK-able until the parent directory fsync succeeds. */
+  private requireDurable(): void {
+    if (!existsSync(this.unackedPath())) return;
+    this.fsyncParentOrThrow();
+    this.clearUnacked();
+  }
+
   private readFile(): StoreFile {
+    this.requireDurable();
     if (this.failReads) {
       this.failReads = false;
       throw new DedupError('storage_failed', 'dedup_read_failed');
@@ -230,12 +282,10 @@ export class DedupStore {
         this.failRename = false;
         throw new DedupError('dedup_rename_failed', 'dedup_rename_failed');
       }
+      this.markUnacked();
       renameSync(tmp, this.config.path);
-      if (this.failDirFsync) {
-        this.failDirFsync = false;
-        throw new DedupError('dedup_dir_fsync_failed', 'dedup_dir_fsync_failed');
-      }
-      fsyncDirectory(parent);
+      this.fsyncParentOrThrow();
+      this.clearUnacked();
     } catch (err) {
       if (err instanceof DedupError) throw err;
       throw new DedupError('storage_failed', 'dedup_write_failed');

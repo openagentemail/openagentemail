@@ -261,6 +261,33 @@ describe('monitor outage and alert-path failure', () => {
     expect(relative.stderr).toContain('invalid_bin');
   });
 
+  test('missing timeout tool fails visibly and does not run a hanging alerter', () => {
+    const script = fileURLToPath(new URL('../templates/monitor.sh', import.meta.url));
+    chmodSync(script, 0o755);
+    const dir = tempDir('monitor-no-timeout-');
+    const curlFail = join(dir, 'curl-fail');
+    writeFileSync(curlFail, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const hang = join(dir, 'hang');
+    writeFileSync(hang, '#!/bin/sh\nsleep 20\n', { mode: 0o755 });
+    const started = Date.now();
+    const missing = spawnSync('sh', [script], {
+      env: {
+        PATH: process.env.PATH,
+        HEALTH_URL: 'https://webhook-wake.example.com/health',
+        FAIL_THRESHOLD: '1',
+        COOLDOWN_SEC: '0',
+        CURL_BIN: curlFail,
+        ALERT_BIN: hang,
+        TIMEOUT_BIN: join(dir, 'no-such-timeout'),
+        STATE_FILE: join(dir, 'state'),
+      },
+      encoding: 'utf8',
+    });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('timeout_missing');
+  });
+
   test('createHttpAlert times out without interpolating caller text', async () => {
     const hanging = createServer(() => {
       /* ignore */

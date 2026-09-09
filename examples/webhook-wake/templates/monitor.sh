@@ -12,6 +12,7 @@ COOLDOWN_SEC="${COOLDOWN_SEC:-300}"
 CURL_BIN="${CURL_BIN:-curl}"
 ALERT_BIN="${ALERT_BIN:-${ALERT_CMD:-}}"
 ALERT_TIMEOUT_SEC="${ALERT_TIMEOUT_SEC:-2}"
+TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
 STATE_FILE="${STATE_FILE:-/var/lib/webhook-wake-monitor/state}"
 NOW_SEC="${NOW_SEC:-}"
 
@@ -81,17 +82,15 @@ run_alert() {
 			return 1
 			;;
 	esac
-	if command -v timeout >/dev/null 2>&1; then
-		if timeout --signal=KILL "$ALERT_TIMEOUT_SEC" "$ALERT_BIN" "$code"; then
-			return 0
-		fi
-		echo "monitor_alert_failed $code" >&2
+	if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
+		echo "monitor_alert_failed timeout_missing" >&2
 		return 1
 	fi
-	if ! "$ALERT_BIN" "$code"; then
-		echo "monitor_alert_failed $code" >&2
-		return 1
+	if "$TIMEOUT_BIN" --signal=KILL "$ALERT_TIMEOUT_SEC" "$ALERT_BIN" "$code"; then
+		return 0
 	fi
+	echo "monitor_alert_failed $code" >&2
+	return 1
 }
 
 load_state

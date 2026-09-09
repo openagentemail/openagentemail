@@ -1,0 +1,20 @@
+[Unit]
+Description=openagent.email webhook-wake receiver (per-user instance)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/openagentemail/examples/webhook-wake
+ExecStart=/usr/bin/bun src/main.ts --config %h/.config/webhook-wake/config.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# User instance: systemd.unit(5) expands %h/%U for the calling user, not root.
+Environment=HOME=%h
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

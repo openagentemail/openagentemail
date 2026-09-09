@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { CANARY_TERMINAL, mailBody, pingBody, postHook, startReceiver, testConfig } from './helpers.ts';
+import { CANARY_TERMINAL, FIXTURE_SECRET, mailBody, pingBody, postHook, startReceiver, testConfig } from './helpers.ts';
 import { recordingWake } from '../src/wake.ts';
+import { buildSignatureHeader } from '../src/verify.ts';
 import type { Receiver } from '../src/server.ts';
 import type { WakeRequest } from '../src/types.ts';
 
@@ -62,5 +63,30 @@ describe('local HTTP integration', () => {
     expect(bucket).toHaveLength(0);
     expect(receiver.metrics.ping).toBe(1);
     expect(receiver.metrics.submitted).toBe(0);
+  });
+
+  test('HTTP rejects a 0xFF substitution of a U+FFFD-signed body', async () => {
+    const receiver = await startReceiver(testConfig({ mode: 'canary' }), { wake: recordingWake([]) });
+    receivers.push(receiver);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const withFffd = Buffer.from(
+      '{"id":"evt_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","type":"webhook.ping","payloadVersion":"v1","createdAt":"2026-09-03T12:20:00.000Z","domain":"openagent.email","note":"\uFFFD"}',
+      'utf8',
+    );
+    const idx = withFffd.indexOf(Buffer.from([0xef, 0xbf, 0xbd]));
+    const mutated = Buffer.concat([
+      withFffd.subarray(0, idx),
+      Buffer.from([0xff]),
+      withFffd.subarray(idx + 3),
+    ]);
+    const header = buildSignatureHeader(FIXTURE_SECRET, withFffd, nowSec);
+    const res = await fetch(`${receiver.url()}/hooks/canary`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-oae-signature': header },
+      body: mutated,
+    });
+    expect(res.status).toBe(401);
+    const json = (await res.json()) as { reason?: string };
+    expect(json.reason).toBe('signature_mismatch');
   });
 });

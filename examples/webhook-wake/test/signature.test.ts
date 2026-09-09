@@ -138,6 +138,45 @@ describe('independent signature vectors', () => {
     expect(previousOnly.valid).toBe(true);
   });
 
+  test('U+FFFD body must not verify after substitution with byte 0xFF', () => {
+    const secret = fixture.vectors[0].displayedSecret;
+    const timestampSec = fixture.vectors[0].timestampSec;
+    const withReplacement = Buffer.from(
+      '{"id":"evt_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","type":"webhook.ping","payloadVersion":"v1","createdAt":"2026-09-03T12:20:00.000Z","domain":"openagent.email","note":"\uFFFD"}',
+      'utf8',
+    );
+    const fffd = Buffer.from([0xef, 0xbf, 0xbd]);
+    const idx = withReplacement.indexOf(fffd);
+    expect(idx).toBeGreaterThan(-1);
+
+    const header = buildSignatureHeader(secret, withReplacement, timestampSec);
+    expect(
+      verifyWebhookSignature({
+        signatureHeader: header,
+        rawBody: withReplacement,
+        secrets: [secret],
+        nowMs: timestampSec * 1000,
+      }).valid,
+    ).toBe(true);
+
+    const mutated = Buffer.concat([
+      withReplacement.subarray(0, idx),
+      Buffer.from([0xff]),
+      withReplacement.subarray(idx + fffd.length),
+    ]);
+    expect(mutated.equals(withReplacement)).toBe(false);
+    // The buggy decode-then-re-encode path would map 0xFF back to U+FFFD.
+    expect(Buffer.from(mutated.toString('utf8'), 'utf8').equals(withReplacement)).toBe(true);
+    const swapped = verifyWebhookSignature({
+      signatureHeader: header,
+      rawBody: mutated,
+      secrets: [secret],
+      nowMs: timestampSec * 1000,
+    });
+    expect(swapped.valid).toBe(false);
+    expect(swapped.reason).toBe('signature_mismatch');
+  });
+
   test('too many v1 candidates is invalid, not verified', () => {
     const vector = fixture.vectors[0];
     const extras = Array.from({ length: 9 }, () => 'ab'.repeat(32));

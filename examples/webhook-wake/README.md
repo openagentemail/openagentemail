@@ -13,10 +13,12 @@ tree.
 
 ## Contract
 
-- HMAC-SHA256 over `timestamp + "." + rawBody` using the displayed `whs_…`
-  secret (UTF-8, prefix included). Rotation: any bounded `v1` candidate may
-  match the current or previous secret. Timestamp must be an integer unix
-  second within ±300s.
+- HMAC-SHA256 over UTF-8(`timestamp + "."`) followed by the **original raw
+  body bytes** (no UTF-8 decode/re-encode of the body) using the displayed
+  `whs_…` secret (UTF-8, prefix included). Rotation: any bounded `v1`
+  candidate may match the current or previous secret. Timestamp must be an
+  integer unix second within ±300s. JSON/UTF-8 is interpreted only after
+  the signature check.
 - Events: metadata `mail.received` and authenticated `webhook.ping`. Ping
   never wakes. Other types are ignored with an explicit disposition.
 - 2xx only after a confirmed Orca **transport submission** (or a durable
@@ -32,14 +34,20 @@ tree.
   `shell=false`, timeout+SIGKILL, and output caps. No `--interrupt`.
 - The child inherits a runtime allowlist (`HOME`, `USER`, `XDG_*`, `PATH`)
   so a colocated Orca install can resolve its files. API credentials and
-  secrets are not forwarded. The systemd unit uses `ProtectHome=read-only`
-  (not `true`) plus `HOME=%h`.
+  secrets are not forwarded. The **system** unit must not use `%h`/`%U`
+  (those are the service manager, typically `/root` and UID 0). Put
+  `HOME` / `XDG_RUNTIME_DIR` in `/etc/webhook-wake/runtime.env`. The
+  optional **user** unit may use `%h`/`%U`. `ProtectHome=read-only`.
 - Dedup fsyncs the file and the parent directory after rename, including
-  first directory creation. 2xx is at-least-once, not exactly-once.
+  first directory creation. A failed directory fsync leaves an `.unacked`
+  marker; 2xx is withheld until that fsync succeeds. At-least-once, not
+  exactly-once.
 - In-memory wake history is off by default (`wakeHistoryLimit=0`).
 - The external monitor keeps durable state under
   `/var/lib/webhook-wake-monitor` (not `/tmp`) and never sources that file
   as shell. Recovery during cooldown is pending and emitted on a later tick.
+  Alert execution requires a `timeout` binary; a missing tool fails visibly
+  and never runs the alerter unbounded.
 
 ## Local run
 

@@ -3,7 +3,8 @@
  *
  * Matches RFC-0001 / packages/api webhook-signing.ts:
  *   signingKey = UTF-8 bytes of the displayed whs_ secret (prefix included)
- *   signedPayload = <unix-seconds> + "." + original raw body bytes as UTF-8 text
+ *   signed input = UTF-8(<unix-seconds> + ".") concatenated with the original
+ *   raw body Buffer (never decode-then-re-encode the body)
  *   v1 = lowercase hex HMAC-SHA256
  *
  * This receiver is stricter on header grammar than the API helper: timestamp
@@ -67,10 +68,14 @@ export function parseSignatureHeader(
   return { ok: true, timestampSec, v1 };
 }
 
+export function rawBodyBytes(rawBody: string | Buffer): Buffer {
+  return typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : rawBody;
+}
+
 export function hmacV1Hex(secret: string, timestampSec: number, rawBody: string | Buffer): string {
-  const raw = typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8');
-  const signedPayload = `${timestampSec}.${raw}`;
-  return createHmac('sha256', Buffer.from(secret, 'utf8')).update(signedPayload, 'utf8').digest('hex');
+  const prefix = Buffer.from(`${timestampSec}.`, 'utf8');
+  const body = rawBodyBytes(rawBody);
+  return createHmac('sha256', Buffer.from(secret, 'utf8')).update(prefix).update(body).digest('hex');
 }
 
 export function buildSignatureHeader(
