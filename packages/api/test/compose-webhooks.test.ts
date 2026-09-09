@@ -6,9 +6,18 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
 
@@ -124,7 +133,21 @@ type ComposeInput = {
   webhookVars?: Record<string, string>;
   /** Mutated Compose text for the deletion negative control. */
   composeText?: string;
+  /** Override the selected CLI (A/B/C compatibility tests). */
+  compose?: ComposeCommand;
+  /** CLI discovery env for probe/render; defaults to PATH/HOME/DOCKER_CONFIG only. */
+  discovery?: Record<string, string>;
 };
+
+/** Only PATH/HOME/DOCKER_CONFIG for CLI discovery. Never copy production env or read Docker auth. */
+function cliDiscoveryEnv(from: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: from.PATH ?? '/usr/bin:/bin',
+    HOME: from.HOME ?? tmpdir(),
+  };
+  if (from.DOCKER_CONFIG) env.DOCKER_CONFIG = from.DOCKER_CONFIG;
+  return env;
+}
 
 function isExecutableFile(path: string): boolean {
   try {
@@ -135,44 +158,87 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
-function probeDockerComposePlugin(dockerPath: string): boolean {
-  const probe = Bun.spawnSync([dockerPath, 'compose', 'version'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  return probe.exitCode === 0;
+function whichOnPath(name: string, pathVar: string): string | undefined {
+  for (const dir of pathVar.split(':')) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function writeExecutable(path: string, body: string): void {
+  writeFileSync(path, body, { mode: 0o755 });
+  chmodSync(path, 0o755);
+}
+
+/** Bounded probe: `config --format json` must succeed. Never download tools. */
+function probeJsonConfig(argv: string[], env: Record<string, string>): boolean {
+  const work = mkdtempSync(join(tmpdir(), 'oae-149-probe-'));
+  try {
+    writeFileSync(join(work, 'compose.yaml'), 'services:\n  probe:\n    image: alpine\n');
+    const spawned = Bun.spawnSync(
+      [...argv, '-f', join(work, 'compose.yaml'), 'config', '--format', 'json'],
+      { cwd: work, env, stdout: 'pipe', stderr: 'pipe' },
+    );
+    if (spawned.exitCode !== 0) return false;
+    JSON.parse(Buffer.from(spawned.stdout).toString('utf8'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 /**
- * Prefer OAE_COMPOSE (FC/local explicit binary). Otherwise use PATH
- * `docker-compose` or `docker compose`. Never download tools; never skip.
+ * Prefer OAE_COMPOSE (resolved to an absolute path). Otherwise use PATH
+ * `docker-compose` or `docker compose` after a JSON-config capability probe.
+ * Incompatible PATH standalone falls through; incompatible explicit override fails.
  */
-function resolveComposeCommand(): ComposeCommand {
-  const explicit = process.env.OAE_COMPOSE?.trim();
+function resolveComposeCommand(
+  from: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): ComposeCommand {
+  const discovery = cliDiscoveryEnv(from);
+  const explicit = from.OAE_COMPOSE?.trim();
   if (explicit) {
-    if (!isExecutableFile(explicit)) {
+    const absolute = isAbsolute(explicit) ? resolve(explicit) : resolve(cwd, explicit);
+    if (!isExecutableFile(absolute)) {
       throw new Error(
-        `OAE_COMPOSE=${explicit} is not an executable. Point it at a Compose ` +
-          'binary (config only), or unset it to use PATH docker-compose / docker compose. ' +
-          'This test does not download Compose.',
+        `OAE_COMPOSE=${explicit} is not an executable (resolved ${absolute}). ` +
+          'Point it at a Compose binary (config only), or unset it to use PATH ' +
+          'docker-compose / docker compose. This test does not download Compose.',
       );
     }
-    return { argv: [explicit], source: `OAE_COMPOSE=${explicit}` };
+    const command: ComposeCommand = { argv: [absolute], source: `OAE_COMPOSE=${absolute}` };
+    if (!probeJsonConfig(command.argv, discovery)) {
+      throw new Error(
+        `OAE_COMPOSE=${explicit} (resolved ${absolute}) does not support Compose JSON config. ` +
+          'Point it at a compatible compose executable. Tests do not silently substitute another binary.',
+      );
+    }
+    return command;
   }
 
-  const standalone = Bun.which('docker-compose');
-  if (standalone) {
+  const standalone = whichOnPath('docker-compose', discovery.PATH);
+  if (standalone && probeJsonConfig([standalone], discovery)) {
     return { argv: [standalone], source: `PATH docker-compose=${standalone}` };
   }
 
-  const docker = Bun.which('docker');
-  if (docker && probeDockerComposePlugin(docker)) {
+  const docker = whichOnPath('docker', discovery.PATH);
+  if (docker && probeJsonConfig([docker, 'compose'], discovery)) {
     return { argv: [docker, 'compose'], source: `PATH docker compose (${docker})` };
   }
 
   throw new Error(
     'Docker Compose is required for #149 compose-webhooks tests but was not found. ' +
-      'Set OAE_COMPOSE to a compose executable, or install `docker compose` / `docker-compose` on PATH. ' +
+      'Set OAE_COMPOSE to a compose executable that supports `config --format json`, ' +
+      'or install `docker compose` / `docker-compose` on PATH. ' +
       'Tests invoke `config` only and never download Compose.',
   );
 }
@@ -219,8 +285,9 @@ function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
     const composePath = input.composeText ? join(work, 'compose.yaml') : input.composeFile;
     if (input.composeText) writeFileSync(composePath, input.composeText);
 
+    const command = input.compose ?? COMPOSE;
     const args = [
-      ...COMPOSE.argv.slice(1),
+      ...command.argv.slice(1),
       '-f',
       composePath,
       '--project-directory',
@@ -236,11 +303,10 @@ function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
     expect(args).not.toContain('run');
     expect(args).not.toContain('start');
 
-    const spawned = Bun.spawnSync([COMPOSE.argv[0]!, ...args], {
+    const spawned = Bun.spawnSync([command.argv[0]!, ...args], {
       cwd: work,
       env: {
-        PATH: process.env.PATH ?? '/usr/bin',
-        HOME: process.env.HOME ?? work,
+        ...(input.discovery ?? cliDiscoveryEnv()),
         ...(input.mode === 'shell' ? webhookVars : {}),
       },
       stdout: 'pipe',
@@ -249,7 +315,7 @@ function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
     if (spawned.exitCode !== 0) {
       const stderr = Buffer.from(spawned.stderr).toString('utf8');
       throw new Error(
-        `Compose config failed (exit ${spawned.exitCode}) via ${COMPOSE.source}. ${stderr}`,
+        `Compose config failed (exit ${spawned.exitCode}) via ${command.source}. ${stderr}`,
       );
     }
     const parsed = JSON.parse(Buffer.from(spawned.stdout).toString('utf8')) as {
@@ -333,6 +399,7 @@ describe('#149 Compose webhook environment', () => {
       expect(example).not.toMatch(/^WEBHOOK_SIGNING_SECRET=/m);
       expect(example).not.toMatch(/^WEBHOOK_SIGNING_SECRET_PREVIOUS=/m);
       expect(example).not.toContain('标注 min 0');
+      expect(example.includes('同名已导出的 shell 变量优先于 env-file')).toBe(true);
     }
   });
 
@@ -466,4 +533,129 @@ describe('#149 Compose webhook environment', () => {
       expect(parseConfig(stripped).webhooks.enabled).toBe(false);
     });
   }
+});
+
+describe('#149 Compose CLI compatibility A/B/C', () => {
+  const apiOnly = join(REPO_DIR, 'compose.api-only.yaml');
+  const realExec = COMPOSE.argv.map(shQuote).join(' ');
+
+  test('A: incompatible PATH docker-compose falls through; explicit override fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-a-'));
+    try {
+      const legacyDir = join(root, 'legacy');
+      const altDir = join(root, 'alt');
+      mkdirSync(legacyDir);
+      mkdirSync(altDir);
+      writeExecutable(
+        join(legacyDir, 'docker-compose'),
+        '#!/bin/sh\necho "legacy compose lacks JSON config" >&2\nexit 1\n',
+      );
+      writeExecutable(
+        join(altDir, 'docker'),
+        `#!/bin/sh\nif [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi\nshift\nexec ${realExec} "$@"\n`,
+      );
+
+      const path = `${legacyDir}:${altDir}:/usr/bin:/bin`;
+      const selected = resolveComposeCommand({ PATH: path, HOME: root });
+      expect(selected.source.includes('docker compose')).toBe(true);
+      expect(selected.argv[0] === join(altDir, 'docker')).toBe(true);
+
+      const rendered = renderApiServiceEnv({
+        composeFile: apiOnly,
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        compose: selected,
+      });
+      expect(rendered.WEBHOOKS_ENABLED).toBe('true');
+      expect(parseConfig(rendered).webhooks.enabled).toBe(true);
+
+      let explicitError = '';
+      try {
+        resolveComposeCommand({
+          PATH: path,
+          HOME: root,
+          OAE_COMPOSE: join(legacyDir, 'docker-compose'),
+        });
+      } catch (error) {
+        explicitError = error instanceof Error ? error.message : String(error);
+      }
+      expect(explicitError.includes('does not support Compose JSON config')).toBe(true);
+      expect(explicitError.includes('do not silently substitute')).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('B: DOCKER_CONFIG discovery reaches probe and render; fixture is not real Compose', () => {
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-b-'));
+    try {
+      const dockerConfig = join(root, 'docker-config');
+      mkdirSync(dockerConfig);
+      const docker = join(root, 'docker');
+      writeExecutable(
+        docker,
+        [
+          '#!/bin/sh',
+          '# Hermetic launcher: require forwarded DOCKER_CONFIG path only; never read its contents.',
+          `if [ "$DOCKER_CONFIG" != ${shQuote(dockerConfig)} ]; then`,
+          '  echo "missing discovery DOCKER_CONFIG" >&2',
+          '  exit 1',
+          'fi',
+          'if [ "$1" != "compose" ]; then echo "not compose" >&2; exit 1; fi',
+          'shift',
+          `exec ${realExec} "$@"`,
+          '',
+        ].join('\n'),
+      );
+
+      const discovery = { PATH: `${root}:/usr/bin:/bin`, HOME: root, DOCKER_CONFIG: dockerConfig };
+      const selected = resolveComposeCommand(discovery);
+      expect(selected.argv[0] === docker).toBe(true);
+
+      const rendered = renderApiServiceEnv({
+        composeFile: apiOnly,
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        compose: selected,
+        discovery,
+      });
+      expect(rendered.WEBHOOKS_ENABLED).toBe('true');
+      expect(parseConfig(rendered).webhooks.enabled).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('C: relative and absolute OAE_COMPOSE resolve to the same rendering', () => {
+    const root = mkdtempSync(join(tmpdir(), 'oae-149-cli-c-'));
+    try {
+      const relativeName = 'rel-compose';
+      writeExecutable(join(root, relativeName), `#!/bin/sh\nexec ${realExec} "$@"\n`);
+      const viaRel = resolveComposeCommand({ ...process.env, OAE_COMPOSE: `./${relativeName}` }, root);
+      const viaAbs = resolveComposeCommand(
+        { ...process.env, OAE_COMPOSE: join(root, relativeName) },
+        root,
+      );
+      expect(isAbsolute(viaRel.argv[0]!)).toBe(true);
+      expect(viaRel.argv[0] === viaAbs.argv[0]).toBe(true);
+
+      const fromRel = renderApiServiceEnv({
+        composeFile: apiOnly,
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        compose: viaRel,
+      });
+      const fromAbs = renderApiServiceEnv({
+        composeFile: apiOnly,
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        compose: viaAbs,
+      });
+      expect(fromRel.WEBHOOKS_ENABLED === fromAbs.WEBHOOKS_ENABLED).toBe(true);
+      expect(parseConfig(fromRel).webhooks.enabled).toBe(true);
+      expect(parseConfig(fromAbs).webhooks.enabled).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
