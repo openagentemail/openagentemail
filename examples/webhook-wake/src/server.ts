@@ -7,7 +7,7 @@ import { DedupError, DedupStore, dedupKey } from './dedup.ts';
 import { decodeRouteKey, isRouteKey, normalizeDomain, normalizeMailbox } from './ids.ts';
 import { logEvent } from './log.ts';
 import { buildNeutralWakeText, buildOrcaArgv } from './notify.ts';
-import { parseVerifiedEnvelope, readMailAddress, readMailMessageId, type EnvelopeBase } from './parse.ts';
+import { parseVerifiedEnvelope, readMailAddress, readMailMessageId, readPingWebhookId, type EnvelopeBase } from './parse.ts';
 import { inspectReadiness } from './readiness.ts';
 import { SeatSerializer } from './serialize.ts';
 import type {
@@ -47,6 +47,7 @@ function emptyMetrics(): Metrics {
     alertFailed: 0,
     unauthorized: 0,
     timeoutKill: 0,
+    alertCoalesced: 0,
   };
 }
 
@@ -85,7 +86,10 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-function writeJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+function writeJson(res: ServerResponse, status: number, body: Record<string, unknown>): boolean {
+  if (res.headersSent || res.writableEnded) {
+    return false;
+  }
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json',
@@ -93,7 +97,11 @@ function writeJson(res: ServerResponse, status: number, body: Record<string, unk
     'content-length': Buffer.byteLength(payload),
   });
   res.end(payload);
+  return true;
 }
+
+const COALESCE_ALERT_CODES = new Set(['mapping_mismatch', 'stale_mapping', 'canary_terminal_unbound']);
+const DEFAULT_ALERT_COOLDOWN_MS = 60_000;
 
 function shouldWake(config: ReceiverConfig, route: RouteBinding): boolean {
   if (config.mode !== 'canary') return false;
@@ -125,8 +133,20 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     });
   const alertFn: AlertFn = hooks.alert ?? createHttpAlert(config.alertHook.url, config.alertHook.timeoutMs);
   let inFlightHttp = 0;
+  const lastAlertAt = new Map<string, number>();
+  const alertCooldownMs = hooks.alertCooldownMs ?? DEFAULT_ALERT_COOLDOWN_MS;
 
   const emitAlert = async (code: string) => {
+    if (COALESCE_ALERT_CODES.has(code)) {
+      const last = lastAlertAt.get(code);
+      const now = nowMs();
+      if (last != null && now - last < alertCooldownMs) {
+        metrics.alertCoalesced += 1;
+        logEvent('warn', 'alert_coalesced', { code });
+        return;
+      }
+      lastAlertAt.set(code, now);
+    }
     const result = await alertFn({ kind: 'receiver_failure', code });
     if (!result.ok) {
       metrics.alertFailed += 1;
@@ -374,6 +394,17 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
 
     if (parsed.envelope.type === 'webhook.ping') {
+      const webhookId = readPingWebhookId(parsed.envelope.data);
+      if (
+        !webhookId ||
+        webhookId !== route.subscriptionId ||
+        normalizeDomain(parsed.envelope.domain) !== route.domain
+      ) {
+        metrics.rejected += 1;
+        logEvent('warn', 'ping_binding_mismatch', { routeKey });
+        writeJson(res, 400, { disposition: 'invalid', reason: 'ping_binding_mismatch' });
+        return;
+      }
       metrics.ping += 1;
       logEvent('info', 'ping_ok', { routeKey, eventId: parsed.envelope.id });
       writeJson(res, 200, { disposition: 'ping_ok', sends: 0 });

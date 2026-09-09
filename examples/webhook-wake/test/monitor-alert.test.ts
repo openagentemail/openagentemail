@@ -128,7 +128,7 @@ describe('monitor outage and alert-path failure', () => {
     const curlOk = join(dir, 'curl-ok');
     const curlFail = join(dir, 'curl-fail');
     const alerts = join(dir, 'alerts.log');
-    writeFileSync(curlOk, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(curlOk, '#!/bin/sh\nprintf 200\n', { mode: 0o755 });
     writeFileSync(curlFail, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const alerter = join(dir, 'alert');
     writeFileSync(alerter, `#!/bin/sh\necho "$1" >> "${alerts}"\nexit 0\n`, { mode: 0o755 });
@@ -184,7 +184,7 @@ describe('monitor outage and alert-path failure', () => {
     const curlOk = join(dir, 'curl-ok');
     const curlFail = join(dir, 'curl-fail');
     const alerts = join(dir, 'alerts.log');
-    writeFileSync(curlOk, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(curlOk, '#!/bin/sh\nprintf 200\n', { mode: 0o755 });
     writeFileSync(curlFail, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const alerter = join(dir, 'alert');
     writeFileSync(alerter, `#!/bin/sh\necho "$1" >> "${alerts}"\nexit 0\n`, { mode: 0o755 });

@@ -6,7 +6,9 @@
  */
 
 import {
+  accessSync,
   closeSync,
+  constants,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -48,6 +50,40 @@ export type DedupFailureKind = 'read' | 'write' | 'capacity' | 'rename' | 'dir_f
 
 export function dedupKey(subscriptionId: string, eventId: string): string {
   return `${subscriptionId}:${eventId}`;
+}
+
+export type DedupInspect =
+  | { ok: true }
+  | { ok: false; reason: 'state_unreadable' | 'state_corrupt' | 'state_unacked' | 'state_unacked_unreadable' };
+
+/** Read-only. Does not repair `.unacked` or rewrite corrupt files. */
+export function inspectDedupFile(path: string): DedupInspect {
+  const unacked = `${path}.unacked`;
+  if (existsSync(unacked)) {
+    try {
+      accessSync(unacked, constants.R_OK);
+    } catch {
+      return { ok: false, reason: 'state_unacked_unreadable' };
+    }
+    return { ok: false, reason: 'state_unacked' };
+  }
+  if (!existsSync(path)) {
+    return { ok: true };
+  }
+  try {
+    accessSync(path, constants.R_OK);
+  } catch {
+    return { ok: false, reason: 'state_unreadable' };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { records?: unknown };
+    if (!parsed || typeof parsed !== 'object' || parsed.records == null || typeof parsed.records !== 'object') {
+      return { ok: false, reason: 'state_corrupt' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: 'state_corrupt' };
+  }
 }
 
 export function isValidDedupRecord(key: string, value: unknown): value is DedupRecord {

@@ -26,8 +26,8 @@ export type FileRouteSpec = {
   secretFile: string;
   previousSecretFile?: string | null;
   terminal: string;
-  active?: boolean;
-  stale?: boolean;
+  active?: unknown;
+  stale?: unknown;
 };
 
 export type FileConfig = {
@@ -148,6 +148,12 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
     if (!isDomain(domain)) throw new Error('config_invalid:domain');
     if (!isMailbox(mailbox)) throw new Error('config_invalid:mailbox');
     if (!isTerminalHandle(terminal)) throw new Error('config_invalid:terminal');
+    if (spec.active !== undefined && typeof spec.active !== 'boolean') {
+      throw new Error('config_invalid:active');
+    }
+    if (spec.stale !== undefined && typeof spec.stale !== 'boolean') {
+      throw new Error('config_invalid:stale');
+    }
 
     let secret = '';
     let previousSecret: string | undefined;

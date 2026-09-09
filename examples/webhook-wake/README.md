@@ -24,7 +24,10 @@ tree.
   or a non-object is `invalid_data` (400). Mail without an address is never
   a 2xx success.
 - Events: metadata `mail.received` and authenticated `webhook.ping`. Ping
-  never wakes. Other types are ignored with an explicit disposition.
+  never wakes. A ping must also match the configured `subscriptionId`
+  (`data.webhookId`) and domain before `ping_ok`; a wrong or missing
+  binding is `400 ping_binding_mismatch` and is not a successful
+  verification. Other types are ignored with an explicit disposition.
 - 2xx only after a confirmed Orca **transport submission** (or a durable
   observe record) **and** a durable dedup write. Transient send/storage/
   timeout/authenticated mapping mismatch failures return 503 so the sender
@@ -52,7 +55,11 @@ tree.
   (`StateDirectory=webhook-wake`). `ProtectHome=read-only`.
 - `GET /health` is liveness only and is the public monitor target.
   `GET /ready` lists `routeKey` / `subscriptionId` and stays **private**.
-  Caddy/nginx templates proxy `/health` and `/hooks/*` only.
+  Caddy/nginx templates proxy `/health` and `/hooks/*` only. Binding a
+  non-loopback listen address logs `listen_not_loopback` (no secrets).
+  Unknown hook routes return **404**; a known route with a failed
+  signature returns **401**. Route keys are not credentials; the
+  distinction is intentional and is not an authentication system.
 - Dedup fsyncs the file and the parent directory after rename, including
   first directory creation. A failed directory fsync leaves an `.unacked`
   marker; 2xx is withheld until that fsync succeeds. At-least-once, not
@@ -65,8 +72,12 @@ tree.
   (`last_alert` / `alarming`). That is an explicit monitor limitation, not
   the receiver 2xx durability contract; FC may confirm the disposition.
   Recovery during cooldown is pending and emitted on a later tick.
-  Alert execution requires a `timeout` binary; a missing tool fails visibly
-  and never runs the alerter unbounded.
+  The probe requires an exact HTTP **200** (no redirect follow; 3xx/4xx/5xx
+  are failures). Alert execution requires a `timeout` binary; a missing
+  tool fails visibly and never runs the alerter unbounded.
+  Authenticated mapping/stale failures coalesce alerts per code (first
+  fire, then cooldown) so sender retries stay 503 without flooding the
+  sink.
   Install rename (required so the timer `Unit=` resolves):
   `monitor.service` → `/etc/systemd/system/webhook-wake-monitor.service`,
   `monitor.timer` → `/etc/systemd/system/webhook-wake-monitor.timer`,

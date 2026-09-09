@@ -5,6 +5,7 @@
 
 import { resolve } from 'node:path';
 import { loadConfigFile } from './config.ts';
+import { isLoopbackHost } from './ids.ts';
 import { logEvent } from './log.ts';
 import { inspectReadiness } from './readiness.ts';
 import { createReceiver, listenReceiver } from './server.ts';
@@ -30,6 +31,9 @@ logEvent('info', 'startup', {
   ready: ready.ready,
   warnings: ready.warnings,
 });
+if (!isLoopbackHost(config.listen.host)) {
+  logEvent('warn', 'listen_not_loopback', { host: config.listen.host });
+}
 if (!ready.ready) {
   logEvent('error', 'startup_not_ready', { warnings: ready.warnings });
 }

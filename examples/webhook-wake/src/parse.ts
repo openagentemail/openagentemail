@@ -1,6 +1,6 @@
 /** JSON interpretation happens only after the raw-byte signature check. */
 
-import { isEventId, isMailbox, isSafeMessageId, normalizeDomain, normalizeMailbox } from './ids.ts';
+import { isEventId, isMailbox, isSafeMessageId, isSubscriptionId, normalizeDomain, normalizeMailbox } from './ids.ts';
 
 export type EnvelopeBase = {
   id: string;
@@ -64,6 +64,11 @@ export function readMailAddress(data: Record<string, unknown>): string | null {
   if (!data || typeof data.address !== 'string') return null;
   const address = normalizeMailbox(data.address);
   return isMailbox(address) ? address : null;
+}
+
+export function readPingWebhookId(data: Record<string, unknown>): string | null {
+  if (typeof data.webhookId !== 'string' || !isSubscriptionId(data.webhookId)) return null;
+  return data.webhookId;
 }
 
 export function readMailMessageId(data: Record<string, unknown>): string | null {

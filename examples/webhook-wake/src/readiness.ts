@@ -3,6 +3,8 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { canaryTerminalBound } from './config.ts';
+import { inspectDedupFile } from './dedup.ts';
+import { isLoopbackHost } from './ids.ts';
 import type { ReceiverConfig } from './types.ts';
 
 export type MappingReport = {
@@ -18,6 +20,7 @@ export type ReadyReport = {
   mode: ReceiverConfig['mode'];
   liveness: 'ok';
   stateWritable: boolean;
+  stateHealthy: boolean;
   orcaBinaryPresent: boolean;
   mappings: MappingReport[];
   warnings: string[];
@@ -61,6 +64,14 @@ export function inspectReadiness(config: ReceiverConfig): ReadyReport {
   if (!stateWritable) {
     warnings.push('state_unwritable');
   }
+  const store = inspectDedupFile(config.dedup.path);
+  const stateHealthy = store.ok;
+  if (!store.ok) {
+    warnings.push(store.reason);
+  }
+  if (!isLoopbackHost(config.listen.host)) {
+    warnings.push('listen_not_loopback');
+  }
 
   const orcaBinaryPresent = isRegularExecutable(config.orcaBinary);
   if (config.mode === 'canary' && !orcaBinaryPresent) {
@@ -99,6 +110,7 @@ export function inspectReadiness(config: ReceiverConfig): ReadyReport {
   const usable = mappings.some((m) => m.active && !m.stale && m.orcaBinding === 'ok');
   const ready =
     stateWritable &&
+    stateHealthy &&
     usable &&
     (config.mode === 'observe' || orcaBinaryPresent) &&
     (config.mode !== 'canary' || canaryBound);
@@ -108,6 +120,7 @@ export function inspectReadiness(config: ReceiverConfig): ReadyReport {
     mode: config.mode,
     liveness: 'ok',
     stateWritable,
+    stateHealthy,
     orcaBinaryPresent,
     mappings,
     warnings,

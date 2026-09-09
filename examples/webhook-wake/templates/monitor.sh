@@ -103,7 +103,9 @@ else
 	now=$(date +%s)
 fi
 
-if "$CURL_BIN" -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+# Exact HTTP 200 only. Do not follow redirects (-L) and do not treat 3xx as ok.
+http_code=$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" || true)
+if [ "$http_code" = "200" ]; then
 	ok=1
 else
 	ok=0

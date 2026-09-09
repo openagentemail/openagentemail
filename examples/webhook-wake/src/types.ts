@@ -96,6 +96,7 @@ export type Metrics = {
   alertFailed: number;
   unauthorized: number;
   timeoutKill: number;
+  alertCoalesced: number;
 };
 
 export type WakeRequest = {
@@ -129,4 +130,6 @@ export type ReceiverHooks = {
   onWake?: (req: WakeRequest) => void;
   crashAfterSendBeforeCommit?: boolean;
   extraWakeEnv?: Record<string, string>;
+  /** Test hook: mapping/stale alert coalescing window. Default 60s. */
+  alertCooldownMs?: number;
 };
