@@ -1,4 +1,4 @@
-// 必须在导入 config 单例之前填齐进程环境，避免模块加载时 parseConfig 抛错。
+// Fill process env before importing the config singleton so parseConfig does not throw.
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
 process.env.IMAP_USER = 'agent@test.example';
@@ -6,7 +6,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,11 +14,9 @@ import { describe, expect, test } from 'bun:test';
 
 const { parseConfig } = await import('../src/lib/config.ts');
 
-/** FC 安装的官方独立 Compose；测试只允许 config，禁止 up/run/start。 */
-const COMPOSE_BIN = '/home/ops/materials/149/tools/docker-compose';
 const REPO_DIR = join(import.meta.dir, '..', '..', '..');
 
-/** 与 r0 / config.ts 对齐的 22 个 WEBHOOK(S) 键。 */
+/** The 22 WEBHOOK/WEBHOOKS keys from config.ts / r0. */
 const WEBHOOK_KEYS = [
   'WEBHOOKS_ENABLED',
   'WEBHOOK_SIGNING_SECRET',
@@ -49,16 +47,18 @@ const OPTIONAL_SECRETS = [
   'WEBHOOK_SIGNING_SECRET_PREVIOUS',
 ] as const;
 
-/** 合成夹具；长度断言用，测试失败信息只报长度，不打印密钥正文。 */
-const SYNTH_SECRET = 'w'.repeat(32);
-const SYNTH_SECRET_PREVIOUS = 'p'.repeat(32);
+/** Distinct synthetic fixtures; assertions use boolean equality so values are not printed. */
+const SYNTH_SECRET = 'synth-webhook-current-secret-aaaa';
+const SYNTH_SECRET_PREVIOUS = 'synth-webhook-previous-secret-bbb';
 
 const VARIANTS = [
   { name: 'bundled', file: 'compose.yaml', example: '.env.example' },
   { name: 'api-only', file: 'compose.api-only.yaml', example: '.env.api-only.example' },
 ] as const;
 
-/** 合成部署输入：满足两套 Compose 插值，不含生产值。 */
+const INPUT_MODES = ['env-file', 'shell'] as const;
+
+/** Synthetic deployment inputs only; never read a production .env. */
 const SYNTH_REQUIRED: Record<string, string> = {
   DOMAIN: 'example.test',
   API_KEYS: 'synth-api-key-not-production',
@@ -76,7 +76,30 @@ const SYNTH_REQUIRED: Record<string, string> = {
   SMTP_PASS: 'synth-smtp-pass-not-production',
 };
 
-/** parseConfig 在 webhook 族全部缺席时的安全默认（对照用，不改 parser）。 */
+const ALL_OVERRIDES: Record<string, string> = {
+  WEBHOOKS_ENABLED: 'true',
+  WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
+  WEBHOOK_ALLOWED_PORTS: '443,8443',
+  WEBHOOK_MAX_SUBSCRIPTIONS: '0',
+  WEBHOOK_MAX_PER_ADDRESS: '0',
+  WEBHOOK_MAX_ATTEMPTS: '1',
+  WEBHOOK_DELIVERY_TIMEOUT_MS: '1000',
+  WEBHOOK_MAX_CONCURRENT: '1',
+  WEBHOOK_POOL_RETRY_MS: '1000',
+  WEBHOOK_PAYLOAD_MAX_BYTES: '2048',
+  WEBHOOK_APPROVAL_ARGS_MAX_BYTES: '0',
+  WEBHOOK_APPROVAL_ARGS_MAX_DEPTH: '1',
+  WEBHOOK_RESPONSE_MAX_BYTES: '1',
+  WEBHOOK_TIMESTAMP_TOLERANCE_SEC: '30',
+  WEBHOOK_DISABLE_THRESHOLD: '1',
+  WEBHOOK_ROTATION_OVERLAP_MS: '0',
+  WEBHOOK_LOG_RETENTION_DAYS: '4',
+  WEBHOOK_RATE_CREATE_PER_MIN: '0',
+  WEBHOOK_RATE_TEST_PER_MIN: '0',
+  WEBHOOK_RATE_DELIVER_PER_MIN: '0',
+};
+
+/** parseConfig defaults when the webhook family is absent (parser unchanged). */
 const DEFAULT_WEBHOOK_CONFIG = parseConfig({
   DOMAIN: 'example.test',
   API_KEYS: 'admin-key',
@@ -87,17 +110,76 @@ const DEFAULT_WEBHOOK_CONFIG = parseConfig({
   TASK_SIGNING_SECRET: SYNTH_REQUIRED.TASK_SIGNING_SECRET,
 }).webhooks;
 
+type InputMode = (typeof INPUT_MODES)[number];
+
+type ComposeCommand = {
+  argv: string[];
+  source: string;
+};
+
 type ComposeInput = {
   composeFile: string;
-  /** 写入合成 --env-file / 项目 .env */
-  envFile: Record<string, string>;
-  /** 仅 shell 路径：注入进程环境 */
-  shell?: Record<string, string>;
-  /** 变异后的 Compose 文本（负回归） */
+  mode: InputMode;
+  /** Webhook-family (and public-edge) overrides for the mode under test. */
+  webhookVars?: Record<string, string>;
+  /** Mutated Compose text for the deletion negative control. */
   composeText?: string;
 };
 
-/** 把 Compose JSON 环境里的 null 当成缺席，空串保留给 parser 判无效。 */
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function probeDockerComposePlugin(dockerPath: string): boolean {
+  const probe = Bun.spawnSync([dockerPath, 'compose', 'version'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  return probe.exitCode === 0;
+}
+
+/**
+ * Prefer OAE_COMPOSE (FC/local explicit binary). Otherwise use PATH
+ * `docker-compose` or `docker compose`. Never download tools; never skip.
+ */
+function resolveComposeCommand(): ComposeCommand {
+  const explicit = process.env.OAE_COMPOSE?.trim();
+  if (explicit) {
+    if (!isExecutableFile(explicit)) {
+      throw new Error(
+        `OAE_COMPOSE=${explicit} is not an executable. Point it at a Compose ` +
+          'binary (config only), or unset it to use PATH docker-compose / docker compose. ' +
+          'This test does not download Compose.',
+      );
+    }
+    return { argv: [explicit], source: `OAE_COMPOSE=${explicit}` };
+  }
+
+  const standalone = Bun.which('docker-compose');
+  if (standalone) {
+    return { argv: [standalone], source: `PATH docker-compose=${standalone}` };
+  }
+
+  const docker = Bun.which('docker');
+  if (docker && probeDockerComposePlugin(docker)) {
+    return { argv: [docker, 'compose'], source: `PATH docker compose (${docker})` };
+  }
+
+  throw new Error(
+    'Docker Compose is required for #149 compose-webhooks tests but was not found. ' +
+      'Set OAE_COMPOSE to a compose executable, or install `docker compose` / `docker-compose` on PATH. ' +
+      'Tests invoke `config` only and never download Compose.',
+  );
+}
+
+const COMPOSE = resolveComposeCommand();
+
+/** Drop JSON-null keys (unset pass-through); keep empty strings for the parser. */
 function omitNullEnv(raw: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(raw)) {
@@ -114,23 +196,37 @@ function writeEnvFile(path: string, vars: Record<string, string>): void {
   writeFileSync(path, `${body}\n`, { mode: 0o600 });
 }
 
-/** 仅调用官方二进制的 config；参数硬编码，避免误跑 daemon 操作。 */
+function secretPresent(serviceEnv: Record<string, string>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(serviceEnv, key);
+}
+
+/**
+ * Render the API service environment with official `config` only.
+ * Interpolation uses explicit `--env-file synth.env`, not default-project `.env`
+ * resolution. A required-only `.env` is written so bundled `env_file: .env`
+ * services can still parse; it never carries webhook overrides.
+ */
 function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
   const work = mkdtempSync(join(tmpdir(), 'oae-149-compose-'));
   try {
-    writeEnvFile(join(work, '.env'), input.envFile);
-    const composePath = input.composeText
-      ? join(work, 'compose.yaml')
-      : input.composeFile;
+    const webhookVars = input.webhookVars ?? {};
+    const synthPath = join(work, 'synth.env');
+    const envFileVars =
+      input.mode === 'env-file' ? { ...SYNTH_REQUIRED, ...webhookVars } : { ...SYNTH_REQUIRED };
+    writeEnvFile(synthPath, envFileVars);
+    writeEnvFile(join(work, '.env'), SYNTH_REQUIRED);
+
+    const composePath = input.composeText ? join(work, 'compose.yaml') : input.composeFile;
     if (input.composeText) writeFileSync(composePath, input.composeText);
 
     const args = [
+      ...COMPOSE.argv.slice(1),
       '-f',
       composePath,
       '--project-directory',
       work,
       '--env-file',
-      join(work, '.env'),
+      synthPath,
       'config',
       '--format',
       'json',
@@ -140,17 +236,22 @@ function renderApiServiceEnv(input: ComposeInput): Record<string, string> {
     expect(args).not.toContain('run');
     expect(args).not.toContain('start');
 
-    const spawned = Bun.spawnSync([COMPOSE_BIN, ...args], {
+    const spawned = Bun.spawnSync([COMPOSE.argv[0]!, ...args], {
       cwd: work,
       env: {
         PATH: process.env.PATH ?? '/usr/bin',
         HOME: process.env.HOME ?? work,
-        ...input.shell,
+        ...(input.mode === 'shell' ? webhookVars : {}),
       },
       stdout: 'pipe',
       stderr: 'pipe',
     });
-    expect(spawned.exitCode).toBe(0);
+    if (spawned.exitCode !== 0) {
+      const stderr = Buffer.from(spawned.stderr).toString('utf8');
+      throw new Error(
+        `Compose config failed (exit ${spawned.exitCode}) via ${COMPOSE.source}. ${stderr}`,
+      );
+    }
     const parsed = JSON.parse(Buffer.from(spawned.stdout).toString('utf8')) as {
       services?: { api?: { environment?: Record<string, unknown> } };
     };
@@ -187,15 +288,38 @@ function expectWebhookDefaults(config: ReturnType<typeof parseConfig>['webhooks'
   expect(config.rateDeliverPerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateDeliverPerMin);
 }
 
-function secretPresent(serviceEnv: Record<string, string>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(serviceEnv, key);
+function expectAllOverrides(serviceEnv: Record<string, string>): void {
+  for (const [key, value] of Object.entries(ALL_OVERRIDES)) {
+    expect(serviceEnv[key]).toBe(value);
+  }
+  const webhooks = parseConfig(serviceEnv).webhooks;
+  expect(webhooks.enabled).toBe(true);
+  expect(webhooks.allowPrivateTargets).toBe(true);
+  expect(webhooks.allowedPorts).toEqual([443, 8443]);
+  expect(webhooks.maxSubscriptions).toBe(0);
+  expect(webhooks.maxPerAddress).toBe(0);
+  expect(webhooks.maxAttempts).toBe(1);
+  expect(webhooks.deliveryTimeoutMs).toBe(1000);
+  expect(webhooks.maxConcurrent).toBe(1);
+  expect(webhooks.poolRetryMs).toBe(1000);
+  expect(webhooks.payloadMaxBytes).toBe(2048);
+  expect(webhooks.approvalArgsMaxBytes).toBe(0);
+  expect(webhooks.approvalArgsMaxDepth).toBe(1);
+  expect(webhooks.responseMaxBytes).toBe(1);
+  expect(webhooks.timestampToleranceSec).toBe(30);
+  expect(webhooks.disableThreshold).toBe(1);
+  expect(webhooks.rotationOverlapMs).toBe(0);
+  expect(webhooks.logRetentionDays).toBe(4);
+  expect(webhooks.rateCreatePerMin).toBe(0);
+  expect(webhooks.rateTestPerMin).toBe(0);
+  expect(webhooks.rateDeliverPerMin).toBe(0);
 }
 
 describe('#149 Compose webhook environment', () => {
-  test('official Compose binary is v5.5.1 and only used for config', () => {
-    const version = Bun.spawnSync([COMPOSE_BIN, 'version'], { stdout: 'pipe' });
-    expect(version.exitCode).toBe(0);
-    expect(Buffer.from(version.stdout).toString('utf8')).toContain('v5.5.1');
+  test('selects OAE_COMPOSE or PATH Compose and invokes config only', () => {
+    expect(COMPOSE.argv.length > 0).toBe(true);
+    expect(COMPOSE.source.includes('OAE_COMPOSE') || COMPOSE.source.includes('PATH')).toBe(true);
+    expect(COMPOSE.source.includes('/home/ops/materials/') && !process.env.OAE_COMPOSE).toBe(false);
   });
 
   test('example env files document all 22 keys and keep optional secrets commented', () => {
@@ -205,159 +329,120 @@ describe('#149 Compose webhook environment', () => {
         expect(example.includes(key)).toBe(true);
       }
       expect(example).toMatch(/^WEBHOOKS_ENABLED=false$/m);
-      // 可选密钥只能以注释出现，禁止发明默认值
       expect(example).toMatch(/^# WEBHOOK_SIGNING_SECRET=$/m);
       expect(example).toMatch(/^# WEBHOOK_SIGNING_SECRET_PREVIOUS=$/m);
       expect(example).not.toMatch(/^WEBHOOK_SIGNING_SECRET=/m);
       expect(example).not.toMatch(/^WEBHOOK_SIGNING_SECRET_PREVIOUS=/m);
+      expect(example).not.toContain('标注 min 0');
     }
   });
 
   for (const variant of VARIANTS) {
     const composeFile = join(REPO_DIR, variant.file);
 
-    test(`${variant.name}: unset webhook env keeps parseConfig defaults and valid boot`, () => {
-      const serviceEnv = renderApiServiceEnv({
-        composeFile,
-        envFile: SYNTH_REQUIRED,
-      });
-      expect(serviceEnv.WEBHOOKS_ENABLED).toBe('false');
-      expect(serviceEnv.WEBHOOK_ALLOW_PRIVATE_TARGETS).toBe('false');
-      expect(serviceEnv.OAE_PUBLIC_EDGE).toBe('false');
-      for (const key of OPTIONAL_SECRETS) {
-        expect(secretPresent(serviceEnv, key)).toBe(false);
-      }
-      const config = parseConfig(serviceEnv);
-      expectWebhookDefaults(config.webhooks);
-    });
+    for (const mode of INPUT_MODES) {
+      const label = `${variant.name} ${mode}`;
 
-    test(`${variant.name}: env-file WEBHOOKS_ENABLED=true reaches parser`, () => {
-      const serviceEnv = renderApiServiceEnv({
-        composeFile,
-        envFile: { ...SYNTH_REQUIRED, WEBHOOKS_ENABLED: 'true' },
+      test(`${label}: unset webhook env keeps parseConfig defaults and valid boot`, () => {
+        const serviceEnv = renderApiServiceEnv({ composeFile, mode });
+        expect(serviceEnv.WEBHOOKS_ENABLED).toBe('false');
+        expect(serviceEnv.WEBHOOK_ALLOW_PRIVATE_TARGETS).toBe('false');
+        expect(serviceEnv.OAE_PUBLIC_EDGE).toBe('false');
+        for (const key of OPTIONAL_SECRETS) {
+          expect(secretPresent(serviceEnv, key)).toBe(false);
+        }
+        expectWebhookDefaults(parseConfig(serviceEnv).webhooks);
       });
-      expect(serviceEnv.WEBHOOKS_ENABLED).toBe('true');
-      expect(parseConfig(serviceEnv).webhooks.enabled).toBe(true);
-    });
 
-    test(`${variant.name}: shell WEBHOOKS_ENABLED=true reaches parser`, () => {
-      const serviceEnv = renderApiServiceEnv({
-        composeFile,
-        envFile: SYNTH_REQUIRED,
-        shell: { WEBHOOKS_ENABLED: 'true' },
+      test(`${label}: WEBHOOKS_ENABLED=true reaches parser`, () => {
+        const serviceEnv = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: { WEBHOOKS_ENABLED: 'true' },
+        });
+        expect(serviceEnv.WEBHOOKS_ENABLED).toBe('true');
+        expect(parseConfig(serviceEnv).webhooks.enabled).toBe(true);
       });
-      expect(serviceEnv.WEBHOOKS_ENABLED).toBe('true');
-      expect(parseConfig(serviceEnv).webhooks.enabled).toBe(true);
-    });
 
-    test(`${variant.name}: every webhook override including zeros and port CSV`, () => {
-      const overrides: Record<string, string> = {
-        WEBHOOKS_ENABLED: 'true',
-        WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
-        WEBHOOK_ALLOWED_PORTS: '443,8443',
-        WEBHOOK_MAX_SUBSCRIPTIONS: '0',
-        WEBHOOK_MAX_PER_ADDRESS: '0',
-        WEBHOOK_MAX_ATTEMPTS: '1',
-        WEBHOOK_DELIVERY_TIMEOUT_MS: '1000',
-        WEBHOOK_MAX_CONCURRENT: '1',
-        WEBHOOK_POOL_RETRY_MS: '1000',
-        WEBHOOK_PAYLOAD_MAX_BYTES: '2048',
-        WEBHOOK_APPROVAL_ARGS_MAX_BYTES: '0',
-        WEBHOOK_APPROVAL_ARGS_MAX_DEPTH: '1',
-        WEBHOOK_RESPONSE_MAX_BYTES: '1',
-        WEBHOOK_TIMESTAMP_TOLERANCE_SEC: '30',
-        WEBHOOK_DISABLE_THRESHOLD: '1',
-        WEBHOOK_ROTATION_OVERLAP_MS: '0',
-        WEBHOOK_LOG_RETENTION_DAYS: '4',
-        WEBHOOK_RATE_CREATE_PER_MIN: '0',
-        WEBHOOK_RATE_TEST_PER_MIN: '0',
-        WEBHOOK_RATE_DELIVER_PER_MIN: '0',
-      };
-      const serviceEnv = renderApiServiceEnv({
-        composeFile,
-        envFile: { ...SYNTH_REQUIRED, ...overrides },
+      test(`${label}: every webhook override including zeros and port CSV`, () => {
+        expectAllOverrides(renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: ALL_OVERRIDES,
+        }));
       });
-      for (const [key, value] of Object.entries(overrides)) {
-        expect(serviceEnv[key]).toBe(value);
-      }
-      const webhooks = parseConfig(serviceEnv).webhooks;
-      expect(webhooks.enabled).toBe(true);
-      expect(webhooks.allowPrivateTargets).toBe(true);
-      expect(webhooks.allowedPorts).toEqual([443, 8443]);
-      expect(webhooks.maxSubscriptions).toBe(0);
-      expect(webhooks.maxPerAddress).toBe(0);
-      expect(webhooks.maxAttempts).toBe(1);
-      expect(webhooks.deliveryTimeoutMs).toBe(1000);
-      expect(webhooks.maxConcurrent).toBe(1);
-      expect(webhooks.poolRetryMs).toBe(1000);
-      expect(webhooks.payloadMaxBytes).toBe(2048);
-      expect(webhooks.approvalArgsMaxBytes).toBe(0);
-      expect(webhooks.approvalArgsMaxDepth).toBe(1);
-      expect(webhooks.responseMaxBytes).toBe(1);
-      expect(webhooks.timestampToleranceSec).toBe(30);
-      expect(webhooks.disableThreshold).toBe(1);
-      expect(webhooks.rotationOverlapMs).toBe(0);
-      expect(webhooks.logRetentionDays).toBe(4);
-      expect(webhooks.rateCreatePerMin).toBe(0);
-      expect(webhooks.rateTestPerMin).toBe(0);
-      expect(webhooks.rateDeliverPerMin).toBe(0);
-    });
 
-    test(`${variant.name}: optional signing secrets absent / valid / invalid`, () => {
-      const absent = renderApiServiceEnv({
-        composeFile,
-        envFile: SYNTH_REQUIRED,
-      });
-      expect(secretPresent(absent, 'WEBHOOK_SIGNING_SECRET')).toBe(false);
-      expect(secretPresent(absent, 'WEBHOOK_SIGNING_SECRET_PREVIOUS')).toBe(false);
-      const absentConfig = parseConfig(absent);
-      expect(absentConfig.webhooks.signingSecret).toBeUndefined();
-      expect(absentConfig.webhooks.signingSecretPrevious).toBeUndefined();
-      expect(absentConfig.webhooks.enabled).toBe(false);
+      test(`${label}: optional secrets absent / valid / empty / short`, () => {
+        const absent = renderApiServiceEnv({ composeFile, mode });
+        expect(secretPresent(absent, 'WEBHOOK_SIGNING_SECRET')).toBe(false);
+        expect(secretPresent(absent, 'WEBHOOK_SIGNING_SECRET_PREVIOUS')).toBe(false);
+        const absentConfig = parseConfig(absent);
+        expect(absentConfig.webhooks.signingSecret).toBeUndefined();
+        expect(absentConfig.webhooks.signingSecretPrevious).toBeUndefined();
+        expect(absentConfig.webhooks.enabled).toBe(false);
 
-      const valid = renderApiServiceEnv({
-        composeFile,
-        envFile: {
-          ...SYNTH_REQUIRED,
-          WEBHOOK_SIGNING_SECRET: SYNTH_SECRET,
-          WEBHOOK_SIGNING_SECRET_PREVIOUS: SYNTH_SECRET_PREVIOUS,
-        },
-      });
-      expect(valid.WEBHOOK_SIGNING_SECRET?.length).toBe(32);
-      expect(valid.WEBHOOK_SIGNING_SECRET_PREVIOUS?.length).toBe(32);
-      const validConfig = parseConfig(valid);
-      expect(validConfig.webhooks.signingSecret?.length).toBe(32);
-      expect(validConfig.webhooks.signingSecretPrevious?.length).toBe(32);
+        const valid = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: {
+            WEBHOOK_SIGNING_SECRET: SYNTH_SECRET,
+            WEBHOOK_SIGNING_SECRET_PREVIOUS: SYNTH_SECRET_PREVIOUS,
+          },
+        });
+        const validConfig = parseConfig(valid);
+        expect(validConfig.webhooks.signingSecret === SYNTH_SECRET).toBe(true);
+        expect(validConfig.webhooks.signingSecretPrevious === SYNTH_SECRET_PREVIOUS).toBe(true);
+        expect(validConfig.webhooks.signingSecret === SYNTH_SECRET_PREVIOUS).toBe(false);
+        expect(validConfig.webhooks.signingSecretPrevious === SYNTH_SECRET).toBe(false);
 
-      const empty = renderApiServiceEnv({
-        composeFile,
-        envFile: { ...SYNTH_REQUIRED, WEBHOOK_SIGNING_SECRET: '' },
-      });
-      expect(empty.WEBHOOK_SIGNING_SECRET).toBe('');
-      expect(() => parseConfig(empty)).toThrow();
+        const emptyCurrent = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: { WEBHOOK_SIGNING_SECRET: '' },
+        });
+        expect(emptyCurrent.WEBHOOK_SIGNING_SECRET).toBe('');
+        expect(() => parseConfig(emptyCurrent)).toThrow();
 
-      const short = renderApiServiceEnv({
-        composeFile,
-        envFile: { ...SYNTH_REQUIRED, WEBHOOK_SIGNING_SECRET_PREVIOUS: 'too-short' },
-      });
-      expect(short.WEBHOOK_SIGNING_SECRET_PREVIOUS?.length).toBeLessThan(32);
-      expect(() => parseConfig(short)).toThrow();
-    });
+        const emptyPrevious = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: { WEBHOOK_SIGNING_SECRET_PREVIOUS: '' },
+        });
+        expect(emptyPrevious.WEBHOOK_SIGNING_SECRET_PREVIOUS).toBe('');
+        expect(() => parseConfig(emptyPrevious)).toThrow();
 
-    test(`${variant.name}: OAE_PUBLIC_EDGE=true forces private targets false`, () => {
-      const serviceEnv = renderApiServiceEnv({
-        composeFile,
-        envFile: {
-          ...SYNTH_REQUIRED,
-          OAE_PUBLIC_EDGE: 'true',
-          WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
-        },
+        const shortCurrent = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: { WEBHOOK_SIGNING_SECRET: 'too-short' },
+        });
+        expect((shortCurrent.WEBHOOK_SIGNING_SECRET?.length ?? 0) < 32).toBe(true);
+        expect(() => parseConfig(shortCurrent)).toThrow();
+
+        const shortPrevious = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: { WEBHOOK_SIGNING_SECRET_PREVIOUS: 'too-short' },
+        });
+        expect((shortPrevious.WEBHOOK_SIGNING_SECRET_PREVIOUS?.length ?? 0) < 32).toBe(true);
+        expect(() => parseConfig(shortPrevious)).toThrow();
       });
-      // Compose 仍原样传递请求值；生效 false 来自既有 parseConfig 优先级
-      expect(serviceEnv.OAE_PUBLIC_EDGE).toBe('true');
-      expect(serviceEnv.WEBHOOK_ALLOW_PRIVATE_TARGETS).toBe('true');
-      expect(parseConfig(serviceEnv).webhooks.allowPrivateTargets).toBe(false);
-    });
+
+      test(`${label}: OAE_PUBLIC_EDGE=true forces private targets false`, () => {
+        const serviceEnv = renderApiServiceEnv({
+          composeFile,
+          mode,
+          webhookVars: {
+            OAE_PUBLIC_EDGE: 'true',
+            WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
+          },
+        });
+        // Compose still forwards the requested value; parseConfig forces false.
+        expect(serviceEnv.OAE_PUBLIC_EDGE).toBe('true');
+        expect(serviceEnv.WEBHOOK_ALLOW_PRIVATE_TARGETS).toBe('true');
+        expect(parseConfig(serviceEnv).webhooks.allowPrivateTargets).toBe(false);
+      });
+    }
 
     test(`${variant.name}: removing WEBHOOKS_ENABLED wiring drops the override`, () => {
       const live = readFileSync(composeFile, 'utf8');
@@ -365,7 +450,8 @@ describe('#149 Compose webhook environment', () => {
 
       const enabled = renderApiServiceEnv({
         composeFile,
-        envFile: { ...SYNTH_REQUIRED, WEBHOOKS_ENABLED: 'true' },
+        mode: 'env-file',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
       });
       expect(enabled.WEBHOOKS_ENABLED).toBe('true');
       expect(parseConfig(enabled).webhooks.enabled).toBe(true);
@@ -373,7 +459,8 @@ describe('#149 Compose webhook environment', () => {
       const mutated = live.replace(/^\s+WEBHOOKS_ENABLED:\s*\$\{WEBHOOKS_ENABLED:-false\}\s*$/m, '');
       const stripped = renderApiServiceEnv({
         composeFile,
-        envFile: { ...SYNTH_REQUIRED, WEBHOOKS_ENABLED: 'true' },
+        mode: 'shell',
+        webhookVars: { WEBHOOKS_ENABLED: 'true' },
         composeText: mutated,
       });
       expect(secretPresent(stripped, 'WEBHOOKS_ENABLED')).toBe(false);
