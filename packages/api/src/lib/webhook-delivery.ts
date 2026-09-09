@@ -352,6 +352,19 @@ function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
 
 let deliveryLogIndex: DeliveryLogIndex = emptyDeliveryLogIndex();
 
+/** Delivery-log data-read counters (full vs incremental; stats excluded). Production read paths always increment these; tests observe them. */
+type DeliveryLogIoStats = {
+  fullReads: number;
+  incrementalReads: number;
+  bytesRead: number;
+};
+
+let deliveryLogIoForTests: DeliveryLogIoStats = {
+  fullReads: 0,
+  incrementalReads: 0,
+  bytesRead: 0,
+};
+
 function groupKeyForRow(row: WebhookDeliveryLogRow): string {
   return `${row.webhookId}:${row.eventId}:${row.runId}`;
 }
@@ -483,6 +496,9 @@ function refreshDeliveryLogIndex(): DeliveryLogIndex {
   try {
     const buf = Buffer.alloc(length);
     const n = readSync(fd, buf, 0, length, deliveryLogIndex.size);
+    // Count incremental bytes; the hot path must not reread the whole file.
+    deliveryLogIoForTests.incrementalReads += 1;
+    deliveryLogIoForTests.bytesRead += n;
     const consumed = ingestIncrementalBytes(deliveryLogIndex, buf.subarray(0, n));
     deliveryLogIndex.size += consumed;
     deliveryLogIndex.mtimeMs = st.mtimeMs;
@@ -514,11 +530,23 @@ export function resetDeliveryLogIndexForTests(): void {
   deliveryLogIndex = emptyDeliveryLogIndex();
 }
 
+export function getDeliveryLogIoForTests(): DeliveryLogIoStats {
+  return { ...deliveryLogIoForTests };
+}
+
+export function resetDeliveryLogIoForTests(): void {
+  deliveryLogIoForTests = { fullReads: 0, incrementalReads: 0, bytesRead: 0 };
+}
+
 /** Full-file parse used by boot reconstruction and compaction. */
 export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   const path = deliveryLogPath();
   if (!existsSync(path)) return [];
-  return parseDeliveryLogText(readFileSync(path, 'utf8'));
+  // Read bytes once; record disk length without a second UTF-8 walk.
+  const buf = readFileSync(path);
+  deliveryLogIoForTests.fullReads += 1;
+  deliveryLogIoForTests.bytesRead += buf.byteLength;
+  return parseDeliveryLogText(buf.toString('utf8'));
 }
 
 function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {

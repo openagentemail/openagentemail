@@ -8,7 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { config } = await import('../src/lib/config.ts');
@@ -33,6 +33,8 @@ const {
   readAllDeliveryLogRowsFromDisk,
   readDeliveryLogRows,
   resetDeliveryLogIndexForTests,
+  getDeliveryLogIoForTests,
+  resetDeliveryLogIoForTests,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
   setReconstructRetryDelaysForTests,
@@ -77,6 +79,7 @@ function setupTestDir(): void {
   setWebhooksFailClosedForTests(false);
   setReconstructRetryDelaysForTests();
   resetDeliveryLogIndexForTests();
+  resetDeliveryLogIoForTests();
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
   stopWebhookMaintenance();
@@ -1825,6 +1828,125 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       setWebhookDnsLookupForTests(undefined);
       deliveryQueue.cancelAll();
     }
+  });
+
+  test('#146: latest-delivery IO stays bounded across warm/append/compact/replace', () => {
+    const logPath = join(TEST_DATA_DIR, 'webhook-deliveries.jsonl');
+    const row = (
+      id: string,
+      webhookId: string,
+      ts: string,
+      attempt = 1,
+    ): WebhookDeliveryLogRow => ({
+      ts,
+      webhookId,
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+
+    const now = Date.now();
+    const t1 = new Date(now - 3000).toISOString();
+    const t2 = new Date(now - 1000).toISOString();
+    appendDeliveryLogRow(row('a1', 'whk_a', t1, 1));
+    const a2 = row('a2', 'whk_a', t1, 2);
+    a2.reason = 'café-测试';
+    appendDeliveryLogRow(a2);
+    appendDeliveryLogRow(row('c1', 'whk_c', t1, 1));
+    appendDeliveryLogRow(row('c2', 'whk_c', t2, 1));
+
+    // 无追加/替换时数据读必须为 0：次数与字节一并封顶
+    const expectNoDataReads = () => {
+      expect(getDeliveryLogIoForTests()).toEqual({
+        fullReads: 0,
+        incrementalReads: 0,
+        bytesRead: 0,
+      });
+    };
+
+    // 显式冷索引：一次全量读，字节按磁盘长度而非字符数
+    resetDeliveryLogIndexForTests();
+    resetDeliveryLogIoForTests();
+    expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
+    expect(getLatestDeliveryForWebhook('whk_b')).toBeNull();
+    expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c2');
+    const seededBuf = readFileSync(logPath);
+    const seededText = seededBuf.toString('utf8');
+    const cold = getDeliveryLogIoForTests();
+    expect(cold.fullReads).toBe(1);
+    expect(cold.incrementalReads).toBe(0);
+    expect(cold.bytesRead).toBe(seededBuf.byteLength);
+    expect(seededBuf.byteLength).toBeGreaterThan(seededText.length);
+    resetDeliveryLogIoForTests();
+    expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
+    expect(getLatestDeliveryForWebhook('whk_b')).toBeNull();
+    expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c2');
+    expectNoDataReads();
+
+    getLatestDeliveryForWebhook('whk_a');
+    getLatestDeliveryForWebhook('whk_b');
+    getLatestDeliveryForWebhook('whk_c');
+    expectNoDataReads();
+
+    for (let i = 0; i < 8; i++) {
+      appendDeliveryLogRow(row(`x${i}`, `whk_x${i}`, t2, 1));
+    }
+    resetDeliveryLogIoForTests();
+    for (let i = 0; i < 8; i++) {
+      expect(getLatestDeliveryForWebhook(`whk_x${i}`)?.deliveryId).toBe(`dlv_x${i}`);
+    }
+    expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_a2');
+    expectNoDataReads();
+
+    const extra = row('c3', 'whk_c', new Date(now).toISOString(), 1);
+    const extraLine = `${JSON.stringify(extra)}\n`;
+    const extraBytes = Buffer.byteLength(extraLine, 'utf8');
+    appendFileSync(logPath, extraLine);
+    resetDeliveryLogIoForTests();
+    expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c3');
+    const afterAppend = getDeliveryLogIoForTests();
+    expect(afterAppend.fullReads).toBe(0);
+    expect(afterAppend.incrementalReads).toBe(1);
+    expect(afterAppend.bytesRead).toBe(extraBytes);
+
+    const oldTs = new Date(now - 40 * 86400000).toISOString();
+    appendDeliveryLogRow(row('old', 'whk_old', oldTs, 1));
+    compactDeliveryLog(now, 30);
+    resetDeliveryLogIoForTests();
+    expect(getLatestDeliveryForWebhook('whk_old')).toBeNull();
+    expect(getLatestDeliveryForWebhook('whk_c')?.deliveryId).toBe('dlv_c3');
+    expectNoDataReads();
+
+    const replacement = row('rep', 'whk_a', new Date(now + 1000).toISOString(), 1);
+    const replacementLine = `${JSON.stringify(replacement)}\n`;
+    const replacementBytes = Buffer.byteLength(replacementLine, 'utf8');
+    const tmp = `${logPath}.replace`;
+    writeFileSync(tmp, replacementLine);
+    renameSync(tmp, logPath);
+    resetDeliveryLogIoForTests();
+    expect(getLatestDeliveryForWebhook('whk_a')?.deliveryId).toBe('dlv_rep');
+    expect(getLatestDeliveryForWebhook('whk_c')).toBeNull();
+    const afterReplace = getDeliveryLogIoForTests();
+    expect(afterReplace.fullReads).toBe(1);
+    expect(afterReplace.incrementalReads).toBe(0);
+    expect(afterReplace.bytesRead).toBe(replacementBytes);
   });
 
   afterAll(async () => {

@@ -8,7 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { createApp } = await import('../src/app.ts');
@@ -18,6 +18,9 @@ const {
   deliveryQueue,
   readAllDeliveryLogRows,
   appendDeliveryLogRow,
+  getDeliveryLogIoForTests,
+  resetDeliveryLogIoForTests,
+  resetDeliveryLogIndexForTests,
   setWebhookDnsLookupForTests,
 } = await import('../src/lib/webhook-delivery.ts');
 const {
@@ -62,6 +65,8 @@ function setupTestDir(): void {
   (config.webhooks as any).maxPerAddress = 4;
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
+  resetDeliveryLogIndexForTests();
+  resetDeliveryLogIoForTests();
   resetWebhooksStoreForTests();
   setWebhooksFailClosedForTests(false);
   setWebhookDnsLookupForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
@@ -1338,6 +1343,432 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       readFileSync(join(TEST_DATA_DIR, 'identities.json'), 'utf8'),
     ) as Array<{ address: string }>;
     expect(identitiesRaw.find((i) => i.address === 'alice@test.example')).toBeDefined();
+  });
+
+  // #146 契约 1：单写运行时并发创建不得越过配额
+  function seedSubscriptions(address: string, count: number): void {
+    for (let i = 0; i < count; i++) {
+      createWebhookSubscription({
+        url: `https://consumer.example/seed-${address.split('@')[0]}-${i}`,
+        address,
+        events: ['mail.received'],
+        createdBy: 'admin',
+      });
+    }
+  }
+
+  function postCreate(opts: { address: string; url: string; key?: string }) {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${adminKey}`,
+      'Content-Type': 'application/json',
+    };
+    if (opts.key) headers['Idempotency-Key'] = opts.key;
+    return app.request('/v1/webhooks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        url: opts.url,
+        address: opts.address,
+        events: ['mail.received'],
+      }),
+    });
+  }
+
+  /** 重叠 URL/DNS 解析完成点，再一起进入配额检查。 */
+  function installOverlappingDns(waiters: number) {
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    setWebhookDnsLookupForTests(async () => {
+      arrived += 1;
+      if (arrived >= waiters) release();
+      await gate;
+      return [{ address: '93.184.216.34', family: 4 }];
+    });
+    return () => arrived;
+  }
+
+  async function statusesOf(responses: Response[]): Promise<number[]> {
+    return Promise.all(responses.map((r) => r.status));
+  }
+
+  async function jsonBodies(responses: Response[]): Promise<any[]> {
+    return Promise.all(responses.map((r) => r.json()));
+  }
+
+  test('#146: overlapping distinct-key creates consume the last per-address slot once', async () => {
+    (config.webhooks as any).maxPerAddress = 3;
+    (config.webhooks as any).maxSubscriptions = 16;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    seedSubscriptions('alice@test.example', 2);
+
+    const n = 4;
+    installOverlappingDns(n);
+    const responses = await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        postCreate({
+          address: 'alice@test.example',
+          key: `quota-addr-${Date.now()}-${i}`,
+          url: `https://consumer.example/overlap-addr-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(n - 1);
+    const bodies = await jsonBodies(responses);
+    for (const body of bodies.filter((_, i) => statuses[i] === 409)) {
+      expect(body.error).toBe('webhook_limit_reached');
+    }
+    expect(
+      listWebhookSubscriptions('alice@test.example').length,
+    ).toBe(3);
+  });
+
+  test('#146: overlapping distinct-address creates consume the last instance slot once', async () => {
+    (config.webhooks as any).maxPerAddress = 8;
+    (config.webhooks as any).maxSubscriptions = 3;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    seedSubscriptions('alice@test.example', 1);
+    seedSubscriptions('bob@test.example', 1);
+
+    const addrs = ['carol@test.example', 'dave@test.example', 'erin@test.example'];
+    installOverlappingDns(addrs.length);
+    const responses = await Promise.all(
+      addrs.map((address, i) =>
+        postCreate({
+          address,
+          key: `quota-inst-${Date.now()}-${i}`,
+          url: `https://consumer.example/overlap-inst-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(addrs.length - 1);
+    expect(listWebhookSubscriptions().length).toBe(3);
+  });
+
+  test('#146: overlapping creates against an already-full address quota all 409', async () => {
+    (config.webhooks as any).maxPerAddress = 2;
+    (config.webhooks as any).maxSubscriptions = 16;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    seedSubscriptions('alice@test.example', 2);
+
+    const n = 3;
+    installOverlappingDns(n);
+    const responses = await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        postCreate({
+          address: 'alice@test.example',
+          key: `quota-full-addr-${Date.now()}-${i}`,
+          url: `https://consumer.example/full-addr-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.every((s) => s === 409)).toBe(true);
+    expect(listWebhookSubscriptions('alice@test.example').length).toBe(2);
+  });
+
+  test('#146: overlapping creates against an already-full instance quota all 409', async () => {
+    (config.webhooks as any).maxPerAddress = 8;
+    (config.webhooks as any).maxSubscriptions = 2;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    seedSubscriptions('alice@test.example', 1);
+    seedSubscriptions('bob@test.example', 1);
+
+    const addrs = ['carol@test.example', 'dave@test.example'];
+    installOverlappingDns(addrs.length);
+    const responses = await Promise.all(
+      addrs.map((address, i) =>
+        postCreate({
+          address,
+          key: `quota-full-inst-${Date.now()}-${i}`,
+          url: `https://consumer.example/full-inst-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.every((s) => s === 409)).toBe(true);
+    expect(listWebhookSubscriptions().length).toBe(2);
+  });
+
+  test('#146: same-key overlapping create still discloses one secret', async () => {
+    (config.webhooks as any).maxPerAddress = 2;
+    (config.webhooks as any).maxSubscriptions = 16;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    seedSubscriptions('alice@test.example', 1);
+
+    const key = `quota-same-${Date.now()}`;
+    // 同键只跑一次 URL 解析；重叠门闩按 1 个 waiter，避免误等第二次 DNS
+    installOverlappingDns(1);
+    const [res1, res2] = await Promise.all([
+      postCreate({
+        address: 'alice@test.example',
+        key,
+        url: 'https://consumer.example/same-key-near-quota',
+      }),
+      postCreate({
+        address: 'alice@test.example',
+        key,
+        url: 'https://consumer.example/same-key-near-quota',
+      }),
+    ]);
+    expect(res1.status).toBe(201);
+    expect(res2.status).toBe(201);
+    const body1: any = await res1.json();
+    const body2: any = await res2.json();
+    expect(body1.id).toBe(body2.id);
+    const secrets = [body1.secret, body2.secret];
+    expect(secrets.filter((s) => typeof s === 'string' && /^whs_[a-f0-9]{64}$/.test(s))).toHaveLength(1);
+    expect(secrets.filter((s) => s === null)).toHaveLength(1);
+    expect(listWebhookSubscriptions('alice@test.example').length).toBe(2);
+  });
+
+  test('#146: list and GET probe latest-delivery without per-subscription full-log IO', async () => {
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+    const now = Date.now();
+    const t1 = new Date(now - 2000).toISOString();
+    const t2 = new Date(now - 500).toISOString();
+    const subs = Array.from({ length: 6 }, (_, i) =>
+      createWebhookSubscription({
+        url: `https://consumer.example/io-${i}`,
+        address: i < 3 ? 'alice@test.example' : 'bob@test.example',
+        events: ['mail.received'],
+        createdBy: 'admin',
+      }),
+    );
+    const empty = subs[1]!;
+    const older = subs[0]!;
+    const newer = subs[2]!;
+    appendDeliveryLogRow({
+      ts: t1,
+      webhookId: older.id,
+      eventId: 'evt_old',
+      runId: 'run_0',
+      deliveryId: 'dlv_old',
+      type: 'mail.received',
+      address: older.address,
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: t1,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    appendDeliveryLogRow({
+      ts: t1,
+      webhookId: older.id,
+      eventId: 'evt_old2',
+      runId: 'run_0',
+      deliveryId: 'dlv_old_attempt2',
+      type: 'mail.received',
+      address: older.address,
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: t1,
+      attempt: 2,
+      outcome: 'success',
+      status: 200,
+      durationMs: 11,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    appendDeliveryLogRow({
+      ts: t2,
+      webhookId: newer.id,
+      eventId: 'evt_new',
+      runId: 'run_0',
+      deliveryId: 'dlv_new',
+      type: 'mail.received',
+      address: newer.address,
+      messageId: '2',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: t2,
+      attempt: 1,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 20,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: 'upstream',
+    });
+
+    const expectNoDataReads = () => {
+      expect(getDeliveryLogIoForTests()).toEqual({
+        fullReads: 0,
+        incrementalReads: 0,
+        bytesRead: 0,
+      });
+    };
+
+    // 显式冷索引：list 一次全量读，字节等于已播种日志磁盘长度
+    resetDeliveryLogIndexForTests();
+    resetDeliveryLogIoForTests();
+    const listRes = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listBody: any = await listRes.json();
+    const byId = new Map<string, any>(listBody.webhooks.map((w: any) => [w.id, w]));
+    expect(byId.get(empty.id).lastDelivery).toBeNull();
+    expect(byId.get(older.id).lastDelivery.deliveryId).toBe('dlv_old_attempt2');
+    expect(byId.get(newer.id).lastDelivery.deliveryId).toBe('dlv_new');
+    const seededBytes = readFileSync(join(TEST_DATA_DIR, 'webhook-deliveries.jsonl')).byteLength;
+    const cold = getDeliveryLogIoForTests();
+    expect(cold.fullReads).toBe(1);
+    expect(cold.incrementalReads).toBe(0);
+    expect(cold.bytesRead).toBe(seededBytes);
+    resetDeliveryLogIoForTests();
+    const warmAfterCold = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(warmAfterCold.status).toBe(200);
+    expectNoDataReads();
+
+    for (const sub of subs) {
+      const detail = await app.request(`/v1/webhooks/${sub.id}`, {
+        headers: { Authorization: `Bearer ${adminKey}` },
+      });
+      expect(detail.status).toBe(200);
+    }
+    expectNoDataReads();
+
+    const warmList = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(warmList.status).toBe(200);
+    expectNoDataReads();
+
+    const extraSubs = Array.from({ length: 6 }, (_, i) =>
+      createWebhookSubscription({
+        url: `https://consumer.example/io-more-${i}`,
+        address: 'alice@test.example',
+        events: ['mail.received'],
+        createdBy: 'admin',
+      }),
+    );
+    for (const sub of extraSubs) {
+      appendDeliveryLogRow({
+        ts: new Date().toISOString(),
+        webhookId: sub.id,
+        eventId: `evt_${sub.id}`,
+        runId: 'run_0',
+        deliveryId: `dlv_${sub.id}`,
+        type: 'mail.received',
+        address: sub.address,
+        messageId: null,
+        uidValidity: null,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt: new Date().toISOString(),
+        attempt: 1,
+        outcome: 'success',
+        status: 200,
+        durationMs: 5,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: null,
+        reason: null,
+      });
+    }
+    resetDeliveryLogIoForTests();
+    const scaled = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(scaled.status).toBe(200);
+    const scaledBody: any = await scaled.json();
+    expect(scaledBody.webhooks.length).toBe(12);
+    expectNoDataReads();
+
+    // 外部 append 必须只付追加字节，并由 list/GET 消费
+    const appended = {
+      ts: new Date(now + 1000).toISOString(),
+      webhookId: newer.id,
+      eventId: 'evt_ext_append',
+      runId: 'run_0',
+      deliveryId: 'dlv_ext_append',
+      type: 'mail.received',
+      address: newer.address,
+      messageId: '9',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date(now + 1000).toISOString(),
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 7,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    };
+    const appendedLine = `${JSON.stringify(appended)}\n`;
+    const appendedBytes = Buffer.byteLength(appendedLine, 'utf8');
+    appendFileSync(join(TEST_DATA_DIR, 'webhook-deliveries.jsonl'), appendedLine);
+    resetDeliveryLogIoForTests();
+    const appendList = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(appendList.status).toBe(200);
+    const appendListBody: any = await appendList.json();
+    const appendById = new Map<string, any>(
+      appendListBody.webhooks.map((w: any) => [w.id, w]),
+    );
+    expect(appendById.get(newer.id).lastDelivery.deliveryId).toBe('dlv_ext_append');
+    const afterAppendList = getDeliveryLogIoForTests();
+    expect(afterAppendList.fullReads).toBe(0);
+    expect(afterAppendList.incrementalReads).toBe(1);
+    expect(afterAppendList.bytesRead).toBe(appendedBytes);
+
+    const appendGet = await app.request(`/v1/webhooks/${newer.id}`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(appendGet.status).toBe(200);
+    const appendGetBody: any = await appendGet.json();
+    expect(appendGetBody.lastDelivery.deliveryId).toBe('dlv_ext_append');
+    const afterAppendGet = getDeliveryLogIoForTests();
+    expect(afterAppendGet.fullReads).toBe(0);
+    expect(afterAppendGet.incrementalReads).toBe(1);
+    expect(afterAppendGet.bytesRead).toBe(appendedBytes);
   });
 
   afterAll(async () => {
