@@ -28,6 +28,29 @@ describe('envelope data object (RFC-0001 §6.1)', () => {
     expect(parseVerifiedEnvelope(envelope({ data: [1] }))).toEqual({ ok: false, reason: 'invalid_data' });
   });
 
+  test('mail.received and webhook.ping require the producer data.object', () => {
+    expect(parseVerifiedEnvelope(envelope({ data: { object: 'webhook' } })).ok).toBe(true);
+    expect(
+      parseVerifiedEnvelope(envelope({ type: 'mail.received', data: { object: 'mail' } })).ok,
+    ).toBe(true);
+
+    expect(parseVerifiedEnvelope(envelope({ data: {} }))).toEqual({
+      ok: false,
+      reason: 'invalid_data_object',
+    });
+    expect(parseVerifiedEnvelope(envelope({ data: { object: 'approval' } }))).toEqual({
+      ok: false,
+      reason: 'invalid_data_object',
+    });
+    expect(
+      parseVerifiedEnvelope(envelope({ type: 'mail.received', data: { object: 'approval' } })),
+    ).toEqual({ ok: false, reason: 'invalid_data_object' });
+    expect(parseVerifiedEnvelope(envelope({ type: 'mail.received', data: {} }))).toEqual({
+      ok: false,
+      reason: 'invalid_data_object',
+    });
+  });
+
   test('mail without an address is not a successful parse-to-ack path', () => {
     const parsed = parseVerifiedEnvelope(
       envelope({

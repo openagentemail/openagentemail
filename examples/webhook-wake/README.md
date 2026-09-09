@@ -21,7 +21,11 @@ tree.
   the signature check. RFC-0001 §5.1 / §6.1 requires a `data` object on
   every event (`docs/rfcs/0001-outbound-webhooks.md` lines 672 and 775;
   `formatPingPayload` always supplies one). `data: null`, a missing `data`,
-  or a non-object is `invalid_data` (400). Mail without an address is never
+  or a non-object is `invalid_data` (400). `mail.received` also requires
+  `data.object === "mail"` and `webhook.ping` requires
+  `data.object === "webhook"` (local producer `formatMailPayload` /
+  `formatPingPayload`). Missing or mismatched `data.object` is
+  `invalid_data_object` (400) and never wakes. Mail without an address is never
   a 2xx success.
 - Events: metadata `mail.received` and authenticated `webhook.ping`. Ping
   never wakes. A ping must also match the configured `subscriptionId`
@@ -60,6 +64,11 @@ tree.
   `/etc/webhook-wake/runtime.env`. The optional **user** unit may use
   `%h`/`%U` and writes durable state under `%h/.local/state/webhook-wake`
   (`StateDirectory=webhook-wake`). `ProtectHome=read-only`.
+  Both units use `ExecStart=/usr/bin/bun` as a **placeholder**. Before
+  enabling either unit, replace that path with the absolute Bun executable
+  the service user can run (`command -v bun` as `ops` or the user
+  instance). The binary must be readable and executable by that user.
+  This tree does not create `/usr/bin/bun` or any host symlink.
 - `GET /health` is liveness only and is the public monitor target.
   `GET /ready` lists `routeKey` / `subscriptionId` and stays **private**.
   Caddy/nginx templates proxy `/health` and `/hooks/*` only. Binding a
@@ -120,7 +129,11 @@ tree.
   are failures) in **both** `templates/monitor.sh` and `httpProbe`.
   `httpProbe` accepts only `http:`/`https:`; `ftp:`, `file:`, and other
   schemes or a malformed URL return `{ ok: false }` and never throw
-  (`ERR_INVALID_PROTOCOL` is contained). That is probe correctness, not
+  (`ERR_INVALID_PROTOCOL` is contained). Socket `timeout` is inactivity
+  only; `httpProbe` also starts an independent wall-clock deadline of the
+  same `timeoutMs`, destroys the request on expiry, and clears the timer
+  on every completion path so a drip of incomplete headers cannot hang
+  the probe. That is probe correctness, not
   an alert-URL SSRF policy. Alert
   execution requires a `timeout` binary; a missing tool fails visibly and
   never runs the alerter unbounded. `alertHook.url` POSTs with
@@ -261,7 +274,10 @@ is allowed in preflight; a real load still fails on a missing file.
 `alertHook`, if present, must be an object (string/array/null/scalar
 fail load) so a typo cannot silently disable the sink. `alertHook.url`
 `null` disables the sink; an explicit empty string fails load
-(`config_invalid:alertHook.url`). The JSON document root must be a
+(`config_invalid:alertHook.url`). A present `canaryTerminal` must be
+`null` or a nonempty valid terminal handle, including observe mode
+(`false` / `0` / `""` / whitespace fail load). Absent or `null` means
+no canary. Canary mode still requires a bound terminal. The JSON document root must be a
 non-array object (`config_invalid:root`); an array, scalar, or `null`
 root does not load as empty defaults. Present `listen` must be a non-array
 object; a present invalid `host` fails (`config_invalid:listen.host`)
@@ -322,6 +338,22 @@ Recommended later: run as the VPS `ops` user next to the working Orca runtime;
 terminate TLS on 443 and proxy to the loopback listener. Monitor from a
 **different** host (probe `/health` every 30s, alarm after two failures,
 recovery notice, cooldown). Templates live in `templates/`.
+
+**Bun path substitution (install, not a host change in this tree):**
+`templates/webhook-wake.service` and `templates/webhook-wake.user.service`
+ship `ExecStart=/usr/bin/bun …` only as a documented placeholder. After
+copying a unit, replace `/usr/bin/bun` with the absolute executable the
+service user can run, for example:
+
+```bash
+# as the service user (ops) or the user-instance owner
+command -v bun
+# then edit ExecStart= to that path; confirm it is executable by that user
+# (world-exec or owned by the service user). Do not create a /usr/bin/bun
+# symlink from this example.
+```
+
+This card does not deploy units or create host symlinks.
 
 Endpoint health does not prove an OAE subscription is enabled. After a real
 deploy order: confirm the subscription, rotate secrets, and measure test-mail

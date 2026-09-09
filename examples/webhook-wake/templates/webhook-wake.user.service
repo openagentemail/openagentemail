@@ -6,6 +6,9 @@ After=network-online.target
 Type=simple
 WorkingDirectory=%h/openagentemail/examples/webhook-wake
 # Config lives under the operator home (readable with ProtectHome=read-only).
+# /usr/bin/bun is a placeholder. Substitute the absolute Bun this user
+# instance can execute (`command -v bun`). This tree does not install or
+# symlink Bun at /usr/bin.
 ExecStart=/usr/bin/bun src/main.ts --config %h/.config/webhook-wake/config.json
 Restart=on-failure
 RestartSec=2

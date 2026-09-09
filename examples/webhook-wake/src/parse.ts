@@ -47,6 +47,11 @@ export function parseVerifiedEnvelope(rawBody: Buffer | string): ParseOk | Parse
   if (obj.data == null || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
     return { ok: false, reason: 'invalid_data' };
   }
+  const data = obj.data as Record<string, unknown>;
+  const want = requiredDataObject(typeof obj.type === 'string' ? obj.type : '');
+  if (want && data.object !== want) {
+    return { ok: false, reason: 'invalid_data_object' };
+  }
   return {
     ok: true,
     envelope: {
@@ -55,9 +60,16 @@ export function parseVerifiedEnvelope(rawBody: Buffer | string): ParseOk | Parse
       payloadVersion: 'v1',
       createdAt: obj.createdAt,
       domain: normalizeDomain(obj.domain),
-      data: obj.data as Record<string, unknown>,
+      data,
     },
   };
+}
+
+/** Producer schema: mail.received → mail, webhook.ping → webhook. */
+function requiredDataObject(type: string): string | null {
+  if (type === 'mail.received') return 'mail';
+  if (type === 'webhook.ping') return 'webhook';
+  return null;
 }
 
 export function readMailAddress(data: Record<string, unknown>): string | null {

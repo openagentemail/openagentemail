@@ -33,6 +33,15 @@ describe('systemd specifier policy', () => {
     expect(assignments).not.toMatch(/whs_|oa_|API_KEY|SECRET|PASSWORD/i);
   });
 
+  test('both units document substituting the real absolute Bun executable', () => {
+    expect(systemUnit).toMatch(/\/usr\/bin\/bun is a placeholder/);
+    expect(systemUnit).toMatch(/Substitute the absolute Bun/);
+    expect(systemUnit).toMatch(/^ExecStart=\/usr\/bin\/bun src\/main\.ts --config \/etc\/webhook-wake\/config\.json$/m);
+    expect(userUnit).toMatch(/\/usr\/bin\/bun is a placeholder/);
+    expect(userUnit).toMatch(/Substitute the absolute Bun/);
+    expect(userUnit).toMatch(/^ExecStart=\/usr\/bin\/bun src\/main\.ts --config %h\/\.config\/webhook-wake\/config\.json$/m);
+  });
+
   test('user unit may use %h/%U because user-mode specifiers are the calling user', () => {
     expect(userUnit).toMatch(/WantedBy=default\.target/);
     expect(userUnit).toMatch(/Environment=HOME=%h/);

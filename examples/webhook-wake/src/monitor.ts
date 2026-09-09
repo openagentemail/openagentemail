@@ -127,9 +127,11 @@ export function probeRequestHostname(hostname: string): string {
 export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: boolean }> {
   return new Promise((resolve) => {
     let settled = false;
+    let wall: ReturnType<typeof setTimeout> | undefined;
     const done = (ok: boolean) => {
       if (settled) return;
       settled = true;
+      if (wall) clearTimeout(wall);
       resolve({ ok });
     };
     let parsed: URL;
@@ -163,6 +165,11 @@ export async function httpProbe(url: string, timeoutMs: number): Promise<{ ok: b
           done(ok);
         },
       );
+      // Inactivity `timeout` is not a wall clock. A drip of header bytes resets it.
+      wall = setTimeout(() => {
+        req.destroy();
+        done(false);
+      }, timeoutMs);
       req.on('timeout', () => {
         req.destroy();
         done(false);

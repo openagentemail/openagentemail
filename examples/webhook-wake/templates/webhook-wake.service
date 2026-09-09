@@ -8,6 +8,9 @@ Type=simple
 User=ops
 Group=ops
 WorkingDirectory=/opt/openagentemail/examples/webhook-wake
+# /usr/bin/bun is a placeholder. Substitute the absolute Bun the service
+# User= can execute (`command -v bun` as that user). This tree does not
+# install or symlink Bun at /usr/bin.
 ExecStart=/usr/bin/bun src/main.ts --config /etc/webhook-wake/config.json
 Restart=on-failure
 RestartSec=2

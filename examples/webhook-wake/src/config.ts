@@ -235,6 +235,19 @@ function requireListenObject(value: unknown): { host?: unknown; port?: unknown }
   return value as { host?: unknown; port?: unknown };
 }
 
+/** Present value must be null or a nonempty terminal string, including observe. */
+function optionalCanaryTerminal(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('config_invalid:canaryTerminal');
+  }
+  const terminal = value.trim();
+  if (!isTerminalHandle(terminal)) {
+    throw new Error('config_invalid:canaryTerminal');
+  }
+  return terminal;
+}
+
 function optionalListenHost(value: unknown, fallback: string): string {
   if (value === undefined) return fallback;
   if (typeof value !== 'string' || !value.trim()) {
@@ -306,10 +319,7 @@ export function parseFileConfig(raw: unknown, options?: { loadSecrets?: boolean 
     });
   }
 
-  const canaryTerminal = parsed.canaryTerminal ? parsed.canaryTerminal.trim() : null;
-  if (canaryTerminal && !isTerminalHandle(canaryTerminal)) {
-    throw new Error('config_invalid:canaryTerminal');
-  }
+  const canaryTerminal = optionalCanaryTerminal(parsed.canaryTerminal);
   if (mode === 'canary' && !canaryTerminal) {
     throw new Error('config_invalid:canary_requires_terminal');
   }
