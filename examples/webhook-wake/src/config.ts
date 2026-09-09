@@ -16,6 +16,7 @@ import type { ReceiverConfig, ReceiverMode, RouteBinding } from './types.ts';
 
 export const DEFAULT_BODY_LIMIT = 16 * 1024;
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const MIN_RETENTION_MS = 72 * 60 * 60 * 1000;
 export const DEFAULT_MAX_RECORDS = 10_000;
 
 export type FileRouteSpec = {
@@ -31,7 +32,8 @@ export type FileRouteSpec = {
 
 export type FileConfig = {
   listen?: { host?: string; port?: number };
-  mode?: ReceiverMode;
+  /** Absent defaults to observe. A present invalid value fails load. */
+  mode?: string;
   canaryTerminal?: string | null;
   orcaBinary?: string;
   bodyLimitBytes?: number;
@@ -48,17 +50,66 @@ export type FileConfig = {
   routes?: Record<string, FileRouteSpec>;
 };
 
+function assertSecretFileMode(path: string, mode: number): void {
+  // Linux (and other POSIX) deployment: group/other bits must be off.
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    return;
+  }
+  if ((mode & 0o077) !== 0) {
+    throw new Error(`secret_insecure_mode:${path}`);
+  }
+}
+
 function readSecretFile(path: string): string {
   const resolved = resolve(path);
   const st = statSync(resolved);
   if (!st.isFile()) {
     throw new Error(`secret_not_file:${path}`);
   }
+  assertSecretFileMode(path, st.mode);
   const value = readFileSync(resolved, 'utf8').trim();
   if (!isDisplayedSecret(value)) {
     throw new Error('secret_format_invalid');
   }
   return value;
+}
+
+function optionalPositiveInt(value: unknown, field: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`config_invalid:${field}`);
+  }
+  return value;
+}
+
+/** Zero is valid (history off, ephemeral listen port). */
+function optionalNonNegInt(value: unknown, field: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`config_invalid:${field}`);
+  }
+  return value;
+}
+
+function optionalPort(value: unknown, fallback: number): number {
+  const port = optionalNonNegInt(value, 'listen.port', fallback);
+  if (port > 65535) {
+    throw new Error('config_invalid:listen.port');
+  }
+  return port;
+}
+
+function optionalRetentionMs(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < MIN_RETENTION_MS) {
+    throw new Error('config_invalid:dedup.retentionMs');
+  }
+  return value;
+}
+
+export function canaryTerminalBound(routes: RouteBinding[], canaryTerminal: string | null): boolean {
+  if (!canaryTerminal) return false;
+  return routes.some((r) => r.terminal === canaryTerminal && r.active && !r.stale);
 }
 
 function requireString(value: unknown, field: string): string {
@@ -78,6 +129,9 @@ export function loadSecretFiles(spec: FileRouteSpec): { secret: string; previous
 }
 
 export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boolean }): ReceiverConfig {
+  if (raw.mode !== undefined && raw.mode !== 'observe' && raw.mode !== 'canary') {
+    throw new Error('config_invalid:mode');
+  }
   const mode: ReceiverMode = raw.mode === 'canary' ? 'canary' : 'observe';
   const routesIn = raw.routes ?? {};
   const routes: RouteBinding[] = [];
@@ -123,32 +177,40 @@ export function parseFileConfig(raw: FileConfig, options?: { loadSecrets?: boole
   if (mode === 'canary' && !canaryTerminal) {
     throw new Error('config_invalid:canary_requires_terminal');
   }
+  if (mode === 'canary' && !canaryTerminalBound(routes, canaryTerminal)) {
+    throw new Error('config_invalid:canary_terminal_unbound');
+  }
+
+  const alertUrl = raw.alertHook?.url ?? null;
+  if (alertUrl != null && typeof alertUrl !== 'string') {
+    throw new Error('config_invalid:alertHook.url');
+  }
 
   return {
     listen: {
-      host: raw.listen?.host ?? '127.0.0.1',
-      port: raw.listen?.port ?? 8787,
+      host: typeof raw.listen?.host === 'string' && raw.listen.host.trim() ? raw.listen.host : '127.0.0.1',
+      port: optionalPort(raw.listen?.port, 8787),
     },
     mode,
     canaryTerminal,
     orcaBinary: raw.orcaBinary ?? '/usr/local/bin/orca',
-    bodyLimitBytes: raw.bodyLimitBytes ?? DEFAULT_BODY_LIMIT,
-    timestampToleranceSec: raw.timestampToleranceSec ?? 300,
-    maxV1Signatures: raw.maxV1Signatures ?? 8,
-    maxHeaderBytes: raw.maxHeaderBytes ?? 2048,
-    requestTimeoutMs: raw.requestTimeoutMs ?? 10_000,
-    maxConcurrent: raw.maxConcurrent ?? 16,
-    sendTimeoutMs: raw.sendTimeoutMs ?? 8_000,
-    outputCapBytes: raw.outputCapBytes ?? 4096,
-    wakeHistoryLimit: raw.wakeHistoryLimit ?? 0,
+    bodyLimitBytes: optionalPositiveInt(raw.bodyLimitBytes, 'bodyLimitBytes', DEFAULT_BODY_LIMIT),
+    timestampToleranceSec: optionalPositiveInt(raw.timestampToleranceSec, 'timestampToleranceSec', 300),
+    maxV1Signatures: optionalPositiveInt(raw.maxV1Signatures, 'maxV1Signatures', 8),
+    maxHeaderBytes: optionalPositiveInt(raw.maxHeaderBytes, 'maxHeaderBytes', 2048),
+    requestTimeoutMs: optionalPositiveInt(raw.requestTimeoutMs, 'requestTimeoutMs', 10_000),
+    maxConcurrent: optionalPositiveInt(raw.maxConcurrent, 'maxConcurrent', 16),
+    sendTimeoutMs: optionalPositiveInt(raw.sendTimeoutMs, 'sendTimeoutMs', 8_000),
+    outputCapBytes: optionalPositiveInt(raw.outputCapBytes, 'outputCapBytes', 4096),
+    wakeHistoryLimit: optionalNonNegInt(raw.wakeHistoryLimit, 'wakeHistoryLimit', 0),
     dedup: {
       path: raw.dedup?.path ?? '/var/lib/webhook-wake/dedup.json',
-      retentionMs: raw.dedup?.retentionMs ?? DEFAULT_RETENTION_MS,
-      maxRecords: raw.dedup?.maxRecords ?? DEFAULT_MAX_RECORDS,
+      retentionMs: optionalRetentionMs(raw.dedup?.retentionMs, DEFAULT_RETENTION_MS),
+      maxRecords: optionalPositiveInt(raw.dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
     },
     alertHook: {
-      url: raw.alertHook?.url ?? null,
-      timeoutMs: raw.alertHook?.timeoutMs ?? 2000,
+      url: alertUrl,
+      timeoutMs: optionalPositiveInt(raw.alertHook?.timeoutMs, 'alertHook.timeoutMs', 2000),
     },
     routes,
   };

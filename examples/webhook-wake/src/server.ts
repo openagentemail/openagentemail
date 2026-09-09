@@ -2,12 +2,12 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHttpAlert } from './alert.ts';
-import { findRoute } from './config.ts';
+import { canaryTerminalBound, findRoute } from './config.ts';
 import { DedupError, DedupStore, dedupKey } from './dedup.ts';
 import { decodeRouteKey, isRouteKey, normalizeDomain, normalizeMailbox } from './ids.ts';
 import { logEvent } from './log.ts';
 import { buildNeutralWakeText, buildOrcaArgv } from './notify.ts';
-import { parseVerifiedEnvelope, readMailAddress, readMailMessageId } from './parse.ts';
+import { parseVerifiedEnvelope, readMailAddress, readMailMessageId, type EnvelopeBase } from './parse.ts';
 import { inspectReadiness } from './readiness.ts';
 import { SeatSerializer } from './serialize.ts';
 import type {
@@ -55,17 +55,23 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
-    const fail = (err: Error) => {
+    const fail = (err: Error, closeSocket: boolean) => {
       if (done) return;
       done = true;
       req.removeAllListeners('data');
-      req.destroy();
+      if (closeSocket) {
+        req.destroy();
+      } else {
+        // Drain leftover bytes without storing them so the 413 can be written.
+        req.resume();
+      }
       reject(err);
     };
     req.on('data', (chunk: Buffer) => {
+      if (done) return;
       size += chunk.length;
       if (size > limit) {
-        fail(Object.assign(new Error('body_too_large'), { code: 'body_too_large' }));
+        fail(Object.assign(new Error('body_too_large'), { code: 'body_too_large' }), false);
         return;
       }
       chunks.push(chunk);
@@ -75,7 +81,7 @@ function readBoundedBody(req: IncomingMessage, limit: number): Promise<Buffer> {
       done = true;
       resolve(Buffer.concat(chunks));
     });
-    req.on('error', (err) => fail(err));
+    req.on('error', (err) => fail(err, true));
   });
 }
 
@@ -128,15 +134,25 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
   };
 
-  const handleVerifiedMail = async (route: RouteBinding, envelope: ReturnType<typeof parseVerifiedEnvelope> extends { ok: true; envelope: infer E } ? E : never): Promise<HandleResult> => {
+  const handleVerifiedMail = async (route: RouteBinding, envelope: EnvelopeBase): Promise<HandleResult> => {
     const address = readMailAddress(envelope.data);
     if (!address || address !== normalizeMailbox(route.mailbox)) {
       metrics.rejected += 1;
-      return { status: 200, disposition: 'rejected', reason: 'mailbox_mismatch' };
+      await emitAlert('mapping_mismatch');
+      logEvent('warn', 'mapping_mismatch', { routeKey: route.routeKey, reason: 'mailbox_mismatch' });
+      return { status: 503, disposition: 'rejected', reason: 'mailbox_mismatch' };
     }
     if (normalizeDomain(envelope.domain) !== route.domain) {
       metrics.rejected += 1;
-      return { status: 200, disposition: 'rejected', reason: 'domain_mismatch' };
+      await emitAlert('mapping_mismatch');
+      logEvent('warn', 'mapping_mismatch', { routeKey: route.routeKey, reason: 'domain_mismatch' });
+      return { status: 503, disposition: 'rejected', reason: 'domain_mismatch' };
+    }
+    if (config.mode === 'canary' && !canaryTerminalBound(config.routes, config.canaryTerminal)) {
+      metrics.rejected += 1;
+      await emitAlert('canary_terminal_unbound');
+      logEvent('warn', 'canary_terminal_unbound', { routeKey: route.routeKey });
+      return { status: 503, disposition: 'rejected', reason: 'canary_terminal_unbound' };
     }
 
     const key = dedupKey(route.subscriptionId, envelope.id);
@@ -292,17 +308,10 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
     const route = findRoute(config, routeKey);
     if (!route) {
+      // Unknown routes never invoke the external alert sink.
       metrics.rejected += 1;
-      await emitAlert('unknown_mapping');
       logEvent('warn', 'unknown_mapping', { routeKey });
       writeJson(res, 404, { disposition: 'rejected', reason: 'unknown_route' });
-      return;
-    }
-    if (!route.active || route.stale) {
-      metrics.rejected += 1;
-      await emitAlert('stale_mapping');
-      logEvent('warn', 'stale_mapping', { routeKey, active: route.active, stale: route.stale });
-      writeJson(res, 503, { disposition: 'rejected', reason: 'stale_mapping' });
       return;
     }
 
@@ -321,6 +330,9 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       const code = (err as { code?: string }).code;
       if (code === 'body_too_large') {
         metrics.rejected += 1;
+        res.once('finish', () => {
+          if (!req.destroyed) req.destroy();
+        });
         writeJson(res, 413, { disposition: 'rejected', reason: 'body_too_large' });
         return;
       }
@@ -345,6 +357,14 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       return;
     }
     metrics.verified += 1;
+
+    if (!route.active || route.stale) {
+      metrics.rejected += 1;
+      await emitAlert('stale_mapping');
+      logEvent('warn', 'stale_mapping', { routeKey, active: route.active, stale: route.stale });
+      writeJson(res, 503, { disposition: 'rejected', reason: 'stale_mapping' });
+      return;
+    }
 
     const parsed = parseVerifiedEnvelope(rawBody);
     if (!parsed.ok) {

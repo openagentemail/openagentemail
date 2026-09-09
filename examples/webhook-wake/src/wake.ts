@@ -1,5 +1,6 @@
 /**
- * Fixed-argv Orca send. Never uses a shell. Timeout kills the child.
+ * Fixed-argv Orca send. Never uses a shell. Timeout kills the spawned job
+ * (process group on POSIX), never the ambient runtime.
  * A zero exit records transport submission, not agent consumption.
  *
  * The child inherits a runtime-context allowlist (HOME / XDG / USER) so a
@@ -7,7 +8,7 @@
  * are never copied from the parent environment.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import type { WakeFn, WakeRequest, WakeResult } from './types.ts';
 
@@ -66,6 +67,24 @@ export function buildOrcaChildEnv(
   return env;
 }
 
+/** SIGKILL the spawned job's process group only. Never pid 1 or this process. */
+export function killSpawnedJob(child: ChildProcess): void {
+  const pid = child.pid;
+  if (typeof pid === 'number' && pid > 1 && pid !== process.pid) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+      return;
+    } catch {
+      // Group may already be gone; fall through to the direct child.
+    }
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // Already exited.
+  }
+}
+
 function takeCapped(stream: NodeJS.ReadableStream | null, cap: number): { bytes: number; overflow: boolean } {
   const state = { bytes: 0, overflow: false };
   if (!stream) return state;
@@ -105,12 +124,13 @@ export function createSpawnWake(options: SpawnWakeOptions): WakeFn {
         resolve(result);
       };
 
-      let child;
+      let child: ChildProcess;
       try {
         child = spawn(binary, args, {
           shell: false,
           stdio: ['ignore', 'pipe', 'pipe'],
           env: buildOrcaChildEnv(options.parentEnv ?? process.env, options.extraEnv),
+          detached: true,
         });
       } catch {
         finish({
@@ -128,7 +148,7 @@ export function createSpawnWake(options: SpawnWakeOptions): WakeFn {
       const stderr = takeCapped(child.stderr, options.outputCapBytes);
 
       const timer = setTimeout(() => {
-        child.kill('SIGKILL');
+        killSpawnedJob(child);
         finish({
           ok: false,
           reason: 'timeout_killed',

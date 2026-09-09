@@ -3,7 +3,8 @@
  * Fake Orca binary for argv-boundary tests. Records argv; never talks to a seat.
  */
 
-import { appendFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 const logPath = process.env.FAKE_ORCA_LOG;
 const mode = process.env.FAKE_ORCA_MODE || 'ok';
@@ -23,8 +24,17 @@ if (mode === 'hang') {
   process.exit(2);
 } else if (mode === 'bigout') {
   const n = Number(process.env.FAKE_ORCA_OUT_BYTES || 100000);
-  process.stdout.write('x'.repeat(n));
-  process.exit(0);
+  process.stdout.write('x'.repeat(n), () => process.exit(0));
+} else if (mode === 'hang-tree') {
+  const marker = process.env.FAKE_ORCA_GRANDCHILD_MARKER;
+  const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
+    stdio: 'ignore',
+    env: process.env,
+  });
+  if (marker && grandchild.pid) {
+    writeFileSync(marker, `${grandchild.pid}\n`);
+  }
+  setInterval(() => {}, 1 << 30);
 } else if (mode === 'slow') {
   const delay = Number(process.env.FAKE_ORCA_DELAY_MS || 3000);
   setTimeout(() => process.exit(0), delay);

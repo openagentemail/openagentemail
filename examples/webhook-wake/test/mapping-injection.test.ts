@@ -27,14 +27,16 @@ describe('mapping and injection boundaries', () => {
     const wrongMailbox = await postHook(receiver, {
       body: mailBody({ data: { address: 'eve@openagent.email', messageId: '123' } }),
     });
-    expect(wrongMailbox.status).toBe(200);
+    expect(wrongMailbox.status).toBe(503);
     expect(wrongMailbox.json.disposition).toBe('rejected');
+    expect(wrongMailbox.json.reason).toBe('mailbox_mismatch');
 
     const wrongDomain = await postHook(receiver, {
       body: mailBody({ domain: 'evil.example', id: 'evt_aaaaaaaabbbbccccddddeeeeffff0001' }),
     });
-    expect(wrongDomain.status).toBe(200);
+    expect(wrongDomain.status).toBe(503);
     expect(wrongDomain.json.disposition).toBe('rejected');
+    expect(wrongDomain.json.reason).toBe('domain_mismatch');
     expect(bucket).toHaveLength(0);
   });
 

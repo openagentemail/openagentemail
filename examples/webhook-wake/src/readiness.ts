@@ -1,7 +1,8 @@
 /** Readiness is not liveness: mappings and state must be visible. */
 
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
+import { canaryTerminalBound } from './config.ts';
 import type { ReceiverConfig } from './types.ts';
 
 export type MappingReport = {
@@ -22,23 +23,46 @@ export type ReadyReport = {
   warnings: string[];
 };
 
-export function inspectReadiness(config: ReceiverConfig): ReadyReport {
-  const warnings: string[] = [];
-  let stateWritable = true;
+/** Regular file with execute permission. Directories and non-executables fail. */
+export function isRegularExecutable(path: string): boolean {
+  if (!isAbsolute(path)) return false;
   try {
-    accessSync(dirname(config.dedup.path), constants.W_OK);
+    const st = statSync(path);
+    if (!st.isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
   } catch {
-    stateWritable = existsSync(dirname(config.dedup.path)) === false ? false : false;
+    return false;
+  }
+}
+
+export function inspectStateWritable(dedupPath: string): boolean {
+  const stateDir = dirname(dedupPath);
+  try {
+    accessSync(stateDir, constants.W_OK);
+    return true;
+  } catch {
+    // Existing but unwritable directory stays unready. Fallback only if absent.
+    if (existsSync(stateDir)) {
+      return false;
+    }
     try {
-      // Directory may not exist yet; create-on-write is allowed if the parent is writable.
-      accessSync(dirname(dirname(config.dedup.path)), constants.W_OK);
-      stateWritable = true;
+      accessSync(dirname(stateDir), constants.W_OK);
+      return true;
     } catch {
-      stateWritable = false;
+      return false;
     }
   }
+}
 
-  const orcaBinaryPresent = isAbsolute(config.orcaBinary) && existsSync(config.orcaBinary);
+export function inspectReadiness(config: ReceiverConfig): ReadyReport {
+  const warnings: string[] = [];
+  const stateWritable = inspectStateWritable(config.dedup.path);
+  if (!stateWritable) {
+    warnings.push('state_unwritable');
+  }
+
+  const orcaBinaryPresent = isRegularExecutable(config.orcaBinary);
   if (config.mode === 'canary' && !orcaBinaryPresent) {
     warnings.push('orca_binary_missing');
   }
@@ -67,12 +91,17 @@ export function inspectReadiness(config: ReceiverConfig): ReadyReport {
     warnings.push('no_routes');
   }
 
+  const canaryBound = canaryTerminalBound(config.routes, config.canaryTerminal);
+  if (config.mode === 'canary' && !canaryBound) {
+    warnings.push('canary_terminal_unbound');
+  }
+
   const usable = mappings.some((m) => m.active && !m.stale && m.orcaBinding === 'ok');
   const ready =
     stateWritable &&
     usable &&
     (config.mode === 'observe' || orcaBinaryPresent) &&
-    (config.mode !== 'canary' || Boolean(config.canaryTerminal));
+    (config.mode !== 'canary' || canaryBound);
 
   return {
     ready,

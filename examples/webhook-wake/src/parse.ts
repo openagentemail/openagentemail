@@ -8,7 +8,8 @@ export type EnvelopeBase = {
   payloadVersion: string;
   createdAt: string;
   domain: string;
-  data: Record<string, unknown> | undefined;
+  /** RFC-0001 §6.1: every event carries a data object. Null/absent is invalid. */
+  data: Record<string, unknown>;
 };
 
 export type ParseFail = { ok: false; reason: string };
@@ -41,13 +42,9 @@ export function parseVerifiedEnvelope(rawBody: Buffer | string): ParseOk | Parse
   if (typeof obj.domain !== 'string') {
     return { ok: false, reason: 'invalid_domain' };
   }
-  const data =
-    obj.data === undefined || obj.data === null
-      ? undefined
-      : typeof obj.data === 'object' && !Array.isArray(obj.data)
-        ? (obj.data as Record<string, unknown>)
-        : undefined;
-  if (obj.data !== undefined && data === undefined) {
+  // RFC-0001 §5.1 / §6.1 (lines 672, 775): data is a required object. Do not
+  // coerce null/absent to undefined — that would ACK mail without an address.
+  if (obj.data == null || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
     return { ok: false, reason: 'invalid_data' };
   }
   return {
@@ -58,18 +55,18 @@ export function parseVerifiedEnvelope(rawBody: Buffer | string): ParseOk | Parse
       payloadVersion: 'v1',
       createdAt: obj.createdAt,
       domain: normalizeDomain(obj.domain),
-      data,
+      data: obj.data as Record<string, unknown>,
     },
   };
 }
 
-export function readMailAddress(data: Record<string, unknown> | undefined): string | null {
+export function readMailAddress(data: Record<string, unknown>): string | null {
   if (!data || typeof data.address !== 'string') return null;
   const address = normalizeMailbox(data.address);
   return isMailbox(address) ? address : null;
 }
 
-export function readMailMessageId(data: Record<string, unknown> | undefined): string | null {
+export function readMailMessageId(data: Record<string, unknown>): string | null {
   if (!data || data.messageId == null) return null;
   const value = String(data.messageId);
   return isSafeMessageId(value) ? value : null;

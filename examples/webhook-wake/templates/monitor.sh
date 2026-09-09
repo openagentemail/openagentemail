@@ -47,6 +47,9 @@ load_state() {
 }
 
 save() {
+	# Atomic rename across timer activations (StateDirectory). No fsync:
+	# a crash between write and disk flush may roll back one tick. That is
+	# a documented monitor limitation, not the receiver 2xx contract.
 	dir=$(dirname "$STATE_FILE")
 	mkdir -p "$dir"
 	tmp="$STATE_FILE.tmp.$$"

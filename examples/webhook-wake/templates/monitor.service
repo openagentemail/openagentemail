@@ -1,6 +1,8 @@
 [Unit]
 Description=webhook-wake external health probe (one shot)
 After=network-online.target
+# Install filename MUST be webhook-wake-monitor.service (timer Unit=).
+#   cp templates/monitor.service /etc/systemd/system/webhook-wake-monitor.service
 
 [Service]
 Type=oneshot

@@ -43,4 +43,30 @@ describe('replay and restart dedup', () => {
     expect(replay.json.disposition).toBe('duplicate');
     expect(bucket).toHaveLength(1);
   });
+
+  test('observed records suppress the same event id after a canary switch', async () => {
+    const bucket: WakeRequest[] = [];
+    const config = testConfig({ mode: 'observe' });
+    const observer = await startReceiver(config, { wake: recordingWake(bucket) });
+    receivers.push(observer);
+    const body = mailBody();
+    expect((await postHook(observer, { body })).json.disposition).toBe('would_wake');
+    await observer.close();
+    receivers.pop();
+
+    const canary = createReceiver({ ...config, mode: 'canary' }, { wake: recordingWake(bucket) });
+    await listenReceiver(canary);
+    receivers.push(canary);
+    const replay = await postHook(canary, { body });
+    expect(replay.status).toBe(200);
+    expect(replay.json.disposition).toBe('duplicate');
+    expect(bucket).toHaveLength(0);
+
+    const fresh = await postHook(canary, {
+      body: mailBody({ id: 'evt_22222222-3333-4444-5555-666666666666' }),
+    });
+    expect(fresh.json.disposition).toBe('submitted');
+    expect(bucket).toHaveLength(1);
+  });
 });
+

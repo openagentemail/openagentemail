@@ -5,6 +5,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/openagentemail/examples/webhook-wake
+# Config lives under the operator home (readable with ProtectHome=read-only).
 ExecStart=/usr/bin/bun src/main.ts --config %h/.config/webhook-wake/config.json
 Restart=on-failure
 RestartSec=2
@@ -14,6 +15,9 @@ ProtectHome=read-only
 # User instance: systemd.unit(5) expands %h/%U for the calling user, not root.
 Environment=HOME=%h
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+# Writable durable store: ~/.local/state/webhook-wake (set dedup.path to match).
+StateDirectory=webhook-wake
+ReadWritePaths=%h/.local/state/webhook-wake
 PrivateTmp=true
 
 [Install]

@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 const systemUnit = readFileSync(fileURLToPath(new URL('../templates/webhook-wake.service', import.meta.url)), 'utf8');
 const userUnit = readFileSync(fileURLToPath(new URL('../templates/webhook-wake.user.service', import.meta.url)), 'utf8');
 const runtimeEnv = readFileSync(fileURLToPath(new URL('../templates/runtime.env.example', import.meta.url)), 'utf8');
+const monitorTimer = readFileSync(fileURLToPath(new URL('../templates/monitor.timer', import.meta.url)), 'utf8');
+const monitorService = readFileSync(fileURLToPath(new URL('../templates/monitor.service', import.meta.url)), 'utf8');
+const userConfig = readFileSync(fileURLToPath(new URL('../templates/config.user.example.json', import.meta.url)), 'utf8');
+const exampleSecret = readFileSync(fileURLToPath(new URL('../templates/canary.whs.example', import.meta.url)), 'utf8').trim();
 
 describe('systemd specifier policy', () => {
   test('system unit does not use manager %h/%U for HOME or XDG_RUNTIME_DIR', () => {
@@ -16,9 +20,12 @@ describe('systemd specifier policy', () => {
   });
 
   test('operator runtime.env example supplies a non-root context without secrets', () => {
-    expect(runtimeEnv).toMatch(/^HOME=\/home\/example-operator$/m);
+    expect(runtimeEnv).toMatch(/^HOME=\/home\/ops$/m);
+    expect(runtimeEnv).toMatch(/^USER=ops$/m);
     expect(runtimeEnv).toMatch(/^XDG_RUNTIME_DIR=\/run\/user\/1000$/m);
     expect(runtimeEnv).not.toMatch(/\/root/);
+    expect(systemUnit).toMatch(/^User=ops$/m);
+    expect(systemUnit).toMatch(/^StateDirectory=webhook-wake$/m);
     const assignments = runtimeEnv
       .split('\n')
       .filter((line) => line.includes('=') && !line.startsWith('#'))
@@ -30,5 +37,15 @@ describe('systemd specifier policy', () => {
     expect(userUnit).toMatch(/WantedBy=default\.target/);
     expect(userUnit).toMatch(/Environment=HOME=%h/);
     expect(userUnit).toMatch(/Environment=XDG_RUNTIME_DIR=\/run\/user\/%U/);
+    expect(userUnit).toMatch(/StateDirectory=webhook-wake/);
+    expect(userUnit).toMatch(/ReadWritePaths=%h\/\.local\/state\/webhook-wake/);
+  });
+
+  test('monitor timer Unit matches the documented install rename', () => {
+    expect(monitorTimer).toMatch(/^Unit=webhook-wake-monitor\.service$/m);
+    expect(monitorService).toContain('webhook-wake-monitor.service');
+    expect(userConfig).toContain('/home/ops/.local/state/webhook-wake/dedup.json');
+    expect(exampleSecret).toMatch(/^whs_/);
+    expect(exampleSecret).not.toMatch(/^whs_[0-9a-f]{64}$/);
   });
 });

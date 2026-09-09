@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { chmodSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync } from 'node:fs';
 import { CANARY_TERMINAL, mailBody, postHook, startReceiver, tempDir, testConfig } from './helpers.ts';
 import { createSpawnWake } from '../src/wake.ts';
 import type { Receiver } from '../src/server.ts';
@@ -80,4 +80,30 @@ describe('timeout, kill, and fake argv boundary', () => {
     expect(big.reason).toBe('output_capped');
     expect(big.stdoutBytes).toBeGreaterThan(32);
   });
+
+  test('timeout kills the spawned job including a hanging grandchild, not this process', async () => {
+    const dir = tempDir();
+    const marker = join(dir, 'grandchild.pid');
+    const hang = createSpawnWake({
+      timeoutMs: 200,
+      outputCapBytes: 64,
+      extraEnv: { FAKE_ORCA_MODE: 'hang-tree', FAKE_ORCA_GRANDCHILD_MARKER: marker },
+    });
+    const self = process.pid;
+    const hung = await hang({
+      terminal: CANARY_TERMINAL,
+      text: 'x',
+      argv: [fakeOrca, 'terminal', 'send', '--terminal', CANARY_TERMINAL, '--enter', '--text', 'x'],
+    });
+    expect(hung.ok).toBe(false);
+    expect(hung.reason).toBe('timeout_killed');
+    expect(process.pid).toBe(self);
+    expect(existsSync(marker)).toBe(true);
+    const gcPid = Number(readFileSync(marker, 'utf8').trim());
+    expect(gcPid).toBeGreaterThan(1);
+    expect(gcPid).not.toBe(self);
+    await Bun.sleep(100);
+    expect(() => process.kill(gcPid, 0)).toThrow();
+  });
 });
+

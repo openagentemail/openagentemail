@@ -89,4 +89,21 @@ describe('local HTTP integration', () => {
     const json = (await res.json()) as { reason?: string };
     expect(json.reason).toBe('signature_mismatch');
   });
+
+  test('signed envelope with data null is 400 invalid_data, never 2xx', async () => {
+    const receiver = await startReceiver(testConfig({ mode: 'canary' }), { wake: recordingWake([]) });
+    receivers.push(receiver);
+    const body = JSON.stringify({
+      id: 'evt_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      type: 'mail.received',
+      payloadVersion: 'v1',
+      createdAt: '2026-09-03T12:20:00.000Z',
+      domain: 'openagent.email',
+      data: null,
+    });
+    const posted = await postHook(receiver, { body });
+    expect(posted.status).toBe(400);
+    expect(posted.json.reason).toBe('invalid_data');
+  });
 });
+

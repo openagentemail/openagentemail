@@ -1,5 +1,9 @@
 [Unit]
 Description=Probe webhook-wake every 30 seconds from an independent host
+# Install as webhook-wake-monitor.timer so Unit= below resolves.
+#   cp templates/monitor.timer /etc/systemd/system/webhook-wake-monitor.timer
+#   cp templates/monitor.service /etc/systemd/system/webhook-wake-monitor.service
+#   cp templates/monitor.sh /usr/local/bin/webhook-wake-monitor.sh
 
 [Timer]
 OnBootSec=30

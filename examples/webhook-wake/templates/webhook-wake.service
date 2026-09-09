@@ -19,6 +19,8 @@ ProtectHome=read-only
 # Operator HOME / XDG_RUNTIME_DIR must come from this file. Missing file fails start.
 EnvironmentFile=/etc/webhook-wake/runtime.env
 PrivateTmp=true
+# Creates /var/lib/webhook-wake owned by User=ops before namespace setup.
+StateDirectory=webhook-wake
 ReadWritePaths=/var/lib/webhook-wake
 AmbientCapabilities=
 CapabilityBoundingSet=

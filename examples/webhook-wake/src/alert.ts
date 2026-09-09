@@ -9,6 +9,8 @@ const ALLOWED_CODES = new Set([
   'timeout_killed',
   'unknown_mapping',
   'stale_mapping',
+  'mapping_mismatch',
+  'canary_terminal_unbound',
   'alert_failed',
   'ready_failed',
   'health_failed',

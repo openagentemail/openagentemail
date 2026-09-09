@@ -20,8 +20,8 @@ function redactValue(key: string, value: unknown): unknown {
   if (REDACT_KEYS.has(key.toLowerCase())) {
     return '[redacted]';
   }
-  if (typeof value === 'string' && (value.startsWith('whs_') || value.length > 256)) {
-    if (value.startsWith('whs_')) return 'whs_[redacted]';
+  if (typeof value === 'string' && value.startsWith('whs_')) {
+    return 'whs_[redacted]';
   }
   return value;
 }
