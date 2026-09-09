@@ -1,0 +1,13 @@
+[Unit]
+Description=webhook-wake external health probe (one shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HEALTH_URL=https://webhook-wake.example.com/health
+ExecStart=/usr/local/bin/webhook-wake-monitor.sh
+User=nobody
+Group=nogroup
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true

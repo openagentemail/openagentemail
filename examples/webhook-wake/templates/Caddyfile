@@ -1,0 +1,6 @@
+# Public HTTPS 443 reverse-proxy to the loopback receiver.
+# Replace example.com with the deployment-order hostname. Do not expose Orca.
+
+example.com {
+	reverse_proxy 127.0.0.1:8787
+}

@@ -1,0 +1,23 @@
+[Unit]
+Description=openagent.email webhook-wake receiver (loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ops
+Group=ops
+WorkingDirectory=/opt/openagentemail/examples/webhook-wake
+ExecStart=/usr/bin/bun src/main.ts --config /etc/webhook-wake/config.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/webhook-wake
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
