@@ -1,0 +1,16 @@
+{
+  "name": "openagentemail-webhook-wake-example",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22",
+    "bun": ">=1.2.21"
+  },
+  "description": "Optional standalone OAE webhook receiver that wakes a pre-bound Orca seat. No production API path.",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "test": "bun test",
+    "typecheck": "../../packages/api/node_modules/typescript/bin/tsc -p tsconfig.json --noEmit"
+  }
+}

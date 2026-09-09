@@ -1,0 +1,36 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "mode": "observe",
+  "canaryTerminal": "term_examplecanary0001",
+  "orcaBinary": "/usr/local/bin/orca",
+  "bodyLimitBytes": 16384,
+  "timestampToleranceSec": 300,
+  "maxV1Signatures": 8,
+  "maxHeaderBytes": 2048,
+  "requestTimeoutMs": 10000,
+  "maxConcurrent": 16,
+  "sendTimeoutMs": 8000,
+  "outputCapBytes": 4096,
+  "wakeHistoryLimit": 0,
+  "dedup": {
+    "path": "/var/lib/webhook-wake/dedup.json",
+    "retentionMs": 604800000,
+    "maxRecords": 10000
+  },
+  "alertHook": {
+    "url": null,
+    "timeoutMs": 2000
+  },
+  "routes": {
+    "canary": {
+      "subscriptionId": "whk_00000000-0000-0000-0000-000000000001",
+      "domain": "example.com",
+      "mailbox": "agent@example.com",
+      "secretFile": "/etc/webhook-wake/canary.whs",
+      "previousSecretFile": null,
+      "terminal": "term_examplecanary0001",
+      "active": true,
+      "stale": false
+    }
+  }
+}

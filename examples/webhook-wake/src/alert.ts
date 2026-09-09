@@ -1,0 +1,77 @@
+/** Bounded alert hook. Codes are fixed; caller input is never interpolated. */
+
+import type { AlertEvent, AlertFn } from './types.ts';
+
+const ALLOWED_CODES = new Set([
+  'send_failed',
+  'storage_failed',
+  'storage_capacity',
+  'timeout_killed',
+  'unknown_mapping',
+  'stale_mapping',
+  'mapping_mismatch',
+  'canary_terminal_unbound',
+  'alert_failed',
+  'ready_failed',
+  'health_failed',
+  'health_recovered',
+  'monitor_probe_failed',
+  'monitor_alert_failed',
+]);
+
+export function sanitizeAlertEvent(event: AlertEvent): AlertEvent {
+  const code = ALLOWED_CODES.has(event.code) ? event.code : 'ready_failed';
+  return { kind: event.kind, code };
+}
+
+export function createHttpAlert(url: string | null, timeoutMs: number): AlertFn {
+  return async (event) => {
+    if (!url) {
+      return { ok: true };
+    }
+    const body = JSON.stringify(sanitizeAlertEvent(event));
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+        signal: ac.signal,
+        redirect: 'manual',
+      });
+      const status = res.status;
+      // Headers are enough. Cancel 200 and non-200 bodies while the timer is live,
+      // then abort so keep-alive cannot retain the chunked socket.
+      const stream = res.body;
+      if (stream && !stream.locked) {
+        try {
+          await stream.cancel();
+        } catch {
+          /* already closed */
+        }
+      }
+      try {
+        ac.abort();
+      } catch {
+        /* already aborted */
+      }
+      // Trusted-operator URL: do not follow redirects to another host.
+      if (status !== 200) {
+        return { ok: false, reason: 'alert_http_status' };
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: 'alert_transport' };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+export function recordingAlert(bucket: AlertEvent[]): AlertFn {
+  return async (event) => {
+    bucket.push(sanitizeAlertEvent(event));
+    return { ok: true };
+  };
+}

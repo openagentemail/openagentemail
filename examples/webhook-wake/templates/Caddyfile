@@ -1,0 +1,16 @@
+# Public HTTPS 443 reverse-proxy to the loopback receiver.
+# Replace example.com with the deployment-order hostname. Do not expose Orca.
+# Public routes: POST /hooks/* and GET /health (independent monitor).
+# GET /ready stays private — it lists routeKey and subscriptionId.
+
+example.com {
+	handle /health {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle /hooks/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle {
+		respond 404
+	}
+}

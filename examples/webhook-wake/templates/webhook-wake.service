@@ -1,0 +1,32 @@
+[Unit]
+Description=openagent.email webhook-wake receiver (loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ops
+Group=ops
+WorkingDirectory=/opt/openagentemail/examples/webhook-wake
+# /usr/bin/bun is a placeholder. Substitute the absolute Bun the service
+# User= can execute (`command -v bun` as that user). This tree does not
+# install or symlink Bun at /usr/bin.
+ExecStart=/usr/bin/bun src/main.ts --config /etc/webhook-wake/config.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+# read-only home keeps a colocated Orca install visible; true would hide it.
+ProtectHome=read-only
+# System-mode %h/%U expand for the service manager (/root and UID 0), not User=.
+# Operator HOME / XDG_RUNTIME_DIR must come from this file. Missing file fails start.
+EnvironmentFile=/etc/webhook-wake/runtime.env
+PrivateTmp=true
+# Creates /var/lib/webhook-wake owned by User=ops before namespace setup.
+StateDirectory=webhook-wake
+ReadWritePaths=/var/lib/webhook-wake
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
