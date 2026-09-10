@@ -149,6 +149,18 @@ export function journalDir(): string {
   return join(dataDir(), 'task-lease-journal');
 }
 
+/** Durably commit a newly created directory entry in the parent DATA_DIR.
+ * Child file and journal-directory fsyncs do not cover the parent's entry.
+ * Failures propagate to the caller; the descriptor is always closed. */
+function fsyncParentDataDir(): void {
+  const parentFd = openSync(dataDir(), 'r');
+  try {
+    fsyncSync(parentFd);
+  } finally {
+    closeSync(parentFd);
+  }
+}
+
 export function markerPath(): string {
   return join(journalDir(), 'activated');
 }
@@ -488,6 +500,10 @@ export function bootstrapTaskLeaseJournal(): JournalFile {
   } finally {
     closeSync(dirFd);
   }
+  // Commit the new journal directory's name entry in DATA_DIR before
+  // publishing success. On failure nothing is published in memory and the
+  // files on disk are left for explicit operator handling.
+  fsyncParentDataDir();
   cache = file;
   loaded = true;
   previouslyLoaded = true;

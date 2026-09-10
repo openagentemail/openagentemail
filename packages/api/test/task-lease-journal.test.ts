@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -213,6 +214,42 @@ describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
 
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('bootstrap 真实 syscall：父 DATA_DIR fsync 在 journal 目录 fsync 之后、成功返回之前（子进程 node:fs spy 观察）', () => {
+    // External syscall observation, not a callback seam: deleting the real
+    // parent fsync removes the traced call and turns this test red. This is a
+    // syscall/order contract, not a host power-loss experiment.
+    // Isolated-subprocess node:fs spy (calls the REAL fsyncSync through and
+    // records fd->path). A syscall/order contract observed at the Node API
+    // boundary, not external syscall tracing or a host power-loss experiment.
+    const preload = join(__dirname, 'support', 'journal-fsync-spy-preload.ts');
+    const probe = join(__dirname, 'support', 'journal-parent-fsync-probe.ts');
+    const parent = mkdtempSync(join(tmpdir(), 'oae-m2-parent-'));
+    const spyLog = join(parent, 'spy.json');
+    const run = spawnSync('bun', ['--preload', preload, probe, parent], {
+      encoding: 'utf8',
+      timeout: 120_000,
+      env: { ...process.env, OAE_FS_SPY_LOG: spyLog },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('BOOTSTRAP_OK');
+
+    // The real bootstrap commits the parent's directory entry after the
+    // journal directory's LAST fsync; every call hits the kernel through the
+    // call-through spy. A missing parent fsync removes the recorded call and
+    // fails this ordering check (snapshot red-proof evidence artifact).
+    const journalDir = join(parent, 'task-lease-journal');
+    const fsyncPaths = (JSON.parse(readFileSync(spyLog, 'utf8')) as Array<{ op: string; path: string | null }>)
+      .filter((event) => event.op === 'fsync' && typeof event.path === 'string')
+      .map((event) => event.path as string);
+    const journalDirSync = fsyncPaths.lastIndexOf(journalDir);
+    const parentSync = fsyncPaths.lastIndexOf(parent);
+    expect(journalDirSync).toBeGreaterThanOrEqual(0);
+    expect(parentSync).toBeGreaterThan(journalDirSync);
+    expect(fsyncPaths).toContain(join(journalDir, 'journal.json'));
+    expect(fsyncPaths).toContain(join(journalDir, 'journal.seal.tmp'));
+    expect(fsyncPaths).toContain(join(journalDir, 'activated'));
   });
 
   test('seal 在 exists 检查后不可读（变成目录）→ corrupt + 永久 latch，文件恢复不解锁', async () => {
