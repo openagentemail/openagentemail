@@ -22,8 +22,11 @@ const {
   claimLostTask,
   claimTask,
   emitPendingExpiryAuditsOnce,
+  getTask,
   isTaskLeaseTokenCurrent,
+  listTaskBoard,
   reapExpiredTaskLeasesOnce,
+  releaseTask,
   renewTask,
   taskFromMessages,
   toTaskView,
@@ -38,6 +41,8 @@ const {
 const {
   claimLeaseHeadersForTests,
   parseTaskMessageForTests,
+  setPostSmtpAcceptHookForTests,
+  setPreSmtpHookForTests,
   withTaskLeaseExpiryAuditM3ForTests,
   withTaskLeasePendingJournalForTests,
   withTaskLeasesEnabledForTests,
@@ -45,13 +50,16 @@ const {
 const {
   bootstrapTaskLeaseJournal,
   journalPathsForTests,
+  journalRecordsFor,
   loadLeaseJournal,
+  markJournalFate,
   resetJournalMemoryForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
   setJournalDurableEvidenceForTests,
   setJournalNowForTests,
   unresolvedClaimFence,
+  upsertJournalRecord,
 } = await import('../src/lib/task-lease-journal.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
@@ -125,6 +133,8 @@ afterEach(() => {
   setTaskGetForTests(null);
   setTaskListAllForTests(null);
   setTaskSendMailForTests(null);
+  setPreSmtpHookForTests(null);
+  setPostSmtpAcceptHookForTests(null);
   setJournalCrashHookForTests(null);
   setJournalNowForTests(null);
   setJournalDurableEvidenceForTests(null);
@@ -158,15 +168,21 @@ describe('M2 配置面与默认关', () => {
       { name: 'mcp-readme', text: readFileSync(new URL('../../mcp/README.md', import.meta.url), 'utf8') },
     ];
     const observed = surfaces.map(({ name, text }) => {
-      const nearby = text.match(/TASK_LEASES_PENDING_JOURNAL[\s\S]{0,280}/)?.[0] ?? '';
+      const marker = 'TASK_LEASES_PENDING_JOURNAL';
+      const index = text.indexOf(marker);
+      const nearby = index < 0 ? '' : text.slice(Math.max(0, index - 280), index + marker.length + 280);
       return {
         name,
-        mentionsFlag: text.includes('TASK_LEASES_PENDING_JOURNAL'),
-        defaultsFalse: /false/.test(nearby) || /default false/i.test(text),
-        requiresLeases: /TASK_LEASES_ENABLED/.test(text),
+        mentionsFlag: index >= 0,
+        defaultsFalse: /false/.test(nearby) || /default false/i.test(nearby),
+        requiresLeases: /TASK_LEASES_ENABLED/.test(nearby),
       };
     });
-    expect(observed.every((row) => row.mentionsFlag && row.defaultsFalse && row.requiresLeases)).toBe(true);
+    for (const row of observed) {
+      expect(row).toEqual({
+        name: row.name, mentionsFlag: true, defaultsFalse: true, requiresLeases: true,
+      });
+    }
   });
 });
 
@@ -329,6 +345,200 @@ describe('M2-2 crash 边界 fail-closed', () => {
     expect(sent).toHaveLength(1);
     const live = await loadLeaseJournal();
     expect(live.records.some((row) => row.taskId === ID && row.generation === 1)).toBe(true);
+  });
+});
+
+describe('PR181 R1 A/D/E/F/G/H/I/J', () => {
+  testOn('A: nonempty release reason survives restart hydration and keeps firstClaimedAt', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async () => ({ messageId: '<a>' }));
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claimRow = (await loadLeaseJournal()).records.find((row) => row.kind === 'claim');
+    expect(claimRow).toBeDefined();
+    await markJournalFate(claimRow!, 'indexed');
+    setTaskGetForTests(async () => grant.task);
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff-complete' });
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const file = await loadLeaseJournal();
+    const rel = file.records.find((row) => row.kind === 'release');
+    expect(rel?.reason).toBe('handoff-complete');
+    expect(rel?.firstClaimedAt).toBe('2026-08-24T00:00:00.000Z');
+    const view = await getTask(ID);
+    expect(view?.releasedLease?.reason).toBe('handoff-complete');
+    expect(view?.releasedLease?.firstClaimedAt).toBe('2026-08-24T00:00:00.000Z');
+  });
+
+  testOn('D: crash-before-SMTP release does not clear durable lease or allow N+1', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async () => ({ messageId: '<d>' }));
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claimRow = (await loadLeaseJournal()).records.find((row) => row.kind === 'claim');
+    expect(claimRow).toBeDefined();
+    await markJournalFate(claimRow!, 'indexed');
+    setTaskGetForTests(async () => grant.task);
+    setPreSmtpHookForTests(async () => {
+      throw new Error('killed_pre_smtp');
+    });
+    await expect(releaseTask({
+      id: ID, from: B, leaseToken: grant.leaseToken, reason: 'pause',
+    })).rejects.toMatchObject({ message: 'killed_pre_smtp' });
+    setPreSmtpHookForTests(null);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const view = await getTask(ID);
+    expect(view?.lease?.leaseGeneration).toBe(1);
+    expect(view?.releasedLease).toBeUndefined();
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_overlay_pending_index',
+    });
+  });
+
+  testOn('E: unresolved tombstone retry reuses exact at/identity', async () => {
+    isolateJournal();
+    let now = START;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async () => ({ messageId: '<e>' }));
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    now = START + TWO_H;
+    setPostSmtpAcceptHookForTests(async () => {
+      throw new Error('killed_after_accept');
+    });
+    await expect(claimLostTask({ id: ID })).rejects.toMatchObject({ message: 'killed_after_accept' });
+    const first = (await loadLeaseJournal()).records.find((row) => row.kind === 'tombstone');
+    expect(first?.fate).toBe('intent');
+    const at = first!.at;
+    const payload = first!.signedPayload;
+    setPostSmtpAcceptHookForTests(null);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    await claimLostTask({ id: ID });
+    const tombs = journalRecordsFor(ID).filter((row) => row.kind === 'tombstone');
+    expect(tombs).toHaveLength(1);
+    expect(tombs[0]?.at).toBe(at);
+    expect(tombs[0]?.signedPayload).toBe(payload);
+  });
+
+  bunTest('F: journal off 时 durableGen 取 receipts 最大值', async () => {
+    await withM2Off(async () => {
+      isolateJournal();
+      setTaskNowForTests(() => START);
+      setTaskGetForTests(async () => ({
+        ...submittedTask(),
+        expiredLease: {
+          leaseGeneration: 1,
+          claimedUntil: '2026-08-24T00:05:00.000Z',
+          expiredAt: '2026-08-24T00:05:00.000Z',
+          firstClaimedAt: '2026-08-24T00:00:00.000Z',
+        },
+        lostLease: {
+          leaseGeneration: 2,
+          claimedUntil: '2026-08-24T00:05:00.000Z',
+          lostAt: '2026-08-24T02:00:00.000Z',
+          firstClaimedAt: '2026-08-24T00:00:00.000Z',
+        },
+      }));
+      setTaskSendMailForTests(async () => ({ messageId: '<f>' }));
+      const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      expect(grant.leaseGeneration).toBe(3);
+    });
+  });
+
+  testOn('G: tombstone accept 后 markFate 失败不得报成功', async () => {
+    isolateJournal();
+    let now = START;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async () => ({ messageId: '<g>' }));
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    now = START + TWO_H;
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'tombstone',
+      generation: 1,
+      actor: 'server',
+      at: '2026-08-24T02:00:00.000Z',
+      fate: 'accepted',
+      claimedUntil: '2026-08-24T00:05:00.000Z',
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    });
+    setJournalCrashHookForTests('before-write');
+    await expect(claimLostTask({ id: ID })).rejects.toMatchObject({
+      message: 'lease_journal_crash_before_write',
+    });
+    expect(unresolvedClaimFence(ID)?.kind).toBe('claim');
+  });
+
+  testOn('H: restart 后 list/detail 对 accepted claim 投影一致且走 publicRead', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskListAllForTests(async () => [submittedTask()]);
+    setTaskSendMailForTests(async () => ({ messageId: '<h>' }));
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    const detail = await getTask(ID);
+    expect(detail?.state).toBe('working');
+    const board = await listTaskBoard(
+      { status: 'all', period: '30d', limit: 20 },
+      { kind: 'admin' },
+    );
+    expect(board.tasks.find((row) => row.id === ID)?.state).toBe('working');
+  });
+
+  testOn('I: 成功重发后 fate=accepted，后续重试不再 SMTP', async () => {
+    isolateJournal();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => submittedTask());
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<i-${sent.length}>` };
+    });
+    setPostSmtpAcceptHookForTests(async () => {
+      throw new Error('killed_after_accept');
+    });
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'killed_after_accept',
+    });
+    expect(sent).toHaveLength(1);
+    setPostSmtpAcceptHookForTests(null);
+    clearQueuedEventsForTests();
+    resetJournalMemoryForTests();
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_overlay_pending_index',
+    });
+    expect(sent).toHaveLength(2);
+    expect((await loadLeaseJournal()).records.find((row) => row.kind === 'claim')?.fate).toBe('accepted');
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 })).rejects.toMatchObject({
+      message: 'lease_overlay_pending_index',
+    });
+    expect(sent).toHaveLength(2);
+  });
+
+  testOn('J: 授权读 journal 失败映射 503', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-m2-j503-'));
+    setJournalDataDirForTests(dir);
+    setTaskGetForTests(async () => submittedTask());
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'identity', address: B });
+      await next();
+    });
+    app.route('/v1/tasks', createTaskRoutes());
+    const res = await app.request(`/v1/tasks/${ID}/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'lease_journal_not_bootstrapped' });
   });
 });
 

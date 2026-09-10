@@ -12,11 +12,8 @@ process.env.NODE_ENV = 'test';
 const { execSync } = await import('node:child_process');
 const { createHash } = await import('node:crypto');
 const {
-  closeSync,
-  constants,
   existsSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   rmSync,
 } = await import('node:fs');
@@ -28,10 +25,30 @@ const {
   resetJournalMemoryForTests,
   setJournalDataDirForTests,
 } = await import('../src/lib/task-lease-journal.ts');
-const { config } = await import('../src/lib/config.ts');
 
 const WORKER_SCRIPT = join(import.meta.dir, 'support', 'task-lease-sigkill-worker.ts');
 const PKG_DIR = join(import.meta.dir, '..');
+
+async function waitForBarrierOrChildExit(
+  child: { exited: Promise<number> },
+  barrierPath: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(barrierPath)) return;
+    const outcome = await Promise.race([
+      child.exited.then((code) => ({ exited: true as const, code })),
+      new Promise<{ exited: false }>((resolve) => {
+        setTimeout(() => resolve({ exited: false }), 25);
+      }),
+    ]);
+    if (outcome.exited) {
+      throw new Error(`sigkill child exited before barrier (code=${outcome.code})`);
+    }
+  }
+  throw new Error('timed out waiting for sigkill barrier');
+}
 
 describe('M2 Real Subprocess SIGKILL Tests', () => {
   test('Case A: SMTP ACCEPT 后、fate 落盘前被 SIGKILL，重启识别 unconfirmed 并重发同 identity，不新开代', async () => {
@@ -80,9 +97,8 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
         stderr: 'inherit',
       });
 
-      // Step 2 & 3: Parent blocks on syncFifo until Child 1 signals barrier reached
-      const syncFd = openSync(syncFifo, constants.O_RDONLY);
-      closeSync(syncFd);
+      // Parent waits for the post-ACCEPT barrier without a blocking FIFO open.
+      await waitForBarrierOrChildExit(child1, barrierFile);
 
       // Read barrier record written by Child 1
       expect(existsSync(barrierFile)).toBe(true);
@@ -243,8 +259,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
         stderr: 'inherit',
       });
 
-      const syncFd = openSync(syncFifo, constants.O_RDONLY);
-      closeSync(syncFd);
+      await waitForBarrierOrChildExit(child1, barrierFile);
 
       expect(existsSync(barrierFile)).toBe(true);
       const barrier = JSON.parse(readFileSync(barrierFile, 'utf8')) as {
@@ -347,6 +362,20 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
     } finally {
       setJournalDataDirForTests(undefined);
       resetJournalMemoryForTests();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('parent rendezvous: child early-exit fails fast instead of hanging on FIFO', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'oae-sigkill-early-'));
+    const barrierFile = join(dataDir, 'barrier.json');
+    try {
+      const child = Bun.spawn([process.execPath, '-e', 'process.exit(7)'], {
+        stdout: 'inherit',
+        stderr: 'inherit',
+      });
+      await expect(waitForBarrierOrChildExit(child, barrierFile, 3000)).rejects.toThrow(/exited before barrier/);
+    } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }
   });

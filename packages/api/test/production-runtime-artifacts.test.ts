@@ -12,6 +12,8 @@ test('#91 R1 RED: canonical runtime bundle carries the ntfy provisioner and ever
 
   const provisioner = join(pkgDir, 'dist', 'ntfy-provision.js');
   expect(existsSync(provisioner)).toBe(true);
+  const leaseProvisioner = join(pkgDir, 'dist', 'task-lease-provision.js');
+  expect(existsSync(leaseProvisioner)).toBe(true);
 
   for (const composeName of ['compose.yaml', 'compose.api-only.yaml']) {
     const compose = readFileSync(join(repoDir, composeName), 'utf8');

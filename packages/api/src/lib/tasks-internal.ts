@@ -1855,16 +1855,25 @@ async function scanDurableTasks(
  * Project a durable task list snapshot by combining it with allowed unindexed
  * synthetic task bases and applying queued-event overlays.
  */
-function projectTaskListSnapshot(snapshot: TaskListSnapshot): Task[] {
+async function hydrateTaskListFromJournal(tasks: Task[]): Promise<void> {
+  if (!taskLeasePendingJournalEnabled() || tasks.length === 0) return;
+  await ensureLeaseJournalLoaded();
+  for (const task of tasks) {
+    await hydrateOverlaysFromLoadedJournal(task);
+  }
+}
+
+async function projectTaskListSnapshot(snapshot: TaskListSnapshot): Promise<Task[]> {
   const unindexed = getUnindexedSyntheticTaskBases(snapshot.tasks, snapshot.hadMatchingRowsIds);
   const combined = unindexed.length === 0 ? snapshot.tasks : [...snapshot.tasks, ...unindexed];
-  // list/board/listCache 装配都是公共读，停播在读时计算，不额外失效缓存。
+  // One journal load for the whole list; publicRead keeps the M1 overlay bound.
+  await hydrateTaskListFromJournal(combined);
   return combined.map((task) => mergeQueuedEvents(task, { publicRead: true }));
 }
 
 export async function listTasks(state?: TaskState): Promise<Task[]> {
   const snapshot = await scanDurableTasks();
-  const projected = projectTaskListSnapshot(snapshot);
+  const projected = await projectTaskListSnapshot(snapshot);
   const filtered = state ? projected.filter((task) => task.state === state) : projected;
   return filtered.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
@@ -2623,6 +2632,7 @@ function journalRecordFromLease(
   event: LeaseEvent,
   fate: JournalRecord['fate'],
   signedPayload?: string,
+  firstClaimedAt?: string,
 ): JournalRecord {
   const rec: JournalRecord = {
     taskId,
@@ -2636,7 +2646,9 @@ function journalRecordFromLease(
   if ('claimedUntil' in event) rec.claimedUntil = event.claimedUntil;
   if ('tokenVerifier' in event) rec.tokenVerifier = event.tokenVerifier;
   if (event.event === 'claim_lost') rec.firstClaimedAt = event.firstClaimedAt;
+  else if (firstClaimedAt) rec.firstClaimedAt = firstClaimedAt;
   if (event.event === 'claim') rec.generationClaimedAt = event.at;
+  if (event.event === 'release') rec.reason = event.reason;
   return rec;
 }
 
@@ -2657,7 +2669,7 @@ function leaseEventFromJournal(rec: JournalRecord): LeaseEvent | null {
     if (!rec.tokenVerifier) return null;
     return {
       version: 1, event: 'release', actor: rec.actor, at: rec.at,
-      generation: rec.generation, tokenVerifier: rec.tokenVerifier, reason: '',
+      generation: rec.generation, tokenVerifier: rec.tokenVerifier, reason: rec.reason ?? '',
     };
   }
   if (rec.kind === 'expired') {
@@ -2677,14 +2689,16 @@ function leaseEventFromJournal(rec: JournalRecord): LeaseEvent | null {
   return null;
 }
 
-async function hydrateOverlaysFromJournal(task: Task): Promise<void> {
-  if (!taskLeasePendingJournalEnabled()) return;
+async function ensureLeaseJournalLoaded(): Promise<void> {
   try {
     await loadLeaseJournal();
   } catch (err) {
     if (err instanceof JournalError) throw err;
     throw new JournalError('lease_journal_corrupt');
   }
+}
+
+async function hydrateOverlaysFromLoadedJournal(task: Task): Promise<void> {
   for (const rec of listHydrationRecords(task.id)) {
     const event = leaseEventFromJournal(rec);
     if (!event) continue;
@@ -2706,11 +2720,20 @@ async function hydrateOverlaysFromJournal(task: Task): Promise<void> {
       }
       continue;
     }
+    // intent/unconfirmed are fences only; applying them would authorize a
+    // bearerless release/claim before SMTP fate is known.
+    if (rec.fate !== 'accepted') continue;
     const already = (queuedEvents.get(task.id) ?? []).some((row) =>
       row.lease && isSameAuthenticatedLeaseEvent(row.lease, event),
     );
     if (!already) queueEventUntilIndexed(task.id, queued.message, event);
   }
+}
+
+async function hydrateOverlaysFromJournal(task: Task): Promise<void> {
+  if (!taskLeasePendingJournalEnabled()) return;
+  await ensureLeaseJournalLoaded();
+  await hydrateOverlaysFromLoadedJournal(task);
 }
 
 async function deliverJournalledLeaseMail(input: {
@@ -2733,6 +2756,7 @@ async function deliverJournalledLeaseMail(input: {
     input.event,
     'intent',
     headers['X-OA-Task-Lease-Payload'],
+    input.event.event === 'claim_lost' ? input.event.firstClaimedAt : taskLeaseFirstClaimedAt(input.task),
   );
   try {
     await upsertJournalRecord(rec);
@@ -2786,6 +2810,19 @@ function throwIfJournalError(err: unknown): never {
   throw err instanceof Error ? err : new Error(String(err));
 }
 
+async function persistAcceptedAfterResend(task: Task, pending: JournalRecord): Promise<void> {
+  try {
+    await resendUnconfirmedLease(task, pending);
+  } catch {
+    throw new Error('lease_overlay_pending_index');
+  }
+  try {
+    await upsertJournalRecord({ ...pending, fate: 'accepted' });
+  } catch (err) {
+    throwIfJournalError(err);
+  }
+}
+
 /** The only lease grant authority. The durable verifier, rather than any
  * process-local plaintext secret map, preserves the server-time exclusive
  * window through restart/rebuild. */
@@ -2814,8 +2851,15 @@ export async function claimTask(input: {
       const pending = unresolvedClaimFence(current.id);
       if (pending) {
         if (pending.fate === 'intent' || pending.fate === 'unconfirmed') {
-          await resendUnconfirmedLease(current, pending).catch(() => undefined);
+          await persistAcceptedAfterResend(current, pending);
         }
+        throw new Error('lease_overlay_pending_index');
+      }
+      const blockingMutation = journalRecordsFor(current.id).some((row) =>
+        (row.kind === 'release' || row.kind === 'renew')
+        && (row.fate === 'intent' || row.fate === 'unconfirmed' || row.fate === 'accepted'),
+      );
+      if (blockingMutation) {
         throw new Error('lease_overlay_pending_index');
       }
     }
@@ -2856,11 +2900,12 @@ export async function claimTask(input: {
       throw new Error('lease_already_claimed');
     }
     if (wasWorking && !current.expiredLease && !current.releasedLease && !current.lostLease) throw new Error('task_not_claimable');
-    const durableGen = current.lease?.leaseGeneration
-      ?? current.releasedLease?.leaseGeneration
-      ?? current.expiredLease?.leaseGeneration
-      ?? current.lostLease?.leaseGeneration
-      ?? 0;
+    const durableGen = Math.max(
+      current.lease?.leaseGeneration ?? 0,
+      current.releasedLease?.leaseGeneration ?? 0,
+      current.expiredLease?.leaseGeneration ?? 0,
+      current.lostLease?.leaseGeneration ?? 0,
+    );
     const journalGen = taskLeasePendingJournalEnabled() ? maxJournalGeneration(current.id) : 0;
     const generation = Math.max(durableGen, journalGen) + 1;
     const at = new Date(now).toISOString();
@@ -3162,8 +3207,19 @@ export async function renewTask(input: {
     }
     if (now >= taskCap) throw new Error('lease_task_cap_exhausted');
     if (now >= generationCap) throw new Error('lease_tenure_exhausted');
-    if (taskLeasePendingJournalEnabled() && unresolvedMutationFence(current.id)) {
-      throw new Error('lease_overlay_pending_index');
+    if (taskLeasePendingJournalEnabled()) {
+      const pendingMut = unresolvedMutationFence(current.id);
+      if (pendingMut) {
+        if (
+          pendingMut.kind === 'renew'
+          && (pendingMut.fate === 'intent' || pendingMut.fate === 'unconfirmed')
+          && pendingMut.tokenVerifier
+          && leaseVerifiersEqual(pendingMut.tokenVerifier, current.lease?.tokenVerifier)
+        ) {
+          await persistAcceptedAfterResend(current, pendingMut);
+        }
+        throw new Error('lease_overlay_pending_index');
+      }
     }
     const currentLease = active!;
     const claimedUntil = capLeaseDeadline(now, seconds, generationClaimedAt, firstClaimedAt);
@@ -3223,8 +3279,23 @@ export async function releaseTask(input: {
       ) return current;
       throw new Error('stale_lease');
     }
-    if (taskLeasePendingJournalEnabled() && unresolvedMutationFence(current.id)) {
-      throw new Error('lease_overlay_pending_index');
+    if (taskLeasePendingJournalEnabled()) {
+      const pendingMut = unresolvedMutationFence(current.id);
+      if (pendingMut) {
+        if (
+          pendingMut.kind === 'release'
+          && (pendingMut.fate === 'intent' || pendingMut.fate === 'unconfirmed')
+          && pendingMut.tokenVerifier
+          && leaseVerifiersEqual(
+            leaseTokenVerifier(current.id, pendingMut.generation, input.leaseToken),
+            pendingMut.tokenVerifier,
+          )
+          && (pendingMut.reason ?? '') === reason
+        ) {
+          await persistAcceptedAfterResend(current, pendingMut);
+        }
+        throw new Error('lease_overlay_pending_index');
+      }
     }
     leaseRecipientAndCurrent(current, actor, input.leaseToken);
     const active = current.lease!;
@@ -3283,34 +3354,63 @@ export async function claimLostTask(input: { id: string }): Promise<Task> {
     }
     const firstClaimedAt = pending.firstClaimedAt ?? taskLeaseFirstClaimedAt(current) ?? pending.at;
     const claimedUntil = pending.claimedUntil ?? pending.at;
-    const at = new Date(nowMs()).toISOString();
-    const lease: ClaimLostLeaseEvent = {
-      version: 1,
-      event: 'claim_lost',
-      actor: 'server',
-      at,
-      generation: pending.generation,
-      claimedUntil,
-      firstClaimedAt,
-    };
-    await deliverJournalledLeaseMail({
-      task: current, event: lease, from: current.from, to: current.to, text: 'Lease claim lost.', state: current.state,
-    });
-    await markJournalFate(pending, 'tombstoned').catch(() => undefined);
+    const existingTombstone = journalRecordsFor(current.id).find((row) =>
+      row.kind === 'tombstone'
+      && row.generation === pending.generation
+      && (row.fate === 'intent' || row.fate === 'unconfirmed' || row.fate === 'accepted'),
+    );
+    let lease: ClaimLostLeaseEvent;
+    if (existingTombstone) {
+      const reconstructed = leaseEventFromJournal(existingTombstone);
+      if (!reconstructed || reconstructed.event !== 'claim_lost') {
+        throw new Error('lease_claim_lost_not_eligible');
+      }
+      lease = reconstructed;
+      if (existingTombstone.fate === 'intent' || existingTombstone.fate === 'unconfirmed') {
+        try {
+          await resendUnconfirmedLease(current, existingTombstone);
+        } catch (err) {
+          throwIfJournalError(err);
+        }
+        try {
+          await upsertJournalRecord({ ...existingTombstone, fate: 'accepted' });
+        } catch (err) {
+          throwIfJournalError(err);
+        }
+      }
+    } else {
+      lease = {
+        version: 1,
+        event: 'claim_lost',
+        actor: 'server',
+        at: new Date(nowMs()).toISOString(),
+        generation: pending.generation,
+        claimedUntil,
+        firstClaimedAt,
+      };
+      await deliverJournalledLeaseMail({
+        task: current, event: lease, from: current.from, to: current.to, text: 'Lease claim lost.', state: current.state,
+      });
+    }
+    try {
+      await markJournalFate(pending, 'tombstoned');
+    } catch (err) {
+      throwIfJournalError(err);
+    }
     invalidateTaskListCache();
     const eventMessage = leaseEventMessage({
-      task: current, from: current.from, to: current.to, state: current.state, at, body: 'Lease claim lost.',
+      task: current, from: current.from, to: current.to, state: current.state, at: lease.at, body: 'Lease claim lost.',
     });
     queueEventUntilIndexed(current.id, eventMessage, lease);
     return {
       ...current,
-      updatedAt: at,
+      updatedAt: lease.at,
       messages: [...current.messages, eventMessage],
       lostLease: {
         leaseGeneration: lease.generation,
-        claimedUntil,
-        lostAt: at,
-        firstClaimedAt,
+        claimedUntil: lease.claimedUntil,
+        lostAt: lease.at,
+        firstClaimedAt: lease.firstClaimedAt,
       },
     };
   });
@@ -3662,7 +3762,7 @@ async function loadImapTaskSnapshot(): Promise<Task[]> {
 
 async function loadAllTasksCached(): Promise<Task[]> {
   const snapshot = await loadImapTaskSnapshotWithMatching();
-  return projectTaskListSnapshot(snapshot);
+  return await projectTaskListSnapshot(snapshot);
 }
 
 /**

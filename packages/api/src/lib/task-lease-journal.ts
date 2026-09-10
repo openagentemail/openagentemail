@@ -50,6 +50,7 @@ export type JournalRecord = {
   generationClaimedAt?: string;
   supersededBy?: number;
   signedPayload?: string;
+  reason?: string;
 };
 
 export type JournalFile = {
@@ -280,6 +281,7 @@ function parseRecord(row: unknown): JournalRecord | null {
   if (typeof value.generationClaimedAt === 'string') rec.generationClaimedAt = value.generationClaimedAt;
   if (typeof value.supersededBy === 'number') rec.supersededBy = value.supersededBy;
   if (typeof value.signedPayload === 'string') rec.signedPayload = value.signedPayload;
+  if (typeof value.reason === 'string') rec.reason = value.reason;
   return rec;
 }
 
