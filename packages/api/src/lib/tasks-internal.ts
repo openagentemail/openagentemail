@@ -27,7 +27,9 @@ import {
   loadLeaseJournal,
   markJournalFate,
   maxJournalGeneration,
+  type JournalExitEvidence,
   type JournalRecord,
+  setJournalExitEvidenceLookup,
   unresolvedClaimFence,
   unresolvedMutationFence,
   upsertJournalRecord,
@@ -1985,6 +1987,11 @@ let listAllForTests: (() => Promise<Task[]>) | null = null;
 let getTaskForTests: ((id: string) => Promise<Task | null>) | null = null;
 /** 测试注入 findTaskMessages 结果，用于走 getTaskSnapshot 的 hadMatchingRows 抑制路径。 */
 let findTaskMessagesForTests: ((id: string) => Promise<TaskLookupResult>) | null = null;
+/** Installed as journal production lookup only in production, or in tests when findTaskMessagesForTests is set. */
+let productionJournalExitLookup: ((
+  taskId: string,
+  opts: { signal: AbortSignal },
+) => Promise<JournalExitEvidence>) | null = null;
 let sendMailForTests: ((input: SendInput) => Promise<{ messageId: string }>) | null = null;
 let preSmtpHookForTests: ((rec: JournalRecord) => void | Promise<void>) | null = null;
 let postSmtpAcceptHookForTests: ((rec: JournalRecord) => void | Promise<void>) | null = null;
@@ -2106,6 +2113,9 @@ export function setFindTaskMessagesForTests(
   fn: ((id: string) => Promise<{ messages: ParsedTaskMessage[]; hadMatchingRows: boolean }>) | null,
 ): void {
   findTaskMessagesForTests = fn;
+  if (process.env.NODE_ENV === 'test') {
+    setJournalExitEvidenceLookup(fn && productionJournalExitLookup ? productionJournalExitLookup : null);
+  }
 }
 
 export function setTaskSendMailForTests(
@@ -4176,3 +4186,93 @@ export const taskService: TaskService = {
   decideApproval: decideApprovalTask,
   waitForTerminal: waitForTaskTerminal,
 };
+
+function collectDurableLeaseHistory(messages: ParsedTaskMessage[]): {
+  leaseGeneration: number;
+  releasedGeneration: number;
+  expiredGeneration: number;
+  lostGeneration: number;
+  tombstones: Array<{ generation: number; at: string }>;
+  firstClaimedAt?: string;
+} {
+  let leaseGeneration = 0;
+  let releasedGeneration = 0;
+  let expiredGeneration = 0;
+  let lostGeneration = 0;
+  let firstClaimedAt: string | undefined;
+  const tombstones: Array<{ generation: number; at: string }> = [];
+  for (const message of messages) {
+    if (!message || message.kind === 'relationship-integrity-failure') continue;
+    const lease = 'lease' in message ? message.lease : undefined;
+    if (!lease) continue;
+    if (lease.event === 'claim') {
+      leaseGeneration = Math.max(leaseGeneration, lease.generation);
+      if (lease.generation === 1) firstClaimedAt = firstClaimedAt ?? lease.at;
+    } else if (lease.event === 'renew') {
+      leaseGeneration = Math.max(leaseGeneration, lease.generation);
+    } else if (lease.event === 'release') {
+      releasedGeneration = Math.max(releasedGeneration, lease.generation);
+    } else if (lease.event === 'expired') {
+      expiredGeneration = Math.max(expiredGeneration, lease.generation);
+    } else if (lease.event === 'claim_lost') {
+      lostGeneration = Math.max(lostGeneration, lease.generation);
+      tombstones.push({ generation: lease.generation, at: lease.at });
+      firstClaimedAt = firstClaimedAt ?? lease.firstClaimedAt;
+    }
+  }
+  return { leaseGeneration, releasedGeneration, expiredGeneration, lostGeneration, tombstones, firstClaimedAt };
+}
+
+function durableExitEvidenceFromLookup(
+  task: Task | null,
+  hadMatchingRows: boolean,
+  messages: ParsedTaskMessage[] = [],
+): JournalExitEvidence {
+  if (!hadMatchingRows) {
+    return {
+      hadMatchingRows: false,
+      reconstructed: false,
+      leaseGeneration: 0,
+      releasedGeneration: 0,
+      expiredGeneration: 0,
+      lostGeneration: 0,
+      tombstones: [],
+    };
+  }
+  if (!task) {
+    return {
+      hadMatchingRows: true,
+      reconstructed: false,
+      leaseGeneration: 0,
+      releasedGeneration: 0,
+      expiredGeneration: 0,
+      lostGeneration: 0,
+      tombstones: [],
+    };
+  }
+  const history = collectDurableLeaseHistory(messages);
+  return {
+    hadMatchingRows: true,
+    reconstructed: true,
+    state: task.state,
+    ...history,
+  };
+}
+
+/** Durable-only IMAP reconstruction for journal whole-task exit. No hydrate/mark/upsert. */
+productionJournalExitLookup = async (taskId, { signal }) => {
+  if (signal.aborted) throw new JournalError('lease_journal_exit_evidence_timeout');
+  if (findTaskMessagesForTests) {
+    const lookup = await findTaskMessagesForTests(taskId);
+    if (signal.aborted) throw new JournalError('lease_journal_exit_evidence_timeout');
+    const task = lookup.messages.length > 0 ? taskFromParsedMessages(taskId, lookup.messages) : null;
+    return durableExitEvidenceFromLookup(task, lookup.hadMatchingRows, lookup.messages);
+  }
+  const lookup = await findTaskMessages(taskId);
+  if (signal.aborted) throw new JournalError('lease_journal_exit_evidence_timeout');
+  const task = lookup.messages.length > 0 ? taskFromParsedMessages(taskId, lookup.messages) : null;
+  return durableExitEvidenceFromLookup(task, lookup.hadMatchingRows, lookup.messages);
+};
+if (process.env.NODE_ENV !== 'test') {
+  setJournalExitEvidenceLookup(productionJournalExitLookup);
+}

@@ -9,6 +9,7 @@
  * 未成功 persist 的变更不得进入 cache / fence 权威。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
@@ -26,6 +27,9 @@ import { config } from './config.ts';
 
 export const TASK_LEASE_JOURNAL_MAX_RECORDS = 10_000;
 export const TASK_LEASE_CLAIM_LOST_MS = 2 * 60 * 60 * 1000;
+/** Per top-level mutation: one durable evidence query, 5s wall deadline. */
+export const JOURNAL_EXIT_QUERY_BUDGET = 1;
+export const JOURNAL_EXIT_EVIDENCE_DEADLINE_MS = 5_000;
 
 export type JournalKind = 'claim' | 'renew' | 'release' | 'expired' | 'tombstone';
 export type JournalFate =
@@ -77,6 +81,29 @@ export type JournalCrashHook =
   | 'after-parent-fsync'
   | 'short-write';
 
+export type JournalExitTombstone = {
+  generation: number;
+  at: string;
+};
+
+/** Durable IMAP reconstruction for whole-task exit. Never hydrated journal overlay. */
+export type JournalExitEvidence = {
+  hadMatchingRows: boolean;
+  reconstructed: boolean;
+  state?: string;
+  leaseGeneration: number;
+  releasedGeneration: number;
+  expiredGeneration: number;
+  lostGeneration: number;
+  tombstones: JournalExitTombstone[];
+  firstClaimedAt?: string;
+};
+
+export type JournalExitEvidenceLookup = (
+  taskId: string,
+  opts: { signal: AbortSignal },
+) => Promise<JournalExitEvidence>;
+
 export class JournalError extends Error {
   constructor(message: string) {
     super(message);
@@ -92,6 +119,22 @@ let crashHook: JournalCrashHook | null = null;
 let dataDirOverride: string | undefined;
 let nowFn: () => number = () => Date.now();
 let mutationQueue: Promise<void> = Promise.resolve();
+let exitCursorTaskId = '';
+let evidenceQueryCount = 0;
+let beforeExitCommitForTests: (() => void | Promise<void>) | null = null;
+type ExitMaintenanceContext = {
+  queryBudgetRemaining: number;
+  deadlineAt: number;
+  abort: AbortController;
+  attempt: number;
+};
+const exitMaintenance = new AsyncLocalStorage<ExitMaintenanceContext>();
+let productionExitLookup: JournalExitEvidenceLookup | null = null;
+let testExitLookup: JournalExitEvidenceLookup | null = null;
+/** Test IO seam: production always fsyncs. Tests may disable to exercise the 10000 cap. */
+let persistFsync = true;
+const OPEN_FATES: ReadonlySet<JournalFate> = new Set(['intent', 'unconfirmed', 'accepted']);
+const RETIRED_FATES: ReadonlySet<JournalFate> = new Set(['indexed', 'rejected', 'superseded', 'tombstoned']);
 
 function dataDir(): string {
   return dataDirOverride ?? config.dataDir;
@@ -296,16 +339,18 @@ function writeSeal(body: Buffer): void {
   const fd = openSync(tmp, 'w', 0o600);
   try {
     writeSync(fd, seal);
-    fsyncSync(fd);
+    if (persistFsync) fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   renameSync(tmp, path);
-  const dirFd = openSync(dirname(path), 'r');
-  try {
-    fsyncSync(dirFd);
-  } finally {
-    closeSync(dirFd);
+  if (persistFsync) {
+    const dirFd = openSync(dirname(path), 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
   }
 }
 
@@ -329,18 +374,20 @@ function persist(file: JournalFile): void {
     }
     writeSync(fd, body);
     fireCrash('after-write');
-    fsyncSync(fd);
+    if (persistFsync) fsyncSync(fd);
     fireCrash('after-file-fsync');
   } finally {
     closeSync(fd);
   }
   renameSync(tmp, journalPath());
   fireCrash('after-rename');
-  const dirFd = openSync(dirname(journalPath()), 'r');
-  try {
-    fsyncSync(dirFd);
-  } finally {
-    closeSync(dirFd);
+  if (persistFsync) {
+    const dirFd = openSync(dirname(journalPath()), 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
   }
   fireCrash('after-parent-fsync');
   writeSeal(body);
@@ -494,24 +541,336 @@ function recordKey(rec: Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | '
   return `${rec.taskId}\n${rec.kind}\n${rec.generation}\n${rec.at}`;
 }
 
-export async function upsertJournalRecord(next: JournalRecord): Promise<JournalRecord> {
-  return enqueueJournal(() => {
-    if (latchedError) {
-      throw latchedError;
+function countOpenForTask(file: JournalFile, taskId: string): number {
+  let n = 0;
+  for (const row of file.records) {
+    if (row.taskId === taskId && OPEN_FATES.has(row.fate)) n += 1;
+  }
+  return n;
+}
+
+function occupancyOf(file: JournalFile): number {
+  return file.records.length;
+}
+
+function isCapacityError(err: unknown): boolean {
+  return err instanceof JournalError && err.message === 'lease_journal_capacity_exhausted';
+}
+
+function logExitMaintenance(code: string, extra: Record<string, unknown> = {}): void {
+  console.warn(JSON.stringify({
+    src: 'task-lease-journal',
+    event: 'exit_maintenance',
+    code,
+    ...extra,
+  }));
+}
+
+function canonicalTaskSnapshot(file: JournalFile, taskId: string): string {
+  const rows = file.records
+    .filter((row) => row.taskId === taskId)
+    .slice()
+    .sort((a, b) => recordKey(a).localeCompare(recordKey(b)))
+    .map((row) => ({
+      taskId: row.taskId,
+      kind: row.kind,
+      generation: row.generation,
+      actor: row.actor,
+      at: row.at,
+      fate: row.fate,
+      claimedUntil: row.claimedUntil ?? null,
+      tokenVerifier: row.tokenVerifier ?? null,
+      firstClaimedAt: row.firstClaimedAt ?? null,
+      generationClaimedAt: row.generationClaimedAt ?? null,
+      supersededBy: row.supersededBy ?? null,
+      signedPayload: row.signedPayload ?? null,
+      reason: row.reason ?? null,
+    }));
+  return JSON.stringify(rows);
+}
+
+function zeroOpenTaskIds(file: JournalFile): string[] {
+  const open = new Set<string>();
+  const all = new Set<string>();
+  for (const row of file.records) {
+    all.add(row.taskId);
+    if (OPEN_FATES.has(row.fate)) open.add(row.taskId);
+  }
+  return [...all].filter((id) => !open.has(id)).sort();
+}
+
+function pickZeroOpenCandidate(ids: string[], preferred: string | undefined, cursor: string): string | undefined {
+  if (preferred && ids.includes(preferred)) return preferred;
+  if (ids.length === 0) return undefined;
+  return ids.find((id) => id > cursor) ?? ids[0];
+}
+
+function maxGenerationFromRows(rows: JournalRecord[]): number {
+  let max = 0;
+  for (const row of rows) {
+    if (row.fate === 'rejected') continue;
+    if (row.generation > max) max = row.generation;
+  }
+  return max;
+}
+
+function canExitTask(file: JournalFile, taskId: string, evidence: JournalExitEvidence): boolean {
+  const rows = file.records.filter((row) => row.taskId === taskId);
+  if (rows.length === 0) return false;
+  if (rows.some((row) => OPEN_FATES.has(row.fate))) return false;
+  if (rows.some((row) => !RETIRED_FATES.has(row.fate))) return false;
+  if (!evidence.hadMatchingRows || !evidence.reconstructed) return false;
+  const journalGen = maxGenerationFromRows(rows);
+  const durableGen = Math.max(
+    evidence.leaseGeneration,
+    evidence.releasedGeneration,
+    evidence.expiredGeneration,
+    evidence.lostGeneration,
+  );
+  if (durableGen < journalGen) return false;
+  for (const row of rows) {
+    if (row.kind !== 'tombstone') continue;
+    const sameIdentity = evidence.tombstones.some((stone) =>
+      stone.generation === row.generation && stone.at === row.at,
+    );
+    if (sameIdentity) continue;
+    if (durableGen > row.generation) continue;
+    return false;
+  }
+  const journalFirst = rows.map((row) => row.firstClaimedAt).find((value) => typeof value === 'string');
+  if (journalFirst && evidence.firstClaimedAt !== journalFirst) {
+    return false;
+  }
+  return true;
+}
+
+function exitTaskRows(file: JournalFile, taskId: string): void {
+  file.records = file.records.filter((row) => row.taskId !== taskId);
+  persist(file);
+}
+
+type MutationMeta<T> = {
+  value: T;
+  occupancy: number;
+  lastOpenTaskId?: string;
+};
+
+function upsertBody(next: JournalRecord): MutationMeta<JournalRecord> {
+  if (latchedError) throw latchedError;
+  const file = cloneJournal(loadLeaseJournalUnlocked());
+  const openBefore = countOpenForTask(file, next.taskId);
+  const idx = file.records.findIndex((row) => recordKey(row) === recordKey(next));
+  if (idx >= 0) {
+    file.records[idx] = { ...file.records[idx]!, ...next };
+  } else {
+    file.records.push({ ...next });
+  }
+  if (next.kind === 'tombstone' && next.fate === 'accepted' && !file.firstTombstoneAt) {
+    file.firstTombstoneAt = next.at;
+  }
+  persist(file);
+  const live = cache ?? file;
+  const openAfter = countOpenForTask(live, next.taskId);
+  return {
+    value: next,
+    occupancy: occupancyOf(live),
+    lastOpenTaskId: openBefore > 0 && openAfter === 0 ? next.taskId : undefined,
+  };
+}
+
+function markFateBody(
+  match: Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | 'at'>,
+  fate: JournalFate,
+  extra?: Partial<Pick<JournalRecord, 'supersededBy'>>,
+): MutationMeta<JournalRecord> {
+  if (latchedError) throw latchedError;
+  const file = cloneJournal(loadLeaseJournalUnlocked());
+  const openBefore = countOpenForTask(file, match.taskId);
+  const rec = file.records.find((row) => recordKey(row) === recordKey(match));
+  if (!rec) throw new JournalError('lease_journal_record_missing');
+  rec.fate = fate;
+  if (extra?.supersededBy !== undefined) rec.supersededBy = extra.supersededBy;
+  persist(file);
+  const live = cache ?? file;
+  const openAfter = countOpenForTask(live, match.taskId);
+  return {
+    value: { ...rec },
+    occupancy: occupancyOf(live),
+    lastOpenTaskId: openBefore > 0 && openAfter === 0 ? match.taskId : undefined,
+  };
+}
+
+function activeExitLookup(): JournalExitEvidenceLookup | null {
+  return testExitLookup ?? productionExitLookup;
+}
+
+async function fetchExitEvidence(taskId: string, remainingMs: number, signal: AbortSignal): Promise<JournalExitEvidence> {
+  const lookup = activeExitLookup();
+  if (!lookup) {
+    return {
+      hadMatchingRows: false,
+      reconstructed: false,
+      leaseGeneration: 0,
+      releasedGeneration: 0,
+      expiredGeneration: 0,
+      lostGeneration: 0,
+      tombstones: [],
+    };
+  }
+  evidenceQueryCount += 1;
+  const local = new AbortController();
+  const onAbort = () => local.abort();
+  signal.addEventListener('abort', onAbort);
+  const timer = setTimeout(() => local.abort(), Math.max(0, remainingMs));
+  const attempt = exitMaintenance.getStore()?.attempt ?? 0;
+  try {
+    const evidence = await Promise.race([
+      lookup(taskId, { signal: local.signal }),
+      new Promise<never>((_, reject) => {
+        const fail = () => reject(new JournalError('lease_journal_exit_evidence_timeout'));
+        if (local.signal.aborted) fail();
+        else local.signal.addEventListener('abort', fail, { once: true });
+      }),
+    ]);
+    if (local.signal.aborted || attempt !== (exitMaintenance.getStore()?.attempt ?? 0)) {
+      throw new JournalError('lease_journal_exit_evidence_timeout');
     }
-    const file = cloneJournal(loadLeaseJournalUnlocked());
-    const idx = file.records.findIndex((row) => recordKey(row) === recordKey(next));
-    if (idx >= 0) {
-      file.records[idx] = { ...file.records[idx]!, ...next };
-    } else {
-      file.records.push({ ...next });
-    }
-    if (next.kind === 'tombstone' && next.fate === 'accepted' && !file.firstTombstoneAt) {
-      file.firstTombstoneAt = next.at;
-    }
-    persist(file);
-    return next;
+    return evidence;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function deadlineExpired(ctx: ExitMaintenanceContext): boolean {
+  return ctx.abort.signal.aborted || Date.now() >= ctx.deadlineAt;
+}
+
+async function reconcileZeroOpenExits(preferredTaskId: string | undefined): Promise<void> {
+  const ctx = exitMaintenance.getStore();
+  if (!ctx || ctx.queryBudgetRemaining <= 0) return;
+  const lookup = activeExitLookup();
+  if (!lookup && !testExitLookup) return;
+  if (deadlineExpired(ctx)) return;
+  const picked = await enqueueJournal(() => {
+    const file = loadLeaseJournalUnlocked();
+    const ids = zeroOpenTaskIds(file);
+    const id = pickZeroOpenCandidate(ids, preferredTaskId, exitCursorTaskId);
+    if (!id) return null;
+    exitCursorTaskId = id;
+    return { id, snapshot: canonicalTaskSnapshot(file, id) };
   });
+  if (!picked) return;
+  ctx.queryBudgetRemaining -= 1;
+  ctx.attempt += 1;
+  const attempt = ctx.attempt;
+  try {
+    const evidence = await fetchExitEvidence(
+      picked.id,
+      Math.max(0, ctx.deadlineAt - Date.now()),
+      ctx.abort.signal,
+    );
+    if (attempt !== ctx.attempt || deadlineExpired(ctx)) {
+      return;
+    }
+    await enqueueJournal(async () => {
+      if (beforeExitCommitForTests) await beforeExitCommitForTests();
+      if (deadlineExpired(ctx) || attempt !== ctx.attempt) return;
+      const file = loadLeaseJournalUnlocked();
+      if (canonicalTaskSnapshot(file, picked.id) !== picked.snapshot) return;
+      if (!canExitTask(file, picked.id, evidence)) return;
+      if (deadlineExpired(ctx) || attempt !== ctx.attempt) return;
+      const next = cloneJournal(file);
+      exitTaskRows(next, picked.id);
+    });
+  } catch (err) {
+    logExitMaintenance(err instanceof JournalError ? err.message : 'exit_evidence_failed', { taskId: picked.id });
+    throw err;
+  }
+}
+
+async function runTopLevelMutation<T>(op: () => MutationMeta<T>): Promise<T> {
+  const ctx: ExitMaintenanceContext = {
+    queryBudgetRemaining: JOURNAL_EXIT_QUERY_BUDGET,
+    deadlineAt: Date.now() + JOURNAL_EXIT_EVIDENCE_DEADLINE_MS,
+    abort: new AbortController(),
+    attempt: 0,
+  };
+  return exitMaintenance.run(ctx, async () => {
+    try {
+      let meta: MutationMeta<T>;
+      try {
+        meta = await enqueueJournal(op);
+      } catch (err) {
+        if (!isCapacityError(err)) throw err;
+        try {
+          await reconcileZeroOpenExits(undefined);
+        } catch (maint) {
+          logExitMaintenance(maint instanceof Error ? maint.message : 'exit_maintenance_failed');
+        }
+        return (await enqueueJournal(op)).value;
+      }
+      if (
+        ctx.queryBudgetRemaining > 0
+        && (meta.occupancy >= TASK_LEASE_JOURNAL_MAX_RECORDS || meta.lastOpenTaskId)
+      ) {
+        try {
+          await reconcileZeroOpenExits(meta.lastOpenTaskId);
+        } catch (maint) {
+          logExitMaintenance(maint instanceof Error ? maint.message : 'exit_maintenance_failed', {
+            taskId: meta.lastOpenTaskId,
+          });
+        }
+      }
+      return meta.value;
+    } finally {
+      ctx.abort.abort();
+    }
+  });
+}
+
+async function withExitMaintenance<T>(op: () => MutationMeta<T>): Promise<T> {
+  if (exitMaintenance.getStore()) {
+    return (await enqueueJournal(op)).value;
+  }
+  return runTopLevelMutation(op);
+}
+
+export function setJournalExitEvidenceLookup(fn: JournalExitEvidenceLookup | null): void {
+  productionExitLookup = fn;
+}
+
+export function setJournalExitEvidenceForTests(fn: JournalExitEvidenceLookup | null): void {
+  testExitLookup = fn;
+}
+
+/** Disclosed test IO seam: skip fsync while still using production cap/rename/seal. */
+export function setJournalPersistFsyncForTests(on: boolean): void {
+  persistFsync = on;
+}
+
+export function journalExitEvidenceQueryCountForTests(): number {
+  return evidenceQueryCount;
+}
+
+export function journalExitCursorForTests(): string {
+  return exitCursorTaskId;
+}
+
+export function journalOccupancyForTests(): number {
+  return cache?.records.length ?? 0;
+}
+
+export function journalMaintenanceDepthForTests(): number {
+  return exitMaintenance.getStore() ? 1 : 0;
+}
+
+export function setJournalBeforeExitCommitForTests(fn: (() => void | Promise<void>) | null): void {
+  beforeExitCommitForTests = fn;
+}
+
+export async function upsertJournalRecord(next: JournalRecord): Promise<JournalRecord> {
+  return withExitMaintenance(() => upsertBody(next));
 }
 
 export async function markJournalFate(
@@ -519,21 +878,8 @@ export async function markJournalFate(
   fate: JournalFate,
   extra?: Partial<Pick<JournalRecord, 'supersededBy'>>,
 ): Promise<JournalRecord> {
-  return enqueueJournal(() => {
-    if (latchedError) {
-      throw latchedError;
-    }
-    const file = cloneJournal(loadLeaseJournalUnlocked());
-    const rec = file.records.find((row) => recordKey(row) === recordKey(match));
-    if (!rec) throw new JournalError('lease_journal_record_missing');
-    rec.fate = fate;
-    if (extra?.supersededBy !== undefined) rec.supersededBy = extra.supersededBy;
-    persist(file);
-    return { ...rec };
-  });
+  return withExitMaintenance(() => markFateBody(match, fate, extra));
 }
-
-const OPEN_FATES: ReadonlySet<JournalFate> = new Set(['intent', 'unconfirmed', 'accepted']);
 
 export function journalRecordsFor(taskId: string, file?: JournalFile): JournalRecord[] {
   if (!file && latchedError) {
@@ -610,6 +956,11 @@ export function resetJournalMemoryForTests(): void {
   previouslyLoaded = false;
   latchedError = null;
   mutationQueue = Promise.resolve();
+  exitCursorTaskId = '';
+  evidenceQueryCount = 0;
+  testExitLookup = null;
+  beforeExitCommitForTests = null;
+  persistFsync = true;
 }
 
 export function setJournalDataDirForTests(dir: string | undefined): void {
