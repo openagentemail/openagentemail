@@ -2967,6 +2967,13 @@ export async function claimTask(input: {
         && current.expiredLease !== before.expiredLease
       ) {
         const window = current.expiredLease;
+        // ORDER-2091 accepted cost (comment/documentation only — no runtime
+        // guard): expired-kind intent rows for expired claim windows have NO
+        // production drain while the emitter is hard-disabled. They stay OPEN,
+        // block whole-task exit and can exhaust the 10000-record journal
+        // capacity. TASK_LEASES_EXPIRY_AUDIT_M3 MUST NOT be enabled in
+        // production before the separately approved emitter work lands; this
+        // cost is reassessed on that card.
         if (!journalSuppressesExpiry(current.id, window.leaseGeneration, window.claimedUntil)) {
           await upsertJournalRecord({
             taskId: current.id,
@@ -3031,8 +3038,12 @@ export async function claimTask(input: {
     queueEventUntilIndexed(current.id, eventMessage, lease);
     if (taskLeasePendingJournalEnabled()) {
       for (const row of journalRecordsFor(current.id)) {
-        if (row.generation < generation && (row.kind === 'tombstone' || row.kind === 'claim') && !row.supersededBy) {
-          await markJournalFate(row, row.kind === 'tombstone' ? 'tombstoned' : row.fate, { supersededBy: generation }).catch(() => undefined);
+        // Tombstone-kind rows are skipped entirely: their retirement requires an
+        // exact authenticated durable receipt on the read path (ORDER-2074/2078);
+        // a newer claim's send is not indexing proof. Claim-kind rows keep their
+        // fate and only gain the supersededBy annotation.
+        if (row.generation < generation && row.kind === 'claim' && !row.supersededBy) {
+          await markJournalFate(row, row.fate, { supersededBy: generation }).catch(() => undefined);
         }
       }
     }

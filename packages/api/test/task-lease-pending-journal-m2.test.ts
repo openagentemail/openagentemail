@@ -1818,3 +1818,54 @@ describe('R4-A tombstone row retirement (ORDER-2074)', () => {
     expect(first.leaseToken).toBeString();
   });
 });
+
+describe('R5-A claimTask supersede skips tombstone rows', () => {
+  testOn('R5-A: new claim never retires or annotates an unindexed tombstone row; exact receipt still retires on read', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r5-${sent.length}>` };
+    });
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    const tombAt = tombstoneMsg!.lease!.at;
+    // Durable has not indexed the tombstone yet; the next claim sends.
+    durable = { ...submittedTask(), state: 'working' as const };
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    const second = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(second.leaseGeneration).toBe(2);
+    // The unindexed tombstone row remains OPEN with complete identity and NO
+    // supersededBy annotation — a newer claim's send is not indexing proof.
+    const tombRow = journalRecordsFor(ID).find((row) => row.kind === 'tombstone');
+    expect(tombRow?.fate).toBe('accepted');
+    expect(tombRow?.at).toBe(tombAt);
+    expect(tombRow?.generation).toBe(1);
+    expect(tombRow?.supersededBy).toBeUndefined();
+    // Claim-kind annotation behavior is preserved: the burned gen1 claim row
+    // keeps its burn-flow fate and gains only the supersededBy marker.
+    const claimRow = journalRecordsFor(ID).find((row) => row.kind === 'claim' && row.generation === 1);
+    expect(claimRow?.fate).toBe('tombstoned');
+    expect(claimRow?.supersededBy).toBe(2);
+    // Expiry suppression reflects ACTUAL policy while the tombstone is OPEN:
+    // an open tombstone row still suppresses the older window's expiry intent.
+    expect(journalSuppressesExpiry(ID, 1, UNTIL)).toBe(true);
+    // No receipt despite the newer claim: read paths do not retire it either.
+    setTaskListAllForTests(async () => [durable]);
+    await listAllAdmin();
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('accepted');
+    // Once the exact authenticated durable receipt exists, read-path retirement works.
+    durable = taskFromMessages(ID, [submittedRaw(), claim1Msg, tombstoneMsg!])!;
+    setTaskListAllForTests(async () => [durable]);
+    await listAllAdmin();
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
+  });
+});
