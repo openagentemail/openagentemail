@@ -3210,6 +3210,48 @@ async function emitExpiryAuditUnlocked(
   current: Task,
   window: { generation: number; claimedUntil: string },
 ): Promise<Task> {
+  if (taskLeasePendingJournalEnabled()) {
+    // Reuse an existing unresolved expiry identity for this authority window
+    // instead of minting a new one: repeated send failures or an
+    // accepted-but-uncommitted send keep ONE journal record with the original
+    // at/expiredAt, and a later retry resends the identical signed payload.
+    const pendingExpiry = journalRecordsFor(current.id).find((row) =>
+      row.kind === 'expired'
+      && (row.fate === 'intent' || row.fate === 'unconfirmed')
+      && row.generation === window.generation
+      && row.claimedUntil === window.claimedUntil);
+    const pendingEvent = pendingExpiry ? leaseEventFromJournal(pendingExpiry) : null;
+    if (pendingExpiry && pendingEvent?.event === 'expired') {
+      // On resend failure the original error propagates unchanged and the
+      // pending row keeps its fate — still a single OPEN identity.
+      await resendUnconfirmedLease(current, pendingExpiry);
+      try {
+        await upsertJournalRecord({ ...pendingExpiry, fate: 'accepted' });
+      } catch (err) {
+        throwIfJournalError(err);
+      }
+      invalidateTaskListCache();
+      const reusedText = 'Lease expired.';
+      const reusedMessage = leaseEventMessage({
+        task: current, from: current.from, to: current.to, state: current.state,
+        at: pendingEvent.at, body: reusedText,
+      });
+      queueEventUntilIndexed(current.id, reusedMessage, pendingEvent);
+      return {
+        ...current,
+        updatedAt: pendingEvent.at,
+        messages: [...current.messages, reusedMessage],
+        lease: undefined,
+        releasedLease: undefined,
+        expiredLease: {
+          leaseGeneration: pendingEvent.generation,
+          claimedUntil: pendingEvent.claimedUntil,
+          expiredAt: pendingEvent.expiredAt,
+          ...(current.lease?.firstClaimedAt ? { firstClaimedAt: current.lease.firstClaimedAt } : {}),
+        },
+      };
+    }
+  }
   const expiredAt = new Date(nowMs()).toISOString();
   const lease: ExpiredLeaseEvent = {
     version: 1,

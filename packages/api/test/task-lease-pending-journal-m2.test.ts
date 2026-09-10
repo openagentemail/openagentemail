@@ -1943,3 +1943,120 @@ describe('R4-2132 unresolved renew recipient fence', () => {
     expect(journalRecordsFor(ID).find((row) => row.kind === 'renew')?.fate).toBe('intent');
   });
 });
+
+describe('R4-2147 expiry retry identity reuse (M3-off)', () => {
+  testOn('2147: repeated SMTP failure leaves ONE open expiry identity with the original at', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<e47-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    setTaskListAllForTests(async () => [durable]);
+    // Expiry materializes while SMTP is down; the attempt persists one intent.
+    now = Date.parse(first.claimedUntil) + 1000;
+    setTaskSendMailForTests(async () => {
+      throw new Error('smtp_down');
+    });
+    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('smtp_down');
+    const firstRow = journalRecordsFor(ID).find((row) => row.kind === 'expired');
+    expect(journalRecordsFor(ID).filter((row) => row.kind === 'expired')).toHaveLength(1);
+    const firstAt = firstRow?.at;
+    expect(typeof firstAt).toBe('string');
+    // A later retry must REUSE that identity, not mint a second record.
+    now += 120_000;
+    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('smtp_down');
+    const rows = journalRecordsFor(ID).filter((row) => row.kind === 'expired');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.at).toBe(firstAt as string);
+    expect(rows[0]?.fate).toBe('unconfirmed');
+  });
+
+  testOn('2147: accepted-but-uncommitted send then retry resends the identical signed payload', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<e48-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    setTaskListAllForTests(async () => [durable]);
+    now = Date.parse(first.claimedUntil) + 1000;
+    // SMTP accepts the expiry, but the accepted-fate commit is lost.
+    setPostSmtpAcceptHookForTests(() => {
+      throw new Error('commit_lost');
+    });
+    await expect(reapExpiredTaskLeasesOnce()).rejects.toThrow('commit_lost');
+    setPostSmtpAcceptHookForTests(null);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'expired')?.fate).toBe('intent');
+    // Retry later: the same immutable identity is resent and marked accepted.
+    now += 120_000;
+    expect(await reapExpiredTaskLeasesOnce()).toBe(1);
+    const rows = journalRecordsFor(ID).filter((row) => row.kind === 'expired');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.fate).toBe('accepted');
+    const expiryMails = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'expired');
+    expect(expiryMails).toHaveLength(2);
+    expect(expiryMails[1]!.headers?.['X-OA-Task-Lease-Payload'])
+      .toBe(expiryMails[0]!.headers?.['X-OA-Task-Lease-Payload']);
+  });
+
+  testOn('2147: two deliveries of the SAME expiry identity reconcile; a different identity conflicts and hides the task', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<e49-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claimMsg = (await parseCaptured(sent[0]!, 2))!;
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    clearQueuedEventsForTests();
+    setTaskListAllForTests(async () => [durable]);
+    now = Date.parse(first.claimedUntil) + 1000;
+    expect(await reapExpiredTaskLeasesOnce()).toBe(1);
+    const expiryMsg = (await parseCaptured(sent[1]!, 3))!;
+    // Duplicate delivery: the SAME single expiry mail (no retry in this
+    // flow) parsed twice into two captures must reconcile idempotently.
+    const expiryDelivery1 = (await parseCaptured(sent[1]!, 3))!;
+    const expiryDelivery2 = (await parseCaptured(sent[1]!, 4))!;
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claimMsg, expiryDelivery1, expiryDelivery2]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt!.expiredLease?.leaseGeneration).toBe(1);
+    // priorReceipt conflict: a same-generation receipt for a DIFFERENT window
+    // is the only shape that reaches the conflict branch in this code —
+    // isSameLeaseExpiryIdentity is (generation, claimedUntil)-keyed, so an
+    // at/expiredAt-only difference is absorbed as an idempotent duplicate
+    // (verified empirically and reported).
+    const forgedHeaders = claimLeaseHeadersForTests({
+      id: ID, state: 'working', from: A, to: B,
+      event: {
+        version: 1, event: 'expired', actor: 'server',
+        at: '2026-08-24T01:00:00.000Z', generation: 1,
+        claimedUntil: '2026-08-24T00:04:00.000Z', expiredAt: '2026-08-24T01:00:00.000Z',
+      },
+    });
+    const forgedMsg = (await parseCaptured({ from: A, to: [B], subject: 'Lease expired', text: 'expired', headers: forgedHeaders }, 4))!;
+    expect(taskFromMessages(ID, [submittedRaw(), claimMsg, expiryDelivery1, forgedMsg])).toBeNull();
+  });
+});
