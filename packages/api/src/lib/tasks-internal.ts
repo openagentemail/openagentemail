@@ -2181,6 +2181,10 @@ function indexedLeaseGenerationDominates(
   queuedGeneration: number,
   expiredReceipt: 'exclude' | 'strict' | 'equal-or-newer',
 ): boolean {
+  // A durable authenticated claim_lost receipt burns its generation and every
+  // older one: queued rows they would otherwise replay are retired. Newer
+  // generations are never dominated by an older tombstone.
+  if ((task.lostLease?.leaseGeneration ?? 0) >= queuedGeneration) return true;
   const indexedGeneration = task.lease?.leaseGeneration
     ?? task.releasedLease?.leaseGeneration
     ?? (expiredReceipt === 'exclude' ? undefined : task.expiredLease?.leaseGeneration)

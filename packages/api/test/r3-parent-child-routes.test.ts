@@ -309,3 +309,44 @@ test('#103 mutation success applies ACL-aware parent projection', async () => {
   expect(omitted.status).toBe(200);
   expect(await omitted.json()).not.toHaveProperty('parentTaskId');
 });
+
+test('R3 journal unavailable maps to 503 on state and decision read and mutation boundaries', async () => {
+  const parent = task(PARENT, A, B);
+  const approvalTask = { ...task(CHILD, A, B, 'input-required'), kind: 'approval', approval: { reviewer: A } } as Task;
+  const post = (instance: ReturnType<typeof app>, path: string, body: unknown) =>
+    instance.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  // Authorization-read boundary: the read throws before the mutation try.
+  for (const code of ['lease_journal_lost', 'lease_journal_corrupt', 'lease_journal_not_bootstrapped'] as const) {
+    const throwing = { ...tasks.taskService, getForAuthorization: async () => { throw new Error(code); } } as TaskService;
+    const stateRes = await post(app(throwing), `/v1/tasks/${PARENT}/state`, { from: A, state: 'working' });
+    expect(stateRes.status).toBe(503);
+    expect(await stateRes.json()).toEqual({ error: code });
+    const decisionRes = await post(app(throwing), `/v1/tasks/${CHILD}/decision`, { from: A, decision: 'approved' });
+    expect(decisionRes.status).toBe(503);
+    expect(await decisionRes.json()).toEqual({ error: code });
+  }
+
+  // Mutation boundary on both routes.
+  const stateMutation = { ...tasks.taskService, getForAuthorization: async () => parent, update: async () => { throw new Error('lease_journal_corrupt'); } } as TaskService;
+  const stateRes = await post(app(stateMutation), `/v1/tasks/${PARENT}/state`, { from: A, state: 'working' });
+  expect(stateRes.status).toBe(503);
+  expect(await stateRes.json()).toEqual({ error: 'lease_journal_corrupt' });
+
+  const decisionMutation = { ...tasks.taskService, getForAuthorization: async () => approvalTask, decideApproval: async () => { throw new Error('lease_journal_lost'); } } as TaskService;
+  const decisionRes = await post(app(decisionMutation), `/v1/tasks/${CHILD}/decision`, { from: A, decision: 'approved' });
+  expect(decisionRes.status).toBe(503);
+  expect(await decisionRes.json()).toEqual({ error: 'lease_journal_lost' });
+
+  // Unrelated mutation failures keep the established 502 mapping; ACL order is unchanged.
+  const smtpMutation = { ...tasks.taskService, getForAuthorization: async () => parent, update: async () => { throw new Error('imap_write_failed'); } } as TaskService;
+  const smtpRes = await post(app(smtpMutation), `/v1/tasks/${PARENT}/state`, { from: A, state: 'working' });
+  expect(smtpRes.status).toBe(502);
+  expect(await smtpRes.json()).toEqual({ error: 'smtp_error' });
+
+  const healthy = { ...tasks.taskService, getForAuthorization: async () => parent } as TaskService;
+  const forbidden = await post(app(healthy, C), `/v1/tasks/${PARENT}/state`, { from: C, state: 'working' });
+  expect(forbidden.status).toBe(403);
+  const missing = await post(app({ ...tasks.taskService, getForAuthorization: async () => null } as TaskService), `/v1/tasks/${PARENT}/state`, { from: A, state: 'working' });
+  expect(missing.status).toBe(404);
+});

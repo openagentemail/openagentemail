@@ -473,7 +473,14 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
+      let task: Task | null;
+      try {
+        task = await readTaskForAuthorization(service, id.data);
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
       if (!task) return c.json({ error: 'not_found' }, 404);
       if (!canReadTask(c, task)) return c.json({ error: 'not_found' }, 404);
       if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -492,6 +499,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           decision: parsed.data.decision,
         })));
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
@@ -515,7 +524,14 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
+      let task: Task | null;
+      try {
+        task = await readTaskForAuthorization(service, id.data);
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
       if (!task) return c.json({ error: 'not_found' }, 404);
       // This is a hard server-side ACL boundary. A guessed task UUID alone
       // never gives another identity authority to advance its state.
@@ -534,6 +550,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (!updated) return c.json({ error: 'not_found' }, 404);
         return c.json(await mutationTaskView(c, service, updated));
       } catch (err) {
+        const mappedJournal = journalUnavailable(c, err);
+        if (mappedJournal) return mappedJournal;
         if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'task_lease_required' || (err as Error).message === 'approval_decision_required') {
           return c.json({ error: (err as Error).message }, 409);
         }

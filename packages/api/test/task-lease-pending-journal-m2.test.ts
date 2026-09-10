@@ -53,6 +53,7 @@ const {
   JournalError,
   batchRetireAcceptedIndexedRows,
   bootstrapTaskLeaseJournal,
+  cloneLoadedLeaseJournal,
   journalCanonicalSnapshotFor,
   journalExitEvidenceQueryCountForTests,
   journalPathsForTests,
@@ -106,6 +107,18 @@ function durableWithLease(id: string, generation: number, verifier = VERIFIER, u
       claimedUntil: until,
       tokenVerifier: verifier,
       generationClaimedAt: '2026-08-24T00:00:00.000Z',
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    },
+  };
+}
+
+function durableWithLostLease(id: string, generation: number): Task {
+  return {
+    ...submittedTask(id),
+    lostLease: {
+      leaseGeneration: generation,
+      claimedUntil: UNTIL,
+      lostAt: '2026-08-24T02:00:00.000Z',
       firstClaimedAt: '2026-08-24T00:00:00.000Z',
     },
   };
@@ -977,6 +990,102 @@ describe('PR181 R2 D list bound', () => {
     expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(1);
     expect(journalPersistCountForTests() - beforePersist).toBe(2);
     expect(journalRecordsFor(ID)).toEqual([]);
+  });
+
+  testOn('B: uncertain post-publication persist latches and invalidates cache', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalCrashHookForTests('after-rename');
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    // No reset: the synchronous cache reader must fail closed, never serve pre-uncertainty state.
+    expect(() => cloneLoadedLeaseJournal()).toThrow('lease_journal_corrupt');
+    // Latched: later operations fail closed without waiting for a reload mismatch.
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    await expect(upsertJournalRecord(acceptedClaim(ID))).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  testOn('B: verified unchanged prepublication failure stays unlatched', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalWriteChunkForTests(0);
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('accepted');
+    // Proven pre-publication failure must not poison cache or latch the journal.
+    expect(() => cloneLoadedLeaseJournal()).not.toThrow();
+    setJournalWriteChunkForTests(null);
+    const again = await listAllAdmin();
+    expect(again.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('indexed');
+  });
+
+  testOn('C: durable lostLease dominates equal and older queued claims, never newer', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLostLease(ID, 2)]);
+    await upsertJournalRecord(acceptedClaim(ID, 1, '2026-08-24T00:00:00.000Z'));
+    await upsertJournalRecord(acceptedClaim(ID, 2, '2026-08-24T00:10:00.000Z'));
+    await upsertJournalRecord(acceptedClaim(ID, 3, '2026-08-24T00:20:00.000Z'));
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    const rows = journalRecordsFor(ID);
+    // Equal (gen2) and older (gen1) queued claims retire against the durable
+    // tombstone; the dominating gen3 row compacts them away in the same persist
+    // (compact(): dominated && retired && kind !== 'tombstone' is dropped).
+    const openGenerations = (list: typeof rows) => list
+      .filter((row) => row.fate === 'intent' || row.fate === 'unconfirmed' || row.fate === 'accepted')
+      .map((row) => row.generation);
+    expect(openGenerations(rows)).toEqual([3]);
+    expect(rows.some((row) => row.generation === 1 || row.generation === 2)).toBe(false);
+    // A newer generation is never dominated by an older tombstone.
+    expect(rows.find((row) => row.generation === 3)?.fate).toBe('accepted');
+    // No-revival: burned generations are not projected as authority; only gen3 is.
+    expect(board.tasks[0]?.leaseGeneration).toBe(3);
+    // And they never reappear on later reads (retirement sticks, nothing replays).
+    const again = await listAllAdmin();
+    expect(again.tasks[0]?.leaseGeneration).toBe(3);
+    const later = journalRecordsFor(ID);
+    expect(openGenerations(later)).toEqual([3]);
+    expect(later.some((row) => row.generation === 1 || row.generation === 2)).toBe(false);
+  });
+
+  testOn('C clause2: older accepted tombstone retires against newer durable lostLease and does not replay', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLostLease(ID, 2)]);
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'tombstone',
+      generation: 1,
+      actor: 'server',
+      at: '2026-08-24T01:00:00.000Z',
+      fate: 'accepted',
+      claimedUntil: UNTIL,
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    });
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    // The older tombstone is dominated by the durable gen2 receipt: retired, never projected.
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
+    // Retired tombstones are recognized as indexed on later reads: no replay, no re-mark.
+    const beforePersist = journalPersistCountForTests();
+    const again = await listAllAdmin();
+    expect(again.tasks).toHaveLength(1);
+    expect(journalPersistCountForTests() - beforePersist).toBe(0);
+  });
+
+  testOn('C: newer durable lostLease does not hide a queued newer claim on detail', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durableWithLostLease(ID, 1));
+    await upsertJournalRecord(acceptedClaim(ID, 2, '2026-08-24T00:10:00.000Z'));
+    const detail = await getTask(ID);
+    expect(detail?.lease?.leaseGeneration).toBe(2);
+    expect(journalRecordsFor(ID).find((row) => row.generation === 2)?.fate).toBe('accepted');
   });
 });
 

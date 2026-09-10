@@ -622,8 +622,14 @@ function publishedPairUnchanged(before: { journal: Buffer; seal: string } | null
 }
 
 function unavailableAfterUncertainPersist(err: unknown): JournalError {
-  if (isAvailabilityJournalError(err)) return err as JournalError;
-  return new JournalError('lease_journal_corrupt');
+  const unavailable = isAvailabilityJournalError(err)
+    ? err as JournalError
+    : new JournalError('lease_journal_corrupt');
+  // Publication outcome is uncertain: no cached state may serve as authority.
+  latchedError ??= unavailable;
+  cache = null;
+  loaded = false;
+  return unavailable;
 }
 
 function logExitMaintenance(code: string, extra: Record<string, unknown> = {}): void {
