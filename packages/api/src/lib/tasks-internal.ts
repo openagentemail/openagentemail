@@ -1873,8 +1873,13 @@ async function scanDurableTasks(
  * synthetic task bases and applying queued-event overlays.
  */
 async function hydrateTaskListFromJournal(tasks: Task[]): Promise<void> {
-  if (!taskLeasePendingJournalEnabled() || tasks.length === 0) return;
+  if (!taskLeasePendingJournalEnabled()) return;
+  // Journal availability is validated even when the eligible task set is
+  // empty: an empty list still performs zero batch persists and zero exit
+  // lookups, but it must not report success over a missing, lost, corrupt or
+  // latched journal.
   await ensureLeaseJournalLoaded();
+  if (tasks.length === 0) return;
   const frozen = cloneLoadedLeaseJournal();
   await fireJournalBeforeListSelectionForTests();
   const selected: Array<JournalRowKey & { snapshot: string }> = [];

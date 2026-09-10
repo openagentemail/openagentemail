@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -54,6 +54,7 @@ const {
   batchRetireAcceptedIndexedRows,
   bootstrapTaskLeaseJournal,
   cloneLoadedLeaseJournal,
+  deleteJournalFilesForTests,
   journalCanonicalSnapshotFor,
   journalExitEvidenceQueryCountForTests,
   journalPathsForTests,
@@ -2058,5 +2059,50 @@ describe('R4-2147 expiry retry identity reuse (M3-off)', () => {
     });
     const forgedMsg = (await parseCaptured({ from: A, to: [B], subject: 'Lease expired', text: 'expired', headers: forgedHeaders }, 4))!;
     expect(taskFromMessages(ID, [submittedRaw(), claimMsg, expiryDelivery1, forgedMsg])).toBeNull();
+  });
+});
+
+describe('R4-EMPTYLIST journal availability on empty task sets', () => {
+  // The actual projection path: listTaskBoard -> loadAllTasksCached ->
+  // hydrateTaskListFromJournal (the same function listTasks uses). The
+  // route-level lease_journal_* -> 503 mappers are pre-established controls
+  // (children/detail/claim/ui-board); these controls prove the error is now
+  // RAISED on an empty eligible set instead of being skipped.
+
+  testOn('EMPTYLIST: enabled + not_bootstrapped / lost / corrupt throw the journal code on an empty list', async () => {
+    setTaskListAllForTests(async () => []);
+    // Absent initial journal.
+    setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-el-absent-')));
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_not_bootstrapped' });
+    // Warm loss after a healthy bootstrap.
+    isolateJournal();
+    deleteJournalFilesForTests({ journal: true, seal: true, marker: false });
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_lost' });
+    // Corrupt seal latches the journal and surfaces on an empty list too.
+    resetJournalMemoryForTests();
+    isolateJournal();
+    const paths = journalPathsForTests();
+    writeFileSync(paths.seal, 'deadbeef');
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  testOn('EMPTYLIST: healthy enabled empty list returns empty with zero persists and zero exit lookups', async () => {
+    isolateJournal();
+    setTaskListAllForTests(async () => []);
+    const beforePersist = journalPersistCountForTests();
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks).toEqual([]);
+    expect(journalPersistCountForTests() - beforePersist).toBe(0);
+    expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(0);
+  });
+
+  testOn('EMPTYLIST: disabled gate with absent journal stays 200 and never reads the journal', async () => {
+    await withM2Off(async () => {
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-el-disabled-')));
+      setTaskListAllForTests(async () => []);
+      const board = await listAllAdmin();
+      expect(board.tasks).toEqual([]);
+    });
   });
 });
