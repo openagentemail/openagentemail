@@ -127,12 +127,17 @@ type ExitMaintenanceContext = {
   deadlineAt: number;
   abort: AbortController;
   attempt: number;
+  /** List hydration only: post-publication / seal uncertainty from optional exit must 503. */
+  propagatePublishedPairFailure: boolean;
 };
 const exitMaintenance = new AsyncLocalStorage<ExitMaintenanceContext>();
 let productionExitLookup: JournalExitEvidenceLookup | null = null;
 let testExitLookup: JournalExitEvidenceLookup | null = null;
 /** Test IO seam: production always fsyncs. Tests may disable to exercise the 10000 cap. */
 let persistFsync = true;
+let persistCount = 0;
+let beforeBatchCommitForTests: (() => void) | null = null;
+let beforeListSelectionForTests: (() => void | Promise<void>) | null = null;
 const OPEN_FATES: ReadonlySet<JournalFate> = new Set(['intent', 'unconfirmed', 'accepted']);
 const RETIRED_FATES: ReadonlySet<JournalFate> = new Set(['indexed', 'rejected', 'superseded', 'tombstoned']);
 
@@ -332,13 +337,32 @@ function serialize(file: JournalFile): Buffer {
   return Buffer.from(JSON.stringify(file), 'utf8');
 }
 
+/** POSIX write(2) may return a short count. Loop until the full buffer is on disk; n<=0 fails before rename. */
+let writeChunkForTests: number | null = null;
+
+function writeAllSync(fd: number, buf: Buffer): void {
+  let offset = 0;
+  while (offset < buf.length) {
+    const slice = writeChunkForTests != null
+      ? buf.subarray(offset, offset + Math.min(writeChunkForTests, buf.length - offset))
+      : buf.subarray(offset);
+    const n = writeSync(fd, slice);
+    if (n <= 0) throw new JournalError('lease_journal_short_write');
+    offset += n;
+  }
+}
+
+export function setJournalWriteChunkForTests(bytes: number | null): void {
+  writeChunkForTests = bytes;
+}
+
 function writeSeal(body: Buffer): void {
   const seal = Buffer.from(`${sealBytes(body)}\n`, 'utf8');
   const path = sealPath();
   const tmp = tmpSealPath();
   const fd = openSync(tmp, 'w', 0o600);
   try {
-    writeSync(fd, seal);
+    writeAllSync(fd, seal);
     if (persistFsync) fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -372,7 +396,7 @@ function persist(file: JournalFile): void {
       writeSync(fd, body.subarray(0, Math.max(1, Math.floor(body.length / 3))));
       throw new JournalError('lease_journal_crash_short_write');
     }
-    writeSync(fd, body);
+    writeAllSync(fd, body);
     fireCrash('after-write');
     if (persistFsync) fsyncSync(fd);
     fireCrash('after-file-fsync');
@@ -393,6 +417,7 @@ function persist(file: JournalFile): void {
   writeSeal(body);
   cache = cloneJournal(file);
   loaded = true;
+  persistCount += 1;
 }
 
 function compact(file: JournalFile): void {
@@ -434,7 +459,7 @@ export function bootstrapTaskLeaseJournal(): JournalFile {
   const jPath = journalPath();
   const jFd = openSync(jPath, 'w', 0o600);
   try {
-    writeSync(jFd, body);
+    writeAllSync(jFd, body);
     fsyncSync(jFd);
   } finally {
     closeSync(jFd);
@@ -452,7 +477,7 @@ export function bootstrapTaskLeaseJournal(): JournalFile {
   const mPath = markerPath();
   const mFd = openSync(mPath, 'w', 0o600);
   try {
-    writeSync(mFd, Buffer.from(JSON.stringify(markerObj), 'utf8'));
+    writeAllSync(mFd, Buffer.from(JSON.stringify(markerObj), 'utf8'));
     fsyncSync(mFd);
   } finally {
     closeSync(mFd);
@@ -557,6 +582,50 @@ function isCapacityError(err: unknown): boolean {
   return err instanceof JournalError && err.message === 'lease_journal_capacity_exhausted';
 }
 
+function isAvailabilityJournalError(err: unknown): boolean {
+  return err instanceof JournalError && (
+    err.message === 'lease_journal_lost'
+    || err.message === 'lease_journal_corrupt'
+    || err.message === 'lease_journal_not_bootstrapped'
+  );
+}
+
+function snapshotPublishedPair(): { journal: Buffer; seal: string } | null {
+  try {
+    const jPath = journalPath();
+    const sPath = sealPath();
+    if (!existsSync(jPath) || !existsSync(sPath)) return null;
+    const journal = readFileSync(jPath);
+    const seal = readFileSync(sPath, 'utf8').trim();
+    if (!safeEqual(sealBytes(journal), seal)) return null;
+    return { journal, seal };
+  } catch {
+    return null;
+  }
+}
+
+function publishedPairUnchanged(before: { journal: Buffer; seal: string } | null): boolean {
+  if (!before) return false;
+  try {
+    const jPath = journalPath();
+    const sPath = sealPath();
+    if (!existsSync(jPath) || !existsSync(sPath)) return false;
+    const journal = readFileSync(jPath);
+    const seal = readFileSync(sPath, 'utf8').trim();
+    if (journal.length !== before.journal.length || !journal.equals(before.journal)) return false;
+    if (!safeEqual(seal, before.seal)) return false;
+    if (!safeEqual(sealBytes(journal), seal)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function unavailableAfterUncertainPersist(err: unknown): JournalError {
+  if (isAvailabilityJournalError(err)) return err as JournalError;
+  return new JournalError('lease_journal_corrupt');
+}
+
 function logExitMaintenance(code: string, extra: Record<string, unknown> = {}): void {
   console.warn(JSON.stringify({
     src: 'task-lease-journal',
@@ -644,9 +713,21 @@ function canExitTask(file: JournalFile, taskId: string, evidence: JournalExitEvi
   return true;
 }
 
+function persistGuardingPublishedPair(file: JournalFile): 'ok' | 'prepublish' {
+  const published = snapshotPublishedPair();
+  try {
+    persist(file);
+    return 'ok';
+  } catch (err) {
+    if (isAvailabilityJournalError(err)) throw err;
+    if (publishedPairUnchanged(published)) return 'prepublish';
+    throw unavailableAfterUncertainPersist(err);
+  }
+}
+
 function exitTaskRows(file: JournalFile, taskId: string): void {
   file.records = file.records.filter((row) => row.taskId !== taskId);
-  persist(file);
+  persistGuardingPublishedPair(file);
 }
 
 type MutationMeta<T> = {
@@ -789,12 +870,20 @@ async function reconcileZeroOpenExits(preferredTaskId: string | undefined): Prom
   }
 }
 
-async function runTopLevelMutation<T>(op: () => MutationMeta<T>): Promise<T> {
+function rethrowListHydrationPublishedPairFailure(ctx: ExitMaintenanceContext, err: unknown): void {
+  if (ctx.propagatePublishedPairFailure && isAvailabilityJournalError(err)) throw err;
+}
+
+async function runTopLevelMutation<T>(
+  op: () => MutationMeta<T>,
+  opts?: { propagatePublishedPairFailure?: boolean },
+): Promise<T> {
   const ctx: ExitMaintenanceContext = {
     queryBudgetRemaining: JOURNAL_EXIT_QUERY_BUDGET,
     deadlineAt: Date.now() + JOURNAL_EXIT_EVIDENCE_DEADLINE_MS,
     abort: new AbortController(),
     attempt: 0,
+    propagatePublishedPairFailure: opts?.propagatePublishedPairFailure === true,
   };
   return exitMaintenance.run(ctx, async () => {
     try {
@@ -807,6 +896,7 @@ async function runTopLevelMutation<T>(op: () => MutationMeta<T>): Promise<T> {
           await reconcileZeroOpenExits(undefined);
         } catch (maint) {
           logExitMaintenance(maint instanceof Error ? maint.message : 'exit_maintenance_failed');
+          rethrowListHydrationPublishedPairFailure(ctx, maint);
         }
         return (await enqueueJournal(op)).value;
       }
@@ -820,6 +910,7 @@ async function runTopLevelMutation<T>(op: () => MutationMeta<T>): Promise<T> {
           logExitMaintenance(maint instanceof Error ? maint.message : 'exit_maintenance_failed', {
             taskId: meta.lastOpenTaskId,
           });
+          rethrowListHydrationPublishedPairFailure(ctx, maint);
         }
       }
       return meta.value;
@@ -829,11 +920,14 @@ async function runTopLevelMutation<T>(op: () => MutationMeta<T>): Promise<T> {
   });
 }
 
-async function withExitMaintenance<T>(op: () => MutationMeta<T>): Promise<T> {
+async function withExitMaintenance<T>(
+  op: () => MutationMeta<T>,
+  opts?: { propagatePublishedPairFailure?: boolean },
+): Promise<T> {
   if (exitMaintenance.getStore()) {
     return (await enqueueJournal(op)).value;
   }
-  return runTopLevelMutation(op);
+  return runTopLevelMutation(op, opts);
 }
 
 export function setJournalExitEvidenceLookup(fn: JournalExitEvidenceLookup | null): void {
@@ -881,6 +975,114 @@ export async function markJournalFate(
   return withExitMaintenance(() => markFateBody(match, fate, extra));
 }
 
+export type JournalRowKey = Pick<JournalRecord, 'taskId' | 'kind' | 'generation' | 'at'>;
+
+function batchRetireBody(
+  selected: Array<JournalRowKey & { snapshot: string }>,
+): MutationMeta<{ persisted: boolean; marked: number }> {
+  if (latchedError) throw latchedError;
+  if (beforeBatchCommitForTests) beforeBatchCommitForTests();
+  const file = cloneJournal(loadLeaseJournalUnlocked());
+  const keep: Array<JournalRowKey & { snapshot: string }> = [];
+  for (const item of selected) {
+    const rec = file.records.find((row) => recordKey(row) === recordKey(item));
+    if (!rec || rec.fate !== 'accepted') continue;
+    if (canonicalTaskSnapshot(file, item.taskId) !== item.snapshot) continue;
+    keep.push(item);
+  }
+  if (keep.length === 0) {
+    return {
+      value: { persisted: false, marked: 0 },
+      occupancy: occupancyOf(file),
+      lastOpenTaskId: undefined,
+    };
+  }
+  const openBefore = new Map<string, number>();
+  for (const item of keep) {
+    if (!openBefore.has(item.taskId)) openBefore.set(item.taskId, countOpenForTask(file, item.taskId));
+  }
+  for (const item of keep) {
+    const rec = file.records.find((row) => recordKey(row) === recordKey(item));
+    if (!rec) continue;
+    rec.fate = item.kind === 'tombstone' ? 'tombstoned' : 'indexed';
+  }
+  if (persistGuardingPublishedPair(file) === 'prepublish') {
+    return {
+      value: { persisted: false, marked: 0 },
+      occupancy: cache ? occupancyOf(cache) : occupancyOf(file),
+      lastOpenTaskId: undefined,
+    };
+  }
+  const live = cache ?? file;
+  let lastOpenTaskId: string | undefined;
+  for (const [taskId, before] of openBefore) {
+    if (before > 0 && countOpenForTask(live, taskId) === 0) {
+      lastOpenTaskId = taskId;
+      break;
+    }
+  }
+  return {
+    value: { persisted: true, marked: keep.length },
+    occupancy: occupancyOf(live),
+    lastOpenTaskId,
+  };
+}
+
+/** One atomic accepted→indexed/tombstoned persist for list hydration. Empty after revalidation does not persist. */
+export async function batchRetireAcceptedIndexedRows(
+  selected: Array<JournalRowKey & { snapshot: string }>,
+): Promise<{ persisted: boolean; marked: number }> {
+  if (latchedError) throw latchedError;
+  if (selected.length === 0) {
+    const occupancy = cache ? occupancyOf(cache) : 0;
+    if (occupancy < TASK_LEASE_JOURNAL_MAX_RECORDS) {
+      return { persisted: false, marked: 0 };
+    }
+    return withExitMaintenance(() => {
+      if (latchedError) throw latchedError;
+      const file = loadLeaseJournalUnlocked();
+      return {
+        value: { persisted: false, marked: 0 },
+        occupancy: occupancyOf(file),
+        lastOpenTaskId: undefined,
+      };
+    }, { propagatePublishedPairFailure: true });
+  }
+  return withExitMaintenance(() => batchRetireBody(selected), { propagatePublishedPairFailure: true });
+}
+
+export function journalCanonicalSnapshotFor(taskId: string): string {
+  if (latchedError) throw latchedError;
+  if (!cache) return '[]';
+  return canonicalTaskSnapshot(cache, taskId);
+}
+
+export function journalCanonicalSnapshotFrom(file: JournalFile, taskId: string): string {
+  return canonicalTaskSnapshot(file, taskId);
+}
+
+export function cloneLoadedLeaseJournal(): JournalFile {
+  if (latchedError) throw latchedError;
+  if (!cache) throw new JournalError('lease_journal_not_bootstrapped');
+  return cloneJournal(cache);
+}
+
+export function setJournalBeforeListSelectionForTests(fn: (() => void | Promise<void>) | null): void {
+  beforeListSelectionForTests = fn;
+}
+
+export async function fireJournalBeforeListSelectionForTests(): Promise<void> {
+  if (beforeListSelectionForTests) await beforeListSelectionForTests();
+}
+
+export function journalPersistCountForTests(): number {
+  return persistCount;
+}
+
+export function setJournalBeforeBatchCommitForTests(fn: (() => void) | null): void {
+  beforeBatchCommitForTests = fn;
+}
+
 export function journalRecordsFor(taskId: string, file?: JournalFile): JournalRecord[] {
   if (!file && latchedError) {
     throw latchedError;
@@ -919,14 +1121,24 @@ export function journalSuppressesExpiry(
 ): boolean {
   return journalRecordsFor(taskId, file).some((row) => {
     if (row.generation !== generation) return false;
-    if (row.kind === 'renew' || row.kind === 'release' || row.kind === 'claim' || row.kind === 'tombstone') {
-      if (OPEN_FATES.has(row.fate) || row.fate === 'indexed' || row.fate === 'tombstoned' || row.fate === 'superseded') {
-        if (row.kind === 'renew' && row.claimedUntil && row.claimedUntil !== claimedUntil) return true;
-        if (row.kind !== 'renew') return true;
-        return true;
-      }
+    if (row.kind === 'expired') {
+      return OPEN_FATES.has(row.fate) && row.claimedUntil === claimedUntil;
     }
-    if (row.kind === 'expired' && OPEN_FATES.has(row.fate) && row.claimedUntil === claimedUntil) return true;
+    if (row.kind === 'claim') {
+      return OPEN_FATES.has(row.fate);
+    }
+    if (row.kind === 'renew') {
+      if (row.claimedUntil && row.claimedUntil !== claimedUntil) {
+        return OPEN_FATES.has(row.fate) || row.fate === 'indexed' || row.fate === 'superseded';
+      }
+      return OPEN_FATES.has(row.fate);
+    }
+    if (row.kind === 'release') {
+      return OPEN_FATES.has(row.fate) || row.fate === 'indexed' || row.fate === 'superseded' || row.fate === 'tombstoned';
+    }
+    if (row.kind === 'tombstone') {
+      return OPEN_FATES.has(row.fate) || row.fate === 'tombstoned' || row.fate === 'indexed' || row.fate === 'superseded';
+    }
     return false;
   });
 }
@@ -961,6 +1173,10 @@ export function resetJournalMemoryForTests(): void {
   testExitLookup = null;
   beforeExitCommitForTests = null;
   persistFsync = true;
+  writeChunkForTests = null;
+  persistCount = 0;
+  beforeBatchCommitForTests = null;
+  beforeListSelectionForTests = null;
 }
 
 export function setJournalDataDirForTests(dir: string | undefined): void {

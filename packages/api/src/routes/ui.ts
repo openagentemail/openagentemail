@@ -904,6 +904,8 @@ export function createUiApiRoutes(
       );
     } catch (err) {
       if (err instanceof InvalidTaskCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+      const code = (err as Error).message;
+      if (typeof code === 'string' && code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
       throw err;
     }
   });

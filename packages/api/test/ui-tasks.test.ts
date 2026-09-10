@@ -411,6 +411,19 @@ describe('UI tasks ACL and contract', () => {
     expect(boardCalls).toEqual([]);
     expect(getCalls).toEqual([]);
   });
+
+  test('lease journal errors on board list map to 503', async () => {
+    const { app, cookie } = makeApp({ kind: 'admin' }, {
+      taskService: {
+        listBoard: mock(async () => {
+          throw new Error('lease_journal_lost');
+        }),
+      } as unknown as UiApiDependencies['taskService'],
+    });
+    const listed = await app.request('/ui/api/tasks', { headers: { cookie } });
+    expect(listed.status).toBe(503);
+    expect(await listed.json()).toEqual({ error: 'lease_journal_lost' });
+  });
 });
 
 describe('UI task reply / remind / close', () => {

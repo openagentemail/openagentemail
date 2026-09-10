@@ -28,8 +28,10 @@ const {
   reapExpiredTaskLeasesOnce,
   releaseTask,
   renewTask,
+  replyTask,
   taskFromMessages,
   toTaskView,
+  updateTask,
 } = await import('../src/lib/tasks.ts');
 const {
   clearQueuedEventsForTests,
@@ -48,26 +50,41 @@ const {
   withTaskLeasesEnabledForTests,
 } = await import('./support/task-lease-seams.ts');
 const {
+  JournalError,
+  batchRetireAcceptedIndexedRows,
   bootstrapTaskLeaseJournal,
+  journalCanonicalSnapshotFor,
+  journalExitEvidenceQueryCountForTests,
   journalPathsForTests,
+  journalPersistCountForTests,
   journalRecordsFor,
+  journalSuppressesExpiry,
   loadLeaseJournal,
   markJournalFate,
   resetJournalMemoryForTests,
+  setJournalBeforeBatchCommitForTests,
+  setJournalBeforeExitCommitForTests,
+  setJournalBeforeListSelectionForTests,
   setJournalCrashHookForTests,
   setJournalDataDirForTests,
   setJournalDurableEvidenceForTests,
+  setJournalExitEvidenceForTests,
   setJournalNowForTests,
+  setJournalWriteChunkForTests,
   unresolvedClaimFence,
   upsertJournalRecord,
 } = await import('../src/lib/task-lease-journal.ts');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
+const ID2 = '1fdc3207-056e-47c1-a65c-b29d39f66b84';
 const A = 'alpha@test.example';
 const B = 'bravo@test.example';
 const START = Date.parse('2026-08-24T00:00:00.000Z');
 const TWO_H = 2 * 60 * 60 * 1000;
+const VERIFIER = 'v'.repeat(43);
+const OTHER_VERIFIER = 'w'.repeat(43);
+const UNTIL = '2026-08-24T00:05:00.000Z';
 
 function submittedRaw(id = ID): RawTaskMessage {
   return {
@@ -78,6 +95,64 @@ function submittedRaw(id = ID): RawTaskMessage {
 
 function submittedTask(id = ID): Task {
   return taskFromMessages(id, [submittedRaw(id)])!;
+}
+
+function durableWithLease(id: string, generation: number, verifier = VERIFIER, until = UNTIL): Task {
+  return {
+    ...submittedTask(id),
+    state: 'working',
+    lease: {
+      leaseGeneration: generation,
+      claimedUntil: until,
+      tokenVerifier: verifier,
+      generationClaimedAt: '2026-08-24T00:00:00.000Z',
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    },
+  };
+}
+
+function acceptedClaim(id: string, generation = 1, at = '2026-08-24T00:00:00.000Z', verifier = VERIFIER) {
+  return {
+    taskId: id,
+    kind: 'claim' as const,
+    generation,
+    actor: B,
+    at,
+    fate: 'accepted' as const,
+    claimedUntil: UNTIL,
+    tokenVerifier: verifier,
+  };
+}
+
+async function listAllAdmin() {
+  return listTaskBoard(
+    { status: 'all', period: '30d', limit: 20 },
+    { kind: 'admin' },
+  );
+}
+
+function ineligibleExitEvidence() {
+  return {
+    hadMatchingRows: false,
+    reconstructed: false,
+    leaseGeneration: 0,
+    releasedGeneration: 0,
+    expiredGeneration: 0,
+    lostGeneration: 0,
+    tombstones: [] as Array<{ generation: number; at: string }>,
+  };
+}
+
+function eligibleExitEvidence(generation = 1) {
+  return {
+    hadMatchingRows: true,
+    reconstructed: true,
+    leaseGeneration: generation,
+    releasedGeneration: 0,
+    expiredGeneration: 0,
+    lostGeneration: 0,
+    tombstones: [] as Array<{ generation: number; at: string }>,
+  };
 }
 
 function source(input: SendInput): Buffer {
@@ -138,6 +213,10 @@ afterEach(() => {
   setJournalCrashHookForTests(null);
   setJournalNowForTests(null);
   setJournalDurableEvidenceForTests(null);
+  setJournalBeforeBatchCommitForTests(null);
+  setJournalBeforeExitCommitForTests(null);
+  setJournalBeforeListSelectionForTests(null);
+  setJournalWriteChunkForTests(null);
   clearQueuedEventsForTests();
   resetJournalMemoryForTests();
 });
@@ -146,6 +225,18 @@ function isolateJournal(): void {
   const dir = mkdtempSync(join(tmpdir(), 'oae-m2-iso-'));
   setJournalDataDirForTests(dir);
   bootstrapTaskLeaseJournal();
+}
+
+/** Flag-bound: neighbor TASK_LEASES_ENABLED=false must not satisfy defaultsFalse. */
+function pendingJournalDefaultsFalse(nearby: string, marker = 'TASK_LEASES_PENDING_JOURNAL'): boolean {
+  return new RegExp(`${marker}\\s*[=:]\\s*["']?false`).test(nearby)
+    || new RegExp(`${marker}:-false`).test(nearby)
+    || new RegExp(`${marker}[^\\n]*\\bdefault(s)?\\s+(to\\s+)?false`, 'i').test(nearby);
+}
+
+function pendingJournalRequiresLeases(nearby: string): boolean {
+  return /requires?[^\n]*TASK_LEASES_ENABLED|TASK_LEASES_ENABLED[^\n]*required|depends on TASK_LEASES_ENABLED|TASK_LEASES_ENABLED[^\n]{0,80}TASK_LEASES_PENDING_JOURNAL|TASK_LEASES_PENDING_JOURNAL[^\n]{0,80}TASK_LEASES_ENABLED/i
+    .test(nearby);
 }
 
 describe('M2 配置面与默认关', () => {
@@ -174,8 +265,8 @@ describe('M2 配置面与默认关', () => {
       return {
         name,
         mentionsFlag: index >= 0,
-        defaultsFalse: /false/.test(nearby) || /default false/i.test(nearby),
-        requiresLeases: /TASK_LEASES_ENABLED/.test(nearby),
+        defaultsFalse: pendingJournalDefaultsFalse(nearby, marker),
+        requiresLeases: pendingJournalRequiresLeases(nearby),
       };
     });
     for (const row of observed) {
@@ -183,6 +274,17 @@ describe('M2 配置面与默认关', () => {
         name: row.name, mentionsFlag: true, defaultsFalse: true, requiresLeases: true,
       });
     }
+  });
+
+  testOn('G: defaultsFalse binds to TASK_LEASES_PENDING_JOURNAL, not neighbor ENABLED=false', () => {
+    const marker = 'TASK_LEASES_PENDING_JOURNAL';
+    const neighborTrue = `${marker}=true\nTASK_LEASES_ENABLED=false`;
+    expect(pendingJournalDefaultsFalse(neighborTrue, marker)).toBe(false);
+    expect(/false/.test(neighborTrue)).toBe(true);
+    const composeDefault = `${marker}: \${${marker}:-false}`;
+    expect(pendingJournalDefaultsFalse(composeDefault, marker)).toBe(true);
+    expect(pendingJournalDefaultsFalse(`${marker}=false`, marker)).toBe(true);
+    expect(pendingJournalDefaultsFalse(`Optional \`${marker}\` (default false, requires TASK_LEASES_ENABLED)`, marker)).toBe(true);
   });
 });
 
@@ -539,6 +641,342 @@ describe('PR181 R1 A/D/E/F/G/H/I/J', () => {
     });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'lease_journal_not_bootstrapped' });
+  });
+});
+
+describe('PR181 R2 A/B/C/M', () => {
+  testOn('B: children journal unavailable maps 503', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-m2-ch503-'));
+    setJournalDataDirForTests(dir);
+    setTaskListAllForTests(async () => [submittedTask()]);
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'identity', address: B });
+      await next();
+    });
+    app.route('/v1/tasks', createTaskRoutes());
+    const res = await app.request(`/v1/tasks/${ID}/children`);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'lease_journal_not_bootstrapped' });
+  });
+
+  testOn('C: intent/unconfirmed fence recipient update/reply; sender and accepted-lease preserved', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskSendMailForTests(async () => ({ messageId: '<c-fence>' }));
+    setTaskGetForTests(async () => submittedTask());
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'claim',
+      generation: 1,
+      actor: B,
+      at: '2026-08-24T00:00:00.000Z',
+      fate: 'intent',
+      claimedUntil: '2026-08-24T00:05:00.000Z',
+      tokenVerifier: 'c'.repeat(43),
+    });
+    await expect(updateTask({ id: ID, from: B, state: 'input-required' })).rejects.toMatchObject({
+      message: 'task_already_terminal',
+    });
+    await expect(updateTask({
+      id: ID, from: B, state: 'input-required', leaseToken: 'supplied-bearer',
+    })).rejects.toMatchObject({ message: 'task_lease_required' });
+    await expect(updateTask({ id: ID, from: A, state: 'input-required' })).resolves.toMatchObject({
+      state: 'input-required',
+    });
+
+    setTaskGetForTests(async () => ({ ...submittedTask(), state: 'input-required' }));
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'claim',
+      generation: 1,
+      actor: B,
+      at: '2026-08-24T00:00:00.000Z',
+      fate: 'unconfirmed',
+      claimedUntil: '2026-08-24T00:05:00.000Z',
+      tokenVerifier: 'c'.repeat(43),
+    });
+    await expect(replyTask({ id: ID, from: B, body: 'no' })).rejects.toMatchObject({
+      message: 'task_already_terminal',
+    });
+    await expect(replyTask({ id: ID, from: A, body: 'sender-ok' })).resolves.toMatchObject({
+      state: 'working',
+    });
+
+    clearQueuedEventsForTests();
+    isolateJournal();
+    setTaskGetForTests(async () => submittedTask());
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    setTaskGetForTests(async () => grant.task);
+    await expect(updateTask({
+      id: ID, from: B, state: 'input-required', leaseToken: grant.leaseToken,
+    })).resolves.toMatchObject({ state: 'input-required' });
+  });
+
+  bunTest('A: leftover indexed claim does not suppress expired intent', async () => {
+    await withM2M3(async () => {
+      isolateJournal();
+      let now = START;
+      setTaskNowForTests(() => now);
+      setTaskSendMailForTests(async () => ({ messageId: '<a-exp>' }));
+      setTaskGetForTests(async () => submittedTask());
+      setJournalExitEvidenceForTests(async () => ({
+        hadMatchingRows: false,
+        reconstructed: false,
+        leaseGeneration: 0,
+        releasedGeneration: 0,
+        expiredGeneration: 0,
+        lostGeneration: 0,
+        tombstones: [],
+      }));
+      const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const claimRow = (await loadLeaseJournal()).records.find((row) => row.kind === 'claim');
+      expect(claimRow?.fate).toBe('accepted');
+      await markJournalFate(claimRow!, 'indexed');
+      expect(journalSuppressesExpiry(ID, 1, grant.claimedUntil)).toBe(false);
+      now = Date.parse(grant.claimedUntil) + 1000;
+      setTaskGetForTests(async () => grant.task);
+      await claimTask({ id: ID, from: B, leaseSec: 300 });
+      const expired = journalRecordsFor(ID).find((row) => row.kind === 'expired');
+      expect(expired?.fate).toBe('intent');
+      expect(expired?.claimedUntil).toBe(grant.claimedUntil);
+    });
+  });
+
+  testOn('M: claim_lost without claimedUntil is not eligible', async () => {
+    isolateJournal();
+    let now = START;
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => submittedTask());
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'claim',
+      generation: 1,
+      actor: B,
+      at: '2026-08-24T00:00:00.000Z',
+      fate: 'intent',
+      tokenVerifier: 'm'.repeat(43),
+    });
+    now = START + TWO_H;
+    await expect(claimLostTask({ id: ID })).rejects.toMatchObject({
+      message: 'lease_claim_lost_not_eligible',
+    });
+  });
+});
+
+describe('PR181 R2 D list bound', () => {
+  testOn('D: N exact-eligible accepted rows use one persist and at most one fresh lookup', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    const one = durableWithLease(ID, 1);
+    const two = durableWithLease(ID2, 1);
+    setTaskListAllForTests(async () => [one, two]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    await upsertJournalRecord(acceptedClaim(ID2, 1, '2026-08-24T00:00:01.000Z'));
+    setJournalExitEvidenceForTests(async () => ineligibleExitEvidence());
+    const beforePersist = journalPersistCountForTests();
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks.map((row) => row.id).sort()).toEqual([ID, ID2].sort());
+    const persistDelta = journalPersistCountForTests() - beforePersist;
+    const queryDelta = journalExitEvidenceQueryCountForTests() - beforeQuery;
+    // Exercised fresh lookup (not vacuous 0): ineligible evidence skips exit persist.
+    expect(queryDelta).toBe(1);
+    expect(persistDelta).toBe(1);
+    expect(persistDelta).toBeLessThanOrEqual(2);
+    expect(queryDelta).toBeLessThanOrEqual(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('indexed');
+    expect(journalRecordsFor(ID2).find((row) => row.kind === 'claim')?.fate).toBe('indexed');
+  });
+
+  testOn('D: exact-receipt eventIsIndexed retires without requiring domination', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    const before = journalPersistCountForTests();
+    await listAllAdmin();
+    expect(journalPersistCountForTests() - before).toBe(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('indexed');
+  });
+
+  testOn('D: domination eventIsIndexed retires without requiring exact same receipt', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 2)]);
+    await upsertJournalRecord(acceptedClaim(ID, 1));
+    const before = journalPersistCountForTests();
+    await listAllAdmin();
+    expect(journalPersistCountForTests() - before).toBe(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim' && row.generation === 1)?.fate).toBe('indexed');
+  });
+
+  testOn('D: same taskId retires only the matching row', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 2)]);
+    await upsertJournalRecord(acceptedClaim(ID, 1, '2026-08-24T00:00:00.000Z'));
+    await upsertJournalRecord({
+      taskId: ID,
+      kind: 'renew',
+      generation: 2,
+      actor: B,
+      at: '2026-08-24T00:01:00.000Z',
+      fate: 'accepted',
+      claimedUntil: UNTIL,
+      tokenVerifier: OTHER_VERIFIER,
+    });
+    const beforePersist = journalPersistCountForTests();
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    await listAllAdmin();
+    expect(journalPersistCountForTests() - beforePersist).toBe(1);
+    expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(0);
+    const rows = journalRecordsFor(ID);
+    // Matching gen-1 claim was eligible → indexed, then existing compact() drops
+    // dominated+retired non-tombstone rows (generation 1 < maxGen 2). Absence is
+    // compact retirement, not a failed eligibility mark. Bad eligibility would
+    // leave fate 'accepted' and compact would keep the row.
+    expect(rows.find((row) => row.kind === 'claim')).toBeUndefined();
+    expect(rows.some((row) => row.kind === 'claim' && row.fate === 'accepted')).toBe(false);
+    // Unmatched OPEN renew must stay accepted. Do not weaken this.
+    expect(rows.find((row) => row.kind === 'renew')?.fate).toBe('accepted');
+    expect(rows.filter((row) => row.fate === 'accepted')).toHaveLength(1);
+  });
+
+  testOn('D: empty after queue revalidation does not persist; list still 200', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    await loadLeaseJournal();
+    const rec = journalRecordsFor(ID).find((row) => row.kind === 'claim')!;
+    const before = journalPersistCountForTests();
+    await batchRetireAcceptedIndexedRows([{
+      taskId: rec.taskId,
+      kind: rec.kind,
+      generation: rec.generation,
+      at: rec.at,
+      snapshot: `${journalCanonicalSnapshotFor(ID)}-stale`,
+    }]);
+    expect(journalPersistCountForTests() - before).toBe(0);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('accepted');
+    setTaskListAllForTests(async () => [submittedTask()]);
+    const beforeList = journalPersistCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalPersistCountForTests() - beforeList).toBe(0);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('accepted');
+  });
+
+  testOn('D: journal lost on batch reload throws unavailable', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalBeforeBatchCommitForTests(() => {
+      unlinkSync(journalPathsForTests().journal);
+    });
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_lost' });
+  });
+
+  testOn('D: proven short-write before rename returns list without fate claim', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    const before = journalPersistCountForTests();
+    setJournalWriteChunkForTests(0);
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalPersistCountForTests() - before).toBe(0);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('accepted');
+  });
+
+  testOn('D: post-publication after-rename is unavailable not list success', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalCrashHookForTests('after-rename');
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  testOn('D: ordinary fresh lookup failure keeps list 200 after successful batch', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalExitEvidenceForTests(async () => {
+      throw new JournalError('lease_journal_exit_evidence_timeout');
+    });
+    const beforePersist = journalPersistCountForTests();
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(1);
+    expect(journalPersistCountForTests() - beforePersist).toBe(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'claim')?.fate).toBe('indexed');
+  });
+
+  testOn('D: optional exit persist after-rename propagates 503; lookup is exercised', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalExitEvidenceForTests(async () => eligibleExitEvidence(1));
+    setJournalBeforeExitCommitForTests(() => {
+      setJournalCrashHookForTests('after-rename');
+    });
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    await expect(listAllAdmin()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(1);
+  });
+
+  testOn('D: non-list mutation still swallows exit post-rename (1970 original success)', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    const rec = await upsertJournalRecord(acceptedClaim(ID));
+    setJournalExitEvidenceForTests(async () => eligibleExitEvidence(1));
+    setJournalBeforeExitCommitForTests(() => {
+      setJournalCrashHookForTests('after-rename');
+    });
+    await expect(markJournalFate(rec, 'indexed')).resolves.toMatchObject({ fate: 'indexed' });
+  });
+
+  testOn('D: concurrent same-key mutation before selection keeps changed accepted row OPEN', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalBeforeListSelectionForTests(async () => {
+      await upsertJournalRecord({
+        ...acceptedClaim(ID),
+        tokenVerifier: OTHER_VERIFIER,
+      });
+    });
+    const beforePersist = journalPersistCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    // Concurrent upsert is one persist; list batch must not add a second.
+    expect(journalPersistCountForTests() - beforePersist).toBe(1);
+    const claim = journalRecordsFor(ID).find((row) => row.kind === 'claim');
+    expect(claim?.fate).toBe('accepted');
+    expect(claim?.tokenVerifier).toBe(OTHER_VERIFIER);
+  });
+
+  testOn('D: successful exit uses one fresh lookup and two persists', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    setTaskListAllForTests(async () => [durableWithLease(ID, 1)]);
+    await upsertJournalRecord(acceptedClaim(ID));
+    setJournalExitEvidenceForTests(async () => eligibleExitEvidence(1));
+    const beforePersist = journalPersistCountForTests();
+    const beforeQuery = journalExitEvidenceQueryCountForTests();
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(1);
+    expect(journalPersistCountForTests() - beforePersist).toBe(2);
+    expect(journalRecordsFor(ID)).toEqual([]);
   });
 });
 

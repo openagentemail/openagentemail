@@ -217,6 +217,9 @@ test('R5e REST children preserves bounded errors from the authoritative list sna
   for (const [code, status, error] of [
     ['not_found', 404, 'not_found'],
     ['forbidden', 403, 'forbidden: task participant required'],
+    ['lease_journal_lost', 503, 'lease_journal_lost'],
+    ['lease_journal_corrupt', 503, 'lease_journal_corrupt'],
+    ['lease_journal_not_bootstrapped', 503, 'lease_journal_not_bootstrapped'],
   ] as const) {
     const service = {
       ...tasks.taskService,

@@ -22,13 +22,19 @@ import {
 import {
   JournalError,
   TASK_LEASE_CLAIM_LOST_MS,
+  batchRetireAcceptedIndexedRows,
+  cloneLoadedLeaseJournal,
+  fireJournalBeforeListSelectionForTests,
+  journalCanonicalSnapshotFrom,
   journalRecordsFor,
   listHydrationRecords,
   loadLeaseJournal,
   markJournalFate,
   maxJournalGeneration,
   type JournalExitEvidence,
+  type JournalFile,
   type JournalRecord,
+  type JournalRowKey,
   setJournalExitEvidenceLookup,
   unresolvedClaimFence,
   unresolvedMutationFence,
@@ -1860,9 +1866,13 @@ async function scanDurableTasks(
 async function hydrateTaskListFromJournal(tasks: Task[]): Promise<void> {
   if (!taskLeasePendingJournalEnabled() || tasks.length === 0) return;
   await ensureLeaseJournalLoaded();
+  const frozen = cloneLoadedLeaseJournal();
+  await fireJournalBeforeListSelectionForTests();
+  const selected: Array<JournalRowKey & { snapshot: string }> = [];
   for (const task of tasks) {
-    await hydrateOverlaysFromLoadedJournal(task);
+    await hydrateOverlaysFromLoadedJournal(task, { retireSelections: selected, file: frozen });
   }
+  await batchRetireAcceptedIndexedRows(selected);
 }
 
 async function projectTaskListSnapshot(snapshot: TaskListSnapshot): Promise<Task[]> {
@@ -2598,6 +2608,20 @@ function assertActiveRecipientLeaseCredential(
     if (leaseToken === undefined) throw new Error('task_already_terminal');
     if (!isTaskLeaseTokenCurrent(current, leaseToken)) throw new Error('task_lease_required');
   }
+  if (
+    taskLeasePendingJournalEnabled()
+    && current
+    && current.to.toLowerCase() === from.toLowerCase()
+  ) {
+    const pending = unresolvedClaimFence(current.id);
+    // accepted stays OPEN occupancy until indexed retirement, but hydration already
+    // projects it as lease authority (branch above). intent/unconfirmed are fences only;
+    // a bearer does not resolve an unknown claim.
+    if (pending && (pending.fate === 'intent' || pending.fate === 'unconfirmed')) {
+      if (leaseToken === undefined) throw new Error('task_already_terminal');
+      throw new Error('task_lease_required');
+    }
+  }
 }
 
 export async function updateTask(input: UpdateTaskInput): Promise<Task | null> {
@@ -2708,8 +2732,14 @@ async function ensureLeaseJournalLoaded(): Promise<void> {
   }
 }
 
-async function hydrateOverlaysFromLoadedJournal(task: Task): Promise<void> {
-  for (const rec of listHydrationRecords(task.id)) {
+async function hydrateOverlaysFromLoadedJournal(
+  task: Task,
+  opts?: {
+    retireSelections?: Array<JournalRowKey & { snapshot: string }>;
+    file?: JournalFile;
+  },
+): Promise<void> {
+  for (const rec of listHydrationRecords(task.id, opts?.file)) {
     const event = leaseEventFromJournal(rec);
     if (!event) continue;
     const queued: QueuedEvent = {
@@ -2725,7 +2755,17 @@ async function hydrateOverlaysFromLoadedJournal(task: Task): Promise<void> {
       lease: event,
     };
     if (eventIsIndexed(task, queued)) {
-      if (rec.fate !== 'indexed' && rec.fate !== 'tombstoned' && rec.fate !== 'superseded') {
+      if (opts?.retireSelections) {
+        if (rec.fate === 'accepted' && opts.file) {
+          opts.retireSelections.push({
+            taskId: rec.taskId,
+            kind: rec.kind,
+            generation: rec.generation,
+            at: rec.at,
+            snapshot: journalCanonicalSnapshotFrom(opts.file, rec.taskId),
+          });
+        }
+      } else if (rec.fate !== 'indexed' && rec.fate !== 'tombstoned' && rec.fate !== 'superseded') {
         await markJournalFate(rec, rec.kind === 'tombstone' ? 'tombstoned' : 'indexed').catch(() => undefined);
       }
       continue;
@@ -2781,7 +2821,13 @@ async function deliverJournalledLeaseMail(input: {
       from: input.from, to: [input.to], subject: input.task.subject, text: input.text, headers,
     });
   } catch (err) {
-    await upsertJournalRecord({ ...rec, fate: 'unconfirmed' }).catch(() => undefined);
+    await upsertJournalRecord({ ...rec, fate: 'unconfirmed' }).catch((writeErr) => {
+      console.warn(JSON.stringify({
+        src: 'task-lease-journal',
+        event: 'unconfirmed_persist_failed',
+        code: writeErr instanceof Error ? writeErr.message : 'unconfirmed_persist_failed',
+      }));
+    });
     throw err;
   }
   if (postSmtpAcceptHookForTests) {
@@ -2790,7 +2836,13 @@ async function deliverJournalledLeaseMail(input: {
   try {
     await upsertJournalRecord({ ...rec, fate: 'accepted' });
   } catch (err) {
-    await upsertJournalRecord({ ...rec, fate: 'unconfirmed' }).catch(() => undefined);
+    await upsertJournalRecord({ ...rec, fate: 'unconfirmed' }).catch((writeErr) => {
+      console.warn(JSON.stringify({
+        src: 'task-lease-journal',
+        event: 'unconfirmed_persist_failed',
+        code: writeErr instanceof Error ? writeErr.message : 'unconfirmed_persist_failed',
+      }));
+    });
     if (err instanceof JournalError) throw new Error(err.message);
     throw new Error('lease_journal_unconfirmed');
   }
@@ -3363,7 +3415,8 @@ export async function claimLostTask(input: { id: string }): Promise<Task> {
       throw new Error('lease_claim_lost_too_early');
     }
     const firstClaimedAt = pending.firstClaimedAt ?? taskLeaseFirstClaimedAt(current) ?? pending.at;
-    const claimedUntil = pending.claimedUntil ?? pending.at;
+    if (!pending.claimedUntil) throw new Error('lease_claim_lost_not_eligible');
+    const claimedUntil = pending.claimedUntil;
     const existingTombstone = journalRecordsFor(current.id).find((row) =>
       row.kind === 'tombstone'
       && row.generation === pending.generation
@@ -4207,6 +4260,9 @@ function collectDurableLeaseHistory(messages: ParsedTaskMessage[]): {
     if (!lease) continue;
     if (lease.event === 'claim') {
       leaseGeneration = Math.max(leaseGeneration, lease.generation);
+      // Conservative IMAP anchor: gen-1 claim.at only. Journal may store per-claim
+      // firstClaimedAt; canExit compares that field only when the journal has one.
+      // Missing gen-1 does not invent evidence.firstClaimedAt (no derivation change).
       if (lease.generation === 1) firstClaimedAt = firstClaimedAt ?? lease.at;
     } else if (lease.event === 'renew') {
       leaseGeneration = Math.max(leaseGeneration, lease.generation);

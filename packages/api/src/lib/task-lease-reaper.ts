@@ -1,4 +1,4 @@
-import { taskLeaseEmitterEnabled, taskLeasePendingJournalEnabled, taskLeasesEnabled } from './task-lease-gate.ts';
+import { taskLeaseEmitterEnabled, taskLeasesEnabled } from './task-lease-gate.ts';
 import { emitPendingExpiryAuditsOnce, reapExpiredTaskLeasesOnce } from './tasks.ts';
 
 // #56 requires explicit recovery, not configurability; a tunable cadence is a separate task.

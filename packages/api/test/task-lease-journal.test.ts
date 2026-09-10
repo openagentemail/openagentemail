@@ -25,6 +25,8 @@ const {
   setJournalDataDirForTests,
   unresolvedClaimFence,
   upsertJournalRecord,
+  journalSuppressesExpiry,
+  setJournalWriteChunkForTests,
 } = await import('../src/lib/task-lease-journal.ts');
 
 const TASK_A = '0fdc3207-056e-47c1-a65c-b29d39f66b82';
@@ -320,5 +322,72 @@ describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
     expect(fresh.records).toHaveLength(1);
     expect(fresh.records[0]?.taskId).toBe(TASK_A);
     expect(fresh.records[0]?.fate).toBe('intent');
+  });
+});
+
+describe('PR181 R2 A expiry predicate + E writeAll', () => {
+  const UNTIL = '2026-08-24T00:05:00.000Z';
+  const OTHER = '2026-08-24T00:10:00.000Z';
+
+  function fileWith(row: {
+    kind: 'claim' | 'renew' | 'release' | 'expired' | 'tombstone';
+    fate: 'intent' | 'unconfirmed' | 'accepted' | 'indexed' | 'tombstoned' | 'superseded' | 'rejected';
+    claimedUntil?: string;
+  }) {
+    return {
+      version: 1 as const,
+      initializedAt: '2026-08-24T00:00:00.000Z',
+      source: 'bootstrap' as const,
+      records: [{
+        taskId: TASK_A,
+        generation: 1,
+        actor: 'bravo@test.example',
+        at: '2026-08-24T00:00:00.000Z',
+        claimedUntil: UNTIL,
+        ...row,
+      }],
+    };
+  }
+
+  test('A: leftover indexed claim/same-window renew do not suppress; OPEN fences and closing receipts do', () => {
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'claim', fate: 'indexed' }))).toBe(false);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'claim', fate: 'superseded' }))).toBe(false);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'renew', fate: 'indexed' }))).toBe(false);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'claim', fate: 'intent' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'claim', fate: 'accepted' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'renew', fate: 'intent' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'renew', fate: 'indexed', claimedUntil: OTHER }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'release', fate: 'indexed' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'release', fate: 'intent' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'tombstone', fate: 'tombstoned' }))).toBe(true);
+    expect(journalSuppressesExpiry(TASK_A, 1, UNTIL, fileWith({ kind: 'expired', fate: 'intent' }))).toBe(true);
+  });
+
+  test('E: short writeSync counts loop to completion; n<=0 fails before rename', async () => {
+    freshDir();
+    setJournalWriteChunkForTests(1);
+    bootstrapTaskLeaseJournal();
+    await upsertJournalRecord(claimIntent(TASK_A));
+    expect(diskRecords()).toMatchObject([{ taskId: TASK_A, fate: 'intent', generation: 1 }]);
+    resetJournalMemoryForTests();
+    const fresh = await loadLeaseJournal();
+    expect(fresh.records).toHaveLength(1);
+
+    setJournalWriteChunkForTests(0);
+    await expect(upsertJournalRecord(claimIntent(TASK_B, '2026-08-24T00:00:01.000Z', 'b'.repeat(43)))).rejects.toMatchObject({
+      message: 'lease_journal_short_write',
+    });
+    expect(diskRecords()).toMatchObject([{ taskId: TASK_A, fate: 'intent', generation: 1 }]);
+    expect(existsSync(`${journalPathsForTests().journal}.tmp`)).toBe(true);
+  });
+
+  test('E: crash short-write hook still fails closed without publishing', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    setJournalCrashHookForTests('short-write');
+    await expect(upsertJournalRecord(claimIntent(TASK_A))).rejects.toMatchObject({
+      message: 'lease_journal_crash_short_write',
+    });
+    expect(diskRecords()).toEqual([]);
   });
 });

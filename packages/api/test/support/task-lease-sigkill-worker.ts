@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
 import type { SendInput } from '../../src/lib/smtp.ts';
@@ -63,13 +64,15 @@ function submittedTask(id: string): Task {
 }
 
 function writeBarrier(record: { stage: string; payloadHash: string; generation: number }): void {
-  const fd = openSync(barrierFile, 'w', 0o600);
+  const tmp = `${barrierFile}.tmp`;
+  const fd = openSync(tmp, 'w', 0o600);
   try {
     writeFileSync(fd, JSON.stringify(record) + '\n');
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+  renameSync(tmp, barrierFile);
 }
 
 function signalSyncFifo(): void {

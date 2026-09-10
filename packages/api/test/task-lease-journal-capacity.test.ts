@@ -430,13 +430,15 @@ describe('M2 journal whole-task exit (v4 + addendum)', () => {
     freshDir();
     await fillIndexed(TASK_LEASE_JOURNAL_MAX_RECORDS - 1);
     await upsertJournalRecord(intentClaim(tid(TASK_LEASE_JOURNAL_MAX_RECORDS)));
+    let depthDuringLookup = -1;
     setJournalExitEvidenceForTests(async () => {
-      expect(journalMaintenanceDepthForTests()).toBeGreaterThan(0);
+      depthDuringLookup = journalMaintenanceDepthForTests();
       await upsertJournalRecord(indexedClaim(tid(TASK_LEASE_JOURNAL_MAX_RECORDS), { at: '2026-08-24T00:00:01.000Z', fate: 'indexed' }));
       return eligibleEvidence();
     });
     const before = journalExitEvidenceQueryCountForTests();
     await markJournalFate(intentClaim(tid(TASK_LEASE_JOURNAL_MAX_RECORDS)), 'indexed');
+    expect(depthDuringLookup).toBeGreaterThan(0);
     expect(journalExitEvidenceQueryCountForTests() - before).toBe(1);
   }, FILL_TIMEOUT);
 

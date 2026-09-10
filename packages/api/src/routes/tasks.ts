@@ -277,6 +277,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           nextCursor: page.nextCursor,
         });
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
