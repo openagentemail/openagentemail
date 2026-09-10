@@ -1,3 +1,5 @@
+const FIXTURE_SIGNING_SECRET = '01234567890123456789012345678901';
+
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
 process.env.IMAP_USER = 'agent@test.example';
@@ -6,7 +8,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.TASK_LEASES_ENABLED = 'true';
 process.env.TASK_LEASES_PENDING_JOURNAL = 'true';
-process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
+process.env.TASK_SIGNING_SECRET = FIXTURE_SIGNING_SECRET;
 process.env.NODE_ENV = 'test';
 
 const { execSync } = await import('node:child_process');
@@ -21,10 +23,10 @@ const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { describe, expect, test } = await import('bun:test');
 const {
-  bootstrapTaskLeaseJournal,
   resetJournalMemoryForTests,
   setJournalDataDirForTests,
 } = await import('../src/lib/task-lease-journal.ts');
+const { provisionJournalInChild } = await import('./support/sigkey-provision.ts');
 
 const WORKER_SCRIPT = join(import.meta.dir, 'support', 'task-lease-sigkill-worker.ts');
 const PKG_DIR = join(import.meta.dir, '..');
@@ -51,6 +53,27 @@ async function waitForBarrierOrChildExit(
 }
 
 describe('M2 Real Subprocess SIGKILL Tests', () => {
+  test('provision helper times out inside the parent budget and reaps the child before raising', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'oae-sigkey-stall-'));
+    try {
+      process.env.OAE_PROVISION_STALL_MS = '10000';
+      const started = Date.now();
+      let message = '';
+      try {
+        await provisionJournalInChild(dataDir, FIXTURE_SIGNING_SECRET);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      const elapsed = Date.now() - started;
+      expect(message).toContain('timed out');
+      expect(message).toMatch(/child reaped exit=\S+/);
+      expect(elapsed).toBeLessThan(5000);
+    } finally {
+      delete process.env.OAE_PROVISION_STALL_MS;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   test('Case A: SMTP ACCEPT 后、fate 落盘前被 SIGKILL，重启识别 unconfirmed 并重发同 identity，不新开代', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'oae-sigkill-a-'));
     const syncFifo = join(dataDir, 'sync.fifo');
@@ -62,9 +85,10 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
 
     try {
       execSync(`mkfifo ${syncFifo} ${pauseFifo}`);
-      // Harness bootstrap: exclusive mkdir within test boundary
-      setJournalDataDirForTests(dataDir);
-      bootstrapTaskLeaseJournal();
+      // Harness bootstrap in a child with the identical explicit fixture env,
+      // so a shared parent-process config poisoned by earlier files cannot
+      // poison the provisioned marker/seal key.
+      await provisionJournalInChild(dataDir, FIXTURE_SIGNING_SECRET);
 
       // Spawn Child 1
       const child1 = Bun.spawn([
@@ -91,7 +115,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
           IMAP_PASS: 'imap-secret',
           SMTP_USER: 'agent@test.example',
           SMTP_PASS: 'smtp-secret',
-          TASK_SIGNING_SECRET: '01234567890123456789012345678901',
+          TASK_SIGNING_SECRET: FIXTURE_SIGNING_SECRET,
         },
         stdout: 'inherit',
         stderr: 'inherit',
@@ -184,7 +208,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
           IMAP_PASS: 'imap-secret',
           SMTP_USER: 'agent@test.example',
           SMTP_PASS: 'smtp-secret',
-          TASK_SIGNING_SECRET: '01234567890123456789012345678901',
+          TASK_SIGNING_SECRET: FIXTURE_SIGNING_SECRET,
         },
         stdout: 'inherit',
         stderr: 'inherit',
@@ -226,8 +250,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
 
     try {
       execSync(`mkfifo ${syncFifo} ${pauseFifo}`);
-      setJournalDataDirForTests(dataDir);
-      bootstrapTaskLeaseJournal();
+      await provisionJournalInChild(dataDir, FIXTURE_SIGNING_SECRET);
 
       const child1 = Bun.spawn([
         process.execPath,
@@ -253,7 +276,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
           IMAP_PASS: 'imap-secret',
           SMTP_USER: 'agent@test.example',
           SMTP_PASS: 'smtp-secret',
-          TASK_SIGNING_SECRET: '01234567890123456789012345678901',
+          TASK_SIGNING_SECRET: FIXTURE_SIGNING_SECRET,
         },
         stdout: 'inherit',
         stderr: 'inherit',
@@ -339,7 +362,7 @@ describe('M2 Real Subprocess SIGKILL Tests', () => {
           IMAP_PASS: 'imap-secret',
           SMTP_USER: 'agent@test.example',
           SMTP_PASS: 'smtp-secret',
-          TASK_SIGNING_SECRET: '01234567890123456789012345678901',
+          TASK_SIGNING_SECRET: FIXTURE_SIGNING_SECRET,
         },
         stdout: 'inherit',
         stderr: 'inherit',

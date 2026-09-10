@@ -2038,7 +2038,7 @@ describe('UI board empty-list journal availability (REAL default taskService)', 
   }
 
   test('empty list with journal unavailable maps to 503 (absent/lost/corrupt) via the real board path', async () => {
-    await withTaskLeasePendingJournalForTests(true, async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {
       const { app, cookie } = realBoardApp();
       setTaskListAllForTests(async () => []);
       setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-absent-')));
@@ -2061,11 +2061,11 @@ describe('UI board empty-list journal availability (REAL default taskService)', 
       const corrupt = await app.request('/ui/api/tasks', { headers: { cookie } });
       expect(corrupt.status).toBe(503);
       expect(await corrupt.json()).toEqual({ error: 'lease_journal_corrupt' });
-    });
+    }));
   });
 
   test('healthy enabled empty list is 200 with zero persists and zero exit lookups via the real board path', async () => {
-    await withTaskLeasePendingJournalForTests(true, async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {
       const { app, cookie } = realBoardApp();
       setTaskListAllForTests(async () => []);
       resetJournalMemoryForTests();
@@ -2079,11 +2079,11 @@ describe('UI board empty-list journal availability (REAL default taskService)', 
       expect(body.tasks).toEqual([]);
       expect(journalPersistCountForTests() - beforePersist).toBe(0);
       expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(0);
-    });
+    }));
   });
 
   test('disabled gate with absent journal stays 200 and never reads the journal via the real board path', async () => {
-    await withTaskLeasePendingJournalForTests(false, async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(false, async () => {
       const { app, cookie } = realBoardApp();
       setTaskListAllForTests(async () => []);
       setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-off-')));
@@ -2091,6 +2091,6 @@ describe('UI board empty-list journal availability (REAL default taskService)', 
       expect(res.status).toBe(200);
       const body = (await res.json()) as { tasks: unknown[] };
       expect(body.tasks).toEqual([]);
-    });
+    }));
   });
 });
