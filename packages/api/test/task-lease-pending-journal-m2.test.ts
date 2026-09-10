@@ -1053,7 +1053,7 @@ describe('PR181 R2 D list bound', () => {
     expect(later.some((row) => row.generation === 1 || row.generation === 2)).toBe(false);
   });
 
-  testOn('C clause2: older accepted tombstone retires against newer durable lostLease and does not replay', async () => {
+  testOn('C clause2 (2074-strict): older accepted tombstone without an exact receipt is NOT retired', async () => {
     isolateJournal();
     setTaskNowForTests(() => START);
     setTaskListAllForTests(async () => [durableWithLostLease(ID, 2)]);
@@ -1069,9 +1069,10 @@ describe('PR181 R2 D list bound', () => {
     });
     const board = await listAllAdmin();
     expect(board.tasks).toHaveLength(1);
-    // The older tombstone is dominated by the durable gen2 receipt: retired, never projected.
-    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
-    // Retired tombstones are recognized as indexed on later reads: no replay, no re-mark.
+    // 2074-strict: no gen1 authenticated receipt exists; dominance over a newer
+    // durable lostLease is NOT indexing proof — the row stays OPEN.
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('accepted');
+    // Replay is projection-only: repeated reads perform no persist.
     const beforePersist = journalPersistCountForTests();
     const again = await listAllAdmin();
     expect(again.tasks).toHaveLength(1);
@@ -1484,5 +1485,336 @@ describe('M2-6 兼容面', () => {
       const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
       expect(grant.leaseGeneration).toBe(1);
     });
+  });
+});
+
+describe('R4-BC old-deadline pending-renew recovery', () => {
+  function renewIntentRow(verifier: string, fate: 'intent' | 'unconfirmed' | 'accepted' = 'intent') {
+    return {
+      taskId: ID,
+      kind: 'renew' as const,
+      generation: 1,
+      actor: B,
+      at: '2026-08-24T00:01:00.000Z',
+      fate,
+      claimedUntil: '2026-08-24T01:00:00.000Z',
+      tokenVerifier: verifier,
+    };
+  }
+
+  testOn('B: old-deadline retry recovers exact pending renew (resend + accepted), replacement still blocked', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<bc-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    // Constructed fixture standing in for the accepted-but-uncommitted state
+    // (a manually seeded intent row, NOT a real SMTP crash reproduction).
+    const seeded = renewIntentRow(durable.lease!.tokenVerifier!);
+    await upsertJournalRecord(seeded);
+    // The old durable deadline passes; neither the 24h generation cap nor the
+    // seven-day task cap is near.
+    now = Date.parse(first.claimedUntil) + 1000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    // The exact immutable renew identity was resent once and marked accepted.
+    const renewMail = sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'renew');
+    expect(renewMail).toHaveLength(1);
+    const acceptedRow = journalRecordsFor(ID).find((row) => row.kind === 'renew');
+    expect(acceptedRow?.fate).toBe('accepted');
+    // Immutable identity proof: every identity field of the recovered row is
+    // byte-identical to the seeded pending row — only fate changed.
+    expect(acceptedRow).toMatchObject({
+      kind: seeded.kind,
+      generation: seeded.generation,
+      actor: seeded.actor,
+      at: seeded.at,
+      claimedUntil: seeded.claimedUntil,
+      tokenVerifier: seeded.tokenVerifier,
+    });
+    // The resent payload carries the same event identity and the ORIGINAL
+    // deadline — nothing minted, nothing extended.
+    const renewMsg = (await parseCaptured(renewMail[0]!, 7))!;
+    expect(renewMsg?.lease).toMatchObject({
+      event: 'renew',
+      generation: seeded.generation,
+      at: seeded.at,
+      claimedUntil: seeded.claimedUntil,
+      tokenVerifier: seeded.tokenVerifier,
+    });
+    // Recovery clears the stale rejection, NOT the fence: a replacement claim
+    // is still blocked while the recovered authority is active and unindexed.
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+  });
+
+  testOn('B: accepted pending renew replays via overlay; retry reports pending index without resend', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<bca-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    await upsertJournalRecord(renewIntentRow(durable.lease!.tokenVerifier!, 'accepted'));
+    now = Date.parse(first.claimedUntil) + 1000;
+    const before = sent.length;
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    expect(sent).toHaveLength(before);
+  });
+
+  testOn('B: stale matrix — wrong bearer, identity mismatch, no pending, caps never bypassed', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<bcn-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    const verifier = durable.lease!.tokenVerifier!;
+    await upsertJournalRecord(renewIntentRow(verifier));
+    now = Date.parse(first.claimedUntil) + 1000;
+    // Wrong bearer is rejected at authentication, before any recovery.
+    await expect(renewTask({ id: ID, from: B, leaseToken: 'wrong-token', leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'stale_lease' });
+    // Identity mismatch: a pending renew under a different verifier is not recovered.
+    resetJournalMemoryForTests();
+    isolateJournal();
+    await upsertJournalRecord(renewIntentRow(OTHER_VERIFIER));
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'stale_lease' });
+    // No pending renew at all: plain stale rejection, unchanged.
+    resetJournalMemoryForTests();
+    isolateJournal();
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'stale_lease' });
+    // Caps are never bypassed: past the 24h generation cap, no recovery happens
+    // even with an exact matching pending renew.
+    resetJournalMemoryForTests();
+    isolateJournal();
+    await upsertJournalRecord(renewIntentRow(verifier));
+    now = START + 24 * 60 * 60 * 1000 + 1000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'stale_lease' });
+    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'renew')).toHaveLength(0);
+    // Seven-day task cap likewise.
+    now = START + 7 * 24 * 60 * 60 * 1000 + 1000;
+    await expect(renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 3600 }))
+      .rejects.toMatchObject({ message: 'stale_lease' });
+    expect(sent.filter((mail) => mail.headers?.['X-OA-Task-Lease-Event'] === 'renew')).toHaveLength(0);
+  });
+});
+
+describe('R4-A tombstone row retirement (ORDER-2074)', () => {
+  function tombstoneRow(at: string, generation = 1, fate: 'intent' | 'accepted' = 'accepted') {
+    return {
+      taskId: ID,
+      kind: 'tombstone' as const,
+      generation,
+      actor: 'server' as const,
+      at,
+      fate,
+      claimedUntil: UNTIL,
+      firstClaimedAt: '2026-08-24T00:00:00.000Z',
+    };
+  }
+
+  testOn('A2074: claim-before-tombstone UID order retires the exact row, preserves authority, no re-persist', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<a71-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    // Claim indexes BEFORE its tombstone: reconstruction keeps the claim
+    // authoritative; the authenticated tombstone is a historical no-op.
+    durable = taskFromMessages(ID, [submittedRaw(), claim1Msg, tombstoneMsg])!;
+    expect(durable.lease?.leaseGeneration).toBe(1);
+    expect(durable.lostLease).toBeUndefined();
+    setTaskListAllForTests(async () => [durable]);
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    // The accepted tombstone journal row retires on exact authenticated identity.
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
+    // Current authority is preserved internally, never rolled back: the durable
+    // lease stays authoritative and no lostLease is fabricated. (The public
+    // projection hides the already-expired window by design.)
+    const detail = await getTask(ID);
+    expect(detail?.lease?.leaseGeneration).toBe(1);
+    expect(detail?.lostLease).toBeUndefined();
+    // No revival and no re-persist on repeated reads.
+    const before = journalPersistCountForTests();
+    const again = await listAllAdmin();
+    expect(again.tasks).toHaveLength(1);
+    expect(journalPersistCountForTests() - before).toBe(0);
+  });
+
+  testOn('A2074: tombstone-before-claim UID order also retires; newer generation never rolled back', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<a72-${sent.length}>` };
+    });
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 3))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 2))!;
+    // Tombstone indexes first (earlier UID); the late claim reconciles history only.
+    durable = taskFromMessages(ID, [submittedRaw(), tombstoneMsg, claim1Msg])!;
+    expect(durable.lostLease?.leaseGeneration).toBe(1);
+    // A newer accepted claim exists only in the journal so far, with a live window.
+    await upsertJournalRecord({
+      ...acceptedClaim(ID, 2, '2026-08-24T02:30:00.000Z'),
+      claimedUntil: '2026-08-24T05:00:00.000Z',
+    });
+    setTaskListAllForTests(async () => [durable]);
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
+    const gen2 = journalRecordsFor(ID).find((row) => row.kind === 'claim' && row.generation === 2);
+    expect(gen2?.fate).toBe('accepted');
+    expect(board.tasks[0]?.leaseGeneration).toBe(2);
+  });
+
+  testOn('A2078: terminal with exact authenticated history retires; different identity stays OPEN; receipts never leak', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<a78-${sent.length}>` };
+    });
+    await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    const completedRaw: RawTaskMessage = {
+      uid: 4, from: B, to: A, subject: 'done', date: '2026-08-24T02:30:00.000Z',
+      state: 'completed', body: 'done',
+    };
+    // Real reconstruction: claim first (authority), tombstone as authenticated
+    // historical no-op, then terminal — receipts preserved privately (2078 cl3).
+    durable = taskFromMessages(ID, [submittedRaw(), claim1Msg, tombstoneMsg, completedRaw])!;
+    expect(durable.state).toBe('completed');
+    expect(durable.tombstoneReceipts).toHaveLength(1);
+    // A second journal tombstone whose identity matches no receipt.
+    await upsertJournalRecord(tombstoneRow('2026-08-24T03:33:00.000Z'));
+    setTaskListAllForTests(async () => [durable]);
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    const rows = journalRecordsFor(ID).filter((row) => row.kind === 'tombstone');
+    // Positive: exact authenticated history retires even on a terminal task.
+    expect(rows.find((row) => row.at !== '2026-08-24T03:33:00.000Z')?.fate).toBe('tombstoned');
+    // Negative: different/unauthenticated identity stays OPEN on the same task.
+    expect(rows.find((row) => row.at === '2026-08-24T03:33:00.000Z')?.fate).toBe('accepted');
+    // Non-disclosure: private receipts never reach public projections.
+    expect(JSON.stringify(board.tasks[0])).not.toContain('tombstoneReceipts');
+    expect(JSON.stringify(toTaskView(durable))).not.toContain('tombstoneReceipts');
+    // No revival, no extra persist on repeated reads.
+    const before = journalPersistCountForTests();
+    const again = await listAllAdmin();
+    expect(again.tasks).toHaveLength(1);
+    expect(journalPersistCountForTests() - before).toBe(0);
+  });
+
+  testOn('A2074: same-generation lostLease or terminal without an exact receipt never retires', async () => {
+    isolateJournal();
+    setTaskNowForTests(() => START);
+    // (a) Durable lostLease gen1 exists, but the journal row's identity matches
+    // no authenticated receipt — generation-only evidence is not enough.
+    setTaskListAllForTests(async () => [durableWithLostLease(ID, 1)]);
+    await upsertJournalRecord(tombstoneRow('2026-08-24T03:33:00.000Z'));
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('accepted');
+    // (b) Terminal task: terminality alone never retires a tombstone row.
+    resetJournalMemoryForTests();
+    isolateJournal();
+    const terminal = { ...submittedTask(ID), state: 'completed' as const };
+    setTaskListAllForTests(async () => [terminal]);
+    await upsertJournalRecord(tombstoneRow('2026-08-24T02:00:00.000Z'));
+    const board2 = await listAllAdmin();
+    expect(board2.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('accepted');
+  });
+
+  testOn('A2074: missing evidence and wrong identity are never retired; same-generation claim is not proof', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<a73-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    const claim1Msg = (await parseCaptured(sent[0]!, 2))!;
+    now = START + TWO_H;
+    await claimLostTask({ id: ID });
+    const tombstoneMsg = (await parseCaptured(sent[1]!, 3))!;
+    durable = taskFromMessages(ID, [submittedRaw(), claim1Msg, tombstoneMsg])!;
+    setTaskListAllForTests(async () => [durable]);
+    // A journal tombstone whose `at` matches NO authenticated durable receipt
+    // must survive every read — same-generation claim existence is not proof.
+    await upsertJournalRecord(tombstoneRow('2026-08-24T03:33:00.000Z'));
+    const board = await listAllAdmin();
+    expect(board.tasks).toHaveLength(1);
+    const tombstones = journalRecordsFor(ID).filter((row) => row.kind === 'tombstone');
+    const forged = tombstones.find((row) => row.at === '2026-08-24T03:33:00.000Z');
+    expect(forged?.fate).toBe('accepted');
+    // The authentic row still retires on exact identity.
+    expect(tombstones.find((row) => row.at !== '2026-08-24T03:33:00.000Z')?.fate).toBe('tombstoned');
+    // And with NO durable tombstone evidence at all (claim only), nothing retires.
+    const durableClaimOnly = taskFromMessages(ID, [submittedRaw(), claim1Msg])!;
+    setTaskListAllForTests(async () => [durableClaimOnly]);
+    resetJournalMemoryForTests();
+    isolateJournal();
+    await upsertJournalRecord(tombstoneRow('2026-08-24T02:00:00.000Z'));
+    const board2 = await listAllAdmin();
+    expect(board2.tasks).toHaveLength(1);
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('accepted');
+    expect(first.leaseToken).toBeString();
   });
 });

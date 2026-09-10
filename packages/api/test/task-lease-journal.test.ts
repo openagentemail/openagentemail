@@ -16,6 +16,7 @@ const { afterEach, describe, expect, test } = await import('bun:test');
 const {
   JournalError,
   bootstrapTaskLeaseJournal,
+  cloneLoadedLeaseJournal,
   deleteJournalFilesForTests,
   journalPathsForTests,
   loadLeaseJournal,
@@ -212,6 +213,23 @@ describe('M2 journal 首次启用、原子落盘与丢失检测', () => {
 
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
     await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+  });
+
+  test('seal 在 exists 检查后不可读（变成目录）→ corrupt + 永久 latch，文件恢复不解锁', async () => {
+    freshDir();
+    bootstrapTaskLeaseJournal();
+    const paths = journalPathsForTests();
+    const sealContent = readFileSync(paths.seal, 'utf8');
+    unlinkSync(paths.seal);
+    mkdirSync(paths.seal);
+    // existsSync 通过但 readFileSync 抛原始 FS 错误：必须归类为 corrupt 并 latch。
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    expect(() => cloneLoadedLeaseJournal()).toThrow('lease_journal_corrupt');
+    // 永久 latch：恢复有效 seal 文件也不能解锁（除非授权 reset）。
+    rmSync(paths.seal, { recursive: true });
+    writeFileSync(paths.seal, sealContent);
+    await expect(loadLeaseJournal()).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
+    await expect(upsertJournalRecord(claimIntent(TASK_A))).rejects.toMatchObject({ message: 'lease_journal_corrupt' });
   });
 
   test('热进程下 marker 丢失：拦截并 latch corrupt', async () => {

@@ -248,6 +248,9 @@ export type Task = {
   expiredLease?: ExpiredLeaseReceipt;
   /** 已接受的 claim_lost 收据；不进公开投影。 */
   lostLease?: LostLeaseReceipt;
+  /** Authenticated durable claim_lost receipts including historical no-ops.
+   * Evidence only — never authority, never publicly projected. */
+  tombstoneReceipts?: ClaimLostLeaseEvent[];
 };
 
 type LostLeaseReceipt = {
@@ -257,7 +260,7 @@ type LostLeaseReceipt = {
   firstClaimedAt?: string;
 };
 
-export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -1648,6 +1651,12 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   if (lostLease && !TERMINAL_TASK_STATES.includes(current.state) && !leaseAuthority) {
     task.lostLease = lostLease;
   }
+  // ORDER-2078 clause3: authenticated tombstone history is evidence, not
+  // authority — preserve it privately even through terminal reconstruction so
+  // exact-evidenced rows can retire on terminal tasks. Never projected.
+  if (appliedTombstones.size > 0) {
+    task.tombstoneReceipts = [...appliedTombstones.values()];
+  }
   return task;
 }
 
@@ -2198,9 +2207,21 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
   if (queued.lease) {
     const authority = task.lease;
     if (queued.lease.event === 'claim_lost') {
-      return (!!task.lostLease && task.lostLease.leaseGeneration === queued.lease.generation)
-        || indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')
-        || TERMINAL_TASK_STATES.includes(task.state);
+      // ORDER-2074 strict: a tombstone row retires ONLY on a durable
+      // AUTHENTICATED receipt whose complete event identity matches
+      // (generation/at/claimedUntil/firstClaimedAt). No generation-only,
+      // dominance, or terminality shortcut retires a tombstone row; without an
+      // exact receipt the row stays OPEN (fail-closed default). A historical
+      // no-op receipt is still authenticated durable evidence. The effective
+      // tombstone behind task.lostLease is itself in tombstoneReceipts, so all
+      // authenticated retirements are preserved.
+      const queuedLease = queued.lease;
+      const receipt = task.tombstoneReceipts?.find((stone) =>
+        stone.generation === queuedLease.generation
+        && stone.at === queuedLease.at
+        && stone.claimedUntil === queuedLease.claimedUntil
+        && stone.firstClaimedAt === queuedLease.firstClaimedAt);
+      return !!receipt;
     }
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
@@ -2347,6 +2368,8 @@ function applyOverlayMessages(task: Task, extra: QueuedEvent[]): Task {
     delete next.releasedLease;
     delete next.expiredLease;
     delete next.lostLease;
+    // tombstoneReceipts are retained on terminal tasks by ORDER-2078 clause3:
+    // private authenticated evidence, never authority, never projected.
   } else if (authority) {
     next.lease = authority;
     delete next.releasedLease;
@@ -3268,6 +3291,25 @@ export async function renewTask(input: {
       }
       if (deadline === generationCap && now >= generationCap) {
         throw new Error('lease_tenure_exhausted');
+      }
+      // The old durable deadline passed without hitting either cap. Before the
+      // stale rejection, recover an exact immutable pending renewal (same task,
+      // kind renew, intent/unconfirmed fate, verifier equal to the current
+      // authority): resend and mark accepted, then report pending index. No new
+      // renewal identity is minted, no payload or deadline is extended, and the
+      // cap checks above still win. Bearer authentication already happened.
+      if (now < taskCap && now < generationCap && taskLeasePendingJournalEnabled()) {
+        const pendingMut = unresolvedMutationFence(current.id);
+        if (
+          pendingMut
+          && pendingMut.kind === 'renew'
+          && (pendingMut.fate === 'intent' || pendingMut.fate === 'unconfirmed')
+          && pendingMut.tokenVerifier
+          && leaseVerifiersEqual(pendingMut.tokenVerifier, current.lease?.tokenVerifier)
+        ) {
+          await persistAcceptedAfterResend(current, pendingMut);
+          throw new Error('lease_overlay_pending_index');
+        }
       }
       throw new Error('stale_lease');
     }

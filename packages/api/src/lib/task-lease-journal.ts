@@ -538,7 +538,12 @@ function loadLeaseJournalUnlocked(): JournalFile {
       throw new JournalError('lease_journal_corrupt');
     }
 
-    const expectedSeal = readFileSync(sPath, 'utf8').trim();
+    let expectedSeal: string;
+    try {
+      expectedSeal = readFileSync(sPath, 'utf8').trim();
+    } catch {
+      throw new JournalError('lease_journal_corrupt');
+    }
     const actualSeal = sealBytes(Buffer.from(raw, 'utf8'));
     if (!safeEqual(expectedSeal, actualSeal)) {
       throw new JournalError('lease_journal_corrupt');
