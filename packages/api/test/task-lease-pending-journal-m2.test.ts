@@ -1869,3 +1869,77 @@ describe('R5-A claimTask supersede skips tombstone rows', () => {
     expect(journalRecordsFor(ID).find((row) => row.kind === 'tombstone')?.fate).toBe('tombstoned');
   });
 });
+
+describe('R4-2132 unresolved renew recipient fence', () => {
+  function liveRenewIntent(verifier: string) {
+    return {
+      taskId: ID,
+      kind: 'renew' as const,
+      generation: 1,
+      actor: B,
+      at: '2026-08-24T00:01:00.000Z',
+      fate: 'intent' as const,
+      claimedUntil: '2026-08-24T01:00:00.000Z',
+      tokenVerifier: verifier,
+    };
+  }
+
+  testOn('2132: recipient update/reply fenced by unresolved live renewal; bearer does not resolve; sender unaffected', async () => {
+    isolateJournal();
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<n32-${sent.length}>` };
+    });
+    const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    // Original claim is durably authoritative; the renewal was accepted by SMTP
+    // (constructed fixture) but never committed.
+    await upsertJournalRecord(liveRenewIntent(durable.lease!.tokenVerifier!));
+    // While the EXISTING lease window is still active, established bearer
+    // behavior is unchanged: the correct bearer passes and the new fence does
+    // not engage.
+    const renewedWhileActive = await updateTask({ id: ID, from: B, state: 'working', leaseToken: first.leaseToken });
+    expect(renewedWhileActive?.state).toBe('working');
+    clearQueuedEventsForTests();
+    // Old deadline expires while the renewed window is still live: the
+    // conservative gap fence now applies.
+    durable = first.task;
+    setTaskGetForTests(async () => durable);
+    now = Date.parse(first.claimedUntil) + 1000;
+
+    // updateTask (recipient): omission is the opaque conflict, any supplied
+    // bearer — including the genuinely valid one — is task_lease_required,
+    // because an unknown renewal is never resolved by a bearer.
+    await expect(updateTask({ id: ID, from: B, state: 'working' }))
+      .rejects.toMatchObject({ message: 'task_already_terminal' });
+    await expect(updateTask({ id: ID, from: B, state: 'working', leaseToken: 'wrong-token' }))
+      .rejects.toMatchObject({ message: 'task_lease_required' });
+    await expect(updateTask({ id: ID, from: B, state: 'working', leaseToken: first.leaseToken }))
+      .rejects.toMatchObject({ message: 'task_lease_required' });
+    // Sender path is untouched: the same update from the task author succeeds.
+    const updated = await updateTask({ id: ID, from: A, state: 'working' });
+    expect(updated?.state).toBe('working');
+
+    // replyTask (recipient): existing policy passes no bearer, so the fence
+    // surfaces as the opaque conflict; the sender may still reply. The queued
+    // overlay from the claim/sender update is cleared so the durable literal
+    // governs the snapshot.
+    clearQueuedEventsForTests();
+    durable = { ...durable, state: 'input-required' as const };
+    setTaskGetForTests(async () => durable);
+    await expect(replyTask({ id: ID, from: B, body: 'blocked by unknown renewal' }))
+      .rejects.toMatchObject({ message: 'task_already_terminal' });
+    const replied = await replyTask({ id: ID, from: A, body: 'sender still may reply' });
+    expect(replied.state).toBe('working');
+
+    // The renewal itself remains recoverable only through the authenticated
+    // renew path (existing R4-BC controls), not through update/reply.
+    expect(journalRecordsFor(ID).find((row) => row.kind === 'renew')?.fate).toBe('intent');
+  });
+});

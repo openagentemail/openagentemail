@@ -2648,6 +2648,24 @@ function assertActiveRecipientLeaseCredential(
       if (leaseToken === undefined) throw new Error('task_already_terminal');
       throw new Error('task_lease_required');
     }
+    // An unresolved renewal is never projected as authority, but when the old
+    // durable deadline has passed its renewed window may still be live. Fence
+    // recipient mutations conservatively ONLY in that gap: while an existing
+    // lease window is still active, the established branch above already
+    // governs bearer behavior and this fence must not override it. A supplied
+    // bearer cannot resolve an unknown renewal either. Recovery of the
+    // renewal itself stays with renewTask's authenticated retry path.
+    const existingLeaseActive = !!(current.lease?.claimedUntil
+      && isLeaseDeadlineActive(current.lease.claimedUntil));
+    const pendingRenewal = !existingLeaseActive && journalRecordsFor(current.id).find((row) =>
+      row.kind === 'renew'
+      && (row.fate === 'intent' || row.fate === 'unconfirmed')
+      && !!row.claimedUntil
+      && isLeaseDeadlineActive(row.claimedUntil));
+    if (pendingRenewal) {
+      if (leaseToken === undefined) throw new Error('task_already_terminal');
+      throw new Error('task_lease_required');
+    }
   }
 }
 
