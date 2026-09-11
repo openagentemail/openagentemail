@@ -153,6 +153,7 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 - `MCP_MAX_WAIT_SECONDS`（默认 60，可配 1..600）：`mail_wait_for` / `POST /v1/messages/wait` 的 `timeoutSec` 与 `task_*` wait 服务端封顶**静默钳制**到该值（schema 仍广告 max 600，不 400）。有效值见响应头 `X-OAE-Wait-Timeout-Sec` 与 408 体 `timeoutSec`。
 - `OAUTH_RATE_PER_MIN`（默认 30）：`/authorize`、`/oauth/token`、`/oauth/revoke` 每 IP 每分钟。
 - `MCP_PREAUTH_RATE_PER_MIN`（默认 120）：`POST /mcp` 无/坏 token 的 401 挑战路径每 IP 每分钟。OAuth 引导握手故意无 token 探 401 拿挑战是规范动作；共享出口 IP 下默认须留余量。超限 `429` + `Retry-After`。
+- `GET /v1/messages` caller 列表限速（固定 60/60s，无独立 env）：按已鉴权地址（admin 共享命名空间桶）进程内单调流逝窗口。满图懒清理最多扫 10000 桶 × 每桶 60 戳。这是 per-caller 速率上界，**不是**全局 IMAP 并发保护；允许窗口内突发 60 次，多实例不共享。详见 docs/api.md。
 
 ### 推荐公网部署姿态
 
