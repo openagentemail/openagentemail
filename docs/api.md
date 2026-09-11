@@ -43,3 +43,13 @@ Pending retries are rebuilt from the delivery log on restart; events emitted whi
 - **代际保护**：游标严格绑定 `uidValidity`；若信箱代际变更（UIDVALIDITY 不匹配），请求将 fail-closed 返回 `400 invalid_cursor`。`GET /v1/messages/:id` 支持可选的 `?uidValidity=` 参数，代际不匹配时返回 `404 stale_message_generation`。
 - **服务端 SINCE 与 receivedAtMs 口径差异说明**：服务端 IMAP SEARCH SINCE 依据 RFC 3501 `INTERNALDATE` 检索（向前预留 1 天缓冲）；应用层 `receivedAtMs` 优先采用 `INTERNALDATE` 并回落至 `ENVELOPE.date`。若个别邮件缺失 `INTERNALDATE` 且其 `ENVELOPE.date` 晚于实际收信时间，此口径差异为 fail-safe（只漏不越权，后续追扫覆盖）。
 
+### Caller 列表限速（#143，单实例前提）
+
+仅 `GET /v1/messages`（普通列表与 `since` 共用同一 caller 桶）。身份键是已鉴权地址的小写形式，不是原始 token、也不是 query `address`。同一地址的 identity token 与 OAuth 凭证聚合；委托方无论轮换目标信箱都消耗**自己的**身份预算。全部 admin 凭证共享一个 `list:admin` 命名空间桶，不是无限豁免。
+
+- **预算：** 每 caller 滚动 60 次录取 / 60 秒；进程内单调毫秒窗口，重启清零。允许一次性打满 60（突发），随后 `429` `{error:"rate_limited",retryAfterSec}` 且带整数 `Retry-After`。
+- **顺序：** query schema 与 ACL（401/400/403）不消耗预算；预算在首次 IMAP 之前同步录取；下游错误（含不透明 `since` 游标失败、IMAP 失败）已录取不退款。
+- **内存：** 最多 10000 个 caller 桶，每桶最多 60 个活戳。仅当**新 key** 将触顶时懒清理过期/空桶（一次检查最多扫 10000 个桶、每桶最多 60 个戳，不是“只做 10000 次常量操作”）；不驱逐仍有活戳的桶，不做后台 janitor。新 caller 在满图且无法回收时拒绝，`retryAfterSec=60` 为保守提示，不保证届时一定能入场。
+- **明确不是：** 全局 IMAP 并发/耗尽保护。多身份与未纳入的路由（detail / wait / UI / MCP-direct）仍可叠加负载。多实例不共享内存桶，部署合同按单实例前提；水平扩展不会自动协调这份预算。
+- **独立：** 不改 send / MCP / wait 槽位的既有桶。
+

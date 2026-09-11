@@ -90,10 +90,11 @@ export function releaseSendLimit(address: string, reservation: number | undefine
   slidingWindowRelease(buckets, address.toLowerCase(), reservation);
 }
 
-/** Test helper: wipe all windows. */
+/** 测试辅助：清空 send/审计 以及列表 caller 桶（不改生产配额）。 */
 export function resetRateLimits(): void {
   buckets.clear();
   resetDelegationDeniedAuditLimits();
+  resetListMessagesLimits();
 }
 
 /**
@@ -300,4 +301,101 @@ export function resetWaitSlots(): void {
   waits.clear();
   waitsPerAddress.clear();
   waitsTotal = 0;
+}
+
+/**
+ * GET /v1/messages 独立 caller 桶。
+ * 与 send/MCP/wait 分图；只复用 slidingWindowCheck，不改那些桶。
+ * 生产路径用进程单调流逝毫秒（performance.now），墙钟拨动不改窗口；重启清零。
+ * 这不是全局 IMAP 并发保护。
+ */
+export const LIST_MESSAGES_LIMIT = 60;
+export const LIST_MESSAGES_WINDOW_MS = 60_000;
+export const LIST_MESSAGES_MAX_BUCKETS = 10_000;
+/** 新 key 触顶且无法回收过期桶时的保守提示，不保证届时一定能入场。 */
+export const LIST_MESSAGES_CAPACITY_RETRY_SEC = 60;
+
+const listMessagesBuckets = new Map<string, number[]>();
+let listMessagesTestNow: (() => number) | null = null;
+
+/** 列表限速时钟：默认进程单调流逝毫秒；测试可整段替换。 */
+export function listMessagesMonotonicNow(): number {
+  if (listMessagesTestNow) return listMessagesTestNow();
+  return performance.now();
+}
+
+/** 测试注入/清除列表限速时钟。 */
+export function setListMessagesNowForTests(now: number | (() => number) | null): void {
+  if (now === null) {
+    listMessagesTestNow = null;
+    return;
+  }
+  listMessagesTestNow = typeof now === 'function' ? now : () => now;
+}
+
+/**
+ * 命名空间桶键：全部 admin 凭证共享 list:admin；
+ * 同一 identity 地址（OAuth / oa_ 轮换）共享 list:id:<lowercased>。
+ */
+export function listMessagesCallerKey(auth: { kind: 'admin' } | { kind: 'identity'; address: string }): string {
+  if (auth.kind === 'admin') return 'list:admin';
+  return `list:id:${auth.address.trim().toLowerCase()}`;
+}
+
+/** 仅新 key 触顶时调用：回收空/过期桶，不驱逐仍有活戳的桶。 */
+function reclaimExpiredListBuckets(now: number): void {
+  const cutoff = now - LIST_MESSAGES_WINDOW_MS;
+  for (const [key, stamps] of listMessagesBuckets) {
+    const live = stamps.filter((t) => t > cutoff);
+    if (live.length === 0) listMessagesBuckets.delete(key);
+    else if (live.length !== stamps.length) listMessagesBuckets.set(key, live);
+  }
+}
+
+/**
+ * 录取 GET /v1/messages。已有 key 只滤本桶最多 60 个戳；
+ * 新 key 遇满员才懒清理（最多扫 10000），仍满则 60s 保守提示。
+ */
+export function checkListMessagesLimit(
+  key: string,
+  now = listMessagesMonotonicNow(),
+): RateLimitResult {
+  if (!listMessagesBuckets.has(key) && listMessagesBuckets.size >= LIST_MESSAGES_MAX_BUCKETS) {
+    reclaimExpiredListBuckets(now);
+    if (listMessagesBuckets.size >= LIST_MESSAGES_MAX_BUCKETS) {
+      return {
+        allowed: false,
+        retryAfterSec: LIST_MESSAGES_CAPACITY_RETRY_SEC,
+        count: 0,
+      };
+    }
+  }
+  return slidingWindowCheck(
+    listMessagesBuckets,
+    key,
+    LIST_MESSAGES_LIMIT,
+    LIST_MESSAGES_WINDOW_MS,
+    now,
+  );
+}
+
+/** 测试辅助：清空列表桶与测试时钟注入。 */
+export function resetListMessagesLimits(): void {
+  listMessagesBuckets.clear();
+  listMessagesTestNow = null;
+}
+
+/** 测试辅助：预置某一 caller 的时间戳（容量/回收矩阵）。 */
+export function seedListMessagesBucketForTests(key: string, stamps: number[]): void {
+  listMessagesBuckets.set(key, [...stamps]);
+}
+
+/** 测试辅助：当前桶数。 */
+export function listMessagesBucketCountForTests(): number {
+  return listMessagesBuckets.size;
+}
+
+/** 测试辅助：某 key 是否仍在图中（活桶不得被驱逐）。 */
+export function listMessagesHasBucketForTests(key: string): boolean {
+  return listMessagesBuckets.has(key);
 }

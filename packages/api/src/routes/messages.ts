@@ -12,7 +12,12 @@ import {
 } from '../lib/imap.ts';
 import { forbidUnlessAddress, forbidUnlessMailboxAccess, getAuth } from '../lib/auth.ts';
 import { clampWaitSeconds } from '../lib/config.ts';
-import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
+import {
+  acquireWaitSlot,
+  checkListMessagesLimit,
+  listMessagesCallerKey,
+  releaseWaitSlot,
+} from '../lib/ratelimit.ts';
 import { hasActiveDelegation } from '../lib/delegations.ts';
 
 const listQuerySchema = z.object({
@@ -58,6 +63,12 @@ export const messagesRoute = new Hono()
     }
     const denied = forbidUnlessMailboxAccess(c, parsed.data.address);
     if (denied) return denied;
+    // schema + ACL 之后、首个 IMAP await 之前同步录取；下游失败不退款。
+    const listLimit = checkListMessagesLimit(listMessagesCallerKey(getAuth(c)));
+    if (!listLimit.allowed) {
+      c.header('Retry-After', String(listLimit.retryAfterSec));
+      return c.json({ error: 'rate_limited', retryAfterSec: listLimit.retryAfterSec }, 429);
+    }
     if (parsed.data.since !== undefined) {
       try {
         const page = await listMessagesSince(parsed.data.address, parsed.data.since, parsed.data.limit);
