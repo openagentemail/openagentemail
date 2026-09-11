@@ -251,6 +251,10 @@ export type Task = {
   /** Authenticated durable claim_lost receipts including historical no-ops.
    * Evidence only — never authority, never publicly projected. */
   tombstoneReceipts?: ClaimLostLeaseEvent[];
+  /** Authenticated durable expiry receipts including historical audit no-ops
+   * (#156 accepted-chain nodes). Evidence only — never authority, never
+   * publicly projected; used for exact M2 row retirement. */
+  expiryReceipts?: ExpiredLeaseReceipt[];
 };
 
 type LostLeaseReceipt = {
@@ -260,7 +264,7 @@ type LostLeaseReceipt = {
   firstClaimedAt?: string;
 };
 
-export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts' | 'expiryReceipts'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -1308,13 +1312,24 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   let expiredLease: ExpiredLeaseReceipt | undefined;
   let firstClaimedAt: string | undefined;
   let lostLease: LostLeaseReceipt | undefined;
-  const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt>();
+  const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt[]>();
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   const appliedReleases = new Map<number, ReleaseLeaseEvent>();
   const appliedTombstones = new Map<number, ClaimLostLeaseEvent>();
-  // 权威窗身份 = (gen, 续约后最终 claimedUntil)，供迟到回执 M3-3 匹配。
+  // 权威窗身份 = (gen, 续约后最终 claimedUntil)，供迟到回执 M3-3 匹配与
+  // renew/release 历史窗校验（保持单一最终窗语义不变）。
   const appliedClaimWindows = new Map<number, { claimedUntil: string }>();
+  // #156 accepted 链全史：每个已认证且通过既有 claim/renew 校验的 deadline
+  // 节点（含续约前的旧窗），按 UID 序在验证通过后入账。迟到旧窗回执据此
+  // 审计 no-op；未知窗/未验证未来窗永远不在集合内，保持 fail-closed。
+  const acceptedDeadlineWindows = new Map<number, Set<string>>();
+  const recordAcceptedWindow = (generation: number, claimedUntil: string): void => {
+    appliedClaimWindows.set(generation, { claimedUntil });
+    const windows = acceptedDeadlineWindows.get(generation) ?? new Set<string>();
+    windows.add(claimedUntil);
+    acceptedDeadlineWindows.set(generation, windows);
+  };
   // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
   const duplicateLeaseMessages = new Set<RawTaskMessage>();
   // 终态前缀：回执 UID 之前任意终态即冻结（含迟到 replayed claim）。
@@ -1333,14 +1348,23 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || !Number.isFinite(Date.parse(lease.claimedUntil))
         || Date.parse(lease.expiredAt) < Date.parse(lease.claimedUntil)
       ) return null;
-      const priorReceipt = appliedExpiryReceipts.get(lease.generation);
-      if (priorReceipt) {
-        if (isSameLeaseExpiryIdentity(priorReceipt, lease)) {
-          duplicateLeaseMessages.add(message);
-          continue;
-        }
-        return null;
+      const priorReceipts = appliedExpiryReceipts.get(lease.generation) ?? [];
+      // 同身份精确重复（含传输层重投）幂等 no-op；不同身份不再立即冲突，
+      // 落到下方窗匹配裁决（#156 配对规则）。
+      if (priorReceipts.some((prior) => isSameLeaseExpiryIdentity(prior, lease))) {
+        duplicateLeaseMessages.add(message);
+        continue;
       }
+      const recordReceipt = (): ExpiredLeaseReceipt => {
+        const receipt: ExpiredLeaseReceipt = {
+          leaseGeneration: lease.generation,
+          claimedUntil: lease.claimedUntil,
+          expiredAt: lease.expiredAt,
+          ...(firstClaimedAt ? { firstClaimedAt } : {}),
+        };
+        appliedExpiryReceipts.set(lease.generation, [...priorReceipts, receipt]);
+        return receipt;
+      };
       const matchesCurrentAuthority = !!leaseAuthority?.claimedUntil
         && lease.generation === leaseAuthority.leaseGeneration
         && lease.claimedUntil === leaseAuthority.claimedUntil;
@@ -1348,42 +1372,24 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         // 终态公共历史冻结：本回执之前任意终态状态事件 → 历史 no-op。
         // 不限 claim 之后，避免迟到索引的 replayed claim 把冻结窗口推到终态后面。
         if (seenTerminalBefore) {
-          appliedExpiryReceipts.set(lease.generation, {
-            leaseGeneration: lease.generation,
-            claimedUntil: lease.claimedUntil,
-            expiredAt: lease.expiredAt,
-            ...(firstClaimedAt ? { firstClaimedAt } : {}),
-          });
+          recordReceipt();
           duplicateLeaseMessages.add(message);
           continue;
         }
         leaseAuthority = undefined;
         releasedLease = undefined;
-        expiredLease = {
-          leaseGeneration: lease.generation,
-          claimedUntil: lease.claimedUntil,
-          expiredAt: lease.expiredAt,
-          ...(firstClaimedAt ? { firstClaimedAt } : {}),
-        };
-        appliedExpiryReceipts.set(lease.generation, expiredLease);
+        expiredLease = recordReceipt();
         continue;
       }
-      // M3-3 容忍无条件：匹配历史权威窗的 server 签名回执一律审计 no-op。
+      // M3-3 容忍无条件 + #156：匹配任一 accepted 链节点（含续约前旧窗）的
+      // server 签名回执一律审计 no-op——不撤回更晚 deadline/后代、不重开终态。
       // 不随解耦开关：回退 off 后，流中已有的迟到回执若再 fail-closed 会整卡消失。
-      const historicalWindow = appliedClaimWindows.get(lease.generation);
-      if (
-        historicalWindow
-        && historicalWindow.claimedUntil === lease.claimedUntil
-      ) {
-        appliedExpiryReceipts.set(lease.generation, {
-          leaseGeneration: lease.generation,
-          claimedUntil: lease.claimedUntil,
-          expiredAt: lease.expiredAt,
-          ...(firstClaimedAt ? { firstClaimedAt } : {}),
-        });
+      if (acceptedDeadlineWindows.get(lease.generation)?.has(lease.claimedUntil)) {
+        recordReceipt();
         duplicateLeaseMessages.add(message);
         continue;
       }
+      // 未知窗（含同代已入账合法回执后的第二个未知窗）保持 fail-closed。
       return null;
     }
     if (lease.event === 'claim_lost') {
@@ -1422,7 +1428,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         firstClaimedAt,
       };
       appliedTombstones.set(lease.generation, lease);
-      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+      recordAcceptedWindow(lease.generation, lease.claimedUntil);
       continue;
     }
     if (
@@ -1453,7 +1459,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         ) return null;
         firstClaimedAt = firstClaimedAt ?? lease.at;
         appliedClaims.set(lease.generation, lease);
-        appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+        recordAcceptedWindow(lease.generation, lease.claimedUntil);
         duplicateLeaseMessages.add(message);
         continue;
       }
@@ -1482,7 +1488,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         firstClaimedAt,
       };
       appliedClaims.set(lease.generation, lease);
-      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+      recordAcceptedWindow(lease.generation, lease.claimedUntil);
       continue;
     }
     if (lease.event === 'renew') {
@@ -1508,7 +1514,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         ) return null;
         leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
         appliedRenews.set(lease.generation, [...priorRenews, lease]);
-        appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+        recordAcceptedWindow(lease.generation, lease.claimedUntil);
         continue;
       }
 
@@ -1530,7 +1536,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || claimedUntil - taskClaimedAt > TASK_LEASE_TASK_MAX_MS
       ) return null;
       appliedRenews.set(lease.generation, [...priorRenews, lease]);
-      appliedClaimWindows.set(lease.generation, { claimedUntil: lease.claimedUntil });
+      recordAcceptedWindow(lease.generation, lease.claimedUntil);
       duplicateLeaseMessages.add(message);
       continue;
     }
@@ -1656,6 +1662,11 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // exact-evidenced rows can retire on terminal tasks. Never projected.
   if (appliedTombstones.size > 0) {
     task.tombstoneReceipts = [...appliedTombstones.values()];
+  }
+  // #156：accepted 链回执全史是证据而非权威——终态重建同样私有保留，
+  // 供 M2 精确退休；永不公开投影。
+  if (appliedExpiryReceipts.size > 0) {
+    task.expiryReceipts = [...appliedExpiryReceipts.values()].flat();
   }
   return task;
 }
@@ -2230,9 +2241,12 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
     }
     if (queued.lease.event === 'expired') {
       const receipt = task.expiredLease;
-      // 身份匹配、后继代已索引、或 durable 已终态都退休。
+      const queuedLease = queued.lease;
+      // 身份匹配（含 #156 accepted 链审计回执的精确身份）、后继代已索引、
+      // 或 durable 已终态都退休。
       // 终态重建剥离全部 lease 回执，同代无后继可 dominates，不退休则每读重放。
-      return (!!receipt && isSameLeaseExpiryIdentity(receipt, queued.lease))
+      return (!!receipt && isSameLeaseExpiryIdentity(receipt, queuedLease))
+        || !!task.expiryReceipts?.some((accepted) => isSameLeaseExpiryIdentity(accepted, queuedLease))
         || indexedLeaseGenerationDominates(task, queued.lease.generation, 'strict')
         || TERMINAL_TASK_STATES.includes(task.state);
     }
