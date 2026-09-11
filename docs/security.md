@@ -88,6 +88,7 @@ acceptance with original-recipient acceptance.
 Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁止子串）。
 
 - **列表：** Inbox = 收件人（TO/Cc/Bcc/Delivered-To）；Sent = 信封 From 匹配 **且** Message-ID 在服务端出站登记表（`/v1/send` / `sendMail` 成功写入 `DATA_DIR/sent-registry.json`）；All Mail = 二者并集。Bearer `GET /v1/messages` 仍只列出 Inbox（TO），以免改 agent 列表契约。
+- **后向列表游标（#144 / Commander2262 / 2269）：** Dashboard 分页使用 `mail-cursor-v2`，`uidValidity` 写入 HMAC（数字串经 BigInt 规范化）。信箱重建后旧游标不可跨代复用。每个 `mail-cursor-v1` 立即作废，客户端须从第一页重启（不带 cursor）。无 v1 fallback。前向 `mail-fcursor-v1` 不变。UI 路由把 codec `invalid_cursor` 映射为既有 **400 `invalid_request`**。REST 不加后向 `cursor` 参数；普通 `GET /v1/messages` 与 `POST /v1/messages/wait` 缺/错代际为 **400 `invalid_cursor`**，应重启第一页或新 wait 会话。
 - **详情 / 已读标记 / Source：** 与列表同一条可信规则（TO ∨ 可信 Sent），不是「任意 FROM」。伪造 From 的信对非收件人在列表/详情/Source/Seen 四个入口均不可见（404）；identity 读他人 address 仍 403。
 - **伪造信：** 照常落收件人 Inbox（它本质就是一封信），但绝不进任何人的 Sent。
 - **Sent 源码：** identity 可读自身**可信** Sent 邮件源码（含 Received 链），属 #26 PR 2 设计决策。隔离边界仍是「这封信是否属于该身份」，Source 视图不剥 Received。

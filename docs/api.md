@@ -43,6 +43,14 @@ Pending retries are rebuilt from the delivery log on restart; events emitted whi
 - **代际保护**：游标严格绑定 `uidValidity`；若信箱代际变更（UIDVALIDITY 不匹配），请求将 fail-closed 返回 `400 invalid_cursor`。`GET /v1/messages/:id` 支持可选的 `?uidValidity=` 参数，代际不匹配时返回 `404 stale_message_generation`。
 - **服务端 SINCE 与 receivedAtMs 口径差异说明**：服务端 IMAP SEARCH SINCE 依据 RFC 3501 `INTERNALDATE` 检索（向前预留 1 天缓冲）；应用层 `receivedAtMs` 优先采用 `INTERNALDATE` 并回落至 `ENVELOPE.date`。若个别邮件缺失 `INTERNALDATE` 且其 `ENVELOPE.date` 晚于实际收信时间，此口径差异为 fail-safe（只漏不越权，后续追扫覆盖）。
 
+## Dashboard 后向列表游标（mail-cursor-v2 / #144）
+
+- Dashboard `GET /ui/api/messages` 的分页游标现为 **`mail-cursor-v2`**：HMAC 绑定 `folder`、`address`、`(receivedAtMs, uid)` 与 **canonical 正整数 `uidValidity`**。`nextCursor` 只绑定本次已验证的选中信箱代际。
+- **旧 `mail-cursor-v1` 一律作废**：解码 fail-closed（`InvalidMailCursorError` / `invalid_cursor`），无 v1 fallback、不从载荷推断代际。客户端必须丢弃旧游标、**不带 cursor 从第一页重新开始**。
+- 同一已 SELECT 的 INBOX 会话里，**search/fetch 之前**必须读到当前合法代际；缺代际（含首页无 cursor）或与游标代际不符均失败。空信箱同样先校验代际，再决定是否 search。
+- 排序、folder 过滤、`SCAN_BACK`、ACL、限速与成功响应形状不变。前向 `since` / `mail-fcursor-v1` 协议不变。不扩展 MessageDetail。REST **不**增加后向 `cursor` 参数。
+- **HTTP 映射（Commander2262 / 2269）：** codec / `listMessagesPage` 抛 `InvalidMailCursorError`（`error.code === 'invalid_cursor'`）。Dashboard `GET /ui/api/messages` 仍折成 **HTTP 400 `{error:"invalid_request"}`**。REST **不加**后向 `cursor` 参数。普通 `GET /v1/messages`（无 `since`）与 `POST /v1/messages/wait` 在缺代际或当前会话代际不可用时返回 **400 `{error:"invalid_cursor"}`**；客户端应丢弃会话位置、从第一页/新 wait 会话重启。MCP `mail_list_messages` / `mail_wait_for` 走同一 REST，自然继承。前向 `since` 仍是 `400 invalid_cursor`。auth / 限速 / 委托撤销等其它分支不变。
+
 ### Caller 列表限速（#143，单实例前提）
 
 仅 `GET /v1/messages`（普通列表与 `since` 共用同一 caller 桶）。身份键是已鉴权地址的小写形式，不是原始 token、也不是 query `address`。同一地址的 identity token 与 OAuth 凭证聚合；委托方无论轮换目标信箱都消耗**自己的**身份预算。全部 admin 凭证共享一个 `list:admin` 命名空间桶，不是无限豁免。

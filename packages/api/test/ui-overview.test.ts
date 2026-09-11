@@ -47,6 +47,10 @@ class FakeImapFlow extends EventEmitter {
     super();
     connections += 1;
   }
+  // 选中会话必须暴露当前代际，供后向列表在 search 前校验（#144 / REPAIR-FIXTURES-01）。
+  get mailbox() {
+    return { uidValidity: 17n };
+  }
   async connect() {}
   async getMailboxLock() {
     return { release() {} };

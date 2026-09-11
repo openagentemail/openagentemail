@@ -55,6 +55,14 @@ const FIRST_CLAIM = '2026-08-24T00:00:00.000Z';
 const FILL_TIMEOUT = 480_000;
 /** Cooperative check *between* admits only. Does not cancel in-flight persist IO. */
 const FILL_DEADLINE_MS = 460_000;
+/**
+ * Commander2362 isolated overrides for #4 and #8 only. Defaults above stay 460s/480s
+ * for every other caller. Empirical samples (not this edit): isolated ~251s / ~275s;
+ * historical suite fills ~390s / ~432s. Commander calibration rationale: reference-
+ * machine jitter ±60s on those samples — not a new measurement from this change.
+ */
+const CALIBRATED_FILL_DEADLINE_MS = 600_000;
+const CALIBRATED_FILL_TIMEOUT = 620_000;
 const POST_FILL_BUDGET_MS = 15_000;
 /** Optional durable path for local diagnosis. Unset → process temp file (CI must not need FC dirs). */
 const ADMIT_RATE_LOG = process.env.OAE_JOURNAL_ADMIT_RATE_LOG
@@ -156,7 +164,13 @@ function absentEvidence(): JournalExitEvidence {
   };
 }
 
-async function fillIndexedBody(count: number, start: number, epoch: number, signal: AbortSignal): Promise<void> {
+async function fillIndexedBody(
+  count: number,
+  start: number,
+  epoch: number,
+  signal: AbortSignal,
+  deadlineMs = FILL_DEADLINE_MS,
+): Promise<void> {
   const started = Date.now();
   const total = start + count - 1;
   const phase = `fillIndexed:${start}-${total}`;
@@ -166,9 +180,9 @@ async function fillIndexedBody(count: number, start: number, epoch: number, sign
       throw new Error(`${phase} aborted at n=${n}`);
     }
     const elapsed = Date.now() - started;
-    if (elapsed > FILL_DEADLINE_MS) {
+    if (elapsed > deadlineMs) {
       logAdmitEvent({ phase: `${phase}:deadline`, n: n - start, total: count, occupancy: journalOccupancyForTests(), elapsed_ms: elapsed });
-      throw new Error(`${phase} exceeded ${FILL_DEADLINE_MS}ms at n=${n}`);
+      throw new Error(`${phase} exceeded ${deadlineMs}ms at n=${n}`);
     }
     await upsertJournalRecord(indexedClaim(tid(n)));
     if (fillWasAborted(epoch, signal)) {
@@ -186,8 +200,8 @@ async function fillIndexedBody(count: number, start: number, epoch: number, sign
   });
 }
 
-function fillIndexed(count: number, start = 1): Promise<void> {
-  return trackFill(fillIndexedBody(count, start, fillEpoch, fillAbort.signal));
+function fillIndexed(count: number, start = 1, deadlineMs = FILL_DEADLINE_MS): Promise<void> {
+  return trackFill(fillIndexedBody(count, start, fillEpoch, fillAbort.signal, deadlineMs));
 }
 
 function freshDir(): void {
@@ -294,8 +308,9 @@ describe('M2 journal whole-task exit (v4 + addendum)', () => {
   }, FILL_TIMEOUT);
 
   test('permanently bad first candidate does not starve a later eligible task', async () => {
+    // 仅本用例覆盖 fill/test 墙钟；默认 460/480 不变。见 CALIBRATED_* 经验样本 vs 裁定抖动说明。
     freshDir();
-    await fillIndexed(TASK_LEASE_JOURNAL_MAX_RECORDS);
+    await fillIndexed(TASK_LEASE_JOURNAL_MAX_RECORDS, 1, CALIBRATED_FILL_DEADLINE_MS);
     const first = tid(1);
     const second = tid(2);
     setJournalExitEvidenceForTests(async (id) => {
@@ -310,7 +325,7 @@ describe('M2 journal whole-task exit (v4 + addendum)', () => {
     const file = await loadLeaseJournal();
     expect(file.records.some((row) => row.taskId === first)).toBe(true);
     expect(file.records.some((row) => row.taskId === second)).toBe(false);
-  }, FILL_TIMEOUT);
+  }, CALIBRATED_FILL_TIMEOUT);
 
   test('retry without new mark: second persist exits after first evidence failure', async () => {
     freshDir();
@@ -427,8 +442,9 @@ describe('M2 journal whole-task exit (v4 + addendum)', () => {
   });
 
   test('evidence lookup cannot reenter reconcile (nested mutation uses no extra query)', async () => {
+    // 仅本用例覆盖 fill/test 墙钟；默认 460/480 不变。见 CALIBRATED_* 经验样本 vs 裁定抖动说明。
     freshDir();
-    await fillIndexed(TASK_LEASE_JOURNAL_MAX_RECORDS - 1);
+    await fillIndexed(TASK_LEASE_JOURNAL_MAX_RECORDS - 1, 1, CALIBRATED_FILL_DEADLINE_MS);
     await upsertJournalRecord(intentClaim(tid(TASK_LEASE_JOURNAL_MAX_RECORDS)));
     let depthDuringLookup = -1;
     setJournalExitEvidenceForTests(async () => {
@@ -440,7 +456,7 @@ describe('M2 journal whole-task exit (v4 + addendum)', () => {
     await markJournalFate(intentClaim(tid(TASK_LEASE_JOURNAL_MAX_RECORDS)), 'indexed');
     expect(depthDuringLookup).toBeGreaterThan(0);
     expect(journalExitEvidenceQueryCountForTests() - before).toBe(1);
-  }, FILL_TIMEOUT);
+  }, CALIBRATED_FILL_TIMEOUT);
 
   test('production reconstruction: completed task still exits via historical claim receipts', async () => {
     freshDir();
