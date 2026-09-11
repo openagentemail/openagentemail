@@ -258,7 +258,15 @@ function taskActionFrom(c: Context, task: Task, supplied: string | undefined): s
   return from;
 }
 
+function journalUnavailableUi(c: Context, err: unknown): Response | null {
+  const code = (err as Error).message;
+  if (typeof code === 'string' && code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
+  return null;
+}
+
 function taskMutationError(c: Context, err: unknown): Response {
+  const mapped = journalUnavailableUi(c, err);
+  if (mapped) return mapped;
   const code = (err as Error).message;
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
   if (code === 'task_already_terminal' || code === 'task_lease_required') return c.json({ error: code }, 409);
@@ -904,6 +912,8 @@ export function createUiApiRoutes(
       );
     } catch (err) {
       if (err instanceof InvalidTaskCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+      const code = (err as Error).message;
+      if (typeof code === 'string' && code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
       throw err;
     }
   });
@@ -912,12 +922,26 @@ export function createUiApiRoutes(
     const parsed = taskIdParamSchema.safeParse(c.req.param('id'));
     if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
     const service = dependencies.taskService ?? taskService;
-    const authorization = await readTaskForAuthorization(service, parsed.data);
+    let authorization;
+    try {
+      authorization = await readTaskForAuthorization(service, parsed.data);
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!authorization) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
-    const task = shouldMaterializeAuthorizedTask(service)
-      ? await service.get(parsed.data)
-      : authorization;
+    let task;
+    try {
+      task = shouldMaterializeAuthorizedTask(service)
+        ? await service.get(parsed.data)
+        : authorization;
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!task) return c.json({ error: 'not_found' }, 404);
     // overdue 由服务端按 queryNow 同类时钟计算，避免各浏览器口径漂移。
     return presentUiTask(c, task);
@@ -937,7 +961,14 @@ export function createUiApiRoutes(
     const body = taskDecisionSchema.safeParse(raw);
     if (!body.success) return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     const service = dependencies.taskService ?? taskService;
-    const task = await readTaskForAuthorization(service, parsed.data);
+    let task;
+    try {
+      task = await readTaskForAuthorization(service, parsed.data);
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) return c.json({ error: 'not_found' }, 404);
     if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -974,7 +1005,14 @@ export function createUiApiRoutes(
       return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const task = await readTaskForAuthorization(service, parsed.data);
+    let task;
+    try {
+      task = await readTaskForAuthorization(service, parsed.data);
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (!canReadUiTask(c, task)) {
       return c.json({ error: 'forbidden: task participant required' }, 403);
@@ -1006,7 +1044,14 @@ export function createUiApiRoutes(
     }
     const service = dependencies.taskService ?? taskService;
     // 授权读不得物化 expiry：approval 拒绝必须发生在任何会发信的 get 之前。
-    const task = await readTaskForAuthorization(service, parsed.data);
+    let task;
+    try {
+      task = await readTaskForAuthorization(service, parsed.data);
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!task) return c.json({ error: 'not_found' }, 404);
     if (task.kind === 'approval') return c.json({ error: 'approval_decision_required' }, 409);
     const from = taskActionFrom(c, task, body.data.from);
@@ -1043,7 +1088,14 @@ export function createUiApiRoutes(
       return c.json({ error: 'invalid_request', details: body.error.issues }, 400);
     }
     const service = dependencies.taskService ?? taskService;
-    const task = await service.get(parsed.data);
+    let task;
+    try {
+      task = await service.get(parsed.data);
+    } catch (err) {
+      const mapped = journalUnavailableUi(c, err);
+      if (mapped) return mapped;
+      throw err;
+    }
     if (!task) return c.json({ error: 'not_found' }, 404);
     const from = taskActionFrom(c, task, body.data.from);
     if (from instanceof Response) return from;

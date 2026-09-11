@@ -10,6 +10,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **Tasks: pending-lease journal + claim_lost + postponed expiry audit** (opt-in): `TASK_LEASES_PENDING_JOURNAL` (default false, requires `TASK_LEASES_ENABLED`) persists conservative pre-SMTP generation fences, admin-signed `claim_lost` after 2h, and records or defers expiry-audit work. Production expiry-audit SMTP emission remains hard-disabled pending a separate commander-approved card; the journal flag is not an emitter opt-in. Upgrade readers before the first tombstone; old-binary rollback after the first `claim_lost` is unsafe (#80, #84).
 - **Tasks: bound public-read lease overlay replay** (opt-in): public read projections cap lease overlay replay at 15 minutes, preventing unbounded replay on read paths. Disabled by default — enable with `TASK_LEASES_OVERLAY_BOUND=true` (#80, #84; #171).
 - **Tasks: decouple reclaim from expiry-audit SMTP** (opt-in): lease reclaim no longer depends on the expiry-audit mail path, with late-receipt tolerance. Disabled by default — enable with `TASK_LEASES_EXPIRY_AUDIT_M3=true` (#80, #84; #167).
 

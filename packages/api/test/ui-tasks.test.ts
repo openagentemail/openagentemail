@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { Hono } from 'hono';
 import type { UiApiDependencies } from '../src/routes/ui.ts';
@@ -28,7 +31,20 @@ const {
   setTaskSendMailForTests,
   setTaskNowForTests,
 } = await import('./support/task-test-seams.ts');
-const { taskLeasesEnabled, withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
+const {
+  taskLeasesEnabled,
+  withTaskLeasesEnabledForTests,
+  withTaskLeasePendingJournalForTests,
+} = await import('./support/task-lease-seams.ts');
+const {
+  bootstrapTaskLeaseJournal,
+  deleteJournalFilesForTests,
+  journalExitEvidenceQueryCountForTests,
+  journalPathsForTests,
+  journalPersistCountForTests,
+  resetJournalMemoryForTests,
+  setJournalDataDirForTests,
+} = await import('../src/lib/task-lease-journal.ts');
 
 for (const localpart of ['fox', 'owl']) {
   if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
@@ -410,6 +426,132 @@ describe('UI tasks ACL and contract', () => {
     expect(detail.status).toBe(401);
     expect(boardCalls).toEqual([]);
     expect(getCalls).toEqual([]);
+  });
+
+  test('lease journal errors on board list map to 503', async () => {
+    const { app, cookie } = makeApp({ kind: 'admin' }, {
+      taskService: {
+        listBoard: mock(async () => {
+          throw new Error('lease_journal_lost');
+        }),
+      } as unknown as UiApiDependencies['taskService'],
+    });
+    const listed = await app.request('/ui/api/tasks', { headers: { cookie } });
+    expect(listed.status).toBe(503);
+    expect(await listed.json()).toEqual({ error: 'lease_journal_lost' });
+  });
+
+  test('lease journal errors on detail and mutation boundaries map to 503', async () => {
+    const post = (instance: ReturnType<typeof makeApp>['app'], path: string, cookie: string, body: unknown) =>
+      instance.request(path, { method: 'POST', headers: { cookie, ...ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+    // Detail read boundary (authorization read).
+    for (const code of ['lease_journal_lost', 'lease_journal_corrupt', 'lease_journal_not_bootstrapped'] as const) {
+      const { app, cookie } = makeApp({ kind: 'admin' }, {
+        taskService: {
+          get: mock(async () => { throw new Error(code); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await app.request(`/ui/api/tasks/${TASK_A.id}`, { headers: { cookie } });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: code });
+    }
+
+    // Reply read boundary: authorization read throws before the mutation try.
+    {
+      const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {
+        taskService: {
+          get: mock(async () => { throw new Error('lease_journal_not_bootstrapped'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_INPUT.id}/reply`, cookie, { body: 'attaching now' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_not_bootstrapped' });
+    }
+
+    // Reply mutation boundary.
+    {
+      const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === TASK_INPUT.id ? TASK_INPUT : null)),
+          reply: mock(async () => { throw new Error('lease_journal_corrupt'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_INPUT.id}/reply`, cookie, { body: 'attaching now' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_corrupt' });
+    }
+
+    // Decision mutation boundary.
+    {
+      const { app, cookie } = makeApp({ kind: 'identity', address: 'owl@test.example' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === APPROVAL_TASK.id ? APPROVAL_TASK : null)),
+          decideApproval: mock(async () => { throw new Error('lease_journal_lost'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      }, [APPROVAL_TASK]);
+      const res = await post(app, `/ui/api/tasks/${APPROVAL_TASK.id}/decision`, cookie, { decision: 'approved' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_lost' });
+    }
+
+    // Remind mutation boundary (admin).
+    {
+      const { app, cookie } = makeApp({ kind: 'admin' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === TASK_A.id ? TASK_A : null)),
+          remind: mock(async () => { throw new Error('lease_journal_corrupt'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_A.id}/remind`, cookie, { from: 'fox@test.example' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_corrupt' });
+    }
+
+    // Close read + mutation boundaries (admin; read uses service.get).
+    {
+      const { app, cookie } = makeApp({ kind: 'admin' }, {
+        taskService: {
+          get: mock(async () => { throw new Error('lease_journal_lost'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_A.id}/close`, cookie, { reason: 'journal check', from: 'fox@test.example' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_lost' });
+    }
+    {
+      const { app, cookie } = makeApp({ kind: 'admin' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === TASK_A.id ? TASK_A : null)),
+          close: mock(async () => { throw new Error('lease_journal_corrupt'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_A.id}/close`, cookie, { reason: 'journal check', from: 'fox@test.example' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'lease_journal_corrupt' });
+    }
+
+    // Established mappings preserved: non-journal failure still 502, ACL still 403/404.
+    {
+      const { app, cookie } = makeApp({ kind: 'admin' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === TASK_A.id ? TASK_A : null)),
+          remind: mock(async () => { throw new Error('imap_write_failed'); }),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_A.id}/remind`, cookie, { from: 'fox@test.example' });
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: 'smtp_error' });
+    }
+    {
+      const { app, cookie } = makeApp({ kind: 'identity', address: 'cat@test.example' }, {
+        taskService: {
+          get: mock(async (id: string) => (id === TASK_INPUT.id ? TASK_INPUT : null)),
+        } as unknown as UiApiDependencies['taskService'],
+      });
+      const res = await post(app, `/ui/api/tasks/${TASK_INPUT.id}/reply`, cookie, { body: 'not a participant' });
+      expect(res.status).toBe(403);
+    }
   });
 });
 
@@ -1862,5 +2004,93 @@ describe('#56 R13 dashboard reply lease boundary RED', () => {
       deliveries: 3,
       tokenFree: true,
     });
+  });
+});
+
+describe('UI board empty-list journal availability (REAL default taskService)', () => {
+  // Genuine HTTP path: no taskService override, so the route uses the real
+  // listTaskBoard -> hydrateTaskListFromJournal with seam-driven empty lists.
+  // REST-level mapper evidence is layered separately; this is the UI route.
+  function realBoardApp() {
+    const store = new UiSessionStore({
+      resolveToken: (token) => (token === 'admin-ok' ? { kind: 'admin' } : null),
+    });
+    const created = store.create('admin-ok', '127.0.0.1');
+    if (!created.ok) throw new Error('test session was not created');
+    const deps: UiApiDependencies = {
+      listIdentities: () => [],
+      listMessages: mock(async () => []),
+      setMessageSeen: mock(async () => true),
+      getMailboxScan: mock(async () => ({
+        kind: 'ready' as const,
+        now: Date.now(),
+        snapshot: null,
+        cached: false,
+        revalidating: false,
+        refreshError: false,
+      })),
+      getMessage: mock(async () => null),
+      setPushContentTier: mock(() => null),
+    };
+    const app = new Hono();
+    app.route('/ui/api', createUiApiRoutes(store, deps));
+    return { app, cookie: `oae_ui=${created.sid}` };
+  }
+
+  test('empty list with journal unavailable maps to 503 (absent/lost/corrupt) via the real board path', async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {
+      const { app, cookie } = realBoardApp();
+      setTaskListAllForTests(async () => []);
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-absent-')));
+      const absent = await app.request('/ui/api/tasks', { headers: { cookie } });
+      expect(absent.status).toBe(503);
+      expect(await absent.json()).toEqual({ error: 'lease_journal_not_bootstrapped' });
+
+      resetJournalMemoryForTests();
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-lost-')));
+      bootstrapTaskLeaseJournal();
+      deleteJournalFilesForTests({ journal: true, seal: true, marker: false });
+      const lost = await app.request('/ui/api/tasks', { headers: { cookie } });
+      expect(lost.status).toBe(503);
+      expect(await lost.json()).toEqual({ error: 'lease_journal_lost' });
+
+      resetJournalMemoryForTests();
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-corrupt-')));
+      bootstrapTaskLeaseJournal();
+      writeFileSync(journalPathsForTests().seal, 'deadbeef');
+      const corrupt = await app.request('/ui/api/tasks', { headers: { cookie } });
+      expect(corrupt.status).toBe(503);
+      expect(await corrupt.json()).toEqual({ error: 'lease_journal_corrupt' });
+    }));
+  });
+
+  test('healthy enabled empty list is 200 with zero persists and zero exit lookups via the real board path', async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {
+      const { app, cookie } = realBoardApp();
+      setTaskListAllForTests(async () => []);
+      resetJournalMemoryForTests();
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-ok-')));
+      bootstrapTaskLeaseJournal();
+      const beforePersist = journalPersistCountForTests();
+      const beforeQuery = journalExitEvidenceQueryCountForTests();
+      const res = await app.request('/ui/api/tasks', { headers: { cookie } });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { tasks: unknown[] };
+      expect(body.tasks).toEqual([]);
+      expect(journalPersistCountForTests() - beforePersist).toBe(0);
+      expect(journalExitEvidenceQueryCountForTests() - beforeQuery).toBe(0);
+    }));
+  });
+
+  test('disabled gate with absent journal stays 200 and never reads the journal via the real board path', async () => {
+    await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(false, async () => {
+      const { app, cookie } = realBoardApp();
+      setTaskListAllForTests(async () => []);
+      setJournalDataDirForTests(mkdtempSync(join(tmpdir(), 'oae-ui-el-off-')));
+      const res = await app.request('/ui/api/tasks', { headers: { cookie } });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { tasks: unknown[] };
+      expect(body.tasks).toEqual([]);
+    }));
   });
 });

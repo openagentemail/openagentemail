@@ -162,6 +162,10 @@ const envSchema = z.object({
   // 只影响展示视图；写路径权威快照不受本开关影响。
   TASK_LEASES_OVERLAY_BOUND: z.enum(['true', 'false']).default('false'),
 
+  // M2：pending journal + claim_lost + 延期审计发射器（默认关）。
+  // 依赖 TASK_LEASES_ENABLED 才生效；不自动开生产。M3 reclaim 仍零内联审计 IO。
+  TASK_LEASES_PENDING_JOURNAL: z.enum(['true', 'false']).default('false'),
+
   // Comma-separated domains allowed as the `from` domain of an identity.
   // Defaults to [DOMAIN]. Sending to any recipient domain is unrestricted.
   ALLOWED_SEND_DOMAINS: z.string().optional(),
@@ -435,6 +439,8 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     taskLeasesExpiryAuditM3: raw.TASK_LEASES_EXPIRY_AUDIT_M3 === 'true',
     // M1 公共读 overlay 有界闸；与 leases 总闸独立，默认关。
     taskLeasesOverlayBound: raw.TASK_LEASES_OVERLAY_BOUND === 'true',
+    // M2 pending journal；默认关。依赖 TASK_LEASES_ENABLED，不替代权威。
+    taskLeasesPendingJournal: raw.TASK_LEASES_PENDING_JOURNAL === 'true',
     // 通知游标与 task/mail 游标域分离；不新增 env。旧 notify 游标失效可接受。
     notifyCursorSecret: createHmac('sha256', taskSigningSecret)
       .update('notify-cursor-v1')

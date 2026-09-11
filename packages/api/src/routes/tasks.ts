@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
-import { taskLeasesEnabled } from '../lib/task-lease-gate.ts';
+import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
 import { readTaskForAuthorization, shouldMaterializeAuthorizedTask } from '../lib/task-authorization-read.ts';
 import {
@@ -100,6 +100,12 @@ function canReadTask(c: Context, task: Task): boolean {
   const auth = getAuth(c);
   // 参与者比较一律小写，避免 identity token 大小写与 IMAP 地址不一致。
   return auth.kind === 'admin' || taskParticipants(task).has(auth.address.toLowerCase());
+}
+
+function journalUnavailable(c: Context, err: unknown): Response | null {
+  const code = (err as Error).message;
+  if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
+  return null;
 }
 
 /** Relationship edges are independently ACL-scoped; the base task stays readable. */
@@ -234,16 +240,22 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
     .get('/', async (c) => {
       const parsed = listSchema.safeParse(c.req.query());
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
-      // One durable snapshot keeps state filtering and parent projection coherent
-      // without a second IMAP scan or a state-filtered parent map.
-      const allTasks = await service.list();
-      const tasks = parsed.data.state === undefined
-        ? allTasks
-        : allTasks.filter((task) => task.state === parsed.data.state);
-      const auth = getAuth(c);
-      const visible = auth.kind === 'admin' ? tasks : tasks.filter((task) => taskParticipants(task).has(auth.address.toLowerCase()));
-      const byId = new Map(allTasks.map((task) => [task.id, task]));
-      return c.json({ tasks: visible.map((task) => taskViewFor(c, task, task.parentTaskId ? byId.get(task.parentTaskId) : null)) });
+      try {
+        // One durable snapshot keeps state filtering and parent projection coherent
+        // without a second IMAP scan or a state-filtered parent map.
+        const allTasks = await service.list();
+        const tasks = parsed.data.state === undefined
+          ? allTasks
+          : allTasks.filter((task) => task.state === parsed.data.state);
+        const auth = getAuth(c);
+        const visible = auth.kind === 'admin' ? tasks : tasks.filter((task) => taskParticipants(task).has(auth.address.toLowerCase()));
+        const byId = new Map(allTasks.map((task) => [task.id, task]));
+        return c.json({ tasks: visible.map((task) => taskViewFor(c, task, task.parentTaskId ? byId.get(task.parentTaskId) : null)) });
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
     })
     .get('/:id/children', async (c) => {
       const id = taskIdSchema.safeParse(c.req.param('id'));
@@ -265,6 +277,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           nextCursor: page.nextCursor,
         });
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
@@ -277,20 +291,26 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request' }, 400);
       const query = getSchema.safeParse(c.req.query());
       if (!query.success) return c.json({ error: 'invalid_request', details: query.error.issues }, 400);
-      const authorization = await readTaskForAuthorization(service, parsed.data);
-      if (!authorization) return c.json({ error: 'not_found' }, 404);
-      if (!canReadTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
-      const task = shouldMaterializeAuthorizedTask(service)
-        ? await service.get(parsed.data)
-        : authorization;
-      if (!task) return c.json({ error: 'not_found' }, 404);
-      const parent = await projectedParentTask(service, task.parentTaskId);
-      if (query.data.wait !== 'true') return c.json(taskViewFor(c, task, parent));
-      const auth = getAuth(c);
-      const address = auth.kind === 'identity' ? auth.address : task.from;
-      const waited = await waitWithSlot(c, service, task, address);
-      if (waited instanceof Response) return waited;
-      return c.json(taskViewFor(c, waited ?? task, parent));
+      try {
+        const authorization = await readTaskForAuthorization(service, parsed.data);
+        if (!authorization) return c.json({ error: 'not_found' }, 404);
+        if (!canReadTask(c, authorization)) return c.json({ error: 'forbidden: task participant required' }, 403);
+        const task = shouldMaterializeAuthorizedTask(service)
+          ? await service.get(parsed.data)
+          : authorization;
+        if (!task) return c.json({ error: 'not_found' }, 404);
+        const parent = await projectedParentTask(service, task.parentTaskId);
+        if (query.data.wait !== 'true') return c.json(taskViewFor(c, task, parent));
+        const auth = getAuth(c);
+        const address = auth.kind === 'identity' ? auth.address : task.from;
+        const waited = await waitWithSlot(c, service, task, address);
+        if (waited instanceof Response) return waited;
+        return c.json(taskViewFor(c, waited ?? task, parent));
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
     })
     .post('/:id/claim', async (c) => {
       const id = taskIdSchema.safeParse(c.req.param('id'));
@@ -307,20 +327,22 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
-      if (!task) return c.json({ error: 'not_found' }, 404);
-      if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
       try {
+        const task = await readTaskForAuthorization(service, id.data);
+        if (!task) return c.json({ error: 'not_found' }, 404);
+        if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
         const claim = service.claim;
         if (!claim) throw new Error('lease_service_unavailable');
         const grant = await claim({ id: id.data, from, leaseSec: parsed.data.leaseSec });
         const leaseView = toTaskLeaseGrantView(grant);
         return c.json({ ...leaseView, task: await mutationTaskView(c, service, grant.task) });
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
-        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted') return c.json({ error: code }, 409);
+        if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
@@ -340,10 +362,10 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
-      if (!task) return c.json({ error: 'not_found' }, 404);
-      if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
       try {
+        const task = await readTaskForAuthorization(service, id.data);
+        if (!task) return c.json({ error: 'not_found' }, 404);
+        if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
         const renew = service.renew;
         if (!renew) throw new Error('lease_service_unavailable');
         return c.json(await mutationTaskView(c, service, await renew({
@@ -353,13 +375,15 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           ...(parsed.data.leaseSec !== undefined ? { leaseSec: parsed.data.leaseSec } : {}),
         })));
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
         // lease_already_released 为不可达死映射：core 对已释放 lease 发 stale_lease（错 token/reason）或 200 幂等成功。
-        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted') {
+        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] renew failed');
@@ -380,10 +404,10 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
       const from = actorAddress(c, undefined);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
-      if (!task) return c.json({ error: 'not_found' }, 404);
-      if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
       try {
+        const task = await readTaskForAuthorization(service, id.data);
+        if (!task) return c.json({ error: 'not_found' }, 404);
+        if (from !== task.to) return c.json({ error: 'forbidden: task recipient required' }, 403);
         const release = service.release;
         if (!release) throw new Error('lease_service_unavailable');
         return c.json(await mutationTaskView(c, service, await release({
@@ -393,16 +417,46 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           ...(parsed.data.reason !== undefined ? { reason: parsed.data.reason } : {}),
         })));
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
         // 同上：不映射 core 不会发出的 lease_already_released。
-        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal') {
+        if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] release failed');
+        return c.json({ error: 'smtp_error' }, 502);
+      }
+    })
+    .post('/:id/claim-lost', async (c) => {
+      const id = taskIdSchema.safeParse(c.req.param('id'));
+      if (!id.success) return c.json({ error: 'invalid_request' }, 400);
+      if (getAuth(c).kind !== 'admin') return c.json({ error: 'forbidden: admin key required' }, 403);
+      if (!leasesEnabled()) return c.json({ error: 'task_leases_disabled' }, 409);
+      if (!taskLeasePendingJournalEnabled()) return c.json({ error: 'task_leases_pending_journal_disabled' }, 409);
+      try {
+        const task = await readTaskForAuthorization(service, id.data);
+        if (!task) return c.json({ error: 'not_found' }, 404);
+        const claimLost = service.claimLost;
+        if (!claimLost) throw new Error('lease_service_unavailable');
+        return c.json(await mutationTaskView(c, service, await claimLost({ id: id.data })));
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        const code = (err as Error).message;
+        if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
+        if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
+        if (
+          code === 'task_not_claimable'
+          || code === 'lease_claim_lost_too_early'
+          || code === 'lease_claim_lost_not_eligible'
+          || code === 'task_leases_pending_journal_disabled'
+        ) return c.json({ error: code }, 409);
+        console.warn('[task] claim-lost failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
       }
     })
@@ -419,7 +473,14 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
+      let task: Task | null;
+      try {
+        task = await readTaskForAuthorization(service, id.data);
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
       if (!task) return c.json({ error: 'not_found' }, 404);
       if (!canReadTask(c, task)) return c.json({ error: 'not_found' }, 404);
       if (task.kind !== 'approval' || !task.approval) return c.json({ error: 'not_approval_task' }, 409);
@@ -438,6 +499,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           decision: parsed.data.decision,
         })));
       } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
         const code = (err as Error).message;
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
@@ -461,7 +524,14 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       if (!parsed.success) return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       const from = actorAddress(c, parsed.data.from);
       if (from instanceof Response) return from;
-      const task = await readTaskForAuthorization(service, id.data);
+      let task: Task | null;
+      try {
+        task = await readTaskForAuthorization(service, id.data);
+      } catch (err) {
+        const mapped = journalUnavailable(c, err);
+        if (mapped) return mapped;
+        throw err;
+      }
       if (!task) return c.json({ error: 'not_found' }, 404);
       // This is a hard server-side ACL boundary. A guessed task UUID alone
       // never gives another identity authority to advance its state.
@@ -480,6 +550,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (!updated) return c.json({ error: 'not_found' }, 404);
         return c.json(await mutationTaskView(c, service, updated));
       } catch (err) {
+        const mappedJournal = journalUnavailable(c, err);
+        if (mappedJournal) return mappedJournal;
         if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'task_lease_required' || (err as Error).message === 'approval_decision_required') {
           return c.json({ error: (err as Error).message }, 409);
         }

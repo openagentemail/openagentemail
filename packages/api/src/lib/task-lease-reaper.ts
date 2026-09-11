@@ -1,5 +1,5 @@
-import { taskLeasesEnabled } from './task-lease-gate.ts';
-import { reapExpiredTaskLeasesOnce } from './tasks.ts';
+import { taskLeaseEmitterEnabled, taskLeasesEnabled } from './task-lease-gate.ts';
+import { emitPendingExpiryAuditsOnce, reapExpiredTaskLeasesOnce } from './tasks.ts';
 
 // #56 requires explicit recovery, not configurability; a tunable cadence is a separate task.
 export const TASK_LEASE_REAPER_INTERVAL_MS = 60_000;
@@ -17,9 +17,17 @@ type ReaperScheduler = {
 export function startTaskLeaseReaper(dependencies: ReaperScheduler = {}): void {
   const leasesEnabled = taskLeasesEnabled();
   if (!leasesEnabled) return;
-  const reapOnce = dependencies.reapOnce ?? reapExpiredTaskLeasesOnce;
-  const schedule = dependencies.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
   const warn = dependencies.warn ?? console.warn;
+  const reapOnce = dependencies.reapOnce ?? (async () => {
+    const reaped = await reapExpiredTaskLeasesOnce();
+    if (taskLeaseEmitterEnabled()) {
+      await emitPendingExpiryAuditsOnce().catch((error: unknown) => {
+        warn('[task-lease-reaper] m2 emitter failed:', error instanceof Error ? error.message : String(error));
+      });
+    }
+    return reaped;
+  });
+  const schedule = dependencies.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
   let running = false;
   const tick = () => {
     if (running) return;

@@ -33,6 +33,10 @@ services:
       TASK_LEASES_EXPIRY_AUDIT_M3: ${TASK_LEASES_EXPIRY_AUDIT_M3:-false}
       TASK_LEASES_OVERLAY_BOUND: ${TASK_LEASES_OVERLAY_BOUND:-false}
       # Public-read lease overlay bound (default false): list/detail stop replaying unindexed lease events after 15 minutes.
+      # M2 pending journal (default false): restart-safe generation fence + claim_lost; records/defers expiry-audit work. Requires TASK_LEASES_ENABLED.
+      # Production emitter stays hard-disabled. First provision: docs/task-lease-journal.md
+      # docker compose -f compose.api-only.yaml run --rm --no-deps --entrypoint bun api dist/task-lease-provision.js
+      TASK_LEASES_PENDING_JOURNAL: ${TASK_LEASES_PENDING_JOURNAL:-false}
       # --- external catch-all mailbox access ---
       IMAP_HOST: ${IMAP_HOST:?Set IMAP_HOST in .env}
       IMAP_PORT: ${IMAP_PORT:?Set IMAP_PORT in .env}
