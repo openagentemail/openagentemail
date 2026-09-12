@@ -69,19 +69,21 @@ export const messagesRoute = new Hono()
       c.header('Retry-After', String(listLimit.retryAfterSec));
       return c.json({ error: 'rate_limited', retryAfterSec: listLimit.retryAfterSec }, 429);
     }
-    if (parsed.data.since !== undefined) {
-      try {
+    // 普通列表与 since 共用 InvalidMailCursorError → 400 invalid_cursor（2269）。
+    // 不加后向 cursor 参数；auth/限速分支保持在此 try 之外。
+    try {
+      if (parsed.data.since !== undefined) {
         const page = await listMessagesSince(parsed.data.address, parsed.data.since, parsed.data.limit);
         return c.json({ messages: page.messages, nextCursor: page.nextCursor });
-      } catch (err) {
-        if (err instanceof InvalidMailCursorError) {
-          return c.json({ error: 'invalid_cursor' }, 400);
-        }
-        throw err;
       }
+      const messages = await listMessages(parsed.data.address, parsed.data.limit);
+      return c.json({ messages });
+    } catch (err) {
+      if (err instanceof InvalidMailCursorError) {
+        return c.json({ error: 'invalid_cursor' }, 400);
+      }
+      throw err;
     }
-    const messages = await listMessages(parsed.data.address, parsed.data.limit);
-    return c.json({ messages });
   })
   .get('/:id', async (c) => {
     const parsed = getQuerySchema.safeParse(c.req.query());
@@ -173,6 +175,10 @@ export const messagesRoute = new Hono()
       }
       return c.json(message);
     } catch (err) {
+      // 缺/错代际：400 invalid_cursor（2269）。委托撤销仍 403；其余上抛。
+      if (err instanceof InvalidMailCursorError) {
+        return c.json({ error: 'invalid_cursor' }, 400);
+      }
       if (err instanceof DelegationRevokedError) {
         return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
       }

@@ -25,6 +25,10 @@ const { describe, expect, mock, test } = await import('bun:test');
 let fakeMessages: any[] = [];
 
 class FakeImapFlow extends EventEmitter {
+  // 选中会话必须暴露当前代际，供后向列表在 search 前校验（#144）。
+  get mailbox() {
+    return { uidValidity: 17n };
+  }
   async connect() {}
   async getMailboxLock() {
     return { release() {} };
@@ -596,7 +600,7 @@ describe('listMessagesPage cursor — 无重复无跳页', () => {
       listMessagesPage('fox@test.example', { folder: 'inbox', cursor: 'not-a-cursor' }),
     ).rejects.toBeInstanceOf(InvalidMailCursorError);
     const foreign = encodeMailCursor(
-      { folder: 'sent', address: 'fox@test.example', t: Date.now(), uid: 1 },
+      { folder: 'sent', address: 'fox@test.example', t: Date.now(), uid: 1, uidValidity: 17 },
       config.taskSigningSecret,
     );
     await expect(

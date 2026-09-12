@@ -688,6 +688,7 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
         address: 'victim@test.example',
         t: 1000,
         uid: 10,
+        uidValidity: 17,
       },
       config.taskSigningSecret,
     );
@@ -1271,5 +1272,66 @@ describe('GET /v1/messages 前向 since 查询与无损翻页', () => {
     expect(res.nextCursor).not.toBeNull();
     const dec = decodeMailForwardCursor(res.nextCursor!, config.taskSigningSecret);
     expect(dec.scanUid).toBe(100);
+  });
+});
+
+/**
+ * Commander2269：普通 GET /v1/messages 与 wait 缺代际 → 400 invalid_cursor。
+ * 走默认 messagesRoute + 真 listMessages/waitForMessage，不注入 mock 服务。
+ * 不加后向 cursor 参数；timeoutSec=1 仅钳测试，不改生产超时。
+ */
+describe('2269 ordinary list/wait missing generation → 400 invalid_cursor', () => {
+  let app: any;
+
+  beforeEach(async () => {
+    fakeMessages = [inboxMessage(8, 'victim@test.example', 'victim@test.example')];
+    failMailboxLock = false;
+    fakeUidValidity = 17n;
+    createdClients.length = 0;
+    const { Hono } = await import('hono');
+    const { messagesRoute } = await import('../src/routes/messages.ts');
+    app = new Hono();
+    // 仅新用例显式标注参数，避免新增 TS7006，指纹回到 baseline133（原有两处中间件仍是历史债务）。
+    app.use('*', async (c: { set: (key: string, value: unknown) => void }, next: () => Promise<void>) => {
+      c.set('auth', { kind: 'admin' });
+      await next();
+    });
+    app.route('/v1/messages', messagesRoute);
+  });
+
+  test('缺代际：普通 GET /v1/messages（无 since/cursor）400 invalid_cursor', async () => {
+    fakeUidValidity = undefined as unknown as bigint;
+    const res = await app.request('/v1/messages?address=victim@test.example');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+  });
+
+  test('缺代际：POST /v1/messages/wait 400 invalid_cursor（不靠超时）', async () => {
+    fakeUidValidity = undefined as unknown as bigint;
+    const started = Date.now();
+    const res = await app.request('/v1/messages/wait', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: 'victim@test.example', timeoutSec: 1 }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test('有代际：普通列表仍 200，形状不变', async () => {
+    const res = await app.request('/v1/messages?address=victim@test.example');
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { messages: { id: string }[] };
+    expect(json.messages.map((m) => m.id)).toEqual(['8']);
+    expect((json as { nextCursor?: unknown }).nextCursor).toBeUndefined();
+  });
+
+  test('坏 address 仍是 schema 400 invalid_request，不是 invalid_cursor', async () => {
+    fakeUidValidity = undefined as unknown as bigint;
+    const res = await app.request('/v1/messages?address=not-an-email');
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string };
+    expect(json.error).toBe('invalid_request');
   });
 });

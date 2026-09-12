@@ -16,6 +16,7 @@ import { simpleParser } from 'mailparser';
 import type { AddressObject } from 'mailparser';
 import { config } from './config.ts';
 import {
+  canonicalizeMailUidValidity,
   decodeMailCursor,
   decodeMailForwardCursor,
   encodeMailCursor,
@@ -781,7 +782,8 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
  * List newest-first message summaries for `address` in `folder`, up to `limit`.
  * Two passes: envelopes+Delivered-To for the last SCAN_BACK messages to
  * find matches cheaply, then full source for the (≤ limit) matches to
- * build snippets. Cursor is HMAC-bound to folder+address+(t,uid).
+ * build snippets. Cursor is HMAC-bound to folder+address+(t,uid)+uidValidity。
+ * 同一已 SELECT 会话上，search/fetch 之前必须拿到合法当前代际（含空信箱与首页）。
  */
 async function listMessagesPageWith(
   client: ImapFlow,
@@ -791,11 +793,19 @@ async function listMessagesPageWith(
   const folder = opts.folder;
   const limit = opts.limit;
   const normalized = address.toLowerCase();
+  // 选中会话上的当前代际：缺失/非法 → 400 invalid_cursor（含首页无 cursor）。
+  const generation = canonicalizeMailUidValidity(
+    client.mailbox ? client.mailbox.uidValidity : undefined,
+  );
   let cursorT: number | undefined;
   let cursorUid: number | undefined;
   if (opts.cursor) {
     const cursor = decodeMailCursor(opts.cursor, config.taskSigningSecret);
     if (cursor.folder !== folder || cursor.address !== normalized) {
+      throw new InvalidMailCursorError();
+    }
+    // 游标代际必须等于本次已验证的选中代际；禁止推断或回退。
+    if (String(cursor.uidValidity) !== generation) {
       throw new InvalidMailCursorError();
     }
     cursorT = cursor.t;
@@ -834,6 +844,7 @@ async function listMessagesPageWith(
             address: normalized,
             t: receivedAtMs(last),
             uid: last.uid,
+            uidValidity: generation,
           },
           config.taskSigningSecret,
         )
@@ -1242,6 +1253,10 @@ export async function waitForMessage(
     if (err instanceof DelegationRevokedError) {
       throw err;
     }
+    // 代际失败不是断线，禁止吞成轮询/超时（2269 wait → 400 invalid_cursor）。
+    if (err instanceof InvalidMailCursorError) {
+      throw err;
+    }
     console.warn('[imap] IDLE wait failed, falling back to polling:', (err as Error).message);
     return waitWithPolling(address, filters, deadline, shouldContinue);
   }
@@ -1328,6 +1343,9 @@ async function waitWithPolling(
       }
     } catch (err) {
       if (err instanceof DelegationRevokedError) {
+        throw err;
+      }
+      if (err instanceof InvalidMailCursorError) {
         throw err;
       }
       console.warn('[imap] poll failed:', (err as Error).message);

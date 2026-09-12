@@ -1,8 +1,10 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import {
   MAIL_CURSOR_PREFIX,
   MAIL_FORWARD_CURSOR_PREFIX,
   InvalidMailCursorError,
+  canonicalizeMailUidValidity,
   decodeMailCursor,
   decodeMailForwardCursor,
   encodeMailCursor,
@@ -19,15 +21,19 @@ describe('mail-cursor', () => {
       address: 'fox@test.example',
       t: 1_752_000_000_000,
       uid: 42,
+      uidValidity: 17,
     };
     const token = encodeMailCursor(payload, KEY);
     expect(token.startsWith(`${MAIL_CURSOR_PREFIX}.`)).toBe(true);
-    expect(decodeMailCursor(token, KEY)).toEqual(payload);
+    expect(decodeMailCursor(token, KEY)).toEqual({
+      ...payload,
+      uidValidity: '17',
+    });
   });
 
   test('篡改 HMAC 或载荷一律失败', () => {
     const token = encodeMailCursor(
-      { folder: 'sent', address: 'fox@test.example', t: 1, uid: 1 },
+      { folder: 'sent', address: 'fox@test.example', t: 1, uid: 1, uidValidity: 17 },
       KEY,
     );
     const parts = token.split('.');
@@ -36,6 +42,20 @@ describe('mail-cursor', () => {
     );
     expect(() => decodeMailCursor('not-a-token', KEY)).toThrow(InvalidMailCursorError);
     expect(() => decodeMailCursor(token, 'other-key')).toThrow(InvalidMailCursorError);
+  });
+
+  test('改代际字段 v 且保留原 MAC 一律失败', () => {
+    const token = encodeMailCursor(
+      { folder: 'inbox', address: 'fox@test.example', t: 100, uid: 1, uidValidity: 17 },
+      KEY,
+    );
+    const parts = token.split('.');
+    const tamperedBody = Buffer.from(
+      JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: 100, u: 1, v: '18' }),
+    ).toString('base64url');
+    expect(() => decodeMailCursor(`${parts[0]}.${tamperedBody}.${parts[2]}`, KEY)).toThrow(
+      InvalidMailCursorError,
+    );
   });
 
   test('isMailFolder 只承认三 folder', () => {
@@ -65,7 +85,7 @@ describe('mail-cursor', () => {
 
     test('后向与前向游标互不通用（域隔离）', () => {
       const backwardToken = encodeMailCursor(
-        { folder: 'inbox', address: 'fox@test.example', t: 1000, uid: 10 },
+        { folder: 'inbox', address: 'fox@test.example', t: 1000, uid: 10, uidValidity: 17 },
         KEY,
       );
       const forwardToken = encodeMailForwardCursor(
@@ -252,5 +272,87 @@ describe('mail-cursor', () => {
       const strBody = Buffer.from(JSON.stringify({ f: 'inbox', a: 'fox@test.example', t: '1752000000000', u: 42, v: '17' })).toString('base64url');
       expect(() => decodeMailForwardCursor(`${prefix}.${strBody}.${sig}`, KEY)).toThrow(InvalidMailCursorError);
     });
+  });
+});
+
+/**
+ * 用与生产相同的 HMAC 域、但不经 canonicalize 的原始 v 签名。
+ * 供「正确签名的畸形代际」用例：失败必须来自校验，不能只靠坏 MAC。
+ */
+function signBackwardV2Raw(
+  bodyObj: { f: string; a: string; t: number; u: number; v?: unknown },
+  key: string,
+): string {
+  const vPart = bodyObj.v === undefined ? '' : String(bodyObj.v);
+  const mac = createHmac('sha256', key)
+    .update(`mail-cursor-v2\n${bodyObj.f}\n${bodyObj.a}\n${bodyObj.t}\n${bodyObj.u}\n${vPart}`)
+    .digest('base64url');
+  const body = Buffer.from(JSON.stringify(bodyObj)).toString('base64url');
+  return `mail-cursor-v2.${body}.${mac}`;
+}
+
+describe('mail-cursor-v2 canonical 代际（2262）', () => {
+  test('canonicalize：前导零数字串收成无前导零；0/00 拒', () => {
+    expect(canonicalizeMailUidValidity('00017')).toBe('17');
+    expect(canonicalizeMailUidValidity('17')).toBe('17');
+    expect(canonicalizeMailUidValidity(17n)).toBe('17');
+    expect(canonicalizeMailUidValidity(17)).toBe('17');
+    expect(() => canonicalizeMailUidValidity('0')).toThrow(InvalidMailCursorError);
+    expect(() => canonicalizeMailUidValidity('00')).toThrow(InvalidMailCursorError);
+  });
+
+  test('canonicalize：非安全整数 number 拒（含 1e21）', () => {
+    expect(() => canonicalizeMailUidValidity(1e21)).toThrow(InvalidMailCursorError);
+    expect(() => canonicalizeMailUidValidity(Number.MAX_SAFE_INTEGER + 1)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => canonicalizeMailUidValidity(1.5)).toThrow(InvalidMailCursorError);
+    expect(() => canonicalizeMailUidValidity(0)).toThrow(InvalidMailCursorError);
+    expect(() => canonicalizeMailUidValidity(-1)).toThrow(InvalidMailCursorError);
+  });
+
+  test('encode/decode 往返：前导零输入规范化为 17', () => {
+    const token = encodeMailCursor(
+      { folder: 'inbox', address: 'fox@test.example', t: 100, uid: 1, uidValidity: '00017' },
+      KEY,
+    );
+    expect(decodeMailCursor(token, KEY)).toEqual({
+      folder: 'inbox',
+      address: 'fox@test.example',
+      t: 100,
+      uid: 1,
+      uidValidity: '17',
+    });
+  });
+
+  test('encode 拒不安全 number，不发出科学计数游标', () => {
+    expect(() =>
+      encodeMailCursor(
+        { folder: 'inbox', address: 'fox@test.example', t: 100, uid: 1, uidValidity: 1e21 },
+        KEY,
+      ),
+    ).toThrow(InvalidMailCursorError);
+  });
+
+  test('正确签名的畸形代际仍拒（行使校验，不是坏 MAC）', () => {
+    const base = { f: 'inbox', a: 'fox@test.example', t: 100, u: 1 };
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base, v: 0 }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base, v: '0' }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base, v: -1 }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base, v: 'abc' }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
+    expect(() => decodeMailCursor(signBackwardV2Raw({ ...base, v: 1e21 }, KEY), KEY)).toThrow(
+      InvalidMailCursorError,
+    );
   });
 });
