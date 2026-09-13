@@ -46,6 +46,8 @@ class FakeImapFlow extends EventEmitter {
   connectStarted = false;
   idleStarted = false;
   logoutStarted = false;
+  idleActive = 0;
+  maxIdleActive = 0;
   private closedWaiters: Array<() => void> = [];
 
   constructor() {
@@ -87,8 +89,14 @@ class FakeImapFlow extends EventEmitter {
 
   async idle() {
     this.idleStarted = true;
-    if (hangIdle) await this.waitUntilClosed(1500);
-    else await new Promise((resolve) => setTimeout(resolve, 15));
+    this.idleActive += 1;
+    this.maxIdleActive = Math.max(this.maxIdleActive, this.idleActive);
+    try {
+      if (hangIdle) await this.waitUntilClosed(1500);
+      else await new Promise((resolve) => setTimeout(resolve, 15));
+    } finally {
+      this.idleActive -= 1;
+    }
   }
 
   async search() {
@@ -377,6 +385,7 @@ describe('#204 既有 wait 结果保持可区分', () => {
     const body = (await res.json()) as { error: string; timeoutSec?: number };
     expect(body.error).toBe('timeout');
     expect(typeof body.timeoutSec).toBe('number');
+    expect(Number(res.headers.get('X-OAE-Wait-Timeout-Sec'))).toBe(Number(body.timeoutSec));
   });
 
   test('命中信件仍是 200', async () => {
@@ -471,5 +480,143 @@ describe('#204 HTTP /mcp 外层 abort 传到内层 REST wait', () => {
     );
     expect(replacements.every((r) => r.status !== 429)).toBe(true);
     expect(settled).toBeTruthy();
+  });
+});
+
+describe('#206 R8 IDLE 收尾与 499 头', () => {
+  test('7 IDLE 命中后 logout 永不返回，再撤销并 abort：403 不是 499，槽位释放一次', async () => {
+    hangLogout = true;
+    const alice = createIdentity({ localpart: 'alice-idle-revoke' })!;
+    const bob = createIdentity({ localpart: 'bob-idle-revoke', scopes: ['read:messages'] })!;
+    const grant = createDelegation({
+      mailbox: alice.identity.address,
+      grantee: bob.identity.address,
+      createdBy: alice.identity.address,
+    });
+    fakeMessages = [matchingMail(alice.identity.address)];
+    const ac = new AbortController();
+    const pending = Promise.resolve(app.request(
+      new Request('http://localhost/v1/messages/wait', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${bob.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ address: alice.identity.address, timeoutSec: 2 }),
+        signal: ac.signal,
+      }),
+    ));
+    await waitUntil(() => createdClients.some((c) => c.logoutStarted));
+    revokeDelegation(grant.id, alice.identity.address);
+    const started = Date.now();
+    ac.abort();
+    const res = await pending;
+    expect(Date.now() - started).toBeLessThan(400);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden: token is scoped to another address' });
+    expect(createdClients.every((c) => c.released)).toBe(true);
+    const caller = bob.identity.address.toLowerCase();
+    const mailbox = alice.identity.address;
+    await waitUntil(() => {
+      const ok = acquireWaitSlot(caller, mailbox);
+      if (ok) releaseWaitSlot(caller, mailbox);
+      return ok;
+    }, 800);
+  });
+
+  test('9 499 携带有效 X-OAE-Wait-Timeout-Sec 且槽位只释放一次', async () => {
+    hangIdle = true;
+    const ac = new AbortController();
+    const pending = restWait('r8-499-hdr@test.example', 5, ac.signal);
+    await waitUntil(() => createdClients.some((c) => c.idleStarted || c.connectStarted));
+    ac.abort();
+    const res = await pending;
+    expect(res.status).toBe(499);
+    expect(res.headers.get('X-OAE-Wait-Timeout-Sec')).toBe('5');
+    expect(await res.json()).toEqual({ error: 'client_disconnected' });
+    hangIdle = false;
+    const replacements = await Promise.all(
+      Array.from({ length: MAX_WAITS_PER_SLOT }, () => restWait('r8-499-hdr@test.example', 1)),
+    );
+    expect(replacements.every((r) => r.status !== 429)).toBe(true);
+  });
+
+  test('14 IDLE logout 挂死：在剩余截止内强关，观察 promise，408 且槽位归还', async () => {
+    hangLogout = true;
+    fakeMessages = [matchingMail('r8-logout-bound@test.example')];
+    const started = Date.now();
+    const res = await restWait('r8-logout-bound@test.example', 1);
+    expect(Date.now() - started).toBeLessThan(1800);
+    expect(res.status).toBe(408);
+    const body = (await res.json()) as { error: string; timeoutSec?: number };
+    expect(body.error).toBe('timeout');
+    expect(createdClients.every((c) => c.closed || c.loggedOut)).toBe(true);
+    hangLogout = false;
+    fakeMessages = [];
+    const replacements = await Promise.all(
+      Array.from({ length: MAX_WAITS_PER_SLOT }, () => restWait('r8-logout-bound@test.example', 1)),
+    );
+    expect(replacements.every((r) => r.status !== 429)).toBe(true);
+  });
+
+  test('4a 已到达服务器的挂起段：总截止打断且走 499 清理，槽位释放一次', async () => {
+    const { OpenAgentEmailClient, ApiError } = await import('../src/mcp/client.ts');
+    hangIdle = true;
+    const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const path = url.replace(/^https?:\/\/[^/]+/, '');
+      return app.request(
+        new Request(`http://localhost${path || '/v1/messages/wait'}`, {
+          method: init?.method ?? 'POST',
+          headers: init?.headers,
+          body: init?.body,
+          signal: init?.signal,
+        }),
+      );
+    };
+    const client = new OpenAgentEmailClient('http://localhost', adminKey, fetchImpl);
+    const err = await client.waitFor('r8-4a@test.example', { timeoutSec: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).kind).toBe('total_deadline');
+    expect(createdClients.every((c) => c.released)).toBe(true);
+    hangIdle = false;
+    const replacements = await Promise.all(
+      Array.from({ length: MAX_WAITS_PER_SLOT }, () => restWait('r8-4a@test.example', 1)),
+    );
+    expect(replacements.every((r) => r.status !== 429)).toBe(true);
+  });
+
+  test('8 重复 IDLE 获胜后无残留 heartbeat timer/listener', async () => {
+    const { waitHeartbeatLiveForTests } = await import('../src/lib/imap.ts');
+    hangIdle = false;
+    fakeMessages = [];
+    const res = await restWait('r8-hb-dispose@test.example', 1);
+    expect(res.status).toBe(408);
+    expect(waitHeartbeatLiveForTests()).toBe(0);
+  });
+
+  test('15 重复 IDLE 获胜：无 unhandledRejection、并发 IDLE 不增长；锁定 imapflow 1.5.0', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const locked = JSON.parse(
+      readFileSync(join(import.meta.dir, '../node_modules/imapflow/package.json'), 'utf8'),
+    ) as { version: string };
+    expect(locked.version).toBe('1.5.0');
+
+    const rejections: unknown[] = [];
+    const onRej = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onRej);
+    hangIdle = false;
+    fakeMessages = [];
+    try {
+      const res = await restWait('r8-idle-repeat@test.example', 1);
+      expect(res.status).toBe(408);
+      expect(rejections).toEqual([]);
+      expect(createdClients.every((c) => c.maxIdleActive <= 1)).toBe(true);
+    } finally {
+      process.off('unhandledRejection', onRej);
+    }
   });
 });

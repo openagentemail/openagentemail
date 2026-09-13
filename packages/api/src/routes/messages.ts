@@ -185,7 +185,13 @@ export const messagesRoute = new Hono()
         return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
       }
       if (err instanceof ClientDisconnectedError) {
-        return new Response(JSON.stringify({ error: 'client_disconnected' }), { status: 499, headers: { 'content-type': 'application/json' } });
+        return new Response(JSON.stringify({ error: 'client_disconnected' }), {
+          status: 499,
+          headers: {
+            'content-type': 'application/json',
+            'X-OAE-Wait-Timeout-Sec': String(effectiveTimeout),
+          },
+        });
       }
       throw err;
     } finally {
