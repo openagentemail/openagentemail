@@ -7,9 +7,9 @@
  * 计数必须来自 create/connect/close，不得只靠 HTTP 状态推断。
  */
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveWaitR9DataDir } from './wait-r9-data-dir.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-r9';
@@ -17,9 +17,11 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-// 复用父 helper 注入的 DATA_DIR；仅直跑本文件时才自建，避免父进程清不掉孤儿目录。
-process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'oae-wait-r9-'));
+// 仅 OAE_WAIT_R9_PARENT=1 时复用父 DATA_DIR；否则自建，防 .env 目录被清库。
+process.env.DATA_DIR = resolveWaitR9DataDir();
 process.env.UI_ENABLED = 'false';
+// 给父进程负控/回收用：直跑自建目录不在 isolate 的 finally 里。
+process.stderr.write(`oae-wait-r9-data-dir=${process.env.DATA_DIR}\n`);
 
 const { afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
