@@ -373,7 +373,6 @@ export async function withInboxAbortable<T>(
     operationFailed = true;
     operationError = err;
   } finally {
-    signal.removeEventListener('abort', onAbort);
     lock?.release();
     if (!failed && client && !closedClients.has(client)) {
       try {
@@ -383,6 +382,7 @@ export async function withInboxAbortable<T>(
       }
     }
     closeOnce();
+    signal.removeEventListener('abort', onAbort);
   }
   if (connectionError) throw connectionError;
   if (operationFailed) throw operationError;
@@ -1221,6 +1221,106 @@ export class DelegationRevokedError extends Error {
   }
 }
 
+/** 调用方断开；不得与 DelegationRevokedError 混用。 */
+export class ClientDisconnectedError extends Error {
+  constructor(message = 'client_disconnected') {
+    super(message);
+    this.name = 'ClientDisconnectedError';
+  }
+}
+
+const throwIfDisconnected = (signal?: AbortSignal) => {
+  if (signal?.aborted) throw new ClientDisconnectedError();
+};
+
+/** 可取消睡眠；abort 须先于 IDLE 失败后的兜底 sleep 抛出。 */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return startHeartbeat(ms, signal).promise;
+}
+
+type HeartbeatHandle = { promise: Promise<void>; dispose: () => void };
+
+let heartbeatLive = 0;
+
+/** 测试钩：当前未释放的 heartbeat 数。IDLE 获胜后必须为 0。 */
+export function waitHeartbeatLiveForTests(): number {
+  return heartbeatLive;
+}
+
+/** 可释放 heartbeat：IDLE 获胜时立刻清 timer/listener。 */
+function startHeartbeat(ms: number, signal?: AbortSignal): HeartbeatHandle {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+    heartbeatLive -= 1;
+  };
+  heartbeatLive += 1;
+  const promise = new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      release();
+      reject(new ClientDisconnectedError());
+      return;
+    }
+    onAbort = () => {
+      release();
+      reject(new ClientDisconnectedError());
+    };
+    timer = setTimeout(() => {
+      release();
+      resolve();
+    }, Math.max(0, ms));
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  return { promise, dispose: release };
+}
+
+function observeIdle<T>(p: Promise<T>): Promise<T> {
+  void p.catch(() => {});
+  return p;
+}
+
+/** 剩余截止或断开时强关 socket，并观察/排空 logout。 */
+async function logoutBounded(
+  client: ImapFlow,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const logoutP = Promise.resolve(client.logout());
+  void logoutP.catch(() => {});
+  const remaining = Math.max(0, deadline - Date.now());
+  const bound = new AbortController();
+  const onDisc = () => bound.abort();
+  signal?.addEventListener('abort', onDisc, { once: true });
+  const timer = setTimeout(() => bound.abort(), remaining);
+  try {
+    await Promise.race([
+      logoutP,
+      new Promise<never>((_, reject) => {
+        if (bound.signal.aborted) {
+          reject(new Error('logout_bound'));
+          return;
+        }
+        bound.signal.addEventListener('abort', () => reject(new Error('logout_bound')), { once: true });
+      }),
+    ]);
+  } catch {
+    try {
+      client.close();
+    } catch {
+      /* already dead */
+    }
+    await logoutP.catch(() => {});
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onDisc);
+  }
+}
+
 /**
  * Wait for a message matching `filters` to arrive in `address`'s mailbox,
  * up to `timeoutSec`.
@@ -1245,20 +1345,18 @@ export async function waitForMessage(
   filters: WaitFilters,
   timeoutSec: number,
   shouldContinue?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<MessageDetail | null> {
+  throwIfDisconnected(signal);
   const deadline = Date.now() + timeoutSec * 1000;
   try {
-    return await waitWithIdle(address, filters, deadline, shouldContinue);
+    return await waitWithIdle(address, filters, deadline, shouldContinue, signal);
   } catch (err) {
-    if (err instanceof DelegationRevokedError) {
-      throw err;
-    }
+    if (err instanceof DelegationRevokedError || err instanceof InvalidMailCursorError || err instanceof ClientDisconnectedError) throw err;
+    if (signal?.aborted) throw new ClientDisconnectedError(); // connect 被 abort 时常抛 closed
     // 代际失败不是断线，禁止吞成轮询/超时（2269 wait → 400 invalid_cursor）。
-    if (err instanceof InvalidMailCursorError) {
-      throw err;
-    }
     console.warn('[imap] IDLE wait failed, falling back to polling:', (err as Error).message);
-    return waitWithPolling(address, filters, deadline, shouldContinue);
+    return waitWithPolling(address, filters, deadline, shouldContinue, signal);
   }
 }
 
@@ -1267,13 +1365,21 @@ async function waitWithIdle(
   filters: WaitFilters,
   deadline: number,
   shouldContinue?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<MessageDetail | null> {
-  const client = await connectImap();
+  let client: ImapFlow | undefined;
+  const onAbort = () => { try { client?.close(); } catch { /* already dead */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
   let failed = false;
   let lock: Awaited<ReturnType<ImapFlow['getMailboxLock']>> | undefined;
+  let provisional: MessageDetail | null | undefined;
   try {
+    client = await connectImapClient(undefined, {
+      beforeConnect: (created) => { client = created; throwIfDisconnected(signal); },
+    });
     lock = await client.getMailboxLock('INBOX');
     while (Date.now() < deadline) {
+      throwIfDisconnected(signal);
       if (shouldContinue && !shouldContinue()) {
         throw new DelegationRevokedError();
       }
@@ -1282,45 +1388,54 @@ async function waitWithIdle(
         if (shouldContinue && !shouldContinue()) {
           throw new DelegationRevokedError();
         }
-        return found;
+        provisional = found;
+        break;
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
+      const idleP = observeIdle(Promise.resolve(client.idle()));
+      const hb = startHeartbeat(Math.min(3000, remaining), signal);
       try {
-        await Promise.race([client.idle(), sleep(Math.min(3000, remaining))]);
-      } catch {
-        await sleep(Math.min(3000, deadline - Date.now()));
+        await Promise.race([idleP, hb.promise]);
+      } catch (err) {
+        if (err instanceof ClientDisconnectedError) throw err;
+        await abortableSleep(Math.min(3000, deadline - Date.now()), signal);
+      } finally {
+        hb.dispose();
       }
     }
-    if (shouldContinue && !shouldContinue()) {
-      throw new DelegationRevokedError();
+    if (provisional === undefined) {
+      if (shouldContinue && !shouldContinue()) {
+        throw new DelegationRevokedError();
+      }
+      provisional = null;
     }
-    return null;
   } catch (err) {
     failed = true;
     throw err;
   } finally {
-    lock?.release();
-    if (failed) {
-      // Same reasoning as withInbox: on the error path drop the socket
-      // instead of waiting on a LOGOUT that may queue behind a stuck command.
-      try {
-        client.close();
-      } catch {
-        /* already dead */
-      }
-    } else {
-      try {
-        await client.logout();
-      } catch {
+    try {
+      lock?.release();
+      if (client && failed) {
         try {
           client.close();
         } catch {
-          /* already closed */
+          /* already dead */
         }
+      } else if (client) {
+        await logoutBounded(client, deadline, signal);
       }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
   }
+  // 最终优先级：撤销 > 断开 > 总超时 > 暂定命中。截止跨越 logout 则丢弃命中。
+  if (shouldContinue && !shouldContinue()) {
+    throw new DelegationRevokedError();
+  }
+  if (signal?.aborted) throw new ClientDisconnectedError();
+  if (Date.now() >= deadline) return null;
+  return provisional ?? null;
 }
 
 async function waitWithPolling(
@@ -1328,31 +1443,33 @@ async function waitWithPolling(
   filters: WaitFilters,
   deadline: number,
   shouldContinue?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<MessageDetail | null> {
   while (Date.now() < deadline) {
+    throwIfDisconnected(signal);
     if (shouldContinue && !shouldContinue()) {
       throw new DelegationRevokedError();
     }
     try {
-      const found = await withInbox((client) => findMatchWith(client, address, filters));
+      const found = signal
+        ? await withInboxAbortable(signal, (client) => findMatchWith(client, address, filters))
+        : await withInbox((client) => findMatchWith(client, address, filters));
       if (found) {
         if (shouldContinue && !shouldContinue()) {
           throw new DelegationRevokedError();
         }
+        throwIfDisconnected(signal); // 收尾期 abort 在 wait 边界升为断开，避免命中改判 200
         return found;
       }
+      throwIfDisconnected(signal);
     } catch (err) {
-      if (err instanceof DelegationRevokedError) {
-        throw err;
-      }
-      if (err instanceof InvalidMailCursorError) {
-        throw err;
-      }
+      if (err instanceof DelegationRevokedError || err instanceof InvalidMailCursorError || err instanceof ClientDisconnectedError) throw err;
+      if (signal?.aborted || (err instanceof Error && err.message === 'scan_aborted')) throw new ClientDisconnectedError();
       console.warn('[imap] poll failed:', (err as Error).message);
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    await sleep(Math.min(3000, remaining));
+    await abortableSleep(Math.min(3000, remaining), signal);
   }
   if (shouldContinue && !shouldContinue()) {
     throw new DelegationRevokedError();

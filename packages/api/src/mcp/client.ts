@@ -36,10 +36,37 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** 408 响应体里的有效 timeoutSec（分块再武装用来观察服务端钳制）。 */
+    public readonly timeoutSec?: number,
+    /** 客户端诊断：malformed / early / 总截止。不是新的服务端码。 */
+    public readonly kind?: string,
+    public readonly waitHeaderSec?: number,
+    public readonly bodyError?: string,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** 仅覆盖调度边界；不可配置。早于 timeoutSec*1000-250ms 的合法外观 408 立即失败。 */
+export const WAIT_TIMEOUT_EARLY_TOLERANCE_MS = 250;
+
+/** 生产读 performance.now；缺省回退 Date.now。测试可注入，墙钟跳变不得改决策。 */
+function defaultWaitMonotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+let waitMonotonicNowFn: () => number = defaultWaitMonotonicNow;
+
+/** 测试注入 wait 单调钟；restore 时不传。 */
+export function setWaitMonotonicNowForTests(fn?: () => number): void {
+  waitMonotonicNowFn = fn ?? defaultWaitMonotonicNow;
+}
+
+function waitMonotonicNow(): number {
+  return waitMonotonicNowFn();
 }
 
 export interface Identity {
@@ -192,6 +219,77 @@ export function apiUrlForDisplay(raw: string): string {
   }
 }
 
+/** 单次 REST wait 上限（秒）；总 deadline 内 408 才再武装。 */
+const WAIT_CHUNK_SEC = 50;
+
+/** 可释放的合并 signal：每段 finally 必须恰好 dispose 一次。 */
+type LinkedAbort = { signal: AbortSignal; dispose: () => void };
+
+/** 任一 signal 中止则中止；父原因优先于内部截止。 */
+function abortAny(signals: Array<AbortSignal | undefined>): LinkedAbort {
+  const ac = new AbortController();
+  const cleanups: Array<() => void> = [];
+  let disposed = false;
+  const link = (s: AbortSignal) => {
+    if (ac.signal.aborted) return;
+    ac.abort(s.reason);
+  };
+  for (const s of signals) {
+    if (!s) continue;
+    if (s.aborted) {
+      link(s);
+      continue;
+    }
+    const onAbort = () => link(s);
+    s.addEventListener("abort", onAbort);
+    cleanups.push(() => s.removeEventListener("abort", onAbort));
+  }
+  return {
+    signal: ac.signal,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const c of cleanups) c();
+      cleanups.length = 0;
+    },
+  };
+}
+
+/** fetch / AbortSignal 取消，不得当成网络故障或 408 再武装。 */
+function isAbortError(err: unknown): boolean {
+  return (
+    (typeof DOMException !== "undefined" && err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  // 保留 Error/string/symbol/object/null；仅 undefined 才补默认 AbortError。
+  if (signal.reason !== undefined) throw signal.reason;
+  throw new DOMException("The operation was aborted.", "AbortError");
+}
+
+function parseWaitHeaderSec(res: Response): number | undefined {
+  const raw = res.headers.get("X-OAE-Wait-Timeout-Sec");
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return n;
+}
+
+function parseTimeoutSec(data: unknown): number | undefined {
+  if (!data || typeof data !== "object" || !("timeoutSec" in data)) return undefined;
+  const n = (data as { timeoutSec: unknown }).timeoutSec;
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+function parseBodyError(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || !("error" in data)) return undefined;
+  const e = (data as { error: unknown }).error;
+  return typeof e === "string" ? e : undefined;
+}
+
 /** Network failure code (ECONNREFUSED, ENOTFOUND, ...), if the runtime gave one. */
 function networkErrorCode(err: unknown): string | undefined {
   for (const candidate of [err, (err as { cause?: unknown })?.cause]) {
@@ -228,7 +326,7 @@ export class OpenAgentEmailClient {
     method: string,
     path: string,
     body?: unknown,
-    opts?: { sendSource?: "mcp" },
+    opts?: { sendSource?: "mcp"; signal?: AbortSignal },
   ): Promise<T> {
     let res: Response;
     try {
@@ -240,8 +338,16 @@ export class OpenAgentEmailClient {
           ...(opts?.sendSource === "mcp" ? this.mcpSourceHeaders() : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal: opts?.signal,
       });
     } catch (err) {
+      // 取消必须原样抛出，不能吞成“连不上 API”。
+      if (isAbortError(err) || opts?.signal?.aborted) {
+        throwIfAborted(opts?.signal);
+        throw err instanceof Error
+          ? err
+          : new DOMException("The operation was aborted.", "AbortError");
+      }
       // Never interpolate err.message: Node's fetch puts the whole URL —
       // credentials included — into the text when it refuses a URL with
       // userinfo. The failure code is enough to tell the user what broke.
@@ -288,9 +394,31 @@ export class OpenAgentEmailClient {
         );
       }
       if (res.status === 408) {
+        const bodyError = parseBodyError(data);
+        const timeoutSec = parseTimeoutSec(data);
+        const waitHeaderSec = parseWaitHeaderSec(res);
+        const identityOk =
+          bodyError === "timeout" &&
+          timeoutSec !== undefined &&
+          waitHeaderSec !== undefined &&
+          waitHeaderSec === timeoutSec;
+        if (!identityOk) {
+          throw new ApiError(
+            408,
+            `Upstream 408 malformed (kind=upstream_408_malformed).`,
+            timeoutSec,
+            "upstream_408_malformed",
+            waitHeaderSec,
+            bodyError,
+          );
+        }
         throw new ApiError(
           408,
-          `Timeout: no matching message arrived in time. Try a longer timeoutSec or relax fromContains/subjectContains.`,
+          `Timeout: no matching message arrived in time.`,
+          timeoutSec,
+          "upstream_timeout",
+          waitHeaderSec,
+          bodyError,
         );
       }
       throw new ApiError(res.status, `API error ${res.status}: ${serverMsg}`);
@@ -366,11 +494,123 @@ export class OpenAgentEmailClient {
     return this.request("POST", `/v1/messages/${encodeURIComponent(id)}/seen`, { address, seen });
   }
 
-  waitFor(
+  /**
+   * 一个内部总截止控制器；REST 每段最多 50s。
+   * 仅完整 v2 谓词（含 elapsed>=N*1000-250）才再武装。无 backoff/sleep/jitter。
+   */
+  async waitFor(
     address: string,
-    opts: { fromContains?: string; subjectContains?: string; timeoutSec?: number },
+    opts: {
+      fromContains?: string;
+      subjectContains?: string;
+      timeoutSec?: number;
+      signal?: AbortSignal;
+    },
   ): Promise<Message> {
-    return this.request("POST", "/v1/messages/wait", { address, ...opts });
+    const requestedTotal = opts.timeoutSec ?? 120;
+    const totalMs = requestedTotal * 1000;
+    const startedMono = waitMonotonicNow();
+    const remainingMs = () => totalMs - (waitMonotonicNow() - startedMono);
+    const parent = opts.signal;
+    const internal = new AbortController();
+    const throwTotalDeadline = (pollCount: number, observedClamp: number): never => {
+      throw new ApiError(
+        408,
+        `Timeout: no matching message arrived within ${requestedTotal}s (observed per-call clamp ${observedClamp}s, ${pollCount} polls).`,
+        undefined,
+        "total_deadline",
+      );
+    };
+    const throwParentOrInternal = (pollCount: number, observedClamp: number): never => {
+      if (parent?.aborted) {
+        if (parent.reason !== undefined) throw parent.reason;
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      if (internal.signal.aborted || remainingMs() <= 0) {
+        throwTotalDeadline(pollCount, observedClamp);
+      }
+      throwIfAborted(parent);
+      throw new DOMException("The operation was aborted.", "AbortError");
+    };
+    const onParentAbort = () => {
+      if (!internal.signal.aborted) {
+        internal.abort(parent?.reason !== undefined ? parent.reason : undefined);
+      }
+    };
+    parent?.addEventListener("abort", onParentAbort, { once: true });
+    // 唯一真实总截止定时器；分段耗时与剩余只读单调钟。
+    const deadlineTimer = setTimeout(() => {
+      if (!internal.signal.aborted && !parent?.aborted) internal.abort();
+    }, Math.max(0, totalMs));
+    let observedClamp = WAIT_CHUNK_SEC;
+    let pollCount = 0;
+    try {
+      if (parent?.aborted) throwParentOrInternal(pollCount, observedClamp);
+      while (true) {
+        if (parent?.aborted || internal.signal.aborted) {
+          throwParentOrInternal(pollCount, observedClamp);
+        }
+        const leftMs = remainingMs();
+        if (leftMs <= 0) throwTotalDeadline(pollCount, observedClamp);
+        const remainingSec = Math.max(1, Math.ceil(leftMs / 1000));
+        const chunkSec = Math.min(WAIT_CHUNK_SEC, observedClamp, remainingSec);
+        pollCount += 1;
+        const linked = abortAny([parent, internal.signal]);
+        const segmentStart = waitMonotonicNow();
+        try {
+          const message = await this.request<Message>(
+            "POST",
+            "/v1/messages/wait",
+            {
+              address,
+              fromContains: opts.fromContains,
+              subjectContains: opts.subjectContains,
+              timeoutSec: chunkSec,
+            },
+            { signal: linked.signal },
+          );
+          if (remainingMs() <= 0 || internal.signal.aborted || parent?.aborted) {
+            throwParentOrInternal(pollCount, observedClamp);
+          }
+          return message;
+        } catch (err) {
+          if (parent?.aborted || internal.signal.aborted) {
+            throwParentOrInternal(pollCount, observedClamp);
+          }
+          if (isAbortError(err)) throwParentOrInternal(pollCount, observedClamp);
+          if (!(err instanceof ApiError) || err.status !== 408) throw err;
+          if (err.kind === "upstream_408_malformed" || err.kind === "total_deadline") throw err;
+          const elapsed = waitMonotonicNow() - segmentStart;
+          const n = err.timeoutSec;
+          const retryable =
+            err.kind === "upstream_timeout" &&
+            err.bodyError === "timeout" &&
+            typeof n === "number" &&
+            Number.isInteger(n) &&
+            n >= 1 &&
+            err.waitHeaderSec === n &&
+            elapsed >= n * 1000 - WAIT_TIMEOUT_EARLY_TOLERANCE_MS;
+          if (!retryable) {
+            throw new ApiError(
+              408,
+              `Upstream timeout early (kind=upstream_timeout_early).`,
+              n,
+              "upstream_timeout_early",
+              err.waitHeaderSec,
+              err.bodyError,
+            );
+          }
+          if (typeof n === "number" && n > 0 && n < chunkSec) {
+            observedClamp = Math.min(observedClamp, n);
+          }
+        } finally {
+          linked.dispose();
+        }
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
+      parent?.removeEventListener("abort", onParentAbort);
+    }
   }
 
   send(

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  ClientDisconnectedError,
   DelegationRevokedError,
   getMessage,
   InvalidMailCursorError,
@@ -168,6 +169,7 @@ export const messagesRoute = new Hono()
         { fromContains, subjectContains },
         effectiveTimeout,
         shouldContinue,
+        c.req.raw.signal,
       );
       if (!message) {
         // 暴露有效钳制值，便于客户端对齐轮询节奏（不 400 超参）
@@ -175,12 +177,21 @@ export const messagesRoute = new Hono()
       }
       return c.json(message);
     } catch (err) {
-      // 缺/错代际：400 invalid_cursor（2269）。委托撤销仍 403；其余上抛。
+      // 缺/错代际：400 invalid_cursor（2269）。委托撤销仍 403；断开为 499；其余上抛。
       if (err instanceof InvalidMailCursorError) {
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       if (err instanceof DelegationRevokedError) {
         return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
+      }
+      if (err instanceof ClientDisconnectedError) {
+        return new Response(JSON.stringify({ error: 'client_disconnected' }), {
+          status: 499,
+          headers: {
+            'content-type': 'application/json',
+            'X-OAE-Wait-Timeout-Sec': String(effectiveTimeout),
+          },
+        });
       }
       throw err;
     } finally {

@@ -49,7 +49,7 @@ Pending retries are rebuilt from the delivery log on restart; events emitted whi
 - **旧 `mail-cursor-v1` 一律作废**：解码 fail-closed（`InvalidMailCursorError` / `invalid_cursor`），无 v1 fallback、不从载荷推断代际。客户端必须丢弃旧游标、**不带 cursor 从第一页重新开始**。
 - 同一已 SELECT 的 INBOX 会话里，**search/fetch 之前**必须读到当前合法代际；缺代际（含首页无 cursor）或与游标代际不符均失败。空信箱同样先校验代际，再决定是否 search。
 - 排序、folder 过滤、`SCAN_BACK`、ACL、限速与成功响应形状不变。前向 `since` / `mail-fcursor-v1` 协议不变。不扩展 MessageDetail。REST **不**增加后向 `cursor` 参数。
-- **HTTP 映射（Commander2262 / 2269）：** codec / `listMessagesPage` 抛 `InvalidMailCursorError`（`error.code === 'invalid_cursor'`）。Dashboard `GET /ui/api/messages` 仍折成 **HTTP 400 `{error:"invalid_request"}`**。REST **不加**后向 `cursor` 参数。普通 `GET /v1/messages`（无 `since`）与 `POST /v1/messages/wait` 在缺代际或当前会话代际不可用时返回 **400 `{error:"invalid_cursor"}`**；客户端应丢弃会话位置、从第一页/新 wait 会话重启。MCP `mail_list_messages` / `mail_wait_for` 走同一 REST，自然继承。前向 `since` 仍是 `400 invalid_cursor`。auth / 限速 / 委托撤销等其它分支不变。
+- **HTTP 映射（Commander2262 / 2269）：** codec / `listMessagesPage` 抛 `InvalidMailCursorError`（`error.code === 'invalid_cursor'`）。Dashboard `GET /ui/api/messages` 仍折成 **HTTP 400 `{error:"invalid_request"}`**。REST **不加**后向 `cursor` 参数。普通 `GET /v1/messages`（无 `since`）与 `POST /v1/messages/wait` 在缺代际或当前会话代际不可用时返回 **400 `{error:"invalid_cursor"}`**；客户端应丢弃会话位置、从第一页/新 wait 会话重启。MCP `mail_list_messages` / `mail_wait_for` 走同一 REST，自然继承。前向 `since` 仍是 `400 invalid_cursor`。auth / 限速 / 委托撤销等其它分支不变。`POST /v1/messages/wait` 在确认调用方断开时返回 **HTTP 499 `{error:"client_disconnected"}`**（仅此新错误面，响应带 `X-OAE-Wait-Timeout-Sec`；不断开的超时仍是 408 `{error:"timeout", timeoutSec:N}` 且头/体 `N` 相等，委托撤销仍是 403）。MCP `mail_wait_for` 在 REST 每段钳制之上还有**调用方总截止**：只有完整超时身份且该段真正等到 `N` 才再武装；过早或畸形 408 立即失败，与总截止 408 文案可区分。
 
 ### Caller 列表限速（#143，单实例前提）
 
