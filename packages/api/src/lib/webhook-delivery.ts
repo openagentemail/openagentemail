@@ -622,16 +622,18 @@ export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
 /**
  * Filtered reader for GET /v1/webhooks/:id/deliveries.
  * Returns newest rows first.
+ * 列表读只吃增量内存索引，过滤/排序/游标语义保持不变。
  */
 export function readDeliveryLogRows(options?: {
   webhookId?: string;
   limit?: number;
   cursor?: string;
 }): { deliveries: WebhookDeliveryLogRow[]; nextCursor?: string } {
-  const all = readAllDeliveryLogRows();
+  // 数据源切到索引 rows；无 webhookId 时复制后再 sort，避免打乱索引内部顺序
+  const all = refreshDeliveryLogIndex().rows;
   let filtered = options?.webhookId
     ? all.filter((r) => r.webhookId === options.webhookId)
-    : all;
+    : all.slice();
 
   // Sort newest first by ts, tie-break by attempt desc
   filtered.sort((a, b) => {

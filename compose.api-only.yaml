@@ -73,6 +73,7 @@ services:
       # 私网目标例外；OAE_PUBLIC_EDGE=true 时由 parseConfig 强制 false
       WEBHOOK_ALLOW_PRIVATE_TARGETS: ${WEBHOOK_ALLOW_PRIVATE_TARGETS:-false}
       WEBHOOK_ALLOWED_PORTS: ${WEBHOOK_ALLOWED_PORTS:-443}
+      # Single API process per mailbox required; multi-process writers can overshoot these caps.
       WEBHOOK_MAX_SUBSCRIPTIONS: ${WEBHOOK_MAX_SUBSCRIPTIONS:-16}
       WEBHOOK_MAX_PER_ADDRESS: ${WEBHOOK_MAX_PER_ADDRESS:-4}
       WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-11}

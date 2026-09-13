@@ -482,6 +482,8 @@ describe('#149 Compose webhook environment', () => {
       expect(example.includes('MAX_ATTEMPTS<=11')).toBe(true);
       expect(example.includes('JSON_BODY_LIMIT_BYTES')).toBe(true);
       expect(example.includes('Docker Compose v2+')).toBe(true);
+      // #78 先例：单写进程边界写在配额键旁
+      expect(example.includes('Single API process per mailbox required; multi-process writers can overshoot these caps.')).toBe(true);
     }
   });
 

@@ -1771,6 +1771,131 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(afterAppendGet.bytesRead).toBe(appendedBytes);
   });
 
+  test('#146: GET deliveries does not increment fullReads on a warm index', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/deliveries-io',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    const now = Date.now();
+    for (let i = 0; i < 4; i++) {
+      appendDeliveryLogRow({
+        ts: new Date(now - i * 1000).toISOString(),
+        webhookId: sub.id,
+        eventId: `evt_list_${i}`,
+        runId: 'run_0',
+        deliveryId: `dlv_list_${i}`,
+        type: 'mail.received',
+        address: sub.address,
+        messageId: String(i),
+        uidValidity: 1,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt: new Date(now - i * 1000).toISOString(),
+        attempt: 1,
+        outcome: 'success',
+        status: 200,
+        durationMs: 8,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: null,
+        reason: null,
+      });
+    }
+
+    resetDeliveryLogIndexForTests();
+    resetDeliveryLogIoForTests();
+    const cold = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=2`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(cold.status).toBe(200);
+    const coldBody: any = await cold.json();
+    expect(coldBody.deliveries).toHaveLength(2);
+    expect(typeof coldBody.nextCursor).toBe('string');
+    expect(getDeliveryLogIoForTests().fullReads).toBe(1);
+
+    resetDeliveryLogIoForTests();
+    const warm = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=2`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(warm.status).toBe(200);
+    const page2 = await app.request(
+      `/v1/webhooks/${sub.id}/deliveries?limit=2&cursor=${encodeURIComponent(coldBody.nextCursor)}`,
+      { headers: { Authorization: `Bearer ${adminKey}` } },
+    );
+    expect(page2.status).toBe(200);
+    const page2Body: any = await page2.json();
+    expect(page2Body.deliveries).toHaveLength(2);
+    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+  });
+
+  test('#146: concurrent N+2 distinct-key creates at maxPerAddress do not overshoot', async () => {
+    const n = 3;
+    (config.webhooks as any).maxPerAddress = n;
+    (config.webhooks as any).maxSubscriptions = 16;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+
+    const total = n + 2;
+    installOverlappingDns(total);
+    const responses = await Promise.all(
+      Array.from({ length: total }, (_, i) =>
+        postCreate({
+          address: 'alice@test.example',
+          key: `quota-nplus2-addr-${Date.now()}-${i}`,
+          url: `https://consumer.example/nplus2-addr-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(n);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(2);
+    const bodies = await jsonBodies(responses);
+    for (const body of bodies.filter((_, i) => statuses[i] === 409)) {
+      expect(body.error).toBe('webhook_limit_reached');
+    }
+    expect(listWebhookSubscriptions('alice@test.example').length).toBe(n);
+  });
+
+  test('#146: concurrent N+2 distinct-key creates at maxTotal do not overshoot', async () => {
+    const n = 3;
+    (config.webhooks as any).maxPerAddress = 8;
+    (config.webhooks as any).maxSubscriptions = n;
+    (config.webhooks as any).rateCreatePerMin = 100;
+    deliveryLimiter.reset();
+
+    const addrs = [
+      'alice@test.example',
+      'bob@test.example',
+      'carol@test.example',
+      'dave@test.example',
+      'erin@test.example',
+    ];
+    installOverlappingDns(addrs.length);
+    const responses = await Promise.all(
+      addrs.map((address, i) =>
+        postCreate({
+          address,
+          key: `quota-nplus2-inst-${Date.now()}-${i}`,
+          url: `https://consumer.example/nplus2-inst-${i}`,
+        }),
+      ),
+    );
+    const statuses = await statusesOf(responses);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(0);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(n);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(2);
+    const bodies = await jsonBodies(responses);
+    for (const body of bodies.filter((_, i) => statuses[i] === 409)) {
+      expect(body.error).toBe('webhook_limit_reached');
+    }
+    expect(listWebhookSubscriptions().length).toBe(n);
+  });
+
   afterAll(async () => {
     resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;

@@ -1949,6 +1949,155 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     expect(afterReplace.bytesRead).toBe(replacementBytes);
   });
 
+  test('#146: deliveries list pages from the in-memory index without extra fullReads', () => {
+    const row = (
+      id: string,
+      webhookId: string,
+      ts: string,
+      attempt = 1,
+    ): WebhookDeliveryLogRow => ({
+      ts,
+      webhookId,
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+
+    const now = Date.now();
+    const tOld = new Date(now - 3000).toISOString();
+    const tMid = new Date(now - 2000).toISOString();
+    const tNew = new Date(now - 1000).toISOString();
+    // 同 ts 用 attempt 打破平局；另一订阅不得混入分页
+    appendDeliveryLogRow(row('keep_old', 'whk_list', tOld, 1));
+    appendDeliveryLogRow(row('keep_tie', 'whk_list', tMid, 1));
+    appendDeliveryLogRow(row('keep_tie2', 'whk_list', tMid, 2));
+    appendDeliveryLogRow(row('keep_new', 'whk_list', tNew, 1));
+    appendDeliveryLogRow(row('other', 'whk_other', tNew, 1));
+
+    resetDeliveryLogIndexForTests();
+    resetDeliveryLogIoForTests();
+    const cold = readDeliveryLogRows({ webhookId: 'whk_list', limit: 2 });
+    expect(cold.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_new', 'dlv_keep_tie2']);
+    expect(cold.nextCursor).toBe(`dlv_keep_tie2|2|${tMid}`);
+    expect(getDeliveryLogIoForTests().fullReads).toBe(1);
+
+    // 暖索引后再翻页：fullReads 不得再增
+    resetDeliveryLogIoForTests();
+    const page2 = readDeliveryLogRows({
+      webhookId: 'whk_list',
+      limit: 2,
+      cursor: cold.nextCursor,
+    });
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_tie', 'dlv_keep_old']);
+    expect(page2.nextCursor).toBeUndefined();
+    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+
+    const again = readDeliveryLogRows({ webhookId: 'whk_list', limit: 100 });
+    expect(again.deliveries).toHaveLength(4);
+    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+
+    // limit 钳制 1..100：0/负数按 1，超 100 按 100
+    expect(readDeliveryLogRows({ webhookId: 'whk_list', limit: 0 }).deliveries).toHaveLength(1);
+    expect(readDeliveryLogRows({ webhookId: 'whk_list', limit: 999 }).deliveries).toHaveLength(4);
+    expect(getDeliveryLogIoForTests().fullReads).toBe(0);
+  });
+
+  test('#146: compaction leaves deliveries list identical to a disk-scan page', () => {
+    const row = (
+      id: string,
+      webhookId: string,
+      ts: string,
+      outcome: 'success' | 'retryable' = 'success',
+    ): WebhookDeliveryLogRow => ({
+      ts,
+      webhookId,
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome,
+      status: outcome === 'success' ? 200 : 500,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: outcome === 'retryable' ? new Date(Date.now() + 60_000).toISOString() : null,
+      reason: null,
+    });
+
+    const now = Date.now();
+    const oldTs = new Date(now - 40 * 86400000).toISOString();
+    const keepTs = new Date(now - 1000).toISOString();
+    appendDeliveryLogRow(row('gone', 'whk_list', oldTs));
+    appendDeliveryLogRow(row('keep_a', 'whk_list', keepTs));
+    appendDeliveryLogRow(row('keep_b', 'whk_list', new Date(now - 500).toISOString()));
+    appendDeliveryLogRow(row('pending', 'whk_list', oldTs, 'retryable'));
+    appendDeliveryLogRow(row('other', 'whk_other', keepTs));
+
+    compactDeliveryLog(now, 30);
+
+    const pageFromDisk = (opts: { webhookId?: string; limit?: number; cursor?: string }) => {
+      const all = readAllDeliveryLogRowsFromDisk();
+      let filtered = opts.webhookId ? all.filter((r) => r.webhookId === opts.webhookId) : all.slice();
+      filtered.sort((a, b) => {
+        const tA = new Date(a.ts).getTime();
+        const tB = new Date(b.ts).getTime();
+        if (tA !== tB) return tB - tA;
+        return b.attempt - a.attempt;
+      });
+      const limit = Math.min(Math.max(1, opts.limit ?? 20), 100);
+      let startIndex = 0;
+      if (opts.cursor) {
+        const idx = filtered.findIndex(
+          (r) => `${r.deliveryId}|${r.attempt}|${r.ts}` === opts.cursor || r.deliveryId === opts.cursor,
+        );
+        if (idx >= 0) startIndex = idx + 1;
+      }
+      const paged = filtered.slice(startIndex, startIndex + limit);
+      const hasMore = startIndex + limit < filtered.length;
+      const nextCursor =
+        hasMore && paged.length > 0
+          ? `${paged[paged.length - 1]!.deliveryId}|${paged[paged.length - 1]!.attempt}|${paged[paged.length - 1]!.ts}`
+          : undefined;
+      return { deliveries: paged, nextCursor };
+    };
+
+    const opts = { webhookId: 'whk_list', limit: 2 };
+    const fromIndex = readDeliveryLogRows(opts);
+    expect(fromIndex).toEqual(pageFromDisk(opts));
+    expect(fromIndex.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_b', 'dlv_keep_a']);
+    expect(fromIndex.nextCursor).toBeDefined();
+    const page2 = readDeliveryLogRows({ ...opts, cursor: fromIndex.nextCursor });
+    expect(page2).toEqual(pageFromDisk({ ...opts, cursor: fromIndex.nextCursor }));
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_pending']);
+    expect(page2.deliveries.some((r) => r.deliveryId === 'dlv_gone')).toBe(false);
+  });
+
   afterAll(async () => {
     resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
