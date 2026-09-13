@@ -17,6 +17,7 @@
  */
 
 import { SEND_SOURCE_MAC_HEADER, macForMcpSendSource } from "../lib/send-source.ts";
+import { waitMonotonicNow } from "../lib/wait-clock.ts";
 
 export type OpenAgentEmailClientOptions = {
   /** 同进程传入 config.taskSigningSecret；stdio 可省略（回退 env）。 */
@@ -51,23 +52,8 @@ export class ApiError extends Error {
 /** 仅覆盖调度边界；不可配置。早于 timeoutSec*1000-250ms 的合法外观 408 立即失败。 */
 export const WAIT_TIMEOUT_EARLY_TOLERANCE_MS = 250;
 
-/** 生产读 performance.now；缺省回退 Date.now。测试可注入，墙钟跳变不得改决策。 */
-function defaultWaitMonotonicNow(): number {
-  return typeof performance !== "undefined" && typeof performance.now === "function"
-    ? performance.now()
-    : Date.now();
-}
-
-let waitMonotonicNowFn: () => number = defaultWaitMonotonicNow;
-
-/** 测试注入 wait 单调钟；restore 时不传。 */
-export function setWaitMonotonicNowForTests(fn?: () => number): void {
-  waitMonotonicNowFn = fn ?? defaultWaitMonotonicNow;
-}
-
-function waitMonotonicNow(): number {
-  return waitMonotonicNowFn();
-}
+/** 与 API waitForMessage 共用单一单调钟缝；墙钟跳变不得改再武装决策。 */
+export { setWaitMonotonicNowForTests } from "../lib/wait-clock.ts";
 
 export interface Identity {
   address: string;

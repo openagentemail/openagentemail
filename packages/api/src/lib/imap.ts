@@ -41,6 +41,7 @@ import {
   withMailserverReconnect,
   type MailserverEndpoint,
 } from './mailserver-reconnect.ts';
+import { waitMonotonicNow } from './wait-clock.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -1373,7 +1374,8 @@ async function logoutBounded(
 ): Promise<void> {
   const logoutP = Promise.resolve(client.logout());
   void logoutP.catch(() => {});
-  const remaining = Math.max(0, deadline - Date.now());
+  // 剩余时间与 deadline 同源单调钟，按整毫秒（与旧 Date.now 差值同粒度）。
+  const remaining = Math.max(0, Math.floor(deadline - waitMonotonicNow()));
   const bound = new AbortController();
   const onDisc = () => bound.abort();
   // Observe current aborted state; addEventListener does not replay a past abort.
@@ -1432,7 +1434,8 @@ export async function waitForMessage(
 ): Promise<MessageDetail | null> {
   throwIfDelegationRevoked(shouldContinue);
   throwIfDisconnected(signal);
-  const deadline = Date.now() + timeoutSec * 1000;
+  // 截止与后续剩余时间一律读单调钟，与客户端 performance.now() 同族。
+  const deadline = waitMonotonicNow() + timeoutSec * 1000;
   try {
     return await waitWithIdle(address, filters, deadline, shouldContinue, signal);
   } catch (err) {
@@ -1469,7 +1472,7 @@ async function waitWithIdle(
       signal,
     });
     lock = await client.getMailboxLock('INBOX');
-    while (Date.now() < deadline) {
+    while (waitMonotonicNow() < deadline) {
       throwIfDelegationRevoked(shouldContinue);
       throwIfDisconnected(signal);
       const found = await findMatchWith(client, address, filters);
@@ -1480,7 +1483,7 @@ async function waitWithIdle(
         provisional = found;
         break;
       }
-      const remaining = deadline - Date.now();
+      const remaining = Math.floor(deadline - waitMonotonicNow());
       if (remaining <= 0) break;
       const idleP = observeIdle(Promise.resolve(client.idle()));
       const hb = startHeartbeat(Math.min(3000, remaining), signal);
@@ -1491,7 +1494,7 @@ async function waitWithIdle(
           throwIfDisconnectShaped(shouldContinue, signal, err);
         }
         try {
-          await abortableSleep(Math.min(3000, deadline - Date.now()), signal);
+          await abortableSleep(Math.min(3000, Math.floor(deadline - waitMonotonicNow())), signal);
         } catch (sleepErr) {
           throwIfDisconnectShaped(shouldContinue, signal, sleepErr);
           throw sleepErr;
@@ -1531,7 +1534,7 @@ async function waitWithIdle(
     throw new DelegationRevokedError();
   }
   if (signal?.aborted) throw new ClientDisconnectedError();
-  if (Date.now() >= deadline) return null;
+  if (waitMonotonicNow() >= deadline) return null;
   return provisional ?? null;
 }
 
@@ -1542,7 +1545,7 @@ async function waitWithPolling(
   shouldContinue?: () => boolean,
   signal?: AbortSignal,
 ): Promise<MessageDetail | null> {
-  while (Date.now() < deadline) {
+  while (waitMonotonicNow() < deadline) {
     throwIfDelegationRevoked(shouldContinue);
     throwIfDisconnected(signal);
     try {
@@ -1564,7 +1567,7 @@ async function waitWithPolling(
       }
       console.warn('[imap] poll failed:', (err as Error).message);
     }
-    const remaining = deadline - Date.now();
+    const remaining = Math.floor(deadline - waitMonotonicNow());
     if (remaining <= 0) break;
     try {
       await abortableSleep(Math.min(3000, remaining), signal);

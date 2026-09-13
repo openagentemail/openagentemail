@@ -279,6 +279,9 @@ describe('send-log store', () => {
   });
 
   test('append hot path does not full-reparse as the file grows', async () => {
+    // 夹具行 sentAt 固定 2026-08-14T00:00:00Z；钉测试时钟，避免 30 天保留窗滤掉预置行。
+    const now = Date.parse('2026-08-14T12:00:00.000Z');
+    setSendLogNowForTests(() => now);
     const lines = Array.from({ length: 80 }, (_, i) =>
       JSON.stringify({
         schemaVersion: 1,

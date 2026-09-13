@@ -17,7 +17,8 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-wait-r9-'));
+// 复用父 helper 注入的 DATA_DIR；仅直跑本文件时才自建，避免父进程清不掉孤儿目录。
+process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'oae-wait-r9-'));
 process.env.UI_ENABLED = 'false';
 
 const { afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
@@ -189,6 +190,7 @@ const {
   DelegationRevokedError,
   ClientDisconnectedError,
 } = await import('../../src/lib/imap.ts');
+const { setWaitMonotonicNowForTests, waitMonotonicNow } = await import('../../src/lib/wait-clock.ts');
 
 const adminKey = [...config.apiKeys][0]!;
 const app = createApp({ uiEnabled: false });
@@ -294,6 +296,7 @@ beforeEach(() => {
   lateLogoutReject = undefined;
   createdClients.length = 0;
   Date.now = realDateNow;
+  setWaitMonotonicNowForTests();
   setWaitMailserverResolverForTests();
   resetWaitSlots();
   resetIdentitiesStore();
@@ -302,6 +305,7 @@ beforeEach(() => {
 
 afterEach(() => {
   Date.now = realDateNow;
+  setWaitMonotonicNowForTests();
   setWaitMailserverResolverForTests();
 });
 
@@ -437,26 +441,32 @@ describe('#206 R9 撤销/断开优先级', () => {
   test('7 轮询截止边界：abort→499 先于 408；撤销+abort→403；普通超时 408', async () => {
     failMailboxLock = true;
     const frozen = realDateNow();
+    const frozenMono = waitMonotonicNow();
     const ac = new AbortController();
     searchHook = () => {
+      // 墙钟与单调钟一并越过截止，才能测 abort/撤销对 408 的优先级。
       Date.now = () => frozen + 60_000;
+      setWaitMonotonicNowForTests(() => frozenMono + 60_000);
       ac.abort();
     };
     const res499 = await restWait('r9-deadline-abort@test.example', 2, ac.signal);
     expect(res499.status).toBe(499);
     expect(res499.headers.get('X-OAE-Wait-Timeout-Sec')).toBe('2');
     Date.now = realDateNow;
+    setWaitMonotonicNowForTests();
 
     const pair = makeDelegate('deadline-rev');
     const ac2 = new AbortController();
     searchHook = () => {
       Date.now = () => frozen + 60_000;
+      setWaitMonotonicNowForTests(() => frozenMono + 60_000);
       revokeDelegation(pair.grant.id, pair.alice.identity.address);
       ac2.abort();
     };
     const res403 = await delegatedWait(pair, 2, ac2.signal);
     expect(res403.status).toBe(403);
     Date.now = realDateNow;
+    setWaitMonotonicNowForTests();
     searchHook = undefined;
 
     const res408 = await restWait('r9-deadline-plain@test.example', 1);
