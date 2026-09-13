@@ -234,6 +234,9 @@ describe('send-log store', () => {
   });
 
   test('torn trailing line is isolated without fail-closing the log', async () => {
+    // 夹具行 sentAt 固定 2026-08-14T00:00:00Z；钉测试时钟，使该行落在 30 天保留窗内后再 seed/query。
+    const now = Date.parse('2026-08-14T12:00:00.000Z');
+    setSendLogNowForTests(() => now);
     const good = JSON.stringify({
       schemaVersion: 1,
       id: 'snd_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -255,6 +258,9 @@ describe('send-log store', () => {
   });
 
   test('complete last line missing newline is kept then appended', async () => {
+    // 夹具行 sentAt 固定 2026-08-14T00:00:00Z；钉测试时钟，使该行落在 30 天保留窗内后再 seed/query。
+    const now = Date.parse('2026-08-14T12:00:00.000Z');
+    setSendLogNowForTests(() => now);
     const good = JSON.stringify({
       schemaVersion: 1,
       id: 'snd_bbbbbbbbbbbbbbbbbbbbbbbb',
