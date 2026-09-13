@@ -36,6 +36,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** 408 响应体里的有效 timeoutSec（分块再武装用来观察服务端钳制）。 */
+    public readonly timeoutSec?: number,
   ) {
     super(message);
     this.name = "ApiError";
@@ -192,6 +194,24 @@ export function apiUrlForDisplay(raw: string): string {
   }
 }
 
+/** 单次 REST wait 上限（秒）；总 deadline 内 408 才再武装。 */
+const WAIT_CHUNK_SEC = 50;
+
+/** fetch / AbortSignal 取消，不得当成网络故障或 408 再武装。 */
+function isAbortError(err: unknown): boolean {
+  return (
+    (typeof DOMException !== "undefined" && err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted.", "AbortError");
+}
+
 /** Network failure code (ECONNREFUSED, ENOTFOUND, ...), if the runtime gave one. */
 function networkErrorCode(err: unknown): string | undefined {
   for (const candidate of [err, (err as { cause?: unknown })?.cause]) {
@@ -228,7 +248,7 @@ export class OpenAgentEmailClient {
     method: string,
     path: string,
     body?: unknown,
-    opts?: { sendSource?: "mcp" },
+    opts?: { sendSource?: "mcp"; signal?: AbortSignal },
   ): Promise<T> {
     let res: Response;
     try {
@@ -240,8 +260,16 @@ export class OpenAgentEmailClient {
           ...(opts?.sendSource === "mcp" ? this.mcpSourceHeaders() : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal: opts?.signal,
       });
     } catch (err) {
+      // 取消必须原样抛出，不能吞成“连不上 API”。
+      if (isAbortError(err) || opts?.signal?.aborted) {
+        throwIfAborted(opts?.signal);
+        throw err instanceof Error
+          ? err
+          : new DOMException("The operation was aborted.", "AbortError");
+      }
       // Never interpolate err.message: Node's fetch puts the whole URL —
       // credentials included — into the text when it refuses a URL with
       // userinfo. The failure code is enough to tell the user what broke.
@@ -288,9 +316,14 @@ export class OpenAgentEmailClient {
         );
       }
       if (res.status === 408) {
+        const clamp =
+          data && typeof data === "object" && "timeoutSec" in data
+            ? Number((data as { timeoutSec: unknown }).timeoutSec)
+            : undefined;
         throw new ApiError(
           408,
           `Timeout: no matching message arrived in time. Try a longer timeoutSec or relax fromContains/subjectContains.`,
+          Number.isFinite(clamp) ? clamp : undefined,
         );
       }
       throw new ApiError(res.status, `API error ${res.status}: ${serverMsg}`);
@@ -366,11 +399,67 @@ export class OpenAgentEmailClient {
     return this.request("POST", `/v1/messages/${encodeURIComponent(id)}/seen`, { address, seen });
   }
 
-  waitFor(
+  /**
+   * 一个总 deadline，REST 每段最多 50s；仅 HTTP 408 且仍有剩余时间才再武装。
+   * 父 AbortSignal 贯穿每一段；中止后不得再发后续请求。
+   */
+  async waitFor(
     address: string,
-    opts: { fromContains?: string; subjectContains?: string; timeoutSec?: number },
+    opts: {
+      fromContains?: string;
+      subjectContains?: string;
+      timeoutSec?: number;
+      signal?: AbortSignal;
+    },
   ): Promise<Message> {
-    return this.request("POST", "/v1/messages/wait", { address, ...opts });
+    const requestedTotal = opts.timeoutSec ?? 120;
+    const deadline = Date.now() + requestedTotal * 1000;
+    const signal = opts.signal;
+    let observedClamp = WAIT_CHUNK_SEC;
+    let pollCount = 0;
+
+    while (true) {
+      throwIfAborted(signal);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new ApiError(
+          408,
+          `Timeout: no matching message arrived within ${requestedTotal}s (observed per-call clamp ${observedClamp}s, ${pollCount} polls).`,
+        );
+      }
+      const remainingSec = Math.max(1, Math.ceil(remainingMs / 1000));
+      const chunkSec = Math.min(WAIT_CHUNK_SEC, observedClamp, remainingSec);
+      pollCount += 1;
+      try {
+        return await this.request<Message>(
+          "POST",
+          "/v1/messages/wait",
+          {
+            address,
+            fromContains: opts.fromContains,
+            subjectContains: opts.subjectContains,
+            timeoutSec: chunkSec,
+          },
+          { signal },
+        );
+      } catch (err) {
+        if (isAbortError(err) || signal?.aborted) {
+          throwIfAborted(signal);
+          throw err instanceof Error
+            ? err
+            : new DOMException("The operation was aborted.", "AbortError");
+        }
+        if (!(err instanceof ApiError) || err.status !== 408) throw err;
+        // 408 体 timeoutSec 小于本段请求值时，作为后续段的观察钳制
+        if (
+          typeof err.timeoutSec === "number" &&
+          err.timeoutSec > 0 &&
+          err.timeoutSec < chunkSec
+        ) {
+          observedClamp = Math.min(observedClamp, err.timeoutSec);
+        }
+      }
+    }
   }
 
   send(

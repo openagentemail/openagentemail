@@ -413,6 +413,8 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
         method: "POST",
         headers: c.req.raw.headers,
         body: bodyText,
+        // 保留外层断开信号，供 SDK ctx.mcpReq.signal → mail_wait_for → REST wait
+        signal: c.req.raw.signal,
       });
 
       const response = await runWithMcpLoopbackBase(publicBase, () =>
@@ -448,6 +450,7 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       method: "POST",
       headers: c.req.raw.headers,
       body: bodyText,
+      signal: c.req.raw.signal,
     });
     // 整段工具调度包在公共 base ALS 内，使 /v1 的 c.req.url.origin ≡ aud 推导源
     return runWithMcpLoopbackBase(publicBase, () =>

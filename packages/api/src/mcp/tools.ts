@@ -510,13 +510,15 @@ export function registerOpenAgentEmailTools(
       outputSchema: messageOutputSchema,
       annotations: { ...mailReadAnnotations, idempotentHint: false },
     },
-    ({ address, fromContains, subjectContains, timeoutSec }) =>
+    ({ address, fromContains, subjectContains, timeoutSec }, ctx) =>
       callApi(async () =>
         prepareMailToolMessage(
           (await client.waitFor(address, {
             fromContains,
             subjectContains,
             timeoutSec,
+            // SDK ServerContext：取消信号在 mcpReq.signal（卡面称 ctx.signal）
+            signal: ctx.mcpReq.signal,
           })) as unknown as Record<string, unknown>,
         ),
       ),
