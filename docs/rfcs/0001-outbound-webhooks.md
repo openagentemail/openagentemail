@@ -554,6 +554,8 @@ because it signs one webhook and not the other, and the contrast is instructive.
   without waiting for real mail. OAE's equivalent is
   `GET /v1/webhooks/:id/deliveries` plus `POST /v1/webhooks/deliveries/:id/redeliver`
   (§10.3), and §16 Q15 asks whether redelivery of succeeded events should be in v1.
+  Stale / unknown delivery-list cursors on `GET /v1/webhooks/:id/deliveries` return
+  **HTTP 400 `{error:"invalid_cursor"}`** rather than silently rewinding to page 1 (#216).
 
 **Refuse:**
 

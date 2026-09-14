@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## Unreleased
+
+### Fixed
+
+- **Webhooks: stale delivery-list cursors are rejected** (#216): `GET /v1/webhooks/:id/deliveries` no longer silently rewinds to page 1 on an unknown cursor; it returns **HTTP 400 `{error:"invalid_cursor"}`**, matching send-log / notify / task cursor semantics.
+- **Dashboard: recover pagination after a stale mail cursor** (#196): load-more clears `nextCursor` on **400 `invalid_cursor`** and prompts Refresh (other errors leave the cursor alone). `GET /ui/api/messages` now maps codec cursor failures to **`invalid_cursor`** (schema failures remain `invalid_request`), so the UI recovery path is live for inbox as well.
+
 ## v0.7.3 — 2026-09-13
 
 ### Added
