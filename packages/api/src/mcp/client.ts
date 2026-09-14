@@ -52,9 +52,6 @@ export class ApiError extends Error {
 /** 仅覆盖调度边界；不可配置。早于 timeoutSec*1000-250ms 的合法外观 408 立即失败。 */
 export const WAIT_TIMEOUT_EARLY_TOLERANCE_MS = 250;
 
-/** 与 API waitForMessage 共用单一单调钟缝；墙钟跳变不得改再武装决策。 */
-export { setWaitMonotonicNowForTests } from "../lib/wait-clock.ts";
-
 export interface Identity {
   address: string;
   name?: string;

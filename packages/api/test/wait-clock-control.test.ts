@@ -1,5 +1,6 @@
 /**
  * #208：墙钟快进 + 单调钟正常时，健康一方 wait 不得早退，也不得被判 upstream_timeout_early。
+ * #212：本文件不注入单调钟（仅恢复墙钟）；生产面已无 setWaitMonotonicNowForTests。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,7 +47,6 @@ mock.module('imapflow', () => ({ ImapFlow: QuietImap }));
 const { createApp } = await import('../src/app.ts');
 const { config } = await import('../src/lib/config.ts');
 const { ApiError, OpenAgentEmailClient } = await import('../src/mcp/client.ts');
-const { setWaitMonotonicNowForTests } = await import('../src/lib/wait-clock.ts');
 
 const adminKey = [...config.apiKeys][0]!;
 const app = createApp({ uiEnabled: false });
@@ -54,7 +54,6 @@ const realDateNow = Date.now;
 
 afterEach(() => {
   Date.now = realDateNow;
-  setWaitMonotonicNowForTests();
 });
 
 afterAll(() => {

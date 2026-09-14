@@ -1,13 +1,22 @@
 /**
  * #203 RED：客户端 waitFor 分块再武装、最终超时文案、中止不再发后续请求。
- * 本文件只测 OpenAgentEmailClient.waitFor；不改生产代码时应全部失败。
+ * #212：经 mock.module 注入 waitMonotonicNow，生产面无 setter。
  */
-import { afterEach, describe, expect, test } from "bun:test";
-import {
-  ApiError,
-  OpenAgentEmailClient,
-  setWaitMonotonicNowForTests,
-} from "../../api/src/mcp/client.ts";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+
+/** mock.module 闭包：未注入时走真实 performance.now。 */
+let waitMonoInjected: (() => number) | undefined;
+type WaitMonotonicMs = number & { readonly __brand: "WaitMonotonicMs" };
+const asWaitMonotonicMs = (n: number): WaitMonotonicMs => n as WaitMonotonicMs;
+
+mock.module("../../api/src/lib/wait-clock.ts", () => ({
+  waitMonotonicNow: (): WaitMonotonicMs =>
+    asWaitMonotonicMs(waitMonoInjected ? waitMonoInjected() : performance.now()),
+  waitMonotonicDeadlineAfter: (timeoutMs: number): WaitMonotonicMs =>
+    asWaitMonotonicMs((waitMonoInjected ? waitMonoInjected() : performance.now()) + timeoutMs),
+}));
+
+const { ApiError, OpenAgentEmailClient } = await import("../../api/src/mcp/client.ts");
 
 const ADDRESS = "bot@test.example";
 const SAMPLE_MESSAGE = {
@@ -29,7 +38,7 @@ function installClock(start = 1_700_000_000_000) {
   let wall = start;
   let mono = 0;
   Date.now = () => wall;
-  setWaitMonotonicNowForTests(() => mono);
+  waitMonoInjected = () => mono;
   return {
     advance(ms: number) {
       wall += ms;
@@ -45,7 +54,7 @@ function installClock(start = 1_700_000_000_000) {
     },
     restore() {
       Date.now = realDateNow;
-      setWaitMonotonicNowForTests();
+      waitMonoInjected = undefined;
     },
   };
 }
@@ -100,7 +109,7 @@ const realAddEventListener = EventTarget.prototype.addEventListener;
 const realRemoveEventListener = EventTarget.prototype.removeEventListener;
 afterEach(() => {
   Date.now = realDateNow;
-  setWaitMonotonicNowForTests();
+  waitMonoInjected = undefined;
   EventTarget.prototype.addEventListener = realAddEventListener;
   EventTarget.prototype.removeEventListener = realRemoveEventListener;
 });

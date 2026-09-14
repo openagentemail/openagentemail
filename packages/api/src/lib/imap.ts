@@ -41,7 +41,11 @@ import {
   withMailserverReconnect,
   type MailserverEndpoint,
 } from './mailserver-reconnect.ts';
-import { waitMonotonicNow } from './wait-clock.ts';
+import {
+  waitMonotonicDeadlineAfter,
+  waitMonotonicNow,
+  type WaitMonotonicMs,
+} from './wait-clock.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -1369,7 +1373,7 @@ function observeIdle<T>(p: Promise<T>): Promise<T> {
 /** 剩余截止或断开时强关 socket，并观察/排空 logout。 */
 async function logoutBounded(
   client: ImapFlow,
-  deadline: number,
+  deadline: WaitMonotonicMs,
   signal?: AbortSignal,
 ): Promise<void> {
   const logoutP = Promise.resolve(client.logout());
@@ -1435,7 +1439,8 @@ export async function waitForMessage(
   throwIfDelegationRevoked(shouldContinue);
   throwIfDisconnected(signal);
   // 截止与后续剩余时间一律读单调钟，与客户端 performance.now() 同族。
-  const deadline = waitMonotonicNow() + timeoutSec * 1000;
+  const deadline = waitMonotonicDeadlineAfter(timeoutSec * 1000);
+
   try {
     return await waitWithIdle(address, filters, deadline, shouldContinue, signal);
   } catch (err) {
@@ -1452,7 +1457,7 @@ export async function waitForMessage(
 async function waitWithIdle(
   address: string,
   filters: WaitFilters,
-  deadline: number,
+  deadline: WaitMonotonicMs,
   shouldContinue?: () => boolean,
   signal?: AbortSignal,
 ): Promise<MessageDetail | null> {
@@ -1541,7 +1546,7 @@ async function waitWithIdle(
 async function waitWithPolling(
   address: string,
   filters: WaitFilters,
-  deadline: number,
+  deadline: WaitMonotonicMs,
   shouldContinue?: () => boolean,
   signal?: AbortSignal,
 ): Promise<MessageDetail | null> {

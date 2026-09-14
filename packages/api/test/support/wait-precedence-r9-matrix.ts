@@ -176,6 +176,17 @@ class FakeImapFlow extends EventEmitter {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
+/** #212 A 路线：测试进程内可变单调钟，生产 wait-clock 无 setter。 */
+type WaitMonotonicMs = number & { readonly __brand: 'WaitMonotonicMs' };
+let waitMonoInjected: (() => number) | undefined;
+const asWaitMonotonicMs = (n: number): WaitMonotonicMs => n as WaitMonotonicMs;
+mock.module('../../src/lib/wait-clock.ts', () => ({
+  waitMonotonicNow: (): WaitMonotonicMs =>
+    asWaitMonotonicMs(waitMonoInjected ? waitMonoInjected() : performance.now()),
+  waitMonotonicDeadlineAfter: (timeoutMs: number): WaitMonotonicMs =>
+    asWaitMonotonicMs((waitMonoInjected ? waitMonoInjected() : performance.now()) + timeoutMs),
+}));
+
 const { createApp } = await import('../../src/app.ts');
 const { config } = await import('../../src/lib/config.ts');
 const { createIdentity } = await import('../../src/lib/identities.ts');
@@ -192,7 +203,12 @@ const {
   DelegationRevokedError,
   ClientDisconnectedError,
 } = await import('../../src/lib/imap.ts');
-const { setWaitMonotonicNowForTests, waitMonotonicNow } = await import('../../src/lib/wait-clock.ts');
+const { waitMonotonicNow } = await import('../../src/lib/wait-clock.ts');
+
+/** 测试注入/恢复单调钟（mock.module 闭包，非生产导出）。 */
+function setWaitMonotonicNowForTests(fn?: () => number): void {
+  waitMonoInjected = fn;
+}
 
 const adminKey = [...config.apiKeys][0]!;
 const app = createApp({ uiEnabled: false });
