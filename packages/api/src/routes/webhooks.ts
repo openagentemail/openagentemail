@@ -857,6 +857,11 @@ export const webhooksRoute = new Hono()
       return c.json({ error: 'forbidden: admin key required' }, 403);
     }
 
+    // #220：已 disabled 则幂等回显既有 reason，不 mutate / 不 cancel / 不记 audit
+    if (sub.state === 'disabled') {
+      return c.json({ ok: true, state: 'disabled', disabledReason: sub.disabledReason });
+    }
+
     updateWebhookSubscription(sub.id, (s) => {
       s.state = 'disabled';
       s.disabledReason = 'manual';
@@ -909,6 +914,10 @@ export const webhooksRoute = new Hono()
 
   // GET /v1/webhooks/:id/deliveries - List deliveries (admin only)
   .get('/:id/deliveries', async (c) => {
+    // #219：与兄弟读路由同序，先读限流再鉴权
+    const deniedRead = rejectIfReadRateLimited(c);
+    if (deniedRead) return deniedRead;
+
     const denied = requireAdmin(c);
     if (denied) return denied;
 

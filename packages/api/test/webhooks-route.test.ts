@@ -1947,6 +1947,89 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(listWebhookSubscriptions().length).toBe(n);
   });
 
+  // #219：deliveries 读限流与兄弟路由同语义
+  test('#219: GET deliveries enforces admin read rate limit', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/deliveries-rate',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    const oldCreate = config.webhooks.rateCreatePerMin;
+    (config.webhooks as any).rateCreatePerMin = 1;
+    deliveryLimiter.reset();
+    try {
+      const first = await app.request(`/v1/webhooks/${sub.id}/deliveries`, {
+        headers: { Authorization: `Bearer ${adminKey}` },
+      });
+      expect(first.status).toBe(200);
+      const second = await app.request(`/v1/webhooks/${sub.id}/deliveries`, {
+        headers: { Authorization: `Bearer ${adminKey}` },
+      });
+      expect(second.status).toBe(429);
+      expect(((await second.json()) as any).error).toBe('rate_limited');
+      expect(second.headers.get('Retry-After')).toBeTruthy();
+    } finally {
+      (config.webhooks as any).rateCreatePerMin = oldCreate;
+      deliveryLimiter.reset();
+    }
+  });
+
+  // #220：单次 mutate/cancel/audit 不变；重复与 threshold 后置均幂等不覆写
+  test('#220: disable is idempotent and preserves disabledReason', async () => {
+    const auditFor = (id: string) =>
+      readAuditEvents({ event: 'webhook.disabled' }).filter((e) => e.webhookId === id);
+
+    const once = createWebhookSubscription({
+      url: 'https://consumer.example/disable-once',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    const eventId = 'evt_disable_cancel_probe';
+    // 挂远期任务，供 cancelForWebhook 验痕
+    deliveryQueue.schedule({
+      webhookId: once.id, eventId, runId: 'run_disable_cancel', deliveryId: 'dlv_disable_cancel',
+      type: 'webhook.ping', payloadBuilder: () => ({ body: '{}', sensitive: false }),
+      firstAttemptAt: Date.now(), attempt: 1, nextAttemptAt: Date.now() + 60_000, replay: false,
+      address: once.address, messageId: null, uidValidity: null, rfc822MessageId: null,
+      taskId: null, taskCreatedAt: null, expiresInSec: null, eventCreatedAt: new Date().toISOString(),
+    });
+    const first = await app.request(`/v1/webhooks/${once.id}/disable`, {
+      method: 'POST', headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ ok: true, state: 'disabled', disabledReason: 'manual' });
+    expect(getWebhookSubscription(once.id)?.disabledReason).toBe('manual');
+    expect(deliveryQueue.hasQueuedJob(once.id, eventId)).toBe(false);
+    expect(auditFor(once.id)).toHaveLength(1);
+
+    const second = await app.request(`/v1/webhooks/${once.id}/disable`, {
+      method: 'POST', headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ ok: true, state: 'disabled', disabledReason: 'manual' });
+    expect(auditFor(once.id)).toHaveLength(1);
+
+    const thr = createWebhookSubscription({
+      url: 'https://consumer.example/disable-threshold',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    updateWebhookSubscription(thr.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'threshold';
+    });
+    const thrRes = await app.request(`/v1/webhooks/${thr.id}/disable`, {
+      method: 'POST', headers: { Authorization: `Bearer ${aliceToken}` },
+    });
+    expect(thrRes.status).toBe(200);
+    expect(await thrRes.json()).toEqual({ ok: true, state: 'disabled', disabledReason: 'threshold' });
+    expect(getWebhookSubscription(thr.id)?.disabledReason).toBe('threshold');
+    expect(auditFor(thr.id)).toHaveLength(0);
+  });
+
   afterAll(async () => {
     resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;
