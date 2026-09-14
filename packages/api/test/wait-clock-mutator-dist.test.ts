@@ -1,29 +1,17 @@
 /**
- * #212 dist 钉测：stdio/API 产物不得再含测试 mutator 字符串，防回流生产面。
+ * #212 dist 钉测（api 半边）：本包产物不得含测试 mutator 字符串。
+ * 只 build api——CI 在 api test 阶段尚未 bun install mcp，不可在此拉 mcp build。
  */
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const apiPkg = join(import.meta.dir, '..');
-const mcpPkg = join(apiPkg, '..', 'mcp');
 /** 生产 mutator 历史符号；任一 dist 命中即红。 */
 const MUTATOR = 'setWaitMonotonicNowForTests';
 
-describe('dist has no wait-clock test mutator (#212)', () => {
-  test('mcp dist/main.js 与 api dist/*.js 不含 setWaitMonotonicNowForTests', () => {
-    const mcpBuild = Bun.spawnSync(['bun', 'run', 'build'], {
-      cwd: mcpPkg,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    if (mcpBuild.exitCode !== 0) {
-      throw new Error(`mcp build failed:\n${mcpBuild.stderr.toString()}\n${mcpBuild.stdout.toString()}`);
-    }
-    const mcpMain = join(mcpPkg, 'dist', 'main.js');
-    expect(existsSync(mcpMain)).toBe(true);
-    expect(readFileSync(mcpMain, 'utf8')).not.toContain(MUTATOR);
-
+describe('api dist has no wait-clock test mutator (#212)', () => {
+  test('api dist/*.js 不含 setWaitMonotonicNowForTests', () => {
     const apiBuild = Bun.spawnSync(['bun', 'run', 'build'], {
       cwd: apiPkg,
       stdout: 'pipe',
