@@ -104,7 +104,13 @@
       await task;
     } catch (error) {
       if (error.name !== 'AbortError' && error.message !== 'session_expired') {
-        messageState.textContent = 'Messages could not be loaded. Try Refresh.';
+        // #196：仅 invalid_cursor 清 stale nextCursor；其余错误负控不清
+        if (error.status === 400 && error.body && error.body.error === 'invalid_cursor') {
+          state.nextCursor = '';
+          messageState.textContent = 'Pagination expired. Press Refresh to load the latest page.';
+        } else {
+          messageState.textContent = 'Messages could not be loaded. Try Refresh.';
+        }
       }
     } finally {
       if (refreshTask === task) refreshTask = null;

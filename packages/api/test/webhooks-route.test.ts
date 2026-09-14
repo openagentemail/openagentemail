@@ -1832,6 +1832,57 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(getDeliveryLogIoForTests().fullReads).toBe(0);
   });
 
+  // #216：路由面 stale cursor → 400 invalid_cursor
+  test('#216: GET deliveries rejects stale cursor with 400 invalid_cursor', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/stale-cursor',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    const ts = new Date().toISOString();
+    appendDeliveryLogRow({
+      ts,
+      webhookId: sub.id,
+      eventId: 'evt_stale_1',
+      runId: 'run_0',
+      deliveryId: 'dlv_stale_1',
+      type: 'mail.received',
+      address: sub.address,
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 8,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    resetDeliveryLogIndexForTests();
+
+    const stale = await app.request(
+      `/v1/webhooks/${sub.id}/deliveries?limit=2&cursor=${encodeURIComponent('dlv_gone|1|1970-01-01T00:00:00.000Z')}`,
+      { headers: { Authorization: `Bearer ${adminKey}` } },
+    );
+    expect(stale.status).toBe(400);
+    expect(await stale.json()).toEqual({ error: 'invalid_cursor' });
+
+    // 负控：首页仍 200
+    const home = await app.request(`/v1/webhooks/${sub.id}/deliveries?limit=2`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(home.status).toBe(200);
+    const homeBody: any = await home.json();
+    expect(homeBody.deliveries).toHaveLength(1);
+  });
+
   test('#146: concurrent N+2 distinct-key creates at maxPerAddress do not overshoot', async () => {
     const n = 3;
     (config.webhooks as any).maxPerAddress = n;

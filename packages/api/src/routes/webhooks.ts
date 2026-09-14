@@ -34,6 +34,7 @@ import {
   executeWebhookTestProbe,
   fireCreationPing,
   getLatestDeliveryForWebhook,
+  InvalidDeliveryCursorError,
   latestDeliveryByWebhookId,
   readAllDeliveryLogRows,
   readDeliveryLogRows,
@@ -930,11 +931,18 @@ export const webhooksRoute = new Hono()
     }
     const cursor = c.req.query('cursor');
 
-    const res = readDeliveryLogRows({
-      webhookId: sub.id,
-      limit,
-      cursor,
-    });
-
-    return c.json(res);
+    // stale cursor → 400 invalid_cursor（#216）；合法分页语义不变
+    try {
+      const res = readDeliveryLogRows({
+        webhookId: sub.id,
+        limit,
+        cursor,
+      });
+      return c.json(res);
+    } catch (err) {
+      if (err instanceof InvalidDeliveryCursorError) {
+        return c.json({ error: 'invalid_cursor' }, 400);
+      }
+      throw err;
+    }
   });

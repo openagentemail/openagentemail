@@ -605,6 +605,18 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
 }
 
 /**
+ * Stale / unknown delivery-list cursor → 400 invalid_cursor（#216）。
+ * 仿 InvalidSendCursorError：只携带稳定 code，不泄漏内部细节。
+ */
+export class InvalidDeliveryCursorError extends Error {
+  readonly code = 'invalid_cursor';
+  constructor() {
+    super('invalid_cursor');
+    this.name = 'InvalidDeliveryCursorError';
+  }
+}
+
+/**
  * Reads all delivery log rows, parsing only bytes appended since the last
  * cursor (offset + mtime/inode). Compaction rename rebuilds the index.
  *
@@ -614,6 +626,8 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
  *   Writes are fail-closed (atomic fsync append), but reads fail open:
  *   corrupted or partial lines are skipped so a single bad line does not crash
  *   the API on startup or cause 500s across read endpoints.
+ *   Cursor miss is an explicit rejection (400 invalid_cursor), not fail-open
+ *   rewind to page 1 (#216).
  */
 export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
   return refreshDeliveryLogIndex().rows.slice();
@@ -623,6 +637,7 @@ export function readAllDeliveryLogRows(): WebhookDeliveryLogRow[] {
  * Filtered reader for GET /v1/webhooks/:id/deliveries.
  * Returns newest rows first.
  * 列表读只吃增量内存索引，过滤/排序/游标语义保持不变。
+ * 提供 cursor 且双匹配均 miss 时抛 InvalidDeliveryCursorError（#216）。
  */
 export function readDeliveryLogRows(options?: {
   webhookId?: string;
@@ -647,10 +662,12 @@ export function readDeliveryLogRows(options?: {
   let startIndex = 0;
 
   if (options?.cursor) {
+    // 全形态 cursor 与裸 deliveryId 双匹配；均 miss → 显式拒绝，禁止静默回卷页 1
     const idx = filtered.findIndex((r) => deliveryRowCursor(r) === options.cursor || r.deliveryId === options.cursor);
-    if (idx >= 0) {
-      startIndex = idx + 1;
+    if (idx < 0) {
+      throw new InvalidDeliveryCursorError();
     }
+    startIndex = idx + 1;
   }
 
   const paged = filtered.slice(startIndex, startIndex + limit);

@@ -32,6 +32,7 @@ const {
   readAllDeliveryLogRows,
   readAllDeliveryLogRowsFromDisk,
   readDeliveryLogRows,
+  InvalidDeliveryCursorError,
   resetDeliveryLogIndexForTests,
   getDeliveryLogIoForTests,
   resetDeliveryLogIoForTests,
@@ -2096,6 +2097,114 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     expect(page2).toEqual(pageFromDisk({ ...opts, cursor: fromIndex.nextCursor }));
     expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_pending']);
     expect(page2.deliveries.some((r) => r.deliveryId === 'dlv_gone')).toBe(false);
+  });
+
+  // #216：stale cursor 显式拒绝，禁止静默回卷页 1
+  test('#216: unknown cursor throws InvalidDeliveryCursorError', () => {
+    const ts = new Date().toISOString();
+    appendDeliveryLogRow({
+      ts,
+      webhookId: 'whk_stale',
+      eventId: 'evt_a',
+      runId: 'run_0',
+      deliveryId: 'dlv_a',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    resetDeliveryLogIndexForTests();
+
+    expect(() =>
+      readDeliveryLogRows({ webhookId: 'whk_stale', limit: 10, cursor: 'dlv_missing|1|1970-01-01T00:00:00.000Z' }),
+    ).toThrow(InvalidDeliveryCursorError);
+
+    try {
+      readDeliveryLogRows({ webhookId: 'whk_stale', limit: 10, cursor: 'not-a-real-cursor' });
+      expect.unreachable('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidDeliveryCursorError);
+      expect((err as InvalidDeliveryCursorError).code).toBe('invalid_cursor');
+    }
+  });
+
+  test('#216: full-form and bare deliveryId cursors still page; home has no throw', () => {
+    const now = Date.now();
+    const tOld = new Date(now - 3000).toISOString();
+    const tMid = new Date(now - 2000).toISOString();
+    const tNew = new Date(now - 1000).toISOString();
+    const row = (id: string, ts: string, attempt = 1): WebhookDeliveryLogRow => ({
+      ts,
+      webhookId: 'whk_cursor',
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    appendDeliveryLogRow(row('old', tOld));
+    appendDeliveryLogRow(row('mid', tMid));
+    appendDeliveryLogRow(row('new', tNew));
+    resetDeliveryLogIndexForTests();
+
+    // 首页：无 cursor 不抛
+    const home = readDeliveryLogRows({ webhookId: 'whk_cursor', limit: 2 });
+    expect(home.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_new', 'dlv_mid']);
+    expect(home.nextCursor).toBe(`dlv_mid|1|${tMid}`);
+
+    // 全形态 cursor 命中分页
+    const page2 = readDeliveryLogRows({
+      webhookId: 'whk_cursor',
+      limit: 2,
+      cursor: home.nextCursor,
+    });
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_old']);
+    expect(page2.nextCursor).toBeUndefined();
+
+    // 裸 deliveryId 命中：从该 id 之后继续
+    const byBare = readDeliveryLogRows({
+      webhookId: 'whk_cursor',
+      limit: 2,
+      cursor: 'dlv_new',
+    });
+    expect(byBare.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_mid', 'dlv_old']);
+  });
+
+  test('#216: empty log + cursor throws InvalidDeliveryCursorError', () => {
+    resetDeliveryLogIndexForTests();
+    expect(() =>
+      readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10, cursor: 'dlv_any|1|1970-01-01T00:00:00.000Z' }),
+    ).toThrow(InvalidDeliveryCursorError);
+    // 空 log 首页仍不抛
+    expect(readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10 }).deliveries).toEqual([]);
   });
 
   afterAll(async () => {
