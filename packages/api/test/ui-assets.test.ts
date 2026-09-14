@@ -1848,8 +1848,8 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('RESULT 形态：普通对象走键值表');
   });
 
-  // #196：stale cursor 精确分支清 nextCursor；其余错误负控不清
-  test('#196: refreshMessages clears nextCursor only on invalid_cursor', () => {
+  // #196 / R3：仅 opts.more + invalid_cursor 清 nextCursor；首页/非 more 负控不清
+  test('#196: refreshMessages clears nextCursor only on load-more invalid_cursor', () => {
     const refresh = UI_JS.slice(
       UI_JS.indexOf('async function refreshMessages'),
       UI_JS.indexOf('async function selectFolder'),
@@ -1860,19 +1860,25 @@ describe('UI static asset contract', () => {
     expect(finallyStart).toBeGreaterThan(catchStart);
     const catchBody = refresh.slice(catchStart, finallyStart);
 
-    // 正向：400 + invalid_cursor 清 cursor 并引导 Refresh
-    expect(catchBody).toContain("error.status === 400");
+    // 正向：opts.more === true 且 400 + invalid_cursor 才清 cursor 并引导 Refresh
+    expect(catchBody).toContain('opts.more === true');
+    expect(catchBody).toContain('error.status === 400');
     expect(catchBody).toContain("error.body.error === 'invalid_cursor'");
     expect(catchBody).toContain("state.nextCursor = ''");
     expect(catchBody).toContain('Pagination expired. Press Refresh to load the latest page.');
 
-    // 负控：通用错误文案仍在 else 分支；清 cursor 只出现在 invalid_cursor 分支内
+    // 负控：通用错误文案仍在 else；清 cursor 恰好一次且位于 more 门控之后
     expect(catchBody).toContain('Messages could not be loaded. Try Refresh.');
+    const moreIdx = catchBody.indexOf('opts.more === true');
     const clearIdx = catchBody.indexOf("state.nextCursor = ''");
     const genericIdx = catchBody.indexOf('Messages could not be loaded. Try Refresh.');
-    expect(clearIdx).toBeGreaterThanOrEqual(0);
+    expect(moreIdx).toBeGreaterThanOrEqual(0);
+    expect(clearIdx).toBeGreaterThan(moreIdx);
     expect(genericIdx).toBeGreaterThan(clearIdx);
-    // 清 cursor 出现恰好一次（仅 invalid_cursor 分支）
     expect(catchBody.split("state.nextCursor = ''").length - 1).toBe(1);
+
+    // R3 负控：非 more 路径上的 invalid_cursor 不得单独清 cursor（门控在前）
+    const expiredIdx = catchBody.indexOf('Pagination expired. Press Refresh to load the latest page.');
+    expect(expiredIdx).toBeGreaterThan(moreIdx);
   });
 });
