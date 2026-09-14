@@ -261,8 +261,8 @@ describe('listMessagesPage 代际校验（search/fetch 之前）', () => {
 });
 
 /**
- * Commander2262：保留 UI HTTP 400 `{error:'invalid_request'}`；
- * codec 仍是 invalid_cursor。注入 throw 只证明映射，默认路径才是端到端。
+ * R1/#196：UI messages 游标错误与全仓口径对齐为 400 `{error:'invalid_cursor'}`；
+ * schema 失败仍为 invalid_request。注入 throw 只证明映射，默认路径才是端到端。
  */
 function makeUiSessionApp(deps?: Parameters<typeof createUiApiRoutes>[1]) {
   const store = new UiSessionStore({
@@ -275,8 +275,8 @@ function makeUiSessionApp(deps?: Parameters<typeof createUiApiRoutes>[1]) {
   return { app, cookie: `oae_ui=${created.sid}` };
 }
 
-describe('UI 2262 映射（保留 invalid_request）', () => {
-  test('注入 throw：仅 mapper，UI 400 invalid_request（不是端到端）', async () => {
+describe('UI messages cursor mapping → invalid_cursor (R1/#196)', () => {
+  test('注入 throw：仅 mapper，UI 400 invalid_cursor（不是端到端）', async () => {
     const { app, cookie } = makeUiSessionApp({
       listIdentities: () => [],
       listMessages: async () => {
@@ -299,10 +299,10 @@ describe('UI 2262 映射（保留 invalid_request）', () => {
       { headers: { cookie } },
     );
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'invalid_request' });
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
   });
 
-  test('默认服务路径 + v1：真 listMessagesPage，HTTP 400 invalid_request 且未 search', async () => {
+  test('默认服务路径 + v1：真 listMessagesPage，HTTP 400 invalid_cursor 且未 search', async () => {
     resetImap(inboxFive(), 17n);
     const v1 = encodeLegacyV1(
       { folder: 'inbox', address: 'fox@test.example', t: Date.now(), uid: 5 },
@@ -317,7 +317,7 @@ describe('UI 2262 映射（保留 invalid_request）', () => {
       { headers: { cookie } },
     );
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'invalid_request' });
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
     expect(searchCalls).toBe(0);
     expect(fetchCalls).toBe(0);
     expect(fetchOneCalls).toBe(0);

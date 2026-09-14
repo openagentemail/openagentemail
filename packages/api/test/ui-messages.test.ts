@@ -11,6 +11,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
+const { InvalidMailCursorError } = await import('../src/lib/mail-cursor.ts');
 
 function makeApp(overrides: Partial<UiApiDependencies> = {}) {
   const deps: UiApiDependencies = {
@@ -168,6 +169,35 @@ describe('UI message JSON contract', () => {
       );
       expect(response.status).toBe(400);
     }
+  });
+
+  // R1/#196：stale cursor → invalid_cursor；schema 失败仍 invalid_request（两码不混）
+  test('R1/#196: stale cursor maps to 400 invalid_cursor', async () => {
+    const listMessages = mock(async () => {
+      throw new InvalidMailCursorError();
+    });
+    const { app, cookie } = makeApp({ listMessages });
+    const response = await app.request(
+      '/ui/api/messages?address=fox%40test.example&cursor=mail-cursor-v1.stale.token',
+      { headers: { cookie } },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'invalid_cursor' });
+    expect(listMessages).toHaveBeenCalled();
+  });
+
+  test('R1/#196: schema failure stays 400 invalid_request (not invalid_cursor)', async () => {
+    const listMessages = mock(async () => {
+      throw new Error('listMessages must not run on schema failure');
+    });
+    const { app, cookie } = makeApp({ listMessages });
+    // 缺 address → listQuerySchema 失败，尚未触达 listMessages
+    const response = await app.request('/ui/api/messages?limit=20', {
+      headers: { cookie },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'invalid_request' });
+    expect(listMessages).not.toHaveBeenCalled();
   });
 
   test('malformed UIDs are rejected before touching IMAP', async () => {

@@ -815,8 +815,10 @@ export function createUiApiRoutes(
       const page = asMessagePage(raw);
       return c.json({ messages: page.messages, nextCursor: page.nextCursor });
     } catch (err) {
+      // R1/#196：与 send-log/notify/task 及公开 /v1 API 游标口径一致；
+      // schema 失败仍走上方 invalid_request（两码不混）。
       if (err instanceof InvalidMailCursorError) {
-        return c.json({ error: 'invalid_request' }, 400);
+        return c.json({ error: 'invalid_cursor' }, 400);
       }
       throw err;
     }
