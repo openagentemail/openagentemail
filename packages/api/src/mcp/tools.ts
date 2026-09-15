@@ -482,7 +482,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Wait for Email",
       description:
-        "Wait for an incoming message matching optional from/subject filters. Returns the full message (with OTP codes/links) or a timeout error." +
+        "Wait for an incoming message matching optional from/subject filters; skips already-seen matches in the newest-20 window and keeps waiting until a true timeout or a new unread match. Returns the full message (with OTP codes/links) or a timeout error." +
         UNTRUSTED_CONTENT_DESCRIPTION,
       inputSchema: {
         address: identityAddressSchema.describe("Full email address of the identity to watch"),

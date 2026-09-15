@@ -1259,6 +1259,9 @@ async function findMatchWith(
   });
   for (const summary of page.messages) {
     if (!summaryPassesFilters(summary, filters)) continue;
+    // 邮件族：已读匹配不算「incoming」——跳过，继续等真超时或新到未读（#230）。
+    // taskId 分支刻意不跳过 seen（批准 #3250）：任务结果回取可能需要已读命中。
+    if (summary.seen) continue;
     const detail = await getMessageWith(client, address, summary.id);
     if (detail && detailPassesFilters(detail, filters)) return detail;
   }
