@@ -74,6 +74,7 @@ import {
 } from '../lib/ui-session.ts';
 import { MAX_EMAIL_HTML_LENGTH } from '../lib/sanitize-email-html.ts';
 import { config } from '../lib/config.ts';
+import { resolveResourceUri } from '../lib/oauth-url.ts';
 import {
   checkNotifyUserLimit,
   releaseNotifyUserLimit,
@@ -543,6 +544,7 @@ export function isValidMessageUid(id: string): boolean {
 export function createUiApiRoutes(
   store: UiSessionStore,
   dependencies: UiApiDependencies = defaultDependencies,
+  options: { publicBaseUrl?: string } = {},
 ): Hono {
   const routes = new Hono();
 
@@ -554,6 +556,27 @@ export function createUiApiRoutes(
     // 已登录用户打开 /ui 时若仍挂着 OAuth return cookie，一并交给前端回跳。
     const returnTo = consumeOAuthReturnCookie(c);
     return c.json(returnTo ? { ...auth, returnTo } : auth);
+  });
+
+  routes.get('/connect', (c) => {
+    const auth = getAuth(c);
+    const endpoint = resolveResourceUri(new URL(c.req.url).origin, options.publicBaseUrl);
+    if (auth.kind !== 'identity') {
+      return c.json({
+        endpoint,
+        identity: null,
+        token: null,
+        unavailable: 'identity_session_required',
+      });
+    }
+
+    const token = store.identityTokenForSession(c.get('uiSessionSid'), auth.address);
+    return c.json({
+      endpoint,
+      identity: auth.address,
+      token,
+      unavailable: token ? null : 'token_unavailable',
+    });
   });
 
   routes.get('/domains', (c) => {

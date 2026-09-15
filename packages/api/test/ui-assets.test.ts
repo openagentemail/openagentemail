@@ -252,6 +252,22 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('return selection.toString() === sourceNode.textContent');
   });
 
+  test('Connect an agent page is routed, token-gated, and assembled without logging credentials', async () => {
+    const { CONNECT_PAGE_JS } = await import('../src/ui/client/pages/connect.ts');
+    expect(UI_HTML).toContain('data-nav="connect" href="/ui/connect"');
+    expect(UI_HTML).toContain('id="connect-panel"');
+    expect(UI_HTML).toContain('id="connect-token-reveal"');
+    expect(UI_JS).toContain("apiJson('/ui/api/connect')");
+    expect(UI_JS).toContain("path === '/ui/connect'");
+    expect(UI_JS).toContain("return '/ui/connect'");
+    expect(CONNECT_PAGE_JS).toContain("payload.unavailable === 'identity_session_required'");
+    expect(CONNECT_PAGE_JS).toContain("payload.unavailable === 'token_unavailable'");
+    expect(CONNECT_PAGE_JS).toContain("button.disabled = Boolean(sensitive && !connectRevealed)");
+    expect(CONNECT_PAGE_JS).toContain("split(connectCredentialValue).join('<identity-token>')");
+    expect(CONNECT_PAGE_JS).not.toMatch(/console\s*\./);
+    expect(CONNECT_PAGE_JS).not.toMatch(/localStorage|sessionStorage|indexedDB/);
+  });
+
   test('shell deep-links register after api/oauth/frame and do not swallow them', async () => {
     const full = createApp({ uiEnabled: true });
     const paths = full.routes.map((route) => `${route.method} ${route.path}`);
@@ -595,7 +611,7 @@ describe('UI static asset contract', () => {
   });
 
   // A15：landmark 挂在 inbox 容器上；scope 在 overview / notifications / tasks / inbox 四个 <main> 间切换
-  test('exactly five mains exist and #main-content wraps the message and detail panels', () => {
+  test('exactly eleven mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');
     expect(UI_HTML).toMatch(/<main id="overview-panel"[^>]*\shidden>/);
     expect(UI_HTML).toContain('<main id="notify-panel" class="notify-panel" tabindex="-1"');
@@ -614,8 +630,8 @@ describe('UI static asset contract', () => {
     // #message-panel / #detail-panel 自身不带 hidden：scope 只切四个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    // login + overview + notify + tasks + configure×4 + plan + inbox-main
-    expect(UI_HTML.split('<main').length - 1).toBe(10);
+    // login + overview + notify + tasks + connect + configure×4 + plan + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(11);
     expect(UI_HTML).toContain('id="app-nav"');
     expect(UI_HTML).toContain('id="nav-toggle"');
   });

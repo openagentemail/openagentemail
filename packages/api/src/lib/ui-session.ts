@@ -523,6 +523,22 @@ export class UiSessionStore {
     return { auth };
   }
 
+  /**
+   * Return the plaintext credential already held by a live, directly-created
+   * identity session.  Persistent and exchange-code sessions intentionally do
+   * not have plaintext credentials, and admin credentials are never exposed.
+   *
+   * The caller must authenticate the session first.  Re-resolving the token
+   * here also makes a rotation between authentication and reveal fail closed.
+   */
+  identityTokenForSession(sid: string, expectedAddress: string): string | null {
+    const session = this.sessions.get(sha256(sid));
+    if (!session?.token) return null;
+    const auth = this.resolve(session.token);
+    if (auth?.kind !== 'identity' || auth.address !== expectedAddress) return null;
+    return session.token;
+  }
+
   destroy(sid: string): void {
     const sidHash = sha256(sid);
     if (!this.sessions.has(sidHash)) return;
