@@ -233,18 +233,18 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         return c.json({ error: 'smtp_error' }, 502);
       }
 
-      const parent = await projectedParentTask(service, task.parentTaskId);
-      if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
-
-      // wait 段：任务已创建；失败响应补 taskId + created，journal 走既有 503 映射口径。
+      // 已创建后：parent 投影 / 非 wait 201 / wait 均在同一 try——抛错不得落到 app 级 500 无 id。
       try {
+        const parent = await projectedParentTask(service, task.parentTaskId);
+        if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
         // `wait` deliberately has one capped server turn. Long tasks are
         // resumed by asking task_get or calling task_create(wait) again.
         const waited = await waitWithSlot(c, service, task, from);
         if (waited instanceof Response) {
-          // 429 too_many_waits：槽位满时任务已在，补 taskId（不改槽位计数语义）。
+          // 429：解析 waitWithSlot 原 body 再合并 taskId，不硬编码 retryAfterSec。
           if (waited.status === 429) {
-            return c.json({ error: 'too_many_waits', retryAfterSec: 5, taskId: task.id }, 429);
+            const b = await waited.json() as Record<string, unknown>;
+            return c.json({ ...b, taskId: task.id }, 429);
           }
           return waited;
         }
@@ -255,7 +255,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (mapped) {
           return c.json({ error: (err as Error).message, taskId: task.id, created: true }, 503);
         }
-        console.warn('[task] create wait failed:', (err as Error).message);
+        console.warn('[task] create post-create/wait failed:', (err as Error).message);
         return c.json({ error: 'smtp_error', taskId: task.id, created: true }, 502);
       }
     })

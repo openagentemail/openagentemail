@@ -281,6 +281,10 @@ describe('#183 create(wait=true) 响应契约分层', () => {
         error?: string; retryAfterSec?: number; taskId?: string;
       };
       expect(res.status).toBe(429);
+      expect(body.error).toBe('too_many_waits');
+      expect(body.taskId).toBe(createdId);
+      // retryAfterSec 必须保留自 waitWithSlot 原 body（解析合并），不得硬编码丢失
+      expect(body.retryAfterSec).toBe(5);
       expect(body).toEqual({
         error: 'too_many_waits',
         retryAfterSec: 5,
