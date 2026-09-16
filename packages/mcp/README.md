@@ -38,7 +38,7 @@ This stdio client does **not** read the mail server's `DOMAIN`, `API_KEYS`, `IMA
 | `mail_list_identities()` | List all identities |
 | `mail_list_messages(address, limit?)` | List messages for an address (id/from/to/subject/date/seen/snippet/hasOtp/source); `from`/`to` are RFC-5322 raw header text (may include display names), not bare addresses |
 | `mail_read_message(address, id)` | Full message: text, html?, `otp:{codes:[],links:[]}`, top-level `links`, and optional `taskId`/`taskState` |
-| `mail_mark_seen(address, id, seen?)` | Mark a message read (default) or unread — reading never changes the flag by itself |
+| `mail_mark_seen(address, id, seen?)` | Mark a message read/unread for all mailbox consumers; prefer `?since=` / `mail_wait_for` for new-mail detection — reading never changes the flag by itself |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Block until a matching message arrives (default 120s, max 600s) |
 | `mail_send(from, to, subject, text, html?)` | Send mail; `from` must be an existing identity |
 | `notify_user(title, message, level?, tags?)` | Send a human alert; needs the server-side `can_notify_user` grant |

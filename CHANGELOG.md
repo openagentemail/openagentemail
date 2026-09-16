@@ -4,6 +4,10 @@ All notable changes to this project are documented here, one section per release
 
 ## Unreleased
 
+### Added
+
+- **Audit: `\Seen` write paths emit `message.mark_seen`** (#152): successful `POST /v1/messages/:id/seen` and `POST /ui/api/messages/:id/seen` append scrubbed audit rows (`messageId`/`seen`); UI rows include `ip`. Read paths gain FakeImapFlow gold tests asserting zero `messageFlagsAdd`/`Remove` (with a write-path control). MCP `mail_mark_seen` copy no longer nudges shared-mailbox agents to mark seen blindly.
+
 ### Fixed
 
 - **Tasks: create(wait=true) 错误响应分层** (#183)：SMTP 发送成功后 wait/journal 失败不再误报裸 `502 smtp_error`。未创建仍为 `502 {error:"smtp_error"}`（无 id）；已创建后 journal 错 → `503 {error,taskId,created:true}`，其他等待异常 → `502` 同 body，`429 too_many_waits` 补 `taskId`。MCP client/`task_create` 透出 `taskId` 并提示用 `task_get`/`task_list` 查、勿重新 create。

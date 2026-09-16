@@ -897,6 +897,17 @@ export function createUiApiRoutes(
 
     const marked = await dependencies.setMessageSeen(address, id, parsed.data.seen);
     if (!marked) return c.json({ error: 'not_found' }, 404);
+    // 成功变更记 audit，并带 clientIp（对齐 identity.create 范例）
+    const auth = getAuth(c);
+    recordAuditEvent({
+      event: 'message.mark_seen',
+      address,
+      actor: auth.kind === 'admin' ? 'admin' : auth.address,
+      messageId: id,
+      seen: parsed.data.seen ? 'true' : 'false',
+      outcome: 'ok',
+      ip: clientIp(c),
+    });
     return c.json({ id, seen: parsed.data.seen });
   });
 

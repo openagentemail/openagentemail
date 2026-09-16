@@ -458,7 +458,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Mark Email Seen",
       description:
-        "Mark a message as read (seen=true) or unread (seen=false). Call this after processing a message so the unseen count reflects what is still unhandled. Reading a message never changes this flag by itself.",
+        "Mark a message as read (seen=true) or unread (seen=false). This flag is shared across all consumers of the mailbox — agents that only need new-mail detection should prefer GET /v1/messages?since= or mail_wait_for. Reading a message never changes this flag by itself.",
       inputSchema: {
         ...receivedMessageInputSchema,
         seen: z

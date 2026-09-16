@@ -12,6 +12,7 @@ import {
   waitForMessage,
 } from '../lib/imap.ts';
 import { forbidUnlessAddress, forbidUnlessMailboxAccess, getAuth } from '../lib/auth.ts';
+import { recordAuditEvent } from '../lib/audit.ts';
 import { clampWaitSeconds } from '../lib/config.ts';
 import {
   acquireWaitSlot,
@@ -129,6 +130,16 @@ export const messagesRoute = new Hono()
     if (!marked) {
       return c.json({ error: 'not_found' }, 404);
     }
+    // 仅成功变更记 audit；404/403 不记（对齐既有写路由口径）
+    const auth = getAuth(c);
+    recordAuditEvent({
+      event: 'message.mark_seen',
+      address: parsed.data.address,
+      actor: auth.kind === 'admin' ? 'admin' : auth.address,
+      messageId: id,
+      seen: parsed.data.seen ? 'true' : 'false',
+      outcome: 'ok',
+    });
     return c.json({ id, seen: parsed.data.seen });
   })
   .post('/wait', async (c) => {

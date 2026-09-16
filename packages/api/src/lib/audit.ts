@@ -58,6 +58,10 @@ export type AuditEvent = {
   webhookId?: string;
   /** 登录/操作来源渠道（如 link-exchange）。 */
   provenance?: string;
+  /** 邮件 UID（message.mark_seen 等写路径）。 */
+  messageId?: string;
+  /** \Seen 目标态：仅允许 'true'/'false' 字符串（过 scrub）。 */
+  seen?: string;
 };
 
 function auditPath(): string {
@@ -155,6 +159,12 @@ export function recordAuditEvent(
       : {}),
     ...(partial.provenance !== undefined
       ? { provenance: scrubAuditField(partial.provenance, 64) }
+      : {}),
+    ...(partial.messageId !== undefined
+      ? { messageId: scrubAuditField(partial.messageId, 32) }
+      : {}),
+    ...(partial.seen !== undefined
+      ? { seen: scrubAuditField(partial.seen, 8) }
       : {}),
   };
 
