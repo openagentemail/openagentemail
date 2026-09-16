@@ -100,7 +100,7 @@ describe('UI real-file manifest (#520-A)', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
     // #134：UI 完整地址键变更有意；CSS 未改。
-    expect(sha256(UI_JS)).toBe('93dc5fb41ff45c018e58353544b7037e78396885c13f14e7353a47dde58bc8aa');
+    expect(sha256(UI_JS)).toBe('28e2d7b1f04a1186fc789cd8be5688c64aed53786f5ed1cb7f7757762b799f30');
     expect(sha256(UI_CSS)).toBe('de1732ea6cd909c377f392e5de16522858820aecf1b9b9cb55555dba093ad576');
   });
 });

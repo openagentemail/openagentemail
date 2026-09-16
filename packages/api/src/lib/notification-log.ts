@@ -62,6 +62,11 @@ export type NotificationLogQuery = {
   channel?: NotificationLogicalChannel;
   /** 属主读侧合并旧 localpart 频道；admin 精确查询勿传。 */
   channelAliases?: NotificationLogicalChannel[];
+  /**
+   * 别名命中时仅保留 identityAddress 匹配该 canonical 地址的行。
+   * 主频道行不受此约束；缺属主或属主不符的别名行保守排除。
+   */
+  expectedOwner?: string;
   level?: NotificationLevel;
   from?: string;
   to?: string;
@@ -148,6 +153,39 @@ function nowMs(): number {
 
 function retentionCutoffMs(now = nowMs()): number {
   return now - NOTIFICATION_LOG_RETENTION_MS;
+}
+
+/** 与 notify.canonicalizeAgentAddress 同口径：仅含 @ 才剥尾点。 */
+function canonicalizeLogIdentityAddress(address: string): string {
+  const lower = address.toLowerCase().trim();
+  if (lower.includes('@')) return lower.replace(/\.+$/, '');
+  return lower;
+}
+
+/**
+ * 旧 localpart 频道属主证据：无相关行 → none；行属主均匹配候选 → consistent；否则 conflict。
+ * 无 identityAddress 的行视为 conflict（保守）。
+ */
+export function inspectLegacyLocalpartOwnerEvidence(
+  localpartKey: string,
+  candidateOwnerCanonical: string,
+): 'none' | 'consistent' | 'conflict' {
+  let records: NotificationLogRecord[];
+  try {
+    records = loadRecordsOrThrow();
+  } catch {
+    return 'conflict';
+  }
+  const channel = `agent:${localpartKey.toLowerCase()}`;
+  const related = records.filter((row) => row.logicalChannel === channel);
+  if (related.length === 0) return 'none';
+  for (const row of related) {
+    if (!row.identityAddress) return 'conflict';
+    if (canonicalizeLogIdentityAddress(row.identityAddress) !== candidateOwnerCanonical) {
+      return 'conflict';
+    }
+  }
+  return 'consistent';
 }
 
 /** 确保 DATA_DIR 0700；单写者约定与 identities/audit 相同。 */
@@ -499,8 +537,17 @@ function applyWindow(
     const t = Date.parse(row.publishedAt);
     if (!Number.isFinite(t) || t < windowFrom || t >= windowTo) return false;
     if (query.channel) {
-      const allowed = new Set<string>([query.channel, ...(query.channelAliases ?? [])]);
-      if (!allowed.has(row.logicalChannel)) return false;
+      const aliases = new Set<string>(query.channelAliases ?? []);
+      if (row.logicalChannel === query.channel) {
+        // 主频道：原样纳入（identity 已强制到自身 full channel）。
+      } else if (aliases.has(row.logicalChannel)) {
+        // 别名命中：仅当行属主 === expectedOwner；无属主或不符则排除。
+        if (!query.expectedOwner || !row.identityAddress) return false;
+        const rowOwner = canonicalizeLogIdentityAddress(row.identityAddress);
+        if (rowOwner !== query.expectedOwner) return false;
+      } else {
+        return false;
+      }
     }
     if (query.level && row.level !== query.level) return false;
     return true;
@@ -723,6 +770,7 @@ export function summarizeNotificationLog(options: {
   tz: string;
   channel?: NotificationLogicalChannel;
   channelAliases?: NotificationLogicalChannel[];
+  expectedOwner?: string;
 }): Promise<NotificationSummary> {
   return enqueue(() => {
     const now = nowMs();
@@ -733,6 +781,7 @@ export function summarizeNotificationLog(options: {
       {
         channel: options.channel,
         channelAliases: options.channelAliases,
+        expectedOwner: options.expectedOwner,
         from: bounds.from,
         to: bounds.to,
         limit: 100,
@@ -771,11 +820,16 @@ export function summarizeNotificationLog(options: {
 export function lastSuccessfulAt(
   channel?: NotificationLogicalChannel,
   channelAliases?: NotificationLogicalChannel[],
+  expectedOwner?: string,
 ): Promise<string | null> {
   return enqueue(() => {
     const now = nowMs();
     const records = loadRecordsOrThrow();
-    const { rows } = applyWindow(records, { channel, channelAliases, limit: 20 }, now);
+    const { rows } = applyWindow(
+      records,
+      { channel, channelAliases, expectedOwner, limit: 20 },
+      now,
+    );
     const sent = rows.find((row) => row.delivery === 'sent');
     return sent?.publishedAt ?? null;
   });

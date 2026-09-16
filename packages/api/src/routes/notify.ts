@@ -59,8 +59,8 @@ const deviceSchema = z.object({
 function toTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
   if (!value.startsWith('agent:')) return null;
-  // 与 Dashboard 入口一致：先 lowercase 再校验（含尾点域名经 canonicalize 在 publish 路径剥除）。
-  const agent = value.slice('agent:'.length).toLowerCase();
+  // 与 Dashboard 入口同口径：canonicalize（含 @ 才剥尾点）后再校验。
+  const agent = canonicalizeAgentAddress(value.slice('agent:'.length));
   return AGENT_NAME_RE.test(agent) ? `agent:${agent}` : null;
 }
 

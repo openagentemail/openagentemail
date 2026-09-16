@@ -710,7 +710,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("return ['self']");
     expect(UI_JS).toContain("'user-alerts'");
     expect(UI_JS).toContain("'user-low'");
-    expect(UI_JS).toContain("'agent:' + identity.address.toLowerCase()");
+    expect(UI_JS).toContain("'agent:' + canonicalizeAgentAddress(identity.address)");
     expect(UI_JS).not.toContain("value = '__notifications__'");
     expect(UI_JS).toContain('notifyPanel.focus({ preventScroll: true })');
     expect(UI_JS).toContain('tierFromPriority');

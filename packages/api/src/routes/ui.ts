@@ -111,7 +111,8 @@ const notifyHistoryQuerySchema = z.object({
 function toNotifyTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
   if (!value.startsWith('agent:')) return null;
-  const agent = value.slice('agent:'.length).toLowerCase();
+  // 与 Bearer 入口同口径：canonicalize（含 @ 才剥尾点）后再校验。
+  const agent = canonicalizeAgentAddress(value.slice('agent:'.length));
   return AGENT_NAME_RE.test(agent) ? `agent:${agent}` : null;
 }
 
@@ -352,6 +353,8 @@ type ScopedNotificationChannel = {
   channel?: NotificationLogicalChannel;
   /** 属主升级兼容：旧 localpart 频道，仅 identity 读侧合并。 */
   aliases?: NotificationLogicalChannel[];
+  /** 别名行属主校验用 canonical 地址。 */
+  expectedOwner?: string;
 };
 
 /**
@@ -383,6 +386,7 @@ function scopeNotificationChannel(
     return {
       channel: own,
       aliases: legacy && legacy !== own ? [legacy] : [],
+      expectedOwner: full,
     };
   }
   if (!requested) return { channel: undefined };
@@ -1179,6 +1183,7 @@ export function createUiApiRoutes(
       const page = await queryNotificationLog({
         channel: scoped.channel,
         channelAliases: scoped.aliases,
+        expectedOwner: scoped.expectedOwner,
         level: parsed.data.level,
         from: parsed.data.from,
         to: parsed.data.to,
@@ -1205,6 +1210,7 @@ export function createUiApiRoutes(
         tz: parsed.data.tz,
         channel: scoped.channel,
         channelAliases: scoped.aliases,
+        expectedOwner: scoped.expectedOwner,
       });
       return c.json(summary);
     } catch (err) {
@@ -1230,7 +1236,11 @@ export function createUiApiRoutes(
     const canVerify =
       auth.kind === 'admin' || Boolean(findIdentity(auth.address)?.canNotifyUser);
     try {
-      const last = await lastSuccessfulAt(scoped.channel, scoped.aliases);
+      const last = await lastSuccessfulAt(
+        scoped.channel,
+        scoped.aliases,
+        scoped.expectedOwner,
+      );
       return c.json({
         enabled: config.ntfy.enabled,
         configured: Boolean(config.ntfy.enabled && config.ntfy.adminPassword),

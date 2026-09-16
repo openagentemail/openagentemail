@@ -17,6 +17,7 @@ import {
   appendNotificationLog,
   logicalChannelFor,
   notificationLogHealthAlert,
+  inspectLegacyLocalpartOwnerEvidence,
   type NotificationLogicalChannel,
   type NotificationLogicalTarget,
   type NotificationSource,
@@ -214,9 +215,11 @@ function statePath(): string {
   return join(dirname(config.ntfy.configPath), 'notifications.json');
 }
 
-/** 键化用完整地址：小写 + 剥尾点（FQDN DOMAIN=example.com. 兼容）。 */
+/** 键化用：小写；仅完整地址（含 @）才剥域名尾点，裸 localpart 如 fox. 原样保留。 */
 export function canonicalizeAgentAddress(address: string): string {
-  return address.toLowerCase().trim().replace(/\.+$/, '');
+  const lower = address.toLowerCase().trim();
+  if (lower.includes('@')) return lower.replace(/\.+$/, '');
+  return lower;
 }
 
 function safeAgentName(value: string): string {
@@ -355,7 +358,7 @@ function loadState(): NotifyState {
 
 /**
  * 给尚未烙印的旧 localpart 键写入 ownerAddress。
- * 唯一持有者 → 烙印其完整地址；0 或多个 → ambiguous。已烙印的不覆盖。
+ * 唯一持有者且 notification-log 无冲突属主证据 → 烙印；否则 ambiguous。已烙印不覆盖。
  */
 function stampLegacyAgentOwners(state: NotifyState): boolean {
   let changed = false;
@@ -366,10 +369,15 @@ function stampLegacyAgentOwners(state: NotifyState): boolean {
     const holders = identities.filter(
       (i) => i.address.split('@')[0].toLowerCase() === key.toLowerCase(),
     );
+    if (holders.length !== 1) {
+      entry.ownerAddress = LEGACY_OWNER_AMBIGUOUS;
+      changed = true;
+      continue;
+    }
+    const candidate = canonicalizeAgentAddress(holders[0]!.address);
+    const evidence = inspectLegacyLocalpartOwnerEvidence(key, candidate);
     entry.ownerAddress =
-      holders.length === 1
-        ? canonicalizeAgentAddress(holders[0]!.address)
-        : LEGACY_OWNER_AMBIGUOUS;
+      evidence === 'conflict' ? LEGACY_OWNER_AMBIGUOUS : candidate;
     changed = true;
   }
   return changed;
@@ -455,6 +463,12 @@ export function getNotificationAgentRouteForTests(agent: string): Route | undefi
   return cachedState.agents[agent];
 }
 
+/** @internal 测试缝：对内存态补跑旧键属主烙印。 */
+export function runLegacyOwnerStampForTests(): void {
+  if (!cachedState) cachedState = loadState();
+  stampLegacyAgentOwners(cachedState);
+}
+
 async function state(): Promise<NotifyState> {
   if (!cachedState) cachedState = loadState();
   return cachedState;
@@ -464,12 +478,24 @@ async function state(): Promise<NotifyState> {
  * 解析 agent 路由：先精确命中（完整地址键），miss 再回退旧 localpart 键。
  * 裸 localpart 且无旧键时 fail-closed（unknown_agent），要求调用方改用完整地址。
  * 旧键回退须匹配 ownerAddress 烙印，ambiguous/错属主一律拒绝。
+ * 裸 localpart 精确命中同样要求 ownerAddress 非 ambiguous（纵深 fail-closed）。
  */
 async function existingAgentRoute(name: string): Promise<Route> {
   const agent = safeAgentName(name);
   const current = await state();
   const exact = current.agents[agent];
-  if (isUsableAgentRoute(exact)) return exact;
+  if (isUsableAgentRoute(exact)) {
+    // 完整地址键直接可用；裸 localpart 键须已烙印且非 ambiguous。
+    if (!agent.includes('@')) {
+      if (
+        exact.ownerAddress === undefined ||
+        exact.ownerAddress === LEGACY_OWNER_AMBIGUOUS
+      ) {
+        throw new NotifyError('unknown_agent');
+      }
+    }
+    return exact;
+  }
   // 仅完整地址 miss 时回退 localpart，兼容未迁移的旧键。
   if (agent.includes('@')) {
     const localpart = agent.split('@')[0];
