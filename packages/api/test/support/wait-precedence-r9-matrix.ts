@@ -52,6 +52,8 @@ let hangPollConnect = false;
 let missingUidValidity = false;
 let searchHook: (() => void) | undefined;
 let lateLogoutReject: ((err: Error) => void) | undefined;
+/** logout 同步开头钩子：可控钟推进（#223）。 */
+let onLogoutHook: (() => void) | undefined;
 /** 夹具显式角色：IDLE 会话 vs 回落后的轮询。不得只靠 created 计数猜阶段。 */
 type FakeClientRole = 'idle' | 'poll';
 let nextClientRole: FakeClientRole = 'idle';
@@ -158,6 +160,7 @@ class FakeImapFlow extends EventEmitter {
 
   async logout() {
     this.logoutStarted = true;
+    onLogoutHook?.();
     if (logoutIgnoresClose) {
       return new Promise<void>((_resolve, reject) => {
         lateLogoutReject = reject;
@@ -312,6 +315,7 @@ beforeEach(() => {
   nextClientRole = 'idle';
   searchHook = undefined;
   lateLogoutReject = undefined;
+  onLogoutHook = undefined;
   createdClients.length = 0;
   Date.now = realDateNow;
   setWaitMonotonicNowForTests();
@@ -683,12 +687,21 @@ describe('#206 R9 撤销/断开优先级', () => {
     };
     process.on('unhandledRejection', onRej);
     try {
-      const started = Date.now();
+      // #223：可控钟推进到截止，去掉对 1s wall 的赌
+      let mono = waitMonotonicNow();
+      const base = mono;
+      setWaitMonotonicNowForTests(() => mono);
+      onLogoutHook = () => {
+        mono = base + 60_000;
+      };
+      const started = performance.now();
       const res = await restWait('r9-logout-bound@test.example', 1);
-      expect(Date.now() - started).toBeLessThan(1800);
+      expect(performance.now() - started).toBeLessThan(800);
       expect(res.status).toBe(408);
       expect(createdClients.reduce((n, c) => n + c.closeCount, 0)).toBe(1);
       await expectSlotReusable('admin', 'r9-logout-bound@test.example');
+      onLogoutHook = undefined;
+      setWaitMonotonicNowForTests();
 
       fakeMessages = [matchingMail('r9-logout-abort@test.example')];
       const ac = new AbortController();
@@ -731,6 +744,8 @@ describe('#206 R9 撤销/断开优先级', () => {
       expect(rejections).toEqual([]);
     } finally {
       process.off('unhandledRejection', onRej);
+      onLogoutHook = undefined;
+      setWaitMonotonicNowForTests();
     }
   });
 

@@ -1373,22 +1373,39 @@ function observeIdle<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 
-/** 剩余截止或断开时强关 socket，并观察/排空 logout。 */
+/** logoutBounded 结算：及时 logout / 截止界胜出 / 断开胜出。 */
+type LogoutBoundOutcome = 'completed' | 'deadline_bound' | 'disconnected';
+
+/**
+ * 剩余截止或断开时强关 socket，并观察/排空 logout。
+ * #223：截止界（bound 定时器）胜出即视为「截止已跨越 logout」——调用方不得再因
+ * floor(remaining) 欠切让 now<deadline 落回 provisional 200。
+ */
 async function logoutBounded(
   client: ImapFlow,
   deadline: WaitMonotonicMs,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<LogoutBoundOutcome> {
   const logoutP = Promise.resolve(client.logout());
   void logoutP.catch(() => {});
   // 剩余时间与 deadline 同源单调钟，按整毫秒（与旧 Date.now 差值同粒度）。
   const remaining = Math.max(0, Math.floor(deadline - waitMonotonicNow()));
   const bound = new AbortController();
-  const onDisc = () => bound.abort();
+  /** 区分截止界 vs 断开，避免 disconnect 被误判成 deadline_bound。 */
+  let boundKind: 'deadline' | 'disconnect' | undefined;
+  const abortForDeadline = () => {
+    if (boundKind === undefined) boundKind = 'deadline';
+    bound.abort();
+  };
+  const abortForDisconnect = () => {
+    boundKind = 'disconnect';
+    bound.abort();
+  };
   // Observe current aborted state; addEventListener does not replay a past abort.
-  if (signal?.aborted) bound.abort();
-  else signal?.addEventListener('abort', onDisc, { once: true });
-  const timer = setTimeout(() => bound.abort(), remaining);
+  if (signal?.aborted) abortForDisconnect();
+  else signal?.addEventListener('abort', abortForDisconnect, { once: true });
+  const timer = setTimeout(abortForDeadline, remaining);
+  let outcome: LogoutBoundOutcome = 'completed';
   try {
     await Promise.race([
       logoutP,
@@ -1400,17 +1417,23 @@ async function logoutBounded(
         bound.signal.addEventListener('abort', () => reject(new Error('logout_bound')), { once: true });
       }),
     ]);
+    // logout 在截止前完成：保留命中→200 路径（由调用方读钟判定）。
+    outcome = 'completed';
   } catch {
     try {
       client.close();
     } catch {
       /* already dead */
     }
-    // Bound won: close now and return; do not await a possibly permanent logoutP.
+    // Bound/disconnect 胜：立即 close，不等可能永久挂起的 logoutP。
+    if (boundKind === 'disconnect' || signal?.aborted) outcome = 'disconnected';
+    else if (boundKind === 'deadline') outcome = 'deadline_bound';
+    else outcome = 'completed';
   } finally {
     clearTimeout(timer);
-    signal?.removeEventListener('abort', onDisc);
+    signal?.removeEventListener('abort', abortForDisconnect);
   }
+  return outcome;
 }
 
 /**
@@ -1531,7 +1554,11 @@ async function waitWithIdle(
           /* already dead */
         }
       } else if (client) {
-        await logoutBounded(client, deadline, signal);
+        const logoutOutcome = await logoutBounded(client, deadline, signal);
+        // #223：截止界胜出 ⇒ 视为截止已跨越，丢弃 provisional（收敛注释原意）。
+        if (logoutOutcome === 'deadline_bound') {
+          provisional = null;
+        }
       }
     } finally {
       signal?.removeEventListener('abort', onAbort);

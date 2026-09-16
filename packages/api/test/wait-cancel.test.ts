@@ -123,6 +123,8 @@ class FakeImapFlow extends EventEmitter {
 
   async logout() {
     this.logoutStarted = true;
+    // 同步钩：logoutBounded 在 await 前已启动 logout，可在此推进单调钟
+    onLogoutHook?.();
     if (hangLogout) await this.waitUntilClosed(1500);
     this.loggedOut = true;
   }
@@ -135,6 +137,19 @@ class FakeImapFlow extends EventEmitter {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
+/** #212/#223：测试进程内可变单调钟；生产 wait-clock 无 setter。 */
+type WaitMonotonicMs = number & { readonly __brand: 'WaitMonotonicMs' };
+let waitMonoInjected: (() => number) | undefined;
+/** logout 同步开头钩子：用于把单调钟推过截止（去 wall 赌）。 */
+let onLogoutHook: (() => void) | undefined;
+const asWaitMonotonicMs = (n: number): WaitMonotonicMs => n as WaitMonotonicMs;
+mock.module('../src/lib/wait-clock.ts', () => ({
+  waitMonotonicNow: (): WaitMonotonicMs =>
+    asWaitMonotonicMs(waitMonoInjected ? waitMonoInjected() : performance.now()),
+  waitMonotonicDeadlineAfter: (timeoutMs: number): WaitMonotonicMs =>
+    asWaitMonotonicMs((waitMonoInjected ? waitMonoInjected() : performance.now()) + timeoutMs),
+}));
+
 const { createApp } = await import('../src/app.ts');
 const { config } = await import('../src/lib/config.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
@@ -144,6 +159,12 @@ const { createDelegation, revokeDelegation, resetDelegationStoreForTests } = awa
 const { MAX_WAITS_PER_SLOT, acquireWaitSlot, releaseWaitSlot, resetWaitSlots } = await import(
   '../src/lib/ratelimit.ts'
 );
+const { waitMonotonicNow } = await import('../src/lib/wait-clock.ts');
+
+/** 测试注入/恢复单调钟（mock.module 闭包，非生产导出）。 */
+function setWaitMonotonicNowForTests(fn?: () => number): void {
+  waitMonoInjected = fn;
+}
 
 const adminKey = [...config.apiKeys][0]!;
 const app = createApp({ uiEnabled: false });
@@ -199,6 +220,8 @@ beforeEach(() => {
   hangLogout = false;
   failMailboxLock = false;
   hangPollConnect = false;
+  onLogoutHook = undefined;
+  setWaitMonotonicNowForTests();
   createdClients.length = 0;
   resetWaitSlots();
   resetIdentitiesStore();
@@ -542,21 +565,57 @@ describe('#206 R8 IDLE 收尾与 499 头', () => {
   });
 
   test('14 IDLE logout 挂死：在剩余截止内强关，观察 promise，408 且槽位归还', async () => {
+    // #223：可控钟推进到截止后观察，去掉对 1s wall 的赌
     hangLogout = true;
     fakeMessages = [matchingMail('r8-logout-bound@test.example')];
-    const started = Date.now();
+    let mono = waitMonotonicNow();
+    const base = mono;
+    setWaitMonotonicNowForTests(() => mono);
+    onLogoutHook = () => {
+      // logoutBounded 计算 remaining 前已进入 logout：推过 1s 截止 → remaining=0
+      mono = base + 60_000;
+    };
+    const started = performance.now();
     const res = await restWait('r8-logout-bound@test.example', 1);
-    expect(Date.now() - started).toBeLessThan(1800);
+    expect(performance.now() - started).toBeLessThan(800);
     expect(res.status).toBe(408);
     const body = (await res.json()) as { error: string; timeoutSec?: number };
     expect(body.error).toBe('timeout');
     expect(createdClients.every((c) => c.closed || c.loggedOut)).toBe(true);
     hangLogout = false;
+    onLogoutHook = undefined;
+    setWaitMonotonicNowForTests();
     fakeMessages = [];
     const replacements = await Promise.all(
       Array.from({ length: MAX_WAITS_PER_SLOT }, () => restWait('r8-logout-bound@test.example', 1)),
     );
     expect(replacements.every((r) => r.status !== 429)).toBe(true);
+  });
+
+  test('14b bound 胜出：挂死 logout 丢弃命中 → 408（#223）', async () => {
+    hangLogout = true;
+    fakeMessages = [matchingMail('r8-bound-wins@test.example')];
+    let mono = waitMonotonicNow();
+    const base = mono;
+    setWaitMonotonicNowForTests(() => mono);
+    onLogoutHook = () => {
+      mono = base + 60_000;
+    };
+    const res = await restWait('r8-bound-wins@test.example', 1);
+    expect(res.status).toBe(408);
+    expect(await res.json()).toEqual({ error: 'timeout', timeoutSec: 1 });
+    hangLogout = false;
+    onLogoutHook = undefined;
+    setWaitMonotonicNowForTests();
+  });
+
+  test('14c logout 及时胜出：命中保留 → 200 负控（#223）', async () => {
+    // 命中且 logout 在截止前完成 → 200；生产语义一寸不动
+    hangLogout = false;
+    fakeMessages = [matchingMail('r8-logout-timely@test.example')];
+    const res = await restWait('r8-logout-timely@test.example', 2);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { subject: string }).subject).toBe('found');
   });
 
   test('4a 已到达服务器的挂起段：总截止打断且走 499 清理，槽位释放一次', async () => {

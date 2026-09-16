@@ -17,6 +17,19 @@ function childDataDir(out: string): string | undefined {
   return /oae-wait-r9-data-dir=(\S+)/.exec(out)?.[1];
 }
 
+/** #223：exit≠0 时 dump 子输出，避免 CI 看不到矩阵哪条挂。 */
+function dumpChildIfFailed(
+  label: string,
+  result: { exitCode: number; timedOut: boolean; stdout: string; stderr: string },
+): void {
+  if (result.exitCode === 0) return;
+  console.error(
+    `[r9-parent] ${label} exitCode=${result.exitCode} timedOut=${result.timedOut}`,
+  );
+  console.error('--- child stdout ---\n' + result.stdout);
+  console.error('--- child stderr ---\n' + result.stderr);
+}
+
 describe('#206 R9 撤销/断开优先级（隔离子进程）', () => {
   test('R9 矩阵子进程 12/0 且临时目录已回收', async () => {
     const result = await runIsolatedChild({
@@ -24,6 +37,7 @@ describe('#206 R9 撤销/断开优先级（隔离子进程）', () => {
       timeoutMs: R9_CHILD_TIMEOUT_MS,
       env: { [WAIT_R9_PARENT_ENV]: '1' },
     });
+    dumpChildIfFailed('R9 矩阵', result);
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(0);
     const childOut = `${result.stdout}\n${result.stderr}`;
@@ -49,6 +63,7 @@ describe('#206 R9 撤销/断开优先级（隔离子进程）', () => {
         timeoutMs: R9_CHILD_TIMEOUT_MS,
         env: { DATA_DIR: existing },
       });
+      dumpChildIfFailed('直跑 DATA_DIR', result);
       expect(result.exitCode).toBe(0);
       const used = childDataDir(`${result.stdout}\n${result.stderr}`);
       expect(used).toBeTruthy();
