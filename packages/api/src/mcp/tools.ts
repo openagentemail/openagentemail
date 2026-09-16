@@ -573,12 +573,16 @@ export function registerOpenAgentEmailTools(
     {
       title: "Notify Agent",
       description:
-        "Wake a named agent through the server-side notification route. The server owns topics and credentials; pass the target agent's identity localpart only.",
+        "Wake a named agent through the server-side notification route. Prefer the target agent's full identity address (localpart@domain); bare localpart remains compatible for legacy single-domain deployments. The server owns topics and credentials.",
       inputSchema: {
         name: z
           .string()
-          .regex(/^[a-z0-9][a-z0-9._-]{0,62}$/)
-          .describe("Target agent identity localpart, for example qa-bot"),
+          .regex(
+            /^[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/,
+          )
+          .describe(
+            "Target agent full address preferred (e.g. qa-bot@example.com); bare localpart (e.g. qa-bot) for legacy single-domain",
+          ),
         ...notificationInputSchema,
       },
       outputSchema: notifyOutputSchema,

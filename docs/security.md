@@ -20,6 +20,10 @@ retention window before reusing one.
 <!-- Canonical copy lives in the website repo (src/content/docs/docs/); mirror
      this note there when publishing. -->
 
+## Multi-domain localparts and notification isolation (#134)
+
+Cross-domain reuse of the same localpart is allowed. Each identity's ntfy agent route is keyed by its full address so notifications do not cross domains; do not rely on bare localpart when more than one domain is configured.
+
 ## DATA_DIR 单写者约定
 
 `DATA_DIR` 下所有 store（`identities.json` / `oauth.json` / `audit.jsonl` / `ui-sessions.json`，以及 `sent-registry.json` / `notification-log.jsonl` / `notification-devices.json` / `send-log.jsonl`）均为**单写者**设计：进程内串行、tmp+rename、文件 0600 / 目录 0700。**不支持**多容器或多进程共享同一 `DATA_DIR`。

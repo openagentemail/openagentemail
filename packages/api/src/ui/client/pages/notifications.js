@@ -40,8 +40,8 @@
     if (!isAdmin()) return ['self'];
     var topics = ['user-alerts', 'user-low'];
     state.identities.forEach(function (identity) {
-      var localpart = identity.address.split('@')[0];
-      if (localpart) topics.push('agent:' + localpart);
+      // 频道键用完整地址，与 agents 新键口径一致。
+      if (identity.address) topics.push('agent:' + identity.address.toLowerCase());
     });
     return topics;
   }
@@ -89,9 +89,8 @@
       notifyTopicFilter.append(option);
     });
     state.identities.forEach(function (identity) {
-      var localpart = identity.address.split('@')[0];
-      if (!localpart) return;
-      var topic = 'agent:' + localpart;
+      if (!identity.address) return;
+      var topic = 'agent:' + identity.address.toLowerCase();
       var option = document.createElement('option');
       option.value = topic;
       option.textContent = topic;
@@ -526,9 +525,9 @@
           failures += 1;
           return;
         }
-        /* identity 的 self 在 UI 上标成 agent:<localpart>，不暴露 self 别名。 */
+        /* identity 的 self 在 UI 上标成 agent:<full-address>，不暴露 self 别名。 */
         var displayTopic = batch.topic === 'self' && state.me && state.me.address
-          ? 'agent:' + state.me.address.split('@')[0]
+          ? 'agent:' + state.me.address.toLowerCase()
           : batch.topic;
         batch.messages.forEach(function (message) {
           merged.push({

@@ -614,17 +614,16 @@ describe('multi-domain identities', () => {
       const dataPrimary = (await resPrimary.json()) as any;
       expect(dataPrimary.address).toBe('shared-name@test.example');
 
-      // Attempting same localpart on secondary domain is rejected with 409 localpart_conflict
-      const resConflict = await app.request('/v1/identities', {
+      // 同 localpart 跨域创建应 201（不再 409 localpart_conflict）
+      const resCross = await app.request('/v1/identities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ localpart: 'shared-name', domain: 'secondary.example' }),
       });
-      expect(resConflict.status).toBe(409);
-      expect(resConflict.headers.get('cache-control')).toBe('no-store');
-      const dataConflict = (await resConflict.json()) as any;
-      expect(dataConflict.error).toBe('localpart_conflict');
-      expect(dataConflict.domains).toContain('test.example');
+      expect(resCross.status).toBe(201);
+      expect(resCross.headers.get('cache-control')).toBe('no-store');
+      const dataCross = (await resCross.json()) as any;
+      expect(dataCross.address).toBe('shared-name@secondary.example');
 
       // Distinct localpart on secondary domain succeeds
       const resSecondary = await app.request('/v1/identities', {
@@ -636,8 +635,9 @@ describe('multi-domain identities', () => {
       const dataSecondary = (await resSecondary.json()) as any;
       expect(dataSecondary.address).toBe('other-name@secondary.example');
 
-      // Both identities exist simultaneously
+      // 三身份并存：同 localpart 跨域 + 不同 localpart
       expect(findIdentity('shared-name@test.example')).toBeDefined();
+      expect(findIdentity('shared-name@secondary.example')).toBeDefined();
       expect(findIdentity('other-name@secondary.example')).toBeDefined();
 
       // Duplicate within same primary domain returns 409 address_exists
@@ -649,6 +649,11 @@ describe('multi-domain identities', () => {
       expect(resDup.status).toBe(409);
       expect(resDup.headers.get('cache-control')).toBe('no-store');
       expect(await resDup.json()).toEqual({ error: 'address_exists' });
+
+      // 同址幂等：createIdentity 直接调用仍返回 null
+      expect(
+        createIdentity({ localpart: 'shared-name', domain: 'secondary.example' }),
+      ).toBeNull();
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       if (!prevHadAllDomain) {

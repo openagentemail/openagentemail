@@ -37,6 +37,8 @@ const {
   NtfyNotificationService,
   physicalAgentTopic,
   revokeNotificationDevice,
+  getNotificationAgentRouteForTests,
+  resetNotificationStateForTests,
   setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
   userRouteKey,
@@ -167,7 +169,7 @@ describe('notification history ACL', () => {
     const own = await appFor({ kind: 'identity', address: allowed.address })
       .request('/v1/notify/messages?topic=self');
     expect(own.status).toBe(200);
-    expect(readCalls).toEqual([{ topic: 'agent:allowed', identityAddress: allowed.address, since: undefined }]);
+    expect(readCalls).toEqual([{ topic: 'agent:allowed@test.example', identityAddress: allowed.address, since: undefined }]);
 
     const other = await appFor({ kind: 'identity', address: allowed.address })
       .request('/v1/notify/messages?topic=agent:ordinary');
@@ -1784,9 +1786,9 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(res.status).toBe(200);
     expect(published).toHaveLength(1);
-    expect(published[0].target).toBe('agent:shared');
+    expect(published[0].target).toBe('agent:shared@secondary.example');
     expect(published[0].identityAddress).toBe('shared@secondary.example');
-    expect(published[0].logicalChannel).toBe('agent:shared');
+    expect(published[0].logicalChannel).toBe('agent:shared@secondary.example');
   });
 
   test('resolves unambiguous bare agent target agent:<localpart>', async () => {
@@ -1803,9 +1805,9 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(res.status).toBe(200);
     expect(published).toHaveLength(1);
-    expect(published[0].target).toBe('agent:unique');
+    expect(published[0].target).toBe('agent:unique@secondary.example');
     expect(published[0].identityAddress).toBe('unique@secondary.example');
-    expect(published[0].logicalChannel).toBe('agent:unique');
+    expect(published[0].logicalChannel).toBe('agent:unique@secondary.example');
   });
 
   test('returns 400 ambiguous_agent when bare target exists in multiple domains for admin caller', async () => {
@@ -2034,9 +2036,9 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(res.status).toBe(200);
     expect(published).toHaveLength(1);
-    expect(published[0].target).toBe('agent:shared');
+    expect(published[0].target).toBe('agent:shared@secondary.example');
     expect(published[0].identityAddress).toBe('shared@secondary.example');
-    expect(published[0].logicalChannel).toBe('agent:shared');
+    expect(published[0].logicalChannel).toBe('agent:shared@secondary.example');
   });
 
   test('identity token caller resolves FQ target with trailing dot', async () => {
@@ -2112,7 +2114,7 @@ describe('multi-domain notify target resolution', () => {
     });
     expect(resOwn.status).toBe(200);
     expect(published).toHaveLength(1);
-    expect(published[0].target).toBe('agent:unique');
+    expect(published[0].target).toBe('agent:unique@secondary.example');
     expect(published[0].identityAddress).toBe('unique@secondary.example');
 
     // Different agent with uppercase prefix is rejected with 403 scope error, not bypassed
@@ -2129,5 +2131,177 @@ describe('multi-domain notify target resolution', () => {
     expect(resOther.status).toBe(403);
     const bodyOther = (await resOther.json()) as any;
     expect(bodyOther.error).toBe('forbidden: token is scoped to another agent');
+  });
+});
+
+describe('ntfy full-address agent route keys (#134 Q1)', () => {
+  const NTFY_TOPIC_RE = /^[-_A-Za-z0-9]{1,64}$/;
+
+  beforeEach(() => {
+    resetNotificationStateForTests();
+    setNotifyPasswordHashForTests(async () => '$2b$10$testhash');
+  });
+
+  afterEach(() => {
+    setNotifyPasswordHashForTests(null);
+    resetNotificationStateForTests();
+  });
+
+  test('a. 迁移负控：旧 localpart 键通知仍达原 topic/reader', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const legacyTopic = 'agent-legacy-x7k2';
+    const legacyReader = {
+      username: 'reader-legacy-ok',
+      token: 'tk_legacy123456789012345678901234',
+    };
+    setNotificationAgentRouteForTests('fox', {
+      topic: legacyTopic,
+      reader: legacyReader,
+    });
+
+    const calls: { url: string; body: any }[] = [];
+    globalThis.fetch = (async (input: any, init: any) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response('{"id":"msg-legacy"}', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      await svc.publish({
+        target: 'agent:fox@test.example',
+        title: 'mail',
+        message: 'still reaches legacy topic',
+        level: 'normal',
+        identityAddress: 'fox@test.example',
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.topic).toBe(legacyTopic);
+      // 旧键原地保留，未写入完整地址键。
+      expect(getNotificationAgentRouteForTests('fox')?.topic).toBe(legacyTopic);
+      expect(getNotificationAgentRouteForTests('fox@test.example')).toBeUndefined();
+    } finally {
+      setNotificationAgentRouteForTests('fox', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('b. 新键：同 localpart 跨域两身份独立 topic，互不串', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+
+    const primaryRoute = {
+      topic: 'agent-primary-aaaa',
+      reader: { username: 'reader-primary-aaaa', token: 'tk_primary1234567890123456789012' },
+    };
+    const secondaryRoute = {
+      topic: 'agent-secondary-bbbb',
+      reader: { username: 'reader-secondary-bbbb', token: 'tk_secondary123456789012345678901' },
+    };
+    setNotificationAgentRouteForTests('shared@primary.example', primaryRoute);
+    setNotificationAgentRouteForTests('shared@secondary.example', secondaryRoute);
+
+    const topics: string[] = [];
+    globalThis.fetch = (async (_input: any, init: any) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      topics.push(body?.topic);
+      return new Response('{"id":"msg-iso"}', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      await svc.publish({
+        target: 'agent:shared@primary.example',
+        title: 'p',
+        message: 'primary',
+        level: 'normal',
+      });
+      await svc.publish({
+        target: 'agent:shared@secondary.example',
+        title: 's',
+        message: 'secondary',
+        level: 'normal',
+      });
+      expect(topics).toEqual(['agent-primary-aaaa', 'agent-secondary-bbbb']);
+      expect(topics[0]).not.toBe(topics[1]);
+    } finally {
+      setNotificationAgentRouteForTests('shared@primary.example', null);
+      setNotificationAgentRouteForTests('shared@secondary.example', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('c. 同址幂等仍 null；跨域同 localpart createIdentity 成功', () => {
+    const prevHad = config.allDomains.has('secondary.example');
+    if (!prevHad) {
+      (config.allDomains as Set<string>).add('secondary.example');
+      if (!config.extraDomains.includes('secondary.example')) {
+        config.extraDomains.push('secondary.example');
+      }
+    }
+    try {
+      const first = createIdentity({ localpart: 'dup-check', domain: 'test.example' });
+      expect(first).not.toBeNull();
+      expect(createIdentity({ localpart: 'dup-check', domain: 'test.example' })).toBeNull();
+      const cross = createIdentity({ localpart: 'dup-check', domain: 'secondary.example' });
+      expect(cross).not.toBeNull();
+      expect(cross!.identity.address).toBe('dup-check@secondary.example');
+    } finally {
+      if (!prevHad) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
+    }
+  });
+
+  test('d. ambiguous：裸 localpart 无旧键且跨域有身份 → unknown_agent', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+
+    setNotificationAgentRouteForTests('twin@primary.example', {
+      topic: 'agent-twin-p',
+      reader: { username: 'reader-twin-p', token: 'tk_twinp1234567890123456789012345' },
+    });
+    setNotificationAgentRouteForTests('twin@secondary.example', {
+      topic: 'agent-twin-s',
+      reader: { username: 'reader-twin-s', token: 'tk_twins1234567890123456789012345' },
+    });
+
+    globalThis.fetch = (async () =>
+      new Response('{"id":"should-not"}', { status: 200 })) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      await expect(
+        svc.publish({
+          target: 'agent:twin',
+          title: 'amb',
+          message: 'need full address',
+          level: 'normal',
+        }),
+      ).rejects.toMatchObject({ code: 'unknown_agent' });
+    } finally {
+      setNotificationAgentRouteForTests('twin@primary.example', null);
+      setNotificationAgentRouteForTests('twin@secondary.example', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('e. normalize 形态：完整地址键 physical topic 走 hash 分支、≤64、符合 NTFY_TOPIC_RE', () => {
+    const full = 'shared-name@secondary.example';
+    const topic = physicalAgentTopic(full, 'x7k2');
+    // 含 @ 不可能走 direct 分支，必须含 shortHash(8 hex)。
+    expect(topic).toMatch(/^agent-.+-[0-9a-f]{8}-x7k2$/);
+    expect(topic.length).toBeLessThanOrEqual(64);
+    expect(topic).toMatch(NTFY_TOPIC_RE);
+    expect(topic).not.toContain('@');
+    expect(topic).not.toContain('.');
   });
 });

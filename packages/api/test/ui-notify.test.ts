@@ -79,7 +79,7 @@ describe('UI notify history ACL', () => {
     expect(own.status).toBe(200);
     expect(await own.json()).toEqual({ messages: [sample] });
     expect(readCalls).toEqual([
-      { topic: 'agent:fox', identityAddress: 'fox@test.example', since: '12h' },
+      { topic: 'agent:fox@test.example', identityAddress: 'fox@test.example', since: '12h' },
     ]);
 
     const peer = await app.request('/ui/api/notify/messages?topic=agent:other', {
@@ -147,18 +147,19 @@ describe('UI notify history ACL', () => {
       kind: 'identity',
       address: 'fox@test.example',
     });
-    const response = await app.request('/ui/api/notify/messages?topic=agent:fox', {
+    const response = await app.request('/ui/api/notify/messages?topic=agent:fox%40test.example', {
       headers: { cookie },
     });
     expect(response.status).toBe(200);
     expect(readCalls).toEqual([
-      { topic: 'agent:fox', identityAddress: 'fox@test.example', since: undefined },
+      { topic: 'agent:fox@test.example', identityAddress: 'fox@test.example', since: undefined },
     ]);
   });
 
   test('invalid agent topic grammar is rejected', async () => {
     const { app, cookie, readCalls } = makeApp({ kind: 'admin' });
-    const response = await app.request('/ui/api/notify/messages?topic=agent:Bad', {
+    // 非法字符仍 400；大小写会先规范化故不再用 agent:Bad。
+    const response = await app.request('/ui/api/notify/messages?topic=agent:bad!', {
       headers: { cookie },
     });
     expect(response.status).toBe(400);

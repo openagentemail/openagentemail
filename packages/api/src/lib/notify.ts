@@ -182,7 +182,9 @@ type NotifyState = {
 
 const TOKEN_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const SUFFIX_ALPHABET = TOKEN_ALPHABET;
-const TOPIC_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** 裸 localpart（旧键）或完整地址（新键）；与 routes/notify 目标口径对齐。 */
+const AGENT_ROUTE_KEY_RE =
+  /^[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/;
 // ntfy's public topic grammar is stricter than our valid identity localparts:
 // it has no dots and caps a topic at 64 characters.
 const NTFY_TOPIC_RE = /^[-_A-Za-z0-9]{1,64}$/;
@@ -205,7 +207,10 @@ function statePath(): string {
 
 function safeAgentName(value: string): string {
   const normalized = value.toLowerCase();
-  if (!TOPIC_NAME_RE.test(normalized)) throw new Error('invalid_agent_name');
+  // 完整地址最长按邮箱惯例封顶，避免异常超长键。
+  if (normalized.length > 254 || !AGENT_ROUTE_KEY_RE.test(normalized)) {
+    throw new Error('invalid_agent_name');
+  }
   return normalized;
 }
 
@@ -223,9 +228,8 @@ export function physicalAgentTopic(name: string, suffix: string): string {
     return direct;
   }
 
-  // Keep the logical route as agent:<localpart>; only this private physical
-  // name is normalized. The hash avoids collisions after dot replacement or
-  // truncation, and the arithmetic below keeps the topic within 64 chars.
+  // 逻辑路由可为 agent:<full-address>；仅此私有物理名做规范化。
+  // hash 避免点替换/截断后碰撞；下方算术保证 topic ≤64 字。算法本身不得改。
   const normalized = name.replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'agent';
   const fragment = normalized.slice(0, 44);
   return `agent-${fragment}-${shortHash(name)}-${suffix}`;
@@ -399,17 +403,35 @@ export function setNotificationAgentRouteForTests(agent: string, route: Route | 
   else delete cachedState.agents[agent];
 }
 
+/** @internal 测试缝：读取内存中的 agent 路由键（完整地址或旧 localpart）。 */
+export function getNotificationAgentRouteForTests(agent: string): Route | undefined {
+  if (!cachedState) cachedState = loadState();
+  return cachedState.agents[agent];
+}
+
 async function state(): Promise<NotifyState> {
   if (!cachedState) cachedState = loadState();
   return cachedState;
 }
 
+/**
+ * 解析 agent 路由：先精确命中（完整地址键），miss 再回退旧 localpart 键。
+ * 裸 localpart 且无旧键时 fail-closed（unknown_agent），要求调用方改用完整地址。
+ */
 async function existingAgentRoute(name: string): Promise<Route> {
   const agent = safeAgentName(name);
   const current = await state();
-  const existing = current.agents[agent];
-  if (!isUsableAgentRoute(existing)) throw new NotifyError('unknown_agent');
-  return existing;
+  const exact = current.agents[agent];
+  if (isUsableAgentRoute(exact)) return exact;
+  // 仅完整地址 miss 时回退 localpart，兼容未迁移的旧键。
+  if (agent.includes('@')) {
+    const localpart = agent.split('@')[0];
+    if (localpart) {
+      const fallback = current.agents[localpart];
+      if (isUsableAgentRoute(fallback)) return fallback;
+    }
+  }
+  throw new NotifyError('unknown_agent');
 }
 
 function priority(level: NotifyLevel): number {
@@ -430,8 +452,9 @@ async function readableTopic(topic: NotifyTopic, identityAddress?: string): Prom
   const current = await state();
   if (topic === 'user-alerts') return current.userAlerts.topic;
   if (topic === 'user-low') return current.userLow.topic;
+  // self 用完整地址键；existingAgentRoute 会在 miss 时回退旧 localpart 键。
   const agent = topic === 'self'
-    ? identityAddress?.split('@')[0]
+    ? identityAddress?.toLowerCase()
     : topic.slice('agent:'.length);
   if (!agent) throw new Error('invalid_notify_topic');
   return (await existingAgentRoute(agent)).topic;
@@ -1044,8 +1067,9 @@ export function notificationService(): NtfyNotificationService {
 export async function provisionIdentityNotifications(identity: Identity): Promise<void> {
   if (!config.ntfy.enabled) return;
   if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
-  const agent = identity.address.split('@')[0];
-  if (!agent) throw new NotifyError('unknown_agent');
+  // 新身份一律以完整地址（小写）为 agents 键；不因旧 localpart 键存在而跳过。
+  const agent = identity.address.toLowerCase();
+  if (!agent.includes('@')) throw new NotifyError('unknown_agent');
 
   const current = await state();
   const existing = current.agents[agent];
@@ -1090,18 +1114,18 @@ export async function notifyTrustedAgentDelivery(address: string): Promise<void>
   if (!config.ntfy.enabled || config.ntfy.pushPolicy === 'none') return;
   const identity = findIdentity(address);
   if (!identity) return;
-  const localpart = identity.address.split('@')[0];
-  if (!localpart) return;
+  const fullAddress = identity.address.toLowerCase();
+  if (!fullAddress.includes('@')) return;
 
   try {
     await notificationService().publish({
-      target: `agent:${localpart}`,
+      target: `agent:${fullAddress}`,
       title: 'openagent.email new mail',
       message: `${identity.address} received new email`,
       level: 'normal',
       tags: ['email'],
       source: 'task',
-      logicalChannel: `agent:${localpart}`,
+      logicalChannel: `agent:${fullAddress}`,
       sensitive: false,
       identityAddress: identity.address,
     });
@@ -1120,9 +1144,20 @@ export async function initializeNotifications(): Promise<void> {
   // ntfy boots. These private routes remain server-only; phone pairing grants
   // a separate account only to the two human topics.
   for (const identity of listIdentities()) {
-    const agent = identity.address.split('@')[0];
-    if (!agent || isUsableAgentRoute(current.agents[agent])) continue;
-    current.agents[agent] = agentRoute(agent, current.suffix);
+    const fullKey = identity.address.toLowerCase();
+    const localpart = fullKey.split('@')[0];
+    if (!fullKey.includes('@')) continue;
+    // 已有完整地址键 → 跳过。
+    if (isUsableAgentRoute(current.agents[fullKey])) continue;
+    // 旧 localpart 键仅在该 localpart 仍唯一时视为已 provision（不重写旧身份）。
+    if (localpart && isUsableAgentRoute(current.agents[localpart])) {
+      const holders = listIdentities().filter(
+        (i) => i.address.split('@')[0].toLowerCase() === localpart,
+      );
+      if (holders.length === 1) continue;
+    }
+    // 写入只写完整地址键；旧 localpart 键原地保留。
+    current.agents[fullKey] = agentRoute(fullKey, current.suffix);
     changed = true;
   }
   if (changed) saveState(current);

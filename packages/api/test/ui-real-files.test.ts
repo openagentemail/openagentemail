@@ -99,8 +99,8 @@ describe('UI real-file manifest (#520-A)', () => {
   test('served bundle bytes are pinned to the B6 real-file baseline', () => {
     const sha256 = (s: string) =>
       new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
-    // #196 / R3：refreshMessages invalid_cursor 仅 opts.more 恢复；更新前已确认差异有意。
-    expect(sha256(UI_JS)).toBe('a84670d6cb962a2d592e6ab63cf0e3443affc7ab306b197439e2549b185b8905');
+    // #134：UI 完整地址键变更有意；CSS 未改。
+    expect(sha256(UI_JS)).toBe('93dc5fb41ff45c018e58353544b7037e78396885c13f14e7353a47dde58bc8aa');
     expect(sha256(UI_CSS)).toBe('de1732ea6cd909c377f392e5de16522858820aecf1b9b9cb55555dba093ad576');
   });
 });

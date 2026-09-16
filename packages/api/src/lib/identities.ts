@@ -63,16 +63,6 @@ export {
 } from './identity-scopes.ts';
 export type { SupportedScope } from './identity-scopes.ts';
 
-export class LocalpartConflictError extends Error {
-  readonly code = 'localpart_conflict';
-  readonly domains: string[];
-  constructor(domains: string[]) {
-    super(`localpart already exists on domain(s): ${domains.join(', ')}`);
-    this.name = 'LocalpartConflictError';
-    this.domains = domains;
-  }
-}
-
 export type ScopeValidationResult =
   | { ok: true; scopes: string[] }
   | { ok: false; error: string; details?: unknown };
@@ -433,19 +423,8 @@ export function createIdentity(input: {
   }
 
   const address = `${localpart}@${targetDomain}`;
+  // 同址幂等：已存在则返回 null（路由层映射为 address_exists）。
   if (identities.some((i) => i.address === address)) return null;
-
-  const conflictingDomains = identities
-    .filter(
-      (i) =>
-        i.address.split('@')[0].toLowerCase() === localpart &&
-        i.address.split('@')[1].toLowerCase() !== targetDomain,
-    )
-    .map((i) => i.address.split('@')[1].toLowerCase());
-
-  if (conflictingDomains.length > 0) {
-    throw new LocalpartConflictError([...new Set(conflictingDomains)]);
-  }
 
   const issueToken = input.issueToken !== false;
   let token = '';

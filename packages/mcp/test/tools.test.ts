@@ -222,8 +222,10 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
 
   const notifyAgent = toolSchemas.get("notify_agent")!;
   expect(ok(notifyAgent, "name", "qa-bot")).toBe(true);
+  expect(ok(notifyAgent, "name", "qa-bot@test.example")).toBe(true);
   expect(ok(notifyAgent, "name", "QA-Bot")).toBe(false);
   expect(ok(notifyAgent, "name", "-bot")).toBe(false);
+  expect(toolConfigs.get("notify_agent")!.description).toContain("full identity address");
 
   const taskCreate = toolSchemas.get("task_create")!;
   expect(ok(taskCreate, "to", "bravo@test.example")).toBe(true);

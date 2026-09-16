@@ -68,8 +68,8 @@ describe('UI 30-day notification log APIs', () => {
     setNotificationLogNowForTests(() => Date.parse('2026-08-12T12:00:00.000Z'));
     await appendNotificationLog({
       source: 'task',
-      logicalTarget: 'agent:fox',
-      logicalChannel: 'agent:fox',
+      logicalTarget: 'agent:fox@test.example',
+      logicalChannel: 'agent:fox@test.example',
       level: 'normal',
       title: 'own',
       message: 'for fox',

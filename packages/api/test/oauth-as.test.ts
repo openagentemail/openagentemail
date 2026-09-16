@@ -17,7 +17,7 @@ process.env.UI_ENABLED = 'true';
 
 const { describe, expect, test, beforeEach } = await import('bun:test');
 const { createApp } = await import('../src/app.ts');
-const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { s256Challenge } = await import('../src/lib/oauth-pkce.ts');
 const {
   putAccessTokenForTests,
@@ -891,7 +891,7 @@ describe('Dashboard 授权管理吊销', () => {
     expect(await clients.text()).toContain('Connected apps');
   });
 
-  test('consent form identity creation returns 409 on cross-domain localpart conflict', async () => {
+  test('consent form identity creation allows same localpart across domains', async () => {
     (config.allDomains as Set<string>).add('secondary.example');
     (config.extraDomains as string[]).push('secondary.example');
 
@@ -909,6 +909,7 @@ describe('Dashboard 授权管理吊销', () => {
       code_challenge_method: 'S256',
       response_type: 'code',
       state: 'st-conflict',
+      resource: RESOURCE,
     }).toString();
 
     // GET /authorize sets up pre-authorization state
@@ -917,7 +918,7 @@ describe('Dashboard 授权管理吊销', () => {
       redirect: 'manual',
     });
 
-    // POST /ui/oauth/authorize attempting to create identity with same localpart (on primary domain)
+    // POST /ui/oauth/authorize：同 localpart 跨域应成功（不再 409）
     const body = new URLSearchParams({
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT,
@@ -940,12 +941,15 @@ describe('Dashboard 授权管理吊销', () => {
       redirect: 'manual',
     });
 
-    expect(res.status).toBe(409);
-    const html = await res.text();
-    expect(html).toContain('That name is already in use on domain(s): secondary.example.');
+    // 同意成功：302 回客户端，或 200 同意页（视流程）；不得再是 localpart_conflict 409。
+    expect(res.status).not.toBe(409);
+    expect([200, 302]).toContain(res.status);
+    expect(findIdentity('oauth-conflict@test.example')).toBeDefined();
+    expect(findIdentity('oauth-conflict@secondary.example')).toBeDefined();
 
     // Clean up
     deleteIdentity('oauth-conflict@secondary.example');
+    deleteIdentity('oauth-conflict@test.example');
     (config.allDomains as Set<string>).delete('secondary.example');
     const idx = config.extraDomains.indexOf('secondary.example');
     if (idx !== -1) config.extraDomains.splice(idx, 1);

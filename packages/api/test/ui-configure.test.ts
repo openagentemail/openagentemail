@@ -326,19 +326,17 @@ describe('Configure UI APIs (#26 PR 5)', () => {
       expect(dup.headers.get('cache-control')).toBe('no-store');
       expect(await dup.json()).toEqual({ error: 'address_exists' });
 
-      // Reject cross-domain localpart conflict
-      const conflict = await app.request('http://localhost/ui/api/identities', {
+      // 同 localpart 跨域创建应 201（放开 409）
+      const cross = await app.request('http://localhost/ui/api/identities', {
         method: 'POST',
         headers: jsonHeaders(cookie),
         body: JSON.stringify({ localpart: 'ui-agent', domain: config.domain }),
       });
-      expect(conflict.status).toBe(409);
-      expect(conflict.headers.get('cache-control')).toBe('no-store');
-      expect(await conflict.json()).toEqual({
-        error: 'localpart_conflict',
-        message: 'localpart already exists on domain(s): secondary.example',
-        domains: ['secondary.example'],
-      });
+      expect(cross.status).toBe(201);
+      expect(cross.headers.get('cache-control')).toBe('no-store');
+      const crossBody = (await cross.json()) as any;
+      expect(crossBody.address).toBe(`ui-agent@${config.domain}`);
+      expect(crossBody.token).toBeDefined();
     } finally {
       (config.ntfy as { enabled: boolean }).enabled = prevNtfy;
       if (!prevHadAllDomain) {

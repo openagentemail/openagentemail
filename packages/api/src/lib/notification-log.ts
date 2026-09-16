@@ -107,7 +107,9 @@ export class InvalidNotifyCursorError extends Error {
 
 const LOG_NAME = 'notification-log.jsonl';
 const CURSOR_PREFIX = 'notify-cursor-v1';
-const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** 允许裸 localpart 或完整地址逻辑频道键。 */
+const AGENT_NAME_RE =
+  /^[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/;
 const SOURCES = new Set<NotificationSource>(['watcher', 'manual', 'task', 'verify']);
 const LEVELS = new Set<NotificationLevel>(['urgent', 'normal', 'low']);
 

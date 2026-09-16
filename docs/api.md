@@ -33,6 +33,10 @@ The website docs are canonical — edit them in the [website repo](https://githu
 
 Pending retries are rebuilt from the delivery log on restart; events emitted while the process was down are not reconstructed (D7, the same weak-restart semantics as ntfy).
 
+## Multi-domain identities and ntfy agent routes (#134)
+
+Same localpart may exist on different configured domains (no cross-domain `409 localpart_conflict`). New identities provision ntfy agent routes under the full address key (`agent:<localpart@domain>` lowercase); legacy bare-localpart keys remain readable via exact-then-fallback lookup. Prefer full addresses when notifying; bare localpart without a legacy key is `unknown_agent` when the name is ambiguous across domains.
+
 ## Messages API (`GET /v1/messages`) 前向追补合同
 
 ### 排序与完整性契约

@@ -8,7 +8,6 @@ import {
   findIdentity,
   listIdentities,
   LOCALPART_RE,
-  LocalpartConflictError,
   PUSH_TIER3_WARNING,
   resolvePushContentTier,
   rotateIdentityToken,
@@ -98,18 +97,20 @@ import {
 /**
  * 与 routes/notify.ts#toTopic 必须保持同一口径（Dashboard cookie 入口的镜像校验）。
  * 若改一侧，另一侧同步；抽出共享 helper 前先靠注释钉死。
+ * 允许裸 localpart（旧）或完整地址（新）。
  */
-const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+const AGENT_NAME_RE =
+  /^[a-z0-9][a-z0-9._-]{0,62}(?:@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)?$/;
 
 const notifyHistoryQuerySchema = z.object({
-  topic: z.string().min(1).max(80),
+  topic: z.string().min(1).max(320),
   since: z.string().min(1).max(64).optional(),
 });
 
 function toNotifyTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
   if (!value.startsWith('agent:')) return null;
-  const agent = value.slice('agent:'.length);
+  const agent = value.slice('agent:'.length).toLowerCase();
   return AGENT_NAME_RE.test(agent) ? `agent:${agent}` : null;
 }
 
@@ -341,8 +342,8 @@ const notifyDiagnosticsQuerySchema = z.object({
 function ownAgentChannel(c: Context): NotificationLogicalChannel | null {
   const auth = getAuth(c);
   if (auth.kind !== 'identity') return null;
-  const localpart = auth.address.split('@')[0];
-  return localpart && AGENT_NAME_RE.test(localpart) ? `agent:${localpart}` : null;
+  const address = auth.address.toLowerCase();
+  return address.includes('@') && AGENT_NAME_RE.test(address) ? `agent:${address}` : null;
 }
 
 /**
@@ -625,18 +626,6 @@ export function createUiApiRoutes(
         201,
       );
     } catch (err) {
-      if (err instanceof LocalpartConflictError || (err as any).code === 'localpart_conflict') {
-        c.header('Cache-Control', 'no-store');
-        const domains = (err as any).domains ?? [];
-        return c.json(
-          {
-            error: 'localpart_conflict',
-            message: `localpart already exists on domain(s): ${domains.join(', ')}`,
-            domains,
-          },
-          409,
-        );
-      }
       if ((err as Error).message === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
       }
@@ -1123,8 +1112,8 @@ export function createUiApiRoutes(
     const auth = getAuth(c);
     let identityAddress: string | undefined;
     if (auth.kind === 'identity') {
-      const localpart = auth.address.split('@')[0];
-      const own = localpart ? (`agent:${localpart}` as NotifyTopic) : null;
+      const address = auth.address.toLowerCase();
+      const own = address.includes('@') ? (`agent:${address}` as NotifyTopic) : null;
       if (!own) return c.json({ error: 'forbidden' }, 403);
       // 授权边界：identity 不可用历史窥探 user 频道或其他 agent。
       if (topic === 'self') topic = own;
