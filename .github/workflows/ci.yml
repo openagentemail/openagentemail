@@ -34,6 +34,8 @@ jobs:
         working-directory: packages/api
         run: |
           bun install
+          # #234：CI 常驻 Chromium，钉同意页 Approve 表单 Origin:null 头形态
+          bunx playwright install --with-deps chromium
           bun run check:approval-publication
           bun test
           bun run lint:ui

@@ -11,6 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:capacity": "OAE_CAPACITY_FILL=1 bun test --max-concurrency 1 test/task-lease-journal-capacity.test.ts",
+    "test:oauth-browser": "OAE_REQUIRE_PLAYWRIGHT=1 bun test test/oauth-consent-origin-browser.test.ts",
+    "playwright:install": "bunx playwright install chromium",
     "check:approval-publication": "node scripts/sync-approval-publication.mjs --check && node scripts/run-approval-python-verifier.mjs",
     "lint:ui": "eslint src/ui",
     "format:ui": "prettier --write 'src/ui/**/*.{js,css}'",
@@ -31,6 +33,7 @@
     "@types/sanitize-html": "2.16.1",
     "bun-types": "^1.2.21",
     "eslint": "^10.9.0",
+    "playwright": "1.63.0",
     "prettier": "^3.9.6",
     "typescript": "^5.7.2"
   }

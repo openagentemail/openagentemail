@@ -777,6 +777,16 @@ export const uiSessionBodyLimit = bodyLimit({
   onError: (c) => c.json({ error: 'request_too_large' }, 413),
 });
 
+/**
+ * UI 非安全方法 Origin / Fetch Metadata 闸。
+ *
+ * 判定序以 Sec-Fetch-Site 为主（forbidden header，页面 JS 不可伪造）：
+ * - same-origin：Origin 缺席 / 字面 "null" / 可解析同源 → 放
+ *   （"null" 是 Referrer-Policy: no-referrer 下 Chrome 表单 POST 的合法序列化，#234）
+ * - cross-site / same-site：任意 Origin → 403 锁死
+ * - SFS 缺席：仅当 Origin 可解析且同源时放（保持现行，不收紧）；null/缺席 → 403
+ * - https→http 同 host 的 TLS 反代特例仅在 same-origin 信号下保留
+ */
 export const requireUiOrigin = createMiddleware(async (c, next) => {
   if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.method === 'OPTIONS') {
     await next();
@@ -785,21 +795,39 @@ export const requireUiOrigin = createMiddleware(async (c, next) => {
 
   const expectedUrl = new URL(c.req.url);
   const origin = c.req.header('origin');
-  const sameOriginSignal = c.req.header('sec-fetch-site') === 'same-origin';
-  let allowed = !origin && sameOriginSignal;
-  if (origin) {
+  const site = c.req.header('sec-fetch-site');
+
+  // 跨站 / 同站异源信号一律拒绝（含 Origin:null / 缺席 / 看似同源）
+  if (site === 'cross-site' || site === 'same-site') {
+    return c.json({ error: 'forbidden_origin' }, 403);
+  }
+
+  const tlsProxyOk = (originUrl: URL): boolean =>
+    site === 'same-origin' &&
+    originUrl.protocol === 'https:' &&
+    expectedUrl.protocol === 'http:' &&
+    originUrl.host === expectedUrl.host;
+
+  const parseableSameOrigin = (): boolean => {
+    if (!origin || origin === 'null') return false;
     try {
       const originUrl = new URL(origin);
-      allowed =
-        originUrl.origin === expectedUrl.origin ||
-        (sameOriginSignal &&
-          originUrl.protocol === 'https:' &&
-          expectedUrl.protocol === 'http:' &&
-          originUrl.host === expectedUrl.host);
+      return originUrl.origin === expectedUrl.origin || tlsProxyOk(originUrl);
     } catch {
-      allowed = false;
+      return false;
     }
+  };
+
+  let allowed = false;
+  if (site === 'same-origin') {
+    // 修复点：字面 Origin:null + same-origin → 放；缺席同样放
+    allowed = !origin || origin === 'null' || parseableSameOrigin();
+  } else if (!site) {
+    // SFS 缺席：不收紧现行——可解析同源仍放；null/缺席 fail-closed
+    allowed = parseableSameOrigin();
   }
+  // 其它 SFS 值（如 none）未列入放行矩阵 → fail-closed
+
   if (!allowed) {
     return c.json({ error: 'forbidden_origin' }, 403);
   }
