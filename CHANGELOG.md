@@ -6,6 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **Tasks: create(wait=true) 错误响应分层** (#183)：SMTP 发送成功后 wait/journal 失败不再误报裸 `502 smtp_error`。未创建仍为 `502 {error:"smtp_error"}`（无 id）；已创建后 journal 错 → `503 {error,taskId,created:true}`，其他等待异常 → `502` 同 body，`429 too_many_waits` 补 `taskId`。MCP client/`task_create` 透出 `taskId` 并提示用 `task_get`/`task_list` 查、勿重新 create。
 - **Webhooks: stale delivery-list cursors are rejected** (#216): `GET /v1/webhooks/:id/deliveries` no longer silently rewinds to page 1 on an unknown cursor; it returns **HTTP 400 `{error:"invalid_cursor"}`**, matching send-log / notify / task cursor semantics.
 - **Dashboard: recover pagination after a stale mail cursor** (#196): load-more clears `nextCursor` on **400 `invalid_cursor`** and prompts Refresh (other errors leave the cursor alone). `GET /ui/api/messages` now maps codec cursor failures to **`invalid_cursor`** (schema failures remain `invalid_request`), so the UI recovery path is live for inbox as well.
 

@@ -197,10 +197,12 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         return c.json({ error: 'invalid_request: task participants must differ' }, 400);
       }
 
+      // create/wait 两段：未创建失败保持旧 502 无 id；已创建后 wait 失败必须带出 taskId。
+      let task: Task;
       try {
         const createApproval = service.createApproval;
         if (parsed.data.kind === 'approval' && !createApproval) throw new Error('approval_service_unavailable');
-        const task = parsed.data.kind === 'approval'
+        task = parsed.data.kind === 'approval'
           ? await createApproval!({
             from,
             to: parsed.data.to.toLowerCase(),
@@ -217,14 +219,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
             body: parsed.data.body!,
             ...(parsed.data.parentTaskId !== undefined ? { parentTaskId: parsed.data.parentTaskId } : {}),
           });
-        const parent = await projectedParentTask(service, task.parentTaskId);
-        if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
-        // `wait` deliberately has one capped server turn. Long tasks are
-        // resumed by asking task_get or calling task_create(wait) again.
-        const waited = await waitWithSlot(c, service, task, from);
-        if (waited instanceof Response) return waited;
-        return c.json(taskViewFor(c, waited ?? task, parent), 201);
       } catch (err) {
+        // create 段：SMTP/校验失败 — 响应逐字节保持旧行为（502 smtp_error 无 id）。
         const code = (err as Error).message;
         if (code === 'invalid_approval_expiry' || code === 'invalid_parent_task_id') return c.json({ error: 'invalid_request' }, 400);
         if (code === 'parent_task_not_found') return c.json({ error: 'not_found' }, 404);
@@ -235,6 +231,32 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         }
         console.warn('[task] create failed:', code);
         return c.json({ error: 'smtp_error' }, 502);
+      }
+
+      const parent = await projectedParentTask(service, task.parentTaskId);
+      if (!parsed.data.wait) return c.json(taskViewFor(c, task, parent), 201);
+
+      // wait 段：任务已创建；失败响应补 taskId + created，journal 走既有 503 映射口径。
+      try {
+        // `wait` deliberately has one capped server turn. Long tasks are
+        // resumed by asking task_get or calling task_create(wait) again.
+        const waited = await waitWithSlot(c, service, task, from);
+        if (waited instanceof Response) {
+          // 429 too_many_waits：槽位满时任务已在，补 taskId（不改槽位计数语义）。
+          if (waited.status === 429) {
+            return c.json({ error: 'too_many_waits', retryAfterSec: 5, taskId: task.id }, 429);
+          }
+          return waited;
+        }
+        return c.json(taskViewFor(c, waited ?? task, parent), 201);
+      } catch (err) {
+        // 复用 journalUnavailable 判定（lease_journal_* → 503），body 补身份字段。
+        const mapped = journalUnavailable(c, err);
+        if (mapped) {
+          return c.json({ error: (err as Error).message, taskId: task.id, created: true }, 503);
+        }
+        console.warn('[task] create wait failed:', (err as Error).message);
+        return c.json({ error: 'smtp_error', taskId: task.id, created: true }, 502);
       }
     })
     .get('/', async (c) => {

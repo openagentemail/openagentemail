@@ -318,12 +318,17 @@ export function registerOpenAgentEmailTools(
   }
 
   function fail(err: unknown): CallToolResult {
-    const message =
+    let message =
       err instanceof ApiError
         ? err.message
         : err instanceof Error
           ? err.message
           : String(err);
+    // create(wait) 已创建后失败：文案带 taskId，并明示用 task_get/task_list 查、勿重新 create。
+    if (err instanceof ApiError && err.taskId) {
+      message =
+        `${message} taskId=${err.taskId}. Task already created — use task_get or task_list to check status; do not call task_create again.`;
+    }
     return { content: [{ type: "text", text: message }], isError: true };
   }
 

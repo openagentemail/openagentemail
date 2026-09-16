@@ -43,6 +43,10 @@ export class ApiError extends Error {
     public readonly kind?: string,
     public readonly waitHeaderSec?: number,
     public readonly bodyError?: string,
+    /** 解析后的错误响应 JSON（create/wait 分层等契约字段从此读取）。 */
+    public readonly errorBody?: unknown,
+    /** 错误体中的 taskId（已创建后 wait 失败时服务端透出）。 */
+    public readonly taskId?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -273,6 +277,13 @@ function parseBodyError(data: unknown): string | undefined {
   return typeof e === "string" ? e : undefined;
 }
 
+/** 从错误 JSON 取出 taskId（create wait 失败契约）。 */
+function parseBodyTaskId(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || !("taskId" in data)) return undefined;
+  const id = (data as { taskId: unknown }).taskId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 /** Network failure code (ECONNREFUSED, ENOTFOUND, ...), if the runtime gave one. */
 function networkErrorCode(err: unknown): string | undefined {
   for (const candidate of [err, (err as { cause?: unknown })?.cause]) {
@@ -404,7 +415,17 @@ export class OpenAgentEmailClient {
           bodyError,
         );
       }
-      throw new ApiError(res.status, `API error ${res.status}: ${serverMsg}`);
+      // 502/503/429 等：透出 error body JSON 与 taskId，供 tools 安全重试口径使用。
+      throw new ApiError(
+        res.status,
+        `API error ${res.status}: ${serverMsg}`,
+        undefined,
+        undefined,
+        undefined,
+        parseBodyError(data),
+        data,
+        parseBodyTaskId(data),
+      );
     }
 
     return data as T;
