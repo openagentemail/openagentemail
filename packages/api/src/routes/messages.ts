@@ -131,10 +131,11 @@ export const messagesRoute = new Hono()
       return c.json({ error: 'not_found' }, 404);
     }
     // 仅成功变更记 audit；404/403 不记（对齐既有写路由口径）
+    // address 小写归一：与 ui 路由一致；setMessageSeen 入参保持存量行为
     const auth = getAuth(c);
     recordAuditEvent({
       event: 'message.mark_seen',
-      address: parsed.data.address,
+      address: parsed.data.address.toLowerCase(),
       actor: auth.kind === 'admin' ? 'admin' : auth.address,
       messageId: id,
       seen: parsed.data.seen ? 'true' : 'false',

@@ -182,6 +182,34 @@ describe('#152 message.mark_seen audit（写路径）', () => {
     expect(rows[0]!.ip).toBeUndefined();
   });
 
+  test('v1 大小写变体地址 → audit 行 address 为小写（对齐 ui）', async () => {
+    const created = createIdentity({ localpart: 'seen-v1-case' })!;
+    const address = created.identity.address; // 规范小写
+    // 请求体故意混大小写；forbidUnlessAddress 可放行，audit 必须归一
+    const mixedCase = address
+      .split('@')
+      .map((part, i) => (i === 0 ? part.toUpperCase() : part.toUpperCase()))
+      .join('@');
+    expect(mixedCase).not.toBe(address);
+    fakeMessages = [makeInboxMsg(102, address)];
+
+    const res = await app.request('/v1/messages/102/seen', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${created.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ address: mixedCase, seen: false }),
+    });
+    expect(res.status).toBe(200);
+
+    const rows = readAuditEvents({ event: 'message.mark_seen', limit: 5 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.address).toBe(address);
+    expect(rows[0]!.address).toBe(address.toLowerCase());
+    expect(rows[0]!.seen).toBe('false');
+  });
+
   test('ui 路由 200 → audit 同上且带 ip（DI mock setMessageSeen）', async () => {
     const address = 'fox@test.example';
     const setSeen = mock(async () => true);
