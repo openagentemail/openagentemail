@@ -2,10 +2,12 @@
  * #234 CI 常驻：真实 Chromium 同意页 Approve 表单 POST 头形态回归。
  * 断言：
  * 1) 浏览器实发 Origin===null 且 Sec-Fetch-Site===same-origin（与 R0 矩阵一致）
- * 2) 响应非 403 forbidden_origin
+ * 2) 响应非 403，且成功 HTML 含「已授权」
  *
- * 实发头经 page.waitForRequest + request.allHeaders() 捕获（含 Sec-Fetch-*；
- * 同步 headers() 会缺 Fetch Metadata）。
+ * 成功等待（禁 sleep / 禁立即读 content）：
+ * - Bun.serve 包装在收到真实浏览器 POST 时 resolve 有类型 Promise（头+状态+正文）
+ *   （CDP getResponseBody 在全量并行下会 No resource；DOM 会被 meta refresh 读空）
+ * - click 前注册该 Promise；click 后 await 它，再 waitForURL + waitForLoadState
  *
  * 浏览器二进制：`bunx playwright install chromium`（CI workflow 已装）。
  * 本地未装浏览器且非 CI 时 skip；CI / OAE_REQUIRE_PLAYWRIGHT=1 则硬失败。
@@ -40,14 +42,10 @@ const requirePw = process.env.CI === 'true' || process.env.OAE_REQUIRE_PLAYWRIGH
 /** Approve POST 捕获结果（显式类型，避免回调赋值收窄失败） */
 type ApproveCapture = {
   status: number;
-  body: string;
   origin: string | null;
   secFetchSite: string | null;
+  body: string;
 };
-
-function isApprovePost(url: string, method: string): boolean {
-  return method === 'POST' && url.includes('/ui/oauth/authorize');
-}
 
 describe('playwright consent Approve origin regression (#234)', () => {
   let base = '';
@@ -56,6 +54,11 @@ describe('playwright consent Approve origin regression (#234)', () => {
   let sid = '';
   let address = '';
   let chromiumAvailable = false;
+  let appFetch: (req: Request) => Response | Promise<Response> = () =>
+    new Response('app not ready', { status: 500 });
+
+  /** 每次用例挂接：服务端见到 Approve POST 时 resolve */
+  let resolveApproveHit: ((value: ApproveCapture) => void) | null = null;
 
   beforeAll(async () => {
     try {
@@ -88,12 +91,30 @@ describe('playwright consent Approve origin regression (#234)', () => {
           ),
       },
     });
+    appFetch = app.fetch.bind(app);
 
     server = Bun.serve({
       port: 0,
       hostname: '127.0.0.1',
       idleTimeout: 0,
-      fetch: app.fetch,
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        if (req.method === 'POST' && url.pathname === '/ui/oauth/authorize') {
+          const origin = req.headers.get('origin');
+          const secFetchSite = req.headers.get('sec-fetch-site');
+          const res = await appFetch(req);
+          const body = await res.clone().text();
+          resolveApproveHit?.({
+            status: res.status,
+            origin,
+            secFetchSite,
+            body,
+          });
+          resolveApproveHit = null;
+          return res;
+        }
+        return appFetch(req);
+      },
     });
     base = `http://127.0.0.1:${server.port}`;
 
@@ -155,37 +176,42 @@ describe('playwright consent Approve origin regression (#234)', () => {
     ]);
     const page = await context.newPage();
 
+    // click 前注册：服务端命中后 resolve（有类型 Promise，非回调赋值收窄）
+    const approveHitPromise: Promise<ApproveCapture> = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('timed out waiting for Approve POST at server')),
+        15_000,
+      );
+      resolveApproveHit = (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      };
+    });
+
     await page.goto(consentUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('button[value="approve"]');
     await page.selectOption('select[name="address"]', address).catch(() => {});
 
-    // 先注册有类型的捕获 Promise，再 click；头来自 allHeaders()
-    const capturePromise: Promise<ApproveCapture> = page
-      .waitForResponse((r) => isApprovePost(r.url(), r.request().method()))
-      .then(async (res) => {
-        const headers = await res.request().allHeaders();
-        return {
-          status: res.status(),
-          // 文档导航的 body 走页面，不在此读 res.text()（常为空）
-          body: '',
-          origin: headers['origin'] ?? null,
-          secFetchSite: headers['sec-fetch-site'] ?? null,
-        };
-      });
+    // POST 导航到同意页响应；随后 meta refresh 外跳属预期
+    const postNav = page.waitForURL(
+      (url) => url.pathname === '/ui/oauth/authorize',
+      { timeout: 15_000 },
+    );
 
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => null),
-      page.click('button[value="approve"]'),
-    ]);
+    await page.click('button[value="approve"]');
 
-    const postResult: ApproveCapture = await capturePromise;
+    const postResult: ApproveCapture = await approveHitPromise;
+    await postNav.catch(() => null);
+    await page.waitForLoadState('domcontentloaded').catch(() => null);
+
     await browser.close();
 
-    // CodeRabbit Minor：必须钉死浏览器实发头（与 R0 矩阵一致）
+    // 浏览器实发头（服务端实收 = 真值）+ 成功正文（响应体，非 DOM 竞态）
     expect(postResult.origin).toBe('null');
     expect(postResult.secFetchSite).toBe('same-origin');
-    // 过闸：非 403（过渡页 meta refresh 会立刻外跳，不依赖 DOM 正文）
     expect(postResult.status).not.toBe(403);
     expect(postResult.status).toBe(200);
+    expect(postResult.body).toContain('已授权');
+    expect(postResult.body).not.toContain('forbidden_origin');
   }, 60_000);
 });
