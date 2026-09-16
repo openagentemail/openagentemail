@@ -565,15 +565,15 @@ describe('#206 R8 IDLE 收尾与 499 头', () => {
   });
 
   test('14 IDLE logout 挂死：在剩余截止内强关，观察 promise，408 且槽位归还', async () => {
-    // #223：可控钟推进到截止后观察，去掉对 1s wall 的赌
+    // #223：可控钟推进到「floor(remaining)=0 且 now 仍 < deadline」欠切窗，去掉 wall 赌
     hangLogout = true;
     fakeMessages = [matchingMail('r8-logout-bound@test.example')];
     let mono = waitMonotonicNow();
     const base = mono;
     setWaitMonotonicNowForTests(() => mono);
     onLogoutHook = () => {
-      // logoutBounded 计算 remaining 前已进入 logout：推过 1s 截止 → remaining=0
-      mono = base + 60_000;
+      // deadline=base+1000；卡在 base+999.5 → floor 余量 0，但 now 仍欠截止
+      mono = base + 999.5;
     };
     const started = performance.now();
     const res = await restWait('r8-logout-bound@test.example', 1);
@@ -593,17 +593,20 @@ describe('#206 R8 IDLE 收尾与 499 头', () => {
   });
 
   test('14b bound 胜出：挂死 logout 丢弃命中 → 408（#223）', async () => {
+    // 唯一钉：欠切窗内旧尾判 now>=deadline 为 false，只有 deadline_bound→清 provisional 能 408
     hangLogout = true;
     fakeMessages = [matchingMail('r8-bound-wins@test.example')];
     let mono = waitMonotonicNow();
     const base = mono;
     setWaitMonotonicNowForTests(() => mono);
     onLogoutHook = () => {
-      mono = base + 60_000;
+      mono = base + 999.5;
     };
     const res = await restWait('r8-bound-wins@test.example', 1);
     expect(res.status).toBe(408);
     expect(await res.json()).toEqual({ error: 'timeout', timeoutSec: 1 });
+    // 证伪旧路径：钩后 mono 仍严格小于截止
+    expect(mono).toBeLessThan(base + 1000);
     hangLogout = false;
     onLogoutHook = undefined;
     setWaitMonotonicNowForTests();
