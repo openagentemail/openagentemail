@@ -241,10 +241,14 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         // resumed by asking task_get or calling task_create(wait) again.
         const waited = await waitWithSlot(c, service, task, from);
         if (waited instanceof Response) {
-          // 429：解析 waitWithSlot 原 body 再合并 taskId，不硬编码 retryAfterSec。
+          // 429：解析 waitWithSlot 原 body 再合并 taskId；解析失败原样返回保语义与响应头。
           if (waited.status === 429) {
-            const b = await waited.json() as Record<string, unknown>;
-            return c.json({ ...b, taskId: task.id }, 429);
+            try {
+              const b = await waited.json() as Record<string, unknown>;
+              return c.json({ ...b, taskId: task.id }, 429);
+            } catch {
+              return waited;
+            }
           }
           return waited;
         }

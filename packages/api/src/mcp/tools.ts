@@ -318,17 +318,12 @@ export function registerOpenAgentEmailTools(
   }
 
   function fail(err: unknown): CallToolResult {
-    let message =
+    const message =
       err instanceof ApiError
         ? err.message
         : err instanceof Error
           ? err.message
           : String(err);
-    // create(wait) 已创建后失败：文案带 taskId，并明示用 task_get/task_list 查、勿重新 create。
-    if (err instanceof ApiError && err.taskId) {
-      message =
-        `${message} taskId=${err.taskId}. Task already created — use task_get or task_list to check status; do not call task_create again.`;
-    }
     return { content: [{ type: "text", text: message }], isError: true };
   }
 
@@ -654,12 +649,31 @@ export function registerOpenAgentEmailTools(
       outputSchema: taskOutputSchema,
       annotations: mutatingAnnotations,
     },
-    ({ to, subject, body, kind, approval, wait, parentTaskId }) => callApi(() => {
-      if (kind === 'approval' && approval) {
-        return client.createApprovalTask(to, subject, approval.action, approval.expiresAt, body, wait ?? false, parentTaskId);
+    ({ to, subject, body, kind, approval, wait, parentTaskId }) => callApi(async () => {
+      try {
+        if (kind === 'approval' && approval) {
+          return await client.createApprovalTask(to, subject, approval.action, approval.expiresAt, body, wait ?? false, parentTaskId);
+        }
+        if (kind === 'approval' || approval || body === undefined) {
+          throw new Error('approval task_create requires approval; ordinary task_create requires body');
+        }
+        return await client.createTask(to, subject, body, wait ?? false, parentTaskId);
+      } catch (err) {
+        // 仅 task_create：已创建后失败补安全重试口径；其他工具不受 fail() 全局耦合。
+        if (err instanceof ApiError && err.taskId) {
+          throw new ApiError(
+            err.status,
+            `${err.message} taskId=${err.taskId}. Task already created — use task_get or task_list to check status; do not call task_create again.`,
+            err.timeoutSec,
+            err.kind,
+            err.waitHeaderSec,
+            err.bodyError,
+            err.errorBody,
+            err.taskId,
+          );
+        }
+        throw err;
       }
-      if (kind === 'approval' || approval || body === undefined) throw new Error('approval task_create requires approval; ordinary task_create requires body');
-      return client.createTask(to, subject, body, wait ?? false, parentTaskId);
     }),
   );
 

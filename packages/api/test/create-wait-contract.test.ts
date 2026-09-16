@@ -295,9 +295,9 @@ describe('#183 create(wait=true) 响应契约分层', () => {
     }
   });
 
-  bunTest('5: MCP client 透出 taskId；tools 失败文案含 id 与勿重新 create', async () => {
+  bunTest('5: MCP client 透出 taskId；task_create 工具文案含 id 与勿重新 create', async () => {
     const taskId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-    // 502 body 透出
+    // 502 body → ApiError.taskId
     {
       const client = new OpenAgentEmailClient('http://test.invalid', 'tok', async () =>
         new Response(JSON.stringify({ error: 'smtp_error', taskId, created: true }), { status: 502 }));
@@ -313,22 +313,12 @@ describe('#183 create(wait=true) 响应契约分层', () => {
       expect(api.taskId).toBe(taskId);
       expect(api.errorBody).toEqual({ error: 'smtp_error', taskId, created: true });
     }
-    // 503 body 透出 + 真实 tools.fail 文案
+    // 503 → 经 task_create handler 包装文案（非 fail() 全局）
     {
       const client = new OpenAgentEmailClient('http://test.invalid', 'tok', async () =>
         new Response(JSON.stringify({
           error: 'lease_journal_not_bootstrapped', taskId, created: true,
         }), { status: 503 }));
-      let err: unknown;
-      try {
-        await client.createTask(B, 'x', 'y', true);
-      } catch (e) {
-        err = e;
-      }
-      expect(err).toBeInstanceOf(ApiError);
-      expect((err as InstanceType<typeof ApiError>).taskId).toBe(taskId);
-      expect((err as InstanceType<typeof ApiError>).status).toBe(503);
-
       const server = new McpServer({ name: 'cw-183', version: '0.0.0' });
       registerOpenAgentEmailTools(server, client);
       const tool = (server as unknown as {
@@ -344,6 +334,18 @@ describe('#183 create(wait=true) 响应契约分层', () => {
       expect(text).toContain(taskId);
       expect(text).toMatch(/task_get/);
       expect(text).toMatch(/do not call task_create again/i);
+      // 同 client 的非 task_create 路径：即使 body 带 taskId，fail() 也不追加重试口径
+      const getTool = (server as unknown as {
+        _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<{
+          isError?: boolean; content?: Array<{ text?: string }>;
+        }> }>;
+      })._registeredTools.task_get;
+      const getResult = await getTool.handler({ id: taskId, wait: false });
+      expect(getResult.isError).toBe(true);
+      const getText = getResult.content?.[0]?.text ?? '';
+      expect(getText).toMatch(/API error 503/);
+      expect(getText).not.toMatch(/do not call task_create again/i);
+      expect(getText).not.toMatch(/Task already created/);
     }
   });
 });
