@@ -48,6 +48,9 @@ export type NotifyTopic = 'self' | 'user-alerts' | 'user-low' | `agent:${string}
  */
 export type NotifyOverflow = 'truncate' | 'error';
 
+/** 旧 localpart 键属主烙印：完整地址，或 ambiguous（拒绝回退）。 */
+export const LEGACY_OWNER_AMBIGUOUS = 'ambiguous';
+
 export interface NotifyInput {
   target: NotifyTarget;
   title: string;
@@ -129,6 +132,7 @@ export class NotifyError extends Error {
       | 'notify_cancelled'
       | 'verify_failed'
       | 'unknown_agent'
+      | 'invalid_agent_name'
       | 'message_too_large'
       | 'device_registry_unavailable',
     public readonly details?: {
@@ -169,6 +173,11 @@ type Reader = {
 type Route = {
   topic: string;
   reader: Reader;
+  /**
+   * 仅旧裸 localpart 键使用：属主完整地址，或 LEGACY_OWNER_AMBIGUOUS。
+   * 完整地址键不写此字段。
+   */
+  ownerAddress?: string;
 };
 
 type NotifyState = {
@@ -205,11 +214,16 @@ function statePath(): string {
   return join(dirname(config.ntfy.configPath), 'notifications.json');
 }
 
+/** 键化用完整地址：小写 + 剥尾点（FQDN DOMAIN=example.com. 兼容）。 */
+export function canonicalizeAgentAddress(address: string): string {
+  return address.toLowerCase().trim().replace(/\.+$/, '');
+}
+
 function safeAgentName(value: string): string {
-  const normalized = value.toLowerCase();
-  // 完整地址最长按邮箱惯例封顶，避免异常超长键。
+  const normalized = canonicalizeAgentAddress(value);
+  // 完整地址最长按邮箱惯例封顶；非法/超长映射既有 NotifyError，避免裸 Error→500。
   if (normalized.length > 254 || !AGENT_ROUTE_KEY_RE.test(normalized)) {
-    throw new Error('invalid_agent_name');
+    throw new NotifyError('invalid_agent_name');
   }
   return normalized;
 }
@@ -282,7 +296,9 @@ function isReader(value: unknown): value is Reader {
 function isRoute(value: unknown): value is Route {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;
-  return typeof entry.topic === 'string' && isReader(entry.reader);
+  if (typeof entry.topic !== 'string' || !isReader(entry.reader)) return false;
+  if (entry.ownerAddress !== undefined && typeof entry.ownerAddress !== 'string') return false;
+  return true;
 }
 
 function isState(value: unknown): value is NotifyState {
@@ -323,10 +339,40 @@ function loadState(): NotifyState {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (!isState(parsed)) throw new Error('invalid notification store shape');
+    // 旧裸 localpart 键烙印属主，防止删身份后跨域复用误绑残留 topic。
+    try {
+      if (stampLegacyAgentOwners(parsed)) {
+        writePrivate(path, JSON.stringify(parsed, null, 2));
+      }
+    } catch {
+      // 烙印失败不阻断加载；下次 load 再试。
+    }
     return parsed;
   } catch {
     throw new Error('notification_store_corrupt');
   }
+}
+
+/**
+ * 给尚未烙印的旧 localpart 键写入 ownerAddress。
+ * 唯一持有者 → 烙印其完整地址；0 或多个 → ambiguous。已烙印的不覆盖。
+ */
+function stampLegacyAgentOwners(state: NotifyState): boolean {
+  let changed = false;
+  const identities = listIdentities();
+  for (const [key, entry] of Object.entries(state.agents)) {
+    if (key.includes('@')) continue;
+    if (entry.ownerAddress !== undefined) continue;
+    const holders = identities.filter(
+      (i) => i.address.split('@')[0].toLowerCase() === key.toLowerCase(),
+    );
+    entry.ownerAddress =
+      holders.length === 1
+        ? canonicalizeAgentAddress(holders[0]!.address)
+        : LEGACY_OWNER_AMBIGUOUS;
+    changed = true;
+  }
+  return changed;
 }
 
 function saveState(state: NotifyState): void {
@@ -417,6 +463,7 @@ async function state(): Promise<NotifyState> {
 /**
  * 解析 agent 路由：先精确命中（完整地址键），miss 再回退旧 localpart 键。
  * 裸 localpart 且无旧键时 fail-closed（unknown_agent），要求调用方改用完整地址。
+ * 旧键回退须匹配 ownerAddress 烙印，ambiguous/错属主一律拒绝。
  */
 async function existingAgentRoute(name: string): Promise<Route> {
   const agent = safeAgentName(name);
@@ -428,7 +475,14 @@ async function existingAgentRoute(name: string): Promise<Route> {
     const localpart = agent.split('@')[0];
     if (localpart) {
       const fallback = current.agents[localpart];
-      if (isUsableAgentRoute(fallback)) return fallback;
+      if (
+        isUsableAgentRoute(fallback) &&
+        fallback.ownerAddress !== undefined &&
+        fallback.ownerAddress !== LEGACY_OWNER_AMBIGUOUS &&
+        fallback.ownerAddress === agent
+      ) {
+        return fallback;
+      }
     }
   }
   throw new NotifyError('unknown_agent');
@@ -452,9 +506,9 @@ async function readableTopic(topic: NotifyTopic, identityAddress?: string): Prom
   const current = await state();
   if (topic === 'user-alerts') return current.userAlerts.topic;
   if (topic === 'user-low') return current.userLow.topic;
-  // self 用完整地址键；existingAgentRoute 会在 miss 时回退旧 localpart 键。
+  // self 用完整地址键（去尾点）；existingAgentRoute 会在属主匹配时回退旧 localpart 键。
   const agent = topic === 'self'
-    ? identityAddress?.toLowerCase()
+    ? (identityAddress ? canonicalizeAgentAddress(identityAddress) : undefined)
     : topic.slice('agent:'.length);
   if (!agent) throw new Error('invalid_notify_topic');
   return (await existingAgentRoute(agent)).topic;
@@ -1067,8 +1121,8 @@ export function notificationService(): NtfyNotificationService {
 export async function provisionIdentityNotifications(identity: Identity): Promise<void> {
   if (!config.ntfy.enabled) return;
   if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
-  // 新身份一律以完整地址（小写）为 agents 键；不因旧 localpart 键存在而跳过。
-  const agent = identity.address.toLowerCase();
+  // 新身份一律以完整地址（小写、去尾点）为 agents 键；不因旧 localpart 键存在而跳过。
+  const agent = canonicalizeAgentAddress(identity.address);
   if (!agent.includes('@')) throw new NotifyError('unknown_agent');
 
   const current = await state();
@@ -1114,7 +1168,7 @@ export async function notifyTrustedAgentDelivery(address: string): Promise<void>
   if (!config.ntfy.enabled || config.ntfy.pushPolicy === 'none') return;
   const identity = findIdentity(address);
   if (!identity) return;
-  const fullAddress = identity.address.toLowerCase();
+  const fullAddress = canonicalizeAgentAddress(identity.address);
   if (!fullAddress.includes('@')) return;
 
   try {
@@ -1144,17 +1198,15 @@ export async function initializeNotifications(): Promise<void> {
   // ntfy boots. These private routes remain server-only; phone pairing grants
   // a separate account only to the two human topics.
   for (const identity of listIdentities()) {
-    const fullKey = identity.address.toLowerCase();
+    const fullKey = canonicalizeAgentAddress(identity.address);
     const localpart = fullKey.split('@')[0];
     if (!fullKey.includes('@')) continue;
     // 已有完整地址键 → 跳过。
     if (isUsableAgentRoute(current.agents[fullKey])) continue;
-    // 旧 localpart 键仅在该 localpart 仍唯一时视为已 provision（不重写旧身份）。
+    // 旧 localpart 键仅当烙印属主就是本身份时视为已 provision（不重写）。
     if (localpart && isUsableAgentRoute(current.agents[localpart])) {
-      const holders = listIdentities().filter(
-        (i) => i.address.split('@')[0].toLowerCase() === localpart,
-      );
-      if (holders.length === 1) continue;
+      const legacy = current.agents[localpart]!;
+      if (legacy.ownerAddress === fullKey) continue;
     }
     // 写入只写完整地址键；旧 localpart 键原地保留。
     current.agents[fullKey] = agentRoute(fullKey, current.suffix);

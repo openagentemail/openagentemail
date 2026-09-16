@@ -68,6 +68,15 @@ describe('UI 30-day notification log APIs', () => {
     setNotificationLogNowForTests(() => Date.parse('2026-08-12T12:00:00.000Z'));
     await appendNotificationLog({
       source: 'task',
+      logicalTarget: 'agent:fox',
+      logicalChannel: 'agent:fox',
+      level: 'normal',
+      title: 'legacy-own',
+      message: 'old channel still visible',
+      identityAddress: 'fox@test.example',
+    });
+    await appendNotificationLog({
+      source: 'task',
       logicalTarget: 'agent:fox@test.example',
       logicalChannel: 'agent:fox@test.example',
       level: 'normal',
@@ -87,7 +96,7 @@ describe('UI 30-day notification log APIs', () => {
     const own = await app.request('/ui/api/notifications?limit=20', { headers: { cookie } });
     expect(own.status).toBe(200);
     const body = await own.json() as { items: Array<{ title: string; logicalChannel: string }> };
-    expect(body.items.map((row) => row.title)).toEqual(['own']);
+    expect(body.items.map((row) => row.title).sort()).toEqual(['legacy-own', 'own']);
 
     const peek = await app.request('/ui/api/notifications?channel=user-alerts&limit=20', {
       headers: { cookie },
@@ -220,18 +229,28 @@ describe('UI 30-day notification log APIs', () => {
   });
 
   test('diagnostics never returns physical topic or secret and is honest when ntfy is off', async () => {
-    const { app, cookie } = makeApp({ kind: 'admin' });
-    const res = await app.request('/ui/api/notify/diagnostics', { headers: { cookie } });
-    expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
-    expect(body.enabled).toBe(false);
-    expect(body.configured).toBe(false);
-    expect(body.canVerify).toBe(true);
-    const dumped = JSON.stringify(body);
-    expect(dumped).not.toContain('topic');
-    expect(dumped).not.toContain('secret');
-    expect(dumped).not.toContain('password');
-    expect(dumped).not.toContain('token');
+    const { config } = await import('../src/lib/config.ts');
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy as { enabled: boolean; adminPassword?: string }, {
+      enabled: false,
+      adminPassword: undefined,
+    });
+    try {
+      const { app, cookie } = makeApp({ kind: 'admin' });
+      const res = await app.request('/ui/api/notify/diagnostics', { headers: { cookie } });
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.enabled).toBe(false);
+      expect(body.configured).toBe(false);
+      expect(body.canVerify).toBe(true);
+      const dumped = JSON.stringify(body);
+      expect(dumped).not.toContain('topic');
+      expect(dumped).not.toContain('secret');
+      expect(dumped).not.toContain('password');
+      expect(dumped).not.toContain('token');
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
   });
 
   test('verify mirrors Bearer permission: identity without canNotifyUser is 403', async () => {

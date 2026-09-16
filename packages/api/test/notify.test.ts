@@ -17,7 +17,7 @@ process.env.NTFY_ADMIN_PASSWORD = 'ntfy-admin-secret';
 const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { config } = await import('../src/lib/config.ts');
-const { createIdentity } = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
 const { resetNotifyUserLimits } = await import('../src/lib/ratelimit.ts');
 const { createNotifyRoutes } = await import('../src/routes/notify.ts');
 const {
@@ -37,7 +37,10 @@ const {
   NtfyNotificationService,
   physicalAgentTopic,
   revokeNotificationDevice,
+  canonicalizeAgentAddress,
   getNotificationAgentRouteForTests,
+  LEGACY_OWNER_AMBIGUOUS,
+  provisionIdentityNotifications,
   resetNotificationStateForTests,
   setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
@@ -56,9 +59,11 @@ const {
   setDeviceRegistryPersistHookForTests,
 } = await import('../src/lib/notification-devices.ts');
 const {
+  appendNotificationLog,
   queryNotificationLog,
   resetNotificationLogForTests,
   setNotificationLogPersistHookForTests,
+  setNotificationLogNowForTests,
 } = await import('../src/lib/notification-log.ts');
 const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
 type NotifyService = import('../src/lib/notify.ts').NotifyService;
@@ -1857,6 +1862,7 @@ describe('multi-domain notify target resolution', () => {
     setNotificationAgentRouteForTests('shared', {
       topic: 'agent-shared-test',
       reader: { username: 'reader-shared', token: 'tk_test1234567890123456789012345' },
+      ownerAddress: 'shared@secondary.example',
     });
     try {
       const realService = new NtfyNotificationService();
@@ -2159,6 +2165,7 @@ describe('ntfy full-address agent route keys (#134 Q1)', () => {
     setNotificationAgentRouteForTests('fox', {
       topic: legacyTopic,
       reader: legacyReader,
+      ownerAddress: 'fox@test.example',
     });
 
     const calls: { url: string; body: any }[] = [];
@@ -2303,5 +2310,170 @@ describe('ntfy full-address agent route keys (#134 Q1)', () => {
     expect(topic).toMatch(NTFY_TOPIC_RE);
     expect(topic).not.toContain('@');
     expect(topic).not.toContain('.');
+  });
+
+  test('R2-1. 尾点域名：fox@example.com. 键化后可发布且 self 历史可读', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    const key = canonicalizeAgentAddress('fox@example.com.');
+    expect(key).toBe('fox@example.com');
+    setNotificationAgentRouteForTests(key, {
+      topic: 'agent-fox-trailing',
+      reader: { username: 'reader-fox-trail', token: 'tk_trail1234567890123456789012345' },
+    });
+    const calls: { url: string; body: any }[] = [];
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' || url.includes('/json')) {
+        return new Response(
+          `${JSON.stringify({
+            event: 'message',
+            id: 'hist-1',
+            time: 1,
+            title: 't',
+            message: 'm',
+            priority: 3,
+            tags: [],
+          })}\n`,
+          { status: 200 },
+        );
+      }
+      calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response('{"id":"msg-trail"}', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const svc = new NtfyNotificationService();
+      await svc.publish({
+        target: 'agent:fox@example.com.',
+        title: 'trail',
+        message: 'ok',
+        level: 'normal',
+      });
+      expect(calls.some((c) => c.body?.topic === 'agent-fox-trailing')).toBe(true);
+      const msgs = await svc.messages('self', 'fox@example.com.');
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]!.id).toBe('hist-1');
+    } finally {
+      setNotificationAgentRouteForTests(key, null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('R2-2. 超长 agent 名映射 invalid_agent_name（非裸 Error）', async () => {
+    const previousNtfy = { ...config.ntfy };
+    Object.assign(config.ntfy, { enabled: true, adminPassword: 'ntfy-admin-secret' });
+    try {
+      const svc = new NtfyNotificationService();
+      const overlong = `agent:${'a'.repeat(250)}@example.com`;
+      await expect(
+        svc.publish({ target: overlong as any, title: 'x', message: 'y', level: 'normal' }),
+      ).rejects.toMatchObject({ code: 'invalid_agent_name' });
+    } finally {
+      Object.assign(config.ntfy, previousNtfy);
+    }
+  });
+
+  test('R2-3. 旧 localpart 日志行在属主双键合并查询中可见', async () => {
+    resetNotificationLogForTests();
+    setNotificationLogNowForTests(() => Date.parse('2026-08-12T12:00:00.000Z'));
+    await appendNotificationLog({
+      source: 'task',
+      logicalTarget: 'agent:fox',
+      logicalChannel: 'agent:fox',
+      level: 'normal',
+      title: 'legacy-row',
+      message: 'old channel',
+      identityAddress: 'fox@test.example',
+    });
+    await appendNotificationLog({
+      source: 'task',
+      logicalTarget: 'agent:fox@test.example',
+      logicalChannel: 'agent:fox@test.example',
+      level: 'normal',
+      title: 'new-row',
+      message: 'full channel',
+      identityAddress: 'fox@test.example',
+    });
+    const page = await queryNotificationLog({
+      channel: 'agent:fox@test.example',
+      channelAliases: ['agent:fox'],
+      limit: 20,
+    });
+    expect(page.items.map((r) => r.title).sort()).toEqual(['legacy-row', 'new-row']);
+    // admin 精确频道：只见新键
+    const exact = await queryNotificationLog({
+      channel: 'agent:fox@test.example',
+      limit: 20,
+    });
+    expect(exact.items.map((r) => r.title)).toEqual(['new-row']);
+  });
+
+  test('R2-4. 删持有者+跨域复用：旧键烙印拒绝误绑', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousNtfy = { ...config.ntfy };
+    const prevHad = config.allDomains.has('secondary.example');
+    if (!prevHad) {
+      (config.allDomains as Set<string>).add('secondary.example');
+      if (!config.extraDomains.includes('secondary.example')) {
+        config.extraDomains.push('secondary.example');
+      }
+    }
+    Object.assign(config.ntfy, { enabled: false, adminPassword: 'ntfy-admin-secret' });
+
+    const staleTopic = 'agent-stale-ghost';
+    setNotificationAgentRouteForTests('ghost', {
+      topic: staleTopic,
+      reader: { username: 'reader-ghost-old', token: 'tk_ghostold1234567890123456789012' },
+      ownerAddress: 'ghost@test.example',
+    });
+
+    // NOTIFY_ENABLED=false 窗口新建跨域同 localpart
+    const created = createIdentity({ localpart: 'ghost', domain: 'secondary.example' });
+    expect(created).not.toBeNull();
+
+    Object.assign(config.ntfy, { enabled: true });
+    globalThis.fetch = (async () =>
+      new Response('{"id":"should-not-use-stale"}', { status: 200 })) as typeof fetch;
+
+    try {
+      const svc = new NtfyNotificationService();
+      // 回退到旧键但属主不匹配 → unknown_agent（未 provision 完整地址键时）
+      await expect(
+        svc.publish({
+          target: 'agent:ghost@secondary.example',
+          title: 'x',
+          message: 'must not hit stale',
+          level: 'normal',
+        }),
+      ).rejects.toMatchObject({ code: 'unknown_agent' });
+      expect(getNotificationAgentRouteForTests('ghost')?.topic).toBe(staleTopic);
+      expect(getNotificationAgentRouteForTests('ghost')?.ownerAddress).toBe('ghost@test.example');
+
+      // initialize 不得因旧键 skip；应写入完整地址新键
+      globalThis.fetch = (async () => new Response('', { status: 200 })) as typeof fetch;
+      await initializeNotifications();
+      const fresh = getNotificationAgentRouteForTests('ghost@secondary.example');
+      expect(fresh).toBeDefined();
+      expect(fresh!.topic).not.toBe(staleTopic);
+    } finally {
+      deleteIdentity('ghost@secondary.example');
+      setNotificationAgentRouteForTests('ghost', null);
+      setNotificationAgentRouteForTests('ghost@secondary.example', null);
+      globalThis.fetch = previousFetch;
+      Object.assign(config.ntfy, previousNtfy);
+      if (!prevHad) {
+        (config.allDomains as Set<string>).delete('secondary.example');
+        const idx = config.extraDomains.indexOf('secondary.example');
+        if (idx !== -1) config.extraDomains.splice(idx, 1);
+      }
+    }
+  });
+
+  test('R2-5. canonicalize 剥尾点与大小写', () => {
+    expect(canonicalizeAgentAddress('Fox@Example.COM.')).toBe('fox@example.com');
+    expect(LEGACY_OWNER_AMBIGUOUS).toBe('ambiguous');
   });
 });

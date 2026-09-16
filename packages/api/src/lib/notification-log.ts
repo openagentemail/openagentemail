@@ -60,6 +60,8 @@ export type NotificationLogRecord = {
 
 export type NotificationLogQuery = {
   channel?: NotificationLogicalChannel;
+  /** 属主读侧合并旧 localpart 频道；admin 精确查询勿传。 */
+  channelAliases?: NotificationLogicalChannel[];
   level?: NotificationLevel;
   from?: string;
   to?: string;
@@ -496,7 +498,10 @@ function applyWindow(
   const rows = records.filter((row) => {
     const t = Date.parse(row.publishedAt);
     if (!Number.isFinite(t) || t < windowFrom || t >= windowTo) return false;
-    if (query.channel && row.logicalChannel !== query.channel) return false;
+    if (query.channel) {
+      const allowed = new Set<string>([query.channel, ...(query.channelAliases ?? [])]);
+      if (!allowed.has(row.logicalChannel)) return false;
+    }
     if (query.level && row.level !== query.level) return false;
     return true;
   });
@@ -717,6 +722,7 @@ export function summarizeNotificationLog(options: {
   date: string;
   tz: string;
   channel?: NotificationLogicalChannel;
+  channelAliases?: NotificationLogicalChannel[];
 }): Promise<NotificationSummary> {
   return enqueue(() => {
     const now = nowMs();
@@ -726,6 +732,7 @@ export function summarizeNotificationLog(options: {
       records,
       {
         channel: options.channel,
+        channelAliases: options.channelAliases,
         from: bounds.from,
         to: bounds.to,
         limit: 100,
@@ -761,11 +768,14 @@ export function summarizeNotificationLog(options: {
   });
 }
 
-export function lastSuccessfulAt(channel?: NotificationLogicalChannel): Promise<string | null> {
+export function lastSuccessfulAt(
+  channel?: NotificationLogicalChannel,
+  channelAliases?: NotificationLogicalChannel[],
+): Promise<string | null> {
   return enqueue(() => {
     const now = nowMs();
     const records = loadRecordsOrThrow();
-    const { rows } = applyWindow(records, { channel, limit: 20 }, now);
+    const { rows } = applyWindow(records, { channel, channelAliases, limit: 20 }, now);
     const sent = rows.find((row) => row.delivery === 'sent');
     return sent?.publishedAt ?? null;
   });

@@ -10,6 +10,7 @@ import {
   createNotificationDevice,
   listNotificationDevices,
   revokeNotificationDevice,
+  canonicalizeAgentAddress,
   type NotificationDevice,
   type NotifyLevel,
   type NotifyService,
@@ -58,7 +59,8 @@ const deviceSchema = z.object({
 function toTopic(value: string): NotifyTopic | null {
   if (value === 'self' || value === 'user-alerts' || value === 'user-low') return value;
   if (!value.startsWith('agent:')) return null;
-  const agent = value.slice('agent:'.length);
+  // 与 Dashboard 入口一致：先 lowercase 再校验（含尾点域名经 canonicalize 在 publish 路径剥除）。
+  const agent = value.slice('agent:'.length).toLowerCase();
   return AGENT_NAME_RE.test(agent) ? `agent:${agent}` : null;
 }
 
@@ -75,6 +77,7 @@ function notificationError(c: Context, err: unknown) {
     );
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  if (err.code === 'invalid_agent_name') return c.json({ error: 'invalid_request' }, 400);
   if (err.code === 'device_registry_unavailable') return c.json({ error: err.code }, 502);
   if (err.code === 'message_too_large') {
     // 413: payload exceeds the ntfy request budget after framing (F76).
@@ -93,8 +96,8 @@ function notificationError(c: Context, err: unknown) {
 function ownAgentTopic(c: Context): NotifyTopic | null {
   const auth = getAuth(c);
   if (auth.kind !== 'identity') return null;
-  // 自身频道键改为完整地址，与 agents 新键口径一致。
-  const address = auth.address.toLowerCase();
+  // 自身频道键改为完整地址（去尾点），与 agents 新键口径一致。
+  const address = canonicalizeAgentAddress(auth.address);
   return address.includes('@') ? `agent:${address}` : null;
 }
 
@@ -214,8 +217,8 @@ export function createNotifyRoutes(options: NotifyRouteOptions = {}) {
       }
 
       try {
-        // 发布目标与逻辑频道一律 agent:<full-address>（小写）。
-        const agentKey = addressed ? addressed.address.toLowerCase() : undefined;
+        // 发布目标与逻辑频道一律 agent:<full-address>（小写、去尾点）。
+        const agentKey = addressed ? canonicalizeAgentAddress(addressed.address) : undefined;
         const publishTarget: NotifyTarget =
           input.target === 'user' ? 'user' : (`agent:${agentKey}` as const);
         return c.json(

@@ -20,6 +20,7 @@ import { recordAuditEvent } from '../lib/audit.ts';
 import { clientIp } from '../lib/net.ts';
 import {
   NotifyError,
+  canonicalizeAgentAddress,
   createNotificationDevice,
   listNotificationDevices,
   notificationService,
@@ -295,6 +296,7 @@ function notifyHistoryError(c: Context, err: unknown) {
     );
   }
   if (err.code === 'unknown_agent') return c.json({ error: err.code }, 404);
+  if (err.code === 'invalid_agent_name') return c.json({ error: 'invalid_request' }, 400);
   return c.json({ error: err.code }, 502);
 }
 
@@ -317,7 +319,7 @@ function notificationLogError(c: Context, err: unknown) {
 }
 
 const notificationsQuerySchema = z.object({
-  channel: z.string().min(1).max(80).optional(),
+  channel: z.string().min(1).max(320).optional(),
   level: z.enum(['urgent', 'normal', 'low']).optional(),
   from: z.string().min(1).max(64).optional(),
   to: z.string().min(1).max(64).optional(),
@@ -336,38 +338,58 @@ const notifySummaryQuerySchema = z.object({
 });
 
 const notifyDiagnosticsQuerySchema = z.object({
-  channel: z.string().min(1).max(80).optional(),
+  channel: z.string().min(1).max(320).optional(),
 });
 
 function ownAgentChannel(c: Context): NotificationLogicalChannel | null {
   const auth = getAuth(c);
   if (auth.kind !== 'identity') return null;
-  const address = auth.address.toLowerCase();
+  const address = canonicalizeAgentAddress(auth.address);
   return address.includes('@') && AGENT_NAME_RE.test(address) ? `agent:${address}` : null;
 }
 
+type ScopedNotificationChannel = {
+  channel?: NotificationLogicalChannel;
+  /** 属主升级兼容：旧 localpart 频道，仅 identity 读侧合并。 */
+  aliases?: NotificationLogicalChannel[];
+};
+
 /**
- * identity：强制自身 agent channel，越权 channel → 403。
- * admin：省略 = 全实例；给出的 channel 必须是合法逻辑频道。
+ * identity：强制自身 agent channel，越权 channel → 403；读侧可合并旧 localpart 别名。
+ * admin：省略 = 全实例；给出的 channel 必须是合法逻辑频道（精确，无别名）。
  */
 function scopeNotificationChannel(
   c: Context,
   requested: string | undefined,
-): NotificationLogicalChannel | undefined | Response {
+): ScopedNotificationChannel | Response {
   const auth = getAuth(c);
   if (auth.kind === 'identity') {
     const own = ownAgentChannel(c);
     if (!own) return c.json({ error: 'forbidden' }, 403);
-    if (requested && requested !== own && requested !== 'self') {
+    const full = canonicalizeAgentAddress(auth.address);
+    const localpart = full.split('@')[0];
+    const legacy =
+      localpart && AGENT_NAME_RE.test(localpart)
+        ? (`agent:${localpart}` as NotificationLogicalChannel)
+        : null;
+    if (
+      requested &&
+      requested !== own &&
+      requested !== 'self' &&
+      requested !== legacy
+    ) {
       return c.json({ error: 'forbidden: token is scoped to another notification channel' }, 403);
     }
-    return own;
+    return {
+      channel: own,
+      aliases: legacy && legacy !== own ? [legacy] : [],
+    };
   }
-  if (!requested) return undefined;
+  if (!requested) return { channel: undefined };
   if (!isLogicalChannel(requested)) {
     return c.json({ error: 'invalid_request: unknown channel' }, 400);
   }
-  return requested;
+  return { channel: requested };
 }
 
 /** 与 Bearer /v1/notify/verify 同一授权：admin 或 canNotifyUser。 */
@@ -1112,7 +1134,7 @@ export function createUiApiRoutes(
     const auth = getAuth(c);
     let identityAddress: string | undefined;
     if (auth.kind === 'identity') {
-      const address = auth.address.toLowerCase();
+      const address = canonicalizeAgentAddress(auth.address);
       const own = address.includes('@') ? (`agent:${address}` as NotifyTopic) : null;
       if (!own) return c.json({ error: 'forbidden' }, 403);
       // 授权边界：identity 不可用历史窥探 user 频道或其他 agent。
@@ -1155,7 +1177,8 @@ export function createUiApiRoutes(
 
     try {
       const page = await queryNotificationLog({
-        channel: scoped,
+        channel: scoped.channel,
+        channelAliases: scoped.aliases,
         level: parsed.data.level,
         from: parsed.data.from,
         to: parsed.data.to,
@@ -1180,7 +1203,8 @@ export function createUiApiRoutes(
       const summary = await summarizeNotificationLog({
         date: parsed.data.date,
         tz: parsed.data.tz,
-        channel: scoped,
+        channel: scoped.channel,
+        channelAliases: scoped.aliases,
       });
       return c.json(summary);
     } catch (err) {
@@ -1206,11 +1230,11 @@ export function createUiApiRoutes(
     const canVerify =
       auth.kind === 'admin' || Boolean(findIdentity(auth.address)?.canNotifyUser);
     try {
-      const last = await lastSuccessfulAt(scoped);
+      const last = await lastSuccessfulAt(scoped.channel, scoped.aliases);
       return c.json({
         enabled: config.ntfy.enabled,
         configured: Boolean(config.ntfy.enabled && config.ntfy.adminPassword),
-        channel: scoped ?? null,
+        channel: scoped.channel ?? null,
         lastSuccessfulAt: last,
         canVerify,
       });
