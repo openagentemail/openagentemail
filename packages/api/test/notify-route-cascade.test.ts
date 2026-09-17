@@ -1,8 +1,8 @@
 /**
  * #235 第 1/3：deleteIdentity 级联清理完整地址 agents 键 + reader pending_revoke 对账。
- * 验收覆盖删键/重建/reconcile 三分类/负控/fail-closed/boot 幽灵键。
+ * 含 R2 返工：串行化 writeServerConfig、reconcile 差集、isState 校验、purge 回滚、boot fixture、禁用不物化。
  */
-import { existsSync, mkdtempSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -23,6 +23,7 @@ const { config } = await import('../src/lib/config.ts');
 const { createIdentity, deleteIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
 const {
+  flushWriteServerConfigForTests,
   getNotificationAgentRouteForTests,
   getPendingReaderRevokesForTests,
   initializeNotifications,
@@ -35,6 +36,7 @@ const {
   setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
   setSyncCascadeCommitForTests,
+  setWriteServerConfigObserverForTests,
 } = await import('../src/lib/notify.ts');
 
 const originalFetch = globalThis.fetch;
@@ -46,6 +48,10 @@ function wipeNotificationStore(): void {
   const path = join(dirname(config.ntfy.configPath), 'notifications.json');
   if (existsSync(path)) unlinkSync(path);
   resetNotificationStateForTests();
+}
+
+function notificationStorePath(): string {
+  return join(dirname(config.ntfy.configPath), 'notifications.json');
 }
 
 /** provision / publish 用的最小 ntfy admin mock。 */
@@ -75,6 +81,7 @@ function mockNtfyOk(onPublish?: (topic: string) => void): void {
 beforeEach(() => {
   setNotifyPasswordHashForTests(async () => '$2b$10$cascade-test-hash.................');
   setSyncCascadeCommitForTests(null);
+  setWriteServerConfigObserverForTests(null);
   Object.assign(config.ntfy, {
     enabled: true,
     adminPassword: 'ntfy-admin-secret',
@@ -85,10 +92,12 @@ beforeEach(() => {
   resetAuditForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushWriteServerConfigForTests();
   globalThis.fetch = originalFetch;
   setNotifyPasswordHashForTests(null);
   setSyncCascadeCommitForTests(null);
+  setWriteServerConfigObserverForTests(null);
   wipeNotificationStore();
   // 强制关 ntfy，避免抢先加载本文件时把全套件 enabled 留 true。
   Object.assign(config.ntfy, previousNtfy, { enabled: false });
@@ -242,6 +251,30 @@ describe('#235 deleteIdentity notify route cascade', () => {
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-recon-d']);
   });
 
+  test('3b. reconcile 迭代间隙新入队不丢行（差集合并）', async () => {
+    setNotificationAgentRouteForTests('gap-a@test.example', {
+      topic: 'agent-gap-a',
+      reader: { username: 'reader-gap-a', token: 'tk_gapaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    });
+    setNotificationAgentRouteForTests('gap-b@test.example', {
+      topic: 'agent-gap-b',
+      reader: { username: 'reader-gap-b', token: 'tk_gapbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+    });
+    removeAgentRouteOnIdentityDelete('gap-a@test.example');
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-gap-a']);
+
+    await reconcilePendingReaderRevokes(async (username) => {
+      if (username === 'reader-gap-a') {
+        // 迭代间隙：新删入队，旧实现整体覆盖会抹掉 reader-gap-b
+        removeAgentRouteOnIdentityDelete('gap-b@test.example');
+        return 'deleted';
+      }
+      return 'deleted';
+    });
+
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-gap-b']);
+  });
+
   test('4. 负控：他址键保留；裸 localpart 键不碰', () => {
     const a = createIdentity({ localpart: 'keep-a' })!;
     const b = createIdentity({ localpart: 'keep-b' })!;
@@ -299,7 +332,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
     expect(findIdentity(address)).toBeUndefined();
   });
 
-  test('6. boot reconcile：完整地址幽灵键清、裸键保留、有主键不动', async () => {
+  test('6. boot reconcile 独立 fixture：只调 initializeNotifications 清幽灵', async () => {
     const live = createIdentity({ localpart: 'live-boot' })!;
     const liveAddr = live.identity.address;
 
@@ -321,26 +354,123 @@ describe('#235 deleteIdentity notify route cascade', () => {
     });
 
     mockNtfyOk();
-    const purged = purgeOrphanFullAddressAgentRoutes('boot_reconcile');
-    expect(purged).toBe(true);
+    // 不直调 purge：删掉 boot 挂点则本断言必红。
+    await initializeNotifications();
+
     expect(getNotificationAgentRouteForTests('ghost-boot@test.example')).toBeUndefined();
-    expect(getNotificationAgentRouteForTests(liveAddr)?.topic).toBe('agent-live-boot');
+    expect(getNotificationAgentRouteForTests(liveAddr)).toBeDefined();
     expect(getNotificationAgentRouteForTests('bareboot')?.topic).toBe('agent-bare-boot');
-    expect(
-      getPendingReaderRevokesForTests().some((r) => r.username === 'reader-ghost-boot'),
-    ).toBe(true);
 
     const audit = readAuditEvents({ event: 'identity.notify_route.delete' }).find(
       (e) => e.address === 'ghost-boot@test.example',
     );
     expect(audit?.actor).toBe('boot_reconcile');
 
-    // initializeNotifications 同样会跑 purge（幂等）+ 不误伤裸键
-    await initializeNotifications();
-    expect(getNotificationAgentRouteForTests('bareboot')?.topic).toBe('agent-bare-boot');
-    expect(getNotificationAgentRouteForTests(liveAddr)).toBeDefined();
-
     deleteIdentity(liveAddr);
+  });
+
+  test('6b. purge save 失败回滚且不发 audit', () => {
+    setNotificationAgentRouteForTests('ghost-rollback@test.example', {
+      topic: 'agent-ghost-rollback',
+      reader: {
+        username: 'reader-ghost-rollback',
+        token: 'tk_ghostrollback12345678901234567',
+      },
+    });
+
+    setSyncCascadeCommitForTests(() => {
+      throw new Error('purge_persist_failed');
+    });
+
+    expect(() => purgeOrphanFullAddressAgentRoutes('boot_reconcile')).toThrow(
+      'purge_persist_failed',
+    );
+    expect(getNotificationAgentRouteForTests('ghost-rollback@test.example')?.topic).toBe(
+      'agent-ghost-rollback',
+    );
+    expect(getPendingReaderRevokesForTests()).toHaveLength(0);
+    expect(
+      readAuditEvents({ event: 'identity.notify_route.delete' }).some(
+        (e) => e.address === 'ghost-rollback@test.example',
+      ),
+    ).toBe(false);
+  });
+
+  test('7. writeServerConfig 串行化：后写覆盖先写，终态无幽灵 reader', async () => {
+    const a = createIdentity({ localpart: 'serial-a' })!;
+    const b = createIdentity({ localpart: 'serial-b' })!;
+    const addrA = a.identity.address;
+    const addrB = b.identity.address;
+    setNotificationAgentRouteForTests(addrA, {
+      topic: 'agent-serial-a',
+      reader: { username: 'reader-serial-a', token: 'tk_serialaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    });
+    setNotificationAgentRouteForTests(addrB, {
+      topic: 'agent-serial-b',
+      reader: { username: 'reader-serial-b', token: 'tk_serialbbbbbbbbbbbbbbbbbbbbbbbbb' },
+    });
+
+    const snapshots: string[][] = [];
+    setWriteServerConfigObserverForTests((keys) => snapshots.push([...keys]));
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let blockedOnce = false;
+    setNotifyPasswordHashForTests(async () => {
+      if (!blockedOnce) {
+        blockedOnce = true;
+        await gate;
+      }
+      return '$2b$10$cascade-serial-hash...............';
+    });
+
+    deleteIdentity(addrA);
+    // 等首写进入哈希闸门（observer 已拍快照）
+    for (let i = 0; i < 50 && snapshots.length < 1; i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(snapshots.length).toBeGreaterThanOrEqual(1);
+
+    deleteIdentity(addrB);
+    release();
+    await flushWriteServerConfigForTests();
+
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    const last = snapshots[snapshots.length - 1]!;
+    expect(last).not.toContain(addrA);
+    expect(last).not.toContain(addrB);
+
+    const yml = readFileSync(config.ntfy.configPath, 'utf8');
+    expect(yml).not.toContain('reader-serial-a');
+    expect(yml).not.toContain('reader-serial-b');
+  });
+
+  test('8. isState 拒收非法 pendingReaderRevokes（corrupt 口径）', () => {
+    setNotificationAgentRouteForTests('shape@test.example', {
+      topic: 'agent-shape',
+      reader: { username: 'reader-shape', token: 'tk_shapeaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    });
+    // 落盘后破坏 pending 行形状
+    resetNotificationStateForTests();
+    const path = notificationStorePath();
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    parsed.pendingReaderRevokes = [{ length: 1 }];
+    writeFileSync(path, JSON.stringify(parsed, null, 2), { mode: 0o600 });
+    resetNotificationStateForTests();
+
+    expect(() => getPendingReaderRevokesForTests()).toThrow('notification_store_corrupt');
+  });
+
+  test('9. ntfy 未启用：deleteIdentity 不物化 notifications.json', () => {
+    Object.assign(config.ntfy, { enabled: false });
+    wipeNotificationStore();
+    expect(existsSync(notificationStorePath())).toBe(false);
+
+    const created = createIdentity({ localpart: 'ntfy-off' })!;
+    expect(deleteIdentity(created.identity.address)).toBe(true);
+    expect(existsSync(notificationStorePath())).toBe(false);
   });
 
   test('mutation：删键步骤缺失则键残留（对照必红逻辑）', () => {

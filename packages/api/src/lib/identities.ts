@@ -526,6 +526,8 @@ export function deleteIdentity(address: string): boolean {
   }
   // ntfy 外泄通道：先删完整地址 agents 键并落 pending_revoke，再 save 身份。
   // state 持久化失败抛错 fail-closed，身份记录必须仍在。
+  // 落盘顺序窗口（与 webhook 级联同款）：notify 路由先删后，若 identity save 失败，
+  // 该身份在下次 boot 前无推送路由=安全收窄方向（可重试 delete；非外泄扩大）。
   removeAgentRouteOnIdentityDelete(needle);
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
