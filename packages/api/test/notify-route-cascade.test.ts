@@ -27,6 +27,7 @@ const {
   getNotificationAgentRouteForTests,
   getPendingReaderRevokesForTests,
   initializeNotifications,
+  isWriteServerConfigIdleForTests,
   NtfyNotificationService,
   provisionIdentityNotifications,
   purgeOrphanFullAddressAgentRoutes,
@@ -558,6 +559,60 @@ describe('#235 deleteIdentity notify route cascade', () => {
     const yml = readFileSync(config.ntfy.configPath, 'utf8');
     for (const lp of ['coa-a', 'coa-b', 'coa-c', 'coa-d']) {
       expect(yml).not.toContain(`reader-${lp}`);
+    }
+  });
+
+  test('7c. writeServerConfig drain 拒绝：无 unhandledrejection 且队列可再入', async () => {
+    const created = createIdentity({ localpart: 'drain-rej' })!;
+    const address = created.identity.address;
+    setNotificationAgentRouteForTests(address, {
+      topic: 'agent-drain-rej',
+      reader: {
+        username: 'reader-drain-rej',
+        token: 'tk_drainrej1234567890123456789012',
+      },
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      // 首次重写在哈希阶段失败 → drain 拒绝
+      setNotifyPasswordHashForTests(async () => {
+        throw new Error('password_hash_boom');
+      });
+      expect(deleteIdentity(address)).toBe(true);
+      await flushWriteServerConfigForTests();
+      // 给 finally/.catch 微任务一轮时间
+      await new Promise((r) => setImmediate(r));
+
+      expect(unhandled).toEqual([]);
+      expect(isWriteServerConfigIdleForTests()).toBe(true);
+
+      // 后续写仍可排队并成功落盘
+      const again = createIdentity({ localpart: 'drain-ok' })!;
+      const addrOk = again.identity.address;
+      setNotificationAgentRouteForTests(addrOk, {
+        topic: 'agent-drain-ok',
+        reader: {
+          username: 'reader-drain-ok',
+          token: 'tk_drainok12345678901234567890123',
+        },
+      });
+      setNotifyPasswordHashForTests(async () => '$2b$10$cascade-drain-ok-hash............');
+      expect(deleteIdentity(addrOk)).toBe(true);
+      await flushWriteServerConfigForTests();
+      await new Promise((r) => setImmediate(r));
+
+      expect(unhandled).toEqual([]);
+      expect(isWriteServerConfigIdleForTests()).toBe(true);
+      const yml = readFileSync(config.ntfy.configPath, 'utf8');
+      expect(yml).not.toContain('reader-drain-ok');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
     }
   });
 

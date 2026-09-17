@@ -487,6 +487,11 @@ export async function flushWriteServerConfigForTests(): Promise<void> {
   );
 }
 
+/** @internal 测试缝：coalesce 队列是否空闲（无 in-flight / 无挂起 latest）。 */
+export function isWriteServerConfigIdleForTests(): boolean {
+  return writeServerConfigCoalesce === null && writeServerConfigLatest === null;
+}
+
 async function writeServerConfigBody(
   state: NotifyState,
   adminPassword: string,
@@ -551,22 +556,23 @@ async function enqueueWriteServerConfig(req: WriteServerConfigRequest): Promise<
     () => undefined,
     () => undefined,
   );
-  // 兜底：fire-and-forget 调用方漏挂 catch 时不致 unhandledrejection；
-  // await 方仍能从返回的 drain 上感知拒绝。
-  void drain.catch(() => undefined);
-  void drain.finally(() => {
-    if (writeServerConfigCoalesce === drain) {
-      writeServerConfigCoalesce = null;
-      // finally 窗口内若又有新请求，用已快照的 latest 补开一轮
-      if (writeServerConfigLatest) {
-        void enqueueWriteServerConfig(writeServerConfigLatest).catch((err) => {
-          console.warn('[notify] writeServerConfig coalesce follow-up failed', {
-            error: err instanceof Error ? err.message : 'unknown',
+  // finally 派生 Promise 在 drain 拒绝时继承拒绝态；必须 .catch，否则 void 即 unhandledrejection。
+  // await 方仍从返回的 drain 上感知拒绝；此处只吞掉 cleanup 链。
+  void drain
+    .finally(() => {
+      if (writeServerConfigCoalesce === drain) {
+        writeServerConfigCoalesce = null;
+        // finally 窗口内若又有新请求，用已快照的 latest 补开一轮
+        if (writeServerConfigLatest) {
+          void enqueueWriteServerConfig(writeServerConfigLatest).catch((err) => {
+            console.warn('[notify] writeServerConfig coalesce follow-up failed', {
+              error: err instanceof Error ? err.message : 'unknown',
+            });
           });
-        });
+        }
       }
-    }
-  });
+    })
+    .catch(() => undefined);
   return drain;
 }
 
