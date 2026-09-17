@@ -79,8 +79,19 @@ jobs:
 
       - name: Assert runtime artifact set
         run: |
-          docker run --rm --entrypoint sh oae-api-smoke -c \
-            'test -f dist/main.js && test ! -f package.json && test ! -d node_modules/typescript'
+          # dist-only + 无 dev 包；可执行件/依赖属 root，数据目录属 bun（P1）
+          docker run --rm --entrypoint sh oae-api-smoke -c '
+            set -eu
+            test -f dist/main.js
+            test ! -f package.json
+            test ! -d node_modules/typescript
+            test "$(stat -c %u dist/main.js)" = "0"
+            test "$(stat -c %u node_modules)" = "0"
+            test ! -w dist/main.js
+            test ! -w node_modules
+            test "$(stat -c %u /app/data)" = "1000"
+            test -w /app/data
+          '
 
       - name: Assert non-root uid
         run: |
@@ -112,19 +123,48 @@ jobs:
             sleep 1
           done
           test "${ok}" = "1"
+          # DATA_DIR 写探针（bun 可写数据目录）
+          docker exec "${cid}" sh -c 'touch /app/data/.w93-write-probe && test -f /app/data/.w93-write-probe'
 
-      - name: Lockfile negative control (build must fail)
+      - name: Lockfile negative control (package.json drift must fail frozen)
         working-directory: packages/api
         run: |
-          cp bun.lock bun.lock.bak
-          # 无论 build 成败，确保还原 lockfile（本地复跑中断也不留脏文件）
-          restore_lock() { mv -f bun.lock.bak bun.lock 2>/dev/null || true; }
-          trap restore_lock EXIT
-          # 破坏 lockfile 哈希/内容，强制 frozen-lockfile 失败
-          sed -i '1s/.*/{"lockfileVersion":1,"tampered":true}/' bun.lock || \
-            printf '%s\n' '{"lockfileVersion":1,"tampered":true}' > bun.lock
+          cp package.json package.json.bak
+          # 无论成败，还原 package.json（bun.lock 保持可解析、不动）
+          restore_pkg() { mv -f package.json.bak package.json 2>/dev/null || true; }
+          trap restore_pkg EXIT
+          # package.json 漂移：新增 dependency，lockfile 仍合法可解析
+          python3 -c '
+          import json
+          from pathlib import Path
+          p = Path("package.json")
+          data = json.loads(p.read_text())
+          data.setdefault("dependencies", {})["left-pad"] = "1.3.0"
+          p.write_text(json.dumps(data, indent=2) + "\n")
+          '
+          # docker build（Dockerfile 内 --frozen-lockfile）必须红
           set +e
           docker build -t oae-api-smoke-neg .
           rc=$?
           set -e
           test "${rc}" -ne 0
+          # 区分度：同一漂移树两份独立拷贝——plain install 成功、frozen 失败（证明红的是 flag 非语法）
+          # 注意：勿用 --production 作 plain 对照（Bun 生产安装路径对漂移亦会拒写 lock）
+          tmp_plain="$(mktemp -d)"
+          tmp_frozen="$(mktemp -d)"
+          cp package.json bun.lock "${tmp_plain}/"
+          cp package.json bun.lock "${tmp_frozen}/"
+          set +e
+          docker run --rm -e CI= -v "${tmp_plain}:/work" -w /work oven/bun:1 \
+            bun install
+          plain_rc=$?
+          docker run --rm -e CI= -v "${tmp_frozen}:/work" -w /work oven/bun:1 \
+            bun install --frozen-lockfile
+          frozen_rc=$?
+          set -e
+          # 容器可能以 root 写 node_modules；用 alpine root 清理，不依赖宿主机 sudo
+          docker run --rm -v "${tmp_plain}:/work" alpine sh -c 'rm -rf /work/*'
+          docker run --rm -v "${tmp_frozen}:/work" alpine sh -c 'rm -rf /work/*'
+          rmdir "${tmp_plain}" "${tmp_frozen}" 2>/dev/null || true
+          test "${plain_rc}" -eq 0
+          test "${frozen_rc}" -ne 0

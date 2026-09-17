@@ -18,8 +18,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# 数据目录属主交给 oven/bun 自带的 bun 用户（uid/gid 1000）；既有卷须部署窗先 chown
-RUN mkdir -p /app/data && chown -R bun:bun /app
+# 只把数据目录交给 bun（uid 1000）；dist/node_modules 保持 root 所有，运行时只读执行
+RUN mkdir -p /app/data && chown -R bun:bun /app/data
 USER bun
 EXPOSE 3100
 CMD ["bun", "dist/main.js"]
