@@ -56,6 +56,45 @@ If no SMTP relay is configured and outbound port 25 is blocked, API
 queue. Treat doctor's outbound-port-25 result as the delivery prerequisite, or
 configure a relay before relying on direct delivery.
 
+## Existing `api-data` volume: one-time non-root migration (#93)
+
+The API runtime image runs as the `bun` user (`uid`/`gid` **1000**), not root.
+**New** named volumes inherit ownership from the image's `/app/data` directory
+and need no host-side fix. **Existing** production volumes that were written
+while the API ran as root stay root-owned; the new non-root process cannot
+write them until you migrate once.
+
+**Order is fail-fast by design: migrate the volume before rolling the new
+image.** Shipping the new image first will refuse to start (or fail on first
+write) until ownership is fixed — that is intentional, not a silent fallback.
+
+1. Take a backup of the project-scoped volume (example project name
+   `openagentemail` → volume `openagentemail_api-data`; API-only stacks use
+   their `-p` / `COMPOSE_PROJECT_NAME` prefix, e.g. `oae-alpha_api-data`).
+2. Stop writers that mount the volume (at minimum the `api` service; full
+   stack: also stop anything else writing `api-data` during the window).
+3. One-shot chown to the runtime user:
+
+```bash
+# Replace <project>_api-data with your real volume name (docker volume ls).
+docker run --rm -v <project>_api-data:/data alpine \
+  sh -c 'chown -R 1000:1000 /data'
+```
+
+4. Spot-check ownership before bringing services back:
+
+```bash
+docker run --rm -v <project>_api-data:/data alpine \
+  sh -c 'ls -ln /data | head'
+# Expect uid/gid columns to show 1000 / 1000 for migrated paths.
+```
+
+5. Only then pull/build and start the new API image (`docker compose up -d`
+   or your usual deploy path).
+
+Do **not** reverse this order. Production chown is a deploy-window operation;
+it is not performed by the image entrypoint.
+
 ## Public TLS with Let's Encrypt (opt-in)
 
 The default `docker compose up -d` path remains self-signed: it does not start

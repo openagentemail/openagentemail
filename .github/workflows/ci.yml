@@ -66,3 +66,64 @@ jobs:
         run: |
           bun install
           bun run test:capacity
+
+  # #93：API 运行时镜像契约（dist-only、生产依赖、non-root、healthz、lockfile fail-closed）
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t oae-api-smoke packages/api
+
+      - name: Assert runtime artifact set
+        run: |
+          docker run --rm --entrypoint sh oae-api-smoke -c \
+            'test -f dist/main.js && test ! -f package.json && test ! -d node_modules/typescript'
+
+      - name: Assert non-root uid
+        run: |
+          uid="$(docker run --rm --entrypoint id oae-api-smoke -u)"
+          echo "uid=${uid}"
+          test "${uid}" = "1000"
+
+      - name: Healthz responds 200
+        run: |
+          cid="$(docker run -d -p 3100:3100 \
+            -e DOMAIN=smoke.example \
+            -e API_KEYS=smoke-ci-key \
+            -e IMAP_USER=agent@smoke.example \
+            -e IMAP_PASS=smoke-pass \
+            -e SMTP_USER=agent@smoke.example \
+            -e SMTP_PASS=smoke-pass \
+            -e DATA_DIR=/app/data \
+            -e UI_ENABLED=false \
+            oae-api-smoke)"
+          cleanup() { docker rm -f "${cid}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          ok=0
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/healthz || true)"
+            if [ "${code}" = "200" ]; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          test "${ok}" = "1"
+
+      - name: Lockfile negative control (build must fail)
+        working-directory: packages/api
+        run: |
+          cp bun.lock bun.lock.bak
+          # 破坏 lockfile 哈希/内容，强制 frozen-lockfile 失败
+          sed -i '1s/.*/{"lockfileVersion":1,"tampered":true}/' bun.lock || \
+            printf '%s\n' '{"lockfileVersion":1,"tampered":true}' > bun.lock
+          set +e
+          set +e
+          docker build -t oae-api-smoke-neg .
+          rc=$?
+          set -e
+          mv -f bun.lock.bak bun.lock
+          test "${rc}" -ne 0
