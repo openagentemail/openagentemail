@@ -74,6 +74,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 行为契约（漂移必红）由既有负控覆盖（Bun 生产安装对漂移默认 frozen）；
+      # 本断言守两阶段 flag 存在性，防 --frozen-lockfile 被删后 CI 静默失守。
+      - name: Assert frozen-lockfile flag present in Dockerfile
+        run: test "$(grep -c -- --frozen-lockfile packages/api/Dockerfile)" = "2"
+
       - name: Build API image
         run: docker build -t oae-api-smoke packages/api
 
