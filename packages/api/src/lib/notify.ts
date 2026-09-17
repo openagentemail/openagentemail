@@ -610,6 +610,15 @@ export function removeAgentRouteOnIdentityDelete(
     throw err;
   }
 
+  // 持久化成功后立即 best-effort 首次吊销（保持同步签名不阻塞）。
+  // 失败行留 pending，由既有 reconcile/boot 对账收敛——无 boot/无设备列表时也能踢出旧 reader。
+  void reconcilePendingReaderRevokes().catch((err) => {
+    console.warn('[notify] first reader revoke after identity delete failed', {
+      address: agent,
+      error: err instanceof Error ? err.message : 'unknown',
+    });
+  });
+
   if (config.ntfy.adminPassword) {
     void writeServerConfig(current).catch((err) => {
       console.warn('[notify] server.yml rewrite after agent route delete failed', {
@@ -631,30 +640,42 @@ export function removeAgentRouteOnIdentityDelete(
  * 对账 pending reader 吊销：复用 deleteNtfyUserResult 三分类。
  * deleted/not_found → 出队收敛；transient → 留 pending 下轮重试。
  * 结尾差集合并：只滤掉本轮已确认 username，迭代间隙新入队行保留。
+ * 模块级串行化：避免 deleteIdentity 首次吊销与 boot/list 对账并发互相覆盖。
  */
+let readerRevokeReconcileTail: Promise<void> = Promise.resolve();
+
 export async function reconcilePendingReaderRevokes(
   deleteUser: DeleteNtfyUser = deleteNtfyUserResult,
 ): Promise<void> {
-  if (!cachedState) cachedState = loadState();
-  const current = cachedState;
-  const snapshot = [...(current.pendingReaderRevokes ?? [])];
-  if (!snapshot.length) return;
+  const run = async (): Promise<void> => {
+    if (!cachedState) cachedState = loadState();
+    const current = cachedState;
+    const snapshot = [...(current.pendingReaderRevokes ?? [])];
+    if (!snapshot.length) return;
 
-  const confirmed = new Set<string>();
-  for (const row of snapshot) {
-    if (row.status !== 'pending_revoke') continue;
-    const result = await deleteUser(row.username);
-    if (result === 'transient') continue;
-    // deleted | not_found：本轮确认收敛。
-    confirmed.add(row.username);
-  }
-  if (confirmed.size === 0) return;
+    const confirmed = new Set<string>();
+    for (const row of snapshot) {
+      if (row.status !== 'pending_revoke') continue;
+      const result = await deleteUser(row.username);
+      if (result === 'transient') continue;
+      // deleted | not_found：本轮确认收敛。
+      confirmed.add(row.username);
+    }
+    if (confirmed.size === 0) return;
 
-  // 重读当前队列（可能含迭代间隙新入队），只去掉 confirmed。
-  const latest = current.pendingReaderRevokes ?? [];
-  const merged = latest.filter((row) => !confirmed.has(row.username));
-  current.pendingReaderRevokes = merged.length > 0 ? merged : undefined;
-  saveState(current);
+    // 重读当前队列（可能含迭代间隙新入队），只去掉 confirmed。
+    const latest = current.pendingReaderRevokes ?? [];
+    const merged = latest.filter((row) => !confirmed.has(row.username));
+    current.pendingReaderRevokes = merged.length > 0 ? merged : undefined;
+    saveState(current);
+  };
+
+  const next = readerRevokeReconcileTail.then(run, run);
+  readerRevokeReconcileTail = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
 }
 
 /**

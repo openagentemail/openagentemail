@@ -54,20 +54,35 @@ function notificationStorePath(): string {
   return join(dirname(config.ntfy.configPath), 'notifications.json');
 }
 
-/** provision / publish 用的最小 ntfy admin mock。 */
-function mockNtfyOk(onPublish?: (topic: string) => void): void {
+/** provision / publish / admin DELETE 用的最小 ntfy mock。 */
+function mockNtfyOk(options?: {
+  onPublish?: (topic: string) => void;
+  onDelete?: (username: string) => void;
+}): void {
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
+    if (method === 'DELETE' && url.includes('/v1/users')) {
+      let username = '';
+      if (typeof init?.body === 'string') {
+        try {
+          username = String((JSON.parse(init.body) as { username?: string }).username ?? '');
+        } catch {
+          username = '';
+        }
+      }
+      options?.onDelete?.(username);
+      return new Response('', { status: 200 });
+    }
     if (method === 'POST' && url.includes('/v1/account/token')) {
-      return new Response(JSON.stringify({ token: 'tk_provisioned123456789012345678901' }), {
+      return new Response(JSON.stringify({ token: `tk_${cryptoRandomToken()}` }), {
         status: 200,
       });
     }
-    if (method === 'POST' && onPublish && typeof init?.body === 'string') {
+    if (method === 'POST' && options?.onPublish && typeof init?.body === 'string') {
       try {
         const body = JSON.parse(init.body) as { topic?: string };
-        if (body.topic) onPublish(body.topic);
+        if (body.topic) options.onPublish(body.topic);
       } catch {
         /* ignore */
       }
@@ -76,6 +91,11 @@ function mockNtfyOk(onPublish?: (topic: string) => void): void {
       status: 200,
     });
   }) as typeof fetch;
+}
+
+/** 测试用随机 token 后缀，避免同址重建两次 provision 撞同一 mock token。 */
+function cryptoRandomToken(): string {
+  return Array.from({ length: 29 }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]!).join('');
 }
 
 beforeEach(() => {
@@ -149,48 +169,89 @@ describe('#235 deleteIdentity notify route cascade', () => {
     ).rejects.toMatchObject({ code: 'unknown_agent' });
   });
 
-  test('2. 同址重建 → 新 topic/reader；旧 topic 不再被解析', async () => {
+  test('2. 同址重建：topic 确定性相同 + 新 reader + 首次吊销 DELETE（禁人工旧 topic fixture）', async () => {
+    const deletedUsers: string[] = [];
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((r) => {
+      releaseDelete = r;
+    });
+
+    // DELETE 闸门：先让同步路径断言 pending，再放行首次吊销收敛
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (method === 'DELETE' && url.includes('/v1/users')) {
+        let username = '';
+        if (typeof init?.body === 'string') {
+          try {
+            username = String((JSON.parse(init.body) as { username?: string }).username ?? '');
+          } catch {
+            username = '';
+          }
+        }
+        deletedUsers.push(username);
+        await deleteGate;
+        return new Response('', { status: 200 });
+      }
+      if (method === 'POST' && url.includes('/v1/account/token')) {
+        return new Response(JSON.stringify({ token: `tk_${cryptoRandomToken()}` }), {
+          status: 200,
+        });
+      }
+      return new Response(method === 'POST' && !url.includes('/v1/') ? '{"id":"ok"}' : '', {
+        status: 200,
+      });
+    }) as typeof fetch;
+
+    // 真实 provision，不用 setNotificationAgentRouteForTests 伪造旧 topic
     const created = createIdentity({ localpart: 'cascade-rebuild' })!;
     const address = created.identity.address;
-    const oldTopic = 'agent-cascade-rebuild-OLD';
-    const oldReader = 'reader-cascade-rebuild-old';
-    setNotificationAgentRouteForTests(address, {
-      topic: oldTopic,
-      reader: {
-        username: oldReader,
-        token: 'tk_cascaderebuildold123456789012345',
-      },
-    });
+    await provisionIdentityNotifications(created.identity);
+    const old = getNotificationAgentRouteForTests(address);
+    expect(old).toBeDefined();
+    const oldTopic = old!.topic;
+    const oldToken = old!.reader.token;
+    const oldUser = old!.reader.username;
 
     expect(deleteIdentity(address)).toBe(true);
     expect(getNotificationAgentRouteForTests(address)).toBeUndefined();
+    // 同步返回后、DELETE 闸门未放行：旧 reader 必在 pending_revoke
+    expect(getPendingReaderRevokesForTests().some((r) => r.username === oldUser)).toBe(true);
+    // 首次吊销已触发（fetch 已入队，username 已记录）
+    for (let i = 0; i < 80 && !deletedUsers.includes(oldUser); i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(deletedUsers).toContain(oldUser);
 
-    mockNtfyOk();
+    await flushWriteServerConfigForTests();
+    // server.yml 重写不含旧 reader 的 auth-tokens / auth-access 声明
+    const yml = readFileSync(config.ntfy.configPath, 'utf8');
+    expect(yml).not.toContain(oldUser);
+
+    releaseDelete();
+    // 等首次吊销收敛出队
+    for (let i = 0; i < 80 && getPendingReaderRevokesForTests().some((r) => r.username === oldUser); i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    // 同址重建走真实 provision：topic 确定性派生相同，reader 凭据换新
+    mockNtfyOk({ onDelete: (u) => deletedUsers.push(u) });
     const again = createIdentity({ localpart: 'cascade-rebuild' })!;
     await provisionIdentityNotifications(again.identity);
-
     const fresh = getNotificationAgentRouteForTests(address);
     expect(fresh).toBeDefined();
-    expect(fresh!.topic).not.toBe(oldTopic);
-    expect(fresh!.reader.username).not.toBe(oldReader);
-
-    // 旧 topic 无路由入口：publish 走新 topic，物理隔离 12h 缓存。
-    const published: string[] = [];
-    mockNtfyOk((topic) => published.push(topic));
-    const svc = new NtfyNotificationService();
-    await svc.publish({
-      target: `agent:${address}`,
-      title: 'new',
-      message: 'fresh route',
-      level: 'normal',
-    });
-    expect(published.some((t) => t === oldTopic)).toBe(false);
-    expect(published.some((t) => t === fresh!.topic)).toBe(true);
+    expect(fresh!.topic).toBe(oldTopic);
+    expect(fresh!.reader.token).not.toBe(oldToken);
+    expect(fresh!.reader.username).not.toBe(oldUser);
 
     deleteIdentity(address);
+    await flushWriteServerConfigForTests();
   });
 
   test('3. reconcile 三分类：2xx→出队；40031→出队；5xx→留 pending', async () => {
+    // 默认 503：remove 触发的首次吊销留 pending，由本测显式控制收敛
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+
     setNotificationAgentRouteForTests('ghost@test.example', {
       topic: 'agent-ghost-recon',
       reader: {
@@ -199,6 +260,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost@test.example');
+    await new Promise((r) => setTimeout(r, 20));
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-recon-a']);
 
     // transient 5xx：留 pending
@@ -218,10 +280,16 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost2@test.example');
+    await new Promise((r) => setTimeout(r, 20));
     await reconcilePendingReaderRevokes(async () => 'deleted');
     expect(getPendingReaderRevokesForTests()).toHaveLength(0);
 
-    // mock fetch 分类：40031 / 5xx
+    // 40031：先设 fetch 再 remove，首次吊销即 not_found 收敛
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ code: 40031, error: 'invalid request: user does not exist' }),
+        { status: 400 },
+      )) as typeof fetch;
     setNotificationAgentRouteForTests('ghost3@test.example', {
       topic: 'agent-ghost3',
       reader: {
@@ -230,14 +298,13 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost3@test.example');
-    globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({ code: 40031, error: 'invalid request: user does not exist' }),
-        { status: 400 },
-      )) as typeof fetch;
-    await reconcilePendingReaderRevokes();
+    for (let i = 0; i < 40 && getPendingReaderRevokesForTests().length > 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
     expect(getPendingReaderRevokesForTests()).toHaveLength(0);
 
+    // 5xx：首次吊销 transient，pending 保留
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
     setNotificationAgentRouteForTests('ghost4@test.example', {
       topic: 'agent-ghost4',
       reader: {
@@ -246,12 +313,13 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost4@test.example');
-    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
-    await reconcilePendingReaderRevokes();
+    await new Promise((r) => setTimeout(r, 20));
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-recon-d']);
   });
 
   test('3b. reconcile 迭代间隙新入队不丢行（差集合并）', async () => {
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+
     setNotificationAgentRouteForTests('gap-a@test.example', {
       topic: 'agent-gap-a',
       reader: { username: 'reader-gap-a', token: 'tk_gapaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
@@ -261,6 +329,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
       reader: { username: 'reader-gap-b', token: 'tk_gapbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
     });
     removeAgentRouteOnIdentityDelete('gap-a@test.example');
+    await new Promise((r) => setTimeout(r, 20));
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-gap-a']);
 
     await reconcilePendingReaderRevokes(async (username) => {
