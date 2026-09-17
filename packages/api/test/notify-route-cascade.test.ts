@@ -33,8 +33,11 @@ const {
   reconcilePendingReaderRevokes,
   removeAgentRouteOnIdentityDelete,
   resetNotificationStateForTests,
+  setAfterCreateRuntimeReaderForTests,
   setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
+  setReaderRevokeReconcileBudgetForTests,
+  setReaderRevokeReconcileMaxRowsForTests,
   setSyncCascadeCommitForTests,
   setWriteServerConfigObserverForTests,
 } = await import('../src/lib/notify.ts');
@@ -102,6 +105,9 @@ beforeEach(() => {
   setNotifyPasswordHashForTests(async () => '$2b$10$cascade-test-hash.................');
   setSyncCascadeCommitForTests(null);
   setWriteServerConfigObserverForTests(null);
+  setAfterCreateRuntimeReaderForTests(null);
+  setReaderRevokeReconcileBudgetForTests(null);
+  setReaderRevokeReconcileMaxRowsForTests(null);
   Object.assign(config.ntfy, {
     enabled: true,
     adminPassword: 'ntfy-admin-secret',
@@ -118,6 +124,9 @@ afterEach(async () => {
   setNotifyPasswordHashForTests(null);
   setSyncCascadeCommitForTests(null);
   setWriteServerConfigObserverForTests(null);
+  setAfterCreateRuntimeReaderForTests(null);
+  setReaderRevokeReconcileBudgetForTests(null);
+  setReaderRevokeReconcileMaxRowsForTests(null);
   wipeNotificationStore();
   // 强制关 ntfy，避免抢先加载本文件时把全套件 enabled 留 true。
   Object.assign(config.ntfy, previousNtfy, { enabled: false });
@@ -506,7 +515,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
     release();
     await flushWriteServerConfigForTests();
 
-    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    expect(snapshots.length).toBeGreaterThanOrEqual(1);
     const last = snapshots[snapshots.length - 1]!;
     expect(last).not.toContain(addrA);
     expect(last).not.toContain(addrB);
@@ -514,6 +523,42 @@ describe('#235 deleteIdentity notify route cascade', () => {
     const yml = readFileSync(config.ntfy.configPath, 'utf8');
     expect(yml).not.toContain('reader-serial-a');
     expect(yml).not.toContain('reader-serial-b');
+  });
+
+  test('7b. writeServerConfig coalesce：连续触发实际重写次数 < 触发次数且终态正确', async () => {
+    const ids = ['coa-a', 'coa-b', 'coa-c', 'coa-d'].map((lp) => createIdentity({ localpart: lp })!);
+    for (const row of ids) {
+      setNotificationAgentRouteForTests(row.identity.address, {
+        topic: `agent-${row.identity.address.split('@')[0]}`,
+        reader: {
+          username: `reader-${row.identity.address.split('@')[0]}`,
+          token: `tk_${row.identity.address.split('@')[0]}1234567890123456789012`.slice(0, 32),
+        },
+      });
+    }
+
+    let writes = 0;
+    setWriteServerConfigObserverForTests(() => {
+      writes += 1;
+    });
+    // 慢哈希拉长单次写窗口，便于后续删除 coalesce 进同一 drain
+    setNotifyPasswordHashForTests(async () => {
+      await new Promise((r) => setTimeout(r, 15));
+      return '$2b$10$cascade-coalesce-hash.............';
+    });
+
+    const triggers = ids.length;
+    for (const row of ids) {
+      deleteIdentity(row.identity.address);
+    }
+    await flushWriteServerConfigForTests();
+
+    expect(writes).toBeGreaterThan(0);
+    expect(writes).toBeLessThan(triggers);
+    const yml = readFileSync(config.ntfy.configPath, 'utf8');
+    for (const lp of ['coa-a', 'coa-b', 'coa-c', 'coa-d']) {
+      expect(yml).not.toContain(`reader-${lp}`);
+    }
   });
 
   test('8. isState 拒收非法 pendingReaderRevokes（corrupt 口径）', () => {
@@ -540,6 +585,65 @@ describe('#235 deleteIdentity notify route cascade', () => {
     const created = createIdentity({ localpart: 'ntfy-off' })!;
     expect(deleteIdentity(created.identity.address)).toBe(true);
     expect(existsSync(notificationStorePath())).toBe(false);
+  });
+
+  test('10. reconcile 整体预算：慢响应超预算则提前停，confirmed 收敛、剩余留队', async () => {
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+    // 先入队 4 行；时间预算极紧 + 每行慢，使得开不完
+    setReaderRevokeReconcileBudgetForTests(30);
+    setReaderRevokeReconcileMaxRowsForTests(100);
+
+    for (const id of ['bud-a', 'bud-b', 'bud-c', 'bud-d']) {
+      setNotificationAgentRouteForTests(`${id}@test.example`, {
+        topic: `agent-${id}`,
+        reader: { username: `reader-${id}`, token: `tk_${id}aaaaaaaaaaaaaaaaaaaaaaaaaaaa`.slice(0, 32) },
+      });
+      removeAgentRouteOnIdentityDelete(`${id}@test.example`);
+    }
+    await new Promise((r) => setTimeout(r, 40));
+
+    const started: string[] = [];
+    await reconcilePendingReaderRevokes(async (username) => {
+      started.push(username);
+      await new Promise((r) => setTimeout(r, 25));
+      // 前两行收敛，后面若被开到也收敛——预算应使 started < 4
+      return 'deleted';
+    });
+
+    expect(started.length).toBeGreaterThan(0);
+    expect(started.length).toBeLessThan(4);
+    const pending = getPendingReaderRevokesForTests().map((r) => r.username);
+    // 已 confirmed 出队；未开行仍在队
+    for (const u of started) {
+      expect(pending).not.toContain(u);
+    }
+    expect(pending.length).toBe(4 - started.length);
+  });
+
+  test('11. provision 中途删身份：不提交键且吊销刚建 reader', async () => {
+    const deletedUsers: string[] = [];
+    mockNtfyOk({ onDelete: (u) => deletedUsers.push(u) });
+
+    const created = createIdentity({ localpart: 'race-orphan' })!;
+    const address = created.identity.address;
+    let midReader = '';
+
+    setAfterCreateRuntimeReaderForTests(() => {
+      const route = getNotificationAgentRouteForTests(address);
+      midReader = route?.reader.username ?? '';
+      // createRuntimeReader 成功后、二次确认前同步删身份
+      deleteIdentity(address);
+    });
+
+    await provisionIdentityNotifications(created.identity);
+
+    expect(findIdentity(address)).toBeUndefined();
+    expect(getNotificationAgentRouteForTests(address)).toBeUndefined();
+    expect(midReader).toMatch(/^reader-agent-/);
+    for (let i = 0; i < 40 && !deletedUsers.includes(midReader); i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(deletedUsers).toContain(midReader);
   });
 
   test('mutation：删键步骤缺失则键残留（对照必红逻辑）', () => {
