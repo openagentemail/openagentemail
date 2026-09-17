@@ -699,14 +699,8 @@ export function removeAgentRouteOnIdentityDelete(
 }
 
 /**
- * 对账 pending reader 吊销：复用 deleteNtfyUserResult 三分类。
- * deleted/not_found → 出队收敛；transient → 留 pending 下轮重试。
- * 结尾差集合并：只滤掉本轮已确认 username，迭代间隙新入队行保留（排在 head）。
- * 轮换公平：本轮 attemptedTransient 行按相对顺序移到队尾，避免队首持续 transient 饿死后续行。
- * 模块级串行化：避免 deleteIdentity 首次吊销与 boot/list 对账并发互相覆盖。
- * 整体预算（时间+行数双闸）：耗尽即停开新行；confirmed 或 rotation 任一非空即落盘。
+ * 单轮 reader 吊销对账时间预算（ms）；与 NTFY_ADMIN_FETCH_TIMEOUT_MS 同口径常量。
  */
-/** 单轮 reader 吊销对账时间预算（ms）；与 NTFY_ADMIN_FETCH_TIMEOUT_MS 同口径常量。 */
 export const READER_REVOKE_RECONCILE_BUDGET_MS = 5_000;
 /** 单轮最多新开 DELETE 的 pending 行数。 */
 export const READER_REVOKE_RECONCILE_MAX_ROWS = 32;
@@ -737,12 +731,47 @@ function readerRevokeReconcileMaxRows(): number {
   return Math.min(Math.max(1, Math.trunc(raw)), 1_000);
 }
 
-let readerRevokeReconcileTail: Promise<void> = Promise.resolve();
+let readerRevokeReconcileInFlight: Promise<void> | null = null;
+let readerRevokeReconcileAgain = false;
 
+/** @internal 测试缝：等待 reader revoke 对账 in-flight 排空（含 again 重跑）。 */
+export async function whenReaderRevokeReconcileIdleForTests(): Promise<void> {
+  for (;;) {
+    const p = readerRevokeReconcileInFlight;
+    if (!p) return;
+    await p.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+}
+
+/** @internal 测试缝：每轮 run() 开头回调（用于断言合并后轮数）。 */
+let onReaderRevokeReconcileRunForTests: (() => void) | null = null;
+
+export function setOnReaderRevokeReconcileRunForTests(fn: (() => void) | null): void {
+  onReaderRevokeReconcileRunForTests = fn;
+}
+
+/**
+ * 对账 pending reader 吊销：复用 deleteNtfyUserResult 三分类。
+ * deleted/not_found → 出队收敛；transient → 留 pending 下轮重试。
+ * 结尾差集合并：只滤掉本轮已确认 username，迭代间隙新入队行保留（排在 head）。
+ * 轮换公平：本轮 attemptedTransient 行按相对顺序移到队尾，避免队首持续 transient 饿死后续行。
+ * in-flight 合并：并发触发共享同一 promise；again 保证至少再跑一轮（间隙入队必处理）；
+ * 调用方等待有界（当前轮 + again 重跑至安静），避免 N 次删除串成 N×预算堵住设备对账。
+ * 整体预算（时间+行数双闸）：耗尽即停开新行；confirmed 或 rotation 任一非空即落盘。
+ */
 export async function reconcilePendingReaderRevokes(
   deleteUser: DeleteNtfyUser = deleteNtfyUserResult,
 ): Promise<void> {
+  if (readerRevokeReconcileInFlight) {
+    readerRevokeReconcileAgain = true;
+    return readerRevokeReconcileInFlight;
+  }
+
   const run = async (): Promise<void> => {
+    onReaderRevokeReconcileRunForTests?.();
     if (!cachedState) cachedState = loadState();
     const current = cachedState;
     const snapshot = [...(current.pendingReaderRevokes ?? [])];
@@ -785,12 +814,18 @@ export async function reconcilePendingReaderRevokes(
     saveState(current);
   };
 
-  const next = readerRevokeReconcileTail.then(run, run);
-  readerRevokeReconcileTail = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  return next;
+  const p = (async () => {
+    try {
+      do {
+        readerRevokeReconcileAgain = false;
+        await run();
+      } while (readerRevokeReconcileAgain);
+    } finally {
+      readerRevokeReconcileInFlight = null;
+    }
+  })();
+  readerRevokeReconcileInFlight = p;
+  return p;
 }
 
 /**

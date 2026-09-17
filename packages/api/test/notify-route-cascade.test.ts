@@ -37,10 +37,12 @@ const {
   setAfterCreateRuntimeReaderForTests,
   setNotificationAgentRouteForTests,
   setNotifyPasswordHashForTests,
+  setOnReaderRevokeReconcileRunForTests,
   setReaderRevokeReconcileBudgetForTests,
   setReaderRevokeReconcileMaxRowsForTests,
   setSyncCascadeCommitForTests,
   setWriteServerConfigObserverForTests,
+  whenReaderRevokeReconcileIdleForTests,
 } = await import('../src/lib/notify.ts');
 
 const originalFetch = globalThis.fetch;
@@ -109,6 +111,7 @@ beforeEach(() => {
   setAfterCreateRuntimeReaderForTests(null);
   setReaderRevokeReconcileBudgetForTests(null);
   setReaderRevokeReconcileMaxRowsForTests(null);
+  setOnReaderRevokeReconcileRunForTests(null);
   Object.assign(config.ntfy, {
     enabled: true,
     adminPassword: 'ntfy-admin-secret',
@@ -120,6 +123,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await whenReaderRevokeReconcileIdleForTests();
   await flushWriteServerConfigForTests();
   globalThis.fetch = originalFetch;
   setNotifyPasswordHashForTests(null);
@@ -128,6 +132,7 @@ afterEach(async () => {
   setAfterCreateRuntimeReaderForTests(null);
   setReaderRevokeReconcileBudgetForTests(null);
   setReaderRevokeReconcileMaxRowsForTests(null);
+  setOnReaderRevokeReconcileRunForTests(null);
   wipeNotificationStore();
   // 强制关 ntfy，避免抢先加载本文件时把全套件 enabled 留 true。
   Object.assign(config.ntfy, previousNtfy, { enabled: false });
@@ -270,7 +275,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost@test.example');
-    await new Promise((r) => setTimeout(r, 20));
+    await whenReaderRevokeReconcileIdleForTests();
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-recon-a']);
 
     // transient 5xx：留 pending
@@ -290,7 +295,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
       },
     });
     removeAgentRouteOnIdentityDelete('ghost2@test.example');
-    await new Promise((r) => setTimeout(r, 20));
+    await whenReaderRevokeReconcileIdleForTests();
     await reconcilePendingReaderRevokes(async () => 'deleted');
     expect(getPendingReaderRevokesForTests()).toHaveLength(0);
 
@@ -339,16 +344,17 @@ describe('#235 deleteIdentity notify route cascade', () => {
       reader: { username: 'reader-gap-b', token: 'tk_gapbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
     });
     removeAgentRouteOnIdentityDelete('gap-a@test.example');
-    await new Promise((r) => setTimeout(r, 20));
+    await whenReaderRevokeReconcileIdleForTests();
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-gap-a']);
 
     await reconcilePendingReaderRevokes(async (username) => {
       if (username === 'reader-gap-a') {
-        // 迭代间隙：新删入队，旧实现整体覆盖会抹掉 reader-gap-b
+        // 迭代间隙：新删入队（会 again 重跑）；差集不得抹掉 B
         removeAgentRouteOnIdentityDelete('gap-b@test.example');
         return 'deleted';
       }
-      return 'deleted';
+      // again 轮开到 B：留 transient，断言 B 仍在队（非被整体覆盖丢掉）
+      return 'transient';
     });
 
     expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-gap-b']);
@@ -655,7 +661,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
       });
       removeAgentRouteOnIdentityDelete(`${id}@test.example`);
     }
-    await new Promise((r) => setTimeout(r, 40));
+    await whenReaderRevokeReconcileIdleForTests();
 
     const started: string[] = [];
     await reconcilePendingReaderRevokes(async (username) => {
@@ -691,39 +697,35 @@ describe('#235 deleteIdentity notify route cascade', () => {
     for (let i = 0; i < 40 && getPendingReaderRevokesForTests().length < 2; i += 1) {
       await new Promise((r) => setTimeout(r, 5));
     }
-    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
-      'reader-rot-a',
-      'reader-rot-b',
-    ]);
+    await whenReaderRevokeReconcileIdleForTests();
+    const before = getPendingReaderRevokesForTests().map((r) => r.username);
+    expect(before).toHaveLength(2);
+    expect(new Set(before)).toEqual(new Set(['reader-rot-a', 'reader-rot-b']));
+    const [head, next] = before;
 
     setReaderRevokeReconcileMaxRowsForTests(1);
-    // 第1轮：只开 A → transient → 落盘 [B,A]（confirmed 空仍 save）
+    // 第1轮：只开队首 → transient → 落盘 [next, head]（confirmed 空仍 save）
     await reconcilePendingReaderRevokes(async (username) => {
-      expect(username).toBe('reader-rot-a');
+      expect(username).toBe(head);
       return 'transient';
     });
-    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
-      'reader-rot-b',
-      'reader-rot-a',
-    ]);
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([next, head]);
     // c. 磁盘 pendingReaderRevokes 顺序已变
     const disk = JSON.parse(readFileSync(notificationStorePath(), 'utf8')) as {
       pendingReaderRevokes?: Array<{ username: string }>;
     };
-    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([
-      'reader-rot-b',
-      'reader-rot-a',
-    ]);
+    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([next, head]);
 
-    // 第2轮：首先 DELETE B → deleted → 收敛后剩 [A]
+    // 第2轮：首先 DELETE 新队首 → deleted → 收敛后剩原 head
+    await whenReaderRevokeReconcileIdleForTests();
     const started: string[] = [];
     await reconcilePendingReaderRevokes(async (username) => {
       started.push(username);
-      if (username === 'reader-rot-b') return 'deleted';
+      if (username === next) return 'deleted';
       return 'transient';
     });
-    expect(started[0]).toBe('reader-rot-b');
-    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-rot-a']);
+    expect(started[0]).toBe(next);
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([head]);
   });
 
   test('12b. reconcile 轮换公平：时间预算只够 1 行时同样轮换', async () => {
@@ -742,30 +744,70 @@ describe('#235 deleteIdentity notify route cascade', () => {
     for (let i = 0; i < 40 && getPendingReaderRevokesForTests().length < 2; i += 1) {
       await new Promise((r) => setTimeout(r, 5));
     }
-    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
-      'reader-trot-a',
-      'reader-trot-b',
-    ]);
+    await whenReaderRevokeReconcileIdleForTests();
+    const before = getPendingReaderRevokesForTests().map((r) => r.username);
+    expect(before).toHaveLength(2);
+    expect(new Set(before)).toEqual(new Set(['reader-trot-a', 'reader-trot-b']));
+    const [head, next] = before;
 
     setReaderRevokeReconcileMaxRowsForTests(100);
     // 时间预算只够 1 行慢 DELETE
     setReaderRevokeReconcileBudgetForTests(20);
     await reconcilePendingReaderRevokes(async (username) => {
-      expect(username).toBe('reader-trot-a');
+      expect(username).toBe(head);
       await new Promise((r) => setTimeout(r, 30));
       return 'transient';
     });
-    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
-      'reader-trot-b',
-      'reader-trot-a',
-    ]);
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([next, head]);
     const disk = JSON.parse(readFileSync(notificationStorePath(), 'utf8')) as {
       pendingReaderRevokes?: Array<{ username: string }>;
     };
-    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([
-      'reader-trot-b',
-      'reader-trot-a',
-    ]);
+    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([next, head]);
+  });
+
+  test('12c. reconcile 并发合并：连发 3 次 ≤2 轮且全 resolve；重跑处理间隙入队', async () => {
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+
+    setNotificationAgentRouteForTests('merge-a@test.example', {
+      topic: 'agent-merge-a',
+      reader: {
+        username: 'reader-merge-a',
+        token: 'tk_mergeaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+    });
+    setNotificationAgentRouteForTests('merge-b@test.example', {
+      topic: 'agent-merge-b',
+      reader: {
+        username: 'reader-merge-b',
+        token: 'tk_mergebbbbbbbbbbbbbbbbbbbbbbbbb',
+      },
+    });
+    removeAgentRouteOnIdentityDelete('merge-a@test.example');
+    await whenReaderRevokeReconcileIdleForTests();
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-merge-a']);
+
+    let runs = 0;
+    setOnReaderRevokeReconcileRunForTests(() => {
+      runs += 1;
+    });
+
+    const deleteUser = async (username: string) => {
+      await new Promise((r) => setTimeout(r, 30));
+      if (username === 'reader-merge-a') {
+        // 首轮间隙入队 B → 触发 again，重跑轮应处理 B
+        removeAgentRouteOnIdentityDelete('merge-b@test.example');
+      }
+      return 'deleted' as const;
+    };
+
+    const p1 = reconcilePendingReaderRevokes(deleteUser);
+    const p2 = reconcilePendingReaderRevokes(deleteUser);
+    const p3 = reconcilePendingReaderRevokes(deleteUser);
+    await Promise.all([p1, p2, p3]);
+
+    expect(runs).toBeGreaterThan(0);
+    expect(runs).toBeLessThanOrEqual(2);
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([]);
   });
 
   test('11. provision 中途删身份：不提交键且吊销刚建 reader', async () => {
