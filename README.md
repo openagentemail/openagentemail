@@ -50,7 +50,11 @@ reviews a small code snippet without editing files or calling a model service.
 ![Existing web dashboard screenshot: an email with its extracted verification code](docs/images/message-detail.png)
 
 This repository image demonstrates the email capability, not an Agent orchestration
-console or a newly recorded task run. Tasks also have their own dashboard view.
+console or a newly recorded task run. Tasks also have their own dashboard view:
+
+![Tasks board: an approval ticket waiting for a human decision](docs/images/tasks-approval.png)
+
+![A completed task with its full state timeline and structured result](docs/images/tasks-timeline.png)
 
 </details>
 
