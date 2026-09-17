@@ -15,7 +15,7 @@
 - **CSP `font-src 'self'`**：不为视觉修改放行外源字体或样式。
 - **favicon**：`/ui/favicon.svg` 同源提供；`/ui/favicon.ico` 的既有 204 行为不是待修视觉问题。
 - **HTML 邮件不可信**：保留消毒、独立 sandbox frame 和严格 CSP；不依赖邮件自身 CSS、图片或链接来丰富演示图。
-- **遵循现有资源流程**：检查 `packages/api/src/ui/` 与 `scripts/copy-ui-to-dist.ts`，不为了视觉引入新的前端打包器。
+- **遵循现有资源流程**：检查 `packages/api/src/ui/` 与 `packages/api/scripts/copy-ui-to-dist.ts`，不为了视觉引入新的前端打包器。
 - `UI_ENABLED=false` 时 UI 路由关闭，不表示 API/MCP 被关闭。
 - **UI 不是只读界面**：身份管理、Seen、任务和其他获授权操作均可能写入状态。具体以路由和会话权限为准，不能把“标记已读”称为唯一写操作。
 
