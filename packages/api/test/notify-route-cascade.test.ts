@@ -675,6 +675,99 @@ describe('#235 deleteIdentity notify route cascade', () => {
     expect(pending.length).toBe(4 - started.length);
   });
 
+  test('12a. reconcile 轮换公平：maxRows=1 队首 transient 不饿死后续行', async () => {
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+
+    for (const id of ['rot-a', 'rot-b']) {
+      setNotificationAgentRouteForTests(`${id}@test.example`, {
+        topic: `agent-${id}`,
+        reader: {
+          username: `reader-${id}`,
+          token: `tk_${id}aaaaaaaaaaaaaaaaaaaaaaaaaaaa`.slice(0, 32),
+        },
+      });
+      removeAgentRouteOnIdentityDelete(`${id}@test.example`);
+    }
+    for (let i = 0; i < 40 && getPendingReaderRevokesForTests().length < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
+      'reader-rot-a',
+      'reader-rot-b',
+    ]);
+
+    setReaderRevokeReconcileMaxRowsForTests(1);
+    // 第1轮：只开 A → transient → 落盘 [B,A]（confirmed 空仍 save）
+    await reconcilePendingReaderRevokes(async (username) => {
+      expect(username).toBe('reader-rot-a');
+      return 'transient';
+    });
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
+      'reader-rot-b',
+      'reader-rot-a',
+    ]);
+    // c. 磁盘 pendingReaderRevokes 顺序已变
+    const disk = JSON.parse(readFileSync(notificationStorePath(), 'utf8')) as {
+      pendingReaderRevokes?: Array<{ username: string }>;
+    };
+    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([
+      'reader-rot-b',
+      'reader-rot-a',
+    ]);
+
+    // 第2轮：首先 DELETE B → deleted → 收敛后剩 [A]
+    const started: string[] = [];
+    await reconcilePendingReaderRevokes(async (username) => {
+      started.push(username);
+      if (username === 'reader-rot-b') return 'deleted';
+      return 'transient';
+    });
+    expect(started[0]).toBe('reader-rot-b');
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual(['reader-rot-a']);
+  });
+
+  test('12b. reconcile 轮换公平：时间预算只够 1 行时同样轮换', async () => {
+    globalThis.fetch = (async () => new Response('unavailable', { status: 503 })) as typeof fetch;
+
+    for (const id of ['trot-a', 'trot-b']) {
+      setNotificationAgentRouteForTests(`${id}@test.example`, {
+        topic: `agent-${id}`,
+        reader: {
+          username: `reader-${id}`,
+          token: `tk_${id}bbbbbbbbbbbbbbbbbbbbbbbbbbbb`.slice(0, 32),
+        },
+      });
+      removeAgentRouteOnIdentityDelete(`${id}@test.example`);
+    }
+    for (let i = 0; i < 40 && getPendingReaderRevokesForTests().length < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
+      'reader-trot-a',
+      'reader-trot-b',
+    ]);
+
+    setReaderRevokeReconcileMaxRowsForTests(100);
+    // 时间预算只够 1 行慢 DELETE
+    setReaderRevokeReconcileBudgetForTests(20);
+    await reconcilePendingReaderRevokes(async (username) => {
+      expect(username).toBe('reader-trot-a');
+      await new Promise((r) => setTimeout(r, 30));
+      return 'transient';
+    });
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toEqual([
+      'reader-trot-b',
+      'reader-trot-a',
+    ]);
+    const disk = JSON.parse(readFileSync(notificationStorePath(), 'utf8')) as {
+      pendingReaderRevokes?: Array<{ username: string }>;
+    };
+    expect(disk.pendingReaderRevokes?.map((r) => r.username)).toEqual([
+      'reader-trot-b',
+      'reader-trot-a',
+    ]);
+  });
+
   test('11. provision 中途删身份：不提交键且吊销刚建 reader', async () => {
     const deletedUsers: string[] = [];
     mockNtfyOk({ onDelete: (u) => deletedUsers.push(u) });

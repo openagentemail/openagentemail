@@ -701,9 +701,10 @@ export function removeAgentRouteOnIdentityDelete(
 /**
  * 对账 pending reader 吊销：复用 deleteNtfyUserResult 三分类。
  * deleted/not_found → 出队收敛；transient → 留 pending 下轮重试。
- * 结尾差集合并：只滤掉本轮已确认 username，迭代间隙新入队行保留。
+ * 结尾差集合并：只滤掉本轮已确认 username，迭代间隙新入队行保留（排在 head）。
+ * 轮换公平：本轮 attemptedTransient 行按相对顺序移到队尾，避免队首持续 transient 饿死后续行。
  * 模块级串行化：避免 deleteIdentity 首次吊销与 boot/list 对账并发互相覆盖。
- * 整体预算（时间+行数双闸）：耗尽即停开新行，已 confirmed 照常合并落盘。
+ * 整体预算（时间+行数双闸）：耗尽即停开新行；confirmed 或 rotation 任一非空即落盘。
  */
 /** 单轮 reader 吊销对账时间预算（ms）；与 NTFY_ADMIN_FETCH_TIMEOUT_MS 同口径常量。 */
 export const READER_REVOKE_RECONCILE_BUDGET_MS = 5_000;
@@ -751,21 +752,35 @@ export async function reconcilePendingReaderRevokes(
     const maxRows = readerRevokeReconcileMaxRows();
     let started = 0;
     const confirmed = new Set<string>();
+    // 本轮已尝试且仍 transient 的行：落盘时移到队尾，让未开行下次优先。
+    const attemptedTransient = new Set<string>();
     for (const row of snapshot) {
       if (row.status !== 'pending_revoke') continue;
       // 预算耗尽：停开新行；未处理与已见 transient 留队下轮。
       if (started >= maxRows || Date.now() >= deadline) break;
       started += 1;
       const result = await deleteUser(row.username);
-      if (result === 'transient') continue;
+      if (result === 'transient') {
+        attemptedTransient.add(row.username);
+        continue;
+      }
       // deleted | not_found：本轮确认收敛。
       confirmed.add(row.username);
     }
-    if (confirmed.size === 0) return;
+    // 无收敛且无轮换则无需落盘。
+    if (confirmed.size === 0 && attemptedTransient.size === 0) return;
 
-    // 重读当前队列（可能含迭代间隙新入队），只去掉 confirmed。
+    // 重读当前队列（可能含迭代间隙新入队），去掉 confirmed；
+    // 未尝试/新入队 → head；本轮 transient → tail（保相对顺序）。
     const latest = current.pendingReaderRevokes ?? [];
-    const merged = latest.filter((row) => !confirmed.has(row.username));
+    const remaining = latest.filter((row) => !confirmed.has(row.username));
+    const head: PendingReaderRevoke[] = [];
+    const tail: PendingReaderRevoke[] = [];
+    for (const row of remaining) {
+      if (attemptedTransient.has(row.username)) tail.push(row);
+      else head.push(row);
+    }
+    const merged = [...head, ...tail];
     current.pendingReaderRevokes = merged.length > 0 ? merged : undefined;
     saveState(current);
   };
