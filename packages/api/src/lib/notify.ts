@@ -11,6 +11,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { recordAuditEvent } from './audit.ts';
 import { config } from './config.ts';
 import { findIdentity, listIdentities, type Identity } from './identities.ts';
 import {
@@ -31,6 +32,7 @@ import {
   reconcilePendingRevokes,
   registerPairedDevice,
   revokePairedDevice,
+  type DeleteNtfyUser,
   type DeviceListItem,
   type NtfyUserDeleteResult,
 } from './notification-devices.ts';
@@ -181,6 +183,14 @@ type Route = {
   ownerAddress?: string;
 };
 
+/** agent reader 吊销对账行：复用 phone 设备线 deleted/not_found/transient 分类。 */
+type PendingReaderRevoke = {
+  username: string;
+  address: string;
+  status: 'pending_revoke';
+  createdAt: string;
+};
+
 type NotifyState = {
   version: 1;
   suffix: string;
@@ -188,6 +198,8 @@ type NotifyState = {
   userAlerts: Route;
   userLow: Route;
   agents: Record<string, Route>;
+  /** 可选：身份删除/boot 清幽灵后待对账的 reader 用户名队列。 */
+  pendingReaderRevokes?: PendingReaderRevoke[];
 };
 
 const TOKEN_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -265,13 +277,47 @@ export function userRouteKey(level: NotifyLevel): 'userAlerts' | 'userLow' {
   return level === 'low' ? 'userLow' : 'userAlerts';
 }
 
+type CommitNotificationStateFn = (
+  writeConfig: () => Promise<void>,
+  save: () => void,
+) => Promise<void>;
+
+const defaultCommitNotificationState: CommitNotificationStateFn = async (writeConfig, save) => {
+  await writeConfig();
+  save();
+};
+
+let commitNotificationStateImpl: CommitNotificationStateFn = defaultCommitNotificationState;
+
 /** Keep route state unpublished until the matching ntfy startup config exists. */
 export async function commitNotificationState(
   writeConfig: () => Promise<void>,
   save: () => void,
 ): Promise<void> {
-  await writeConfig();
+  return commitNotificationStateImpl(writeConfig, save);
+}
+
+/** @internal 测试缝：注入 commit（fail-closed / 顺序断言）。 */
+export function setCommitNotificationStateForTests(fn: CommitNotificationStateFn | null): void {
+  commitNotificationStateImpl = fn ?? defaultCommitNotificationState;
+}
+
+/**
+ * deleteIdentity 同步级联用的落盘钩子：先请求 writeConfig，再 save JSON。
+ * 默认 writeConfig 异步踢 server.yml 重写（不阻塞同步签名）；save 失败即抛。
+ */
+type SyncCascadeCommitFn = (writeConfig: () => void, save: () => void) => void;
+
+const defaultSyncCascadeCommit: SyncCascadeCommitFn = (writeConfig, save) => {
+  writeConfig();
   save();
+};
+
+let syncCascadeCommitImpl: SyncCascadeCommitFn = defaultSyncCascadeCommit;
+
+/** @internal 测试缝：注入同步级联落盘（state 持久化失败 fail-closed）。 */
+export function setSyncCascadeCommitForTests(fn: SyncCascadeCommitFn | null): void {
+  syncCascadeCommitImpl = fn ?? defaultSyncCascadeCommit;
 }
 
 function isUsableAgentRoute(entry: Route | undefined): entry is Route {
@@ -467,6 +513,141 @@ export function getNotificationAgentRouteForTests(agent: string): Route | undefi
 export function runLegacyOwnerStampForTests(): void {
   if (!cachedState) cachedState = loadState();
   stampLegacyAgentOwners(cachedState);
+}
+
+/** @internal 测试缝：读取 pending reader 吊销队列。 */
+export function getPendingReaderRevokesForTests(): PendingReaderRevoke[] {
+  if (!cachedState) cachedState = loadState();
+  return [...(cachedState.pendingReaderRevokes ?? [])];
+}
+
+function enqueuePendingReaderRevoke(
+  state: NotifyState,
+  username: string,
+  address: string,
+): void {
+  if (!username) return;
+  const list = state.pendingReaderRevokes ?? (state.pendingReaderRevokes = []);
+  if (list.some((row) => row.username === username && row.status === 'pending_revoke')) return;
+  list.push({
+    username,
+    address,
+    status: 'pending_revoke',
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * deleteIdentity 同步级联：删完整地址 agents 键并持久化（请求 writeConfig），
+ * reader 落 pending_revoke；裸 localpart 键不碰。state 持久化失败抛错 fail-closed。
+ */
+export function removeAgentRouteOnIdentityDelete(
+  address: string,
+  actor = 'deleteIdentity',
+): void {
+  const agent = canonicalizeAgentAddress(address);
+  // 只碰完整地址键；裸 localpart 一行不动（R2-4 跨域复用防线）。
+  if (!agent.includes('@')) return;
+
+  if (!cachedState) cachedState = loadState();
+  const current = cachedState;
+  const entry = current.agents[agent];
+  if (!entry) return;
+
+  const previous = entry;
+  const previousPending = current.pendingReaderRevokes
+    ? current.pendingReaderRevokes.map((row) => ({ ...row }))
+    : undefined;
+  delete current.agents[agent];
+  enqueuePendingReaderRevoke(current, previous.reader.username, agent);
+
+  try {
+    // 先落 JSON（fail-closed 边界）；成功后再踢 server.yml，避免回滚与异步重写竞态。
+    syncCascadeCommitImpl(
+      () => {
+        /* writeConfig 延后到 save 成功之后 */
+      },
+      () => saveState(current),
+    );
+  } catch (err) {
+    current.agents[agent] = previous;
+    if (previousPending) current.pendingReaderRevokes = previousPending;
+    else delete current.pendingReaderRevokes;
+    throw err;
+  }
+
+  if (config.ntfy.enabled && config.ntfy.adminPassword) {
+    void writeServerConfig(current).catch((err) => {
+      console.warn('[notify] server.yml rewrite after agent route delete failed', {
+        address: agent,
+        error: err instanceof Error ? err.message : 'unknown',
+      });
+    });
+  }
+
+  recordAuditEvent({
+    event: 'identity.notify_route.delete',
+    outcome: 'ok',
+    address: agent,
+    actor,
+  });
+}
+
+/**
+ * 对账 pending reader 吊销：复用 deleteNtfyUserResult 三分类。
+ * deleted/not_found → 出队收敛；transient → 留 pending 下轮重试。
+ */
+export async function reconcilePendingReaderRevokes(
+  deleteUser: DeleteNtfyUser = deleteNtfyUserResult,
+): Promise<void> {
+  if (!cachedState) cachedState = loadState();
+  const current = cachedState;
+  const pending = current.pendingReaderRevokes;
+  if (!pending?.length) return;
+
+  const remaining: PendingReaderRevoke[] = [];
+  let changed = false;
+  for (const row of pending) {
+    if (row.status !== 'pending_revoke') {
+      remaining.push(row);
+      continue;
+    }
+    const result = await deleteUser(row.username);
+    if (result === 'transient') {
+      remaining.push(row);
+      continue;
+    }
+    // deleted | not_found：已收敛，出队。
+    changed = true;
+  }
+  if (!changed && remaining.length === pending.length) return;
+  current.pendingReaderRevokes = remaining.length > 0 ? remaining : undefined;
+  saveState(current);
+}
+
+/**
+ * boot reconcile：清「完整地址键但对应身份不存在」的存量幽灵。
+ * 裸 localpart 键一律保留；有身份主键不动。
+ */
+export function purgeOrphanFullAddressAgentRoutes(actor = 'boot_reconcile'): boolean {
+  if (!cachedState) cachedState = loadState();
+  const current = cachedState;
+  let changed = false;
+  for (const key of Object.keys(current.agents)) {
+    if (!key.includes('@')) continue;
+    if (findIdentity(key)) continue;
+    const entry = current.agents[key]!;
+    delete current.agents[key];
+    enqueuePendingReaderRevoke(current, entry.reader.username, key);
+    recordAuditEvent({
+      event: 'identity.notify_route.delete',
+      outcome: 'ok',
+      address: key,
+      actor,
+    });
+    changed = true;
+  }
+  return changed;
 }
 
 async function state(): Promise<NotifyState> {
@@ -793,12 +974,18 @@ export async function reconcileNotificationDevices(skipDeviceId?: string): Promi
   if (!config.ntfy.enabled || !config.ntfy.adminPassword) return;
   // skip 路径只清其它 pending，不占用/替换 list 的 in-flight coalesce。
   if (skipDeviceId) {
-    return reconcilePendingRevokes(deleteNtfyUserResult, skipDeviceId);
+    await reconcilePendingRevokes(deleteNtfyUserResult, skipDeviceId);
+    await reconcilePendingReaderRevokes(deleteNtfyUserResult);
+    return;
   }
   // 并发入口共用一次 in-flight（同一 tick 的 list/revoke 不放大 ntfy）。
   // 不做跨请求 TTL：列表必须能收敛刚写入的 pending_revoke。
   if (reconcileInFlight) return reconcileInFlight;
-  const run = reconcilePendingRevokes(deleteNtfyUserResult).finally(() => {
+  const run = (async () => {
+    await reconcilePendingRevokes(deleteNtfyUserResult);
+    // agent reader 吊销与 phone 设备线共用同一对账挂点。
+    await reconcilePendingReaderRevokes(deleteNtfyUserResult);
+  })().finally(() => {
     if (reconcileInFlight === run) reconcileInFlight = null;
   });
   reconcileInFlight = run;
@@ -1220,6 +1407,8 @@ export async function notifyTrustedAgentDelivery(address: string): Promise<void>
 export async function initializeNotifications(): Promise<void> {
   const current = await state();
   let changed = false;
+  // 先清完整地址幽灵键（身份已不存在）；裸 localpart 键一行不动。
+  if (purgeOrphanFullAddressAgentRoutes('boot_reconcile')) changed = true;
   // Provision a reader account for every identity that already exists before
   // ntfy boots. These private routes remain server-only; phone pairing grants
   // a separate account only to the two human topics.

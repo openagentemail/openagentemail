@@ -36,6 +36,7 @@ import {
 } from './delegations.ts';
 import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
 import { recordAuditEvent } from './audit.ts';
+import { removeAgentRouteOnIdentityDelete } from './notify.ts';
 
 export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
 let webhookCancelCallback: WebhookCancelCallback | undefined;
@@ -523,6 +524,9 @@ export function deleteIdentity(address: string): boolean {
       webhookId: wh.id,
     });
   }
+  // ntfy 外泄通道：先删完整地址 agents 键并落 pending_revoke，再 save 身份。
+  // state 持久化失败抛错 fail-closed，身份记录必须仍在。
+  removeAgentRouteOnIdentityDelete(needle);
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
   save(kept);
