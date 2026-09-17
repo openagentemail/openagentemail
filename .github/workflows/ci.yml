@@ -117,13 +117,14 @@ jobs:
         working-directory: packages/api
         run: |
           cp bun.lock bun.lock.bak
+          # 无论 build 成败，确保还原 lockfile（本地复跑中断也不留脏文件）
+          restore_lock() { mv -f bun.lock.bak bun.lock 2>/dev/null || true; }
+          trap restore_lock EXIT
           # 破坏 lockfile 哈希/内容，强制 frozen-lockfile 失败
           sed -i '1s/.*/{"lockfileVersion":1,"tampered":true}/' bun.lock || \
             printf '%s\n' '{"lockfileVersion":1,"tampered":true}' > bun.lock
           set +e
-          set +e
           docker build -t oae-api-smoke-neg .
           rc=$?
           set -e
-          mv -f bun.lock.bak bun.lock
           test "${rc}" -ne 0
