@@ -449,11 +449,14 @@ export function setNotifyPasswordHashForTests(fn: ((password: string) => Promise
 }
 
 /**
- * 模块级串行化 + coalesce：挂起期间再调只更新 latest state 引用并返回同一 promise；
+ * 模块级串行化 + coalesce：挂起期间再调只更新 latest 引用并返回同一 promise；
  * 开写时再拍 agents 快照。连续 N 次删除合并为尽量少的全量 bcrypt 重写。
+ * adminPassword 在入队时快照：避免测试 finally / 配置热切把 in-flight 重写打成 unconfigured。
  */
+type WriteServerConfigRequest = { state: NotifyState; adminPassword: string };
+
 let writeServerConfigChain: Promise<void> = Promise.resolve();
-let writeServerConfigLatest: NotifyState | null = null;
+let writeServerConfigLatest: WriteServerConfigRequest | null = null;
 let writeServerConfigCoalesce: Promise<void> | null = null;
 
 /** @internal 测试缝：每次实际开写时回调当前 agents 键（排队后、await 哈希前）。 */
@@ -467,18 +470,28 @@ export function setWriteServerConfigObserverForTests(
 
 /** @internal 测试缝：等待 writeServerConfig 队列排空（含 coalesce drain）。 */
 export async function flushWriteServerConfigForTests(): Promise<void> {
-  await writeServerConfigChain;
+  // 吞掉 drain 拒绝：flush 只保证排空，不把 best-effort 失败抬成用例失败。
+  await writeServerConfigChain.then(
+    () => undefined,
+    () => undefined,
+  );
   while (writeServerConfigCoalesce) {
-    await writeServerConfigCoalesce;
+    await writeServerConfigCoalesce.then(
+      () => undefined,
+      () => undefined,
+    );
   }
-  await writeServerConfigChain;
+  await writeServerConfigChain.then(
+    () => undefined,
+    () => undefined,
+  );
 }
 
-async function writeServerConfigBody(state: NotifyState): Promise<void> {
-  const adminPassword = config.ntfy.adminPassword;
-  if (!adminPassword) throw new NotifyError('notifications_unconfigured');
-
-  // 快照在拿到槽位、真正开写时拍。
+async function writeServerConfigBody(
+  state: NotifyState,
+  adminPassword: string,
+): Promise<void> {
+  // agents 快照在拿到槽位、真正开写时拍；密码用入队快照。
   writeServerConfigObserverForTests?.(Object.keys(state.agents).sort());
   const readers = [state.userAlerts, state.userLow, ...Object.values(state.agents)];
   const adminHash = await passwordHash(adminPassword);
@@ -516,8 +529,9 @@ async function writeServerConfigBody(state: NotifyState): Promise<void> {
   writePrivate(config.ntfy.configPath, lines.join('\n'));
 }
 
-async function writeServerConfig(state: NotifyState): Promise<void> {
-  writeServerConfigLatest = state;
+/** 入队重写；挂起中只更新 latest（含密码快照）并返回同一 drain。 */
+async function enqueueWriteServerConfig(req: WriteServerConfigRequest): Promise<void> {
+  writeServerConfigLatest = req;
   if (writeServerConfigCoalesce) return writeServerConfigCoalesce;
 
   const drain = (async () => {
@@ -528,7 +542,7 @@ async function writeServerConfig(state: NotifyState): Promise<void> {
     while (writeServerConfigLatest) {
       const toWrite = writeServerConfigLatest;
       writeServerConfigLatest = null;
-      await writeServerConfigBody(toWrite);
+      await writeServerConfigBody(toWrite.state, toWrite.adminPassword);
     }
   })();
 
@@ -537,14 +551,29 @@ async function writeServerConfig(state: NotifyState): Promise<void> {
     () => undefined,
     () => undefined,
   );
+  // 兜底：fire-and-forget 调用方漏挂 catch 时不致 unhandledrejection；
+  // await 方仍能从返回的 drain 上感知拒绝。
+  void drain.catch(() => undefined);
   void drain.finally(() => {
     if (writeServerConfigCoalesce === drain) {
       writeServerConfigCoalesce = null;
-      // finally 窗口内若又有新请求，补开一轮 drain
-      if (writeServerConfigLatest) void writeServerConfig(writeServerConfigLatest);
+      // finally 窗口内若又有新请求，用已快照的 latest 补开一轮
+      if (writeServerConfigLatest) {
+        void enqueueWriteServerConfig(writeServerConfigLatest).catch((err) => {
+          console.warn('[notify] writeServerConfig coalesce follow-up failed', {
+            error: err instanceof Error ? err.message : 'unknown',
+          });
+        });
+      }
     }
   });
   return drain;
+}
+
+async function writeServerConfig(state: NotifyState): Promise<void> {
+  const adminPassword = config.ntfy.adminPassword;
+  if (!adminPassword) throw new NotifyError('notifications_unconfigured');
+  return enqueueWriteServerConfig({ state, adminPassword });
 }
 
 let cachedState: NotifyState | undefined;

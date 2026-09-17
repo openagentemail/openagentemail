@@ -38,6 +38,7 @@ const {
   physicalAgentTopic,
   revokeNotificationDevice,
   canonicalizeAgentAddress,
+  flushWriteServerConfigForTests,
   getNotificationAgentRouteForTests,
   LEGACY_OWNER_AMBIGUOUS,
   provisionIdentityNotifications,
@@ -2462,6 +2463,8 @@ describe('ntfy full-address agent route keys (#134 Q1)', () => {
       expect(fresh!.topic).not.toBe(staleTopic);
     } finally {
       deleteIdentity('ghost@secondary.example');
+      // 等级联 server.yml 重写排空后再还原 config，避免 in-flight 撞 unconfigured。
+      await flushWriteServerConfigForTests();
       setNotificationAgentRouteForTests('ghost', null);
       setNotificationAgentRouteForTests('ghost@secondary.example', null);
       globalThis.fetch = previousFetch;
@@ -2648,6 +2651,7 @@ describe('ntfy full-address agent route keys (#134 Q1)', () => {
       }
     } finally {
       deleteIdentity('usurp@secondary.example');
+      await flushWriteServerConfigForTests();
       setNotificationAgentRouteForTests('usurp', null);
       if (!prevHad) {
         (config.allDomains as Set<string>).delete('secondary.example');
