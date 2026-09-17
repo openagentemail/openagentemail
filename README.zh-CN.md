@@ -97,14 +97,21 @@ npx -y @openagentemail/setup
 保留 API 默认的 localhost 绑定；远程接入使用 SSH 隧道或 HTTPS 反向代理。
 邮件服务器证书和 API 的 HTTPS 是两件事，不要把携带令牌的明文 HTTP API 暴露到公网。
 
-部署后检查前提：
+部署后按你实际选的路径核对：
+
+**自带邮件服务器（bundled）。** 这套栈自管 `mail.$DOMAIN`、DKIM 选择器 `mail`，以及 465/993
+上的 TLS。用 doctor 检查这套布局：
 
 ```bash
 sudo ./deploy/doctor.sh
 ```
 
-doctor 检查 DNS、端口、证书和通知前提，**不会登录 IMAP/SMTP，也不会发送往返测试邮件**。
-要依赖投递，仍需确认真实邮件到达且可读取。`/healthz` 正常只说明 HTTP 进程存活，不等于协作闭环已经正常。
+它会检查 DNS、端口、证书和通知前提，仍然**不会登录 IMAP/SMTP，也不会发往返测试邮件**。
+
+**只用 API、邮件在外部邮局（API-only）。** 不要跑 `deploy/doctor.sh`——它默认 bundled
+邮件主机，换了 MX/DKIM 时会出现误报失败。请改做：确认 `/healthz` 正常、确认 catch-all
+邮箱的 IMAP/SMTP 凭据可用，再给一个身份发一封真实邮件并读回来。然后才试任务交接。
+`/healthz` 正常只说明 HTTP 进程存活，不等于邮件已经通。
 
 ## 连接 Agent
 

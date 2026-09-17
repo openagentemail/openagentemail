@@ -110,16 +110,24 @@ Keep the API's localhost binding unless you deliberately configure an SSH tunnel
 HTTPS reverse proxy. Mail certificates and HTTPS for the API are separate concerns.
 Do not publish a bare HTTP API carrying tokens.
 
-After deployment, check prerequisites:
+After deployment, verify the path you actually chose:
+
+**Bundled mailserver.** This stack owns `mail.$DOMAIN`, the `mail` DKIM selector, and
+TLS on ports 465/993. Run the doctor against that layout:
 
 ```bash
 sudo ./deploy/doctor.sh
 ```
 
-Doctor checks DNS, port access, certificates and notification prerequisites. It does
-**not** authenticate over IMAP/SMTP or send a round-trip email. Confirm a real message
-arrives and can be read before relying on delivery; then try the task recipe. A healthy
-`/healthz` response alone proves the HTTP process is alive, not that this workflow works.
+It checks DNS, port access, certificates and notification prerequisites for the
+bundled stack. It still does **not** log in over IMAP/SMTP or send a round-trip email.
+
+**API-only (your own mail provider).** Skip `deploy/doctor.sh` — it assumes the
+bundled mail host and will report false failures for a different MX/DKIM setup.
+Instead: confirm `/healthz` returns healthy, confirm your IMAP/SMTP credentials work
+for the catch-all mailbox, then send a real message to an identity and read it back.
+Only then try the task recipe. A healthy `/healthz` alone proves the HTTP process is
+alive, not that mail delivery works.
 
 ## Existing `api-data` volume: one-time non-root migration (#93)
 

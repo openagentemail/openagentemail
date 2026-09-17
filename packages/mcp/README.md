@@ -120,7 +120,7 @@ this table is the human reference rather than a second protocol implementation.
 | `mail_webhook_list(address?)` | Own subscriptions for an identity; optional address filter is admin-only |
 | `mail_webhook_delete(id)` | Permanently delete a subscription and cancel pending retries; a destructive operation |
 | `mail_webhook_test(id)` | Send a probe to the configured subscription endpoint |
-| `mail_webhook_disable(id)` | Pause a subscription subject to ownership/authorization rules |
+| `mail_webhook_disable(id)` | Mark the subscription disabled and discard pending retries as permanent failures (they are not replayed on re-enable). Re-enable is admin API only — there is no MCP tool, so an identity cannot restore the subscription by itself |
 
 Webhooks require `WEBHOOKS_ENABLED=true` on the API (default false). `metadata` is the
 default content scope; `preview` and private-target exceptions need the required
