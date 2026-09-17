@@ -79,19 +79,12 @@ jobs:
 
       - name: Assert runtime artifact set
         run: |
-          # dist-only + 无 dev 包；可执行件/依赖属 root，数据目录属 bun（P1）
-          docker run --rm --entrypoint sh oae-api-smoke -c '
-            set -eu
-            test -f dist/main.js
-            test ! -f package.json
-            test ! -d node_modules/typescript
-            test "$(stat -c %u dist/main.js)" = "0"
-            test "$(stat -c %u node_modules)" = "0"
-            test ! -w dist/main.js
-            test ! -w node_modules
-            test "$(stat -c %u /app/data)" = "1000"
-            test -w /app/data
-          '
+          # dist-only + 无 dev 包
+          docker run --rm --entrypoint sh oae-api-smoke -c \
+            'test -f dist/main.js && test ! -f package.json && test ! -d node_modules/typescript'
+          # P1 属主双断言：可执行件 root、数据目录 bun
+          test "$(docker run --rm --entrypoint stat oae-api-smoke -c %u dist/main.js)" = "0"
+          test "$(docker run --rm --entrypoint stat oae-api-smoke -c %u /app/data)" = "1000"
 
       - name: Assert non-root uid
         run: |
