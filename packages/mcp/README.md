@@ -122,7 +122,9 @@ this table is the human reference rather than a second protocol implementation.
 | `mail_webhook_test(id)` | Send a probe to the configured subscription endpoint |
 | `mail_webhook_disable(id)` | Mark the subscription disabled and discard pending retries as permanent failures (they are not replayed on re-enable). Re-enable is admin API only — there is no MCP tool, so an identity cannot restore the subscription by itself |
 
-Webhooks require `WEBHOOKS_ENABLED=true` on the API (default false). `metadata` is the
+Webhooks require `WEBHOOKS_ENABLED=true` on the API (default false). Turning that on
+also requires an explicit `TASK_SIGNING_SECRET` of at least 32 characters; if it is
+missing or too short, the API refuses to start. `metadata` is the
 default content scope; `preview` and private-target exceptions need the required
 operator permission/configuration. OAuth callers cannot assume the direct-identity
 webhook mutation surface. Configure and verify receivers explicitly. Their delivery
