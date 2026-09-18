@@ -24,6 +24,7 @@ import {
   type SendLogSource,
 } from '../lib/send-log.ts';
 import { resolveSendLogSource } from '../lib/send-source.ts';
+import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
 
 const emailField = z.string().email().max(SEND_LOG_EMAIL_MAX_LEN);
 
@@ -75,8 +76,12 @@ async function recordSend(input: {
   }
 }
 
-function historyError(c: Context, err: unknown) {
-  if (err instanceof InvalidSendCursorError) return c.json({ error: 'invalid_cursor' }, 400);
+function historyError(c: Context, err: unknown, cursor?: string) {
+  if (err instanceof InvalidSendCursorError) {
+    // #202：send 族拒收可观测；400 体逐字不变
+    logInvalidCursorRejectionFor('send', cursor);
+    return c.json({ error: 'invalid_cursor' }, 400);
+  }
   if (err instanceof SendLogCorruptError) return c.json({ error: 'send_log_corrupt' }, 500);
   throw err;
 }
@@ -109,7 +114,7 @@ sendRoute.get('/history', async (c) => {
     });
     return c.json(page);
   } catch (err) {
-    return historyError(c, err);
+    return historyError(c, err, parsed.data.cursor);
   }
 });
 

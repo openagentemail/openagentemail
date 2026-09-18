@@ -20,6 +20,7 @@ import {
   toTaskLeaseGrantView,
   toTaskView,
 } from '../lib/tasks.ts';
+import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
 
 const taskStateSchema = z.enum(TASK_STATES);
 const taskIdSchema = z.string().uuid();
@@ -306,7 +307,11 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
         const code = (err as Error).message;
-        if (code === 'invalid_cursor') return c.json({ error: 'invalid_cursor' }, 400);
+        if (code === 'invalid_cursor') {
+          // #202：tasks children 游标拒收可观测；400 体逐字不变
+          logInvalidCursorRejectionFor('tasks', query.data.cursor);
+          return c.json({ error: 'invalid_cursor' }, 400);
+        }
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'forbidden') return c.json({ error: 'forbidden: task participant required' }, 403);
         throw err;

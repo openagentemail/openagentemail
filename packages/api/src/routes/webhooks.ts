@@ -41,6 +41,7 @@ import {
   validateWebhookUrlResolution,
   type WebhookDeliveryLogRow,
 } from '../lib/webhook-delivery.ts';
+import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
 
 function requireAdmin(c: Context) {
   const auth = getAuth(c);
@@ -949,6 +950,8 @@ export const webhooksRoute = new Hono()
       return c.json(res);
     } catch (err) {
       if (err instanceof InvalidDeliveryCursorError) {
+        // #202：拒收可观测；400 体逐字不变
+        logInvalidCursorRejectionFor('deliveries', cursor);
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       throw err;
