@@ -17,7 +17,11 @@ name: openagentemail
 
 services:
   api:
-    build: ./packages/api
+    # H1：build 时钉死 SOURCE_COMMIT；XAGT_VERIFICATION_SLUG 运行时可选
+    build:
+      context: ./packages/api
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:-}
     environment:
       # --- shared API contract env ---
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
@@ -100,6 +104,8 @@ services:
       SEND_RATE_LIMIT: ${SEND_RATE_LIMIT:-20}
       # Auto-delete mail older than this many days (0 = keep forever):
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      # H1 / X-Agent：可选验证 slug（与镜像内 SOURCE_COMMIT 同时配置才挂 well-known）
+      XAGT_VERIFICATION_SLUG: ${XAGT_VERIFICATION_SLUG:-}
     volumes:
       - api-data:/app/data
     ports:

@@ -36,6 +36,8 @@ import {
   createUiOAuthApiRoutes,
   createUiOAuthPageRoutes,
 } from './routes/ui-oauth.ts';
+// 构建期打进 bundle 的包版本（勿硬编码；Docker 运行时无 package.json）
+import apiPackage from '../package.json' with { type: 'json' };
 
 type AppOptions = {
   uiEnabled?: boolean;
@@ -56,8 +58,29 @@ type AppOptions = {
 export function createApp(options: AppOptions = {}): Hono {
   const app = new Hono();
 
-  app.get('/healthz', (c) => c.json({ ok: true }));
+  // 默认逐字 {ok:true}；仅当 SOURCE_COMMIT 已配置时改为三字段自证形态。
+  app.get('/healthz', (c) => {
+    if (config.sourceCommit) {
+      return c.json({
+        status: 'ok',
+        commit: config.sourceCommit,
+        version: apiPackage.version,
+      });
+    }
+    return c.json({ ok: true });
+  });
   // PRM / 8414 必须在 agentCard 子应用之前注册，避免 /.well-known 前缀吞掉路径。
+  // X-Agent 自证同理：精确路径先于 agentCard 的 /.well-known 挂载。
+  app.get('/.well-known/xagent-verification.json', (c) => {
+    if (!config.sourceCommit || !config.xagtVerificationSlug) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    return c.json({
+      schemaVersion: 1,
+      slug: config.xagtVerificationSlug,
+      commit: config.sourceCommit,
+    });
+  });
   registerMcpHttpRoutes(app, {
     // 工具回环：base 为外部 origin / MCP_PUBLIC_URL（见 mcp-loopback ALS）。
     // 必须用完整绝对 URL 的 Request 走 app.fetch，使 /v1 的 c.req.url.origin
