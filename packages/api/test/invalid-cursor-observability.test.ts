@@ -308,6 +308,69 @@ describe('#202 invalid_cursor observability helper', () => {
       within_retention: false,
     });
   });
+
+  test('R3：v=2^53 number 必 malformed/warn；string 大数仍 full', () => {
+    const now = Date.now();
+    const lines = installCapture();
+    // number 2^53 超 safe integer → malformed（对齐 canonicalizeMailUidValidity）
+    const unsafeBody = Buffer.from(
+      JSON.stringify({
+        f: 'inbox',
+        a: 'alice@test.example',
+        t: now - 1000,
+        u: 42,
+        v: 2 ** 53,
+      }),
+    ).toString('base64url');
+    const unsafe = inspectMailCursor(
+      `${MAIL_CURSOR_PREFIX}.${unsafeBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+      now,
+    );
+    expect(unsafe).toEqual({ shape: 'malformed', within_retention: false });
+    expect(classifyInvalidCursorLevel(unsafe.shape, unsafe.within_retention)).toBe('warn');
+    logInvalidCursorRejection({ family: 'messages', ...unsafe });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.level).toBe('warn');
+
+    // string 分支：任意精度数字串仍收（BigInt）
+    const bigStrBody = Buffer.from(
+      JSON.stringify({
+        f: 'inbox',
+        a: 'alice@test.example',
+        t: now - 1000,
+        u: 42,
+        v: String(2 ** 53),
+      }),
+    ).toString('base64url');
+    expect(
+      inspectMailCursor(
+        `${MAIL_CURSOR_PREFIX}.${bigStrBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        now,
+      ),
+    ).toEqual({ shape: 'full', within_retention: true });
+  });
+
+  test('R3：deliveries 非规范 UUID / attempt=0 → malformed', () => {
+    const now = Date.now();
+    // dlv_ + 36 字符含连字符但非 8-4-4-4-12 固定位 → malformed
+    const withHyphensWrong = `dlv_${'a'.repeat(32)}----`; // 32 hex + 4 hyphens = 36，位宽不对
+    expect(withHyphensWrong.slice(4).length).toBe(36);
+    expect(inspectDeliveryCursor(withHyphensWrong, now)).toEqual({
+      shape: 'malformed',
+      within_retention: false,
+    });
+
+    // attempt=0 必 malformed
+    const id = `dlv_${randomUUID()}`;
+    expect(
+      inspectDeliveryCursor(`${id}|0|${new Date(now - 1000).toISOString()}`, now),
+    ).toEqual({ shape: 'malformed', within_retention: false });
+
+    // 规范 UUID + attempt≥1 仍 full
+    expect(
+      inspectDeliveryCursor(`${id}|1|${new Date(now - 1000).toISOString()}`, now),
+    ).toEqual({ shape: 'full', within_retention: true });
+  });
 });
 
 /** 前向 since 游标（REST messages 用 mail-fcursor-v1）。 */

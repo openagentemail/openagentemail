@@ -10,10 +10,13 @@
  * within_retention 以盘留存窗为准，不用内存截断视图（#217）。
  * 未来时间戳（ts > now）：within_retention=true（语义上仍属「窗内」），走 warn，不得归 stale/info（R2 P1-2）。
  *
- * 结构校验边界（R2 P1-1）：
+ * 结构校验边界（R2 P1-1 / R3）：
  *   软解析只按各族真实 codec 的**必填字段**收紧（缺任一键或类型不符 → malformed）。
  *   **不**做 zod `.strict()` 式额外字段拒绝，避免与 codec 双份漂移；
  *   多余键忽略；可选字段（如 mail-fcursor 的 `s`）仅在出现时做类型校验。
+ *   mail v2 的 number 型 `v` 对齐 canonicalizeMailUidValidity：Number.isSafeInteger；
+ *   string 型 `v` 仍走 BigInt（任意精度数字串照收）。
+ *   deliveries 形状对齐生产可生成域：dlv_+规范 UUID（8-4-4-4-12）与 attempt≥1。
  */
 
 import { config } from './config.ts';
@@ -112,8 +115,11 @@ function mailRetentionMs(): number {
   return config.retentionDays * 86_400_000;
 }
 
-const DELIVERY_BARE_ID_RE = /^dlv_[0-9a-fA-F-]{36}$/;
-const DELIVERY_FULL_RE = /^(dlv_[0-9a-fA-F-]{36})\|(\d+)\|(.+)$/;
+const DELIVERY_ID_RE =
+  /^dlv_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** full = 规范 deliveryId | attempt≥1 | ts；非生产可生成域 → malformed（R3）。 */
+const DELIVERY_FULL_RE =
+  /^(dlv_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\|(\d+)\|(.+)$/;
 
 /** 只读解析 deliveries 游标形状与盘留存窗归属；不验盘、不读内存索引。 */
 export function inspectDeliveryCursor(
@@ -125,6 +131,11 @@ export function inspectDeliveryCursor(
   }
   const full = DELIVERY_FULL_RE.exec(cursor);
   if (full) {
+    // attempt 必须 ≥1 正整数（生产 attempt 自 1 起）
+    const attempt = Number(full[2]);
+    if (!Number.isInteger(attempt) || attempt < 1) {
+      return { shape: 'malformed', within_retention: false };
+    }
     const ts = Date.parse(full[3]!);
     if (!Number.isFinite(ts)) return { shape: 'malformed', within_retention: false };
     return {
@@ -132,7 +143,7 @@ export function inspectDeliveryCursor(
       within_retention: withinRetentionMs(ts, deliveriesRetentionMs(), now),
     };
   }
-  if (DELIVERY_BARE_ID_RE.test(cursor)) {
+  if (DELIVERY_ID_RE.test(cursor)) {
     // bare_id 无时间戳：判不准 → 按 stale（within_retention=false）
     return { shape: 'bare_id', within_retention: false };
   }
@@ -173,10 +184,19 @@ function mailRequiredTimestamp(prefix: string, body: Record<string, unknown>): n
     // 退役 v1：必填 f/a/t/u，无 v
     return t;
   }
-  // v2 / fcursor：必填 v（正整数代际）
-  const vOk =
-    (typeof v === 'string' && /^\d+$/.test(v) && BigInt(v) > 0n) ||
-    (typeof v === 'number' && Number.isInteger(v) && v > 0);
+  // v2 / fcursor：必填 v。string 分支对齐生产 BigInt 任意精度数字串；
+  // v2 number 分支对齐 canonicalizeMailUidValidity：Number.isSafeInteger（R3 P1）。
+  // fcursor number 分支对齐 decodeMailForwardCursor：Number.isInteger。
+  let vOk = false;
+  if (typeof v === 'string' && /^\d+$/.test(v) && BigInt(v) > 0n) {
+    vOk = true;
+  } else if (typeof v === 'number' && v > 0) {
+    if (prefix === MAIL_CURSOR_PREFIX) {
+      vOk = Number.isSafeInteger(v);
+    } else if (prefix === MAIL_FORWARD_CURSOR_PREFIX) {
+      vOk = Number.isInteger(v);
+    }
+  }
   if (!vOk) return null;
   if (prefix === MAIL_FORWARD_CURSOR_PREFIX) {
     // 前向 codec：t 须为非负整数；可选 s
