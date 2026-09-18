@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { withDistBuildLock } from './support/dist-build-lock.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -22,6 +23,8 @@ const sha256 = (s: string) => new Bun.CryptoHasher('sha256').update(Buffer.from(
 
 const pkgDir = join(import.meta.dir, '..');
 const dist = join(pkgDir, 'dist');
+/** #226① R2：与同包其余 dist 写入测共用锁。 */
+const LOCK_DIR = join(pkgDir, '.dist-build.lock');
 
 async function waitForServer(port: number, deadlineMs: number, getBootLog: () => string): Promise<void> {
   const started = Date.now();
@@ -52,20 +55,23 @@ async function freePort(): Promise<number> {
 
 describe('dist bundle is self-contained (#520-A)', () => {
   test('built dist/main.js serves byte-gold /ui/app.js, /ui/styles.css and fonts', async () => {
-    rmSync(dist, { recursive: true, force: true });
+    // #226① R2：rm+build 写 dist 必须持包内锁
+    withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+      rmSync(dist, { recursive: true, force: true });
 
-    const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
-    if (build.exitCode !== 0) throw new Error(`bun run build failed:\n${build.stderr}`);
+      const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
+      if (build.exitCode !== 0) throw new Error(`bun run build failed:\n${build.stderr}`);
 
-    // dist/ui 清单：19 js + 4 css + 4 字体 = 27，且只有真资产（不带 .ts）。
-    const distUi = readdirSync(join(dist, 'ui')).sort();
-    expect(distUi).toEqual([
-      ...[...readdirSync(join(pkgDir, 'src/ui/client')).filter((f) => f.endsWith('.js'))],
-      ...readdirSync(join(pkgDir, 'src/ui/client/components')).filter((f) => f.endsWith('.js')),
-      ...readdirSync(join(pkgDir, 'src/ui/client/pages')).filter((f) => f.endsWith('.js')),
-      ...readdirSync(join(pkgDir, 'src/ui/styles')).filter((f) => f.endsWith('.css')),
-      ...readdirSync(join(pkgDir, 'src/ui/fonts')),
-    ].sort());
+      // dist/ui 清单：19 js + 4 css + 4 字体 = 27，且只有真资产（不带 .ts）。
+      const distUi = readdirSync(join(dist, 'ui')).sort();
+      expect(distUi).toEqual([
+        ...[...readdirSync(join(pkgDir, 'src/ui/client')).filter((f) => f.endsWith('.js'))],
+        ...readdirSync(join(pkgDir, 'src/ui/client/components')).filter((f) => f.endsWith('.js')),
+        ...readdirSync(join(pkgDir, 'src/ui/client/pages')).filter((f) => f.endsWith('.js')),
+        ...readdirSync(join(pkgDir, 'src/ui/styles')).filter((f) => f.endsWith('.css')),
+        ...readdirSync(join(pkgDir, 'src/ui/fonts')),
+      ].sort());
+    });
 
     const PORT = String(await freePort());
     const child = spawn('bun', ['dist/main.js'], {

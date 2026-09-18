@@ -7,10 +7,13 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withDistBuildLock } from "./support/dist-build-lock.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mcpRoot = join(here, "..");
 const distMain = join(mcpRoot, "dist/main.js");
+/** #226① R2：与同包其余 dist 写入测共用锁。 */
+const LOCK_DIR = join(mcpRoot, ".dist-build.lock");
 const SERVER_ENV_KEYS = [
   "DOMAIN",
   "API_KEYS",
@@ -132,14 +135,16 @@ async function handshakeCleanBoot(command: string, args: string[]): Promise<{
 }
 
 test("#168 净环境 dist bundle 完成 initialize + tools/list，且不含服务端 parseConfig", async () => {
-  if (!existsSync(distMain)) {
-    const build = spawn("bun", ["run", "build"], { cwd: mcpRoot, stdio: "inherit" });
-    const status = await new Promise<number>((resolve, reject) => {
-      build.on("error", reject);
-      build.on("exit", (code) => resolve(code ?? 1));
+  // #226① R2：条件 build 写 dist 必须持包内锁（持锁内再检查，防 TOCTOU）
+  withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+    if (existsSync(distMain)) return;
+    const build = Bun.spawnSync(["bun", "run", "build"], {
+      cwd: mcpRoot,
+      stdout: "inherit",
+      stderr: "inherit",
     });
-    expect(status).toBe(0);
-  }
+    expect(build.exitCode).toBe(0);
+  });
   const bundle = readFileSync(distMain, "utf8");
   expect(bundle).not.toContain("parseConfig(process.env)");
   expect(bundle).not.toMatch(/envSchema\.parse\(\s*env\s*\)/);

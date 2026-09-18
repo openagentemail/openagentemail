@@ -1,19 +1,24 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withDistBuildLock } from './support/dist-build-lock.ts';
 
 const { expect, test } = await import('bun:test');
 
 const pkgDir = join(import.meta.dir, '..');
 const repoDir = join(pkgDir, '..', '..');
+/** #226① R2：与同包其余 dist 写入测共用锁。 */
+const LOCK_DIR = join(pkgDir, '.dist-build.lock');
 
 test('#91 R1 RED: canonical runtime bundle carries the ntfy provisioner and every Compose command targets dist', () => {
-  const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
-  expect(build.exitCode).toBe(0);
+  withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+    const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
+    expect(build.exitCode).toBe(0);
 
-  const provisioner = join(pkgDir, 'dist', 'ntfy-provision.js');
-  expect(existsSync(provisioner)).toBe(true);
-  const leaseProvisioner = join(pkgDir, 'dist', 'task-lease-provision.js');
-  expect(existsSync(leaseProvisioner)).toBe(true);
+    const provisioner = join(pkgDir, 'dist', 'ntfy-provision.js');
+    expect(existsSync(provisioner)).toBe(true);
+    const leaseProvisioner = join(pkgDir, 'dist', 'task-lease-provision.js');
+    expect(existsSync(leaseProvisioner)).toBe(true);
+  });
 
   for (const composeName of ['compose.yaml', 'compose.api-only.yaml']) {
     const compose = readFileSync(join(repoDir, composeName), 'utf8');
