@@ -3,6 +3,8 @@
   var HOME_ACTIVE_PAGE_LIMIT = 100;
   var HOME_ACTIVE_MAX_PAGES = 5;
   var HOME_ACTIVE_MAX_ROWS = 500;
+  /* 硬停徽标/空态共用：不是裸 500+，标明已达扫描上限、计数封顶。 */
+  var HOME_WAITING_SCAN_CAPPED_LABEL = '500+ · scan capped';
   var HOME_VISIBLE_ROWS = 5;
   var DASHBOARD_POLL_MS = 30000;
   var DASHBOARD_IDLE_POLL_MS = 120000;
@@ -106,13 +108,19 @@
 
   /*
    * 完整扫描（无 nextCursor）才发布精确数：totalApprox 扣已扫描投影行。
-   * 硬停时不得用同一公式冒充精确值（500 活 + 未扫 100 过期会虚报 600），改发 500+ 下界。
+   * 硬停时不得用同一公式冒充精确值（500 活 + 未扫 100 过期会虚报 600），
+   * 改发诚实封顶文案（含「scan capped」），禁止裸 500+。
    */
   function publishHomeWaitingTotal(acc) {
-    if (homeWaitingScanCapped(acc)) return '500+';
+    if (homeWaitingScanCapped(acc)) return HOME_WAITING_SCAN_CAPPED_LABEL;
     var totalApprox = acc && typeof acc.totalApprox === 'number' ? acc.totalApprox : 0;
     var expired = acc && acc.expiredTasks ? acc.expiredTasks.length : 0;
     return Math.max(0, totalApprox - expired);
+  }
+
+  /* 是否为硬停封顶总数（徽标与空态分支共用）。 */
+  function homeWaitingTotalIsCapped(total) {
+    return total === HOME_WAITING_SCAN_CAPPED_LABEL;
   }
 
   /* 分页拉完匹配窗（页/行上限内）再发布 waiting 计数。 */
@@ -200,7 +208,7 @@
     if (typeof count === 'number' || (typeof count === 'string' && count)) {
       var badge = document.createElement('span');
       badge.className = 'count home-count';
-      /* 精确数来自完整扫描；硬停发布 500+，不可用数组长度代替。 */
+      /* 精确数来自完整扫描；硬停发布含 scan capped 的诚实文案，不可用数组长度代替。 */
       badge.textContent = String(count);
       heading.append(badge);
     }
@@ -229,7 +237,18 @@
       return;
     }
     if (!rows.length) {
-      appendHomeEmpty(section, 'Nothing needs you right now.', 'New requests that need your input will appear here.', 'Open Tasks', 'tasks');
+      /* 硬停 + 列表空：可与封顶徽标共存，文案须标明扫描上限而非假装无待办。 */
+      if (homeWaitingTotalIsCapped(state.homeWaitingTotal)) {
+        appendHomeEmpty(
+          section,
+          'Scan limit reached.',
+          'Waiting count is capped at 500+ scanned rows — actionable approvals may exist beyond this window.',
+          'Open Tasks',
+          'tasks'
+        );
+      } else {
+        appendHomeEmpty(section, 'Nothing needs you right now.', 'New requests that need your input will appear here.', 'Open Tasks', 'tasks');
+      }
       return;
     }
     var list = document.createElement('div');
@@ -412,7 +431,7 @@
       var waitingBoard = results[0].payload || {};
       /* 只收已分类的活审批；投影行不得进 homeWaitingTasks / Total。 */
       state.homeWaitingTasks = Array.isArray(waitingBoard.waitingTasks) ? waitingBoard.waitingTasks : [];
-      state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'
+      state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || homeWaitingTotalIsCapped(waitingBoard.waitingTotal)
         ? waitingBoard.waitingTotal
         : 0;
       expiredWaiting = Array.isArray(waitingBoard.expiredTasks) ? waitingBoard.expiredTasks : [];
