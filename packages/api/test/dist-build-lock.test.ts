@@ -2,11 +2,11 @@
  * #226①：dist build 锁——陈旧 PID 回收；并行第二进程等锁。
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { withDistBuildLock } from './support/dist-build-lock.ts';
+import { isPidAlive, withDistBuildLock } from './support/dist-build-lock.ts';
 
 describe('#226① dist-build-lock', () => {
   test('陈旧 PID 回收后可重新占锁', () => {
@@ -204,4 +204,33 @@ describe('#226① dist-build-lock', () => {
     expect(await new Response(a.stdout).text()).toBe('MUTATOR_OK');
     expect(await new Response(b.stdout).text()).toBe('BUNDLE_OK');
   }, 300_000);
+
+  test('R3 P1-1：kill EPERM 视为存活，锁不得被回收', () => {
+    const lockDir = join(mkdtempSync(join(tmpdir(), 'oae-dist-lock-')), '.dist-build.lock');
+    mkdirSync(lockDir);
+    // 任意正 PID；mock kill(0)→EPERM 模拟「活但无权」
+    writeFileSync(join(lockDir, 'pid'), '424242', 'utf8');
+
+    const realKill = process.kill.bind(process);
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === 0 || signal === undefined) {
+        const err = new Error('kill EPERM') as NodeJS.ErrnoException;
+        err.code = 'EPERM';
+        throw err;
+      }
+      return realKill(pid, signal as NodeJS.Signals | number);
+    }) as typeof process.kill;
+
+    try {
+      expect(isPidAlive(424242)).toBe(true);
+      expect(() =>
+        withDistBuildLock({ lockDir, pollMs: 30, timeoutMs: 250 }, () => 'stolen'),
+      ).toThrow(/timeout/);
+      // 锁仍在且 PID 未变——证明未走 stale 回收
+      expect(existsSync(lockDir)).toBe(true);
+      expect(readFileSync(join(lockDir, 'pid'), 'utf8').trim()).toBe('424242');
+    } finally {
+      process.kill = realKill;
+    }
+  });
 });
