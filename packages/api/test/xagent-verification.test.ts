@@ -1,7 +1,7 @@
 /**
  * H1 / X-Agent 黑客松自证端点契约：
  * - /healthz 无 SOURCE_COMMIT → 逐字 {ok:true}
- * - /healthz 有 SOURCE_COMMIT → {status,commit,version} 三字段
+ * - /healthz 有 SOURCE_COMMIT → {ok:true, status, commit, version}（ok 永远在场）
  * - /.well-known/xagent-verification.json 双 env 齐 → 200+三字段；缺任一 → 404
  */
 process.env.DOMAIN = 'test.example';
@@ -50,7 +50,7 @@ describe('H1 config: SOURCE_COMMIT / XAGT_VERIFICATION_SLUG', () => {
     expect(blank.xagtVerificationSlug).toBeUndefined();
   });
 
-  test('accepts 40-char lowercase hex and a non-empty slug', () => {
+  test('accepts 40-char lowercase hex and openagent-email slug shape', () => {
     const cfg = parseConfig({
       ...requiredEnv,
       SOURCE_COMMIT: COMMIT,
@@ -77,6 +77,28 @@ describe('H1 config: SOURCE_COMMIT / XAGT_VERIFICATION_SLUG', () => {
       }),
     ).toThrow();
   });
+
+  // R2-2：slug 负控——超长 / 大写 / 特殊字符各一必抛
+  test('rejects XAGT_VERIFICATION_SLUG that is too long, uppercase, or special', () => {
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        XAGT_VERIFICATION_SLUG: `${'a'.repeat(65)}`,
+      }),
+    ).toThrow();
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        XAGT_VERIFICATION_SLUG: 'OpenAgent-Email',
+      }),
+    ).toThrow();
+    expect(() =>
+      parseConfig({
+        ...requiredEnv,
+        XAGT_VERIFICATION_SLUG: 'open_agent',
+      }),
+    ).toThrow();
+  });
 });
 
 describe('H1 /healthz two-state contract', () => {
@@ -97,7 +119,7 @@ describe('H1 /healthz two-state contract', () => {
     }
   });
 
-  test('with SOURCE_COMMIT returns status/commit/version pinned', async () => {
+  test('with SOURCE_COMMIT keeps ok:true and pins status/commit/version (setup consumer)', async () => {
     const prevCommit = config.sourceCommit;
     const prevSlug = config.xagtVerificationSlug;
     try {
@@ -106,7 +128,16 @@ describe('H1 /healthz two-state contract', () => {
       const app = createApp({ uiEnabled: false });
       const res = await app.request('/healthz');
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
+      const body = (await res.json()) as {
+        ok?: unknown;
+        status?: unknown;
+        commit?: unknown;
+        version?: unknown;
+      };
+      // 模拟 setup connect.ts / demo.ts：硬要求 body.ok === true
+      expect(body.ok).toBe(true);
+      expect(body).toEqual({
+        ok: true,
         status: 'ok',
         commit: COMMIT,
         version: pkg.version,

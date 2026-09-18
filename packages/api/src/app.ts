@@ -58,10 +58,12 @@ type AppOptions = {
 export function createApp(options: AppOptions = {}): Hono {
   const app = new Hono();
 
-  // 默认逐字 {ok:true}；仅当 SOURCE_COMMIT 已配置时改为三字段自证形态。
+  // 默认逐字 {ok:true}；SOURCE_COMMIT 配置态追加自证字段，但 ok:true 永远在场
+  //（setup connect.ts / demo.ts 硬要求 body.ok===true，不得破坏）。
   app.get('/healthz', (c) => {
     if (config.sourceCommit) {
       return c.json({
+        ok: true,
         status: 'ok',
         commit: config.sourceCommit,
         version: apiPackage.version,

@@ -276,7 +276,19 @@ const envSchema = z.object({
       .optional(),
   ),
   // H1：可选验证 slug；与 SOURCE_COMMIT 同时存在时才挂 /.well-known/xagent-verification.json。
-  XAGT_VERIFICATION_SLUG: z.preprocess(emptyAsUndefined, z.string().min(1).optional()),
+  // 形态：1–64，小写字母/数字开头，仅 [a-z0-9-]（与 SOURCE_COMMIT 同严格风格）。
+  XAGT_VERIFICATION_SLUG: z.preprocess(
+    emptyAsUndefined,
+    z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[a-z0-9][a-z0-9-]*$/,
+        'XAGT_VERIFICATION_SLUG must match /^[a-z0-9][a-z0-9-]*$/ (max 64)',
+      )
+      .optional(),
+  ),
 });
 
 function splitCsv(value: string): string[] {

@@ -74,7 +74,15 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
 - `POST /v1/notify/devices` `{publicUrl, displayName?}` → `201` 一次性 ntfy 凭据（password / `qrPayload` / `qr` 只此一次；`Cache-Control: no-store`）。旧 client 只传 `publicUrl` 仍可用，缺省 displayName=`Phone`。**admin only**
 - `GET /v1/notify/devices` → `{devices:[{id,displayName,topicLabels,pairedAt,revokeStatus,…}]}`（默认隐藏 `revoked`；不含 password/token）。**admin only**
 - `DELETE /v1/notify/devices/:id` → `204`（`pending_revoke` 中间态；ntfy 缺失 user = HTTP 400/code 40031 或 404+缺失正文，视为成功；已 revoked 幂等 204）。ntfy 临时关闭且行含 `ntfyUsername` 时 `503`，不标 revoked。**admin only**
-- `GET /healthz` → `{ok:true}`
+- `GET /healthz` → `{ok:true}` by default. When `SOURCE_COMMIT` is set (40-char
+  lowercase hex), the same endpoint returns
+  `{ok:true, status:"ok", commit:<SOURCE_COMMIT>, version:<packages/api version>}` —
+  **`ok:true` is always present** so setup CLI / demo health checks keep working.
+  `commit` and `version` are visible to unauthenticated callers (operator
+  choice when enabling the env). Host/CI platforms that auto-inject a
+  `SOURCE_COMMIT` of a different shape will fail boot (zod fail-fast); echo the
+  value before `compose up` / rebuild. Compose passes `${SOURCE_COMMIT:-}` as a
+  build arg into the API image.
 
 ## Operating notes
 
@@ -91,9 +99,10 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
   damaged one on the next create/rotate and lose every identity. While it is
   damaged, anything that reads the store answers `500`: that is every request
   authenticated with an identity token, plus all `/v1/identities` calls.
-  **`GET /healthz` does not read the store and keeps returning `{ok:true}`, so
-  the container healthcheck stays green** — watch the API log for
-  `identity_store_corrupt` and restore the file from backup.
+  **`GET /healthz` does not read the store and always includes `{ok:true}` (plus
+  optional commit/version when `SOURCE_COMMIT` is set), so the container
+  healthcheck stays green** — watch the API log for `identity_store_corrupt`
+  and restore the file from backup.
 - **Notification log.** `DATA_DIR/notification-log.jsonl` records successful
   ntfy publishes for 30 days (0600, single-writer queue, UTC daily compact).
   Do not backfill ntfy 12h cache into it. Trailing half-lines are isolated to
