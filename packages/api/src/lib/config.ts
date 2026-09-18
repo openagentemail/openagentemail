@@ -266,6 +266,29 @@ const envSchema = z.object({
   RETENTION_DAYS: z.coerce.number().int().min(0).default(30),
   // How often the retention sweeper runs, in hours.
   RETENTION_CHECK_HOURS: z.coerce.number().positive().default(6),
+
+  // H1 / X-Agent 黑客松自证：可选 40 位小写 hex commit（空串视为未配置）。
+  SOURCE_COMMIT: z.preprocess(
+    emptyAsUndefined,
+    z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, 'SOURCE_COMMIT must be a 40-char lowercase hex SHA')
+      .optional(),
+  ),
+  // H1：可选验证 slug；与 SOURCE_COMMIT 同时存在时才挂 /.well-known/xagent-verification.json。
+  // 形态：1–64，小写字母/数字开头，仅 [a-z0-9-]（与 SOURCE_COMMIT 同严格风格）。
+  XAGT_VERIFICATION_SLUG: z.preprocess(
+    emptyAsUndefined,
+    z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[a-z0-9][a-z0-9-]*$/,
+        'XAGT_VERIFICATION_SLUG must match /^[a-z0-9][a-z0-9-]*$/ (max 64)',
+      )
+      .optional(),
+  ),
 });
 
 function splitCsv(value: string): string[] {
@@ -499,6 +522,9 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     sendRateLimit: raw.SEND_RATE_LIMIT,
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,
+    // X-Agent 自证（可选；未配置时 /healthz 与 well-known 保持历史行为）
+    sourceCommit: raw.SOURCE_COMMIT,
+    xagtVerificationSlug: raw.XAGT_VERIFICATION_SLUG,
   } as const;
 }
 

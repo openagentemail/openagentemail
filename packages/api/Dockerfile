@@ -16,6 +16,9 @@ RUN bun run build
 FROM oven/bun:1 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# H1：build 时钉死 SOURCE_COMMIT（40 位 hex）；空 ARG 保持未配置，/healthz 仍为 {ok:true}
+ARG SOURCE_COMMIT=
+ENV SOURCE_COMMIT=$SOURCE_COMMIT
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 # 只把数据目录交给 bun（uid 1000）；可执行件保持 root 所有，bun 只读执行（去掉 -R 与 /app 整树）
