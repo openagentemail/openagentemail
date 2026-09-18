@@ -11,19 +11,45 @@ function asWaitMonotonicMs(n: number): WaitMonotonicMs {
   return n as WaitMonotonicMs;
 }
 
-/** 回退墙钟时只警告一次，避免刷屏；不得 throw（#214）。 */
+/** 回退墙钟时只警告一次，避免刷屏。 */
 let warnedPerformanceFallback = false;
 
-/** 生产读 performance.now；缺省回退 Date.now 并 warn-once。 */
-function defaultWaitMonotonicNow(): number {
+/** 钟族：performance 或 Date；首次调用钉死，之后 flip 即 throw（#226②）。 */
+type WaitClockFamily = 'performance' | 'Date';
+
+/** 首次成功读钟时钉死的族名；undefined 表示尚未钉死。 */
+let pinnedClockFamily: WaitClockFamily | undefined;
+
+/** 探测当前运行时可提供的钟族。 */
+function detectWaitClockFamily(): WaitClockFamily {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-    return performance.now();
+    return 'performance';
   }
-  if (!warnedPerformanceFallback) {
-    warnedPerformanceFallback = true;
-    console.warn(
-      '[wait-clock] performance.now unavailable; wait deadlines fall back to Date.now() (monotonicity invariant lost)',
+  return 'Date';
+}
+
+/**
+ * 生产读 performance.now；缺省回退 Date.now 并 warn-once。
+ * #226②：首次调用钉死 family；运行期 flip 即 throw（响亮失败优于静默全超时）。
+ */
+function defaultWaitMonotonicNow(): number {
+  const family = detectWaitClockFamily();
+  if (pinnedClockFamily === undefined) {
+    pinnedClockFamily = family;
+    if (family === 'Date' && !warnedPerformanceFallback) {
+      warnedPerformanceFallback = true;
+      console.warn(
+        '[wait-clock] performance.now unavailable; wait deadlines fall back to Date.now() (monotonicity invariant lost)',
+      );
+    }
+  } else if (pinnedClockFamily !== family) {
+    throw new Error(
+      `[wait-clock] clock family flipped from ${pinnedClockFamily} to ${family}; refusing silent switch`,
     );
+  }
+
+  if (pinnedClockFamily === 'performance') {
+    return performance.now();
   }
   return Date.now();
 }

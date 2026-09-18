@@ -6,6 +6,8 @@ data/
 # Dependencies & build output
 node_modules/
 dist/
+# #226① 测试期 dist build 互斥锁目录（勿提交）
+.dist-build.lock/
 output/playwright/
 
 # OS noise
