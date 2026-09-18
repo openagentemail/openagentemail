@@ -3,6 +3,7 @@
  * 拆分边界是源码维护边界，不改变对外 /ui/styles.css 与 /ui/app.js 契约（ADR #26 PR1）。
  */
 import { logoGeometry, SHELL_HTML } from './shell.ts';
+import { withConnectShell } from './connect-shell.ts';
 import { TOKENS_CSS } from './styles/tokens.ts';
 import { BASE_CSS } from './styles/base.ts';
 import { LAYOUT_CSS } from './styles/layout.ts';
@@ -24,6 +25,7 @@ import { TASKS_PAGE_JS } from './client/pages/tasks.ts';
 import { IDENTITIES_PAGE_JS } from './client/pages/identities.ts';
 import { PUSH_DEVICES_PAGE_JS } from './client/pages/push-devices.ts';
 import { AUTHORIZED_CLIENTS_PAGE_JS } from './client/pages/authorized-clients.ts';
+import { CONNECT_PAGE_JS } from './client/pages/connect.ts';
 import { PLAN_PAGE_JS } from './client/pages/plan.ts';
 import { APP_JS } from './client/app.ts';
 
@@ -35,7 +37,7 @@ export const OUTER_CSP =
 export const UI_LOGO_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\n${logoGeometry}\n</svg>\n`;
 
-export const UI_HTML = SHELL_HTML;
+export const UI_HTML = withConnectShell(SHELL_HTML);
 
 export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;
 
@@ -60,6 +62,7 @@ export const UI_JS =
   IDENTITIES_PAGE_JS +
   PUSH_DEVICES_PAGE_JS +
   AUTHORIZED_CLIENTS_PAGE_JS +
+  CONNECT_PAGE_JS +
   PLAN_PAGE_JS +
   APP_JS +
   '})();';

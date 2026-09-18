@@ -252,6 +252,65 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('return selection.toString() === sourceNode.textContent');
   });
 
+  test('Connect an agent page is routed, token-gated, and assembled without logging credentials', async () => {
+    const { CONNECT_PAGE_JS } = await import('../src/ui/client/pages/connect.ts');
+    expect(UI_HTML).toContain('data-nav="connect" href="/ui/connect"');
+    expect(UI_HTML).toContain('id="connect-panel"');
+    expect(UI_HTML).toContain('id="connect-token-reveal"');
+    expect(UI_JS).toContain("apiJson('/ui/api/connect')");
+    expect(UI_JS).toContain("path === '/ui/connect'");
+    expect(UI_JS).toContain("return '/ui/connect'");
+    expect(CONNECT_PAGE_JS).toContain("payload.unavailable === 'identity_session_required'");
+    expect(CONNECT_PAGE_JS).toContain("payload.unavailable === 'token_unavailable'");
+    expect(CONNECT_PAGE_JS).toContain("button.disabled = Boolean(sensitive && !connectRevealed)");
+    // nit：主 Copy token 钮纳入 reveal 门控（遮蔽态 disabled + 点击守卫）
+    expect(CONNECT_PAGE_JS).toContain('connectTokenCopy.disabled = !connectRevealed');
+    expect(CONNECT_PAGE_JS).toContain(
+      'if (!connectCredentialValue || !connectRevealed) return;',
+    );
+    // R3 i案：Copy instruction 只复制 prompt，不含 config/token 拼接
+    expect(CONNECT_PAGE_JS).toContain("'Copy instruction'");
+    expect(CONNECT_PAGE_JS).not.toContain(
+      "definition.prompt + '\\n\\n' + definition.config",
+    );
+    expect(CONNECT_PAGE_JS).toContain('definition.prompt,');
+    expect(CONNECT_PAGE_JS).toContain('with Copy setup');
+    expect(CONNECT_PAGE_JS).toContain('Do not ask me to paste a token');
+    // R5：掐读回——写入后重启/重连；禁止读回含 token 文件
+    expect(CONNECT_PAGE_JS).toContain('Do not read that file back or print the bearer');
+    expect(CONNECT_PAGE_JS).toContain('Do not read that config back or print the bearer');
+    expect(CONNECT_PAGE_JS).toContain('Restart or reconnect');
+    expect(CONNECT_PAGE_JS).not.toContain('Read that local file');
+    expect(CONNECT_PAGE_JS).not.toContain('Read that local config');
+    expect(CONNECT_PAGE_JS).not.toContain('codex mcp get openagent_email');
+    expect(CONNECT_PAGE_JS).not.toContain('claude mcp get openagent-email');
+    // R6：Claude 卡命令本体零凭证——$OAE_TOKEN 变量引用 + read -s 指引
+    expect(CONNECT_PAGE_JS).toContain('$OAE_TOKEN');
+    expect(CONNECT_PAGE_JS).toContain("read -s OAE_TOKEN");
+    expect(CONNECT_PAGE_JS).toContain("'Authorization: Bearer '");
+    expect(CONNECT_PAGE_JS).not.toContain(
+      "shellSingleQuote('Authorization: ' + authorization)",
+    );
+    // R2：logout/离页代际作废，迟到响应不得复活明文
+    expect(CONNECT_PAGE_JS).toContain('var connectLoadGen = 0');
+    expect(CONNECT_PAGE_JS).toContain('connectLoadGen += 1');
+    expect(CONNECT_PAGE_JS).toContain(
+      "if (state.scope !== 'connect' || generation !== connectLoadGen) return;",
+    );
+    expect(CONNECT_PAGE_JS).toContain("split(connectCredentialValue).join('<identity-token>')");
+    // R4/R5：bfcache pagehide 清态；persisted+connect 重跑 loadConnectPage
+    expect(CONNECT_PAGE_JS).toContain("window.addEventListener('pagehide'");
+    expect(CONNECT_PAGE_JS).toContain("window.addEventListener('pageshow'");
+    expect(CONNECT_PAGE_JS).toContain('if (!event.persisted) return;');
+    expect(CONNECT_PAGE_JS).toContain("if (state.scope === 'connect')");
+    expect(CONNECT_PAGE_JS).toContain('loadConnectPage()');
+    expect(CONNECT_PAGE_JS).toContain('clearConnectSensitiveState()');
+    expect(CONNECT_PAGE_JS).not.toMatch(/console\s*\./);
+    expect(CONNECT_PAGE_JS).not.toMatch(/localStorage|sessionStorage|indexedDB/);
+    // R2 P1-1：appNav 点击链必须认 connect，否则 data-nav 真点击永不进页
+    expect(UI_JS).toContain("else if (key === 'connect') navigateTo('connect')");
+  });
+
   test('shell deep-links register after api/oauth/frame and do not swallow them', async () => {
     const full = createApp({ uiEnabled: true });
     const paths = full.routes.map((route) => `${route.method} ${route.path}`);
@@ -595,7 +654,7 @@ describe('UI static asset contract', () => {
   });
 
   // A15：landmark 挂在 inbox 容器上；scope 在 overview / notifications / tasks / inbox 四个 <main> 间切换
-  test('exactly five mains exist and #main-content wraps the message and detail panels', () => {
+  test('exactly eleven mains exist and #main-content wraps the message and detail panels', () => {
     expect(UI_HTML).toContain('<main id="overview-panel" class="overview-panel" tabindex="-1"');
     expect(UI_HTML).toMatch(/<main id="overview-panel"[^>]*\shidden>/);
     expect(UI_HTML).toContain('<main id="notify-panel" class="notify-panel" tabindex="-1"');
@@ -614,8 +673,8 @@ describe('UI static asset contract', () => {
     // #message-panel / #detail-panel 自身不带 hidden：scope 只切四个内容 <main>
     expect(UI_HTML).not.toMatch(/<section id="(message|detail)-panel"[^>]*\shidden/);
 
-    // login + overview + notify + tasks + configure×4 + plan + inbox-main
-    expect(UI_HTML.split('<main').length - 1).toBe(10);
+    // login + overview + notify + tasks + connect + configure×4 + plan + inbox-main
+    expect(UI_HTML.split('<main').length - 1).toBe(11);
     expect(UI_HTML).toContain('id="app-nav"');
     expect(UI_HTML).toContain('id="nav-toggle"');
   });

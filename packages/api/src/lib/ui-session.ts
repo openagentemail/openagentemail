@@ -32,6 +32,10 @@ const MAX_GLOBAL_FAILURES = 60;
 const MAX_TRACKED_IPS = 1000;
 export const DENIED_AUDIT_THROTTLE_MS = 60 * 1000;
 const MINT_DENIED_AUDIT_THROTTLE_MS = DENIED_AUDIT_THROTTLE_MS;
+/** Connect 明文 token 下发审计节流窗口（与 denied 审计同为 60s）。 */
+export const CONNECT_REVEAL_AUDIT_THROTTLE_MS = DENIED_AUDIT_THROTTLE_MS;
+/** 测试可见：Connect reveal 节流表与 mint/session denied 共用上限。 */
+export const CONNECT_REVEAL_AUDIT_MAX_TRACKED = MAX_TRACKED_IPS;
 /** authenticate 更新 lastSeenAt 的落盘节流：默认 5 分钟内不重复写盘。 */
 export const LAST_SEEN_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
 /** ?token= 换取的一次性交换码默认 TTL：硬约束 ≤10 分钟。 */
@@ -151,6 +155,8 @@ export class UiSessionStore {
   private readonly consumedCodes = new Map<string, ConsumedCodeRecord>();
   private readonly lastMintDeniedAuditAt = new Map<string, number>();
   private readonly lastSessionDeniedAuditAt = new Map<string, number>();
+  /** Connect reveal 审计节流：键=`${sid}:${ip}`，cleanup 过期清理 + MAX_TRACKED_IPS 封顶。 */
+  private readonly lastConnectRevealAuditAt = new Map<string, number>();
   private readonly resolve: (token: string) => Auth | null;
   private readonly resolveHash: ((tokenHash: string) => Auth | null) | null;
   private readonly maxSessions: number;
@@ -523,6 +529,62 @@ export class UiSessionStore {
     return { auth };
   }
 
+  /**
+   * Return the plaintext credential already held by a live, directly-created
+   * identity session.  Persistent and exchange-code sessions intentionally do
+   * not have plaintext credentials, and admin credentials are never exposed.
+   *
+   * The caller must authenticate the session first.  Re-resolving the token
+   * here also makes a rotation between authentication and reveal fail closed.
+   */
+  identityTokenForSession(sid: string, expectedAddress: string): string | null {
+    const session = this.sessions.get(sha256(sid));
+    if (!session?.token) return null;
+    const auth = this.resolve(session.token);
+    if (auth?.kind !== 'identity' || auth.address !== expectedAddress) return null;
+    return session.token;
+  }
+
+  /**
+   * Connect 明文 token 下发审计节流：每会话+IP 每分钟至多认领 1 次。
+   * 认领前顺手清过期；插入新键时若已满则剪最旧（读路径自封顶，不依赖 cleanup）。
+   * @returns true 时调用方应落 identity.token.reveal
+   */
+  claimConnectRevealAudit(sid: string, ip: string, now = Date.now()): boolean {
+    for (const [trackedKey, trackedAt] of this.lastConnectRevealAuditAt) {
+      if (now - trackedAt > CONNECT_REVEAL_AUDIT_THROTTLE_MS) {
+        this.lastConnectRevealAuditAt.delete(trackedKey);
+      }
+    }
+    const key = `${sid}:${ip}`;
+    const lastAt = this.lastConnectRevealAuditAt.get(key) ?? 0;
+    if (now - lastAt < CONNECT_REVEAL_AUDIT_THROTTLE_MS) return false;
+    if (!this.lastConnectRevealAuditAt.has(key)) {
+      while (this.lastConnectRevealAuditAt.size >= MAX_TRACKED_IPS) {
+        const oldest = this.lastConnectRevealAuditAt.keys().next().value;
+        if (oldest === undefined) break;
+        this.lastConnectRevealAuditAt.delete(oldest);
+      }
+    }
+    this.lastConnectRevealAuditAt.set(key, now);
+    return true;
+  }
+
+  /** 测试辅助：当前 Connect reveal 节流表大小。 */
+  connectRevealAuditSizeForTests(): number {
+    return this.lastConnectRevealAuditAt.size;
+  }
+
+  /** 测试辅助：直接写入节流表（填充上限 / 过期清理场景）。 */
+  seedConnectRevealAuditForTests(key: string, at: number): void {
+    this.lastConnectRevealAuditAt.set(key, at);
+  }
+
+  /** 测试辅助：触发 cleanup（含节流 Map 过期清理与 MAX_TRACKED_IPS 封顶）。 */
+  cleanupThrottleMapsForTests(now = Date.now()): void {
+    this.cleanup(now);
+  }
+
   destroy(sid: string): void {
     const sidHash = sha256(sid);
     if (!this.sessions.has(sidHash)) return;
@@ -609,6 +671,21 @@ export class UiSessionStore {
       let count = 0;
       for (const key of this.lastSessionDeniedAuditAt.keys()) {
         this.lastSessionDeniedAuditAt.delete(key);
+        count++;
+        if (count >= excess) break;
+      }
+    }
+    // Connect reveal 审计节流：过期条目清理 + 与 mint/session denied 同上限
+    for (const [key, lastAt] of this.lastConnectRevealAuditAt) {
+      if (now - lastAt > CONNECT_REVEAL_AUDIT_THROTTLE_MS) {
+        this.lastConnectRevealAuditAt.delete(key);
+      }
+    }
+    if (this.lastConnectRevealAuditAt.size > MAX_TRACKED_IPS) {
+      const excess = this.lastConnectRevealAuditAt.size - MAX_TRACKED_IPS;
+      let count = 0;
+      for (const key of this.lastConnectRevealAuditAt.keys()) {
+        this.lastConnectRevealAuditAt.delete(key);
         count++;
         if (count >= excess) break;
       }

@@ -81,6 +81,7 @@
   }
 
   function showLogin(message) {
+    if (typeof clearConnectSensitiveState === 'function') clearConnectSensitiveState();
     cancelOverview();
     cancelNotifyLoad();
     cancelTasksLoad();

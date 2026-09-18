@@ -1151,6 +1151,63 @@ async function runAcceptance() {
     'A56 identity Home has exactly one visible main',
   );
 
+  /* ============ B138：Connect 页凭据门与离页清理 ============ */
+  await evaluate("document.querySelector('[data-nav=\"connect\"]').click()");
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'connect' && document.querySelectorAll('.connect-card').length === 7",
+    'Connect agent cards for an identity session',
+  );
+  const connectMasked = await evaluate(`(() => ({
+    mains: __oae.visibleMains().map((main) => main.id),
+    endpoint: document.querySelector('#connect-endpoint').textContent,
+    token: document.querySelector('#connect-token').textContent,
+    setupDisabled: [...document.querySelectorAll('.connect-card-actions button:first-child')]
+      .filter((button) => button.disabled).length,
+    manualCards: document.querySelectorAll('.connect-card[data-manual="true"]').length
+  }))()`);
+  check(
+    connectMasked.mains.length === 1 && connectMasked.mains[0] === 'connect-panel',
+    'B138 Connect has exactly one visible main',
+  );
+  check(
+    connectMasked.endpoint === `${base}/mcp`,
+    `B138 Connect uses the live MCP endpoint (saw ${connectMasked.endpoint})`,
+  );
+  check(
+    connectMasked.token === '••••••••••••' && connectMasked.setupDisabled === 5,
+    'B138 identity token is masked and sensitive setup copy actions start disabled',
+  );
+  check(connectMasked.manualCards === 2, 'B138 ChatGPT and Grok remain manual-path cards');
+  await evaluate("document.querySelector('#connect-token-reveal').click()");
+  await waitFor(
+    "document.querySelector('#connect-token-reveal').getAttribute('aria-pressed') === 'true'",
+    'Connect identity token reveal',
+  );
+  const connectRevealed = await evaluate(`(() => ({
+    token: document.querySelector('#connect-token').textContent,
+    setupDisabled: [...document.querySelectorAll('.connect-card-actions button:first-child')]
+      .filter((button) => button.disabled).length,
+    configsContainToken: [...document.querySelectorAll('.connect-config')]
+      .slice(0, 5)
+      .every((config) => config.textContent.includes('preview-identity-token'))
+  }))()`);
+  check(
+    connectRevealed.token === 'preview-identity-token' &&
+      connectRevealed.setupDisabled === 0 &&
+      connectRevealed.configsContainToken,
+    'B138 reveal exposes the current identity token and enables all setup copies',
+  );
+  await evaluate("document.querySelector('[data-nav=\"overview\"]').click()");
+  await waitFor(
+    "document.querySelector('#inbox-view').dataset.scope === 'overview'",
+    'Home after leaving Connect',
+  );
+  check(
+    (await evaluate("document.querySelector('#connect-token').textContent")) === '••••••••••••' &&
+      (await evaluate("document.querySelectorAll('.connect-card').length")) === 0,
+    'B138 leaving Connect clears the rendered credential and setup cards',
+  );
+
   /* ============ A61 / A61b / A62 / A62b / A63 / A64：五种 fixture ============ */
   function stubbedIdentities(count, delayMs = 0) {
     return () => ({

@@ -221,9 +221,49 @@ describe('UI session cookie', () => {
     tokenValid = false;
     expect(store.authenticate(rotated.sid, 2)).toBeNull();
   });
+
+  test('identity credential reveal is scoped to the exact live direct session', () => {
+    const identityStore = new UiSessionStore({
+      resolveToken: (token: string) =>
+        token === 'oa_fox' ? { kind: 'identity', address: 'fox@test.example' } : null,
+    });
+    const identity = identityStore.create('oa_fox', '127.0.0.1', 1);
+    expect(identity.ok).toBe(true);
+    if (!identity.ok) throw new Error('expected an identity session');
+    expect(identityStore.identityTokenForSession(identity.sid, 'fox@test.example')).toBe('oa_fox');
+    expect(identityStore.identityTokenForSession(identity.sid, 'other@test.example')).toBeNull();
+    identityStore.destroy(identity.sid);
+    expect(identityStore.identityTokenForSession(identity.sid, 'fox@test.example')).toBeNull();
+
+    const adminStore = new UiSessionStore({ resolveToken: adminResolver });
+    const admin = adminStore.create(adminToken, '127.0.0.1', 1);
+    expect(admin.ok).toBe(true);
+    if (!admin.ok) throw new Error('expected an admin session');
+    expect(adminStore.identityTokenForSession(admin.sid, 'admin@test.example')).toBeNull();
+  });
 });
 
 describe('UI session persistence', () => {
+  test('a restored hash-only identity session cannot reveal its credential', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'oae-ui-sess-connect-'));
+    const path = join(dir, 'ui-sessions.json');
+    const token = 'oa_persisted-fox';
+    const tokenHash = sha256Hex(token);
+    const resolveToken = (candidate: string): Auth | null =>
+      candidate === token ? { kind: 'identity', address: 'fox@test.example' } : null;
+    const resolveTokenHash = (candidate: string): Auth | null =>
+      candidate === tokenHash ? { kind: 'identity', address: 'fox@test.example' } : null;
+    const writer = new UiSessionStore({ resolveToken, resolveTokenHash, persistPath: path });
+    const created = writer.create(token, '127.0.0.1');
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error('expected an identity session');
+    expect(writer.identityTokenForSession(created.sid, 'fox@test.example')).toBe(token);
+
+    const restored = new UiSessionStore({ resolveToken, resolveTokenHash, persistPath: path });
+    expect(restored.authenticate(created.sid)).not.toBeNull();
+    expect(restored.identityTokenForSession(created.sid, 'fox@test.example')).toBeNull();
+  });
+
   test('create → 落盘 → 新 store 加载后 authenticate 命中（tokenHash 反解）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'oae-ui-sess-persist-'));
     const path = join(dir, 'ui-sessions.json');

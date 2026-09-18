@@ -162,7 +162,7 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 
 ### 推荐公网部署姿态
 
-1. TLS 反代终止 → API；设 `MCP_PUBLIC_URL=https://…`（PRM / 401 `resource_metadata` / AS issuer 同源）。
+1. TLS 反代终止 → API；**反代部署必配** `MCP_PUBLIC_URL=https://…`（PRM / 401 `resource_metadata` / AS issuer / `/ui/api/connect` endpoint 同源；未设时回退 request origin 是存量模式，生产勿依赖）。
 2. `TRUST_PROXY_HEADERS=true`——**仅当**反代已满足上节硬性前置（覆写/剥离客户端 XFF）；否则保持 `false`。
 3. `OAE_PUBLIC_EDGE=true`。
 4. 保持 `MCP_MAX_WAIT_SECONDS≤60`（多数边缘读超时 ~100s）。

@@ -13,7 +13,7 @@ const { UI_CSS, UI_JS } = await import('../src/ui/assets.ts');
 /**
  * 真文件产物清单（#520-A 提取 PR）：assets.ts 拼接所用的全部真 .js/.css 文件。
  * 钉死两件事：
- *   1. 磁盘上正好这 23 个真文件、非空（防真文件漏层——CI/Docker 上下文缺文件即红）；
+ *   1. 磁盘上正好这 24 个真文件、非空（防真文件漏层——CI/Docker 上下文缺文件即红）；
  *   2. 按本清单 + IIFE 包装重组 === UI_JS / UI_CSS 导出（顺序与内容都被钉死，
  *      loader 读盘而非藏字符串副本）。
  */
@@ -36,11 +36,17 @@ const JS_FILES = [
   'client/pages/identities.js',
   'client/pages/push-devices.js',
   'client/pages/authorized-clients.js',
+  'client/pages/connect.js',
   'client/pages/plan.js',
   'client/app.js',
 ];
 
-const CSS_FILES = ['styles/tokens.css', 'styles/base.css', 'styles/layout.css', 'styles/pages.css'];
+const CSS_FILES = [
+  'styles/tokens.css',
+  'styles/base.css',
+  'styles/layout.css',
+  'styles/pages.css',
+];
 
 function readUi(rel: string): string {
   return readFileSync(new URL(`../src/ui/${rel}`, import.meta.url), 'utf8');
@@ -54,8 +60,14 @@ function realFilesUnder(dir: string, ext: string): string[] {
 }
 
 describe('UI real-file manifest (#520-A)', () => {
-  test('disk holds exactly the 19 real .js files and 4 real .css files, all non-empty', () => {
-    expect(realFilesUnder('client', '.js')).toEqual(['api.js', 'app.js', 'dom.js', 'router.js', 'store.js']);
+  test('disk holds exactly the 20 real .js files and 4 real .css files, all non-empty', () => {
+    expect(realFilesUnder('client', '.js')).toEqual([
+      'api.js',
+      'app.js',
+      'dom.js',
+      'router.js',
+      'store.js',
+    ]);
     expect(realFilesUnder('client/components', '.js')).toEqual([
       'app-nav.js',
       'empty-state.js',
@@ -66,6 +78,7 @@ describe('UI real-file manifest (#520-A)', () => {
     ]);
     expect(realFilesUnder('client/pages', '.js')).toEqual([
       'authorized-clients.js',
+      'connect.js',
       'identities.js',
       'inbox.js',
       'notifications.js',
@@ -74,7 +87,12 @@ describe('UI real-file manifest (#520-A)', () => {
       'push-devices.js',
       'tasks.js',
     ]);
-    expect(realFilesUnder('styles', '.css')).toEqual(['base.css', 'layout.css', 'pages.css', 'tokens.css']);
+    expect(realFilesUnder('styles', '.css')).toEqual([
+      'base.css',
+      'layout.css',
+      'pages.css',
+      'tokens.css',
+    ]);
 
     for (const rel of [...JS_FILES, ...CSS_FILES]) {
       const url = new URL(`../src/ui/${rel}`, import.meta.url);
@@ -98,9 +116,16 @@ describe('UI real-file manifest (#520-A)', () => {
   // 从而避免把逻辑重新塞回 TS 字符串或无意修改已抽出的 UI 资源。
   test('served bundle bytes are pinned to the B6 real-file baseline', () => {
     const sha256 = (s: string) =>
-      new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
-    // #134：UI 完整地址键变更有意；CSS 未改。
-    expect(sha256(UI_JS)).toBe('28e2d7b1f04a1186fc789cd8be5688c64aed53786f5ed1cb7f7757762b799f30');
-    expect(sha256(UI_CSS)).toBe('de1732ea6cd909c377f392e5de16522858820aecf1b9b9cb55555dba093ad576');
+      new Bun.CryptoHasher('sha256')
+        .update(Buffer.from(s, 'utf8'))
+        .digest('hex');
+    // #134、#196/R3 与 #231 Connect 页面均为有意 UI 变更；更新前已确认差异有意。
+    // #231 R6：Claude 卡 $OAE_TOKEN 零凭证命令后更新 UI_JS 针脚。
+    expect(sha256(UI_JS)).toBe(
+      'a9fae6babe450c4d8d5b7f714a2edf3ead4d04be2fb7013ea2c571cc978463c5',
+    );
+    expect(sha256(UI_CSS)).toBe(
+      'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',
+    );
   });
 });

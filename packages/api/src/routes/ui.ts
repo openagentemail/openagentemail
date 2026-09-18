@@ -74,6 +74,7 @@ import {
 } from '../lib/ui-session.ts';
 import { MAX_EMAIL_HTML_LENGTH } from '../lib/sanitize-email-html.ts';
 import { config } from '../lib/config.ts';
+import { resolveResourceUri } from '../lib/oauth-url.ts';
 import {
   checkNotifyUserLimit,
   releaseNotifyUserLimit,
@@ -567,9 +568,21 @@ export function isValidMessageUid(id: string): boolean {
   return Number.isSafeInteger(uid) && uid <= 4_294_967_295;
 }
 
+/** Connect 明文 token 下发审计节流已迁入 UiSessionStore（cleanup + MAX_TRACKED_IPS）。 */
+
+/**
+ * GET /ui/api/connect 防御深度：仅放行 Sec-Fetch-Site=same-origin|none。
+ * SFS 为 forbidden header，页面 JS 不可伪造；缺席与 cross-site 一律 403。
+ */
+function connectSecFetchSiteAllowed(c: Context): boolean {
+  const site = (c.req.header('sec-fetch-site') ?? '').toLowerCase();
+  return site === 'same-origin' || site === 'none';
+}
+
 export function createUiApiRoutes(
   store: UiSessionStore,
   dependencies: UiApiDependencies = defaultDependencies,
+  options: { publicBaseUrl?: string } = {},
 ): Hono {
   const routes = new Hono();
 
@@ -581,6 +594,44 @@ export function createUiApiRoutes(
     // 已登录用户打开 /ui 时若仍挂着 OAuth return cookie，一并交给前端回跳。
     const returnTo = consumeOAuthReturnCookie(c);
     return c.json(returnTo ? { ...auth, returnTo } : auth);
+  });
+
+  routes.get('/connect', (c) => {
+    // P2-2：凭据下发 GET 追加 SFS 闸，不依赖未来 CORS/SameSite 变更仍能兜底
+    if (!connectSecFetchSiteAllowed(c)) {
+      return c.json({ error: 'forbidden' }, 403);
+    }
+    const auth = getAuth(c);
+    const endpoint = resolveResourceUri(new URL(c.req.url).origin, options.publicBaseUrl);
+    if (auth.kind !== 'identity') {
+      return c.json({
+        endpoint,
+        identity: null,
+        token: null,
+        unavailable: 'identity_session_required',
+      });
+    }
+
+    const sid = c.get('uiSessionSid');
+    const token = store.identityTokenForSession(sid, auth.address);
+    // P2-1：明文 token 非空返回才落 identity.token.reveal；按会话+IP 节流（店内 cleanup 封顶）
+    if (token) {
+      const ip = clientIp(c);
+      if (store.claimConnectRevealAudit(sid, ip)) {
+        recordAuditEvent({
+          event: 'identity.token.reveal',
+          address: auth.address,
+          outcome: 'ok',
+          ip,
+        });
+      }
+    }
+    return c.json({
+      endpoint,
+      identity: auth.address,
+      token,
+      unavailable: token ? null : 'token_unavailable',
+    });
   });
 
   routes.get('/domains', (c) => {

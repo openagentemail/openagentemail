@@ -1,4 +1,4 @@
-# #520-A 提取 PR：以下 23 个真文件的内容 = /ui/app.js 与 /ui/styles.css 的
+# #520-A 提取 PR：以下 24 个真文件的内容 = /ui/app.js 与 /ui/styles.css 的
 # 字节金标（sha256 钉在 test/ui-real-files.test.ts）。在 B6 重写解除冻结之前，
 # 任何格式化（含 IDE format-on-save / 全仓 --write）都会破坏金标，故在此忽略。
 # B6 重写某个页面时：从本清单删掉该文件，跑 format:ui，并更新测试里的指纹。
@@ -24,4 +24,5 @@ src/ui/client/pages/tasks.js
 src/ui/client/pages/identities.js
 src/ui/client/pages/push-devices.js
 src/ui/client/pages/authorized-clients.js
+src/ui/client/pages/connect.js
 src/ui/client/pages/plan.js

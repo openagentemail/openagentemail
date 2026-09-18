@@ -88,6 +88,7 @@
 }
 
 .inbox-view[data-scope="configure-identities"] .identity-panel,
+.inbox-view[data-scope="connect"] .identity-panel,
 .inbox-view[data-scope="configure-push"] .identity-panel,
 .inbox-view[data-scope="configure-clients"] .identity-panel,
 .inbox-view[data-scope="configure-domains"] .identity-panel,
@@ -660,3 +661,98 @@
 }
 .send-result-badge[data-result="queued"] { color: var(--gold); }
 .send-result-badge[data-result="failed"] { color: var(--red); }
+.connect-credential {
+  margin: 0 0 24px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-card);
+}
+
+.connect-credential h3,
+.connect-card h3,
+.connect-card h4 {
+  margin-top: 0;
+}
+
+.connect-details {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.connect-details > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.25fr) 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.connect-details dt {
+  color: var(--ink-dim);
+}
+
+.connect-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.connect-token-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.connect-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 16px;
+}
+
+.connect-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-card);
+}
+
+.connect-card[data-manual='true'] {
+  border-style: dashed;
+}
+
+.connect-card-location {
+  margin: -8px 0 12px;
+  color: var(--ink-dim);
+  font-size: 0.875rem;
+}
+
+.connect-config {
+  max-height: 260px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.connect-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 20px;
+}
+
+.connect-prompt {
+  color: var(--ink-dim);
+}
+
+@media (max-width: 640px) {
+  .connect-details > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}

@@ -139,7 +139,10 @@ export function createApp(options: AppOptions = {}): Hono {
     app.use('/ui/api/*', uiSessionBodyLimit);
     app.use('/ui/api/*', requireUiOrigin);
     app.route('/ui/api/oauth', createUiOAuthApiRoutes(uiSessions));
-    app.route('/ui/api', createUiApiRoutes(uiSessions));
+    app.route(
+      '/ui/api',
+      createUiApiRoutes(uiSessions, undefined, { publicBaseUrl: options.mcpPublicBaseUrl }),
+    );
     app.route('/ui/oauth', createUiOAuthPageRoutes(uiSessions, options.oauth ?? {}));
     app.route('/ui/frame', createUiFrameRoutes(uiSessions));
     // ADR #26：shell 深链必须在 API / OAuth / frame 之后，防止吞专用路由。

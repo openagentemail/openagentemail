@@ -16,6 +16,7 @@
     if (path === '/ui/overview') return { scope: 'overview', taskId: '', address: '', folder: '' };
     if (path === '/ui/inbox') return { scope: 'inbox', taskId: '', address: '', folder: '' };
     if (path === '/ui/notifications') return { scope: 'notifications', taskId: '', address: '', folder: '' };
+    if (path === '/ui/connect') return { scope: 'connect', taskId: '', address: '', folder: '' };
     if (path === '/ui/tasks') return { scope: 'tasks', taskId: '', address: '', folder: '' };
     if (path.indexOf('/ui/tasks/') === 0) {
       var taskId = safeDecodeURIComponent(path.slice('/ui/tasks/'.length));
@@ -51,6 +52,7 @@
     var extra = extras || {};
     if (scope === 'overview') return '/ui';
     if (scope === 'notifications') return '/ui/notifications';
+    if (scope === 'connect') return '/ui/connect';
     if (scope === 'tasks') {
       return extra.taskId ? '/ui/tasks/' + encodeURIComponent(extra.taskId) : '/ui/tasks';
     }
@@ -106,6 +108,10 @@
     if (route.scope === 'notifications') {
       enterNotifications({ announce: opts.announce, skipUrl: true });
       syncUrlFromScope(true);
+      return;
+    }
+    if (route.scope === 'connect') {
+      enterConnect({ announce: opts.announce });
       return;
     }
     if (route.scope === 'tasks') {
@@ -196,6 +202,7 @@
     var opts = options || {};
     var overviewActive = next === 'overview';
     var notifyActive = next === 'notifications';
+    var connectActive = next === 'connect';
     var tasksActive = next === 'tasks';
     var inboxActive = next === 'inbox';
     var cfgIdentitiesActive = next === 'configure-identities';
@@ -217,6 +224,13 @@
         skip: 'Skip to Alerts',
         href: '#notify-panel',
         mobileView: 'notifications'
+      },
+      connect: {
+        title: 'Connect',
+        docTitle: 'Connect an agent · OpenAgent.email',
+        skip: 'Skip to Connect an agent',
+        href: '#connect-panel',
+        mobileView: ''
       },
       tasks: {
         title: 'Tasks',
@@ -273,6 +287,7 @@
     inboxView.dataset.scope = next;
     overviewPanel.hidden = !overviewActive;
     notifyPanel.hidden = !notifyActive;
+    connectPanel.hidden = !connectActive;
     tasksPanel.hidden = !tasksActive;
     mainContent.hidden = !inboxActive;
     configureIdentitiesPanel.hidden = !cfgIdentitiesActive;
@@ -280,6 +295,7 @@
     configureClientsPanel.hidden = !cfgClientsActive;
     configureDomainsPanel.hidden = !cfgDomainsActive;
     planPanel.hidden = !planActive;
+    if (!connectActive) clearConnectSensitiveState();
     identityPanel.hidden = !inboxActive;
     mobileIdentityContainer.hidden = !inboxActive;
     viewTitle.textContent = meta.title;

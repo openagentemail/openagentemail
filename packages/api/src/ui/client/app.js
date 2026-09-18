@@ -803,6 +803,7 @@
     else if (key === 'configure-clients') navigateTo('configure-clients');
     else if (key === 'configure-domains') navigateTo('configure-domains');
     else if (key === 'plan') navigateTo('plan');
+    else if (key === 'connect') navigateTo('connect');
   });
   window.addEventListener('popstate', function (event) {
     applyRoute(parseLocationRoute(), { announce: '', historyState: event.state, fromPop: true });

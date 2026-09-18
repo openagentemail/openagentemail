@@ -114,6 +114,15 @@
   var configureClientsNotice = byId('configure-clients-notice');
   var configureClientsUpdated = byId('configure-clients-updated');
   var configureClientsRefresh = byId('configure-clients-refresh');
+  var connectPanel = byId('connect-panel');
+  var connectCredential = byId('connect-credential');
+  var connectIdentity = byId('connect-identity');
+  var connectEndpoint = byId('connect-endpoint');
+  var connectToken = byId('connect-token');
+  var connectTokenReveal = byId('connect-token-reveal');
+  var connectTokenCopy = byId('connect-token-copy');
+  var connectState = byId('connect-state');
+  var connectCards = byId('connect-cards');
   var configureDomainsPanel = byId('configure-domains-panel');
   var configureDomainsState = byId('configure-domains-state');
   var planPanel = byId('plan-panel');

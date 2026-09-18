@@ -6,6 +6,7 @@
 /** 精确页面路径（无通配）；刷新时尾斜杠变体也必须 200。 */
 export const UI_SHELL_EXACT_PATHS = [
   '/ui/notifications',
+  '/ui/connect',
   '/ui/configure/identities',
   '/ui/configure/push',
   '/ui/configure/clients',
