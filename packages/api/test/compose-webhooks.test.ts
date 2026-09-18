@@ -428,6 +428,7 @@ function expectWebhookDefaults(config: ReturnType<typeof parseConfig>['webhooks'
   expect(config.disableThreshold).toBe(DEFAULT_WEBHOOK_CONFIG.disableThreshold);
   expect(config.rotationOverlapMs).toBe(DEFAULT_WEBHOOK_CONFIG.rotationOverlapMs);
   expect(config.logRetentionDays).toBe(DEFAULT_WEBHOOK_CONFIG.logRetentionDays);
+  expect(config.logMaxRows).toBe(DEFAULT_WEBHOOK_CONFIG.logMaxRows);
   expect(config.rateCreatePerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateCreatePerMin);
   expect(config.rateTestPerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateTestPerMin);
   expect(config.rateDeliverPerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateDeliverPerMin);

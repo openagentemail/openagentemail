@@ -33,10 +33,9 @@ import {
   deliveryQueue,
   executeWebhookTestProbe,
   fireCreationPing,
+  getLatestDeliveryByWebhookMap,
   getLatestDeliveryForWebhook,
   InvalidDeliveryCursorError,
-  latestDeliveryByWebhookId,
-  readAllDeliveryLogRows,
   readDeliveryLogRows,
   redeliverWebhookDelivery,
   validateWebhookUrlResolution,
@@ -368,7 +367,7 @@ export const webhooksRoute = new Hono()
       filtered = all.filter((s) => s.address === auth.address);
     }
 
-    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    const latestByWebhook = getLatestDeliveryByWebhookMap();
     return c.json({
       webhooks: filtered.map((sub) =>
         formatSubscriptionDetail(sub, latestByWebhook.get(sub.id) ?? null),
@@ -444,7 +443,7 @@ export const webhooksRoute = new Hono()
     const denied = forbidUnlessAddress(c, sub.address);
     if (denied) return denied;
 
-    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    const latestByWebhook = getLatestDeliveryByWebhookMap();
     return c.json(formatSubscriptionDetail(sub, latestByWebhook.get(sub.id) ?? null));
   })
 
@@ -556,7 +555,7 @@ export const webhooksRoute = new Hono()
       webhookId: sub.id,
     });
 
-    const latestByWebhook = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    const latestByWebhook = getLatestDeliveryByWebhookMap();
     return c.json(formatSubscriptionDetail(updated, latestByWebhook.get(updated.id) ?? null));
   })
 
