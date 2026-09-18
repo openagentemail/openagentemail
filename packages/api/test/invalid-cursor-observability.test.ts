@@ -154,12 +154,21 @@ describe('#202 invalid_cursor observability helper', () => {
   });
 
   test('mutation 负控：若把 warn 路径误降为 info，分级契约必红', () => {
-    // 模拟错误实现：一律 info。真实 classify 对 anomaly 必须 warn。
+    // 模拟错误实现：一律 info。真实 classify 对 anomaly（含未来 ts→within_retention）必须 warn。
     const buggy = (_shape: InvalidCursorShape, _within: boolean): 'info' | 'warn' => 'info';
     expect(buggy('malformed', false)).toBe('info');
     expect(classifyInvalidCursorLevel('malformed', false)).toBe('warn');
     expect(buggy('full', true)).toBe('info');
     expect(classifyInvalidCursorLevel('full', true)).toBe('warn');
+    // R2 P1-2：未来 ts 经 inspect 得 within_retention=true，误降 info 必与真实分级冲突
+    const now = Date.now();
+    const future = inspectDeliveryCursor(
+      `dlv_${randomUUID()}|1|${new Date(now + 60_000).toISOString()}`,
+      now,
+    );
+    expect(future).toEqual({ shape: 'full', within_retention: true });
+    expect(buggy(future.shape, future.within_retention)).toBe('info');
+    expect(classifyInvalidCursorLevel(future.shape, future.within_retention)).toBe('warn');
   });
 
   test('log 单行恰三枚标签，永不回写游标原文', () => {
@@ -226,6 +235,78 @@ describe('#202 invalid_cursor observability helper', () => {
     expect(taskOut).toEqual({ shape: 'full', within_retention: false });
     const taskIn = inspectTaskCursor(forgeTaskCursor({ t: daysAgoMs(1, now), badMac: true }), now);
     expect(taskIn).toEqual({ shape: 'full', within_retention: true });
+  });
+
+  test('R2 P1-2：future-ts full 游标必出 warn（不得归 stale/info）', () => {
+    const now = Date.now();
+    const futureMs = now + 3_600_000;
+    const lines = installCapture();
+
+    const del = inspectDeliveryCursor(
+      `dlv_${randomUUID()}|1|${new Date(futureMs).toISOString()}`,
+      now,
+    );
+    expect(del).toEqual({ shape: 'full', within_retention: true });
+    expect(classifyInvalidCursorLevel(del.shape, del.within_retention)).toBe('warn');
+
+    const send = inspectSendCursor(forgeSendCursor({ t: futureMs, badMac: true }), now);
+    expect(send).toEqual({ shape: 'full', within_retention: true });
+    const mail = inspectMailCursor(forgeMailCursor({ t: futureMs, badMac: true }), now);
+    expect(mail).toEqual({ shape: 'full', within_retention: true });
+    const task = inspectTaskCursor(forgeTaskCursor({ t: futureMs, badMac: true }), now);
+    expect(task).toEqual({ shape: 'full', within_retention: true });
+
+    logInvalidCursorRejection({ family: 'deliveries', ...del });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.level).toBe('warn');
+    expect(parseLine(lines[0]!.line).within_retention).toBe(true);
+  });
+
+  test('R2 P1-1：缺 codec 必填键 → malformed（不拒多余键）', () => {
+    const now = Date.now();
+    // mail v2 缺 v
+    const mailBody = Buffer.from(
+      JSON.stringify({ f: 'inbox', a: 'alice@test.example', t: now - 1000, u: 42 }),
+    ).toString('base64url');
+    expect(
+      inspectMailCursor(`${MAIL_CURSOR_PREFIX}.${mailBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`, now),
+    ).toEqual({ shape: 'malformed', within_retention: false });
+
+    // mail 多余键仍 full（不 strict）
+    const mailExtra = Buffer.from(
+      JSON.stringify({
+        f: 'inbox',
+        a: 'alice@test.example',
+        t: now - 1000,
+        u: 42,
+        v: '17',
+        extra: 'ignored',
+      }),
+    ).toString('base64url');
+    expect(
+      inspectMailCursor(
+        `${MAIL_CURSOR_PREFIX}.${mailExtra}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        now,
+      ),
+    ).toEqual({ shape: 'full', within_retention: true });
+
+    // send 缺 id
+    const sendBody = Buffer.from(
+      JSON.stringify({ addr: 'fox@test.example', t: now - 1000 }),
+    ).toString('base64url');
+    expect(inspectSendCursor(`send-log-cursor-v1.${sendBody}.AAA`, now)).toEqual({
+      shape: 'malformed',
+      within_retention: false,
+    });
+
+    // tasks 缺 fp
+    const taskBody = Buffer.from(
+      JSON.stringify({ t: now - 1000, id: randomUUID() }),
+    ).toString('base64url');
+    expect(inspectTaskCursor(`${TASK_BOARD_CURSOR_PREFIX}.${taskBody}.AAA`, now)).toEqual({
+      shape: 'malformed',
+      within_retention: false,
+    });
   });
 });
 

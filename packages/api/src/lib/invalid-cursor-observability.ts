@@ -8,6 +8,12 @@
  *   - anomaly：malformed，或窗内 well-formed 但 unmatched（可能后端生成缺陷）
  * 判不准时按 stale（within_retention=false）记，不自创第三级。
  * within_retention 以盘留存窗为准，不用内存截断视图（#217）。
+ * 未来时间戳（ts > now）：within_retention=true（语义上仍属「窗内」），走 warn，不得归 stale/info（R2 P1-2）。
+ *
+ * 结构校验边界（R2 P1-1）：
+ *   软解析只按各族真实 codec 的**必填字段**收紧（缺任一键或类型不符 → malformed）。
+ *   **不**做 zod `.strict()` 式额外字段拒绝，避免与 codec 双份漂移；
+ *   多余键忽略；可选字段（如 mail-fcursor 的 `s`）仅在出现时做类型校验。
  */
 
 import { config } from './config.ts';
@@ -16,6 +22,7 @@ import {
   MAIL_CURSOR_PREFIX,
   MAIL_CURSOR_V1_PREFIX,
   MAIL_FORWARD_CURSOR_PREFIX,
+  isMailFolder,
 } from './mail-cursor.ts';
 import {
   TASK_BOARD_CURSOR_PREFIX,
@@ -80,9 +87,15 @@ function retentionCutoffMs(retentionMs: number, now: number): number {
   return now - retentionMs;
 }
 
+/**
+ * 游标时间戳是否落在盘留存窗内（含未来 ts）。
+ * ts > now → true：未来戳本就「未出窗」，诚实归窗内 → 上层 warn，禁止 stale/info。
+ */
 function withinRetentionMs(ts: number, retentionMs: number, now: number): boolean {
-  if (!Number.isFinite(ts) || ts > now) return false;
-  // retentionDays=0 → 无界留存：凡未到未来的 ts 都算窗内
+  if (!Number.isFinite(ts)) return false;
+  // R2 P1-2：未来时间戳不得归 stale
+  if (ts > now) return true;
+  // retentionDays=0 → 无界留存：凡过去/现在 ts 都算窗内
   if (!Number.isFinite(retentionMs)) return true;
   return ts >= retentionCutoffMs(retentionMs, now);
 }
@@ -146,6 +159,63 @@ function softParseHmacCursorBody(
   }
 }
 
+/**
+ * mail codec 必填字段（对齐 decodeMailCursor / decodeMailForwardCursor；v1 无 v）。
+ * 返回合法 t，否则 null。不拒绝多余键。
+ */
+function mailRequiredTimestamp(prefix: string, body: Record<string, unknown>): number | null {
+  const { f, a, t, u, v, s } = body;
+  if (typeof f !== 'string' || !isMailFolder(f)) return null;
+  if (typeof a !== 'string' || !a.includes('@')) return null;
+  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
+  if (typeof u !== 'number' || !Number.isInteger(u) || u <= 0) return null;
+  if (prefix === MAIL_CURSOR_V1_PREFIX) {
+    // 退役 v1：必填 f/a/t/u，无 v
+    return t;
+  }
+  // v2 / fcursor：必填 v（正整数代际）
+  const vOk =
+    (typeof v === 'string' && /^\d+$/.test(v) && BigInt(v) > 0n) ||
+    (typeof v === 'number' && Number.isInteger(v) && v > 0);
+  if (!vOk) return null;
+  if (prefix === MAIL_FORWARD_CURSOR_PREFIX) {
+    // 前向 codec：t 须为非负整数；可选 s
+    if (!Number.isInteger(t) || t < 0) return null;
+    if (s !== undefined && (typeof s !== 'number' || !Number.isInteger(s) || s < 0)) return null;
+  }
+  return t;
+}
+
+/**
+ * send-log codec 必填：addr / t / id（对齐 decodeCursor；addr 允许空串）。
+ * 不拒绝多余键。
+ */
+function sendRequiredTimestamp(body: Record<string, unknown>): number | null {
+  if (!Object.hasOwn(body, 'addr') || !Object.hasOwn(body, 't') || !Object.hasOwn(body, 'id')) {
+    return null;
+  }
+  const { addr, t, id } = body;
+  if (typeof addr !== 'string') return null;
+  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
+  if (typeof id !== 'string' || !id) return null;
+  return t;
+}
+
+/**
+ * task board/children codec 必填：fp / t / id（对齐 decodeTask*Cursor）。
+ * 不拒绝多余键（children 生产 codec 虽禁多余，观测侧不双份 strict）。
+ */
+function taskRequiredTimestamp(body: Record<string, unknown>): number | null {
+  if (!Object.hasOwn(body, 'fp') || !Object.hasOwn(body, 't') || !Object.hasOwn(body, 'id')) {
+    return null;
+  }
+  const { fp, t, id } = body;
+  if (typeof fp !== 'string' || !fp) return null;
+  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
+  if (typeof id !== 'string' || !id) return null;
+  return t;
+}
+
 /** messages：后向 v2 / 退役 v1 / 前向 fcursor；无 bare_id。 */
 export function inspectMailCursor(
   cursor: string | undefined,
@@ -161,10 +231,8 @@ export function inspectMailCursor(
     MAIL_FORWARD_CURSOR_PREFIX,
   ]);
   if (!soft) return { shape: 'malformed', within_retention: false };
-  const t = soft.body.t;
-  if (typeof t !== 'number' || !Number.isFinite(t)) {
-    return { shape: 'malformed', within_retention: false };
-  }
+  const t = mailRequiredTimestamp(soft.prefix, soft.body);
+  if (t === null) return { shape: 'malformed', within_retention: false };
   return { shape: 'full', within_retention: withinRetentionMs(t, mailRetentionMs(), now) };
 }
 
@@ -178,15 +246,8 @@ export function inspectSendCursor(
   }
   const soft = softParseHmacCursorBody(cursor, ['send-log-cursor-v1']);
   if (!soft) return { shape: 'malformed', within_retention: false };
-  const t = soft.body.t;
-  const id = soft.body.id;
-  const addr = soft.body.addr;
-  if (typeof t !== 'number' || !Number.isFinite(t)) {
-    return { shape: 'malformed', within_retention: false };
-  }
-  if (typeof id !== 'string' || !id || typeof addr !== 'string') {
-    return { shape: 'malformed', within_retention: false };
-  }
+  const t = sendRequiredTimestamp(soft.body);
+  if (t === null) return { shape: 'malformed', within_retention: false };
   return {
     shape: 'full',
     within_retention: withinRetentionMs(t, SEND_LOG_RETENTION_MS, now),
@@ -206,15 +267,8 @@ export function inspectTaskCursor(
     TASK_CHILDREN_CURSOR_PREFIX,
   ]);
   if (!soft) return { shape: 'malformed', within_retention: false };
-  const t = soft.body.t;
-  const id = soft.body.id;
-  const fp = soft.body.fp;
-  if (typeof t !== 'number' || !Number.isFinite(t)) {
-    return { shape: 'malformed', within_retention: false };
-  }
-  if (typeof id !== 'string' || !id || typeof fp !== 'string' || !fp) {
-    return { shape: 'malformed', within_retention: false };
-  }
+  const t = taskRequiredTimestamp(soft.body);
+  if (t === null) return { shape: 'malformed', within_retention: false };
   return { shape: 'full', within_retention: withinRetentionMs(t, mailRetentionMs(), now) };
 }
 
