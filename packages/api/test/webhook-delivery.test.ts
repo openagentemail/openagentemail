@@ -2478,4 +2478,64 @@ describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
     expect(readAllDeliveryLogRows().length).toBe(10);
     expect(getDeliveryLogRowCapForTests().rebuilds).toBe(1);
   });
+
+  // (h) maxRows=1：目标钳制为 1，连续两笔终态后内存恰剩最新一行
+  test('#217(h): maxRows=1 clamps hysteresis target to 1; keeps newest terminal', () => {
+    (config.webhooks as any).logMaxRows = 1;
+    const base = Date.now();
+    appendDeliveryLogRow(successRow('old', new Date(base).toISOString(), 'whk_h'));
+    appendDeliveryLogRow(successRow('new', new Date(base + 1000).toISOString(), 'whk_h'));
+
+    const mem = readAllDeliveryLogRows();
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_new']);
+    expect(getLatestDeliveryForWebhook('whk_h')?.deliveryId).toBe('dlv_new');
+    expect(getLatestDeliveryForWebhook('whk_h')).not.toBeNull();
+  });
+
+  // (i) 盘源 maxRunNum：内存逐出 run_3 后 redeliver 得 run_4；boot 不丢新 pending 组
+  test('#217(i): redeliver maxRunNum from disk; boot keeps new pending group active', async () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1：最旧 run_3 必被逐出
+    (config.webhooks as any).allowPrivateTargets = true;
+    const sub = createWebhookSubscription({
+      url: 'https://127.0.0.1/cap-runid',
+      address: 'alice@test.example',
+      events: ['webhook.ping'],
+      createdBy: 'alice@test.example',
+    });
+    setWebhookDnsLookupForTests(async () => [{ address: '127.0.0.1', family: 4 }]);
+
+    const base = Date.now();
+    const mk = (runNum: number, id: string, tsOff: number): WebhookDeliveryLogRow => ({
+      ...successRow(id, new Date(base + tsOff).toISOString(), sub.id),
+      eventId: 'evt_runid',
+      runId: `run_${runNum}`,
+      type: 'webhook.ping',
+    });
+    // 盘序：run_3 最旧 → 将被内存逐出；run_1/run_2 较新
+    appendDeliveryLogRow(mk(3, 'r3', 0));
+    appendDeliveryLogRow(mk(1, 'r1', 1000));
+    appendDeliveryLogRow(mk(2, 'r2', 2000));
+
+    expect(readAllDeliveryLogRowsFromDisk().map((r) => r.runId)).toEqual([
+      'run_3',
+      'run_1',
+      'run_2',
+    ]);
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.runId === 'run_3')).toBe(false);
+    expect(mem.some((r) => r.runId === 'run_2')).toBe(true);
+
+    const replay = await redeliverWebhookDelivery('dlv_r2');
+    expect(replay.runId).toBe('run_4'); // 盘源 max=3 → +1；若吃内存会错成 run_3
+    deliveryQueue.cancelAll();
+
+    // 盘上已有 run_4 pending（enqueue 写入）+ 历史 run_3 终态；冷重建后 pending 组须被 boot 收起
+    resetDeliveryLogIndexForTests();
+    const boot = await reconstructPendingDeliveriesAtBoot(Date.now());
+    expect(boot.reconstructed).toBeGreaterThanOrEqual(1);
+    // 负控：若撞成 run_3，高 attempt 终态会压过 pending，boot 会丢组（reconstructed 不含该链）
+    const disk = readAllDeliveryLogRowsFromDisk();
+    expect(disk.some((r) => r.runId === 'run_4' && r.outcome === 'pending')).toBe(true);
+    setWebhookDnsLookupForTests(undefined);
+  });
 });

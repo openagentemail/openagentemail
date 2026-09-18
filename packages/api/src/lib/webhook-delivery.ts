@@ -440,8 +440,8 @@ function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
   const maxRows = config.webhooks.logMaxRows;
   if (index.rows.length <= maxRows) return;
 
-  // 滞回批量：目标长度 = 上限的 90%
-  const targetLength = Math.floor(maxRows * 0.9);
+  // 滞回批量：目标长度 = 上限的 90%，至少保留 1 行（maxRows=1 时 floor(0.9)=0 会剔光最新行）
+  const targetLength = Math.max(1, Math.floor(maxRows * 0.9));
   const activeGroupKeys = computeActiveGroupKeys(index.rows);
   const needEvict = index.rows.length - targetLength;
   const drop = new Set<number>();
@@ -2605,9 +2605,10 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   }
 
   // Calculate new runId
-  // 截断视图下 maxRunNum 可能复用历史 runNum——良性（payload 自任务/邮件重建、
-  // deliveryId 全新 UUID、组语义按最新行判定）；盘上旧 run 仍在但不参与内存视图。
-  const matchingRuns = rows.filter(
+  // maxRunNum 必须盘源计算——截断视图欠数会与盘历史 run 撞号，合并组经 attempt
+  // 优先比较可误判 pending 为终态（boot 重建丢重试链），故禁止吃内存视图。
+  const diskRows = readAllDeliveryLogRowsFromDisk();
+  const matchingRuns = diskRows.filter(
     (r) => r.webhookId === original.webhookId && r.eventId === original.eventId,
   );
   let maxRunNum = 0;

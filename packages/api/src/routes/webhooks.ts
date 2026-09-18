@@ -443,8 +443,8 @@ export const webhooksRoute = new Hono()
     const denied = forbidUnlessAddress(c, sub.address);
     if (denied) return denied;
 
-    const latestByWebhook = getLatestDeliveryByWebhookMap();
-    return c.json(formatSubscriptionDetail(sub, latestByWebhook.get(sub.id) ?? null));
+    // 单键查索引，避免为详情拷贝整张 latestByWebhook Map
+    return c.json(formatSubscriptionDetail(sub, getLatestDeliveryForWebhook(sub.id)));
   })
 
   // POST /v1/webhooks/:id - Update subscription
@@ -555,8 +555,8 @@ export const webhooksRoute = new Hono()
       webhookId: sub.id,
     });
 
-    const latestByWebhook = getLatestDeliveryByWebhookMap();
-    return c.json(formatSubscriptionDetail(updated, latestByWebhook.get(updated.id) ?? null));
+    // 单键查索引，避免为 update 响应拷贝整张 Map（list 仍用批量视图）
+    return c.json(formatSubscriptionDetail(updated, getLatestDeliveryForWebhook(updated.id)));
   })
 
   // GET /v1/webhooks/:id/secret - Reveal signing secret
