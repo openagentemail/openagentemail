@@ -1450,6 +1450,59 @@ describe('#75 board expiryProjection presentation', () => {
     expect(leafTexts(rows.tasksRows.childNodes[0])).not.toContain('Waiting for you');
   });
 
+  /* #162 负控：详情挂第 2 页，轮询把 state.tasks 重置为第 1 页后，旧∪新仍能打上投影。 */
+  test('#162 poll after two pages still projects an open page-2 detail via old∪new by id', () => {
+    const labels = sliceTasksFn('function taskIsClosed(', 'function syncTasksFilters(');
+    const syncAndUnion = sliceTasksFn('function syncActiveTaskDetailFromList(', 'function renderTasks(');
+    const page1 = {
+      id: 'page1-live',
+      state: 'input-required',
+      subject: 'Still on page one',
+      kind: 'task',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+    };
+    const page2Projected = {
+      ...APPROVAL_TASK,
+      id: 'page2-expired',
+      expiryProjection: 'past-deadline-unmaterialized' as const,
+      messages: [],
+    };
+    const state = {
+      activeTaskId: page2Projected.id,
+      taskDetail: {
+        ...APPROVAL_TASK,
+        id: page2Projected.id,
+        messages: [{ id: '1', body: 'open on page 2' }],
+      },
+    };
+    const helpers = new Function(
+      'state',
+      `${labels}\n${syncAndUnion}\nreturn { syncActiveTaskDetailFromList: syncActiveTaskDetailFromList, unionTasksById: unionTasksById, taskStateLabel: taskStateLabel };`,
+    )(state) as {
+      syncActiveTaskDetailFromList: (rows: unknown[]) => void;
+      unionTasksById: (previous: unknown[], incoming: unknown[]) => unknown[];
+      taskStateLabel: (task: { state?: string; expiryProjection?: string; result?: unknown }) => string;
+    };
+    /* 模拟两页已加载后轮询：列表被换成第 1 页，sync 走旧∪新。 */
+    const previousTasks = [page1, page2Projected];
+    const incoming = [page1];
+    const syncRows = helpers.unionTasksById(previousTasks, incoming);
+    expect(syncRows.map((row) => (row as { id: string }).id).sort()).toEqual(['page1-live', 'page2-expired']);
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Waiting for you');
+    helpers.syncActiveTaskDetailFromList(incoming);
+    expect(state.taskDetail.expiryProjection).toBeUndefined();
+    helpers.syncActiveTaskDetailFromList(syncRows);
+    expect(state.taskDetail.expiryProjection).toBe('past-deadline-unmaterialized');
+    expect(state.taskDetail.messages).toEqual([{ id: '1', body: 'open on page 2' }]);
+    expect(helpers.taskStateLabel(state.taskDetail)).toBe('Past deadline');
+
+    const { renderer } = makeApprovalActionHarness();
+    expect(renderer.approvalCanDecide(state.taskDetail as Task)).toBe(false);
+    const action = renderer.renderApprovalAction(state.taskDetail as Task)!;
+    expect(leafTexts(action)).toContain('Approval expired');
+    expect(action.childNodes.some((node) => node.tagName === 'BUTTON')).toBe(false);
+  });
+
   test('past-deadline CSS is an inset red bar; expiry flag is red text', () => {
     expect(PAGES_CSS).toContain('.task-row.is-past-deadline {\n  box-shadow: inset 3px 0 0 var(--red);\n}');
     expect(PAGES_CSS).toContain('.task-expiry-flag {\n  display: inline-block;\n  margin-top: 4px;\n  color: var(--red);');
@@ -1459,12 +1512,14 @@ describe('#75 board expiryProjection presentation', () => {
 
 describe('#75 Home waiting excludes expiryProjection', () => {
   const pastDeadline = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
+  const HOME_WAITING_SCAN_CAPPED_LABEL = '500+ · scan capped';
   const homeFlow = new Function(
     'HOME_VISIBLE_ROWS',
     'HOME_ACTIVE_MAX_PAGES',
     'HOME_ACTIVE_MAX_ROWS',
-    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, homeWaitingScanCapped: homeWaitingScanCapped, publishHomeWaitingTotal: publishHomeWaitingTotal, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
-  )(5, 5, 500) as {
+    'HOME_WAITING_SCAN_CAPPED_LABEL',
+    `${pastDeadline}\n${sliceOverviewFn('function classifyHomeWaiting(', 'function homeTaskButton(')}\nreturn { classifyHomeWaiting: classifyHomeWaiting, emptyHomeWaitingAcc: emptyHomeWaitingAcc, accumulateHomeWaitingPage: accumulateHomeWaitingPage, homeWaitingShouldContinue: homeWaitingShouldContinue, homeWaitingScanCapped: homeWaitingScanCapped, publishHomeWaitingTotal: publishHomeWaitingTotal, homeWaitingTotalIsCapped: homeWaitingTotalIsCapped, mergeHomeStuck: mergeHomeStuck, applyHomeStuckSources: applyHomeStuckSources };`,
+  )(5, 5, 500, HOME_WAITING_SCAN_CAPPED_LABEL) as {
     classifyHomeWaiting: (tasks: unknown) => {
       waitingTasks: Array<{ id: string; subject?: string }>;
       expiredTasks: Array<{ id: string }>;
@@ -1498,6 +1553,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     homeWaitingShouldContinue: (acc: { nextCursor: string; waitingTasks: unknown[]; pages: number; scannedRows: number }) => boolean;
     homeWaitingScanCapped: (acc: { nextCursor: string; pages: number; scannedRows: number }) => boolean;
     publishHomeWaitingTotal: (acc: { nextCursor: string; pages: number; scannedRows: number; totalApprox: number; expiredTasks: unknown[] }) => number | string;
+    homeWaitingTotalIsCapped: (total: unknown) => boolean;
     mergeHomeStuck: (stuck: Array<{ id: string }>, expired: Array<{ id: string }>) => Array<{ id: string }>;
     applyHomeStuckSources: (
       cachedOverdue: Array<{ id: string }>,
@@ -1589,7 +1645,7 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     expect(homeFlow.homeWaitingShouldContinue(second)).toBe(false);
   });
 
-  test('a 500-row hard stop with later expired rows publishes 500+ instead of an inflated exact total', () => {
+  test('a 500-row hard stop with later expired rows publishes scan-capped label instead of an inflated exact total', () => {
     let acc = homeFlow.emptyHomeWaitingAcc();
     for (let page = 0; page < 5; page += 1) {
       acc = homeFlow.accumulateHomeWaitingPage(acc, {
@@ -1603,9 +1659,11 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     expect(acc.nextCursor).toBe('page-6');
     expect(homeFlow.homeWaitingShouldContinue(acc)).toBe(false);
     expect(homeFlow.homeWaitingScanCapped(acc)).toBe(true);
-    expect(homeFlow.publishHomeWaitingTotal(acc)).toBe('500+');
-    expect(acc.waitingTotal).toBe('500+');
+    expect(homeFlow.publishHomeWaitingTotal(acc)).toBe(HOME_WAITING_SCAN_CAPPED_LABEL);
+    expect(acc.waitingTotal).toBe(HOME_WAITING_SCAN_CAPPED_LABEL);
     expect(acc.waitingTotal).not.toBe(600);
+    expect(acc.waitingTotal).not.toBe('500+');
+    expect(homeFlow.homeWaitingTotalIsCapped(acc.waitingTotal)).toBe(true);
 
     const finished = homeFlow.accumulateHomeWaitingPage(null, {
       tasks: Array.from({ length: 100 }, (_, index) => live(`done-${index}`)),
@@ -1615,14 +1673,49 @@ describe('#75 Home waiting excludes expiryProjection', () => {
     expect(finished.waitingTotal).toBe(100);
   });
 
-  test('Waiting for you badge paints 500+ when the published total is capped', () => {
+  test('Waiting for you badge paints scan-capped label when the published total is capped', () => {
     const source = sliceOverviewFn('function homeSection(', 'function appendHomeEmpty(');
     const section = new Function(
       'document',
-      `${source}\nreturn homeSection('Waiting for you', '500+');`,
+      `${source}\nreturn homeSection('Waiting for you', ${JSON.stringify(HOME_WAITING_SCAN_CAPPED_LABEL)});`,
     )({ createElement: fakeEl }) as ReturnType<typeof fakeEl>;
-    expect(leafTexts(section)).toContain('500+');
+    expect(leafTexts(section)).toContain(HOME_WAITING_SCAN_CAPPED_LABEL);
+    expect(HOME_WAITING_SCAN_CAPPED_LABEL).toContain('scan capped');
     expect(leafTexts(section)).not.toContain('600');
+    /* 负控：不得再裸发 500+（整段徽标文案必须带封顶语义）。 */
+    expect(leafTexts(section).some((text) => text === '500+')).toBe(false);
+  });
+
+  /* #163 负控：硬停 + 列表空时空态文案标明扫描上限，且不为裸 500+。 */
+  test('#163 hard-stop empty Waiting copy is honest and not a bare 500+', () => {
+    const past = sliceTasksFn('function approvalPastDeadline(', 'function taskStateLabel(');
+    const source = sliceOverviewFn('function homeLinkButton(', 'function renderHomeStuck(');
+    const state = {
+      homeStatus: 'ready',
+      homeWaitingTasks: [] as unknown[],
+      homeWaitingTotal: HOME_WAITING_SCAN_CAPPED_LABEL,
+    };
+    const section = fakeEl('section');
+    const helpers = new Function(
+      'document',
+      'state',
+      'HOME_VISIBLE_ROWS',
+      'homeWaitingTotalIsCapped',
+      'navigateTo',
+      `${past}\n${source}\nreturn { renderHomeWaiting: renderHomeWaiting };`,
+    )(
+      { createElement: fakeEl },
+      state,
+      5,
+      (total: unknown) => total === HOME_WAITING_SCAN_CAPPED_LABEL,
+      () => {},
+    ) as { renderHomeWaiting: (host: ReturnType<typeof fakeEl>) => void };
+    helpers.renderHomeWaiting(section);
+    const texts = leafTexts(section);
+    expect(texts).toContain('Scan limit reached.');
+    expect(texts.some((text) => /500\+/.test(text) && /capped|beyond this window/i.test(text))).toBe(true);
+    expect(texts.some((text) => text === '500+')).toBe(false);
+    expect(texts).not.toContain('Nothing needs you right now.');
   });
 
   test('applyHomeStuckSources keeps the failed source cache instead of rebuilding from the winner', () => {

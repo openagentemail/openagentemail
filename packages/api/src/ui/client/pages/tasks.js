@@ -625,6 +625,18 @@
     });
   }
 
+  /* 按 id 并集：旧行保留，同行以新值覆盖（轮询第 1 页替换时仍能 sync 第 2+ 页详情）。 */
+  function unionTasksById(previous, incoming) {
+    var byId = {};
+    (Array.isArray(previous) ? previous : []).forEach(function (row) {
+      if (row && row.id) byId[row.id] = row;
+    });
+    (Array.isArray(incoming) ? incoming : []).forEach(function (row) {
+      if (row && row.id) byId[row.id] = row;
+    });
+    return Object.keys(byId).map(function (id) { return byId[id]; });
+  }
+
   function renderTasks() {
     renderTasksMeta();
     renderTaskRows();
@@ -663,16 +675,21 @@
       var payload = await apiJson('/ui/api/tasks?' + params.join('&'), { signal: controller.signal });
       if (tasksController !== controller) return;
       var incoming = Array.isArray(payload.tasks) ? payload.tasks : [];
+      /* 详情同步用的行集：more 用已加载并集；非 more（含轮询）用替换前旧∪新按 id，避免第 2+ 页详情丢投影。 */
+      var syncRows;
       if (more) {
         var seen = {};
         state.tasks.forEach(function (row) { seen[row.id] = true; });
         incoming.forEach(function (row) {
           if (!seen[row.id]) state.tasks.push(row);
         });
+        syncRows = state.tasks;
       } else {
+        var previousTasks = Array.isArray(state.tasks) ? state.tasks : [];
         state.tasks = incoming;
+        syncRows = unionTasksById(previousTasks, incoming);
       }
-      syncActiveTaskDetailFromList(state.tasks);
+      syncActiveTaskDetailFromList(syncRows);
       state.tasksNextCursor = payload.nextCursor || '';
       state.tasksTotalApprox = typeof payload.totalApprox === 'number' ? payload.totalApprox : state.tasks.length;
       state.tasksUpdatedAt = Date.now();

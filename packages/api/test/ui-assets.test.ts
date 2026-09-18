@@ -893,7 +893,8 @@ describe('UI static asset contract', () => {
     expect(load).toContain('state.tasks = []');
     expect(load).toContain('state.tasksFetchKey = tasksFetchKey()');
     expect(load).toContain('if (!stillThere && !more && !opts.poll) clearTaskDetail();');
-    expect(load).toContain('syncActiveTaskDetailFromList(state.tasks)');
+    expect(load).toContain('syncActiveTaskDetailFromList(syncRows)');
+    expect(load).toContain('unionTasksById(previousTasks, incoming)');
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderTaskRows('),
       UI_JS.indexOf('function renderTaskDetail('),
@@ -1253,8 +1254,9 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function loadHome('),
       UI_JS.indexOf('function stopDashboardPolling('),
     );
-    expect(home).toContain("state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || waitingBoard.waitingTotal === '500+'");
-    expect(UI_JS).toContain("if (homeWaitingScanCapped(acc)) return '500+'");
+    expect(home).toContain("state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || homeWaitingTotalIsCapped(waitingBoard.waitingTotal)");
+    expect(UI_JS).toContain('if (homeWaitingScanCapped(acc)) return HOME_WAITING_SCAN_CAPPED_LABEL');
+    expect(UI_JS).toContain("var HOME_WAITING_SCAN_CAPPED_LABEL = '500+ · scan capped'");
     expect(UI_JS).toContain('function publishHomeWaitingTotal(');
     expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
