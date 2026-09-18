@@ -2538,4 +2538,78 @@ describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
     expect(disk.some((r) => r.runId === 'run_4' && r.outcome === 'pending')).toBe(true);
     setWebhookDnsLookupForTests(undefined);
   });
+
+  // (j) 纯活组超限态：futile 置位后连续 append 非终态 → 全表扫描次数=0
+  test('#217(j): pure-active over-cap: subsequent non-terminal appends do not full-scan', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const now = Date.now();
+    // 灌入 3 条同组 pending（mail.received），alone 超限 → 置 futile
+    for (let i = 1; i <= 3; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`live${i}`, new Date(now + 1000 * i).toISOString(), 'whk_j'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_j_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(readAllDeliveryLogRows().length).toBe(3); // 宁超不丢活
+    // 已进入 futile；重置计数后连续 append 非终态不得再全表扫
+    resetDeliveryLogRowCapForTests();
+    for (let i = 4; i <= 6; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`live${i}`, new Date(now + 1000 * i).toISOString(), 'whk_j'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_j_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(0);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(0);
+    expect(getDeliveryLogRowCapForTests().evictedTotal).toBe(0);
+    expect(readAllDeliveryLogRows().length).toBe(6);
+  });
+
+  // (k) futile 置位后 append 终态 → 清位且下一轮 enforce 恢复逐出该终态行
+  test('#217(k): terminal after futile clears memo and resumes eviction', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const now = Date.now();
+    for (let i = 1; i <= 3; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`k${i}`, new Date(now + 1000 * i).toISOString(), 'whk_k'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_k_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(readAllDeliveryLogRows().length).toBe(3);
+    resetDeliveryLogRowCapForTests();
+
+    // 终态行清 futile；本轮 enforce 须扫描并逐出该终态（活组保留）
+    appendDeliveryLogRow(
+      successRow('term', new Date(now + 4000).toISOString(), 'whk_k_term'),
+    );
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(1);
+    expect(getDeliveryLogRowCapForTests().evictedTotal).toBeGreaterThanOrEqual(1);
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_k1', 'dlv_k2', 'dlv_k3']);
+  });
 });
