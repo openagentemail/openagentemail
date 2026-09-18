@@ -371,11 +371,14 @@ type DeliveryLogRowCapStats = {
   evictedTotal: number;
   /** warn-once 触发次数（每进程至多 1） */
   warnCount: number;
+  /** rebuildIndexMaps 调用次数（滞回批量负控用） */
+  rebuilds: number;
 };
 
 let deliveryLogRowCapForTests: DeliveryLogRowCapStats = {
   evictedTotal: 0,
   warnCount: 0,
+  rebuilds: 0,
 };
 
 /** 每进程只打一行逐出 warn */
@@ -386,36 +389,40 @@ function groupKeyForRow(row: WebhookDeliveryLogRow): string {
 }
 
 /**
- * 与 compactDeliveryLog 的 activeGroupKeys 同语义：
- * 组内按 attempt desc、再 ts desc 取最新行；非终态则整组为 active（pending-retry）。
+ * compact / 内存逐出共用：组内「最新行」比较——attempt 先、ts 后
+ * （与历史 compactDeliveryLog sort 同优先级，不许悄悄换序）。
  */
-function activeGroupKeysFromRows(rows: WebhookDeliveryLogRow[]): Set<string> {
-  const groups = new Map<string, WebhookDeliveryLogRow[]>();
+function isPreferredActiveGroupRow(
+  candidate: WebhookDeliveryLogRow,
+  incumbent: WebhookDeliveryLogRow,
+): boolean {
+  if (candidate.attempt !== incumbent.attempt) return candidate.attempt > incumbent.attempt;
+  return new Date(candidate.ts).getTime() > new Date(incumbent.ts).getTime();
+}
+
+/**
+ * 包内共用：组内最新行非终态 → 整组为 active（pending-retry）。
+ * 单遍求每组最新，避免逐组 sort。
+ */
+function computeActiveGroupKeys(rows: WebhookDeliveryLogRow[]): Set<string> {
+  const latestByGroup = new Map<string, WebhookDeliveryLogRow>();
   for (const row of rows) {
     const key = groupKeyForRow(row);
-    let list = groups.get(key);
-    if (!list) {
-      list = [];
-      groups.set(key, list);
+    const prev = latestByGroup.get(key);
+    if (!prev || isPreferredActiveGroupRow(row, prev)) {
+      latestByGroup.set(key, row);
     }
-    list.push(row);
   }
-
   const activeGroupKeys = new Set<string>();
-  for (const [key, groupRows] of groups.entries()) {
-    groupRows.sort((a, b) => {
-      if (a.attempt !== b.attempt) return b.attempt - a.attempt;
-      return new Date(b.ts).getTime() - new Date(a.ts).getTime();
-    });
-    const latest = groupRows[0]!;
-    if (!isTerminalDeliveryRow(latest)) {
-      activeGroupKeys.add(key);
-    }
+  for (const [key, latest] of latestByGroup) {
+    if (!isTerminalDeliveryRow(latest)) activeGroupKeys.add(key);
   }
   return activeGroupKeys;
 }
 
 function rebuildIndexMaps(index: DeliveryLogIndex): void {
+  // 测试钩：统计重建次数（滞回批量逐出负控 (g)）
+  deliveryLogRowCapForTests.rebuilds += 1;
   index.latestByWebhook.clear();
   index.latestByGroup.clear();
   for (const row of index.rows) {
@@ -425,16 +432,18 @@ function rebuildIndexMaps(index: DeliveryLogIndex): void {
 }
 
 /**
- * #217 A 案：内存索引行上限。只裁 rows+两 Map；不写盘、不碰 compact。
- * 从最旧（数组头）起逐出非 active 行；active 组行永不逐出。
- * 若剔光所有非 active 后仍超上限（活组 alone 超限），宁超不丢活并 warn。
+ * #217 A 案 + R2 滞回：内存索引行上限。只裁 rows+两 Map；不写盘。
+ * 超限时一次逐出到 floor(maxRows*0.9)，摊销重建；≤上限不触发。
+ * active 组行永不逐出；剔光非 active 后仍超上限则宁超不丢活并 warn。
  */
 function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
   const maxRows = config.webhooks.logMaxRows;
   if (index.rows.length <= maxRows) return;
 
-  const activeGroupKeys = activeGroupKeysFromRows(index.rows);
-  const needEvict = index.rows.length - maxRows;
+  // 滞回批量：目标长度 = 上限的 90%
+  const targetLength = Math.floor(maxRows * 0.9);
+  const activeGroupKeys = computeActiveGroupKeys(index.rows);
+  const needEvict = index.rows.length - targetLength;
   const drop = new Set<number>();
   let dropped = 0;
   // 始终尽量逐出最旧非 active；不得因 activeCount 已超而整表停裁
@@ -457,15 +466,16 @@ function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
   // 仍超限 ⟺ 活组 alone 已压过上限（无可再丢的终态）
   const stoppedForActiveOverflow = index.rows.length > maxRows;
   if (dropped > 0 || stoppedForActiveOverflow) {
-    noteDeliveryLogRowCapEvent(maxRows, dropped, stoppedForActiveOverflow);
+    noteDeliveryLogRowCapEvent(maxRows, dropped, stoppedForActiveOverflow, targetLength);
   }
 }
 
-/** 累计逐出数 + 每进程 warn-once（含上限与累计逐出数） */
+/** 累计逐出数 + 每进程 warn-once（含上限、滞回目标与累计逐出数） */
 function noteDeliveryLogRowCapEvent(
   maxRows: number,
   evictedThisRound: number,
   stoppedForActiveOverflow: boolean,
+  targetLength: number,
 ): void {
   deliveryLogRowCapForTests.evictedTotal += evictedThisRound;
   if (deliveryLogRowCapWarned) return;
@@ -479,7 +489,8 @@ function noteDeliveryLogRowCapEvent(
     );
   } else {
     console.warn(
-      `[webhooks] delivery-log in-memory index trimmed to WEBHOOK_LOG_MAX_ROWS=${maxRows}; ` +
+      `[webhooks] delivery-log in-memory index trimmed toward WEBHOOK_LOG_MAX_ROWS=${maxRows} ` +
+        `(hysteresis target=${targetLength}); ` +
         `evictedTotal=${deliveryLogRowCapForTests.evictedTotal} (memory view only; disk unchanged)`,
     );
   }
@@ -667,7 +678,7 @@ export function getDeliveryLogRowCapForTests(): DeliveryLogRowCapStats {
 
 /** #217：重置逐出计数与 warn-once 门闩 */
 export function resetDeliveryLogRowCapForTests(): void {
-  deliveryLogRowCapForTests = { evictedTotal: 0, warnCount: 0 };
+  deliveryLogRowCapForTests = { evictedTotal: 0, warnCount: 0, rebuilds: 0 };
   deliveryLogRowCapWarned = false;
 }
 
@@ -873,32 +884,11 @@ export function compactDeliveryLog(
   const rows = readAllDeliveryLogRowsFromDisk();
   const retentionCutoff = now - retentionDays * 86400000;
 
-  // Identify groups with pending retries so we never prune them
-  const groups = new Map<string, WebhookDeliveryLogRow[]>();
-  for (const row of rows) {
-    const key = `${row.webhookId}:${row.eventId}:${row.runId}`;
-    let list = groups.get(key);
-    if (!list) {
-      list = [];
-      groups.set(key, list);
-    }
-    list.push(row);
-  }
-
-  const activeGroupKeys = new Set<string>();
-  for (const [key, groupRows] of groups.entries()) {
-    groupRows.sort((a, b) => {
-      if (a.attempt !== b.attempt) return b.attempt - a.attempt;
-      return new Date(b.ts).getTime() - new Date(a.ts).getTime();
-    });
-    const latest = groupRows[0]!;
-    if (!isTerminalDeliveryRow(latest)) {
-      activeGroupKeys.add(key);
-    }
-  }
+  // 与内存逐出共用 computeActiveGroupKeys——一处真相，避免漂移
+  const activeGroupKeys = computeActiveGroupKeys(rows);
 
   const retainedRows = rows.filter((row) => {
-    const key = `${row.webhookId}:${row.eventId}:${row.runId}`;
+    const key = groupKeyForRow(row);
     if (activeGroupKeys.has(key)) return true;
     return new Date(row.ts).getTime() > retentionCutoff;
   });
@@ -2615,6 +2605,8 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   }
 
   // Calculate new runId
+  // 截断视图下 maxRunNum 可能复用历史 runNum——良性（payload 自任务/邮件重建、
+  // deliveryId 全新 UUID、组语义按最新行判定）；盘上旧 run 仍在但不参与内存视图。
   const matchingRuns = rows.filter(
     (r) => r.webhookId === original.webhookId && r.eventId === original.eventId,
   );

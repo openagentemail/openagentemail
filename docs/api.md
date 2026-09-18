@@ -33,6 +33,8 @@ The website docs are canonical — edit them in the [website repo](https://githu
 
 Pending retries are rebuilt from the delivery log on restart; events emitted while the process was down are not reconstructed (D7, the same weak-restart semantics as ntfy).
 
+**`WEBHOOK_LOG_MAX_ROWS`（默认 `100000`）** 只约束进程内 delivery-log 索引行数（磁盘 `webhook-deliveries.jsonl` 仍由 `WEBHOOK_LOG_RETENTION_DAYS` 压缩）。边界：① 内存逐出区 `deliveryId` 上 `redeliver` → `404 delivery_not_found`（盘行可能仍在）；② 深分页游标落在逐出区 → `400 invalid_cursor`，客户端应回首页；③ 某 webhook 的全部行均已被内存逐出时，`lastDelivery` 显示 `null`（内存视图降级，盘数据仍在）。
+
 ## Multi-domain identities and ntfy agent routes (#134)
 
 Same localpart may exist on different configured domains (no cross-domain `409 localpart_conflict`). New identities provision ntfy agent routes under the full address key (`agent:<localpart@domain>` lowercase); legacy bare-localpart keys remain readable via exact-then-fallback lookup. Prefer full addresses when notifying; bare localpart without a legacy key is `unknown_agent` when the name is ambiguous across domains.
