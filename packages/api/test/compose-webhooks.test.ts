@@ -25,7 +25,7 @@ const { parseConfig } = await import('../src/lib/config.ts');
 
 const REPO_DIR = join(import.meta.dir, '..', '..', '..');
 
-/** The 22 WEBHOOK/WEBHOOKS keys from config.ts / r0. */
+/** The 23 WEBHOOK/WEBHOOKS keys from config.ts / r0 + #217. */
 const WEBHOOK_KEYS = [
   'WEBHOOKS_ENABLED',
   'WEBHOOK_SIGNING_SECRET',
@@ -46,6 +46,7 @@ const WEBHOOK_KEYS = [
   'WEBHOOK_DISABLE_THRESHOLD',
   'WEBHOOK_ROTATION_OVERLAP_MS',
   'WEBHOOK_LOG_RETENTION_DAYS',
+  'WEBHOOK_LOG_MAX_ROWS',
   'WEBHOOK_RATE_CREATE_PER_MIN',
   'WEBHOOK_RATE_TEST_PER_MIN',
   'WEBHOOK_RATE_DELIVER_PER_MIN',
@@ -103,6 +104,7 @@ const ALL_OVERRIDES: Record<string, string> = {
   WEBHOOK_DISABLE_THRESHOLD: '1',
   WEBHOOK_ROTATION_OVERLAP_MS: '0',
   WEBHOOK_LOG_RETENTION_DAYS: '4',
+  WEBHOOK_LOG_MAX_ROWS: '50000',
   WEBHOOK_RATE_CREATE_PER_MIN: '0',
   WEBHOOK_RATE_TEST_PER_MIN: '0',
   WEBHOOK_RATE_DELIVER_PER_MIN: '0',
@@ -428,6 +430,7 @@ function expectWebhookDefaults(config: ReturnType<typeof parseConfig>['webhooks'
   expect(config.disableThreshold).toBe(DEFAULT_WEBHOOK_CONFIG.disableThreshold);
   expect(config.rotationOverlapMs).toBe(DEFAULT_WEBHOOK_CONFIG.rotationOverlapMs);
   expect(config.logRetentionDays).toBe(DEFAULT_WEBHOOK_CONFIG.logRetentionDays);
+  expect(config.logMaxRows).toBe(DEFAULT_WEBHOOK_CONFIG.logMaxRows);
   expect(config.rateCreatePerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateCreatePerMin);
   expect(config.rateTestPerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateTestPerMin);
   expect(config.rateDeliverPerMin).toBe(DEFAULT_WEBHOOK_CONFIG.rateDeliverPerMin);
@@ -455,6 +458,7 @@ function expectAllOverrides(serviceEnv: Record<string, string>): void {
   expect(webhooks.disableThreshold).toBe(1);
   expect(webhooks.rotationOverlapMs).toBe(0);
   expect(webhooks.logRetentionDays).toBe(4);
+  expect(webhooks.logMaxRows).toBe(50000);
   expect(webhooks.rateCreatePerMin).toBe(0);
   expect(webhooks.rateTestPerMin).toBe(0);
   expect(webhooks.rateDeliverPerMin).toBe(0);
@@ -466,7 +470,7 @@ describe('#149 Compose webhook environment', () => {
     expect(COMPOSE.source.includes('OAE_COMPOSE') || COMPOSE.source.includes('PATH')).toBe(true);
   });
 
-  test('example env files document all 22 keys and keep optional secrets commented', () => {
+  test('example env files document all 23 keys and keep optional secrets commented', () => {
     for (const variant of VARIANTS) {
       const example = readFileSync(join(REPO_DIR, variant.example), 'utf8');
       for (const key of WEBHOOK_KEYS) {

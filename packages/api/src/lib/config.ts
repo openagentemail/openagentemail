@@ -203,6 +203,8 @@ const envSchema = z.object({
   WEBHOOK_DISABLE_THRESHOLD: z.coerce.number().int().min(1).default(10),
   WEBHOOK_ROTATION_OVERLAP_MS: z.coerce.number().int().min(0).default(86400000),
   WEBHOOK_LOG_RETENTION_DAYS: z.coerce.number().int().min(4).default(30),
+  // 内存索引行上限（#217）：只约束 deliveryLogIndex.rows，不改盘上 jsonl
+  WEBHOOK_LOG_MAX_ROWS: z.coerce.number().int().min(1).default(100000),
   WEBHOOK_RATE_CREATE_PER_MIN: z.coerce.number().int().min(0).default(10),
   WEBHOOK_RATE_TEST_PER_MIN: z.coerce.number().int().min(0).default(3),
   WEBHOOK_RATE_DELIVER_PER_MIN: z.coerce.number().int().min(0).default(60),
@@ -504,6 +506,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       disableThreshold: raw.WEBHOOK_DISABLE_THRESHOLD,
       rotationOverlapMs: raw.WEBHOOK_ROTATION_OVERLAP_MS,
       logRetentionDays: raw.WEBHOOK_LOG_RETENTION_DAYS,
+      logMaxRows: raw.WEBHOOK_LOG_MAX_ROWS,
       rateCreatePerMin: raw.WEBHOOK_RATE_CREATE_PER_MIN,
       rateTestPerMin: raw.WEBHOOK_RATE_TEST_PER_MIN,
       rateDeliverPerMin: raw.WEBHOOK_RATE_DELIVER_PER_MIN,

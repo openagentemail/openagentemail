@@ -36,6 +36,9 @@ const {
   resetDeliveryLogIndexForTests,
   getDeliveryLogIoForTests,
   resetDeliveryLogIoForTests,
+  getDeliveryLogRowCapForTests,
+  resetDeliveryLogRowCapForTests,
+  getLatestDeliveryByWebhookMap,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
   setReconstructRetryDelaysForTests,
@@ -81,6 +84,7 @@ function setupTestDir(): void {
   setReconstructRetryDelaysForTests();
   resetDeliveryLogIndexForTests();
   resetDeliveryLogIoForTests();
+  resetDeliveryLogRowCapForTests();
   deliveryLimiter.reset();
   deliveryQueue.cancelAll();
   stopWebhookMaintenance();
@@ -2217,5 +2221,395 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     await new Promise((r) => setTimeout(r, 50));
     deliveryQueue.cancelAll();
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+});
+
+describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
+  const originalLogMaxRows = config.webhooks.logMaxRows;
+
+  beforeEach(() => {
+    setupTestDir();
+    resetDeliveryLogRowCapForTests();
+  });
+  afterEach(() => {
+    (config.webhooks as any).logMaxRows = originalLogMaxRows;
+    deliveryQueue.cancelAll();
+    // 恢复 dataDir，避免删目录后污染后续用例（delegations 等）
+    (config as any).dataDir = originalDataDir;
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+
+  /** 构造最小成功行；ts 递增保证 append 序=时间序 */
+  function successRow(
+    id: string,
+    ts: string,
+    webhookId = 'whk_cap',
+  ): WebhookDeliveryLogRow {
+    return {
+      ts,
+      webhookId,
+      eventId: `evt_${id}`,
+      runId: 'run_0',
+      deliveryId: `dlv_${id}`,
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    };
+  }
+
+  // (a) 超限逐出后旧区游标必 400 invalid_cursor 非回卷
+  test('#217(a): cursor into evicted zone throws InvalidDeliveryCursorError (no rewind)', () => {
+    (config.webhooks as any).logMaxRows = 3; // 滞回目标 floor(3*0.9)=2
+    const base = Date.now();
+    const rows = [0, 1, 2, 3, 4].map((i) =>
+      successRow(String(i), new Date(base + i * 1000).toISOString()),
+    );
+    for (const r of rows) appendDeliveryLogRow(r);
+
+    // 滞回一次裁到目标 2；最旧区已逐出
+    const mem = readAllDeliveryLogRows();
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_3', 'dlv_4']);
+
+    const staleCursor = `${rows[0]!.deliveryId}|1|${rows[0]!.ts}`;
+    expect(() =>
+      readDeliveryLogRows({ webhookId: 'whk_cap', limit: 10, cursor: staleCursor }),
+    ).toThrow(InvalidDeliveryCursorError);
+
+    try {
+      readDeliveryLogRows({ webhookId: 'whk_cap', limit: 10, cursor: rows[0]!.deliveryId });
+      expect.unreachable('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidDeliveryCursorError);
+      expect((err as InvalidDeliveryCursorError).code).toBe('invalid_cursor');
+    }
+
+    // 负控：合法首页不抛、不回卷成含已逐出行
+    const home = readDeliveryLogRows({ webhookId: 'whk_cap', limit: 10 });
+    expect(home.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_4', 'dlv_3']);
+  });
+
+  // (b) active 组行零逐出
+  test('#217(b): active pending-retry group rows are never evicted', () => {
+    (config.webhooks as any).logMaxRows = 3; // 目标 2
+    const now = Date.now();
+    // 先写入 1 条终态，再写入同组 2 条 pending（最新非终态 → 整组 active）
+    appendDeliveryLogRow(successRow('old', new Date(now).toISOString(), 'whk_other'));
+    appendDeliveryLogRow({
+      ...successRow('p1', new Date(now + 1000).toISOString(), 'whk_active'),
+      eventId: 'evt_pending',
+      outcome: 'retryable',
+      status: 500,
+      nextAttemptAt: new Date(now + 60_000).toISOString(),
+    });
+    appendDeliveryLogRow({
+      ...successRow('p2', new Date(now + 2000).toISOString(), 'whk_active'),
+      eventId: 'evt_pending',
+      attempt: 2,
+      outcome: 'retryable',
+      status: 502,
+      nextAttemptAt: new Date(now + 120_000).toISOString(),
+    });
+    // 再灌入多条终态迫使超限；active 组两行必须全留
+    appendDeliveryLogRow(successRow('n1', new Date(now + 3000).toISOString(), 'whk_n'));
+    appendDeliveryLogRow(successRow('n2', new Date(now + 4000).toISOString(), 'whk_n'));
+    appendDeliveryLogRow(successRow('n3', new Date(now + 5000).toISOString(), 'whk_n'));
+
+    const mem = readAllDeliveryLogRows();
+    // 目标 2：仅保留 active 两行（终态全逐出）
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_p1', 'dlv_p2']);
+  });
+
+  // (b2) 活组 alone 已超上限：仍须剔光终态，仅对活组宁超
+  test('#217(b2): when active alone exceeds cap, terminals still evict; actives retained over cap', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const now = Date.now();
+    appendDeliveryLogRow(successRow('term_a', new Date(now).toISOString(), 'whk_t'));
+    appendDeliveryLogRow(successRow('term_b', new Date(now + 500).toISOString(), 'whk_t'));
+    // mail.received + attempt≤3 仍非终态（cap=11）；勿用 webhook.ping（attempt=3 已终态）
+    for (let i = 1; i <= 3; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`p${i}`, new Date(now + 1000 * i).toISOString(), 'whk_live'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    const mem = readAllDeliveryLogRows();
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_p1', 'dlv_p2', 'dlv_p3']);
+    expect(mem.length).toBeGreaterThan(2); // 宁超不丢活
+    expect(mem.some((r) => r.deliveryId.startsWith('dlv_term_'))).toBe(false);
+  });
+
+  // (c) 逐出前后盘文件字节零变化
+  test('#217(c): eviction leaves on-disk jsonl bytes unchanged', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const logPath = join(TEST_DATA_DIR, 'webhook-deliveries.jsonl');
+    const base = Date.now();
+    for (let i = 0; i < 5; i++) {
+      appendDeliveryLogRow(successRow(String(i), new Date(base + i * 1000).toISOString()));
+    }
+    const diskBefore = readFileSync(logPath);
+    expect(readAllDeliveryLogRows().length).toBe(1);
+
+    // 强制冷重建再收敛：盘字节仍应一字不动
+    resetDeliveryLogIndexForTests();
+    const mem = readAllDeliveryLogRows();
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_4']);
+    const diskAfter = readFileSync(logPath);
+    expect(Buffer.compare(diskBefore, diskAfter)).toBe(0);
+    expect(readAllDeliveryLogRowsFromDisk().map((r) => r.deliveryId)).toEqual([
+      'dlv_0',
+      'dlv_1',
+      'dlv_2',
+      'dlv_3',
+      'dlv_4',
+    ]);
+  });
+
+  // (d) Map 视图与全量扫 latestDeliveryByWebhookId 逐字一致
+  test('#217(d): getLatestDeliveryByWebhookMap matches scan-built map', () => {
+    const base = Date.now();
+    appendDeliveryLogRow(successRow('a1', new Date(base).toISOString(), 'whk_a'));
+    appendDeliveryLogRow(successRow('a2', new Date(base + 1000).toISOString(), 'whk_a'));
+    appendDeliveryLogRow(successRow('b1', new Date(base + 2000).toISOString(), 'whk_b'));
+
+    const fromMap = getLatestDeliveryByWebhookMap();
+    const fromScan = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    expect([...fromMap.entries()].sort(([a], [b]) => a.localeCompare(b))).toEqual(
+      [...fromScan.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    );
+    expect(fromMap.get('whk_a')?.deliveryId).toBe('dlv_a2');
+    expect(fromMap.get('whk_b')?.deliveryId).toBe('dlv_b1');
+  });
+
+  // (e) redeliver 逐出区 id → delivery_not_found
+  test('#217(e): redeliver of evicted deliveryId yields delivery_not_found', async () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const base = Date.now();
+    for (let i = 0; i < 4; i++) {
+      appendDeliveryLogRow(successRow(String(i), new Date(base + i * 1000).toISOString()));
+    }
+    expect(readAllDeliveryLogRows().map((r) => r.deliveryId)).toEqual(['dlv_3']);
+
+    await expect(redeliverWebhookDelivery('dlv_0')).rejects.toMatchObject({
+      code: 'delivery_not_found',
+    });
+  });
+
+  // (f) warn-once 只出一行 + 计数正确（滞回：一次可多丢）
+  test('#217(f): warn-once fires once; eviction counter accumulates', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(' '));
+    };
+    try {
+      const base = Date.now();
+      // 先灌满上限并预热索引，使后续 append 走热路径 enforce
+      appendDeliveryLogRow(successRow('0', new Date(base).toISOString()));
+      appendDeliveryLogRow(successRow('1', new Date(base + 1000).toISOString()));
+      expect(readAllDeliveryLogRows().map((r) => r.deliveryId)).toEqual(['dlv_0', 'dlv_1']);
+      resetDeliveryLogRowCapForTests();
+      warns.length = 0;
+
+      // 3 > 2 → 一次裁到目标 1，丢 2 行
+      appendDeliveryLogRow(successRow('2', new Date(base + 2000).toISOString()));
+      expect(getDeliveryLogRowCapForTests().evictedTotal).toBe(2);
+      expect(getDeliveryLogRowCapForTests().warnCount).toBe(1);
+      expect(getDeliveryLogRowCapForTests().rebuilds).toBe(1);
+      expect(warns.length).toBe(1);
+      expect(warns[0]).toContain('WEBHOOK_LOG_MAX_ROWS=2');
+      expect(warns[0]).toContain('evictedTotal=2');
+
+      // 再 append：长度 2 ≤ 上限，不触发；再超限才第二次重建
+      appendDeliveryLogRow(successRow('3', new Date(base + 3000).toISOString()));
+      expect(getDeliveryLogRowCapForTests().rebuilds).toBe(1);
+      expect(getDeliveryLogRowCapForTests().warnCount).toBe(1);
+      expect(warns.length).toBe(1);
+
+      appendDeliveryLogRow(successRow('4', new Date(base + 4000).toISOString()));
+      expect(getDeliveryLogRowCapForTests().rebuilds).toBe(2);
+      expect(getDeliveryLogRowCapForTests().evictedTotal).toBe(4);
+      expect(getDeliveryLogRowCapForTests().warnCount).toBe(1);
+      expect(warns.length).toBe(1); // 仍只一行
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  // (g) 滞回：上限+1 触发一次重建；上限+2 仍 ≤ 上限则不再重建
+  test('#217(g): hysteresis — second append under cap after batch trim does not rebuild', () => {
+    (config.webhooks as any).logMaxRows = 10; // 目标 9
+    const base = Date.now();
+    for (let i = 0; i < 10; i++) {
+      appendDeliveryLogRow(successRow(String(i), new Date(base + i * 1000).toISOString()));
+    }
+    expect(readAllDeliveryLogRows().length).toBe(10);
+    resetDeliveryLogRowCapForTests();
+
+    // 上限+1 → 一次裁到 9
+    appendDeliveryLogRow(successRow('10', new Date(base + 10_000).toISOString()));
+    expect(readAllDeliveryLogRows().length).toBe(9);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(1);
+
+    // 上限+2：现长 10 ≤ 10，不触发重建
+    appendDeliveryLogRow(successRow('11', new Date(base + 11_000).toISOString()));
+    expect(readAllDeliveryLogRows().length).toBe(10);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(1);
+  });
+
+  // (h) maxRows=1：目标钳制为 1，连续两笔终态后内存恰剩最新一行
+  test('#217(h): maxRows=1 clamps hysteresis target to 1; keeps newest terminal', () => {
+    (config.webhooks as any).logMaxRows = 1;
+    const base = Date.now();
+    appendDeliveryLogRow(successRow('old', new Date(base).toISOString(), 'whk_h'));
+    appendDeliveryLogRow(successRow('new', new Date(base + 1000).toISOString(), 'whk_h'));
+
+    const mem = readAllDeliveryLogRows();
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_new']);
+    expect(getLatestDeliveryForWebhook('whk_h')?.deliveryId).toBe('dlv_new');
+    expect(getLatestDeliveryForWebhook('whk_h')).not.toBeNull();
+  });
+
+  // (i) 盘源 maxRunNum：内存逐出 run_3 后 redeliver 得 run_4；boot 不丢新 pending 组
+  test('#217(i): redeliver maxRunNum from disk; boot keeps new pending group active', async () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1：最旧 run_3 必被逐出
+    (config.webhooks as any).allowPrivateTargets = true;
+    const sub = createWebhookSubscription({
+      url: 'https://127.0.0.1/cap-runid',
+      address: 'alice@test.example',
+      events: ['webhook.ping'],
+      createdBy: 'alice@test.example',
+    });
+    setWebhookDnsLookupForTests(async () => [{ address: '127.0.0.1', family: 4 }]);
+
+    const base = Date.now();
+    const mk = (runNum: number, id: string, tsOff: number): WebhookDeliveryLogRow => ({
+      ...successRow(id, new Date(base + tsOff).toISOString(), sub.id),
+      eventId: 'evt_runid',
+      runId: `run_${runNum}`,
+      type: 'webhook.ping',
+    });
+    // 盘序：run_3 最旧 → 将被内存逐出；run_1/run_2 较新
+    appendDeliveryLogRow(mk(3, 'r3', 0));
+    appendDeliveryLogRow(mk(1, 'r1', 1000));
+    appendDeliveryLogRow(mk(2, 'r2', 2000));
+
+    expect(readAllDeliveryLogRowsFromDisk().map((r) => r.runId)).toEqual([
+      'run_3',
+      'run_1',
+      'run_2',
+    ]);
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.runId === 'run_3')).toBe(false);
+    expect(mem.some((r) => r.runId === 'run_2')).toBe(true);
+
+    const replay = await redeliverWebhookDelivery('dlv_r2');
+    expect(replay.runId).toBe('run_4'); // 盘源 max=3 → +1；若吃内存会错成 run_3
+    deliveryQueue.cancelAll();
+
+    // 盘上已有 run_4 pending（enqueue 写入）+ 历史 run_3 终态；冷重建后 pending 组须被 boot 收起
+    resetDeliveryLogIndexForTests();
+    const boot = await reconstructPendingDeliveriesAtBoot(Date.now());
+    expect(boot.reconstructed).toBeGreaterThanOrEqual(1);
+    // 负控：若撞成 run_3，高 attempt 终态会压过 pending，boot 会丢组（reconstructed 不含该链）
+    const disk = readAllDeliveryLogRowsFromDisk();
+    expect(disk.some((r) => r.runId === 'run_4' && r.outcome === 'pending')).toBe(true);
+    setWebhookDnsLookupForTests(undefined);
+  });
+
+  // (j) 纯活组超限态：futile 置位后连续 append 非终态 → 全表扫描次数=0
+  test('#217(j): pure-active over-cap: subsequent non-terminal appends do not full-scan', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const now = Date.now();
+    // 灌入 3 条同组 pending（mail.received），alone 超限 → 置 futile
+    for (let i = 1; i <= 3; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`live${i}`, new Date(now + 1000 * i).toISOString(), 'whk_j'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_j_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(readAllDeliveryLogRows().length).toBe(3); // 宁超不丢活
+    // 已进入 futile；重置计数后连续 append 非终态不得再全表扫
+    resetDeliveryLogRowCapForTests();
+    for (let i = 4; i <= 6; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`live${i}`, new Date(now + 1000 * i).toISOString(), 'whk_j'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_j_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(0);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(0);
+    expect(getDeliveryLogRowCapForTests().evictedTotal).toBe(0);
+    expect(readAllDeliveryLogRows().length).toBe(6);
+  });
+
+  // (k) futile 置位后 append 终态 → 清位且下一轮 enforce 恢复逐出该终态行
+  test('#217(k): terminal after futile clears memo and resumes eviction', () => {
+    (config.webhooks as any).logMaxRows = 2; // 目标 1
+    const now = Date.now();
+    for (let i = 1; i <= 3; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`k${i}`, new Date(now + 1000 * i).toISOString(), 'whk_k'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_k_live',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    expect(readAllDeliveryLogRows().length).toBe(3);
+    resetDeliveryLogRowCapForTests();
+
+    // 终态行清 futile；本轮 enforce 须扫描并逐出该终态（活组保留）
+    appendDeliveryLogRow(
+      successRow('term', new Date(now + 4000).toISOString(), 'whk_k_term'),
+    );
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(1);
+    expect(getDeliveryLogRowCapForTests().evictedTotal).toBeGreaterThanOrEqual(1);
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
+    expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_k1', 'dlv_k2', 'dlv_k3']);
   });
 });

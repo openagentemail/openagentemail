@@ -335,7 +335,18 @@ type DeliveryLogIndex = {
   size: number;
   rows: WebhookDeliveryLogRow[];
   latestByWebhook: Map<string, WebhookDeliveryLogRow>;
+  /** webhook/event/run 组最新行：ts 先（路由 lastDelivery 等） */
   latestByGroup: Map<string, WebhookDeliveryLogRow>;
+  /**
+   * 活跃判定专用增量 Map：attempt 先、ts 后（= isPreferredActiveGroupRow）。
+   * ⚠️ 禁复用 latestByGroup——后者走 isNewerDeliveryRow（ts 先），复用=语义漂移。
+   */
+  latestForActiveByGroup: Map<string, WebhookDeliveryLogRow>;
+  /**
+   * 无可逐出态记忆化：完整扫描 dropped===0 后置位；
+   * 置位期间 enforce 早退 O(1)，避免活组超限每次全表扫。
+   */
+  capScanFutile: boolean;
 };
 
 function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
@@ -347,6 +358,8 @@ function emptyDeliveryLogIndex(path = ''): DeliveryLogIndex {
     rows: [],
     latestByWebhook: new Map(),
     latestByGroup: new Map(),
+    latestForActiveByGroup: new Map(),
+    capScanFutile: false,
   };
 }
 
@@ -365,8 +378,176 @@ let deliveryLogIoForTests: DeliveryLogIoStats = {
   bytesRead: 0,
 };
 
+/** #217：内存行上限逐出计数（仿 deliveryLogIoForTests；生产只写、测试可读） */
+type DeliveryLogRowCapStats = {
+  /** 进程内累计从内存视图逐出的行数（盘不动） */
+  evictedTotal: number;
+  /** warn-once 触发次数（每进程至多 1） */
+  warnCount: number;
+  /** rebuildIndexMaps 调用次数（滞回批量负控用） */
+  rebuilds: number;
+  /** enforce 完整扫描次数（R4 活组超限短路负控用；futile 早退不计） */
+  scanCount: number;
+};
+
+let deliveryLogRowCapForTests: DeliveryLogRowCapStats = {
+  evictedTotal: 0,
+  warnCount: 0,
+  rebuilds: 0,
+  scanCount: 0,
+};
+
+/** 每进程只打一行逐出 warn */
+let deliveryLogRowCapWarned = false;
+
 function groupKeyForRow(row: WebhookDeliveryLogRow): string {
   return `${row.webhookId}:${row.eventId}:${row.runId}`;
+}
+
+/**
+ * compact / 内存逐出共用：组内「最新行」比较——attempt 先、ts 后
+ * （与历史 compactDeliveryLog sort 同优先级，不许悄悄换序）。
+ */
+function isPreferredActiveGroupRow(
+  candidate: WebhookDeliveryLogRow,
+  incumbent: WebhookDeliveryLogRow,
+): boolean {
+  if (candidate.attempt !== incumbent.attempt) return candidate.attempt > incumbent.attempt;
+  return new Date(candidate.ts).getTime() > new Date(incumbent.ts).getTime();
+}
+
+/**
+ * 盘冷路径专用（compactDeliveryLog）：组内最新行非终态 → 整组 active。
+ * 热路径 enforce 改吃 index.latestForActiveByGroup（增量 O(组数)），勿再每 append 全量分组。
+ * 比较器=isPreferredActiveGroupRow（attempt 先），与增量 Map 同优先级。
+ */
+function computeActiveGroupKeys(rows: WebhookDeliveryLogRow[]): Set<string> {
+  const latestByGroup = new Map<string, WebhookDeliveryLogRow>();
+  for (const row of rows) {
+    const key = groupKeyForRow(row);
+    const prev = latestByGroup.get(key);
+    if (!prev || isPreferredActiveGroupRow(row, prev)) {
+      latestByGroup.set(key, row);
+    }
+  }
+  const activeGroupKeys = new Set<string>();
+  for (const [key, latest] of latestByGroup) {
+    if (!isTerminalDeliveryRow(latest)) activeGroupKeys.add(key);
+  }
+  return activeGroupKeys;
+}
+
+/** 从增量活跃 Map 派生 active 组键集合——O(组数)，供 enforce 热路径 */
+function activeGroupKeysFromIndex(index: DeliveryLogIndex): Set<string> {
+  const activeGroupKeys = new Set<string>();
+  for (const [key, latest] of index.latestForActiveByGroup) {
+    if (!isTerminalDeliveryRow(latest)) activeGroupKeys.add(key);
+  }
+  return activeGroupKeys;
+}
+
+/**
+ * 活跃判定专用 upsert：attempt 先、ts 后（= isPreferredActiveGroupRow）。
+ * 与 upsertLatestRow / isNewerDeliveryRow（ts 先）刻意分离，防语义漂移。
+ */
+function upsertActiveGroupLatest(
+  map: Map<string, WebhookDeliveryLogRow>,
+  key: string,
+  row: WebhookDeliveryLogRow,
+): void {
+  const prev = map.get(key);
+  if (!prev || isPreferredActiveGroupRow(row, prev)) map.set(key, row);
+}
+
+function rebuildIndexMaps(index: DeliveryLogIndex): void {
+  // 测试钩：统计重建次数（滞回批量逐出负控 (g)）
+  deliveryLogRowCapForTests.rebuilds += 1;
+  index.latestByWebhook.clear();
+  index.latestByGroup.clear();
+  index.latestForActiveByGroup.clear();
+  for (const row of index.rows) {
+    upsertLatestRow(index.latestByWebhook, row.webhookId, row);
+    upsertLatestRow(index.latestByGroup, groupKeyForRow(row), row);
+    // 活跃 Map 必须走 attempt 先比较器，禁 upsertLatestRow
+    upsertActiveGroupLatest(index.latestForActiveByGroup, groupKeyForRow(row), row);
+  }
+  // 重建后保守清位，由下次 enforce 再判定 futile
+  index.capScanFutile = false;
+}
+
+/**
+ * #217 A 案 + R2 滞回 + R4 增量活跃/futile 短路：内存索引行上限。
+ * 只裁 rows+三 Map；不写盘。超限时一次逐出到 floor(maxRows*0.9)；≤上限不触发。
+ * active 组行永不逐出；剔光非 active 后仍超上限则宁超不丢活并 warn。
+ * 活组 alone 超限（dropped=0）→ 置 capScanFutile，后续 append 早退 O(1)。
+ */
+function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
+  const maxRows = config.webhooks.logMaxRows;
+  if (index.rows.length <= maxRows) return;
+  // R4：无可逐出态记忆化——置位期间早退，避免每 append O(n) 全表扫
+  if (index.capScanFutile) return;
+
+  // 测试钩：完整扫描计数（futile 早退不计）
+  deliveryLogRowCapForTests.scanCount += 1;
+
+  // 滞回批量：目标长度 = 上限的 90%，至少保留 1 行（maxRows=1 时 floor(0.9)=0 会剔光最新行）
+  const targetLength = Math.max(1, Math.floor(maxRows * 0.9));
+  // R4：从增量活跃 Map 派生，O(组数)；禁每 append 调 computeActiveGroupKeys
+  const activeGroupKeys = activeGroupKeysFromIndex(index);
+  const needEvict = index.rows.length - targetLength;
+  const drop = new Set<number>();
+  let dropped = 0;
+  // 始终尽量逐出最旧非 active；不得因 activeCount 已超而整表停裁
+  for (let i = 0; i < index.rows.length && dropped < needEvict; i++) {
+    if (activeGroupKeys.has(groupKeyForRow(index.rows[i]!))) continue;
+    drop.add(i);
+    dropped++;
+  }
+
+  if (dropped > 0) {
+    // 前端截断语义：去掉最旧可逐出行，保留剩余行的 append 序
+    const kept: WebhookDeliveryLogRow[] = [];
+    for (let i = 0; i < index.rows.length; i++) {
+      if (!drop.has(i)) kept.push(index.rows[i]!);
+    }
+    index.rows = kept;
+    rebuildIndexMaps(index);
+  } else {
+    // 完整扫描无可逐出（全部行皆 active）→ 置位，后续 enforce 早退
+    index.capScanFutile = true;
+  }
+
+  // 仍超限 ⟺ 活组 alone 已压过上限（无可再丢的终态）
+  const stoppedForActiveOverflow = index.rows.length > maxRows;
+  if (dropped > 0 || stoppedForActiveOverflow) {
+    noteDeliveryLogRowCapEvent(maxRows, dropped, stoppedForActiveOverflow, targetLength);
+  }
+}
+
+/** 累计逐出数 + 每进程 warn-once（含上限、滞回目标与累计逐出数） */
+function noteDeliveryLogRowCapEvent(
+  maxRows: number,
+  evictedThisRound: number,
+  stoppedForActiveOverflow: boolean,
+  targetLength: number,
+): void {
+  deliveryLogRowCapForTests.evictedTotal += evictedThisRound;
+  if (deliveryLogRowCapWarned) return;
+  deliveryLogRowCapWarned = true;
+  deliveryLogRowCapForTests.warnCount += 1;
+  if (stoppedForActiveOverflow) {
+    console.warn(
+      `[webhooks] delivery-log in-memory index over WEBHOOK_LOG_MAX_ROWS=${maxRows}; ` +
+        `active pending-retry rows alone exceed cap — stopping eviction ` +
+        `(evictedTotal=${deliveryLogRowCapForTests.evictedTotal}; memory view only)`,
+    );
+  } else {
+    console.warn(
+      `[webhooks] delivery-log in-memory index trimmed toward WEBHOOK_LOG_MAX_ROWS=${maxRows} ` +
+        `(hysteresis target=${targetLength}); ` +
+        `evictedTotal=${deliveryLogRowCapForTests.evictedTotal} (memory view only; disk unchanged)`,
+    );
+  }
 }
 
 function isNewerDeliveryRow(a: WebhookDeliveryLogRow, b: WebhookDeliveryLogRow): boolean {
@@ -389,6 +570,12 @@ function applyRowToIndex(index: DeliveryLogIndex, row: WebhookDeliveryLogRow): v
   index.rows.push(row);
   upsertLatestRow(index.latestByWebhook, row.webhookId, row);
   upsertLatestRow(index.latestByGroup, groupKeyForRow(row), row);
+  // 活跃判定增量维护：attempt 先（禁复用 latestByGroup / isNewerDeliveryRow）
+  upsertActiveGroupLatest(index.latestForActiveByGroup, groupKeyForRow(row), row);
+  // 终态行=新的可逐出候选 → 清 futile；非终态新行不产生可逐出行，不清位
+  if (isTerminalDeliveryRow(row)) {
+    index.capScanFutile = false;
+  }
 }
 
 function parseDeliveryLogText(content: string): WebhookDeliveryLogRow[] {
@@ -439,6 +626,8 @@ function adoptDeliveryLogIndex(rows: WebhookDeliveryLogRow[]): void {
   const path = deliveryLogPath();
   const index = emptyDeliveryLogIndex(path);
   for (const row of rows) applyRowToIndex(index, row);
+  // 重建后以上限再收敛一次，行为与增量路径一致
+  enforceDeliveryLogRowCap(index);
   captureIndexCursor(index, path);
   deliveryLogIndex = index;
 }
@@ -467,6 +656,8 @@ function ingestIncrementalBytes(index: DeliveryLogIndex, chunk: Buffer): number 
       );
     }
   }
+  // 增量 ingest 后收口内存行上限（不写盘）
+  enforceDeliveryLogRowCap(index);
   return Buffer.byteLength(complete, 'utf8');
 }
 
@@ -519,6 +710,8 @@ function syncIndexAfterAppend(row: WebhookDeliveryLogRow, lineBytes: number): vo
     deliveryLogIndex.size + lineBytes === st.size
   ) {
     applyRowToIndex(deliveryLogIndex, row);
+    // append 热路径收口内存行上限
+    enforceDeliveryLogRowCap(deliveryLogIndex);
     deliveryLogIndex.size = st.size;
     deliveryLogIndex.mtimeMs = st.mtimeMs;
     return;
@@ -536,6 +729,17 @@ export function getDeliveryLogIoForTests(): DeliveryLogIoStats {
 
 export function resetDeliveryLogIoForTests(): void {
   deliveryLogIoForTests = { fullReads: 0, incrementalReads: 0, bytesRead: 0 };
+}
+
+/** #217：内存行上限逐出统计（测试断言用） */
+export function getDeliveryLogRowCapForTests(): DeliveryLogRowCapStats {
+  return { ...deliveryLogRowCapForTests };
+}
+
+/** #217：重置逐出计数与 warn-once 门闩 */
+export function resetDeliveryLogRowCapForTests(): void {
+  deliveryLogRowCapForTests = { evictedTotal: 0, warnCount: 0, rebuilds: 0, scanCount: 0 };
+  deliveryLogRowCapWarned = false;
 }
 
 /** Full-file parse used by boot reconstruction and compaction. */
@@ -720,6 +924,14 @@ export function getLatestDeliveryForWebhook(webhookId: string): WebhookDeliveryL
 }
 
 /**
+ * #217：列表/详情/更新端点用的 webhookId→最新行批量视图。
+ * 返回索引 Map 的浅拷贝，禁止路由层直接摸模块内变量。
+ */
+export function getLatestDeliveryByWebhookMap(): Map<string, WebhookDeliveryLogRow> {
+  return new Map(refreshDeliveryLogIndex().latestByWebhook);
+}
+
+/**
  * Compaction: prune rows older than retention days, preserving pending sequences.
  */
 export function compactDeliveryLog(
@@ -732,32 +944,11 @@ export function compactDeliveryLog(
   const rows = readAllDeliveryLogRowsFromDisk();
   const retentionCutoff = now - retentionDays * 86400000;
 
-  // Identify groups with pending retries so we never prune them
-  const groups = new Map<string, WebhookDeliveryLogRow[]>();
-  for (const row of rows) {
-    const key = `${row.webhookId}:${row.eventId}:${row.runId}`;
-    let list = groups.get(key);
-    if (!list) {
-      list = [];
-      groups.set(key, list);
-    }
-    list.push(row);
-  }
-
-  const activeGroupKeys = new Set<string>();
-  for (const [key, groupRows] of groups.entries()) {
-    groupRows.sort((a, b) => {
-      if (a.attempt !== b.attempt) return b.attempt - a.attempt;
-      return new Date(b.ts).getTime() - new Date(a.ts).getTime();
-    });
-    const latest = groupRows[0]!;
-    if (!isTerminalDeliveryRow(latest)) {
-      activeGroupKeys.add(key);
-    }
-  }
+  // 盘冷路径：全量分组求 active（热路径 enforce 吃增量 Map，此处保留一处真相比较器）
+  const activeGroupKeys = computeActiveGroupKeys(rows);
 
   const retainedRows = rows.filter((row) => {
-    const key = `${row.webhookId}:${row.eventId}:${row.runId}`;
+    const key = groupKeyForRow(row);
     if (activeGroupKeys.has(key)) return true;
     return new Date(row.ts).getTime() > retentionCutoff;
   });
@@ -2474,7 +2665,10 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   }
 
   // Calculate new runId
-  const matchingRuns = rows.filter(
+  // maxRunNum 必须盘源计算——截断视图欠数会与盘历史 run 撞号，合并组经 attempt
+  // 优先比较可误判 pending 为终态（boot 重建丢重试链），故禁止吃内存视图。
+  const diskRows = readAllDeliveryLogRowsFromDisk();
+  const matchingRuns = diskRows.filter(
     (r) => r.webhookId === original.webhookId && r.eventId === original.eventId,
   );
   let maxRunNum = 0;

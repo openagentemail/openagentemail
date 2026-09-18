@@ -2047,6 +2047,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_DISABLE_THRESHOLD` | int ≥ 1 | `10` | Consecutive **failed attempts** per endpoint, reset to 0 on any success (**D2a**, §8.5). `deferred` does not count. |
 | `WEBHOOK_ROTATION_OVERLAP_MS` | int ≥ 0 | `86400000` | 24 h dual-signature window (§12.2). `0` = atomic swap. |
 | `WEBHOOK_LOG_RETENTION_DAYS` | int ≥ **4** | `30` | **Floor is tied to the retry horizon, not to taste.** D2's schedule runs to +72 h, so a retention window under 4 days would let daily compaction delete the only durable record of a pending attempt *before that attempt is due* — silently dropping attempts 9–11 and with them the whole tail the extension bought. Enforced in the schema, and it must be re-checked if the schedule is ever lengthened. |
+| `WEBHOOK_LOG_MAX_ROWS` | int ≥ 1 | `100000` | **In-memory delivery-log index row cap only** (#217). Disk retention is unchanged. Eviction uses hysteresis (trim to 90% of the cap). Boundary behavior: redeliver of an evicted `deliveryId` → `delivery_not_found`; list cursor into the evicted zone → `400 invalid_cursor` (client should restart from page 1); a webhook whose rows are entirely absent from the memory view reports `lastDelivery: null`. |
 | `WEBHOOK_RATE_CREATE_PER_MIN` | int ≥ 0 | `10` | |
 | `WEBHOOK_RATE_TEST_PER_MIN` | int ≥ 0 | `3` | Per token, separate bucket from delivery (§8.7). Bounds caller-triggered egress. |
 | `WEBHOOK_RATE_DELIVER_PER_MIN` | int ≥ 0 | `60` | Per endpoint. `0` disables. |

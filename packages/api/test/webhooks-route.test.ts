@@ -21,6 +21,8 @@ const {
   getDeliveryLogIoForTests,
   resetDeliveryLogIoForTests,
   resetDeliveryLogIndexForTests,
+  getLatestDeliveryByWebhookMap,
+  latestDeliveryByWebhookId,
   setWebhookDnsLookupForTests,
 } = await import('../src/lib/webhook-delivery.ts');
 const {
@@ -2028,6 +2030,116 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(await thrRes.json()).toEqual({ ok: true, state: 'disabled', disabledReason: 'threshold' });
     expect(getWebhookSubscription(thr.id)?.disabledReason).toBe('threshold');
     expect(auditFor(thr.id)).toHaveLength(0);
+  });
+
+  // #217(d)：三端点换 Map 后响应与扫盘建 Map 语义逐字一致
+  test('#217(d): list/get/update lastDelivery matches Map and scan-built map', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/cap-map',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    const other = createWebhookSubscription({
+      url: 'https://consumer.example/cap-map-other',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'alice@test.example',
+    });
+    const t1 = new Date(Date.now() - 2000).toISOString();
+    const t2 = new Date(Date.now() - 1000).toISOString();
+    appendDeliveryLogRow({
+      ts: t1,
+      webhookId: sub.id,
+      eventId: 'evt_map_1',
+      runId: 'run_0',
+      deliveryId: 'dlv_map_old',
+      type: 'mail.received',
+      address: sub.address,
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: t1,
+      attempt: 1,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 10,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+    appendDeliveryLogRow({
+      ts: t2,
+      webhookId: sub.id,
+      eventId: 'evt_map_2',
+      runId: 'run_0',
+      deliveryId: 'dlv_map_new',
+      type: 'mail.received',
+      address: sub.address,
+      messageId: '2',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: t2,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 12,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    });
+
+    const fromMap = getLatestDeliveryByWebhookMap();
+    const fromScan = latestDeliveryByWebhookId(readAllDeliveryLogRows());
+    expect(fromMap.get(sub.id)).toEqual(fromScan.get(sub.id));
+    expect(fromMap.get(other.id)).toBeUndefined();
+    expect(fromScan.get(other.id)).toBeUndefined();
+
+    const listRes = await app.request('/v1/webhooks', {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listBody: any = await listRes.json();
+    const listed = listBody.webhooks.find((w: any) => w.id === sub.id);
+    const listedOther = listBody.webhooks.find((w: any) => w.id === other.id);
+    expect(listed.lastDelivery).toEqual({
+      deliveryId: 'dlv_map_new',
+      ts: t2,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 12,
+      reason: null,
+    });
+    expect(listedOther.lastDelivery).toBeNull();
+
+    const getRes = await app.request(`/v1/webhooks/${sub.id}`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(getRes.status).toBe(200);
+    const getBody: any = await getRes.json();
+    expect(getBody.lastDelivery).toEqual(listed.lastDelivery);
+
+    const updateRes = await app.request(`/v1/webhooks/${sub.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ description: 'map-unchanged-ld' }),
+    });
+    expect(updateRes.status).toBe(200);
+    const updateBody: any = await updateRes.json();
+    expect(updateBody.lastDelivery).toEqual(listed.lastDelivery);
+    expect(updateBody.description).toBe('map-unchanged-ld');
   });
 
   afterAll(async () => {
