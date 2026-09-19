@@ -63,7 +63,8 @@ const {
   InvalidTaskCursorError,
   encodeTaskBoardCursor,
 } = await import('../src/lib/task-cursor.ts');
-const { SEND_LOG_RETENTION_MS, InvalidSendCursorError } = await import('../src/lib/send-log.ts');
+const { SEND_LOG_RETENTION_MS, InvalidSendCursorError, encodeSendLogCursorForTests } =
+  await import('../src/lib/send-log.ts');
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-invalid-cursor-obs');
 const originalDataDir = config.dataDir;
@@ -303,6 +304,19 @@ describe('#202/#270 invalid_cursor observability helper', () => {
     // 残缺 ISO（Date.parse 可解）→ parse_fail
     expect(() => parseDeliveryListCursor(`${id}|1|2020-01-01`)).toThrow(InvalidDeliveryCursorError);
 
+    // 日历无效但格式像 ISO（2024-02-30）→ Date.parse 归一化；round-trip 拒为 parse_fail
+    const calBogus = '2024-02-30T00:00:00.000Z';
+    expect(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(calBogus)).toBe(true);
+    expect(new Date(calBogus).toISOString()).not.toBe(calBogus);
+    let calKind: string | undefined;
+    try {
+      parseDeliveryListCursor(`${id}|1|${calBogus}`);
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidDeliveryCursorError);
+      calKind = (err as InvalidDeliveryCursorError).kind;
+    }
+    expect(calKind).toBe('parse_fail');
+
     // 超长数字 attempt（Number→Infinity / 非 SafeInteger）→ parse_fail，不得进查找误记 stale
     const hugeAttempt = '9'.repeat(309);
     expect(Number(hugeAttempt)).toBe(Infinity);
@@ -332,7 +346,6 @@ describe('#202/#270 invalid_cursor observability helper', () => {
     expect(parseDeliveryListCursor(id)).toEqual({ form: 'bare_id', deliveryId: id });
   });
 });
-
 describe('#202/#270 四族路由负控', () => {
   let app: ReturnType<typeof createApp>;
   let aliceToken: string;
@@ -543,6 +556,37 @@ describe('#202/#270 四族路由负控', () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+  });
+
+  // R2 #4：send 族路由级 stale——真打 /v1/send/history，未匹配签名游标
+  test('④ send 族路由级 stale：/v1/send/history lookup_miss 窗外 → info', async () => {
+    (config as { retentionDays: number }).retentionDays = 30;
+    const now = Date.now();
+    const outsideTs = daysAgoMs(120, now);
+    // 远超 SEND_LOG 留存亦窗外
+    expect(now - outsideTs).toBeGreaterThan(SEND_LOG_RETENTION_MS);
+    const lines = installCapture();
+    // 用模块冻结 cursorKey 签：addr 与 alice 作用域不匹配 → lookup_miss
+    const cursor = encodeSendLogCursorForTests({
+      addr: 'other@test.example',
+      t: outsideTs,
+      id: `snd_${'cd'.repeat(12)}`,
+    });
+    const res = await app.request(
+      `/v1/send/history?limit=20&cursor=${encodeURIComponent(cursor)}`,
+      { headers: { Authorization: `Bearer ${aliceToken}` } },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.level).toBe('info');
+    expect(parseLine(lines[0]!.line)).toEqual({
+      event: INVALID_CURSOR_LOG_EVENT,
+      family: 'send',
+      shape: 'full',
+      within_retention: false,
+    });
+    expect(lines[0]!.line).not.toContain(cursor);
   });
 
   test('#270 并入：deliveries cursor 超长 → malformed 400', async () => {
