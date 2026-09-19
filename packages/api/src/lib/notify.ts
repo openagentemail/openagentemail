@@ -13,7 +13,12 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname, join } from 'node:path';
 import { recordAuditEvent } from './audit.ts';
 import { config } from './config.ts';
-import { findIdentity, listIdentities, type Identity } from './identities.ts';
+import {
+  findIdentity,
+  listIdentities,
+  registerNotifyRouteDeleteCallback,
+  type Identity,
+} from './identities.ts';
 import {
   appendNotificationLog,
   logicalChannelFor,
@@ -403,27 +408,39 @@ function loadState(): NotifyState {
 
 /**
  * 给尚未烙印的旧 localpart 键写入 ownerAddress。
- * 唯一持有者且 notification-log 无冲突属主证据 → 烙印；否则 ambiguous。已烙印不覆盖。
+ * 唯一持有者且 notification-log 无冲突属主证据 → 烙印；否则 ambiguous。
+ * #235-2：ambiguous 可单向升级到唯一持有者；已烙具体地址永不降级。
  */
 function stampLegacyAgentOwners(state: NotifyState): boolean {
   let changed = false;
   const identities = listIdentities();
   for (const [key, entry] of Object.entries(state.agents)) {
     if (key.includes('@')) continue;
-    if (entry.ownerAddress !== undefined) continue;
+    // 已烙具体地址：不降级、不重算。
+    if (
+      entry.ownerAddress !== undefined &&
+      entry.ownerAddress !== LEGACY_OWNER_AMBIGUOUS
+    ) {
+      continue;
+    }
+    // undefined（首次）或 ambiguous（允许单向升级）→ 按当前持有者重算。
     const holders = identities.filter(
       (i) => i.address.split('@')[0].toLowerCase() === key.toLowerCase(),
     );
     if (holders.length !== 1) {
-      entry.ownerAddress = LEGACY_OWNER_AMBIGUOUS;
-      changed = true;
+      if (entry.ownerAddress !== LEGACY_OWNER_AMBIGUOUS) {
+        entry.ownerAddress = LEGACY_OWNER_AMBIGUOUS;
+        changed = true;
+      }
       continue;
     }
     const candidate = canonicalizeAgentAddress(holders[0]!.address);
     const evidence = inspectLegacyLocalpartOwnerEvidence(key, candidate);
-    entry.ownerAddress =
-      evidence === 'conflict' ? LEGACY_OWNER_AMBIGUOUS : candidate;
-    changed = true;
+    const next = evidence === 'conflict' ? LEGACY_OWNER_AMBIGUOUS : candidate;
+    if (entry.ownerAddress !== next) {
+      entry.ownerAddress = next;
+      changed = true;
+    }
   }
   return changed;
 }
@@ -633,17 +650,20 @@ function enqueuePendingReaderRevoke(
 /**
  * deleteIdentity 同步级联：删完整地址 agents 键并持久化（请求 writeConfig），
  * reader 落 pending_revoke；裸 localpart 键不碰。state 持久化失败抛错 fail-closed。
+ * #249-①：禁用窗内仍入队落盘（有既有 store 时），重启用后 boot 对账统一清；无 store 不物化。
  */
 export function removeAgentRouteOnIdentityDelete(
   address: string,
   actor = 'deleteIdentity',
 ): void {
-  // 未启用 ntfy：无活凭据可外泄，跳过清理且不物化 notifications.json。
-  if (!config.ntfy.enabled) return;
-
   const agent = canonicalizeAgentAddress(address);
   // 只碰完整地址键；裸 localpart 一行不动（R2-4 跨域复用防线）。
   if (!agent.includes('@')) return;
+
+  // 禁用窗：无既有 notifications.json / 内存态则不物化；有则级联入 pending 队列。
+  if (!config.ntfy.enabled) {
+    if (!cachedState && !existsSync(statePath())) return;
+  }
 
   if (!cachedState) cachedState = loadState();
   const current = cachedState;
@@ -672,16 +692,15 @@ export function removeAgentRouteOnIdentityDelete(
     throw err;
   }
 
-  // 持久化成功后立即 best-effort 首次吊销（保持同步签名不阻塞）。
-  // 失败行留 pending，由既有 reconcile/boot 对账收敛——无 boot/无设备列表时也能踢出旧 reader。
-  void reconcilePendingReaderRevokes().catch((err) => {
-    console.warn('[notify] first reader revoke after identity delete failed', {
-      address: agent,
-      error: err instanceof Error ? err.message : 'unknown',
+  // 首次吊销 + server.yml：与 writeServerConfig 同款门禁（#249-⑥）；
+  // 禁用窗只落盘，留给重启用后 boot/reconcile 统一清（#249-①）。
+  if (config.ntfy.enabled && config.ntfy.adminPassword) {
+    void reconcilePendingReaderRevokes().catch((err) => {
+      console.warn('[notify] first reader revoke after identity delete failed', {
+        address: agent,
+        error: err instanceof Error ? err.message : 'unknown',
+      });
     });
-  });
-
-  if (config.ntfy.adminPassword) {
     void writeServerConfig(current).catch((err) => {
       console.warn('[notify] server.yml rewrite after agent route delete failed', {
         address: agent,
@@ -1103,11 +1122,13 @@ export function classifyNtfyUserDeleteResponse(
 }
 
 export async function deleteNtfyUserResult(username: string): Promise<NtfyUserDeleteResult> {
+  // #249-⑥：无 admin 密码不发注定 401 的 DELETE；留 pending 待配置后收敛。
+  if (!config.ntfy.adminPassword) return 'transient';
   try {
     const response = await ntfyFetch('/v1/users', {
       method: 'DELETE',
       headers: {
-        ...basic('admin', config.ntfy.adminPassword!),
+        ...basic('admin', config.ntfy.adminPassword),
         'content-type': 'application/json',
       },
       body: JSON.stringify({ username }),
@@ -1593,6 +1614,16 @@ export async function provisionIdentityNotifications(identity: Identity): Promis
     if (!findIdentity(agent)) {
       if (existing) current.agents[agent] = existing;
       else delete current.agents[agent];
+      // #249-⑤：孤儿 reader 同走 pending 对账队列（瞬断时 deleteRuntimeReader 仅 warn）。
+      enqueuePendingReaderRevoke(current, entry.reader.username, agent);
+      try {
+        saveState(current);
+      } catch (persistErr) {
+        console.warn('[notify] pending reader revoke persist after provision race failed', {
+          address: agent,
+          error: persistErr instanceof Error ? persistErr.message : 'unknown',
+        });
+      }
       await deleteRuntimeReader(entry);
       runtimeReaderCreated = false;
       return;
@@ -1619,7 +1650,19 @@ export async function provisionIdentityNotifications(identity: Identity): Promis
         // reconcile this best-effort rollback before ntfy next boots.
       }
     }
-    if (runtimeReaderCreated) await deleteRuntimeReader(entry);
+    if (runtimeReaderCreated) {
+      // 提交失败路径的孤儿 reader 同样入队，避免仅 warn-only 丢失对账。
+      enqueuePendingReaderRevoke(current, entry.reader.username, agent);
+      try {
+        saveState(current);
+      } catch (persistErr) {
+        console.warn('[notify] pending reader revoke persist after provision rollback failed', {
+          address: agent,
+          error: persistErr instanceof Error ? persistErr.message : 'unknown',
+        });
+      }
+      await deleteRuntimeReader(entry);
+    }
     throw err;
   }
 }
@@ -1685,3 +1728,8 @@ export async function initializeNotifications(): Promise<void> {
     throw err;
   }
 }
+
+// #249-⑦：模块加载时注入 deleteIdentity 级联回调，打断 identities→notify 环依赖。
+registerNotifyRouteDeleteCallback((address, actor) => {
+  removeAgentRouteOnIdentityDelete(address, actor);
+});
