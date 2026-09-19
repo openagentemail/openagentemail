@@ -400,6 +400,12 @@ let deliveryLogRowCapForTests: DeliveryLogRowCapStats = {
 /** 每进程只打一行逐出 warn */
 let deliveryLogRowCapWarned = false;
 
+/** #268：活组超次级上限（10×maxRows）error 级告警，每进程至多一次 */
+let deliveryLogActiveOverflowErrored = false;
+
+/** 可采集事件名：活组 alone 压过次级放大上限（不丢活，仅升 error） */
+export const DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT = 'delivery_log_active_overflow';
+
 function groupKeyForRow(row: WebhookDeliveryLogRow): string {
   return `${row.webhookId}:${row.eventId}:${row.runId}`;
 }
@@ -480,12 +486,20 @@ function rebuildIndexMaps(index: DeliveryLogIndex): void {
  * 只裁 rows+三 Map；不写盘。超限时一次逐出到 floor(maxRows*0.9)；≤上限不触发。
  * active 组行永不逐出；剔光非 active 后仍超上限则宁超不丢活并 warn。
  * 活组 alone 超限（dropped=0）→ 置 capScanFutile，后续 append 早退 O(1)。
+ * #268：次级放大上限 = floor(10×maxRows)；仍不丢活，但超次级升 error 级
+ * `delivery_log_active_overflow`（warn-once 节流）。
+ * #268 附带：滞回 rebuild 后若仍超上限（活组 alone），立即钉回 futile，
+ * 避免每次 append 再 O(n) 全表扫（滞回 rebuild I/O 放大）。
  */
 function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
   const maxRows = config.webhooks.logMaxRows;
   if (index.rows.length <= maxRows) return;
   // R4：无可逐出态记忆化——置位期间早退，避免每 append O(n) 全表扫
-  if (index.capScanFutile) return;
+  if (index.capScanFutile) {
+    // 早退路径仍须检查次级上限（活组持续膨胀）
+    noteDeliveryLogActiveOverflowIfNeeded(index.rows.length, maxRows);
+    return;
+  }
 
   // 测试钩：完整扫描计数（futile 早退不计）
   deliveryLogRowCapForTests.scanCount += 1;
@@ -512,16 +526,42 @@ function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
     }
     index.rows = kept;
     rebuildIndexMaps(index);
-  } else {
-    // 完整扫描无可逐出（全部行皆 active）→ 置位，后续 enforce 早退
-    index.capScanFutile = true;
   }
 
   // 仍超限 ⟺ 活组 alone 已压过上限（无可再丢的终态）
   const stoppedForActiveOverflow = index.rows.length > maxRows;
+  if (stoppedForActiveOverflow) {
+    // 含：dropped=0 纯活组；以及滞回剔光终态后仍超限。
+    // rebuildIndexMaps 会清 futile——此处钉回，堵住后续每 append O(n) 放大。
+    index.capScanFutile = true;
+  } else if (dropped === 0) {
+    // 完整扫描无可逐出但未超限（理论上达不到：入口已要求 > maxRows）
+    index.capScanFutile = true;
+  }
+
   if (dropped > 0 || stoppedForActiveOverflow) {
     noteDeliveryLogRowCapEvent(maxRows, dropped, stoppedForActiveOverflow, targetLength);
   }
+  noteDeliveryLogActiveOverflowIfNeeded(index.rows.length, maxRows);
+}
+
+/**
+ * #268 b 案：总行数超 floor(10×maxRows) 时升 error 级可采集日志；零逐出语义变更。
+ * 每进程至多一行（与 warn-once 同节流口径）。
+ */
+function noteDeliveryLogActiveOverflowIfNeeded(rowCount: number, maxRows: number): void {
+  const secondaryCap = Math.floor(maxRows * 10);
+  if (rowCount <= secondaryCap) return;
+  if (deliveryLogActiveOverflowErrored) return;
+  deliveryLogActiveOverflowErrored = true;
+  console.error(
+    JSON.stringify({
+      event: DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT,
+      maxRows,
+      secondaryCap,
+      rows: rowCount,
+    }),
+  );
 }
 
 /** 累计逐出数 + 每进程 warn-once（含上限、滞回目标与累计逐出数） */
@@ -740,6 +780,7 @@ export function getDeliveryLogRowCapForTests(): DeliveryLogRowCapStats {
 export function resetDeliveryLogRowCapForTests(): void {
   deliveryLogRowCapForTests = { evictedTotal: 0, warnCount: 0, rebuilds: 0, scanCount: 0 };
   deliveryLogRowCapWarned = false;
+  deliveryLogActiveOverflowErrored = false;
 }
 
 /** Full-file parse used by boot reconstruction and compaction. */

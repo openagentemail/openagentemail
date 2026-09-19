@@ -38,6 +38,7 @@ const {
   resetDeliveryLogIoForTests,
   getDeliveryLogRowCapForTests,
   resetDeliveryLogRowCapForTests,
+  DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT,
   getLatestDeliveryByWebhookMap,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
@@ -2611,5 +2612,100 @@ describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
     const mem = readAllDeliveryLogRows();
     expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
     expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_k1', 'dlv_k2', 'dlv_k3']);
+  });
+
+  // #268 b 案：超 floor(10×maxRows) 升 error 级 delivery_log_active_overflow；不丢活；once
+  test('#268: active overflow past 10×maxRows emits error once; rows retained', () => {
+    (config.webhooks as { logMaxRows: number }).logMaxRows = 2; // 次级上限 floor(20)
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(' '));
+    };
+    try {
+      const now = Date.now();
+      // 21 个独立活组（各 attempt=1），避免 attempt≥cap 变终态被逐出
+      for (let i = 1; i <= 21; i++) {
+        appendDeliveryLogRow({
+          ...successRow(`ov${i}`, new Date(now + 1000 * i).toISOString(), 'whk_ov'),
+          type: 'mail.received',
+          address: 'alice@test.example',
+          messageId: String(i),
+          uidValidity: 1,
+          eventId: `evt_ov_${i}`,
+          attempt: 1,
+          outcome: 'retryable',
+          status: 500,
+          nextAttemptAt: new Date(now + 60_000).toISOString(),
+        });
+      }
+      expect(readAllDeliveryLogRows().length).toBe(21);
+      expect(errors.length).toBe(1);
+      const payload = JSON.parse(errors[0]!);
+      expect(payload.event).toBe(DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT);
+      expect(payload.maxRows).toBe(2);
+      expect(payload.secondaryCap).toBe(20);
+      expect(payload.rows).toBeGreaterThan(20);
+
+      // 再 append 仍 once
+      appendDeliveryLogRow({
+        ...successRow('ov22', new Date(now + 22_000).toISOString(), 'whk_ov'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: '22',
+        uidValidity: 1,
+        eventId: 'evt_ov_22',
+        attempt: 1,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000).toISOString(),
+      });
+      expect(errors.length).toBe(1);
+      expect(readAllDeliveryLogRows().length).toBe(22);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  // #268 附带：滞回剔光终态后仍超限 → 钉 futile，后续非终态 append 不再全表扫
+  test('#268: hysteresis rebuild while still over cap sets futile (no rescan amplify)', () => {
+    (config.webhooks as { logMaxRows: number }).logMaxRows = 3; // 目标 2
+    const now = Date.now();
+    // 1 终态 + 4 活组行：超限时剔终态后仍 4>3 → 须钉 futile
+    appendDeliveryLogRow(successRow('term', new Date(now).toISOString(), 'whk_t'));
+    for (let i = 1; i <= 4; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`h${i}`, new Date(now + 1000 * i).toISOString(), 'whk_hyst'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_hyst',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
+    expect(mem.length).toBe(4);
+    resetDeliveryLogRowCapForTests();
+    appendDeliveryLogRow({
+      ...successRow('h5', new Date(now + 5000).toISOString(), 'whk_hyst'),
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '5',
+      uidValidity: 1,
+      eventId: 'evt_hyst',
+      attempt: 5,
+      outcome: 'retryable',
+      status: 500,
+      nextAttemptAt: new Date(now + 60_000 * 5).toISOString(),
+    });
+    // 若未钉 futile，本轮会再 scan+rebuild；钉死后 scanCount=0
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(0);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(0);
+    expect(readAllDeliveryLogRows().length).toBe(5);
   });
 });
