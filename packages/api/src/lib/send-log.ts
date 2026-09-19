@@ -651,6 +651,18 @@ function encodeCursor(payload: CursorPayload): string {
   return `${CURSOR_PREFIX}.${body}.${cursorMac(payload)}`;
 }
 
+/**
+ * 测试用：用模块冻结的 cursorKey 签 send-log 游标。
+ * 全量套件下 live config 可能漂移；本 helper 保证 MAC 与 decode 同源，便于路由级 stale 负控。
+ */
+export function encodeSendLogCursorForTests(payload: {
+  addr: string;
+  t: number;
+  id: string;
+}): string {
+  return encodeCursor(payload);
+}
+
 function decodeCursor(token: string): CursorPayload {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== CURSOR_PREFIX || !parts[1] || !parts[2]) {
