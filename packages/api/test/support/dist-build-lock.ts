@@ -50,7 +50,17 @@ const HOLDER_WORKER_SOURCE = `
 `;
 
 /**
- * 同步尝试占 127.0.0.1:port；成功返回句柄，EADDRINUSE 返回 null。
+ * 解释 Worker 报到态（#272 R2）：0/2 均可重试；1=持锁；其它=致命。
+ * 慢报到（Atomics.wait 超时仍为 0）不得 throw，交上层 180s 轮询。
+ */
+export function classifyPortAcquireState(v: number): 'held' | 'retry' | 'fatal' {
+  if (v === 1) return 'held';
+  if (v === 0 || v === 2) return 'retry';
+  return 'fatal';
+}
+
+/**
+ * 同步尝试占 127.0.0.1:port；成功返回句柄，忙/慢报到返回 null。
  * EADDRINUSE = 锁被占而非服务冲突（见文件头）。
  */
 function tryAcquirePortSync(port: number): HeldLock | null {
@@ -60,10 +70,20 @@ function tryAcquirePortSync(port: number): HeldLock | null {
     eval: true,
     workerData: { sab, port },
   });
+  // 防 Worker 启动失败变成 unhandled error（CR R2 Major）
+  worker.once('error', () => {
+    try {
+      Atomics.compareExchange(state, 0, 0, 2);
+      Atomics.notify(state, 0);
+    } catch {
+      // ignore
+    }
+  });
   // 最多等 2s 报到
   Atomics.wait(state, 0, 0, 2_000);
   const v = Atomics.load(state, 0);
-  if (v === 1) {
+  const kind = classifyPortAcquireState(v);
+  if (kind === 'held') {
     return {
       release: () => {
         try {
@@ -84,10 +104,7 @@ function tryAcquirePortSync(port: number): HeldLock | null {
   } catch {
     // ignore
   }
-  if (v === 2) return null;
-  if (v === 0) {
-    throw new Error(`[dist-build-lock] timeout acquiring 127.0.0.1:${port}`);
-  }
+  if (kind === 'retry') return null;
   throw new Error(`[dist-build-lock] listen failed on 127.0.0.1:${port} (state=${v})`);
 }
 
@@ -96,6 +113,9 @@ function isAddrInUse(err: unknown): boolean {
   return e?.code === 'EADDRINUSE' || /EADDRINUSE/i.test(String(e?.message ?? err));
 }
 
+/**
+ * 异步尝试占端口；EADDRINUSE 返回 null，其它错误上抛。
+ */
 async function tryAcquirePortAsync(port: number): Promise<HeldLock | null> {
   const server: Server = createServer();
   try {

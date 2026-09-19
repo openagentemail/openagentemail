@@ -4,7 +4,11 @@
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DIST_BUILD_LOCK_PORT, withDistBuildLock } from './support/dist-build-lock.ts';
+import {
+  DIST_BUILD_LOCK_PORT,
+  classifyPortAcquireState,
+  withDistBuildLock,
+} from './support/dist-build-lock.ts';
 
 /** 负控用高位隔离端口，避免与包默认 43301 及并行套件撞车。 */
 function allocTestPort(): number {
@@ -156,6 +160,15 @@ describe('#272 dist-build-lock port lock', () => {
 
   test('包默认端口钉死为 api=43301（与 mcp=43302 分立）', () => {
     expect(DIST_BUILD_LOCK_PORT).toBe(43301);
+  });
+
+  test('R2：慢报到 state=0 / busy=2 均 classify→retry（不抛），fatal 才抛', () => {
+    // 直接单测 v=0 路径：交上层 withDistBuildLock 180s 轮询，不得在 tryAcquire 内 throw
+    expect(classifyPortAcquireState(0)).toBe('retry');
+    expect(classifyPortAcquireState(2)).toBe('retry');
+    expect(classifyPortAcquireState(1)).toBe('held');
+    expect(classifyPortAcquireState(3)).toBe('fatal');
+    expect(classifyPortAcquireState(-1)).toBe('fatal');
   });
 
   test('R2 P1-2：dist-bundle 与 mutator 并行写 dist 不撞', async () => {
