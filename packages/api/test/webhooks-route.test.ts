@@ -1787,7 +1787,8 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
         webhookId: sub.id,
         eventId: `evt_list_${i}`,
         runId: 'run_0',
-        deliveryId: `dlv_list_${i}`,
+        // #270：nextCursor 须可被规范 UUID 解析
+        deliveryId: `dlv_${crypto.randomUUID()}`,
         type: 'mail.received',
         address: sub.address,
         messageId: String(i),

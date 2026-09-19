@@ -1957,17 +1957,23 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
   });
 
   test('#146: deliveries list pages from the in-memory index without extra fullReads', () => {
+    // #270：游标解析要求生产形 dlv_+UUID
+    const idKeepOld = `dlv_${randomUUID()}`;
+    const idKeepTie = `dlv_${randomUUID()}`;
+    const idKeepTie2 = `dlv_${randomUUID()}`;
+    const idKeepNew = `dlv_${randomUUID()}`;
+    const idOther = `dlv_${randomUUID()}`;
     const row = (
-      id: string,
+      deliveryId: string,
       webhookId: string,
       ts: string,
       attempt = 1,
     ): WebhookDeliveryLogRow => ({
       ts,
       webhookId,
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -1992,17 +1998,17 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const tMid = new Date(now - 2000).toISOString();
     const tNew = new Date(now - 1000).toISOString();
     // 同 ts 用 attempt 打破平局；另一订阅不得混入分页
-    appendDeliveryLogRow(row('keep_old', 'whk_list', tOld, 1));
-    appendDeliveryLogRow(row('keep_tie', 'whk_list', tMid, 1));
-    appendDeliveryLogRow(row('keep_tie2', 'whk_list', tMid, 2));
-    appendDeliveryLogRow(row('keep_new', 'whk_list', tNew, 1));
-    appendDeliveryLogRow(row('other', 'whk_other', tNew, 1));
+    appendDeliveryLogRow(row(idKeepOld, 'whk_list', tOld, 1));
+    appendDeliveryLogRow(row(idKeepTie, 'whk_list', tMid, 1));
+    appendDeliveryLogRow(row(idKeepTie2, 'whk_list', tMid, 2));
+    appendDeliveryLogRow(row(idKeepNew, 'whk_list', tNew, 1));
+    appendDeliveryLogRow(row(idOther, 'whk_other', tNew, 1));
 
     resetDeliveryLogIndexForTests();
     resetDeliveryLogIoForTests();
     const cold = readDeliveryLogRows({ webhookId: 'whk_list', limit: 2 });
-    expect(cold.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_new', 'dlv_keep_tie2']);
-    expect(cold.nextCursor).toBe(`dlv_keep_tie2|2|${tMid}`);
+    expect(cold.deliveries.map((r) => r.deliveryId)).toEqual([idKeepNew, idKeepTie2]);
+    expect(cold.nextCursor).toBe(`${idKeepTie2}|2|${tMid}`);
     expect(getDeliveryLogIoForTests().fullReads).toBe(1);
 
     // 暖索引后再翻页：fullReads 不得再增
@@ -2012,7 +2018,7 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       limit: 2,
       cursor: cold.nextCursor,
     });
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_tie', 'dlv_keep_old']);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idKeepTie, idKeepOld]);
     expect(page2.nextCursor).toBeUndefined();
     expect(getDeliveryLogIoForTests().fullReads).toBe(0);
 
@@ -2027,17 +2033,22 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
   });
 
   test('#146: compaction leaves deliveries list identical to a disk-scan page', () => {
+    const idGone = `dlv_${randomUUID()}`;
+    const idKeepA = `dlv_${randomUUID()}`;
+    const idKeepB = `dlv_${randomUUID()}`;
+    const idPending = `dlv_${randomUUID()}`;
+    const idOther = `dlv_${randomUUID()}`;
     const row = (
-      id: string,
+      deliveryId: string,
       webhookId: string,
       ts: string,
       outcome: 'success' | 'retryable' = 'success',
     ): WebhookDeliveryLogRow => ({
       ts,
       webhookId,
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -2060,11 +2071,11 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const now = Date.now();
     const oldTs = new Date(now - 40 * 86400000).toISOString();
     const keepTs = new Date(now - 1000).toISOString();
-    appendDeliveryLogRow(row('gone', 'whk_list', oldTs));
-    appendDeliveryLogRow(row('keep_a', 'whk_list', keepTs));
-    appendDeliveryLogRow(row('keep_b', 'whk_list', new Date(now - 500).toISOString()));
-    appendDeliveryLogRow(row('pending', 'whk_list', oldTs, 'retryable'));
-    appendDeliveryLogRow(row('other', 'whk_other', keepTs));
+    appendDeliveryLogRow(row(idGone, 'whk_list', oldTs));
+    appendDeliveryLogRow(row(idKeepA, 'whk_list', keepTs));
+    appendDeliveryLogRow(row(idKeepB, 'whk_list', new Date(now - 500).toISOString()));
+    appendDeliveryLogRow(row(idPending, 'whk_list', oldTs, 'retryable'));
+    appendDeliveryLogRow(row(idOther, 'whk_other', keepTs));
 
     compactDeliveryLog(now, 30);
 
@@ -2097,12 +2108,12 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const opts = { webhookId: 'whk_list', limit: 2 };
     const fromIndex = readDeliveryLogRows(opts);
     expect(fromIndex).toEqual(pageFromDisk(opts));
-    expect(fromIndex.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_b', 'dlv_keep_a']);
+    expect(fromIndex.deliveries.map((r) => r.deliveryId)).toEqual([idKeepB, idKeepA]);
     expect(fromIndex.nextCursor).toBeDefined();
     const page2 = readDeliveryLogRows({ ...opts, cursor: fromIndex.nextCursor });
     expect(page2).toEqual(pageFromDisk({ ...opts, cursor: fromIndex.nextCursor }));
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_pending']);
-    expect(page2.deliveries.some((r) => r.deliveryId === 'dlv_gone')).toBe(false);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idPending]);
+    expect(page2.deliveries.some((r) => r.deliveryId === idGone)).toBe(false);
   });
 
   // #216：stale cursor 显式拒绝，禁止静默回卷页 1

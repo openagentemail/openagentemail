@@ -347,6 +347,9 @@ describe('#202/#270 四族路由负控', () => {
     const { createUiApiRoutes } = await import('../src/routes/ui.ts');
 
     const now = Date.now();
+    // 全量并发下其他套件可能改写 retentionDays；请求前再钉死窗外口径
+    (config as { retentionDays: number }).retentionDays = 30;
+    (config.webhooks as { logRetentionDays: number }).logRetentionDays = 30;
     const lines = installCapture();
     const families: InvalidCursorFamily[] = ['deliveries', 'messages', 'send', 'tasks'];
     const outsideTs = daysAgoMs(60, now);
