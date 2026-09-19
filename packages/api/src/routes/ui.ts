@@ -285,8 +285,8 @@ function taskMutationError(c: Context, err: unknown): Response {
   }
   if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
   if (err instanceof InvalidTaskCursorError) {
-    // #202：UI task 突变路径偶发游标错；无 cursor 串时记 malformed
-    logInvalidCursorRejectionFor('tasks', undefined);
+    // #202/#270：UI task 突变路径偶发游标错；decoder kind 直传
+    logInvalidCursorRejectionFor('tasks', err.kind, { cursorTs: err.cursorTs });
     return c.json({ error: 'invalid_cursor' }, 400);
   }
   console.warn('[task] ui mutation failed:', (err as Error).message);
@@ -825,10 +825,10 @@ export function createUiApiRoutes(
     cursor: z.string().min(1).max(1024).optional(),
   });
 
-  function sendLogQueryError(c: Context, err: unknown, cursor?: string) {
+  function sendLogQueryError(c: Context, err: unknown, _cursor?: string) {
     if (err instanceof InvalidSendCursorError) {
-      // #202：UI send-log 拒收可观测；400 体逐字不变
-      logInvalidCursorRejectionFor('send', cursor);
+      // #202/#270：UI send-log 拒收可观测；decoder kind 直传；400 体逐字不变
+      logInvalidCursorRejectionFor('send', err.kind, { cursorTs: err.cursorTs });
       return c.json({ error: 'invalid_cursor' }, 400);
     }
     if (err instanceof SendLogCorruptError) return c.json({ error: 'send_log_corrupt' }, 500);
@@ -893,8 +893,8 @@ export function createUiApiRoutes(
       // R1/#196：与 send-log/notify/task 及公开 /v1 API 游标口径一致；
       // schema 失败仍走上方 invalid_request（两码不混）。
       if (err instanceof InvalidMailCursorError) {
-        // #202：UI messages 后向游标拒收可观测；400 体逐字不变
-        logInvalidCursorRejectionFor('messages', parsed.data.cursor);
+        // #202/#270：UI messages 后向游标拒收可观测；decoder kind 直传；400 体逐字不变
+        logInvalidCursorRejectionFor('messages', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       throw err;
@@ -1002,8 +1002,8 @@ export function createUiApiRoutes(
       );
     } catch (err) {
       if (err instanceof InvalidTaskCursorError) {
-        // #202：UI tasks 板游标拒收可观测；400 体逐字不变
-        logInvalidCursorRejectionFor('tasks', parsed.data.cursor);
+        // #202/#270：UI tasks 板游标拒收可观测；decoder kind 直传；400 体逐字不变
+        logInvalidCursorRejectionFor('tasks', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       const code = (err as Error).message;

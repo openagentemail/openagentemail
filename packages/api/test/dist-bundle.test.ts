@@ -23,8 +23,7 @@ const sha256 = (s: string) => new Bun.CryptoHasher('sha256').update(Buffer.from(
 
 const pkgDir = join(import.meta.dir, '..');
 const dist = join(pkgDir, 'dist');
-/** #226①：与同包其余 dist 写入测共用锁。 */
-const LOCK_DIR = join(pkgDir, '.dist-build.lock');
+/** #272：与同包其余 dist 写入测共用端口锁。 */
 
 async function waitForServer(port: number, deadlineMs: number, getBootLog: () => string): Promise<void> {
   const started = Date.now();
@@ -57,7 +56,7 @@ describe('dist bundle is self-contained (#520-A)', () => {
   test('built dist/main.js serves byte-gold /ui/app.js, /ui/styles.css and fonts', async () => {
     const PORT = String(await freePort());
     // R3 P1-3：锁覆盖 rm+build+子进程 spawn+资产断言全程，防竞争者读资产期 rmSync(dist)
-    await withDistBuildLockAsync({ lockDir: LOCK_DIR }, async () => {
+    await withDistBuildLockAsync({}, async () => {
       rmSync(dist, { recursive: true, force: true });
 
       const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });

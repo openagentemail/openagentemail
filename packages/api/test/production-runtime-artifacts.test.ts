@@ -6,11 +6,9 @@ const { expect, test } = await import('bun:test');
 
 const pkgDir = join(import.meta.dir, '..');
 const repoDir = join(pkgDir, '..', '..');
-/** #226① R2：与同包其余 dist 写入测共用锁。 */
-const LOCK_DIR = join(pkgDir, '.dist-build.lock');
 
 test('#91 R1 RED: canonical runtime bundle carries the ntfy provisioner and every Compose command targets dist', () => {
-  withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+  withDistBuildLock({}, () => {
     const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
     expect(build.exitCode).toBe(0);
 

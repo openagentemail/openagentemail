@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
 import {
@@ -400,6 +401,12 @@ let deliveryLogRowCapForTests: DeliveryLogRowCapStats = {
 /** 每进程只打一行逐出 warn */
 let deliveryLogRowCapWarned = false;
 
+/** #268：活组超次级上限（10×maxRows）error 级告警，每进程至多一次 */
+let deliveryLogActiveOverflowErrored = false;
+
+/** 可采集事件名：活组 alone 压过次级放大上限（不丢活，仅升 error） */
+export const DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT = 'delivery_log_active_overflow';
+
 function groupKeyForRow(row: WebhookDeliveryLogRow): string {
   return `${row.webhookId}:${row.eventId}:${row.runId}`;
 }
@@ -459,6 +466,10 @@ function upsertActiveGroupLatest(
   if (!prev || isPreferredActiveGroupRow(row, prev)) map.set(key, row);
 }
 
+/**
+ * 重建 latestByWebhook / latestByGroup / latestForActiveByGroup。
+ * 滞回批量逐出后调用；#268 附带：调用方若仍超 maxRows 须立即钉回 capScanFutile。
+ */
 function rebuildIndexMaps(index: DeliveryLogIndex): void {
   // 测试钩：统计重建次数（滞回批量逐出负控 (g)）
   deliveryLogRowCapForTests.rebuilds += 1;
@@ -480,12 +491,20 @@ function rebuildIndexMaps(index: DeliveryLogIndex): void {
  * 只裁 rows+三 Map；不写盘。超限时一次逐出到 floor(maxRows*0.9)；≤上限不触发。
  * active 组行永不逐出；剔光非 active 后仍超上限则宁超不丢活并 warn。
  * 活组 alone 超限（dropped=0）→ 置 capScanFutile，后续 append 早退 O(1)。
+ * #268：次级放大上限 = floor(10×maxRows)；仍不丢活，但超次级升 error 级
+ * `delivery_log_active_overflow`（warn-once 节流）。
+ * #268 附带：滞回 rebuild 后若仍超上限（活组 alone），立即钉回 futile，
+ * 避免每次 append 再 O(n) 全表扫（滞回 rebuild I/O 放大）。
  */
 function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
   const maxRows = config.webhooks.logMaxRows;
   if (index.rows.length <= maxRows) return;
   // R4：无可逐出态记忆化——置位期间早退，避免每 append O(n) 全表扫
-  if (index.capScanFutile) return;
+  if (index.capScanFutile) {
+    // 早退路径仍须检查次级上限（活组持续膨胀）
+    noteDeliveryLogActiveOverflowIfNeeded(index.rows.length, maxRows);
+    return;
+  }
 
   // 测试钩：完整扫描计数（futile 早退不计）
   deliveryLogRowCapForTests.scanCount += 1;
@@ -512,16 +531,42 @@ function enforceDeliveryLogRowCap(index: DeliveryLogIndex): void {
     }
     index.rows = kept;
     rebuildIndexMaps(index);
-  } else {
-    // 完整扫描无可逐出（全部行皆 active）→ 置位，后续 enforce 早退
-    index.capScanFutile = true;
   }
 
   // 仍超限 ⟺ 活组 alone 已压过上限（无可再丢的终态）
   const stoppedForActiveOverflow = index.rows.length > maxRows;
+  if (stoppedForActiveOverflow) {
+    // 含：dropped=0 纯活组；以及滞回剔光终态后仍超限。
+    // rebuildIndexMaps 会清 futile——此处钉回，堵住后续每 append O(n) 放大。
+    index.capScanFutile = true;
+  } else if (dropped === 0) {
+    // 完整扫描无可逐出但未超限（理论上达不到：入口已要求 > maxRows）
+    index.capScanFutile = true;
+  }
+
   if (dropped > 0 || stoppedForActiveOverflow) {
     noteDeliveryLogRowCapEvent(maxRows, dropped, stoppedForActiveOverflow, targetLength);
   }
+  noteDeliveryLogActiveOverflowIfNeeded(index.rows.length, maxRows);
+}
+
+/**
+ * #268 b 案：总行数超 floor(10×maxRows) 时升 error 级可采集日志；零逐出语义变更。
+ * 每进程至多一行（与 warn-once 同节流口径）。
+ */
+function noteDeliveryLogActiveOverflowIfNeeded(rowCount: number, maxRows: number): void {
+  const secondaryCap = Math.floor(maxRows * 10);
+  if (rowCount <= secondaryCap) return;
+  if (deliveryLogActiveOverflowErrored) return;
+  deliveryLogActiveOverflowErrored = true;
+  console.error(
+    JSON.stringify({
+      event: DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT,
+      maxRows,
+      secondaryCap,
+      rows: rowCount,
+    }),
+  );
 }
 
 /** 累计逐出数 + 每进程 warn-once（含上限、滞回目标与累计逐出数） */
@@ -740,6 +785,7 @@ export function getDeliveryLogRowCapForTests(): DeliveryLogRowCapStats {
 export function resetDeliveryLogRowCapForTests(): void {
   deliveryLogRowCapForTests = { evictedTotal: 0, warnCount: 0, rebuilds: 0, scanCount: 0 };
   deliveryLogRowCapWarned = false;
+  deliveryLogActiveOverflowErrored = false;
 }
 
 /** Full-file parse used by boot reconstruction and compaction. */
@@ -751,6 +797,85 @@ export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   deliveryLogIoForTests.fullReads += 1;
   deliveryLogIoForTests.bytesRead += buf.byteLength;
   return parseDeliveryLogText(buf.toString('utf8'));
+}
+
+/**
+ * #268 P2-2：盘源逐行流式扫描求 (webhookId, eventId) 的 max run_N。
+ * 内存 O(1)，不累积行数组；语义与全量读后 filter+match 逐字一致：
+ * 仍扫全盘、仍按 `run_(\d+)` 取最大值。
+ * 禁止退回内存截断视图（截断欠数会撞历史 run 号、boot 丢重试链）。
+ */
+/**
+ * 盘源流式求某 webhookId+eventId 的最大 run_N（#268）。
+ * 内存 O(1)：64KiB 分块 + StringDecoder 跨 chunk 保多字节 UTF-8；语义等同全盘扫。
+ * @param webhookId 目标订阅 id（可含多字节）
+ * @param eventId 目标事件 id
+ * @param chunkSize 分块字节数；负控可注入小值以逼出跨 chunk 切分
+ */
+export function scanMaxRunNumFromDisk(
+  webhookId: string,
+  eventId: string,
+  chunkSize = 64 * 1024,
+): number {
+  const path = deliveryLogPath();
+  if (!existsSync(path)) return 0;
+
+  const fd = openSync(path, 'r');
+  let maxRunNum = 0;
+  let leftover = '';
+  let totalBytes = 0;
+  const buf = Buffer.alloc(chunkSize);
+  // StringDecoder 保留跨 chunk 残缺 UTF-8 字节，避免 toString 换成 U+FFFD
+  const decoder = new StringDecoder('utf8');
+  try {
+    for (;;) {
+      const n = readSync(fd, buf, 0, chunkSize, null);
+      if (n <= 0) break;
+      totalBytes += n;
+      const text = leftover + decoder.write(buf.subarray(0, n));
+      const lines = text.split('\n');
+      // 末段可能是半行，留到下一轮
+      leftover = lines.pop() ?? '';
+      for (const line of lines) {
+        maxRunNum = considerRunNumLine(line, webhookId, eventId, maxRunNum);
+      }
+    }
+    // 冲刷 decoder 内残余码点，再收尾可能无换行的最后一行
+    leftover += decoder.end();
+    if (leftover.length > 0) {
+      maxRunNum = considerRunNumLine(leftover, webhookId, eventId, maxRunNum);
+    }
+  } finally {
+    closeSync(fd);
+  }
+  // 与全量读同口径计入盘读统计（仍是一次全盘扫描）
+  deliveryLogIoForTests.fullReads += 1;
+  deliveryLogIoForTests.bytesRead += totalBytes;
+  return maxRunNum;
+}
+
+/**
+ * 流式扫描单行：坏行跳过（与 parseDeliveryLogText fail-open 一致）。
+ * 按 run_(\d+) 取最大 runNum；webhookId/eventId 不匹配则忽略。
+ */
+function considerRunNumLine(
+  line: string,
+  webhookId: string,
+  eventId: string,
+  maxRunNum: number,
+): number {
+  const trimmed = line.trim();
+  if (!trimmed) return maxRunNum;
+  try {
+    const row = JSON.parse(trimmed) as WebhookDeliveryLogRow;
+    if (row.webhookId !== webhookId || row.eventId !== eventId) return maxRunNum;
+    if (typeof row.runId !== 'string') return maxRunNum;
+    const m = row.runId.match(/^run_(\d+)$/);
+    if (!m) return maxRunNum;
+    return Math.max(maxRunNum, Number.parseInt(m[1]!, 10));
+  } catch {
+    return maxRunNum;
+  }
 }
 
 function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {
@@ -811,13 +936,69 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
 /**
  * Stale / unknown delivery-list cursor → 400 invalid_cursor（#216）。
  * 仿 InvalidSendCursorError：只携带稳定 code，不泄漏内部细节。
+ * #270：带 kind（parse_fail vs lookup_miss）供观测 helper 直传。
  */
 export class InvalidDeliveryCursorError extends Error {
   readonly code = 'invalid_cursor';
-  constructor() {
+  readonly kind: 'parse_fail' | 'lookup_miss';
+  /** lookup_miss 全形态游标的时间戳（ms）；bare_id 无 ts */
+  readonly cursorTs?: number;
+  constructor(kind: 'parse_fail' | 'lookup_miss' = 'parse_fail', cursorTs?: number) {
     super('invalid_cursor');
     this.name = 'InvalidDeliveryCursorError';
+    this.kind = kind;
+    if (cursorTs !== undefined) this.cursorTs = cursorTs;
   }
+}
+
+/** deliveries 游标 query 硬限（对齐 send/tasks/ui 族 1024）。 */
+export const DELIVERIES_CURSOR_MAX_LENGTH = 1024;
+
+/** 生产可生成的 deliveryId：dlv_ + 规范 UUID（8-4-4-4-12）。 */
+const DELIVERY_ID_RE =
+  /^dlv_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** attempt 规范十进制：无前导零、≥1（生产 Number 序列化）。 */
+const DELIVERY_ATTEMPT_RE = /^[1-9]\d*$/;
+/** ts 必须是 toISOString 完整形（含毫秒与 Z）；Date.parse 可解的残缺串一律拒。 */
+const DELIVERY_ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+type ParsedDeliveryListCursor =
+  | { form: 'full'; deliveryId: string; attempt: number; ts: string; cursorTs: number }
+  | { form: 'bare_id'; deliveryId: string };
+
+/**
+ * 解析 deliveries 列表游标；非生产可生成域 → parse_fail。
+ * 全形态 = deliveryId|attempt|ts；裸 id = 仅 deliveryId。
+ */
+export function parseDeliveryListCursor(cursor: string): ParsedDeliveryListCursor {
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    throw new InvalidDeliveryCursorError('parse_fail');
+  }
+  if (cursor.length > DELIVERIES_CURSOR_MAX_LENGTH) {
+    throw new InvalidDeliveryCursorError('parse_fail');
+  }
+  const pipe = cursor.indexOf('|');
+  if (pipe < 0) {
+    if (!DELIVERY_ID_RE.test(cursor)) throw new InvalidDeliveryCursorError('parse_fail');
+    return { form: 'bare_id', deliveryId: cursor };
+  }
+  const deliveryId = cursor.slice(0, pipe);
+  const rest = cursor.slice(pipe + 1);
+  const pipe2 = rest.indexOf('|');
+  if (pipe2 < 0) throw new InvalidDeliveryCursorError('parse_fail');
+  const attemptRaw = rest.slice(0, pipe2);
+  const ts = rest.slice(pipe2 + 1);
+  if (!DELIVERY_ID_RE.test(deliveryId)) throw new InvalidDeliveryCursorError('parse_fail');
+  if (!DELIVERY_ATTEMPT_RE.test(attemptRaw)) throw new InvalidDeliveryCursorError('parse_fail');
+  if (!DELIVERY_ISO_TS_RE.test(ts)) throw new InvalidDeliveryCursorError('parse_fail');
+  const attempt = Number(attemptRaw);
+  // 309+ 位纯数字经 Number()→Infinity，不得当合法 full cursor 进查找（会误记 stale）
+  if (!Number.isSafeInteger(attempt)) throw new InvalidDeliveryCursorError('parse_fail');
+  const cursorTs = Date.parse(ts);
+  if (!Number.isFinite(cursorTs)) throw new InvalidDeliveryCursorError('parse_fail');
+  // 日历无效值（如 2024-02-30）会被 Date.parse 归一化；round-trip 钉死生产 toISOString 域
+  if (new Date(ts).toISOString() !== ts) throw new InvalidDeliveryCursorError('parse_fail');
+  return { form: 'full', deliveryId, attempt, ts, cursorTs };
 }
 
 /**
@@ -866,10 +1047,21 @@ export function readDeliveryLogRows(options?: {
   let startIndex = 0;
 
   if (options?.cursor) {
-    // 全形态 cursor 与裸 deliveryId 双匹配；均 miss → 显式拒绝，禁止静默回卷页 1
-    const idx = filtered.findIndex((r) => deliveryRowCursor(r) === options.cursor || r.deliveryId === options.cursor);
+    // #270：先规范解析（非生产可生成域 → parse_fail），再双匹配；均 miss → lookup_miss
+    const parsed = parseDeliveryListCursor(options.cursor);
+    const idx = filtered.findIndex((r) => {
+      if (parsed.form === 'bare_id') return r.deliveryId === parsed.deliveryId;
+      return (
+        r.deliveryId === parsed.deliveryId &&
+        r.attempt === parsed.attempt &&
+        r.ts === parsed.ts
+      );
+    });
     if (idx < 0) {
-      throw new InvalidDeliveryCursorError();
+      throw new InvalidDeliveryCursorError(
+        'lookup_miss',
+        parsed.form === 'full' ? parsed.cursorTs : undefined,
+      );
     }
     startIndex = idx + 1;
   }
@@ -2667,17 +2859,8 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   // Calculate new runId
   // maxRunNum 必须盘源计算——截断视图欠数会与盘历史 run 撞号，合并组经 attempt
   // 优先比较可误判 pending 为终态（boot 重建丢重试链），故禁止吃内存视图。
-  const diskRows = readAllDeliveryLogRowsFromDisk();
-  const matchingRuns = diskRows.filter(
-    (r) => r.webhookId === original.webhookId && r.eventId === original.eventId,
-  );
-  let maxRunNum = 0;
-  for (const r of matchingRuns) {
-    const m = r.runId.match(/^run_(\d+)$/);
-    if (m) {
-      maxRunNum = Math.max(maxRunNum, Number.parseInt(m[1]!, 10));
-    }
-  }
+  // #268：流式扫描求最大值（O(1) 内存），语义与全量读 filter+match 逐字一致。
+  const maxRunNum = scanMaxRunNumFromDisk(original.webhookId, original.eventId);
   const newRunId = `run_${maxRunNum + 1}`;
   const newDeliveryId = `dlv_${randomUUID()}`;
 

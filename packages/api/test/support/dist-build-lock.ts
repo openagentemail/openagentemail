@@ -1,175 +1,161 @@
 /**
- * #226①：dist 钉子测试阶段 bun build 的包内串行锁。
- * 协议：staging 写好 PID 后 rename→锁路径（原子占锁）。
- * 陈旧回收身份绑定：rename 前重读确认仍是目标死 PID；rename 后校验 trash，
- * 误收他人新锁则立刻归还；回收后一律回到抢锁循环（不假定已得锁）。
- * R3：isPidAlive 仅 ESRCH=死亡；EPERM 等视为存活，禁止回收。
+ * #272：dist 钉子测试阶段 bun build 的包内串行锁。
+ *
+ * 协议：`net.createServer().listen(固定端口, '127.0.0.1')` 占锁。
+ * EADDRINUSE = 锁被占而非服务冲突（本端口专用于 dist build 互斥）。
+ * 内核保证持锁进程死即释放——无 stale 回收 / PID 判断整层。
+ * 同步路径：Worker 线程内 listen（同进程），主线程 Atomics.wait；
+ *   临界区内可安全 spawnSync(bun build)；kill -9 整进程即释端口。
  * 零构建面变化（不改 build 脚本/产物路径）。
- * 注：P1-2 回收竞态残余窗口本卡不动（FC 呈裁中）。
+ *
+ * api=43301 / mcp=43302：双包独立高位冷门端口，避免两包 build 串在同一把锁上。
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createServer, type Server } from 'node:net';
+import { Worker } from 'node:worker_threads';
 
-/**
- * 探测 PID 是否仍存活（signal 0）。
- * 仅 ESRCH（无此进程）判死亡；EPERM（活但无权）及其它错误一律视为存活，禁止回收。
- */
-export function isPidAlive(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    // 只有「进程不存在」才可 stale 回收
-    if (code === 'ESRCH') return false;
-    return true;
-  }
-}
-
-/** 读取锁目录内 PID；无法解析则返回 NaN。 */
-function readLockPid(lockPath: string): number {
-  try {
-    return Number(readFileSync(join(lockPath, 'pid'), 'utf8').trim());
-  } catch {
-    return NaN;
-  }
-}
-
-/**
- * 身份绑定回收：仅当锁内 PID 仍等于 expectedDeadPid 时 rename 走 trash；
- * 若 trash 内 PID 已变（误收他人新活锁）则立刻归还。
- * @returns 是否成功清掉该死锁（调用方必须 continue 抢锁，不得假定持锁）
- */
-function tryReclaimStaleDeadPid(lockDir: string, expectedDeadPid: number): boolean {
-  // 回收前再确认仍是那个死 PID（双竞争者同见死 PID 时后手不得盲 rename）
-  const before = readLockPid(lockDir);
-  if (before !== expectedDeadPid) return false;
-
-  const trash = `${lockDir}.stale.${expectedDeadPid}.${process.pid}.${Date.now()}`;
-  try {
-    renameSync(lockDir, trash);
-  } catch {
-    return false;
-  }
-
-  const moved = readLockPid(trash);
-  if (moved !== expectedDeadPid) {
-    // 误收了他人新锁：立刻归还
-    console.warn(
-      `[dist-build-lock] reclaim raced (expected dead ${expectedDeadPid}, got ${moved}); restoring`,
-    );
-    try {
-      renameSync(trash, lockDir);
-    } catch {
-      // 归还失败则尽力保留 trash，避免丢锁目录
-    }
-    return false;
-  }
-
-  console.warn(`[dist-build-lock] stale PID ${expectedDeadPid} reclaiming ${lockDir}`);
-  rmSync(trash, { recursive: true, force: true });
-  return true;
-}
-
-/**
- * 无合法 PID 的半写锁：确认仍无合法 PID 后再收；误收则归还。
- */
-function tryReclaimBrokenLock(lockDir: string): boolean {
-  const before = readLockPid(lockDir);
-  if (Number.isFinite(before) && before > 0) return false;
-
-  const trash = `${lockDir}.broken.${process.pid}.${Date.now()}`;
-  try {
-    renameSync(lockDir, trash);
-  } catch {
-    return false;
-  }
-
-  const moved = readLockPid(trash);
-  if (Number.isFinite(moved) && moved > 0) {
-    console.warn(`[dist-build-lock] broken reclaim raced (got pid ${moved}); restoring`);
-    try {
-      renameSync(trash, lockDir);
-    } catch {
-      // ignore
-    }
-    return false;
-  }
-
-  console.warn(`[dist-build-lock] lock without valid pid, reclaiming ${lockDir}`);
-  rmSync(trash, { recursive: true, force: true });
-  return true;
-}
+export const DIST_BUILD_LOCK_PORT = 43301;
 
 export type DistBuildLockOptions = {
-  /** 锁目录路径（通常为 package 根下 .dist-build.lock）。 */
-  lockDir: string;
+  /** 锁端口；默认本包 DIST_BUILD_LOCK_PORT。负控可注入隔离端口。 */
+  port?: number;
   /** 轮询间隔毫秒。 */
   pollMs?: number;
   /** 最长等锁毫秒；超时抛错。 */
   timeoutMs?: number;
 };
 
-/** 单次抢锁尝试：成功返回 true；否则处理 stale/等待逻辑后返回 false。 */
-function tryAcquireOnce(lockDir: string, pollMs: number, deadline: number): boolean {
-  const staging = `${lockDir}.staging.${process.pid}.${Date.now()}`;
-  try {
-    mkdirSync(staging);
-    writeFileSync(join(staging, 'pid'), String(process.pid), 'utf8');
-    renameSync(staging, lockDir);
-    return true;
-  } catch (err) {
-    rmSync(staging, { recursive: true, force: true });
+type HeldLock = { release: () => void };
 
-    const code = (err as { code?: string }).code;
-    const targetBusy =
-      code === 'EEXIST' || code === 'ENOTEMPTY' || (code !== undefined && existsSync(lockDir));
-    if (!targetBusy && code !== undefined) {
-      throw err;
+/** Worker 内 listen 脚本：state[0] 0=pending 1=ok 2=busy 3=err */
+const HOLDER_WORKER_SOURCE = `
+  const { parentPort, workerData } = require('node:worker_threads');
+  const { createServer } = require('node:net');
+  const state = new Int32Array(workerData.sab);
+  const server = createServer();
+  server.once('error', (err) => {
+    const busy = err && (err.code === 'EADDRINUSE' || /EADDRINUSE/i.test(String(err.message || '')));
+    Atomics.store(state, 0, busy ? 2 : 3);
+    Atomics.notify(state, 0);
+  });
+  server.listen(workerData.port, '127.0.0.1', () => {
+    Atomics.store(state, 0, 1);
+    Atomics.notify(state, 0);
+  });
+  parentPort.on('message', (msg) => {
+    if (msg === 'release') {
+      try { server.close(); } catch (_) {}
+      process.exit(0);
     }
+  });
+`;
 
-    if (existsSync(lockDir)) {
-      const holder = readLockPid(lockDir);
-      if (Number.isFinite(holder) && holder > 0 && !isPidAlive(holder)) {
-        tryReclaimStaleDeadPid(lockDir, holder);
-        return false;
-      }
-      if (!Number.isFinite(holder) || holder <= 0) {
-        if (Date.now() + pollMs > deadline) {
-          tryReclaimBrokenLock(lockDir);
-        }
-      }
-    }
-    return false;
-  }
+/**
+ * 解释 Worker 报到态（#272 R2）：0/2 均可重试；1=持锁；其它=致命。
+ * 慢报到（Atomics.wait 超时仍为 0）不得 throw，交上层 180s 轮询。
+ */
+export function classifyPortAcquireState(v: number): 'held' | 'retry' | 'fatal' {
+  if (v === 1) return 'held';
+  if (v === 0 || v === 2) return 'retry';
+  return 'fatal';
 }
 
-/** 释放本进程持有的锁（PID 不匹配则不盲删）。 */
-function releaseIfOwned(lockDir: string): void {
-  const holder = readLockPid(lockDir);
-  if (holder === process.pid) {
-    const trash = `${lockDir}.release.${process.pid}.${Date.now()}`;
+/**
+ * 同步尝试占 127.0.0.1:port；成功返回句柄，忙/慢报到返回 null。
+ * EADDRINUSE = 锁被占而非服务冲突（见文件头）。
+ */
+function tryAcquirePortSync(port: number): HeldLock | null {
+  const sab = new SharedArrayBuffer(8);
+  const state = new Int32Array(sab);
+  const worker = new Worker(HOLDER_WORKER_SOURCE, {
+    eval: true,
+    workerData: { sab, port },
+  });
+  // 防 Worker 启动失败变成 unhandled error（CR R2 Major）
+  worker.once('error', () => {
     try {
-      renameSync(lockDir, trash);
-      rmSync(trash, { recursive: true, force: true });
+      Atomics.compareExchange(state, 0, 0, 2);
+      Atomics.notify(state, 0);
     } catch {
-      // 已被回收则忽略
+      // ignore
     }
+  });
+  // 最多等 2s 报到
+  Atomics.wait(state, 0, 0, 2_000);
+  const v = Atomics.load(state, 0);
+  const kind = classifyPortAcquireState(v);
+  if (kind === 'held') {
+    return {
+      release: () => {
+        try {
+          worker.postMessage('release');
+        } catch {
+          // ignore
+        }
+        try {
+          void worker.terminate();
+        } catch {
+          // ignore
+        }
+      },
+    };
+  }
+  try {
+    void worker.terminate();
+  } catch {
+    // ignore
+  }
+  if (kind === 'retry') return null;
+  throw new Error(`[dist-build-lock] listen failed on 127.0.0.1:${port} (state=${v})`);
+}
+
+function isAddrInUse(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { message?: string };
+  return e?.code === 'EADDRINUSE' || /EADDRINUSE/i.test(String(e?.message ?? err));
+}
+
+/**
+ * 异步尝试占端口；EADDRINUSE 返回 null，其它错误上抛。
+ */
+async function tryAcquirePortAsync(port: number): Promise<HeldLock | null> {
+  const server: Server = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => resolve());
+    });
+    return {
+      release: () => {
+        try {
+          server.close();
+        } catch {
+          // ignore
+        }
+      },
+    };
+  } catch (err) {
+    try {
+      server.close();
+    } catch {
+      // ignore
+    }
+    if (isAddrInUse(err)) return null;
+    throw err;
   }
 }
 
 /**
- * 在互斥锁内执行同步 fn；第二进程自旋等待，陈旧 PID 身份绑定回收。
+ * 在端口锁内执行同步 fn；第二进程自旋等待，持锁进程死=锁即释放。
  */
 export function withDistBuildLock<T>(options: DistBuildLockOptions, fn: () => T): T {
-  const { lockDir, pollMs = 50, timeoutMs = 180_000 } = options;
+  const { port = DIST_BUILD_LOCK_PORT, pollMs = 50, timeoutMs = 180_000 } = options;
   const deadline = Date.now() + timeoutMs;
+  let held: HeldLock | null = null;
 
   for (;;) {
-    if (tryAcquireOnce(lockDir, pollMs, deadline)) break;
+    held = tryAcquirePortSync(port);
+    if (held) break;
     if (Date.now() > deadline) {
-      throw new Error(`[dist-build-lock] timeout waiting for ${lockDir}`);
+      throw new Error(`[dist-build-lock] timeout waiting for 127.0.0.1:${port}`);
     }
     Bun.sleepSync(pollMs);
   }
@@ -177,7 +163,7 @@ export function withDistBuildLock<T>(options: DistBuildLockOptions, fn: () => T)
   try {
     return fn();
   } finally {
-    releaseIfOwned(lockDir);
+    held.release();
   }
 }
 
@@ -188,13 +174,15 @@ export async function withDistBuildLockAsync<T>(
   options: DistBuildLockOptions,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const { lockDir, pollMs = 50, timeoutMs = 180_000 } = options;
+  const { port = DIST_BUILD_LOCK_PORT, pollMs = 50, timeoutMs = 180_000 } = options;
   const deadline = Date.now() + timeoutMs;
+  let held: HeldLock | null = null;
 
   for (;;) {
-    if (tryAcquireOnce(lockDir, pollMs, deadline)) break;
+    held = await tryAcquirePortAsync(port);
+    if (held) break;
     if (Date.now() > deadline) {
-      throw new Error(`[dist-build-lock] timeout waiting for ${lockDir}`);
+      throw new Error(`[dist-build-lock] timeout waiting for 127.0.0.1:${port}`);
     }
     await Bun.sleep(pollMs);
   }
@@ -202,6 +190,6 @@ export async function withDistBuildLockAsync<T>(
   try {
     return await fn();
   } finally {
-    releaseIfOwned(lockDir);
+    held.release();
   }
 }

@@ -68,9 +68,15 @@ export type MailForwardCursorPayload = {
 /** 非法 / 篡改 / 跨 folder 错用游标。路由折成 400。 */
 export class InvalidMailCursorError extends Error {
   readonly code = 'invalid_cursor';
-  constructor() {
+  /** parse_fail=解码失败；lookup_miss=解码成功但绑定/代际 miss */
+  readonly kind: 'parse_fail' | 'lookup_miss';
+  /** lookup_miss 时解码出的游标时间戳（ms） */
+  readonly cursorTs?: number;
+  constructor(kind: 'parse_fail' | 'lookup_miss' = 'parse_fail', cursorTs?: number) {
     super('invalid_cursor');
     this.name = 'InvalidMailCursorError';
+    this.kind = kind;
+    if (cursorTs !== undefined) this.cursorTs = cursorTs;
   }
 }
 

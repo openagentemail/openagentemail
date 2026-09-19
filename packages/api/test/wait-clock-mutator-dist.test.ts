@@ -11,12 +11,10 @@ import { withDistBuildLock } from './support/dist-build-lock.ts';
 const apiPkg = join(import.meta.dir, '..');
 /** 生产 mutator 历史符号；任一 dist 命中即红。 */
 const MUTATOR = 'setWaitMonotonicNowForTests';
-/** 包内 dist build 互斥锁目录（不进构建产物）。 */
-const LOCK_DIR = join(apiPkg, '.dist-build.lock');
 
 describe('api dist has no wait-clock test mutator (#212)', () => {
   test('api dist/*.js 不含 setWaitMonotonicNowForTests', () => {
-    withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+    withDistBuildLock({}, () => {
       const apiBuild = Bun.spawnSync(['bun', 'run', 'build'], {
         cwd: apiPkg,
         stdout: 'pipe',

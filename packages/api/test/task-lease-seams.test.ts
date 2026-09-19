@@ -94,9 +94,8 @@ test('#94: build diagnostic helper formats exit code, stdout, and stderr on fail
 
 test('#89 / #92 / #94 GREEN: canonical production bundle and final Docker stage exclude every test seam', () => {
   const pkgDir = join(import.meta.dir, '..');
-  /** #226① R2：与同包其余 dist 写入测共用锁。 */
-  const LOCK_DIR = join(pkgDir, '.dist-build.lock');
-  const bundle = withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+  /** #272：与同包其余 dist 写入测共用端口锁。 */
+  const bundle = withDistBuildLock({}, () => {
     const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: pkgDir });
     assertSubprocessSuccess(build, ['bun', 'run', 'build']);
     return readFileSync(join(pkgDir, 'dist', 'main.js'), 'utf8');

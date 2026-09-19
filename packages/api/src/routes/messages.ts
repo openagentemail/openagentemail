@@ -83,8 +83,8 @@ export const messagesRoute = new Hono()
       return c.json({ messages });
     } catch (err) {
       if (err instanceof InvalidMailCursorError) {
-        // #202：since 前向游标拒收可观测；400 体逐字不变
-        logInvalidCursorRejectionFor('messages', parsed.data.since);
+        // #202/#270：since 前向游标拒收可观测；decoder kind 直传；400 体逐字不变
+        logInvalidCursorRejectionFor('messages', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       throw err;
@@ -194,8 +194,8 @@ export const messagesRoute = new Hono()
     } catch (err) {
       // 缺/错代际：400 invalid_cursor（2269）。委托撤销仍 403；断开为 499；其余上抛。
       if (err instanceof InvalidMailCursorError) {
-        // #202：wait 无后向 cursor；缺代际记 malformed→anomaly
-        logInvalidCursorRejectionFor('messages', undefined);
+        // #202/#270：wait 无后向 cursor；缺代际等 parse_fail 记 malformed→anomaly
+        logInvalidCursorRejectionFor('messages', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       if (err instanceof DelegationRevokedError) {

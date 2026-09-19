@@ -90,9 +90,15 @@ export class SendLogPersistError extends Error {
 
 export class InvalidSendCursorError extends Error {
   readonly code = 'invalid_cursor';
-  constructor() {
+  /** parse_fail=解码失败；lookup_miss=解码成功但 addr 绑定 miss */
+  readonly kind: 'parse_fail' | 'lookup_miss';
+  /** lookup_miss 时解码出的游标时间戳（ms） */
+  readonly cursorTs?: number;
+  constructor(kind: 'parse_fail' | 'lookup_miss' = 'parse_fail', cursorTs?: number) {
     super('invalid_cursor');
     this.name = 'InvalidSendCursorError';
+    this.kind = kind;
+    if (cursorTs !== undefined) this.cursorTs = cursorTs;
   }
 }
 
@@ -645,6 +651,18 @@ function encodeCursor(payload: CursorPayload): string {
   return `${CURSOR_PREFIX}.${body}.${cursorMac(payload)}`;
 }
 
+/**
+ * 测试用：用模块冻结的 cursorKey 签 send-log 游标。
+ * 全量套件下 live config 可能漂移；本 helper 保证 MAC 与 decode 同源，便于路由级 stale 负控。
+ */
+export function encodeSendLogCursorForTests(payload: {
+  addr: string;
+  t: number;
+  id: string;
+}): string {
+  return encodeCursor(payload);
+}
+
 function decodeCursor(token: string): CursorPayload {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== CURSOR_PREFIX || !parts[1] || !parts[2]) {
@@ -772,7 +790,7 @@ export function querySendLog(query: SendLogQuery): Promise<SendLogPage> {
     let start = 0;
     if (query.cursor) {
       const cursor = decodeCursor(query.cursor);
-      if (cursor.addr !== fp) throw new InvalidSendCursorError();
+      if (cursor.addr !== fp) throw new InvalidSendCursorError('lookup_miss', cursor.t);
       start = rows.findIndex((row) => olderThanCursor(row, cursor));
       if (start < 0) start = rows.length;
     }

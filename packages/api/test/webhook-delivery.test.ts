@@ -8,6 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -33,11 +34,13 @@ const {
   readAllDeliveryLogRowsFromDisk,
   readDeliveryLogRows,
   InvalidDeliveryCursorError,
+  scanMaxRunNumFromDisk,
   resetDeliveryLogIndexForTests,
   getDeliveryLogIoForTests,
   resetDeliveryLogIoForTests,
   getDeliveryLogRowCapForTests,
   resetDeliveryLogRowCapForTests,
+  DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT,
   getLatestDeliveryByWebhookMap,
   reconstructPendingDeliveriesAtBoot,
   redeliverWebhookDelivery,
@@ -1955,17 +1958,23 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
   });
 
   test('#146: deliveries list pages from the in-memory index without extra fullReads', () => {
+    // #270：游标解析要求生产形 dlv_+UUID
+    const idKeepOld = `dlv_${randomUUID()}`;
+    const idKeepTie = `dlv_${randomUUID()}`;
+    const idKeepTie2 = `dlv_${randomUUID()}`;
+    const idKeepNew = `dlv_${randomUUID()}`;
+    const idOther = `dlv_${randomUUID()}`;
     const row = (
-      id: string,
+      deliveryId: string,
       webhookId: string,
       ts: string,
       attempt = 1,
     ): WebhookDeliveryLogRow => ({
       ts,
       webhookId,
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -1990,17 +1999,17 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const tMid = new Date(now - 2000).toISOString();
     const tNew = new Date(now - 1000).toISOString();
     // 同 ts 用 attempt 打破平局；另一订阅不得混入分页
-    appendDeliveryLogRow(row('keep_old', 'whk_list', tOld, 1));
-    appendDeliveryLogRow(row('keep_tie', 'whk_list', tMid, 1));
-    appendDeliveryLogRow(row('keep_tie2', 'whk_list', tMid, 2));
-    appendDeliveryLogRow(row('keep_new', 'whk_list', tNew, 1));
-    appendDeliveryLogRow(row('other', 'whk_other', tNew, 1));
+    appendDeliveryLogRow(row(idKeepOld, 'whk_list', tOld, 1));
+    appendDeliveryLogRow(row(idKeepTie, 'whk_list', tMid, 1));
+    appendDeliveryLogRow(row(idKeepTie2, 'whk_list', tMid, 2));
+    appendDeliveryLogRow(row(idKeepNew, 'whk_list', tNew, 1));
+    appendDeliveryLogRow(row(idOther, 'whk_other', tNew, 1));
 
     resetDeliveryLogIndexForTests();
     resetDeliveryLogIoForTests();
     const cold = readDeliveryLogRows({ webhookId: 'whk_list', limit: 2 });
-    expect(cold.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_new', 'dlv_keep_tie2']);
-    expect(cold.nextCursor).toBe(`dlv_keep_tie2|2|${tMid}`);
+    expect(cold.deliveries.map((r) => r.deliveryId)).toEqual([idKeepNew, idKeepTie2]);
+    expect(cold.nextCursor).toBe(`${idKeepTie2}|2|${tMid}`);
     expect(getDeliveryLogIoForTests().fullReads).toBe(1);
 
     // 暖索引后再翻页：fullReads 不得再增
@@ -2010,7 +2019,7 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       limit: 2,
       cursor: cold.nextCursor,
     });
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_tie', 'dlv_keep_old']);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idKeepTie, idKeepOld]);
     expect(page2.nextCursor).toBeUndefined();
     expect(getDeliveryLogIoForTests().fullReads).toBe(0);
 
@@ -2025,17 +2034,22 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
   });
 
   test('#146: compaction leaves deliveries list identical to a disk-scan page', () => {
+    const idGone = `dlv_${randomUUID()}`;
+    const idKeepA = `dlv_${randomUUID()}`;
+    const idKeepB = `dlv_${randomUUID()}`;
+    const idPending = `dlv_${randomUUID()}`;
+    const idOther = `dlv_${randomUUID()}`;
     const row = (
-      id: string,
+      deliveryId: string,
       webhookId: string,
       ts: string,
       outcome: 'success' | 'retryable' = 'success',
     ): WebhookDeliveryLogRow => ({
       ts,
       webhookId,
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -2058,11 +2072,11 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const now = Date.now();
     const oldTs = new Date(now - 40 * 86400000).toISOString();
     const keepTs = new Date(now - 1000).toISOString();
-    appendDeliveryLogRow(row('gone', 'whk_list', oldTs));
-    appendDeliveryLogRow(row('keep_a', 'whk_list', keepTs));
-    appendDeliveryLogRow(row('keep_b', 'whk_list', new Date(now - 500).toISOString()));
-    appendDeliveryLogRow(row('pending', 'whk_list', oldTs, 'retryable'));
-    appendDeliveryLogRow(row('other', 'whk_other', keepTs));
+    appendDeliveryLogRow(row(idGone, 'whk_list', oldTs));
+    appendDeliveryLogRow(row(idKeepA, 'whk_list', keepTs));
+    appendDeliveryLogRow(row(idKeepB, 'whk_list', new Date(now - 500).toISOString()));
+    appendDeliveryLogRow(row(idPending, 'whk_list', oldTs, 'retryable'));
+    appendDeliveryLogRow(row(idOther, 'whk_other', keepTs));
 
     compactDeliveryLog(now, 30);
 
@@ -2095,12 +2109,12 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const opts = { webhookId: 'whk_list', limit: 2 };
     const fromIndex = readDeliveryLogRows(opts);
     expect(fromIndex).toEqual(pageFromDisk(opts));
-    expect(fromIndex.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_keep_b', 'dlv_keep_a']);
+    expect(fromIndex.deliveries.map((r) => r.deliveryId)).toEqual([idKeepB, idKeepA]);
     expect(fromIndex.nextCursor).toBeDefined();
     const page2 = readDeliveryLogRows({ ...opts, cursor: fromIndex.nextCursor });
     expect(page2).toEqual(pageFromDisk({ ...opts, cursor: fromIndex.nextCursor }));
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_pending']);
-    expect(page2.deliveries.some((r) => r.deliveryId === 'dlv_gone')).toBe(false);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idPending]);
+    expect(page2.deliveries.some((r) => r.deliveryId === idGone)).toBe(false);
   });
 
   // #216：stale cursor 显式拒绝，禁止静默回卷页 1
@@ -2150,12 +2164,16 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const tOld = new Date(now - 3000).toISOString();
     const tMid = new Date(now - 2000).toISOString();
     const tNew = new Date(now - 1000).toISOString();
-    const row = (id: string, ts: string, attempt = 1): WebhookDeliveryLogRow => ({
+    // #270：游标解析对齐生产 dlv_+规范 UUID
+    const idOld = `dlv_${randomUUID()}`;
+    const idMid = `dlv_${randomUUID()}`;
+    const idNew = `dlv_${randomUUID()}`;
+    const row = (deliveryId: string, ts: string, attempt = 1): WebhookDeliveryLogRow => ({
       ts,
       webhookId: 'whk_cursor',
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -2174,15 +2192,15 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       nextAttemptAt: null,
       reason: null,
     });
-    appendDeliveryLogRow(row('old', tOld));
-    appendDeliveryLogRow(row('mid', tMid));
-    appendDeliveryLogRow(row('new', tNew));
+    appendDeliveryLogRow(row(idOld, tOld));
+    appendDeliveryLogRow(row(idMid, tMid));
+    appendDeliveryLogRow(row(idNew, tNew));
     resetDeliveryLogIndexForTests();
 
     // 首页：无 cursor 不抛
     const home = readDeliveryLogRows({ webhookId: 'whk_cursor', limit: 2 });
-    expect(home.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_new', 'dlv_mid']);
-    expect(home.nextCursor).toBe(`dlv_mid|1|${tMid}`);
+    expect(home.deliveries.map((r) => r.deliveryId)).toEqual([idNew, idMid]);
+    expect(home.nextCursor).toBe(`${idMid}|1|${tMid}`);
 
     // 全形态 cursor 命中分页
     const page2 = readDeliveryLogRows({
@@ -2190,22 +2208,26 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       limit: 2,
       cursor: home.nextCursor,
     });
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_old']);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idOld]);
     expect(page2.nextCursor).toBeUndefined();
 
     // 裸 deliveryId 命中：从该 id 之后继续
     const byBare = readDeliveryLogRows({
       webhookId: 'whk_cursor',
       limit: 2,
-      cursor: 'dlv_new',
+      cursor: idNew,
     });
-    expect(byBare.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_mid', 'dlv_old']);
+    expect(byBare.deliveries.map((r) => r.deliveryId)).toEqual([idMid, idOld]);
   });
 
   test('#216: empty log + cursor throws InvalidDeliveryCursorError', () => {
     resetDeliveryLogIndexForTests();
     expect(() =>
-      readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10, cursor: 'dlv_any|1|1970-01-01T00:00:00.000Z' }),
+      readDeliveryLogRows({
+        webhookId: 'whk_empty',
+        limit: 10,
+        cursor: `dlv_${randomUUID()}|1|1970-01-01T00:00:00.000Z`,
+      }),
     ).toThrow(InvalidDeliveryCursorError);
     // 空 log 首页仍不抛
     expect(readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10 }).deliveries).toEqual([]);
@@ -2611,5 +2633,140 @@ describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
     const mem = readAllDeliveryLogRows();
     expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
     expect(mem.map((r) => r.deliveryId)).toEqual(['dlv_k1', 'dlv_k2', 'dlv_k3']);
+  });
+
+  // #268 b 案：超 floor(10×maxRows) 升 error 级 delivery_log_active_overflow；不丢活；once
+  test('#268: active overflow past 10×maxRows emits error once; rows retained', () => {
+    (config.webhooks as { logMaxRows: number }).logMaxRows = 2; // 次级上限 floor(20)
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(' '));
+    };
+    try {
+      const now = Date.now();
+      // 21 个独立活组（各 attempt=1），避免 attempt≥cap 变终态被逐出
+      for (let i = 1; i <= 21; i++) {
+        appendDeliveryLogRow({
+          ...successRow(`ov${i}`, new Date(now + 1000 * i).toISOString(), 'whk_ov'),
+          type: 'mail.received',
+          address: 'alice@test.example',
+          messageId: String(i),
+          uidValidity: 1,
+          eventId: `evt_ov_${i}`,
+          attempt: 1,
+          outcome: 'retryable',
+          status: 500,
+          nextAttemptAt: new Date(now + 60_000).toISOString(),
+        });
+      }
+      expect(readAllDeliveryLogRows().length).toBe(21);
+      expect(errors.length).toBe(1);
+      const payload = JSON.parse(errors[0]!);
+      expect(payload.event).toBe(DELIVERY_LOG_ACTIVE_OVERFLOW_EVENT);
+      expect(payload.maxRows).toBe(2);
+      expect(payload.secondaryCap).toBe(20);
+      expect(payload.rows).toBeGreaterThan(20);
+
+      // 再 append 仍 once
+      appendDeliveryLogRow({
+        ...successRow('ov22', new Date(now + 22_000).toISOString(), 'whk_ov'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: '22',
+        uidValidity: 1,
+        eventId: 'evt_ov_22',
+        attempt: 1,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000).toISOString(),
+      });
+      expect(errors.length).toBe(1);
+      expect(readAllDeliveryLogRows().length).toBe(22);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  // #268 附带：滞回剔光终态后仍超限 → 钉 futile，后续非终态 append 不再全表扫
+  test('#268: hysteresis rebuild while still over cap sets futile (no rescan amplify)', () => {
+    (config.webhooks as { logMaxRows: number }).logMaxRows = 3; // 目标 2
+    const now = Date.now();
+    // 1 终态 + 4 活组行：超限时剔终态后仍 4>3 → 须钉 futile
+    appendDeliveryLogRow(successRow('term', new Date(now).toISOString(), 'whk_t'));
+    for (let i = 1; i <= 4; i++) {
+      appendDeliveryLogRow({
+        ...successRow(`h${i}`, new Date(now + 1000 * i).toISOString(), 'whk_hyst'),
+        type: 'mail.received',
+        address: 'alice@test.example',
+        messageId: String(i),
+        uidValidity: 1,
+        eventId: 'evt_hyst',
+        attempt: i,
+        outcome: 'retryable',
+        status: 500,
+        nextAttemptAt: new Date(now + 60_000 * i).toISOString(),
+      });
+    }
+    const mem = readAllDeliveryLogRows();
+    expect(mem.some((r) => r.deliveryId === 'dlv_term')).toBe(false);
+    expect(mem.length).toBe(4);
+    resetDeliveryLogRowCapForTests();
+    appendDeliveryLogRow({
+      ...successRow('h5', new Date(now + 5000).toISOString(), 'whk_hyst'),
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '5',
+      uidValidity: 1,
+      eventId: 'evt_hyst',
+      attempt: 5,
+      outcome: 'retryable',
+      status: 500,
+      nextAttemptAt: new Date(now + 60_000 * 5).toISOString(),
+    });
+    // 若未钉 futile，本轮会再 scan+rebuild；钉死后 scanCount=0
+    expect(getDeliveryLogRowCapForTests().scanCount).toBe(0);
+    expect(getDeliveryLogRowCapForTests().rebuilds).toBe(0);
+    expect(readAllDeliveryLogRows().length).toBe(5);
+  });
+
+  // #268 R2：多字节 UTF-8 webhookId 跨分块边界仍能匹配 maxRunNum（StringDecoder）
+  test('#268 R2: multi-byte webhookId split across chunk still yields maxRunNum', () => {
+    const webhookId = 'whk_测🌿试'; // 多字节序列，逼出跨 chunk 切 UTF-8
+    const eventId = 'evt_utf8_chunk';
+    const ts = new Date().toISOString();
+    const row = {
+      ts,
+      webhookId,
+      eventId,
+      runId: 'run_7',
+      deliveryId: `dlv_${randomUUID()}`,
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 1,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    };
+    const line = `${JSON.stringify(row)}\n`;
+    const path = join(TEST_DATA_DIR, 'webhook-deliveries.jsonl');
+    const fileBuf = Buffer.from(line, 'utf8');
+    // 在「测」(3 字节) 的首字节后切开，旧 toString 会变 U+FFFD 导致 webhookId 失配
+    const cutAt = fileBuf.indexOf(Buffer.from('测', 'utf8'));
+    expect(cutAt).toBeGreaterThan(0);
+    writeFileSync(path, fileBuf);
+    expect(scanMaxRunNumFromDisk(webhookId, eventId, cutAt + 1)).toBe(7);
+    expect(scanMaxRunNumFromDisk('whk_other', eventId, cutAt + 1)).toBe(0);
   });
 });

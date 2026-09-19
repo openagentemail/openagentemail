@@ -1787,7 +1787,8 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
         webhookId: sub.id,
         eventId: `evt_list_${i}`,
         runId: 'run_0',
-        deliveryId: `dlv_list_${i}`,
+        // #270：nextCursor 须可被规范 UUID 解析
+        deliveryId: `dlv_${crypto.randomUUID()}`,
         type: 'mail.received',
         address: sub.address,
         messageId: String(i),
@@ -1843,12 +1844,13 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
       createdBy: 'admin',
     });
     const ts = new Date().toISOString();
+    const staleId = `dlv_${crypto.randomUUID()}`;
     appendDeliveryLogRow({
       ts,
       webhookId: sub.id,
       eventId: 'evt_stale_1',
       runId: 'run_0',
-      deliveryId: 'dlv_stale_1',
+      deliveryId: staleId,
       type: 'mail.received',
       address: sub.address,
       messageId: '1',
@@ -1869,8 +1871,9 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     });
     resetDeliveryLogIndexForTests();
 
+    const gone = `dlv_${crypto.randomUUID()}|1|1970-01-01T00:00:00.000Z`;
     const stale = await app.request(
-      `/v1/webhooks/${sub.id}/deliveries?limit=2&cursor=${encodeURIComponent('dlv_gone|1|1970-01-01T00:00:00.000Z')}`,
+      `/v1/webhooks/${sub.id}/deliveries?limit=2&cursor=${encodeURIComponent(gone)}`,
       { headers: { Authorization: `Bearer ${adminKey}` } },
     );
     expect(stale.status).toBe(400);
