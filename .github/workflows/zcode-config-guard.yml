@@ -1,0 +1,55 @@
+# 危险路径守卫 (tizerluo/zcode-open-bridge#49 洞三的 GitHub 侧防线)
+# .zcode/config.json / zcode.json 会被 zcode 在启动时直接执行其中定义的
+# 命令 (进程 spawn, 不经过模型也不受工具黑名单约束), 禁止入库。
+# pull_request: 全量跑 (供必需检查), 干净=绿; push: 仅在该路径变更时触发=必红。
+name: zcode-config-guard
+
+on:
+  pull_request:
+  push:
+    paths:
+      - ".zcode/config.json"
+      - "zcode.json"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: zcode-config-guard-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查变更是否触碰 ZCode 项目配置
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          FILES="$(gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[].filename')"
+          BAD="$(echo "$FILES" | grep -Ex '\.zcode/config\.json|zcode\.json' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::error::检测到 ZCode 项目配置文件变更: $BAD — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
+            exit 1
+          fi
+          echo "变更未触碰危险路径, 通过"
+
+      - name: push 触发即危险 (paths 已过滤)
+        if: github.event_name == 'push'
+        run: |
+          echo "::error::push 直接修改了 .zcode/config.json / zcode.json — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
+          exit 1
+
+      - name: PR 留痕评论
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body "🚫 **该 PR 修改了 ZCode 项目配置文件（\`.zcode/config.json\` / \`zcode.json\`）**，已被 zcode-config-guard 拦截。该文件在 zcode 启动时会被直接执行（进程 spawn，不经模型、不受工具黑名单约束），属于危险路径，禁止入库（详见 tizerluo/zcode-open-bridge#49）。请从提交中移除后重推。"
