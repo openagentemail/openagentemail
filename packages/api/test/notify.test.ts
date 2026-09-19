@@ -2685,4 +2685,38 @@ describe('ntfy full-address agent route keys (#134 Q1)', () => {
       Object.assign(config.ntfy, previousNtfy);
     }
   });
+
+  test('R3-7. #235-2 ambiguous 收敛到唯一持有者时单向升级；具体地址不降级', async () => {
+    resetNotificationLogForTests();
+    const created = createIdentity({ localpart: 'upgrade-stamp' });
+    expect(created).not.toBeNull();
+    const addr = created!.identity.address;
+
+    setNotificationAgentRouteForTests('upgrade-stamp', {
+      topic: 'agent-upgrade-stamp',
+      reader: {
+        username: 'reader-upgrade-stamp',
+        token: 'tk_upgradestamp12345678901234567',
+      },
+      ownerAddress: LEGACY_OWNER_AMBIGUOUS,
+    });
+    try {
+      runLegacyOwnerStampForTests();
+      expect(getNotificationAgentRouteForTests('upgrade-stamp')?.ownerAddress).toBe(addr);
+
+      // 已烙具体地址：删身份后仍不降级为 ambiguous
+      deleteIdentity(addr);
+      await flushWriteServerConfigForTests();
+      runLegacyOwnerStampForTests();
+      expect(getNotificationAgentRouteForTests('upgrade-stamp')?.ownerAddress).toBe(addr);
+    } finally {
+      try {
+        deleteIdentity(addr);
+      } catch {
+        /* already gone */
+      }
+      await flushWriteServerConfigForTests();
+      setNotificationAgentRouteForTests('upgrade-stamp', null);
+    }
+  });
 });

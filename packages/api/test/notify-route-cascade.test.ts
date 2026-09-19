@@ -638,7 +638,7 @@ describe('#235 deleteIdentity notify route cascade', () => {
     expect(() => getPendingReaderRevokesForTests()).toThrow('notification_store_corrupt');
   });
 
-  test('9. ntfy 未启用：deleteIdentity 不物化 notifications.json', () => {
+  test('9. ntfy 未启用且无既有 store：deleteIdentity 不物化 notifications.json', () => {
     Object.assign(config.ntfy, { enabled: false });
     wipeNotificationStore();
     expect(existsSync(notificationStorePath())).toBe(false);
@@ -646,6 +646,47 @@ describe('#235 deleteIdentity notify route cascade', () => {
     const created = createIdentity({ localpart: 'ntfy-off' })!;
     expect(deleteIdentity(created.identity.address)).toBe(true);
     expect(existsSync(notificationStorePath())).toBe(false);
+  });
+
+  test('9b. #249-① 禁用窗有既有路由：级联入 pending 落盘，不发 DELETE', async () => {
+    const deletedUsers: string[] = [];
+    mockNtfyOk({ onDelete: (u) => deletedUsers.push(u) });
+
+    const created = createIdentity({ localpart: 'ntfy-off-queued' })!;
+    const address = created.identity.address;
+    setNotificationAgentRouteForTests(address, {
+      topic: 'agent-ntfy-off-queued',
+      reader: {
+        username: 'reader-ntfy-off-queued',
+        token: 'tk_ntfyoffqueued1234567890123456',
+      },
+    });
+
+    Object.assign(config.ntfy, { enabled: false });
+    expect(deleteIdentity(address)).toBe(true);
+    expect(getNotificationAgentRouteForTests(address)).toBeUndefined();
+    expect(getPendingReaderRevokesForTests().some((r) => r.username === 'reader-ntfy-off-queued')).toBe(
+      true,
+    );
+    // 禁用窗不发 live DELETE
+    expect(deletedUsers).not.toContain('reader-ntfy-off-queued');
+    expect(existsSync(notificationStorePath())).toBe(true);
+  });
+
+  test('9c. #249-⑥ 无 adminPassword：首次吊销不发 DELETE，行留 pending', async () => {
+    const deletedUsers: string[] = [];
+    mockNtfyOk({ onDelete: (u) => deletedUsers.push(u) });
+
+    setNotificationAgentRouteForTests('nopw@test.example', {
+      topic: 'agent-nopw',
+      reader: { username: 'reader-nopw', token: 'tk_nopwaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    });
+    Object.assign(config.ntfy, { adminPassword: undefined });
+    removeAgentRouteOnIdentityDelete('nopw@test.example');
+    await whenReaderRevokeReconcileIdleForTests();
+
+    expect(deletedUsers).toEqual([]);
+    expect(getPendingReaderRevokesForTests().map((r) => r.username)).toContain('reader-nopw');
   });
 
   test('10. reconcile 整体预算：慢响应超预算则提前停，confirmed 收敛、剩余留队', async () => {
@@ -834,6 +875,37 @@ describe('#235 deleteIdentity notify route cascade', () => {
       await new Promise((r) => setTimeout(r, 5));
     }
     expect(deletedUsers).toContain(midReader);
+  });
+
+  test('11b. #249-⑤ provision 竞态：DELETE 瞬断时孤儿仍入 pending 队列', async () => {
+    mockNtfyOk({
+      onDelete: () => {
+        throw new Error('ntfy_transient');
+      },
+    });
+
+    const created = createIdentity({ localpart: 'race-pending' })!;
+    const address = created.identity.address;
+    let midReader = '';
+
+    setAfterCreateRuntimeReaderForTests(() => {
+      midReader = getNotificationAgentRouteForTests(address)?.reader.username ?? '';
+      deleteIdentity(address);
+    });
+
+    await provisionIdentityNotifications(created.identity);
+    await whenReaderRevokeReconcileIdleForTests();
+
+    expect(midReader).toMatch(/^reader-agent-/);
+    expect(getPendingReaderRevokesForTests().some((r) => r.username === midReader)).toBe(true);
+  });
+
+  test('13. #249-⑦ identities 源码不直接 import notify（回调注入）', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(import.meta.dir, '../src/lib/identities.ts'), 'utf8');
+    expect(src).not.toMatch(/from ['"]\.\/notify\.ts['"]/);
+    expect(src).toContain('registerNotifyRouteDeleteCallback');
   });
 
   test('mutation：删键步骤缺失则键残留（对照必红逻辑）', () => {
