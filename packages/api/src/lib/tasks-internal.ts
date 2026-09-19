@@ -3997,7 +3997,7 @@ export async function listTaskBoard(
   let start = 0;
   if (query.cursor) {
     const cursor = taskBoardCursor.decodeTaskBoardCursor(query.cursor);
-    if (cursor.fp !== fp) throw new taskBoardCursor.InvalidTaskCursorError();
+    if (cursor.fp !== fp) throw new taskBoardCursor.InvalidTaskCursorError('lookup_miss', cursor.t);
     start = filtered.findIndex((task) => olderThanCursor(task, cursor));
     if (start < 0) start = filtered.length;
   }
@@ -4031,7 +4031,7 @@ export async function listTaskChildren(query: TaskChildrenQuery, viewer: TaskBoa
   let start = 0;
   if (query.cursor) {
     const cursor = taskChildrenCursor.decodeTaskChildrenCursor(query.cursor);
-    if (cursor.fp !== fp) throw new taskChildrenCursor.InvalidTaskCursorError();
+    if (cursor.fp !== fp) throw new taskChildrenCursor.InvalidTaskCursorError('lookup_miss', cursor.t);
     start = visible.findIndex((task) => olderThanCursor(task, cursor));
     if (start < 0) start = visible.length;
   }

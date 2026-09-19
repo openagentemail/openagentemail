@@ -20,9 +20,15 @@ const childrenCursorKey = createHmac('sha256', config.taskSigningSecret)
 
 export class InvalidTaskCursorError extends Error {
   readonly code = 'invalid_cursor';
-  constructor() {
+  /** parse_fail=解码失败；lookup_miss=解码成功但 fp 绑定 miss */
+  readonly kind: 'parse_fail' | 'lookup_miss';
+  /** lookup_miss 时解码出的游标时间戳（ms） */
+  readonly cursorTs?: number;
+  constructor(kind: 'parse_fail' | 'lookup_miss' = 'parse_fail', cursorTs?: number) {
     super('invalid_cursor');
     this.name = 'InvalidTaskCursorError';
+    this.kind = kind;
+    if (cursorTs !== undefined) this.cursorTs = cursorTs;
   }
 }
 

@@ -855,11 +855,11 @@ async function listMessagesPageWith(
   if (opts.cursor) {
     const cursor = decodeMailCursor(opts.cursor, config.taskSigningSecret);
     if (cursor.folder !== folder || cursor.address !== normalized) {
-      throw new InvalidMailCursorError();
+      throw new InvalidMailCursorError('lookup_miss', cursor.t);
     }
     // 游标代际必须等于本次已验证的选中代际；禁止推断或回退。
     if (String(cursor.uidValidity) !== generation) {
-      throw new InvalidMailCursorError();
+      throw new InvalidMailCursorError('lookup_miss', cursor.t);
     }
     cursorT = cursor.t;
     cursorUid = cursor.uid;
@@ -971,7 +971,7 @@ async function listMessagesSinceWith(
 
   const cursor = decodeMailForwardCursor(sinceCursor, config.taskSigningSecret);
   if (cursor.folder !== folder || cursor.address !== normalized) {
-    throw new InvalidMailCursorError();
+    throw new InvalidMailCursorError('lookup_miss', cursor.t);
   }
 
   const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
@@ -979,7 +979,7 @@ async function listMessagesSinceWith(
     currentUidValidity === undefined ||
     String(cursor.uidValidity) !== String(currentUidValidity)
   ) {
-    throw new InvalidMailCursorError();
+    throw new InvalidMailCursorError('lookup_miss', cursor.t);
   }
 
   const startScanUid = cursor.scanUid ?? 0;

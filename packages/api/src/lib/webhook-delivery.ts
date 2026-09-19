@@ -915,13 +915,65 @@ export function appendDeliveryLogRow(row: WebhookDeliveryLogRow): void {
 /**
  * Stale / unknown delivery-list cursor → 400 invalid_cursor（#216）。
  * 仿 InvalidSendCursorError：只携带稳定 code，不泄漏内部细节。
+ * #270：带 kind（parse_fail vs lookup_miss）供观测 helper 直传。
  */
 export class InvalidDeliveryCursorError extends Error {
   readonly code = 'invalid_cursor';
-  constructor() {
+  readonly kind: 'parse_fail' | 'lookup_miss';
+  /** lookup_miss 全形态游标的时间戳（ms）；bare_id 无 ts */
+  readonly cursorTs?: number;
+  constructor(kind: 'parse_fail' | 'lookup_miss' = 'parse_fail', cursorTs?: number) {
     super('invalid_cursor');
     this.name = 'InvalidDeliveryCursorError';
+    this.kind = kind;
+    if (cursorTs !== undefined) this.cursorTs = cursorTs;
   }
+}
+
+/** deliveries 游标 query 硬限（对齐 send/tasks/ui 族 1024）。 */
+export const DELIVERIES_CURSOR_MAX_LENGTH = 1024;
+
+/** 生产可生成的 deliveryId：dlv_ + 规范 UUID（8-4-4-4-12）。 */
+const DELIVERY_ID_RE =
+  /^dlv_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** attempt 规范十进制：无前导零、≥1（生产 Number 序列化）。 */
+const DELIVERY_ATTEMPT_RE = /^[1-9]\d*$/;
+/** ts 必须是 toISOString 完整形（含毫秒与 Z）；Date.parse 可解的残缺串一律拒。 */
+const DELIVERY_ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+type ParsedDeliveryListCursor =
+  | { form: 'full'; deliveryId: string; attempt: number; ts: string; cursorTs: number }
+  | { form: 'bare_id'; deliveryId: string };
+
+/**
+ * 解析 deliveries 列表游标；非生产可生成域 → parse_fail。
+ * 全形态 = deliveryId|attempt|ts；裸 id = 仅 deliveryId。
+ */
+export function parseDeliveryListCursor(cursor: string): ParsedDeliveryListCursor {
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    throw new InvalidDeliveryCursorError('parse_fail');
+  }
+  if (cursor.length > DELIVERIES_CURSOR_MAX_LENGTH) {
+    throw new InvalidDeliveryCursorError('parse_fail');
+  }
+  const pipe = cursor.indexOf('|');
+  if (pipe < 0) {
+    if (!DELIVERY_ID_RE.test(cursor)) throw new InvalidDeliveryCursorError('parse_fail');
+    return { form: 'bare_id', deliveryId: cursor };
+  }
+  const deliveryId = cursor.slice(0, pipe);
+  const rest = cursor.slice(pipe + 1);
+  const pipe2 = rest.indexOf('|');
+  if (pipe2 < 0) throw new InvalidDeliveryCursorError('parse_fail');
+  const attemptRaw = rest.slice(0, pipe2);
+  const ts = rest.slice(pipe2 + 1);
+  if (!DELIVERY_ID_RE.test(deliveryId)) throw new InvalidDeliveryCursorError('parse_fail');
+  if (!DELIVERY_ATTEMPT_RE.test(attemptRaw)) throw new InvalidDeliveryCursorError('parse_fail');
+  if (!DELIVERY_ISO_TS_RE.test(ts)) throw new InvalidDeliveryCursorError('parse_fail');
+  const attempt = Number(attemptRaw);
+  const cursorTs = Date.parse(ts);
+  if (!Number.isFinite(cursorTs)) throw new InvalidDeliveryCursorError('parse_fail');
+  return { form: 'full', deliveryId, attempt, ts, cursorTs };
 }
 
 /**
@@ -970,10 +1022,21 @@ export function readDeliveryLogRows(options?: {
   let startIndex = 0;
 
   if (options?.cursor) {
-    // 全形态 cursor 与裸 deliveryId 双匹配；均 miss → 显式拒绝，禁止静默回卷页 1
-    const idx = filtered.findIndex((r) => deliveryRowCursor(r) === options.cursor || r.deliveryId === options.cursor);
+    // #270：先规范解析（非生产可生成域 → parse_fail），再双匹配；均 miss → lookup_miss
+    const parsed = parseDeliveryListCursor(options.cursor);
+    const idx = filtered.findIndex((r) => {
+      if (parsed.form === 'bare_id') return r.deliveryId === parsed.deliveryId;
+      return (
+        r.deliveryId === parsed.deliveryId &&
+        r.attempt === parsed.attempt &&
+        r.ts === parsed.ts
+      );
+    });
     if (idx < 0) {
-      throw new InvalidDeliveryCursorError();
+      throw new InvalidDeliveryCursorError(
+        'lookup_miss',
+        parsed.form === 'full' ? parsed.cursorTs : undefined,
+      );
     }
     startIndex = idx + 1;
   }

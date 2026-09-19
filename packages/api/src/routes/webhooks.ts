@@ -36,6 +36,7 @@ import {
   getLatestDeliveryByWebhookMap,
   getLatestDeliveryForWebhook,
   InvalidDeliveryCursorError,
+  DELIVERIES_CURSOR_MAX_LENGTH,
   readDeliveryLogRows,
   redeliverWebhookDelivery,
   validateWebhookUrlResolution,
@@ -940,6 +941,12 @@ export const webhooksRoute = new Hono()
     }
     const cursor = c.req.query('cursor');
 
+    // #270 并入：cursor 长度硬限（对齐兄弟族 1024）；超限=malformed
+    if (cursor !== undefined && cursor.length > DELIVERIES_CURSOR_MAX_LENGTH) {
+      logInvalidCursorRejectionFor('deliveries', 'parse_fail');
+      return c.json({ error: 'invalid_cursor' }, 400);
+    }
+
     // stale cursor → 400 invalid_cursor（#216）；合法分页语义不变
     try {
       const res = readDeliveryLogRows({
@@ -950,8 +957,8 @@ export const webhooksRoute = new Hono()
       return c.json(res);
     } catch (err) {
       if (err instanceof InvalidDeliveryCursorError) {
-        // #202：拒收可观测；400 体逐字不变
-        logInvalidCursorRejectionFor('deliveries', cursor);
+        // #202/#270：拒收可观测；decoder kind 直传；400 体逐字不变
+        logInvalidCursorRejectionFor('deliveries', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
       throw err;

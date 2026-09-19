@@ -8,6 +8,7 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -2151,12 +2152,16 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     const tOld = new Date(now - 3000).toISOString();
     const tMid = new Date(now - 2000).toISOString();
     const tNew = new Date(now - 1000).toISOString();
-    const row = (id: string, ts: string, attempt = 1): WebhookDeliveryLogRow => ({
+    // #270：游标解析对齐生产 dlv_+规范 UUID
+    const idOld = `dlv_${randomUUID()}`;
+    const idMid = `dlv_${randomUUID()}`;
+    const idNew = `dlv_${randomUUID()}`;
+    const row = (deliveryId: string, ts: string, attempt = 1): WebhookDeliveryLogRow => ({
       ts,
       webhookId: 'whk_cursor',
-      eventId: `evt_${id}`,
+      eventId: `evt_${deliveryId}`,
       runId: 'run_0',
-      deliveryId: `dlv_${id}`,
+      deliveryId,
       type: 'webhook.ping',
       address: null,
       messageId: null,
@@ -2175,15 +2180,15 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       nextAttemptAt: null,
       reason: null,
     });
-    appendDeliveryLogRow(row('old', tOld));
-    appendDeliveryLogRow(row('mid', tMid));
-    appendDeliveryLogRow(row('new', tNew));
+    appendDeliveryLogRow(row(idOld, tOld));
+    appendDeliveryLogRow(row(idMid, tMid));
+    appendDeliveryLogRow(row(idNew, tNew));
     resetDeliveryLogIndexForTests();
 
     // 首页：无 cursor 不抛
     const home = readDeliveryLogRows({ webhookId: 'whk_cursor', limit: 2 });
-    expect(home.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_new', 'dlv_mid']);
-    expect(home.nextCursor).toBe(`dlv_mid|1|${tMid}`);
+    expect(home.deliveries.map((r) => r.deliveryId)).toEqual([idNew, idMid]);
+    expect(home.nextCursor).toBe(`${idMid}|1|${tMid}`);
 
     // 全形态 cursor 命中分页
     const page2 = readDeliveryLogRows({
@@ -2191,22 +2196,26 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       limit: 2,
       cursor: home.nextCursor,
     });
-    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_old']);
+    expect(page2.deliveries.map((r) => r.deliveryId)).toEqual([idOld]);
     expect(page2.nextCursor).toBeUndefined();
 
     // 裸 deliveryId 命中：从该 id 之后继续
     const byBare = readDeliveryLogRows({
       webhookId: 'whk_cursor',
       limit: 2,
-      cursor: 'dlv_new',
+      cursor: idNew,
     });
-    expect(byBare.deliveries.map((r) => r.deliveryId)).toEqual(['dlv_mid', 'dlv_old']);
+    expect(byBare.deliveries.map((r) => r.deliveryId)).toEqual([idMid, idOld]);
   });
 
   test('#216: empty log + cursor throws InvalidDeliveryCursorError', () => {
     resetDeliveryLogIndexForTests();
     expect(() =>
-      readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10, cursor: 'dlv_any|1|1970-01-01T00:00:00.000Z' }),
+      readDeliveryLogRows({
+        webhookId: 'whk_empty',
+        limit: 10,
+        cursor: `dlv_${randomUUID()}|1|1970-01-01T00:00:00.000Z`,
+      }),
     ).toThrow(InvalidDeliveryCursorError);
     // 空 log 首页仍不抛
     expect(readDeliveryLogRows({ webhookId: 'whk_empty', limit: 10 }).deliveries).toEqual([]);

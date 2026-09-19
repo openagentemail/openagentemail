@@ -76,10 +76,10 @@ async function recordSend(input: {
   }
 }
 
-function historyError(c: Context, err: unknown, cursor?: string) {
+function historyError(c: Context, err: unknown, _cursor?: string) {
   if (err instanceof InvalidSendCursorError) {
-    // #202：send 族拒收可观测；400 体逐字不变
-    logInvalidCursorRejectionFor('send', cursor);
+    // #202/#270：send 族拒收可观测；decoder kind 直传；400 体逐字不变
+    logInvalidCursorRejectionFor('send', err.kind, { cursorTs: err.cursorTs });
     return c.json({ error: 'invalid_cursor' }, 400);
   }
   if (err instanceof SendLogCorruptError) return c.json({ error: 'send_log_corrupt' }, 500);

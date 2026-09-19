@@ -1,8 +1,10 @@
 /**
- * #202 invalid_cursor 可观测性：共用 helper + 四族拒收路径负控。
+ * #202 / #270 invalid_cursor 可观测性：共用 helper + 四族拒收路径负控。
+ *
+ * #270 根治：decoder kind 直传；软解退役；malformed/unmatched 以真实解码为准。
  *
  * 验收：
- * ① stale（形状合法、窗外）→ 恰 1 条 info，三枚标签，日志无游标原文
+ * ① stale（lookup_miss、窗外）→ 恰 1 条 info，三枚标签，日志无游标原文
  * ② 窗内 well-formed unmatched → warn 单行
  * ③ 400 响应体与既有钉测逐字一致 `{error:'invalid_cursor'}`
  * mutation：classify 把 warn 降成 info → 分级断言必红
@@ -30,10 +32,7 @@ const { createApp } = await import('../src/app.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
   classifyInvalidCursorLevel,
-  inspectDeliveryCursor,
-  inspectMailCursor,
-  inspectSendCursor,
-  inspectTaskCursor,
+  inspectionFromKind,
   logInvalidCursorRejection,
   logInvalidCursorRejectionFor,
   setInvalidCursorLogSinkForTests,
@@ -41,6 +40,9 @@ const {
 } = await import('../src/lib/invalid-cursor-observability.ts');
 const {
   appendDeliveryLogRow,
+  DELIVERIES_CURSOR_MAX_LENGTH,
+  parseDeliveryListCursor,
+  InvalidDeliveryCursorError,
   resetDeliveryLogIndexForTests,
   resetDeliveryLogIoForTests,
 } = await import('../src/lib/webhook-delivery.ts');
@@ -52,13 +54,16 @@ const {
 const { createIdentity } = await import('../src/lib/identities.ts');
 const {
   MAIL_CURSOR_PREFIX,
+  InvalidMailCursorError,
+  decodeMailCursor,
   encodeMailCursor,
 } = await import('../src/lib/mail-cursor.ts');
 const {
   TASK_BOARD_CURSOR_PREFIX,
+  InvalidTaskCursorError,
   encodeTaskBoardCursor,
 } = await import('../src/lib/task-cursor.ts');
-const { SEND_LOG_RETENTION_MS } = await import('../src/lib/send-log.ts');
+const { SEND_LOG_RETENTION_MS, InvalidSendCursorError } = await import('../src/lib/send-log.ts');
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-invalid-cursor-obs');
 const originalDataDir = config.dataDir;
@@ -89,7 +94,7 @@ function parseLine(line: string): {
   };
 }
 
-/** 伪造 send-log 游标：可刻意坏 MAC，body 仍可供软解析。 */
+/** 伪造 send-log 游标（默认好 MAC；可指定 addr 制造 lookup_miss）。 */
 function forgeSendCursor(opts: { t: number; id?: string; addr?: string; badMac?: boolean }): string {
   const payload = {
     addr: opts.addr ?? 'fox@test.example',
@@ -105,41 +110,11 @@ function forgeSendCursor(opts: { t: number; id?: string; addr?: string; badMac?:
   return `send-log-cursor-v1.${body}.${mac}`;
 }
 
-/** 伪造 mail-cursor-v2：坏 MAC，软解析仍可读 t。 */
-function forgeMailCursor(opts: { t: number; badMac?: boolean }): string {
-  if (!opts.badMac) {
-    return encodeMailCursor(
-      {
-        folder: 'inbox',
-        address: 'alice@test.example',
-        t: opts.t,
-        uid: 42,
-        uidValidity: '17',
-      },
-      config.taskSigningSecret,
-    );
-  }
-  const body = Buffer.from(
-    JSON.stringify({ f: 'inbox', a: 'alice@test.example', t: opts.t, u: 42, v: '17' }),
-  ).toString('base64url');
-  return `${MAIL_CURSOR_PREFIX}.${body}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
-}
-
-/** 伪造 task-board 游标：坏 MAC。 */
-function forgeTaskCursor(opts: { t: number; badMac?: boolean }): string {
-  if (!opts.badMac) {
-    return encodeTaskBoardCursor({ fp: 'all|7d|admin', t: opts.t, id: randomUUID() });
-  }
-  const payload = { fp: 'all|7d|admin', t: opts.t, id: randomUUID() };
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${TASK_BOARD_CURSOR_PREFIX}.${body}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
-}
-
 function daysAgoMs(days: number, now = Date.now()): number {
   return now - days * 86_400_000;
 }
 
-describe('#202 invalid_cursor observability helper', () => {
+describe('#202/#270 invalid_cursor observability helper', () => {
   afterEach(() => {
     setInvalidCursorLogSinkForTests(undefined);
   });
@@ -154,18 +129,14 @@ describe('#202 invalid_cursor observability helper', () => {
   });
 
   test('mutation 负控：若把 warn 路径误降为 info，分级契约必红', () => {
-    // 模拟错误实现：一律 info。真实 classify 对 anomaly（含未来 ts→within_retention）必须 warn。
     const buggy = (_shape: InvalidCursorShape, _within: boolean): 'info' | 'warn' => 'info';
     expect(buggy('malformed', false)).toBe('info');
     expect(classifyInvalidCursorLevel('malformed', false)).toBe('warn');
     expect(buggy('full', true)).toBe('info');
     expect(classifyInvalidCursorLevel('full', true)).toBe('warn');
-    // R2 P1-2：未来 ts 经 inspect 得 within_retention=true，误降 info 必与真实分级冲突
+    // 未来 ts：lookup_miss + cursorTs>now → within_retention=true → warn
     const now = Date.now();
-    const future = inspectDeliveryCursor(
-      `dlv_${randomUUID()}|1|${new Date(now + 60_000).toISOString()}`,
-      now,
-    );
+    const future = inspectionFromKind('deliveries', 'lookup_miss', now + 60_000, now);
     expect(future).toEqual({ shape: 'full', within_retention: true });
     expect(buggy(future.shape, future.within_retention)).toBe('info');
     expect(classifyInvalidCursorLevel(future.shape, future.within_retention)).toBe('warn');
@@ -198,121 +169,82 @@ describe('#202 invalid_cursor observability helper', () => {
     expect(lines[0]!.line).not.toContain('dlv_');
   });
 
-  test('inspectDeliveryCursor: full / bare_id / malformed + 盘留存窗', () => {
+  test('inspectionFromKind: parse_fail→malformed；lookup_miss±ts→full/bare_id', () => {
     const now = Date.now();
-    const id = `dlv_${randomUUID()}`;
-    const outside = inspectDeliveryCursor(
-      `${id}|1|${new Date(daysAgoMs(60, now)).toISOString()}`,
-      now,
-    );
-    expect(outside).toEqual({ shape: 'full', within_retention: false });
-    const inside = inspectDeliveryCursor(
-      `${id}|2|${new Date(daysAgoMs(1, now)).toISOString()}`,
-      now,
-    );
-    expect(inside).toEqual({ shape: 'full', within_retention: true });
-    expect(inspectDeliveryCursor(id, now)).toEqual({ shape: 'bare_id', within_retention: false });
-    expect(inspectDeliveryCursor('not-a-cursor', now)).toEqual({
+    expect(inspectionFromKind('deliveries', 'parse_fail')).toEqual({
       shape: 'malformed',
       within_retention: false,
     });
-  });
-
-  test('inspectSend/Mail/Task: 窗外 full→stale；窗内 full→anomaly 输入', () => {
-    const now = Date.now();
-    const sendOut = inspectSendCursor(forgeSendCursor({ t: daysAgoMs(60, now), badMac: true }), now);
-    expect(sendOut).toEqual({ shape: 'full', within_retention: false });
-    const sendIn = inspectSendCursor(forgeSendCursor({ t: daysAgoMs(1, now), badMac: true }), now);
-    expect(sendIn).toEqual({ shape: 'full', within_retention: true });
+    expect(inspectionFromKind('deliveries', 'lookup_miss')).toEqual({
+      shape: 'bare_id',
+      within_retention: false,
+    });
+    expect(inspectionFromKind('deliveries', 'lookup_miss', daysAgoMs(60, now), now)).toEqual({
+      shape: 'full',
+      within_retention: false,
+    });
+    expect(inspectionFromKind('deliveries', 'lookup_miss', daysAgoMs(1, now), now)).toEqual({
+      shape: 'full',
+      within_retention: true,
+    });
     expect(SEND_LOG_RETENTION_MS).toBeGreaterThan(0);
-
-    const mailOut = inspectMailCursor(forgeMailCursor({ t: daysAgoMs(60, now), badMac: true }), now);
-    expect(mailOut).toEqual({ shape: 'full', within_retention: false });
-    const mailIn = inspectMailCursor(forgeMailCursor({ t: daysAgoMs(1, now), badMac: true }), now);
-    expect(mailIn).toEqual({ shape: 'full', within_retention: true });
-
-    const taskOut = inspectTaskCursor(forgeTaskCursor({ t: daysAgoMs(60, now), badMac: true }), now);
-    expect(taskOut).toEqual({ shape: 'full', within_retention: false });
-    const taskIn = inspectTaskCursor(forgeTaskCursor({ t: daysAgoMs(1, now), badMac: true }), now);
-    expect(taskIn).toEqual({ shape: 'full', within_retention: true });
   });
 
-  test('R2 P1-2：future-ts full 游标必出 warn（不得归 stale/info）', () => {
+  // 锚 :240 —— 未来 ts lookup_miss 必 warn
+  test('R2 P1-2：future-ts lookup_miss 必出 warn（不得归 stale/info）', () => {
     const now = Date.now();
     const futureMs = now + 3_600_000;
     const lines = installCapture();
-
-    const del = inspectDeliveryCursor(
-      `dlv_${randomUUID()}|1|${new Date(futureMs).toISOString()}`,
-      now,
-    );
+    const del = inspectionFromKind('deliveries', 'lookup_miss', futureMs, now);
     expect(del).toEqual({ shape: 'full', within_retention: true });
     expect(classifyInvalidCursorLevel(del.shape, del.within_retention)).toBe('warn');
-
-    const send = inspectSendCursor(forgeSendCursor({ t: futureMs, badMac: true }), now);
-    expect(send).toEqual({ shape: 'full', within_retention: true });
-    const mail = inspectMailCursor(forgeMailCursor({ t: futureMs, badMac: true }), now);
-    expect(mail).toEqual({ shape: 'full', within_retention: true });
-    const task = inspectTaskCursor(forgeTaskCursor({ t: futureMs, badMac: true }), now);
-    expect(task).toEqual({ shape: 'full', within_retention: true });
-
+    for (const family of ['send', 'messages', 'tasks'] as const) {
+      const hit = inspectionFromKind(family, 'lookup_miss', futureMs, now);
+      expect(hit).toEqual({ shape: 'full', within_retention: true });
+    }
     logInvalidCursorRejection({ family: 'deliveries', ...del });
     expect(lines).toHaveLength(1);
     expect(lines[0]!.level).toBe('warn');
     expect(parseLine(lines[0]!.line).within_retention).toBe(true);
   });
 
-  test('R2 P1-1：缺 codec 必填键 → malformed（不拒多余键）', () => {
+  // 锚 :265 —— 缺 codec 必填 → decoder parse_fail（不再软解）
+  test('R2 P1-1：缺 codec 必填键 → decoder parse_fail（软解退役）', () => {
     const now = Date.now();
-    // mail v2 缺 v
+    // mail v2 缺 v → decode 抛 parse_fail
     const mailBody = Buffer.from(
       JSON.stringify({ f: 'inbox', a: 'alice@test.example', t: now - 1000, u: 42 }),
     ).toString('base64url');
-    expect(
-      inspectMailCursor(`${MAIL_CURSOR_PREFIX}.${mailBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`, now),
-    ).toEqual({ shape: 'malformed', within_retention: false });
-
-    // mail 多余键仍 full（不 strict）
-    const mailExtra = Buffer.from(
-      JSON.stringify({
-        f: 'inbox',
-        a: 'alice@test.example',
-        t: now - 1000,
-        u: 42,
-        v: '17',
-        extra: 'ignored',
-      }),
-    ).toString('base64url');
-    expect(
-      inspectMailCursor(
-        `${MAIL_CURSOR_PREFIX}.${mailExtra}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
-        now,
+    expect(() =>
+      decodeMailCursor(
+        `${MAIL_CURSOR_PREFIX}.${mailBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        config.taskSigningSecret,
       ),
-    ).toEqual({ shape: 'full', within_retention: true });
-
-    // send 缺 id
-    const sendBody = Buffer.from(
-      JSON.stringify({ addr: 'fox@test.example', t: now - 1000 }),
-    ).toString('base64url');
-    expect(inspectSendCursor(`send-log-cursor-v1.${sendBody}.AAA`, now)).toEqual({
+    ).toThrow(InvalidMailCursorError);
+    try {
+      decodeMailCursor(
+        `${MAIL_CURSOR_PREFIX}.${mailBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        config.taskSigningSecret,
+      );
+    } catch (err) {
+      expect((err as InvalidMailCursorError).kind).toBe('parse_fail');
+    }
+    // helper：parse_fail → malformed
+    expect(inspectionFromKind('messages', 'parse_fail')).toEqual({
       shape: 'malformed',
       within_retention: false,
     });
-
-    // tasks 缺 fp
-    const taskBody = Buffer.from(
-      JSON.stringify({ t: now - 1000, id: randomUUID() }),
-    ).toString('base64url');
-    expect(inspectTaskCursor(`${TASK_BOARD_CURSOR_PREFIX}.${taskBody}.AAA`, now)).toEqual({
+    // send 坏串 → 路由侧 parse_fail
+    expect(inspectionFromKind('send', 'parse_fail')).toEqual({
       shape: 'malformed',
       within_retention: false,
     });
   });
 
-  test('R3：v=2^53 number 必 malformed/warn；string 大数仍 full', () => {
+  // 锚 :312 —— v=2^53 number 必 parse_fail；string 大数仍可编码
+  test('R3：v=2^53 number 必 parse_fail/warn；string 大数仍可 encode', () => {
     const now = Date.now();
     const lines = installCapture();
-    // number 2^53 超 safe integer → malformed（对齐 canonicalizeMailUidValidity）
     const unsafeBody = Buffer.from(
       JSON.stringify({
         f: 'inbox',
@@ -322,66 +254,67 @@ describe('#202 invalid_cursor observability helper', () => {
         v: 2 ** 53,
       }),
     ).toString('base64url');
-    const unsafe = inspectMailCursor(
-      `${MAIL_CURSOR_PREFIX}.${unsafeBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
-      now,
-    );
-    expect(unsafe).toEqual({ shape: 'malformed', within_retention: false });
-    expect(classifyInvalidCursorLevel(unsafe.shape, unsafe.within_retention)).toBe('warn');
-    logInvalidCursorRejection({ family: 'messages', ...unsafe });
+    try {
+      decodeMailCursor(
+        `${MAIL_CURSOR_PREFIX}.${unsafeBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        config.taskSigningSecret,
+      );
+      expect.unreachable('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidMailCursorError);
+      expect((err as InvalidMailCursorError).kind).toBe('parse_fail');
+    }
+    logInvalidCursorRejectionFor('messages', 'parse_fail');
     expect(lines).toHaveLength(1);
     expect(lines[0]!.level).toBe('warn');
+    expect(parseLine(lines[0]!.line).shape).toBe('malformed');
 
-    // string 分支：任意精度数字串仍收（BigInt）
-    const bigStrBody = Buffer.from(
-      JSON.stringify({
-        f: 'inbox',
-        a: 'alice@test.example',
+    // string 分支：任意精度仍可生成合法游标
+    const ok = encodeMailCursor(
+      {
+        folder: 'inbox',
+        address: 'alice@test.example',
         t: now - 1000,
-        u: 42,
-        v: String(2 ** 53),
-      }),
-    ).toString('base64url');
-    expect(
-      inspectMailCursor(
-        `${MAIL_CURSOR_PREFIX}.${bigStrBody}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
-        now,
-      ),
-    ).toEqual({ shape: 'full', within_retention: true });
+        uid: 42,
+        uidValidity: String(2 ** 53),
+      },
+      config.taskSigningSecret,
+    );
+    expect(ok.startsWith(MAIL_CURSOR_PREFIX)).toBe(true);
   });
 
-  test('R3：deliveries 非规范 UUID / attempt=0 → malformed', () => {
+  // 锚 :353 —— deliveries 非规范 + 前导零 attempt + 残缺 ISO → parse_fail
+  test('R3/#270：deliveries 非规范 UUID / attempt=0 / 前导零 / 残缺 ISO → parse_fail', () => {
     const now = Date.now();
-    // dlv_ + 36 字符含连字符但非 8-4-4-4-12 固定位 → malformed
-    const withHyphensWrong = `dlv_${'a'.repeat(32)}----`; // 32 hex + 4 hyphens = 36，位宽不对
+    const withHyphensWrong = `dlv_${'a'.repeat(32)}----`;
     expect(withHyphensWrong.slice(4).length).toBe(36);
-    expect(inspectDeliveryCursor(withHyphensWrong, now)).toEqual({
-      shape: 'malformed',
-      within_retention: false,
-    });
+    expect(() => parseDeliveryListCursor(withHyphensWrong)).toThrow(InvalidDeliveryCursorError);
 
-    // attempt=0 必 malformed
     const id = `dlv_${randomUUID()}`;
-    expect(
-      inspectDeliveryCursor(`${id}|0|${new Date(now - 1000).toISOString()}`, now),
-    ).toEqual({ shape: 'malformed', within_retention: false });
+    expect(() => parseDeliveryListCursor(`${id}|0|${new Date(now - 1000).toISOString()}`)).toThrow(
+      InvalidDeliveryCursorError,
+    );
+    // attempt 前导零 `01` → parse_fail（生产永不生成）
+    expect(() => parseDeliveryListCursor(`${id}|01|${new Date(now - 1000).toISOString()}`)).toThrow(
+      InvalidDeliveryCursorError,
+    );
+    // 残缺 ISO（Date.parse 可解）→ parse_fail
+    expect(() => parseDeliveryListCursor(`${id}|1|2020-01-01`)).toThrow(InvalidDeliveryCursorError);
 
-    // 规范 UUID + attempt≥1 仍 full
-    expect(
-      inspectDeliveryCursor(`${id}|1|${new Date(now - 1000).toISOString()}`, now),
-    ).toEqual({ shape: 'full', within_retention: true });
+    // 规范 UUID + attempt≥1 + 完整 ISO 仍可解析
+    const ts = new Date(now - 1000).toISOString();
+    expect(parseDeliveryListCursor(`${id}|1|${ts}`)).toEqual({
+      form: 'full',
+      deliveryId: id,
+      attempt: 1,
+      ts,
+      cursorTs: Date.parse(ts),
+    });
+    expect(parseDeliveryListCursor(id)).toEqual({ form: 'bare_id', deliveryId: id });
   });
 });
 
-/** 前向 since 游标（REST messages 用 mail-fcursor-v1）。 */
-function forgeForwardMailCursor(opts: { t: number }): string {
-  const body = Buffer.from(
-    JSON.stringify({ f: 'inbox', a: 'alice@test.example', t: opts.t, u: 42, v: '17' }),
-  ).toString('base64url');
-  return `mail-fcursor-v1.${body}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`;
-}
-
-describe('#202 四族路由负控', () => {
+describe('#202/#270 四族路由负控', () => {
   let app: ReturnType<typeof createApp>;
   let aliceToken: string;
 
@@ -408,21 +341,22 @@ describe('#202 四族路由负控', () => {
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   });
 
-  test('① stale（形状合法、窗外）四族各恰 1 条 info，三标签，无游标原文', async () => {
+  test('① stale（lookup_miss、窗外）四族各恰 1 条 info，三标签，无游标原文', async () => {
     const { Hono } = await import('hono');
     const { UiSessionStore } = await import('../src/lib/ui-session.ts');
     const { createUiApiRoutes } = await import('../src/routes/ui.ts');
-    const { InvalidTaskCursorError } = await import('../src/lib/task-cursor.ts');
-    const { InvalidMailCursorError } = await import('../src/lib/mail-cursor.ts');
 
     const now = Date.now();
     const lines = installCapture();
     const families: InvalidCursorFamily[] = ['deliveries', 'messages', 'send', 'tasks'];
+    const outsideTs = daysAgoMs(60, now);
     const cursors: Record<InvalidCursorFamily, string> = {
-      deliveries: `dlv_${randomUUID()}|1|${new Date(daysAgoMs(60, now)).toISOString()}`,
-      messages: forgeForwardMailCursor({ t: daysAgoMs(60, now) }),
-      send: forgeSendCursor({ t: daysAgoMs(60, now), badMac: true }),
-      tasks: forgeTaskCursor({ t: daysAgoMs(60, now), badMac: true }),
+      deliveries: `dlv_${randomUUID()}|1|${new Date(outsideTs).toISOString()}`,
+      // UI mock 不吃 cursor 串；用占位即可
+      messages: 'mail-cursor-v2.unused.unused',
+      // 好 MAC + 错 addr → lookup_miss（alice 作用域）
+      send: forgeSendCursor({ t: outsideTs, addr: 'other@test.example' }),
+      tasks: 'task-board-cursor-v1.unused.unused',
     };
 
     // —— deliveries（v1）——
@@ -466,7 +400,7 @@ describe('#202 四族路由负控', () => {
     expect(delRes.status).toBe(400);
     expect(await delRes.json()).toEqual({ error: 'invalid_cursor' });
 
-    // —— send（v1）——
+    // —— send（v1）：好 MAC + 错 addr → lookup_miss ——
     const sendRes = await app.request(
       `/v1/send/history?limit=20&cursor=${encodeURIComponent(cursors.send)}`,
       { headers: { Authorization: `Bearer ${aliceToken}` } },
@@ -474,7 +408,7 @@ describe('#202 四族路由负控', () => {
     expect(sendRes.status).toBe(400);
     expect(await sendRes.json()).toEqual({ error: 'invalid_cursor' });
 
-    // —— messages + tasks：UI 会话路由（避免全栈 Origin/IMAP）——
+    // —— messages + tasks：UI 夹具抛 lookup_miss + 窗外 ts ——
     const store = new UiSessionStore({
       resolveToken: (token) => (token === 'ok' ? { kind: 'admin' } : null),
     });
@@ -487,7 +421,7 @@ describe('#202 四族路由负控', () => {
       createUiApiRoutes(store, {
         listIdentities: () => [],
         listMessages: async () => {
-          throw new InvalidMailCursorError();
+          throw new InvalidMailCursorError('lookup_miss', outsideTs);
         },
         setMessageSeen: async () => true,
         getMailboxScan: async () => ({
@@ -502,7 +436,7 @@ describe('#202 四族路由负控', () => {
         setPushContentTier: () => null,
         taskService: {
           listBoard: async () => {
-            throw new InvalidTaskCursorError();
+            throw new InvalidTaskCursorError('lookup_miss', outsideTs);
           },
         } as never,
       }),
@@ -571,7 +505,7 @@ describe('#202 四族路由负控', () => {
 
   test('③ malformed → warn；400 体仍逐字 invalid_cursor', async () => {
     const lines = installCapture();
-    logInvalidCursorRejectionFor('send', '%%%not-a-cursor%%%');
+    logInvalidCursorRejectionFor('send', 'parse_fail');
     expect(lines).toHaveLength(1);
     expect(lines[0]!.level).toBe('warn');
     expect(parseLine(lines[0]!.line).shape).toBe('malformed');
@@ -581,5 +515,30 @@ describe('#202 四族路由负控', () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+  });
+
+  test('#270 并入：deliveries cursor 超长 → malformed 400', async () => {
+    const lines = installCapture();
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/270-len',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      createdBy: 'admin',
+    });
+    const overlong = 'x'.repeat(DELIVERIES_CURSOR_MAX_LENGTH + 1);
+    const res = await app.request(
+      `/v1/webhooks/${sub.id}/deliveries?limit=2&cursor=${encodeURIComponent(overlong)}`,
+      { headers: { Authorization: `Bearer ${adminKey}` } },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid_cursor' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.level).toBe('warn');
+    expect(parseLine(lines[0]!.line)).toEqual({
+      event: INVALID_CURSOR_LOG_EVENT,
+      family: 'deliveries',
+      shape: 'malformed',
+      within_retention: false,
+    });
   });
 });
