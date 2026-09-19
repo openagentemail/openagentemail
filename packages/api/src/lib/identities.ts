@@ -36,13 +36,23 @@ import {
 } from './delegations.ts';
 import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
 import { recordAuditEvent } from './audit.ts';
-import { removeAgentRouteOnIdentityDelete } from './notify.ts';
 
 export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
 let webhookCancelCallback: WebhookCancelCallback | undefined;
 
 export function registerWebhookCancelCallback(cb: WebhookCancelCallback): void {
   webhookCancelCallback = cb;
+}
+
+/**
+ * deleteIdentity → ntfy 路由级联（#249-⑦）：回调注入，避免 identities↔notify 循环依赖。
+ * 与 registerWebhookCancelCallback 同款；由 notify.ts 模块加载时注册。
+ */
+export type NotifyRouteDeleteCallback = (address: string, actor?: string) => void;
+let notifyRouteDeleteCallback: NotifyRouteDeleteCallback | undefined;
+
+export function registerNotifyRouteDeleteCallback(cb: NotifyRouteDeleteCallback): void {
+  notifyRouteDeleteCallback = cb;
 }
 
 /** Mail-arrival push content detail. 1 = interrupt only (default), 2 = +subject/from, 3 = +body preview/OTP. */
@@ -528,7 +538,8 @@ export function deleteIdentity(address: string): boolean {
   // state 持久化失败抛错 fail-closed，身份记录必须仍在。
   // 落盘顺序窗口（与 webhook 级联同款）：notify 路由先删后，若 identity save 失败，
   // 该身份在下次 boot 前无推送路由=安全收窄方向（可重试 delete；非外泄扩大）。
-  removeAgentRouteOnIdentityDelete(needle);
+  // 回调由 notify 侧 registerNotifyRouteDeleteCallback 注入（#249-⑦）。
+  notifyRouteDeleteCallback?.(needle);
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
   save(kept);
