@@ -181,16 +181,23 @@ docker run --rm -v <project>_api-data:/data alpine \
 # Expect no output: zero files still owned by a non-1000 user.
 ```
 
-6. Pull/build the new API image, then verify it declares the runtime user
-   **before** starting it:
+6. Pull/build the new images, then verify the API image declares the
+   runtime user **before** starting anything. Build the whole project
+   (`docker compose build` with no service name) — or at minimum `api`
+   and `ntfy-provision` together: they share one Dockerfile, and the
+   `--force-recreate` below re-runs the one-shot ntfy-provision container
+   too, so it must come from the same non-root image batch. A stale
+   root-based provision image re-running here would write the volume as
+   root and roll your migration back — the same failure this runbook
+   exists to prevent.
 
 ```bash
 docker inspect <new-api-image> --format '{{.Config.User}}'
 # Expect bun (uid 1000) — never empty/root.
 ```
 
-   Only then start it (`docker compose up -d --force-recreate` or your
-   usual deploy path).
+   Only then start everything (`docker compose up -d --force-recreate`
+   or your usual deploy path).
 
 Do **not** reverse this order. Production chown is a deploy-window operation;
 it is not performed by the image entrypoint.
