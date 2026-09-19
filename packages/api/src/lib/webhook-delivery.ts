@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
 import {
@@ -465,6 +466,10 @@ function upsertActiveGroupLatest(
   if (!prev || isPreferredActiveGroupRow(row, prev)) map.set(key, row);
 }
 
+/**
+ * 重建 latestByWebhook / latestByGroup / latestForActiveByGroup。
+ * 滞回批量逐出后调用；#268 附带：调用方若仍超 maxRows 须立即钉回 capScanFutile。
+ */
 function rebuildIndexMaps(index: DeliveryLogIndex): void {
   // 测试钩：统计重建次数（滞回批量逐出负控 (g)）
   deliveryLogRowCapForTests.rebuilds += 1;
@@ -800,7 +805,18 @@ export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
  * 仍扫全盘、仍按 `run_(\d+)` 取最大值。
  * 禁止退回内存截断视图（截断欠数会撞历史 run 号、boot 丢重试链）。
  */
-export function scanMaxRunNumFromDisk(webhookId: string, eventId: string): number {
+/**
+ * 盘源流式求某 webhookId+eventId 的最大 run_N（#268）。
+ * 内存 O(1)：64KiB 分块 + StringDecoder 跨 chunk 保多字节 UTF-8；语义等同全盘扫。
+ * @param webhookId 目标订阅 id（可含多字节）
+ * @param eventId 目标事件 id
+ * @param chunkSize 分块字节数；负控可注入小值以逼出跨 chunk 切分
+ */
+export function scanMaxRunNumFromDisk(
+  webhookId: string,
+  eventId: string,
+  chunkSize = 64 * 1024,
+): number {
   const path = deliveryLogPath();
   if (!existsSync(path)) return 0;
 
@@ -808,14 +824,15 @@ export function scanMaxRunNumFromDisk(webhookId: string, eventId: string): numbe
   let maxRunNum = 0;
   let leftover = '';
   let totalBytes = 0;
-  const chunkSize = 64 * 1024;
   const buf = Buffer.alloc(chunkSize);
+  // StringDecoder 保留跨 chunk 残缺 UTF-8 字节，避免 toString 换成 U+FFFD
+  const decoder = new StringDecoder('utf8');
   try {
     for (;;) {
       const n = readSync(fd, buf, 0, chunkSize, null);
       if (n <= 0) break;
       totalBytes += n;
-      const text = leftover + buf.toString('utf8', 0, n);
+      const text = leftover + decoder.write(buf.subarray(0, n));
       const lines = text.split('\n');
       // 末段可能是半行，留到下一轮
       leftover = lines.pop() ?? '';
@@ -823,7 +840,8 @@ export function scanMaxRunNumFromDisk(webhookId: string, eventId: string): numbe
         maxRunNum = considerRunNumLine(line, webhookId, eventId, maxRunNum);
       }
     }
-    // 文件未必以换行结尾：收尾残留行
+    // 冲刷 decoder 内残余码点，再收尾可能无换行的最后一行
+    leftover += decoder.end();
     if (leftover.length > 0) {
       maxRunNum = considerRunNumLine(leftover, webhookId, eventId, maxRunNum);
     }
@@ -836,7 +854,10 @@ export function scanMaxRunNumFromDisk(webhookId: string, eventId: string): numbe
   return maxRunNum;
 }
 
-/** 流式扫描单行：坏行跳过（与 parseDeliveryLogText fail-open 一致）。 */
+/**
+ * 流式扫描单行：坏行跳过（与 parseDeliveryLogText fail-open 一致）。
+ * 按 run_(\d+) 取最大 runNum；webhookId/eventId 不匹配则忽略。
+ */
 function considerRunNumLine(
   line: string,
   webhookId: string,
@@ -975,6 +996,8 @@ export function parseDeliveryListCursor(cursor: string): ParsedDeliveryListCurso
   if (!Number.isSafeInteger(attempt)) throw new InvalidDeliveryCursorError('parse_fail');
   const cursorTs = Date.parse(ts);
   if (!Number.isFinite(cursorTs)) throw new InvalidDeliveryCursorError('parse_fail');
+  // 日历无效值（如 2024-02-30）会被 Date.parse 归一化；round-trip 钉死生产 toISOString 域
+  if (new Date(ts).toISOString() !== ts) throw new InvalidDeliveryCursorError('parse_fail');
   return { form: 'full', deliveryId, attempt, ts, cursorTs };
 }
 

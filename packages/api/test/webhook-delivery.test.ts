@@ -34,6 +34,7 @@ const {
   readAllDeliveryLogRowsFromDisk,
   readDeliveryLogRows,
   InvalidDeliveryCursorError,
+  scanMaxRunNumFromDisk,
   resetDeliveryLogIndexForTests,
   getDeliveryLogIoForTests,
   resetDeliveryLogIoForTests,
@@ -2727,5 +2728,45 @@ describe('webhook-delivery: #217 in-memory delivery-log row cap', () => {
     expect(getDeliveryLogRowCapForTests().scanCount).toBe(0);
     expect(getDeliveryLogRowCapForTests().rebuilds).toBe(0);
     expect(readAllDeliveryLogRows().length).toBe(5);
+  });
+
+  // #268 R2：多字节 UTF-8 webhookId 跨分块边界仍能匹配 maxRunNum（StringDecoder）
+  test('#268 R2: multi-byte webhookId split across chunk still yields maxRunNum', () => {
+    const webhookId = 'whk_测🌿试'; // 多字节序列，逼出跨 chunk 切 UTF-8
+    const eventId = 'evt_utf8_chunk';
+    const ts = new Date().toISOString();
+    const row = {
+      ts,
+      webhookId,
+      eventId,
+      runId: 'run_7',
+      deliveryId: `dlv_${randomUUID()}`,
+      type: 'mail.received',
+      address: 'alice@test.example',
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: ts,
+      attempt: 1,
+      outcome: 'success',
+      status: 200,
+      durationMs: 1,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: null,
+    };
+    const line = `${JSON.stringify(row)}\n`;
+    const path = join(TEST_DATA_DIR, 'webhook-deliveries.jsonl');
+    const fileBuf = Buffer.from(line, 'utf8');
+    // 在「测」(3 字节) 的首字节后切开，旧 toString 会变 U+FFFD 导致 webhookId 失配
+    const cutAt = fileBuf.indexOf(Buffer.from('测', 'utf8'));
+    expect(cutAt).toBeGreaterThan(0);
+    writeFileSync(path, fileBuf);
+    expect(scanMaxRunNumFromDisk(webhookId, eventId, cutAt + 1)).toBe(7);
+    expect(scanMaxRunNumFromDisk('whk_other', eventId, cutAt + 1)).toBe(0);
   });
 });
