@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createConfigurableFakeMailbox } from './helpers/imap-fake-mailbox.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-delg-test';
@@ -31,10 +32,13 @@ let fakeMessages: any[] = [
   },
 ];
 
+/** #201：共享可注入 UIDVALIDITY（默认 17n）。 */
+const fakeMailbox = createConfigurableFakeMailbox();
+
 class FakeImapFlow extends EventEmitter {
   // 选中会话必须暴露当前代际，供后向列表在 search 前校验（#144 / REPAIR-FIXTURES-01）。
   get mailbox() {
-    return { uidValidity: 17n };
+    return fakeMailbox.mailbox;
   }
   async connect() {}
   async getMailboxLock() {
