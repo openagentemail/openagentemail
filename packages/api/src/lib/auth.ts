@@ -79,12 +79,17 @@ export function resolveAccessToken(
   token: string,
   options: ResolveTokenOptions = {},
 ): ResolveAccessResult {
-  if (config.apiKeys.has(token)) {
-    return {
-      status: 'ok',
-      auth: { kind: 'admin' },
-      attribution: { kind: 'admin' },
-    };
+  // #227：admin key 照 resolveUiSessionTokenByHash 做 sha256Hex+hashEquals 循环
+  //（单次比较 timing-safe；命中即 return 与既有 pattern 一致），取代 Set.has 短路。
+  // accept/reject 语义不变。
+  for (const key of config.apiKeys) {
+    if (hashEquals(sha256Hex(key), sha256Hex(token))) {
+      return {
+        status: 'ok',
+        auth: { kind: 'admin' },
+        attribution: { kind: 'admin' },
+      };
+    }
   }
 
   let identity: ReturnType<typeof findIdentityByToken>;

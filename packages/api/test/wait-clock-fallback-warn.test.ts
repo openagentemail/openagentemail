@@ -1,5 +1,6 @@
 /**
- * #214：performance.now 缺失时 warn-once 回退墙钟；不得 throw。
+ * #214：performance.now 缺失时 warn-once 回退墙钟（首次即钉 Date 族）。
+ * #226②：同实例内再 flip 才 throw；本用例只覆盖首次回退路径。
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 

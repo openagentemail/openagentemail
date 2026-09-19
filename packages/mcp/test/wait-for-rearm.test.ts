@@ -1,20 +1,15 @@
 /**
  * #203 RED：客户端 waitFor 分块再武装、最终超时文案、中止不再发后续请求。
- * #212：经 mock.module 注入 waitMonotonicNow，生产面无 setter。
+ * #225：经共享 wait-clock mock helper 注入 waitMonotonicNow，生产面无 setter。
  */
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { join } from "node:path";
+import { installWaitClockMock } from "../../api/test/support/wait-clock-mock.ts";
 
-/** mock.module 闭包：未注入时走真实 performance.now。 */
-let waitMonoInjected: (() => number) | undefined;
-type WaitMonotonicMs = number & { readonly __brand: "WaitMonotonicMs" };
-const asWaitMonotonicMs = (n: number): WaitMonotonicMs => n as WaitMonotonicMs;
-
-mock.module("../../api/src/lib/wait-clock.ts", () => ({
-  waitMonotonicNow: (): WaitMonotonicMs =>
-    asWaitMonotonicMs(waitMonoInjected ? waitMonoInjected() : performance.now()),
-  waitMonotonicDeadlineAfter: (timeoutMs: number): WaitMonotonicMs =>
-    asWaitMonotonicMs((waitMonoInjected ? waitMonoInjected() : performance.now()) + timeoutMs),
-}));
+/** #225：共享 wait-clock mock（导出面断言 + 可注入单调钟）。 */
+const { setWaitMonotonicNowForTests } = installWaitClockMock(
+  join(import.meta.dir, "../../api/src/lib/wait-clock.ts"),
+);
 
 const { ApiError, OpenAgentEmailClient } = await import("../../api/src/mcp/client.ts");
 
@@ -38,7 +33,7 @@ function installClock(start = 1_700_000_000_000) {
   let wall = start;
   let mono = 0;
   Date.now = () => wall;
-  waitMonoInjected = () => mono;
+  setWaitMonotonicNowForTests(() => mono);
   return {
     advance(ms: number) {
       wall += ms;
@@ -54,7 +49,7 @@ function installClock(start = 1_700_000_000_000) {
     },
     restore() {
       Date.now = realDateNow;
-      waitMonoInjected = undefined;
+      setWaitMonotonicNowForTests();
     },
   };
 }
@@ -109,7 +104,7 @@ const realAddEventListener = EventTarget.prototype.addEventListener;
 const realRemoveEventListener = EventTarget.prototype.removeEventListener;
 afterEach(() => {
   Date.now = realDateNow;
-  waitMonoInjected = undefined;
+  setWaitMonotonicNowForTests();
   EventTarget.prototype.addEventListener = realAddEventListener;
   EventTarget.prototype.removeEventListener = realRemoveEventListener;
 });

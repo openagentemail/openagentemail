@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveWaitR9DataDir } from './wait-r9-data-dir.ts';
+import { installWaitClockMock } from './wait-clock-mock.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-r9';
@@ -179,16 +180,10 @@ class FakeImapFlow extends EventEmitter {
 
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
-/** #212 A 路线：测试进程内可变单调钟，生产 wait-clock 无 setter。 */
-type WaitMonotonicMs = number & { readonly __brand: 'WaitMonotonicMs' };
-let waitMonoInjected: (() => number) | undefined;
-const asWaitMonotonicMs = (n: number): WaitMonotonicMs => n as WaitMonotonicMs;
-mock.module('../../src/lib/wait-clock.ts', () => ({
-  waitMonotonicNow: (): WaitMonotonicMs =>
-    asWaitMonotonicMs(waitMonoInjected ? waitMonoInjected() : performance.now()),
-  waitMonotonicDeadlineAfter: (timeoutMs: number): WaitMonotonicMs =>
-    asWaitMonotonicMs((waitMonoInjected ? waitMonoInjected() : performance.now()) + timeoutMs),
-}));
+/** #225：共享 wait-clock mock（导出面断言 + 可注入单调钟）。 */
+const { setWaitMonotonicNowForTests } = installWaitClockMock(
+  join(import.meta.dir, '../../src/lib/wait-clock.ts'),
+);
 
 const { createApp } = await import('../../src/app.ts');
 const { config } = await import('../../src/lib/config.ts');
@@ -207,11 +202,6 @@ const {
   ClientDisconnectedError,
 } = await import('../../src/lib/imap.ts');
 const { waitMonotonicNow } = await import('../../src/lib/wait-clock.ts');
-
-/** 测试注入/恢复单调钟（mock.module 闭包，非生产导出）。 */
-function setWaitMonotonicNowForTests(fn?: () => number): void {
-  waitMonoInjected = fn;
-}
 
 const adminKey = [...config.apiKeys][0]!;
 const app = createApp({ uiEnabled: false });
