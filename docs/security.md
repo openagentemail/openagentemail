@@ -24,6 +24,10 @@ retention window before reusing one.
 
 Cross-domain reuse of the same localpart is allowed. Each identity's ntfy agent route is keyed by its full address so notifications do not cross domains; do not rely on bare localpart when more than one domain is configured.
 
+## notifications.json fail-closed and deleteIdentity (#249)
+
+`DATA_DIR/.../notifications.json` is the commit record for agent routes and pending reader revokes. If that file is corrupt or not writable, `deleteIdentity` **fails closed** (identity record kept; retryable) rather than deleting the identity while leaving ntfy reader credentials untracked. This is an intentional availability trade-off: prefer a blocked delete over an untracked live reader. Repair or restore the store, then retry the delete.
+
 ## DATA_DIR 单写者约定
 
 `DATA_DIR` 下所有 store（`identities.json` / `oauth.json` / `audit.jsonl` / `ui-sessions.json`，以及 `sent-registry.json` / `notification-log.jsonl` / `notification-devices.json` / `send-log.jsonl`）均为**单写者**设计：进程内串行、tmp+rename、文件 0600 / 目录 0700。**不支持**多容器或多进程共享同一 `DATA_DIR`。
