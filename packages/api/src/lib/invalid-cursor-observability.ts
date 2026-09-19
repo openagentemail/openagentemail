@@ -74,6 +74,7 @@ export function logInvalidCursorRejection(input: LogInvalidCursorRejectionInput)
   else logSink.info(line);
 }
 
+/** 留存窗下沿（ms）：now - retentionMs。 */
 function retentionCutoffMs(retentionMs: number, now: number): number {
   return now - retentionMs;
 }
@@ -103,6 +104,7 @@ function mailRetentionMs(): number {
   return config.retentionDays * 86_400_000;
 }
 
+/** 按族选取盘留存窗 ms（deliveries / send / mail）。 */
 function retentionMsFor(family: InvalidCursorFamily): number {
   switch (family) {
     case 'deliveries':
