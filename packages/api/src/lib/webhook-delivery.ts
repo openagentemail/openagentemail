@@ -753,6 +753,69 @@ export function readAllDeliveryLogRowsFromDisk(): WebhookDeliveryLogRow[] {
   return parseDeliveryLogText(buf.toString('utf8'));
 }
 
+/**
+ * #268 P2-2：盘源逐行流式扫描求 (webhookId, eventId) 的 max run_N。
+ * 内存 O(1)，不累积行数组；语义与全量读后 filter+match 逐字一致：
+ * 仍扫全盘、仍按 `run_(\d+)` 取最大值。
+ * 禁止退回内存截断视图（截断欠数会撞历史 run 号、boot 丢重试链）。
+ */
+export function scanMaxRunNumFromDisk(webhookId: string, eventId: string): number {
+  const path = deliveryLogPath();
+  if (!existsSync(path)) return 0;
+
+  const fd = openSync(path, 'r');
+  let maxRunNum = 0;
+  let leftover = '';
+  let totalBytes = 0;
+  const chunkSize = 64 * 1024;
+  const buf = Buffer.alloc(chunkSize);
+  try {
+    for (;;) {
+      const n = readSync(fd, buf, 0, chunkSize, null);
+      if (n <= 0) break;
+      totalBytes += n;
+      const text = leftover + buf.toString('utf8', 0, n);
+      const lines = text.split('\n');
+      // 末段可能是半行，留到下一轮
+      leftover = lines.pop() ?? '';
+      for (const line of lines) {
+        maxRunNum = considerRunNumLine(line, webhookId, eventId, maxRunNum);
+      }
+    }
+    // 文件未必以换行结尾：收尾残留行
+    if (leftover.length > 0) {
+      maxRunNum = considerRunNumLine(leftover, webhookId, eventId, maxRunNum);
+    }
+  } finally {
+    closeSync(fd);
+  }
+  // 与全量读同口径计入盘读统计（仍是一次全盘扫描）
+  deliveryLogIoForTests.fullReads += 1;
+  deliveryLogIoForTests.bytesRead += totalBytes;
+  return maxRunNum;
+}
+
+/** 流式扫描单行：坏行跳过（与 parseDeliveryLogText fail-open 一致）。 */
+function considerRunNumLine(
+  line: string,
+  webhookId: string,
+  eventId: string,
+  maxRunNum: number,
+): number {
+  const trimmed = line.trim();
+  if (!trimmed) return maxRunNum;
+  try {
+    const row = JSON.parse(trimmed) as WebhookDeliveryLogRow;
+    if (row.webhookId !== webhookId || row.eventId !== eventId) return maxRunNum;
+    if (typeof row.runId !== 'string') return maxRunNum;
+    const m = row.runId.match(/^run_(\d+)$/);
+    if (!m) return maxRunNum;
+    return Math.max(maxRunNum, Number.parseInt(m[1]!, 10));
+  } catch {
+    return maxRunNum;
+  }
+}
+
 function sanitizeDeliveryLogRow(row: WebhookDeliveryLogRow): WebhookDeliveryLogRow {
   return {
     ts: row.ts,
@@ -2667,17 +2730,8 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
   // Calculate new runId
   // maxRunNum 必须盘源计算——截断视图欠数会与盘历史 run 撞号，合并组经 attempt
   // 优先比较可误判 pending 为终态（boot 重建丢重试链），故禁止吃内存视图。
-  const diskRows = readAllDeliveryLogRowsFromDisk();
-  const matchingRuns = diskRows.filter(
-    (r) => r.webhookId === original.webhookId && r.eventId === original.eventId,
-  );
-  let maxRunNum = 0;
-  for (const r of matchingRuns) {
-    const m = r.runId.match(/^run_(\d+)$/);
-    if (m) {
-      maxRunNum = Math.max(maxRunNum, Number.parseInt(m[1]!, 10));
-    }
-  }
+  // #268：流式扫描求最大值（O(1) 内存），语义与全量读 filter+match 逐字一致。
+  const maxRunNum = scanMaxRunNumFromDisk(original.webhookId, original.eventId);
   const newRunId = `run_${maxRunNum + 1}`;
   const newDeliveryId = `dlv_${randomUUID()}`;
 
