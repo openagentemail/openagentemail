@@ -173,19 +173,24 @@ docker run --rm -v <project>_api-data:/data alpine \
 # Expect uid/gid columns to show 1000 / 1000 for migrated paths.
 ```
 
-5. Read back the migration — both checks must pass:
+5. Read back the migration on the volume — must pass:
 
 ```bash
 docker run --rm -v <project>_api-data:/data alpine \
   sh -c 'find /data ! -user 1000 | head'
 # Expect no output: zero files still owned by a non-1000 user.
-
-docker inspect <new-api-image> --format '{{.Config.User}}'
-# Expect 1000 (or bun) — never empty/root.
 ```
 
-6. Only then pull/build and start the new API image (`docker compose up -d
-   --force-recreate` or your usual deploy path).
+6. Pull/build the new API image, then verify it declares the runtime user
+   **before** starting it:
+
+```bash
+docker inspect <new-api-image> --format '{{.Config.User}}'
+# Expect bun (uid 1000) — never empty/root.
+```
+
+   Only then start it (`docker compose up -d --force-recreate` or your
+   usual deploy path).
 
 Do **not** reverse this order. Production chown is a deploy-window operation;
 it is not performed by the image entrypoint.
