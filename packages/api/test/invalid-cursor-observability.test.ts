@@ -303,6 +303,23 @@ describe('#202/#270 invalid_cursor observability helper', () => {
     // 残缺 ISO（Date.parse 可解）→ parse_fail
     expect(() => parseDeliveryListCursor(`${id}|1|2020-01-01`)).toThrow(InvalidDeliveryCursorError);
 
+    // 超长数字 attempt（Number→Infinity / 非 SafeInteger）→ parse_fail，不得进查找误记 stale
+    const hugeAttempt = '9'.repeat(309);
+    expect(Number(hugeAttempt)).toBe(Infinity);
+    let hugeKind: string | undefined;
+    try {
+      parseDeliveryListCursor(`${id}|${hugeAttempt}|${new Date(now - 1000).toISOString()}`);
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidDeliveryCursorError);
+      hugeKind = (err as InvalidDeliveryCursorError).kind;
+    }
+    expect(hugeKind).toBe('parse_fail');
+    // 刚好越出 MAX_SAFE_INTEGER 亦拒
+    const overSafe = String(Number.MAX_SAFE_INTEGER + 1);
+    expect(() =>
+      parseDeliveryListCursor(`${id}|${overSafe}|${new Date(now - 1000).toISOString()}`),
+    ).toThrow(InvalidDeliveryCursorError);
+
     // 规范 UUID + attempt≥1 + 完整 ISO 仍可解析
     const ts = new Date(now - 1000).toISOString();
     expect(parseDeliveryListCursor(`${id}|1|${ts}`)).toEqual({

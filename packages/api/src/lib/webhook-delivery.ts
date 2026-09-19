@@ -971,6 +971,8 @@ export function parseDeliveryListCursor(cursor: string): ParsedDeliveryListCurso
   if (!DELIVERY_ATTEMPT_RE.test(attemptRaw)) throw new InvalidDeliveryCursorError('parse_fail');
   if (!DELIVERY_ISO_TS_RE.test(ts)) throw new InvalidDeliveryCursorError('parse_fail');
   const attempt = Number(attemptRaw);
+  // 309+ 位纯数字经 Number()→Infinity，不得当合法 full cursor 进查找（会误记 stale）
+  if (!Number.isSafeInteger(attempt)) throw new InvalidDeliveryCursorError('parse_fail');
   const cursorTs = Date.parse(ts);
   if (!Number.isFinite(cursorTs)) throw new InvalidDeliveryCursorError('parse_fail');
   return { form: 'full', deliveryId, attempt, ts, cursorTs };
