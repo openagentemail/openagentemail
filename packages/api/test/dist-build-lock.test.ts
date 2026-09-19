@@ -52,8 +52,18 @@ describe('#272 dist-build-lock port lock', () => {
     const helperHref = pathToFileURL(
       join(import.meta.dir, 'support/dist-build-lock.ts'),
     ).href;
-    const markerPath = join(import.meta.dir, `tmp-overlap-${port}.marker`);
-    const script = `
+    // 崩溃残留 marker 会使下次全员 existsSync→OVERLAP；启动前清 + finally 再清
+    const { mkdtempSync, unlinkSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const markerDir = mkdtempSync(join(tmpdir(), `dist-lock-overlap-${port}-`));
+    const markerPath = join(markerDir, 'overlap.marker');
+    try {
+      try {
+        unlinkSync(markerPath);
+      } catch {
+        // ignore
+      }
+      const script = `
       import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
       import { withDistBuildLock } from ${JSON.stringify(helperHref)};
       withDistBuildLock({ port: ${port}, pollMs: 5, timeoutMs: 30_000 }, () => {
@@ -69,14 +79,26 @@ describe('#272 dist-build-lock port lock', () => {
         try { unlinkSync(${JSON.stringify(markerPath)}); } catch {}
       });
     `;
-    const procs = Array.from({ length: 8 }, () =>
-      Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' }),
-    );
-    const exits = await Promise.all(procs.map((p) => p.exited));
-    expect(exits.every((e) => e === 0)).toBe(true);
-    const outs = await Promise.all(procs.map((p) => new Response(p.stdout).text()));
-    expect(outs.every((o) => o === 'OK')).toBe(true);
-    expect(outs.some((o) => o.includes('OVERLAP'))).toBe(false);
+      const procs = Array.from({ length: 8 }, () =>
+        Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' }),
+      );
+      const exits = await Promise.all(procs.map((p) => p.exited));
+      expect(exits.every((e) => e === 0)).toBe(true);
+      const outs = await Promise.all(procs.map((p) => new Response(p.stdout).text()));
+      expect(outs.every((o) => o === 'OK')).toBe(true);
+      expect(outs.some((o) => o.includes('OVERLAP'))).toBe(false);
+    } finally {
+      try {
+        unlinkSync(markerPath);
+      } catch {
+        // ignore
+      }
+      try {
+        rmSync(markerDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
   }, 60_000);
 
   test('持锁进程 kill -9 后锁即释放（无 stale 回收）', async () => {
