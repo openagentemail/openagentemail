@@ -149,7 +149,14 @@ write) until ownership is fixed — that is intentional, not a silent fallback.
    `openagentemail` → volume `openagentemail_api-data`; API-only stacks use
    their `-p` / `COMPOSE_PROJECT_NAME` prefix, e.g. `oae-alpha_api-data`).
 2. Stop writers that mount the volume (at minimum the `api` service; full
-   stack: also stop anything else writing `api-data` during the window).
+   stack: also stop anything else writing `api-data` during the window) —
+   and keep them down until they are **recreated** in step 6. Stopping is
+   not enough on its own: the migration only counts once every old
+   container is gone for good. `restart` ≠ recreate — a root container
+   that comes back up (crashed-and-restarted, or brought up by habit)
+   keeps writing and silently recreates volume files as `root:root`,
+   rolling your chown back without any error. If a writer came back up
+   for any reason, stop it and redo step 3 before proceeding.
 3. One-shot chown to the runtime user:
 
 ```bash
@@ -166,7 +173,30 @@ docker run --rm -v <project>_api-data:/data alpine \
 # Expect uid/gid columns to show 1000 / 1000 for migrated paths.
 ```
 
-5. Only then pull/build and start the new API image (`docker compose up -d`
+5. Read back the migration on the volume — must pass:
+
+```bash
+docker run --rm -v <project>_api-data:/data alpine \
+  sh -c 'find /data ! -user 1000 | head'
+# Expect no output: zero files still owned by a non-1000 user.
+```
+
+6. Pull/build the new images, then verify the API image declares the
+   runtime user **before** starting anything. Build the whole project
+   (`docker compose build` with no service name) — or at minimum `api`
+   and `ntfy-provision` together: they share one Dockerfile, and the
+   `--force-recreate` below re-runs the one-shot ntfy-provision container
+   too, so it must come from the same non-root image batch. A stale
+   root-based provision image re-running here would write the volume as
+   root and roll your migration back — the same failure this runbook
+   exists to prevent.
+
+```bash
+docker inspect <new-api-image> --format '{{.Config.User}}'
+# Expect bun (uid 1000) — never empty/root.
+```
+
+   Only then start everything (`docker compose up -d --force-recreate`
    or your usual deploy path).
 
 Do **not** reverse this order. Production chown is a deploy-window operation;
