@@ -12,8 +12,6 @@ import { withDistBuildLock } from "./support/dist-build-lock.ts";
 const here = dirname(fileURLToPath(import.meta.url));
 const mcpRoot = join(here, "..");
 const distMain = join(mcpRoot, "dist/main.js");
-/** #226① R2：与同包其余 dist 写入测共用锁。 */
-const LOCK_DIR = join(mcpRoot, ".dist-build.lock");
 const SERVER_ENV_KEYS = [
   "DOMAIN",
   "API_KEYS",
@@ -135,8 +133,8 @@ async function handshakeCleanBoot(command: string, args: string[]): Promise<{
 }
 
 test("#168 净环境 dist bundle 完成 initialize + tools/list，且不含服务端 parseConfig", async () => {
-  // #226① R2：条件 build 写 dist 必须持包内锁（持锁内再检查，防 TOCTOU）
-  withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+  // #272：条件 build 写 dist 必须持包内端口锁（持锁内再检查，防 TOCTOU）
+  withDistBuildLock({}, () => {
     if (existsSync(distMain)) return;
     const build = Bun.spawnSync(["bun", "run", "build"], {
       cwd: mcpRoot,

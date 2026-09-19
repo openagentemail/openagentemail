@@ -11,12 +11,10 @@ import { withDistBuildLock } from './support/dist-build-lock.ts';
 const mcpPkg = join(import.meta.dir, '..');
 /** 生产 mutator 历史符号；dist 命中即红。 */
 const MUTATOR = 'setWaitMonotonicNowForTests';
-/** 包内 dist build 互斥锁目录（不进构建产物）。 */
-const LOCK_DIR = join(mcpPkg, '.dist-build.lock');
 
 describe('mcp dist has no wait-clock test mutator (#212)', () => {
   test('mcp dist/main.js 不含 setWaitMonotonicNowForTests', () => {
-    withDistBuildLock({ lockDir: LOCK_DIR }, () => {
+    withDistBuildLock({}, () => {
       const mcpBuild = Bun.spawnSync(['bun', 'run', 'build'], {
         cwd: mcpPkg,
         stdout: 'pipe',
