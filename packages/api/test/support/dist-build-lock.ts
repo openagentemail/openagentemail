@@ -1,13 +1,18 @@
 /**
  * #272：dist 钉子测试阶段 bun build 的包内串行锁。
  *
- * 协议：`Bun.serve({ port, hostname: '127.0.0.1' })` 占锁（同步；EADDRINUSE 抛错）。
- * 「Failed to start server / port in use」= 锁被占而非服务冲突（本端口专用于 dist build 互斥）。
+ * 协议：`net.createServer().listen(固定端口, '127.0.0.1')` 占锁。
+ * EADDRINUSE = 锁被占而非服务冲突（本端口专用于 dist build 互斥）。
  * 内核保证持锁进程死即释放——无 stale 回收 / PID 判断整层。
+ * 同步路径：Worker 线程内 listen（同进程），主线程 Atomics.wait；
+ *   临界区内可安全 spawnSync(bun build)；kill -9 整进程即释端口。
  * 零构建面变化（不改 build 脚本/产物路径）。
  *
  * api=43301 / mcp=43302：双包独立高位冷门端口，避免两包 build 串在同一把锁上。
  */
+import { createServer, type Server } from 'node:net';
+import { Worker } from 'node:worker_threads';
+
 export const DIST_BUILD_LOCK_PORT = 43301;
 
 export type DistBuildLockOptions = {
@@ -19,35 +24,102 @@ export type DistBuildLockOptions = {
   timeoutMs?: number;
 };
 
-type HeldServer = { stop: (closeActiveConnections?: boolean) => void; port: number };
+type HeldLock = { release: () => void };
+
+/** Worker 内 listen 脚本：state[0] 0=pending 1=ok 2=busy 3=err */
+const HOLDER_WORKER_SOURCE = `
+  const { parentPort, workerData } = require('node:worker_threads');
+  const { createServer } = require('node:net');
+  const state = new Int32Array(workerData.sab);
+  const server = createServer();
+  server.once('error', (err) => {
+    const busy = err && (err.code === 'EADDRINUSE' || /EADDRINUSE/i.test(String(err.message || '')));
+    Atomics.store(state, 0, busy ? 2 : 3);
+    Atomics.notify(state, 0);
+  });
+  server.listen(workerData.port, '127.0.0.1', () => {
+    Atomics.store(state, 0, 1);
+    Atomics.notify(state, 0);
+  });
+  parentPort.on('message', (msg) => {
+    if (msg === 'release') {
+      try { server.close(); } catch (_) {}
+      process.exit(0);
+    }
+  });
+`;
 
 /**
- * 尝试占锁。成功返回 Bun Server；端口被占返回 null。
- * EADDRINUSE / "port in use" = 锁被占而非服务冲突（见文件头）。
+ * 同步尝试占 127.0.0.1:port；成功返回句柄，EADDRINUSE 返回 null。
+ * EADDRINUSE = 锁被占而非服务冲突（见文件头）。
  */
-function tryAcquirePort(port: number): HeldServer | null {
-  try {
-    // fetch 永不被业务调用；仅用 listen 作互斥原语
-    return Bun.serve({
-      port,
-      hostname: '127.0.0.1',
-      fetch() {
-        return new Response('dist-build-lock');
+function tryAcquirePortSync(port: number): HeldLock | null {
+  const sab = new SharedArrayBuffer(8);
+  const state = new Int32Array(sab);
+  const worker = new Worker(HOLDER_WORKER_SOURCE, {
+    eval: true,
+    workerData: { sab, port },
+  });
+  // 最多等 2s 报到
+  Atomics.wait(state, 0, 0, 2_000);
+  const v = Atomics.load(state, 0);
+  if (v === 1) {
+    return {
+      release: () => {
+        try {
+          worker.postMessage('release');
+        } catch {
+          // ignore
+        }
+        try {
+          void worker.terminate();
+        } catch {
+          // ignore
+        }
       },
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Bun：Failed to start server. Is port N in use?
-    if (/port .+ in use/i.test(msg) || /EADDRINUSE/i.test(msg)) return null;
-    throw err;
+    };
   }
+  try {
+    void worker.terminate();
+  } catch {
+    // ignore
+  }
+  if (v === 2) return null;
+  if (v === 0) {
+    throw new Error(`[dist-build-lock] timeout acquiring 127.0.0.1:${port}`);
+  }
+  throw new Error(`[dist-build-lock] listen failed on 127.0.0.1:${port} (state=${v})`);
 }
 
-function releasePort(server: HeldServer): void {
+function isAddrInUse(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { message?: string };
+  return e?.code === 'EADDRINUSE' || /EADDRINUSE/i.test(String(e?.message ?? err));
+}
+
+async function tryAcquirePortAsync(port: number): Promise<HeldLock | null> {
+  const server: Server = createServer();
   try {
-    server.stop(true);
-  } catch {
-    // 已被内核回收则忽略
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => resolve());
+    });
+    return {
+      release: () => {
+        try {
+          server.close();
+        } catch {
+          // ignore
+        }
+      },
+    };
+  } catch (err) {
+    try {
+      server.close();
+    } catch {
+      // ignore
+    }
+    if (isAddrInUse(err)) return null;
+    throw err;
   }
 }
 
@@ -57,10 +129,10 @@ function releasePort(server: HeldServer): void {
 export function withDistBuildLock<T>(options: DistBuildLockOptions, fn: () => T): T {
   const { port = DIST_BUILD_LOCK_PORT, pollMs = 50, timeoutMs = 180_000 } = options;
   const deadline = Date.now() + timeoutMs;
-  let held: HeldServer | null = null;
+  let held: HeldLock | null = null;
 
   for (;;) {
-    held = tryAcquirePort(port);
+    held = tryAcquirePortSync(port);
     if (held) break;
     if (Date.now() > deadline) {
       throw new Error(`[dist-build-lock] timeout waiting for 127.0.0.1:${port}`);
@@ -71,7 +143,7 @@ export function withDistBuildLock<T>(options: DistBuildLockOptions, fn: () => T)
   try {
     return fn();
   } finally {
-    releasePort(held);
+    held.release();
   }
 }
 
@@ -84,10 +156,10 @@ export async function withDistBuildLockAsync<T>(
 ): Promise<T> {
   const { port = DIST_BUILD_LOCK_PORT, pollMs = 50, timeoutMs = 180_000 } = options;
   const deadline = Date.now() + timeoutMs;
-  let held: HeldServer | null = null;
+  let held: HeldLock | null = null;
 
   for (;;) {
-    held = tryAcquirePort(port);
+    held = await tryAcquirePortAsync(port);
     if (held) break;
     if (Date.now() > deadline) {
       throw new Error(`[dist-build-lock] timeout waiting for 127.0.0.1:${port}`);
@@ -98,6 +170,6 @@ export async function withDistBuildLockAsync<T>(
   try {
     return await fn();
   } finally {
-    releasePort(held);
+    held.release();
   }
 }
