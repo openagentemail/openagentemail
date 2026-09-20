@@ -165,3 +165,25 @@
 - HEAD：`2f7860dd96539e8d45f397c85e10ddf3c33d5d67`
 - 分支：`w280-redeliver-404` · PR #295
 - 材料：`/home/ops/materials/280/completion.md`
+
+## 2026-09-20 · w285（#285 租约 journal O(N²) 索引化）
+
+### 我们实现了哪些功能？
+1. `tasks-internal.ts` 同代 renew/expiry 去重改为键控 Set（`canonicalLeaseEvent` / `claimedUntil`），追加改为 map 持有数组后原地 `push`。
+2. `expiryReceipts` 可观察插入序保真（`Map.values().flat()`）；`isSame*` 与 journal 写策略零改动。
+3. 聚焦测试三件：去重键 vs `.some()` 等价、索引与主结构一致性、expiryReceipts 顺序快照。
+4. Bench 复测：N=10⁴ m2=off slice log-log slope **1.015**（基线 1.998）；满链重建 83.5ms（基线 57–70s）。
+
+### 我们遇到了哪些错误？
+1. 聚焦顺序测试初版 `parseCaptured` 得 null（续约未先重建 durable / leaseSec 未拉长窗）。
+2. 全量套件预存红：`#206` 25s timeout（与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 对齐 `#156 claimThenRenew` 夹具：claim 后重建 durable、`leaseSec: 600` 拉长窗后再 parse。
+2. 预存 flake 编号记入 completion.md；不挡合入。独立 subagent 自审（`3b7424c7-c543-4ccd-960f-76302329e632`）。
+
+### 基线与证据
+- origin/main：`dde584540a3884e8f4e4339870f38bebfb5497ed`
+- HEAD：`b2be6a16de2de7c5c3cd01e29beb9c71061d8e5e`
+- 分支：`w285-lease-index` · PR #296
+- 材料：`/home/ops/materials/285/completion.md`
