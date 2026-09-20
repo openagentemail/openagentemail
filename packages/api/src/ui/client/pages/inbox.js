@@ -136,11 +136,11 @@
     /* 数值的诚实呈现：截断影响到该行时只给下界，下界为 0 时说 Unknown。 */
     if (!row) return { text: state.overviewStatus === 'loading' || state.overviewStatus === 'idle' ? t('tasks.action.loading') : t('overview.copy.unavailable'), flat: true };
     var value = row[key];
-    if (row.complete) return { text: formatNumber(value), unit: key === 'unseen' ? 'unseen' : 'msgs', flat: value === 0 };
+    if (row.complete) return { text: formatNumber(value), unit: key === 'unseen' ? t('inbox.unit.unseen') : t('inbox.unit.msgs'), flat: value === 0 };
     if (value > 0) {
       return {
         text: '≥' + formatNumber(value),
-        unit: key === 'unseen' ? 'unseen' : 'msgs',
+        unit: key === 'unseen' ? t('inbox.unit.unseen') : t('inbox.unit.msgs'),
         title: t('inbox.title.lowerBoundThisScanHitIts')
       };
     }

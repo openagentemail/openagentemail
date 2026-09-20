@@ -304,8 +304,8 @@ describe('console i18n R2 P1×4 (#137)', () => {
       /home-link|home-count|seen-toggle|tab-headers|delete-action|row-flat|is-selected/,
       /^noopener noreferrer$/,
       /^T\d{2}:\d{2}:\d{2}/,
-      /^(urgent|normal|low|active|failed|completed|all|inbox|sent|admin)$/i,
-      /^[a-z0-9_.@:-]+$/, // 无空格标识符 / 路径片段 / email-ish
+      // 显式协议标识（原 catch-all /^[a-z0-9_.@:-]+$/ 已删：∩ looksLikeUiCopy 命中为空，且会放行可见单位词）
+      /^(urgent|normal|low|active|failed|completed|all|inbox|sent|admin|unseen|input-required|working|submitted|reminder|closed|queued)$/i,
       /^https?:\/\//,
       /^\/ui\//,
       /^\?/,
@@ -349,7 +349,7 @@ describe('console i18n R2 P1×4 (#137)', () => {
       return out;
     }
 
-    /** 用户可见文案启发式：多词句 / Title Case 词；丢弃含换行伪影与代码碎片。 */
+    /** 用户可见文案启发式：多词句 / Title Case 词 / 已知单位词；丢弃含换行伪影与代码碎片。 */
     function looksLikeUiCopy(lit: string): boolean {
       if (lit.includes('\n') || lit.includes('\r')) return false;
       if (/[{}=;<>]|:\s|"/.test(lit)) return false; // 代码/属性碎片
@@ -359,6 +359,8 @@ describe('console i18n R2 P1×4 (#137)', () => {
       }
       if (/\s/.test(lit)) return true;
       if (/^[A-Z][a-z][A-Za-z-]*$/.test(lit)) return true; // Blocked / Health / Date
+      // 可见单位词（原 catch-all 会误放行；须进字典）
+      if (/^(unseen|msgs)$/.test(lit)) return true;
       return false;
     }
 
@@ -396,6 +398,15 @@ describe('console i18n R2 P1×4 (#137)', () => {
     const connectSrc = readFileSync(join(root, 'pages/connect.js'), 'utf8');
     expect(literals(connectSrc).filter((s) => s === 'Copy setup')).toEqual([]);
     expect(connectSrc).toContain("t('connect.copy.copySetup')");
+
+    // B-R4 红证：countParts 可见单位词 unseen/msgs 不得裸字面（修前红 / 修后绿）
+    const inboxSrc = readFileSync(join(root, 'pages/inbox.js'), 'utf8');
+    expect(inboxSrc).toContain("t('inbox.unit.unseen')");
+    expect(inboxSrc).toContain("t('inbox.unit.msgs')");
+    expect(inboxSrc).not.toMatch(/unit:\s*key\s*===\s*'unseen'\s*\?\s*'unseen'\s*:\s*'msgs'/);
+    // 通扫亦须能抓住裸 'msgs'（不在协议白名单）；修后 offenders 无 msgs
+    expect(offenders.filter((o) => o.includes('"msgs"') || o.includes("'msgs'"))).toEqual([]);
+    expect(literals(inboxSrc).filter((s) => s === 'msgs')).toEqual([]);
 
     expect(offenders).toEqual([]);
 
@@ -846,5 +857,30 @@ describe('console i18n R2 P1×4 (#137)', () => {
         `No tasks in "${filter}" for this period.`,
       );
     }
+  });
+
+  /** B-R4：单位词字典化 + sent 文件夹/时间戳分键。 */
+  test('B-R4 P1-1/P1-2：inbox.unit.* 与 inbox.label.sentAt', () => {
+    expect(I18N_EN['inbox.unit.unseen']).toBe('unseen');
+    expect(I18N_EN['inbox.unit.msgs']).toBe('msgs');
+    expect(I18N_EN['inbox.label.sentAt']).toBe('Sent');
+    expect(I18N_EN['inbox.label.sent']).toBe('Sent'); // 文件夹键不动
+
+    const inboxSrc = readFileSync(
+      join(import.meta.dir, '../src/ui/client/pages/inbox.js'),
+      'utf8',
+    );
+    expect(inboxSrc).toContain("t('inbox.unit.unseen')");
+    expect(inboxSrc).toContain("t('inbox.unit.msgs')");
+    expect(inboxSrc).not.toMatch(/\?\s*'unseen'\s*:\s*'msgs'/);
+
+    const appSrc = readFileSync(
+      join(import.meta.dir, '../src/ui/client/app.js'),
+      'utf8',
+    );
+    expect(appSrc).toContain("appendMeta(meta, t('inbox.label.sentAt'), row.sentAt)");
+    expect(appSrc).not.toMatch(/appendMeta\(meta,\s*t\('inbox\.label\.sent'\),\s*row\.sentAt\)/);
+    // 文件夹面仍用原键
+    expect(inboxSrc).toContain("t('inbox.label.sent')");
   });
 });

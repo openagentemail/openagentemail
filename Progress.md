@@ -130,3 +130,17 @@
 
 ### 我们是如何解决这些错误的？
 1. 徽章继续用 `tasks.state.*`；空态/filter 引号用 `tasks.filter.*`（同源协议令牌、异展示面）。
+
+## 2026-09-20 · B-R4（Codex P1×2 · allowlist + sentAt）
+
+### 我们实现了哪些功能？
+1. 完备性删 `/^[a-z0-9_.@:-]+$/`；协议标识显式枚举；`looksLikeUiCopy` 认 `unseen|msgs`。
+2. `countParts` 单位词 `t('inbox.unit.*')`；en=原令牌；红证修前形禁止。
+3. `inbox.label.sentAt` 专用于 send-log 时间戳；文件夹键不动。
+4. 一键多用清单入 completion.md。
+
+### 我们遇到了哪些错误？
+1. 无阻断；catch-all ∩ looksLikeUiCopy 实测为空（死门），但仍构成过宽风险。
+
+### 我们是如何解决这些错误的？
+1. 删除 catch-all 并显式列协议令牌；单位词走字典 + 红证双保险。

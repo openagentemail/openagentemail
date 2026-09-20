@@ -517,7 +517,7 @@
     meta.className = 'meta';
     appendMeta(meta, t('shell.html.from'), row.from);
     appendMeta(meta, t('shell.html.to'), Array.isArray(row.to) ? row.to.join(', ') : row.to);
-    appendMeta(meta, t('inbox.label.sent'), row.sentAt);
+    appendMeta(meta, t('inbox.label.sentAt'), row.sentAt);
     appendMeta(meta, t('tasks.action.result'), row.result === 'failed' ? (t('inbox.error.failed') + (row.error ? ' · ' + row.error : '')) : t('inbox.error.queued'));
     appendMeta(meta, 'Message-ID', row.messageId);
     appendMeta(meta, t('app.action.source'), row.source === 'mcp' ? 'MCP' : 'API');
