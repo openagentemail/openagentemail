@@ -190,16 +190,19 @@ describe('MCP HTTP 工具', () => {
     expect({
       // 根 README 现改为工具参考链接；完整签名落在 packages/mcp/README.md
       rootCreate: rootReadme.includes('(packages/mcp/README.md#tools)'),
+      // 目标侧：mcp README 须保留能生成 #tools 锚点的标题（防指向漂、目标删）
+      toolsAnchor: /^##\s+Tools\s*$/m.test(packageReadme),
       packageCreate: packageReadme.includes('task_create(to, subject, body?, kind?, approval?, wait?, parentTaskId?)'),
       listChildren: rootReadme.includes('(packages/mcp/README.md#tools)')
         && packageReadme.includes('task_list_children(parentTaskId, limit?, cursor?)'),
       typedApproval: /approval.*action.*expiresAt|kind.*approval/s.test(docs),
       decide: docs.includes('task_decide'),
-      securityToolCount: /20\s+tools/i.test(security),
+      securityToolCount: /25\s+tools/i.test(security),
       readChildren: /read[^\n]*task_list_children|task_list_children[^\n]*read/i.test(security),
       containedDecision: /contained[^\n]*task_decide|task_decide[^\n]*contained/i.test(security),
     }).toEqual({
       rootCreate: true,
+      toolsAnchor: true,
       packageCreate: true,
       listChildren: true,
       typedApproval: true,
@@ -225,14 +228,14 @@ describe('MCP HTTP 工具', () => {
       optInDefaultDisabled: /TASK_LEASES_ENABLED[\s\S]{0,160}(default|默认)[\s\S]{0,80}(false|关闭)|(?:default|默认)[\s\S]{0,80}(false|关闭)[\s\S]{0,160}TASK_LEASES_ENABLED/i.test(docs),
       // #251 保密句迁到 MCP README 并改为 "opaque bearer is never listed..."；保留原 leaseToken 邻近断言并兼容新文案
       bearerSecrecy: /leaseToken[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}(bearer|token)|(?:bearer|token)[\s\S]{0,160}(never|only|仅|不)[\s\S]{0,160}leaseToken|opaque\s+bearer[\s\S]{0,80}never[\s\S]{0,80}(listed|rendered|logged)/i.test(docs),
-      securityTwentyTools: /20\s+tools/i.test(security),
+      securityTwentyFiveTools: /25\s+tools/i.test(security),
       securityContainedLeases: ['task_claim', 'task_renew', 'task_release'].every((tool) => new RegExp(`contained[^\\n]*${tool}|${tool}[^\\n]*contained`, 'i').test(security)),
     }).toEqual({
       rootSignatures: true,
       packageSignatures: true,
       optInDefaultDisabled: true,
       bearerSecrecy: true,
-      securityTwentyTools: true,
+      securityTwentyFiveTools: true,
       securityContainedLeases: true,
     });
   });
