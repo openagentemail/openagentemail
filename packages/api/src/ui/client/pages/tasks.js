@@ -66,10 +66,22 @@
   }
 
   function taskStateLabel(task) {
-    if (taskIsClosed(task)) return t('tasks.action.closed');
+    if (taskIsClosed(task)) return t('tasks.state.closed');
     if (approvalPastDeadline(task)) return t('tasks.copy.pastDeadline');
-    if (task && task.state === 'input-required') return t('tasks.copy.waitingForYou');
-    return task && task.state ? task.state : '—';
+    var s = task && task.state ? String(task.state) : '';
+    if (!s) return '—';
+    var key = 'tasks.state.' + s;
+    var mapped = t(key);
+    return mapped === key ? s : mapped;
+  }
+
+  /** timeline / 通用状态令牌 → 可见文案（协议值仍在 data-state）。 */
+  function taskStateDisplay(stateToken) {
+    var s = stateToken ? String(stateToken) : '';
+    if (!s) return '—';
+    var key = 'tasks.state.' + s;
+    var mapped = t(key);
+    return mapped === key ? s : mapped;
   }
 
   function taskStateToken(task) {
@@ -502,10 +514,10 @@
       msgBadge.className = 'task-badge';
       if (message.kind === 'reminder') {
         msgBadge.setAttribute('data-state', 'reminder');
-        msgBadge.textContent = 'reminder';
+        msgBadge.textContent = taskStateDisplay('reminder');
       } else {
         msgBadge.setAttribute('data-state', message.state || '');
-        msgBadge.textContent = message.state || '—';
+        msgBadge.textContent = taskStateDisplay(message.state);
       }
       var from = document.createElement('span');
       from.className = 'task-timeline-from';

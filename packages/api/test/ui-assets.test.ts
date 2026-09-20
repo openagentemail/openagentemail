@@ -795,7 +795,8 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).not.toContain("value = '__tasks__'");
-    expect(UI_JS).toContain("return t('tasks.copy.waitingForYou')");
+    expect(UI_JS).toContain("return t('tasks.state.closed')");
+    expect(UI_JS).toContain("var key = 'tasks.state.' + s");
     expect(UI_JS).toContain("return t('tasks.copy.pastDeadline')");
     expect(UI_JS).toContain('function approvalPastDeadline(');
     expect(UI_JS).toContain("button.classList.add('is-past-deadline')");
@@ -860,7 +861,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/reply'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/remind'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/close'");
-    expect(UI_JS).toContain("return t('tasks.action.closed')");
+    expect(UI_JS).toContain("return t('tasks.state.closed')");
     expect(UI_JS).toContain('task-result-table');
     expect(UI_JS).toContain('Original request');
     const renderRows = UI_JS.slice(

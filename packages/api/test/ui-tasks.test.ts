@@ -878,6 +878,7 @@ function makeAdminTaskDetailHarness(task: Task) {
   const source = sliceTasksFn('function renderTaskDetail(', 'function renderTasks(');
   const fn = new Function(
     'document', 'state', 'tasksDetailContent', 'isAdmin', 'clearTaskDetail', 'taskStateToken', 'taskStateLabel',
+    'taskStateDisplay',
     'formatAgo', 'taskTimelineBody', 'formatDate', 'taskIsClosed', 'renderTaskResultNode', 'renderApprovalAction',
     'fillTaskFromSelect', 'submitTaskReply', 'submitTaskRemind', 'confirmCloseTask', 'TASK_TIMELINE_RENDER_LIMIT',
     'approvalPastDeadline',
@@ -885,6 +886,7 @@ function makeAdminTaskDetailHarness(task: Task) {
   );
   const renderTaskDetail = fn(
     { createElement: fakeEl }, state, tasksDetailContent, () => true, () => {}, () => 'input-required', () => 'Input required',
+    (stateToken: string) => stateToken || '—',
     () => 'just now', (value: string) => value, () => '2026-08-12', () => false, () => fakeEl('pre'),
     () => {
       const actions = fakeEl('section');

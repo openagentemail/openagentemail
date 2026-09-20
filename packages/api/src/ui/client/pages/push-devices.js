@@ -205,8 +205,17 @@
   function topicSemantics(device) {
     var labels = device && device.topicLabels ? device.topicLabels : {};
     var parts = [];
-    if (labels.userAlerts) parts.push(labels.userAlerts);
-    if (labels.userLow) parts.push(labels.userLow);
+    // 已知话题语义一律 t()；服务端英文 display 不作可见源。未知键才原样。
+    if (Object.prototype.hasOwnProperty.call(labels, 'userAlerts') && labels.userAlerts) {
+      parts.push(t('push.copy.userAlerts'));
+    }
+    if (Object.prototype.hasOwnProperty.call(labels, 'userLow') && labels.userLow) {
+      parts.push(t('push.copy.userLow'));
+    }
+    Object.keys(labels).forEach(function (k) {
+      if (k === 'userAlerts' || k === 'userLow') return;
+      if (labels[k]) parts.push(String(labels[k]));
+    });
     return parts.length ? parts.join(' · ') : t('push.copy.userAlertsUserLow');
   }
 
@@ -255,7 +264,7 @@
     devicePairUser.textContent = created.username || (created.qrPayload && created.qrPayload.username) || '';
     devicePairPassword.textContent = created.password || (created.qrPayload && created.qrPayload.password) || '';
     devicePairTopics.textContent = topicSemantics({
-      topicLabels: { userAlerts: t('notifications.copy.userAlerts'), userLow: t('notifications.copy.userLow') }
+      topicLabels: { userAlerts: true, userLow: true }
     });
     paintDeviceQr(created.qr);
     devicePairModal.hidden = false;

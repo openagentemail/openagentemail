@@ -612,4 +612,152 @@ describe('console i18n R2 P1×4 (#137)', () => {
       }),
     ).toBe('gone@test.example is no longer available. Back to Home.');
   });
+
+  /**
+   * B-R2：API 协议令牌不得直渲为可见文案。
+   * 可见文本走 t() 显示映射；data-* / 过滤仍保留协议值。
+   * en 字典值 = 原令牌串（或既有展示串），en 输出逐字不变。
+   */
+  test('B-R2 P1-1：notifications 级别值过映射；data-tier 保留协议令牌', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '../src/ui/client/pages/notifications.js'),
+      'utf8',
+    );
+    // 两处渲染（日志 + 缓存）均经 notifyLevelLabel，禁止 row.level 直赋 textContent
+    expect(src).toContain("tierValue.textContent = notifyLevelLabel(row.level)");
+    expect(src).toContain("tierValue.textContent = notifyLevelLabel(tier)");
+    expect(src).toContain("tierValue.setAttribute('data-tier', row.level || 'unknown')");
+    expect(src).toContain("tierValue.setAttribute('data-tier', tier)");
+    expect(src).not.toMatch(/tierValue\.textContent\s*=\s*row\.level/);
+    expect(src).not.toMatch(/tierValue\.textContent\s*=\s*tier\s*[;)]/);
+
+    // en 四值入字典；值=原令牌串
+    for (const lv of ['urgent', 'normal', 'low', 'unknown'] as const) {
+      expect(I18N_EN[`notifications.level.${lv}`]).toBe(lv);
+    }
+
+    // 运行时：可见文案走 t 键；缺键回落原令牌
+    const helper = src.slice(
+      src.indexOf('function notifyLevelLabel('),
+      src.indexOf('function notifyTimeZone('),
+    );
+    const calls: string[] = [];
+    const label = new Function(
+      't',
+      `${helper}\nreturn notifyLevelLabel;`,
+    )((key: string) => {
+      calls.push(key);
+      return I18N_EN[key] || key;
+    }) as (level: string | undefined) => string;
+    expect(label('urgent')).toBe('urgent');
+    expect(calls).toContain('notifications.level.urgent');
+    expect(label(undefined)).toBe('unknown');
+    expect(calls).toContain('notifications.level.unknown');
+    // 缺键：t 回落 key 本身 → 回落原令牌
+    const fallback = new Function(
+      't',
+      `${helper}\nreturn notifyLevelLabel;`,
+    )((key: string) => key) as (level: string) => string;
+    expect(fallback('custom-tier')).toBe('custom-tier');
+  });
+
+  test('B-R2 P1-2：tasks 全状态显示映射；data-state 保留协议令牌', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '../src/ui/client/pages/tasks.js'),
+      'utf8',
+    );
+    expect(src).toContain("badge.setAttribute('data-state', taskStateToken(task))");
+    expect(src).toContain("badge.textContent = taskStateLabel(task)");
+    expect(src).toContain("msgBadge.setAttribute('data-state', message.state || '')");
+    expect(src).toContain("msgBadge.textContent = taskStateDisplay(message.state)");
+    expect(src).toContain("msgBadge.textContent = taskStateDisplay('reminder')");
+
+    // 六状态 + closed/reminder；input-required en=既有「Waiting for you」
+    expect(I18N_EN['tasks.state.submitted']).toBe('submitted');
+    expect(I18N_EN['tasks.state.working']).toBe('working');
+    expect(I18N_EN['tasks.state.completed']).toBe('completed');
+    expect(I18N_EN['tasks.state.failed']).toBe('failed');
+    expect(I18N_EN['tasks.state.input-required']).toBe('Waiting for you');
+    expect(I18N_EN['tasks.state.closed']).toBe('Closed');
+    expect(I18N_EN['tasks.state.reminder']).toBe('reminder');
+
+    const slice = src.slice(
+      src.indexOf('function taskIsClosed('),
+      src.indexOf('function syncTasksFilters('),
+    );
+    const calls: string[] = [];
+    const helpers = new Function(
+      't',
+      `${slice}\nreturn { taskStateLabel, taskStateDisplay, taskStateToken };`,
+    )((key: string) => {
+      calls.push(key);
+      return I18N_EN[key] || key;
+    }) as {
+      taskStateLabel: (task: { state?: string; result?: unknown; expiryProjection?: string }) => string;
+      taskStateDisplay: (state: string) => string;
+      taskStateToken: (task: { state?: string; result?: unknown; expiryProjection?: string }) => string;
+    };
+
+    expect(helpers.taskStateLabel({ state: 'submitted' })).toBe('submitted');
+    expect(calls).toContain('tasks.state.submitted');
+    expect(helpers.taskStateLabel({ state: 'working' })).toBe('working');
+    expect(helpers.taskStateLabel({ state: 'completed' })).toBe('completed');
+    expect(helpers.taskStateLabel({ state: 'failed' })).toBe('failed');
+    expect(helpers.taskStateLabel({ state: 'input-required' })).toBe('Waiting for you');
+    expect(helpers.taskStateToken({ state: 'input-required' })).toBe('input-required');
+    expect(helpers.taskStateDisplay('reminder')).toBe('reminder');
+    expect(helpers.taskStateDisplay('working')).toBe('working');
+    // 协议 token 属性面：列表徽章 data-state 用 taskStateToken，非显示串
+    expect(helpers.taskStateToken({ state: 'submitted' })).toBe('submitted');
+    expect(helpers.taskStateLabel({ result: { closed_by_admin: true } })).toBe('Closed');
+    expect(helpers.taskStateToken({ result: { closed_by_admin: true } })).toBe('closed');
+  });
+
+  test('B-R2 P1-3：push topicLabels 已知话题一律 t()；服务端英文 display 不作可见源', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '../src/ui/client/pages/push-devices.js'),
+      'utf8',
+    );
+    expect(src).toContain("parts.push(t('push.copy.userAlerts'))");
+    expect(src).toContain("parts.push(t('push.copy.userLow'))");
+    // 禁止把服务端 display 串当已知话题可见源
+    expect(src).not.toMatch(/parts\.push\(String\(labels\.userAlerts\)\)/);
+    expect(src).not.toMatch(/parts\.push\(labels\.userAlerts\)/);
+    expect(src).not.toMatch(/parts\.push\(String\(labels\.userLow\)\)/);
+
+    expect(I18N_EN['push.copy.userAlerts']).toBe('User alerts');
+    expect(I18N_EN['push.copy.userLow']).toBe('User low');
+
+    const helper = src.slice(
+      src.indexOf('function topicSemantics('),
+      src.indexOf('function paintDeviceQr('),
+    );
+    const calls: string[] = [];
+    const topicSemantics = new Function(
+      't',
+      `${helper}\nreturn topicSemantics;`,
+    )((key: string) => {
+      calls.push(key);
+      // 故意返回可区分串，证明未采用服务端英文
+      if (key === 'push.copy.userAlerts') return 'ALERTS_VIA_T';
+      if (key === 'push.copy.userLow') return 'LOW_VIA_T';
+      return I18N_EN[key] || key;
+    }) as (device: { topicLabels?: Record<string, string | boolean> }) => string;
+
+    // 服务端给英文 display 时仍走 t()，不直推英文
+    const out = topicSemantics({
+      topicLabels: { userAlerts: 'User alerts', userLow: 'User low' },
+    });
+    expect(out).toBe('ALERTS_VIA_T · LOW_VIA_T');
+    expect(calls).toContain('push.copy.userAlerts');
+    expect(calls).toContain('push.copy.userLow');
+    expect(out).not.toContain('User alerts');
+    expect(out).not.toContain('User low');
+
+    // 未知话题才原样显示
+    const unknown = topicSemantics({
+      topicLabels: { customTopic: 'Custom Channel Name' },
+    });
+    expect(unknown).toBe('Custom Channel Name');
+  });
 });

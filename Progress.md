@@ -98,3 +98,21 @@
 
 ### 我们是如何解决这些错误的？
 1. 断言改为期望 `$&amp;`，同时保留 `$1`/`$$` 字面计数——证明既未被 replace 语义吞掉，又经 R4④ 转义。
+
+## 2026-09-20 · B-R2（Codex P1×3 · API 令牌显示映射）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`notifications.js` 级别可见值经 `notifyLevelLabel`→`t('notifications.level.*')`（urgent/normal/low/unknown）；日志+缓存同修；`data-tier` 保留协议令牌。
+2. **P1-2**：`tasks.js` 全状态 `t('tasks.state.<state>')`（含 submitted/working/completed/failed）；新增 `taskStateDisplay` 供 timeline badges；`data-state` 仍用协议 token。
+3. **P1-3**：`push-devices.js` 已知话题一律 `t('push.copy.userAlerts'|'userLow')`，服务端英文 display 不作可见源；未知话题原样。
+4. 字典键入 `i18n-en.ts`；en 值=原可见串；三路径聚焦测试；UI_JS sha 更新。
+
+### 我们遇到了哪些错误？
+1. `makeAdminTaskDetailHarness` 未注入新函数 `taskStateDisplay` → `ReferenceError`。
+2. `ui-assets.test.ts` 仍断言旧 `t('tasks.copy.waitingForYou')` / `t('tasks.action.closed')` 字面。
+3. 全量偶发 `#91` dist 竞态 1 红（单测重跑绿）。
+
+### 我们是如何解决这些错误的？
+1. harness 增加 `taskStateDisplay` 桩参。
+2. 静态断言改为 `tasks.state.closed` / `tasks.state.` 动态键形态。
+3. 记录为预存/环境竞态；聚焦 160 pass；不挡 B-R2。

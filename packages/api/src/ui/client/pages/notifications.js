@@ -17,6 +17,14 @@
     return topic;
   }
 
+  /** 级别可见文本过映射；data-tier 仍保留协议令牌。缺键回落原令牌。 */
+  function notifyLevelLabel(level) {
+    var token = level || 'unknown';
+    var key = 'notifications.level.' + token;
+    var mapped = t(key);
+    return mapped === key ? token : mapped;
+  }
+
   function notifyTimeZone() {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -239,7 +247,7 @@
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', row.level || 'unknown');
-      tierValue.textContent = row.level || 'unknown';
+      tierValue.textContent = notifyLevelLabel(row.level);
       tierCell.append(tierLabel, tierValue);
       if (row.delivery === 'failed') {
         var delivery = document.createElement('span');
@@ -354,7 +362,7 @@
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', tier);
-      tierValue.textContent = tier;
+      tierValue.textContent = notifyLevelLabel(tier);
       tierCell.append(tierLabel, tierValue);
 
       var contentCell = document.createElement('div');
