@@ -1,3 +1,4 @@
+import "./support/ui-i18n-shim.ts";
 // Issue #60: ?token= query direct login for bookmarkable admin UI
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';

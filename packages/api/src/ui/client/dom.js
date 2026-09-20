@@ -139,7 +139,7 @@
   var confirmModalCancel = byId('confirm-modal-cancel');
   var confirmModalConfirm = byId('confirm-modal-confirm');
   var PUSH_TIER3_WARNING =
-    'Tier 3 includes message body previews and OTP codes/links in push notifications. That content leaves this server for the ntfy channel.';
+    t('dom.copy.tier3IncludesMessageBodyPreviews');
   var createModal = byId('create-modal');
   var createName = byId('create-name');
   var createLocalpart = byId('create-localpart');

@@ -11,12 +11,12 @@
   /* 与 lib/tasks.ts RESULT_MARKER 逐字一致；时间线正文剥离用。 */
   var TASK_RESULT_MARKER = '<!-- openagent.email task result -->';
   var SORT_COLUMNS = [
-    { key: 'address', label: 'Address' },
-    { key: 'name', label: 'Name' },
-    { key: 'count', label: 'Messages' },
-    { key: 'unseen', label: 'Unseen' },
-    { key: 'last', label: 'Last' },
-    { key: 'created', label: 'Created' }
+    { key: 'address', label: t('store.label.address') },
+    { key: 'name', label: t('store.label.name') },
+    { key: 'count', label: t('store.label.messages') },
+    { key: 'unseen', label: t('store.label.unseen') },
+    { key: 'last', label: t('store.label.last') },
+    { key: 'created', label: t('store.label.created') }
   ];
 
   var state = {

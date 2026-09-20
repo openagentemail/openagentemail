@@ -136,7 +136,7 @@
     init.credentials = 'same-origin';
     var response = await fetch(path, init);
     if (response.status === 401) {
-      showLogin('Your session expired. Sign in again.');
+      showLogin(t('api.copy.yourSessionExpiredSignInAgain'));
       throw new Error('session_expired');
     }
     if (!response.ok) {
@@ -186,11 +186,11 @@
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
-        window.alert('address already exists');
+        window.alert(t('api.copy.addressAlreadyExists'));
       } else if (error.status === 400) {
-        announce('Invalid identity request. Try again.');
+        announce(t('api.announce.invalidIdentityRequestTryAgain'));
       } else if (error.message !== 'session_expired') {
-        announce('Could not create the identity. Try again.');
+        announce(t('api.announce.couldNotCreateTheIdentityTry'));
       }
     } finally {
       /* 仅当前代际才复位：stale 请求不得复活新 dialog 的共享钮；新窗由 beginModal 复位。 */
@@ -208,13 +208,13 @@
         { method: 'POST' }
       );
       if (openedGen !== modalGeneration) return;
-      showTokenModal(payload.token, 'Rotated Token');
+      showTokenModal(payload.token, t('api.copy.rotatedToken'));
       refreshInboxIdentities();
       loadHome({ refresh: false });
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.message !== 'session_expired') {
-        announce('Could not rotate the token. Try again.');
+        announce(t('api.announce.couldNotRotateTheTokenTry'));
       }
     }
   }
@@ -222,10 +222,10 @@
   function handleDeleteIdentity(address) {
     if (!isAdmin()) return;
     var openedGen = beginModal();
-    confirmModalTitle.textContent = 'Delete Identity';
-    confirmModalText.textContent = 'Delete ' + address + '? This cannot be undone.';
+    confirmModalTitle.textContent = t('api.modal.deleteIdentity');
+    confirmModalText.textContent = tFormat('api.modal.deleteConfirm', { address: address });
     confirmModalRisk.hidden = true;
-    confirmModalConfirm.textContent = 'Delete';
+    confirmModalConfirm.textContent = t('identities.action.delete');
     confirmModal.hidden = false;
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
@@ -251,16 +251,16 @@
         if (openedGen !== modalGeneration) return;
         closeAllModals();
         if (isConfigureScope(state.scope)) {
-          announce(address + ' deleted.');
+          announce(tFormat('api.announce.deletedAddress', { address: address }));
           refreshConfigureSurfaces();
         } else {
-          enterOverview({ announce: address + ' deleted. Back to Home.' });
+          enterOverview({ announce: tFormat('api.announce.deletedBackToHomeFull', { address: address }) });
         }
         loadHome({ refresh: false });
       } catch (error) {
         if (openedGen !== modalGeneration) return;
         if (error.message !== 'session_expired') {
-          announce('Could not delete the identity. Try again.');
+          announce(t('api.announce.couldNotDeleteTheIdentityTry'));
         }
       } finally {
         /* 仅当前代际才复位：stale 请求不得复活新 dialog 的共享钮；新窗由 beginModal 复位。 */
@@ -288,7 +288,7 @@
         return identity.address === address;
       });
       if (!row) {
-        announce('Could not update push content tier. Try again.');
+        announce(t('api.announce.couldNotUpdatePushContentTier'));
         return { status: 'missing' };
       }
       var authoritative =
@@ -296,16 +296,15 @@
           ? row.pushContentTier
           : 1;
       announce(
-        'Push content tier is tier ' +
-          authoritative +
-          ' for ' +
-          address +
-          ' (refreshed).',
+        tFormat('api.announce.pushContentTierRefreshed', {
+          tier: authoritative,
+          address: address,
+        }),
       );
       return { status: 'ok', authoritative: authoritative };
     } catch (_refreshErr) {
       if (recoveryGen !== state.overviewGen) return { status: 'stale' };
-      announce('Could not update push content tier. Try again.');
+      announce(t('api.announce.couldNotUpdatePushContentTier'));
       return { status: 'error' };
     }
   }
@@ -353,7 +352,7 @@
       // confirmation ran. apply() bypasses the handlePushTierChange entry lock,
       // so recheck here: the in-flight change wins, this stale one is dropped.
       if (state.tierPending[address]) {
-        announce('Another push content change is already in progress for ' + address + '.');
+        announce(tFormat('push.announce.anotherInProgressFull', { address: address }));
         return;
       }
       state.tierPending[address] = true;
@@ -365,7 +364,7 @@
       try {
         await savePushContentTier(address, tier, confirmRisk);
         selectEl.dataset.currentTier = String(tier);
-        announce('Push content set to tier ' + tier + ' for ' + address + '.');
+        announce(tFormat('push.announce.pushContentSetToTierFull', { tier: tier, address: address }));
         renderOverview();
         // Restart overview only while still on Overview: unstick Refresh after
         // bumpIdentityEpoch, but do not revive overview polling after openAddress.
@@ -380,7 +379,7 @@
         ) {
           // Server rejected — no ambiguous state.
           restore();
-          announce('Tier 3 requires explicit risk confirmation.');
+          announce(t('push.announce.tier3RequiresExplicitRiskConfirmation'));
         } else if (error.message === 'session_expired') {
           restore();
         } else {
@@ -410,12 +409,11 @@
     }
 
     var openedGen = beginModal();
-    confirmModalTitle.textContent = 'Enable sensitive push content';
-    confirmModalText.textContent =
-      'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
+    confirmModalTitle.textContent = t('push.modal.enableSensitivePushContent');
+    confirmModalText.textContent = tFormat('push.modal.enableTier3Confirm', { address: address });
     confirmModalRisk.textContent = PUSH_TIER3_WARNING;
     confirmModalRisk.hidden = false;
-    confirmModalConfirm.textContent = 'Enable tier 3';
+    confirmModalConfirm.textContent = t('push.modal.enableTier3');
     confirmModal.hidden = false;
     // Restore the previous tier if the dialog closes unconfirmed (Cancel or an
     // indirect close runs it via closeAllModals); the success path clears it.
@@ -479,12 +477,12 @@
     var when = Date.parse(value);
     if (Number.isNaN(when)) return '—';
     var seconds = Math.max(0, Math.round((Date.now() - when) / 1000));
-    if (seconds < 60) return 'just now';
+    if (seconds < 60) return t('api.copy.justNow');
     var minutes = Math.round(seconds / 60);
-    if (minutes < 60) return minutes + ' min ago';
+    if (minutes < 60) return minutes + t('api.copy.minAgo');
     var hours = Math.round(minutes / 60);
-    if (hours < 24) return hours + ' h ago';
-    return Math.round(hours / 24) + ' d ago';
+    if (hours < 24) return hours + t('api.copy.hAgo');
+    return Math.round(hours / 24) + t('api.copy.dAgo');
   }
 
   function clearDetail() {
@@ -495,14 +493,14 @@
     var placeholder = document.createElement('div');
     placeholder.className = 'empty-state-card';
     var title = document.createElement('h3');
-    title.textContent = 'Read a message';
+    title.textContent = t('api.action.readAMessage');
     var purpose = document.createElement('p');
     purpose.className = 'muted';
-    purpose.textContent = 'This pane shows the selected email: codes and links first, then Rendered, Plain text, or Source. HTML stays in an isolated frame.';
+    purpose.textContent = t('api.action.thisPaneShowsTheSelectedEmail');
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'primary empty-state-action';
-    btn.textContent = 'Open the latest message';
+    btn.textContent = t('api.action.openTheLatestMessage');
     btn.addEventListener('click', function () {
       if (state.messages[0]) selectMessage(state.messages[0].id);
     });

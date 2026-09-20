@@ -12,9 +12,17 @@
   }
 
   function formatNotifyChannel(topic) {
-    if (topic === 'user-alerts') return 'User alerts';
-    if (topic === 'user-low') return 'User low';
+    if (topic === 'user-alerts') return t('notifications.copy.userAlerts');
+    if (topic === 'user-low') return t('notifications.copy.userLow');
     return topic;
+  }
+
+  /** 级别可见文本过映射；data-tier 仍保留协议令牌。缺键回落原令牌。 */
+  function notifyLevelLabel(level) {
+    var token = level || 'unknown';
+    var key = 'notifications.level.' + token;
+    var mapped = t(key);
+    return mapped === key ? token : mapped;
   }
 
   function notifyTimeZone() {
@@ -81,7 +89,7 @@
     notifyTopicFilter.replaceChildren();
     var all = document.createElement('option');
     all.value = '';
-    all.textContent = 'All channels';
+    all.textContent = t('notifications.action.allChannels');
     notifyTopicFilter.append(all);
     if (!isAdmin()) {
       notifyTopicFilter.hidden = true;
@@ -134,14 +142,22 @@
     var summary = state.notifySummary;
     if (!summary) {
       notifySummary.textContent = state.notifySummaryStatus === 'loading'
-        ? 'Loading today’s summary…'
+        ? t('notifications.copy.loadingTodaySSummary')
         : '';
       return;
     }
-    notifySummary.textContent = 'Today (' + summary.tz + '): ' +
-      summary.total + ' sent · ' + summary.ringCount + ' urgent' +
-      (summary.lastSuccessfulAt ? ' · last ' + formatClock(summary.lastSuccessfulAt, true) : '') +
-      '. Undelivered notifications are not included in today’s sent count.';
+    // 整句模板化：语序由 locale 字典决定；en 模板值=原拼接句逐字。
+    var lastClause = summary.lastSuccessfulAt
+      ? tFormat('notifications.summary.lastClause', {
+          last: formatClock(summary.lastSuccessfulAt, true)
+        })
+      : '';
+    notifySummary.textContent = tFormat('notifications.summary.today', {
+      tz: summary.tz,
+      total: summary.total,
+      urgent: summary.ringCount,
+      lastClause: lastClause
+    });
   }
 
   function renderNotifyDiagnostics() {
@@ -153,13 +169,15 @@
       return;
     }
     var parts = [];
-    if (!diag.enabled) parts.push('Push transport is disabled on this server.');
-    else if (!diag.configured) parts.push('Push transport is not configured on this server.');
-    else parts.push('Push transport is enabled.');
+    if (!diag.enabled) parts.push(t('notifications.copy.pushTransportIsDisabledOnThis'));
+    else if (!diag.configured) parts.push(t('notifications.copy.pushTransportIsNotConfiguredOn'));
+    else parts.push(t('notifications.copy.pushTransportIsEnabled'));
     if (diag.lastSuccessfulAt) {
-      parts.push('Last successful send ' + formatClock(diag.lastSuccessfulAt, true) + '.');
+      parts.push(tFormat('notifications.summary.diagLastSend', {
+        when: formatClock(diag.lastSuccessfulAt, true)
+      }));
     } else {
-      parts.push('No successful send in the 30-day log yet.');
+      parts.push(t('notifications.copy.noSuccessfulSendInThe30'));
     }
     notifyDiagnostics.textContent = parts.join(' ');
     if (notifyVerify) {
@@ -180,18 +198,18 @@
       });
     }
     if (awaiting) {
-      notifyStateNode.textContent = 'Loading…';
+      notifyStateNode.textContent = t('tasks.action.loading');
       return;
     }
     if (state.notifyStatus === 'error' && rows.length === 0) {
-      notifyStateNode.textContent = state.notifyMessage || 'Notifications could not be loaded. Try Refresh.';
+      notifyStateNode.textContent = state.notifyMessage || t('notifications.error.notificationsCouldNotBeLoadedTry');
       return;
     }
     if (rows.length === 0) {
       renderEmptyState(notifyStateNode, {
-        title: 'No notifications in this window',
-        purpose: 'The 30-day log starts empty after deploy and does not backfill the 12-hour transport cache. Send a push or run Verify to accumulate history.',
-        actionLabel: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? 'Send a test notification' : '',
+        title: t('notifications.title.noNotificationsInThisWindow'),
+        purpose: t('notifications.empty.the30DayLogStartsEmpty'),
+        actionLabel: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? t('notifications.copy.sendATestNotification') : '',
         onAction: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? handleNotifyVerify : null
       });
       return;
@@ -206,7 +224,7 @@
       whenCell.className = 'cell notify-when';
       var whenLabel = document.createElement('span');
       whenLabel.className = 'cell-label';
-      whenLabel.textContent = 'When';
+      whenLabel.textContent = t('notifications.action.when');
       var whenValue = document.createElement('time');
       whenValue.dateTime = row.publishedAt || '';
       whenValue.textContent = row.publishedAt ? formatDate(row.publishedAt) : '—';
@@ -216,7 +234,7 @@
       channelCell.className = 'cell notify-channel';
       var channelLabel = document.createElement('span');
       channelLabel.className = 'cell-label';
-      channelLabel.textContent = 'Channel';
+      channelLabel.textContent = t('notifications.action.channel');
       var channelValue = document.createElement('span');
       channelValue.textContent = formatNotifyChannel(row.logicalChannel);
       channelCell.append(channelLabel, channelValue);
@@ -225,16 +243,16 @@
       tierCell.className = 'cell';
       var tierLabel = document.createElement('span');
       tierLabel.className = 'cell-label';
-      tierLabel.textContent = 'Level';
+      tierLabel.textContent = t('notifications.action.level');
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', row.level || 'unknown');
-      tierValue.textContent = row.level || 'unknown';
+      tierValue.textContent = notifyLevelLabel(row.level);
       tierCell.append(tierLabel, tierValue);
       if (row.delivery === 'failed') {
         var delivery = document.createElement('span');
         delivery.className = 'notify-delivery-failed';
-        delivery.textContent = 'Delivery failed';
+        delivery.textContent = t('notifications.error.deliveryFailed');
         tierCell.append(delivery);
       }
 
@@ -242,10 +260,10 @@
       contentCell.className = 'cell notify-content';
       var contentLabel = document.createElement('span');
       contentLabel.className = 'cell-label';
-      contentLabel.textContent = 'Content';
+      contentLabel.textContent = t('notifications.action.content');
       var title = document.createElement('p');
       title.className = 'notify-title-text';
-      title.textContent = row.title || '(no title)';
+      title.textContent = row.title || t('notifications.action.noTitle');
       var body = document.createElement('div');
       body.className = 'notify-body-text';
       var revealed = !!state.notifyRevealed[row.id];
@@ -282,26 +300,33 @@
     notifyShown.textContent = awaiting
       ? ''
       : truncated
-        ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
+        ? tFormat('notifications.copy.showingLatestOf', {
+            limit: NOTIFY_RENDER_LIMIT,
+            total: total
+          })
         : String(total);
     if (awaiting) {
-      notifyStateNode.textContent = 'Loading…';
+      notifyStateNode.textContent = t('tasks.action.loading');
       return;
     }
     if (state.notifyStatus === 'error' && state.notifyMessages.length === 0) {
-      notifyStateNode.textContent = state.notifyMessage || 'Notifications could not be loaded. Try Refresh.';
+      notifyStateNode.textContent = state.notifyMessage || t('notifications.error.notificationsCouldNotBeLoadedTry');
       return;
     }
     if (rows.length === 0) {
       notifyStateNode.textContent = state.notifyFilter
-        ? 'No notifications on this channel in the last 12 hours.'
-        : 'No notifications in the last 12 hours. Refresh after a push is sent.';
+        ? t('notifications.copy.noNotificationsOnThisChannelIn')
+        : t('notifications.copy.noNotificationsInTheLast12');
       return;
     }
     var cacheExplanation =
-      'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.';
+      t('notifications.copy.whatWeTriedToSendTo');
     notifyStateNode.textContent = truncated
-      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications. ' + cacheExplanation
+      ? tFormat('notifications.copy.showingLatestOfNotifications', {
+          limit: NOTIFY_RENDER_LIMIT,
+          total: total,
+          cacheExplanation: cacheExplanation
+        })
       : cacheExplanation;
     visible.forEach(function (row) {
       var tier = tierFromPriority(row.priority);
@@ -312,7 +337,7 @@
       whenCell.className = 'cell notify-when';
       var whenLabel = document.createElement('span');
       whenLabel.className = 'cell-label';
-      whenLabel.textContent = 'When';
+      whenLabel.textContent = t('notifications.action.when');
       var whenValue = document.createElement('time');
       whenValue.dateTime = row.time ? new Date(row.time * 1000).toISOString() : '';
       whenValue.textContent = row.time
@@ -324,7 +349,7 @@
       channelCell.className = 'cell notify-channel';
       var channelLabel = document.createElement('span');
       channelLabel.className = 'cell-label';
-      channelLabel.textContent = 'Channel';
+      channelLabel.textContent = t('notifications.action.channel');
       var channelValue = document.createElement('span');
       channelValue.textContent = formatNotifyChannel(row.topic);
       channelCell.append(channelLabel, channelValue);
@@ -333,21 +358,21 @@
       tierCell.className = 'cell';
       var tierLabel = document.createElement('span');
       tierLabel.className = 'cell-label';
-      tierLabel.textContent = 'Tier';
+      tierLabel.textContent = t('notifications.action.tier');
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', tier);
-      tierValue.textContent = tier;
+      tierValue.textContent = notifyLevelLabel(tier);
       tierCell.append(tierLabel, tierValue);
 
       var contentCell = document.createElement('div');
       contentCell.className = 'cell notify-content';
       var contentLabel = document.createElement('span');
       contentLabel.className = 'cell-label';
-      contentLabel.textContent = 'Content';
+      contentLabel.textContent = t('notifications.action.content');
       var title = document.createElement('p');
       title.className = 'notify-title-text';
-      title.textContent = row.title || '(no title)';
+      title.textContent = row.title || t('notifications.action.noTitle');
       var body = document.createElement('div');
       body.className = 'notify-body-text';
       /* transport cache 没有可靠 sensitive 标记：默认遮蔽，避免空日志期把 OTP 明文画出来。 */
@@ -371,13 +396,13 @@
   function renderNotifyMeta() {
     if (notifySubtitle) {
       notifySubtitle.textContent = state.notifySource === 'cache'
-        ? 'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.'
-        : 'What we tried to send to your phone and computers';
+        ? t('notifications.copy.whatWeTriedToSendTo')
+        : t('notifications.copy.whatWeTriedToSendTo2');
     }
     renderNotifySummaryBar();
     renderNotifyDiagnostics();
     if (state.notifyUpdatedAt) {
-      notifyUpdated.textContent = 'Updated ' + formatClock(new Date(state.notifyUpdatedAt).toISOString(), true);
+      notifyUpdated.textContent = t('tasks.action.updated') + formatClock(new Date(state.notifyUpdatedAt).toISOString(), true);
     } else {
       notifyUpdated.textContent = '';
     }
@@ -385,7 +410,7 @@
       (state.notifyLogItems.length === 0 && state.notifyMessages.length === 0);
     notifyNotice.textContent = notifyNotice.hidden ? '' : state.notifyMessage;
     notifyRefresh.disabled = state.notifyPending;
-    notifyRefresh.textContent = state.notifyPending ? 'Refreshing…' : 'Refresh';
+    notifyRefresh.textContent = state.notifyPending ? t('tasks.action.refreshing') : t('tasks.action.refresh');
   }
 
   function renderNotify() {
@@ -504,8 +529,8 @@
         return fetchNotifyTopic(topic, controller.signal).then(function (result) {
           if (result && result.disabled && !disabledMessage) {
             disabledMessage = result.disabledCode === 'notifications_disabled'
-              ? 'Notifications are disabled on this server.'
-              : 'Notifications are not configured on this server.';
+              ? t('notifications.copy.notificationsAreDisabledOnThisServer')
+              : t('notifications.copy.notificationsAreNotConfiguredOnThis');
             try {
               controller.abort();
             } catch (_abortError) {
@@ -559,7 +584,7 @@
         state.notifyFetchKey === fetchKey
       ) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
         renderNotify();
         announce(state.notifyMessage);
       } else {
@@ -568,27 +593,27 @@
         state.notifyFetchKey = fetchKey;
         if (failures && merged.length === 0) {
           state.notifyStatus = 'error';
-          state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+          state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         } else if (failures) {
           state.notifyStatus = 'error';
-          state.notifyMessage = 'Some channels could not be loaded. Showing what succeeded.';
+          state.notifyMessage = t('notifications.error.someChannelsCouldNotBeLoaded');
         } else {
           state.notifyStatus = 'ready';
           state.notifyMessage = '';
         }
         renderNotify();
-        announce(merged.length + ' notifications loaded');
+        announce(merged.length + t('notifications.announce.notificationsLoaded'));
       }
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyMessages.length === 0) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
         state.notifyFetchKey = notifyFetchKey();
       } else {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
       }
       renderNotify();
     } finally {
@@ -702,16 +727,16 @@
         return;
       }
       renderNotify();
-      if (!opts.poll) announce(state.notifyLogItems.length + ' notifications loaded');
+      if (!opts.poll) announce(state.notifyLogItems.length + t('notifications.announce.notificationsLoaded'));
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyLogItems.length === 0) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         state.notifyLogFetchKey = fetchKey;
       } else {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
       }
       renderNotify();
     } finally {
@@ -728,17 +753,17 @@
     if (!notifyVerify || notifyVerify.hidden || state.notifyVerifyPending) return;
     state.notifyVerifyPending = true;
     notifyVerify.disabled = true;
-    notifyVerify.textContent = 'Sending…';
+    notifyVerify.textContent = t('notifications.action.sending');
     try {
       await apiJson('/ui/api/notify/verify', { method: 'POST' });
-      announce('Test notification sent.');
+      announce(t('notifications.announce.testNotificationSent'));
       await loadNotificationLog({ force: true });
     } catch (error) {
       if (error.message === 'session_expired') return;
-      announce('Test notification failed.');
+      announce(t('notifications.announce.testNotificationFailed'));
     } finally {
       state.notifyVerifyPending = false;
-      if (notifyVerify) notifyVerify.textContent = 'Send test';
+      if (notifyVerify) notifyVerify.textContent = t('notifications.action.sendTest');
       renderNotifyDiagnostics();
     }
   }
