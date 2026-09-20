@@ -146,5 +146,5 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
 Dashboard UI uses an en source dictionary (`src/ui/client/i18n-en.ts`) plus `t(key)` / `tFormat(key, vars)`.
 Locale resolution is `resolveUiLocale` (cookie `oa_lang` → `Accept-Language` with `q=0` filtered → `en`).
 Shell HTML is a **key-slot template** (`{{key}}` → `fillI18nSlots`); en fill is byte-identical to pre-i18n main.
-Non-en shells load `/ui/i18n/{locale}.js` (es/ja/ko/zh-CN skeletons in B1; real copy in B2) and fill the same slots from a locale dict.
+B1 ships locale assets at `/ui/i18n/{locale}.js` (es/ja/ko/zh-CN empty skeletons); the shell switches `lang` and injects that script **only** when given a non-empty locale dict (`hasRealDict`).
 English remains the default with **byte-identical** shell HTML vs pre-i18n main.
