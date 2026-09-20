@@ -40,7 +40,7 @@ Production expiry-audit SMTP remains **hard-disabled** even when the journal fla
 
 ## Capacity wall and renewal bounds (issue #285)
 
-Task wait and long-chain lease renewal have a hard capacity wall established by design and verified by measurement (#189 benchmark: `/home/ops/materials/pool4-batch/c-189-measure-summary.md`):
+Task wait and long-chain lease renewal have a hard capacity wall established by design and verified by measurement (#189 benchmark, tracked in issue #285):
 
 - **Single-generation renewal hard cap:** within the **same generation** of a single task, lease renewal has a hard upper limit of **9,999 times** (1 claim + 9,999 renewals = 10,000 records).
 - **Fail-closed capacity exhaustion:** the journal row ceiling is `TASK_LEASE_JOURNAL_MAX_RECORDS` (default **10,000**, `packages/api/src/lib/task-lease-journal.ts:28`). When occupancy reaches this ceiling, the 10,000th renewal attempt fails closed and throws **`lease_journal_capacity_exhausted`** (`packages/api/src/lib/task-lease-journal.ts:398-400`), failing loudly rather than silently truncating or overwriting.
