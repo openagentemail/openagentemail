@@ -223,6 +223,7 @@ afterEach(() => {
 describe('#198 wait 进行中 uidValidity 变化', () => {
   test('① 权威终态不受污染：返回始终取签名任务快照，IMAP 命中被丢弃', async () => {
     // IMAP 返回会暗示 failed 的命中；快照则给出 completed + 独特 result
+    // otp 必填（imap.ts MessageDetail）；句式对照 ui-frame/ui-messages fixture
     const imapHint: MessageDetail = {
       id: '999',
       from: PEER,
@@ -230,8 +231,9 @@ describe('#198 wait 进行中 uidValidity 变化', () => {
       subject: 'IMAP pollution',
       date: '2026-08-24T00:01:00.000Z',
       text: 'would-be-failed',
+      otp: { codes: [], links: [] },
       links: [],
-      source: 'trusted',
+      source: 'external', // MailSource = internal|external（对照 ui-frame fixture）
       taskId: TASK_ID,
       taskState: 'failed',
     };
