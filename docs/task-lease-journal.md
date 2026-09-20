@@ -37,3 +37,13 @@ The journal seal and activated-marker MACs (and every lease-token verifier) are 
 Production expiry-audit SMTP remains **hard-disabled** even when the journal flag is on. Emission is a separate commander-approved card; these flags do not opt in to sending postponed expiry audits.
 
 **M3 + journal capacity consequence (accepted per commander-2091):** with `TASK_LEASES_EXPIRY_AUDIT_M3=true` and the journal enabled, each reclaimed lease window writes an expired-kind `intent` record for the expired claim window. While the emitter is hard-disabled these records have **no production drain**: they remain OPEN, they block whole-task exit (which requires zero open records), and they can accumulate until the 10,000-record journal capacity is exhausted, after which lease mutations fail closed with `lease_journal_capacity_exhausted`. Do **not** enable `TASK_LEASES_EXPIRY_AUDIT_M3` in production before the separately approved emitter work is implemented; this cost is reassessed on that card. There is intentionally no runtime guard — this is operator policy, not enforced behavior.
+
+## Capacity wall and renewal bounds (issue #285)
+
+Task wait and long-chain lease renewal have a hard capacity wall established by design and verified by measurement (#189 benchmark: `/home/ops/materials/pool4-batch/c-189-measure-summary.md`):
+
+- **Single-generation renewal hard cap:** within the **same generation** of a single task, lease renewal has a hard upper limit of **9,999 times** (1 claim + 9,999 renewals = 10,000 records).
+- **Fail-closed capacity exhaustion:** the journal row ceiling is `TASK_LEASE_JOURNAL_MAX_RECORDS` (default **10,000**, `packages/api/src/lib/task-lease-journal.ts:28`). When occupancy reaches this ceiling, the 10,000th renewal attempt fails closed and throws **`lease_journal_capacity_exhausted`** (`packages/api/src/lib/task-lease-journal.ts:398-400`), failing loudly rather than silently truncating or overwriting.
+- **No compaction within the same generation:** `compact()` keeps all records belonging to the current generation (`packages/api/src/lib/task-lease-journal.ts:435-448`) — single-generation records are **never compacted away**. Hitting the capacity wall without exit-evidence reclamation is permanent for that generation (operators can search for `lease_journal_capacity_exhausted` during troubleshooting).
+- **Measurement reference:** 10⁴ records in `journal.json` occupy approximately 6,040 kB; a 10⁵ chain hits the capacity wall in approximately 29 minutes under continuous renewal. In normal operation, task renewal counts are orders of magnitude below this ceiling; hitting this capacity wall indicates a pathological long-running task, lease spin, or renewal loop bug (tracked as performance debt in issue #285).
+
