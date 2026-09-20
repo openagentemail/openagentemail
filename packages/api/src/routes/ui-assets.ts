@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
-import { OUTER_CSP, UI_CSS, UI_HTML, UI_JS, UI_LOGO_SVG } from '../ui/assets.ts';
+import { OUTER_CSP, UI_CSS, UI_JS, UI_LOGO_SVG, renderUiHtml } from '../ui/assets.ts';
+import { i18nLocaleScript } from '../ui/client/i18n-en.ts';
+import {
+  isUiI18nFileLocale,
+  resolveUiLocale,
+} from '../ui/i18n/resolve-ui-locale.ts';
 import { resolveUiAssetUrl } from '../ui/load-ui-asset.ts';
 import { uiShellRegisterPaths } from '../ui/shell-routes.ts';
 import { COOKIE_NAME, type UiSessionStore } from '../lib/ui-session.ts';
@@ -32,6 +37,10 @@ function commonHeaders(c: Context): void {
 }
 
 function shell(c: Context) {
+  const locale = resolveUiLocale({
+    cookie: getCookie(c, 'oa_lang'),
+    acceptLanguage: c.req.header('Accept-Language'),
+  });
   commonHeaders(c);
   c.header('Content-Type', 'text/html; charset=utf-8');
   c.header('Content-Security-Policy', OUTER_CSP);
@@ -42,7 +51,8 @@ function shell(c: Context) {
     'Permissions-Policy',
     'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
   );
-  return c.body(UI_HTML);
+  // en 默认与历史 UI_HTML 逐字节一致；非 en 注入字典件 script。
+  return c.body(renderUiHtml(locale));
 }
 
 function legacyOverviewRedirect(c: Context) {
@@ -51,12 +61,24 @@ function legacyOverviewRedirect(c: Context) {
   return c.redirect('/ui', 301);
 }
 
-/** 静态资产：js/css/fonts/favicon。不含 shell 深链（防注册顺序吞路由）。 */
+/** 静态资产：js/css/fonts/favicon + i18n 字典件。不含 shell 深链（防注册顺序吞路由）。 */
 export function registerUiAssets(app: Hono): void {
   app.get('/ui/app.js', (c) => {
     commonHeaders(c);
     c.header('Content-Type', 'text/javascript; charset=utf-8');
     return c.body(UI_JS);
+  });
+  // #137 B1：字典件挂既有资产树与同款安全头；合法集 es/ja/ko/zh-CN，未知 404。
+  // Hono 对 `:locale.js` 会把参数名解析成 `locale.js` 且值含后缀，故用 :file 再剥 .js。
+  app.get('/ui/i18n/:file', (c) => {
+    const file = c.req.param('file') || '';
+    if (!file.endsWith('.js')) return c.body(null, 404);
+    const locale = file.slice(0, -'.js'.length);
+    if (!isUiI18nFileLocale(locale)) return c.body(null, 404);
+    commonHeaders(c);
+    c.header('Content-Type', 'text/javascript; charset=utf-8');
+    c.header('Content-Security-Policy', OUTER_CSP);
+    return c.body(i18nLocaleScript(locale));
   });
   app.get('/ui/styles.css', (c) => {
     commonHeaders(c);
