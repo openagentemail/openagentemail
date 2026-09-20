@@ -26,9 +26,9 @@
   function renderMessages() {
     messageList.replaceChildren();
     activeAddress.textContent = state.activeAddress;
-    var folderLabel = 'Inbox';
-    if (state.activeFolder === 'sent') folderLabel = 'Sent';
-    if (state.activeFolder === 'all') folderLabel = 'All Mail';
+    var folderLabel = t('inbox.label.inbox');
+    if (state.activeFolder === 'sent') folderLabel = t('inbox.label.sent');
+    if (state.activeFolder === 'all') folderLabel = t('inbox.label.allMail');
     messagesTitle.textContent = folderLabel;
     if (!state.activeAddress) {
       renderEmptyState(messageState, {

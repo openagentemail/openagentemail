@@ -186,7 +186,7 @@
     } catch (error) {
       if (openedGen !== modalGeneration) return;
       if (error.status === 409) {
-        window.alert('address already exists');
+        window.alert(t('api.copy.addressAlreadyExists'));
       } else if (error.status === 400) {
         announce(t('api.announce.invalidIdentityRequestTryAgain'));
       } else if (error.message !== 'session_expired') {
@@ -208,7 +208,7 @@
         { method: 'POST' }
       );
       if (openedGen !== modalGeneration) return;
-      showTokenModal(payload.token, 'Rotated Token');
+      showTokenModal(payload.token, t('api.copy.rotatedToken'));
       refreshInboxIdentities();
       loadHome({ refresh: false });
     } catch (error) {
@@ -296,11 +296,11 @@
           ? row.pushContentTier
           : 1;
       announce(
-        'Push content tier is tier ' +
+        t('api.copy.pushContentTierIsTier') +
           authoritative +
-          ' for ' +
+          t('push.announce.for') +
           address +
-          ' (refreshed).',
+          t('api.copy.refreshed'),
       );
       return { status: 'ok', authoritative: authoritative };
     } catch (_refreshErr) {
@@ -478,12 +478,12 @@
     var when = Date.parse(value);
     if (Number.isNaN(when)) return '—';
     var seconds = Math.max(0, Math.round((Date.now() - when) / 1000));
-    if (seconds < 60) return 'just now';
+    if (seconds < 60) return t('api.copy.justNow');
     var minutes = Math.round(seconds / 60);
-    if (minutes < 60) return minutes + ' min ago';
+    if (minutes < 60) return minutes + t('api.copy.minAgo');
     var hours = Math.round(minutes / 60);
-    if (hours < 24) return hours + ' h ago';
-    return Math.round(hours / 24) + ' d ago';
+    if (hours < 24) return hours + t('api.copy.hAgo');
+    return Math.round(hours / 24) + t('api.copy.dAgo');
   }
 
   function clearDetail() {

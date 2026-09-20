@@ -126,8 +126,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #162+#163：tasks 轮询旧∪新 sync + overview 硬停文案诚实化（纯 UI）。
     // #137 B1：拼入 I18N_JS + call-site t()；en 文案零变化，UI_JS 字节因字典/t() 增长。
     // #137 R2：自检直查 I18N_EN + tFormat 整句模板 + 同形面回扫。
+    // #137 R3：壳键槽模板（弃子串替换）+ 裸字面量收尾迁移。
     expect(sha256(UI_JS)).toBe(
-      '94098ec612bb5a49d60acad02ba00c0bc5d675dad9ce16d4bf514e851f2fffa1',
+      '5eb29bfce5b46ca8f98b455d0eb777de6723ec55226af02f9200df73f8a218a2',
     );
     expect(sha256(UI_CSS)).toBe(
       'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',

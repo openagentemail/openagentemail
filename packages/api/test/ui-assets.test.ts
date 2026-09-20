@@ -272,7 +272,7 @@ describe('UI static asset contract', () => {
       'if (!connectCredentialValue || !connectRevealed) return;',
     );
     // R3 i案：Copy instruction 只复制 prompt，不含 config/token 拼接
-    expect(CONNECT_PAGE_JS).toContain("'Copy instruction'");
+    expect(CONNECT_PAGE_JS).toContain("t('connect.copy.copyInstruction')");
     expect(CONNECT_PAGE_JS).not.toContain(
       "definition.prompt + '\\n\\n' + definition.config",
     );
@@ -795,8 +795,8 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks?' + params.join('&')");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(id)");
     expect(UI_JS).not.toContain("value = '__tasks__'");
-    expect(UI_JS).toContain("return 'Waiting for you'");
-    expect(UI_JS).toContain("return 'Past deadline'");
+    expect(UI_JS).toContain("return t('tasks.copy.waitingForYou')");
+    expect(UI_JS).toContain("return t('tasks.copy.pastDeadline')");
     expect(UI_JS).toContain('function approvalPastDeadline(');
     expect(UI_JS).toContain("button.classList.add('is-past-deadline')");
     expect(UI_JS).toContain('Write a reply. This goes back to the agent as a working update.');
@@ -860,7 +860,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/reply'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/remind'");
     expect(UI_JS).toContain("'/ui/api/tasks/' + encodeURIComponent(task.id) + '/close'");
-    expect(UI_JS).toContain("return 'Closed'");
+    expect(UI_JS).toContain("return t('tasks.action.closed')");
     expect(UI_JS).toContain('task-result-table');
     expect(UI_JS).toContain('Original request');
     const renderRows = UI_JS.slice(
@@ -875,7 +875,7 @@ describe('UI static asset contract', () => {
   test('task timeline is capped at TASK_TIMELINE_RENDER_LIMIT with an honest truncation label', () => {
     expect(UI_JS).toContain('var TASK_TIMELINE_RENDER_LIMIT = 200');
     expect(UI_JS).toContain('messages.slice(timelineTotal - TASK_TIMELINE_RENDER_LIMIT)');
-    expect(UI_JS).toContain("'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT");
+    expect(UI_JS).toContain("t('tasks.copy.showingLatest')");
     const detail = UI_JS.slice(
       UI_JS.indexOf('function renderTaskDetail('),
       UI_JS.indexOf('function renderTasks('),
@@ -1017,8 +1017,8 @@ describe('UI static asset contract', () => {
   test('a 503 from notify history short-circuits the remaining topic fan-out (F7)', () => {
     expect(UI_JS).toContain('error.status === 503');
     expect(UI_JS).toContain('disabled: true');
-    expect(UI_JS).toContain("'Notifications are not configured on this server.'");
-    expect(UI_JS).toContain("'Notifications are disabled on this server.'");
+    expect(UI_JS).toContain("t('notifications.copy.notificationsAreNotConfiguredOnThis')");
+    expect(UI_JS).toContain("t('notifications.copy.notificationsAreDisabledOnThisServer')");
     const load = UI_JS.slice(
       UI_JS.indexOf('async function loadNotifyHistory('),
       UI_JS.indexOf('function enterNotifications('),
@@ -1037,17 +1037,23 @@ describe('UI static asset contract', () => {
     expect(load).toContain('merged.length === 0');
     expect(load).toContain('state.notifyMessages.length > 0');
     expect(load).toContain('state.notifyFetchKey === fetchKey');
-    expect(load).toContain("'Refresh failed. Showing previous notifications.'");
+    expect(load).toContain("t('notifications.error.refreshFailedShowingPreviousNotifications')");
     // 保留文案必须出现在「写回 merged」之前；else 侧才允许赋值
-    const keepMsgIdx = load.indexOf("'Refresh failed. Showing previous notifications.'");
+    const keepMsgIdx = load.indexOf(
+      "t('notifications.error.refreshFailedShowingPreviousNotifications')",
+    );
     const assignIdx = load.indexOf('state.notifyMessages = merged;');
     expect(keepMsgIdx).toBeGreaterThan(-1);
     expect(assignIdx).toBeGreaterThan(keepMsgIdx);
     const beforeAssign = load.slice(0, assignIdx);
-    expect(beforeAssign).toContain("'Refresh failed. Showing previous notifications.'");
+    expect(beforeAssign).toContain(
+      "t('notifications.error.refreshFailedShowingPreviousNotifications')",
+    );
     expect(beforeAssign).toContain('state.notifyMessages.length > 0');
     // else 侧仍写 merged（部分失败 / 首载全败 / 成功）
-    expect(load.slice(assignIdx)).toContain('Some channels could not be loaded');
+    expect(load.slice(assignIdx)).toContain(
+      "t('notifications.error.someChannelsCouldNotBeLoaded')",
+    );
   });
 
   // N1：Home 落焦不滚动；一期 Home 不再保留旧的地址行返回焦点。
@@ -1065,8 +1071,8 @@ describe('UI static asset contract', () => {
     expect(enter).toContain('loadHome({ refresh: false });');
     expect(enter).not.toContain('preventScroll');
 
-    expect(UI_JS).toContain("'Waiting for you'");
-    expect(UI_JS).toContain("'Urgent pushes today'");
+    expect(UI_JS).toContain("t('tasks.copy.waitingForYou')");
+    expect(UI_JS).toContain("t('overview.copy.urgentPushesToday')");
     expect(UI_JS).toContain("'/ui/api/notify/summary?date=today&tz='");
 
     // B6 0 期：Home/非 Mail 深链必须在 Mail 初载前落面，慢邮箱不能挡住首屏。
@@ -1108,7 +1114,9 @@ describe('UI static asset contract', () => {
     );
     expect(reconcile).toContain('if (!state.activeAddress) return;');
     expect(reconcile).toContain("state.activeAddress = '';");
-    expect(reconcile).toContain("if (state.scope === 'inbox') enterOverview({ announce: lost + ' is no longer available. Back to Home.' });");
+    expect(reconcile).toContain(
+      "if (state.scope === 'inbox') enterOverview({ announce: lost + t('overview.copy.isNoLongerAvailableBackTo') });",
+    );
     // Home roster refresh and inbox admin Refresh both reconcile the active address.
     expect(UI_JS).toContain('      reconcileActiveAddress();');
     expect(UI_JS).toContain('if (isAdmin()) refreshInboxIdentities();');
@@ -1260,7 +1268,7 @@ describe('UI static asset contract', () => {
     );
     expect(home).toContain("state.homeWaitingTotal = typeof waitingBoard.waitingTotal === 'number' || homeWaitingTotalIsCapped(waitingBoard.waitingTotal)");
     expect(UI_JS).toContain('if (homeWaitingScanCapped(acc)) return HOME_WAITING_SCAN_CAPPED_LABEL');
-    expect(UI_JS).toContain("var HOME_WAITING_SCAN_CAPPED_LABEL = '500+ · scan capped'");
+    expect(UI_JS).toContain("var HOME_WAITING_SCAN_CAPPED_LABEL = t('overview.copy.n500ScanCapped')");
     expect(UI_JS).toContain('function publishHomeWaitingTotal(');
     expect(home).toContain('loadHomeWaiting(signal)');
     expect(home).toContain('loadHomeActiveOverdue(signal)');
@@ -1293,9 +1301,15 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function renderHomeSessionEmpty('),
     );
     expect(home).toContain("if (isAdmin()) {");
-    expect(home).toContain("healthCard('Addresses', String(state.identities.length), 'configure-identities')");
-    expect(home).toContain("healthCard('Unread mail', homeNumber(state.homeUnseenCount), 'inbox')");
-    expect(home).toContain("healthCard('Mail', 'Open mailbox', 'inbox')");
+    expect(home).toContain(
+      "healthCard(t('shell.html.addresses'), String(state.identities.length), 'configure-identities')",
+    );
+    expect(home).toContain(
+      "healthCard(t('overview.copy.unreadMail'), homeNumber(state.homeUnseenCount), 'inbox')",
+    );
+    expect(home).toContain(
+      "healthCard(t('shell.nav.mail'), t('overview.copy.openMailbox'), 'inbox')",
+    );
   });
 
   // N1：仅前台、仅有交互的会话按 30s 轮询；闲置降频，隐藏标签停止。
@@ -1454,7 +1468,7 @@ describe('UI static asset contract', () => {
     expect(renderCfg).toContain("del.textContent = t('identities.action.delete')");
     expect(renderCfg).not.toContain('identity.token');
     expect(UI_JS).toContain('showTokenModal(payload.token');
-    expect(UI_JS).toContain("showTokenModal(payload.token, 'Rotated Token')");
+    expect(UI_JS).toContain("showTokenModal(payload.token, t('api.copy.rotatedToken'))");
     expect(UI_HTML).toContain('Copy this token now. It will not be shown again.');
     expect(UI_JS).toContain('isConfigureScope(state.scope)');
     expect(UI_JS).not.toContain("indexOf('configure-')");
@@ -1695,7 +1709,7 @@ describe('UI static asset contract', () => {
       API_JS.indexOf('function handleDeleteIdentity('),
     );
     expect(rotate.indexOf('openedGen !== modalGeneration')).toBeLessThan(
-      rotate.indexOf("showTokenModal(payload.token, 'Rotated Token')"),
+      rotate.indexOf("showTokenModal(payload.token, t('api.copy.rotatedToken'))"),
     );
     const configurePush = PUSH_DEVICES_PAGE_JS.slice(
       PUSH_DEVICES_PAGE_JS.indexOf('function handleConfigurePushTier('),
@@ -1847,7 +1861,7 @@ describe('UI static asset contract', () => {
     );
     expect(helper).toContain('var recoveryGen = state.overviewGen;');
     expect(helper).toContain("if (recoveryGen !== state.overviewGen) return { status: 'stale' }");
-    expect(helper).toContain("(refreshed).");
+    expect(helper).toContain("t('api.copy.refreshed')");
     expect(UI_JS.indexOf('function handlePushTierChange(')).toBeGreaterThan(
       UI_JS.indexOf('async function recoverPushTier('),
     );

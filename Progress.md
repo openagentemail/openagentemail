@@ -46,3 +46,20 @@
 ### 我们是如何解决这些错误的？
 1. 重算并钉死 UI_JS sha `94098ec6…`。
 2. 断言改为 `tFormat('notifications.copy.showingLatestOf'…)` 形态；shim 补 `tFormat`。
+
+## 2026-09-20 · R3（Codex P1×2）
+
+### 我们实现了哪些功能？
+1. **P1-1**：废弃 `applyI18nLiteralReplacements` 全局子串替换；壳层改为 `SHELL_HTML_TEMPLATE` 键槽 `{{key}}` + `fillI18nSlots`；connect 同模板；en 填充 ≡ 历史 UI_HTML 逐字节。
+2. **P1-2**：connect/Overview/Tasks/inbox/notifications 等剩余可见字面量收尾迁移；agent 粘贴指令/配置体显式 allowlist；完备性测试扫描「字典值全等裸字面量 − allowlist」，红证 `Copy setup`。
+3. Codex 反例断言：mock 含 `Open` / `notice warning` 不得污染 `OpenAgent.email` / `class="notice warning"`。
+
+### 我们遇到了哪些错误？
+1. connect 地标正则 `\s*` 吞掉前导换行 → en 字节偏离。
+2. 批量 wrap 误把 CSS `className` 包进 `t()`。
+3. `ui-assets` 大量字面量断言需同步改为 `t('…')` 形态。
+
+### 我们是如何解决这些错误的？
+1. 地标改为固定缩进 + `data-nav`/`id`，不吞换行。
+2. 还原 className；完备性 allowlist 排除 CSS/技术串。
+3. 更新 `ui-assets.test.ts` 断言；UI_JS sha → `5eb29bfc…`；全量 1892 pass / 0 fail。

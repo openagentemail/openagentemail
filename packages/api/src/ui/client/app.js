@@ -176,8 +176,8 @@
     } catch {
       var selected = selectForManualCopy(sourceNode);
       announce(selected
-        ? 'Clipboard unavailable. The value is selected for manual copying.'
-        : 'Clipboard unavailable. Select the value and copy it manually.');
+        ? t('app.copy.clipboardUnavailableTheValueIsSelected')
+        : t('app.copy.clipboardUnavailableSelectTheValueAnd'));
     }
   }
 
@@ -218,7 +218,7 @@
     open.className = 'open-link';
     open.textContent = t('app.action.open');
     open.target = '_blank';
-    open.rel = 'noopener noreferrer';
+    open.rel = t('app.copy.noopenerNoreferrer');
     open.referrerPolicy = 'no-referrer';
     open.href = parsed.href;
     row.append(text, copy, open);
@@ -275,7 +275,7 @@
       section.append(title, list);
       parent.append(section);
     }
-    appendLinks(parent, 'Verification links', otp.links);
+    appendLinks(parent, t('app.copy.verificationLinks'), otp.links);
   }
 
   function renderPlainBody(container, detail) {
@@ -366,11 +366,11 @@
     var meta = document.createElement('dl');
     meta.className = summary ? 'meta metadata-summary' : 'meta';
     var append = summary ? appendMetadataItem : appendMeta;
-    append(meta, 'From', detail.from);
+    append(meta, t('shell.html.from'), detail.from);
     append(meta, 'To', detail.to);
     append(meta, 'Date', formatDate(detail.date));
     append(meta, 'Id', detail.id);
-    append(meta, 'Source', detail.source === 'internal' ? 'internal' : 'external');
+    append(meta, t('app.action.source'), detail.source === 'internal' ? 'internal' : 'external');
     drawer.append(heading, meta);
   }
 
@@ -405,7 +405,7 @@
     var otpHost = document.createElement('div');
     otpHost.className = 'detail-otp';
     appendOtp(otpHost, detail.otp);
-    appendLinks(otpHost, 'Links in this message', detail.links);
+    appendLinks(otpHost, t('app.copy.linksInThisMessage'), detail.links);
 
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
@@ -469,7 +469,7 @@
       var htmlUnavailable = document.createElement('p');
       htmlUnavailable.className = 'notice warning';
       htmlUnavailable.textContent =
-        'This email is too large to preview safely. Use the plain-text view instead.';
+        t('app.copy.thisEmailIsTooLargeTo2');
       mainCol.append(htmlUnavailable);
     }
     mainCol.append(body);
@@ -515,12 +515,12 @@
     heading.textContent = row.subject || t('tasks.action.noSubject');
     var meta = document.createElement('dl');
     meta.className = 'meta';
-    appendMeta(meta, 'From', row.from);
+    appendMeta(meta, t('shell.html.from'), row.from);
     appendMeta(meta, 'To', Array.isArray(row.to) ? row.to.join(', ') : row.to);
-    appendMeta(meta, 'Sent', row.sentAt);
-    appendMeta(meta, 'Result', row.result === 'failed' ? ('Failed' + (row.error ? ' · ' + row.error : '')) : 'Queued');
+    appendMeta(meta, t('inbox.label.sent'), row.sentAt);
+    appendMeta(meta, t('tasks.action.result'), row.result === 'failed' ? (t('inbox.error.failed') + (row.error ? ' · ' + row.error : '')) : t('inbox.error.queued'));
     appendMeta(meta, 'Message-ID', row.messageId);
-    appendMeta(meta, 'Source', row.source === 'mcp' ? 'MCP' : 'API');
+    appendMeta(meta, t('app.action.source'), row.source === 'mcp' ? 'MCP' : 'API');
     var badge = document.createElement('span');
     badge.className = 'send-result-badge';
     badge.setAttribute('data-result', row.result === 'failed' ? 'failed' : 'queued');
@@ -598,7 +598,7 @@
   async function startSession() {
     configureSession();
     byId('session-label').textContent = state.me.kind === 'admin'
-      ? 'Admin session'
+      ? t('app.copy.adminSession')
       : state.me.address;
     /* Home/其它非 Mail 深链必须先落面：不能被首个邮箱的消息加载挡住。 */
     var route = parseLocationRoute();
@@ -631,8 +631,8 @@
       if (gen !== loginGeneration) return;
       if (!response.ok) {
         loginError.textContent = response.status === 401
-          ? 'That token is not valid.'
-          : 'Sign-in is temporarily unavailable. Try again.';
+          ? t('app.copy.thatTokenIsNotValid')
+          : t('app.copy.signInIsTemporarilyUnavailableTry');
         return;
       }
       var loginPayload = await response.json();
@@ -772,7 +772,7 @@
   });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
-    enterOverview({ returnTo: state.returnAddress, announce: 'Back to Home' });
+    enterOverview({ returnTo: state.returnAddress, announce: t('app.copy.backToHome') });
   });
   function handleInboxMobileBack() {
     history.back();
@@ -871,8 +871,8 @@
       if (gen !== loginGeneration) return;
       if (!response.ok) {
         var msg = response.status === 401 || response.status === 400
-          ? 'That token is not valid.'
-          : 'Sign-in is temporarily unavailable. Try again.';
+          ? t('app.copy.thatTokenIsNotValid')
+          : t('app.copy.signInIsTemporarilyUnavailableTry');
         showLogin(msg);
         return;
       }
@@ -882,7 +882,7 @@
       setLinkLoginMarker();
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
-      var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+      var label = state.me.kind === 'admin' ? t('app.copy.adminSession') : state.me.address;
       var noticeText = tFormat('app.copy.signedInViaLinkAsFull', { label: label });
       if (linkLoginNotice) {
         linkLoginNotice.textContent = noticeText;
@@ -917,8 +917,8 @@
   function setLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        var secure = isCookieSecure() ? '; Secure' : '';
-        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict' + secure;
+        var secure = isCookieSecure() ? t('app.copy.secure') : '';
+        document.cookie = t('app.copy.oaeLinkLogin1PathSamesite') + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */
@@ -928,8 +928,8 @@
   function clearLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        var secure = isCookieSecure() ? '; Secure' : '';
-        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0' + secure;
+        var secure = isCookieSecure() ? t('app.copy.secure') : '';
+        document.cookie = t('app.copy.oaeLinkLoginPathSamesiteStrict') + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */
@@ -992,7 +992,7 @@
       state.me = mePayload;
       if (consumeReturnTo(mePayload)) return;
       if (hasLinkLoginMarker()) {
-        var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+        var existingLabel = state.me.kind === 'admin' ? t('app.copy.adminSession') : state.me.address;
         if (linkLoginNotice) {
           linkLoginNotice.textContent = tFormat('app.copy.signedInViaLinkAsFull', { label: existingLabel });
           linkLoginNotice.hidden = false;

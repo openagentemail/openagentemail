@@ -8,7 +8,7 @@ import { TOKENS_CSS } from './styles/tokens.ts';
 import { BASE_CSS } from './styles/base.ts';
 import { LAYOUT_CSS } from './styles/layout.ts';
 import { PAGES_CSS } from './styles/pages.ts';
-import { I18N_JS, applyI18nLiteralReplacements } from './client/i18n-en.ts';
+import { I18N_JS } from './client/i18n-en.ts';
 import { STORE_JS } from './client/store.ts';
 import { DOM_JS } from './client/dom.ts';
 import { API_JS } from './client/api.ts';
@@ -45,24 +45,14 @@ export const UI_HTML = withConnectShell(shellHtml('en'));
 /**
  * 按 locale 渲染完整 dashboard HTML。
  * en：withConnectShell(shellHtml('en')) 逐字节锚。
- * 非 en：先英文壳过 connect 地标，再改 lang/script，可选 dict 字面量替换（含 connect 串）。
+ * 非 en：键槽模板填充（shell + connect 共用 dict），再改 lang/script；无全局子串替换。
  */
 export function renderUiHtml(
   locale: UiLocale = 'en',
   dict?: Record<string, string>,
 ): string {
   if (locale === 'en') return withConnectShell(shellHtml('en'));
-  let html = withConnectShell(shellHtml('en'));
-  html = html
-    .replace('<html lang="en">', `<html lang="${locale}">`)
-    .replace(
-      '<script src="/ui/app.js" defer></script>',
-      `<script src="/ui/i18n/${locale}.js" defer></script>\n  <script src="/ui/app.js" defer></script>`,
-    );
-  if (dict && Object.keys(dict).length > 0) {
-    html = applyI18nLiteralReplacements(html, dict);
-  }
-  return html;
+  return withConnectShell(shellHtml(locale, dict), dict);
 }
 
 export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;

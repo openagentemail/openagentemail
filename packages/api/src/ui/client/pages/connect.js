@@ -17,10 +17,11 @@ function connectAgentDefinitions(endpoint, token) {
   var jsonServer = { url: endpoint, headers: { Authorization: authorization } };
   return [
     {
-      name: 'Kimi Code',
+      name: t('connect.copy.kimiCode'),
       location: '~/.kimi-code/mcp.json',
       config: jsonConfig(jsonServer),
       // R5：掐读回——写入后重启/重连即生效；勿读回含 token 文件、勿打印
+      // allowlist: agent paste instruction（非 UI 壳层；见 completion.md）
       prompt:
         'I already saved openagent-email into ~/.kimi-code/mcp.json with Copy setup. Do not ask me to paste a token. Do not read that file back or print the bearer. Restart or reconnect the agent so the new MCP entry takes effect.',
     },
@@ -33,12 +34,13 @@ function connectAgentDefinitions(endpoint, token) {
         '\nhttp_headers = { Authorization = ' +
         JSON.stringify(authorization) +
         ' }',
+      // allowlist: agent paste instruction
       prompt:
         'I already added openagent_email to ~/.codex/config.toml with Copy setup. Do not ask me to paste a token. Do not read that config back or print the bearer. Restart or reconnect so the MCP server takes effect.',
     },
     {
-      name: 'Claude Code',
-      location: 'Terminal command',
+      name: t('connect.copy.claudeCode'),
+      location: t('connect.copy.terminalCommand'),
       // R6：命令本体零凭证——header 用 $OAE_TOKEN 变量引用（单引号外展开）
       config:
         'claude mcp add --transport http --scope user --header ' +
@@ -46,6 +48,7 @@ function connectAgentDefinitions(endpoint, token) {
         '$OAE_TOKEN' +
         ' openagent-email ' +
         shellSingleQuote(endpoint),
+      // allowlist: agent paste instruction
       prompt:
         'In your shell, run read -s OAE_TOKEN and paste the identity token (silent input, not saved to history), then press Enter. Next run the Copy setup command; it references $OAE_TOKEN and never embeds the bearer. Do not echo or print OAE_TOKEN. Restart or reconnect so Claude Code picks up the MCP entry.',
     },
@@ -53,6 +56,7 @@ function connectAgentDefinitions(endpoint, token) {
       name: 'Cursor',
       location: '~/.cursor/mcp.json',
       config: jsonConfig(jsonServer),
+      // allowlist: agent paste instruction
       prompt:
         'I already merged openagent-email into ~/.cursor/mcp.json with Copy setup. Do not ask me to paste a token. Do not read that file back or print the bearer. Restart or reconnect Cursor MCP so openagent-email takes effect.',
     },
@@ -74,22 +78,27 @@ function connectAgentDefinitions(endpoint, token) {
         null,
         2,
       ),
+      // allowlist: agent paste instruction
       prompt:
         'I already merged openagent-email into mcp.servers in ~/.zcode/cli/config.json with Copy setup. Do not ask me to paste a token. Do not read that config back or print the bearer. Restart or reconnect the agent session so it takes effect.',
     },
     {
       name: 'ChatGPT',
       manual: true,
+      // allowlist: connector placeholder paste
       config:
         'OAuth connector setup is coming in a separate update. Do not paste an identity token into a ChatGPT conversation.',
+      // allowlist: agent paste instruction
       prompt:
         'Open ChatGPT Settings > Connectors and look for a custom MCP connector option. If it is unavailable, stop; do not paste this identity token into chat.',
     },
     {
       name: 'Grok',
       manual: true,
+      // allowlist: connector placeholder paste
       config:
         'OAuth connector setup is coming in a separate update. Do not paste an identity token into a Grok conversation.',
+      // allowlist: agent paste instruction
       prompt:
         'Open Grok settings and look for an MCP or connector setup flow. If it is unavailable, stop; do not paste this identity token into chat.',
     },
@@ -131,7 +140,7 @@ function renderConnectCards() {
     var location = document.createElement('p');
     location.className = 'connect-card-location';
     location.textContent = definition.manual
-      ? 'Manual connection'
+      ? t('connect.copy.manualConnection')
       : definition.location;
     var config = document.createElement('pre');
     config.className = 'connect-config';
@@ -139,7 +148,7 @@ function renderConnectCards() {
     configCode.textContent = redactConnectText(definition.config);
     config.append(configCode);
     var configCopy = connectCopyButton(
-      'Copy setup',
+      t('connect.copy.copySetup'),
       definition.config,
       configCode,
       !definition.manual,
@@ -150,7 +159,7 @@ function renderConnectCards() {
     prompt.className = 'connect-prompt';
     prompt.textContent = definition.prompt;
     var promptCopy = connectCopyButton(
-      'Copy instruction',
+      t('connect.copy.copyInstruction'),
       // i案：只复制 prompt 文案，绝不附带 config/token
       definition.prompt,
       prompt,
@@ -191,30 +200,25 @@ async function loadConnectPage() {
     connectEndpointValue = payload.endpoint || '';
     connectEndpoint.textContent = connectEndpointValue;
     if (payload.unavailable === 'identity_session_required') {
-      connectState.textContent =
-        'Sign in with an identity token to build agent-specific setup instructions. Admin credentials are never exposed here.';
+      connectState.textContent = t('connect.copy.signInWithAnIdentityToken');
       return;
     }
     connectIdentity.textContent = payload.identity || '';
     if (payload.unavailable === 'token_unavailable' || !payload.token) {
-      connectState.textContent =
-        'This session was restored without a plaintext token. Sign out and sign in directly with this identity token to reveal setup instructions.';
+      connectState.textContent = t('connect.copy.thisSessionWasRestoredWithoutA');
       return;
     }
     connectCredentialValue = payload.token;
     connectCredential.hidden = false;
     // nit：主「Copy token」钮与五卡 copy 同逻辑——遮蔽态保持 disabled
     connectTokenCopy.disabled = true;
-    connectTokenCopy.title =
-      'Reveal the identity token before copying this value.';
-    connectState.textContent =
-      'Reveal the token to enable ready-to-copy setup for each agent.';
+    connectTokenCopy.title = t('connect.action.revealTheIdentityTokenBeforeCopying');
+    connectState.textContent = t('connect.copy.revealTheTokenToEnableReady');
     renderConnectCards();
   } catch (error) {
     if (generation !== connectLoadGen) return;
     if (error.message !== 'session_expired') {
-      connectState.textContent =
-        'Connection details could not be loaded. Try opening this page again.';
+      connectState.textContent = t('connect.error.connectionDetailsCouldNotBeLoaded');
     }
   }
 }
@@ -240,14 +244,15 @@ connectTokenReveal.addEventListener('click', function () {
   // 与 connectCopyButton 对齐：仅 reveal 后允许复制明文 token
   connectTokenCopy.disabled = !connectRevealed;
   if (connectTokenCopy.disabled) {
-    connectTokenCopy.title =
-      'Reveal the identity token before copying this value.';
+    connectTokenCopy.title = t('connect.action.revealTheIdentityTokenBeforeCopying');
   } else {
     connectTokenCopy.removeAttribute('title');
   }
   renderConnectCards();
   announce(
-    connectRevealed ? 'Identity token revealed.' : 'Identity token hidden.',
+    connectRevealed
+      ? t('connect.copy.identityTokenRevealed')
+      : t('connect.copy.identityTokenHidden'),
   );
 });
 

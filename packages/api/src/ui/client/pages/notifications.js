@@ -12,8 +12,8 @@
   }
 
   function formatNotifyChannel(topic) {
-    if (topic === 'user-alerts') return 'User alerts';
-    if (topic === 'user-low') return 'User low';
+    if (topic === 'user-alerts') return t('notifications.copy.userAlerts');
+    if (topic === 'user-low') return t('notifications.copy.userLow');
     return topic;
   }
 
@@ -388,8 +388,8 @@
   function renderNotifyMeta() {
     if (notifySubtitle) {
       notifySubtitle.textContent = state.notifySource === 'cache'
-        ? 'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.'
-        : 'What we tried to send to your phone and computers';
+        ? t('notifications.copy.whatWeTriedToSendTo')
+        : t('notifications.copy.whatWeTriedToSendTo2');
     }
     renderNotifySummaryBar();
     renderNotifyDiagnostics();
@@ -521,8 +521,8 @@
         return fetchNotifyTopic(topic, controller.signal).then(function (result) {
           if (result && result.disabled && !disabledMessage) {
             disabledMessage = result.disabledCode === 'notifications_disabled'
-              ? 'Notifications are disabled on this server.'
-              : 'Notifications are not configured on this server.';
+              ? t('notifications.copy.notificationsAreDisabledOnThisServer')
+              : t('notifications.copy.notificationsAreNotConfiguredOnThis');
             try {
               controller.abort();
             } catch (_abortError) {
@@ -576,7 +576,7 @@
         state.notifyFetchKey === fetchKey
       ) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
         renderNotify();
         announce(state.notifyMessage);
       } else {
@@ -585,10 +585,10 @@
         state.notifyFetchKey = fetchKey;
         if (failures && merged.length === 0) {
           state.notifyStatus = 'error';
-          state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+          state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         } else if (failures) {
           state.notifyStatus = 'error';
-          state.notifyMessage = 'Some channels could not be loaded. Showing what succeeded.';
+          state.notifyMessage = t('notifications.error.someChannelsCouldNotBeLoaded');
         } else {
           state.notifyStatus = 'ready';
           state.notifyMessage = '';
@@ -600,12 +600,12 @@
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyMessages.length === 0) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
         state.notifyFetchKey = notifyFetchKey();
       } else {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
       }
       renderNotify();
     } finally {
@@ -724,11 +724,11 @@
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyLogItems.length === 0) {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Notifications could not be loaded. Try Refresh.';
+        state.notifyMessage = t('notifications.error.notificationsCouldNotBeLoadedTry');
         state.notifyLogFetchKey = fetchKey;
       } else {
         state.notifyStatus = 'error';
-        state.notifyMessage = 'Refresh failed. Showing previous notifications.';
+        state.notifyMessage = t('notifications.error.refreshFailedShowingPreviousNotifications');
       }
       renderNotify();
     } finally {

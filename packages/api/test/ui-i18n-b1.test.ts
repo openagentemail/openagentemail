@@ -22,7 +22,7 @@ const { withConnectShell } = await import('../src/ui/connect-shell.ts');
 const {
   I18N_EN,
   I18N_JS,
-  applyI18nLiteralReplacements,
+  fillI18nSlots,
   tServer,
 } = await import('../src/ui/client/i18n-en.ts');
 const { resolveUiLocale } = await import('../src/ui/i18n/resolve-ui-locale.ts');
@@ -169,51 +169,42 @@ describe('console i18n R2 P1×4 (#137)', () => {
     expect(() => out.t(selfKey)).not.toThrow();
   });
 
-  test('P1-2：非 en 字面量最长优先替换；en 逐字节不变；tServer(dict?)', () => {
-    // en 路径：dict 被忽略，逐字节护栏
+  test('R3-P1-1：键槽填充；Codex 反例 Open/notice warning 不得污染', () => {
+    // en 路径：dict 忽略，逐字节护栏
     const enWithDict = shellHtml('en', { 'shell.html.signOut': 'Cerrar sesión' });
     expect(Buffer.from(enWithDict, 'utf8')).toEqual(Buffer.from(shellHtml('en'), 'utf8'));
 
-    // mock locale 字典：含 5 键译文（单测内构造；不动 /ui/i18n/:locale.js）
     const mockDict: Record<string, string> = {
       'shell.html.signOut': '【退出】',
       'shell.html.menu': '【菜单】',
       'shell.html.work': '【工作】',
       'login.submit': '【打开邮箱】',
       'login.title': '【无噪收件箱。】',
+      // Codex 反例形态：若误用子串替换会污染 brand / class
+      'shell.html.openCounterexample': 'Open',
+      'shell.html.noticeWarningCounterexample': 'notice warning',
     };
-    expect(shellHtml('en')).toContain(I18N_EN['shell.html.signOut']!);
-    expect(shellHtml('en')).toContain(I18N_EN['login.submit']!);
 
-    const es = shellHtml('es', mockDict);
+    const es = renderUiHtml('es', mockDict);
     expect(es).toContain('<html lang="es">');
     expect(es).toContain('<script src="/ui/i18n/es.js" defer></script>');
     expect(es).toContain('【退出】');
-    expect(es).toContain('【菜单】');
-    expect(es).toContain('【工作】');
     expect(es).toContain('【打开邮箱】');
-    expect(es).toContain('【无噪收件箱。】');
     expect(es).not.toContain('>Sign out<');
     expect(es).not.toContain('>Open Mail<');
 
-    // 期望 HTML = lang+script 注入后再做替换
-    let expected = shellHtml('en')
-      .replace('<html lang="en">', '<html lang="es">')
-      .replace(
-        '<script src="/ui/app.js" defer></script>',
-        '<script src="/ui/i18n/es.js" defer></script>\n  <script src="/ui/app.js" defer></script>',
-      );
-    expected = applyI18nLiteralReplacements(expected, mockDict);
-    expect(es).toBe(expected);
+    // 反例：wordmark / title / class 属性必须原样
+    expect(es).toContain('>OpenAgent.email<');
+    expect(es).toContain('<title>OpenAgent Home</title>');
+    expect(es).toMatch(/class="notice warning"/);
+    // 「Open」/「notice warning」即使出现在 mock 字典也不得污染 brand / class（键槽无此槽）
+    expect((es.match(/OpenAgent\.email/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect(es).not.toContain('【打开邮箱】Agent');
 
-    // 最长优先：短串是长串子串时不得半替换
-    const longFirstDict: Record<string, string> = {
-      'shell.html.signOut': '【退出登录】',
-    };
-    const sample = 'Please Sign out now';
-    expect(applyI18nLiteralReplacements(sample, longFirstDict)).toBe('Please 【退出登录】 now');
+    // 键槽填充保真：模板 + en 值 ≡ shellHtml(en)
+    const slotted = fillI18nSlots('X{{login.submit}}Y{{shell.html.signOut}}Z');
+    expect(slotted).toBe('XOpen MailYSign outZ');
 
-    // tServer(dict?)
     expect(tServer('login.submit')).toBe('Open Mail');
     expect(tServer('login.submit', mockDict)).toBe('【打开邮箱】');
     expect(tServer('missing.key', mockDict)).toBe('missing.key');
@@ -280,5 +271,89 @@ describe('console i18n R2 P1×4 (#137)', () => {
   test('P1-4：Accept-Language q=0 过滤', () => {
     expect(resolveUiLocale({ acceptLanguage: 'es;q=0, en' })).toBe('en');
     expect(resolveUiLocale({ acceptLanguage: 'es;q=0' })).toBe('en');
+  });
+
+  test('R3-P1-2：完备性——裸 UI 字面量差集；Copy setup 红证已绿', () => {
+    /** 显式 allowlist：非 UI 壳层（agent 粘贴指令 / 配置体 / 路径 / CSS / 技术 token）。 */
+    const ALLOWLIST: RegExp[] = [
+      /^I already (saved|added|merged) /,
+      /^In your shell, run read/,
+      /^Open ChatGPT Settings/,
+      /^Open Grok settings/,
+      /^OAuth connector setup is coming/,
+      /^~\/\./,
+      /^claude mcp add /,
+      /^\[mcp_servers/,
+      /^http_headers/,
+      /^Bearer /,
+      /^Authorization/,
+      /^openagent-email$/,
+      /^openagent_email$/,
+      /^Terminal command$/,
+      // CSS / DOM 技术串
+      /^(quiet|primary|notice|tab|cell|home-|overview-|connect-|task-|row-|is-|sr-only)/,
+      /home-link|home-count|seen-toggle|tab-headers|delete-action|row-flat|is-selected/,
+      /^noopener noreferrer$/,
+      // 日期输入拼装碎片（非可见文案）
+      /^T\d{2}:\d{2}:\d{2}/,
+      // 纯技术 / 短状态 token
+      /^(urgent|normal|low|active|failed|completed|all|inbox|sent|admin)$/i,
+      /^[a-z0-9_-]+$/, // 无空格标识符
+      /^https?:\/\//,
+      /^\/ui\//,
+      /^\?/,
+      /^&/,
+      /^#/,
+      /^\$/,
+      /^<\w/,
+      // 数字/单位碎片
+      /^\d+$/,
+      /^[·•]+$/,
+      /^••••/,
+    ];
+
+    const enValues = new Set(Object.values(I18N_EN));
+    const root = join(import.meta.dir, '../src/ui/client');
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.js')) files.push(p);
+      }
+    };
+    walk(root);
+
+    /** 抽取单引号字面量（足够覆盖本仓 UI 字面量风格）。 */
+    function literals(src: string): string[] {
+      const out: string[] = [];
+      const re = /'((?:\\'|[^'])*)'/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(src))) out.push(m[1]!.replace(/\\'/g, "'"));
+      return out;
+    }
+
+    const offenders: string[] = [];
+    for (const f of files) {
+      if (f.includes('i18n-en')) continue;
+      const src = readFileSync(f, 'utf8');
+      for (const lit of literals(src)) {
+        if (lit.length < 4) continue;
+        if (!/[A-Za-z]/.test(lit)) continue;
+        if (ALLOWLIST.some((re) => re.test(lit))) continue;
+        // 与字典值全等 → 未迁移的可见英文
+        if (enValues.has(lit)) {
+          offenders.push(`${f.replace(/.*\/client\//, '')}: ${JSON.stringify(lit)}`);
+        }
+      }
+    }
+
+    // 红证：迁移前 connect 页存在裸 'Copy setup'；迁移后不得再出现该精确字面量
+    const connectSrc = readFileSync(join(root, 'pages/connect.js'), 'utf8');
+    const connectLits = literals(connectSrc);
+    expect(connectLits.filter((s) => s === 'Copy setup')).toEqual([]);
+    expect(connectSrc).toContain("t('connect.copy.copySetup')");
+
+    expect(offenders).toEqual([]);
   });
 });

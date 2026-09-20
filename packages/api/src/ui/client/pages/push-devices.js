@@ -192,8 +192,8 @@
         var risk = document.createElement('p');
         risk.className = 'push-tier-risk';
         risk.textContent = selected
-          ? 'Active. Body previews and OTP codes leave this server.'
-          : 'Requires an explicit risk confirmation. The server rejects the change without it.';
+          ? t('push.copy.activeBodyPreviewsAndOtpCodes')
+          : t('push.modal.requiresAnExplicitRiskConfirmationThe');
         node.append(risk);
       }
       configurePushCards.append(node);
@@ -207,7 +207,7 @@
     var parts = [];
     if (labels.userAlerts) parts.push(labels.userAlerts);
     if (labels.userLow) parts.push(labels.userLow);
-    return parts.length ? parts.join(' · ') : 'User alerts · User low';
+    return parts.length ? parts.join(' · ') : t('push.copy.userAlertsUserLow');
   }
 
   function paintDeviceQr(qr) {
@@ -249,13 +249,13 @@
   function showDevicePairModal(created) {
     beginModal();
     devicePairName.textContent = created.displayName
-      ? 'Device: ' + created.displayName
+      ? t('push.copy.device') + created.displayName
       : '';
     devicePairServer.textContent = created.serverUrl || (created.qrPayload && created.qrPayload.serverUrl) || '';
     devicePairUser.textContent = created.username || (created.qrPayload && created.qrPayload.username) || '';
     devicePairPassword.textContent = created.password || (created.qrPayload && created.qrPayload.password) || '';
     devicePairTopics.textContent = topicSemantics({
-      topicLabels: { userAlerts: 'User alerts', userLow: 'User low' }
+      topicLabels: { userAlerts: t('notifications.copy.userAlerts'), userLow: t('notifications.copy.userLow') }
     });
     paintDeviceQr(created.qr);
     devicePairModal.hidden = false;
@@ -294,8 +294,8 @@
     var openedGen = beginModal();
     confirmModalTitle.textContent = t('push.modal.revokeDevice');
     confirmModalText.textContent =
-      'This deletes the ntfy login for ' +
-      (device.displayName || 'this device') +
+      t('push.copy.thisDeletesTheNtfyLoginFor') +
+      (device.displayName || t('push.copy.thisDevice')) +
       '. Push to that phone stops immediately.';
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = t('clients.action.revoke');

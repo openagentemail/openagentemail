@@ -553,27 +553,40 @@ export function tServer(key: string, dict?: Record<string, string>): string {
 }
 
 /**
- * 对 HTML 做最长优先精确字面量替换：I18N_EN 值 → dict 译文。
- * 仅替换 dict 中有对应键且译文不同于 en 值的条目。
+ * 解码壳层字典值：\\uXXXX 字面转义 → 真实字符；HTML 文本中的 & → &amp;。
+ * 仅用于键槽填充，不做全局子串搜索。
  */
-export function applyI18nLiteralReplacements(
-  html: string,
-  dict: Record<string, string>,
+function decodeShellSlotValue(raw: string): string {
+  let s = raw;
+  if (s.includes('\\u')) {
+    try {
+      s = JSON.parse(`"${s}"`);
+    } catch {
+      /* 保持原串 */
+    }
+  }
+  // 文本节点安全：& 写成实体（字典存「Push & Devices」，HTML 需 &amp;）
+  if (s.includes('&') && !s.includes('&amp;') && !s.includes('&lt;')) {
+    s = s.replace(/&/g, '&amp;');
+  }
+  return s;
+}
+
+/**
+ * 键槽模板填充：仅替换 {{key}}，绝不做 HTML 全局子串替换。
+ * dict 缺省或缺键时回落 I18N_EN。
+ */
+export function fillI18nSlots(
+  template: string,
+  dict?: Record<string, string>,
 ): string {
-  const pairs: Array<{ en: string; tr: string }> = [];
-  for (const key of Object.keys(dict)) {
-    const en = I18N_EN[key];
-    const tr = dict[key];
-    if (en == null || tr == null || tr === en || en.length < 1) continue;
-    pairs.push({ en, tr });
-  }
-  pairs.sort((a, b) => b.en.length - a.en.length);
-  let out = html;
-  for (const { en, tr } of pairs) {
-    if (!out.includes(en)) continue;
-    out = out.split(en).join(tr);
-  }
-  return out;
+  return template.replace(/\{\{([\w.-]+)\}\}/g, (_m, key: string) => {
+    const raw =
+      dict && Object.prototype.hasOwnProperty.call(dict, key)
+        ? dict[key]!
+        : I18N_EN[key] || key;
+    return decodeShellSlotValue(raw);
+  });
 }
 
 /** 字典件响应体：B1 骨架为空对象（真译文 B2）。 */

@@ -66,9 +66,9 @@
   }
 
   function taskStateLabel(task) {
-    if (taskIsClosed(task)) return 'Closed';
-    if (approvalPastDeadline(task)) return 'Past deadline';
-    if (task && task.state === 'input-required') return 'Waiting for you';
+    if (taskIsClosed(task)) return t('tasks.action.closed');
+    if (approvalPastDeadline(task)) return t('tasks.copy.pastDeadline');
+    if (task && task.state === 'input-required') return t('tasks.copy.waitingForYou');
     return task && task.state ? task.state : '—';
   }
 
@@ -217,8 +217,8 @@
     section.className = 'task-approval';
     var title = document.createElement('h4');
     title.textContent = approvalPastDeadline(task)
-      ? 'Approval expired'
-      : task.state === 'input-required' ? 'Approval required' : 'Approval details';
+      ? t('tasks.copy.approvalExpired')
+      : task.state === 'input-required' ? t('tasks.copy.approvalRequired') : t('tasks.copy.approvalDetails');
     var type = document.createElement('p');
     type.textContent = t('tasks.action.type') + String(approval.action.type || '—');
     var name = document.createElement('p');
@@ -267,8 +267,8 @@
     if (rows.length === 0) {
       var filter = state.tasksFilter || 'input-required';
       tasksStateNode.textContent = filter === 'all'
-        ? 'No tasks in this period. Refresh after a task mail arrives.'
-        : 'No tasks in "' + filter + '" for this period.';
+        ? t('tasks.copy.noTasksInThisPeriodRefresh')
+        : t('tasks.copy.noTasksIn') + filter + t('tasks.copy.forThisPeriod');
       return;
     }
     tasksStateNode.textContent = '';
@@ -344,8 +344,8 @@
         leaseLabel.textContent = hasDisabledLeaseAuthority ? t('tasks.action.leaseDisabled') : t('tasks.action.claimedUntil');
         var leaseValue = document.createElement('span');
         leaseValue.textContent = hasDisabledLeaseAuthority
-          ? 'Retained authority until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration
-          : task.claimedUntil + ' · generation ' + task.leaseGeneration;
+          ? t('tasks.copy.retainedAuthorityUntil') + task.claimedUntil + t('tasks.copy.generation') + task.leaseGeneration
+          : task.claimedUntil + t('tasks.copy.generation') + task.leaseGeneration;
         leaseCell.append(leaseLabel, leaseValue);
       }
 
@@ -426,11 +426,11 @@
       (task.from || '—') +
       ' → ' +
       (task.to || '—') +
-      ' · updated ' +
+      t('tasks.copy.updated') +
       formatAgo(task.updatedAt) +
       ' · ' +
       (Array.isArray(task.messages) ? task.messages.length : 0) +
-      ' messages';
+      t('tasks.copy.messages');
     head.append(title, badge, meta);
     var hasLeaseAuthority = typeof task.claimedUntil === 'string' && typeof task.leaseGeneration === 'number';
     var hasActiveLease = hasLeaseAuthority && task.leaseStatus !== 'disabled';
@@ -439,16 +439,16 @@
       var leaseMeta = document.createElement('p');
       leaseMeta.className = 'task-detail-meta';
       leaseMeta.textContent = hasDisabledLeaseAuthority
-        ? 'Lease disabled · Retained authority until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration
-        : 'Claimed until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration;
+        ? t('tasks.copy.leaseDisabledRetainedAuthorityUntil') + task.claimedUntil + t('tasks.copy.generation') + task.leaseGeneration
+        : t('tasks.copy.claimedUntil') + task.claimedUntil + t('tasks.copy.generation') + task.leaseGeneration;
       head.append(leaseMeta);
     }
     if (task.overdueReason) {
       var overdueNote = document.createElement('p');
       overdueNote.className = 'task-overdue-flag';
       overdueNote.textContent = task.overdueReason === 'submitted'
-        ? 'Overdue: submitted more than 4 hours ago.'
-        : 'Overdue: working more than 24 hours ago.';
+        ? t('tasks.copy.overdueSubmittedMoreThan4Hours')
+        : t('tasks.copy.overdueWorkingMoreThan24Hours');
       head.append(overdueNote);
     }
     if (approvalPastDeadline(task)) {
@@ -488,7 +488,7 @@
       var timelineNote = document.createElement('p');
       timelineNote.className = 'task-detail-meta';
       timelineNote.textContent =
-        'Showing latest ' + TASK_TIMELINE_RENDER_LIMIT + ' of ' + timelineTotal + ' timeline events.';
+        t('tasks.copy.showingLatest') + TASK_TIMELINE_RENDER_LIMIT + t('tasks.copy.of') + timelineTotal + t('tasks.copy.timelineEvents');
       tasksDetailContent.append(timelineNote);
     }
     var timeline = document.createElement('ol');
@@ -708,12 +708,12 @@
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.tasks.length === 0) {
         state.tasksStatus = 'error';
-        state.tasksMessage = 'Tasks could not be loaded. Try Refresh.';
+        state.tasksMessage = t('tasks.error.tasksCouldNotBeLoadedTry');
         /* 对齐 fetchKey，避免 !keyMatches 把诚实错误盖成永远 Loading… */
         state.tasksFetchKey = tasksFetchKey();
       } else {
         state.tasksStatus = 'error';
-        state.tasksMessage = 'Refresh failed. Showing previous tasks.';
+        state.tasksMessage = t('tasks.error.refreshFailedShowingPreviousTasks');
       }
       renderTasks();
     } finally {
@@ -762,10 +762,10 @@
       state.taskDetailStatus = 'error';
       state.taskDetailMessage =
         error.status === 403
-          ? 'You are not a participant on this task.'
+          ? t('tasks.copy.youAreNotAParticipantOn')
           : error.status === 404
-            ? 'Task not found.'
-            : 'Task could not be loaded.';
+            ? t('tasks.copy.taskNotFound')
+            : t('tasks.error.taskCouldNotBeLoaded');
       renderTasks();
       announce(state.taskDetailMessage);
     } finally {
@@ -841,7 +841,7 @@
     var openedGen = beginModal();
     confirmModalTitle.textContent = t('tasks.modal.closeTask');
     confirmModalText.textContent =
-      'Close "' + (task.subject || task.id) + '"? This writes a Closed event and cannot be undone.';
+      t('tasks.copy.close') + (task.subject || task.id) + t('tasks.copy.thisWritesAClosedEventAnd');
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = t('tasks.modal.closeTask');
     confirmModal.hidden = false;

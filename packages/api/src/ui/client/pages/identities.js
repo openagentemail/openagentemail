@@ -6,9 +6,9 @@
   }
 
   function pushTierProjection(tier) {
-    if (tier === 3) return 'Tier 3 · body & OTP';
-    if (tier === 2) return 'Tier 2 · sender & subject';
-    return 'Tier 1 · notify only';
+    if (tier === 3) return t('identities.copy.tier3BodyOtp');
+    if (tier === 2) return t('identities.copy.tier2SenderSubject');
+    return t('identities.copy.tier1NotifyOnly');
   }
 
   function isConfigureScope(scope) {
@@ -31,8 +31,8 @@
       renderEmptyState(configureIdentitiesState, {
         title: t('identities.title.noIdentitiesYet'),
         purpose: isAdmin()
-          ? 'Create an identity to get a one-time token. The plaintext token is shown once and never stored.'
-          : 'No identity is visible in this session.',
+          ? t('identities.copy.createAnIdentityToGetA')
+          : t('identities.copy.noIdentityIsVisibleInThis'),
         actionLabel: isAdmin() ? t('identities.copy.createIdentity') : '',
         onAction: isAdmin() ? showCreateModal : null
       });
