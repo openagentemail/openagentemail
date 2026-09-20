@@ -190,6 +190,8 @@ describe('MCP HTTP 工具', () => {
     expect({
       // 根 README 现改为工具参考链接；完整签名落在 packages/mcp/README.md
       rootCreate: rootReadme.includes('(packages/mcp/README.md#tools)'),
+      // 目标侧：mcp README 须保留能生成 #tools 锚点的标题（防指向漂、目标删）
+      toolsAnchor: /^##\s+Tools\s*$/m.test(packageReadme),
       packageCreate: packageReadme.includes('task_create(to, subject, body?, kind?, approval?, wait?, parentTaskId?)'),
       listChildren: rootReadme.includes('(packages/mcp/README.md#tools)')
         && packageReadme.includes('task_list_children(parentTaskId, limit?, cursor?)'),
@@ -200,6 +202,7 @@ describe('MCP HTTP 工具', () => {
       containedDecision: /contained[^\n]*task_decide|task_decide[^\n]*contained/i.test(security),
     }).toEqual({
       rootCreate: true,
+      toolsAnchor: true,
       packageCreate: true,
       listChildren: true,
       typedApproval: true,
