@@ -140,3 +140,11 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
   the registry (`.failclosed` marker, all evidence files kept). If directory fsync, `.bak` rename, and the
   in-memory snapshot write all fail, the new dest is isolated as `.unrestored`
   and the API fail-closes; `.bak` is kept and must not be discarded.
+
+## Console i18n（#137 B1-A 机制件）
+
+Dashboard shell is a **key-slot template** (`{{key}}` → `fillI18nSlots`) with HTML escaping.
+`I18N_JS` (`t` / `tFormat`) is assembled into `UI_JS`; locale resolution is `resolveUiLocale`
+(cookie `oa_lang` → Accept-Language with `q=0` filtered → `en`). Non-en shells may load
+`/ui/i18n/{locale}.js` skeletons (B1 empty object; real copy in B2).
+English shell HTML remains **byte-identical** to pre-i18n main. Page call-site migration is B1-B.
