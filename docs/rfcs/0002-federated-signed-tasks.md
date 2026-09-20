@@ -468,7 +468,7 @@ Under NO circumstances shall a failed federated task degrade to an unauthenticat
 
 ### 7.1 Environment variables
 
-Following repository conventions (`packages/api/src/lib/config.ts:15`, `:91-230`), all configuration settings are validated at import time via Zod:
+Following repository conventions (`packages/api/src/lib/config.ts:1`, `:92-294`), all configuration settings are validated at import time via Zod:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -486,7 +486,7 @@ When `FEDERATION_ENABLED === 'true'`, boot-time validation strictly requires (`p
 2. `FEDERATION_SIGNING_KEY_ID` MUST be non-empty (1–64 characters).
 3. `FEDERATION_TRUSTED_DOMAINS` MUST be non-empty and contain valid domain names without wildcards.
 
-If any check fails, the process terminates immediately on boot with an informative error rather than starting in an insecure state (`packages/api/src/lib/config.ts:345`).
+If any check fails, the process terminates immediately on boot with an informative error rather than starting in an insecure state (`packages/api/src/lib/config.ts:354`, `:414-428`).
 
 ### 7.2 REST API proposals
 
