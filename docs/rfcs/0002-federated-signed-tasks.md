@@ -1,6 +1,6 @@
 # RFC-0002: Federated signed tasks
 
-- **Status:** **Proposed** — draft for owner ratification.
+- **Status:** **Proposed** — draft for owner ratification. 本 RFC 的「批准前修订清单」（见终审补报与闸面意见记录）未清空之前，Status 不得由 Proposed 升为 Accepted。
 - **Date:** 2026-09-19
 - **Issue:** [#59](https://github.com/openagentemail/openagentemail/issues/59)
 - **Decision scope:** federated discovery metadata (`.well-known/openagent-federation`), domain trust and allowlist model, asymmetric signing envelope (Ed25519), signature verification rules and ordinary mail spoofing rejection, cross-domain trust boundaries and key compromise semantics, configuration surface (env + REST), discovery cache lifecycle and key rotation.
@@ -50,7 +50,7 @@ RFC-0001 explicitly reserved cross-domain federation (#59) as out of scope (`doc
 4. **Strict explicit allowlist (default closed):** Out-of-the-box federation is disabled (`FEDERATION_ENABLED=false`). When enabled, federation is permitted only with domains explicitly enumerated in `FEDERATION_TRUSTED_DOMAINS`.
 5. **Robust anti-spoofing:** External emails carrying forged `X-OA-Task-*` headers without a valid federated signature from an allowlisted domain MUST be discarded as tasks and treated strictly as ordinary mail (`packages/api/src/lib/tasks-internal.ts:1041-1180`).
 6. **Strict egress SSRF isolation:** Remote discovery fetches MUST enforce strict SSRF options (`ssrfOptions: { publicEdge: true }`), unconditionally blocking loopback, RFC 1918, CGNAT, link-local, and ULA addresses regardless of whether the hosting deployment has set `OAE_PUBLIC_EDGE`.
-7. **Mandatory replay defense:** In v1, receivers MUST maintain a bounded deduplication cache for seen `(task_id, event_kind, timestamp)` tuples, alongside strictly monotonic timestamp validation for state advancements.
+7. **Mandatory replay defense:** In v1, receivers MUST maintain a bounded deduplication cache for seen `(task_id, event_kind, state, timestamp)` tuples, alongside strictly monotonic timestamp validation for state advancements.
 8. **No attachments in v1:** Federated task envelopes bind plain text and HTML bodies; emails carrying MIME attachments MUST fail closed and be rejected as tasks.
 9. **Bounded cache & safe rotation:** Cache remote discovery metadata with bounded in-memory capacity and strict TTLs, supporting zero-downtime key rotation with multi-key overlap and active revocation.
 10. **Backward compatibility:** Intra-domain tasks between local identities continue to use the existing symmetric HMAC stamp mechanism (`packages/api/src/lib/tasks-internal.ts:545-549`) without runtime disruption or secret migration.
@@ -345,17 +345,23 @@ To prevent attackers from injecting unauthenticated extensions, bypassing ACLs, 
 To eliminate field boundary ambiguity (`packages/api/src/lib/mail-stamp.ts:21-23`), the signed payload bytes are constructed using newline-separated length-prefixed UTF-8 segments:
 
 ```text
-oae-federated-task-v1
-len(task_id)\ntask_id
-len(event_kind)\nevent_kind
-len(state)\nstate
-len(from)\nfrom
-len(to)\nto
-len(subject)\nsubject
-len(timestamp)\ntimestamp
-len(expires_at)\nexpires_at
-len(body_hash)\nbody_hash
+oae-federated-task-v1\n
+len(task_id)\ntask_id\n
+len(event_kind)\nevent_kind\n
+len(state)\nstate\n
+len(from)\nfrom\n
+len(to)\nto\n
+len(subject)\nsubject\n
+len(timestamp)\ntimestamp\n
+len(expires_at)\nexpires_at\n
+len(body_hash)\nbody_hash\n
 ```
+
+**Precise Framing Specification:**
+1. **UTF-8 Byte-Length Semantics:** All `len(...)` prefixes are formatted as base-10 decimal ASCII strings representing the exact UTF-8 byte length (strictly equivalent to Node.js `Buffer.byteLength(value, 'utf8')` semantics), eliminating any ambiguity between Unicode codepoints, UTF-16 code units, and byte lengths.
+2. **Segment Encoding Structure:** Each field in the canonical tuple is encoded as: decimal byte length + newline (`\n`) + UTF-8 byte string + newline (`\n`).
+3. **Domain Separator and Trailing Newline:** The fixed domain separator string (`oae-federated-task-v1`) is followed immediately by a newline (`\n`), and the final field (`body_hash`) is likewise terminated with a trailing newline (`\n`).
+4. **Deterministic Cross-Platform Reproducibility:** Any independent implementation conforming to this definition is guaranteed to construct byte-identical signed payloads (a canonical test vector will be provided with the implementation PR).
 
 The sender signs these canonical bytes using its Ed25519 private key (RFC 8032:3).
 
@@ -523,7 +529,7 @@ If any check fails, the process terminates immediately on boot with an informati
 #### Administrative Management Endpoints
 Mounted under `/v1/federation` and gated by `requireAdmin` (`packages/api/src/routes/audit.ts:9`):
 - `GET /v1/federation/trusted-domains`: Lists configured trusted domains and their current cached discovery status.
-- `POST /v1/federation/trusted-domains`: Adds a new trusted domain to the runtime allowlist.
+- `POST /v1/federation/trusted-domains`: Adds a new trusted domain to the runtime allowlist. **Validation Requirement (Normative MUST):** Runtime addition MUST strictly re-execute the boot-time domain validation rules specified in §7.1.4 on each candidate domain: the candidate domain MUST NOT intersect with `config.allDomains` (`packages/api/src/lib/config.ts:440`), MUST NOT contain wildcards, and MUST satisfy domain syntax and length constraints (`Buffer.byteLength(label) <= 63`, `packages/api/src/lib/config.ts:341-350`). Any violation MUST reject the request with HTTP 4xx, MUST NOT add the domain to the allowlist, and MUST NOT trigger any discovery fetch.
 - `DELETE /v1/federation/trusted-domains/:domain`: Removes a trusted domain and flushes its cached metadata.
 - `POST /v1/federation/trusted-domains/:domain/refresh`: Flushes cached discovery metadata for a domain and forces an immediate re-fetch via `federatedDiscoveryFetcher()`.
 - `POST /v1/federation/test`: Tests discovery document retrieval and key parsing against a target domain without sending email, exercising `pinnedFetch()` with strict SSRF options and returning diagnostic results.
@@ -543,6 +549,8 @@ The following design decisions are explicitly left open for owner and commander 
 - **Q7: Approval task cross-domain delegation:** Should `createApprovalTask()` (`packages/api/src/lib/tasks-internal.ts:1964`) allow cross-domain reviewers in v1, or should federated approvals be deferred to a follow-up RFC given that approvals can trigger external execution?
 - **Q8: Multi-domain hosting and signature keys:** For OAE deployments configured with multiple domains (`config.extraDomains`, `packages/api/src/lib/config.ts:439`), should each domain have a distinct Ed25519 signing key, or should one primary key sign for all domains managed by the instance?
 - **Q12: Limitations of second-resolution wire timestamps for strict total ordering (秒级 wire 时间戳作严格全序的局限):** In v1, timestamp monotonicity ($T_{msg} > T_{\text{last}}$, §5.4) relies on second-resolution UTC wire timestamps (`000Z`, §5.2). In environments permitting clock skew (`FEDERATION_TIMESTAMP_TOLERANCE_SEC = 300s`) or bursty event sequences where multiple transitions occur within the same second, a causally subsequent task event may arrive carrying $T_{msg} \le T_{\text{last\_state}}$ and be rejected as a false replay or stale transition. Should future iterations introduce a signed monotonic sequence counter, cryptographic nonce, or sub-second tie-breaker into the canonical binding tuple as the authoritative total ordering mechanism, or does wall-clock second precision remain sufficient for asynchronous email delivery? Left for owner determination.
+- **Q13: Keyring configuration for rotation overlap (轮换重叠期的多密钥配置形态):** In §7.1, configuration defines a single `FEDERATION_SIGNING_PRIVATE_KEY` and `FEDERATION_SIGNING_KEY_ID`. However, §4.5 requires retired or revoked signing keys to remain advertised as `retired` or `revoked` for a minimum of 7 days to support verification retries and in-flight mail delivery. A single-key environment variable pair cannot express overlapping multi-key lifecycles. Whether OpenAgentEmail should adopt a JSON-formatted multi-key keyring in environment variables, a dedicated 0600-permission filesystem key directory, or a database-backed keystore is left for owner determination.
+- **Q14: TOFU-over-HTTPS trust establishment and public key fingerprint pinning (TOFU-over-HTTPS 信任建立与公钥指纹钉扎):** Domain trust is established via HTTPS discovery on first contact (Trust On First Use / TOFU). The initial cold-cache fetch constitutes the single window required for an active attacker (via BGP hijacking, rogue Web PKI certificate misissuance, or DNS hijacking) to replace a remote domain's Ed25519 public key. Whether OpenAgentEmail should support cryptographic public key fingerprint pinning (TOFU-PIN) in `FEDERATION_TRUSTED_DOMAINS` (e.g. `domain:sha256-fingerprint`) or require explicit out-of-band initial fingerprint verification before admitting a domain is left for owner determination.
 
 ### 8.1 Known integration gaps (已知集成缺口)
 
