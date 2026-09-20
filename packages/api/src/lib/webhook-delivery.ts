@@ -2878,11 +2878,17 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
     payloadBuilder = (currentSub) => formatPingPayload(envelope, currentSub.id, 'test');
   } else if (original.type === 'approval.requested') {
     if (!original.taskId) {
-      throw new Error('missing_task_id');
+      // #280：裸 Error 无 code 会漏过 redeliver 路由映射 → 500；镜像兄弟抛点补 code
+      const err: any = new Error('missing_task_id');
+      err.code = 'missing_task_id';
+      throw err;
     }
     const task = await getTaskSnapshot(original.taskId);
     if (!task || task.kind !== 'approval' || !task.approval) {
-      throw new Error('task_not_found');
+      // #280：同 missing_task_id，补 code 供路由 404 映射
+      const err: any = new Error('task_not_found');
+      err.code = 'task_not_found';
+      throw err;
     }
     const envelope: WebhookEnvelopeBase = {
       id: original.eventId,

@@ -42,6 +42,7 @@ const {
   resetOAuthStoreCacheForTests,
 } = await import('../src/lib/oauth-store.ts');
 const { readAuditEvents } = await import('../src/lib/audit.ts');
+const { setTaskGetForTests } = await import('../src/lib/tasks-internal.ts');
 
 const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhooks-route');
 const originalDataDir = config.dataDir;
@@ -1211,6 +1212,99 @@ describe('webhooks REST API (§10.3, §10.4, §10.6, §12)', () => {
     expect(resValid.status).toBe(200);
     const bodyValid: any = await resValid.json();
     expect(Array.isArray(bodyValid.deliveries)).toBe(true);
+  });
+
+  // #280：ghost-task 投递 redeliver → 404 task_not_found（裸 Error 曾漏映射变 500）
+  test('#280: redeliver ghost-task approval.requested yields 404 task_not_found', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-ghost-task',
+      address: 'alice@test.example',
+      events: ['approval.requested'],
+      createdBy: 'admin',
+    });
+
+    const deliveryId = 'dlv_ghost_task_280';
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_ghost_task_280',
+      runId: 'run_0',
+      deliveryId,
+      type: 'approval.requested',
+      address: 'alice@test.example',
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: '3f8a1c62-9d4e-4b07-a5f1-6c2e8d904b73', // 不存在的幽灵任务
+      taskCreatedAt: new Date().toISOString(),
+      expiresInSec: 86400,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'permanent',
+      status: 500,
+      durationMs: 50,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: 'test_seed',
+    });
+
+    setTaskGetForTests(async () => null);
+    try {
+      const res = await app.request(`/v1/webhooks/deliveries/${deliveryId}/redeliver`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminKey}` },
+      });
+      expect(res.status).toBe(404);
+      const body: any = await res.json();
+      expect(body).toEqual({ error: 'task_not_found' });
+    } finally {
+      setTaskGetForTests(null);
+    }
+  });
+
+  // #280：缺 taskId 行 redeliver → 404 missing_task_id（总指挥 #4009：资源解析失败族）
+  test('#280: redeliver approval.requested without taskId yields 404 missing_task_id', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook-missing-task-id',
+      address: 'alice@test.example',
+      events: ['approval.requested'],
+      createdBy: 'admin',
+    });
+
+    const deliveryId = 'dlv_missing_task_id_280';
+    appendDeliveryLogRow({
+      ts: new Date().toISOString(),
+      webhookId: sub.id,
+      eventId: 'evt_missing_task_id_280',
+      runId: 'run_0',
+      deliveryId,
+      type: 'approval.requested',
+      address: 'alice@test.example',
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null, // 投递行存在但任务引用缺失
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date().toISOString(),
+      attempt: 1,
+      outcome: 'permanent',
+      status: 500,
+      durationMs: 50,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: null,
+      reason: 'test_seed',
+    });
+
+    const res = await app.request(`/v1/webhooks/deliveries/${deliveryId}/redeliver`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}` },
+    });
+    expect(res.status).toBe(404);
+    const body: any = await res.json();
+    expect(body).toEqual({ error: 'missing_task_id' });
   });
 
   test('P2-2: POST /v1/webhooks/deliveries/:id/redeliver refuses redelivery when uidValidity is null', async () => {
