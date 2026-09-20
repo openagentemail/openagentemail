@@ -46,7 +46,7 @@ All notable changes to this project are documented here, one section per release
 - **观测面变化（#202, #270）**：四族游标拒收（messages / send / tasks / deliveries）现在打结构化日志，标签恰三枚封顶 `{family, shape, within_retention}`，隐私硬线不输出游标原文；**400 响应体逐字不变**。路由直传 decoder 真实种类（`parse_fail` / `lookup_miss`），旧的从游标字符串软解反推形状那一层整体退役。
 - **wait 钟族钉死（#214, #226）**：首次成功读钟即钉死 `performance` / `Date` 族，运行期 flip 直接抛错（响亮失败优于静默全超时）；`performance.now` 不可用时回退 `Date.now` 并 warn-once。
 - **单写者前提**：`WEBHOOK_LOG_MAX_ROWS` 等进程内上限与增量索引都假定**每信箱单 API 进程**，多进程写者会越界（已写进 `.env.example` / `compose.yaml`）。
-- 配置位置盘点：`SOURCE_COMMIT` 出现在 `compose.yaml` / `compose.api-only.yaml`、`packages/api/Dockerfile`（build arg）、`packages/api/src/app.ts`、`packages/api/src/lib/config.ts` 与 `packages/api/README.md`（/healthz 节）；`XAGT_VERIFICATION_SLUG` **已作为环境变量接进** `compose.yaml` / `compose.api-only.yaml`（紧邻 `SOURCE_COMMIT` 的同段 `env`，无需改 compose 文件），另见 `packages/api/src/lib/config.ts`（README 未写）。两者均**未进** `.env.example` / `.env.api-only.example`——compose 部署者在自己 `.env` 里设这两个键即可；`/.well-known/xagent-verification.json` 端点目前除测试外无文档。
+- **X-Agent 自证端点的启用前提（#266）**：`SOURCE_COMMIT` 与 `XAGT_VERIFICATION_SLUG` 必须**同时**配置，`/.well-known/xagent-verification.json` 才挂。两者**生效路径不同**：`SOURCE_COMMIT` 是**构建期 build arg**（compose 的 `api` / `ntfy-provision` 服务 `build.args`），改了必须**重建镜像**——只改 `.env` 再 `up -d` 会仍报旧/空 commit、端点仍不挂；`XAGT_VERIFICATION_SLUG` 是**运行时环境变量**（compose 的 `api` 服务 `environment` 段），改 `.env` 后重建容器即生效。两个键均**未进** `.env.example` / `.env.api-only.example`，且该端点目前除测试外无文档——启用前请对照 `compose.yaml` 的 `api` 服务段与 `packages/api/README.md`。
 
 ## v0.7.3 — 2026-09-13
 
