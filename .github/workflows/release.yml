@@ -61,7 +61,13 @@ jobs:
 
       - name: Publish to npm
         working-directory: packages/mcp
-        run: npm publish --provenance --access public --ignore-scripts
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "@openagentemail/mcp@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::@openagentemail/mcp@${PKG_VERSION} 已在 npm 上 —— 跳过发布（重跑幂等）"
+          else
+            npm publish --provenance --access public --ignore-scripts
+          fi
 
       - name: Install mcp-publisher
         run: |
@@ -71,4 +77,16 @@ jobs:
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        run: ./mcp-publisher publish
+        run: |
+          # registry 会在 npm 传播完成前校验包版本，刚发布的版本常瞬时 404
+          # （上游错误原文即建议 "Wait and retry"）——故带退避重试，且整体幂等。
+          for attempt in 1 2 3 4 5; do
+            if ./mcp-publisher publish; then
+              echo "::notice::MCP Registry 发布成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+            echo "::warning::MCP Registry 发布第 ${attempt} 次失败（npm 传播竞态）；30s 后重试"
+            sleep 30
+          done
+          echo "::error::MCP Registry 发布 5 次均失败"
+          exit 1
