@@ -128,7 +128,7 @@ describe('UI real-file manifest (#520-A)', () => {
     // #137 R2：自检直查 I18N_EN + tFormat 整句模板 + 同形面回扫。
     // #137 R3：壳键槽模板（弃子串替换）+ 裸字面量收尾迁移。
     expect(sha256(UI_JS)).toBe(
-      '5eb29bfce5b46ca8f98b455d0eb777de6723ec55226af02f9200df73f8a218a2',
+      '0e86d19684e9c9bba087857c928cd2178b990d214023f94f0d2939349d157026',
     );
     expect(sha256(UI_CSS)).toBe(
       'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',

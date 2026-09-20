@@ -63,3 +63,23 @@
 1. 地标改为固定缩进 + `data-nav`/`id`，不吞换行。
 2. 还原 className；完备性 allowlist 排除 CSS/技术串。
 3. 更新 `ui-assets.test.ts` 断言；UI_JS sha → `5eb29bfc…`；全量 1892 pass / 0 fail。
+
+## 2026-09-20 · R4（总指挥 #4024 五项 · 绝对末轮）
+
+### 我们实现了哪些功能？
+1. **④**：`fillI18nSlots` 槽值一律完整 HTML 转义（`escapeHtmlText`/`escapeHtmlAttr`）；文本位与属性位分流；弃「已含实体则跳过」；负向断言覆盖 `<>"'` 与属性 breakout。
+2. **②**：cookie Path/SameSite/Secure 与 `open.rel` 恢复代码常量；从 I18N_EN 删除 Bearer/Authorization/SameSite/noopener 及 CSS/技术死键（见 completion.md 删键清单）；完备性负向断言。
+3. **①**：`shellHtml`/`renderUiHtml` 无真字典 → 完整 en 原样（`lang="en"`、无 i18n script）；lang 翻转留给 B2。
+4. **③**：壳层 Search/aria-label/optional labels 等入键槽；模板完备性扫描 `SHELL_HTML_TEMPLATE`。
+5. **⑤**：api.js recover / overview unavailable/opened 整句 `tFormat`；同形面回扫含 api.js；删碎片死键。
+6. 聚焦 94 pass；UI_JS sha `0e86d196…`；en UI_HTML sha 仍绿。
+
+### 我们遇到了哪些错误？
+1. bun 多文件并行 import 时偶发 UI_JS sha 针脚读到旧模块缓存。
+2. 残留 CSS 死键 `tasks.copy.quietDeleteAction` 初扫漏删。
+3. 全量套件 `#206` 25s timeout（预存，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 聚焦三件套改为顺序跑确认针脚；sha 钉 `0e86d196…`。
+2. 删净后重算 UI_JS sha。
+3. 记录为环境竞态，不挡 R4 合入（R3 同口径）。

@@ -23,6 +23,8 @@ const {
   I18N_EN,
   I18N_JS,
   fillI18nSlots,
+  escapeHtmlText,
+  escapeHtmlAttr,
   tServer,
 } = await import('../src/ui/client/i18n-en.ts');
 const { resolveUiLocale } = await import('../src/ui/i18n/resolve-ui-locale.ts');
@@ -47,13 +49,16 @@ describe('console i18n B1 (#137)', () => {
     expect(en).not.toContain('/ui/i18n/');
   });
 
-  test('①b 非 en 注入字典件 script + lang', () => {
-    const es = renderUiHtml('es');
-    expect(es).toContain('<html lang="es">');
-    expect(es).toContain('<script src="/ui/i18n/es.js" defer></script>');
-    expect(es).toContain('<script src="/ui/app.js" defer></script>');
-    // en 基线仍不变
-    expect(UI_HTML).not.toContain('/ui/i18n/');
+  test('①b 无真字典时非 en locale 仍走 en 原样（R4①）', () => {
+    const esEmpty = renderUiHtml('es');
+    expect(esEmpty).toEqual(renderUiHtml('en'));
+    expect(esEmpty).toContain('<html lang="en">');
+    expect(esEmpty).not.toContain('/ui/i18n/');
+    // 真字典在场才翻 lang + script
+    const esDict = renderUiHtml('es', { 'login.submit': 'Abrir correo' });
+    expect(esDict).toContain('<html lang="es">');
+    expect(esDict).toContain('<script src="/ui/i18n/es.js" defer></script>');
+    expect(esDict).toContain('Abrir correo');
   });
 
   test('② 键完备：每个 t(\'…\') / tFormat(\'…\') 调用键 ∈ I18N_EN', () => {
@@ -355,5 +360,109 @@ describe('console i18n R2 P1×4 (#137)', () => {
     expect(connectSrc).toContain("t('connect.copy.copySetup')");
 
     expect(offenders).toEqual([]);
+
+    // ② 负向：cookie / rel 赋值右侧不得出现 t(
+    const appSrc = readFileSync(join(root, 'app.js'), 'utf8');
+    expect(appSrc).not.toMatch(/document\.cookie\s*=\s*t\(/);
+    expect(appSrc).not.toMatch(/\.rel\s*=\s*t\(/);
+    // 字典值不得匹配协议/鉴权技术串
+    for (const [k, v] of Object.entries(I18N_EN)) {
+      if (/^(Bearer |Authorization|; Secure)/.test(v) || /SameSite=/.test(v) || v === 'noopener noreferrer') {
+        throw new Error(`tech value still in I18N_EN: ${k}=${JSON.stringify(v)}`);
+      }
+    }
+  });
+
+  test('R4-④：槽值 HTML 完整转义 + 属性 breakout 负向', () => {
+    expect(escapeHtmlText(`a<b>c&d`)).toBe('a&lt;b&gt;c&amp;d');
+    expect(escapeHtmlAttr(`x"y'z`)).toBe('x&quot;y&#39;z');
+
+    const evilText = 'Hi <img src=x onerror=alert(1)> & "q"';
+    const textOut = fillI18nSlots('<p>{{login.title}}</p>', {
+      'login.title': evilText,
+    });
+    expect(textOut).not.toContain('<img');
+    expect(textOut).toContain('&lt;img');
+    expect(textOut).toContain('&amp;');
+    expect(textOut).not.toMatch(/<p>Hi <img/);
+
+    // 属性 breakout：译文含 " 不得截断/逃出 placeholder
+    const evilAttr = 'foo" onclick="alert(1)';
+    const attrOut = fillI18nSlots(
+      '<input placeholder="{{shell.html.search}}">',
+      { 'shell.html.search': evilAttr },
+    );
+    expect(attrOut).toContain('placeholder="foo&quot; onclick=&quot;alert(1)"');
+    expect(attrOut).not.toMatch(/placeholder="foo"/);
+    expect(attrOut).not.toContain('onclick="alert');
+    // 单引号属性同理
+    const attrOut2 = fillI18nSlots(
+      "<input aria-label='{{shell.a11y.dashboard}}'>",
+      { 'shell.a11y.dashboard': `x' onclick='alert(1)` },
+    );
+    expect(attrOut2).toContain("aria-label='x&#39; onclick=&#39;alert(1)'");
+    expect(attrOut2).not.toContain("onclick='alert");
+  });
+
+  test('R4-③：壳模板无未槽化用户可见英文（allowlist 除外）', () => {
+    // 从 shell.ts 源解析模板字符串
+    const shellSrc = readFileSync(
+      join(import.meta.dir, '../src/ui/shell.ts'),
+      'utf8',
+    );
+    const m = shellSrc.match(
+      /const SHELL_HTML_TEMPLATE = ("(?:\\.|[^"\\])*")/,
+    );
+    expect(m).toBeTruthy();
+    const tpl: string = JSON.parse(m![1]!);
+    // 文本节点 / aria-label / placeholder 中的裸英文
+    const texts = [
+      ...[...tpl.matchAll(/>([^<{][^<]{0,200})</g)].map((x) => x[1]!),
+      ...[...tpl.matchAll(/(?:aria-label|placeholder)="([^"{]*)"/g)].map(
+        (x) => x[1]!,
+      ),
+    ]
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 2 && /[A-Za-z]/.test(s));
+
+    /** 模板内允许保留的非槽英文（品牌 / 技术 option 值） */
+    const TPL_ALLOW = new Set([
+      'OpenAgent Home',
+      'OpenAgent.email',
+      'urgent',
+      'normal',
+      'low',
+      '20',
+      '50',
+      '100',
+    ]);
+    const leftover = [...new Set(texts)].filter(
+      (s) => !TPL_ALLOW.has(s) && !/^\d+$/.test(s),
+    );
+    expect(leftover).toEqual([]);
+  });
+
+  test('R4-⑤：错误路径整句模板 en 逐字', () => {
+    expect(I18N_EN['api.announce.pushContentTierRefreshed']).toBe(
+      'Push content tier is tier {tier} for {address} (refreshed).',
+    );
+    expect(I18N_EN['overview.announce.addressNoLongerAvailable']).toBe(
+      '{address} is no longer available. Back to Home.',
+    );
+    const fmt = (k: string, vars: Record<string, string | number>) =>
+      (I18N_EN[k] || k).replace(/\{(\w+)\}/g, (_m, n: string) =>
+        vars[n] != null ? String(vars[n]) : '',
+      );
+    expect(
+      fmt('api.announce.pushContentTierRefreshed', {
+        tier: 2,
+        address: 'a@test.example',
+      }),
+    ).toBe('Push content tier is tier 2 for a@test.example (refreshed).');
+    expect(
+      fmt('overview.announce.addressNoLongerAvailable', {
+        address: 'gone@test.example',
+      }),
+    ).toBe('gone@test.example is no longer available. Back to Home.');
   });
 });

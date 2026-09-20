@@ -578,7 +578,11 @@
     state.sourceCache = null;
     clearDetail();
     renderMessages();
-    if (state.scope === 'inbox') enterOverview({ announce: lost + t('overview.copy.isNoLongerAvailableBackTo') });
+    if (state.scope === 'inbox') {
+      enterOverview({
+        announce: tFormat('overview.announce.addressNoLongerAvailable', { address: lost }),
+      });
+    }
   }
 
   function focusOverviewPanel() {
@@ -603,7 +607,7 @@
     cancelTasksLoad();
     applyScope('inbox', { replaceUrl: true });
     inboxView.dataset.mobileView = 'list';
-    announce(t('overview.announce.opened') + address);
+    announce(tFormat('overview.announce.openedAddress', { address: address }));
     messagesTitle.focus();
     selectIdentity(address);
   }

@@ -1115,7 +1115,7 @@ describe('UI static asset contract', () => {
     expect(reconcile).toContain('if (!state.activeAddress) return;');
     expect(reconcile).toContain("state.activeAddress = '';");
     expect(reconcile).toContain(
-      "if (state.scope === 'inbox') enterOverview({ announce: lost + t('overview.copy.isNoLongerAvailableBackTo') });",
+      "tFormat('overview.announce.addressNoLongerAvailable'",
     );
     // Home roster refresh and inbox admin Refresh both reconcile the active address.
     expect(UI_JS).toContain('      reconcileActiveAddress();');
@@ -1861,7 +1861,7 @@ describe('UI static asset contract', () => {
     );
     expect(helper).toContain('var recoveryGen = state.overviewGen;');
     expect(helper).toContain("if (recoveryGen !== state.overviewGen) return { status: 'stale' }");
-    expect(helper).toContain("t('api.copy.refreshed')");
+    expect(helper).toContain("tFormat('api.announce.pushContentTierRefreshed'");
     expect(UI_JS.indexOf('function handlePushTierChange(')).toBeGreaterThan(
       UI_JS.indexOf('async function recoverPushTier('),
     );

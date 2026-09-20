@@ -16,6 +16,8 @@ export const I18N_EN: Record<string, string> = {
   "api.announce.deleted": " deleted.",
   "api.announce.deletedBackToHomeFull": "{address} deleted. Back to Home.",
   "api.announce.invalidIdentityRequestTryAgain": "Invalid identity request. Try again.",
+  "api.announce.pushContentTierRefreshed": "Push content tier is tier {tier} for {address} (refreshed).",
+  "api.announce.deletedAddress": "{address} deleted.",
   "api.copy.addressAlreadyExists": "address already exists",
   "api.copy.dAgo": " d ago",
   "api.copy.deletedBackToHome": " deleted. Back to Home.",
@@ -23,7 +25,6 @@ export const I18N_EN: Record<string, string> = {
   "api.copy.justNow": "just now",
   "api.copy.minAgo": " min ago",
   "api.copy.pushContentTierIsTier": "Push content tier is tier ",
-  "api.copy.refreshed": " (refreshed).",
   "api.copy.rotatedToken": "Rotated Token",
   "api.copy.yourSessionExpiredSignInAgain": "Your session expired. Sign in again.",
   "api.modal.delete": "Delete ",
@@ -60,17 +61,9 @@ export const I18N_EN: Record<string, string> = {
   "app.copy.clipboardUnavailableTheValueIsSelected": "Clipboard unavailable. The value is selected for manual copying.",
   "app.copy.isolatedHtmlEmailPreview": "Isolated HTML email preview",
   "app.copy.linksInThisMessage": "Links in this message",
-  "app.copy.noopenerNoreferrer": "noopener noreferrer",
-  "app.copy.noticeWarning": "notice warning",
-  "app.copy.oaeLinkLogin1PathSamesite": "oae-link-login=1; path=/; SameSite=Strict",
-  "app.copy.oaeLinkLoginPathSamesiteStrict": "oae-link-login=; path=/; SameSite=Strict; Max-Age=0",
-  "app.copy.quietLinkCopy": "quiet link-copy",
-  "app.copy.quietSeenToggle": "quiet seen-toggle",
-  "app.copy.secure": "; Secure",
   "app.copy.signInIsTemporarilyUnavailableTry": "Sign-in is temporarily unavailable. Try again.",
   "app.copy.signedInViaLinkAs": "Signed in via link as ",
   "app.copy.signedInViaLinkAsFull": "Signed in via link as {label}",
-  "app.copy.tabTabHeaders": "tab tab-headers",
   "app.copy.thatTokenIsNotValid": "That token is not valid.",
   "app.copy.thisEmailIsTooLargeTo": "This email is too large to preview safely.",
   "app.copy.thisEmailIsTooLargeTo2": "This email is too large to preview safely. Use the plain-text view instead.",
@@ -92,13 +85,9 @@ export const I18N_EN: Record<string, string> = {
   "connect.action.pasteToYourAgent": "Paste to your agent",
   "connect.action.reveal": "Reveal",
   "connect.action.revealTheIdentityTokenBeforeCopying": "Reveal the identity token before copying this value.",
-  "connect.copy.authorizationBearer": "'Authorization: Bearer '",
-  "connect.copy.bearer": "Bearer ",
   "connect.copy.claudeCode": "Claude Code",
-  "connect.copy.claudeMcpAddTransportHttpScope": "claude mcp add --transport http --scope user --header ",
   "connect.copy.copyInstruction": "Copy instruction",
   "connect.copy.copySetup": "Copy setup",
-  "connect.copy.httpHeadersAuthorization": "\nhttp_headers = { Authorization = ",
   "connect.copy.iAlreadyAddedOpenagentEmailTo": "I already added openagent_email to ~/.codex/config.toml with Copy setup. Do not ask me to paste a token. Do not read that config back or print the bearer. Restart or reconnect so the MCP server takes effect.",
   "connect.copy.iAlreadyMergedOpenagentEmailInto": "I already merged openagent-email into ~/.cursor/mcp.json with Copy setup. Do not ask me to paste a token. Do not read that file back or print the bearer. Restart or reconnect Cursor MCP so openagent-email takes effect.",
   "connect.copy.iAlreadyMergedOpenagentEmailInto2": "I already merged openagent-email into mcp.servers in ~/.zcode/cli/config.json with Copy setup. Do not ask me to paste a token. Do not read that config back or print the bearer. Restart or reconnect the agent session so it takes effect.",
@@ -112,7 +101,6 @@ export const I18N_EN: Record<string, string> = {
   "connect.copy.oauthConnectorSetupIsComingIn2": "OAuth connector setup is coming in a separate update. Do not paste an identity token into a Grok conversation.",
   "connect.copy.openChatgptSettingsConnectorsAndLook": "Open ChatGPT Settings > Connectors and look for a custom MCP connector option. If it is unavailable, stop; do not paste this identity token into chat.",
   "connect.copy.openGrokSettingsAndLookFor": "Open Grok settings and look for an MCP or connector setup flow. If it is unavailable, stop; do not paste this identity token into chat.",
-  "connect.copy.openagentEmail": " openagent-email ",
   "connect.copy.revealTheTokenToEnableReady": "Reveal the token to enable ready-to-copy setup for each agent.",
   "connect.copy.signInWithAnIdentityToken": "Sign in with an identity token to build agent-specific setup instructions. Admin credentials are never exposed here.",
   "connect.copy.terminalCommand": "Terminal command",
@@ -149,7 +137,6 @@ export const I18N_EN: Record<string, string> = {
   "inbox.copy.createIdentity": "Create identity",
   "inbox.copy.mailListsMessagesForOneIdentity": "Mail lists messages for one identity at a time. Pick an address in the left column, then open Inbox, Sent, or All Mail.",
   "inbox.copy.refreshAddresses": "Refresh addresses",
-  "inbox.copy.rowFlat": " row-flat",
   "inbox.copy.sentListsAuditRecordsOfApi": "Sent lists audit records of API/MCP sends (30 days). Direct SMTP is not listed. Refresh after mail_send or POST /v1/send.",
   "inbox.copy.thisFolderOnlyShowsMailThe": "This folder only shows mail the server can match for ",
   "inbox.empty.folderPurposeFull": "This folder only shows mail the server can match for {address}. Refresh after new mail arrives, or switch folder.",
@@ -191,9 +178,6 @@ export const I18N_EN: Record<string, string> = {
   "notifications.summary.diagLastSend": "Last successful send {when}.",
   "notifications.copy.showingLatestOf": "Showing latest {limit} of {total}",
   "notifications.copy.showingLatestOfNotifications": "Showing latest {limit} of {total} notifications. {cacheExplanation}",
-  "notifications.copy.cellNotifyChannel": "cell notify-channel",
-  "notifications.copy.cellNotifyContent": "cell notify-content",
-  "notifications.copy.cellNotifyWhen": "cell notify-when",
   "notifications.copy.last": " · last ",
   "notifications.copy.lastSuccessfulSend": "Last successful send ",
   "notifications.copy.loadingTodaySSummary": "Loading today’s summary…",
@@ -223,18 +207,15 @@ export const I18N_EN: Record<string, string> = {
   "notifications.title.noNotificationsInThisWindow": "No notifications in this window",
   "overview.action.aQuickReadOnYourAddresses": "A quick read on your addresses, unread mail, and urgent pushes today.",
   "overview.action.openAlerts": "Open Alerts",
-  "overview.action.quietHomeLink": "quiet home-link",
-  "overview.announce.opened": "Opened ",
-  "overview.copy.countHomeCount": "count home-count",
+  "overview.announce.addressNoLongerAvailable": "{address} is no longer available. Back to Home.",
+  "overview.announce.openedAddress": "Opened {address}",
   "overview.copy.createAnAddressToStartReceiving": "Create an address to start receiving mail and task updates.",
-  "overview.copy.isNoLongerAvailableBackTo": " is no longer available. Back to Home.",
   "overview.copy.n500ScanCapped": "500+ · scan capped",
   "overview.copy.noAddressesYet": "No addresses yet.",
   "overview.copy.openIdentities": "Open Identities",
   "overview.copy.openMailToCheckYourAddress": "Open Mail to check your address or return when an agent needs you.",
   "overview.copy.openMailbox": "Open mailbox",
   "overview.copy.openTasks": "Open Tasks",
-  "overview.copy.overviewStatsHomeDashboard": "overview-stats home-dashboard",
   "overview.copy.scanLimitReached": "Scan limit reached.",
   "overview.copy.todaySPushSummaryIsUnavailable": "Today’s push summary is unavailable.",
   "overview.copy.unreadMail": "Unread mail",
@@ -290,7 +271,6 @@ export const I18N_EN: Record<string, string> = {
   "push.copy.enableTier3For": "Enable tier 3 for ",
   "push.modal.enableTier3Confirm": "Enable tier 3 for {address}? Body previews and OTP codes/links will leave this server.",
   "push.copy.enoughToDecideWhetherToOpen": "Enough to decide whether to open the inbox. Body and OTP codes stay on this server.",
-  "push.copy.isSelected": " is-selected",
   "push.copy.justTellMeAMessageArrived": "Just tell me a message arrived.",
   "push.copy.thePushSaysMailIsWaiting": "The push says mail is waiting. No sender, subject, or body leaves this server.",
   "push.copy.thisDeletesTheNtfyLoginFor": "This deletes the ntfy login for ",
@@ -332,8 +312,16 @@ export const I18N_EN: Record<string, string> = {
   "router.title.plan": "Plan",
   "router.title.pushDevices": "Push & Devices",
   "sensitive.a11y.sensitiveContentHidden": "Sensitive content hidden",
-  "sensitive.copy.quietSensitiveReveal": "quiet sensitive-reveal",
-  "shell.copy.panelHeadingOverviewHeading": "panel-heading overview-heading",
+  "shell.a11y.closeNavigation": "Close navigation",
+  "shell.a11y.dashboard": "Dashboard",
+  "shell.a11y.inboxAddresses": "Inbox addresses",
+  "shell.a11y.mailFolders": "Mail folders",
+  "shell.a11y.sortAddresses": "Sort addresses",
+  "shell.a11y.taskList": "Task list",
+  "shell.a11y.taskStatus": "Task status",
+  "shell.a11y.taskDetail": "Task detail",
+  "shell.a11y.pairingQrCode": "Pairing QR code",
+  "shell.a11y.domain": "Domain",
   "shell.html.account": "Account",
   "shell.html.actions": "Actions",
   "shell.html.active": "Active",
@@ -352,8 +340,6 @@ export const I18N_EN: Record<string, string> = {
   "shell.html.configuredMailDomainsForThisOpenagent": "Configured mail domains for this openagent.email instance.",
   "shell.html.connectAnAgent": "Connect an agent",
   "shell.html.connectionDetails": "Connection details",
-  "shell.html.constConnectPanel": "'; const CONNECT_PANEL = `",
-  "shell.html.constPanellandmark": "'; const panelLandmark = '",
   "shell.html.copyPassword": "Copy password",
   "shell.html.copyThisPasswordNowItWill": "Copy this password now. It will not be shown again.",
   "shell.html.copyThisTokenNowItWill": "Copy this token now. It will not be shown again.",
@@ -400,6 +386,10 @@ export const I18N_EN: Record<string, string> = {
   "shell.html.treatThisTokenLikeAPassword": "Treat this token like a password. Do not paste it into chat, commit it, or share screenshots containing it.",
   "shell.html.u2190Home": "\\u2190 Home",
   "shell.html.work": "Work",
+  "shell.html.search": "Search",
+  "shell.html.kitchenPhone": "Kitchen phone",
+  "shell.html.myBot": "My Bot",
+  "shell.html.myBotPlaceholder": "my-bot",
   "shell.nav.alerts": "Alerts",
   "shell.nav.home": "Home",
   "shell.nav.mail": "Mail",
@@ -468,14 +458,10 @@ export const I18N_EN: Record<string, string> = {
   "tasks.copy.approvalDetails": "Approval details",
   "tasks.copy.approvalExpired": "Approval expired",
   "tasks.copy.approvalRequired": "Approval required",
-  "tasks.copy.cellTaskMsgs": "cell task-msgs",
-  "tasks.copy.cellTaskParticipants": "cell task-participants",
-  "tasks.copy.cellTaskUpdated": "cell task-updated",
   "tasks.copy.claimedUntil": "Claimed until ",
   "tasks.copy.close": "Close \"",
   "tasks.copy.forThisPeriod": "\" for this period.",
   "tasks.copy.generation": " · generation ",
-  "tasks.copy.jsonSSS": "json\\s*\\\n([\\s\\S]*?)\\\n",
   "tasks.copy.leaseDisabledRetainedAuthorityUntil": "Lease disabled · Retained authority until ",
   "tasks.copy.messages": " messages",
   "tasks.copy.noTasksIn": "No tasks in \"",
@@ -484,7 +470,6 @@ export const I18N_EN: Record<string, string> = {
   "tasks.copy.overdueSubmittedMoreThan4Hours": "Overdue: submitted more than 4 hours ago.",
   "tasks.copy.overdueWorkingMoreThan24Hours": "Overdue: working more than 24 hours ago.",
   "tasks.copy.pastDeadline": "Past deadline",
-  "tasks.copy.quietDeleteAction": "quiet delete-action",
   "tasks.copy.retainedAuthorityUntil": "Retained authority until ",
   "tasks.copy.showingLatest": "Showing latest ",
   "tasks.copy.taskNotFound": "Task not found.",
@@ -553,39 +538,52 @@ export function tServer(key: string, dict?: Record<string, string>): string {
 }
 
 /**
- * 解码壳层字典值：\\uXXXX 字面转义 → 真实字符；HTML 文本中的 & → &amp;。
- * 仅用于键槽填充，不做全局子串搜索。
+ * 解码字典中的 \\uXXXX 字面转义为真实字符（不做 HTML 编码）。
  */
-function decodeShellSlotValue(raw: string): string {
-  let s = raw;
-  if (s.includes('\\u')) {
-    try {
-      s = JSON.parse(`"${s}"`);
-    } catch {
-      /* 保持原串 */
-    }
+function decodeUnicodeEscapes(raw: string): string {
+  if (!raw.includes('\\u')) return raw;
+  try {
+    return JSON.parse(`"${raw}"`);
+  } catch {
+    return raw;
   }
-  // 文本节点安全：& 写成实体（字典存「Push & Devices」，HTML 需 &amp;）
-  if (s.includes('&') && !s.includes('&amp;') && !s.includes('&lt;')) {
-    s = s.replace(/&/g, '&amp;');
-  }
-  return s;
 }
 
 /**
- * 键槽模板填充：仅替换 {{key}}，绝不做 HTML 全局子串替换。
+ * HTML 文本位转义：& < > 一律编码（弃「已含实体则跳过」）。
+ */
+export function escapeHtmlText(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * HTML 属性位转义：在文本转义基础上再编码 " '，防属性 breakout。
+ */
+export function escapeHtmlAttr(raw: string): string {
+  return escapeHtmlText(raw).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * 键槽模板填充：仅替换 {{key}}；按上下文选文本位/属性位转义。
  * dict 缺省或缺键时回落 I18N_EN。
  */
 export function fillI18nSlots(
   template: string,
   dict?: Record<string, string>,
 ): string {
-  return template.replace(/\{\{([\w.-]+)\}\}/g, (_m, key: string) => {
+  return template.replace(/\{\{([\w.-]+)\}\}/g, (_m, key: string, offset: number) => {
     const raw =
       dict && Object.prototype.hasOwnProperty.call(dict, key)
         ? dict[key]!
         : I18N_EN[key] || key;
-    return decodeShellSlotValue(raw);
+    const decoded = decodeUnicodeEscapes(raw);
+    // 属性位：紧邻 =" 或 ='（placeholder="{{k}}" / aria-label="{{k}}"）
+    const before = template.slice(Math.max(0, offset - 2), offset);
+    const inAttr = before === '="' || before === "='";
+    return inAttr ? escapeHtmlAttr(decoded) : escapeHtmlText(decoded);
   });
 }
 

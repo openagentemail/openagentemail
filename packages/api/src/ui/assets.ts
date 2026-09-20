@@ -51,9 +51,14 @@ export function renderUiHtml(
   locale: UiLocale = 'en',
   dict?: Record<string, string>,
 ): string {
-  if (locale === 'en') return withConnectShell(shellHtml('en'));
+  // ① 无真字典 → en 原样（与 shellHtml 一致）；B2 真字典在场才翻 lang/script。
+  const hasRealDict = Boolean(dict && Object.keys(dict).length > 0);
+  if (locale === 'en' || !hasRealDict) {
+    return withConnectShell(shellHtml('en'));
+  }
   return withConnectShell(shellHtml(locale, dict), dict);
 }
+
 
 export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;
 

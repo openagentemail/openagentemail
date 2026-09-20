@@ -218,7 +218,7 @@
     open.className = 'open-link';
     open.textContent = t('app.action.open');
     open.target = '_blank';
-    open.rel = t('app.copy.noopenerNoreferrer');
+    open.rel = 'noopener noreferrer';
     open.referrerPolicy = 'no-referrer';
     open.href = parsed.href;
     row.append(text, copy, open);
@@ -917,8 +917,8 @@
   function setLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        var secure = isCookieSecure() ? t('app.copy.secure') : '';
-        document.cookie = t('app.copy.oaeLinkLogin1PathSamesite') + secure;
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=1; path=/; SameSite=Strict' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */
@@ -928,8 +928,8 @@
   function clearLinkLoginMarker() {
     try {
       if (typeof document !== 'undefined') {
-        var secure = isCookieSecure() ? t('app.copy.secure') : '';
-        document.cookie = t('app.copy.oaeLinkLoginPathSamesiteStrict') + secure;
+        var secure = isCookieSecure() ? '; Secure' : '';
+        document.cookie = 'oae-link-login=; path=/; SameSite=Strict; Max-Age=0' + secure;
       }
     } catch (_err) {
       /* cookie unavailable or restricted */

@@ -251,7 +251,7 @@
         if (openedGen !== modalGeneration) return;
         closeAllModals();
         if (isConfigureScope(state.scope)) {
-          announce(address + t('api.announce.deleted'));
+          announce(tFormat('api.announce.deletedAddress', { address: address }));
           refreshConfigureSurfaces();
         } else {
           enterOverview({ announce: tFormat('api.announce.deletedBackToHomeFull', { address: address }) });
@@ -296,11 +296,10 @@
           ? row.pushContentTier
           : 1;
       announce(
-        t('api.copy.pushContentTierIsTier') +
-          authoritative +
-          t('push.announce.for') +
-          address +
-          t('api.copy.refreshed'),
+        tFormat('api.announce.pushContentTierRefreshed', {
+          tier: authoritative,
+          address: address,
+        }),
       );
       return { status: 'ok', authoritative: authoritative };
     } catch (_refreshErr) {
