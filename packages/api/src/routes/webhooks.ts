@@ -411,6 +411,10 @@ export const webhooksRoute = new Hono()
       if (err.code === 'task_not_found' || err.reason === 'task_not_found') {
         return c.json({ error: 'task_not_found' }, 404);
       }
+      // #280：缺 taskId 属资源解析失败族 → 404（总指挥 #4009 裁定；非 409）
+      if (err.code === 'missing_task_id' || err.reason === 'missing_task_id') {
+        return c.json({ error: 'missing_task_id' }, 404);
+      }
       if (
         err instanceof StaleMessageGenerationError ||
         err?.name === 'StaleMessageGenerationError' ||

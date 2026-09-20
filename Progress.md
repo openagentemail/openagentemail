@@ -144,3 +144,24 @@
 
 ### 我们是如何解决这些错误的？
 1. 删除 catch-all 并显式列协议令牌；单位词走字典 + 红证双保险。
+
+## 2026-09-20 · w280（#280 redeliver 裸 Error 500→404）
+
+### 我们实现了哪些功能？
+1. `redeliverWebhookDelivery` 两处裸抛补 `err.code`：`task_not_found` / `missing_task_id`（镜像 :2836–2856 兄弟模式）。
+2. `routes/webhooks.ts` redeliver catch 补 `missing_task_id` → **404** `{"error":"missing_task_id"}`（总指挥 #4009；非 409）。
+3. 路由级测试两件：ghost-task → 404 `task_not_found`；缺 taskId → 404 `missing_task_id`。
+4. 死信内部记账路径未动；未改 message 匹配（B 案已驳）。
+
+### 我们遇到了哪些错误？
+1. 无本卡阻断错误；全量套件预存红：#206 25s timeout、#272 kill-9 锁释放失败（环境性，非本路径）。
+
+### 我们是如何解决这些错误的？
+1. 本卡路径聚焦 2 pass + webhooks-route 47 pass；预存红编号记入 completion.md，不挡合入。
+2. 独立 subagent 自审 PASS（`356cc45c-126a-4fcb-9933-765dca5a8260`）。
+
+### 基线与证据
+- origin/main：`d35e011ff022a3ffbf957fc79c7fe2d91631012e`
+- HEAD：`2f7860dd96539e8d45f397c85e10ddf3c33d5d67`
+- 分支：`w280-redeliver-404` · PR #295
+- 材料：`/home/ops/materials/280/completion.md`
