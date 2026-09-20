@@ -61,7 +61,7 @@ RFC-0001 explicitly reserved cross-domain federation (#59) as out of scope (`doc
 2. **No distributed two-phase commit:** Tasks communicate asynchronously across domains via message exchange; there is no distributed transaction manager or synchronous consensus across deployments.
 3. **No inbound HTTP task injection:** Federated tasks are transported via email (SMTP/IMAP) so that all standard MTA audit trails, DMARC/SPF checks, and delivery guarantees apply. HTTP endpoints are used solely for metadata discovery.
 4. **No auto-reply or LLM responder engine:** Automatic task dispatching, prompt processing, and autonomous agent loops remain separate concerns (#105, `docs/rfcs/0001-outbound-webhooks.md:96-100`).
-5. **No centralized PKI or CA hierarchy:** Trust is established directly between domain operators via DNS/HTTPS trust anchors and explicit configuration, avoiding external certificate authorities or proprietary centralized registries.
+5. **No federation-specific PKI or centralized registry:** Federation introduces no proprietary certificate authorities or centralized registries. HTTPS discovery relies on standard Web PKI certificate chains (CA misissuance or compromise remains an inherent boundary threat; whether to enforce certificate pinning is left for owner determination), while task authorization is governed directly by explicit operator allowlists.
 
 ---
 
@@ -411,6 +411,7 @@ Incoming emails from IMAP execute verification within `parseTaskMessage()` (`pac
    - Parse `X-OA-Federation-Timestamp` ($T_{msg}$) and `X-OA-Federation-Expires` ($T_{exp}$).
    - Reject if $T_{msg} > \text{now} + \text{tolerance}$ (future clock skew, `FEDERATION_TIMESTAMP_TOLERANCE_SEC`, default 300s).
    - Reject if $\text{now} > T_{exp}$ (task message has expired).
+   - **Non-Negative Validity Interval (Normative MUST):** Assert $T_{exp} \ge T_{msg}$. Reject any message where $T_{exp} < T_{msg}$ (fail-closed on inverted validity intervals, preventing negative intervals from bypassing horizon limits within clock skew tolerance windows).
    - **Mandatory Expiration Horizon (Normative MUST):** Assert $(T_{exp} - T_{msg}) \le \text{FEDERATION\_MAX\_EXPIRY\_SEC}$ (default `604800` seconds / 7 days). Reject any message with an excessively long validity window. Together with `FEDERATION_REPLAY_CACHE_MAX_ENTRIES = 10000`, this strictly bounds the retention window and memory footprint of the replay deduplication cache.
    - **Replay Deduplication:** Check bounded in-memory replay cache for `(task_id, event_kind, state, timestamp)`. If hit, drop idempotently.
    - **Monotonic Advancement for States and Reminders (Normative MUST) [本 RFC 提议]:**
@@ -464,7 +465,7 @@ Because SMTP is an open protocol, malicious external mail servers can send email
 - **Compromise of Domain A's Private Key:**
   - Blast radius: The attacker can forge task state transitions claiming to originate from Domain A.
   - Containment: The attacker CANNOT forge tasks from Domain B, nor decrypt past tasks, nor compromise Domain B's internal database or symmetric `taskSigningSecret`.
-  - Remediation & Revocation Propagation: Domain A updates its `.well-known/openagent-federation` document, marking the compromised key as `"revoked"` and publishing a fresh key pair. Without active intervention, verifier caches expire within `FEDERATION_DISCOVERY_CACHE_TTL_SEC` (default 3600s). For active defense, Domain B verifiers bypass cache on verification failures (§4.4), and operators can invoke `POST /v1/federation/trusted-domains/:domain/refresh` to instantly revoke compromised keys.
+  - Remediation & Revocation Propagation: Domain A updates its `.well-known/openagent-federation` document, marking the compromised key as `"revoked"` and publishing a fresh key pair. Without active intervention, verifier caches expire within `FEDERATION_DISCOVERY_CACHE_TTL_SEC` (default 3600s). For active defense, Domain B verifiers bypass cache strictly for unknown KIDs (per §4.4.6), and operators can invoke `POST /v1/federation/trusted-domains/:domain/refresh` to instantly revoke compromised keys.
 - **Compromise of Local `TASK_SIGNING_SECRET`:**
   - Internal scope only: Affects internal domain stamps (`packages/api/src/lib/tasks-internal.ts:546`) and cursors (`packages/api/src/lib/task-cursor.ts:14`). Because federated tasks use Ed25519 asymmetric keys, a leak of `TASK_SIGNING_SECRET` does NOT compromise federated signatures if the Ed25519 private key is maintained separately.
 
@@ -508,7 +509,7 @@ When `FEDERATION_ENABLED === 'true'`, boot-time validation strictly requires (`p
 1. `FEDERATION_SIGNING_PRIVATE_KEY` MUST be provided and decode to a valid 32-byte Ed25519 private key.
 2. `FEDERATION_SIGNING_KEY_ID` MUST be non-empty (1–64 characters).
 3. `FEDERATION_TRUSTED_DOMAINS` MUST be non-empty and contain valid domain names without wildcards.
-4. **Disjoint Domain Sets (Normative MUST):** `FEDERATION_TRUSTED_DOMAINS` MUST NOT intersect with `config.allDomains` (`packages/api/src/lib/config.ts:440`). If any domain in `FEDERATION_TRUSTED_DOMAINS` is also present in `config.allDomains`, boot-time validation MUST fail closed and throw an error, preventing misconfiguration where local domains attempt to federate with themselves.
+4. **Disjoint Domain Sets (Normative MUST):** The intersection between `FEDERATION_TRUSTED_DOMAINS` and `config.allDomains` (`packages/api/src/lib/config.ts:440`) MUST be strictly empty (`FEDERATION_TRUSTED_DOMAINS ∩ config.allDomains = ∅`). If any domain in `FEDERATION_TRUSTED_DOMAINS` is also present in `config.allDomains`, boot-time validation MUST fail closed and immediately throw a fatal error on startup, preventing route aliasing and self-federation.
 
 If any check fails, the process terminates immediately on boot with an informative error rather than starting in an insecure state (`packages/api/src/lib/config.ts:354`, `:414-428`).
 
@@ -541,6 +542,7 @@ The following design decisions are explicitly left open for owner and commander 
 - **Q6: Maximum task expiration lifetime:** In v1, a mandatory global ceiling of $(T_{exp} - T_{msg}) \le \text{FEDERATION\_MAX\_EXPIRY\_SEC}$ (default 7 days) is enforced as a normative MUST alongside monotonic timestamp validation (§5.4). The remaining open question for the owner is whether domain operators should be allowed to negotiate tighter per-domain validity windows via discovery metadata (e.g. 24 hours), or if 7 days should remain the universal immutable ceiling.
 - **Q7: Approval task cross-domain delegation:** Should `createApprovalTask()` (`packages/api/src/lib/tasks-internal.ts:1964`) allow cross-domain reviewers in v1, or should federated approvals be deferred to a follow-up RFC given that approvals can trigger external execution?
 - **Q8: Multi-domain hosting and signature keys:** For OAE deployments configured with multiple domains (`config.extraDomains`, `packages/api/src/lib/config.ts:439`), should each domain have a distinct Ed25519 signing key, or should one primary key sign for all domains managed by the instance?
+- **Q12: Limitations of second-resolution wire timestamps for strict total ordering (秒级 wire 时间戳作严格全序的局限):** In v1, timestamp monotonicity ($T_{msg} > T_{\text{last}}$, §5.4) relies on second-resolution UTC wire timestamps (`000Z`, §5.2). In environments permitting clock skew (`FEDERATION_TIMESTAMP_TOLERANCE_SEC = 300s`) or bursty event sequences where multiple transitions occur within the same second, a causally subsequent task event may arrive carrying $T_{msg} \le T_{\text{last\_state}}$ and be rejected as a false replay or stale transition. Should future iterations introduce a signed monotonic sequence counter, cryptographic nonce, or sub-second tie-breaker into the canonical binding tuple as the authoritative total ordering mechanism, or does wall-clock second precision remain sufficient for asynchronous email delivery? Left for owner determination.
 
 ### 8.1 Known integration gaps (已知集成缺口)
 
