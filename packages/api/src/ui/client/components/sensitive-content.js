@@ -15,11 +15,11 @@
       var mask = document.createElement('span');
       mask.className = 'sensitive-mask';
       mask.textContent = '•••';
-      mask.setAttribute('aria-label', 'Sensitive content hidden');
+      mask.setAttribute('aria-label', t('sensitive.a11y.sensitiveContentHidden'));
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'quiet sensitive-reveal';
-      btn.textContent = 'Reveal';
+      btn.textContent = t('connect.action.reveal');
       btn.addEventListener('click', function (event) {
         event.preventDefault();
         if (options.onToggle) options.onToggle();
@@ -32,7 +32,7 @@
       var hide = document.createElement('button');
       hide.type = 'button';
       hide.className = 'quiet sensitive-reveal';
-      hide.textContent = 'Hide';
+      hide.textContent = t('connect.action.hide');
       hide.addEventListener('click', function (event) {
         event.preventDefault();
         if (options.onToggle) options.onToggle();

@@ -4,6 +4,7 @@
  * 用可控 Promise 模拟 logout 后迟到响应不得复活明文。
  */
 import { describe, expect, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 
 const { CONNECT_PAGE_JS } = await import('../src/ui/client/pages/connect.ts');
 

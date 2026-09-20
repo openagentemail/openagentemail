@@ -2,12 +2,13 @@
  * UI 资产聚合出口：仅导出 OUTER_CSP / UI_HTML / UI_CSS / UI_JS / UI_LOGO_SVG。
  * 拆分边界是源码维护边界，不改变对外 /ui/styles.css 与 /ui/app.js 契约（ADR #26 PR1）。
  */
-import { logoGeometry, SHELL_HTML } from './shell.ts';
+import { logoGeometry, shellHtml } from './shell.ts';
 import { withConnectShell } from './connect-shell.ts';
 import { TOKENS_CSS } from './styles/tokens.ts';
 import { BASE_CSS } from './styles/base.ts';
 import { LAYOUT_CSS } from './styles/layout.ts';
 import { PAGES_CSS } from './styles/pages.ts';
+import { I18N_JS } from './client/i18n-en.ts';
 import { STORE_JS } from './client/store.ts';
 import { DOM_JS } from './client/dom.ts';
 import { API_JS } from './client/api.ts';
@@ -28,6 +29,7 @@ import { AUTHORIZED_CLIENTS_PAGE_JS } from './client/pages/authorized-clients.ts
 import { CONNECT_PAGE_JS } from './client/pages/connect.ts';
 import { PLAN_PAGE_JS } from './client/pages/plan.ts';
 import { APP_JS } from './client/app.ts';
+import type { UiLocale } from './i18n/resolve-ui-locale.ts';
 
 // font-src 'self'：Satoshi 由 /ui/fonts/ 同源提供（见 routes/ui-assets.ts），不放行任何外源。
 export const OUTER_CSP =
@@ -37,7 +39,13 @@ export const OUTER_CSP =
 export const UI_LOGO_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\n${logoGeometry}\n</svg>\n`;
 
-export const UI_HTML = withConnectShell(SHELL_HTML);
+/** en 默认壳（与历史 UI_HTML 逐字节对齐）；非 en 经 renderUiHtml(locale)。 */
+export const UI_HTML = withConnectShell(shellHtml('en'));
+
+/** 按 locale 渲染完整 dashboard HTML（withConnectShell 包装链原样）。 */
+export function renderUiHtml(locale: UiLocale = 'en'): string {
+  return withConnectShell(shellHtml(locale));
+}
 
 export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;
 
@@ -45,6 +53,7 @@ export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;
 export const UI_JS =
   '(function () {\n' +
   "  'use strict';\n\n" +
+  I18N_JS +
   STORE_JS +
   DOM_JS +
   API_JS +

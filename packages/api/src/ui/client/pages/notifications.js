@@ -81,7 +81,7 @@
     notifyTopicFilter.replaceChildren();
     var all = document.createElement('option');
     all.value = '';
-    all.textContent = 'All channels';
+    all.textContent = t('notifications.action.allChannels');
     notifyTopicFilter.append(all);
     if (!isAdmin()) {
       notifyTopicFilter.hidden = true;
@@ -138,7 +138,7 @@
         : '';
       return;
     }
-    notifySummary.textContent = 'Today (' + summary.tz + '): ' +
+    notifySummary.textContent = t('notifications.action.today') + summary.tz + '): ' +
       summary.total + ' sent · ' + summary.ringCount + ' urgent' +
       (summary.lastSuccessfulAt ? ' · last ' + formatClock(summary.lastSuccessfulAt, true) : '') +
       '. Undelivered notifications are not included in today’s sent count.';
@@ -180,18 +180,18 @@
       });
     }
     if (awaiting) {
-      notifyStateNode.textContent = 'Loading…';
+      notifyStateNode.textContent = t('tasks.action.loading');
       return;
     }
     if (state.notifyStatus === 'error' && rows.length === 0) {
-      notifyStateNode.textContent = state.notifyMessage || 'Notifications could not be loaded. Try Refresh.';
+      notifyStateNode.textContent = state.notifyMessage || t('notifications.error.notificationsCouldNotBeLoadedTry');
       return;
     }
     if (rows.length === 0) {
       renderEmptyState(notifyStateNode, {
-        title: 'No notifications in this window',
-        purpose: 'The 30-day log starts empty after deploy and does not backfill the 12-hour transport cache. Send a push or run Verify to accumulate history.',
-        actionLabel: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? 'Send a test notification' : '',
+        title: t('notifications.title.noNotificationsInThisWindow'),
+        purpose: t('notifications.empty.the30DayLogStartsEmpty'),
+        actionLabel: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? t('notifications.copy.sendATestNotification') : '',
         onAction: state.notifyDiagnostics && state.notifyDiagnostics.canVerify ? handleNotifyVerify : null
       });
       return;
@@ -206,7 +206,7 @@
       whenCell.className = 'cell notify-when';
       var whenLabel = document.createElement('span');
       whenLabel.className = 'cell-label';
-      whenLabel.textContent = 'When';
+      whenLabel.textContent = t('notifications.action.when');
       var whenValue = document.createElement('time');
       whenValue.dateTime = row.publishedAt || '';
       whenValue.textContent = row.publishedAt ? formatDate(row.publishedAt) : '—';
@@ -216,7 +216,7 @@
       channelCell.className = 'cell notify-channel';
       var channelLabel = document.createElement('span');
       channelLabel.className = 'cell-label';
-      channelLabel.textContent = 'Channel';
+      channelLabel.textContent = t('notifications.action.channel');
       var channelValue = document.createElement('span');
       channelValue.textContent = formatNotifyChannel(row.logicalChannel);
       channelCell.append(channelLabel, channelValue);
@@ -225,7 +225,7 @@
       tierCell.className = 'cell';
       var tierLabel = document.createElement('span');
       tierLabel.className = 'cell-label';
-      tierLabel.textContent = 'Level';
+      tierLabel.textContent = t('notifications.action.level');
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', row.level || 'unknown');
@@ -234,7 +234,7 @@
       if (row.delivery === 'failed') {
         var delivery = document.createElement('span');
         delivery.className = 'notify-delivery-failed';
-        delivery.textContent = 'Delivery failed';
+        delivery.textContent = t('notifications.error.deliveryFailed');
         tierCell.append(delivery);
       }
 
@@ -242,10 +242,10 @@
       contentCell.className = 'cell notify-content';
       var contentLabel = document.createElement('span');
       contentLabel.className = 'cell-label';
-      contentLabel.textContent = 'Content';
+      contentLabel.textContent = t('notifications.action.content');
       var title = document.createElement('p');
       title.className = 'notify-title-text';
-      title.textContent = row.title || '(no title)';
+      title.textContent = row.title || t('notifications.action.noTitle');
       var body = document.createElement('div');
       body.className = 'notify-body-text';
       var revealed = !!state.notifyRevealed[row.id];
@@ -285,11 +285,11 @@
         ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
         : String(total);
     if (awaiting) {
-      notifyStateNode.textContent = 'Loading…';
+      notifyStateNode.textContent = t('tasks.action.loading');
       return;
     }
     if (state.notifyStatus === 'error' && state.notifyMessages.length === 0) {
-      notifyStateNode.textContent = state.notifyMessage || 'Notifications could not be loaded. Try Refresh.';
+      notifyStateNode.textContent = state.notifyMessage || t('notifications.error.notificationsCouldNotBeLoadedTry');
       return;
     }
     if (rows.length === 0) {
@@ -312,7 +312,7 @@
       whenCell.className = 'cell notify-when';
       var whenLabel = document.createElement('span');
       whenLabel.className = 'cell-label';
-      whenLabel.textContent = 'When';
+      whenLabel.textContent = t('notifications.action.when');
       var whenValue = document.createElement('time');
       whenValue.dateTime = row.time ? new Date(row.time * 1000).toISOString() : '';
       whenValue.textContent = row.time
@@ -324,7 +324,7 @@
       channelCell.className = 'cell notify-channel';
       var channelLabel = document.createElement('span');
       channelLabel.className = 'cell-label';
-      channelLabel.textContent = 'Channel';
+      channelLabel.textContent = t('notifications.action.channel');
       var channelValue = document.createElement('span');
       channelValue.textContent = formatNotifyChannel(row.topic);
       channelCell.append(channelLabel, channelValue);
@@ -333,7 +333,7 @@
       tierCell.className = 'cell';
       var tierLabel = document.createElement('span');
       tierLabel.className = 'cell-label';
-      tierLabel.textContent = 'Tier';
+      tierLabel.textContent = t('notifications.action.tier');
       var tierValue = document.createElement('span');
       tierValue.className = 'notify-tier';
       tierValue.setAttribute('data-tier', tier);
@@ -344,10 +344,10 @@
       contentCell.className = 'cell notify-content';
       var contentLabel = document.createElement('span');
       contentLabel.className = 'cell-label';
-      contentLabel.textContent = 'Content';
+      contentLabel.textContent = t('notifications.action.content');
       var title = document.createElement('p');
       title.className = 'notify-title-text';
-      title.textContent = row.title || '(no title)';
+      title.textContent = row.title || t('notifications.action.noTitle');
       var body = document.createElement('div');
       body.className = 'notify-body-text';
       /* transport cache 没有可靠 sensitive 标记：默认遮蔽，避免空日志期把 OTP 明文画出来。 */
@@ -377,7 +377,7 @@
     renderNotifySummaryBar();
     renderNotifyDiagnostics();
     if (state.notifyUpdatedAt) {
-      notifyUpdated.textContent = 'Updated ' + formatClock(new Date(state.notifyUpdatedAt).toISOString(), true);
+      notifyUpdated.textContent = t('tasks.action.updated') + formatClock(new Date(state.notifyUpdatedAt).toISOString(), true);
     } else {
       notifyUpdated.textContent = '';
     }
@@ -385,7 +385,7 @@
       (state.notifyLogItems.length === 0 && state.notifyMessages.length === 0);
     notifyNotice.textContent = notifyNotice.hidden ? '' : state.notifyMessage;
     notifyRefresh.disabled = state.notifyPending;
-    notifyRefresh.textContent = state.notifyPending ? 'Refreshing…' : 'Refresh';
+    notifyRefresh.textContent = state.notifyPending ? t('tasks.action.refreshing') : t('tasks.action.refresh');
   }
 
   function renderNotify() {
@@ -577,7 +577,7 @@
           state.notifyMessage = '';
         }
         renderNotify();
-        announce(merged.length + ' notifications loaded');
+        announce(merged.length + t('notifications.announce.notificationsLoaded'));
       }
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
@@ -702,7 +702,7 @@
         return;
       }
       renderNotify();
-      if (!opts.poll) announce(state.notifyLogItems.length + ' notifications loaded');
+      if (!opts.poll) announce(state.notifyLogItems.length + t('notifications.announce.notificationsLoaded'));
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.notifyLogItems.length === 0) {
@@ -728,17 +728,17 @@
     if (!notifyVerify || notifyVerify.hidden || state.notifyVerifyPending) return;
     state.notifyVerifyPending = true;
     notifyVerify.disabled = true;
-    notifyVerify.textContent = 'Sending…';
+    notifyVerify.textContent = t('notifications.action.sending');
     try {
       await apiJson('/ui/api/notify/verify', { method: 'POST' });
-      announce('Test notification sent.');
+      announce(t('notifications.announce.testNotificationSent'));
       await loadNotificationLog({ force: true });
     } catch (error) {
       if (error.message === 'session_expired') return;
-      announce('Test notification failed.');
+      announce(t('notifications.announce.testNotificationFailed'));
     } finally {
       state.notifyVerifyPending = false;
-      if (notifyVerify) notifyVerify.textContent = 'Send test';
+      if (notifyVerify) notifyVerify.textContent = t('notifications.action.sendTest');
       renderNotifyDiagnostics();
     }
   }

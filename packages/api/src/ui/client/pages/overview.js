@@ -175,7 +175,7 @@
     if (approvalPastDeadline(task)) button.classList.add('is-past-deadline');
     var subject = document.createElement('span');
     subject.className = 'home-task-subject';
-    subject.textContent = task.subject || '(no subject)';
+    subject.textContent = task.subject || t('tasks.action.noSubject');
     var meta = document.createElement('span');
     meta.className = 'home-task-meta';
     meta.textContent = taskStateLabel(task) + ' · ' + formatAgo(task.updatedAt);
@@ -303,7 +303,7 @@
   function renderHomeHealth(section) {
     var sentence = document.createElement('p');
     sentence.className = 'home-health-copy';
-    sentence.textContent = 'A quick read on your addresses, unread mail, and urgent pushes today.';
+    sentence.textContent = t('overview.action.aQuickReadOnYourAddresses');
     section.append(sentence);
     var grid = document.createElement('div');
     grid.className = 'home-health-grid';
@@ -346,7 +346,7 @@
   function renderOverview() {
     overviewPanel.classList.add('home-panel');
     overviewSubtitle.hidden = false;
-    overviewSubtitle.textContent = 'What needs your attention today.';
+    overviewSubtitle.textContent = t('overview.subtitle.whatNeedsYourAttentionToday');
     overviewOverlap.hidden = true;
     overviewDisclosure.hidden = true;
     overviewControls.hidden = true;
@@ -359,7 +359,7 @@
     createIdentityButton.hidden = true;
     overviewRefresh.hidden = false;
     overviewRefresh.disabled = state.homeStatus === 'loading';
-    overviewRefresh.textContent = state.homeStatus === 'loading' ? 'Refreshing…' : 'Refresh';
+    overviewRefresh.textContent = state.homeStatus === 'loading' ? t('tasks.action.refreshing') : t('tasks.action.refresh');
     overviewUpdated.textContent = state.homeUpdatedAt
       ? 'Updated ' + formatClock(new Date(state.homeUpdatedAt).toISOString(), true)
       : '';
@@ -603,7 +603,7 @@
     cancelTasksLoad();
     applyScope('inbox', { replaceUrl: true });
     inboxView.dataset.mobileView = 'list';
-    announce('Opened ' + address);
+    announce(t('overview.announce.opened') + address);
     messagesTitle.focus();
     selectIdentity(address);
   }

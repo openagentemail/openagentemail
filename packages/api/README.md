@@ -140,3 +140,10 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
   the registry (`.failclosed` marker, all evidence files kept). If directory fsync, `.bak` rename, and the
   in-memory snapshot write all fail, the new dest is isolated as `.unrestored`
   and the API fail-closes; `.bak` is kept and must not be discarded.
+
+## Console i18n（#137 B1）
+
+Dashboard UI uses an en source dictionary (`src/ui/client/i18n-en.ts`) and `t(key)`.
+Locale resolution is `resolveUiLocale` (cookie `oa_lang` → `Accept-Language` → `en`).
+Non-en shells load `/ui/i18n/{locale}.js` (es/ja/ko/zh-CN skeletons in B1; real copy in B2).
+English remains the default with **byte-identical** shell HTML vs pre-i18n main.

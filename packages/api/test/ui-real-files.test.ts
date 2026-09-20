@@ -100,10 +100,12 @@ describe('UI real-file manifest (#520-A)', () => {
     }
   });
 
-  test('concatenating the real files in assets.ts order reproduces UI_JS byte-for-byte', () => {
+  test('concatenating the real files in assets.ts order reproduces UI_JS byte-for-byte', async () => {
+    const { I18N_JS } = await import('../src/ui/client/i18n-en.ts');
     const wrapperOpen = '(function () {\n' + "  'use strict';\n\n";
     const wrapperClose = '})();';
-    const expected = wrapperOpen + JS_FILES.map(readUi).join('') + wrapperClose;
+    // #137 B1：I18N_JS（TS 生成）插在真 .js 清单之前。
+    const expected = wrapperOpen + I18N_JS + JS_FILES.map(readUi).join('') + wrapperClose;
     expect(Buffer.from(expected, 'utf8')).toEqual(Buffer.from(UI_JS, 'utf8'));
   });
 
@@ -122,8 +124,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #134、#196/R3 与 #231 Connect 页面均为有意 UI 变更；更新前已确认差异有意。
     // #231 R6：Claude 卡 $OAE_TOKEN 零凭证命令后更新 UI_JS 针脚。
     // #162+#163：tasks 轮询旧∪新 sync + overview 硬停文案诚实化（纯 UI）。
+    // #137 B1：拼入 I18N_JS + call-site t()；en 文案零变化，UI_JS 字节因字典/t() 增长。
     expect(sha256(UI_JS)).toBe(
-      '7d6dca0f3a2805c3b109271716db12ab84a23f47c9dfad2920803995b7c1466b',
+      '7b4448b5f23c1da6e329b0d4bae55a2a9f2cdea8e92abd7f476acdb23cc6e0d2',
     );
     expect(sha256(UI_CSS)).toBe(
       'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',

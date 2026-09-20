@@ -212,72 +212,72 @@
     var planActive = next === 'plan';
     var SCOPE_META = {
       overview: {
-        title: 'Home',
-        docTitle: 'OpenAgent Home',
-        skip: 'Skip to Home',
+        title: t('shell.nav.home'),
+        docTitle: t('router.docTitle.openagentHome'),
+        skip: t('router.copy.skipToHome'),
         href: '#overview-panel',
         mobileView: 'overview'
       },
       notifications: {
-        title: 'Alerts',
-        docTitle: 'OpenAgent Alerts',
-        skip: 'Skip to Alerts',
+        title: t('shell.nav.alerts'),
+        docTitle: t('router.docTitle.openagentAlerts'),
+        skip: t('router.copy.skipToAlerts'),
         href: '#notify-panel',
         mobileView: 'notifications'
       },
       connect: {
-        title: 'Connect',
-        docTitle: 'Connect an agent · OpenAgent.email',
-        skip: 'Skip to Connect an agent',
+        title: t('router.title.connect'),
+        docTitle: t('router.docTitle.connectAnAgentOpenagentEmail'),
+        skip: t('router.copy.skipToConnectAnAgent'),
         href: '#connect-panel',
         mobileView: ''
       },
       tasks: {
-        title: 'Tasks',
-        docTitle: 'OpenAgent Tasks',
-        skip: 'Skip to tasks',
+        title: t('shell.nav.tasks'),
+        docTitle: t('router.docTitle.openagentTasks'),
+        skip: t('router.copy.skipToTasks'),
         href: '#tasks-panel',
         mobileView: 'tasks-list'
       },
       'configure-identities': {
-        title: 'Identities',
-        docTitle: 'OpenAgent Identities',
-        skip: 'Skip to identities',
+        title: t('router.title.identities'),
+        docTitle: t('router.docTitle.openagentIdentities'),
+        skip: t('router.copy.skipToIdentities'),
         href: '#configure-identities-panel',
         mobileView: ''
       },
       'configure-push': {
-        title: 'Push & Devices',
-        docTitle: 'OpenAgent Push & Devices',
-        skip: 'Skip to push',
+        title: t('router.title.pushDevices'),
+        docTitle: t('router.docTitle.openagentPushDevices'),
+        skip: t('router.copy.skipToPush'),
         href: '#configure-push-panel',
         mobileView: ''
       },
       'configure-clients': {
-        title: 'Connected apps',
-        docTitle: 'OpenAgent Connected apps',
-        skip: 'Skip to Connected apps',
+        title: t('router.title.connectedApps'),
+        docTitle: t('router.docTitle.openagentConnectedApps'),
+        skip: t('router.copy.skipToConnectedApps'),
         href: '#configure-clients-panel',
         mobileView: ''
       },
       'configure-domains': {
-        title: 'Domains',
-        docTitle: 'OpenAgent Domains',
-        skip: 'Skip to domains',
+        title: t('router.title.domains'),
+        docTitle: t('router.docTitle.openagentDomains'),
+        skip: t('router.copy.skipToDomains'),
         href: '#configure-domains-panel',
         mobileView: ''
       },
       plan: {
-        title: 'Plan',
-        docTitle: 'OpenAgent Plan',
-        skip: 'Skip to Plan',
+        title: t('router.title.plan'),
+        docTitle: t('router.docTitle.openagentPlan'),
+        skip: t('router.copy.skipToPlan'),
         href: '#plan-panel',
         mobileView: ''
       },
       inbox: {
-        title: 'Mail',
-        docTitle: 'OpenAgent Mail',
-        skip: 'Skip to Mail',
+        title: t('shell.nav.mail'),
+        docTitle: t('router.docTitle.openagentMail'),
+        skip: t('router.copy.skipToMail'),
         href: '#main-content',
         mobileView: ''
       }

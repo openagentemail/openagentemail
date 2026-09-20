@@ -38,12 +38,12 @@
     placeholder.className = 'detail-placeholder';
     var label = document.createElement('p');
     label.className = 'eyebrow';
-    label.textContent = 'Task ticket';
+    label.textContent = t('tasks.action.taskTicket');
     var title = document.createElement('h2');
-    title.textContent = 'Select a task';
+    title.textContent = t('tasks.detail.selectTask');
     var copy = document.createElement('p');
     copy.className = 'muted';
-    copy.textContent = 'Choose a ticket to inspect its state timeline and result.';
+    copy.textContent = t('tasks.action.chooseATicketToInspectIts');
     placeholder.append(label, title, copy);
     tasksDetailContent.append(placeholder);
   }
@@ -92,7 +92,7 @@
 
   function renderTasksMeta() {
     if (state.tasksUpdatedAt) {
-      tasksUpdated.textContent = 'Updated ' + formatClock(new Date(state.tasksUpdatedAt).toISOString(), true);
+      tasksUpdated.textContent = t('tasks.action.updated') + formatClock(new Date(state.tasksUpdatedAt).toISOString(), true);
     } else {
       tasksUpdated.textContent = '';
     }
@@ -108,7 +108,7 @@
       tasksNotice.textContent = '';
     }
     tasksRefresh.disabled = state.tasksPending;
-    tasksRefresh.textContent = state.tasksPending ? 'Refreshing…' : 'Refresh';
+    tasksRefresh.textContent = state.tasksPending ? t('tasks.action.refreshing') : t('tasks.action.refresh');
     syncTasksFilters();
     if (typeof renderLoadMore === 'function' && tasksLoadMore) {
       renderLoadMore(tasksLoadMore, !!state.tasksNextCursor && state.tasksStatus === 'ready', function () {
@@ -199,10 +199,10 @@
       state.taskDetailStatus = 'ready';
       renderTasks();
       loadTasks();
-      announce(decision === 'approved' ? 'Approval recorded.' : 'Rejection recorded.');
+      announce(decision === 'approved' ? t('tasks.announce.approvalRecorded') : t('tasks.announce.rejectionRecorded'));
     } catch (error) {
       if (error.message !== 'session_expired') {
-        announce(error.status === 409 ? 'This approval is no longer pending.' : 'Approval decision could not be recorded.');
+        announce(error.status === 409 ? t('tasks.announce.thisApprovalIsNoLongerPending') : t('tasks.announce.approvalDecisionCouldNotBeRecorded'));
       }
     } finally {
       delete approvalDecisionInFlight[task.id];
@@ -220,9 +220,9 @@
       ? 'Approval expired'
       : task.state === 'input-required' ? 'Approval required' : 'Approval details';
     var type = document.createElement('p');
-    type.textContent = 'Type: ' + String(approval.action.type || '—');
+    type.textContent = t('tasks.action.type') + String(approval.action.type || '—');
     var name = document.createElement('p');
-    name.textContent = 'Name: ' + String(approval.action.name || '—');
+    name.textContent = t('tasks.action.name') + String(approval.action.name || '—');
     var args = document.createElement('pre');
     args.className = 'task-approval-arguments';
     try { args.textContent = JSON.stringify(approval.action.arguments); } catch (_err) { args.textContent = String(approval.action.arguments); }
@@ -231,14 +231,14 @@
       var approve = document.createElement('button');
       approve.type = 'button';
       approve.className = 'primary';
-      approve.setAttribute('aria-label', 'Approve action');
-      approve.textContent = 'Approve';
+      approve.setAttribute('aria-label', t('tasks.a11y.approveAction'));
+      approve.textContent = t('tasks.action.approve');
       approve.addEventListener('click', function () { submitApprovalDecision(task, 'approved', [approve, reject]); });
       var reject = document.createElement('button');
       reject.type = 'button';
       reject.className = 'quiet delete-action';
-      reject.setAttribute('aria-label', 'Reject action');
-      reject.textContent = 'Reject';
+      reject.setAttribute('aria-label', t('tasks.a11y.rejectAction'));
+      reject.textContent = t('tasks.action.reject');
       reject.addEventListener('click', function () { submitApprovalDecision(task, 'rejected', [approve, reject]); });
       section.append(approve, reject);
     }
@@ -253,17 +253,17 @@
     var awaiting = state.tasksStatus === 'loading' || !keyMatches;
     if (awaiting) {
       tasksShown.textContent = '';
-      tasksStateNode.textContent = 'Loading…';
+      tasksStateNode.textContent = t('tasks.action.loading');
       return;
     }
     if (state.tasksStatus === 'error' && state.tasks.length === 0) {
       tasksShown.textContent = '';
-      tasksStateNode.textContent = state.tasksMessage || 'Tasks could not be loaded. Try Refresh.';
+      tasksStateNode.textContent = state.tasksMessage || t('tasks.error.tasksCouldNotBeLoadedTry');
       return;
     }
     var shown = rows.length;
     var total = typeof state.tasksTotalApprox === 'number' ? state.tasksTotalApprox : shown;
-    tasksShown.textContent = shown === total ? String(shown) : shown + ' of ~' + total;
+    tasksShown.textContent = shown === total ? String(shown) : shown + t('tasks.action.of') + total;
     if (rows.length === 0) {
       var filter = state.tasksFilter || 'input-required';
       tasksStateNode.textContent = filter === 'all'
@@ -284,7 +284,7 @@
       stateCell.className = 'cell';
       var stateLabel = document.createElement('span');
       stateLabel.className = 'cell-label';
-      stateLabel.textContent = 'State';
+      stateLabel.textContent = t('tasks.action.state');
       var badge = document.createElement('span');
       badge.className = 'task-badge';
       badge.setAttribute('data-state', taskStateToken(task));
@@ -293,13 +293,13 @@
       if (task.overdueReason) {
         var overdue = document.createElement('span');
         overdue.className = 'task-overdue-flag';
-        overdue.textContent = 'Overdue';
+        overdue.textContent = t('tasks.action.overdue');
         stateCell.append(overdue);
       }
       if (approvalPastDeadline(task)) {
         var expired = document.createElement('span');
         expired.className = 'task-expiry-flag';
-        expired.textContent = 'Past deadline';
+        expired.textContent = t('tasks.copy.pastDeadline');
         stateCell.append(expired);
       }
 
@@ -307,7 +307,7 @@
       peopleCell.className = 'cell task-participants';
       var peopleLabel = document.createElement('span');
       peopleLabel.className = 'cell-label';
-      peopleLabel.textContent = 'Participants';
+      peopleLabel.textContent = t('tasks.action.participants');
       var peopleValue = document.createElement('span');
       peopleValue.textContent = (task.from || '—') + ' → ' + (task.to || '—');
       peopleCell.append(peopleLabel, peopleValue);
@@ -316,17 +316,17 @@
       subjectCell.className = 'cell';
       var subjectLabel = document.createElement('span');
       subjectLabel.className = 'cell-label';
-      subjectLabel.textContent = 'Subject';
+      subjectLabel.textContent = t('tasks.action.subject');
       var subjectValue = document.createElement('p');
       subjectValue.className = 'task-subject';
-      subjectValue.textContent = task.subject || '(no subject)';
+      subjectValue.textContent = task.subject || t('tasks.action.noSubject');
       subjectCell.append(subjectLabel, subjectValue);
 
       var updatedCell = document.createElement('div');
       updatedCell.className = 'cell task-updated';
       var updatedLabel = document.createElement('span');
       updatedLabel.className = 'cell-label';
-      updatedLabel.textContent = 'Updated';
+      updatedLabel.textContent = t('tasks.action.updated2');
       var updatedValue = document.createElement('time');
       updatedValue.dateTime = task.updatedAt || '';
       updatedValue.textContent = formatAgo(task.updatedAt);
@@ -341,7 +341,7 @@
         leaseCell.className = 'cell';
         var leaseLabel = document.createElement('span');
         leaseLabel.className = 'cell-label';
-        leaseLabel.textContent = hasDisabledLeaseAuthority ? 'Lease disabled' : 'Claimed until';
+        leaseLabel.textContent = hasDisabledLeaseAuthority ? t('tasks.action.leaseDisabled') : t('tasks.action.claimedUntil');
         var leaseValue = document.createElement('span');
         leaseValue.textContent = hasDisabledLeaseAuthority
           ? 'Retained authority until ' + task.claimedUntil + ' · generation ' + task.leaseGeneration
@@ -353,7 +353,7 @@
       msgsCell.className = 'cell task-msgs';
       var msgsLabel = document.createElement('span');
       msgsLabel.className = 'cell-label';
-      msgsLabel.textContent = 'Msgs';
+      msgsLabel.textContent = t('tasks.action.msgs');
       var msgsValue = document.createElement('span');
       msgsValue.textContent = String(Array.isArray(task.messages) ? task.messages.length : 0);
       msgsCell.append(msgsLabel, msgsValue);
@@ -372,7 +372,7 @@
     select.replaceChildren();
     var blank = document.createElement('option');
     blank.value = '';
-    blank.textContent = 'Choose your address';
+    blank.textContent = t('tasks.action.chooseYourAddress');
     select.append(blank);
     [task.from, task.to].forEach(function (address) {
       if (!address) return;
@@ -393,7 +393,7 @@
       tasksDetailContent.replaceChildren();
       var err = document.createElement('p');
       err.className = 'empty-state';
-      err.textContent = state.taskDetailMessage || 'Task could not be loaded.';
+      err.textContent = state.taskDetailMessage || t('tasks.error.taskCouldNotBeLoaded');
       tasksDetailContent.append(err);
       return;
     }
@@ -401,7 +401,7 @@
       tasksDetailContent.replaceChildren();
       var loading = document.createElement('p');
       loading.className = 'empty-state';
-      loading.textContent = 'Loading task…';
+      loading.textContent = t('tasks.action.loadingTask');
       tasksDetailContent.append(loading);
       return;
     }
@@ -419,7 +419,7 @@
     badge.setAttribute('data-state', taskStateToken(task));
     badge.textContent = taskStateLabel(task);
     var title = document.createElement('h3');
-    title.textContent = task.subject || '(no subject)';
+    title.textContent = task.subject || t('tasks.action.noSubject');
     var meta = document.createElement('p');
     meta.className = 'task-detail-meta';
     meta.textContent =
@@ -454,13 +454,13 @@
     if (approvalPastDeadline(task)) {
       var expiryNote = document.createElement('p');
       expiryNote.className = 'task-expiry-flag';
-      expiryNote.textContent = 'Past deadline: this approval has expired and is no longer decidable.';
+      expiryNote.textContent = t('tasks.action.pastDeadlineThisApprovalHasExpired');
       head.append(expiryNote);
     }
     if (state.taskDetailStatus === 'loading') {
       var pending = document.createElement('p');
       pending.className = 'task-detail-meta';
-      pending.textContent = 'Refreshing ticket detail…';
+      pending.textContent = t('tasks.action.refreshingTicketDetail');
       head.append(pending);
     }
     tasksDetailContent.append(head);
@@ -471,7 +471,7 @@
       var originalBlock = document.createElement('details');
       originalBlock.className = 'task-original';
       var originalSummary = document.createElement('summary');
-      originalSummary.textContent = 'Original request';
+      originalSummary.textContent = t('tasks.action.originalRequest');
       var originalBody = document.createElement('pre');
       originalBody.className = 'task-original-body';
       originalBody.textContent = taskTimelineBody(original.body);
@@ -518,7 +518,7 @@
       var messageBlock = document.createElement('details');
       messageBlock.className = 'task-timeline-message';
       var messageSummary = document.createElement('summary');
-      messageSummary.textContent = 'View message';
+      messageSummary.textContent = t('tasks.action.viewMessage');
       var body = document.createElement('pre');
       body.className = 'task-timeline-body';
       body.textContent = taskTimelineBody(message.body);
@@ -533,7 +533,7 @@
       resultBlock.className = 'task-result';
       resultBlock.open = true;
       var summary = document.createElement('summary');
-      summary.textContent = taskIsClosed(task) ? 'Closed' : 'Result';
+      summary.textContent = taskIsClosed(task) ? t('tasks.action.closed') : t('tasks.action.result');
       resultBlock.append(summary, renderTaskResultNode(task.result));
       tasksDetailContent.append(resultBlock);
     }
@@ -545,26 +545,26 @@
       var reply = document.createElement('form');
       reply.className = 'task-reply';
       var replyTitle = document.createElement('h4');
-      replyTitle.textContent = 'Reply';
+      replyTitle.textContent = t('tasks.action.reply');
       var replyHelp = document.createElement('p');
       replyHelp.className = 'muted';
-      replyHelp.textContent = 'Write a reply. This goes back to the agent as a working update.';
+      replyHelp.textContent = t('tasks.action.writeAReplyThisGoesBack');
       var replyBody = document.createElement('textarea');
       replyBody.rows = 4;
       replyBody.required = true;
       replyBody.maxLength = 3000;
-      replyBody.setAttribute('aria-label', 'Reply body');
+      replyBody.setAttribute('aria-label', t('tasks.a11y.replyBody'));
       var replyFrom = null;
       if (isAdmin()) {
         replyFrom = document.createElement('select');
         replyFrom.className = 'search-input';
-        replyFrom.setAttribute('aria-label', 'Send as');
+        replyFrom.setAttribute('aria-label', t('tasks.a11y.sendAs'));
         fillTaskFromSelect(replyFrom, task);
       }
       var replySubmit = document.createElement('button');
       replySubmit.type = 'submit';
       replySubmit.className = 'primary';
-      replySubmit.textContent = 'Send reply';
+      replySubmit.textContent = t('tasks.action.sendReply');
       reply.append(replyTitle, replyHelp, replyBody);
       if (replyFrom) reply.append(replyFrom);
       reply.append(replySubmit);
@@ -580,12 +580,12 @@
       admin.className = 'task-admin-actions';
       var fromSelect = document.createElement('select');
       fromSelect.className = 'search-input';
-      fromSelect.setAttribute('aria-label', 'Act as');
+      fromSelect.setAttribute('aria-label', t('tasks.a11y.actAs'));
       fillTaskFromSelect(fromSelect, task);
       var remindBtn = document.createElement('button');
       remindBtn.type = 'button';
       remindBtn.className = 'quiet';
-      remindBtn.textContent = 'Remind';
+      remindBtn.textContent = t('tasks.action.remind');
       remindBtn.addEventListener('click', function () {
         submitTaskRemind(task, fromSelect.value, remindBtn);
       });
@@ -593,12 +593,12 @@
       reasonInput.type = 'text';
       reasonInput.className = 'search-input';
       reasonInput.maxLength = 3000;
-      reasonInput.placeholder = 'Close reason';
-      reasonInput.setAttribute('aria-label', 'Close reason');
+      reasonInput.placeholder = t('tasks.placeholder.closeReason');
+      reasonInput.setAttribute('aria-label', t('tasks.placeholder.closeReason'));
       var closeBtn = document.createElement('button');
       closeBtn.type = 'button';
       closeBtn.className = 'quiet delete-action';
-      closeBtn.textContent = 'Close';
+      closeBtn.textContent = t('tasks.action.close');
       closeBtn.addEventListener('click', function () {
         confirmCloseTask(task, fromSelect.value, reasonInput.value);
       });
@@ -697,7 +697,7 @@
       state.tasksStatus = 'ready';
       state.tasksMessage = '';
       renderTasks();
-      if (!opts.poll) announce(state.tasks.length + ' tasks loaded');
+      if (!opts.poll) announce(state.tasks.length + t('tasks.announce.tasksLoaded'));
       if (state.activeTaskId) {
         var stillThere = state.tasks.some(function (task) {
           return task.id === state.activeTaskId;
@@ -754,7 +754,7 @@
       state.taskDetailStatus = 'ready';
       state.taskDetailMessage = '';
       renderTasks();
-      announce('Opened task ' + (detail.subject || id));
+      announce(t('tasks.announce.openedTask') + (detail.subject || id));
     } catch (error) {
       if (error.name === 'AbortError' || error.message === 'session_expired') return;
       if (state.activeTaskId !== id) return;
@@ -777,7 +777,7 @@
     var text = (body || '').trim();
     if (!text) return;
     if (isAdmin() && !from) {
-      announce('Choose which address to send as.');
+      announce(t('tasks.announce.chooseWhichAddressToSendAs'));
       return;
     }
     button.disabled = true;
@@ -789,12 +789,12 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      announce('Reply sent.');
+      announce(t('tasks.announce.replySent'));
       await selectTask(task.id);
       loadTasks();
     } catch (error) {
       if (error.message === 'session_expired') return;
-      announce(error.status === 409 ? 'This task is not waiting for input.' : 'Reply could not be sent.');
+      announce(error.status === 409 ? t('tasks.announce.thisTaskIsNotWaitingFor') : t('tasks.announce.replyCouldNotBeSent'));
     } finally {
       button.disabled = false;
     }
@@ -802,7 +802,7 @@
 
   async function submitTaskRemind(task, from, button) {
     if (!from) {
-      announce('Choose which address to send as.');
+      announce(t('tasks.announce.chooseWhichAddressToSendAs'));
       return;
     }
     button.disabled = true;
@@ -815,14 +815,14 @@
           idempotencyKey: 'ui-' + Date.now() + '-' + Math.random().toString(16).slice(2)
         })
       });
-      announce('Reminder sent.');
+      announce(t('tasks.announce.reminderSent'));
       await selectTask(task.id);
       loadTasks();
     } catch (error) {
       if (error.message === 'session_expired') return;
-      if (error.status === 409) announce('This task is already closed.');
-      else if (error.status === 429) announce('Wait a moment before sending another reminder.');
-      else announce('Reminder could not be sent.');
+      if (error.status === 409) announce(t('tasks.announce.thisTaskIsAlreadyClosed'));
+      else if (error.status === 429) announce(t('tasks.announce.waitAMomentBeforeSendingAnother'));
+      else announce(t('tasks.announce.reminderCouldNotBeSent'));
     } finally {
       button.disabled = false;
     }
@@ -830,20 +830,20 @@
 
   function confirmCloseTask(task, from, reason) {
     if (!from) {
-      announce('Choose which address to send as.');
+      announce(t('tasks.announce.chooseWhichAddressToSendAs'));
       return;
     }
     var text = (reason || '').trim();
     if (!text) {
-      announce('Enter a close reason.');
+      announce(t('tasks.announce.enterACloseReason'));
       return;
     }
     var openedGen = beginModal();
-    confirmModalTitle.textContent = 'Close task';
+    confirmModalTitle.textContent = t('tasks.modal.closeTask');
     confirmModalText.textContent =
       'Close "' + (task.subject || task.id) + '"? This writes a Closed event and cannot be undone.';
     confirmModalRisk.hidden = true;
-    confirmModalConfirm.textContent = 'Close task';
+    confirmModalConfirm.textContent = t('tasks.modal.closeTask');
     confirmModal.hidden = false;
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
@@ -855,13 +855,13 @@
         });
         if (openedGen !== modalGeneration) return;
         closeAllModals();
-        announce('Task closed.');
+        announce(t('tasks.announce.taskClosed'));
         await selectTask(task.id);
         loadTasks();
       } catch (error) {
         if (openedGen !== modalGeneration) return;
         if (error.message !== 'session_expired') {
-          announce(error.status === 409 ? 'This task is already closed.' : 'Task could not be closed.');
+          announce(error.status === 409 ? t('tasks.announce.thisTaskIsAlreadyClosed') : t('tasks.announce.taskCouldNotBeClosed'));
         }
       } finally {
         /* 仅当前代际才复位；stale 请求不得复活新 dialog 的共享钮。 */

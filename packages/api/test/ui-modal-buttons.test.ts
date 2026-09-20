@@ -5,6 +5,7 @@
  * 仓库无 jsdom；用 new Function 抽出真实 onclick / beginModal 在假按钮上跑。
  */
 import { describe, expect, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 
 const { API_JS } = await import('../src/ui/client/api.ts');
 const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');

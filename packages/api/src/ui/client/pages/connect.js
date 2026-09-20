@@ -108,7 +108,7 @@ function connectCopyButton(label, value, sourceNode, sensitive) {
   button.textContent = label;
   button.disabled = Boolean(sensitive && !connectRevealed);
   if (button.disabled)
-    button.title = 'Reveal the identity token before copying this value.';
+    button.title = t('connect.action.revealTheIdentityTokenBeforeCopying');
   button.addEventListener('click', function () {
     copyValue(value, sourceNode, button);
   });
@@ -145,7 +145,7 @@ function renderConnectCards() {
       !definition.manual,
     );
     var promptLabel = document.createElement('h4');
-    promptLabel.textContent = 'Paste to your agent';
+    promptLabel.textContent = t('connect.action.pasteToYourAgent');
     var prompt = document.createElement('p');
     prompt.className = 'connect-prompt';
     prompt.textContent = definition.prompt;
@@ -171,7 +171,7 @@ function clearConnectSensitiveState() {
   connectEndpointValue = '';
   connectRevealed = false;
   connectToken.textContent = '••••••••••••';
-  connectTokenReveal.textContent = 'Reveal';
+  connectTokenReveal.textContent = t('connect.action.reveal');
   connectTokenReveal.setAttribute('aria-pressed', 'false');
   connectTokenCopy.disabled = true;
   connectEndpoint.textContent = '';
@@ -183,7 +183,7 @@ function clearConnectSensitiveState() {
 async function loadConnectPage() {
   clearConnectSensitiveState();
   var generation = connectLoadGen;
-  connectState.textContent = 'Loading connection details…';
+  connectState.textContent = t('connect.action.loadingConnectionDetails');
   try {
     var payload = await apiJson('/ui/api/connect');
     // 双闸：仍在 connect scope，且代际未被 logout/离页作废
@@ -235,7 +235,7 @@ connectTokenReveal.addEventListener('click', function () {
   connectToken.textContent = connectRevealed
     ? connectCredentialValue
     : '••••••••••••';
-  connectTokenReveal.textContent = connectRevealed ? 'Hide' : 'Reveal';
+  connectTokenReveal.textContent = connectRevealed ? t('connect.action.hide') : t('connect.action.reveal');
   connectTokenReveal.setAttribute('aria-pressed', String(connectRevealed));
   // 与 connectCopyButton 对齐：仅 reveal 后允许复制明文 token
   connectTokenCopy.disabled = !connectRevealed;

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -127,9 +128,9 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain(
       "await apiJson('/ui/api/oauth/grants/' + encodeURIComponent(grant.id), { method: 'DELETE' })",
     );
-    expect(UI_JS).toContain("announce('Client revoked.')");
+    expect(UI_JS).toContain("announce(t('clients.announce.clientRevoked'))");
     expect(UI_JS).toContain('loadConfigureClients()');
-    expect(UI_JS).toContain("'Could not revoke that client.'");
+    expect(UI_JS).toContain('clients.error.couldNotRevokeThatClient');
   });
 
   test('front-end code contains no HTML parser sinks and confines searchParams strictly to consumeQueryToken', () => {
@@ -175,22 +176,24 @@ describe('UI static asset contract', () => {
 
   test('PR2 inbox folders, source view, and layered mobile back', () => {
     expect(UI_HTML).toContain('id="folder-list"');
-    expect(UI_JS).toContain("id: 'inbox', label: 'Inbox'");
-    expect(UI_JS).toContain("id: 'sent', label: 'Sent'");
+    expect(UI_JS).toContain("id: 'inbox', label: t('inbox.label.inbox')");
+    expect(UI_JS).toContain("id: 'sent', label: t('inbox.label.sent')");
     expect(UI_JS).toContain("'/ui/api/send-log?address='");
     expect(UI_JS).toContain("'/ui/api/send-log/'");
     expect(UI_JS).toContain('No API/MCP sends in 30 days');
     expect(UI_JS).toContain('Direct SMTP is not listed');
-    expect(UI_JS).toContain("badge.textContent = message.result === 'failed' ? 'Failed' : 'Queued'");
+    expect(UI_JS).toContain(
+      "badge.textContent = message.result === 'failed' ? t('inbox.error.failed') : t('inbox.error.queued')",
+    );
     expect(UI_CSS).toContain('.send-result-badge[data-result="queued"]');
     expect(UI_CSS).toContain('.send-result-badge[data-result="failed"]');
-    expect(UI_JS).toContain("id: 'all', label: 'All Mail'");
+    expect(UI_JS).toContain("id: 'all', label: t('inbox.label.allMail')");
     expect(UI_HTML).not.toContain('Scheduled');
     expect(UI_HTML).not.toContain('Trash');
     expect(UI_JS).not.toContain('Scheduled');
     expect(UI_JS).not.toContain("'trash'");
-    expect(UI_JS).toContain("textContent = 'Rendered'");
-    expect(UI_JS).toContain("textContent = 'Source'");
+    expect(UI_JS).toContain("textContent = t('app.action.rendered')");
+    expect(UI_JS).toContain("textContent = t('app.action.source')");
     expect(UI_JS).toContain('createTextNode(payload.source');
     expect(UI_JS).toContain('/source?address=');
     expect(UI_JS).toContain("setAttribute('sandbox', '')");
@@ -694,8 +697,8 @@ describe('UI static asset contract', () => {
     expect(applyScope).toContain('mobileIdentityContainer.hidden = !inboxActive;');
     expect(applyScope).toContain('var SCOPE_META = {');
     expect(applyScope).toContain('skipLink.textContent = meta.skip');
-    expect(applyScope).toContain("'Skip to Alerts'");
-    expect(applyScope).toContain("'Skip to tasks'");
+    expect(applyScope).toContain("t('router.copy.skipToAlerts')");
+    expect(applyScope).toContain("t('router.copy.skipToTasks')");
     expect(applyScope).toContain("'#notify-panel'");
     expect(applyScope).toContain("'#tasks-panel'");
     // landmark 与断点无关，所以不需要 matchMedia
@@ -901,7 +904,7 @@ describe('UI static asset contract', () => {
     );
     expect(renderRows).toContain('state.tasksFetchKey === tasksFetchKey()');
     expect(renderRows).toContain("state.tasksStatus === 'loading' || !keyMatches");
-    expect(renderRows).toContain("'Loading…'");
+    expect(renderRows).toContain("t('tasks.action.loading')");
   });
 
   // F1：401 → showLogin 必须清掉通知缓存，否则换 token 会渲染上一主体内容
@@ -938,7 +941,7 @@ describe('UI static asset contract', () => {
       expect(clear).toContain(field);
     }
     // apiJson 401 走 showLogin（因而间接触发清理），不是只 abort
-    expect(UI_JS).toContain("showLogin('Your session expired. Sign in again.')");
+    expect(UI_JS).toContain("showLogin(t('api.copy.yourSessionExpiredSignInAgain'))");
   });
 
   // F1（tasks）：401 → showLogin 必须清掉工单缓存，否则换 token 会渲染上一主体任务
@@ -1006,7 +1009,7 @@ describe('UI static asset contract', () => {
     );
     expect(renderRows).toContain('state.notifyFetchKey === notifyFetchKey()');
     expect(renderRows).toContain("state.notifyStatus === 'loading' || !keyMatches");
-    expect(renderRows).toContain("'Loading…'");
+    expect(renderRows).toContain("t('tasks.action.loading')");
   });
 
   // F7：任一路 503 短路扇出，不再打剩余 topic
@@ -1246,9 +1249,9 @@ describe('UI static asset contract', () => {
     );
     expect(countParts).toContain("if (row.complete) return");
     expect(countParts).toContain("'≥' + formatNumber(value)");
-    expect(countParts).toContain("text: 'Unknown'");
-    expect(countParts).toContain('Lower bound — this scan hit its recipient limit.');
-    expect(countParts).toContain('Not counted — this scan hit its recipient limit.');
+    expect(countParts).toContain("text: t('inbox.title.unknown')");
+    expect(countParts).toContain("t('inbox.title.lowerBoundThisScanHitIts')");
+    expect(countParts).toContain("t('inbox.title.notCountedThisScanHitIts')");
     expect(countParts).toContain("'Unavailable'");
     const home = UI_JS.slice(
       UI_JS.indexOf('function loadHome('),
@@ -1394,7 +1397,7 @@ describe('UI static asset contract', () => {
     const afterConfirm = catchBody.slice(confirmIdx);
     expect(afterConfirm.indexOf('restore()')).toBeGreaterThanOrEqual(0);
     expect(afterConfirm.indexOf('restore()')).toBeLessThan(
-      afterConfirm.indexOf("announce('Tier 3 requires explicit risk confirmation.')"),
+      afterConfirm.indexOf("announce(t('push.announce.tier3RequiresExplicitRiskConfirmation'))"),
     );
 
     // session_expired: restore only (session flow takes over).
@@ -1440,14 +1443,14 @@ describe('UI static asset contract', () => {
       UI_JS.indexOf('function renderConfigureIdentities('),
       UI_JS.indexOf('function enterConfigureIdentities('),
     );
-    expect(renderCfg).toContain("'Key: set'");
-    expect(renderCfg).toContain("'Key: missing'");
+    expect(renderCfg).toContain("t('identities.action.keySet')");
+    expect(renderCfg).toContain("t('identities.action.keyMissing')");
     expect(UI_JS).toContain('No connected apps.');
     expect(UI_JS).toContain('Could not load connected apps.');
     expect(UI_JS).not.toContain('authorized clients');
     expect(renderCfg).toContain('if (isAdmin())');
-    expect(renderCfg).toContain("rotate.textContent = 'Rotate'");
-    expect(renderCfg).toContain("del.textContent = 'Delete'");
+    expect(renderCfg).toContain("rotate.textContent = t('identities.action.rotate')");
+    expect(renderCfg).toContain("del.textContent = t('identities.action.delete')");
     expect(renderCfg).not.toContain('identity.token');
     expect(UI_JS).toContain('showTokenModal(payload.token');
     expect(UI_JS).toContain("showTokenModal(payload.token, 'Rotated Token')");
@@ -1457,10 +1460,10 @@ describe('UI static asset contract', () => {
   });
 
   test('Configure push renders three human-language tier cards and server-enforced tier 3 confirm', () => {
-    expect(UI_JS).toContain("title: 'Notify only'");
-    expect(UI_JS).toContain("summary: 'Just tell me a message arrived.'");
-    expect(UI_JS).toContain("title: 'Sender & subject'");
-    expect(UI_JS).toContain("title: 'Body & OTP'");
+    expect(UI_JS).toContain("title: t('push.title.notifyOnly')");
+    expect(UI_JS).toContain("summary: t('push.copy.justTellMeAMessageArrived')");
+    expect(UI_JS).toContain("title: t('push.title.senderSubject')");
+    expect(UI_JS).toContain("title: t('push.title.bodyOtp')");
     expect(UI_JS).toContain('function handleConfigurePushTier(');
     const configurePush = UI_JS.slice(
       UI_JS.indexOf('function handleConfigurePushTier('),
@@ -1501,7 +1504,7 @@ describe('UI static asset contract', () => {
     expect(UI_JS).toContain('function showDevicePairModal(');
     expect(UI_JS).toContain('function handleRevokeDevice(');
     expect(UI_JS).toContain(
-      "'Restore ntfy admin access before revoking. The phone may still receive notifications.'",
+      "t('push.announce.restoreNtfyAdminAccessBeforeRevoking')",
     );
     expect(UI_JS).toContain('topicSemantics');
     expect(UI_JS).toContain('User alerts');
@@ -1517,7 +1520,7 @@ describe('UI static asset contract', () => {
     expect(renderPush).toContain("role', 'radio'");
     expect(renderPush).toContain('aria-checked');
     expect(renderPush).not.toContain('aria-pressed');
-    expect(renderPush).toContain('Current push content:');
+    expect(renderPush).toContain("t('push.action.currentPushContent')");
     expect(renderPush).toContain("aria-disabled', 'true'");
   });
 
@@ -1525,10 +1528,10 @@ describe('UI static asset contract', () => {
     expect(UI_HTML).not.toContain('Upgrade');
     expect(UI_JS).not.toContain("'Upgrade'");
     expect(UI_JS).not.toContain('Upgrade plan');
-    expect(UI_JS).toContain("'Self-hosted instance'");
-    expect(UI_JS).toContain("docsLabel: 'Read the self-hosted API docs'");
+    expect(UI_JS).toContain("t('plan.title.selfHostedInstance')");
+    expect(UI_JS).toContain("docsLabel: t('plan.copy.readTheSelfHostedApiDocs')");
     expect(UI_JS).toContain("docsHref: 'https://openagent.email/docs/reference/api/'");
-    expect(UI_JS).toContain("'Configured instance domains'");
+    expect(UI_JS).toContain("t('plan.title.configuredInstanceDomains')");
     expect(UI_CSS).toContain('.empty-state-docs');
   });
 
@@ -1741,7 +1744,9 @@ describe('UI static asset contract', () => {
     const { MODAL_JS } = await import('../src/ui/client/components/modal.ts');
     expect(MODAL_JS).toContain('function populateCreateDomain(');
     expect(MODAL_JS).toContain('createModalSubmit.disabled = true;');
-    expect(MODAL_JS).toContain("createModalError.textContent = 'Could not load domains — try again';");
+    expect(MODAL_JS).toContain(
+      "createModalError.textContent = t('modal.error.couldNotLoadDomainsTryAgain');",
+    );
 
     // Execute showCreateModal in mock DOM environment when apiJson rejects
     const runner = new Function(`
@@ -1812,7 +1817,7 @@ describe('UI static asset contract', () => {
 
   // §7.6：复制成功态只是附加信号，失败降级路径逐字不动
   test('a successful copy adds a transient class without replacing the announcement', () => {
-    expect(UI_JS).toContain("announce('Copied to clipboard');");
+    expect(UI_JS).toContain("announce(t('app.announce.copiedToClipboard'));");
     expect(UI_JS).toContain("sourceButton.classList.add('copied');");
     expect(UI_JS).toContain("sourceButton.classList.remove('copied');");
     expect(UI_JS).toContain('}, 1200);');
@@ -1926,20 +1931,20 @@ describe('UI static asset contract', () => {
     expect(catchBody).toContain('error.status === 400');
     expect(catchBody).toContain("error.body.error === 'invalid_cursor'");
     expect(catchBody).toContain("state.nextCursor = ''");
-    expect(catchBody).toContain('Pagination expired. Press Refresh to load the latest page.');
+    expect(catchBody).toContain("t('app.action.paginationExpiredPressRefreshToLoad')");
 
     // 负控：通用错误文案仍在 else；清 cursor 恰好一次且位于 more 门控之后
-    expect(catchBody).toContain('Messages could not be loaded. Try Refresh.');
+    expect(catchBody).toContain("t('app.error.messagesCouldNotBeLoadedTry')");
     const moreIdx = catchBody.indexOf('opts.more === true');
     const clearIdx = catchBody.indexOf("state.nextCursor = ''");
-    const genericIdx = catchBody.indexOf('Messages could not be loaded. Try Refresh.');
+    const genericIdx = catchBody.indexOf("t('app.error.messagesCouldNotBeLoadedTry')");
     expect(moreIdx).toBeGreaterThanOrEqual(0);
     expect(clearIdx).toBeGreaterThan(moreIdx);
     expect(genericIdx).toBeGreaterThan(clearIdx);
     expect(catchBody.split("state.nextCursor = ''").length - 1).toBe(1);
 
     // R3 负控：非 more 路径上的 invalid_cursor 不得单独清 cursor（门控在前）
-    const expiredIdx = catchBody.indexOf('Pagination expired. Press Refresh to load the latest page.');
+    const expiredIdx = catchBody.indexOf("t('app.action.paginationExpiredPressRefreshToLoad')");
     expect(expiredIdx).toBeGreaterThan(moreIdx);
   });
 });

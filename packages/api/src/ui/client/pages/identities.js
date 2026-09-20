@@ -29,11 +29,11 @@
     configureIdentitiesRows.replaceChildren();
     if (!state.identities.length) {
       renderEmptyState(configureIdentitiesState, {
-        title: 'No identities yet',
+        title: t('identities.title.noIdentitiesYet'),
         purpose: isAdmin()
           ? 'Create an identity to get a one-time token. The plaintext token is shown once and never stored.'
           : 'No identity is visible in this session.',
-        actionLabel: isAdmin() ? 'Create Identity' : '',
+        actionLabel: isAdmin() ? t('identities.copy.createIdentity') : '',
         onAction: isAdmin() ? showCreateModal : null
       });
       return;
@@ -48,14 +48,14 @@
       addr.textContent = identity.address;
       var name = document.createElement('p');
       name.className = 'muted';
-      name.textContent = identity.name || 'No display name';
+      name.textContent = identity.name || t('identities.action.noDisplayName');
       var token = document.createElement('p');
       token.className = 'identity-token-slot';
       /* 单 slot 诚实展示：只报 Set/Missing，永不回显旧 token 明文。 */
-      token.textContent = identity.hasToken ? 'Key: set' : 'Key: missing';
+      token.textContent = identity.hasToken ? t('identities.action.keySet') : t('identities.action.keyMissing');
       var tier = document.createElement('p');
       tier.className = 'muted';
-      tier.textContent = 'Push: ' + pushTierProjection(currentPushTier(identity));
+      tier.textContent = t('identities.action.push') + pushTierProjection(currentPushTier(identity));
       meta.append(addr, name, token, tier);
       var actions = document.createElement('div');
       actions.className = 'row-actions';
@@ -63,12 +63,12 @@
         var rotate = document.createElement('button');
         rotate.type = 'button';
         rotate.className = 'quiet';
-        rotate.textContent = 'Rotate';
+        rotate.textContent = t('identities.action.rotate');
         rotate.addEventListener('click', function () { handleRotateToken(identity.address); });
         var del = document.createElement('button');
         del.type = 'button';
         del.className = 'quiet delete-action';
-        del.textContent = 'Delete';
+        del.textContent = t('identities.action.delete');
         del.addEventListener('click', function () { handleDeleteIdentity(identity.address); });
         actions.append(rotate, del);
       }

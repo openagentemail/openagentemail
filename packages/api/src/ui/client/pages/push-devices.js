@@ -2,21 +2,21 @@
   var PUSH_TIER_CARDS = [
     {
       tier: 1,
-      title: 'Notify only',
-      summary: 'Just tell me a message arrived.',
-      detail: 'The push says mail is waiting. No sender, subject, or body leaves this server.'
+      title: t('push.title.notifyOnly'),
+      summary: t('push.copy.justTellMeAMessageArrived'),
+      detail: t('push.copy.thePushSaysMailIsWaiting')
     },
     {
       tier: 2,
-      title: 'Sender & subject',
-      summary: 'Also include From and Subject.',
-      detail: 'Enough to decide whether to open the inbox. Body and OTP codes stay on this server.'
+      title: t('push.title.senderSubject'),
+      summary: t('push.copy.alsoIncludeFromAndSubject'),
+      detail: t('push.copy.enoughToDecideWhetherToOpen')
     },
     {
       tier: 3,
-      title: 'Body & OTP',
-      summary: 'Also include body preview and verification codes.',
-      detail: 'Sensitive: body previews and OTP codes/links leave this server for the ntfy channel. Enabling this tier requires an explicit risk confirmation that the server enforces.'
+      title: t('push.title.bodyOtp'),
+      summary: t('push.copy.alsoIncludeBodyPreviewAndVerification'),
+      detail: t('push.modal.sensitiveBodyPreviewsAndOtpCodes')
     }
   ];
 
@@ -44,14 +44,14 @@
 
     async function apply(tier, confirmRisk, openedGen) {
       if (state.tierPending[address]) {
-        announce('Another push content change is already in progress for ' + address + '.');
+        announce(t('push.announce.anotherPushContentChangeIsAlready') + address + '.');
         return;
       }
       state.tierPending[address] = true;
       renderConfigurePush();
       try {
         await savePushContentTier(address, tier, confirmRisk);
-        announce('Push content set to tier ' + tier + ' for ' + address + '.');
+        announce(t('push.announce.pushContentSetToTier') + tier + t('push.announce.for') + address + '.');
         /* 先关确认框再重绘，避免 replaceChildren 卸掉 modalOpener。 */
         if (openedGen !== undefined) {
           if (openedGen !== modalGeneration) return;
@@ -72,7 +72,7 @@
           error.body &&
           error.body.error === 'confirm_risk_required'
         ) {
-          announce('Tier 3 requires explicit risk confirmation.');
+          announce(t('push.announce.tier3RequiresExplicitRiskConfirmation'));
           renderConfigurePush();
         } else if (error.message === 'session_expired') {
           renderConfigurePush();
@@ -104,12 +104,12 @@
     }
 
     var openedGen = beginModal();
-    confirmModalTitle.textContent = 'Enable sensitive push content';
+    confirmModalTitle.textContent = t('push.modal.enableSensitivePushContent');
     confirmModalText.textContent =
       'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
     confirmModalRisk.textContent = PUSH_TIER3_WARNING;
     confirmModalRisk.hidden = false;
-    confirmModalConfirm.textContent = 'Enable tier 3';
+    confirmModalConfirm.textContent = t('push.modal.enableTier3');
     confirmModal.hidden = false;
     /* 卡面在 apply() 前未改档；取消时不要 replaceChildren，否则 opener 被卸下无法回焦。 */
     confirmModalOnCancel = null;
@@ -145,7 +145,7 @@
     });
     configurePushCards.replaceChildren();
     if (!target) {
-      configurePushState.textContent = 'Create an identity before choosing a push tier.';
+      configurePushState.textContent = t('push.action.createAnIdentityBeforeChoosingA');
       configurePushCards.replaceChildren();
       renderPairedDevices();
       return;
@@ -156,10 +156,10 @@
     var currentLabel = document.createElement('p');
     currentLabel.className = 'sr-only';
     currentLabel.id = 'configure-push-tier-current';
-    currentLabel.textContent = 'Current push content: ' + pushTierProjection(current);
+    currentLabel.textContent = t('push.action.currentPushContent') + pushTierProjection(current);
     configurePushCards.append(currentLabel);
     configurePushCards.setAttribute('role', 'radiogroup');
-    configurePushCards.setAttribute('aria-label', 'Push content for ' + target.address);
+    configurePushCards.setAttribute('aria-label', t('push.a11y.pushContentFor') + target.address);
     configurePushCards.setAttribute('aria-describedby', 'configure-push-tier-current');
     configurePushCards.setAttribute('aria-readonly', isAdmin() ? 'false' : 'true');
     PUSH_TIER_CARDS.forEach(function (def) {
@@ -179,7 +179,7 @@
       }
       var kicker = document.createElement('p');
       kicker.className = 'push-tier-kicker';
-      kicker.textContent = 'Tier ' + def.tier;
+      kicker.textContent = t('push.action.tier') + def.tier;
       var title = document.createElement('h3');
       title.textContent = def.title;
       var summary = document.createElement('p');
@@ -281,9 +281,9 @@
       if (openedGen !== modalGeneration) return;
       if (error.message === 'session_expired') return;
       if (error.body && (error.body.error === 'notifications_disabled' || error.body.error === 'notifications_unconfigured')) {
-        announce('Notifications are not configured on this instance.');
+        announce(t('push.announce.notificationsAreNotConfiguredOnThis'));
       } else {
-        announce('Could not create device credentials. Try again.');
+        announce(t('push.announce.couldNotCreateDeviceCredentialsTry'));
       }
     } finally {
       if (openedGen === modalGeneration) deviceAddSubmit.disabled = false;
@@ -293,13 +293,13 @@
   function handleRevokeDevice(device) {
     if (!isAdmin()) return;
     var openedGen = beginModal();
-    confirmModalTitle.textContent = 'Revoke device?';
+    confirmModalTitle.textContent = t('push.modal.revokeDevice');
     confirmModalText.textContent =
       'This deletes the ntfy login for ' +
       (device.displayName || 'this device') +
       '. Push to that phone stops immediately.';
     confirmModalRisk.hidden = true;
-    confirmModalConfirm.textContent = 'Revoke';
+    confirmModalConfirm.textContent = t('clients.action.revoke');
     confirmModal.hidden = false;
     confirmModalConfirm.onclick = async function () {
       confirmModalConfirm.disabled = true;
@@ -308,16 +308,16 @@
         await apiJson('/ui/api/notify/devices/' + encodeURIComponent(device.id), { method: 'DELETE' });
         if (openedGen !== modalGeneration) return;
         closeAllModals();
-        announce('Device revoked.');
+        announce(t('push.announce.deviceRevoked'));
         loadPairedDevices();
       } catch (error) {
         if (openedGen !== modalGeneration) return;
         if (error.message === 'session_expired') return;
         /* ntfy 临时关闭时凭据可能仍活着，不要说成普通失败。 */
         if (error.body && (error.body.error === 'notifications_disabled' || error.body.error === 'notifications_unconfigured')) {
-          announce('Restore ntfy admin access before revoking. The phone may still receive notifications.');
+          announce(t('push.announce.restoreNtfyAdminAccessBeforeRevoking'));
         } else {
-          announce('Could not revoke that device. Try again.');
+          announce(t('push.announce.couldNotRevokeThatDeviceTry'));
         }
         /* transient 已落 pending_revoke：立刻重拉，让 Revoking… 马上可见。 */
         loadPairedDevices();
@@ -336,20 +336,20 @@
     if (configurePushAdd) configurePushAdd.hidden = !isAdmin();
     configurePushDeviceList.replaceChildren();
     if (!isAdmin()) {
-      configurePushDevicesState.textContent = 'Only the instance admin can manage paired devices.';
+      configurePushDevicesState.textContent = t('push.action.onlyTheInstanceAdminCanManage');
       return;
     }
     if (state.devicesStatus === 'loading' && !state.devices.length) {
-      configurePushDevicesState.textContent = 'Loading…';
+      configurePushDevicesState.textContent = t('tasks.action.loading');
       return;
     }
     if (state.devicesStatus === 'error') {
-      configurePushDevicesState.textContent = 'Could not load paired devices.';
+      configurePushDevicesState.textContent = t('push.error.couldNotLoadPairedDevices');
       return;
     }
     var devices = Array.isArray(state.devices) ? state.devices : [];
     if (!devices.length) {
-      configurePushDevicesState.textContent = 'No paired devices yet. Add a phone to get a one-time password and QR.';
+      configurePushDevicesState.textContent = t('push.action.noPairedDevicesYetAddA');
       return;
     }
     configurePushDevicesState.textContent = '';
@@ -358,18 +358,18 @@
       row.className = 'device-row';
       var meta = document.createElement('div');
       var title = document.createElement('strong');
-      title.textContent = device.displayName || 'Phone';
+      title.textContent = device.displayName || t('push.action.phone');
       var channels = document.createElement('p');
       channels.className = 'muted';
       channels.textContent = topicSemantics(device);
       var paired = document.createElement('p');
       paired.className = 'muted';
       var when = device.pairedAt ? formatDate(device.pairedAt) : '';
-      paired.textContent = when ? ('Paired ' + when) : '';
+      paired.textContent = when ? (t('push.action.paired') + when) : '';
       if (device.revokeStatus === 'pending_revoke') {
         var pending = document.createElement('p');
         pending.className = 'device-pending';
-        pending.textContent = 'Revoking…';
+        pending.textContent = t('push.action.revoking');
         meta.append(title, channels, paired, pending);
       } else {
         meta.append(title, channels, paired);
@@ -377,7 +377,7 @@
       var revoke = document.createElement('button');
       revoke.type = 'button';
       revoke.className = 'quiet';
-      revoke.textContent = device.revokeStatus === 'pending_revoke' ? 'Retry revoke' : 'Revoke';
+      revoke.textContent = device.revokeStatus === 'pending_revoke' ? t('push.action.retryRevoke') : t('clients.action.revoke');
       revoke.addEventListener('click', function () {
         handleRevokeDevice(device);
       });
