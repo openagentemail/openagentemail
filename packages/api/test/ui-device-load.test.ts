@@ -3,6 +3,7 @@
  * 仓库无 jsdom；抽出真实 loadPairedDevices / clearNotifyState，用可控 Promise 模拟乱序与登出。
  */
 import { describe, expect, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 
 const { API_JS } = await import('../src/ui/client/api.ts');
 const { PUSH_DEVICES_PAGE_JS } = await import('../src/ui/client/pages/push-devices.ts');

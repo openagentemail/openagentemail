@@ -65,8 +65,8 @@
     var controller = new AbortController();
     refreshController = controller;
     refreshButton.disabled = true;
-    refreshButton.textContent = 'Refreshing…';
-    if (!opts.more) messageState.textContent = 'Loading messages…';
+    refreshButton.textContent = t('tasks.action.refreshing');
+    if (!opts.more) messageState.textContent = t('app.action.loadingMessages');
     if (loadMoreMessages) loadMoreMessages.disabled = true;
 
     var url = requestedFolder === 'sent'
@@ -97,7 +97,7 @@
       renderMessages();
       renderIdentities();
       renderFolderNav();
-      announce(state.messages.length + ' messages loaded');
+      announce(state.messages.length + t('app.announce.messagesLoaded'));
     })();
     refreshTask = task;
     try {
@@ -113,16 +113,16 @@
           error.body.error === 'invalid_cursor'
         ) {
           state.nextCursor = '';
-          messageState.textContent = 'Pagination expired. Press Refresh to load the latest page.';
+          messageState.textContent = t('app.action.paginationExpiredPressRefreshToLoad');
         } else {
-          messageState.textContent = 'Messages could not be loaded. Try Refresh.';
+          messageState.textContent = t('app.error.messagesCouldNotBeLoadedTry');
         }
       }
     } finally {
       if (refreshTask === task) refreshTask = null;
       if (refreshController === controller) refreshController = null;
       refreshButton.disabled = false;
-      refreshButton.textContent = 'Refresh';
+      refreshButton.textContent = t('tasks.action.refresh');
       if (loadMoreMessages) loadMoreMessages.disabled = !state.nextCursor;
     }
   }
@@ -165,7 +165,7 @@
   async function copyValue(value, sourceNode, sourceButton) {
     try {
       await navigator.clipboard.writeText(value);
-      announce('Copied to clipboard');
+      announce(t('app.announce.copiedToClipboard'));
       /* 颜色不是唯一信号：播报先行，绿色只是附加确认。 */
       if (sourceButton) {
         sourceButton.classList.add('copied');
@@ -176,8 +176,8 @@
     } catch {
       var selected = selectForManualCopy(sourceNode);
       announce(selected
-        ? 'Clipboard unavailable. The value is selected for manual copying.'
-        : 'Clipboard unavailable. Select the value and copy it manually.');
+        ? t('app.copy.clipboardUnavailableTheValueIsSelected')
+        : t('app.copy.clipboardUnavailableSelectTheValueAnd'));
     }
   }
 
@@ -209,14 +209,14 @@
     var copy = document.createElement('button');
     copy.type = 'button';
     copy.className = 'quiet link-copy';
-    copy.textContent = 'Copy';
+    copy.textContent = t('app.action.copy');
     copy.addEventListener('click', function () {
       copyValue(parsed.href, url, copy);
     });
 
     var open = document.createElement('a');
     open.className = 'open-link';
-    open.textContent = 'Open';
+    open.textContent = t('app.action.open');
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
     open.referrerPolicy = 'no-referrer';
@@ -238,7 +238,7 @@
     title.textContent = titleText;
     var warning = document.createElement('p');
     warning.className = 'sender-warning';
-    warning.textContent = 'This link came from the sender. Check the domain before opening it.';
+    warning.textContent = t('app.action.thisLinkCameFromTheSender');
     var list = document.createElement('div');
     list.className = 'link-list';
     list.append.apply(list, validRows);
@@ -253,7 +253,7 @@
       var section = document.createElement('section');
       section.className = 'info-section';
       var title = document.createElement('h3');
-      title.textContent = 'Verification codes';
+      title.textContent = t('app.action.verificationCodes');
       var list = document.createElement('div');
       list.className = 'code-list';
       codes.forEach(function (code) {
@@ -265,7 +265,7 @@
         var copy = document.createElement('button');
         copy.type = 'button';
         copy.className = 'quiet';
-        copy.textContent = 'Copy';
+        copy.textContent = t('app.action.copy');
         copy.addEventListener('click', function () {
           copyValue(code, value, copy);
         });
@@ -275,14 +275,14 @@
       section.append(title, list);
       parent.append(section);
     }
-    appendLinks(parent, 'Verification links', otp.links);
+    appendLinks(parent, t('app.copy.verificationLinks'), otp.links);
   }
 
   function renderPlainBody(container, detail) {
     container.replaceChildren();
     var plain = document.createElement('pre');
     plain.className = 'plain-body';
-    plain.textContent = detail.text || 'This message has no plain-text body.';
+    plain.textContent = detail.text || t('app.action.thisMessageHasNoPlainText');
     container.append(plain);
   }
 
@@ -290,7 +290,7 @@
     container.replaceChildren();
     var frame = document.createElement('iframe');
     frame.className = 'mail-frame';
-    frame.title = 'Isolated HTML email preview';
+    frame.title = t('app.copy.isolatedHtmlEmailPreview');
     frame.loading = 'lazy';
     frame.setAttribute('sandbox', '');
     frame.src = '/ui/frame/' + encodeURIComponent(detail.id) +
@@ -307,7 +307,7 @@
     if (payload.truncated) {
       var note = document.createElement('p');
       note.className = 'notice warning';
-      note.textContent = 'Source truncated at the server size limit.';
+      note.textContent = t('app.action.sourceTruncatedAtTheServerSize');
       container.append(note);
     }
   }
@@ -329,7 +329,7 @@
     container.replaceChildren();
     var loading = document.createElement('p');
     loading.className = 'empty-state';
-    loading.textContent = 'Loading source…';
+    loading.textContent = t('app.action.loadingSource');
     container.append(loading);
     try {
       var payload = await apiJson(
@@ -352,7 +352,7 @@
       renderSourceBody(container, state.sourceCache);
     } catch (error) {
       if (error.name !== 'AbortError' && error.message !== 'session_expired') {
-        loading.textContent = 'Source could not be loaded.';
+        loading.textContent = t('app.error.sourceCouldNotBeLoaded');
       }
     } finally {
       if (sourceController === controller) sourceController = null;
@@ -362,15 +362,15 @@
   function fillMetadata(drawer, detail, summary) {
     drawer.replaceChildren();
     var heading = document.createElement('h3');
-    heading.textContent = 'Headers';
+    heading.textContent = t('app.action.headers');
     var meta = document.createElement('dl');
     meta.className = summary ? 'meta metadata-summary' : 'meta';
     var append = summary ? appendMetadataItem : appendMeta;
-    append(meta, 'From', detail.from);
-    append(meta, 'To', detail.to);
-    append(meta, 'Date', formatDate(detail.date));
+    append(meta, t('shell.html.from'), detail.from);
+    append(meta, t('shell.html.to'), detail.to);
+    append(meta, t('shell.html.date'), formatDate(detail.date));
     append(meta, 'Id', detail.id);
-    append(meta, 'Source', detail.source === 'internal' ? 'internal' : 'external');
+    append(meta, t('app.action.source'), detail.source === 'internal' ? 'internal' : 'external');
     drawer.append(heading, meta);
   }
 
@@ -382,9 +382,9 @@
     header.className = 'detail-header';
     var label = document.createElement('p');
     label.className = 'eyebrow';
-    label.textContent = 'Message';
+    label.textContent = t('app.action.message');
     var title = document.createElement('h2');
-    title.textContent = detail.subject || '(no subject)';
+    title.textContent = detail.subject || t('tasks.action.noSubject');
     header.append(label, title);
 
     var summary = null;
@@ -395,7 +395,7 @@
       var seenToggle = document.createElement('button');
       seenToggle.type = 'button';
       seenToggle.className = 'quiet seen-toggle';
-      seenToggle.textContent = summary.seen ? 'Mark as unread' : 'Mark as read';
+      seenToggle.textContent = summary.seen ? t('app.action.markAsUnread') : t('app.action.markAsRead');
       seenToggle.addEventListener('click', function () {
         toggleSeen(detail.id, summary, seenToggle);
       });
@@ -405,7 +405,7 @@
     var otpHost = document.createElement('div');
     otpHost.className = 'detail-otp';
     appendOtp(otpHost, detail.otp);
-    appendLinks(otpHost, 'Links in this message', detail.links);
+    appendLinks(otpHost, t('app.copy.linksInThisMessage'), detail.links);
 
     var tabs = document.createElement('div');
     tabs.className = 'tabs';
@@ -413,26 +413,26 @@
     var renderedTab = document.createElement('button');
     renderedTab.type = 'button';
     renderedTab.className = 'tab';
-    renderedTab.textContent = 'Rendered';
+    renderedTab.textContent = t('app.action.rendered');
     renderedTab.setAttribute('role', 'tab');
     renderedTab.disabled = !detail.hasHtml || detail.htmlTooLarge;
     if (detail.htmlTooLarge) {
-      renderedTab.title = 'This email is too large to preview safely.';
+      renderedTab.title = t('app.copy.thisEmailIsTooLargeTo');
     }
     var plainTab = document.createElement('button');
     plainTab.type = 'button';
     plainTab.className = 'tab';
-    plainTab.textContent = 'Plain text';
+    plainTab.textContent = t('app.action.plainText');
     plainTab.setAttribute('role', 'tab');
     var sourceTab = document.createElement('button');
     sourceTab.type = 'button';
     sourceTab.className = 'tab';
-    sourceTab.textContent = 'Source';
+    sourceTab.textContent = t('app.action.source');
     sourceTab.setAttribute('role', 'tab');
     var headersTab = document.createElement('button');
     headersTab.type = 'button';
     headersTab.className = 'tab tab-headers';
-    headersTab.textContent = 'Headers';
+    headersTab.textContent = t('app.action.headers');
     headersTab.setAttribute('role', 'tab');
     tabs.append(renderedTab, plainTab, sourceTab, headersTab);
 
@@ -469,14 +469,14 @@
       var htmlUnavailable = document.createElement('p');
       htmlUnavailable.className = 'notice warning';
       htmlUnavailable.textContent =
-        'This email is too large to preview safely. Use the plain-text view instead.';
+        t('app.copy.thisEmailIsTooLargeTo2');
       mainCol.append(htmlUnavailable);
     }
     mainCol.append(body);
 
     var drawer = document.createElement('section');
     drawer.className = 'metadata-drawer';
-    drawer.setAttribute('aria-label', 'Message metadata');
+    drawer.setAttribute('aria-label', t('app.a11y.messageMetadata'));
     fillMetadata(drawer, detail, true);
 
     var layout = document.createElement('div');
@@ -495,12 +495,12 @@
         body: JSON.stringify({ address: state.activeAddress, seen: !summary.seen })
       });
       summary.seen = !summary.seen;
-      button.textContent = summary.seen ? 'Mark as unread' : 'Mark as read';
+      button.textContent = summary.seen ? t('app.action.markAsUnread') : t('app.action.markAsRead');
       renderMessages();
-      announce(summary.seen ? 'Marked as read.' : 'Marked as unread.');
+      announce(summary.seen ? t('app.announce.markedAsRead') : t('app.announce.markedAsUnread'));
     } catch (error) {
       if (error.message !== 'session_expired') {
-        announce('Could not update the message. Try again.');
+        announce(t('app.announce.couldNotUpdateTheMessageTry'));
       }
     } finally {
       button.disabled = false;
@@ -512,22 +512,22 @@
   function renderSendLogDetail(row) {
     detailContent.replaceChildren();
     var heading = document.createElement('h2');
-    heading.textContent = row.subject || '(no subject)';
+    heading.textContent = row.subject || t('tasks.action.noSubject');
     var meta = document.createElement('dl');
     meta.className = 'meta';
-    appendMeta(meta, 'From', row.from);
-    appendMeta(meta, 'To', Array.isArray(row.to) ? row.to.join(', ') : row.to);
-    appendMeta(meta, 'Sent', row.sentAt);
-    appendMeta(meta, 'Result', row.result === 'failed' ? ('Failed' + (row.error ? ' · ' + row.error : '')) : 'Queued');
+    appendMeta(meta, t('shell.html.from'), row.from);
+    appendMeta(meta, t('shell.html.to'), Array.isArray(row.to) ? row.to.join(', ') : row.to);
+    appendMeta(meta, t('inbox.label.sent'), row.sentAt);
+    appendMeta(meta, t('tasks.action.result'), row.result === 'failed' ? (t('inbox.error.failed') + (row.error ? ' · ' + row.error : '')) : t('inbox.error.queued'));
     appendMeta(meta, 'Message-ID', row.messageId);
-    appendMeta(meta, 'Source', row.source === 'mcp' ? 'MCP' : 'API');
+    appendMeta(meta, t('app.action.source'), row.source === 'mcp' ? 'MCP' : 'API');
     var badge = document.createElement('span');
     badge.className = 'send-result-badge';
     badge.setAttribute('data-result', row.result === 'failed' ? 'failed' : 'queued');
-    badge.textContent = row.result === 'failed' ? 'Failed' : 'Queued';
+    badge.textContent = row.result === 'failed' ? t('inbox.error.failed') : t('inbox.error.queued');
     var note = document.createElement('p');
     note.className = 'send-log-note';
-    note.textContent = 'API/MCP send audit (30 days). Direct SMTP is not listed. Body is not stored.';
+    note.textContent = t('app.action.apiMcpSendAudit30Days');
     detailContent.append(heading, badge, meta, note);
   }
 
@@ -547,7 +547,7 @@
     detailContent.replaceChildren();
     var loading = document.createElement('p');
     loading.className = 'empty-state';
-    loading.textContent = 'Loading message…';
+    loading.textContent = t('app.action.loadingMessage');
     detailContent.append(loading);
     if (!opts.skipPush && window.innerWidth <= 820) {
       history.pushState(
@@ -575,7 +575,7 @@
       detailPanel.focus();
     } catch (error) {
       if (error.name !== 'AbortError' && error.message !== 'session_expired') {
-        loading.textContent = 'This message could not be loaded.';
+        loading.textContent = t('app.error.thisMessageCouldNotBeLoaded');
       }
     } finally {
       if (detailController === controller) detailController = null;
@@ -598,7 +598,7 @@
   async function startSession() {
     configureSession();
     byId('session-label').textContent = state.me.kind === 'admin'
-      ? 'Admin session'
+      ? t('app.copy.adminSession')
       : state.me.address;
     /* Home/其它非 Mail 深链必须先落面：不能被首个邮箱的消息加载挡住。 */
     var route = parseLocationRoute();
@@ -631,8 +631,8 @@
       if (gen !== loginGeneration) return;
       if (!response.ok) {
         loginError.textContent = response.status === 401
-          ? 'That token is not valid.'
-          : 'Sign-in is temporarily unavailable. Try again.';
+          ? t('app.copy.thatTokenIsNotValid')
+          : t('app.copy.signInIsTemporarilyUnavailableTry');
         return;
       }
       var loginPayload = await response.json();
@@ -650,7 +650,7 @@
       await startSession();
     } catch {
       if (gen !== loginGeneration) return;
-      loginError.textContent = 'Could not reach the server.';
+      loginError.textContent = t('app.error.couldNotReachTheServer');
     } finally {
       loginSubmit.disabled = !isLoginContextSafe();
     }
@@ -772,7 +772,7 @@
   });
   createModalCancel.addEventListener('click', closeAllModals);
   backToOverview.addEventListener('click', function () {
-    enterOverview({ returnTo: state.returnAddress, announce: 'Back to Home' });
+    enterOverview({ returnTo: state.returnAddress, announce: t('app.copy.backToHome') });
   });
   function handleInboxMobileBack() {
     history.back();
@@ -871,8 +871,8 @@
       if (gen !== loginGeneration) return;
       if (!response.ok) {
         var msg = response.status === 401 || response.status === 400
-          ? 'That token is not valid.'
-          : 'Sign-in is temporarily unavailable. Try again.';
+          ? t('app.copy.thatTokenIsNotValid')
+          : t('app.copy.signInIsTemporarilyUnavailableTry');
         showLogin(msg);
         return;
       }
@@ -882,8 +882,8 @@
       setLinkLoginMarker();
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
-      var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
-      var noticeText = 'Signed in via link as ' + label;
+      var label = state.me.kind === 'admin' ? t('app.copy.adminSession') : state.me.address;
+      var noticeText = tFormat('app.copy.signedInViaLinkAsFull', { label: label });
       if (linkLoginNotice) {
         linkLoginNotice.textContent = noticeText;
         linkLoginNotice.hidden = false;
@@ -894,7 +894,7 @@
       await startSession();
     } catch {
       if (gen !== loginGeneration) return;
-      showLogin('Could not reach the server.');
+      showLogin(t('app.error.couldNotReachTheServer'));
     } finally {
       loginSubmit.disabled = !isLoginContextSafe();
     }
@@ -992,9 +992,9 @@
       state.me = mePayload;
       if (consumeReturnTo(mePayload)) return;
       if (hasLinkLoginMarker()) {
-        var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
+        var existingLabel = state.me.kind === 'admin' ? t('app.copy.adminSession') : state.me.address;
         if (linkLoginNotice) {
-          linkLoginNotice.textContent = 'Signed in via link as ' + existingLabel;
+          linkLoginNotice.textContent = tFormat('app.copy.signedInViaLinkAsFull', { label: existingLabel });
           linkLoginNotice.hidden = false;
         }
         setLinkBannerActive(true);
@@ -1003,6 +1003,6 @@
       await startSession();
     } catch {
       if (gen !== loginGeneration) return;
-      showLogin('Could not reach the server.');
+      showLogin(t('app.error.couldNotReachTheServer'));
     }
   })();

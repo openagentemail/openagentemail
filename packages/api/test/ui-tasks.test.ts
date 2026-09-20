@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, mock, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 import { Hono } from 'hono';
 import type { UiApiDependencies } from '../src/routes/ui.ts';
 import type { Task, TaskState } from '../src/lib/tasks.ts';

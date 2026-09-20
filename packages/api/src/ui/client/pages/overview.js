@@ -4,7 +4,7 @@
   var HOME_ACTIVE_MAX_PAGES = 5;
   var HOME_ACTIVE_MAX_ROWS = 500;
   /* 硬停徽标/空态共用：不是裸 500+，标明已达扫描上限、计数封顶。 */
-  var HOME_WAITING_SCAN_CAPPED_LABEL = '500+ · scan capped';
+  var HOME_WAITING_SCAN_CAPPED_LABEL = t('overview.copy.n500ScanCapped');
   var HOME_VISIBLE_ROWS = 5;
   var DASHBOARD_POLL_MS = 30000;
   var DASHBOARD_IDLE_POLL_MS = 120000;
@@ -46,7 +46,7 @@
   }
 
   function homeNumber(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : 'Unavailable';
+    return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : t('overview.copy.unavailable');
   }
 
   /* 过期未物化仍是 input-required，但不得进 waiting 存储。 */
@@ -175,7 +175,7 @@
     if (approvalPastDeadline(task)) button.classList.add('is-past-deadline');
     var subject = document.createElement('span');
     subject.className = 'home-task-subject';
-    subject.textContent = task.subject || '(no subject)';
+    subject.textContent = task.subject || t('tasks.action.noSubject');
     var meta = document.createElement('span');
     meta.className = 'home-task-meta';
     meta.textContent = taskStateLabel(task) + ' · ' + formatAgo(task.updatedAt);
@@ -233,7 +233,7 @@
       return !approvalPastDeadline(task);
     });
     if (state.homeStatus === 'loading' && !rows.length) {
-      appendHomeEmpty(section, 'Loading tasks', 'Checking the tasks that need your input.');
+      appendHomeEmpty(section, t('overview.empty.loadingTasks'), t('overview.empty.checkingTheTasksThatNeedYour'));
       return;
     }
     if (!rows.length) {
@@ -241,13 +241,13 @@
       if (homeWaitingTotalIsCapped(state.homeWaitingTotal)) {
         appendHomeEmpty(
           section,
-          'Scan limit reached.',
-          'Waiting count is capped at 500+ scanned rows — actionable approvals may exist beyond this window.',
-          'Open Tasks',
+          t('overview.copy.scanLimitReached'),
+          t('overview.copy.waitingCountIsCappedAt500'),
+          t('overview.copy.openTasks'),
           'tasks'
         );
       } else {
-        appendHomeEmpty(section, 'Nothing needs you right now.', 'New requests that need your input will appear here.', 'Open Tasks', 'tasks');
+        appendHomeEmpty(section, t('overview.empty.nothingNeedsYouRightNow'), t('overview.empty.newRequestsThatNeedYourInput'), t('overview.copy.openTasks'), 'tasks');
       }
       return;
     }
@@ -256,14 +256,14 @@
     rows.slice(0, HOME_VISIBLE_ROWS).forEach(function (task) {
       list.append(homeTaskButton(task));
     });
-    section.append(list, homeLinkButton('Open Tasks', 'tasks'));
+    section.append(list, homeLinkButton(t('overview.copy.openTasks'), 'tasks'));
   }
 
   function renderHomeStuck(section) {
     var overdue = Array.isArray(state.homeStuckTasks) ? state.homeStuckTasks : [];
     var hasFailures = typeof state.homeFailedUrgentCount === 'number' && state.homeFailedUrgentCount > 0;
     if (!overdue.length && !hasFailures) {
-      appendHomeEmpty(section, 'Nothing is blocked.', 'Overdue tasks, expired approvals, and failed urgent pushes will be listed here.');
+      appendHomeEmpty(section, t('overview.empty.nothingIsBlocked'), t('overview.empty.overdueTasksExpiredApprovalsAndFailed'));
       return;
     }
     if (overdue.length) {
@@ -279,11 +279,11 @@
       failed.type = 'button';
       failed.className = 'home-failed-push';
       failed.textContent = state.homeFailedUrgentCount +
-        (state.homeFailedUrgentCount === 1 ? ' urgent push failed today' : ' urgent pushes failed today');
+        (state.homeFailedUrgentCount === 1 ? t('overview.error.urgentPushFailedToday') : t('overview.error.urgentPushesFailedToday'));
       failed.addEventListener('click', function () { navigateTo('notifications'); });
       section.append(failed);
     }
-    section.append(homeLinkButton('Open Alerts', 'notifications'));
+    section.append(homeLinkButton(t('overview.action.openAlerts'), 'notifications'));
   }
 
   function healthCard(label, value, scope) {
@@ -303,17 +303,17 @@
   function renderHomeHealth(section) {
     var sentence = document.createElement('p');
     sentence.className = 'home-health-copy';
-    sentence.textContent = 'A quick read on your addresses, unread mail, and urgent pushes today.';
+    sentence.textContent = t('overview.action.aQuickReadOnYourAddresses');
     section.append(sentence);
     var grid = document.createElement('div');
     grid.className = 'home-health-grid';
     if (isAdmin()) {
-      grid.append(healthCard('Addresses', String(state.identities.length), 'configure-identities'));
-      grid.append(healthCard('Unread mail', homeNumber(state.homeUnseenCount), 'inbox'));
+      grid.append(healthCard(t('shell.html.addresses'), String(state.identities.length), 'configure-identities'));
+      grid.append(healthCard(t('overview.copy.unreadMail'), homeNumber(state.homeUnseenCount), 'inbox'));
     } else {
-      grid.append(healthCard('Mail', 'Open mailbox', 'inbox'));
+      grid.append(healthCard(t('shell.nav.mail'), t('overview.copy.openMailbox'), 'inbox'));
     }
-    grid.append(healthCard('Urgent pushes today', homeNumber(state.homeUrgentSentCount), 'notifications'));
+    grid.append(healthCard(t('overview.copy.urgentPushesToday'), homeNumber(state.homeUrgentSentCount), 'notifications'));
     section.append(grid);
   }
 
@@ -326,17 +326,17 @@
     if (isAdmin() && state.identities.length === 0) {
       appendHomeEmpty(
         section,
-        'No addresses yet.',
-        'Create an address to start receiving mail and task updates.',
-        'Open Identities',
+        t('overview.copy.noAddressesYet'),
+        t('overview.copy.createAnAddressToStartReceiving'),
+        t('overview.copy.openIdentities'),
         'configure-identities',
       );
     } else if (!isAdmin()) {
       appendHomeEmpty(
         section,
-        'Your desk is clear.',
-        'Open Mail to check your address or return when an agent needs you.',
-        'Open Mail',
+        t('overview.copy.yourDeskIsClear'),
+        t('overview.copy.openMailToCheckYourAddress'),
+        t('login.submit'),
         'inbox',
       );
     }
@@ -346,7 +346,7 @@
   function renderOverview() {
     overviewPanel.classList.add('home-panel');
     overviewSubtitle.hidden = false;
-    overviewSubtitle.textContent = 'What needs your attention today.';
+    overviewSubtitle.textContent = t('overview.subtitle.whatNeedsYourAttentionToday');
     overviewOverlap.hidden = true;
     overviewDisclosure.hidden = true;
     overviewControls.hidden = true;
@@ -359,9 +359,9 @@
     createIdentityButton.hidden = true;
     overviewRefresh.hidden = false;
     overviewRefresh.disabled = state.homeStatus === 'loading';
-    overviewRefresh.textContent = state.homeStatus === 'loading' ? 'Refreshing…' : 'Refresh';
+    overviewRefresh.textContent = state.homeStatus === 'loading' ? t('tasks.action.refreshing') : t('tasks.action.refresh');
     overviewUpdated.textContent = state.homeUpdatedAt
-      ? 'Updated ' + formatClock(new Date(state.homeUpdatedAt).toISOString(), true)
+      ? t('tasks.action.updated') + formatClock(new Date(state.homeUpdatedAt).toISOString(), true)
       : '';
     overviewNotice.hidden = !state.homeMessage;
     overviewNotice.textContent = state.homeMessage;
@@ -369,11 +369,11 @@
     overviewStats.hidden = false;
     overviewStats.className = 'overview-stats home-dashboard';
     overviewStats.replaceChildren();
-    var waiting = homeSection('Waiting for you', state.homeWaitingTotal);
+    var waiting = homeSection(t('tasks.copy.waitingForYou'), state.homeWaitingTotal);
     renderHomeWaiting(waiting);
-    var stuck = homeSection('Blocked');
+    var stuck = homeSection(t('overview.section.blocked'));
     renderHomeStuck(stuck);
-    var health = homeSection('Health');
+    var health = homeSection(t('overview.section.health'));
     renderHomeHealth(health);
     overviewStats.append(waiting, stuck, health);
     renderHomeSessionEmpty(overviewStats);
@@ -436,14 +436,14 @@
         : 0;
       expiredWaiting = Array.isArray(waitingBoard.expiredTasks) ? waitingBoard.expiredTasks : [];
     } else if (results[0] && results[0].error.message !== 'session_expired') {
-      issues.push('Tasks that need you could not be loaded.');
+      issues.push(t('overview.error.tasksThatNeedYouCouldNot'));
     }
     var overdue = [];
     var overdueOk = !!(results[1] && results[1].ok);
     if (overdueOk) {
       overdue = Array.isArray(results[1].payload) ? results[1].payload : [];
     } else if (results[1] && results[1].error.message !== 'session_expired') {
-      issues.push('Blocked tasks could not be loaded.');
+      issues.push(t('overview.error.blockedTasksCouldNotBeLoaded'));
     }
     var nextStuck = applyHomeStuckSources(
       state.homeOverdueTasks,
@@ -466,7 +466,7 @@
         : 0;
     } else if (results[2] && results[2].error.message !== 'session_expired') {
       state.homeUrgentSentCount = null;
-      issues.push('Today’s push summary is unavailable.');
+      issues.push(t('overview.copy.todaySPushSummaryIsUnavailable'));
     }
     if (results[3]) {
       if (results[3].ok) {
@@ -477,7 +477,7 @@
           : null;
       } else if (results[3].error.message !== 'session_expired') {
         state.homeUnseenCount = null;
-        issues.push('Unread mail count is unavailable.');
+        issues.push(t('overview.copy.unreadMailCountIsUnavailable'));
       }
     }
     state.homeStatus = issues.length ? 'error' : 'ready';
@@ -578,7 +578,11 @@
     state.sourceCache = null;
     clearDetail();
     renderMessages();
-    if (state.scope === 'inbox') enterOverview({ announce: lost + ' is no longer available. Back to Home.' });
+    if (state.scope === 'inbox') {
+      enterOverview({
+        announce: tFormat('overview.announce.addressNoLongerAvailable', { address: lost }),
+      });
+    }
   }
 
   function focusOverviewPanel() {
@@ -603,7 +607,7 @@
     cancelTasksLoad();
     applyScope('inbox', { replaceUrl: true });
     inboxView.dataset.mobileView = 'list';
-    announce('Opened ' + address);
+    announce(tFormat('overview.announce.openedAddress', { address: address }));
     messagesTitle.focus();
     selectIdentity(address);
   }

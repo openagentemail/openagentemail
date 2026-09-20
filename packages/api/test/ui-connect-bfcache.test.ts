@@ -4,6 +4,7 @@
  * 仓库无 jsdom；抽出真实 clear / load / 监听体，用可控 Promise 模拟。
  */
 import { describe, expect, test } from 'bun:test';
+import "./support/ui-i18n-shim.ts";
 
 const { CONNECT_PAGE_JS } = await import('../src/ui/client/pages/connect.ts');
 

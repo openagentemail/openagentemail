@@ -23,13 +23,13 @@
     devicePairTopics.textContent = '';
     devicePairName.textContent = '';
     tokenValue.textContent = '';
-    tokenModalTitle.textContent = 'Token';
+    tokenModalTitle.textContent = t('modal.action.token');
     tokenCopyButton.classList.remove('copied');
-    confirmModalTitle.textContent = 'Confirm';
+    confirmModalTitle.textContent = t('modal.modal.confirm');
     confirmModalText.textContent = '';
     confirmModalRisk.textContent = '';
     confirmModalRisk.hidden = true;
-    confirmModalConfirm.textContent = 'Confirm';
+    confirmModalConfirm.textContent = t('modal.modal.confirm');
     confirmModalConfirm.onclick = null;
     if (createModalError) {
       createModalError.textContent = '';
@@ -76,7 +76,7 @@
 
   function showTokenModal(token, title) {
     beginModal();
-    tokenModalTitle.textContent = title || 'Token';
+    tokenModalTitle.textContent = title || t('modal.action.token');
     tokenValue.textContent = token;
     tokenModal.hidden = false;
     tokenCopyButton.focus();
@@ -91,7 +91,7 @@
       createDomain.disabled = true;
       createModalSubmit.disabled = true;
       if (createModalError) {
-        createModalError.textContent = 'Could not load domains — try again';
+        createModalError.textContent = t('modal.error.couldNotLoadDomainsTryAgain');
         createModalError.hidden = false;
       }
       return;
@@ -137,10 +137,10 @@
       createDomain.disabled = true;
       createModalSubmit.disabled = true;
       if (createModalError) {
-        createModalError.textContent = 'Could not load domains — try again';
+        createModalError.textContent = t('modal.error.couldNotLoadDomainsTryAgain');
         createModalError.hidden = false;
       }
-      announce('Could not load domains — try again');
+      announce(t('modal.error.couldNotLoadDomainsTryAgain'));
     }
     if (openedGen !== modalGeneration) return;
     createModal.hidden = false;

@@ -1,7 +1,7 @@
   function renderConfigureClients(grants) {
     configureClientsRows.replaceChildren();
     if (!grants.length) {
-      configureClientsState.textContent = 'No connected apps.';
+      configureClientsState.textContent = t('clients.action.noConnectedApps');
       return;
     }
     configureClientsState.textContent = '';
@@ -10,7 +10,7 @@
       row.className = 'client-row';
       var meta = document.createElement('div');
       var title = document.createElement('strong');
-      title.textContent = grant.clientName || grant.clientId || 'Client';
+      title.textContent = grant.clientName || grant.clientId || t('clients.action.client');
       var detail = document.createElement('p');
       detail.className = 'muted';
       detail.textContent = (grant.address || '') + (grant.clientId ? ' · ' + grant.clientId : '');
@@ -18,13 +18,13 @@
       var revoke = document.createElement('button');
       revoke.type = 'button';
       revoke.className = 'quiet';
-      revoke.textContent = 'Revoke';
+      revoke.textContent = t('clients.action.revoke');
       revoke.addEventListener('click', function () {
         var openedGen = beginModal();
-        confirmModalTitle.textContent = 'Revoke client?';
-        confirmModalText.textContent = 'This deletes the grant and invalidates its tokens immediately.';
+        confirmModalTitle.textContent = t('clients.modal.revokeClient');
+        confirmModalText.textContent = t('clients.modal.thisDeletesTheGrantAndInvalidates');
         confirmModalRisk.hidden = true;
-        confirmModalConfirm.textContent = 'Revoke';
+        confirmModalConfirm.textContent = t('clients.action.revoke');
         confirmModal.hidden = false;
         confirmModalConfirm.onclick = async function () {
           confirmModalConfirm.disabled = true;
@@ -32,13 +32,13 @@
             await apiJson('/ui/api/oauth/grants/' + encodeURIComponent(grant.id), { method: 'DELETE' });
             if (openedGen !== modalGeneration) return;
             closeAllModals();
-            announce('Client revoked.');
+            announce(t('clients.announce.clientRevoked'));
             loadConfigureClients();
           } catch (error) {
             if (openedGen !== modalGeneration) return;
             if (error.message !== 'session_expired') {
               configureClientsNotice.hidden = false;
-              configureClientsNotice.textContent = 'Could not revoke that client.';
+              configureClientsNotice.textContent = t('clients.error.couldNotRevokeThatClient');
             }
           } finally {
             /* 仅当前代际才复位；stale 请求不得复活新 dialog 的共享钮。 */
@@ -54,15 +54,15 @@
 
   async function loadConfigureClients() {
     configureClientsNotice.hidden = true;
-    configureClientsState.textContent = 'Loading…';
+    configureClientsState.textContent = t('tasks.action.loading');
     try {
       var payload = await apiJson('/ui/api/oauth/grants');
       var grants = Array.isArray(payload.grants) ? payload.grants : [];
-      configureClientsUpdated.textContent = 'Updated ' + formatClock(new Date().toISOString(), true);
+      configureClientsUpdated.textContent = t('tasks.action.updated') + formatClock(new Date().toISOString(), true);
       renderConfigureClients(grants);
     } catch (error) {
       if (error.message !== 'session_expired') {
-        configureClientsState.textContent = 'Could not load connected apps.';
+        configureClientsState.textContent = t('clients.error.couldNotLoadConnectedApps');
       }
     }
   }

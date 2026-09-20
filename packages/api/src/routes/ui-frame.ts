@@ -1,3 +1,6 @@
+/**
+ * 邮件 HTML iframe 文档面（#137 B1：用户可见串走 tServer）。
+ */
 import { getCookie } from 'hono/cookie';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -8,6 +11,7 @@ import {
   type SanitizedEmailHtml,
 } from '../lib/sanitize-email-html.ts';
 import { UiSessionStore } from '../lib/ui-session.ts';
+import { tServer as t } from '../ui/client/i18n-en.ts';
 import { isValidMessageUid } from './ui.ts';
 
 export const FRAME_CSP =
@@ -28,7 +32,9 @@ function frameDocument(body: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>OpenAgent Inbox message</title>' +
+    '<title>' +
+    t('frame.docTitle') +
+    '</title>' +
     '<style>html{color-scheme:dark}body{margin:0;padding:24px;background:#fff;color:#171717;' +
     'font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
     'overflow-wrap:anywhere}main{max-width:760px;margin:auto}table{border-collapse:collapse;max-width:100%}' +
@@ -38,7 +44,7 @@ function frameDocument(body: string): string {
 }
 
 function errorBody(message: string): string {
-  return `<main><h1>OpenAgent Inbox</h1><p>${message}</p></main>`;
+  return `<main><h1>${t('frame.brandH1')}</h1><p>${message}</p></main>`;
 }
 
 function frameResponse(
@@ -68,21 +74,21 @@ export function createUiFrameRoutes(
     if (!session) {
       return frameResponse(
         c,
-        errorBody('Your session has expired. Return to the inbox and sign in again.'),
+        errorBody(t('frame.error.sessionExpired')),
         401,
       );
     }
 
     const parsed = querySchema.safeParse(c.req.query());
     if (!parsed.success || !isValidMessageUid(c.req.param('id'))) {
-      return frameResponse(c, errorBody('This message request is invalid.'), 400);
+      return frameResponse(c, errorBody(t('frame.error.invalidRequest')), 400);
     }
     const address = parsed.data.address.toLowerCase();
     if (
       session.auth.kind === 'identity' &&
       session.auth.address !== address
     ) {
-      return frameResponse(c, errorBody('This inbox is not available to this session.'), 403);
+      return frameResponse(c, errorBody(t('frame.error.forbidden')), 403);
     }
 
     let message: MessageDetail | null;
@@ -91,29 +97,29 @@ export function createUiFrameRoutes(
     } catch {
       return frameResponse(
         c,
-        errorBody('The HTML preview is unavailable. Use the plain-text view instead.'),
+        errorBody(t('frame.error.previewUnavailable')),
         500,
       );
     }
     if (!message) {
-      return frameResponse(c, errorBody('This email is no longer available.'), 404);
+      return frameResponse(c, errorBody(t('frame.error.gone')), 404);
     }
     if (!message.html) {
-      return frameResponse(c, errorBody('This email has no HTML version.'), 404);
+      return frameResponse(c, errorBody(t('frame.error.noHtml')), 404);
     }
 
     const sanitized = sanitize(message.html);
     if (sanitized.kind === 'too_large') {
       return frameResponse(
         c,
-        errorBody('This email is too large to preview. Use the plain-text view instead.'),
+        errorBody(t('frame.error.tooLarge')),
         413,
       );
     }
     if (sanitized.kind === 'failed') {
       return frameResponse(
         c,
-        errorBody('The HTML preview is unavailable. Use the plain-text view instead.'),
+        errorBody(t('frame.error.previewUnavailable')),
         500,
       );
     }

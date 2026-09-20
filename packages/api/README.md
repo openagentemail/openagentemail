@@ -141,10 +141,10 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
   in-memory snapshot write all fail, the new dest is isolated as `.unrestored`
   and the API fail-closes; `.bak` is kept and must not be discarded.
 
-## Console i18n（#137 B1-A 机制件）
+## Console i18n（#137 B1 / R2 / R3）
 
-Dashboard shell is a **key-slot template** (`{{key}}` → `fillI18nSlots`) with HTML escaping.
-`I18N_JS` (`t` / `tFormat`) is assembled into `UI_JS`; locale resolution is `resolveUiLocale`
-(cookie `oa_lang` → Accept-Language with `q=0` filtered → `en`). Non-en shells may load
-`/ui/i18n/{locale}.js` skeletons (B1 empty object; real copy in B2).
-English shell HTML remains **byte-identical** to pre-i18n main. Page call-site migration is B1-B.
+Dashboard UI uses an en source dictionary (`src/ui/client/i18n-en.ts`) plus `t(key)` / `tFormat(key, vars)`.
+Locale resolution is `resolveUiLocale` (cookie `oa_lang` → `Accept-Language` with `q=0` filtered → `en`).
+Shell HTML is a **key-slot template** (`{{key}}` → `fillI18nSlots`); en fill is byte-identical to pre-i18n main.
+Non-en shells load `/ui/i18n/{locale}.js` (es/ja/ko/zh-CN skeletons in B1; real copy in B2) and fill the same slots from a locale dict.
+English remains the default with **byte-identical** shell HTML vs pre-i18n main.

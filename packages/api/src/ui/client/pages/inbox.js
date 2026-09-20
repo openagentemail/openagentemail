@@ -1,7 +1,7 @@
   var MAIL_FOLDER_ITEMS = [
-    { id: 'inbox', label: 'Inbox' },
-    { id: 'sent', label: 'Sent' },
-    { id: 'all', label: 'All Mail' }
+    { id: 'inbox', label: t('inbox.label.inbox') },
+    { id: 'sent', label: t('inbox.label.sent') },
+    { id: 'all', label: t('inbox.label.allMail') }
   ];
 
   function renderFolderNav() {
@@ -26,15 +26,15 @@
   function renderMessages() {
     messageList.replaceChildren();
     activeAddress.textContent = state.activeAddress;
-    var folderLabel = 'Inbox';
-    if (state.activeFolder === 'sent') folderLabel = 'Sent';
-    if (state.activeFolder === 'all') folderLabel = 'All Mail';
+    var folderLabel = t('inbox.label.inbox');
+    if (state.activeFolder === 'sent') folderLabel = t('inbox.label.sent');
+    if (state.activeFolder === 'all') folderLabel = t('inbox.label.allMail');
     messagesTitle.textContent = folderLabel;
     if (!state.activeAddress) {
       renderEmptyState(messageState, {
-        title: 'Choose an address',
-        purpose: 'Mail lists messages for one identity at a time. Pick an address in the left column, then open Inbox, Sent, or All Mail.',
-        actionLabel: isAdmin() ? 'Create identity' : 'Refresh addresses',
+        title: t('inbox.title.chooseAnAddress'),
+        purpose: t('inbox.copy.mailListsMessagesForOneIdentity'),
+        actionLabel: isAdmin() ? t('inbox.copy.createIdentity') : t('inbox.copy.refreshAddresses'),
         onAction: function () {
           if (isAdmin()) showCreateModal();
           else refreshInboxIdentities();
@@ -46,15 +46,15 @@
     if (state.messages.length === 0) {
       renderEmptyState(messageState, state.activeFolder === 'sent'
         ? {
-            title: 'No API/MCP sends in 30 days',
-            purpose: 'Sent lists audit records of API/MCP sends (30 days). Direct SMTP is not listed. Refresh after mail_send or POST /v1/send.',
-            actionLabel: 'Refresh',
+            title: t('inbox.title.noApiMcpSendsIn30'),
+            purpose: t('inbox.copy.sentListsAuditRecordsOfApi'),
+            actionLabel: t('tasks.action.refresh'),
             onAction: function () { refreshMessages(); }
           }
         : {
-            title: 'No messages in ' + folderLabel,
-            purpose: 'This folder only shows mail the server can match for ' + state.activeAddress + '. Refresh after new mail arrives, or switch folder.',
-            actionLabel: 'Refresh',
+            title: tFormat('inbox.title.noMessagesInFolder', { folder: folderLabel }),
+            purpose: tFormat('inbox.empty.folderPurposeFull', { address: state.activeAddress }),
+            actionLabel: t('tasks.action.refresh'),
             onAction: function () { refreshMessages(); }
           });
       if (loadMoreMessages) loadMoreMessages.hidden = true;
@@ -65,7 +65,7 @@
     if (state.activeFolder === 'sent') {
       var note = document.createElement('p');
       note.className = 'send-log-note';
-      note.textContent = 'API/MCP send audit (30 days). Direct SMTP is not listed.';
+      note.textContent = t('inbox.action.apiMcpSendAudit30Days');
       messageState.append(note);
     }
 
@@ -81,7 +81,7 @@
       line.className = 'message-line';
       var from = document.createElement('span');
       from.className = 'message-from';
-      from.textContent = message.from || 'Unknown sender';
+      from.textContent = message.from || t('inbox.action.unknownSender');
       var date = document.createElement('time');
       date.className = 'message-date';
       date.dateTime = message.date || message.sentAt || '';
@@ -90,7 +90,7 @@
 
       var subject = document.createElement('div');
       subject.className = 'message-subject';
-      subject.textContent = message.subject || '(no subject)';
+      subject.textContent = message.subject || t('tasks.action.noSubject');
       var snippet = document.createElement('p');
       snippet.className = 'message-snippet';
       if (state.activeFolder === 'sent') {
@@ -99,16 +99,16 @@
         var badge = document.createElement('span');
         badge.className = 'send-result-badge';
         badge.setAttribute('data-result', message.result === 'failed' ? 'failed' : 'queued');
-        badge.textContent = message.result === 'failed' ? 'Failed' : 'Queued';
+        badge.textContent = message.result === 'failed' ? t('inbox.error.failed') : t('inbox.error.queued');
         button.append(line, subject, snippet, badge);
       } else {
-        snippet.textContent = message.snippet || 'No preview';
+        snippet.textContent = message.snippet || t('inbox.action.noPreview');
         button.append(line, subject, snippet);
       }
       if (message.hasOtp) {
         var badge = document.createElement('span');
         badge.className = 'otp-badge';
-        badge.textContent = 'CODE / ACTION';
+        badge.textContent = t('inbox.action.codeAction');
         button.append(badge);
       }
       button.addEventListener('click', function () {
@@ -134,17 +134,17 @@
 
   function countParts(row, key) {
     /* 数值的诚实呈现：截断影响到该行时只给下界，下界为 0 时说 Unknown。 */
-    if (!row) return { text: state.overviewStatus === 'loading' || state.overviewStatus === 'idle' ? 'Loading…' : 'Unavailable', flat: true };
+    if (!row) return { text: state.overviewStatus === 'loading' || state.overviewStatus === 'idle' ? t('tasks.action.loading') : t('overview.copy.unavailable'), flat: true };
     var value = row[key];
     if (row.complete) return { text: formatNumber(value), unit: key === 'unseen' ? 'unseen' : 'msgs', flat: value === 0 };
     if (value > 0) {
       return {
         text: '≥' + formatNumber(value),
         unit: key === 'unseen' ? 'unseen' : 'msgs',
-        title: 'Lower bound — this scan hit its recipient limit.'
+        title: t('inbox.title.lowerBoundThisScanHitIts')
       };
     }
-    return { text: 'Unknown', flat: true, title: 'Not counted — this scan hit its recipient limit.' };
+    return { text: t('inbox.title.unknown'), flat: true, title: t('inbox.title.notCountedThisScanHitIts') };
   }
 
   /* 聚合卡片与行级共用同一套界向口径：totals.exact===false 时 IN WINDOW /
@@ -154,10 +154,10 @@
     if (value > 0) {
       return {
         text: '≥' + formatNumber(value),
-        title: 'Lower bound — this scan hit its recipient limit.'
+        title: t('inbox.title.lowerBoundThisScanHitIts')
       };
     }
-    return { text: 'Unknown', title: 'Not counted — this scan hit its recipient limit.' };
+    return { text: t('inbox.title.unknown'), title: t('inbox.title.notCountedThisScanHitIts') };
   }
 
   function appendCell(parent, labelText, parts, extra) {
