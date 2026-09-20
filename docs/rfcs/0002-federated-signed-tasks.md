@@ -251,7 +251,7 @@ To protect against availability degradation and Denial-of-Service attacks from r
 3. **Positive TTL:** Cached entries expire after `FEDERATION_DISCOVERY_CACHE_TTL_SEC` (default `3600` seconds / 1 hour).
 4. **Negative Caching:** When discovery fails (e.g. DNS failure, HTTP 404/500, SSRF violation, invalid JSON), a negative entry is cached for `FEDERATION_DISCOVERY_NEGATIVE_TTL_SEC = 60` seconds to prevent request hammering against faulty peers.
 5. **Revocation Propagation Upper Bound:** The worst-case passive propagation delay for key revocation is bounded by `FEDERATION_DISCOVERY_CACHE_TTL_SEC` (default 3600s). The 60-second negative cache TTL applies strictly to failed lookups; it does not accelerate positive cache invalidation.
-6. **Automated Signature-Failure Re-fetch:** When an inbound message presents a signature referencing an unknown `kid` or a key marked `"revoked"`, the verifier MUST NOT immediately fail if the cached document is older than `FEDERATION_DISCOVERY_NEGATIVE_TTL_SEC` (60s). Instead, it performs a single conditional, cache-bypassing re-fetch of the domain's discovery document before declaring permanent verification failure.
+6. **Automated Discovery Re-fetch Restricted Strictly to Unknown KIDs:** When an incoming message references a `<kid>` not present in the cached discovery document, the verifier performs a single conditional, cache-bypassing re-fetch using `federatedDiscoveryFetcher()` (§4.3) to handle key rotation propagation races, provided the positive cache entry is older than `FEDERATION_DISCOVERY_NEGATIVE_TTL_SEC` (60s). Crucially, **re-fetch is triggered strictly for unknown `kid`s**. If a key is present in cache with `status: "revoked"`, verification MUST immediately fail closed without re-fetch (revocation is monotonic; re-fetching on revoked keys is futile and introduces an unauthenticated outbound network trigger). Regardless of outcome, any re-fetched discovery document MUST undergo full strict validation (domain matching, schema validation, 10 KiB size cap, and strict SSRF) before admission to cache.
 7. **Purge on Reboot:** The cache is memory-only; a process restart starts with a cold cache by design (`packages/api/src/lib/ratelimit.ts:26-30` precedent).
 
 ### 4.5 Key rotation and safe transition
@@ -261,7 +261,7 @@ Key rotation must occur without dropping in-flight messages or invalidating rece
 1. **Multi-Key Overlap:** An operator rotating their signing key generates a new Ed25519 key pair, assigns a new `kid`, and publishes both the new key (`status: "active"`) and the old key (`status: "retired"`) in `.well-known/openagent-federation`.
 2. **Overlap Horizon:** The retiring key MUST remain advertised as `"retired"` for a minimum of 7 days to cover delayed or retried email deliveries.
 3. **Key Identifier Resolution:** The verifier matches the `kid` specified in the incoming task envelope (`X-OA-Federation-Key-Id` or embedded in `X-OA-Federation-Signature`) against the keys present in the sender domain's cached discovery document.
-4. **Emergency Revocation:** If a private key is compromised, the operator immediately marks `status: "revoked"` in their discovery document. Verifiers receiving `"revoked"` keys immediately fail signature verification, rejecting any further tasks claiming that key.
+4. **Emergency Revocation:** If a private key is compromised, the operator immediately marks `status: "revoked"` in their discovery document. Verifiers encountering a key with `status: "revoked"` MUST immediately fail closed with `task_federation_key_untrusted` without triggering a re-fetch, as revocation is monotonic.
 5. **Administrative Invalidation:** Operators can force immediate cache invalidation for any peer domain via `POST /v1/federation/trusted-domains/:domain/refresh` (§7.2).
 
 ---
@@ -291,7 +291,7 @@ In existing local task processing, the event discriminator is defined as:
 export type TaskEventKind = 'state' | 'reminder';
 ```
 
-For the federated wire envelope [本 RFC 提议], the event discriminator is defined as `FederatedEventKind` (`export type FederatedEventKind = 'state' | 'reminder'`), directly mirroring `TaskEventKind`.
+For the federated wire envelope [本 RFC 提议], the event discriminator is defined as `FederatedEventKind` (`export type FederatedEventKind = 'state' | 'reminder'`), sharing the exact enumeration values of `TaskEventKind`.
 
 #### Canonical Binding Tuple
 1. `domain_separator`: Constant string `"oae-federated-task-v1"`.
@@ -305,20 +305,38 @@ For the federated wire envelope [本 RFC 提议], the event discriminator is def
 9. `expires_at`: ISO-8601 UTC timestamp string after which this task transition is invalid.
 10. `body_hash`: SHA-256 length-prefixed hash over email body text and html, computed using the `mail-body-v2` specification (`packages/api/src/lib/mail-stamp.ts:21-23`, `:36-38`, `:92-102`).
 
+#### Wire Timestamp Resolution vs. Replay Identity 4-Tuple
+Wire timestamps in `X-OA-Federation-Timestamp` retain second resolution (`...000Z`) to ensure compatibility with RFC 2822 email Date headers (`packages/api/src/lib/mail-stamp.ts:34-35`, `:60`). To prevent false collisions between distinct legitimate events occurring within the same second for the same task (e.g. rapid valid state transitions), the in-memory replay deduplication cache indexes events by the complete 4-tuple:
+`(task_id, event_kind, state, timestamp)`
+The signed wire format remains unchanged, while replay verification is disambiguated by incorporating `state`.
+
 #### Closed Enumeration & Deterministic Derivation for `(event_kind, state)`
-- In `packages/api/src/lib/tasks-internal.ts:1060`, `:1171-1172`, `x-oa-task-event` distinguishes reminders from state transitions.
-- In federated tasks, derivation is strictly deterministic:
-  - If `X-OA-Task-Event` is `'reminder'`, `event_kind` MUST be `"reminder"`, and `state` MUST be `"working"` (`packages/api/src/lib/tasks-internal.ts:1172-1174`).
+- In `packages/api/src/lib/tasks-internal.ts:1060`, `:1171-1172`, `x-oa-task-event` distinguishes reminders from state transitions. In local task processing (`packages/api/src/lib/tasks-internal.ts:1172-1174`), the reminder stamp check does not strictly enforce `headerState === 'working'`.
+- For federated tasks, this RFC introduces a stricter constraint [本 RFC 提议] (本 RFC 新增强制，严于本地行为):
+  - If `X-OA-Task-Event` is `'reminder'`, `event_kind` MUST be `"reminder"`, and `state` MUST be `"working"`.
   - Otherwise, `event_kind` MUST be `"state"`, and `state` MUST be one of the five canonical states in `TASK_STATES` (`packages/api/src/lib/tasks-internal.ts:56`).
   - Any message presenting an inconsistent `(event_kind, state)` pairing (e.g. `event_kind: 'reminder'` with `state: 'submitted'`) MUST fail closed and return `null` (`packages/api/src/lib/tasks-internal.ts:1174`).
 
-#### Strict Fail-Closed Rejection of Un-Modeled Headers
-The internal parser `parseTaskMessage()` inspects additional headers (`packages/api/src/lib/tasks-internal.ts:1056-1067`):
-- `x-oa-task-root` / `x-oa-task-parent` (hierarchy)
-- `x-oa-task-approval-*` (approvals)
-- `x-oa-task-lease-*` (leasing)
+#### Strict Fail-Closed Closed Whitelist of Permitted Headers
+The internal parser `parseTaskMessage()` inspects headers across multiple subsystems (`packages/api/src/lib/tasks-internal.ts:1056-1067`):
+- Hierarchy: `x-oa-task-root`, `x-oa-task-parent`
+- Approvals: `x-oa-task-approval-*`
+- Leasing: `x-oa-task-lease-*`
+- Idempotency: `x-oa-task-idempotency-key` (read at `packages/api/src/lib/tasks-internal.ts:1061`, exposed at `:1192`, consumed at `:2277`)
+- Symmetric stamps: `X-OA-Task-Stamp`, `X-OA-Mail-Stamp` (`packages/api/src/lib/mail-stamp.ts:137`)
 
-In v1 of federated signed tasks, cross-domain leasing is out of scope (§2.2), while cross-domain approvals and hierarchies are deferred (Q7). **If any incoming federated task message carries any of these un-modeled headers, `parseTaskMessage()` MUST fail closed and return `null`**, preventing attackers from injecting unauthenticated extensions.
+To prevent attackers from injecting unauthenticated extensions, bypassing ACLs, or exploiting legacy parser branches, **v1 enforces a strict closed whitelist of headers for federated task emails**. The ONLY permitted task and federation headers on incoming federated messages are:
+1. `X-OA-Task`
+2. `X-OA-Task-State`
+3. `X-OA-Task-Event`
+4. `X-OA-Federation-Version`
+5. `X-OA-Federation-Origin`
+6. `X-OA-Federation-Signature`
+7. `X-OA-Federation-Timestamp`
+8. `X-OA-Federation-Expires`
+9. `X-OA-Federation-Key-Id` (optional)
+
+**If an incoming external message carries ANY header starting with `X-OA-Task-*` or `X-OA-Federation-*` outside this closed whitelist, or ANY stamp header (`X-OA-Task-Stamp`, `X-OA-Mail-Stamp`), `parseTaskMessage()` MUST immediately fail closed and return `null`**. In particular, `x-oa-task-idempotency-key`, `x-oa-task-root`, `x-oa-task-parent`, `x-oa-task-approval-*`, `x-oa-task-lease-*`, and local stamp headers are unconditionally forbidden on federated mail.
 
 #### Prohibition of Attachments
 `hashMailBody()` (`packages/api/src/lib/mail-stamp.ts:92-102`) hashes only `text` and `html`; MIME attachments are not hashed. In v1, **federated task emails MUST NOT carry MIME attachments (`parsed.attachments.length === 0`)**. Any email carrying attachments is fail-closed rejected from task processing and demoted to ordinary mail. Task arguments and results are serialized directly into JSON code blocks within the message body (`resultBlock()`, `packages/api/src/lib/tasks-internal.ts:954-956`).
@@ -374,39 +392,43 @@ Notice that `X-OA-Task-Stamp` (the local symmetric stamp, `packages/api/src/lib/
 
 Incoming emails from IMAP execute verification within `parseTaskMessage()` (`packages/api/src/lib/tasks-internal.ts:1041-1180`) through the following sequential steps:
 
-1. **Header Inspection & Attachment Gating:**
-   - Check if `X-OA-Federation-Signature` and `X-OA-Task` are present.
-   - If absent:
-     - If `from` domain is in `config.allDomains` (`packages/api/src/lib/config.ts:440`), evaluate under the existing local `taskStamp()` path (`packages/api/src/lib/tasks-internal.ts:1038`, `:1178-1179`).
-     - If `from` domain is external, treat as non-federated ordinary mail (§5.5).
-   - If present: verify that `parsed.attachments` is empty (`parsed.attachments.length === 0`). If attachments are present, fail closed (`return null`).
-2. **Allowlist Gating:**
+1. **Header Inspection, Local Invariant & Attachment Gating:**
    - Extract domain from sender address `from` (`normalizeMailbox()`, `packages/api/src/lib/mail-stamp.ts:48-53`).
+   - **Local Sender Invariant (Normative MUST):** If the `from` domain is in `config.allDomains` (`packages/api/src/lib/config.ts:440`), evaluate unconditionally under the existing local symmetric `taskStamp()` path (`packages/api/src/lib/tasks-internal.ts:1038`, `:1178-1179`), strictly ignoring any `X-OA-Federation-*` headers. Local identities NEVER use or trust asymmetric federation headers for intra-domain traffic.
+   - For external senders (`from` domain not in `config.allDomains`):
+     - Check if `X-OA-Federation-Signature` and `X-OA-Task` are present. If absent, treat strictly as non-federated ordinary mail (§5.5).
+     - If present: verify that `parsed.attachments` is empty (`parsed.attachments.length === 0`). If attachments are present, fail closed (`return null`).
+2. **Allowlist Gating:**
    - Check that `FEDERATION_ENABLED === true` and domain is an exact member of `FEDERATION_TRUSTED_DOMAINS`.
    - If not allowlisted: fail closed, strip task semantics, treat strictly as ordinary mail without initiating outbound network requests.
-3. **Header Consistency & Key-ID Assertion:**
+3. **Header Consistency, Key-ID Assertion & Closed Whitelist:**
    - Verify `X-OA-Federation-Origin` matches the domain of `from`.
    - Verify `X-OA-Federation-Version === '1'`.
    - Parse `v2=<kid>.<signature>` from `X-OA-Federation-Signature`.
    - If `X-OA-Federation-Key-Id` is present, assert `X-OA-Federation-Key-Id === kid`. Mismatch causes immediate fail-closed rejection.
-   - Verify un-modeled headers (`x-oa-task-root`, `x-oa-task-parent`, `x-oa-task-approval-*`, `x-oa-task-lease-*`) are absent (§5.2).
-4. **Temporal Freshness, Expiry & Replay Checks (Normative MUST):**
+   - **Enforce Closed Whitelist:** Verify that NO unlisted `X-OA-Task-*`, `X-OA-Federation-*`, or stamp headers (`X-OA-Task-Stamp`, `X-OA-Mail-Stamp`, `x-oa-task-idempotency-key`, `packages/api/src/lib/tasks-internal.ts:1061`, `:1192`, `:2277`) are present (§5.2). Any extra header causes immediate fail-closed rejection (`return null`).
+4. **Temporal Freshness, Expiry Horizon & Replay Checks (Normative MUST):**
    - Parse `X-OA-Federation-Timestamp` ($T_{msg}$) and `X-OA-Federation-Expires` ($T_{exp}$).
    - Reject if $T_{msg} > \text{now} + \text{tolerance}$ (future clock skew, `FEDERATION_TIMESTAMP_TOLERANCE_SEC`, default 300s).
    - Reject if $\text{now} > T_{exp}$ (task message has expired).
-   - **Replay Deduplication:** Check bounded in-memory replay cache for `(task_id, event_kind, timestamp)`. If hit, drop idempotently.
-   - **Monotonic Advancement [本 RFC 提议]:** For state advancements (`event_kind === 'state'`), the consumer MUST assert that the message timestamp is strictly newer than the last recorded state timestamp for that task: $T_{msg} > T_{\text{last\_seen}}$. Reject out-of-order or stale transitions.
+   - **Mandatory Expiration Horizon (Normative MUST):** Assert $(T_{exp} - T_{msg}) \le \text{FEDERATION\_MAX\_EXPIRY\_SEC}$ (default `604800` seconds / 7 days). Reject any message with an excessively long validity window. Together with `FEDERATION_REPLAY_CACHE_MAX_ENTRIES = 10000`, this strictly bounds the retention window and memory footprint of the replay deduplication cache.
+   - **Replay Deduplication:** Check bounded in-memory replay cache for `(task_id, event_kind, state, timestamp)`. If hit, drop idempotently.
+   - **Monotonic Advancement for States and Reminders (Normative MUST) [本 RFC 提议]:**
+     - For state advancements (`event_kind === 'state'`), assert that $T_{msg} > T_{\text{last\_state}}$ for that task. Reject out-of-order or stale transitions.
+     - For reminders (`event_kind === 'reminder'`), assert that $T_{msg} > T_{\text{last\_reminder}}$ for that task. Reject stale or replayed reminders.
+     Cryptographically enforcing timestamp monotonicity across both states and reminders eliminates historical replay vulnerabilities even after entries are evicted from the in-memory replay cache.
 5. **Key Resolution via Strict Parameterized Fetcher:**
    - Query discovery cache for origin domain.
-   - If cache miss, or if `<kid>` is unknown in cached document: perform rate-limited re-fetch using `federatedDiscoveryFetcher()` backed by `pinnedFetch` with `{ ssrfOptions: { publicEdge: true }, maxBytes: 10240, timeoutMs: 5000, deadlineMs: 5000 }` (§4.3).
-   - Look up public key matching `<kid>`. If key not found, or `status === "revoked"`, or current time outside `[validFrom, validUntil]`: fail closed with `task_federation_key_untrusted`.
+   - If `<kid>` is present in cache with `status: "revoked"`, fail closed immediately with `task_federation_key_untrusted` without triggering a re-fetch.
+   - If cache miss, or if `<kid>` is unknown in cached document: perform rate-limited re-fetch using `federatedDiscoveryFetcher()` backed by `pinnedFetch` with `{ ssrfOptions: { publicEdge: true }, maxBytes: 10240, timeoutMs: 5000, deadlineMs: 5000 }` (§4.3). The re-fetched document MUST pass all strict checks (domain match, JSON schema, size limits, SSRF) before admission to cache.
+   - Look up public key matching `<kid>`. If key not found (after re-fetch), or `status === "revoked"`, or current time outside `[validFrom, validUntil]`: fail closed with `task_federation_key_untrusted`.
 6. **Cryptographic Signature Verification:**
    - Compute `body_hash` from received mail body text and html (`mail-body-v2`, `packages/api/src/lib/mail-stamp.ts:36-38`, `:92-102`).
    - Reconstruct canonical 10-element signed string (§5.2).
    - Verify Ed25519 signature over canonical UTF-8 bytes using resolved public key (RFC 8032:3).
    - If verification fails: log security alert (rate-limited, §5.5), drop task metadata, treat as ordinary mail.
 7. **Task State Advancement:**
-   - If verification succeeds, record `(task_id, event_kind, timestamp)` in replay cache.
+   - If verification succeeds, record `(task_id, event_kind, state, timestamp)` in replay cache.
    - Instantiate or advance task entity via `canAdvanceTask()` (`packages/api/src/lib/tasks-internal.ts:404`), recording origin domain and verification key ID in audit metadata.
 
 ### 5.5 Spoofing defense and handling ordinary emails with forged headers
@@ -416,8 +438,8 @@ Because SMTP is an open protocol, malicious external mail servers can send email
 #### Handling Rules
 1. **Never Trust Unsigned Task Headers:** An email from an external domain that carries `X-OA-Task` but lacks a valid `X-OA-Federation-Signature` MUST NOT be parsed into a task (`packages/api/src/lib/tasks-internal.ts:1041-1180`). It MUST return `null` from `parseTaskMessage()`.
 2. **Strict Demotion to Ordinary Mail:** The incoming email is still stored in the IMAP inbox for the recipient identity, but it possesses no task attributes, creates no task entry on the board, and cannot trigger agent wait-loops (`parseTaskMessage()` fails closed and returns `null` at `packages/api/src/lib/tasks-internal.ts:1041-1180`, specifically `:1179`, preventing task board hydration or `notifyTrustedTaskDelivery`).
-3. **No Internal Stamp Injection:** Inbound federated or external emails are NEVER assigned a local `X-OA-Task-Stamp` or `X-OA-Mail-Stamp` (`packages/api/src/lib/mail-stamp.ts:137`), preventing elevation of privilege inside the local database.
-4. **Security Audit Log with Rate Limiting:** Whenever an email carrying `X-OA-Task-*` headers fails federated signature verification or arrives from an unlisted domain, a structured audit event `task_federation_spoof_attempt` is recorded (`packages/api/src/lib/audit.ts:117-142`). To protect against log flooding and rotation attacks (`packages/api/src/lib/audit.ts:94-112`), spoof attempt logging is rate-limited and deduplicated in memory by `(sender_domain, kid)` to at most 1 audit write per 60 seconds per tuple.
+3. **Closed Whitelist and No Internal Stamp Injection:** Inbound federated or external emails are NEVER assigned a local `X-OA-Task-Stamp` or `X-OA-Mail-Stamp` (`packages/api/src/lib/mail-stamp.ts:137`), and any external message carrying unlisted task headers (such as `x-oa-task-idempotency-key`, `packages/api/src/lib/tasks-internal.ts:1061`, `:1192`, `:2277`) or existing symmetric stamps MUST fail closed immediately.
+4. **Security Audit Log with Domain-Level Rate Limiting and Summary Aggregation:** Whenever an email carrying task headers fails federated verification or arrives from an unlisted domain, a structured audit event `task_federation_spoof_attempt` is recorded (`packages/api/src/lib/audit.ts:117-142`). Because both sender domain and key ID can be forged or randomized by an adversary, rate-limiting MUST NOT rely on a composite `(sender_domain, kid)` key. Instead, rate-limiting is keyed strictly by `sender_domain` alongside a global token bucket ceiling (e.g. at most 10 audit events per minute across all spoof attempts). Events exceeding the limit are dropped from immediate detailed logging, counted, and periodically emitted as an aggregated summary event `task_federation_spoof_summary` (recording dropped count and domain), preserving forensic observability while preventing log rotation attacks against the 10MB `audit.jsonl` boundary (`packages/api/src/lib/audit.ts:94-112`).
 
 ---
 
@@ -458,7 +480,7 @@ Every failure condition in the federation pipeline MUST fail closed:
 - Expired timestamp → REJECT task semantics.
 - Replay detected → REJECT / DROP idempotently.
 - Attachments present → REJECT task semantics.
-- Un-modeled extension headers present → REJECT task semantics.
+- Unlisted or unauthenticated headers (outside closed whitelist) → REJECT task semantics.
 
 Under NO circumstances shall a failed federated task degrade to an unauthenticated task or bypass participant validation.
 
@@ -478,13 +500,15 @@ Following repository conventions (`packages/api/src/lib/config.ts:1`, `:92-294`)
 | `FEDERATION_SIGNING_PRIVATE_KEY` | `string` (base64url or PKCS#8) | `undefined` | 32-byte Ed25519 private signing key. |
 | `FEDERATION_DISCOVERY_CACHE_TTL_SEC`| `number` | `3600` | In-memory cache TTL for remote metadata. |
 | `FEDERATION_TIMESTAMP_TOLERANCE_SEC`| `number` | `300` | Allowed clock skew window in seconds. |
+| `FEDERATION_MAX_EXPIRY_SEC` | `number` | `604800` | Maximum validity lifetime window (7 days) for task envelopes. |
 | `FEDERATION_REPLAY_CACHE_MAX_ENTRIES`| `number` | `10000` | In-memory bounded replay deduplication cache size. |
 
 #### Boot-Time Validation
-When `FEDERATION_ENABLED === 'true'`, boot-time validation strictly requires (`packages/api/src/lib/config.ts:414-424` precedent):
+When `FEDERATION_ENABLED === 'true'`, boot-time validation strictly requires (`packages/api/src/lib/config.ts:414-428` precedent):
 1. `FEDERATION_SIGNING_PRIVATE_KEY` MUST be provided and decode to a valid 32-byte Ed25519 private key.
 2. `FEDERATION_SIGNING_KEY_ID` MUST be non-empty (1–64 characters).
 3. `FEDERATION_TRUSTED_DOMAINS` MUST be non-empty and contain valid domain names without wildcards.
+4. **Disjoint Domain Sets (Normative MUST):** `FEDERATION_TRUSTED_DOMAINS` MUST NOT intersect with `config.allDomains` (`packages/api/src/lib/config.ts:440`). If any domain in `FEDERATION_TRUSTED_DOMAINS` is also present in `config.allDomains`, boot-time validation MUST fail closed and throw an error, preventing misconfiguration where local domains attempt to federate with themselves.
 
 If any check fails, the process terminates immediately on boot with an informative error rather than starting in an insecure state (`packages/api/src/lib/config.ts:354`, `:414-428`).
 
@@ -514,6 +538,14 @@ The following design decisions are explicitly left open for owner and commander 
 - **Q3: Envelope signing granularity — Whole-MIME DKIM alignment vs Custom Header Envelope:** Should federated task signing use standard ARC / DKIM signature headers (RFC 6376, RFC 8617) generated by the MTA, or should OpenAgentEmail maintain its own application-level `X-OA-Federation-Signature` headers independent of the underlying MTA transport?
 - **Q4: Asymmetric encryption of task bodies:** Ed25519 provides signature authenticity and integrity, but does not provide end-to-end encryption across intermediate mail relays. Should RFC-0002 specify an X25519 key agreement scheme (RFC 8410) in Phase 2 for encrypting sensitive task arguments and results across domains?
 - **Q5: Dynamic allowlist persistence without restarts:** Should dynamically added trusted domains (`POST /v1/federation/trusted-domains`) persist to a local JSONL file (following `notification-log.ts` / `audit.ts`), or should `FEDERATION_TRUSTED_DOMAINS` remain strictly immutable via environment variables to minimize mutable attack surfaces?
-- **Q6: Maximum task expiration lifetime:** What should be the mandatory global ceiling for `X-OA-Federation-Expires` relative to message creation time to bound the replay window of old task envelopes? Security motivation: long expiry windows require proportionally larger replay deduplication caches and extend the attack window for compromised signing keys; recommended default hard ceiling is `≤ 7 days`.
+- **Q6: Maximum task expiration lifetime:** In v1, a mandatory global ceiling of $(T_{exp} - T_{msg}) \le \text{FEDERATION\_MAX\_EXPIRY\_SEC}$ (default 7 days) is enforced as a normative MUST alongside monotonic timestamp validation (§5.4). The remaining open question for the owner is whether domain operators should be allowed to negotiate tighter per-domain validity windows via discovery metadata (e.g. 24 hours), or if 7 days should remain the universal immutable ceiling.
 - **Q7: Approval task cross-domain delegation:** Should `createApprovalTask()` (`packages/api/src/lib/tasks-internal.ts:1964`) allow cross-domain reviewers in v1, or should federated approvals be deferred to a follow-up RFC given that approvals can trigger external execution?
 - **Q8: Multi-domain hosting and signature keys:** For OAE deployments configured with multiple domains (`config.extraDomains`, `packages/api/src/lib/config.ts:439`), should each domain have a distinct Ed25519 signing key, or should one primary key sign for all domains managed by the instance?
+
+### 8.1 Known integration gaps (已知集成缺口)
+
+以下三项为 **RFC 未定义、需业主定方向的集成层缺口**——v1 实现者不得照本 RFC 对这三处自行发挥：
+
+- **Q9: Outbound federated event local persistence (出站联邦事件的本地持久化):** When an agent initiates or advances a federated task, outbound emails sent via SMTP do not automatically appear in the sender's own IMAP mailbox. This is fundamentally incompatible with OpenAgentEmail's storage model, where task states and message threads are reconstructed by scanning IMAP mailboxes (`packages/api/src/lib/tasks-internal.ts:1235`), and in-memory synthetic task bases survive for only 60 seconds (`packages/api/src/lib/tasks-internal.ts:2043`, `:2065`). How local outbound copies are captured (e.g. SMTP Bcc to self, IMAP append to Sent folder, or independent durable storage) is undefined. This cannot be decided within this document because selecting a persistence strategy alters global mail flow, quota assumptions, and IMAP synchronization semantics across the entire platform.
+- **Q10: Federated task creation gate (联邦任务的创建门):** The task creation endpoint `POST /v1/tasks` currently enforces that both participants MUST be known local identities managed by the local instance (`packages/api/src/routes/tasks.ts:168-175`, `known()`, rejecting external domains with HTTP 403 `forbidden: task participants must be known identities`). How an allowlisted remote domain recipient passes this creation gate is undefined. This cannot be decided within this document because relaxing participant gating directly affects multi-tenant isolation, authorization policy, and identity creation boundaries across the REST API.
+- **Q11: Separation of replay defense from storage reconstruction (重放防线与存储重建的分离):** `parseTaskMessage()` is reused repeatedly across offline storage scans, board re-indexing, and startup recovery via `scanDurableTasks()` and `findTaskMessages()` (`packages/api/src/lib/tasks-internal.ts:1235`). If the replay deduplication tuple `(task_id, event_kind, state, timestamp)` is recorded indiscriminately inside `parseTaskMessage()`, re-scanning the same stored message UID on subsequent iterations would classify legitimate historical messages as replays and drop them, causing existing tasks to disappear from the board. How the verification layer cleanly distinguishes initial ingress delivery from storage-layer reconstruction is undefined. This cannot be decided within this document because it requires restructuring the core mailbox processing pipeline and separating transport admission from idempotent event playback.
