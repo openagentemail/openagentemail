@@ -34,5 +34,8 @@ export function withConnectShell(
   }
   navRe.lastIndex = 0;
   panelRe.lastIndex = 0;
-  return shell.replace(navRe, "$1" + nav).replace(panelRe, panel + "$1");
+  // 回调插入：译文含 $ / $& / $$ / $1 时一律字面，杜绝 String.replace 替换语义。
+  return shell
+    .replace(navRe, (_m, p1: string) => p1 + nav)
+    .replace(panelRe, (_m, p1: string) => panel + p1);
 }

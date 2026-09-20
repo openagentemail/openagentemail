@@ -405,41 +405,145 @@ describe('console i18n R2 P1×4 (#137)', () => {
   });
 
   test('R4-③：壳模板无未槽化用户可见英文（allowlist 除外）', () => {
-    // 从 shell.ts 源解析模板字符串
+    // 同族扫描：shell + connect 全部模板纯文本/option/aria/placeholder
+    function loadTpl(file: string, constName: string): string {
+      const src = readFileSync(join(import.meta.dir, '../src/ui', file), 'utf8');
+      const m = src.match(
+        new RegExp(`const ${constName} = ("(?:\\\\.|[^"\\\\])*")`),
+      );
+      if (!m) throw new Error(`template missing: ${file}:${constName}`);
+      return JSON.parse(m[1]!);
+    }
+    const templates = [
+      loadTpl('shell.ts', 'SHELL_HTML_TEMPLATE'),
+      loadTpl('connect-shell.ts', 'CONNECT_NAV_TEMPLATE'),
+      loadTpl('connect-shell.ts', 'CONNECT_PANEL_TEMPLATE'),
+    ];
+
+    /** 白名单：品牌 / 分页数字（非用户句子）；协议 value= 属性不在文本扫描内 */
+    const TPL_ALLOW = new Set([
+      'OpenAgent Home', // <title> 品牌
+      'OpenAgent.email', // wordmark 品牌
+      '20',
+      '50',
+      '100', // 分页 option 可见文本=协议数字
+    ]);
+
+    const leftover: string[] = [];
+    for (const tpl of templates) {
+      const texts = [
+        ...[...tpl.matchAll(/>([^<{][^<]{0,200})</g)].map((x) => x[1]!),
+        ...[...tpl.matchAll(/(?:aria-label|placeholder|title)="([^"{]*)"/g)].map(
+          (x) => x[1]!,
+        ),
+        ...[...tpl.matchAll(/<option\b[^>]*>([^<]*)<\/option>/gi)].map(
+          (x) => x[1]!,
+        ),
+      ]
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 1 && /[A-Za-z]/.test(s));
+      for (const s of texts) {
+        if (TPL_ALLOW.has(s) || /^\d+$/.test(s)) continue;
+        if (/^\{\{[\w.-]+\}\}$/.test(s)) continue;
+        leftover.push(s);
+      }
+      // option 可见文本必须为槽（机械化：非槽非白名单即红）
+      for (const m of tpl.matchAll(/<option\b[^>]*>([^<]*)<\/option>/gi)) {
+        const body = m[1]!.trim();
+        if (TPL_ALLOW.has(body) || /^\d+$/.test(body)) continue;
+        if (!/^\{\{[\w.-]+\}\}$/.test(body)) {
+          leftover.push(`option-body:${body}`);
+        }
+      }
+    }
+    expect([...new Set(leftover)]).toEqual([]);
+  });
+
+  test('R4.1：对抗自测 — $ 字面 / 转义 / 回落 / CJK / 赋值负向', () => {
+    // ① withConnectShell：$ / $& / $$ / $1 字面插入，不 interpret
+    // 注：文本位 HTML 转义后源串 $& → 输出 $&amp;（证明未被 replace 语义吞掉）
+    const dollarDict: Record<string, string> = {
+      'shell.html.connectAnAgent': 'Pay $1 now $$ and $& plus $` end',
+      'shell.html.giveACodingAgentSecureAccess': 'Cost is $2 only',
+    };
+    const injected = withConnectShell(shellHtml('es', dollarDict), dollarDict);
+    expect(injected).toContain('Pay $1 now $$ and $&amp; plus $` end');
+    expect(injected).toContain('Cost is $2 only');
+    // 旧工法 "$1"+nav 会把译文内 $1 当捕获组；回调工法下 $1/$$ 保持字面
+    expect(injected).toContain('Pay $1 now');
+    expect(injected.match(/\$1/g)?.length).toBeGreaterThanOrEqual(1);
+    expect(injected.match(/\$\$/g)?.length).toBeGreaterThanOrEqual(1);
+
+    // ② fillI18nSlots 译文含 $ 同样字面（回调替换）+ & 转义
+    const slotDollar = fillI18nSlots('<p>{{login.title}}</p>', {
+      'login.title': 'Price $1 / $$ / $&',
+    });
+    expect(slotDollar).toBe('<p>Price $1 / $$ / $&amp;</p>');
+
+    // ③ HTML 特殊字符：文本位 + 属性位（衔接 R4-④，不削弱）
+    const evil = `<>"'&`;
+    expect(fillI18nSlots('<span>{{login.title}}</span>', { 'login.title': evil })).toBe(
+      '<span>&lt;&gt;"\'&amp;</span>',
+    );
+    expect(
+      fillI18nSlots('<input placeholder="{{shell.html.search}}">', {
+        'shell.html.search': evil,
+      }),
+    ).toBe('<input placeholder="&lt;&gt;&quot;&#39;&amp;">');
+
+    // ④ 空字典 / 缺键回落 en
+    expect(fillI18nSlots('<b>{{login.submit}}</b>', {})).toBe(
+      `<b>${I18N_EN['login.submit']}</b>`,
+    );
+    expect(fillI18nSlots('<b>{{login.submit}}</b>')).toBe(
+      `<b>${I18N_EN['login.submit']}</b>`,
+    );
+    expect(renderUiHtml('es')).toEqual(renderUiHtml('en'));
+
+    // ⑤ CJK 译文用例
+    const cjk = renderUiHtml('zh-CN', {
+      'login.submit': '登录',
+      'shell.html.levelUrgent': '紧急',
+    });
+    expect(cjk).toContain('<html lang="zh-CN">');
+    expect(cjk).toContain('登录');
+    expect(cjk).toContain('>紧急<');
+    expect(cjk).toContain('value="urgent"'); // 协议 value 不动
+
+    // ⑥ 负向：document.cookie= / .rel= / .value= 右侧不得 t(
+    const root = join(import.meta.dir, '../src/ui/client');
+    const walk = (d: string, acc: string[] = []): string[] => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p, acc);
+        else if (e.name.endsWith('.js')) acc.push(p);
+      }
+      return acc;
+    };
+    const offenders: string[] = [];
+    for (const f of walk(root)) {
+      const src = readFileSync(f, 'utf8');
+      if (/document\.cookie\s*=\s*t\(/.test(src)) offenders.push(`${f}: cookie=t(`);
+      if (/\.rel\s*=\s*t\(/.test(src)) offenders.push(`${f}: rel=t(`);
+      if (/\.value\s*=\s*t\(/.test(src)) offenders.push(`${f}: value=t(`);
+    }
+    expect(offenders).toEqual([]);
+
+    // ⑦ 通知级别 option：可见文本为槽，value 为协议常量
     const shellSrc = readFileSync(
       join(import.meta.dir, '../src/ui/shell.ts'),
       'utf8',
     );
-    const m = shellSrc.match(
+    const tm = shellSrc.match(
       /const SHELL_HTML_TEMPLATE = ("(?:\\.|[^"\\])*")/,
     );
-    expect(m).toBeTruthy();
-    const tpl: string = JSON.parse(m![1]!);
-    // 文本节点 / aria-label / placeholder 中的裸英文
-    const texts = [
-      ...[...tpl.matchAll(/>([^<{][^<]{0,200})</g)].map((x) => x[1]!),
-      ...[...tpl.matchAll(/(?:aria-label|placeholder)="([^"{]*)"/g)].map(
-        (x) => x[1]!,
-      ),
-    ]
-      .map((s) => s.trim())
-      .filter((s) => s.length >= 2 && /[A-Za-z]/.test(s));
-
-    /** 模板内允许保留的非槽英文（品牌 / 技术 option 值） */
-    const TPL_ALLOW = new Set([
-      'OpenAgent Home',
-      'OpenAgent.email',
-      'urgent',
-      'normal',
-      'low',
-      '20',
-      '50',
-      '100',
-    ]);
-    const leftover = [...new Set(texts)].filter(
-      (s) => !TPL_ALLOW.has(s) && !/^\d+$/.test(s),
-    );
-    expect(leftover).toEqual([]);
+    const tpl: string = JSON.parse(tm![1]!);
+    expect(tpl).toContain('value="urgent">{{shell.html.levelUrgent}}<');
+    expect(tpl).toContain('value="normal">{{shell.html.levelNormal}}<');
+    expect(tpl).toContain('value="low">{{shell.html.levelLow}}<');
+    expect(I18N_EN['shell.html.levelUrgent']).toBe('urgent');
+    expect(I18N_EN['shell.html.levelNormal']).toBe('normal');
+    expect(I18N_EN['shell.html.levelLow']).toBe('low');
   });
 
   test('R4-⑤：错误路径整句模板 en 逐字', () => {
