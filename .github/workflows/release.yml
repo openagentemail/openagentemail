@@ -91,14 +91,30 @@ jobs:
       - name: Publish to MCP Registry
         run: |
           # registry 会在 npm 传播完成前校验包版本，刚发布的版本常瞬时 404
-          # （上游错误原文即建议 "Wait and retry"）——故带退避重试，且整体幂等。
-          for attempt in 1 2 3 4 5; do
-            if ./mcp-publisher publish; then
+          # （上游错误原文即建议 "Wait and retry"）。
+          # 但**只对传播竞态类失败重试**：确定性错误（鉴权失败、server.json 校验
+          # 不过等）立即失败，不空等；「已存在」视为成功（幂等）。ZCode P2-2 @ #283。
+          MAX_ATTEMPTS=5
+          RC=0
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            OUT=$(./mcp-publisher publish 2>&1) || RC=$?
+            printf '%s\n' "$OUT"
+            if [ "$RC" -eq 0 ]; then
               echo "::notice::MCP Registry 发布成功（第 ${attempt} 次尝试）"
               exit 0
             fi
-            echo "::warning::MCP Registry 发布第 ${attempt} 次失败（npm 传播竞态）；30s 后重试"
-            sleep 30
+            if printf '%s' "$OUT" | grep -qiE "already exists|already published|already registered"; then
+              echo "::notice::MCP Registry 已存在该版本 —— 视为成功（重跑幂等）"
+              exit 0
+            fi
+            if ! printf '%s' "$OUT" | grep -qiE "404|not found|not yet|take a moment|wait and retry"; then
+              echo "::error::MCP Registry 发布失败且**非**传播竞态类（确定性错误）——不重试"
+              exit 1
+            fi
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "::warning::MCP Registry 发布第 ${attempt} 次失败（疑似 npm 传播竞态）；30s 后重试"
+              sleep 30
+            fi
           done
-          echo "::error::MCP Registry 发布 5 次均失败"
+          echo "::error::MCP Registry 发布 ${MAX_ATTEMPTS} 次均失败（均为传播竞态类）"
           exit 1
