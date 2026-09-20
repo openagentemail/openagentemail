@@ -61,7 +61,25 @@ jobs:
 
       - name: Publish to npm
         working-directory: packages/mcp
-        run: npm publish --provenance --access public --ignore-scripts
+        run: |
+          PKG_NAME="@openagentemail/mcp"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          QUERY_RC=0
+          QUERY_OUT=$(npm view "${PKG_NAME}@${PKG_VERSION}" version 2>&1) || QUERY_RC=$?
+          if [ "${QUERY_RC}" -eq 0 ]; then
+            echo "::notice::${PKG_NAME}@${PKG_VERSION} 已在 npm 上 —— 跳过发布（重跑幂等）"
+            exit 0
+          fi
+          # 只有「明确 404：该版本不存在」才发布。其它查询失败（网络、registry 5xx、
+          # 限流、npm 配置错）一律拒绝发布——否则会把「查不到」误当「不存在」，
+          # 重复发布撞 EPUBLISHCONFLICT，恰好破坏本步要提供的幂等性。
+          if printf '%s' "${QUERY_OUT}" | grep -qE "E404|No match found for version|is not in this registry"; then
+            npm publish --provenance --access public --ignore-scripts
+          else
+            echo "::error::npm view 查询失败且非 404 —— 拒绝发布以免重复发布。原始输出："
+            printf '%s\n' "${QUERY_OUT}"
+            exit 1
+          fi
 
       - name: Install mcp-publisher
         run: |
@@ -71,4 +89,32 @@ jobs:
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        run: ./mcp-publisher publish
+        run: |
+          # registry 会在 npm 传播完成前校验包版本，刚发布的版本常瞬时 404
+          # （上游错误原文即建议 "Wait and retry"）。
+          # 但**只对传播竞态类失败重试**：确定性错误（鉴权失败、server.json 校验
+          # 不过等）立即失败，不空等；「已存在」视为成功（幂等）。ZCode P2-2 @ #283。
+          MAX_ATTEMPTS=5
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            RC=0
+            OUT=$(./mcp-publisher publish 2>&1) || RC=$?
+            printf '%s\n' "$OUT"
+            if [ "$RC" -eq 0 ]; then
+              echo "::notice::MCP Registry 发布成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+            if printf '%s' "$OUT" | grep -qiE "already exists|already published|already registered"; then
+              echo "::notice::MCP Registry 已存在该版本 —— 视为成功（重跑幂等）"
+              exit 0
+            fi
+            if ! printf '%s' "$OUT" | grep -qiE "404|not found|not yet|take a moment|wait and retry"; then
+              echo "::error::MCP Registry 发布失败且**非**传播竞态类（确定性错误）——不重试"
+              exit 1
+            fi
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "::warning::MCP Registry 发布第 ${attempt} 次失败（疑似 npm 传播竞态）；30s 后重试"
+              sleep 30
+            fi
+          done
+          echo "::error::MCP Registry 发布 ${MAX_ATTEMPTS} 次均失败（均为传播竞态类）"
+          exit 1
