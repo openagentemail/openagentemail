@@ -223,7 +223,7 @@
     if (!isAdmin()) return;
     var openedGen = beginModal();
     confirmModalTitle.textContent = t('api.modal.deleteIdentity');
-    confirmModalText.textContent = t('api.modal.delete') + address + t('api.modal.thisCannotBeUndone');
+    confirmModalText.textContent = tFormat('api.modal.deleteConfirm', { address: address });
     confirmModalRisk.hidden = true;
     confirmModalConfirm.textContent = t('identities.action.delete');
     confirmModal.hidden = false;
@@ -254,7 +254,7 @@
           announce(address + t('api.announce.deleted'));
           refreshConfigureSurfaces();
         } else {
-          enterOverview({ announce: address + ' deleted. Back to Home.' });
+          enterOverview({ announce: tFormat('api.announce.deletedBackToHomeFull', { address: address }) });
         }
         loadHome({ refresh: false });
       } catch (error) {
@@ -353,7 +353,7 @@
       // confirmation ran. apply() bypasses the handlePushTierChange entry lock,
       // so recheck here: the in-flight change wins, this stale one is dropped.
       if (state.tierPending[address]) {
-        announce(t('push.announce.anotherPushContentChangeIsAlready') + address + '.');
+        announce(tFormat('push.announce.anotherInProgressFull', { address: address }));
         return;
       }
       state.tierPending[address] = true;
@@ -365,7 +365,7 @@
       try {
         await savePushContentTier(address, tier, confirmRisk);
         selectEl.dataset.currentTier = String(tier);
-        announce(t('push.announce.pushContentSetToTier') + tier + t('push.announce.for') + address + '.');
+        announce(tFormat('push.announce.pushContentSetToTierFull', { tier: tier, address: address }));
         renderOverview();
         // Restart overview only while still on Overview: unstick Refresh after
         // bumpIdentityEpoch, but do not revive overview polling after openAddress.
@@ -411,8 +411,7 @@
 
     var openedGen = beginModal();
     confirmModalTitle.textContent = t('push.modal.enableSensitivePushContent');
-    confirmModalText.textContent =
-      'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
+    confirmModalText.textContent = tFormat('push.modal.enableTier3Confirm', { address: address });
     confirmModalRisk.textContent = PUSH_TIER3_WARNING;
     confirmModalRisk.hidden = false;
     confirmModalConfirm.textContent = t('push.modal.enableTier3');

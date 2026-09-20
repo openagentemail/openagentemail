@@ -44,14 +44,14 @@
 
     async function apply(tier, confirmRisk, openedGen) {
       if (state.tierPending[address]) {
-        announce(t('push.announce.anotherPushContentChangeIsAlready') + address + '.');
+        announce(tFormat('push.announce.anotherInProgressFull', { address: address }));
         return;
       }
       state.tierPending[address] = true;
       renderConfigurePush();
       try {
         await savePushContentTier(address, tier, confirmRisk);
-        announce(t('push.announce.pushContentSetToTier') + tier + t('push.announce.for') + address + '.');
+        announce(tFormat('push.announce.pushContentSetToTierFull', { tier: tier, address: address }));
         /* 先关确认框再重绘，避免 replaceChildren 卸掉 modalOpener。 */
         if (openedGen !== undefined) {
           if (openedGen !== modalGeneration) return;
@@ -105,8 +105,7 @@
 
     var openedGen = beginModal();
     confirmModalTitle.textContent = t('push.modal.enableSensitivePushContent');
-    confirmModalText.textContent =
-      'Enable tier 3 for ' + address + '? Body previews and OTP codes/links will leave this server.';
+    confirmModalText.textContent = tFormat('push.modal.enableTier3Confirm', { address: address });
     confirmModalRisk.textContent = PUSH_TIER3_WARNING;
     confirmModalRisk.hidden = false;
     confirmModalConfirm.textContent = t('push.modal.enableTier3');

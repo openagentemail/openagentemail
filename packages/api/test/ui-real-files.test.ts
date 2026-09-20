@@ -125,8 +125,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #231 R6：Claude 卡 $OAE_TOKEN 零凭证命令后更新 UI_JS 针脚。
     // #162+#163：tasks 轮询旧∪新 sync + overview 硬停文案诚实化（纯 UI）。
     // #137 B1：拼入 I18N_JS + call-site t()；en 文案零变化，UI_JS 字节因字典/t() 增长。
+    // #137 R2：自检直查 I18N_EN + tFormat 整句模板 + 同形面回扫。
     expect(sha256(UI_JS)).toBe(
-      '7b4448b5f23c1da6e329b0d4bae55a2a9f2cdea8e92abd7f476acdb23cc6e0d2',
+      '94098ec612bb5a49d60acad02ba00c0bc5d675dad9ce16d4bf514e851f2fffa1',
     );
     expect(sha256(UI_CSS)).toBe(
       'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',

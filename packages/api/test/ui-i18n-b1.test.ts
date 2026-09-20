@@ -2,6 +2,7 @@
  * #137 B1 控制台 i18n 基建测试：
  * ① en 逐字节快照 ② t() 键完备 ③ resolveUiLocale 四例
  * ④ /ui/i18n/:locale.js ⑤ 由全量套件覆盖
+ * R2：P1-1 自检不经 t；P1-2 非 en 字面量替换；P1-3 摘要模板；P1-4 q=0 过滤
  */
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -18,7 +19,12 @@ process.env.SMTP_PASS = 'smtp-secret';
 const { UI_HTML, UI_JS, OUTER_CSP, renderUiHtml } = await import('../src/ui/assets.ts');
 const { shellHtml } = await import('../src/ui/shell.ts');
 const { withConnectShell } = await import('../src/ui/connect-shell.ts');
-const { I18N_EN } = await import('../src/ui/client/i18n-en.ts');
+const {
+  I18N_EN,
+  I18N_JS,
+  applyI18nLiteralReplacements,
+  tServer,
+} = await import('../src/ui/client/i18n-en.ts');
 const { resolveUiLocale } = await import('../src/ui/i18n/resolve-ui-locale.ts');
 const { registerUiAssets, registerUiShell } = await import('../src/routes/ui-assets.ts');
 const { Hono } = await import('hono');
@@ -50,7 +56,7 @@ describe('console i18n B1 (#137)', () => {
     expect(UI_HTML).not.toContain('/ui/i18n/');
   });
 
-  test('② 键完备：每个 t(\'…\') 调用键 ∈ I18N_EN', () => {
+  test('② 键完备：每个 t(\'…\') / tFormat(\'…\') 调用键 ∈ I18N_EN', () => {
     const root = join(import.meta.dir, '../src');
     const files: string[] = [];
     const walk = (d: string) => {
@@ -63,7 +69,7 @@ describe('console i18n B1 (#137)', () => {
     walk(join(root, 'ui/client'));
     files.push(join(root, 'routes/ui-frame.ts'));
 
-    const re = /\bt\(\s*['"]([^'"]+)['"]\s*\)/g;
+    const re = /\bt(?:Format)?\(\s*['"]([^'"]+)['"]/g;
     const missing: string[] = [];
     let used = 0;
     for (const f of files) {
@@ -115,6 +121,7 @@ describe('console i18n B1 (#137)', () => {
 
   test('I18N_JS 已拼入 UI_JS 且含 t()', () => {
     expect(UI_JS).toContain('function t(key)');
+    expect(UI_JS).toContain('function tFormat(key, vars)');
     expect(UI_JS).toContain('window.OAE_I18N');
     expect(UI_JS).toContain('I18N_EN');
     // 自检锚
@@ -124,5 +131,154 @@ describe('console i18n B1 (#137)', () => {
   test('en UI_HTML sha 钉死 origin/main 基线', () => {
     expect(sha256(UI_HTML)).toBe(MAIN_UI_HTML_SHA256);
     expect(sha256(withConnectShell(shellHtml('en')))).toBe(MAIN_UI_HTML_SHA256);
+  });
+});
+
+describe('console i18n R2 P1×4 (#137)', () => {
+  test('P1-1：自检直查 I18N_EN；假 OAE_I18N 自检键不抛且 t() 返译文', () => {
+    // 自检片段不得调用 t(（须直查 I18N_EN[…]）
+    expect(I18N_JS).toContain('if (I18N_EN[');
+    const selfCheckBlock = I18N_JS.slice(I18N_JS.indexOf('i18n_en_empty'));
+    expect(selfCheckBlock).not.toContain('t(');
+
+    const selfKey = Object.keys(I18N_EN).sort()[0]!;
+    const selfVal = I18N_EN[selfKey]!;
+    const fakeVal = 'FAKE_OAE_I18N_SELF_CHECK_TRANSLATION';
+
+    // 在隔离作用域执行 I18N_JS：先注入假 OAE_I18N，再跑自检+t
+    const run = new Function(
+      'window',
+      I18N_JS +
+        ';\n' +
+        'return { t: t, lookedUp: t(' +
+        JSON.stringify(selfKey) +
+        '), enVal: I18N_EN[' +
+        JSON.stringify(selfKey) +
+        '] };\n',
+    );
+    const windowStub: { OAE_I18N: Record<string, string> } = {
+      OAE_I18N: { [selfKey]: fakeVal },
+    };
+    const out = run(windowStub) as {
+      t: (k: string) => string;
+      lookedUp: string;
+      enVal: string;
+    };
+    expect(out.enVal).toBe(selfVal);
+    expect(out.lookedUp).toBe(fakeVal);
+    expect(() => out.t(selfKey)).not.toThrow();
+  });
+
+  test('P1-2：非 en 字面量最长优先替换；en 逐字节不变；tServer(dict?)', () => {
+    // en 路径：dict 被忽略，逐字节护栏
+    const enWithDict = shellHtml('en', { 'shell.html.signOut': 'Cerrar sesión' });
+    expect(Buffer.from(enWithDict, 'utf8')).toEqual(Buffer.from(shellHtml('en'), 'utf8'));
+
+    // mock locale 字典：含 5 键译文（单测内构造；不动 /ui/i18n/:locale.js）
+    const mockDict: Record<string, string> = {
+      'shell.html.signOut': '【退出】',
+      'shell.html.menu': '【菜单】',
+      'shell.html.work': '【工作】',
+      'login.submit': '【打开邮箱】',
+      'login.title': '【无噪收件箱。】',
+    };
+    expect(shellHtml('en')).toContain(I18N_EN['shell.html.signOut']!);
+    expect(shellHtml('en')).toContain(I18N_EN['login.submit']!);
+
+    const es = shellHtml('es', mockDict);
+    expect(es).toContain('<html lang="es">');
+    expect(es).toContain('<script src="/ui/i18n/es.js" defer></script>');
+    expect(es).toContain('【退出】');
+    expect(es).toContain('【菜单】');
+    expect(es).toContain('【工作】');
+    expect(es).toContain('【打开邮箱】');
+    expect(es).toContain('【无噪收件箱。】');
+    expect(es).not.toContain('>Sign out<');
+    expect(es).not.toContain('>Open Mail<');
+
+    // 期望 HTML = lang+script 注入后再做替换
+    let expected = shellHtml('en')
+      .replace('<html lang="en">', '<html lang="es">')
+      .replace(
+        '<script src="/ui/app.js" defer></script>',
+        '<script src="/ui/i18n/es.js" defer></script>\n  <script src="/ui/app.js" defer></script>',
+      );
+    expected = applyI18nLiteralReplacements(expected, mockDict);
+    expect(es).toBe(expected);
+
+    // 最长优先：短串是长串子串时不得半替换
+    const longFirstDict: Record<string, string> = {
+      'shell.html.signOut': '【退出登录】',
+    };
+    const sample = 'Please Sign out now';
+    expect(applyI18nLiteralReplacements(sample, longFirstDict)).toBe('Please 【退出登录】 now');
+
+    // tServer(dict?)
+    expect(tServer('login.submit')).toBe('Open Mail');
+    expect(tServer('login.submit', mockDict)).toBe('【打开邮箱】');
+    expect(tServer('missing.key', mockDict)).toBe('missing.key');
+  });
+
+  test('P1-3：notifications 摘要 en 逐字=原句；假字典整句无裸英文碎片', () => {
+    const todayEn = I18N_EN['notifications.summary.today']!;
+    const lastEn = I18N_EN['notifications.summary.lastClause']!;
+    // en 模板值必须是「拼好的原句」形态
+    expect(todayEn).toBe(
+      "Today ({tz}): {total} sent · {urgent} urgent{lastClause}. Undelivered notifications are not included in today’s sent count.",
+    );
+    expect(lastEn).toBe(' · last {last}');
+
+    // 模拟 en 渲染（与现状拼接结果逐字一致）
+    function formatSummary(
+      dict: Record<string, string>,
+      opts: { tz: string; total: number; urgent: number; last?: string },
+    ): string {
+      const t = (k: string) => dict[k] || I18N_EN[k] || k;
+      const tFormat = (k: string, vars: Record<string, string | number>) =>
+        t(k).replace(/\{(\w+)\}/g, (_m, n: string) =>
+          vars[n] != null ? String(vars[n]) : '',
+        );
+      const lastClause = opts.last
+        ? tFormat('notifications.summary.lastClause', { last: opts.last })
+        : '';
+      return tFormat('notifications.summary.today', {
+        tz: opts.tz,
+        total: opts.total,
+        urgent: opts.urgent,
+        lastClause,
+      });
+    }
+
+    const enOut = formatSummary(I18N_EN, {
+      tz: 'UTC',
+      total: 3,
+      urgent: 1,
+      last: '14:02',
+    });
+    expect(enOut).toBe(
+      "Today (UTC): 3 sent · 1 urgent · last 14:02. Undelivered notifications are not included in today’s sent count.",
+    );
+
+    const fakeDict: Record<string, string> = {
+      ...I18N_EN,
+      'notifications.summary.today':
+        '本日（{tz}）：送信 {total} · 緊急 {urgent}{lastClause}。未達通知は本日の送信数に含まれません。',
+      'notifications.summary.lastClause': ' · 最終 {last}',
+    };
+    const jaOut = formatSummary(fakeDict, {
+      tz: 'Asia/Tokyo',
+      total: 2,
+      urgent: 0,
+      last: '09:00',
+    });
+    expect(jaOut).toContain('本日（Asia/Tokyo）');
+    expect(jaOut).not.toContain(' sent · ');
+    expect(jaOut).not.toContain(' urgent');
+    expect(jaOut).not.toMatch(/\bToday\b/);
+  });
+
+  test('P1-4：Accept-Language q=0 过滤', () => {
+    expect(resolveUiLocale({ acceptLanguage: 'es;q=0, en' })).toBe('en');
+    expect(resolveUiLocale({ acceptLanguage: 'es;q=0' })).toBe('en');
   });
 });

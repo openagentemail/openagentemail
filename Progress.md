@@ -29,3 +29,20 @@
 - en UI_HTML sha256：`ba8f245b89602117ca6ceca7e270be0d43425fd75243280ba17c14ab11542a39`（与 main 逐字节一致）
 - 分支：`w137-b1-console-i18n-infra`
 - 材料：`/home/ops/materials/137-b1/`
+
+## 2026-09-20 · R2（Codex P1×4）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`I18N_JS` 自检改为直查 `I18N_EN[key] !== val`，不经 `t()`/`window.OAE_I18N`；假字典注入时 `t()` 返译文且不抛。
+2. **P1-2**：`shellHtml(locale, dict?)` / `renderUiHtml` 非 en 路径最长优先精确字面量替换；`tServer(key, dict?)`；en 路径逐字节不变。
+3. **P1-3**：notifications 摘要/诊断整句 `tFormat` 模板；同形面回扫（inbox 空态、delete announce、push tier 句、signed-in、showing latest 等）。
+4. **P1-4**：`parseAcceptLanguage` 过滤 `q===0`；`'es;q=0, en'`→en、`'es;q=0'`→en。
+5. 测试扩展至 11 例；全量 **1891 pass / 9 skip / 0 fail**。
+
+### 我们遇到了哪些错误？
+1. `ui-real-files` UI_JS sha 针脚需随字典/tFormat 增长更新。
+2. `ui-assets` 仍断言旧 `'Showing latest ' + NOTIFY_RENDER_LIMIT` 拼接形态。
+
+### 我们是如何解决这些错误的？
+1. 重算并钉死 UI_JS sha `94098ec6…`。
+2. 断言改为 `tFormat('notifications.copy.showingLatestOf'…)` 形态；shim 补 `tFormat`。

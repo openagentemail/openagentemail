@@ -52,8 +52,8 @@
             onAction: function () { refreshMessages(); }
           }
         : {
-            title: t('inbox.title.noMessagesIn') + folderLabel,
-            purpose: t('inbox.copy.thisFolderOnlyShowsMailThe') + state.activeAddress + '. Refresh after new mail arrives, or switch folder.',
+            title: tFormat('inbox.title.noMessagesInFolder', { folder: folderLabel }),
+            purpose: tFormat('inbox.empty.folderPurposeFull', { address: state.activeAddress }),
             actionLabel: t('tasks.action.refresh'),
             onAction: function () { refreshMessages(); }
           });

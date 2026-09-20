@@ -8,7 +8,7 @@ import { TOKENS_CSS } from './styles/tokens.ts';
 import { BASE_CSS } from './styles/base.ts';
 import { LAYOUT_CSS } from './styles/layout.ts';
 import { PAGES_CSS } from './styles/pages.ts';
-import { I18N_JS } from './client/i18n-en.ts';
+import { I18N_JS, applyI18nLiteralReplacements } from './client/i18n-en.ts';
 import { STORE_JS } from './client/store.ts';
 import { DOM_JS } from './client/dom.ts';
 import { API_JS } from './client/api.ts';
@@ -39,12 +39,30 @@ export const OUTER_CSP =
 export const UI_LOGO_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\n${logoGeometry}\n</svg>\n`;
 
-/** en 默认壳（与历史 UI_HTML 逐字节对齐）；非 en 经 renderUiHtml(locale)。 */
+/** en 默认壳（与历史 UI_HTML 逐字节对齐）；非 en 经 renderUiHtml(locale, dict?)。 */
 export const UI_HTML = withConnectShell(shellHtml('en'));
 
-/** 按 locale 渲染完整 dashboard HTML（withConnectShell 包装链原样）。 */
-export function renderUiHtml(locale: UiLocale = 'en'): string {
-  return withConnectShell(shellHtml(locale));
+/**
+ * 按 locale 渲染完整 dashboard HTML。
+ * en：withConnectShell(shellHtml('en')) 逐字节锚。
+ * 非 en：先英文壳过 connect 地标，再改 lang/script，可选 dict 字面量替换（含 connect 串）。
+ */
+export function renderUiHtml(
+  locale: UiLocale = 'en',
+  dict?: Record<string, string>,
+): string {
+  if (locale === 'en') return withConnectShell(shellHtml('en'));
+  let html = withConnectShell(shellHtml('en'));
+  html = html
+    .replace('<html lang="en">', `<html lang="${locale}">`)
+    .replace(
+      '<script src="/ui/app.js" defer></script>',
+      `<script src="/ui/i18n/${locale}.js" defer></script>\n  <script src="/ui/app.js" defer></script>`,
+    );
+  if (dict && Object.keys(dict).length > 0) {
+    html = applyI18nLiteralReplacements(html, dict);
+  }
+  return html;
 }
 
 export const UI_CSS = TOKENS_CSS + BASE_CSS + LAYOUT_CSS + PAGES_CSS;

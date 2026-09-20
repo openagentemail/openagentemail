@@ -50,7 +50,7 @@ export function normalizeUiLocale(raw: string | undefined | null): UiLocale | nu
   return null;
 }
 
-/** Accept-Language 条目：按 q 降序。 */
+/** Accept-Language 条目：过滤 q=0（RFC 9110 显式不可接受）后按 q 降序。 */
 function parseAcceptLanguage(header: string | undefined | null): string[] {
   if (!header) return [];
   return header
@@ -64,7 +64,7 @@ function parseAcceptLanguage(header: string | undefined | null): string[] {
       }
       return { tag: (tag || '').trim(), q: Number.isFinite(q) ? q : 0 };
     })
-    .filter((e) => e.tag)
+    .filter((e) => e.tag && e.q > 0)
     .sort((a, b) => b.q - a.q)
     .map((e) => e.tag);
 }

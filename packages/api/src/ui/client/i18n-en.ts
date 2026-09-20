@@ -14,6 +14,7 @@ export const I18N_EN: Record<string, string> = {
   "api.announce.couldNotRotateTheTokenTry": "Could not rotate the token. Try again.",
   "api.announce.couldNotUpdatePushContentTier": "Could not update push content tier. Try again.",
   "api.announce.deleted": " deleted.",
+  "api.announce.deletedBackToHomeFull": "{address} deleted. Back to Home.",
   "api.announce.invalidIdentityRequestTryAgain": "Invalid identity request. Try again.",
   "api.copy.addressAlreadyExists": "address already exists",
   "api.copy.dAgo": " d ago",
@@ -26,6 +27,7 @@ export const I18N_EN: Record<string, string> = {
   "api.copy.rotatedToken": "Rotated Token",
   "api.copy.yourSessionExpiredSignInAgain": "Your session expired. Sign in again.",
   "api.modal.delete": "Delete ",
+  "api.modal.deleteConfirm": "Delete {address}? This cannot be undone.",
   "api.modal.deleteIdentity": "Delete Identity",
   "api.modal.thisCannotBeUndone": "? This cannot be undone.",
   "app.a11y.messageMetadata": "Message metadata",
@@ -67,6 +69,7 @@ export const I18N_EN: Record<string, string> = {
   "app.copy.secure": "; Secure",
   "app.copy.signInIsTemporarilyUnavailableTry": "Sign-in is temporarily unavailable. Try again.",
   "app.copy.signedInViaLinkAs": "Signed in via link as ",
+  "app.copy.signedInViaLinkAsFull": "Signed in via link as {label}",
   "app.copy.tabTabHeaders": "tab tab-headers",
   "app.copy.thatTokenIsNotValid": "That token is not valid.",
   "app.copy.thisEmailIsTooLargeTo": "This email is too large to preview safely.",
@@ -149,6 +152,7 @@ export const I18N_EN: Record<string, string> = {
   "inbox.copy.rowFlat": " row-flat",
   "inbox.copy.sentListsAuditRecordsOfApi": "Sent lists audit records of API/MCP sends (30 days). Direct SMTP is not listed. Refresh after mail_send or POST /v1/send.",
   "inbox.copy.thisFolderOnlyShowsMailThe": "This folder only shows mail the server can match for ",
+  "inbox.empty.folderPurposeFull": "This folder only shows mail the server can match for {address}. Refresh after new mail arrives, or switch folder.",
   "inbox.error.failed": "Failed",
   "inbox.error.queued": "Queued",
   "inbox.label.allMail": "All Mail",
@@ -158,6 +162,7 @@ export const I18N_EN: Record<string, string> = {
   "inbox.title.lowerBoundThisScanHitIts": "Lower bound — this scan hit its recipient limit.",
   "inbox.title.noApiMcpSendsIn30": "No API/MCP sends in 30 days",
   "inbox.title.noMessagesIn": "No messages in ",
+  "inbox.title.noMessagesInFolder": "No messages in {folder}",
   "inbox.title.notCountedThisScanHitIts": "Not counted — this scan hit its recipient limit.",
   "inbox.title.unknown": "Unknown",
   "login.remember": "Trust this device for 30 days",
@@ -181,6 +186,11 @@ export const I18N_EN: Record<string, string> = {
   "notifications.announce.notificationsLoaded": " notifications loaded",
   "notifications.announce.testNotificationFailed": "Test notification failed.",
   "notifications.announce.testNotificationSent": "Test notification sent.",
+  "notifications.summary.lastClause": " · last {last}",
+  "notifications.summary.today": "Today ({tz}): {total} sent · {urgent} urgent{lastClause}. Undelivered notifications are not included in today’s sent count.",
+  "notifications.summary.diagLastSend": "Last successful send {when}.",
+  "notifications.copy.showingLatestOf": "Showing latest {limit} of {total}",
+  "notifications.copy.showingLatestOfNotifications": "Showing latest {limit} of {total} notifications. {cacheExplanation}",
   "notifications.copy.cellNotifyChannel": "cell notify-channel",
   "notifications.copy.cellNotifyContent": "cell notify-content",
   "notifications.copy.cellNotifyWhen": "cell notify-when",
@@ -262,12 +272,14 @@ export const I18N_EN: Record<string, string> = {
   "push.action.revoking": "Revoking…",
   "push.action.tier": "Tier ",
   "push.announce.anotherPushContentChangeIsAlready": "Another push content change is already in progress for ",
+  "push.announce.anotherInProgressFull": "Another push content change is already in progress for {address}.",
   "push.announce.couldNotCreateDeviceCredentialsTry": "Could not create device credentials. Try again.",
   "push.announce.couldNotRevokeThatDeviceTry": "Could not revoke that device. Try again.",
   "push.announce.deviceRevoked": "Device revoked.",
   "push.announce.for": " for ",
   "push.announce.notificationsAreNotConfiguredOnThis": "Notifications are not configured on this instance.",
   "push.announce.pushContentSetToTier": "Push content set to tier ",
+  "push.announce.pushContentSetToTierFull": "Push content set to tier {tier} for {address}.",
   "push.announce.restoreNtfyAdminAccessBeforeRevoking": "Restore ntfy admin access before revoking. The phone may still receive notifications.",
   "push.announce.tier3RequiresExplicitRiskConfirmation": "Tier 3 requires explicit risk confirmation.",
   "push.copy.activeBodyPreviewsAndOtpCodes": "Active. Body previews and OTP codes leave this server.",
@@ -276,6 +288,7 @@ export const I18N_EN: Record<string, string> = {
   "push.copy.bodyPreviewsAndOtpCodesLinks": "? Body previews and OTP codes/links will leave this server.",
   "push.copy.device": "Device: ",
   "push.copy.enableTier3For": "Enable tier 3 for ",
+  "push.modal.enableTier3Confirm": "Enable tier 3 for {address}? Body previews and OTP codes/links will leave this server.",
   "push.copy.enoughToDecideWhetherToOpen": "Enough to decide whether to open the inbox. Body and OTP codes stay on this server.",
   "push.copy.isSelected": " is-selected",
   "push.copy.justTellMeAMessageArrived": "Just tell me a message arrived.",
@@ -498,8 +511,9 @@ const I18N_SELF_CHECK_KEY = Object.keys(I18N_EN).sort()[0]!;
 const I18N_SELF_CHECK_VAL = I18N_EN[I18N_SELF_CHECK_KEY]!;
 
 /**
- * 拼入 UI_JS 的运行时件：t(key) + 键集自检。
+ * 拼入 UI_JS 的运行时件：t(key) + tFormat + 键集自检。
  * 解析序：window.OAE_I18N[key] → I18N_EN[key] → key。
+ * 自检直查 I18N_EN，不经 t()/OAE_I18N——避免 B2 真字典注入后误抛。
  */
 export const I18N_JS =
   '  var I18N_EN = ' +
@@ -508,21 +522,58 @@ export const I18N_JS =
   '  function t(key) {\n' +
   '    return (window.OAE_I18N && window.OAE_I18N[key]) || I18N_EN[key] || key;\n' +
   '  }\n' +
-  '  // 键集自检：字典必须非空，且 t 对已知键回落稳定。\n' +
+  '  /** 带参模板：{name} 占位替换；缺省键清空。 */\n' +
+  '  function tFormat(key, vars) {\n' +
+  '    var s = t(key);\n' +
+  '    if (!vars) return s;\n' +
+  "    return s.replace(/\\{(\\w+)\\}/g, function (_m, name) {\n" +
+  '      return vars[name] != null ? String(vars[name]) : "";\n' +
+  '    });\n' +
+  '  }\n' +
+  '  // 键集自检：字典非空，且内嵌 I18N_EN 首键值自洽（不经 t/OAE_I18N）。\n' +
   '  if (Object.keys(I18N_EN).length < 1) {\n' +
   "    throw new Error('i18n_en_empty');\n" +
   '  }\n' +
-  '  if (t(' +
+  '  if (I18N_EN[' +
   JSON.stringify(I18N_SELF_CHECK_KEY) +
-  ') !== ' +
+  '] !== ' +
   JSON.stringify(I18N_SELF_CHECK_VAL) +
   ') {\n' +
   "    throw new Error('i18n_en_lookup_failed');\n" +
   '  }\n\n';
 
-/** 服务端 t：B1 仅 en 字典；非 en 同样回落 I18N_EN（B2 再接四语）。 */
-export function tServer(key: string): string {
+/**
+ * 服务端 t：优先可选 locale 字典，缺省回落 I18N_EN。
+ */
+export function tServer(key: string, dict?: Record<string, string>): string {
+  if (dict && Object.prototype.hasOwnProperty.call(dict, key)) {
+    return dict[key]!;
+  }
   return I18N_EN[key] || key;
+}
+
+/**
+ * 对 HTML 做最长优先精确字面量替换：I18N_EN 值 → dict 译文。
+ * 仅替换 dict 中有对应键且译文不同于 en 值的条目。
+ */
+export function applyI18nLiteralReplacements(
+  html: string,
+  dict: Record<string, string>,
+): string {
+  const pairs: Array<{ en: string; tr: string }> = [];
+  for (const key of Object.keys(dict)) {
+    const en = I18N_EN[key];
+    const tr = dict[key];
+    if (en == null || tr == null || tr === en || en.length < 1) continue;
+    pairs.push({ en, tr });
+  }
+  pairs.sort((a, b) => b.en.length - a.en.length);
+  let out = html;
+  for (const { en, tr } of pairs) {
+    if (!out.includes(en)) continue;
+    out = out.split(en).join(tr);
+  }
+  return out;
 }
 
 /** 字典件响应体：B1 骨架为空对象（真译文 B2）。 */

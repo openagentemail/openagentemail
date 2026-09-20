@@ -984,7 +984,8 @@ describe('UI static asset contract', () => {
   test('notify rows are capped at NOTIFY_RENDER_LIMIT with an honest truncation label (F2)', () => {
     expect(UI_JS).toContain('var NOTIFY_RENDER_LIMIT = 500');
     expect(UI_JS).toContain('rows.slice(0, NOTIFY_RENDER_LIMIT)');
-    expect(UI_JS).toContain("'Showing latest ' + NOTIFY_RENDER_LIMIT");
+    expect(UI_JS).toContain("tFormat('notifications.copy.showingLatestOf'");
+    expect(UI_JS).toContain("tFormat('notifications.copy.showingLatestOfNotifications'");
     const renderRows = UI_JS.slice(
       UI_JS.indexOf('function renderNotifyRows('),
       UI_JS.indexOf('function renderNotifyMeta('),

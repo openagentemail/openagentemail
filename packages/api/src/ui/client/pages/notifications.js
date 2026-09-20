@@ -134,14 +134,22 @@
     var summary = state.notifySummary;
     if (!summary) {
       notifySummary.textContent = state.notifySummaryStatus === 'loading'
-        ? 'Loading today’s summary…'
+        ? t('notifications.copy.loadingTodaySSummary')
         : '';
       return;
     }
-    notifySummary.textContent = t('notifications.action.today') + summary.tz + '): ' +
-      summary.total + ' sent · ' + summary.ringCount + ' urgent' +
-      (summary.lastSuccessfulAt ? ' · last ' + formatClock(summary.lastSuccessfulAt, true) : '') +
-      '. Undelivered notifications are not included in today’s sent count.';
+    // 整句模板化：语序由 locale 字典决定；en 模板值=原拼接句逐字。
+    var lastClause = summary.lastSuccessfulAt
+      ? tFormat('notifications.summary.lastClause', {
+          last: formatClock(summary.lastSuccessfulAt, true)
+        })
+      : '';
+    notifySummary.textContent = tFormat('notifications.summary.today', {
+      tz: summary.tz,
+      total: summary.total,
+      urgent: summary.ringCount,
+      lastClause: lastClause
+    });
   }
 
   function renderNotifyDiagnostics() {
@@ -153,13 +161,15 @@
       return;
     }
     var parts = [];
-    if (!diag.enabled) parts.push('Push transport is disabled on this server.');
-    else if (!diag.configured) parts.push('Push transport is not configured on this server.');
-    else parts.push('Push transport is enabled.');
+    if (!diag.enabled) parts.push(t('notifications.copy.pushTransportIsDisabledOnThis'));
+    else if (!diag.configured) parts.push(t('notifications.copy.pushTransportIsNotConfiguredOn'));
+    else parts.push(t('notifications.copy.pushTransportIsEnabled'));
     if (diag.lastSuccessfulAt) {
-      parts.push('Last successful send ' + formatClock(diag.lastSuccessfulAt, true) + '.');
+      parts.push(tFormat('notifications.summary.diagLastSend', {
+        when: formatClock(diag.lastSuccessfulAt, true)
+      }));
     } else {
-      parts.push('No successful send in the 30-day log yet.');
+      parts.push(t('notifications.copy.noSuccessfulSendInThe30'));
     }
     notifyDiagnostics.textContent = parts.join(' ');
     if (notifyVerify) {
@@ -282,7 +292,10 @@
     notifyShown.textContent = awaiting
       ? ''
       : truncated
-        ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total
+        ? tFormat('notifications.copy.showingLatestOf', {
+            limit: NOTIFY_RENDER_LIMIT,
+            total: total
+          })
         : String(total);
     if (awaiting) {
       notifyStateNode.textContent = t('tasks.action.loading');
@@ -294,14 +307,18 @@
     }
     if (rows.length === 0) {
       notifyStateNode.textContent = state.notifyFilter
-        ? 'No notifications on this channel in the last 12 hours.'
-        : 'No notifications in the last 12 hours. Refresh after a push is sent.';
+        ? t('notifications.copy.noNotificationsOnThisChannelIn')
+        : t('notifications.copy.noNotificationsInTheLast12');
       return;
     }
     var cacheExplanation =
-      'What we tried to send to your phone and computers in the last 12 hours. This is not a 30-day audit log.';
+      t('notifications.copy.whatWeTriedToSendTo');
     notifyStateNode.textContent = truncated
-      ? 'Showing latest ' + NOTIFY_RENDER_LIMIT + ' of ' + total + ' notifications. ' + cacheExplanation
+      ? tFormat('notifications.copy.showingLatestOfNotifications', {
+          limit: NOTIFY_RENDER_LIMIT,
+          total: total,
+          cacheExplanation: cacheExplanation
+        })
       : cacheExplanation;
     visible.forEach(function (row) {
       var tier = tierFromPriority(row.priority);

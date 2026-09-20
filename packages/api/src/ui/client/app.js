@@ -883,7 +883,7 @@
       /* 登录成功后若服务端带回 returnTo（OAuth 同意页），优先回跳。 */
       if (consumeReturnTo(loginPayload)) return;
       var label = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
-      var noticeText = 'Signed in via link as ' + label;
+      var noticeText = tFormat('app.copy.signedInViaLinkAsFull', { label: label });
       if (linkLoginNotice) {
         linkLoginNotice.textContent = noticeText;
         linkLoginNotice.hidden = false;
@@ -994,7 +994,7 @@
       if (hasLinkLoginMarker()) {
         var existingLabel = state.me.kind === 'admin' ? 'Admin session' : state.me.address;
         if (linkLoginNotice) {
-          linkLoginNotice.textContent = t('app.copy.signedInViaLinkAs') + existingLabel;
+          linkLoginNotice.textContent = tFormat('app.copy.signedInViaLinkAsFull', { label: existingLabel });
           linkLoginNotice.hidden = false;
         }
         setLinkBannerActive(true);
