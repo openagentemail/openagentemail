@@ -57,7 +57,7 @@ RFC-0001 explicitly reserved cross-domain federation (#59) as out of scope (`doc
 
 ### 2.2 Non-goals (explicit)
 
-1. **No cross-domain task leasing:** Distributed leasing (`TASK_LEASES_ENABLED`, `packages/api/src/lib/task-lease-journal.ts:28`, `docs/task-lease-journal.md:1-50`) requires single-host authoritative serialized journals. Cross-domain distributed locking or distributed consensus is explicitly excluded.
+1. **No cross-domain task leasing:** Distributed leasing (`TASK_LEASES_ENABLED`, `packages/api/src/lib/config.ts:155`, `packages/api/src/lib/task-lease-journal.ts`, `docs/task-lease-journal.md:1-50`) requires single-host authoritative serialized journals. Cross-domain distributed locking or distributed consensus is explicitly excluded.
 2. **No distributed two-phase commit:** Tasks communicate asynchronously across domains via message exchange; there is no distributed transaction manager or synchronous consensus across deployments.
 3. **No inbound HTTP task injection:** Federated tasks are transported via email (SMTP/IMAP) so that all standard MTA audit trails, DMARC/SPF checks, and delivery guarantees apply. HTTP endpoints are used solely for metadata discovery.
 4. **No auto-reply or LLM responder engine:** Automatic task dispatching, prompt processing, and autonomous agent loops remain separate concerns (#105, `docs/rfcs/0001-outbound-webhooks.md:96-100`).
@@ -282,12 +282,16 @@ Phase 2 specifies the cryptographic envelope, wire headers, and verification rul
 
 ### 5.2 Signed string and canonical binding tuple
 
-To guarantee that signatures cannot be transplanted between different tasks, states, actors, subjects, or timestamps, the signature MUST bind a strictly canonical tuple covering all semantically consumed attributes:
+To guarantee that signatures cannot be transplanted between different tasks, states, actors, subjects, or timestamps, the signature MUST bind a strictly canonical tuple covering all semantically consumed attributes.
+
+In existing local task processing, the event discriminator is defined as:
 
 ```ts
 // packages/api/src/lib/tasks-internal.ts:99
-export type FederatedEventKind = 'state' | 'reminder';
+export type TaskEventKind = 'state' | 'reminder';
 ```
+
+For the federated wire envelope [本 RFC 提议], the event discriminator is defined as `FederatedEventKind` (`export type FederatedEventKind = 'state' | 'reminder'`), directly mirroring `TaskEventKind`.
 
 #### Canonical Binding Tuple
 1. `domain_separator`: Constant string `"oae-federated-task-v1"`.
@@ -368,7 +372,7 @@ Notice that `X-OA-Task-Stamp` (the local symmetric stamp, `packages/api/src/lib/
 
 ### 5.4 Verification procedure
 
-Incoming emails from IMAP (`packages/api/src/lib/notification-watcher.ts:1602`, `packages/api/src/lib/tasks-internal.ts:1041`) execute the following verification steps sequentially:
+Incoming emails from IMAP execute verification within `parseTaskMessage()` (`packages/api/src/lib/tasks-internal.ts:1041-1180`) through the following sequential steps:
 
 1. **Header Inspection & Attachment Gating:**
    - Check if `X-OA-Federation-Signature` and `X-OA-Task` are present.
@@ -391,7 +395,7 @@ Incoming emails from IMAP (`packages/api/src/lib/notification-watcher.ts:1602`, 
    - Reject if $T_{msg} > \text{now} + \text{tolerance}$ (future clock skew, `FEDERATION_TIMESTAMP_TOLERANCE_SEC`, default 300s).
    - Reject if $\text{now} > T_{exp}$ (task message has expired).
    - **Replay Deduplication:** Check bounded in-memory replay cache for `(task_id, event_kind, timestamp)`. If hit, drop idempotently.
-   - **Monotonic Advancement:** For state advancements (`event_kind === 'state'`), assert $T_{msg} > T_{\text{last\_seen}}$ (`packages/api/src/lib/tasks-internal.ts:872-876`). Reject out-of-order or stale transitions.
+   - **Monotonic Advancement [本 RFC 提议]:** For state advancements (`event_kind === 'state'`), the consumer MUST assert that the message timestamp is strictly newer than the last recorded state timestamp for that task: $T_{msg} > T_{\text{last\_seen}}$. Reject out-of-order or stale transitions.
 5. **Key Resolution via Strict Parameterized Fetcher:**
    - Query discovery cache for origin domain.
    - If cache miss, or if `<kid>` is unknown in cached document: perform rate-limited re-fetch using `federatedDiscoveryFetcher()` backed by `pinnedFetch` with `{ ssrfOptions: { publicEdge: true }, maxBytes: 10240, timeoutMs: 5000, deadlineMs: 5000 }` (§4.3).
@@ -411,7 +415,7 @@ Because SMTP is an open protocol, malicious external mail servers can send email
 
 #### Handling Rules
 1. **Never Trust Unsigned Task Headers:** An email from an external domain that carries `X-OA-Task` but lacks a valid `X-OA-Federation-Signature` MUST NOT be parsed into a task (`packages/api/src/lib/tasks-internal.ts:1041-1180`). It MUST return `null` from `parseTaskMessage()`.
-2. **Strict Demotion to Ordinary Mail:** The incoming email is still stored in the IMAP inbox for the recipient identity, but it possesses no task attributes, creates no task entry on the board, and cannot trigger agent wait-loops (`packages/api/src/lib/tasks-internal.ts:1945-1947`).
+2. **Strict Demotion to Ordinary Mail:** The incoming email is still stored in the IMAP inbox for the recipient identity, but it possesses no task attributes, creates no task entry on the board, and cannot trigger agent wait-loops (`parseTaskMessage()` fails closed and returns `null` at `packages/api/src/lib/tasks-internal.ts:1041-1180`, specifically `:1179`, preventing task board hydration or `notifyTrustedTaskDelivery`).
 3. **No Internal Stamp Injection:** Inbound federated or external emails are NEVER assigned a local `X-OA-Task-Stamp` or `X-OA-Mail-Stamp` (`packages/api/src/lib/mail-stamp.ts:137`), preventing elevation of privilege inside the local database.
 4. **Security Audit Log with Rate Limiting:** Whenever an email carrying `X-OA-Task-*` headers fails federated signature verification or arrives from an unlisted domain, a structured audit event `task_federation_spoof_attempt` is recorded (`packages/api/src/lib/audit.ts:117-142`). To protect against log flooding and rotation attacks (`packages/api/src/lib/audit.ts:94-112`), spoof attempt logging is rate-limited and deduplicated in memory by `(sender_domain, kid)` to at most 1 audit write per 60 seconds per tuple.
 
