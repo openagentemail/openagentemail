@@ -95,8 +95,8 @@ jobs:
           # 但**只对传播竞态类失败重试**：确定性错误（鉴权失败、server.json 校验
           # 不过等）立即失败，不空等；「已存在」视为成功（幂等）。ZCode P2-2 @ #283。
           MAX_ATTEMPTS=5
-          RC=0
           for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            RC=0
             OUT=$(./mcp-publisher publish 2>&1) || RC=$?
             printf '%s\n' "$OUT"
             if [ "$RC" -eq 0 ]; then
