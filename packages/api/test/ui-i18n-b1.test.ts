@@ -760,4 +760,91 @@ describe('console i18n R2 P1×4 (#137)', () => {
     });
     expect(unknown).toBe('Custom Channel Name');
   });
+
+  /**
+   * B-R3：空态句不得内插裸 filter 协议值；经 taskFilterDisplay → tasks.filter.*。
+   * en 值=原令牌，四 filter 输出逐字不变。
+   */
+  test('B-R3 P1-1：空态×四 filter 走 tasks.filter.* 显示映射', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '../src/ui/client/pages/tasks.js'),
+      'utf8',
+    );
+    expect(src).toContain(
+      "t('tasks.copy.noTasksIn') + taskFilterDisplay(filter) + t('tasks.copy.forThisPeriod')",
+    );
+    expect(src).not.toMatch(
+      /t\('tasks\.copy\.noTasksIn'\)\s*\+\s*filter\s*\+/,
+    );
+
+    for (const f of ['active', 'input-required', 'completed', 'failed'] as const) {
+      expect(I18N_EN[`tasks.filter.${f}`]).toBe(f);
+    }
+
+    const slice = src.slice(
+      src.indexOf('function taskFilterDisplay('),
+      src.indexOf('function taskStateToken('),
+    );
+    const renderSlice = src.slice(
+      src.indexOf('function renderTaskRows('),
+      src.indexOf('function fillTaskFromSelect('),
+    );
+    // 抽 taskFilterDisplay + 空态分支；桩 DOM/state
+    const calls: string[] = [];
+    const tFn = (key: string) => {
+      calls.push(key);
+      return I18N_EN[key] || key;
+    };
+    type FakeNode = { textContent: string; childNodes: unknown[]; replaceChildren: () => void; append: () => void };
+    const tasksStateNode = { textContent: '' };
+    const tasksShown = { textContent: '' };
+    const tasksRows: FakeNode = {
+      textContent: '',
+      childNodes: [],
+      replaceChildren() {
+        this.childNodes = [];
+      },
+      append() {},
+    };
+
+    for (const filter of ['active', 'input-required', 'completed', 'failed'] as const) {
+      calls.length = 0;
+      const state = {
+        tasksStatus: 'ready',
+        tasksFetchKey: `${filter}|30d|20`,
+        tasksFilter: filter,
+        tasksPeriod: '30d',
+        tasksLimit: 20,
+        tasks: [] as unknown[],
+        tasksTotalApprox: 0,
+        activeTaskId: '',
+        tasksMessage: '',
+      };
+      const render = new Function(
+        'document',
+        'state',
+        'tasksRows',
+        'tasksShown',
+        'tasksStateNode',
+        't',
+        'formatAgo',
+        'selectTask',
+        `${slice}\nfunction tasksFetchKey(){return [state.tasksFilter||'input-required',state.tasksPeriod||'30d',String(state.tasksLimit||20)].join('|');}\n${renderSlice}\nreturn renderTaskRows;`,
+      )(
+        { createElement: () => ({ className: '', textContent: '', childNodes: [], classList: { add() {} }, setAttribute() {}, append() {}, addEventListener() {} }) },
+        state,
+        tasksRows,
+        tasksShown,
+        tasksStateNode,
+        tFn,
+        () => '',
+        () => {},
+      ) as () => void;
+      render();
+      expect(calls).toContain(`tasks.filter.${filter}`);
+      expect(tasksStateNode.textContent).toBe(
+        `No tasks in "${filter}" for this period.`,
+      );
+    }
+  });
 });

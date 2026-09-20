@@ -116,3 +116,17 @@
 1. harness 增加 `taskStateDisplay` 桩参。
 2. 静态断言改为 `tasks.state.closed` / `tasks.state.` 动态键形态。
 3. 记录为预存/环境竞态；聚焦 160 pass；不挡 B-R2。
+
+## 2026-09-20 · B-R3（Codex P1×1 · 空态 filter 显示映射）
+
+### 我们实现了哪些功能？
+1. `taskFilterDisplay`：`t('tasks.filter.'+token)`，en 四键值=原令牌（active/input-required/completed/failed）。
+2. 空态句改 `taskFilterDisplay(filter)` 再内插；`all` 仍整句键。
+3. 全仓同形面终扫 17 条清单入 completion.md（仅 #1 需修；其余不适用/已合规）。
+4. 聚焦测试：空态×四 filter 断言走 `tasks.filter.*` 且 en 句逐字=`No tasks in "<token>" for this period.`。
+
+### 我们遇到了哪些错误？
+1. 无阻断错误；`tasks.state.input-required`=`Waiting for you` 与空态引号内原令牌冲突，故另开 `tasks.filter.*` 钉令牌。
+
+### 我们是如何解决这些错误的？
+1. 徽章继续用 `tasks.state.*`；空态/filter 引号用 `tasks.filter.*`（同源协议令牌、异展示面）。

@@ -84,6 +84,18 @@
     return mapped === key ? s : mapped;
   }
 
+  /**
+   * 空态/tab filter 协议值 → 可见文案。
+   * 与 tasks.state.* 同源令牌；en 值钉原令牌（空态引号内保持 input-required 等，异于徽章 Waiting for you）。
+   */
+  function taskFilterDisplay(filterToken) {
+    var s = filterToken ? String(filterToken) : '';
+    if (!s) return '—';
+    var key = 'tasks.filter.' + s;
+    var mapped = t(key);
+    return mapped === key ? s : mapped;
+  }
+
   function taskStateToken(task) {
     if (taskIsClosed(task)) return 'closed';
     if (approvalPastDeadline(task)) return 'past-deadline';
@@ -280,7 +292,7 @@
       var filter = state.tasksFilter || 'input-required';
       tasksStateNode.textContent = filter === 'all'
         ? t('tasks.copy.noTasksInThisPeriodRefresh')
-        : t('tasks.copy.noTasksIn') + filter + t('tasks.copy.forThisPeriod');
+        : t('tasks.copy.noTasksIn') + taskFilterDisplay(filter) + t('tasks.copy.forThisPeriod');
       return;
     }
     tasksStateNode.textContent = '';
