@@ -124,9 +124,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #134、#196/R3 与 #231 Connect 页面均为有意 UI 变更；更新前已确认差异有意。
     // #231 R6：Claude 卡 $OAE_TOKEN 零凭证命令后更新 UI_JS 针脚。
     // #162+#163：tasks 轮询旧∪新 sync + overview 硬停文案诚实化（纯 UI）。
-    // #137 B1-B：页面 call-site 全量迁移后 UI_JS 增长。
+    // #137 B1-B：页面 call-site 全量迁移后 UI_JS 增长；收口字面 ·/←。
     expect(sha256(UI_JS)).toBe(
-      '5a4a3f3ad191f682e80dc604f1e2e71288002ed39e06d33e7509df162ed47627',
+      'f7d022b051eeca7faa71e807b6994b22b4210c0c8e0933c97d2cd1fcf0f202df',
     );
     expect(sha256(UI_CSS)).toBe(
       'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',

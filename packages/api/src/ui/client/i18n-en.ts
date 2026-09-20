@@ -334,7 +334,7 @@ export const I18N_EN: Record<string, string> = {
 
   "shell.html.addresses": "Addresses",
   "shell.html.all": "All",
-  "shell.html.allAddressesU00b7CountsFromThe": "All addresses \\u00b7 counts from the newest 500 messages",
+  "shell.html.allAddressesU00b7CountsFromThe": "All addresses · counts from the newest 500 messages",
   "shell.html.allLevels": "All levels",
   "shell.html.backToFolders": "Back to folders",
   "shell.html.backToMessages": "Back to messages",
@@ -393,7 +393,7 @@ export const I18N_EN: Record<string, string> = {
   "shell.html.thisConnectionIsNotSecureOpen": "This connection is not secure. Open the inbox over HTTPS or an SSH tunnel before entering a token.",
   "shell.html.to": "To",
   "shell.html.treatThisTokenLikeAPassword": "Treat this token like a password. Do not paste it into chat, commit it, or share screenshots containing it.",
-  "shell.html.u2190Home": "\\u2190 Home",
+  "shell.html.u2190Home": "← Home",
   "shell.html.work": "Work",
   "shell.html.search": "Search",
   "shell.html.kitchenPhone": "Kitchen phone",
