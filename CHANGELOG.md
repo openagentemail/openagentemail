@@ -46,7 +46,7 @@ All notable changes to this project are documented here, one section per release
 - **观测面变化（#202, #270）**：四族游标拒收（messages / send / tasks / deliveries）现在打结构化日志，标签恰三枚封顶 `{family, shape, within_retention}`，隐私硬线不输出游标原文；**400 响应体逐字不变**。路由直传 decoder 真实种类（`parse_fail` / `lookup_miss`），旧的从游标字符串软解反推形状那一层整体退役。
 - **wait 钟族钉死（#214, #226）**：首次成功读钟即钉死 `performance` / `Date` 族，运行期 flip 直接抛错（响亮失败优于静默全超时）；`performance.now` 不可用时回退 `Date.now` 并 warn-once。
 - **单写者前提**：`WEBHOOK_LOG_MAX_ROWS` 等进程内上限与增量索引都假定**每信箱单 API 进程**，多进程写者会越界（已写进 `.env.example` / `compose.yaml`）。
-- `SOURCE_COMMIT` 出现在 `compose.yaml` / `compose.api-only.yaml`、`packages/api/README.md`（/healthz 节）、`packages/api/Dockerfile` 与 `packages/api/src/app.ts`；`XAGT_VERIFICATION_SLUG` 只出现在 compose 注释与 `packages/api/src/lib/config.ts`（README 未写）。两者均**未进** `.env.example` / `.env.api-only.example`；`/.well-known/xagent-verification.json` 端点目前除测试外无文档。
+- 配置位置盘点：`SOURCE_COMMIT` 出现在 `compose.yaml` / `compose.api-only.yaml`、`packages/api/Dockerfile`（build arg）、`packages/api/src/app.ts`、`packages/api/src/lib/config.ts` 与 `packages/api/README.md`（/healthz 节）；`XAGT_VERIFICATION_SLUG` **已作为环境变量接进** `compose.yaml` / `compose.api-only.yaml`（紧邻 `SOURCE_COMMIT` 的同段 `env`，无需改 compose 文件），另见 `packages/api/src/lib/config.ts`（README 未写）。两者均**未进** `.env.example` / `.env.api-only.example`——compose 部署者在自己 `.env` 里设这两个键即可；`/.well-known/xagent-verification.json` 端点目前除测试外无文档。
 
 ## v0.7.3 — 2026-09-13
 
