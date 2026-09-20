@@ -181,6 +181,60 @@ async function claimThenRenew(): Promise<{
   return { first, renewedUntil, claim1, renew1, sent };
 }
 
+/**
+ * #188：认证 claim + 两次续约，构造三窗口链（T1→T2→T3）。
+ * 返回各窗截止与邮件证据，供中间窗回执控制用例复用。
+ */
+async function claimThenTwoRenews(): Promise<{
+  first: Awaited<ReturnType<typeof claimTask>>;
+  until1: string;
+  until2: string;
+  until3: string;
+  claim1: RawTaskMessage;
+  renew1: RawTaskMessage;
+  renew2: RawTaskMessage;
+  sent: SendInput[];
+}> {
+  let durable = submittedTask();
+  const sent: SendInput[] = [];
+  setTaskNowForTests(() => START);
+  setTaskGetForTests(async () => durable);
+  setTaskSendMailForTests(async (input) => {
+    sent.push(input);
+    return { messageId: `<156-3w-${sent.length}>` };
+  });
+  const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+  const claim1 = (await parseCaptured(sent[0]!, 2))!;
+  durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+  clearQueuedEventsForTests();
+  setTaskGetForTests(async () => durable);
+  const renewA = await renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 600 });
+  const renew1 = (await parseCaptured(sent[1]!, 3))!;
+  const until2 = renewA.lease?.claimedUntil;
+  if (!until2 || Date.parse(until2) <= Date.parse(first.claimedUntil)) {
+    throw new Error('first renew must extend the window');
+  }
+  durable = taskFromMessages(ID, [submittedRaw(), claim1, renew1])!;
+  clearQueuedEventsForTests();
+  setTaskGetForTests(async () => durable);
+  const renewB = await renewTask({ id: ID, from: B, leaseToken: first.leaseToken, leaseSec: 900 });
+  const renew2 = (await parseCaptured(sent[2]!, 4))!;
+  const until3 = renewB.lease?.claimedUntil;
+  if (!until3 || Date.parse(until3) <= Date.parse(until2)) {
+    throw new Error('second renew must extend past the intermediate window');
+  }
+  return {
+    first,
+    until1: first.claimedUntil,
+    until2,
+    until3,
+    claim1,
+    renew1,
+    renew2,
+    sent,
+  };
+}
+
 describe('#156 RED-core: 同代续约后旧窗回执', () => {
   testOn('claim T1 -> renew T2 -> 迟到签名 expiry(T1)：重建成功且权威=T2，回执仅审计', async () => {
     const { first, renewedUntil, claim1, renew1 } = await claimThenRenew();
@@ -311,6 +365,40 @@ describe('#156 历史代与终态', () => {
       phantom: false,
       publicMessages: 4,
     });
+    // #186：终态下两条认证 expiry receipt 均保留在私有数组（不进公共投影）。
+    const receipts = rebuilt?.expiryReceipts ?? [];
+    expect(receipts).toHaveLength(2);
+    expect(receipts.map((r) => r.claimedUntil).sort()).toEqual(
+      [first.claimedUntil, renewedUntil].sort(),
+    );
+    expect(JSON.stringify(view)).not.toContain('expiryReceipts');
+  });
+
+  // #188：三窗口链——中间窗回执被接受且不清除后续（最终）权威。
+  testOn('claim T1 -> renew T2 -> renew T3 -> 中间窗 expiry(T2)：接受且权威仍=T3', async () => {
+    const { until2, until3, claim1, renew1, renew2, first } = await claimThenTwoRenews();
+    const midExpiry = (await parseCaptured(expiryDelivery({ claimedUntil: until2 }), 5))!;
+    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, renew1, renew2, midExpiry]);
+    expect({
+      rebuilt: rebuilt !== null,
+      generation: rebuilt?.lease?.leaseGeneration ?? null,
+      claimedUntil: rebuilt?.lease?.claimedUntil ?? null,
+      tokenCurrent: rebuilt ? isTaskLeaseTokenCurrent(rebuilt, first.leaseToken) : null,
+      noExpiredLease: rebuilt?.expiredLease === undefined,
+      publicMessages: rebuilt ? toTaskView(rebuilt).messages.length : 0,
+      phantom: rebuilt ? toTaskView(rebuilt).messages.some((m) => m.body === 'Lease expired.') : true,
+      privateReceipts: rebuilt?.expiryReceipts?.length ?? 0,
+    }).toEqual({
+      rebuilt: true,
+      generation: 1,
+      claimedUntil: until3,
+      tokenCurrent: true,
+      noExpiredLease: true,
+      publicMessages: 4,
+      phantom: false,
+      privateReceipts: 1,
+    });
+    expect(rebuilt?.expiryReceipts?.[0]?.claimedUntil).toBe(until2);
   });
 });
 
@@ -414,13 +502,18 @@ describe('#156 M2 精确证据退休与 OPEN 围栏', () => {
 
   bunTest('M2 off：同一 durable 流重建一致，无 journal 交互', async () => {
     await withM2Off(async () => {
+      // #187：隔离 journal，断言 flag-off 零持久化增量 + 零行；既有返回值断言保留。
+      isolateJournal();
       const { first, renewedUntil, claim1, renew1 } = await claimThenRenew();
       const expiryOld = (await parseCaptured(expiryDelivery({ claimedUntil: first.claimedUntil }), 4))!;
       const durable = taskFromMessages(ID, [submittedRaw(), claim1, renew1, expiryOld])!;
       setTaskGetForTests(async () => durable);
+      const before = journalPersistCountForTests();
       const detail = await getTask(ID);
       expect(detail?.lease?.claimedUntil).toBe(renewedUntil);
       expect(toTaskView(detail!).messages).toHaveLength(3);
+      expect(journalPersistCountForTests() - before).toBe(0);
+      expect(journalRecordsFor(ID)).toHaveLength(0);
     });
   });
 

@@ -14,6 +14,11 @@ import type { ImapFlow } from 'imapflow';
 import type { MailboxScanResult, ScanRecord } from '../src/lib/imap.ts';
 import type { MailboxSnapshot, ScanOutcome } from '../src/lib/overview-cache.ts';
 import type { UiApiDependencies } from '../src/routes/ui.ts';
+import {
+  createConfigurableFakeMailbox,
+  createFakeMailboxState,
+  DEFAULT_FAKE_UID_VALIDITY,
+} from './helpers/imap-fake-mailbox.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -42,6 +47,9 @@ let mailboxUids: number[] | null = null;
 let fetchOptionsSeen: unknown[] = [];
 let connections = 0;
 
+/** #201：共享可注入 UIDVALIDITY（默认 17n）。 */
+const fakeMailbox = createConfigurableFakeMailbox();
+
 class FakeImapFlow extends EventEmitter {
   constructor() {
     super();
@@ -49,7 +57,7 @@ class FakeImapFlow extends EventEmitter {
   }
   // 选中会话必须暴露当前代际，供后向列表在 search 前校验（#144 / REPAIR-FIXTURES-01）。
   get mailbox() {
-    return { uidValidity: 17n };
+    return fakeMailbox.mailbox;
   }
   async connect() {}
   async getMailboxLock() {
@@ -106,6 +114,8 @@ function resetMailbox() {
   mailboxUids = null;
   fetchOptionsSeen = [];
   connections = 0;
+  // #201：避免前一用例注入的非默认 uidValidity 串扰
+  fakeMailbox.resetUidValidity();
 }
 
 function fakeMessage(
@@ -1585,5 +1595,20 @@ describe('Overview 缓存状态机', () => {
     // ⑥公开签名里都没有 now 尾参
     expect(cache.getOverview.length).toBe(1);
     expect(cacheSource).not.toMatch(/getOverview\([^)]*now/);
+  });
+});
+
+describe('#201 IMAP fake UIDVALIDITY 可注入复用示范', () => {
+  test('非默认 uidValidity 注入后 FakeImapFlow.mailbox 回显；复位回 17n', () => {
+    // 快照工厂：缺省仍是历史常量
+    expect(createFakeMailboxState().uidValidity).toBe(DEFAULT_FAKE_UID_VALIDITY);
+    expect(createFakeMailboxState({ uidValidity: 42n }).uidValidity).toBe(42n);
+
+    // 可变控制器：注入 → FakeImapFlow 读到非默认值 → 复位
+    fakeMailbox.setUidValidity(99n);
+    const client = new FakeImapFlow();
+    expect(client.mailbox.uidValidity).toBe(99n);
+    fakeMailbox.resetUidValidity();
+    expect(client.mailbox.uidValidity).toBe(DEFAULT_FAKE_UID_VALIDITY);
   });
 });
