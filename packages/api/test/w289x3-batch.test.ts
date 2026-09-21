@@ -320,6 +320,51 @@ describe('#289 webhook URL reject details + log', () => {
     });
   });
 
+  // R5：空串不得被 update truthiness 门短路成 200 no-op
+  test('create+update: empty url string → invalid_webhook_url + details malformed_url', async () => {
+    const createRes = await app.request('/v1/webhooks', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: '',
+        address: 'alice@test.example',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+      }),
+    });
+    expect(createRes.status).toBe(400);
+    expect(await createRes.json()).toEqual({
+      error: 'invalid_webhook_url',
+      details: 'malformed_url',
+    });
+
+    const sub = createWebhookSubscription({
+      url: 'https://example.com/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const updateRes = await app.request(`/v1/webhooks/${sub.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: '' }),
+    });
+    expect(updateRes.status).toBe(400);
+    expect(await updateRes.json()).toEqual({
+      error: 'invalid_webhook_url',
+      details: 'malformed_url',
+    });
+    // 空串不得写入；订阅 URL 保持原值
+    expect(getWebhookSubscription(sub.id)?.url).toBe('https://example.com/hook');
+  });
+
   // R3 反向负控：合法但不可达 URL（dns_empty）行为不变
   test('create: reachable-shape URL with empty DNS still invalid_webhook_url without details', async () => {
     setWebhookDnsLookupForTests(async () => []);

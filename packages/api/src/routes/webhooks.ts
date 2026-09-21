@@ -510,7 +510,7 @@ export const webhooksRoute = new Hono()
     let urlChanged = false;
     let isPrivateTarget = sub.privateTargetGranted;
 
-    if (parsed.data.url && parsed.data.url !== sub.url) {
+    if (parsed.data.url !== undefined && parsed.data.url !== sub.url) {
       urlChanged = true;
       const resolution = await validateWebhookUrlResolution(parsed.data.url, {
         allowPrivateTargets: config.webhooks.allowPrivateTargets,
@@ -534,7 +534,8 @@ export const webhooksRoute = new Hono()
     }
 
     const updated = updateWebhookSubscription(sub.id, (s) => {
-      if (parsed.data.url) s.url = parsed.data.url;
+      // 空串已在上方校验门被拦；此处与 :513 同款用 !== undefined
+      if (parsed.data.url !== undefined) s.url = parsed.data.url;
       if (parsed.data.events) s.events = parsed.data.events;
       if (parsed.data.contentScope) s.contentScope = parsed.data.contentScope;
       if (parsed.data.description !== undefined) s.description = parsed.data.description;
