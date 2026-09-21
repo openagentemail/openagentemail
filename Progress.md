@@ -429,3 +429,19 @@
 ### 基线与证据
 - HEAD：`fc371bcb053eba61f3501049e3c0a09fad2d2819`
 - 材料：`/home/ops/materials/137-b2/completion.md` R1 节
+
+## 2026-09-21 · w137b2 R2（Intl 跟随 html lang）
+
+### 我们实现了哪些功能？
+1. `uiLang()` + `formatDate`/`formatDay`/`formatClock`/`formatNumber` 传 `document.documentElement.lang`，选择器 locale 驱动日期/数字格式。
+
+### 我们遇到了哪些错误？
+1. 无功能性错误；金标 UI_JS 需随 api.js 变更刷新。
+
+### 我们是如何解决这些错误的？
+1. 更新 `ui-real-files` pin；R2 单测钉死源码面 + en/de 运行面。
+
+### 基线与证据
+- HEAD：`06563a5a4789093239f81abc1fe74891a098d910`
+- 全量：1933 pass / 9 skip / 1 fail（#149 flake）
+- 材料：`completion.md` R2 节
