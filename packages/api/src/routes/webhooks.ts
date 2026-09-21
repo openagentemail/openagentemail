@@ -40,6 +40,8 @@ import {
   readDeliveryLogRows,
   redeliverWebhookDelivery,
   validateWebhookUrlResolution,
+  logWebhookUrlRejected,
+  webhookUrlRejectionResponseBody,
   type WebhookDeliveryLogRow,
 } from '../lib/webhook-delivery.ts';
 import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
@@ -251,14 +253,14 @@ export const webhooksRoute = new Hono()
         allowPrivateTargets: config.webhooks.allowPrivateTargets,
       });
       if (!resolution.valid) {
+        // #289：白名单 details + 拒绝点日志（URL 原文不入）
+        logWebhookUrlRejected({
+          reason: resolution.error,
+          address: targetAddress,
+        });
         return {
           status: 400,
-          body: {
-            error:
-              resolution.code === 'webhook_target_forbidden'
-                ? 'webhook_target_forbidden'
-                : 'invalid_webhook_url',
-          },
+          body: webhookUrlRejectionResponseBody(resolution.code, resolution.error),
         };
       }
 
@@ -514,13 +516,14 @@ export const webhooksRoute = new Hono()
         allowPrivateTargets: config.webhooks.allowPrivateTargets,
       });
       if (!resolution.valid) {
+        // #289：白名单 details + 拒绝点日志（update 带 webhookId）
+        logWebhookUrlRejected({
+          reason: resolution.error,
+          address: sub.address,
+          webhookId: sub.id,
+        });
         return c.json(
-          {
-            error:
-              resolution.code === 'webhook_target_forbidden'
-                ? 'webhook_target_forbidden'
-                : 'invalid_webhook_url',
-          },
+          webhookUrlRejectionResponseBody(resolution.code, resolution.error),
           400,
         );
       }

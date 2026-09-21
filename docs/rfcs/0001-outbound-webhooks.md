@@ -1510,6 +1510,16 @@ plus a reason expresses strictly more than two overlapping on/off switches.
   dead-lettered immediately rather than queued, so a dead endpoint cannot accumulate an
   unbounded backlog over the three-day retry horizon (§8.3).
 
+**Lazy cleanup of in-flight retries is intentional (not eager cancel).** Attempts that were
+already queued *before* disablement are **not** cancelled at the disable moment. They settle
+when `runExecuteJob` next fires for that job: if the endpoint is then `disabled`, the job is
+deleted and a dead-letter row is written with `reason=webhook_disabled`. The dead-letter
+timestamp is therefore the **settlement** time, not the disable time. Two tracks coexist by
+design: (1) new events after disable are dead-lettered immediately; (2) pre-disable queued
+retries are cleaned lazily at settlement. Ping-path threshold trips follow the same rule as
+the main delivery path: retryable outcomes convert in place to permanent
+(`reason=webhook_disabled`) and do not schedule a further attempt.
+
 **Disablement threshold: consecutive failed *attempts*, reset on any success.** Per decision
 **D2a** (§17), which overrode this document's proposal:
 

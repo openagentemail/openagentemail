@@ -27,7 +27,7 @@ UTF-8 字节数。满 8_000 units 时，头体积随字符编码 **与 JSON 转�
 | reason 单字段 `JSON.stringify(reason)` | ≈8_002 B | ≈24_002 B | **48_002 B** | 仅 reason 字符串字段，**不是**完整 lease 事件体 |
 | 完整事件 canonical JSON 体 | ≈ 8.1–8.3 KiB | ≈ **24.1 KiB** | **48_181 B**（#82 NUL 用例实测） | 含 `version` / `event` / `actor` / `at` / `generation` / `tokenVerifier` + reason |
 | `X-OA-Task-Lease-Payload` base64url | **≈ 10.9 KiB** | **≈ 31.3 KiB** | **64_242 chars ≈ 62.7 KiB**（#82 NUL 用例实测） | `ceil(jsonBytes / 3) * 4` |
-| 折行后线上行数 | 视 MTA 折行宽 | 同左 | 同左，显著更多 | 生产解析 **接受 MIME 中介重折**（strip 空白后再严格 base64url） |
+| 折行后线上行数 | 视 MTA 折行宽 | 同左 | 同左，显著更多 | 生产解析（lease + approval）**接受 MIME 中介重折**（strip 空白后再严格 base64url） |
 
 演算核对（写全；估算式仅辅助，权威以用例实测为准）：
 
@@ -126,9 +126,9 @@ Gmail 满载 BMP 一点＋Exchange/SES/其它 SMTP，需业主提供的测试账
 3. 经商用中继前，用公开表做风险预判；对 Gmail：**满 bound 控制字符/lone surrogate reason（≈62.7KiB）必超其 32KB 单头上限（552 硬拒）**；满载 BMP（32,251 chars）在限内——探测至 31,320B 已逐字节保留，满载点待实弹（见上表 Gmail 行）。
 4. 回归：`packages/api` 内 `task-lease-core` 对 8k reason 的 folding/unfolding
    走 **mailparser 生产解析路径**（非 mock）；见该文件 R17 / #82 语料（ASCII + CJK + NUL 满 bound）。
-   生产 `readLeaseEventPayload` **接受 MIME 中介重折**：对头值 strip 全部空白后再做
-   严格 base64url round-trip 校验。安全性：base64url 字母表不含空白，删除无歧义；
-   非法非空白字符（如 `!!!!`）strip 后仍拒——容忍重折 ≠ 容忍垃圾。
+   生产 `readLeaseEventPayload` 与 `readApprovalPayloadHeader` **均接受 MIME 中介重折**：
+   对头值 strip 全部空白后再做严格 base64url round-trip 校验。安全性：base64url 字母表不含空白，
+   删除无歧义；非法非空白字符（如 `!!!!`）strip 后仍拒——容忍重折 ≠ 容忍垃圾。
 
 5. 绑定栈上满载 reason 头实测有 **59_820 字符截断点**（2026-09-21，当前发送形态；机制未定位）：
    **仅 JSON 转义膨胀档**（控制字符 / lone surrogate，payload ≈62.7 KiB）会触到该点——满载 BMP/CJK

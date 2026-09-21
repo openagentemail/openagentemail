@@ -1227,6 +1227,69 @@ export function stopWebhookMaintenance(): void {
 /**
  * Static validation of webhook URL before persistence (§9.5).
  */
+/**
+ * #289 白名单：可写入调用方响应 `details` 的 URL 拒绝 reason（前 8 条）。
+ * 排除 `http_target_must_be_private` / `dns_empty` / `dns_lookup_failed` /
+ * `ssrf_blocked_ip`——仅进服务端日志，响应逐字节同现状。
+ */
+export const WEBHOOK_URL_REJECT_DETAILS_WHITELIST = [
+  'malformed_url',
+  'unsupported_protocol',
+  'http_requires_private_targets',
+  'userinfo_forbidden',
+  'query_string_forbidden',
+  'fragment_forbidden',
+  'port_not_allowed',
+  'ip_literal_forbidden',
+] as const;
+
+export type WebhookUrlRejectDetailsReason =
+  (typeof WEBHOOK_URL_REJECT_DETAILS_WHITELIST)[number];
+
+const WEBHOOK_URL_REJECT_DETAILS_SET: ReadonlySet<string> = new Set(
+  WEBHOOK_URL_REJECT_DETAILS_WHITELIST,
+);
+
+/** 判断 reason 是否允许出现在调用方 `details` 字段。 */
+export function isWebhookUrlRejectDetailsWhitelisted(reason: string): boolean {
+  return WEBHOOK_URL_REJECT_DETAILS_SET.has(reason);
+}
+
+/**
+ * 构造 URL 拒绝响应体：白名单内附 `details:'<reason>'`；白名单外仅粗码。
+ * `error` 值与改前逐字节一致。
+ */
+export function webhookUrlRejectionResponseBody(
+  code: 'invalid_webhook_url' | 'webhook_target_forbidden',
+  reason: string,
+): { error: 'invalid_webhook_url' | 'webhook_target_forbidden'; details?: string } {
+  const error: 'invalid_webhook_url' | 'webhook_target_forbidden' =
+    code === 'webhook_target_forbidden' ? 'webhook_target_forbidden' : 'invalid_webhook_url';
+  if (isWebhookUrlRejectDetailsWhitelisted(reason)) {
+    return { error, details: reason };
+  }
+  return { error };
+}
+
+/**
+ * 拒绝点无条件日志（#289 B）：单行 JSON；不含 URL 原文/查询/用户信息。
+ * reason 为机器码，不得回显用户可控子串。
+ */
+export function logWebhookUrlRejected(fields: {
+  reason: string;
+  address: string;
+  webhookId?: string;
+}): void {
+  console.warn(
+    JSON.stringify({
+      kind: 'webhook_url_rejected',
+      reason: fields.reason,
+      address: fields.address,
+      ...(fields.webhookId ? { webhookId: fields.webhookId } : {}),
+    }),
+  );
+}
+
 export function validateWebhookUrlStatic(
   urlStr: string,
   opts?: {
@@ -2751,6 +2814,7 @@ export async function executeWebhookTestProbe(
       webhookId: subscription.id,
     });
   } else if (countsTowardCircuitBreaker('webhook.ping', fetchResult.outcome, subscription)) {
+    // #290 B：ping 熔断对齐主路径——置位后补 audit、retryable 就地转 permanent，不再排 attempt-2
     updateWebhookSubscription(subscription.id, (s) => {
       s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
       if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
@@ -2758,9 +2822,27 @@ export async function executeWebhookTestProbe(
         s.disabledReason = 'threshold';
       }
     });
+
+    const updated = getWebhookSubscription(subscription.id);
+    if (updated?.state === 'disabled') {
+      recordAuditEvent({
+        event: 'webhook.disabled',
+        outcome: 'ok',
+        address: subscription.address,
+        webhookId: subscription.id,
+      });
+      if (fetchResult.outcome === 'retryable') {
+        fetchResult = {
+          ...fetchResult,
+          outcome: 'permanent',
+          reason: 'webhook_disabled',
+        };
+      }
+    }
   }
 
   let nextScheduledTime: number | null = null;
+  // 熔断转 permanent 后此处不再进分支，故不调 deliveryQueue.schedule
   if (fetchResult.outcome === 'retryable') {
     nextScheduledTime = calculateNextAttemptTime(1, Date.now(), { isPing: true });
     if (nextScheduledTime) {
