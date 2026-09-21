@@ -11,13 +11,13 @@
 | 产品名 | openagent.email / OpenAgent Email / MCP / ntfy / Creem / Hosted Pro |
 | 凭据面术语 | admin key / API token（行文可作首现式注记，如「管理密钥 (admin key)」） |
 | 协议/技术词 | catch-all / OTP / URL / API 字段名 / CLI 命令 / 错误码字面（如 `invalid_cursor`） |
-| 结构性内容 | 代码**语法与标识符**（命令、字段、路径、Mermaid/PlantUML 语法行）——**块内自然语言可译**（参与者标签/消息文案/注释/示例叙述），锚实践=README.zh-CN:30-40 同款 Mermaid 全译形态 |
+| 结构性内容 | 代码**语法与标识符**（命令、字段、路径、Mermaid/PlantUML 语法行）——**块内自然语言可译**（参与者标签/消息文案/注释/示例叙述），锚实践=README.zh-CN「任务流转」Mermaid 时序图（自然语言全译形态；引图不引行号防漂移） |
 
 ## 2. 术语表（zh-CN 锚；es/ja/ko 译名待落串时补充列）
 
 | EN（源） | zh-CN（锚） | 备注 |
 |---|---|---|
-| identity | 身份邮箱地址 | |
+| identity | 身份地址 | 措辞对齐锚源 README.zh-CN「身份地址/身份令牌」用法 |
 | task ticket | 任务工单 | |
 | push tier | 推送档位 | |
 | connected apps | 已连接应用 | |
@@ -37,4 +37,5 @@
 ## 4. 演进记录
 
 - v0（2026-09-21）：建档，种子=R0 v2 附录 B。
-- v0.1（同日）：Codex P1 采纳——「代码块整体不译」收窄为「语法与标识符不译、块内自然语言可译」（锚实践=README.zh-CN:30-40 Mermaid 全译）。
+- v0.1（同日）：Codex P1 采纳——「代码块整体不译」收窄为「语法与标识符不译、块内自然语言可译」（锚实践=README.zh-CN Mermaid 全译）。
+- v0.2（同日）：CR 2 Minor 采纳——行号锚改稳定锚（引图不引行号）；identity 措辞对齐锚源「身份地址」。
