@@ -881,8 +881,12 @@ function readApprovalPayloadHeader(value: unknown): { payload: ApprovalEventPayl
 function readLeaseEventPayload(value: unknown): { event: LeaseEvent; canonical: string } | null {
   if (typeof value !== 'string' || !value) return null;
   try {
-    const bytes = Buffer.from(value, 'base64url');
-    if (!bytes.length || bytes.toString('base64url') !== value) return null;
+    // 接受 MIME 中介重折：mailparser 等会把续行 WSP 留在头值内。
+    // base64url 字母表不含空白，删除全部空白无歧义；strip 后仍走严格 round-trip 校验。
+    const compact = value.replace(/\s+/g, '');
+    if (!compact) return null;
+    const bytes = Buffer.from(compact, 'base64url');
+    if (!bytes.length || bytes.toString('base64url') !== compact) return null;
     const canonical = bytes.toString('utf8');
     const parsed = JSON.parse(canonical) as Record<string, unknown>;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;

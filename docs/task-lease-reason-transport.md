@@ -24,7 +24,7 @@ UTF-8 字节数。满 8_000 units 时，头体积随字符的 UTF-8 宽度剧烈
 | `reason` UTF-8 字节 | 8_000 | **24_000**（每字 3 bytes） | JSON 字符串按 UTF-8 编码进 canonical 体 |
 | Canonical JSON 体 | ≈ 8.1–8.3 KiB | ≈ **24.1 KiB**（约 24_100 B 级，含定长字段） | 另含 `version` / `event` / `actor` / `at` / `generation` / `tokenVerifier` 等 |
 | `X-OA-Task-Lease-Payload` base64url | **≈ 10.9 KiB** | **≈ 31.3 KiB** | `ceil(jsonBytes / 3) * 4` |
-| 折行后线上行数 | 视 MTA/客户端折行宽 | 同左，行数更多 | nodemailer 出站常按 ≈76–78 列折；解析侧须 unfold 后再 base64url 解码 |
+| 折行后线上行数 | 视 MTA/客户端折行宽 | 同左，行数更多 | nodemailer 出站常按 ≈76–78 列折；生产解析 **接受 MIME 中介重折**（strip 空白后再严格 base64url） |
 
 演算核对（写全）：
 
@@ -77,3 +77,6 @@ dogfood 路径做满 bound（含非 ASCII）release 往返（本仓 CI 不代替
 3. 经商用中继前，用公开表做风险预判；**避免对 Gmail 等 32KB 单头上限路径使用满 bound 多字节 reason**，或在目标 hop **自行**实测（**未实测**条目不得省略）。
 4. 回归：`packages/api` 内 `task-lease-core` 对 8k reason 的 folding/unfolding
    走 **mailparser 生产解析路径**（非 mock）；见该文件 R17 / #82 语料（ASCII + CJK 满 bound）。
+   生产 `readLeaseEventPayload` **接受 MIME 中介重折**：对头值 strip 全部空白后再做
+   严格 base64url round-trip 校验。安全性：base64url 字母表不含空白，删除无歧义；
+   非法非空白字符（如 `!!!!`）strip 后仍拒——容忍重折 ≠ 容忍垃圾。

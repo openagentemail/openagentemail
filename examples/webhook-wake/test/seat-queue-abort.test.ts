@@ -300,4 +300,56 @@ describe('dedup.share waiter aggregate (#229 P1-1)', () => {
     expect(retry.json.disposition).toBe('submitted');
     expect(woken).toHaveLength(2);
   });
+
+  test('阴性对照：单请求（无其他 waiter）超时 → 仍须正常弃队', async () => {
+    let releaseHold!: () => void;
+    const holdGate = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const holdWakeStarted = Promise.withResolvers<void>();
+    const woken: string[] = [];
+    const wake: WakeFn = async (req) => {
+      woken.push(req.text);
+      if (woken.length === 1) {
+        holdWakeStarted.resolve();
+        await holdGate;
+      }
+      return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
+    };
+
+    // 故意违反 headroom（requestTimeoutMs >= sendTimeoutMs+2000）以触发排队超时，勿当可运行配置样例
+    const receiver = await startReceiver(
+      testConfig({ mode: 'canary', requestTimeoutMs: 100, sendTimeoutMs: 800 }),
+      { wake },
+    );
+    receivers.push(receiver);
+
+    const holdBody = mailBody({ id: 'evt_hold0003-2222-3333-4444-555555555555' });
+    const pHold = postHook(receiver, { body: holdBody });
+    await holdWakeStarted.promise;
+    expect(woken).toHaveLength(1);
+
+    const soloBody = mailBody({
+      id: 'evt_solo0001-2222-3333-4444-555555555555',
+      data: { address: 'alice@openagent.email', messageId: 'solo-1' },
+    });
+    const pSolo = postHook(receiver, { body: soloBody });
+    const rSolo = await pSolo;
+    expect(rSolo.status).toBe(503);
+    expect(rSolo.json.reason).toBe('request_timeout');
+    // 单 waiter 走光 → 聚合 abort → 排队弃队：solo 不得 spawn
+    expect(woken).toHaveLength(1);
+    expect(receiver.metrics.shareAbandoned).toBeGreaterThanOrEqual(1);
+
+    releaseHold();
+    await pHold;
+    await Bun.sleep(80);
+    expect(woken).toHaveLength(1);
+
+    // dedup 键未消费：重试走首验
+    const retry = await postHook(receiver, { body: soloBody });
+    expect(retry.status).toBe(200);
+    expect(retry.json.disposition).toBe('submitted');
+    expect(woken).toHaveLength(2);
+  });
 });

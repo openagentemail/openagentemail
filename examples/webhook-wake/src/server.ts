@@ -507,6 +507,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       disposition: result.disposition,
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.sends != null ? { sends: result.sends } : {}),
+      ...(result.submitted != null ? { submitted: result.submitted } : {}),
     });
   };
 
