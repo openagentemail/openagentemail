@@ -367,6 +367,8 @@ export const I18N_JA: Record<string, string> = {
   "shell.html.filterChannel": "チャンネルを絞り込む",
   "shell.html.folders": "フォルダー",
   "shell.html.formTokensNeverEnterTheAddress": "フォームのトークンがアドレスバーに入ることはなく、ページに保存されることもありません。直接の ?token= リンクは読み込み時に取り除かれますが、ブラウザーの履歴やサーバーのアクセスログに残る場合があります。",
+  "shell.html.dateFrom": "開始日",
+  "shell.html.dateTo": "終了日",
   "shell.html.from": "差出人",
   "shell.html.giveACodingAgentSecureAccess": "インスタンスの MCP エンドポイントを通じて、コーディングエージェントにこのアイデンティティへの安全なアクセスを許可します。",
   "shell.html.giveThisPhoneANameYou": "後で見分けられる名前を、このスマートフォンに付けてください。パスワードは一度だけ表示されます。",

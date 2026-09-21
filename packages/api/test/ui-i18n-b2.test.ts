@@ -41,7 +41,7 @@ const LOCALES = [
 describe('console i18n B2 (#137)', () => {
   test('① 键集全等 ×4：每 locale ≡ I18N_EN', () => {
     const enKeys = Object.keys(I18N_EN).sort();
-    expect(enKeys.length).toBe(508);
+    expect(enKeys.length).toBe(510);
     for (const { code, dict } of LOCALES) {
       const keys = Object.keys(dict).sort();
       expect(keys, `${code} key parity`).toEqual(enKeys);
@@ -138,6 +138,21 @@ describe('console i18n B2 (#137)', () => {
 
   test('getUiI18nDict：en undefined；四语非空', () => {
     expect(getUiI18nDict('en')).toBeUndefined();
-    expect(Object.keys(getUiI18nDict('ja')!).length).toBe(508);
+    expect(Object.keys(getUiI18nDict('ja')!).length).toBe(510);
+  });
+
+  test('P1 自审修复：Alerts 日期筛标签 ≠ 邮件 From/To', () => {
+    // shell.html.from/to 保留邮件头语义；dateFrom/dateTo 专供 notify 日期筛
+    expect(I18N_EN['shell.html.from']).toBe('From');
+    expect(I18N_EN['shell.html.dateFrom']).toBe('From');
+    expect(I18N_ZH_CN['shell.html.from']).toBe('发件人');
+    expect(I18N_ZH_CN['shell.html.dateFrom']).toBe('开始日期');
+    expect(I18N_ES['shell.html.dateFrom']).toBe('Desde');
+    expect(I18N_JA['shell.html.dateTo']).toBe('終了日');
+    expect(I18N_KO['shell.html.dateTo']).toBe('종료일');
+    const zh = renderUiHtml('zh-CN', I18N_ZH_CN);
+    expect(zh).toMatch(/for="notify-from">开始日期</);
+    expect(zh).toMatch(/for="notify-to">结束日期</);
+    expect(zh).not.toMatch(/for="notify-from">发件人</);
   });
 });

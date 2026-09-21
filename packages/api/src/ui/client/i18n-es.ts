@@ -367,6 +367,8 @@ export const I18N_ES: Record<string, string> = {
   "shell.html.filterChannel": "Filtrar canal",
   "shell.html.folders": "Carpetas",
   "shell.html.formTokensNeverEnterTheAddress": "Los tokens de formulario nunca entran en la barra de direcciones y la página no los almacena. Los enlaces directos con ?token= se eliminan al cargar, pero pueden permanecer en el historial del navegador o en los registros de acceso del servidor.",
+  "shell.html.dateFrom": "Desde",
+  "shell.html.dateTo": "Hasta",
   "shell.html.from": "De",
   "shell.html.giveACodingAgentSecureAccess": "Dé a un agente de programación acceso seguro a esta identidad a través del endpoint MCP de la instancia.",
   "shell.html.giveThisPhoneANameYou": "Dé a este teléfono un nombre que pueda reconocer más adelante. La contraseña se muestra una sola vez.",

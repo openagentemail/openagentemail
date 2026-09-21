@@ -367,6 +367,8 @@ export const I18N_KO: Record<string, string> = {
   "shell.html.filterChannel": "채널 필터",
   "shell.html.folders": "폴더",
   "shell.html.formTokensNeverEnterTheAddress": "폼 토큰은 주소 표시줄에 입력되지 않으며 페이지에 저장되지 않습니다. 직접 전달된 ?token= 링크는 로드 시 제거되지만 브라우저 기록이나 서버 접근 로그에 남을 수 있습니다.",
+  "shell.html.dateFrom": "시작일",
+  "shell.html.dateTo": "종료일",
   "shell.html.from": "보낸 사람",
   "shell.html.giveACodingAgentSecureAccess": "인스턴스 MCP 엔드포인트를 통해 코딩 에이전트에 이 아이덴티티에 대한 안전한 접근 권한을 부여합니다.",
   "shell.html.giveThisPhoneANameYou": "나중에 알아볼 수 있는 이름을 이 휴대폰에 지정하십시오. 비밀번호는 한 번만 표시됩니다.",

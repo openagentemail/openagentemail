@@ -373,6 +373,8 @@ export const I18N_EN: Record<string, string> = {
   "shell.html.filterChannel": "Filter channel",
   "shell.html.folders": "Folders",
   "shell.html.formTokensNeverEnterTheAddress": "Form tokens never enter the address bar and are not stored by the page. Direct ?token= links are stripped on load, but may linger in browser history or server access logs.",
+  "shell.html.dateFrom": "From",
+  "shell.html.dateTo": "To",
   "shell.html.from": "From",
   "shell.html.giveACodingAgentSecureAccess": "Give a coding agent secure access to this identity through the instance MCP endpoint.",
   "shell.html.giveThisPhoneANameYou": "Give this phone a name you will recognize later. The password is shown once.",

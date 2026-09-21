@@ -367,6 +367,8 @@ export const I18N_ZH_CN: Record<string, string> = {
   "shell.html.filterChannel": "筛选通道",
   "shell.html.folders": "文件夹",
   "shell.html.formTokensNeverEnterTheAddress": "表单令牌不会进入地址栏，页面也不会存储它们。直接携带 ?token= 的链接会在加载时被剥离，但仍可能残留在浏览器历史记录或服务器访问日志中。",
+  "shell.html.dateFrom": "开始日期",
+  "shell.html.dateTo": "结束日期",
   "shell.html.from": "发件人",
   "shell.html.giveACodingAgentSecureAccess": "通过实例 MCP 端点，为编码 Agent 提供访问此身份的安全通道。",
   "shell.html.giveThisPhoneANameYou": "为这部手机起一个你以后能认出的名称。密码只显示一次。",
