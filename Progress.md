@@ -247,5 +247,6 @@
 
 ### 基线与证据
 - 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`e5b4e0952d14c2241dedfdd2109eb8eace62b223`
 - 聚焦 `7d`：1 pass；全量：1915 pass / 9 skip / 1 fail（list-rate isolate flake）
 - grep：`compose.yaml` 仅 `NTFY_INTERNAL_URL: http://ntfy:2587`；`config.ts:211` 仍 `envUrl('http://ntfy')`
