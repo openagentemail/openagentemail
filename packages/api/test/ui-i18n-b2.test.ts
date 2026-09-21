@@ -169,4 +169,29 @@ describe('console i18n B2 (#137)', () => {
       expect(I18N_ZH_CN[key]).not.toBe(I18N_EN[key]);
     }
   });
+
+  test('R2：Intl formatters 跟随 document.documentElement.lang', () => {
+    // 源码面：不再把 undefined/空参交给 Intl（会锁死浏览器默认 locale）
+    expect(UI_JS).not.toContain('Intl.DateTimeFormat(undefined');
+    expect(UI_JS).toContain('function uiLang()');
+    expect(UI_JS).toContain('document.documentElement.lang');
+    const fmtChunk = UI_JS.slice(
+      UI_JS.indexOf('function uiLang()'),
+      UI_JS.indexOf('function formatAgo('),
+    );
+    expect(fmtChunk).toContain('new Intl.DateTimeFormat(uiLang()');
+    expect(fmtChunk).toContain('new Intl.NumberFormat(uiLang())');
+    expect(fmtChunk).not.toMatch(/new Intl\.NumberFormat\(\s*\)/);
+
+    // 运行面：同函数体随 lang 切换（数字分组在 en vs de 上可区分）
+    const formatNumber = new Function(
+      'document',
+      `${fmtChunk}\nreturn formatNumber;`,
+    ) as (doc: { documentElement: { lang: string } }) => (n: number) => string;
+    const enOut = formatNumber({ documentElement: { lang: 'en' } })(1234567);
+    const deOut = formatNumber({ documentElement: { lang: 'de' } })(1234567);
+    expect(enOut).toBe(new Intl.NumberFormat('en').format(1234567));
+    expect(deOut).toBe(new Intl.NumberFormat('de').format(1234567));
+    expect(enOut).not.toBe(deOut);
+  });
 });

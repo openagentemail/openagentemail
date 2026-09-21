@@ -129,8 +129,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #137 B2：语言选择器 cookie 写入 + Settings 组 lang select 样式。
     // #137 B2 fix：dateFrom/dateTo 键拆分后 I18N_EN→I18N_JS 体积变化。
     // #137 B2 R1：oauth.error.* 三键入 I18N_EN。
+    // #137 B2 R2：Intl formatters 跟随 document.documentElement.lang。
     expect(sha256(UI_JS)).toBe(
-      '10af954a22bdee6b07e6530ef128f6a998b59a0c9926b54b99d7457a4b68e918',
+      '86824aed2d667a059820225d5a088ea83b05ac8a2f60d7611d287ccf117f842f',
     );
     expect(sha256(UI_CSS)).toBe(
       '17972c8d27e939a4472b159f36e7b0277b64ce61bcb94efe94adf0b0ed39710b',

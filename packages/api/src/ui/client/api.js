@@ -443,10 +443,15 @@
     confirmModalConfirm.focus();
   }
 
+  /** #137 B2 R2：Intl 跟随壳层 <html lang>（会话 locale）；缺省回落 en。 */
+  function uiLang() {
+    return (document.documentElement && document.documentElement.lang) || 'en';
+  }
+
   function formatDate(value) {
     var date = new Date(value);
     if (Number.isNaN(date.getTime())) return value || '';
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat(uiLang(), {
       month: 'short',
       day: 'numeric',
       hour: 'numeric',
@@ -457,7 +462,7 @@
   function formatDay(value) {
     var date = new Date(value);
     if (Number.isNaN(date.getTime())) return '';
-    return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+    return new Intl.DateTimeFormat(uiLang(), { month: 'short', day: 'numeric' }).format(date);
   }
 
   function formatClock(value, withSeconds) {
@@ -466,11 +471,11 @@
     var options = withSeconds
       ? { hour: '2-digit', minute: '2-digit', second: '2-digit' }
       : { hour: '2-digit', minute: '2-digit' };
-    return new Intl.DateTimeFormat(undefined, options).format(date);
+    return new Intl.DateTimeFormat(uiLang(), options).format(date);
   }
 
   function formatNumber(value) {
-    return new Intl.NumberFormat().format(value);
+    return new Intl.NumberFormat(uiLang()).format(value);
   }
 
   function formatAgo(value) {
