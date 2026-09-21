@@ -1564,6 +1564,13 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       // #305：已鉴权但与残留权威时间窗冲突 → 按无效事件出账（不推进权威、不整卡丢弃）。
       if (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil)) {
         noteClaimWindowConflictDegraded(id, lease.generation, lease.claimedUntil);
+        // 证据记账：同代后续 renew/release/expired 走 historical / accepted 窗路径，而非整卡 null。
+        // 不写 leaseAuthority / firstClaimedAt（权威仍停前窗）。
+        appliedClaims.set(lease.generation, lease);
+        recordAcceptedWindow(lease.generation, lease.claimedUntil);
+        // 代际游标推进（同 tombstone）：否则下一代 claim 仍因 generation 序整卡 null。
+        // 「不推进权威」指 leaseAuthority/firstClaimedAt，不含本游标。
+        previousGeneration = lease.generation;
         duplicateLeaseMessages.add(message);
         continue;
       }
@@ -2144,7 +2151,10 @@ let overlayReplayExpiredCount = 0;
 let overlayReplayExpiredLastWarnAt = 0;
 /** #305：claim 窗冲突降级审计去重；键=taskId:generation:claimedUntil，有界插入序淘汰。 */
 export const CLAIM_WINDOW_CONFLICT_DEGRADED_SEEN_CAP = 1024;
+/** #305：进程级 audit 限频——即使去重表被稳定扫描序击穿，窗口内最多写 1 条。 */
+export const CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS = 60 * 1000;
 const claimWindowConflictDegradedSeen = new Map<string, true>();
+let claimWindowConflictDegradedLastAuditAt = 0;
 
 type QueuedEvent = {
   message: TaskMessage;
@@ -2291,6 +2301,7 @@ export function clearQueuedEventsForTests(): void {
   overlayReplayExpiredLastWarnAt = 0;
   // #305：降级审计去重器同样清掉，避免跨用例串味。
   claimWindowConflictDegradedSeen.clear();
+  claimWindowConflictDegradedLastAuditAt = 0;
 }
 
 /** 测试可读：累计首次停播次数。 */
@@ -2528,7 +2539,8 @@ function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs
 
 /**
  * #305：已鉴权 claim 与残留权威时间窗冲突时记一条 audit。
- * 同键（taskId:generation:claimedUntil）进程内只审计一次，防读路径刷屏。
+ * 同键（taskId:generation:claimedUntil）进程内只审计一次；另加全局限频，
+ * 防止 >cap 稳定扫描序击穿 FIFO 去重表后每轮整批重写 audit。
  * 原因编码在事件名中（窗口冲突）；不落 reason 原文或任何载荷字段。
  */
 function noteClaimWindowConflictDegraded(
@@ -2543,12 +2555,27 @@ function noteClaimWindowConflictDegraded(
     if (oldest !== undefined) claimWindowConflictDegradedSeen.delete(oldest);
   }
   claimWindowConflictDegradedSeen.set(key, true);
+  // 全局限频（照 noteLeaseOverlayReplayExpired）：击穿去重表时仍有界。
+  const now = nowMs();
+  if (now - claimWindowConflictDegradedLastAuditAt < CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS) {
+    return;
+  }
+  claimWindowConflictDegradedLastAuditAt = now;
   recordAuditEvent({
     event: 'task.lease.claim_window_conflict_degraded',
     outcome: 'denied',
     taskId,
     leaseGeneration: generation,
   });
+}
+
+/** 测试缝：直打降级审计去重/限频（构造 >cap 击穿无需全量签名重建）。 */
+export function noteClaimWindowConflictDegradedForTests(
+  taskId: string,
+  generation: number,
+  claimedUntil: string,
+): void {
+  noteClaimWindowConflictDegraded(taskId, generation, claimedUntil);
 }
 
 /**

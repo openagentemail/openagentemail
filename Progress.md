@@ -507,5 +507,21 @@
 - Baseline：`6dc4368`（origin/main）
 - HEAD：`3da97f9f87f9daaa8074adeb3e2eca2c323453f0`
 - PR：https://github.com/openagentemail/openagentemail/pull/309
-- Subagent：`2d66df28-0749-4696-8e77-efa904018ee3` → `/home/ops/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/2d66df28-0749-4696-8e77-efa904018ee3/2d66df28-0749-4696-8e77-efa904018ee3.jsonl`
+- Subagent：`2d66df28-0749-4696-8e77-efa904018ee3` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/2d66df28-0749-4696-8e77-efa904018ee3/2d66df28-0749-4696-8e77-efa904018ee3.jsonl`
 - 完工报：`/home/ops/materials/305/completion.md`
+
+## 2026-09-21 · w305 #305 R2 闸变返工
+
+### 我们实现了哪些功能？
+1. **P1**：降级冲突 claim 以证据记账——`appliedClaims.set` + `recordAcceptedWindow`；不写 `leaseAuthority`/`firstClaimedAt`；`previousGeneration` 作代际游标推进（同 tombstone），否则下一代 claim 仍整卡 null。
+2. **P2**：降级 audit 加全局限频（`CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS`），防 >cap FIFO 击穿整批重写。
+3. **测试**：冲突 claim + renew/release/expired/next-claim 四场景正/负控参数化；>cap 审计有界；公开面断言改为 `claim2.at`（CR nitpick）。
+4. **P3**：Progress 路径 `~` 化；`leaseGeneration` 非有限静默丢弃补注释。
+
+### 我们遇到了哪些错误？
+1. FC 卡字面「不动 previousGeneration」与测试④「下一代 claim 可读」冲突——不推进游标则 gen 序仍整卡 null。
+2. 全量偶发 `#272` dist-build-lock / `#206` wait-precedence 超时（预存/环境，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 游标推进、权威字段不动；完工报写明偏离与理由（Codex P1 / tombstone 同型）。
+2. 聚焦 14/14 绿；完报注明全量 flake。

@@ -1,7 +1,8 @@
 /**
  * #305：读侧降级——已鉴权但与残留权威时间窗冲突的 claim
- * 不再整卡 return null，而是按无效事件出账 + audit。
+ * 不再整卡 return null；以证据记账 + audit（R2：同代后续事件可 historical 出账）。
  */
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +27,9 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
-const { setFindTaskMessagesForTests } = await import('../src/lib/tasks-internal.ts');
+const {
+  setFindTaskMessagesForTests,
+} = await import('../src/lib/tasks-internal.ts');
 const {
   claimLeaseHeadersForTests,
   parseTaskMessageForTests,
@@ -42,6 +45,11 @@ const NEIGHBOR = '305c3207-056e-47c1-a65c-b29d39f66b84';
 const A = 'alpha@test.example';
 const B = 'bravo@test.example';
 const START = Date.parse('2026-08-24T00:00:00.000Z');
+const CLAIM1_AT = new Date(START).toISOString();
+const CLAIM1_UNTIL = new Date(START + 300_000).toISOString();
+const CONFLICT_AT = new Date(START + 60_000).toISOString();
+const CONFLICT_UNTIL = new Date(START + 360_000).toISOString();
+const CONFLICT_VERIFIER = 'y'.repeat(43);
 
 function submittedRaw(id = ID): RawTaskMessage {
   return {
@@ -105,6 +113,33 @@ async function liveVerifier(id = ID): Promise<string> {
   return payload.tokenVerifier;
 }
 
+/** 前缀：handoff + claim1 + 窗冲突 claim2（降级证据）。 */
+async function conflictPrefix(verifier: string): Promise<{
+  claim1: RawTaskMessage;
+  claim2: RawTaskMessage;
+  prefix: RawTaskMessage[];
+}> {
+  const claim1 = await signedLease(ID, 2, {
+    version: 1, event: 'claim', actor: B, at: CLAIM1_AT, generation: 1,
+    claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
+  });
+  const claim2 = await signedLease(ID, 3, {
+    version: 1, event: 'claim', actor: B, at: CONFLICT_AT, generation: 2,
+    claimedUntil: CONFLICT_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+  });
+  return { claim1, claim2, prefix: [submittedRaw(), claim1, claim2] };
+}
+
+/** 权威仍停前窗（gen1）。 */
+function expectAuthorityUnmoved(task: Task | null): void {
+  expect(task).not.toBeNull();
+  expect(task?.lease).toMatchObject({
+    leaseGeneration: 1,
+    claimedUntil: CLAIM1_UNTIL,
+    firstClaimedAt: CLAIM1_AT,
+  });
+}
+
 afterEach(() => {
   setTaskNowForTests(null);
   setTaskGetForTests(null);
@@ -117,32 +152,18 @@ afterEach(() => {
 describe('#305 claim window conflict degrade', () => {
   test('正1: 冲突 claim 降级——整卡可读、权威=前窗、消息隐藏、audit 恰一条', async () => {
     const verifier = await liveVerifier();
-    const claim1At = new Date(START).toISOString();
-    const claim1Until = new Date(START + 300_000).toISOString();
-    // claim2.at 仍落在 claim1 窗内 → 与残留权威冲突（模拟坏 release 被 parse 丢弃后的 re-claim）
-    const claim2At = new Date(START + 60_000).toISOString();
-    const claim2Until = new Date(START + 360_000).toISOString();
-    const claim1 = await signedLease(ID, 2, {
-      version: 1, event: 'claim', actor: B, at: claim1At, generation: 1,
-      claimedUntil: claim1Until, tokenVerifier: verifier,
-    });
-    const claim2 = await signedLease(ID, 3, {
-      version: 1, event: 'claim', actor: B, at: claim2At, generation: 2,
-      claimedUntil: claim2Until, tokenVerifier: 'y'.repeat(43),
-    });
+    const { claim1, claim2, prefix } = await conflictPrefix(verifier);
 
     resetAuditForTests();
     clearQueuedEventsForTests();
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, claim2]);
-    expect(rebuilt).not.toBeNull();
-    expect(rebuilt?.lease).toMatchObject({
-      leaseGeneration: 1,
-      claimedUntil: claim1Until,
-      firstClaimedAt: claim1At,
-    });
+    const rebuilt = taskFromMessages(ID, prefix);
+    expectAuthorityUnmoved(rebuilt);
     // claim2 按重复事件隐藏：公开消息仅 handoff + claim1
     expect(toTaskView(rebuilt!).messages).toHaveLength(2);
     expect(toTaskView(rebuilt!).messages.map((m) => m.state)).toEqual(['submitted', 'working']);
+    // 公开面不含冲突 claim 的事件时间（消息 date 取 lease.at=claim2.at；
+    // 勿断言 claim2.claimedUntil——公开 claimedUntil 只来自 task.lease/gen1，该串永不会出现）
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
 
     const audits = readAuditEvents({ event: 'task.lease.claim_window_conflict_degraded', limit: 10 });
     expect(audits).toHaveLength(1);
@@ -152,15 +173,13 @@ describe('#305 claim window conflict degrade', () => {
       taskId: ID,
       leaseGeneration: 2,
     });
-    // 不得回显 reason 原文或载荷类字段
     expect(audits[0]).not.toHaveProperty('reason');
-    expect(JSON.stringify(audits[0])).not.toContain(claim2Until);
+    expect(JSON.stringify(audits[0])).not.toContain(CONFLICT_UNTIL);
 
     // 同键再重建不刷屏
-    expect(taskFromMessages(ID, [submittedRaw(), claim1, claim2])).not.toBeNull();
+    expect(taskFromMessages(ID, prefix)).not.toBeNull();
     expect(readAuditEvents({ event: 'task.lease.claim_window_conflict_degraded', limit: 10 })).toHaveLength(1);
 
-    // getTaskSnapshot 路径：hadMatchingRows 时不再 fail-closed 404
     setTaskGetForTests(null);
     setFindTaskMessagesForTests(async () => ({
       hadMatchingRows: true,
@@ -168,36 +187,21 @@ describe('#305 claim window conflict degrade', () => {
     }));
     const snapped = await getTask(ID);
     expect(snapped?.lease?.leaseGeneration).toBe(1);
-    expect(snapped?.lease?.claimedUntil).toBe(claim1Until);
+    expect(snapped?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
   });
 
   test('正2+正3: 邻单不受影响；列表重建包含降级单', async () => {
     const verifier = await liveVerifier();
     const neighborVerifier = await liveVerifier(NEIGHBOR);
-    const claim1Until = new Date(START + 300_000).toISOString();
-    const claim1At = new Date(START).toISOString();
-    const conflictAt = new Date(START + 30_000).toISOString();
-
-    const badThread = [
-      submittedRaw(ID),
-      await signedLease(ID, 2, {
-        version: 1, event: 'claim', actor: B, at: claim1At, generation: 1,
-        claimedUntil: claim1Until, tokenVerifier: verifier,
-      }),
-      await signedLease(ID, 3, {
-        version: 1, event: 'claim', actor: B, at: conflictAt, generation: 2,
-        claimedUntil: new Date(START + 360_000).toISOString(), tokenVerifier: 'z'.repeat(43),
-      }),
-    ];
+    const { prefix: badThread } = await conflictPrefix(verifier);
     const neighborThread = [
       submittedRaw(NEIGHBOR),
       await signedLease(NEIGHBOR, 2, {
-        version: 1, event: 'claim', actor: B, at: claim1At, generation: 1,
-        claimedUntil: claim1Until, tokenVerifier: neighborVerifier,
+        version: 1, event: 'claim', actor: B, at: CLAIM1_AT, generation: 1,
+        claimedUntil: CLAIM1_UNTIL, tokenVerifier: neighborVerifier,
       }),
     ];
 
-    // 模拟 scanDurableTasks 的「逐单重建 + 静默过滤 null」列表路径
     const listed = [ID, NEIGHBOR]
       .map((id) => taskFromMessages(id, id === ID ? badThread : neighborThread))
       .filter((task): task is Task => !!task);
@@ -205,32 +209,27 @@ describe('#305 claim window conflict degrade', () => {
     expect(listed.find((t) => t.id === ID)?.lease?.leaseGeneration).toBe(1);
     expect(listed.find((t) => t.id === NEIGHBOR)?.lease).toMatchObject({
       leaseGeneration: 1,
-      claimedUntil: claim1Until,
+      claimedUntil: CLAIM1_UNTIL,
     });
   });
 
   test('负1: 无冲突 claim（合法 release 后 re-claim）行为不变', async () => {
     const verifier = await liveVerifier();
-    const claim1At = new Date(START).toISOString();
-    const claim1Until = new Date(START + 300_000).toISOString();
-    const releaseAt = new Date(START + 120_000).toISOString();
     const claim2At = new Date(START + 180_000).toISOString();
     const claim2Until = new Date(START + 480_000).toISOString();
-    const claim2Verifier = 'w'.repeat(43);
-
     const history = [
       submittedRaw(),
       await signedLease(ID, 2, {
-        version: 1, event: 'claim', actor: B, at: claim1At, generation: 1,
-        claimedUntil: claim1Until, tokenVerifier: verifier,
+        version: 1, event: 'claim', actor: B, at: CLAIM1_AT, generation: 1,
+        claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
       }),
       await signedLease(ID, 3, {
-        version: 1, event: 'release', actor: B, at: releaseAt, generation: 1,
-        tokenVerifier: verifier, reason: 'handoff',
+        version: 1, event: 'release', actor: B, at: new Date(START + 120_000).toISOString(),
+        generation: 1, tokenVerifier: verifier, reason: 'handoff',
       }),
       await signedLease(ID, 4, {
         version: 1, event: 'claim', actor: B, at: claim2At, generation: 2,
-        claimedUntil: claim2Until, tokenVerifier: claim2Verifier,
+        claimedUntil: claim2Until, tokenVerifier: 'w'.repeat(43),
       }),
     ];
 
@@ -241,7 +240,7 @@ describe('#305 claim window conflict degrade', () => {
     expect(rebuilt?.lease).toMatchObject({
       leaseGeneration: 2,
       claimedUntil: claim2Until,
-      firstClaimedAt: claim1At,
+      firstClaimedAt: CLAIM1_AT,
     });
     expect(rebuilt?.releasedLease).toBeUndefined();
     expect(readAuditEvents({ event: 'task.lease.claim_window_conflict_degraded', limit: 5 })).toHaveLength(0);
@@ -249,14 +248,10 @@ describe('#305 claim window conflict degrade', () => {
 
   test('负2: 鉴权不弱化——坏签名 lease 仍被 parse 层丢弃', async () => {
     const verifier = await liveVerifier();
-    const claim1At = new Date(START).toISOString();
-    const claim1Until = new Date(START + 300_000).toISOString();
     const claim1 = await signedLease(ID, 2, {
-      version: 1, event: 'claim', actor: B, at: claim1At, generation: 1,
-      claimedUntil: claim1Until, tokenVerifier: verifier,
+      version: 1, event: 'claim', actor: B, at: CLAIM1_AT, generation: 1,
+      claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
     });
-
-    // 伪造 payload：改 generation 但不重签 → parse 丢弃
     const headers = claimLeaseHeadersForTests({
       id: ID,
       state: 'working',
@@ -264,10 +259,7 @@ describe('#305 claim window conflict degrade', () => {
       to: A,
       event: {
         version: 1, event: 'claim', actor: B,
-        at: new Date(START + 60_000).toISOString(),
-        generation: 2,
-        claimedUntil: new Date(START + 360_000).toISOString(),
-        tokenVerifier: 'f'.repeat(43),
+        at: CONFLICT_AT, generation: 2, claimedUntil: CONFLICT_UNTIL, tokenVerifier: 'f'.repeat(43),
       },
     });
     const forgedPayload = JSON.parse(
@@ -284,30 +276,157 @@ describe('#305 claim window conflict degrade', () => {
       internalDate: new Date(START + 60_000),
     } as unknown as FetchMessageObject, ID);
     expect(forged).toBeNull();
-
-    // 仅 claim1 入账；权威仍为 gen1
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1]);
-    expect(rebuilt?.lease?.leaseGeneration).toBe(1);
+    expect(taskFromMessages(ID, [submittedRaw(), claim1])?.lease?.leaseGeneration).toBe(1);
   });
 
   test('负3: 降级=忽略≠接受——冲突 claim 不获得权威', async () => {
     const verifier = await liveVerifier();
-    const claim1Until = new Date(START + 300_000).toISOString();
-    const claim1 = await signedLease(ID, 2, {
-      version: 1, event: 'claim', actor: B, at: new Date(START).toISOString(), generation: 1,
-      claimedUntil: claim1Until, tokenVerifier: verifier,
-    });
-    const claim2 = await signedLease(ID, 3, {
-      version: 1, event: 'claim', actor: B,
-      at: new Date(START + 10_000).toISOString(), generation: 2,
-      claimedUntil: new Date(START + 400_000).toISOString(), tokenVerifier: 'n'.repeat(43),
+    const { prefix } = await conflictPrefix(verifier);
+    const rebuilt = taskFromMessages(ID, prefix);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt!.lease?.leaseGeneration).toBe(1);
+    expect(rebuilt!.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    expect(rebuilt!.lease?.firstClaimedAt).toBe(CLAIM1_AT);
+    expect(rebuilt!.lease?.tokenVerifier === verifier).toBe(true);
+    expect(toTaskView(rebuilt!).messages).toHaveLength(2);
+    // 同上：断言 claim2.at（CONFLICT_AT），非 claim2.claimedUntil
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
+  });
+});
+
+describe('#305 R2 同代后续事件不出整卡 null', () => {
+  type FollowOn = 'renew' | 'release' | 'expired' | 'next-claim';
+
+  const cases: Array<{
+    name: FollowOn;
+    build: (uid: number) => Promise<RawTaskMessage>;
+    bad: (uid: number) => Promise<RawTaskMessage>;
+  }> = [
+    {
+      name: 'renew',
+      build: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'renew', actor: B,
+        at: new Date(START + 90_000).toISOString(),
+        generation: 2,
+        claimedUntil: new Date(START + 420_000).toISOString(),
+        tokenVerifier: CONFLICT_VERIFIER,
+      }),
+      // verifier 不符 → 仍 fail-closed
+      bad: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'renew', actor: B,
+        at: new Date(START + 90_000).toISOString(),
+        generation: 2,
+        claimedUntil: new Date(START + 420_000).toISOString(),
+        tokenVerifier: 'x'.repeat(43),
+      }),
+    },
+    {
+      name: 'release',
+      build: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'release', actor: B,
+        at: new Date(START + 90_000).toISOString(),
+        generation: 2,
+        tokenVerifier: CONFLICT_VERIFIER,
+        reason: 'done',
+      }),
+      bad: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'release', actor: B,
+        at: new Date(START + 90_000).toISOString(),
+        generation: 2,
+        tokenVerifier: 'x'.repeat(43),
+        reason: 'done',
+      }),
+    },
+    {
+      name: 'expired',
+      build: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'expired', actor: 'server',
+        at: CONFLICT_UNTIL, generation: 2,
+        claimedUntil: CONFLICT_UNTIL, expiredAt: CONFLICT_UNTIL,
+      }),
+      // 未知窗 → 仍 fail-closed
+      bad: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'expired', actor: 'server',
+        at: new Date(START + 999_000).toISOString(),
+        generation: 2,
+        claimedUntil: new Date(START + 999_000).toISOString(),
+        expiredAt: new Date(START + 999_000).toISOString(),
+      }),
+    },
+    {
+      name: 'next-claim',
+      // 仍落在 claim1 窗内 → 再次降级；权威不推进
+      build: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'claim', actor: B,
+        at: new Date(START + 120_000).toISOString(),
+        generation: 3,
+        claimedUntil: new Date(START + 480_000).toISOString(),
+        tokenVerifier: 'z'.repeat(43),
+      }),
+      // generation 跳号（缺 gen3 证据却直接 gen4）→ 仍 fail-closed
+      bad: (uid) => signedLease(ID, uid, {
+        version: 1, event: 'claim', actor: B,
+        at: new Date(START + 120_000).toISOString(),
+        generation: 4,
+        claimedUntil: new Date(START + 480_000).toISOString(),
+        tokenVerifier: 'z'.repeat(43),
+      }),
+    },
+  ];
+
+  for (const c of cases) {
+    test(`R2 正控: 冲突 claim + ${c.name} → 可读且权威不推进`, async () => {
+      const verifier = await liveVerifier();
+      const { prefix } = await conflictPrefix(verifier);
+      const follow = await c.build(4);
+      const rebuilt = taskFromMessages(ID, [...prefix, follow]);
+      expectAuthorityUnmoved(rebuilt);
+      // 冲突 claim 与后续 historical/降级事件均不进公开面
+      expect(toTaskView(rebuilt!).messages).toHaveLength(2);
     });
 
-    const rebuilt = taskFromMessages(ID, [submittedRaw(), claim1, claim2])!;
-    expect(rebuilt.lease?.leaseGeneration).toBe(1);
-    expect(rebuilt.lease?.claimedUntil).toBe(claim1Until);
-    expect(rebuilt.lease?.tokenVerifier).toBe(verifier);
-    // 公开面不含冲突 claim 的时间戳
-    expect(JSON.stringify(toTaskView(rebuilt))).not.toContain('2026-08-24T00:06:40.000Z');
+    test(`R2 负控: 冲突 claim + 坏 ${c.name} 仍拒（整卡 fail-closed）`, async () => {
+      const verifier = await liveVerifier();
+      const { prefix } = await conflictPrefix(verifier);
+      const bad = await c.bad(4);
+      expect(taskFromMessages(ID, [...prefix, bad])).toBeNull();
+    });
+  }
+});
+
+describe('#305 R2 audit 去重表击穿有界', () => {
+  test('>cap 稳定键扫描：全局限频下 audit 写入有界', async () => {
+    const {
+      noteClaimWindowConflictDegradedForTests,
+      CLAIM_WINDOW_CONFLICT_DEGRADED_SEEN_CAP: cap,
+    } = await import('../src/lib/tasks-internal.ts');
+
+    resetAuditForTests();
+    clearQueuedEventsForTests();
+    setTaskNowForTests(() => START);
+
+    const keys = Array.from({ length: cap + 1 }, (_, i) => ({
+      taskId: randomUUID(),
+      generation: 2,
+      claimedUntil: new Date(START + 360_000 + i).toISOString(),
+    }));
+
+    // 第一轮：>cap 不同键填满 FIFO 去重表
+    for (const k of keys) {
+      noteClaimWindowConflictDegradedForTests(k.taskId, k.generation, k.claimedUntil);
+    }
+    expect(readAuditEvents({
+      event: 'task.lease.claim_window_conflict_degraded',
+      limit: 1000,
+    }).length).toBe(1);
+
+    // 第二轮：相同稳定序再扫——无全局限频时 FIFO 击穿会整批重写
+    for (const k of keys) {
+      noteClaimWindowConflictDegradedForTests(k.taskId, k.generation, k.claimedUntil);
+    }
+    expect(readAuditEvents({
+      event: 'task.lease.claim_window_conflict_degraded',
+      limit: 1000,
+    }).length).toBe(1);
   });
 });

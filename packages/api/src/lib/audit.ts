@@ -175,6 +175,7 @@ export function recordAuditEvent(
     ...(partial.taskId !== undefined
       ? { taskId: scrubAuditField(partial.taskId, 64) }
       : {}),
+    // 非有限 leaseGeneration 静默丢弃（不抛——审计不得拖垮读路径）
     ...(partial.leaseGeneration !== undefined
       && Number.isFinite(partial.leaseGeneration)
       ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
