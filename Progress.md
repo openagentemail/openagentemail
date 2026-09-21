@@ -250,3 +250,21 @@
 - HEAD：`e5b4e0952d14c2241dedfdd2109eb8eace62b223`
 - 聚焦 `7d`：1 pass；全量：1915 pass / 9 skip / 1 fail（list-rate isolate flake）
 - grep：`compose.yaml` 仅 `NTFY_INTERNAL_URL: http://ntfy:2587`；`config.ts:211` 仍 `envUrl('http://ntfy')`
+
+## 2026-09-20 · w278 R3（Codex P1×2 · bare 缺省 + 升级注释）
+
+### 我们实现了哪些功能？
+1. **P1-2**：`config.ts` `NTFY_INTERNAL_URL` 缺省 → `envUrl('http://ntfy:2587')`（与 listen-http 锁步；显式 env 仍覆盖）。
+2. **P1-1 文档锚**：compose ntfy 节补升级 chown 注释；PR/completion 写明 sweep→chown→up 次序。
+3. `notify.test.ts` mock URL 针脚随缺省更新；`7d` 旁说明同步。
+
+### 我们遇到了哪些错误？
+1. 改缺省后既有 `http://ntfy/v1/...` 断言必红（两处）。
+
+### 我们是如何解决这些错误的？
+1. 针脚改为 `http://ntfy:2587/v1/...`；全量 **1916 pass / 0 fail**。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- 材料：`/home/ops/materials/278/completion.md`（R3 追记）
+- 部署面：compose 已显式注入；bare 缺省现与 :2587 自洽

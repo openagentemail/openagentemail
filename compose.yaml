@@ -200,6 +200,7 @@ services:
     image: binwiederhier/ntfy:v2
     container_name: openagent-ntfy
     # #278：非 root（与 api/ntfy-provision 同 uid）；listen-http :2587 >1024 才可不特权绑定。
+    # 升级既有部署：若 cache.db/auth.db 曾以 root 属主存在，up 前须先 chown 1000:1000（#278 窗内清单第一步）。
     user: "1000:1000"
     depends_on:
       ntfy-provision:

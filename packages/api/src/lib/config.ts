@@ -208,7 +208,9 @@ const envSchema = z.object({
   WEBHOOK_RATE_CREATE_PER_MIN: z.coerce.number().int().min(0).default(10),
   WEBHOOK_RATE_TEST_PER_MIN: z.coerce.number().int().min(0).default(3),
   WEBHOOK_RATE_DELIVER_PER_MIN: z.coerce.number().int().min(0).default(60),
-  NTFY_INTERNAL_URL: envUrl('http://ntfy'),
+  // #278 R3：与 server.yml listen-http :2587 锁步；bare 不设 env 时 API 缺省打同一口。
+  // 显式 NTFY_INTERNAL_URL 仍覆盖（compose 已注入 http://ntfy:2587）。
+  NTFY_INTERNAL_URL: envUrl('http://ntfy:2587'),
   // Path as seen by the ntfy container. The API writes the same named volume
   // at /app/data, so this must not be derived from DATA_DIR.
   NTFY_STORAGE_DIR: z.string().min(1).default('/var/lib/openagentemail/ntfy'),

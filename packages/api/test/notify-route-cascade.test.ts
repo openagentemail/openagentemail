@@ -623,8 +623,8 @@ describe('#235 deleteIdentity notify route cascade', () => {
   });
 
   // #278：生成器写出 >1024 listen-http，配合 compose 非 root。
-  // 部署面锁步（非本测断言）：compose api.NTFY_INTERNAL_URL=http://ntfy:2587
-  // （config.ts 缺省仍 envUrl('http://ntfy')——env 驱动；compose 注入覆盖。grep 证据见 materials/278/completion.md）。
+  // 部署面锁步：compose 显式 NTFY_INTERNAL_URL=http://ntfy:2587；config 缺省同为 :2587（R3 bare 自洽）。
+  // （显式 env 仍覆盖。grep/关系见 materials/278/completion.md）。
   test('7d. writeServerConfig 生成 listen-http :2587（#278 去 root）', async () => {
     mockNtfyOk();
     await initializeNotifications();
