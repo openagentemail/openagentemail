@@ -459,3 +459,28 @@
 
 ### 基线与证据
 - 材料：`completion.md` R3 节
+
+## 2026-09-21 · w251 README 大改（#251 first PR / R0 A）
+
+### 我们实现了哪些功能？
+1. 自 `origin/main`=`b4fb8841` 建分支 `w251-readme-overhaul`；四件已验素材原样 `cp` 入 `docs/assets/251/`（sha256 与 materials 一致）。
+2. 根 README / README.zh-CN：See it work（封面+MP4 相对链、脚手架披露）；Human visibility 挂 tasks 截图；架构 Mermaid 补齐 DATA_DIR/lease journal/执行在外。
+3. `tools.ts` 头注释 16→25；`docs/architecture.md` 基线注刷新；`DESIGN.md` 资产路径；`docs/i18n-glossary.md` 锚「看它工作」。
+4. PR #307 Addresses #251；completion 落盘 `/home/ops/materials/251-readme/completion.md`；subagent 自审 PASS-WITH-NOTES。
+
+### 我们遇到了哪些错误？
+1. 未装依赖时 `bun test` 大量 fail（缺 hono / MCP SDK）。
+2. 全量 api 测试 #206 `wait-precedence-r9` 偶发 25s 超时（已知 flake）。
+3. markdownlint 对 GitHub 英雄 HTML 报 MD033（既有形态，非本卡引入）。
+
+### 我们是如何解决这些错误的？
+1. `packages/api` + `packages/mcp` 执行 `bun install` 后复跑。
+2. 单文件复跑 `bun test ./test/wait-precedence-r9.test.ts` → 2 pass；完报注明 flake。
+3. 不改英雄 HTML 去过 lint；link/anchor 自检 123/0 + JSON 示例 OK。
+
+### 基线与证据
+- Baseline：`b4fb884147f8613c2f858e9d1e726daa732e3fbd`
+- HEAD：`7fbb2e9443cdd84a7bc58f07e49811d26b29269c`
+- PR：https://github.com/openagentemail/openagentemail/pull/307
+- 测试：api 1933p/9s/#206 flake 复跑绿；mcp 48p/0f
+- Subagent：`b2a13616-dafb-4779-bc2c-078ebdf62d95` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w251/agent-transcripts/b2a13616-dafb-4779-bc2c-078ebdf62d95/`
