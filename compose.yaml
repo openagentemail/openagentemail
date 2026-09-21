@@ -277,7 +277,8 @@ services:
       SMTP_TLS_REJECT_UNAUTHORIZED: ${SMTP_TLS_REJECT_UNAUTHORIZED:-false}
       # --- server-side ntfy notifications (agents never receive these creds) ---
       NTFY_ENABLED: ${NTFY_ENABLED:-true}
-      NTFY_INTERNAL_URL: http://ntfy
+      # #278 R2：容器内 listen-http :2587；缺省 http://ntfy（:80）会让 API 发布/配对假绿断连。
+      NTFY_INTERNAL_URL: http://ntfy:2587
       NTFY_STORAGE_DIR: /var/lib/openagentemail/ntfy
       NOTIFY_PUBLIC_URL: ${NOTIFY_PUBLIC_URL:-http://127.0.0.1:2586}
       NTFY_UPSTREAM: ${NTFY_UPSTREAM:-true}

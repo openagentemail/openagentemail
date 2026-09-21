@@ -229,3 +229,23 @@
 - 材料：`/home/ops/materials/278/`
 - subagent 自审：`be1c3f15-83dd-4bc6-8243-f2d8b75913f7` · verdict PASS
 - 全量 api：1915 pass / 9 skip / 1 fail（#206 预存 timeout）
+
+## 2026-09-20 · w278 R2（Codex P1×1 · NTFY_INTERNAL_URL 层序漏点）
+
+### 我们实现了哪些功能？
+1. `compose.yaml` api：`NTFY_INTERNAL_URL: http://ntfy` → `http://ntfy:2587`（与 listen-http/ports/healthcheck 锁步）。
+2. `config.ts` 缺省 `envUrl('http://ntfy')` **不动**（env 驱动；compose 注入覆盖）。
+3. `7d` 旁中文说明部署面锁步；compose 非单测面 → completion 记 grep 证据。
+
+### 我们遇到了哪些错误？
+1. R0/窗前卡漏改内部 URL：healthcheck 绿但 API 仍打 :80 → 配对/发布断连（FC 亲验属实）。
+2. 全量套件偶发 `list-rate isolate parent` 红（预存 flake，与本修无关）。
+
+### 我们是如何解决这些错误的？
+1. 只改 compose 注入面一行 + 注释；不动代码缺省。
+2. 预存 flake 记 completion，不挡合入。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- 聚焦 `7d`：1 pass；全量：1915 pass / 9 skip / 1 fail（list-rate isolate flake）
+- grep：`compose.yaml` 仅 `NTFY_INTERNAL_URL: http://ntfy:2587`；`config.ts:211` 仍 `envUrl('http://ntfy')`
