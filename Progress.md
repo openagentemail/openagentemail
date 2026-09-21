@@ -502,3 +502,10 @@
 1. 在 `packages/api` 执行 `bun install` 后复跑。
 2. 测试改为直引 `tasks-internal.setFindTaskMessagesForTests`，并在 snapshot 断言前 `setTaskGetForTests(null)`。
 3. 完报注明 #206 flake；聚焦 5/5 绿；全量 1938 pass / 9 skip / 1 fail(#206)。
+
+### 基线与证据
+- Baseline：`6dc4368`（origin/main）
+- HEAD：`3da97f9f87f9daaa8074adeb3e2eca2c323453f0`
+- PR：https://github.com/openagentemail/openagentemail/pull/309
+- Subagent：`2d66df28-0749-4696-8e77-efa904018ee3` → `/home/ops/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/2d66df28-0749-4696-8e77-efa904018ee3/2d66df28-0749-4696-8e77-efa904018ee3.jsonl`
+- 完工报：`/home/ops/materials/305/completion.md`
