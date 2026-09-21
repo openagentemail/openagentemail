@@ -2,9 +2,10 @@
 
 [Back to README](../README.md#how-it-works)
 
-This page describes the implementation reviewed at `1feb2a2` (2026-09-17), not a
-future orchestration design. Source paths below are the verification entry points;
-update this explanation alongside changes to those contracts.
+This page describes the implementation aligned with `origin/main` at the #251 README
+refresh (`b4fb8841`, 2026-09-21), not a future orchestration design. Source paths
+below are the verification entry points; update this explanation alongside changes
+to those contracts.
 
 ## Components and ownership
 

@@ -11,7 +11,7 @@
 | 产品名 | **OpenAgentEmail**（仓内规范拼写，README/md 均此形）/ OpenAgent Email（别名，护译用）/ openagent.email（域名）/ MCP / ntfy / Creem / Hosted Pro |
 | 凭据面术语 | admin key / API token（行文可作首现式注记，如「管理密钥 (admin key)」） |
 | 协议/技术词 | catch-all / OTP / URL / API 字段名 / CLI 命令 / 错误码字面（如 `invalid_cursor`） |
-| 结构性内容 | 代码**语法与标识符**（命令、字段、路径、Mermaid/PlantUML 语法行）——**块内自然语言可译**（参与者标签/消息文案/注释/示例叙述），锚实践=README.zh-CN `## 看一次任务交接` 小节内 Mermaid 时序图（自然语言全译形态；引真实小节名防漂移） |
+| 结构性内容 | 代码**语法与标识符**（命令、字段、路径、Mermaid/PlantUML 语法行）——**块内自然语言可译**（参与者标签/消息文案/注释/示例叙述），锚实践=README.zh-CN `## 看它工作` 小节内 Mermaid 时序图（自然语言全译形态；引真实小节名防漂移） |
 
 ## 2. 术语表（zh-CN 锚；es/ja/ko 随 #137 B2 落串补齐）
 
@@ -42,3 +42,4 @@
 - v0.2（同日）：CR 2 Minor 采纳——稳定锚；identity 措辞对齐。
 - v0.3（同日）：Codex P1×3+P2 采纳——跨仓更新=主仓 companion PR 强制+合并顺序；规范拼写 OpenAgentEmail 入列；identity（实体）/identity address（地址）拆行；锚改真实小节名「看一次任务交接」。
 - v0.4（2026-09-21）：#137 B2 控制台落串——补齐 es/ja/ko 术语列；保真扫描键见 `packages/api/src/ui/client/i18n-preserved.ts`。
+- v0.5（2026-09-21 / #251）：README.zh-CN 小节更名为「看它工作」；本表锚点同步，避免术语实践引用漂。

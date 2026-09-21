@@ -1,5 +1,5 @@
 /**
- * 16 个 MCP 工具的注册逻辑（stdio 与 HTTP /mcp 共用唯一实现）。
+ * 25 个 MCP 工具的注册逻辑（stdio 与 HTTP /mcp 共用唯一实现）。
  * 每个工具在注册处声明 WriteGuard tier（见 lib/tool-tiers.ts）；
  * 未声明 → HTTP default deny；注册与规格表不一致 → throw。
  * stdio 不执行 tier 策略（operator 本地；REST ACL 兜底）。

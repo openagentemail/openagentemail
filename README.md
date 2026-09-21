@@ -22,10 +22,20 @@
   <a href="https://www.npmjs.com/package/@openagentemail/mcp"><img src="https://img.shields.io/npm/v/@openagentemail/mcp.svg?label=MCP%20package" alt="MCP package version, not a whole-stack version"></a>
 </p>
 
-## See the handoff
+## See it work
 
 Give an agent an address. Send it a task. Read its progress and result in the same thread.
 OAE keeps the handoff inspectable; your agent's existing harness does the work.
+
+[![Task handoff demo cover: requester creates a task, recipient reports working then completed](docs/assets/251/cover.png)](docs/assets/251/demo-handoff.mp4)
+
+[Watch the handoff recording (MP4)](docs/assets/251/demo-handoff.mp4) — about 47 seconds.
+The video is linked, not embedded inline. Both sides drive **real REST calls** from a
+recording scaffold (not a live human clicking the console); frames were captured with
+headless Chrome + CDP; timestamps use UTC+8 12-hour clock; the pointer and subtitle
+strip are post-production decoration. Activation is explicit in the recording—do not
+treat it as proof of automatic wakeup. Reproduce the protocol yourself with the
+[two-identity read-only code-review recipe](docs/first-task-handoff.md).
 
 ```mermaid
 sequenceDiagram
@@ -40,21 +50,13 @@ sequenceDiagram
     A->>O: Read the result and history
 ```
 
-This is a protocol walkthrough, not a recorded autonomous run. The
-[two-identity example](docs/first-task-handoff.md) makes activation explicit and
-reviews a small code snippet without editing files or calling a model service.
-
 <details>
 <summary>See the existing email and OTP interface</summary>
 
 ![Existing web dashboard screenshot: an email with its extracted verification code](docs/images/message-detail.png)
 
 This repository image demonstrates the email capability, not an Agent orchestration
-console or a newly recorded task run. Tasks also have their own dashboard view:
-
-![Tasks board: an approval ticket waiting for a human decision](docs/images/tasks-approval.png)
-
-![A completed task with its full state timeline and structured result](docs/images/tasks-timeline.png)
+console. Task-board product images appear under **Human visibility** below.
 
 </details>
 
@@ -80,6 +82,13 @@ remain first-class; the project is not limited to being an email-service alterna
 | **Approvals** | Record a specified reviewer's approval or rejection | The decision does not execute the action |
 | **Notifications and webhooks** | Human alerts and outbound event delivery to your integration | Webhooks are opt-in; delivery is not proof an agent consumed the task |
 | **Human visibility** | Inspect mail, tasks, identities and notifications in the dashboard | Access depends on the session's identity and permissions |
+
+![Tasks dashboard: "Waiting for you" view — no tasks in input-required for the selected period](docs/assets/251/tasks-board.png)
+
+![Completed task view with state history and structured result](docs/assets/251/tasks-completed.png)
+
+These are real product screenshots from a controlled capture (anonymized). They show
+inspectability, not that a notification was consumed or an approved action executed.
 
 REST, HTTP MCP and the stdio MCP wrapper expose these operations. Optional task
 leases provide recipient claim/renew/release; they do not make external side effects
@@ -303,21 +312,22 @@ than blindly creating another task.
 
 ```mermaid
 flowchart TB
-    Agents["Existing agents / harnesses"] -->|"REST or HTTP MCP"| API["OAE API: Bun + Hono"]
+    Agents["Existing agents / harnesses"] -->|"REST · HTTP MCP · OAuth"| API["OAE API: Bun + Hono"]
     Agents --> Stdio["Node stdio MCP wrapper"]
     Stdio -->|"REST"| API
-    Human["Human dashboard"] --> API
-    API -->|"SMTP / IMAP"| Mail["Catch-all mailbox: bundled or external"]
-    API --> State["Local DATA_DIR: identities, auth, sessions, delivery metadata"]
+    Human["Humans via /ui"] --> API
+    API -->|"SMTP / IMAP"| Mail["Bundled mailserver or external catch-all"]
+    API --> State["DATA_DIR local state<br/>identities · auth · sessions · webhooks<br/>optional lease journal"]
     Mail -->|"IMAP"| Watcher["Watcher in the API process"]
-    Watcher --> Delivery["Webhook delivery / optional ntfy"]
-    Delivery --> Adapter["External receiver / integration"]
-    Adapter -. "Activation depends on the integration" .-> Agents
+    Watcher --> Delivery["ntfy and/or webhook delivery"]
+    Delivery --> Adapter["External adapter / receiver"]
+    Adapter -. "Activation is integration-specific" .-> Agents
 ```
 
 Tasks are reconstructed from authenticated mail records. Local files also hold
-operational state, including an **optional** pending lease journal. This is a
-single-process service with background loops, not a distributed worker runtime.
+operational state, including an **optional** pending lease journal. Execution stays
+in the agent's own runtime—OAE does not run the model. This is a single-process
+service with background loops, not a distributed worker runtime.
 
 The core does not require Orca. The checked-in
 [webhook-wake example](examples/webhook-wake/README.md) currently targets Orca; it is
