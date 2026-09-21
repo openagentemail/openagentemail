@@ -773,3 +773,20 @@ N/A。聚焦 **48 pass**；api **1982p/9s/0f**；mcp **48p**。
 - HEAD：`5000dbd682f11e84bebc7eebf02cfe3e0b41aa31`
 - 聚焦 13p；api 1995p/9s/0f；mcp 48p
 - 完工件：`/home/ops/materials/289-290-302/completion.md` R4 节
+
+## 2026-09-21 · w289x3 R5（update 空 URL）
+
+### 我们实现了哪些功能？
+1. update 路径 `url` 门改为 `!== undefined`；空串 400 + `malformed_url`。
+2. 测试 create+update `url:""` 同形验收。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- HEAD：`7e8acb27b8509bd8fc8405a7ef1b771f687d1646`
+- 聚焦 14p；api 1996p/9s/0f；mcp 48p
+- Subagent：`c8b3a09d-a98e-4406-98d7-592c10aa4d8a` → PASS
