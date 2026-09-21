@@ -554,6 +554,23 @@ describe('授权负例', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  test('#137 B2 R1：非 en 预检失败错误页无英文裸串', async () => {
+    const { I18N_ZH_CN } = await import('../src/ui/client/i18n-zh-cn.ts');
+    const app = makeApp();
+    const cookie = await loginCookie(app);
+    const bad = authQuery({ redirect_uri: 'http://evil.example/callback' });
+    const res = await app.request(`http://localhost/ui/oauth/authorize?${bad.q}`, {
+      headers: { cookie: `${cookie}; oa_lang=zh-CN` },
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text).toContain('<html lang="zh-CN">');
+    expect(text).toContain(I18N_ZH_CN['oauth.error.redirectUriUnregistered']!);
+    expect(text).not.toContain('redirect_uri is not registered for this client.');
+    expect(text).not.toContain('Missing client_id or redirect_uri.');
+  });
+
   test('identity 会话 POST 批准 → 403', async () => {
     const app = makeApp();
     const { token, identity } = createIdentity({ localpart: 'oauth-id-sess' })!;

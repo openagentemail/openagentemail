@@ -410,6 +410,11 @@ function handleRefresh(
 }
 
 /** 供同意页复用：预检授权请求参数。 */
+export type PreflightPageErrorCode =
+  | 'missing_client_or_redirect'
+  | 'invalid_client'
+  | 'redirect_uri_unregistered';
+
 export async function preflightAuthorizeRequest(
   query: Record<string, string | undefined>,
   requestOrigin: string,
@@ -427,7 +432,14 @@ export async function preflightAuthorizeRequest(
       loopbackWarning: boolean;
     }
   | { ok: false; kind: 'redirect'; location: string }
-  | { ok: false; kind: 'page'; status: 400; message: string }
+  | {
+      ok: false;
+      kind: 'page';
+      status: 400;
+      /** 稳定错误种类：UI 层映射到 i18n 键，不直渲英文 message。 */
+      code: PreflightPageErrorCode;
+      message: string;
+    }
 > {
   const issuer = resolveIssuer(requestOrigin);
   const expectedResource = resolveResourceUri(requestOrigin);
@@ -446,6 +458,7 @@ export async function preflightAuthorizeRequest(
       ok: false,
       kind: 'page',
       status: 400,
+      code: 'missing_client_or_redirect',
       message: 'Missing client_id or redirect_uri.',
     };
   }
@@ -460,6 +473,7 @@ export async function preflightAuthorizeRequest(
       ok: false,
       kind: 'page',
       status: 400,
+      code: 'invalid_client',
       message: `Invalid client: ${cimd.reason}`,
     };
   }
@@ -468,6 +482,7 @@ export async function preflightAuthorizeRequest(
       ok: false,
       kind: 'page',
       status: 400,
+      code: 'redirect_uri_unregistered',
       message: 'redirect_uri is not registered for this client.',
     };
   }

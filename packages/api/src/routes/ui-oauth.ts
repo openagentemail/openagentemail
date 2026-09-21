@@ -35,7 +35,10 @@ import {
   buildAuthorizeRedirect,
   preflightAuthorizeRequest,
   type OAuthRouteOptions,
+  type PreflightPageErrorCode,
 } from './oauth.ts';
+import { getUiI18nDict } from '../ui/client/i18n-dicts.ts';
+import { tServer } from '../ui/client/i18n-en.ts';
 import { oauthCopy } from '../ui/i18n/oauth-copy.ts';
 import { resolveUiLocale, type UiLocale } from '../ui/i18n/resolve-ui-locale.ts';
 
@@ -70,6 +73,17 @@ function localeOf(c: Context): UiLocale {
     cookie: getCookie(c, 'oa_lang'),
     acceptLanguage: c.req.header('Accept-Language'),
   });
+}
+
+/** 预检 page 错误 → 五字典键（不直渲英文 pre.message）。 */
+const PREFLIGHT_PAGE_ERROR_KEYS: Record<PreflightPageErrorCode, string> = {
+  missing_client_or_redirect: 'oauth.error.missingClientOrRedirect',
+  invalid_client: 'oauth.error.invalidClient',
+  redirect_uri_unregistered: 'oauth.error.redirectUriUnregistered',
+};
+
+function preflightPageErrorMessage(locale: UiLocale, code: PreflightPageErrorCode): string {
+  return tServer(PREFLIGHT_PAGE_ERROR_KEYS[code], getUiI18nDict(locale));
 }
 
 const PAGE_CSS = `
@@ -287,12 +301,13 @@ export function createUiOAuthPageRoutes(
     const pre = await preflightAuthorizeRequest(q, new URL(c.req.url).origin, options);
     if (!pre.ok) {
       if (pre.kind === 'redirect') return c.redirect(pre.location, 302);
+      const errMsg = preflightPageErrorMessage(locale, pre.code);
       return htmlResponse(
         c,
         shell(
           locale,
           copy.authErrorTitle,
-          `<section class="card"><h1>${escapeHtml(copy.authErrorH1)}</h1><p class="error">${escapeHtml(pre.message)}</p></section>`,
+          `<section class="card"><h1>${escapeHtml(copy.authErrorH1)}</h1><p class="error">${escapeHtml(errMsg)}</p></section>`,
         ),
         pre.status,
       );
@@ -368,9 +383,10 @@ export function createUiOAuthPageRoutes(
     );
     if (!pre.ok) {
       if (pre.kind === 'redirect') return authorizeHandoffResponse(c, pre.location);
+      const errMsg = preflightPageErrorMessage(locale, pre.code);
       return htmlResponse(
         c,
-        shell(locale, copy.authErrorTitle, `<p class="error">${escapeHtml(pre.message)}</p>`),
+        shell(locale, copy.authErrorTitle, `<p class="error">${escapeHtml(errMsg)}</p>`),
         pre.status,
       );
     }
