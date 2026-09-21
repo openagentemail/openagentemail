@@ -917,3 +917,206 @@ describe('#305 R4 P1-1 overlay/journal 决退降级 claim', () => {
     });
   });
 });
+
+describe('#305 R5 已消费身份精确重放幂等', () => {
+  const REISSUE_VERIFIER = 'r'.repeat(43);
+  const REISSUE_AT = new Date(START + 300_000).toISOString();
+  const REISSUE_UNTIL = new Date(START + 600_000).toISOString();
+  const STILL_AT = new Date(START + 90_000).toISOString();
+  const STILL_UNTIL = new Date(START + 390_000).toISOString();
+  const STILL_VERIFIER = 's'.repeat(43);
+  const ALIEN_VERIFIER = 'a'.repeat(43);
+
+  test('R5-1(a) re-degrade: 已消费 renew/release 精确重放 → 幂等，不整卡 null', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewV1 = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 70_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 400_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const releaseV1 = await signedLease(ID, 5, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 80_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const redegrade = await signedLease(ID, 6, {
+      version: 1, event: 'claim', actor: B,
+      at: STILL_AT, generation: 2,
+      claimedUntil: STILL_UNTIL, tokenVerifier: STILL_VERIFIER,
+    });
+    const renewDup = await signedLease(ID, 7, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 70_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 400_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const releaseDup = await signedLease(ID, 8, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 80_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    // renew 消费 → re-degrade → renew dup
+    const afterRenewDup = taskFromMessages(ID, [...prefix, renewV1, redegrade, renewDup]);
+    expect(afterRenewDup).not.toBeNull();
+    expectAuthorityUnmoved(afterRenewDup);
+    // release 消费 → re-degrade → release dup（与 renew 链独立构造）
+    const afterReleaseDup = taskFromMessages(ID, [...prefix, releaseV1, redegrade, releaseDup]);
+    expect(afterReleaseDup).not.toBeNull();
+    expectAuthorityUnmoved(afterReleaseDup);
+  });
+
+  test('R5-1(b) accept: 已消费 renew/release 精确重放 → 幂等，权威=gen2\'', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewV1 = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 70_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 400_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const releaseV1 = await signedLease(ID, 5, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 80_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const reissue = await signedLease(ID, 6, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const renewDup = await signedLease(ID, 7, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 70_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 400_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const releaseDup = await signedLease(ID, 8, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 80_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const afterRenewDup = taskFromMessages(ID, [...prefix, renewV1, reissue, renewDup]);
+    expect(afterRenewDup).not.toBeNull();
+    expect(afterRenewDup?.lease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+    });
+    const afterReleaseDup = taskFromMessages(ID, [...prefix, releaseV1, reissue, releaseDup]);
+    expect(afterReleaseDup).not.toBeNull();
+    expect(afterReleaseDup?.lease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+    });
+  });
+
+  test('R5-1(c) 反向: 未曾入账的迟到旧 verifier renew/release → 仍 null', async () => {
+    // 保 R3 边界 515-546 与 R4 P1-B②：迟到且从未消费 → fail-closed
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const reissue = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const lateOldRenew = await signedLease(ID, 5, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 650_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const lateOldRelease = await signedLease(ID, 5, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'stale',
+    });
+    expect(taskFromMessages(ID, [...prefix, reissue, lateOldRenew])).toBeNull();
+    expect(taskFromMessages(ID, [...prefix, reissue, lateOldRelease])).toBeNull();
+  });
+
+  test('R5-2(a) accept 后降级 claimV1 精确重放 → 可读，权威=gen2\'', async () => {
+    const verifier = await liveVerifier();
+    const { claim2, prefix } = await conflictPrefix(verifier);
+    const reissue = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    // 精确重放降级 claimV1（与 claim2 同身份）
+    const claimV1Dup = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: CONFLICT_AT, generation: 2,
+      claimedUntil: CONFLICT_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, reissue, claimV1Dup]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.lease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+      claimedUntil: REISSUE_UNTIL,
+    });
+    // dup 隐藏：公开面仍无 CONFLICT_AT
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
+    expect(claim2.lease?.tokenVerifier).toBe(CONFLICT_VERIFIER);
+  });
+
+  test('R5-2(b) re-degrade 后 claimV1 精确重放 → 可读且不翻转当前降级实例', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const redegrade = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: STILL_AT, generation: 2,
+      claimedUntil: STILL_UNTIL, tokenVerifier: STILL_VERIFIER,
+    });
+    const claimV1Dup = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: CONFLICT_AT, generation: 2,
+      claimedUntil: CONFLICT_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+    });
+    // 若 V1 dup 被重新降级记账，当前证据会翻成 CONFLICT，STILL renew 将 verifier 失配 → null
+    const renewStill = await signedLease(ID, 6, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 100_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 450_000).toISOString(),
+      tokenVerifier: STILL_VERIFIER,
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, redegrade, claimV1Dup, renewStill]);
+    expect(rebuilt).not.toBeNull();
+    expectAuthorityUnmoved(rebuilt);
+  });
+
+  test('R5-2(c) 反向: 从未消费的异容 claim → 仍 null（已接受证据 fail-closed）', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const reissue = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const alien = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: new Date(START + 320_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 620_000).toISOString(),
+      tokenVerifier: ALIEN_VERIFIER,
+    });
+    expect(taskFromMessages(ID, [...prefix, reissue, alien])).toBeNull();
+  });
+});

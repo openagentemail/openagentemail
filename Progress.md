@@ -591,3 +591,25 @@
 - 自审 R4：`42f6b61a-fa6d-463c-9c21-48b42e15a284`（P1-A/B）
 - 自审 R4 P1-1：`571c93b9-4815-4299-9e24-e256a3bd86f0`
 - 完工报：`/home/ops/materials/305/completion.md`（R4 节）
+
+## 2026-09-21 · w305 #305 R5（同代替换流已消费重放幂等）
+
+### 我们实现了哪些功能？
+1. **R5-1 renew**：`clearDegradedGenerationResiduals` **不再清** `seenRenewCanonical`/`appliedRenews`（grep 确认 appliedRenews 无读方；新实例 renew key 不同不受影响）。
+2. **R5-1 release**：清门前把 prior release 身份迁入 `consumedReleaseCanonical`；release 分支早段精确命中 → dup no-op；`appliedReleases` 门照旧清（保 P1-B 新 token release）。
+3. **R5-2 claim**：在 `!priorIsDegraded → null` 前，精确命中 `degradedLeaseClaims` → dup no-op（不放宽异容全新 vs 已接受 → null）。
+4. **R5-3**：评估后**不改**限频结构（见下）。
+
+### 我们遇到了哪些错误？
+1. RED：已消费 renew/release 在替换后精确重放 → 去重表被清 → verifier 失配 → 整卡 null。
+2. RED：已消费降级 claimV1 在 accept 后精确重放 → priorIsDegraded=false → 整卡 null。
+3. R5-2(b) 弱断言曾假绿：V1 dup 经降级路径重记账；加强为 STILL renew 探针。
+
+### 我们是如何解决这些错误的？
+1–2. 按上列语义修；聚焦 **34 pass**；全量 api **1968p/9s/0f**；mcp **48p/0f**。
+3. R5-3 评估（≤300 字）：`noteClaimWindowConflictDegraded` 先 `seen.set` 再过 60s 限频 → 被吞键永不补写 audit。若「吞掉时不记 seen」：第二轮同序在窗内会对未入 seen 键反复 count，破坏 pin `count=(cap+1)×2`（现依赖 FIFO 淘汰后整轮再 miss）；若同时改 count 口径则动既有 >cap 钉。count 已暴露 ops 可读（`takeClaimWindowConflictDegradedCountForTests`）。**记债：保持先 seen 后限频 + count 兜底；不改 pin/60s 上界。交 FC 呈裁是否另开「限频失败不入 seen + 调整 count 语义」卡。**
+
+### 基线与证据
+- HEAD：（推送后填）
+- 自审 R5：`258af8a9-ea6f-4c3a-8538-7fa4d028fb76` → PASS-WITH-NITS（已补 R5-3 债）
+- 完工报：`/home/ops/materials/305/completion.md`（R5 节）

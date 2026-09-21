@@ -1409,17 +1409,6 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     windows.add(claimedUntil);
     acceptedDeadlineWindows.set(generation, windows);
   };
-  /**
-   * #305 R4：降级代证据换代时清理同代 renew/release 残渣。
-   * 旧实例 historical release 先入 appliedReleases 后，若不清理，新 token release
-   * 会在权威判定前被 priorRelease 异容门判为冲突第二份 → 整卡 null。
-   * 保留 acceptedDeadlineWindows（旧窗 expiry 仍审计 no-op）；appliedClaimWindows 由随后覆盖。
-   */
-  const clearDegradedGenerationResiduals = (generation: number): void => {
-    appliedReleases.delete(generation);
-    appliedRenews.delete(generation);
-    seenRenewCanonical.delete(generation);
-  };
   /** #285：确保 map 持有数组后原地 push（插入顺序=可观察面）。 */
   const pushOwned = <T>(map: Map<number, T[]>, generation: number, item: T): void => {
     let arr = map.get(generation);
@@ -1437,6 +1426,21 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       index.set(generation, seen);
     }
     seen.add(key);
+  };
+  /**
+   * #305 R4/R5：降级代证据换代时清理「会挡住新实例」的同代门控残渣。
+   * - release：把当前 appliedReleases 身份迁入已消费史后退门（保 P1-B 新 token release；
+   *   已消费精确重放走 consumedReleaseCanonical → dup no-op）。
+   * - renew：不再清 seenRenewCanonical/appliedRenews（纯身份去重；appliedRenews 无读方；
+   *   新实例 renew key 不同，天然不受影响）。R5-1。
+   */
+  const consumedReleaseCanonical = new Map<number, Set<string>>();
+  const clearDegradedGenerationResiduals = (generation: number): void => {
+    const priorRelease = appliedReleases.get(generation);
+    if (priorRelease) {
+      rememberKey(consumedReleaseCanonical, generation, canonicalLeaseEvent(priorRelease));
+    }
+    appliedReleases.delete(generation);
   };
   // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
   const duplicateLeaseMessages = new Set<RawTaskMessage>();
@@ -1556,6 +1560,12 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
           duplicateLeaseMessages.add(message);
           continue;
         }
+        // #305 R5-2：已消费降级身份精确重放 → dup no-op（接受后 degraded 标记已清，
+        // 不得落入下方「异容全新 claim vs 已接受 → null」）。
+        if (degradedLeaseClaims.some((deg) => isSameAuthenticatedLeaseEvent(deg, lease))) {
+          duplicateLeaseMessages.add(message);
+          continue;
+        }
         // #305 R3：降级证据允许同代异容重评估；已接受证据保持整卡 null。
         if (!priorIsDegraded) return null;
       }
@@ -1599,7 +1609,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       if (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil)) {
         noteClaimWindowConflictDegraded(id, lease.generation, lease.claimedUntil);
         // 证据记账（降级标记）：同代后续 renew/release/expired 走 historical；可被同代重评估覆盖。
-        // R4：重新降级覆盖时清理同代 release/renew 残渣（与重评估接受同清）。
+        // R4/R5：重新降级覆盖时清 appliedReleases 门（释放身份入已消费史）；不清 renew 去重表。
         clearDegradedGenerationResiduals(lease.generation);
         appliedClaims.set(lease.generation, lease);
         recordAcceptedWindow(lease.generation, lease.claimedUntil);
@@ -1622,7 +1632,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         generationClaimedAt: lease.at,
         firstClaimedAt,
       };
-      // R4：重评估接受时必须清同代旧实例 release/renew，否则新 token release 被 priorRelease 挡死。
+      // R4/R5：重评估接受时清 appliedReleases 门（旧 release 身份入已消费史），不挡新 token release。
       if (isDegradedReeval) clearDegradedGenerationResiduals(lease.generation);
       appliedClaims.set(lease.generation, lease);
       recordAcceptedWindow(lease.generation, lease.claimedUntil);
@@ -1678,6 +1688,12 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       pushOwned(appliedRenews, lease.generation, lease);
       rememberKey(seenRenewCanonical, lease.generation, renewKey);
       recordAcceptedWindow(lease.generation, lease.claimedUntil);
+      duplicateLeaseMessages.add(message);
+      continue;
+    }
+    // #305 R5-1：被替换实例已消费的 release 身份 → 精确重放 dup no-op（门逻辑不放宽）。
+    const releaseKey = canonicalLeaseEvent(lease);
+    if (consumedReleaseCanonical.get(lease.generation)?.has(releaseKey)) {
       duplicateLeaseMessages.add(message);
       continue;
     }
