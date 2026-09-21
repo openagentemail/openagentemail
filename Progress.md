@@ -484,3 +484,188 @@
 - PR：https://github.com/openagentemail/openagentemail/pull/307
 - 测试：api 1933p/9s/#206 flake 复跑绿；mcp 48p/0f
 - Subagent：`b2a13616-dafb-4779-bc2c-078ebdf62d95` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w251/agent-transcripts/b2a13616-dafb-4779-bc2c-078ebdf62d95/`
+
+## 2026-09-21 · w305 #305 读取层降级修复
+
+### 我们实现了哪些功能？
+1. `taskFromMessages` claim 分支：已鉴权但与残留权威时间窗冲突的 claim，从整卡 `return null` 改为按无效事件出账（不推进权威、`duplicateLeaseMessages` 隐藏、继续重建）。
+2. 结构类检查（state / generation 序 / 时间有限性 / 窗方向）仍 fail-closed，一行未改语义。
+3. audit：`task.lease.claim_window_conflict_degraded` + `taskId`/`leaseGeneration` 白名单最小扩展；同键进程内去重（cap 1024）。
+4. 测试：`task-lease-claim-window-conflict-305.test.ts` 覆盖正 1–3、负 1–3。
+
+### 我们遇到了哪些错误？
+1. 冷启动缺 `zod` 等依赖，`bun test` 无法 import。
+2. `setFindTaskMessagesForTests` 未从 `task-test-seams` 导出；且 `getTaskForTests` 仍注入时会绕过 find 路径。
+3. 全量套件 `#206` 25s timeout（预存 flake，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 在 `packages/api` 执行 `bun install` 后复跑。
+2. 测试改为直引 `tasks-internal.setFindTaskMessagesForTests`，并在 snapshot 断言前 `setTaskGetForTests(null)`。
+3. 完报注明 #206 flake；聚焦 5/5 绿；全量 1938 pass / 9 skip / 1 fail(#206)。
+
+### 基线与证据
+- Baseline：`6dc4368`（origin/main）
+- HEAD：`3da97f9f87f9daaa8074adeb3e2eca2c323453f0`
+- PR：https://github.com/openagentemail/openagentemail/pull/309
+- Subagent：`2d66df28-0749-4696-8e77-efa904018ee3` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/2d66df28-0749-4696-8e77-efa904018ee3/2d66df28-0749-4696-8e77-efa904018ee3.jsonl`
+- 完工报：`/home/ops/materials/305/completion.md`
+
+## 2026-09-21 · w305 #305 R2 闸变返工
+
+### 我们实现了哪些功能？
+1. **P1**：降级冲突 claim 以证据记账——`appliedClaims.set` + `recordAcceptedWindow`；不写 `leaseAuthority`/`firstClaimedAt`；`previousGeneration` 作代际游标推进（同 tombstone），否则下一代 claim 仍整卡 null。
+2. **P2**：降级 audit 加全局限频（`CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS`），防 >cap FIFO 击穿整批重写。
+3. **测试**：冲突 claim + renew/release/expired/next-claim 四场景正/负控参数化；>cap 审计有界；公开面断言改为 `claim2.at`（CR nitpick）。
+4. **P3**：Progress 路径 `~` 化；`leaseGeneration` 非有限静默丢弃补注释。
+
+### 我们遇到了哪些错误？
+1. FC 卡字面「不动 previousGeneration」与测试④「下一代 claim 可读」冲突——不推进游标则 gen 序仍整卡 null。
+2. 全量偶发 `#272` dist-build-lock / `#206` wait-precedence 超时（预存/环境，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 游标推进、权威字段不动；完工报写明偏离与理由（Codex P1 / tombstone 同型）。
+2. 聚焦 14/14 绿；完报注明全量 flake。
+
+### 基线与证据
+- HEAD：`b1dcf29` · PR #309 · diff vs main：+554/−3（未越 600）
+- 聚焦 14 pass；全量 1947p/9s/1f(#272 flake)
+- Subagent R2：`6673b8c2-0697-4c6b-9e44-a4baad7f4f2f` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/6673b8c2-0697-4c6b-9e44-a4baad7f4f2f/`
+- 完工报：`/home/ops/materials/305/completion.md`（含 R2 节）
+
+## 2026-09-21 · w305 #305 R3 降级代复用编号
+
+### 我们实现了哪些功能？
+1. `degradedClaimGenerations` 区分降级证据 vs 已接受证据。
+2. dup gate：已接受异容仍整卡 null；降级异容下落重评估。
+3. generation 门：降级代 `generation===previousGeneration` 可重评；跨代跳号仍 fail-closed。
+4. 重评估：`claimedAt>=权威窗` 接受并清降级标记；`<窗` 再降级、权威不推进。
+5. 边界测试：接受 gen2' 后迟到旧 verifier renew → 保守 null（显式声明）。
+
+### 我们遇到了哪些错误？
+1. R2 证据记账后写路径过期复用 gen2 → dup gate 整卡 null（R1 无此回归）。
+
+### 我们是如何解决这些错误的？
+1. 按上列语义修 + RED→绿；聚焦 18/18；全量 1952p/9s/0f。
+
+### 基线与证据
+- HEAD：`f33ec0a` · PR #309 · diff vs main：**+693/−7（已越 600；测试 538 行主体）**
+- 自审 R3：`f57b57c5-32de-4c45-aa0a-35bed0889d3e` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/f57b57c5-32de-4c45-aa0a-35bed0889d3e/`
+- 完工报：`/home/ops/materials/305/completion.md`（R3 节）
+
+## 2026-09-21 · w305 #305 R3 追加（高水位+E2E+计数器+PR 描述）
+
+### 我们实现了哪些功能？
+1. **并用** `leaseGenerationHighWater` 计入 `claimTask` durableGen（与读侧重评估双保险）。
+2. `claimTask` 端到端：seam 降级 → 真实分配 gen3 → 重建。
+3. `claimWindowConflictDegradedCount` + take 缝（限频吞键可观测）。
+4. PR #309 描述补「回归点名」「偏离声明」；completion 映射表；越 600 总指挥已核准。
+
+### 我们遇到了哪些错误？
+1. E2E 初版 `sent.length===1` 在 M3-off expiry 物化下收到 2 封。
+
+### 我们是如何解决这些错误的？
+1. 按 `X-OA-Task-Lease-Event===claim` 取签发信。聚焦 19/19；全量 1952p/#206 flake。
+
+## 2026-09-21 · w305 #305 R4（Codex 2×P1：release 残渣 + 多降级代）
+
+### 我们实现了哪些功能？
+1. **P1-B**：`clearDegradedGenerationResiduals(G)`——重评估接受与重新降级覆盖时清理同代 `appliedReleases`/`appliedRenews`/`seenRenewCanonical`（保留 `acceptedDeadlineWindows`）。旧实例 historical release 不再挡住新 token release。
+2. **P1-A①**：连续降级 gen2+gen3 → highWater=3 → `claimTask` E2E 分配 **gen4**。
+3. **P1-A②**：读侧重评估门 **保** `gen === previousGeneration`（不放宽 ≤prev）；更早代 gen2' 在 prev=3 时整卡 null（显式声明+钉测）。理由：放宽会使 prevGen 回退并与更高降级代残渣交错。
+4. **P1-1（Codex e8ec6aa 复审）**：`Task.degradedLeaseClaims` 私有降级身份全史；`eventIsIndexed` claim 分支精确身份匹配决退 overlay/journal——**不授权**；不用 high-water 代际短路。
+5. ZCode P2 限频计数器：e8ec6aa 已补；本轮未改限频结构。
+
+### 我们遇到了哪些错误？
+1. RED：降级 gen2 + 旧 release → gen2' 接受 → 新 release → 整卡 null（priorRelease 异容门在权威判定前）。
+2. 推演放宽重评估门：接受 gen2' 会把 previousGeneration 从 3 回退到 2，与 gen3 降级残渣/高水位语义冲突。
+3. RED P1-1：durable 已降级 gen2 后，queued/journal 同身份 claim 永不退休 → `applyOverlayMessages` 复现为活跃权威 gen2。
+
+### 我们是如何解决这些错误的？
+1. 证据换代时清同代 release/renew 残渣（accept + re-degrade 同清）。
+2. 保 tip 门 + 写路径 highWater 覆盖多降级；钉测 gen2'→null。
+3. 重建填充 `degradedLeaseClaims`；`eventIsIndexed` 身份匹配退休；TaskView Omit；①合并权威=前窗+队列空②非降级回归③journal fate=indexed；②b high-water  alone 不误退。
+4. 聚焦 **28 pass**；全量 1961p/9s/1f(#206 flake)；自审 PASS-WITH-NITS（已补②b）。
+
+### 基线与证据
+- HEAD：`3d61162`
+- 自审 R4：`42f6b61a-fa6d-463c-9c21-48b42e15a284`（P1-A/B）
+- 自审 R4 P1-1：`571c93b9-4815-4299-9e24-e256a3bd86f0`
+- 完工报：`/home/ops/materials/305/completion.md`（R4 节）
+
+## 2026-09-21 · w305 #305 R5（同代替换流已消费重放幂等）
+
+### 我们实现了哪些功能？
+1. **R5-1 renew**：`clearDegradedGenerationResiduals` **不再清** `seenRenewCanonical`/`appliedRenews`（grep 确认 appliedRenews 无读方；新实例 renew key 不同不受影响）。
+2. **R5-1 release**：清门前把 prior release 身份迁入 `consumedReleaseCanonical`；release 分支早段精确命中 → dup no-op；`appliedReleases` 门照旧清（保 P1-B 新 token release）。
+3. **R5-2 claim**：在 `!priorIsDegraded → null` 前，精确命中 `degradedLeaseClaims` → dup no-op（不放宽异容全新 vs 已接受 → null）。
+4. **R5-3**：评估后**不改**限频结构（见下）。
+
+### 我们遇到了哪些错误？
+1. RED：已消费 renew/release 在替换后精确重放 → 去重表被清 → verifier 失配 → 整卡 null。
+2. RED：已消费降级 claimV1 在 accept 后精确重放 → priorIsDegraded=false → 整卡 null。
+3. R5-2(b) 弱断言曾假绿：V1 dup 经降级路径重记账；加强为 STILL renew 探针。
+
+### 我们是如何解决这些错误的？
+1–2. 按上列语义修；聚焦 **34 pass**；全量 api **1968p/9s/0f**；mcp **48p/0f**。
+3. R5-3 评估（≤300 字）：`noteClaimWindowConflictDegraded` 先 `seen.set` 再过 60s 限频 → 被吞键永不补写 audit。若「吞掉时不记 seen」：第二轮同序在窗内会对未入 seen 键反复 count，破坏 pin `count=(cap+1)×2`（现依赖 FIFO 淘汰后整轮再 miss）；若同时改 count 口径则动既有 >cap 钉。count 已暴露 ops 可读（`takeClaimWindowConflictDegradedCountForTests`）。**记债：保持先 seen 后限频 + count 兜底；不改 pin/60s 上界。交 FC 呈裁是否另开「限频失败不入 seen + 调整 count 语义」卡。**
+
+### 基线与证据
+- HEAD：`b3834496c29115a040d4bcfa59438d1e732e3c6d`（功能 `d2398c5` + Progress）
+- 自审 R5：`258af8a9-ea6f-4c3a-8538-7fa4d028fb76` → PASS-WITH-NITS（已补 R5-3 债）
+- 完工报：`/home/ops/materials/305/completion.md`（R5 节）
+
+## 2026-09-21 · w305 #305 R6（historical renew/release overlay 决退）
+
+### 我们实现了哪些功能？
+1. `Task.historicalRenewReceipts` / `historicalReleaseReceipts`（TaskView Omit）——对称 `degradedLeaseClaims`/`expiryReceipts`。
+2. 填充：Late historical renew/release 记账路径；R5 `clearDegradedGenerationResiduals` 迁出的 release 一并暴露。
+3. `eventIsIndexed`：精确身份命中即退休（renew 在 generic 尾前；release 在 release 分支）；**无代际短路**；不碰 expired/claim 既有逻辑。
+
+### 我们遇到了哪些错误？
+1. RED：durable 消费降级代 historical renew/release 后，queued 行不退休 → `applyOverlayMessages` 无条件延长权威窗 / 清空权威。
+
+### 我们是如何解决这些错误的？
+1. 证据暴露 + 精确决退；聚焦 **39 pass**；M1 overlay 全绿；R6(a–e) 钉污染/误退/journal。
+2. 全量 api 1972p/9s/1f(#206) → 复跑一次留证；mcp 48p。
+
+### 基线与证据
+- HEAD：`04419f2416331d7d9bdee1e94a05c02da23ce699`
+- 自审 R6：`0e736c72-dd30-49d1-ba4e-4895d04a0172` → PASS-WITH-NITS
+- 完工报：`/home/ops/materials/305/completion.md`（R6 节）
+
+## 2026-09-21 · w305 #305 R7（pending 降级 follow-on 抑制投影）
+
+### 我们实现了哪些功能？
+1. `degradedInstanceFollowOn`：renew|release 且 degradedLeaseClaims **gen+verifier** 精确匹配（无代际短路）。
+2. `mergeQueuedEvents` 分流：写回全量 `stillLagging`（保 pending）；投影只用 `applicable`；空 applicable → 原样返回；publicRead 有界同样喂 applicable。
+3. **不改** `eventIsIndexed` / journal / applyOverlayMessages 内部语义。
+4. claim_lost：无 verifier、服务器对权威租约签发，降级代不可达 → 不扩（评估一句）；expired 既有 authority 匹配守卫确认未动。
+
+### 我们遇到了哪些错误？
+1. RED：降级 claim 已索引、follow-on renew/release 未进 durable → pending 行被投影并进前一代权威。
+
+### 我们是如何解决这些错误的？
+1. 抑制投影、保留 pending；R6 已消费路径仍精确退休；聚焦 **44 pass**；M1 全绿；api 1977p/1f(#206)→复跑绿；mcp 48p。
+
+### 基线与证据
+- HEAD：`ee49e7095754c44b0b6e2616bce99f774cc2ccb5`
+- 自审 R7：`ac7eb955-9fa2-49b4-a7a7-7f8395f69494` → PASS-WITH-NITS
+- 完工报：`/home/ops/materials/305/completion.md`（R7 节）
+
+## 2026-09-21 · w305 #305 R8（矩阵收口 · test-only）
+
+### 我们实现了哪些功能？
+1. 钉测 GAP?-1a/1b/1c、GAP?-2（乐观 overlay / 索引 fail-closed / 同队列收敛）。
+2. completion + PR「矩阵产物 · 已声明边界」节。
+3. **未改生产代码**；可选证据缺口 5 处本轮未补（缺矩阵原文，避免误判）。
+
+### 我们遇到了哪些错误？
+无（四钉先跑现状均与声明一致）。
+
+### 我们是如何解决这些错误的？
+N/A。聚焦 **48 pass**；api **1982p/9s/0f**；mcp **48p**。
+
+### 基线与证据
+- HEAD：`9dd39360f16ce8a625afe979b294af99dffac6ca`
+- 自审 R8：`61c9bee6-d5f7-464c-852d-e89f01558a23` → PASS-WITH-NITS（docs 本轮补齐）
+- 完工报：`/home/ops/materials/305/completion.md`（R8 + 矩阵边界节）
