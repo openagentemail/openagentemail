@@ -47,6 +47,8 @@ UTF-8 字节数。满 8_000 units 时，头体积随字符编码 **与 JSON 转�
 - **默认 102400 字节（100 KiB）**（单个逻辑头，含已折叠续行）
 - 公开来源：[Postfix postconf(5) `header_size_limit`](https://www.postfix.org/postconf.5.html)
 
+注：该上限按**单个逻辑头**独立约束——其他头（Received/DKIM 等）各自独立受同一上限，非与 lease 头共享一个池；整信总大小另受 `message_size_limit` 约束。
+
 相对 JSON 转义最坏 ≈**62.7 KiB**（64242 chars），默认 102400 **仍能容纳**，但余量约 **1.6×**（102400/64242 ≈ 1.59），**不是**相对 31.3KiB 时那种 ≈3× 观感。若操作者把
 `header_size_limit` **调小到接近或低于** max-bound payload（再加其它头），
 cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` /
