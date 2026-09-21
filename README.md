@@ -209,11 +209,15 @@ it is not performed by the image entrypoint.
    `api`→`mailserver`→`provision` (and `ntfy` pulls `ntfy-provision`) —
    healthy, ~11s, no loss, but unintended. To recreate **only** the named
    services, add `--no-deps`; full-project builds keep the plain form.
-2. **Only `compose.override.yaml` is live.** A leftover sibling named
-   `docker-compose.override.yml` is ignored by docker compose (startup
-   warning observed). Editing the dead file changes nothing — check which
-   override file actually exists before hand-editing, and clean the dead
-   one up in your next deploy window.
+2. **Only `compose.override.yaml` is live — and only on default-file
+   invocations.** Auto-merging of an override happens when compose runs
+   without `-f`; a leftover sibling named `docker-compose.override.yml` is
+   ignored either way (startup warning observed). Editing the dead file
+   changes nothing — check which override file actually exists before
+   hand-editing, and clean the dead one up in your next deploy window.
+   Deployments that select files explicitly (e.g. API-only
+   `docker compose -f compose.api-only.yaml ...`) auto-merge **no**
+   override at all — `-f` users must pass every override explicitly.
 
 ### ntfy non-root upgrade (#278)
 
