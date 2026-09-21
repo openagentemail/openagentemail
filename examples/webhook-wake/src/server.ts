@@ -49,6 +49,7 @@ function emptyMetrics(): Metrics {
     unauthorized: 0,
     timeoutKill: 0,
     alertCoalesced: 0,
+    shareAbandoned: 0,
   };
 }
 
@@ -560,9 +561,13 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       }, config.requestTimeoutMs);
       handleHook(req, res, decoded.value, ac.signal)
         .catch((err) => {
-          // 席队列弃队：外层计时器已写 503，勿记 handler_error / 勿二次写响应
           if ((err as { code?: string }).code === SEAT_QUEUE_ABORTED) {
-            return;
+            // 纵深防御：ShareWaiterAggregate 修根后，未超时 waiter 理论不应收到此 reject。
+            // 仅本请求已写出响应或自身已 abort 才静默；否则落 handler_error 写 503，避免静默挂起。
+            metrics.shareAbandoned += 1;
+            if (res.headersSent || ac.signal.aborted) {
+              return;
+            }
           }
           logEvent('error', 'handler_error', { reason: err instanceof Error ? err.message : 'error' });
           if (!res.headersSent) {

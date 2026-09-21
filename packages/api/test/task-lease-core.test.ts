@@ -1678,6 +1678,75 @@ describe('#82 8k release-reason fold corpus', () => {
     }
     console.info(JSON.stringify({ r82FoldCorpus: results, payloadChars: payloadValue.length }));
   });
+
+  // 追加五：CJK 满 bound（8000 UTF-16 units）与 ASCII 同构；payload≈31.3KiB 为文档最坏口径活证据
+  test('8k CJK reason survives nodemailer wire + production parser (BMP worst-case budget)', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = '界'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    expect(reason.length).toBe(TASK_LEASE_REASON_MAX_CHARS);
+    expect(Buffer.byteLength(reason, 'utf8')).toBe(TASK_LEASE_REASON_MAX_CHARS * 3);
+
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-cjk-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    // ceil(≈24100/3)*4 ≈ 32134 → ≈31.3KiB（见 docs/task-lease-reason-transport.md）
+    expect(payloadValue.length).toBeGreaterThan(30_000);
+    expect(payloadValue.length).toBeLessThan(33_000);
+
+    const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+    const serialized = await transport.sendMail({
+      from: releaseInput!.from,
+      to: releaseInput!.to,
+      subject: releaseInput!.subject,
+      text: releaseInput!.text,
+      headers: releaseInput!.headers,
+    });
+    if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 CJK nodemailer must buffer RFC 5322 source');
+    const fetchMsg = {
+      uid: 31,
+      source: serialized.message,
+      envelope: {
+        from: [{ address: releaseInput!.from }],
+        to: [{ address: releaseInput!.to[0] }],
+        subject: releaseInput!.subject,
+      },
+      internalDate: new Date(START),
+    } as unknown as FetchMessageObject;
+    const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+    expect({
+      event: parsed?.lease?.event ?? null,
+      reasonMatch: parsed?.lease?.event === 'release' && parsed.lease.reason === reason,
+      reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason.length : null,
+      payloadChars: payloadValue.length,
+    }).toEqual({
+      event: 'release',
+      reasonMatch: true,
+      reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+      payloadChars: expect.any(Number),
+    });
+    console.info(JSON.stringify({
+      r82CjkBudgetEvidence: {
+        reasonUnits: reason.length,
+        reasonUtf8Bytes: Buffer.byteLength(reason, 'utf8'),
+        payloadChars: payloadValue.length,
+        approxKiB: Number((payloadValue.length / 1024).toFixed(2)),
+      },
+    }));
+  });
 });
 
 if (process.env.TASK_LEASES_R6_RED === '1') {

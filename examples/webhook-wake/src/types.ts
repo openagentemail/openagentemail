@@ -97,6 +97,8 @@ export type Metrics = {
   unauthorized: number;
   timeoutKill: number;
   alertCoalesced: number;
+  /** 席队列/共享弃队到达 handler catch 的次数（含纵深防御路径） */
+  shareAbandoned: number;
 };
 
 export type WakeRequest = {

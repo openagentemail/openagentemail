@@ -13,20 +13,19 @@ describe('SeatSerializer queue abort (#229)', () => {
   test('排队段 abort 弃队且不执行 work；已开跑 work 不因后续 abort 打断', async () => {
     const seats = new SeatSerializer();
     const order: string[] = [];
+    const firstStarted = Promise.withResolvers<void>();
 
     // 第一席：占住锁
     const gate = Promise.withResolvers<void>();
     const first = seats.run('term_a', async () => {
       order.push('first-start');
+      firstStarted.resolve();
       await gate.promise;
       order.push('first-done');
       return 'first';
     });
 
-    // 等第一席真正开跑
-    for (let i = 0; i < 50 && !order.includes('first-start'); i += 1) {
-      await Bun.sleep(5);
-    }
+    await firstStarted.promise;
     expect(order).toEqual(['first-start']);
 
     // 第二席：排队中 abort → 弃队
@@ -75,14 +74,17 @@ describe('seat-queue vs request_timeout (#229)', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const firstWakeStarted = Promise.withResolvers<void>();
     const woken: string[] = [];
     const wake: WakeFn = async (req) => {
       // 从 argv 文本里抽 event id 不便；用调用序 + 闭包计数
       woken.push(req.text);
+      if (woken.length === 1) firstWakeStarted.resolve();
       await gate;
       return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
     };
 
+    // 故意违反 headroom（requestTimeoutMs >= sendTimeoutMs+2000）以触发排队超时，勿当可运行配置样例
     const receiver = await startReceiver(
       testConfig({ mode: 'canary', requestTimeoutMs: 120, sendTimeoutMs: 800 }),
       { wake },
@@ -96,10 +98,7 @@ describe('seat-queue vs request_timeout (#229)', () => {
     });
 
     const p1 = postHook(receiver, { body: body1 });
-    // 等第一事件占住席锁再发第二
-    for (let i = 0; i < 80 && woken.length === 0; i += 1) {
-      await Bun.sleep(5);
-    }
+    await firstWakeStarted.promise;
     expect(woken).toHaveLength(1);
 
     const p2 = postHook(receiver, { body: body2 });
@@ -143,10 +142,14 @@ describe('seat-queue vs request_timeout (#229)', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const firstWakeStarted = Promise.withResolvers<void>();
     let wakes = 0;
     const wake: WakeFn = async (req) => {
       wakes += 1;
-      if (wakes === 1) await gate;
+      if (wakes === 1) {
+        firstWakeStarted.resolve();
+        await gate;
+      }
       return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
     };
 
@@ -163,9 +166,7 @@ describe('seat-queue vs request_timeout (#229)', () => {
     });
 
     const p1 = postHook(receiver, { body: body1 });
-    for (let i = 0; i < 80 && wakes === 0; i += 1) {
-      await Bun.sleep(5);
-    }
+    await firstWakeStarted.promise;
     expect(wakes).toBe(1);
     const p2 = postHook(receiver, { body: body2 });
     // 短等后放行，第二事件应在超时前开跑
@@ -188,14 +189,19 @@ describe('dedup.share waiter aggregate (#229 P1-1)', () => {
     const holdGate = new Promise<void>((resolve) => {
       releaseHold = resolve;
     });
+    const holdWakeStarted = Promise.withResolvers<void>();
     const woken: string[] = [];
     const wake: WakeFn = async (req) => {
       woken.push(req.text);
       // 首个占席事件阻塞；共享 key 的事件开跑后立即完成
-      if (woken.length === 1) await holdGate;
+      if (woken.length === 1) {
+        holdWakeStarted.resolve();
+        await holdGate;
+      }
       return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
     };
 
+    // 故意违反 headroom（requestTimeoutMs >= sendTimeoutMs+2000）以触发排队超时，勿当可运行配置样例
     const receiver = await startReceiver(
       testConfig({ mode: 'canary', requestTimeoutMs: 150, sendTimeoutMs: 800 }),
       { wake },
@@ -205,9 +211,7 @@ describe('dedup.share waiter aggregate (#229 P1-1)', () => {
     // 占住同 terminal 席锁（distinct key）
     const holdBody = mailBody({ id: 'evt_hold0001-2222-3333-4444-555555555555' });
     const pHold = postHook(receiver, { body: holdBody });
-    for (let i = 0; i < 80 && woken.length === 0; i += 1) {
-      await Bun.sleep(5);
-    }
+    await holdWakeStarted.promise;
     expect(woken).toHaveLength(1);
 
     const sharedBody = mailBody({
@@ -246,13 +250,18 @@ describe('dedup.share waiter aggregate (#229 P1-1)', () => {
     const holdGate = new Promise<void>((resolve) => {
       releaseHold = resolve;
     });
+    const holdWakeStarted = Promise.withResolvers<void>();
     const woken: string[] = [];
     const wake: WakeFn = async (req) => {
       woken.push(req.text);
-      if (woken.length === 1) await holdGate;
+      if (woken.length === 1) {
+        holdWakeStarted.resolve();
+        await holdGate;
+      }
       return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
     };
 
+    // 故意违反 headroom（requestTimeoutMs >= sendTimeoutMs+2000）以触发排队超时，勿当可运行配置样例
     const receiver = await startReceiver(
       testConfig({ mode: 'canary', requestTimeoutMs: 80, sendTimeoutMs: 800 }),
       { wake },
@@ -261,9 +270,7 @@ describe('dedup.share waiter aggregate (#229 P1-1)', () => {
 
     const holdBody = mailBody({ id: 'evt_hold0002-2222-3333-4444-555555555555' });
     const pHold = postHook(receiver, { body: holdBody });
-    for (let i = 0; i < 80 && woken.length === 0; i += 1) {
-      await Bun.sleep(5);
-    }
+    await holdWakeStarted.promise;
     expect(woken).toHaveLength(1);
 
     const sharedBody = mailBody({
