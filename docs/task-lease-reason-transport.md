@@ -59,7 +59,7 @@ cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` 
 在同一条真实出站链（API → 绑定 docker-mailserver/Postfix 3.7.11 → 本域投递 → catch-all 信箱）上，
 用产品真实 task lease `release` 事件（`X-OA-Task-Lease-Payload`）发三档满 8_000 UTF-16 单位的 reason：
 
-| 档 | canonical JSON（签名） | payload（签名字符数） | 实际到达 | 结论 |
+| 档 | canonical JSON（签名） | payload 头值（base64url 字符数） | 实际到达 | 结论 |
 | --- | --- | --- | --- | --- |
 | 全 ASCII | 8_188 B | 10_918 | 10_918（11 续行） | 完整送达 |
 | 全 BMP（`界`） | 24_188 B | 32_251 | 32_251（33 续行） | 完整送达 |
@@ -67,7 +67,7 @@ cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` 
 
 - 实测现象：满载 NUL 档 payload（64_251 chars）经绑定栈后到达 **59_820 字符**（60 续行 × 每行精确 997，尾部丢失）；单条超长行的诊断信（64_252 / 61_000 chars）**同样**落在 59_820；32_251 字符档完整送达。**截断的底层机制未定位**——已知不是 `header_size_limit`（102400 预算未触达），Postfix 日志仅有 `breaking line > 998 bytes` 折行记录、无截断告警；「发送端预折叠成 ≤998 字节续行是否可避开截断」是**未验证的候选修复方向**，本文不作排除。测量方法与原始 `.eml`/队列取证见 `materials/8k-relay/results.md`（fleet 内档）。
 - 相近数字的来源区分：**64,242**＝#82 仓内语料事件体；**64,251**＝本批 8k-relay 实测事件体；**64,252**＝诊断信构造值——同一「JSON 转义最坏」概念在不同事件体构成（`actor`/`at` 等定长字段）下的 ±10 字符级差异，非矛盾。
-- 截断发生在 **mailserver 侧**（postfix 队列体积 `size=60683` 已小于完整体量；nodemailer 本地对照证明发信侧发出的是完整值；发信侧 HMAC `X-OA-Task-Stamp` 覆盖的是**完整** 64_251 字符载荷）。
+- 截断发生在 **mailserver 侧**（postfix 队列体积 `size=60683` 已小于完整体量；nodemailer 本地对照证明发信侧发出的是完整头值；发信侧 HMAC `X-OA-Task-Stamp` 签的是**完整 canonical 事件**（48_188 B），64_251 字符头值是它的 base64url 编码）。
 - postfix 只记录折行（`breaking line > 998 bytes with <CR><LF>SPACE`），**没有任何截断告警** → 操作者无法从中继日志察觉。
 - 推论：本页上文「默认 102400 仍能容纳 62.7 KiB、余量 ≈1.6×」在绑定栈上**与实测不符**（62.7 KiB 档在当前发送形态下未完整通过）；`header_size_limit` 不是这条路径的有效预算口径。
 
