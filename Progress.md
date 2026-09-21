@@ -756,3 +756,20 @@ N/A。聚焦 **48 pass**；api **1982p/9s/0f**；mcp **48p**。
 - HEAD：`cfa29f9b5685d7537a3d34088ef901f8c1eed41c`
 - Subagent：`4159a841-6619-4285-a132-5479828a6261` → PASS
 - PR #310 描述已更新（契约变更 + 主路径债）
+
+## 2026-09-21 · w289x3 R4（rebase → origin/main 30155ea0）
+
+### 我们实现了哪些功能？
+1. 提交 Progress 后 rebase 到 `#305` 并入后的 `30155ea0`；Progress 冲突保双侧；其余自动合并。
+2. 自核 a–d 全过；force-with-lease 推送。
+
+### 我们遇到了哪些错误？
+1. 仅 Progress.md content conflict（预期）。
+
+### 我们是如何解决这些错误的？
+1. 保 #305 段 + 本卡 R0–R3 段顺序拼接，去冲突标记。
+
+### 基线与证据
+- HEAD：`5000dbd682f11e84bebc7eebf02cfe3e0b41aa31`
+- 聚焦 13p；api 1995p/9s/0f；mcp 48p
+- 完工件：`/home/ops/materials/289-290-302/completion.md` R4 节
