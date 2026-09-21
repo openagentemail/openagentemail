@@ -5,6 +5,7 @@
 import { createHmac } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { Hono } from 'hono';
+import { MAIL_CURSOR_V1_PREFIX } from '../../src/lib/mail-cursor.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -97,9 +98,10 @@ function encodeLegacyV1(
     }),
   ).toString('base64url');
   const mac = createHmac('sha256', key)
-    .update(`mail-cursor-v1\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}`)
+    // 故意用 retired 前缀构造 v1 阴性 token，验 v1 见前缀即拒
+    .update(`${MAIL_CURSOR_V1_PREFIX}\n${payload.folder}\n${payload.address}\n${payload.t}\n${payload.uid}`)
     .digest('base64url');
-  return `mail-cursor-v1.${body}.${mac}`;
+  return `${MAIL_CURSOR_V1_PREFIX}.${body}.${mac}`;
 }
 
 function folderMessage(opts: { uid: number; from: string; to: string; at: string }): FakeMessage {
