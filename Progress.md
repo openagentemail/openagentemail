@@ -406,5 +406,8 @@
 ### 基线与证据
 - 开工基线 origin/main：`07c75461`
 - 分支：`w137b2-console-locales`
+- HEAD：`1fb2fb7cb3908fe12619ac04dcd25ebf33abb5ea`
+- PR：https://github.com/openagentemail/openagentemail/pull/306
 - 材料：`/home/ops/materials/137-b2/`
+- subagent：`70cd1a41-1e16-42d7-b099-9b950aec1491` PASS（P1 From/To 已修）
 - >600 行预授权：总裁定 #4241
