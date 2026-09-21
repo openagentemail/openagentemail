@@ -206,3 +206,83 @@
 - origin/main：`18dd9421df22b445b93cb4618aa339ceae652156`
 - 分支：`w284-publisher-pin`
 - 材料：`/home/ops/materials/284/completion.md`
+
+## 2026-09-20 · w278（#278 ntfy 去根化·窗前备货）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/lib/notify.ts` `writeServerConfigBody`：生成 `listen-http: ":2587"`（>1024，随 server.yml 生成器走）。
+2. `compose.yaml` ntfy 节三项锁步：`user: "1000:1000"`；ports `127.0.0.1:${NTFY_PORT:-2586}:2587`；healthcheck wget 打 `:2587`；注释保留原意图并标 #278。
+3. `notify-route-cascade.test.ts` 新增 `7d`：断言生成的 server.yml 含 `listen-http: ":2587"`。
+
+### 我们遇到了哪些错误？
+1. 本地无 `.env` 时 `docker compose config` 因 `env_file: .env` 直接失败。
+2. 全量 api 套件预存红：`#206` 25s timeout（与本卡无关，Progress 既有记载）。
+
+### 我们是如何解决这些错误的？
+1. 冒烟用临时 env 软链为项目 `.env`，校验后立即拆除；不落盘、不改真 `.env`。
+2. 预存 flake 记入 completion；不挡合入。窗内执行（chown/up/id 验）留给 FC，本卡不动产线。
+
+### 基线与证据
+- origin/main：`fd4135935c5308e6af4b6a531f529db4b39149e0`
+- HEAD：`40147a4e4ac0549fecb4400e7252e95de0c7d527`
+- 分支：`w278-ntfy-nonroot` · PR #298
+- 材料：`/home/ops/materials/278/`
+- subagent 自审：`be1c3f15-83dd-4bc6-8243-f2d8b75913f7` · verdict PASS
+- 全量 api：1915 pass / 9 skip / 1 fail（#206 预存 timeout）
+
+## 2026-09-20 · w278 R2（Codex P1×1 · NTFY_INTERNAL_URL 层序漏点）
+
+### 我们实现了哪些功能？
+1. `compose.yaml` api：`NTFY_INTERNAL_URL: http://ntfy` → `http://ntfy:2587`（与 listen-http/ports/healthcheck 锁步）。
+2. `config.ts` 缺省 `envUrl('http://ntfy')` **不动**（env 驱动；compose 注入覆盖）。
+3. `7d` 旁中文说明部署面锁步；compose 非单测面 → completion 记 grep 证据。
+
+### 我们遇到了哪些错误？
+1. R0/窗前卡漏改内部 URL：healthcheck 绿但 API 仍打 :80 → 配对/发布断连（FC 亲验属实）。
+2. 全量套件偶发 `list-rate isolate parent` 红（预存 flake，与本修无关）。
+
+### 我们是如何解决这些错误的？
+1. 只改 compose 注入面一行 + 注释；不动代码缺省。
+2. 预存 flake 记 completion，不挡合入。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`e5b4e0952d14c2241dedfdd2109eb8eace62b223`
+- 聚焦 `7d`：1 pass；全量：1915 pass / 9 skip / 1 fail（list-rate isolate flake）
+- grep：`compose.yaml` 仅 `NTFY_INTERNAL_URL: http://ntfy:2587`；`config.ts:211` 仍 `envUrl('http://ntfy')`
+
+## 2026-09-20 · w278 R3（Codex P1×2 · bare 缺省 + 升级注释）
+
+### 我们实现了哪些功能？
+1. **P1-2**：`config.ts` `NTFY_INTERNAL_URL` 缺省 → `envUrl('http://ntfy:2587')`（与 listen-http 锁步；显式 env 仍覆盖）。
+2. **P1-1 文档锚**：compose ntfy 节补升级 chown 注释；PR/completion 写明 sweep→chown→up 次序。
+3. `notify.test.ts` mock URL 针脚随缺省更新；`7d` 旁说明同步。
+
+### 我们遇到了哪些错误？
+1. 改缺省后既有 `http://ntfy/v1/...` 断言必红（两处）。
+
+### 我们是如何解决这些错误的？
+1. 针脚改为 `http://ntfy:2587/v1/...`；全量 **1916 pass / 0 fail**。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`04976a4854abf5abfcf0b7fb49b6c50c29acba56`
+- 材料：`/home/ops/materials/278/completion.md`（R3 追记）
+- 部署面：compose 已显式注入；bare 缺省现与 :2587 自洽
+- 全量 api：**1916 pass / 9 skip / 0 fail**
+
+## 2026-09-20 · w278 R4（README 用户面 ntfy chown runbook）
+
+### 我们实现了哪些功能？
+1. README `#93` 迁移节后增 `### ntfy non-root upgrade (#278)`：升级前对 `/data/ntfy` 一次性 chown（命令风格对齐既有 `docker run -v <project>_api-data`）；否则 ntfy UID 1000 起不来且 API `depends_on` healthy 连带挂。
+
+### 我们遇到了哪些错误？
+1. 无；Codex 第三次同条裁为半成立——compose comment 不执行 chown，正解=用户面 README 注记。
+
+### 我们是如何解决这些错误的？
+1. 只加 README 一段；不动代码/compose。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`69f4b38258a5e2abe1ba8e71680fbb99649512fa`
+- 材料：`/home/ops/materials/278/completion.md`（R4 追记）

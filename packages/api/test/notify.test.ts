@@ -366,10 +366,10 @@ describe('phone device ACL', () => {
       await expect(createNotificationDevice()).rejects.toThrow('notify_unavailable');
 
       expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
-        'POST http://ntfy/v1/users',
-        'POST http://ntfy/v1/users/access',
-        'POST http://ntfy/v1/users/access',
-        'DELETE http://ntfy/v1/users',
+        'POST http://ntfy:2587/v1/users',
+        'POST http://ntfy:2587/v1/users/access',
+        'POST http://ntfy:2587/v1/users/access',
+        'DELETE http://ntfy:2587/v1/users',
       ]);
       expect(calls.slice(1, 3).map((call) => call.body)).toEqual([
         expect.objectContaining({ topic: expect.stringMatching(/^user-alerts-/), permission: 'read-only' }),
@@ -1147,9 +1147,9 @@ describe('live ntfy reader provisioning', () => {
     } as any)).rejects.toThrow('notify_unavailable');
 
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
-      'POST http://ntfy/v1/users',
-      'POST http://ntfy/v1/users/access',
-      'DELETE http://ntfy/v1/users',
+      'POST http://ntfy:2587/v1/users',
+      'POST http://ntfy:2587/v1/users/access',
+      'DELETE http://ntfy:2587/v1/users',
     ]);
   });
 });

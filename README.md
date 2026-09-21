@@ -202,6 +202,23 @@ docker inspect <new-api-image> --format '{{.Config.User}}'
 Do **not** reverse this order. Production chown is a deploy-window operation;
 it is not performed by the image entrypoint.
 
+### ntfy non-root upgrade (#278)
+
+ntfy now runs as **UID 1000** and listens on container port **2587**. If an
+existing deploy previously ran ntfy as root, chown its data **before**
+`up -d` — otherwise ntfy fails to start and the API stays down (`depends_on`
+healthy):
+
+```bash
+# Same volume naming as above; only the ntfy subtree is required here.
+docker run --rm -v <project>_api-data:/data alpine \
+  sh -c 'chown -R 1000:1000 /data/ntfy'
+```
+
+Then `docker compose up -d` (recreate `ntfy` and `api`). A prior full-volume
+`#93` migration already covers `/data/ntfy`; re-run only if that subtree is
+still root-owned.
+
 <a id="use-it-from-your-agent-mcp"></a>
 ## Connect your agent
 
