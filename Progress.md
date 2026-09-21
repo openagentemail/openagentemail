@@ -610,6 +610,6 @@
 3. R5-3 评估（≤300 字）：`noteClaimWindowConflictDegraded` 先 `seen.set` 再过 60s 限频 → 被吞键永不补写 audit。若「吞掉时不记 seen」：第二轮同序在窗内会对未入 seen 键反复 count，破坏 pin `count=(cap+1)×2`（现依赖 FIFO 淘汰后整轮再 miss）；若同时改 count 口径则动既有 >cap 钉。count 已暴露 ops 可读（`takeClaimWindowConflictDegradedCountForTests`）。**记债：保持先 seen 后限频 + count 兜底；不改 pin/60s 上界。交 FC 呈裁是否另开「限频失败不入 seen + 调整 count 语义」卡。**
 
 ### 基线与证据
-- HEAD：`d2398c57fcb6ea74ed56d2bd1f3fb6617c743f2e`
+- HEAD：`b3834496c29115a040d4bcfa59438d1e732e3c6d`（功能 `d2398c5` + Progress）
 - 自审 R5：`258af8a9-ea6f-4c3a-8538-7fa4d028fb76` → PASS-WITH-NITS（已补 R5-3 债）
 - 完工报：`/home/ops/materials/305/completion.md`（R5 节）
