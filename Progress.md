@@ -546,3 +546,8 @@
 
 ### 我们是如何解决这些错误的？
 1. 按上列语义修 + RED→绿；聚焦 18/18；全量 1952p/9s/0f。
+
+### 基线与证据
+- HEAD：`f33ec0a` · PR #309 · diff vs main：**+693/−7（已越 600；测试 538 行主体）**
+- 自审 R3：`f57b57c5-32de-4c45-aa0a-35bed0889d3e` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/f57b57c5-32de-4c45-aa0a-35bed0889d3e/`
+- 完工报：`/home/ops/materials/305/completion.md`（R3 节）
