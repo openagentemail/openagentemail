@@ -275,6 +275,72 @@ describe('#289 webhook URL reject details + log', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'invalid_webhook_url' });
   });
+
+  // R3 P1-1 方案 a：zod 去 .url() 后，语法坏 URL 到达 resolver → malformed_url details
+  test('create+update: not-a-url → invalid_webhook_url + details malformed_url', async () => {
+    const createRes = await app.request('/v1/webhooks', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: 'not-a-url',
+        address: 'alice@test.example',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+      }),
+    });
+    expect(createRes.status).toBe(400);
+    expect(await createRes.json()).toEqual({
+      error: 'invalid_webhook_url',
+      details: 'malformed_url',
+    });
+
+    const sub = createWebhookSubscription({
+      url: 'https://example.com/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    // 更新走 POST /v1/webhooks/:id（非 PATCH；与 RFC §10.3 一致）
+    const updateRes = await app.request(`/v1/webhooks/${sub.id}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: 'not-a-url' }),
+    });
+    expect(updateRes.status).toBe(400);
+    expect(await updateRes.json()).toEqual({
+      error: 'invalid_webhook_url',
+      details: 'malformed_url',
+    });
+  });
+
+  // R3 反向负控：合法但不可达 URL（dns_empty）行为不变
+  test('create: reachable-shape URL with empty DNS still invalid_webhook_url without details', async () => {
+    setWebhookDnsLookupForTests(async () => []);
+    const res = await app.request('/v1/webhooks', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: 'https://still-empty-dns.example/hook',
+        address: 'alice@test.example',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: 'invalid_webhook_url' });
+    expect(Object.keys(body)).toEqual(['error']);
+  });
 });
 
 describe('#290 ping circuit-breaker aligns with main path', () => {
@@ -515,14 +581,15 @@ describe('#302 approval payload MIME folding', () => {
 
 afterAll(async () => {
   resetWebhooksStoreForTests();
-  (config as any).dataDir = originalDataDir;
   (config.webhooks as any).enabled = false;
   setWebhookDnsLookupForTests(undefined);
   deliveryQueue.cancelAll();
+  // deleteIdentity 必须在 dataDir 仍指向 TEST_DATA_DIR 时执行，避免误删原始 store 身份
   try {
     deleteIdentity('alice@test.example');
   } catch {
     /* ignore */
   }
+  (config as any).dataDir = originalDataDir;
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
 });

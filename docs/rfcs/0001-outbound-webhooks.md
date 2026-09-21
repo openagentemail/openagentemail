@@ -1510,15 +1510,22 @@ plus a reason expresses strictly more than two overlapping on/off switches.
   dead-lettered immediately rather than queued, so a dead endpoint cannot accumulate an
   unbounded backlog over the three-day retry horizon (§8.3).
 
-**Lazy cleanup of in-flight retries is intentional (not eager cancel).** Attempts that were
-already queued *before* disablement are **not** cancelled at the disable moment. They settle
-when `runExecuteJob` next fires for that job: if the endpoint is then `disabled`, the job is
-deleted and a dead-letter row is written with `reason=webhook_disabled`. The dead-letter
-timestamp is therefore the **settlement** time, not the disable time. Two tracks coexist by
-design: (1) new events after disable are dead-lettered immediately; (2) pre-disable queued
+**Lazy cleanup of in-flight retries applies to threshold disablement only (not
+eager cancel).** When the circuit breaker trips via consecutive failures
+(`disabledReason: "threshold"`), attempts that were already queued *before* the trip are
+**not** cancelled at the disable moment. They settle when `runExecuteJob` next fires for
+that job: if the endpoint is then `disabled`, the job is deleted and a dead-letter row is
+written with `reason=webhook_disabled`. The dead-letter timestamp is therefore the
+**settlement** time, not the disable time. Two tracks coexist by design for the threshold
+path: (1) new events after disable are dead-lettered immediately; (2) pre-disable queued
 retries are cleaned lazily at settlement. Ping-path threshold trips follow the same rule as
 the main delivery path: retryable outcomes convert in place to permanent
 (`reason=webhook_disabled`) and do not schedule a further attempt.
+
+**Manual pause and delete are eager.** `POST /:id/disable` (`disabledReason: "manual"`)
+calls `deliveryQueue.cancelForWebhook` immediately and writes permanent dead-letter rows with
+`reason=webhook_disabled` at cancel time. `DELETE /:id` likewise cancels pending retries
+up front with `reason=subscription_deleted`. Those paths are **not** lazy cleanup.
 
 **Disablement threshold: consecutive failed *attempts*, reset on any success.** Per decision
 **D2a** (§17), which overrode this document's proposal:
@@ -2119,6 +2126,10 @@ bodies.
 | `POST` | `/v1/webhooks/deliveries/:deliveryId/redeliver` | admin | Manual replay of one recorded delivery — **dead letter or success**, per decision **D15** (§17), following Resend's "replay both `failed` and `succeeded`". Enqueues a fresh attempt with a **new** `deliveryId`, the **same** event `id`, and a `replay: true` marker in the log row. Replaying a success re-sends an event the consumer already processed, so it leans on their `id` dedupe (§8.1); the marker exists so an operator reading the log can tell a replay from an original. |
 
 Create and update request validation rules:
+- `url`: string up to 2048 characters (over-long → `invalid_request`). URL *syntax* and the
+  rest of §9.5 static rules are enforced by the resolver after zod, returning
+  `invalid_webhook_url` (whitelist `details` may carry `malformed_url`, etc.) — not
+  `invalid_request`.
 - `events`: must be a non-empty array of unique event types (`events.length >= 1`, duplicate entries rejected with `invalid_request`, Item 8).
 - `description`: optional human-readable string up to 1000 characters (`<= 1000 chars`, Item 4).
 - `contentScope`: `'metadata'` (default) or `'preview'` (admin-only).
@@ -2163,9 +2174,9 @@ Error codes, following the existing snake_case convention:
 | Code | Status | Cause |
 | --- | --- | --- |
 | `webhooks_disabled` | 404 | `WEBHOOKS_ENABLED=false` |
-| `invalid_request` | 400 | zod validation failure, with `details` |
+| `invalid_request` | 400 | zod validation failure (e.g. over-long `url`, empty/duplicate `events`), with `details` |
 | `unknown_event_type` | 400 | Reserved-but-unemitted or nonsense type (§5.3) |
-| `invalid_webhook_url` | 400 | Fails §9.5 static rules |
+| `invalid_webhook_url` | 400 | Fails §9.5 static rules (incl. unparseable / malformed URL syntax) |
 | `webhook_target_forbidden` | 400 | Fails the SSRF policy at creation (§9.3) |
 | `content_scope_requires_admin` | 403 | Identity token requested `preview` (§6.5) |
 | `forbidden: token is scoped to another address` | 403 | Existing `forbidUnlessAddress` message, reused verbatim |
