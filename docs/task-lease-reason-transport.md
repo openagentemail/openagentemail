@@ -122,8 +122,8 @@ Gmail 满载 BMP 一点＋Exchange/SES/其它 SMTP，需业主提供的测试账
 ## 操作建议（短）
 
 1. 保持双闸 8k；不要在中继侧「截断 reason」冒充成功。
-2. 自托管 Postfix 勿盲目下调 `header_size_limit`；同时**勿按其纸面预算做容量规划**——绑定栈实测单头 ~59,820 字符即静默截断（纸面 102400 不是真实天花板，见实测小节），满 bound 多字节/控制字符档按「可能被判丢」设计。
-3. 经商用中继前，用公开表做风险预判；**勿对 Gmail 使用满 bound 多字节或控制字符 reason**（62.7KiB 必超 32KB 单头）；BMP 贴线亦应实测（**未实测**条目不得省略）。
+2. 自托管 Postfix 勿盲目下调 `header_size_limit`；同时**勿按其纸面预算做容量规划**——绑定栈实测满载头在 ~59,820 字符被静默截断（当前发送形态，机制未定位，见实测小节）。**仅 JSON 转义膨胀档**（控制字符/lone surrogate，≈62.7KiB）触到该点；满载 BMP/CJK（32,251 chars）实测完整送达，不在风险内。触点面按「可能被判丢」设计。
+3. 经商用中继前，用公开表做风险预判；对 Gmail：**满 bound 控制字符/lone surrogate reason（≈62.7KiB）必超其 32KB 单头上限（552 硬拒）**；满载 BMP（32,251 chars）在限内——探测至 31,320B 已逐字节保留，满载点待实弹（见上表 Gmail 行）。
 4. 回归：`packages/api` 内 `task-lease-core` 对 8k reason 的 folding/unfolding
    走 **mailparser 生产解析路径**（非 mock）；见该文件 R17 / #82 语料（ASCII + CJK + NUL 满 bound）。
    生产 `readLeaseEventPayload` **接受 MIME 中介重折**：对头值 strip 全部空白后再做
