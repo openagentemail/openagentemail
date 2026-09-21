@@ -822,6 +822,21 @@
   });
   configureClientsRefresh.addEventListener('click', function () { loadConfigureClients(); });
 
+  /* #137 B2：语言选择器——写 oa_lang cookie 后整页刷新；零新增 API。 */
+  (function bindLanguageSelector() {
+    var sel = byId('oa-lang-select');
+    if (!sel) return;
+    var htmlLang = document.documentElement.getAttribute('lang') || 'en';
+    if (sel.querySelector('option[value="' + htmlLang + '"]')) {
+      sel.value = htmlLang;
+    }
+    sel.addEventListener('change', function () {
+      var v = sel.value || 'en';
+      document.cookie = 'oa_lang=' + encodeURIComponent(v) + '; Path=/ui; Max-Age=31536000; SameSite=Lax';
+      window.location.reload();
+    });
+  })();
+
   /**
    * Consumes and strips the one-time exchange ?code= query parameter from window.location via history.replaceState.
    * Under #132 hardening, the server redirects ?token= to ?code=<one-time-code>.

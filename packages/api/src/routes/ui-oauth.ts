@@ -35,7 +35,12 @@ import {
   buildAuthorizeRedirect,
   preflightAuthorizeRequest,
   type OAuthRouteOptions,
+  type PreflightPageErrorCode,
 } from './oauth.ts';
+import { getUiI18nDict } from '../ui/client/i18n-dicts.ts';
+import { tServer } from '../ui/client/i18n-en.ts';
+import { oauthCopy } from '../ui/i18n/oauth-copy.ts';
+import { resolveUiLocale, type UiLocale } from '../ui/i18n/resolve-ui-locale.ts';
 
 function escapeHtml(value: string): string {
   return value
@@ -60,6 +65,25 @@ function redirectHostname(redirectUri: string): string {
   } catch {
     return redirectUri;
   }
+}
+
+/** OAuth 页与 dashboard 共用 oa_lang → Accept-Language → en。 */
+function localeOf(c: Context): UiLocale {
+  return resolveUiLocale({
+    cookie: getCookie(c, 'oa_lang'),
+    acceptLanguage: c.req.header('Accept-Language'),
+  });
+}
+
+/** 预检 page 错误 → 五字典键（不直渲英文 pre.message）。 */
+const PREFLIGHT_PAGE_ERROR_KEYS: Record<PreflightPageErrorCode, string> = {
+  missing_client_or_redirect: 'oauth.error.missingClientOrRedirect',
+  invalid_client: 'oauth.error.invalidClient',
+  redirect_uri_unregistered: 'oauth.error.redirectUriUnregistered',
+};
+
+function preflightPageErrorMessage(locale: UiLocale, code: PreflightPageErrorCode): string {
+  return tServer(PREFLIGHT_PAGE_ERROR_KEYS[code], getUiI18nDict(locale));
 }
 
 const PAGE_CSS = `
@@ -88,12 +112,13 @@ th{color:var(--muted);font-weight:600;font-size:0.8rem}
 .error{color:var(--danger)}
 `;
 
-function shell(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+function shell(locale: UiLocale, title: string, body: string): string {
+  const copy = oauthCopy(locale);
+  return `<!doctype html><html lang="${escapeHtml(locale)}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(title)} · OpenAgent.email</title>
+<title>${escapeHtml(title)} · ${escapeHtml(copy.brandSuffix)}</title>
 <style>${PAGE_CSS}</style></head><body><main>
-<div class="brand"><span>OpenAgent.email</span></div>
+<div class="brand"><span>${escapeHtml(copy.brandSuffix)}</span></div>
 ${body}
 </main></body></html>`;
 }
@@ -113,23 +138,26 @@ function htmlResponse(c: Context, html: string, status: 200 | 400 | 401 | 403 | 
 /**
  * 批准/拒绝后的过渡页：200 + meta refresh + 可见链接。
  * Chrome 会因 CSP form-action 'self' 拦 302 外跳，故不用 302；本页 CSP 不含 form-action。
+ * #137 B2：文案随会话 locale（废除钉死 zh-CN）。
  */
 function authorizeHandoffResponse(c: Context, redirectUrl: string): Response {
   // 契约硬化：必须过返工 3 scheme 白名单（https / http-loopback）
   if (!isAllowedRedirectUri(redirectUrl)) {
     throw new Error('authorize_handoff_forbidden_redirect');
   }
+  const locale = localeOf(c);
+  const copy = oauthCopy(locale);
   const safe = escapeHtml(redirectUrl);
   // meta refresh 的 URL 用属性转义；可见链接同
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+  const html = `<!doctype html><html lang="${escapeHtml(locale)}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="0;url=${safe}">
-<title>已授权 · OpenAgent.email</title>
+<title>${escapeHtml(copy.handoffTitle)} · ${escapeHtml(copy.brandSuffix)}</title>
 <style>${PAGE_CSS}</style></head><body><main>
 <section class="card">
-  <h1>已授权，正在跳回客户端</h1>
-  <p class="muted">若未自动跳转，请点击下方链接继续。</p>
-  <p><a class="btn primary" href="${safe}">返回客户端</a></p>
+  <h1>${escapeHtml(copy.handoffH1)}</h1>
+  <p class="muted">${escapeHtml(copy.handoffMuted)}</p>
+  <p><a class="btn primary" href="${safe}">${escapeHtml(copy.handoffLink)}</a></p>
 </section>
 </main></body></html>`;
   c.header('Content-Type', 'text/html; charset=utf-8');
@@ -164,18 +192,22 @@ function redirectToLogin(c: Context): Response {
 }
 
 /** 同意仪式仅业主（admin）可执行；表单始终含已有身份 + 当场新建。 */
-function consentFormHtml(input: {
-  clientName: string;
-  clientId: string;
-  redirectUri: string;
-  codeChallenge: string;
-  state?: string;
-  resource: string;
-  loopbackWarning: boolean;
-  identities: { address: string }[];
-  error?: string;
-  hasLinkLoginMarker?: boolean;
-}): string {
+function consentFormHtml(
+  locale: UiLocale,
+  input: {
+    clientName: string;
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    state?: string;
+    resource: string;
+    loopbackWarning: boolean;
+    identities: { address: string }[];
+    error?: string;
+    hasLinkLoginMarker?: boolean;
+  },
+): string {
+  const copy = oauthCopy(locale);
   const host = clientHostname(input.clientId);
   const redirectHost = redirectHostname(input.redirectUri);
   const identityOptions = input.identities
@@ -186,24 +218,25 @@ function consentFormHtml(input: {
     .join('');
 
   const warn = input.loopbackWarning || redirectUriIsLoopback(input.redirectUri)
-    ? `<p class="warn">This client redirects to a loopback address (<strong>${escapeHtml(redirectHost)}</strong>). Only continue if you started this authorization yourself.</p>`
+    ? `<p class="warn">${escapeHtml(copy.loopbackWarnBefore)}<strong>${escapeHtml(redirectHost)}</strong>${escapeHtml(copy.loopbackWarnAfter)}</p>`
     : '';
 
   const linkLoginNotice = input.hasLinkLoginMarker
-    ? `<p class="warn" id="link-login-notice" role="status" aria-live="polite">Signed in via link as Admin session</p>`
+    ? `<p class="warn" id="link-login-notice" role="status" aria-live="polite">${escapeHtml(copy.linkLoginNotice)}</p>`
     : '';
 
   return shell(
-    'Authorize',
+    locale,
+    copy.authorizeTitle,
     `<section class="card">
-      <h1>Authorize application</h1>
-      <p class="muted"><strong>${escapeHtml(input.clientName)}</strong> wants access to an OpenAgent identity via MCP.</p>
+      <h1>${escapeHtml(copy.authorizeH1)}</h1>
+      <p class="muted"><strong>${escapeHtml(input.clientName)}</strong>${escapeHtml(copy.wantsAccess)}</p>
       ${linkLoginNotice}
       <dl class="meta">
-        <dt>Client</dt><dd>${escapeHtml(input.clientName)}</dd>
-        <dt>Client ID host</dt><dd>${escapeHtml(host)}</dd>
-        <dt>Redirect host</dt><dd>${escapeHtml(redirectHost)}</dd>
-        <dt>Client ID</dt><dd>${escapeHtml(input.clientId)}</dd>
+        <dt>${escapeHtml(copy.metaClient)}</dt><dd>${escapeHtml(input.clientName)}</dd>
+        <dt>${escapeHtml(copy.metaClientIdHost)}</dt><dd>${escapeHtml(host)}</dd>
+        <dt>${escapeHtml(copy.metaRedirectHost)}</dt><dd>${escapeHtml(redirectHost)}</dd>
+        <dt>${escapeHtml(copy.metaClientId)}</dt><dd>${escapeHtml(input.clientId)}</dd>
       </dl>
       ${warn}
       ${input.error ? `<p class="error">${escapeHtml(input.error)}</p>` : ''}
@@ -214,31 +247,33 @@ function consentFormHtml(input: {
         <input type="hidden" name="resource" value="${escapeHtml(input.resource)}">
         ${input.state ? `<input type="hidden" name="state" value="${escapeHtml(input.state)}">` : ''}
         <fieldset style="border:0;padding:0;margin:0">
-          <legend class="muted">Choose identity</legend>
+          <legend class="muted">${escapeHtml(copy.chooseIdentity)}</legend>
           <label class="row"><input type="radio" name="identity_mode" value="existing" checked>
-            <span>Existing identity<br><select name="address">${identityOptions}</select></span>
+            <span>${escapeHtml(copy.existingIdentity)}<br><select name="address">${identityOptions}</select></span>
           </label>
           <label class="row"><input type="radio" name="identity_mode" value="create">
-            <span>Create a new identity<br>
-            <input type="text" name="localpart" placeholder="localpart" pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
+            <span>${escapeHtml(copy.createIdentity)}<br>
+            <input type="text" name="localpart" placeholder="${escapeHtml(copy.localpartPlaceholder)}" pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
             </span>
           </label>
         </fieldset>
         <div class="actions">
-          <button class="primary" type="submit" name="decision" value="approve">Approve</button>
-          <button class="quiet" type="submit" name="decision" value="deny">Deny</button>
+          <button class="primary" type="submit" name="decision" value="approve">${escapeHtml(copy.approve)}</button>
+          <button class="quiet" type="submit" name="decision" value="deny">${escapeHtml(copy.deny)}</button>
         </div>
       </form>
     </section>`,
   );
 }
 
-function adminOnlyForbiddenPage(): string {
+function adminOnlyForbiddenPage(locale: UiLocale): string {
+  const copy = oauthCopy(locale);
   return shell(
-    'Forbidden',
-    `<section class="card"><h1>Admin session required</h1>
-     <p class="error">OAuth consent is owner-only. Sign in with an admin API token.</p>
-     <p><a class="btn quiet" href="/ui">← Back to inbox</a></p></section>`,
+    locale,
+    copy.forbiddenTitle,
+    `<section class="card"><h1>${escapeHtml(copy.forbiddenH1)}</h1>
+     <p class="error">${escapeHtml(copy.forbiddenBody)}</p>
+     <p><a class="btn quiet" href="/ui">${escapeHtml(copy.backToInbox)}</a></p></section>`,
   );
 }
 
@@ -250,6 +285,8 @@ export function createUiOAuthPageRoutes(
 
   // 同意页：手工查 session（未登录→登录；非 admin→403）
   routes.get('/authorize', async (c) => {
+    const locale = localeOf(c);
+    const copy = oauthCopy(locale);
     const sid = getCookie(c, 'oae_ui');
     const session = sid ? store.authenticate(sid) : null;
     if (!session) {
@@ -257,16 +294,21 @@ export function createUiOAuthPageRoutes(
     }
     // 红线：同意仪式仅业主 admin；identity 自批准会把注入面升成 30d 可续期门票
     if (session.auth.kind !== 'admin') {
-      return htmlResponse(c, adminOnlyForbiddenPage(), 403);
+      return htmlResponse(c, adminOnlyForbiddenPage(locale), 403);
     }
 
     const q = c.req.query();
     const pre = await preflightAuthorizeRequest(q, new URL(c.req.url).origin, options);
     if (!pre.ok) {
       if (pre.kind === 'redirect') return c.redirect(pre.location, 302);
+      const errMsg = preflightPageErrorMessage(locale, pre.code);
       return htmlResponse(
         c,
-        shell('Authorization error', `<section class="card"><h1>Authorization error</h1><p class="error">${escapeHtml(pre.message)}</p></section>`),
+        shell(
+          locale,
+          copy.authErrorTitle,
+          `<section class="card"><h1>${escapeHtml(copy.authErrorH1)}</h1><p class="error">${escapeHtml(errMsg)}</p></section>`,
+        ),
         pre.status,
       );
     }
@@ -275,7 +317,7 @@ export function createUiOAuthPageRoutes(
 
     return htmlResponse(
       c,
-      consentFormHtml({
+      consentFormHtml(locale, {
         clientName: pre.doc.client_name,
         clientId: pre.clientId,
         redirectUri: pre.redirectUri,
@@ -291,13 +333,15 @@ export function createUiOAuthPageRoutes(
 
   // 与其他 /ui/api 一致限体，防超大 multipart
   routes.post('/authorize', uiSessionBodyLimit, requireUiOrigin, async (c) => {
+    const locale = localeOf(c);
+    const copy = oauthCopy(locale);
     const sid = getCookie(c, 'oae_ui');
     const session = sid ? store.authenticate(sid) : null;
     if (!session) {
       return redirectToLogin(c);
     }
     if (session.auth.kind !== 'admin') {
-      return htmlResponse(c, adminOnlyForbiddenPage(), 403);
+      return htmlResponse(c, adminOnlyForbiddenPage(locale), 403);
     }
 
     let rawBody: Record<string, string | File>;
@@ -306,7 +350,7 @@ export function createUiOAuthPageRoutes(
     } catch {
       return htmlResponse(
         c,
-        shell('Authorization error', `<p class="error">Malformed body.</p>`),
+        shell(locale, copy.authErrorTitle, `<p class="error">${escapeHtml(copy.malformedBody)}</p>`),
         400,
       );
     }
@@ -314,7 +358,11 @@ export function createUiOAuthPageRoutes(
     if (!parsed.ok) {
       return htmlResponse(
         c,
-        shell('Authorization error', `<p class="error">Invalid form field types.</p>`),
+        shell(
+          locale,
+          copy.authErrorTitle,
+          `<p class="error">${escapeHtml(copy.invalidFormFieldTypes)}</p>`,
+        ),
         400,
       );
     }
@@ -335,9 +383,10 @@ export function createUiOAuthPageRoutes(
     );
     if (!pre.ok) {
       if (pre.kind === 'redirect') return authorizeHandoffResponse(c, pre.location);
+      const errMsg = preflightPageErrorMessage(locale, pre.code);
       return htmlResponse(
         c,
-        shell('Authorization error', `<p class="error">${escapeHtml(pre.message)}</p>`),
+        shell(locale, copy.authErrorTitle, `<p class="error">${escapeHtml(errMsg)}</p>`),
         pre.status,
       );
     }
@@ -371,7 +420,7 @@ export function createUiOAuthPageRoutes(
       if (!LOCALPART_RE.test(localpart)) {
         return htmlResponse(
           c,
-          consentFormHtml({
+          consentFormHtml(locale, {
             clientName: pre.doc.client_name,
             clientId: pre.clientId,
             redirectUri: pre.redirectUri,
@@ -380,7 +429,7 @@ export function createUiOAuthPageRoutes(
             resource: pre.resource,
             loopbackWarning: pre.loopbackWarning,
             identities: listIdentities(),
-            error: 'Invalid localpart.',
+            error: copy.invalidLocalpart,
           }),
           400,
         );
@@ -390,7 +439,7 @@ export function createUiOAuthPageRoutes(
       if (!created) {
         return htmlResponse(
           c,
-          consentFormHtml({
+          consentFormHtml(locale, {
             clientName: pre.doc.client_name,
             clientId: pre.clientId,
             redirectUri: pre.redirectUri,
@@ -399,7 +448,7 @@ export function createUiOAuthPageRoutes(
             resource: pre.resource,
             loopbackWarning: pre.loopbackWarning,
             identities: listIdentities(),
-            error: 'That address is already taken.',
+            error: copy.addressTaken,
           }),
           400,
         );
@@ -409,12 +458,10 @@ export function createUiOAuthPageRoutes(
       } catch (err) {
         deleteIdentity(created.identity.address);
         const msg =
-          err instanceof NotifyError
-            ? 'Notification provisioning failed; identity was not created.'
-            : 'Failed to provision identity.';
+          err instanceof NotifyError ? copy.notifyProvisionFailed : copy.provisionFailed;
         return htmlResponse(
           c,
-          consentFormHtml({
+          consentFormHtml(locale, {
             clientName: pre.doc.client_name,
             clientId: pre.clientId,
             redirectUri: pre.redirectUri,
@@ -435,7 +482,7 @@ export function createUiOAuthPageRoutes(
       if (!known) {
         return htmlResponse(
           c,
-          consentFormHtml({
+          consentFormHtml(locale, {
             clientName: pre.doc.client_name,
             clientId: pre.clientId,
             redirectUri: pre.redirectUri,
@@ -444,7 +491,7 @@ export function createUiOAuthPageRoutes(
             resource: pre.resource,
             loopbackWarning: pre.loopbackWarning,
             identities: listIdentities(),
-            error: 'Unknown identity.',
+            error: copy.unknownIdentity,
           }),
           400,
         );

@@ -68,7 +68,7 @@ describe('/ui/frame isolation response', () => {
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(response.headers.get('vary')).toBe('Authorization, Cookie');
+    expect(response.headers.get('vary')).toBe('Authorization, Cookie, Accept-Language');
     expect(body).toContain('<p>Hello</p>');
     expect(body).not.toMatch(/script|onerror|<img/i);
   });
@@ -162,5 +162,31 @@ describe('/ui/frame isolation response', () => {
       expectFrameSecurityHeaders(response);
     }
     expect(getMessage).not.toHaveBeenCalled();
+  });
+
+  test('#137 B2 R1：非 en 会话 iframe 错误页 lang + 本地化串', async () => {
+    const { I18N_ZH_CN } = await import('../src/ui/client/i18n-zh-cn.ts');
+    const { I18N_JA } = await import('../src/ui/client/i18n-ja.ts');
+    const unauthenticated = frameApp({ kind: 'admin' });
+    const zh = await unauthenticated.app.request(
+      `/ui/frame/7?address=${encodeURIComponent('fox@test.example')}`,
+      { headers: { Cookie: 'oa_lang=zh-CN' } },
+    );
+    expect(zh.status).toBe(401);
+    const zhBody = await zh.text();
+    expect(zhBody).toContain('<html lang="zh-CN">');
+    expect(zhBody).toContain(I18N_ZH_CN['frame.error.sessionExpired']!);
+    expect(zhBody).not.toContain('Your session has expired');
+
+    const scoped = frameApp({ kind: 'identity', address: 'fox@test.example' });
+    const ja = await scoped.app.request(
+      `/ui/frame/7?address=${encodeURIComponent('owl@test.example')}`,
+      { headers: { cookie: `${scoped.cookie}; oa_lang=ja` } },
+    );
+    expect(ja.status).toBe(403);
+    const jaBody = await ja.text();
+    expect(jaBody).toContain('<html lang="ja">');
+    expect(jaBody).toContain(I18N_JA['frame.error.forbidden']!);
+    expect(jaBody).not.toContain('This inbox is not available');
   });
 });

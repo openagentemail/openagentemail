@@ -359,6 +359,7 @@ describe('#234 consent POST form-header shape', () => {
     expect(text).not.toContain('forbidden_origin');
     // 过闸后应走到业务成功过渡页
     expect(approved.status).toBe(200);
-    expect(text).toContain('已授权，正在跳回客户端');
+    // #137 B2：handoff 随 locale；缺省 en
+    expect(text).toMatch(/已授权|Authorized/);
   });
 });

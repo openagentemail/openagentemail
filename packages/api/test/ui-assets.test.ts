@@ -52,6 +52,8 @@ describe('UI static asset contract', () => {
     expect(shell.headers.get('content-security-policy')).toBe(OUTER_CSP);
     expect(shell.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     expect(shell.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+    // #137 B2 R3：shell 随 cookie/ACL locale 变体，与 frame 同款 Vary
+    expect(shell.headers.get('vary')).toBe('Authorization, Cookie, Accept-Language');
     expect(shell.headers.get('permissions-policy')).toBe(
       'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
     );

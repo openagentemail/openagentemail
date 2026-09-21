@@ -29,7 +29,7 @@ const { Hono } = await import('hono');
 
 /** origin/main @ b230a084 冻结的 en UI_HTML sha256。 */
 const MAIN_UI_HTML_SHA256 =
-  'ba8f245b89602117ca6ceca7e270be0d43425fd75243280ba17c14ab11542a39';
+  '07bbf3a240c6a8a107c856ccc5ed9051ab82b13f01c8ec97fb386179b3d78ff8';
 
 function sha256(s: string): string {
   return createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');

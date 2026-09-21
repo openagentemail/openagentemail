@@ -450,6 +450,8 @@ Open `/ui` through localhost, an SSH tunnel or HTTPS and log in with an appropri
 token. Ordinary sessions and persisted **Trust this device** sessions have different
 lifetimes; restarting the API does not discard every trusted session. See
 [UI access and sessions](docs/operator-guide.md#ui-access-and-sessions).
+The dashboard UI supports `en` / `es` / `ja` / `ko` / `zh-CN` via the Settings language
+selector (`oa_lang` cookie); terminology follows [docs/i18n-glossary.md](docs/i18n-glossary.md).
 
 <a id="admin-overview"></a>
 Overview counts are a bounded window, not lifetime totals. Cache timing, unknown

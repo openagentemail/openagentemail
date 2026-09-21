@@ -380,3 +380,82 @@
 - HEAD：`501fe40603d74575be8616a8c01a243733c4dbf3`
 - 材料：`/home/ops/materials/229-82-199/completion.md` R3 节
 - #82 聚焦：**4 pass**
+
+## 2026-09-21 · w137b2（#137 B2 四语落串 + 语言选择器）
+
+### 我们实现了哪些功能？
+1. 四字典 `i18n-es.ts` / `i18n-ja.ts` / `i18n-ko.ts` / `i18n-zh-cn.ts`（508 键，与 I18N_EN 全等）；术语对齐 `docs/i18n-glossary.md`（补 es/ja/ko 列）。
+2. `i18n-preserved.ts` + 保真扫描测试：产品名标题 / CLI 指令块 / API token·MCP 标签 / 任务状态枚举字面量 —— 四字典值与 en 逐字节相同。
+3. `getUiI18nDict` + `i18nLocaleScript` 真译文；`shell()` 非 en 传 dict → lang + `/ui/i18n/:locale.js`。
+4. Settings 组语言选择器（en/es/ja/ko/zh-CN）：`document.cookie` 写 `oa_lang`（Path=/ui; Max-Age=1y; SameSite=Lax）+ 刷新；零新 API。
+5. ui-oauth 随会话 locale 归一（a 案）；废除 handoff 钉死 zh-CN。
+6. 测试 `ui-i18n-b2.test.ts`；走查单 `materials/137-b2/walkthrough-{es,ja,ko,zh}.md`。
+
+### 我们遇到了哪些错误？
+1. B1 壳模板 allowlist 把语言 option 的 `en/es/ja/ko/zh-CN` 判为未槽化英文。
+2. OAuth 既有测试钉死中文 handoff「已授权」，缺省 locale=en 后红。
+3. UI real-file 金标（UI_JS/UI_CSS sha）因选择器与样式变更需更新。
+4. worktree 缺 `node_modules` → `Cannot find module 'hono/cookie'`。
+
+### 我们是如何解决这些错误的？
+1. R4-③ allowlist 显式加入五 locale 代码（卡规定可见文本=代码本身）。
+2. handoff 断言改为 `/已授权|Authorized/`；zh-CN 路径仍由 cookie/ACL 覆盖。
+3. 更新 `ui-real-files.test.ts` 与 en UI_HTML sha 针脚并注释 #137 B2。
+4. 在 worktree `packages/api` 执行 `bun install`。
+
+### 基线与证据
+- 开工基线 origin/main：`07c75461`
+- 分支：`w137b2-console-locales`
+- HEAD：`fc371bcb053eba61f3501049e3c0a09fad2d2819`
+- PR：https://github.com/openagentemail/openagentemail/pull/306
+- 材料：`/home/ops/materials/137-b2/`
+- subagent：`70cd1a41-1e16-42d7-b099-9b950aec1491` PASS（P1 From/To 已修）
+- >600 行预授权：总裁定 #4241
+
+## 2026-09-21 · w137b2 R1（Codex P1×2）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`ui-frame` 随会话 locale 传字典给 `tServer`，`<html lang>` 跟随；错误页本地化。
+2. **P1-2**：`preflightAuthorizeRequest` 增加 page `code`；五字典 `oauth.error.*`；GET/POST 错误页映射键，不直渲英文 `pre.message`。
+
+### 我们遇到了哪些错误？
+1. UI_JS 金标随 I18N_EN 增键需刷新。
+2. 并行跑 oauth-as 与其他套件时偶发 `createIdentity` 撞址（与本修无关；单文件重跑绿）。
+
+### 我们是如何解决这些错误的？
+1. 更新 `ui-real-files` UI_JS pin 为 `10af954a…`。
+2. 聚焦/全量串行确认；全量 1932 pass / 9 skip / 1 fail（#206 flake）。
+
+### 基线与证据
+- HEAD：`fc371bcb053eba61f3501049e3c0a09fad2d2819`
+- 材料：`/home/ops/materials/137-b2/completion.md` R1 节
+
+## 2026-09-21 · w137b2 R2（Intl 跟随 html lang）
+
+### 我们实现了哪些功能？
+1. `uiLang()` + `formatDate`/`formatDay`/`formatClock`/`formatNumber` 传 `document.documentElement.lang`，选择器 locale 驱动日期/数字格式。
+
+### 我们遇到了哪些错误？
+1. 无功能性错误；金标 UI_JS 需随 api.js 变更刷新。
+
+### 我们是如何解决这些错误的？
+1. 更新 `ui-real-files` pin；R2 单测钉死源码面 + en/de 运行面。
+
+### 基线与证据
+- HEAD：`06563a5a4789093239f81abc1fe74891a098d910`
+- 全量：1933 pass / 9 skip / 1 fail（#149 flake）
+- 材料：`completion.md` R2 节
+
+## 2026-09-21 · w137b2 R3（shell Vary）
+
+### 我们实现了哪些功能？
+1. `/ui` shell 响应补 `Vary: Authorization, Cookie, Accept-Language`，与 frame 对齐，防共享反代串染 locale 变体。
+
+### 我们遇到了哪些错误？
+1. 无。
+
+### 我们是如何解决这些错误的？
+1. N/A
+
+### 基线与证据
+- 材料：`completion.md` R3 节

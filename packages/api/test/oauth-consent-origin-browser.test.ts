@@ -2,7 +2,7 @@
  * #234 CI 常驻：真实 Chromium 同意页 Approve 表单 POST 头形态回归。
  * 断言：
  * 1) 浏览器实发 Origin===null 且 Sec-Fetch-Site===same-origin（与 R0 矩阵一致）
- * 2) 响应非 403，且成功 HTML 含「已授权」
+ * 2) 响应非 403，且成功 HTML 含授权交接文案（随 locale；缺省 en）
  *
  * 成功等待（禁 sleep / 禁立即读 content）：
  * - Bun.serve 包装在收到真实浏览器 POST 时 resolve 有类型 Promise（头+状态+正文）
@@ -211,7 +211,7 @@ describe('playwright consent Approve origin regression (#234)', () => {
     expect(postResult.secFetchSite).toBe('same-origin');
     expect(postResult.status).not.toBe(403);
     expect(postResult.status).toBe(200);
-    expect(postResult.body).toContain('已授权');
+    expect(postResult.body).toMatch(/已授权|Authorized/);
     expect(postResult.body).not.toContain('forbidden_origin');
   }, 60_000);
 });
