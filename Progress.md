@@ -663,8 +663,9 @@
 无（四钉先跑现状均与声明一致）。
 
 ### 我们是如何解决这些错误的？
-N/A。
+N/A。聚焦 **48 pass**；api **1982p/9s/0f**；mcp **48p**。
 
 ### 基线与证据
-- 自审 R8：（填）
-- 完工报：`/home/ops/materials/305/completion.md`（R8 节）
+- HEAD：`9dd39360f16ce8a625afe979b294af99dffac6ca`
+- 自审 R8：`61c9bee6-d5f7-464c-852d-e89f01558a23` → PASS-WITH-NITS（docs 本轮补齐）
+- 完工报：`/home/ops/materials/305/completion.md`（R8 + 矩阵边界节）
