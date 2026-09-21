@@ -256,6 +256,11 @@ export type Task = {
    * (#156 accepted-chain nodes). Evidence only — never authority, never
    * publicly projected; used for exact M2 row retirement. */
   expiryReceipts?: ExpiredLeaseReceipt[];
+  /**
+   * #305：消息流观测到的最大 lease generation（含降级证据代）。
+   * 私有——写路径 claim 分配计入 durableGen；永不公开投影。
+   */
+  leaseGenerationHighWater?: number;
 };
 
 type LostLeaseReceipt = {
@@ -265,7 +270,7 @@ type LostLeaseReceipt = {
   firstClaimedAt?: string;
 };
 
-export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts' | 'expiryReceipts'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts' | 'expiryReceipts' | 'leaseGenerationHighWater'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -1777,6 +1782,10 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   if (appliedExpiryReceipts.size > 0) {
     task.expiryReceipts = [...appliedExpiryReceipts.values()].flat();
   }
+  // #305：高水位含降级代——写路径 claim 分配避免复用已占用 generation。
+  if (previousGeneration > 0) {
+    task.leaseGenerationHighWater = previousGeneration;
+  }
   return task;
 }
 
@@ -2163,6 +2172,8 @@ export const CLAIM_WINDOW_CONFLICT_DEGRADED_SEEN_CAP = 1024;
 export const CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS = 60 * 1000;
 const claimWindowConflictDegradedSeen = new Map<string, true>();
 let claimWindowConflictDegradedLastAuditAt = 0;
+/** 首次见键累计（含被限频吞掉未写 audit 的键）；供诊断/测试。 */
+let claimWindowConflictDegradedCount = 0;
 
 type QueuedEvent = {
   message: TaskMessage;
@@ -2310,6 +2321,14 @@ export function clearQueuedEventsForTests(): void {
   // #305：降级审计去重器同样清掉，避免跨用例串味。
   claimWindowConflictDegradedSeen.clear();
   claimWindowConflictDegradedLastAuditAt = 0;
+  claimWindowConflictDegradedCount = 0;
+}
+
+/** 测试可读：累计首次降级键次数（含限频未落 audit 的键）。 */
+export function takeClaimWindowConflictDegradedCountForTests(): number {
+  const n = claimWindowConflictDegradedCount;
+  claimWindowConflictDegradedCount = 0;
+  return n;
 }
 
 /** 测试可读：累计首次停播次数。 */
@@ -2563,6 +2582,8 @@ function noteClaimWindowConflictDegraded(
     if (oldest !== undefined) claimWindowConflictDegradedSeen.delete(oldest);
   }
   claimWindowConflictDegradedSeen.set(key, true);
+  // 照 overlayReplayExpiredCount：新键一律计数（含随后被限频吞掉未写 audit 的键）。
+  claimWindowConflictDegradedCount += 1;
   // 全局限频（照 noteLeaseOverlayReplayExpired）：击穿去重表时仍有界。
   const now = nowMs();
   if (now - claimWindowConflictDegradedLastAuditAt < CLAIM_WINDOW_CONFLICT_DEGRADED_AUDIT_INTERVAL_MS) {
@@ -3197,6 +3218,8 @@ export async function claimTask(input: {
       current.releasedLease?.leaseGeneration ?? 0,
       current.expiredLease?.leaseGeneration ?? 0,
       current.lostLease?.leaseGeneration ?? 0,
+      // #305：含降级证据代，避免写路径复用已占用 generation
+      current.leaseGenerationHighWater ?? 0,
     );
     const journalGen = taskLeasePendingJournalEnabled() ? maxJournalGeneration(current.id) : 0;
     const generation = Math.max(durableGen, journalGen) + 1;

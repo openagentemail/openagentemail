@@ -428,6 +428,13 @@ describe('#305 R2 audit 去重表击穿有界', () => {
       event: 'task.lease.claim_window_conflict_degraded',
       limit: 1000,
     }).length).toBe(1);
+
+    // 新键均计数（含限频吞掉未写 audit 的键）；去重表次序不变
+    const {
+      takeClaimWindowConflictDegradedCountForTests,
+    } = await import('../src/lib/tasks-internal.ts');
+    // 两轮各 cap+1 次首次见键；第二轮因 FIFO 淘汰后再次 miss，再计 cap+1
+    expect(takeClaimWindowConflictDegradedCountForTests()).toBe((cap + 1) * 2);
   });
 });
 
@@ -534,5 +541,63 @@ describe('#305 R3 降级代写路径复用编号', () => {
     expect(taskFromMessages(ID, [...prefix, reissue, lateOldRenew])).toBeNull();
     // renew-before-reissue 线程仍可读（旧 renew 已隐藏）
     expect(taskFromMessages(ID, [...prefix, renewOld, reissue])?.lease?.leaseGeneration).toBe(2);
+  });
+
+  test('R3 端到端: seam 降级任务 → claimTask 真实分配 → 重建权威=新代', async () => {
+    // 两闸必并：经 claimTask 分配，不用手工构造 gen2'。
+    // 高水位暴露后应分配 gen3（durableGen=max(1, highWater=2)+1）。
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    let durable = taskFromMessages(ID, prefix)!;
+    expect(durable.leaseGenerationHighWater).toBe(2);
+    expect(durable.lease?.leaseGeneration).toBe(1);
+
+    const sent: Array<{ headers?: Record<string, string>; from: string; to: string[]; subject: string; text: string }> = [];
+    // 权威窗过后：deriveExpired → durableGen 含 highWater=2 → 新代=3
+    let now = Date.parse(CLAIM1_UNTIL);
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input as typeof sent[number]);
+      return { messageId: `<r3-e2e-${sent.length}>` };
+    });
+    clearQueuedEventsForTests();
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(grant.leaseGeneration).toBe(3);
+    expect(grant.task.lease?.leaseGeneration).toBe(3);
+    // M3-off 时可能先物化 expiry 信；取最后一封 claim 事件
+    const claimSend = [...sent].reverse().find(
+      (row) => row.headers?.['X-OA-Task-Lease-Event'] === 'claim',
+    );
+    expect(claimSend).toBeDefined();
+
+    const issued = await parseTaskMessageForTests({
+      uid: 4,
+      source: source(
+        claimSend!.from,
+        claimSend!.to[0]!,
+        claimSend!.subject,
+        claimSend!.headers ?? {},
+      ),
+      envelope: {
+        from: [{ address: claimSend!.from }],
+        to: [{ address: claimSend!.to[0]! }],
+        subject: claimSend!.subject,
+      },
+      internalDate: new Date(now),
+    } as unknown as FetchMessageObject, ID);
+    expect(issued?.lease?.event).toBe('claim');
+    expect(issued?.lease && 'generation' in issued.lease ? issued.lease.generation : 0).toBe(3);
+
+    const rebuilt = taskFromMessages(ID, [...prefix, issued!]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.lease?.leaseGeneration).toBe(3);
+    expect(rebuilt?.lease?.tokenVerifier).toBe(
+      issued?.lease && 'tokenVerifier' in issued.lease ? issued.lease.tokenVerifier : undefined,
+    );
+    // 公开面不含降级 claim2.at；含新代
+    expect(toTaskView(rebuilt!).messages.length).toBeGreaterThanOrEqual(3);
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
   });
 });

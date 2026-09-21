@@ -551,3 +551,17 @@
 - HEAD：`f33ec0a` · PR #309 · diff vs main：**+693/−7（已越 600；测试 538 行主体）**
 - 自审 R3：`f57b57c5-32de-4c45-aa0a-35bed0889d3e` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/f57b57c5-32de-4c45-aa0a-35bed0889d3e/`
 - 完工报：`/home/ops/materials/305/completion.md`（R3 节）
+
+## 2026-09-21 · w305 #305 R3 追加（高水位+E2E+计数器+PR 描述）
+
+### 我们实现了哪些功能？
+1. **并用** `leaseGenerationHighWater` 计入 `claimTask` durableGen（与读侧重评估双保险）。
+2. `claimTask` 端到端：seam 降级 → 真实分配 gen3 → 重建。
+3. `claimWindowConflictDegradedCount` + take 缝（限频吞键可观测）。
+4. PR #309 描述补「回归点名」「偏离声明」；completion 映射表；越 600 总指挥已核准。
+
+### 我们遇到了哪些错误？
+1. E2E 初版 `sent.length===1` 在 M3-off expiry 物化下收到 2 封。
+
+### 我们是如何解决这些错误的？
+1. 按 `X-OA-Task-Lease-Event===claim` 取签发信。聚焦 19/19；全量 1952p/#206 flake。
