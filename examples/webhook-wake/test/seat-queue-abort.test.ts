@@ -133,8 +133,10 @@ describe('seat-queue vs request_timeout (#229)', () => {
     expect(receiver.metrics.duplicates).toBe(1);
     expect(woken).toHaveLength(2);
 
-    // r1 可能是 503（超时已写）或竞态下 200；不把写响应当作验收点
-    expect([200, 503]).toContain(r1.status);
+    // r1 先注册计时器且 await p2 已保证其 120ms deadline 先 fire（wake 挂 gate 时响应未写）：
+    // 计时器写 503 后 headersSent=true，wake 完成路径的 writeJson 被 :103 守卫拦——终态确定
+    expect(r1.status).toBe(503);
+    expect(r1.json.reason).toBe('request_timeout');
   });
 
   test('正例：排队等待短于 request_timeout 时第二事件照常执行', async () => {
