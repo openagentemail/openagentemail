@@ -187,3 +187,22 @@
 - HEAD：`b2be6a16de2de7c5c3cd01e29beb9c71061d8e5e`
 - 分支：`w285-lease-index` · PR #296
 - 材料：`/home/ops/materials/285/completion.md`
+
+## 2026-09-20 · w284（#284 release.yml mcp-publisher 供应链加固）
+
+### 我们实现了哪些功能？
+1. `release.yml` Install mcp-publisher：URL 从 `releases/latest/download` pin 到 `releases/download/v1.8.1`。
+2. 内联 sha256 主锚 `a06c9096…cf2cc`；下载后 `sha256sum -c` 通过才 `tar xz`，失配 `::error::` 退出。
+3. 架构守卫：`uname -m` 非 `x86_64` 直接 `::error::` 退出（不预置 arm64）。
+4. 注释记升级口径：升上游版须重测 hash 改内联值，升级 PR 必附下载+sha256sum 原始输出。
+
+### 我们遇到了哪些错误？
+1. 无阻断错误；yaml.safe_load 与本地下载/sha256sum/解压模拟均一次通过。
+
+### 我们是如何解决这些错误的？
+1. 无代码修复；hash 与官方 `registry_1.8.1_checksums.txt` 互证一致（见 materials/284/completion.md 原始输出）。
+
+### 基线与证据
+- origin/main：`18dd9421df22b445b93cb4618aa339ceae652156`
+- 分支：`w284-publisher-pin`
+- 材料：`/home/ops/materials/284/completion.md`

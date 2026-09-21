@@ -81,9 +81,20 @@ jobs:
             exit 1
           fi
 
+      # #284：pin mcp-publisher v1.8.1 + 内联 sha256；升上游版须重测 hash 并改下方
+      # 内联值，升级 PR 必附「下载 + sha256sum」原始输出（见 materials/284）。
       - name: Install mcp-publisher
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          ARCH="$(uname -m)"
+          if [ "$ARCH" != "x86_64" ]; then
+            echo "::error::mcp-publisher pin 仅支持 x86_64/amd64（当前 uname -m=${ARCH}）；arm64 未预置 hash，拒绝静默换源"
+            exit 1
+          fi
+          curl -fsSL -o mcp-publisher_linux_amd64.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz"
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher_linux_amd64.tar.gz" | sha256sum -c - \
+            || { echo "::error::mcp-publisher_linux_amd64.tar.gz sha256 与内联锚失配"; exit 1; }
+          tar xz -f mcp-publisher_linux_amd64.tar.gz mcp-publisher
 
       - name: Authenticate to MCP Registry
         run: ./mcp-publisher login github-oidc
