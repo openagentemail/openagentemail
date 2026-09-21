@@ -632,3 +632,21 @@
 - HEAD：`04419f2416331d7d9bdee1e94a05c02da23ce699`
 - 自审 R6：`0e736c72-dd30-49d1-ba4e-4895d04a0172` → PASS-WITH-NITS
 - 完工报：`/home/ops/materials/305/completion.md`（R6 节）
+
+## 2026-09-21 · w305 #305 R7（pending 降级 follow-on 抑制投影）
+
+### 我们实现了哪些功能？
+1. `degradedInstanceFollowOn`：renew|release 且 degradedLeaseClaims **gen+verifier** 精确匹配（无代际短路）。
+2. `mergeQueuedEvents` 分流：写回全量 `stillLagging`（保 pending）；投影只用 `applicable`；空 applicable → 原样返回；publicRead 有界同样喂 applicable。
+3. **不改** `eventIsIndexed` / journal / applyOverlayMessages 内部语义。
+4. claim_lost：无 verifier、服务器对权威租约签发，降级代不可达 → 不扩（评估一句）；expired 既有 authority 匹配守卫确认未动。
+
+### 我们遇到了哪些错误？
+1. RED：降级 claim 已索引、follow-on renew/release 未进 durable → pending 行被投影并进前一代权威。
+
+### 我们是如何解决这些错误的？
+1. 抑制投影、保留 pending；R6 已消费路径仍精确退休；聚焦 44 pass；M1 全绿。
+
+### 基线与证据
+- 自审 R7：`ac7eb955-9fa2-49b4-a7a7-7f8395f69494` → PASS-WITH-NITS
+- 完工报：`/home/ops/materials/305/completion.md`（R7 节）

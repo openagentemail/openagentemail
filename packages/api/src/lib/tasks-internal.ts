@@ -2747,6 +2747,20 @@ function suppressDurableLeaseProjection(task: Task, stoppedClosingGens: Readonly
   return next;
 }
 
+/**
+ * #305 R7：降级实例的 pending follow-on renew/release（gen+verifier 精确匹配）。
+ * 行须保持 pending（eventIsIndexed=false），但不得投影进前一代权威。
+ * claim_lost 无 verifier、且由服务器对权威租约签发——降级代不可达，不扩本判据。
+ */
+function degradedInstanceFollowOn(task: Task, row: QueuedEvent): boolean {
+  const lease = row.lease;
+  if (!lease || (lease.event !== 'renew' && lease.event !== 'release')) return false;
+  if (!('tokenVerifier' in lease) || typeof lease.tokenVerifier !== 'string') return false;
+  return !!task.degradedLeaseClaims?.some((deg) =>
+    deg.generation === lease.generation
+    && leaseVerifiersEqual(deg.tokenVerifier, lease.tokenVerifier));
+}
+
 function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
   const pending = queuedEvents.get(task.id);
   if (!pending || pending.length === 0) return task;
@@ -2762,13 +2776,15 @@ function mergeQueuedEvents(task: Task, opts?: { publicRead?: boolean }): Task {
     return task;
   }
   if (stillLagging.length !== pending.length) invalidateTaskListCache();
-  // 退休判定仍写回全量 stillLagging；有界过滤只作用于本次返回视图。
+  // 退休判定仍写回全量 stillLagging（含降级 follow-on pending）；投影只用 applicable。
   queuedEvents.set(task.id, stillLagging);
+  const applicable = stillLagging.filter((row) => !degradedInstanceFollowOn(task, row));
+  if (applicable.length === 0) return task;
   if (opts?.publicRead && taskLeaseOverlayBoundEnabled()) {
-    const { overlay, stoppedClosingGens } = filterPublicLeaseOverlay(task.id, stillLagging, now);
+    const { overlay, stoppedClosingGens } = filterPublicLeaseOverlay(task.id, applicable, now);
     return suppressDurableLeaseProjection(applyOverlayMessages(task, overlay), stoppedClosingGens);
   }
-  return applyOverlayMessages(task, stillLagging);
+  return applyOverlayMessages(task, applicable);
 }
 
 function queueEventUntilIndexed(

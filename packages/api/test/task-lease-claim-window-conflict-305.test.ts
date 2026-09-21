@@ -1319,3 +1319,170 @@ describe('#305 R6 historical renew/release overlay 决退', () => {
     expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
   });
 });
+
+describe('#305 R7 pending 降级 follow-on 抑制投影', () => {
+  const RENEW_AT = new Date(START + 70_000).toISOString();
+  const RENEW_UNTIL = new Date(START + 400_000).toISOString();
+  const RELEASE_AT = new Date(START + 80_000).toISOString();
+  const ALIEN = 'q'.repeat(43);
+
+  test('R7(a): 降级 claim 已索引 + pending renew 同实例 → 权威=gen1 原窗，行仍 pending', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    // 仅降级 claim，无 durable renew 收据
+    const durable = taskFromMessages(ID, prefix)!;
+    expect(durable.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    expect(durable.degradedLeaseClaims?.some((c) => c.tokenVerifier === CONFLICT_VERIFIER)).toBe(true);
+    expect(durable.historicalRenewReceipts ?? []).toHaveLength(0);
+
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RENEW_AT),
+      generation: 2,
+      event: 'renew',
+      at: RENEW_AT,
+      claimedUntil: RENEW_UNTIL,
+      tokenVerifier: CONFLICT_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease?.leaseGeneration).toBe(1);
+    expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    // pending 不得提前退休
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+  });
+
+  test('R7(b): 同 pending release → 权威仍在，行仍 pending', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const durable = taskFromMessages(ID, prefix)!;
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RELEASE_AT),
+      generation: 2,
+      event: 'release',
+      at: RELEASE_AT,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'pending',
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease).toMatchObject({
+      leaseGeneration: 1,
+      claimedUntil: CLAIM1_UNTIL,
+    });
+    expect(merged?.releasedLease).toBeUndefined();
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+  });
+
+  test('R7(c): durable 已消费 follow-on → R6 收据退休（不回归）', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewV1 = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: RENEW_AT, generation: 2,
+      claimedUntil: RENEW_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const durable = taskFromMessages(ID, [...prefix, renewV1])!;
+    expect(durable.historicalRenewReceipts?.length).toBeGreaterThanOrEqual(1);
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RENEW_AT),
+      generation: 2,
+      event: 'renew',
+      at: RENEW_AT,
+      claimedUntil: RENEW_UNTIL,
+      tokenVerifier: CONFLICT_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+  });
+
+  test('R7(d): verifier 不匹配降级实例 → 不过度抑制（照常投影路径）', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const durable = taskFromMessages(ID, prefix)!;
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RENEW_AT),
+      generation: 2,
+      event: 'renew',
+      at: RENEW_AT,
+      claimedUntil: RENEW_UNTIL,
+      tokenVerifier: ALIEN,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    // 异容非同实例：不抑制 → 照常并进权威窗（证明不过度抑制）
+    expect(merged?.lease?.claimedUntil).toBe(RENEW_UNTIL);
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+  });
+
+  test('R7(e): journal 降级 follow-on → 不提前 fate=indexed、不投影', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const {
+      bootstrapTaskLeaseJournal,
+      journalRecordsFor,
+      resetJournalMemoryForTests,
+      setJournalDataDirForTests,
+      upsertJournalRecord,
+    } = await import('../src/lib/task-lease-journal.ts');
+    const { withTaskLeasePendingJournalForTests } = await import('./support/task-lease-seams.ts');
+
+    await withTaskLeasePendingJournalForTests(true, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'oae-305-r7j-'));
+      setJournalDataDirForTests(dir);
+      resetJournalMemoryForTests();
+      bootstrapTaskLeaseJournal();
+
+      const verifier = await liveVerifier();
+      const { prefix } = await conflictPrefix(verifier);
+      const durable = taskFromMessages(ID, prefix)!;
+      clearQueuedEventsForTests();
+      await upsertJournalRecord({
+        taskId: ID,
+        kind: 'renew',
+        generation: 2,
+        actor: B,
+        at: RENEW_AT,
+        fate: 'accepted',
+        claimedUntil: RENEW_UNTIL,
+        tokenVerifier: CONFLICT_VERIFIER,
+      });
+      setTaskGetForTests(async () => durable);
+      setTaskNowForTests(() => START + 90_000);
+      const merged = await getTask(ID);
+      expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+      // eventIsIndexed 仍 false → 不得提前 mark indexed
+      expect(journalRecordsFor(ID).find((r) => r.kind === 'renew' && r.generation === 2)?.fate)
+        .toBe('accepted');
+      // 水合入队后被 R7 抑制投影，仍 pending
+      expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+    });
+  });
+});
