@@ -645,8 +645,9 @@
 1. RED：降级 claim 已索引、follow-on renew/release 未进 durable → pending 行被投影并进前一代权威。
 
 ### 我们是如何解决这些错误的？
-1. 抑制投影、保留 pending；R6 已消费路径仍精确退休；聚焦 44 pass；M1 全绿。
+1. 抑制投影、保留 pending；R6 已消费路径仍精确退休；聚焦 **44 pass**；M1 全绿；api 1977p/1f(#206)→复跑绿；mcp 48p。
 
 ### 基线与证据
+- HEAD：`ee49e7095754c44b0b6e2616bce99f774cc2ccb5`
 - 自审 R7：`ac7eb955-9fa2-49b4-a7a7-7f8395f69494` → PASS-WITH-NITS
 - 完工报：`/home/ops/materials/305/completion.md`（R7 节）
