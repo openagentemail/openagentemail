@@ -445,3 +445,17 @@
 - HEAD：`06563a5a4789093239f81abc1fe74891a098d910`
 - 全量：1933 pass / 9 skip / 1 fail（#149 flake）
 - 材料：`completion.md` R2 节
+
+## 2026-09-21 · w137b2 R3（shell Vary）
+
+### 我们实现了哪些功能？
+1. `/ui` shell 响应补 `Vary: Authorization, Cookie, Accept-Language`，与 frame 对齐，防共享反代串染 locale 变体。
+
+### 我们遇到了哪些错误？
+1. 无。
+
+### 我们是如何解决这些错误的？
+1. N/A
+
+### 基线与证据
+- 材料：`completion.md` R3 节
