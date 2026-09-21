@@ -377,5 +377,6 @@
 
 ### 基线与证据
 - 分支：`wmisc-229-82-199` · PR #300
+- HEAD：`501fe40603d74575be8616a8c01a243733c4dbf3`
 - 材料：`/home/ops/materials/229-82-199/completion.md` R3 节
 - #82 聚焦：**4 pass**
