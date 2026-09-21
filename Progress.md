@@ -266,5 +266,7 @@
 
 ### 基线与证据
 - 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`04976a4854abf5abfcf0b7fb49b6c50c29acba56`
 - 材料：`/home/ops/materials/278/completion.md`（R3 追记）
 - 部署面：compose 已显式注入；bare 缺省现与 :2587 自洽
+- 全量 api：**1916 pass / 9 skip / 0 fail**
