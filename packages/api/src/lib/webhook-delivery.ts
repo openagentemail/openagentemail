@@ -2814,17 +2814,22 @@ export async function executeWebhookTestProbe(
       webhookId: subscription.id,
     });
   } else if (countsTowardCircuitBreaker('webhook.ping', fetchResult.outcome, subscription)) {
-    // #290 B：ping 熔断对齐主路径——置位后补 audit、retryable 就地转 permanent，不再排 attempt-2
+    // #290 B / R2 P1-2：仅当本次实际完成 threshold→disabled 转换才 audit。
+    // 快照仍为 enabled、中途已被手动 /disable 时：不得再 +1 计数、不得重复 audit。
+    // （主路径同款终态判定属存量同族，本卡红线不动主路径。）
+    let trippedThisAttempt = false;
     updateWebhookSubscription(subscription.id, (s) => {
+      // 已 disabled：跳过整段更新（不加计数、不改 reason）
+      if (s.state === 'disabled') return;
       s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
-      if (s.consecutiveFailures >= config.webhooks.disableThreshold && s.state !== 'disabled') {
+      if (s.consecutiveFailures >= config.webhooks.disableThreshold) {
         s.state = 'disabled';
         s.disabledReason = 'threshold';
+        trippedThisAttempt = true;
       }
     });
 
-    const updated = getWebhookSubscription(subscription.id);
-    if (updated?.state === 'disabled') {
+    if (trippedThisAttempt) {
       recordAuditEvent({
         event: 'webhook.disabled',
         outcome: 'ok',
@@ -2838,6 +2843,16 @@ export async function executeWebhookTestProbe(
           reason: 'webhook_disabled',
         };
       }
+    } else if (
+      getWebhookSubscription(subscription.id)?.state === 'disabled'
+      && fetchResult.outcome === 'retryable'
+    ) {
+      // 中途已禁用：抑制 attempt-2（死信结算），不写第二份 disable audit
+      fetchResult = {
+        ...fetchResult,
+        outcome: 'permanent',
+        reason: 'webhook_disabled',
+      };
     }
   }
 

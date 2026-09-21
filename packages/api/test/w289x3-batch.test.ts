@@ -41,7 +41,7 @@ const {
   updateWebhookSubscription,
 } = await import('../src/lib/webhook-store.ts');
 const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
-const { readAuditEvents } = await import('../src/lib/audit.ts');
+const { readAuditEvents, recordAuditEvent } = await import('../src/lib/audit.ts');
 const {
   encodeStampedApprovalRequestForTests,
   parseStampedTaskMessageForTests,
@@ -369,6 +369,75 @@ describe('#290 ping circuit-breaker aligns with main path', () => {
     expect(deliveryQueue.hasQueuedJob(sub.id)).toBe(true);
 
     deliveryQueue.cancelAll();
+  });
+
+  // R2 P1-2：在途探测 + 手动 disable → 不得假重复 audit / 不得 +1 计数 / 无 attempt-2
+  test('in-flight ping + manual disable: exactly one disable audit, no counter bump, no attempt-2', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://ping-manual-race.example/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    updateWebhookSubscription(sub.id, (s) => {
+      s.state = 'enabled';
+      s.consecutiveFailures = 3; // 钉：中途 disable 后不得再 +1
+    });
+    (config.webhooks as any).disableThreshold = 10;
+
+    let rejectDns!: (err: unknown) => void;
+    setWebhookDnsLookupForTests(
+      () =>
+        new Promise((_, reject) => {
+          rejectDns = reject;
+        }),
+    );
+
+    // 快照仍为 enabled（与真实在途探测一致）；countsTowardCircuitBreaker 会为真
+    const enabledSnapshot = getWebhookSubscription(sub.id)!;
+    expect(enabledSnapshot.state).toBe('enabled');
+    const probePromise = executeWebhookTestProbe(enabledSnapshot, 'admin');
+
+    // 等探测进入 DNS 等待，再模拟手动 /disable（含恰好 1 条 audit）
+    await new Promise((r) => setTimeout(r, 30));
+    updateWebhookSubscription(sub.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'manual';
+    });
+    recordAuditEvent({
+      event: 'webhook.disabled',
+      outcome: 'ok',
+      address: sub.address,
+      webhookId: sub.id,
+    });
+    const auditsAfterManual = readAuditEvents({ event: 'webhook.disabled' }).filter(
+      (e) => e.webhookId === sub.id,
+    );
+    expect(auditsAfterManual).toHaveLength(1);
+
+    const err: any = new Error('getaddrinfo ENOTFOUND');
+    err.code = 'ENOTFOUND';
+    rejectDns(err);
+
+    const probe = await probePromise;
+    expect(probe.outcome).toBe('permanent');
+    expect(probe.reason).toBe('webhook_disabled');
+
+    const after = getWebhookSubscription(sub.id)!;
+    expect(after.state).toBe('disabled');
+    expect(after.disabledReason).toBe('manual'); // 不得被改成 threshold
+    expect(after.consecutiveFailures).toBe(3); // 不得 +1
+
+    // audit 仍恰好 1 条（来自手动 disable），无假重复
+    const audits = readAuditEvents({ event: 'webhook.disabled' }).filter(
+      (e) => e.webhookId === sub.id,
+    );
+    expect(audits).toHaveLength(1);
+
+    expect(deliveryQueue.hasQueuedJob(sub.id)).toBe(false);
+    const rows = readAllDeliveryLogRows().filter((r) => r.webhookId === sub.id);
+    expect(rows.some((r) => r.attempt === 2)).toBe(false);
   });
 });
 
