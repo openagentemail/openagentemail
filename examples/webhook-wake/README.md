@@ -226,7 +226,7 @@ integers capped at the recommended upper band; also
 | `timestampToleranceSec` | 300 | integer > 0 | 60–600 | Replay window. Large values accept stale signatures. |
 | `maxV1Signatures` | 8 | integer > 0 | 2–16 | Rotation candidates. Too low rejects a valid current+previous header. |
 | `maxHeaderBytes` | 2048 | integer > 0 | 2048–8192 | **UTF-8 byte** length (`Buffer.byteLength`). The parser and `createServer({ maxHeaderSize })` use `maxHeaderBytes + 4096` so other request headers fit. If that total exceeds the process `http.maxHeaderSize` (Bun default 16384), **load fails** (`config_invalid:maxHeaderBytes_exceeds_transport`). Raise the runtime (`bun --max-http-header-size=…`) before promising a larger signature. Too small → 401 `invalid_header`. |
-| `requestTimeoutMs` | 10000 | integer 1–30000 | 2000–30000 | Inbound HTTP deadline (starts before body handling **and** seat-queue wait). On fire: writes 503 `request_timeout` and aborts the signal. **Queued** (not-yet-running) seat work is abandoned — no wake spawn, no dedup commit. **Already-running** send continues under `sendTimeoutMs` and may still commit (dedup covers retry). Does not SIGKILL an already-spawned Orca child. Must be ≥ `sendTimeoutMs` + 2000. |
+| `requestTimeoutMs` | 10000 | integer 1–30000 | 2000–30000 | Inbound HTTP deadline (starts before body handling **and** seat-queue wait). On fire: writes 503 `request_timeout` and aborts that request's signal. **Queued** seat work is abandoned only when **every** waiter for that dedup key has timed out/abandoned (shared `dedup.share` work uses an aggregate signal — one live waiter keeps the shared queue slot). No wake spawn / no dedup commit on abandon. **Already-running** send continues under `sendTimeoutMs`. Does not SIGKILL an already-spawned Orca child. Must be ≥ `sendTimeoutMs` + 2000. |
 | `maxConcurrent` | 16 | integer > 0 | 1–64 | In-flight HTTP cap. `0` fails load. Too low → 503 `busy`. |
 | `sendTimeoutMs` | 8000 | integer 1–30000 | 1000–30000 | SIGKILL of the **spawned job process group** after this budget. Autonomous once send has started — a parent `request_timeout` does **not** interrupt an in-flight send. Must leave ≥2s headroom under `requestTimeoutMs` (see Timer distinction). Too small → 503 `timeout_killed`. |
 | `outputCapBytes` | 4096 | integer > 0 | 1024–16384 | Bound on **retained** child stdout/stderr counts. Excess is drained and discarded (not pipe-destroyed) so a zero-exit send still commits. |
@@ -261,15 +261,19 @@ request timer is already running when send begins, load requires
 `config_invalid:requestTimeoutMs.headroom` otherwise) so a full send budget
 can still elapse. Caps stay ≤30000 — do not raise them to invent headroom.
 
-When `request_timeout` fires: **queued** (not-yet-running) seat work is
-**abandoned** — wake is not spawned and the event is not committed to dedup
-(so a later retry with the same `envelope.id` still takes the first-seen
-path). An **already-running** send is **not** interrupted; it may finish and
-commit under `sendTimeoutMs`, and dedup makes a late retry safe as a
-duplicate. Setting either timer far below the other still does not invent
-headroom: a late body can complete a wake once the request already passed
-to send, and a tiny send budget kills a healthy child while the HTTP slot
-is still open.
+When `request_timeout` fires: that request leaves the dedup-key **waiter
+set**. **Queued** (not-yet-running) shared seat work is **abandoned only when
+the waiter set is empty** — i.e. every overlapping request for the same
+`subscriptionId+envelope.id` has timed out or otherwise abandoned. A later
+duplicate request that is still within its own deadline is **not** cancelled
+by an earlier waiter's timeout (aggregate signal, not the first hookSignal).
+On abandon: wake is not spawned and the event is not committed to dedup (so a
+later retry with the same `envelope.id` still takes the first-seen path). An
+**already-running** send is **not** interrupted; it may finish and commit
+under `sendTimeoutMs`, and dedup makes a late retry safe as a duplicate.
+Setting either timer far below the other still does not invent headroom: a
+late body can complete a wake once the request already passed to send, and a
+tiny send budget kills a healthy child while the HTTP slot is still open.
 
 **Runtime timer range + load-time caps:**
 `requestTimeoutMs`, `sendTimeoutMs`, and `alertHook.timeoutMs` are passed

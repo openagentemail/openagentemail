@@ -181,3 +181,116 @@ describe('seat-queue vs request_timeout (#229)', () => {
     expect(receiver.metrics.duplicates).toBe(0);
   });
 });
+
+describe('dedup.share waiter aggregate (#229 P1-1)', () => {
+  test('同 key 两请求重叠排队：首请求 request_timeout 不连坐，第二请求照常完成', async () => {
+    let releaseHold!: () => void;
+    const holdGate = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const woken: string[] = [];
+    const wake: WakeFn = async (req) => {
+      woken.push(req.text);
+      // 首个占席事件阻塞；共享 key 的事件开跑后立即完成
+      if (woken.length === 1) await holdGate;
+      return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
+    };
+
+    const receiver = await startReceiver(
+      testConfig({ mode: 'canary', requestTimeoutMs: 150, sendTimeoutMs: 800 }),
+      { wake },
+    );
+    receivers.push(receiver);
+
+    // 占住同 terminal 席锁（distinct key）
+    const holdBody = mailBody({ id: 'evt_hold0001-2222-3333-4444-555555555555' });
+    const pHold = postHook(receiver, { body: holdBody });
+    for (let i = 0; i < 80 && woken.length === 0; i += 1) {
+      await Bun.sleep(5);
+    }
+    expect(woken).toHaveLength(1);
+
+    const sharedBody = mailBody({
+      id: 'evt_shared01-2222-3333-4444-555555555555',
+      data: { address: 'alice@openagent.email', messageId: 'shared-1' },
+    });
+    // 首个同 key 请求先入队（将先 timeout）
+    const pFirst = postHook(receiver, { body: sharedBody });
+    await Bun.sleep(40);
+    // 第二同 key 请求加入 waiter 集合（自身 deadline 更晚）
+    const pSecond = postHook(receiver, { body: sharedBody });
+
+    const rFirst = await pFirst;
+    expect(rFirst.status).toBe(503);
+    expect(rFirst.json.reason).toBe('request_timeout');
+    // 首请求超时不得弃掉共享 work：尚未 spawn shared 事件
+    expect(woken).toHaveLength(1);
+
+    releaseHold();
+    const rSecond = await pSecond;
+    // 第二请求应完成（submitted 或 duplicate——share 单次 wake）
+    expect(rSecond.status).toBe(200);
+    expect(['submitted', 'duplicate']).toContain(rSecond.json.disposition);
+    const deadline = Date.now() + 2000;
+    while (woken.length < 2 && Date.now() < deadline) {
+      await Bun.sleep(10);
+    }
+    expect(woken).toHaveLength(2);
+    expect(receiver.metrics.submitted).toBeGreaterThanOrEqual(2);
+
+    await pHold;
+  });
+
+  test('同 key 全部 waiter 超时 → 共享 work 弃队（wake 未 spawn、dedup 键未消费）', async () => {
+    let releaseHold!: () => void;
+    const holdGate = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const woken: string[] = [];
+    const wake: WakeFn = async (req) => {
+      woken.push(req.text);
+      if (woken.length === 1) await holdGate;
+      return { ok: true, exitCode: 0, argv: req.argv, stdoutBytes: 0, stderrBytes: 0 };
+    };
+
+    const receiver = await startReceiver(
+      testConfig({ mode: 'canary', requestTimeoutMs: 80, sendTimeoutMs: 800 }),
+      { wake },
+    );
+    receivers.push(receiver);
+
+    const holdBody = mailBody({ id: 'evt_hold0002-2222-3333-4444-555555555555' });
+    const pHold = postHook(receiver, { body: holdBody });
+    for (let i = 0; i < 80 && woken.length === 0; i += 1) {
+      await Bun.sleep(5);
+    }
+    expect(woken).toHaveLength(1);
+
+    const sharedBody = mailBody({
+      id: 'evt_shared02-2222-3333-4444-555555555555',
+      data: { address: 'alice@openagent.email', messageId: 'shared-2' },
+    });
+    const pA = postHook(receiver, { body: sharedBody });
+    const pB = postHook(receiver, { body: sharedBody });
+    const [rA, rB] = await Promise.all([pA, pB]);
+    expect(rA.status).toBe(503);
+    expect(rB.status).toBe(503);
+    expect(rA.json.reason).toBe('request_timeout');
+    expect(rB.json.reason).toBe('request_timeout');
+    // 全部 waiter 超时 → 共享排队弃队，shared 事件不得 spawn
+    expect(woken).toHaveLength(1);
+
+    releaseHold();
+    await pHold;
+    const afterHold = Date.now() + 500;
+    while (Date.now() < afterHold) {
+      await Bun.sleep(20);
+      expect(woken).toHaveLength(1);
+    }
+    // dedup 键未消费：重试走首验并成功提交
+    const retry = await postHook(receiver, { body: sharedBody });
+    expect(retry.status).toBe(200);
+    expect(retry.json.disposition).toBe('submitted');
+    expect(woken).toHaveLength(2);
+  });
+});
