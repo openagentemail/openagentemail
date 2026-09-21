@@ -7,6 +7,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { simpleParser, type ParsedMail } from 'mailparser';
 import type { FetchMessageObject } from 'imapflow';
+import { recordAuditEvent } from './audit.ts';
 import { config } from './config.ts';
 import { findIdentity } from './identities.ts';
 import { withInbox, waitForMessage } from './imap.ts';
@@ -1551,15 +1552,21 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       const claimedUntil = Date.parse(lease.claimedUntil);
       const taskClaimedAt = firstClaimedAt ?? lease.at;
       const taskClaimedAtMs = Date.parse(taskClaimedAt);
+      // 结构类检查仍 fail-closed（state / generation 序 / 时间有限性 / 窗方向）。
       if (
         message.state !== 'working'
         || lease.generation !== previousGeneration + 1
         || !Number.isFinite(claimedAt)
         || !Number.isFinite(claimedUntil)
         || !Number.isFinite(taskClaimedAtMs)
-        || (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil))
         || claimedUntil <= claimedAt
       ) return null;
+      // #305：已鉴权但与残留权威时间窗冲突 → 按无效事件出账（不推进权威、不整卡丢弃）。
+      if (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil)) {
+        noteClaimWindowConflictDegraded(id, lease.generation, lease.claimedUntil);
+        duplicateLeaseMessages.add(message);
+        continue;
+      }
       firstClaimedAt = taskClaimedAt;
       previousGeneration = lease.generation;
       releasedLease = undefined;
@@ -2135,6 +2142,9 @@ export const LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS = 60 * 1000;
 const overlayReplayExpiredSeen = new Map<string, true>();
 let overlayReplayExpiredCount = 0;
 let overlayReplayExpiredLastWarnAt = 0;
+/** #305：claim 窗冲突降级审计去重；键=taskId:generation:claimedUntil，有界插入序淘汰。 */
+export const CLAIM_WINDOW_CONFLICT_DEGRADED_SEEN_CAP = 1024;
+const claimWindowConflictDegradedSeen = new Map<string, true>();
 
 type QueuedEvent = {
   message: TaskMessage;
@@ -2279,6 +2289,8 @@ export function clearQueuedEventsForTests(): void {
   overlayReplayExpiredSeen.clear();
   overlayReplayExpiredCount = 0;
   overlayReplayExpiredLastWarnAt = 0;
+  // #305：降级审计去重器同样清掉，避免跨用例串味。
+  claimWindowConflictDegradedSeen.clear();
 }
 
 /** 测试可读：累计首次停播次数。 */
@@ -2511,6 +2523,31 @@ function noteLeaseOverlayReplayExpired(taskId: string, generation: number, ageMs
     taskId,
     generation,
     age: ageMs,
+  });
+}
+
+/**
+ * #305：已鉴权 claim 与残留权威时间窗冲突时记一条 audit。
+ * 同键（taskId:generation:claimedUntil）进程内只审计一次，防读路径刷屏。
+ * 原因编码在事件名中（窗口冲突）；不落 reason 原文或任何载荷字段。
+ */
+function noteClaimWindowConflictDegraded(
+  taskId: string,
+  generation: number,
+  claimedUntil: string,
+): void {
+  const key = `${taskId}:${generation}:${claimedUntil}`;
+  if (claimWindowConflictDegradedSeen.has(key)) return;
+  if (claimWindowConflictDegradedSeen.size >= CLAIM_WINDOW_CONFLICT_DEGRADED_SEEN_CAP) {
+    const oldest = claimWindowConflictDegradedSeen.keys().next().value;
+    if (oldest !== undefined) claimWindowConflictDegradedSeen.delete(oldest);
+  }
+  claimWindowConflictDegradedSeen.set(key, true);
+  recordAuditEvent({
+    event: 'task.lease.claim_window_conflict_degraded',
+    outcome: 'denied',
+    taskId,
+    leaseGeneration: generation,
   });
 }
 

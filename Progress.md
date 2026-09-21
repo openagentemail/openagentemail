@@ -484,3 +484,21 @@
 - PR：https://github.com/openagentemail/openagentemail/pull/307
 - 测试：api 1933p/9s/#206 flake 复跑绿；mcp 48p/0f
 - Subagent：`b2a13616-dafb-4779-bc2c-078ebdf62d95` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w251/agent-transcripts/b2a13616-dafb-4779-bc2c-078ebdf62d95/`
+
+## 2026-09-21 · w305 #305 读取层降级修复
+
+### 我们实现了哪些功能？
+1. `taskFromMessages` claim 分支：已鉴权但与残留权威时间窗冲突的 claim，从整卡 `return null` 改为按无效事件出账（不推进权威、`duplicateLeaseMessages` 隐藏、继续重建）。
+2. 结构类检查（state / generation 序 / 时间有限性 / 窗方向）仍 fail-closed，一行未改语义。
+3. audit：`task.lease.claim_window_conflict_degraded` + `taskId`/`leaseGeneration` 白名单最小扩展；同键进程内去重（cap 1024）。
+4. 测试：`task-lease-claim-window-conflict-305.test.ts` 覆盖正 1–3、负 1–3。
+
+### 我们遇到了哪些错误？
+1. 冷启动缺 `zod` 等依赖，`bun test` 无法 import。
+2. `setFindTaskMessagesForTests` 未从 `task-test-seams` 导出；且 `getTaskForTests` 仍注入时会绕过 find 路径。
+3. 全量套件 `#206` 25s timeout（预存 flake，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. 在 `packages/api` 执行 `bun install` 后复跑。
+2. 测试改为直引 `tasks-internal.setFindTaskMessagesForTests`，并在 snapshot 断言前 `setTaskGetForTests(null)`。
+3. 完报注明 #206 flake；聚焦 5/5 绿；全量 1938 pass / 9 skip / 1 fail(#206)。

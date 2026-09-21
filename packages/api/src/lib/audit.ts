@@ -32,8 +32,9 @@ export const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
 export type AuditOutcome = 'ok' | 'denied' | 'rate_limited' | 'error';
 
 /**
- * Scrubbed 行。字段白名单即红线：禁止扩展出 args/body/token/subject 等。
- * clientId/grantId/address/tool/tier 均可选——按事件类型填已知标识即可。
+ * Scrubbed 行。字段白名单即红线：禁止扩展出 args/body/token/subject 等载荷类字段。
+ * clientId/grantId/address/tool/tier/taskId 均可选——按事件类型填已知纯标识即可。
+ * 允许最小扩展：UUID/整数类标识（如 taskId、leaseGeneration）；严禁 args/body/subject。
  */
 export type AuditEvent = {
   ts: string;
@@ -62,6 +63,10 @@ export type AuditEvent = {
   messageId?: string;
   /** \Seen 目标态：仅允许 'true'/'false' 字符串（过 scrub）。 */
   seen?: string;
+  /** 任务 UUID（#305 lease 读侧降级等；纯标识，非载荷）。 */
+  taskId?: string;
+  /** lease generation 整数（#305；纯标识，非载荷）。 */
+  leaseGeneration?: number;
 };
 
 function auditPath(): string {
@@ -165,6 +170,14 @@ export function recordAuditEvent(
       : {}),
     ...(partial.seen !== undefined
       ? { seen: scrubAuditField(partial.seen, 8) }
+      : {}),
+    // taskId / leaseGeneration：纯标识（UUID / 整数），禁止塞入 reason/body 等载荷
+    ...(partial.taskId !== undefined
+      ? { taskId: scrubAuditField(partial.taskId, 64) }
+      : {}),
+    ...(partial.leaseGeneration !== undefined
+      && Number.isFinite(partial.leaseGeneration)
+      ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
       : {}),
   };
 
