@@ -202,6 +202,19 @@ docker inspect <new-api-image> --format '{{.Config.User}}'
 Do **not** reverse this order. Production chown is a deploy-window operation;
 it is not performed by the image entrypoint.
 
+### Deploy-window recreate gotchas (measured 2026-09-21)
+
+1. **`--force-recreate <service>` follows the dependency chain.** Measured on
+   the reference host: recreating `api` also recreated `mailserver` along
+   `api`→`mailserver`→`provision` (and `ntfy` pulls `ntfy-provision`) —
+   healthy, ~11s, no loss, but unintended. To recreate **only** the named
+   services, add `--no-deps`; full-project builds keep the plain form.
+2. **Only `compose.override.yaml` is live.** A leftover sibling named
+   `docker-compose.override.yml` is ignored by docker compose (startup
+   warning observed). Editing the dead file changes nothing — check which
+   override file actually exists before hand-editing, and clean the dead
+   one up in your next deploy window.
+
 ### ntfy non-root upgrade (#278)
 
 ntfy now runs as **UID 1000** and listens on container port **2587**. If an
