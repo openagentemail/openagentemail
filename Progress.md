@@ -613,3 +613,21 @@
 - HEAD：`b3834496c29115a040d4bcfa59438d1e732e3c6d`（功能 `d2398c5` + Progress）
 - 自审 R5：`258af8a9-ea6f-4c3a-8538-7fa4d028fb76` → PASS-WITH-NITS（已补 R5-3 债）
 - 完工报：`/home/ops/materials/305/completion.md`（R5 节）
+
+## 2026-09-21 · w305 #305 R6（historical renew/release overlay 决退）
+
+### 我们实现了哪些功能？
+1. `Task.historicalRenewReceipts` / `historicalReleaseReceipts`（TaskView Omit）——对称 `degradedLeaseClaims`/`expiryReceipts`。
+2. 填充：Late historical renew/release 记账路径；R5 `clearDegradedGenerationResiduals` 迁出的 release 一并暴露。
+3. `eventIsIndexed`：精确身份命中即退休（renew 在 generic 尾前；release 在 release 分支）；**无代际短路**；不碰 expired/claim 既有逻辑。
+
+### 我们遇到了哪些错误？
+1. RED：durable 消费降级代 historical renew/release 后，queued 行不退休 → `applyOverlayMessages` 无条件延长权威窗 / 清空权威。
+
+### 我们是如何解决这些错误的？
+1. 证据暴露 + 精确决退；聚焦 **39 pass**；M1 overlay 全绿；R6(a–e) 钉污染/误退/journal。
+2. 全量 api 1972p/9s/1f(#206) → 复跑一次留证；mcp 48p。
+
+### 基线与证据
+- 自审 R6：`0e736c72-dd30-49d1-ba4e-4895d04a0172` → PASS-WITH-NITS
+- 完工报：`/home/ops/materials/305/completion.md`（R6 节）

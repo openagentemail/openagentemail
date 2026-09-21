@@ -1120,3 +1120,202 @@ describe('#305 R5 已消费身份精确重放幂等', () => {
     expect(taskFromMessages(ID, [...prefix, reissue, alien])).toBeNull();
   });
 });
+
+describe('#305 R6 historical renew/release overlay 决退', () => {
+  const RENEW_AT = new Date(START + 70_000).toISOString();
+  const RENEW_UNTIL = new Date(START + 400_000).toISOString();
+  const RELEASE_AT = new Date(START + 80_000).toISOString();
+  const REISSUE_VERIFIER = 'r'.repeat(43);
+  const REISSUE_AT = new Date(START + 300_000).toISOString();
+  const REISSUE_UNTIL = new Date(START + 600_000).toISOString();
+  const ALIEN = 'q'.repeat(43);
+
+  test('R6(a): durable 降级 + historical renewV1 → queue renew 退休且权威窗不延长', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewV1 = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: RENEW_AT, generation: 2,
+      claimedUntil: RENEW_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const durable = taskFromMessages(ID, [...prefix, renewV1])!;
+    expectAuthorityUnmoved(durable);
+    expect(durable.historicalRenewReceipts?.length).toBeGreaterThanOrEqual(1);
+    expect(toTaskView(durable)).not.toHaveProperty('historicalRenewReceipts');
+
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RENEW_AT),
+      generation: 2,
+      event: 'renew',
+      at: RENEW_AT,
+      claimedUntil: RENEW_UNTIL,
+      tokenVerifier: CONFLICT_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease?.leaseGeneration).toBe(1);
+    expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+  });
+
+  test('R6(b): durable 降级 + historical releaseV1 → queue release 退休且 lease 仍在', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const releaseV1 = await signedLease(ID, 4, {
+      version: 1, event: 'release', actor: B,
+      at: RELEASE_AT, generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const durable = taskFromMessages(ID, [...prefix, releaseV1])!;
+    expectAuthorityUnmoved(durable);
+    expect(durable.historicalReleaseReceipts?.length).toBeGreaterThanOrEqual(1);
+
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RELEASE_AT),
+      generation: 2,
+      event: 'release',
+      at: RELEASE_AT,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease).toMatchObject({
+      leaseGeneration: 1,
+      claimedUntil: CLAIM1_UNTIL,
+    });
+    expect(merged?.releasedLease).toBeUndefined();
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+  });
+
+  test('R6(c): 被替换实例 release（R5 链）→ queue 行退休', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const releaseV1 = await signedLease(ID, 4, {
+      version: 1, event: 'release', actor: B,
+      at: RELEASE_AT, generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const reissue = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const durable = taskFromMessages(ID, [...prefix, releaseV1, reissue])!;
+    expect(durable.lease?.tokenVerifier).toBe(REISSUE_VERIFIER);
+    expect(durable.historicalReleaseReceipts?.some(
+      (r) => r.tokenVerifier === CONFLICT_VERIFIER && r.at === RELEASE_AT,
+    )).toBe(true);
+
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RELEASE_AT),
+      generation: 2,
+      event: 'release',
+      at: RELEASE_AT,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 310_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease?.tokenVerifier).toBe(REISSUE_VERIFIER);
+    expect(merged?.lease).toBeDefined();
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+  });
+
+  test('R6(d): journal-on 水合——historical renew/release → fate=indexed', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const {
+      bootstrapTaskLeaseJournal,
+      journalRecordsFor,
+      resetJournalMemoryForTests,
+      setJournalDataDirForTests,
+      upsertJournalRecord,
+    } = await import('../src/lib/task-lease-journal.ts');
+    const { withTaskLeasePendingJournalForTests } = await import('./support/task-lease-seams.ts');
+
+    await withTaskLeasePendingJournalForTests(true, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'oae-305-r6j-'));
+      setJournalDataDirForTests(dir);
+      resetJournalMemoryForTests();
+      bootstrapTaskLeaseJournal();
+
+      const verifier = await liveVerifier();
+      const { prefix } = await conflictPrefix(verifier);
+      const renewV1 = await signedLease(ID, 4, {
+        version: 1, event: 'renew', actor: B,
+        at: RENEW_AT, generation: 2,
+        claimedUntil: RENEW_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+      });
+      const durable = taskFromMessages(ID, [...prefix, renewV1])!;
+      clearQueuedEventsForTests();
+      await upsertJournalRecord({
+        taskId: ID,
+        kind: 'renew',
+        generation: 2,
+        actor: B,
+        at: RENEW_AT,
+        fate: 'accepted',
+        claimedUntil: RENEW_UNTIL,
+        tokenVerifier: CONFLICT_VERIFIER,
+      });
+      setTaskGetForTests(async () => durable);
+      setTaskNowForTests(() => START + 90_000);
+      const merged = await getTask(ID);
+      expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+      expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+      expect(journalRecordsFor(ID).find((r) => r.kind === 'renew' && r.generation === 2)?.fate)
+        .toBe('indexed');
+    });
+  });
+
+  test('R6(e): 异容未消费 renew overlay 不误退', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewV1 = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: RENEW_AT, generation: 2,
+      claimedUntil: RENEW_UNTIL, tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const durable = taskFromMessages(ID, [...prefix, renewV1])!;
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RENEW_AT),
+      generation: 2,
+      event: 'renew',
+      at: RENEW_AT,
+      claimedUntil: RENEW_UNTIL,
+      tokenVerifier: ALIEN,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    await getTask(ID);
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+  });
+});
