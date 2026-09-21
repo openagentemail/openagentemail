@@ -127,8 +127,9 @@ describe('UI real-file manifest (#520-A)', () => {
     // #137 B1-B：页面 call-site 全量迁移后 UI_JS 增长；收口字面 ·/←。
     // #137 B-R4：inbox.unit.* + sentAt 分键后 UI_JS 变更。
     // #137 B2：语言选择器 cookie 写入 + Settings 组 lang select 样式。
+    // #137 B2 fix：dateFrom/dateTo 键拆分后 I18N_EN→I18N_JS 体积变化。
     expect(sha256(UI_JS)).toBe(
-      'ddb5e0b6a4777ae9baeb953d2abdfab4574fb6da5c1cb1421b6aee9e589c63a7',
+      '2b3970efc571f8af2e88694ebc5e071f171ad965dfe1b512f4b6689d1ae1905b',
     );
     expect(sha256(UI_CSS)).toBe(
       '17972c8d27e939a4472b159f36e7b0277b64ce61bcb94efe94adf0b0ed39710b',
