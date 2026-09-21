@@ -209,15 +209,20 @@ it is not performed by the image entrypoint.
    `api`→`mailserver`→`provision` (and `ntfy` pulls `ntfy-provision`) —
    healthy, ~11s, no loss, but unintended. To recreate **only** the named
    services, add `--no-deps`; full-project builds keep the plain form.
-2. **Only `compose.override.yaml` is live — and only on default-file
-   invocations.** Auto-merging of an override happens when compose runs
-   without `-f`; a leftover sibling named `docker-compose.override.yml` is
-   ignored either way (startup warning observed). Editing the dead file
-   changes nothing — check which override file actually exists before
-   hand-editing, and clean the dead one up in your next deploy window.
-   Deployments that select files explicitly (e.g. API-only
+2. **Measure override attribution — do not assume it.** Before editing
+   or removing any override, run `docker compose config` against **three
+   configurations**: base alone, base + each override, and compare the
+   resolved output field by field. On the reference host (2026-09-21)
+   this distinguished two siblings: `docker-compose.override.yml` was a
+   zero-contribution no-op (its patches had long been absorbed into the
+   base file) and was removed with a timestamped backup, while
+   `compose.override.yaml` is **live and must be kept** (adds the loopback
+   binding and widens allowed ports). A "Found multiple override files"
+   warning at recreate time is the cue to run this check. Scope note:
+   override auto-merging happens only on default-file invocations —
+   deployments selecting files explicitly (e.g. API-only
    `docker compose -f compose.api-only.yaml ...`) auto-merge **no**
-   override at all — `-f` users must pass every override explicitly.
+   override at all and must pass every override explicitly.
 
 ### ntfy non-root upgrade (#278)
 
