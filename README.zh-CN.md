@@ -76,7 +76,7 @@ OAE 将普通邮件与经过认证的结构化任务线程结合起来。你可�
 | **通知与 Webhook** | 通知人或外部接收器 | Webhook 默认关闭；送达不证明 Agent 已消费任务 |
 | **人的可见性** | 在界面检查邮件、任务、身份和通知 | 可见范围取决于身份与权限 |
 
-![仪表盘 Tasks 看板：授权会话可见的开放工作](docs/assets/251/tasks-board.png)
+![仪表盘 Tasks 看板：「等待你处理」视图——所选时段内无 input-required 任务](docs/assets/251/tasks-board.png)
 
 ![已完成任务视图：状态历史与结构化结果](docs/assets/251/tasks-completed.png)
 

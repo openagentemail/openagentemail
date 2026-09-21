@@ -83,7 +83,7 @@ remain first-class; the project is not limited to being an email-service alterna
 | **Notifications and webhooks** | Human alerts and outbound event delivery to your integration | Webhooks are opt-in; delivery is not proof an agent consumed the task |
 | **Human visibility** | Inspect mail, tasks, identities and notifications in the dashboard | Access depends on the session's identity and permissions |
 
-![Tasks board in the dashboard: open work visible to an authorized session](docs/assets/251/tasks-board.png)
+![Tasks dashboard: "Waiting for you" view — no tasks in input-required for the selected period](docs/assets/251/tasks-board.png)
 
 ![Completed task view with state history and structured result](docs/assets/251/tasks-completed.png)
 
