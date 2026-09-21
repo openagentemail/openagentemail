@@ -49,19 +49,59 @@ UTF-8 字节数。满 8_000 units 时，头体积随字符编码 **与 JSON 转�
 
 注：该上限按**单个逻辑头**独立约束——其他头（Received/DKIM 等）各自独立受同一上限，非与 lease 头共享一个池；整信总大小另受 `message_size_limit` 约束。
 
-相对 JSON 转义最坏 ≈**62.7 KiB**（64242 chars），默认 102400 **仍能容纳**，但余量约 **1.6×**（102400/64242 ≈ 1.59），**不是**相对 31.3KiB 时那种 ≈3× 观感。若操作者把
+相对 JSON 转义最坏 ≈**62.7 KiB**（64242 chars），`header_size_limit` 的纸面预算 102400 理论上能容纳——**但绑定栈实测推翻了这个余量观感**：单头实际 ~**59,820 字符**即被静默截断（见下文「绑定栈实物实测」小节），勿按 1.6× 余量做容量规划。若操作者把
 `header_size_limit` **调小到接近或低于** max-bound payload（再加其它头），
 cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` /
 `postconf -d header_size_limit` 核对，并在 dogfood 做满 bound（含控制字符）往返。
 
-## 常见商用中继 / 邮箱商头上限（公开文档；**未实测**）
+### 绑定栈实物实测（2026-09-21，OAE↔OAE 同实例往返，3 档满 bound）
 
-下表摘自各厂商**公开文档**，仅作风险提示。本仓库**未**对下列商用路径做
-满 8k reason 实弹投递；**一律标注「未实测」**，不得当作交付承诺。
+在同一条真实出站链（API → 绑定 docker-mailserver/Postfix 3.7.11 → 本域投递 → catch-all 信箱）上，
+用产品真实 task lease `release` 事件（`X-OA-Task-Lease-Payload`）发三档满 8_000 UTF-16 单位的 reason：
+
+| 档 | canonical JSON（签名） | payload 头值（base64url 字符数） | 实际到达 | 结论 |
+| --- | --- | --- | --- | --- |
+| 全 ASCII | 8_188 B | 10_918 | 10_918（11 续行） | 完整送达 |
+| 全 BMP（`界`） | 24_188 B | 32_251 | 32_251（33 续行） | 完整送达 |
+| JSON 转义最坏（NUL） | 48_188 B | **64_251（≈62.7 KiB）** | **59_820（60 续行，尾部丢失）** | **被静默截断** |
+
+- 实测现象：满载 NUL 档 payload（64_251 chars）经绑定栈后到达 **59_820 字符**（60 续行 × 每行精确 997，尾部丢失）；单条超长行的诊断信（64_252 / 61_000 chars）**同样**落在 59_820；32_251 字符档完整送达。**截断的底层机制未定位**——已知不是 `header_size_limit`（102400 预算未触达），Postfix 日志仅有 `breaking line > 998 bytes` 折行记录、无截断告警；「发送端预折叠成 ≤998 字节续行是否可避开截断」是**未验证的候选修复方向**，本文不作排除。测量方法与原始 `.eml`/队列取证见 `materials/8k-relay/results.md`（fleet 内档）。
+- 相近数字的来源区分：**64,242**＝#82 仓内语料事件体；**64,251**＝本批 8k-relay 实测事件体；**64,252**＝诊断信构造值——同一「JSON 转义最坏」概念在不同事件体构成（`actor`/`at` 等定长字段）下的 ±10 字符级差异，非矛盾。
+- 截断发生在 **mailserver 侧**（postfix 队列体积 `size=60683` 已小于完整体量；nodemailer 本地对照证明发信侧发出的是完整头值；发信侧 HMAC `X-OA-Task-Stamp` 签的是**完整 canonical 事件**（48_188 B），64_251 字符头值是它的 base64url 编码）。
+- postfix 只记录折行（`breaking line > 998 bytes with <CR><LF>SPACE`），**没有任何截断告警** → 操作者无法从中继日志察觉。
+- 推论：本页上文「默认 102400 仍能容纳 62.7 KiB、余量 ≈1.6×」在绑定栈上**与实测不符**（62.7 KiB 档在当前发送形态下未完整通过）；`header_size_limit` 不是这条路径的有效预算口径。
+
+同批实测的收件侧解析（决定「送到 ≠ 能还原」）：
+
+- mailparser 交出的头值会保留折行空白（空白数 = 续行数 − 1）；**payload ≳997 字符起必带空白**，短载荷（单续行）不带。
+- 未含重折容忍的解析器（≤13ea2ca）对三档**全部拒收**（`roundtrip_mismatch`）；含重折容忍的解析器（≥33a2cc1 / 本页所述 strip 空白实现）对 ASCII/BMP 档**逐字节还原成功**（长度 + sha256 一致），对完整 64_251 字符的 NUL 档也能还原（反事实验证）。
+- 因此：**部署早于 33a2cc1 的实例，8k reason 的 release 事件会「送达但永久不被承认」**（进程内 overlay 会短暂显示成功，重启/重读后 lease 仍在）。
+
+### Gmail 档实测补记与复测陷阱（2026-09-21）
+
+Gmail 四档实测结论（详见上表该行）：单头上限 **32,768 字节**，超限是 **SMTP 硬拒（`552-5.3.4`）
+**退信可见于发送侧，不是静默截断；上限以下（实测至 31,320B）逐字节保留、仅折行。
+
+**复测陷阱（务必入流程）**：Gmail 网页「显示原始邮件」（Show original）页面**自身会把长头截到
+约 10,000 字符且无任何提示**——10,920/31,320 两档在该页均停在第 10,000 字符处，形似"Google
+截断"，但**下载的存储原件 `.eml` 中值完整、sha256 与发送侧一致**。**只用 Show original UI 做
+本类实测会得出错误结论；一律以存储原件 `.eml` 为准**（取法：会话取 `ik`＝`window.GLOBALS[7]`
+→ `?ui=2&ik=<ik>&view=om&th=<hex(threadId)>` → 该页「下载原始邮件」`?view=att&…&disp=comp`）。
+
+## 常见商用中继 / 邮箱商头上限（公开文档口径＋2026-09-21 起部分实测）
+
+下表以各厂商**公开文档**口径为底，实测状态见表末列——**未经实测的行不得当作交付承诺**。
+（首行为自托管绑定栈，非商用路径，列于此处作对照；Gmail 行为 2026-09-21 部分实测，
+满 bound BMP 点待补。）
+
+（2026-09-21 更新：**自托管绑定栈**已完成实测；**Google Gmail 部分实测**（探测至 31,320B 逐字节
+保留，满 bound BMP 32,251 chars 待实弹）；其余三行**商用**路径仍为未实测——#301 的商用半边余下
+Gmail 满载 BMP 一点＋Exchange/SES/其它 SMTP，需业主提供的测试账号。）
 
 | 路径 | 公开口径（摘要） | 来源 | 对 8k reason 头的粗判 | 实测状态 |
 | --- | --- | --- | --- | --- |
-| Google Gmail / Workspace | 单头 value 上限 32KB；全头合计 500KB；头字段数 5000 | [Gmail message header limits](https://support.google.com/a/answer/14016360) | ASCII ≈10.9KiB 低于 32KB；**BMP ≈31.3KiB 贴线**；**JSON 转义最坏 ≈62.7KiB（64242）明确超其单头 32KB——满 bound 控制字符 reason 经 Gmail 必丢** | **未实测**（仓内 #82 NUL 用例仅证 wire 体积，非 Gmail hop） |
+| **自托管绑定栈（docker-mailserver/Postfix 3.7.11，OAE↔OAE 同实例）** | 单头 `header_size_limit` 默认 102400 | 本仓实测（#301 前半） | ASCII/BMP 档完整；**JSON 转义膨胀档（≈62.7KiB）被静默截断到 59_820 字符**（实测截断点；机制未定位，非 102400 预算口径） | **已实测 2026-09-21**（同机同镜像沙箱 API 进程 + 真实 postfix + 真实 mailserver，见本页实测小节） |
+| Google Gmail / Workspace | 单头 value 上限 **32,768 字节**；全头合计 500KB；头字段数 5000 | [Gmail message header limits](https://support.google.com/a/answer/14016360)＋2026-09-21 实测 | ASCII ≈10.9KiB（10,918B）低于上限；**满 bound BMP payload＝32,251 chars（31.5KiB）＜32,768，理论上限内但未实弹**——已实测至 31,320B 逐字节保留（sha256 一致，DKIM/SPF/DMARC pass），距满载点尚余 ~931B 未验证区间；JSON 转义最坏 ≈62.7KiB 超限 → **SMTP 阶段硬拒（552 5.3.4）退信，非静默丢** | **部分实测 2026-09-21**（探测档 200/10,920/31,320B 逐字节保留；40,020B 收 `552-5.3.4 … 32768 bytes` bounced；**满 bound BMP 32,251 待实弹**） |
 | Microsoft Exchange / 文档化 Receive connector | 全部头字段合计默认 **256 KB**（`MaxHeaderSize`） | [Message size and recipient limits (Exchange)](https://learn.microsoft.com/en-us/exchange/mail-flow/message-size-limits) | 合计 256KB 对 ≈62.7KiB 通常仍够用；Exchange Online 现场是否同值以租户为准 | **未实测** |
 | Amazon SES | 公开配额主写**整信**大小（含附件）；SNS 通知路径另有「headers 10KB」类限制（通知面，非 SMTP 出站主路径） | [SES service quotas](https://docs.aws.amazon.com/ses/latest/dg/quotas.html) | SMTP/API 出站整信配额远大于 62KiB；勿与 SNS header 配额混读 | **未实测** |
 | 其它 SMTP 中继（SendGrid / Mailgun 等） | 多数公开材料写整信/附件上限，**少有**单独的单头 KiB 表 | 各厂商当前 docs | 遇拒信时查 SMTP 应答与中继状态页；不要假设与 Postfix 默认相同 | **未实测** |
@@ -82,10 +122,18 @@ cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` 
 ## 操作建议（短）
 
 1. 保持双闸 8k；不要在中继侧「截断 reason」冒充成功。
-2. 自托管 Postfix 勿盲目下调 `header_size_limit`（按最坏 ≈**62.7KiB** 留 ≈1.6× 余量）。
-3. 经商用中继前，用公开表做风险预判；**勿对 Gmail 使用满 bound 多字节或控制字符 reason**（62.7KiB 必超 32KB 单头）；BMP 贴线亦应实测（**未实测**条目不得省略）。
+2. 自托管 Postfix 勿盲目下调 `header_size_limit`；同时**勿按其纸面预算做容量规划**——绑定栈实测满载头在 ~59,820 字符被静默截断（当前发送形态，机制未定位，见实测小节）。**仅 JSON 转义膨胀档**（控制字符/lone surrogate，≈62.7KiB）触到该点；满载 BMP/CJK（32,251 chars）实测完整送达，不在风险内。触点面按「可能被判丢」设计。
+3. 经商用中继前，用公开表做风险预判；对 Gmail：**满 bound 控制字符/lone surrogate reason（≈62.7KiB）必超其 32KB 单头上限（552 硬拒）**；满载 BMP（32,251 chars）在限内——探测至 31,320B 已逐字节保留，满载点待实弹（见上表 Gmail 行）。
 4. 回归：`packages/api` 内 `task-lease-core` 对 8k reason 的 folding/unfolding
    走 **mailparser 生产解析路径**（非 mock）；见该文件 R17 / #82 语料（ASCII + CJK + NUL 满 bound）。
    生产 `readLeaseEventPayload` **接受 MIME 中介重折**：对头值 strip 全部空白后再做
    严格 base64url round-trip 校验。安全性：base64url 字母表不含空白，删除无歧义；
    非法非空白字符（如 `!!!!`）strip 后仍拒——容忍重折 ≠ 容忍垃圾。
+
+5. 绑定栈上满载 reason 头实测有 **59_820 字符截断点**（2026-09-21，当前发送形态；机制未定位）：
+   **仅 JSON 转义膨胀档**（控制字符 / lone surrogate，payload ≈62.7 KiB）会触到该点——满载 BMP/CJK
+   （32,251 chars）实测完整送达，**不在**此风险内。触点面按「可能被判丢」设计：收件侧至少应把
+   「解析失败」与「从未发生」在可观测面上区分开，并避免单条坏事件把整条 task 拖成不可读；
+   发送端预折叠（≤998 字节续行）为未验证的候选缓解。
+6. 收件侧解析器必须 ≥ 33a2cc1（重折容忍）；**升级读取端先于任何满 bound 实测**，否则量到的是
+   「解析器丢」而不是「传输丢」（页首三档量化账的完成度也依赖这一点）。
