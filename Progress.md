@@ -270,3 +270,18 @@
 - 材料：`/home/ops/materials/278/completion.md`（R3 追记）
 - 部署面：compose 已显式注入；bare 缺省现与 :2587 自洽
 - 全量 api：**1916 pass / 9 skip / 0 fail**
+
+## 2026-09-20 · w278 R4（README 用户面 ntfy chown runbook）
+
+### 我们实现了哪些功能？
+1. README `#93` 迁移节后增 `### ntfy non-root upgrade (#278)`：升级前对 `/data/ntfy` 一次性 chown（命令风格对齐既有 `docker run -v <project>_api-data`）；否则 ntfy UID 1000 起不来且 API `depends_on` healthy 连带挂。
+
+### 我们遇到了哪些错误？
+1. 无；Codex 第三次同条裁为半成立——compose comment 不执行 chown，正解=用户面 README 注记。
+
+### 我们是如何解决这些错误的？
+1. 只加 README 一段；不动代码/compose。
+
+### 基线与证据
+- 分支：`w278-ntfy-nonroot` · PR #298
+- 材料：`/home/ops/materials/278/completion.md`（R4 追记）
