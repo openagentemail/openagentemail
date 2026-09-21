@@ -525,3 +525,9 @@
 ### 我们是如何解决这些错误的？
 1. 游标推进、权威字段不动；完工报写明偏离与理由（Codex P1 / tombstone 同型）。
 2. 聚焦 14/14 绿；完报注明全量 flake。
+
+### 基线与证据
+- HEAD：`b1dcf29` · PR #309 · diff vs main：+554/−3（未越 600）
+- 聚焦 14 pass；全量 1947p/9s/1f(#272 flake)
+- Subagent R2：`6673b8c2-0697-4c6b-9e44-a4baad7f4f2f` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/6673b8c2-0697-4c6b-9e44-a4baad7f4f2f/`
+- 完工报：`/home/ops/materials/305/completion.md`（含 R2 节）
