@@ -52,6 +52,8 @@ function shell(c: Context) {
     'Permissions-Policy',
     'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
   );
+  // shell 随 oa_lang / Accept-Language（及会话 Cookie）变体；与 ui-frame 同款 Vary。
+  c.header('Vary', 'Authorization, Cookie, Accept-Language');
   // en：无 dict → 与历史 UI_HTML 逐字节一致；非 en：真字典填充壳 + 注入 /ui/i18n/:locale.js。
   return c.body(renderUiHtml(locale, getUiI18nDict(locale)));
 }

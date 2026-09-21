@@ -109,6 +109,8 @@ describe('console i18n B2 (#137)', () => {
       headers: { Cookie: 'oa_lang=es' },
     });
     expect(res.status).toBe(200);
+    expect(res.headers.get('vary')).toBe('Authorization, Cookie, Accept-Language');
+    expect(res.headers.get('cache-control')).toBe('no-cache');
     const html = await res.text();
     expect(html).toContain('<html lang="es">');
     expect(html).toContain('/ui/i18n/es.js');
