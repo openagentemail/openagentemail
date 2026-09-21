@@ -406,8 +406,26 @@
 ### 基线与证据
 - 开工基线 origin/main：`07c75461`
 - 分支：`w137b2-console-locales`
-- HEAD：`1fb2fb7cb3908fe12619ac04dcd25ebf33abb5ea`
+- HEAD：`fc371bcb053eba61f3501049e3c0a09fad2d2819`
 - PR：https://github.com/openagentemail/openagentemail/pull/306
 - 材料：`/home/ops/materials/137-b2/`
 - subagent：`70cd1a41-1e16-42d7-b099-9b950aec1491` PASS（P1 From/To 已修）
 - >600 行预授权：总裁定 #4241
+
+## 2026-09-21 · w137b2 R1（Codex P1×2）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`ui-frame` 随会话 locale 传字典给 `tServer`，`<html lang>` 跟随；错误页本地化。
+2. **P1-2**：`preflightAuthorizeRequest` 增加 page `code`；五字典 `oauth.error.*`；GET/POST 错误页映射键，不直渲英文 `pre.message`。
+
+### 我们遇到了哪些错误？
+1. UI_JS 金标随 I18N_EN 增键需刷新。
+2. 并行跑 oauth-as 与其他套件时偶发 `createIdentity` 撞址（与本修无关；单文件重跑绿）。
+
+### 我们是如何解决这些错误的？
+1. 更新 `ui-real-files` UI_JS pin 为 `10af954a…`。
+2. 聚焦/全量串行确认；全量 1932 pass / 9 skip / 1 fail（#206 flake）。
+
+### 基线与证据
+- HEAD：`fc371bcb053eba61f3501049e3c0a09fad2d2819`
+- 材料：`/home/ops/materials/137-b2/completion.md` R1 节
