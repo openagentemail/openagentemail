@@ -76,18 +76,29 @@ cleanup 会丢弃超额头文本。调小前请用 `postconf header_size_limit` 
 - 未含重折容忍的解析器（≤13ea2ca）对三档**全部拒收**（`roundtrip_mismatch`）；含重折容忍的解析器（≥33a2cc1 / 本页所述 strip 空白实现）对 ASCII/BMP 档**逐字节还原成功**（长度 + sha256 一致），对完整 64_251 字符的 NUL 档也能还原（反事实验证）。
 - 因此：**部署早于 33a2cc1 的实例，8k reason 的 release 事件会「送达但永久不被承认」**（进程内 overlay 会短暂显示成功，重启/重读后 lease 仍在）。
 
+### Gmail 档实测补记与复测陷阱（2026-09-21）
+
+Gmail 四档实测结论（详见上表该行）：单头上限 **32,768 字节**，超限是 **SMTP 硬拒（`552-5.3.4`）
+**退信可见于发送侧，不是静默截断；上限以下（实测至 31,320B）逐字节保留、仅折行。
+
+**复测陷阱（务必入流程）**：Gmail 网页「显示原始邮件」（Show original）页面**自身会把长头截到
+约 10,000 字符且无任何提示**——10,920/31,320 两档在该页均停在第 10,000 字符处，形似"Google
+截断"，但**下载的存储原件 `.eml` 中值完整、sha256 与发送侧一致**。**只用 Show original UI 做
+本类实测会得出错误结论；一律以存储原件 `.eml` 为准**（取法：会话取 `ik`＝`window.GLOBALS[7]`
+→ `?ui=2&ik=<ik>&view=om&th=<hex(threadId)>` → 该页「下载原始邮件」`?view=att&…&disp=comp`）。
+
 ## 常见商用中继 / 邮箱商头上限（公开文档；**未实测**）
 
 下表摘自各厂商**公开文档**，仅作风险提示。本仓库**未**对下列商用路径做
 满 8k reason 实弹投递；**一律标注「未实测」**，不得当作交付承诺。
 
-（2026-09-21 更新：**自托管绑定栈**一行已完成实测并写回上表；下列四行**商用**路径仍为未实测——
-#301 的商用半边需要业主提供的测试账号。）
+（2026-09-21 更新：**自托管绑定栈**与 **Google Gmail** 两行已完成实测并写回上表；其余三行
+**商用**路径仍为未实测——#301 的商用半边余下 Exchange/SES/其它 SMTP 需业主提供的测试账号。）
 
 | 路径 | 公开口径（摘要） | 来源 | 对 8k reason 头的粗判 | 实测状态 |
 | --- | --- | --- | --- | --- |
 | **自托管绑定栈（docker-mailserver/Postfix 3.7.11，OAE↔OAE 同实例）** | 单头 `header_size_limit` 默认 102400 | 本仓实测（#301 前半） | ASCII/BMP 档完整；**JSON 转义最坏档被静默截断到 59_820 字符**（实际单头上限 59_820，非 102400） | **已实测 2026-09-21**（同机同镜像沙箱 API 进程 + 真实 postfix + 真实 mailserver，见本页实测小节） |
-| Google Gmail / Workspace | 单头 value 上限 32KB；全头合计 500KB；头字段数 5000 | [Gmail message header limits](https://support.google.com/a/answer/14016360) | ASCII ≈10.9KiB 低于 32KB；**BMP ≈31.3KiB 贴线**；**JSON 转义最坏 ≈62.7KiB（64242）明确超其单头 32KB——满 bound 控制字符 reason 经 Gmail 必丢** | **未实测**（仓内 #82 NUL 用例仅证 wire 体积，非 Gmail hop） |
+| Google Gmail / Workspace | 单头 value 上限 **32,768 字节**；全头合计 500KB；头字段数 5000 | [Gmail message header limits](https://support.google.com/a/answer/14016360)＋2026-09-21 实测 | ASCII ≈10.9KiB 低于上限；**BMP ≈31.3KiB（31,320B）贴线不越线 → 通过（逐字节保留，sha256 一致，DKIM/SPF/DMARC pass）**；JSON 转义最坏 ≈62.7KiB 超限 → **SMTP 阶段硬拒（552 5.3.4）退信，非静默丢** | **已实测 2026-09-21**（四档：200/10,920/31,320B 逐字节保留；40,020B 收 `552-5.3.4 … exceeds Google's limit of 32768 bytes per individual header` bounced） |
 | Microsoft Exchange / 文档化 Receive connector | 全部头字段合计默认 **256 KB**（`MaxHeaderSize`） | [Message size and recipient limits (Exchange)](https://learn.microsoft.com/en-us/exchange/mail-flow/message-size-limits) | 合计 256KB 对 ≈62.7KiB 通常仍够用；Exchange Online 现场是否同值以租户为准 | **未实测** |
 | Amazon SES | 公开配额主写**整信**大小（含附件）；SNS 通知路径另有「headers 10KB」类限制（通知面，非 SMTP 出站主路径） | [SES service quotas](https://docs.aws.amazon.com/ses/latest/dg/quotas.html) | SMTP/API 出站整信配额远大于 62KiB；勿与 SNS header 配额混读 | **未实测** |
 | 其它 SMTP 中继（SendGrid / Mailgun 等） | 多数公开材料写整信/附件上限，**少有**单独的单头 KiB 表 | 各厂商当前 docs | 遇拒信时查 SMTP 应答与中继状态页；不要假设与 Postfix 默认相同 | **未实测** |
