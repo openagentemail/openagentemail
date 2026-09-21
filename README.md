@@ -202,6 +202,28 @@ docker inspect <new-api-image> --format '{{.Config.User}}'
 Do **not** reverse this order. Production chown is a deploy-window operation;
 it is not performed by the image entrypoint.
 
+### Deploy-window recreate gotchas (measured 2026-09-21)
+
+1. **`--force-recreate <service>` follows the dependency chain.** Measured on
+   the reference host: recreating `api` also recreated `mailserver` along
+   `api`→`mailserver`→`provision` (and `ntfy` pulls `ntfy-provision`) —
+   healthy, ~11s, no loss, but unintended. To recreate **only** the named
+   services, add `--no-deps`; full-project builds keep the plain form.
+2. **Measure override attribution — do not assume it.** Before editing
+   or removing any override, run `docker compose config` against **three
+   configurations**: base alone, base + each override, and compare the
+   resolved output field by field. On the reference host (2026-09-21)
+   this distinguished two siblings: `docker-compose.override.yml` was a
+   zero-contribution no-op (its patches had long been absorbed into the
+   base file) and was removed with a timestamped backup, while
+   `compose.override.yaml` is **live and must be kept** (adds the loopback
+   binding and widens allowed ports). A "Found multiple override files"
+   warning at recreate time is the cue to run this check. Scope note:
+   override auto-merging happens only on default-file invocations —
+   deployments selecting files explicitly (e.g. API-only
+   `docker compose -f compose.api-only.yaml ...`) auto-merge **no**
+   override at all and must pass every override explicitly.
+
 ### ntfy non-root upgrade (#278)
 
 ntfy now runs as **UID 1000** and listens on container port **2587**. If an
