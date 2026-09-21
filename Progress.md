@@ -284,4 +284,5 @@
 
 ### 基线与证据
 - 分支：`w278-ntfy-nonroot` · PR #298
+- HEAD：`69f4b38258a5e2abe1ba8e71680fbb99649512fa`
 - 材料：`/home/ops/materials/278/completion.md`（R4 追记）
