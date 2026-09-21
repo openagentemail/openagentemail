@@ -480,7 +480,7 @@
 
 ### 基线与证据
 - Baseline：`b4fb884147f8613c2f858e9d1e726daa732e3fbd`
-- HEAD：`7fbb2e9443cdd84a7bc58f07e49811d26b29269c`
+- HEAD：`7de6e009c057e7af0142d36741a25aaa587e4ecd`（rebase 到 `c756ee2` 后；此前 `7fbb2e94` 系 rebase 前旧 sha，已废弃仅存历史）
 - PR：https://github.com/openagentemail/openagentemail/pull/307
 - 测试：api 1933p/9s/#206 flake 复跑绿；mcp 48p/0f
 - Subagent：`b2a13616-dafb-4779-bc2c-078ebdf62d95` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w251/agent-transcripts/b2a13616-dafb-4779-bc2c-078ebdf62d95/`
