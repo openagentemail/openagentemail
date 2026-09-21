@@ -636,17 +636,19 @@ describe('#302 approval payload MIME folding', () => {
 });
 
 afterAll(async () => {
-  resetWebhooksStoreForTests();
   (config.webhooks as any).enabled = false;
   setWebhookDnsLookupForTests(undefined);
   deliveryQueue.cancelAll();
-  // R6：仅当仍指向本文件 TEST_DATA_DIR 时清 alice——filtered 跑 #302 不碰真实 store
-  if (config.dataDir === TEST_DATA_DIR) {
-    try {
-      deleteIdentity('alice@test.example');
-    } catch {
-      /* ignore */
-    }
+  // R7（方案 b）：文件清理全部钉在 TEST_DATA_DIR——resetWebhooksStoreForTests 会 unlink
+  // webhooks.json{,.tmp,.failclosed}；deleteIdentity 写 identities.json。
+  // 内存 failClosed 重置仍经 reset 无条件执行；filtered 跑 #302 不触碰真实 store。
+  mkdirSync(TEST_DATA_DIR, { recursive: true, mode: 0o700 });
+  (config as any).dataDir = TEST_DATA_DIR;
+  resetWebhooksStoreForTests();
+  try {
+    deleteIdentity('alice@test.example');
+  } catch {
+    /* ignore */
   }
   (config as any).dataDir = originalDataDir;
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
