@@ -9,7 +9,8 @@ import { logEvent } from './log.ts';
 import { buildNeutralWakeText, buildOrcaArgv } from './notify.ts';
 import { parseVerifiedEnvelope, readMailAddress, readMailMessageId, readPingWebhookId, type EnvelopeBase } from './parse.ts';
 import { inspectReadiness, inspectStateWritable } from './readiness.ts';
-import { SeatSerializer } from './serialize.ts';
+import { SEAT_QUEUE_ABORTED, SeatSerializer } from './serialize.ts';
+import { ShareWaiterAggregate } from './share-waiters.ts';
 import type {
   AlertFn,
   HandleResult,
@@ -48,6 +49,7 @@ function emptyMetrics(): Metrics {
     unauthorized: 0,
     timeoutKill: 0,
     alertCoalesced: 0,
+    shareAbandoned: 0,
   };
 }
 
@@ -140,6 +142,8 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
   const metrics = emptyMetrics();
   const dedup = new DedupStore(config.dedup);
   const seats = new SeatSerializer();
+  // 同 dedup key 的共享 work 用聚合 signal：仅当全部 waiter 放弃才弃队
+  const shareWaiters = new ShareWaiterAggregate();
   const wakes: Receiver['wakes'] = [];
   const historyLimit = Math.max(0, config.wakeHistoryLimit);
   const recordWake = (entry: Receiver['wakes'][number]) => {
@@ -181,7 +185,11 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
   };
 
-  const handleVerifiedMail = async (route: RouteBinding, envelope: EnvelopeBase): Promise<HandleResult> => {
+  const handleVerifiedMail = async (
+    route: RouteBinding,
+    envelope: EnvelopeBase,
+    hookSignal: AbortSignal,
+  ): Promise<HandleResult> => {
     const address = readMailAddress(envelope.data);
     if (!address || address !== normalizeMailbox(route.mailbox)) {
       metrics.rejected += 1;
@@ -203,27 +211,13 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
     }
 
     const key = dedupKey(route.subscriptionId, envelope.id);
-    return dedup.share(key, async () => {
-      try {
-        const existing = await dedup.get(key, nowMs());
-        if (existing) {
-          metrics.duplicates += 1;
-          return { status: 200, disposition: 'duplicate' };
-        }
-      } catch (err) {
-        metrics.storageFailed += 1;
-        await emitAlert('storage_failed');
-        return {
-          status: 503,
-          disposition: 'storage_failed',
-          reason: err instanceof DedupError ? err.code : 'storage_failed',
-        };
-      }
-
-      return seats.run(route.terminal, async () => {
+    // 注册本请求 hookSignal；seats.run 只看聚合 signal（避免首 waiter 连坐后来者）
+    const shared = shareWaiters.join(key, hookSignal);
+    try {
+      return await dedup.share(key, async () => {
         try {
-          const again = await dedup.get(key, nowMs());
-          if (again) {
+          const existing = await dedup.get(key, nowMs());
+          if (existing) {
             metrics.duplicates += 1;
             return { status: 200, disposition: 'duplicate' };
           }
@@ -237,137 +231,162 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
           };
         }
 
-        const messageId = readMailMessageId(envelope.data);
-        const text = buildNeutralWakeText({
-          mailbox: route.mailbox,
-          eventId: envelope.id,
-          messageId,
-        });
-        const argv = buildOrcaArgv({
-          orcaBinary: config.orcaBinary,
-          terminal: route.terminal,
-          text,
-        });
+        // 聚合 signal：任一 waiter 存活则不 abort；全部放弃才弃队
+        return seats.run(
+          route.terminal,
+          async () => {
+            try {
+              const again = await dedup.get(key, nowMs());
+              if (again) {
+                metrics.duplicates += 1;
+                return { status: 200, disposition: 'duplicate' };
+              }
+            } catch (err) {
+              metrics.storageFailed += 1;
+              await emitAlert('storage_failed');
+              return {
+                status: 503,
+                disposition: 'storage_failed',
+                reason: err instanceof DedupError ? err.code : 'storage_failed',
+              };
+            }
 
-        if (!inspectStateWritable(config.dedup.path)) {
-          metrics.storageFailed += 1;
-          await emitAlert('storage_failed');
-          return {
-            status: 503,
-            disposition: 'storage_failed',
-            reason: 'state_unwritable',
-          };
-        }
+            const messageId = readMailMessageId(envelope.data);
+            const text = buildNeutralWakeText({
+              mailbox: route.mailbox,
+              eventId: envelope.id,
+              messageId,
+            });
+            const argv = buildOrcaArgv({
+              orcaBinary: config.orcaBinary,
+              terminal: route.terminal,
+              text,
+            });
 
-        let reserved = false;
-        try {
-          await dedup.reserveCapacity(key, nowMs());
-          reserved = true;
-        } catch (err) {
-          metrics.storageFailed += 1;
-          await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
-          return {
-            status: 503,
-            disposition: 'storage_failed',
-            reason: err instanceof DedupError ? err.code : 'storage_failed',
-          };
-        }
+            if (!inspectStateWritable(config.dedup.path)) {
+              metrics.storageFailed += 1;
+              await emitAlert('storage_failed');
+              return {
+                status: 503,
+                disposition: 'storage_failed',
+                reason: 'state_unwritable',
+              };
+            }
 
-        const releaseIfHeld = async () => {
-          if (!reserved) return;
-          reserved = false;
-          await dedup.releaseCapacity(key);
-        };
+            let reserved = false;
+            try {
+              await dedup.reserveCapacity(key, nowMs());
+              reserved = true;
+            } catch (err) {
+              metrics.storageFailed += 1;
+              await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
+              return {
+                status: 503,
+                disposition: 'storage_failed',
+                reason: err instanceof DedupError ? err.code : 'storage_failed',
+              };
+            }
 
-        if (!shouldWake(config, route)) {
-          try {
-            await dedup.commit(
-              {
-                key,
-                status: 'observed',
-                storedAtMs: nowMs(),
-                expiresAtMs: nowMs() + config.dedup.retentionMs,
-              },
-              nowMs(),
-            );
-            reserved = false;
-          } catch (err) {
-            await releaseIfHeld();
-            metrics.storageFailed += 1;
-            await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
-            return {
-              status: 503,
-              disposition: 'storage_failed',
-              reason: err instanceof DedupError ? err.code : 'storage_failed',
+            const releaseIfHeld = async () => {
+              if (!reserved) return;
+              reserved = false;
+              await dedup.releaseCapacity(key);
             };
-          }
-          metrics.wouldWake += 1;
-          logEvent('info', 'would_wake', {
-            routeKey: route.routeKey,
-            subscriptionId: route.subscriptionId,
-            eventId: envelope.id,
-            terminal: route.terminal,
-          });
-          return { status: 200, disposition: 'would_wake', sends: 0 };
-        }
 
-        const result = await wakeFn({ terminal: route.terminal, text, argv });
-        if (result.reason === 'timeout_killed') {
-          metrics.timeoutKill += 1;
-        }
-        if (!result.ok) {
-          await releaseIfHeld();
-          metrics.sendFailed += 1;
-          await emitAlert(result.reason === 'timeout_killed' ? 'timeout_killed' : 'send_failed');
-          logEvent('error', 'send_failed', {
-            routeKey: route.routeKey,
-            eventId: envelope.id,
-            reason: result.reason ?? 'send_failed',
-          });
-          return { status: 503, disposition: 'send_failed', reason: result.reason, sends: 0 };
-        }
+            if (!shouldWake(config, route)) {
+              try {
+                await dedup.commit(
+                  {
+                    key,
+                    status: 'observed',
+                    storedAtMs: nowMs(),
+                    expiresAtMs: nowMs() + config.dedup.retentionMs,
+                  },
+                  nowMs(),
+                );
+                reserved = false;
+              } catch (err) {
+                await releaseIfHeld();
+                metrics.storageFailed += 1;
+                await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
+                return {
+                  status: 503,
+                  disposition: 'storage_failed',
+                  reason: err instanceof DedupError ? err.code : 'storage_failed',
+                };
+              }
+              metrics.wouldWake += 1;
+              logEvent('info', 'would_wake', {
+                routeKey: route.routeKey,
+                subscriptionId: route.subscriptionId,
+                eventId: envelope.id,
+                terminal: route.terminal,
+              });
+              return { status: 200, disposition: 'would_wake', sends: 0 };
+            }
 
-        recordWake({ terminal: route.terminal, text, argv });
+            const result = await wakeFn({ terminal: route.terminal, text, argv });
+            if (result.reason === 'timeout_killed') {
+              metrics.timeoutKill += 1;
+            }
+            if (!result.ok) {
+              await releaseIfHeld();
+              metrics.sendFailed += 1;
+              await emitAlert(result.reason === 'timeout_killed' ? 'timeout_killed' : 'send_failed');
+              logEvent('error', 'send_failed', {
+                routeKey: route.routeKey,
+                eventId: envelope.id,
+                reason: result.reason ?? 'send_failed',
+              });
+              return { status: 503, disposition: 'send_failed', reason: result.reason, sends: 0 };
+            }
 
-        if (hooks.crashAfterSendBeforeCommit) {
-          await releaseIfHeld();
-          return { status: 503, disposition: 'send_failed', reason: 'crash_after_send', submitted: true, sends: 1 };
-        }
+            recordWake({ terminal: route.terminal, text, argv });
 
-        try {
-          await dedup.commit(
-            {
-              key,
-              status: 'success',
-              storedAtMs: nowMs(),
-              expiresAtMs: nowMs() + config.dedup.retentionMs,
-            },
-            nowMs(),
-          );
-          reserved = false;
-        } catch (err) {
-          await releaseIfHeld();
-          metrics.storageFailed += 1;
-          await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
-          return {
-            status: 503,
-            disposition: 'storage_failed',
-            reason: err instanceof DedupError ? err.code : 'storage_failed',
-            submitted: true,
-            sends: 1,
-          };
-        }
+            if (hooks.crashAfterSendBeforeCommit) {
+              await releaseIfHeld();
+              return { status: 503, disposition: 'send_failed', reason: 'crash_after_send', submitted: true, sends: 1 };
+            }
 
-        metrics.submitted += 1;
-        logEvent('info', 'wake_submitted', {
-          routeKey: route.routeKey,
-          subscriptionId: route.subscriptionId,
-          eventId: envelope.id,
-          terminal: route.terminal,
-        });
-        return { status: 200, disposition: 'submitted', submitted: true, sends: 1 };
+            try {
+              await dedup.commit(
+                {
+                  key,
+                  status: 'success',
+                  storedAtMs: nowMs(),
+                  expiresAtMs: nowMs() + config.dedup.retentionMs,
+                },
+                nowMs(),
+              );
+              reserved = false;
+            } catch (err) {
+              await releaseIfHeld();
+              metrics.storageFailed += 1;
+              await emitAlert(err instanceof DedupError && err.code === 'storage_capacity' ? 'storage_capacity' : 'storage_failed');
+              return {
+                status: 503,
+                disposition: 'storage_failed',
+                reason: err instanceof DedupError ? err.code : 'storage_failed',
+                submitted: true,
+                sends: 1,
+              };
+            }
+
+            metrics.submitted += 1;
+            logEvent('info', 'wake_submitted', {
+              routeKey: route.routeKey,
+              subscriptionId: route.subscriptionId,
+              eventId: envelope.id,
+              terminal: route.terminal,
+            });
+            return { status: 200, disposition: 'submitted', submitted: true, sends: 1 };
+          },
+          shared.signal,
+        );
       });
-    });
+    } finally {
+      shared.leave();
+    }
   };
 
   const handleHook = async (
@@ -479,11 +498,16 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       return;
     }
 
-    const result = await handleVerifiedMail(route, parsed.envelope);
+    const result = await handleVerifiedMail(route, parsed.envelope, signal);
+    // 排队弃队或外层已写 503：不再次写响应（writeJson 亦守卫 headersSent）
+    if (signal.aborted && !res.headersSent) {
+      return;
+    }
     writeJson(res, result.status, {
       disposition: result.disposition,
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.sends != null ? { sends: result.sends } : {}),
+      ...(result.submitted != null ? { submitted: result.submitted } : {}),
     });
   };
 
@@ -538,6 +562,14 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       }, config.requestTimeoutMs);
       handleHook(req, res, decoded.value, ac.signal)
         .catch((err) => {
+          if ((err as { code?: string }).code === SEAT_QUEUE_ABORTED) {
+            // 纵深防御：ShareWaiterAggregate 修根后，未超时 waiter 理论不应收到此 reject。
+            // 仅本请求已写出响应或自身已 abort 才静默；否则落 handler_error 写 503，避免静默挂起。
+            metrics.shareAbandoned += 1;
+            if (res.headersSent || ac.signal.aborted) {
+              return;
+            }
+          }
           logEvent('error', 'handler_error', { reason: err instanceof Error ? err.message : 'error' });
           if (!res.headersSent) {
             writeJson(res, 503, { disposition: 'send_failed', reason: 'handler_error' });

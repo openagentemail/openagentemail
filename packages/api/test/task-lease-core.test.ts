@@ -1514,6 +1514,330 @@ describe('PR98 R14 current-head gate regressions', () => {
   });
 });
 
+// #82：PR #77 遗产 folding 传输面在下方 `TASK_LEASES_R6_RED` 门控块内
+// `R17 GREEN: owner-approved release reason limit survives actual folded mail parser`。
+// 本 describe 常开。
+//
+// P2 采 a：foldedRaw 直过生产 parseTaskMessageForTests（mailparser.get 会把续行
+// WSP 留在值内）；生产 readLeaseEventPayload 先 strip 全部空白再严格 base64url。
+// 已删除「手动 unfold 重建 cleanRaw」workaround。nodemailer 正对照保留。
+describe('#82 8k release-reason fold corpus', () => {
+  test('8k reason survives explicit fold corpus (76/78/998, consecutive, CR/LF) via production parser', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = 'r'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-fold-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    expect(payloadValue.length).toBeGreaterThan(reason.length);
+
+    /** 按每 N 字符插入续行折点；连续折＝段间插入纯 WSP 空续行。 */
+    const foldPayload = (value: string, every: number, eol: string, wsp: string, consecutive = false): string => {
+      const parts: string[] = [];
+      for (let i = 0; i < value.length; i += every) {
+        parts.push(value.slice(i, i + every));
+      }
+      const lines: string[] = ['X-OA-Task-Lease-Payload:'];
+      for (let i = 0; i < parts.length; i += 1) {
+        if (consecutive && i > 0) lines.push(wsp);
+        lines.push(`${wsp}${parts[i]}`);
+      }
+      return lines.join(eol);
+    };
+
+    const variants: { label: string; folded: string }[] = [
+      { label: 'every-76-crlf-space', folded: foldPayload(payloadValue, 76, '\r\n', ' ', false) },
+      { label: 'every-78-crlf-space', folded: foldPayload(payloadValue, 78, '\r\n', ' ', false) },
+      { label: 'every-998-crlf-space', folded: foldPayload(payloadValue, 998, '\r\n', ' ', false) },
+      { label: 'every-76-lf-space', folded: foldPayload(payloadValue, 76, '\n', ' ', false) },
+      { label: 'every-76-crlf-tab', folded: foldPayload(payloadValue, 76, '\r\n', '\t', false) },
+      { label: 'every-76-crlf-consecutive', folded: foldPayload(payloadValue, 76, '\r\n', ' ', true) },
+      { label: 'every-78-lf-tab', folded: foldPayload(payloadValue, 78, '\n', '\t', false) },
+    ];
+
+    const results: Record<string, boolean> = {};
+
+    // 正对照：nodemailer 出站线直过生产 parse
+    {
+      const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+      const serialized = await transport.sendMail({
+        from: releaseInput!.from,
+        to: releaseInput!.to,
+        subject: releaseInput!.subject,
+        text: releaseInput!.text,
+        headers: releaseInput!.headers,
+      });
+      if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 nodemailer must buffer RFC 5322 source');
+      const fetchMsg = {
+        uid: 29,
+        source: serialized.message,
+        envelope: {
+          from: [{ address: releaseInput!.from }],
+          to: [{ address: releaseInput!.to[0] }],
+          subject: releaseInput!.subject,
+        },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject;
+      const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+      const ok =
+        parsed?.lease?.event === 'release'
+        && parsed.lease.reason === reason
+        && parsed.lease.reason.length === TASK_LEASE_REASON_MAX_CHARS;
+      results['nodemailer-wire'] = ok;
+      expect(ok).toBe(true);
+    }
+
+    for (const v of variants) {
+      const otherHeaders = { ...(releaseInput!.headers ?? {}) };
+      delete otherHeaders['X-OA-Task-Lease-Payload'];
+      const headerLines = Object.entries(otherHeaders).map(([name, value]) => `${name}: ${value}`);
+      // foldedRaw 直过生产 parse（无手动 unfold / cleanRaw）
+      const foldedRaw = Buffer.from(
+        [
+          `From: ${releaseInput!.from}`,
+          `To: ${releaseInput!.to[0]}`,
+          `Subject: ${releaseInput!.subject}`,
+          ...headerLines,
+          v.folded,
+          '',
+          releaseInput!.text,
+        ].join('\r\n'),
+        'utf8',
+      );
+      const fetchMsg = {
+        uid: 30,
+        source: foldedRaw,
+        envelope: {
+          from: [{ address: releaseInput!.from }],
+          to: [{ address: releaseInput!.to[0] }],
+          subject: releaseInput!.subject,
+        },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject;
+      const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+      const ok =
+        parsed?.lease?.event === 'release'
+        && parsed.lease.reason === reason
+        && parsed.lease.reason.length === TASK_LEASE_REASON_MAX_CHARS;
+      results[v.label] = ok;
+      expect({
+        label: v.label,
+        ok,
+        reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason?.length : null,
+      }).toEqual({
+        label: v.label,
+        ok: true,
+        reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+      });
+    }
+    console.info(JSON.stringify({ r82FoldCorpus: results, payloadChars: payloadValue.length }));
+  });
+
+  test('lease payload with non-whitespace garbage (!!!!) still rejects after whitespace strip', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-garbage-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason: 'ok' });
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+    const releaseInput = sent[1]!;
+    const good = releaseInput.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    expect(good.length).toBeGreaterThan(0);
+    // 插入非空白非法字符；即便夹空白，strip 后仍含 !!!!
+    const poisoned = `${good.slice(0, 8)} !!!! ${good.slice(8)}`;
+    const otherHeaders = { ...(releaseInput.headers ?? {}) };
+    delete otherHeaders['X-OA-Task-Lease-Payload'];
+    const headerLines = Object.entries(otherHeaders).map(([name, value]) => `${name}: ${value}`);
+    const raw = Buffer.from(
+      [
+        `From: ${releaseInput.from}`,
+        `To: ${releaseInput.to[0]}`,
+        `Subject: ${releaseInput.subject}`,
+        ...headerLines,
+        `X-OA-Task-Lease-Payload: ${poisoned}`,
+        '',
+        releaseInput.text,
+      ].join('\r\n'),
+      'utf8',
+    );
+    const fetchMsg = {
+      uid: 32,
+      source: raw,
+      envelope: {
+        from: [{ address: releaseInput.from }],
+        to: [{ address: releaseInput.to[0] }],
+        subject: releaseInput.subject,
+      },
+      internalDate: new Date(START),
+    } as unknown as FetchMessageObject;
+    const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+    // 非法字符照样拒：不得解析出 release 事件
+    expect(parsed?.lease ?? null).toBeNull();
+  });
+
+  // 追加五：CJK 满 bound（8000 UTF-16 units）与 ASCII 同构；payload≈31.3KiB 为文档最坏口径活证据
+  test('8k CJK reason survives nodemailer wire + production parser (BMP worst-case budget)', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = '界'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    expect(reason.length).toBe(TASK_LEASE_REASON_MAX_CHARS);
+    expect(Buffer.byteLength(reason, 'utf8')).toBe(TASK_LEASE_REASON_MAX_CHARS * 3);
+
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-cjk-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    // ceil(≈24100/3)*4 ≈ 32134 → ≈31.3KiB（见 docs/task-lease-reason-transport.md）
+    expect(payloadValue.length).toBeGreaterThan(30_000);
+    expect(payloadValue.length).toBeLessThan(33_000);
+
+    const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+    const serialized = await transport.sendMail({
+      from: releaseInput!.from,
+      to: releaseInput!.to,
+      subject: releaseInput!.subject,
+      text: releaseInput!.text,
+      headers: releaseInput!.headers,
+    });
+    if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 CJK nodemailer must buffer RFC 5322 source');
+    const fetchMsg = {
+      uid: 31,
+      source: serialized.message,
+      envelope: {
+        from: [{ address: releaseInput!.from }],
+        to: [{ address: releaseInput!.to[0] }],
+        subject: releaseInput!.subject,
+      },
+      internalDate: new Date(START),
+    } as unknown as FetchMessageObject;
+    const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+    expect({
+      event: parsed?.lease?.event ?? null,
+      reasonMatch: parsed?.lease?.event === 'release' && parsed.lease.reason === reason,
+      reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason.length : null,
+      payloadChars: payloadValue.length,
+    }).toEqual({
+      event: 'release',
+      reasonMatch: true,
+      reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+      payloadChars: expect.any(Number),
+    });
+    console.info(JSON.stringify({
+      r82CjkBudgetEvidence: {
+        reasonUnits: reason.length,
+        reasonUtf8Bytes: Buffer.byteLength(reason, 'utf8'),
+        payloadChars: payloadValue.length,
+        approxKiB: Number((payloadValue.length / 1024).toFixed(2)),
+      },
+    }));
+  });
+
+  // R3：JSON 转义最坏真实测（与 CJK 同路径：sent headers → payloadValue.length）
+  test('8k NUL reason dual-gate + production payload length (JSON-escape worst-case budget)', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = '\u0000'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    expect(reason.length).toBe(TASK_LEASE_REASON_MAX_CHARS);
+    // reason 单字段 stringify 长度（非完整事件体）——文档分层引用
+    const reasonFieldJsonBytes = Buffer.byteLength(JSON.stringify(reason), 'utf8');
+    expect(reasonFieldJsonBytes).toBe(48_002);
+
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-nul-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    // 双闸放行（zod/core 只查 length）
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    // 完整事件 canonical JSON → base64url 实测（权威数字进 docs/task-lease-reason-transport.md）
+    expect(payloadValue.length).toBe(64_242);
+
+    const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+    const serialized = await transport.sendMail({
+      from: releaseInput!.from,
+      to: releaseInput!.to,
+      subject: releaseInput!.subject,
+      text: releaseInput!.text,
+      headers: releaseInput!.headers,
+    });
+    if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 NUL nodemailer must buffer RFC 5322 source');
+    const fetchMsg = {
+      uid: 33,
+      source: serialized.message,
+      envelope: {
+        from: [{ address: releaseInput!.from }],
+        to: [{ address: releaseInput!.to[0] }],
+        subject: releaseInput!.subject,
+      },
+      internalDate: new Date(START),
+    } as unknown as FetchMessageObject;
+    const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+    expect({
+      event: parsed?.lease?.event ?? null,
+      reasonMatch: parsed?.lease?.event === 'release' && parsed.lease.reason === reason,
+      reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason.length : null,
+    }).toEqual({
+      event: 'release',
+      reasonMatch: true,
+      reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+    });
+
+    // 完整事件体字节 ≈ base64url 解码长度
+    const eventJsonBytes = Buffer.from(payloadValue, 'base64url').length;
+    console.info(JSON.stringify({
+      r82NulEscapeBudgetEvidence: {
+        reasonUnits: reason.length,
+        reasonFieldJsonBytes,
+        eventJsonBytes,
+        payloadChars: payloadValue.length,
+        approxKiB: Number((payloadValue.length / 1024).toFixed(2)),
+      },
+    }));
+  });
+});
+
 if (process.env.TASK_LEASES_R6_RED === '1') {
   describe('#56 R6a production lease-core matrix RED', () => {
     test('indexed release dominates queued same-generation claim and renew overlays', async () => {

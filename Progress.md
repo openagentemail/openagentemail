@@ -286,3 +286,97 @@
 - 分支：`w278-ntfy-nonroot` · PR #298
 - HEAD：`69f4b38258a5e2abe1ba8e71680fbb99649512fa`
 - 材料：`/home/ops/materials/278/completion.md`（R4 追记）
+
+## 2026-09-21 · wmisc-229-82-199（#229+#82+#199）
+
+### 我们实现了哪些功能？
+1. **#229**：`SeatSerializer` 排队段 AbortSignal 弃队；已开跑 send 不打断；弃队不消费 dedup；README Timer/参数表同步；阴性+正例测试。
+2. **#82**：`docs/task-lease-reason-transport.md`（8k→≈10.9KiB 账、Postfix/商用头风险表标源+未实测）；task-lease-core 常开 folding 语料（76/78/998 等）。
+3. **#199**：矩阵夹具改导入 `MAIL_CURSOR_V1_PREFIX`。
+
+### 我们遇到了哪些错误？
+1. 多折行语料直接喂 `parseTaskMessageForTests` 时 mailparser `.get()` 保留续行 WSP，打断 base64url。
+2. `npm run typecheck` 对 `as const` / 字面量 code 类型一度报 TS1355/TS2322（缓存与赋型纠缠）。
+3. PR #77 R17 folding 遗产挂在 `TASK_LEASES_R6_RED=1` 门控内，默认 `bun test` 发现不了。
+
+### 我们是如何解决这些错误的？
+1. 语料经 mailparser `headerLines` + 与 R17 相同的 unfold（去 CRLF+WSP）后重建单行头，再走生产 parse；并保留 nodemailer 线正对照。
+2. 错误工厂改为 `code: string`；清增量缓存后 typecheck 绿。
+3. #82 语料放在门控外常开 describe，并在完工报写明遗产 file:line（:1933）。
+
+### 基线与证据
+- 分支：`wmisc-229-82-199` · PR #300
+- HEAD：`bdf948c55fb4abb3809f44fb47927de90a1c3206`
+- 材料：`/home/ops/materials/229-82-199/completion.md`
+- api：**1917 pass / 9 skip / 0 fail**；webhook-wake：**178 pass** + typecheck clean
+- subagent：`243a953e-10f1-4a84-8c37-7901283c2714` PASS
+
+## 2026-09-21 · wmisc R1（PR #300 P1×2）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`ShareWaiterAggregate`——同 dedup key 多 waiter 动态聚合；共享 `seats.run` 仅在全部 waiter 放弃时 abort；README 同步；两例回归。
+2. **P1-2**：`task-lease-reason-transport.md` 拆 ASCII≈10.9KiB / BMP 最坏≈32.2KiB；Gmail 行重判贴/超 32KB；存储账补最坏。
+
+### 我们遇到了哪些错误？
+1. 无新运行时错误；聚焦与全量测试一次绿。
+
+### 我们是如何解决这些错误的？
+1. N/A。
+
+### 基线与证据
+- HEAD：`36209bfaf5cae73f03d77b84834e3ed162b46a64`
+- PR #300；材料 completion.md R1 节
+- api 1917 pass；wake 180 pass + typecheck clean
+
+## 2026-09-21 · wmisc R1+ZCode（PR #300）
+
+### 我们实现了哪些功能？
+1. SEAT_QUEUE_ABORTED catch 纵深防御（headersSent||aborted 才静默）+ metric `shareAbandoned`
+2. 文档最坏口径勘误为 ≈31.3KiB（ceil(24100/3)*4）；否决 43KB
+3. 测试 headroom 注释；wake 启动改事件驱动；CJK 8000 满长语料（payloadChars=32242）
+
+### 我们遇到了哪些错误？
+1. 无。
+
+### 我们是如何解决这些错误的？
+1. N/A。
+
+### 基线与证据
+- HEAD：`b8bd7ee5872eb9c26527f7a7f8cdeba8a2dd9bb6`
+- api 1918 pass；wake 180 pass + typecheck；CJK ≈31.49KiB
+
+## 2026-09-21 · wmisc R1 第二追加（#4171 P2-a）
+
+### 我们实现了哪些功能？
+1. 单 waiter 超时阴性对照；生产 `readLeaseEventPayload` strip 空白；foldedRaw 直过；`!!!!` 负例；submitted 序列化。
+
+### 我们遇到了哪些错误？
+1. foldedRaw 直过未修前 RED（mailparser 留 WSP）。
+2. 全量 api #206 25s timeout flake。
+
+### 我们是如何解决这些错误的？
+1. strip `\s+` 后严格 base64url → GREEN。
+2. 单文件复跑 wait-precedence-r9 2 pass；完报注明 flake。
+
+### 基线与证据
+- HEAD：`072e2c116008143dd58766d15827372932bb756d`
+- subagent：`d3883c4a-c6f9-46b7-b36f-20a42424ff59` PASS
+- api 1918(+#206 flake复跑绿)；wake 181+typecheck
+
+## 2026-09-21 · wmisc R3（PR #300 P2×2 · JSON 转义真实测）
+
+### 我们实现了哪些功能？
+1. **P2-2**：#82 语料新增 NUL×8000 生产路径用例；权威数字 reasonFieldJsonBytes=48002 / eventJsonBytes=48181 / payloadChars=**64242**（≈62.74KiB）；文档三层账 JSON 转义列改钉实测，删除旧「48002/64112」口径。
+2. **P2-1**：`operator-guide.md` + `task-lease-journal.md` 挂链摘要同步 ASCII/BMP/JSON 转义三层最坏口径。
+
+### 我们遇到了哪些错误？
+1. R2 沿用的「FC 实测 48002/64112」把单字段 stringify 与猜测 wrapper 演算混成同一权威——Codex/FC 确认不自洽。
+
+### 我们是如何解决这些错误的？
+1. 与 CJK 同路径从 `X-OA-Task-Lease-Payload` 读真实 `payloadValue.length=64242`；断言钉死；文档分层写清「单字段 vs 完整事件体+payload」。
+
+### 基线与证据
+- 分支：`wmisc-229-82-199` · PR #300
+- HEAD：`501fe40603d74575be8616a8c01a243733c4dbf3`
+- 材料：`/home/ops/materials/229-82-199/completion.md` R3 节
+- #82 聚焦：**4 pass**

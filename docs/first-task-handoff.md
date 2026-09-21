@@ -170,5 +170,6 @@ Use the existing task ID after timeout; do not create a replacement merely to wa
 
 For optional leases, typed approvals and outbound notifications, read the
 [MCP reference](../packages/mcp/README.md#tools),
-[journal operating guide](task-lease-journal.md) and
+[journal operating guide](task-lease-journal.md),
+[8k release-reason transport guidance](task-lease-reason-transport.md) and
 [wake adapter's actual prerequisites](../examples/webhook-wake/README.md).
