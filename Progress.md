@@ -224,6 +224,8 @@
 
 ### 基线与证据
 - origin/main：`fd4135935c5308e6af4b6a531f529db4b39149e0`
-- 分支：`w278-ntfy-nonroot`
+- HEAD：`40147a4e4ac0549fecb4400e7252e95de0c7d527`
+- 分支：`w278-ntfy-nonroot` · PR #298
 - 材料：`/home/ops/materials/278/`
 - subagent 自审：`be1c3f15-83dd-4bc6-8243-f2d8b75913f7` · verdict PASS
+- 全量 api：1915 pass / 9 skip / 1 fail（#206 预存 timeout）
