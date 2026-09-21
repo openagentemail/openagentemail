@@ -13,6 +13,7 @@ import {
   LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP,
   LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS,
   queueLeaseOverlayForTests,
+  queuedLeaseOverlayCountForTests,
 } from '../../src/lib/tasks-internal.ts';
 
 export {
@@ -30,4 +31,5 @@ export {
   LEASE_OVERLAY_REPLAY_EXPIRED_SEEN_CAP,
   LEASE_OVERLAY_REPLAY_EXPIRED_WARN_INTERVAL_MS,
   queueLeaseOverlayForTests,
+  queuedLeaseOverlayCountForTests,
 };

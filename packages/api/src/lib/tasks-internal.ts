@@ -261,6 +261,11 @@ export type Task = {
    * 私有——写路径 claim 分配计入 durableGen；永不公开投影。
    */
   leaseGenerationHighWater?: number;
+  /**
+   * #305 R4 P1-1：降级出账的 claim 身份全史（证据≠权威）。
+   * 供 overlay/journal `eventIsIndexed` 精确决退对应 queued 行；永不授权、永不公开投影。
+   */
+  degradedLeaseClaims?: ClaimLeaseEvent[];
 };
 
 type LostLeaseReceipt = {
@@ -270,7 +275,7 @@ type LostLeaseReceipt = {
   firstClaimedAt?: string;
 };
 
-export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts' | 'expiryReceipts' | 'leaseGenerationHighWater'> & {
+export type TaskView = Omit<Task, 'parentTaskId' | 'lease' | 'releasedLease' | 'expiredLease' | 'lostLease' | 'tombstoneReceipts' | 'expiryReceipts' | 'leaseGenerationHighWater' | 'degradedLeaseClaims'> & {
   claimedUntil?: string;
   leaseGeneration?: number;
   leaseStatus?: 'disabled';
@@ -1384,6 +1389,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
   /** #305 R3：仅降级出账的 generation（证据≠已接受权威）；与 appliedClaims 同生。 */
   const degradedClaimGenerations = new Set<number>();
+  /** #305 R4 P1-1：降级 claim 身份全史——overlay/journal 精确决退，接受后仍保留。 */
+  const degradedLeaseClaims: ClaimLeaseEvent[] = [];
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   // #285：同代 renew 去重索引（键=canonicalLeaseEvent；与主 Map 同生共死）。
   const seenRenewCanonical = new Map<number, Set<string>>();
@@ -1401,6 +1408,17 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     const windows = acceptedDeadlineWindows.get(generation) ?? new Set<string>();
     windows.add(claimedUntil);
     acceptedDeadlineWindows.set(generation, windows);
+  };
+  /**
+   * #305 R4：降级代证据换代时清理同代 renew/release 残渣。
+   * 旧实例 historical release 先入 appliedReleases 后，若不清理，新 token release
+   * 会在权威判定前被 priorRelease 异容门判为冲突第二份 → 整卡 null。
+   * 保留 acceptedDeadlineWindows（旧窗 expiry 仍审计 no-op）；appliedClaimWindows 由随后覆盖。
+   */
+  const clearDegradedGenerationResiduals = (generation: number): void => {
+    appliedReleases.delete(generation);
+    appliedRenews.delete(generation);
+    seenRenewCanonical.delete(generation);
   };
   /** #285：确保 map 持有数组后原地 push（插入顺序=可观察面）。 */
   const pushOwned = <T>(map: Map<number, T[]>, generation: number, item: T): void => {
@@ -1561,7 +1579,10 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       const claimedUntil = Date.parse(lease.claimedUntil);
       const taskClaimedAt = firstClaimedAt ?? lease.at;
       const taskClaimedAtMs = Date.parse(taskClaimedAt);
-      // 结构类检查仍 fail-closed。降级代重评估：generation === previousGeneration 且标记在案。
+      // 结构类检查仍 fail-closed。
+      // #305 R3/R4 P1-A：降级代重评估仅 tip 代 `generation === previousGeneration`。
+      // 不放宽为「降级集合内且 ≤ previousGeneration」——否则接受更早代会使 prevGen 回退，
+      // 与更高降级代残渣交错（高水位游标/权威不一致）；多降级靠写路径 highWater 跳号覆盖。
       const isDegradedReeval = !!priorClaim && priorIsDegraded;
       const generationOk = isDegradedReeval
         ? lease.generation === previousGeneration
@@ -1578,9 +1599,13 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       if (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil)) {
         noteClaimWindowConflictDegraded(id, lease.generation, lease.claimedUntil);
         // 证据记账（降级标记）：同代后续 renew/release/expired 走 historical；可被同代重评估覆盖。
+        // R4：重新降级覆盖时清理同代 release/renew 残渣（与重评估接受同清）。
+        clearDegradedGenerationResiduals(lease.generation);
         appliedClaims.set(lease.generation, lease);
         recordAcceptedWindow(lease.generation, lease.claimedUntil);
         degradedClaimGenerations.add(lease.generation);
+        // 保留每一次降级身份（含被覆盖的旧实例），供 overlay 精确退休。
+        degradedLeaseClaims.push(lease);
         previousGeneration = lease.generation;
         duplicateLeaseMessages.add(message);
         continue;
@@ -1597,6 +1622,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         generationClaimedAt: lease.at,
         firstClaimedAt,
       };
+      // R4：重评估接受时必须清同代旧实例 release/renew，否则新 token release 被 priorRelease 挡死。
+      if (isDegradedReeval) clearDegradedGenerationResiduals(lease.generation);
       appliedClaims.set(lease.generation, lease);
       recordAcceptedWindow(lease.generation, lease.claimedUntil);
       degradedClaimGenerations.delete(lease.generation);
@@ -1785,6 +1812,10 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // #305：高水位含降级代——写路径 claim 分配避免复用已占用 generation。
   if (previousGeneration > 0) {
     task.leaseGenerationHighWater = previousGeneration;
+  }
+  // #305 R4 P1-1：降级身份全史私有保留（接受后亦不删）——overlay/journal 精确决退。
+  if (degradedLeaseClaims.length > 0) {
+    task.degradedLeaseClaims = degradedLeaseClaims;
   }
   return task;
 }
@@ -2395,6 +2426,14 @@ function eventIsIndexed(task: Task, queued: QueuedEvent): boolean {
         && task.releasedLease.reason === queued.lease.reason)
         || TERMINAL_TASK_STATES.includes(task.state);
     }
+    // #305 R4 P1-1：降级证据身份精确匹配 → 决退 queued/journal claim，不授权。
+    // 不用 high-water 代际短路，避免误退尚未索引的更新行。
+    if (
+      queued.lease.event === 'claim'
+      && task.degradedLeaseClaims?.some((deg) => isSameAuthenticatedLeaseEvent(deg, queued.lease!))
+    ) {
+      return true;
+    }
     if (indexedLeaseGenerationDominates(task, queued.lease.generation, 'equal-or-newer')) return true;
     const released = task.releasedLease;
     if (!authority) {
@@ -2697,26 +2736,42 @@ export function queueLeaseOverlayForTests(input: {
   taskId: string;
   sentAt: number;
   generation?: number;
+  /** #305：精确身份字段——与 durable 降级证据对齐时可退休。 */
+  tokenVerifier?: string;
+  claimedUntil?: string;
+  at?: string;
+  actor?: string;
+  from?: string;
+  to?: string;
+  subject?: string;
 }): void {
-  const at = new Date(input.sentAt).toISOString();
+  const at = input.at ?? new Date(input.sentAt).toISOString();
   const generation = input.generation ?? 1;
+  // 默认保持历史 M1 注入方向；#305 精确身份用例显式传 from/to/actor。
+  const from = input.from ?? 'alpha@test.example';
+  const to = input.to ?? 'bravo@test.example';
   queueEventUntilIndexed(input.taskId, {
     id: `overlay-${input.taskId}-${generation}`,
-    from: 'alpha@test.example',
-    to: 'bravo@test.example',
-    subject: 'overlay',
+    from,
+    to,
+    subject: input.subject ?? 'overlay',
     date: at,
     state: 'working',
     body: 'overlay',
   }, {
     version: 1,
     event: 'claim',
-    actor: 'bravo@test.example',
+    actor: input.actor ?? 'bravo@test.example',
     at,
     generation,
-    claimedUntil: new Date(input.sentAt + 3600 * 1000).toISOString(),
-    tokenVerifier: `verifier-${input.taskId}`,
+    claimedUntil: input.claimedUntil ?? new Date(input.sentAt + 3600 * 1000).toISOString(),
+    tokenVerifier: input.tokenVerifier ?? `verifier-${input.taskId}`,
   });
+}
+
+/** 测试可读：某 task 仍滞后的 queued overlay 行数（退休后应为 0）。 */
+export function queuedLeaseOverlayCountForTests(taskId: string): number {
+  return queuedEvents.get(taskId)?.length ?? 0;
 }
 
 /** 发信走可注入缝，单测才能钉死并发 reply 只写出一封 working。 */

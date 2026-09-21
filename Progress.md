@@ -565,3 +565,28 @@
 
 ### 我们是如何解决这些错误的？
 1. 按 `X-OA-Task-Lease-Event===claim` 取签发信。聚焦 19/19；全量 1952p/#206 flake。
+
+## 2026-09-21 · w305 #305 R4（Codex 2×P1：release 残渣 + 多降级代）
+
+### 我们实现了哪些功能？
+1. **P1-B**：`clearDegradedGenerationResiduals(G)`——重评估接受与重新降级覆盖时清理同代 `appliedReleases`/`appliedRenews`/`seenRenewCanonical`（保留 `acceptedDeadlineWindows`）。旧实例 historical release 不再挡住新 token release。
+2. **P1-A①**：连续降级 gen2+gen3 → highWater=3 → `claimTask` E2E 分配 **gen4**。
+3. **P1-A②**：读侧重评估门 **保** `gen === previousGeneration`（不放宽 ≤prev）；更早代 gen2' 在 prev=3 时整卡 null（显式声明+钉测）。理由：放宽会使 prevGen 回退并与更高降级代残渣交错。
+4. **P1-1（Codex e8ec6aa 复审）**：`Task.degradedLeaseClaims` 私有降级身份全史；`eventIsIndexed` claim 分支精确身份匹配决退 overlay/journal——**不授权**；不用 high-water 代际短路。
+5. ZCode P2 限频计数器：e8ec6aa 已补；本轮未改限频结构。
+
+### 我们遇到了哪些错误？
+1. RED：降级 gen2 + 旧 release → gen2' 接受 → 新 release → 整卡 null（priorRelease 异容门在权威判定前）。
+2. 推演放宽重评估门：接受 gen2' 会把 previousGeneration 从 3 回退到 2，与 gen3 降级残渣/高水位语义冲突。
+3. RED P1-1：durable 已降级 gen2 后，queued/journal 同身份 claim 永不退休 → `applyOverlayMessages` 复现为活跃权威 gen2。
+
+### 我们是如何解决这些错误的？
+1. 证据换代时清同代 release/renew 残渣（accept + re-degrade 同清）。
+2. 保 tip 门 + 写路径 highWater 覆盖多降级；钉测 gen2'→null。
+3. 重建填充 `degradedLeaseClaims`；`eventIsIndexed` 身份匹配退休；TaskView Omit；①合并权威=前窗+队列空②非降级回归③journal fate=indexed；②b high-water  alone 不误退。
+4. 聚焦 **28 pass**；自审 PASS-WITH-NITS（已补负例/Progress）。
+
+### 基线与证据
+- 自审 R4：`42f6b61a-fa6d-463c-9c21-48b42e15a284`（P1-A/B）
+- 自审 R4 P1-1：`571c93b9-4815-4299-9e24-e256a3bd86f0`
+- 完工报：`/home/ops/materials/305/completion.md`（R4 节）

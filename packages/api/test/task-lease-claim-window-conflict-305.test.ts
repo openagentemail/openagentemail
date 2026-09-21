@@ -26,6 +26,8 @@ const {
   setTaskGetForTests,
   setTaskNowForTests,
   setTaskSendMailForTests,
+  queueLeaseOverlayForTests,
+  queuedLeaseOverlayCountForTests,
 } = await import('./support/task-test-seams.ts');
 const {
   setFindTaskMessagesForTests,
@@ -599,5 +601,319 @@ describe('#305 R3 降级代写路径复用编号', () => {
     // 公开面不含降级 claim2.at；含新代
     expect(toTaskView(rebuilt!).messages.length).toBeGreaterThanOrEqual(3);
     expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
+  });
+});
+
+describe('#305 R4 release 残渣与多降级代', () => {
+  const REISSUE_VERIFIER = 'r'.repeat(43);
+  const REISSUE_AT = new Date(START + 300_000).toISOString();
+  const REISSUE_UNTIL = new Date(START + 600_000).toISOString();
+  const GEN3_AT = new Date(START + 120_000).toISOString();
+  const GEN3_UNTIL = new Date(START + 480_000).toISOString();
+  const GEN3_VERIFIER = 'z'.repeat(43);
+
+  test('R4 P1-B①: 降级 gen2 + 旧 release → gen2\' 接受 → 新 token release 可读', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const oldRelease = await signedLease(ID, 4, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 90_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const reissue = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const newRelease = await signedLease(ID, 6, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+      reason: 'new-instance',
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, oldRelease, reissue, newRelease]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.lease).toBeUndefined();
+    expect(rebuilt?.releasedLease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+    });
+  });
+
+  test('R4 P1-B②: 接受 gen2\' 后旧 token release → 保守 null（边界不变）', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const reissue = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const lateOldRelease = await signedLease(ID, 5, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'stale',
+    });
+    expect(taskFromMessages(ID, [...prefix, reissue, lateOldRelease])).toBeNull();
+  });
+
+  test('R4 P1-B③: 重新降级覆盖时亦清残渣 → 其后 gen2\' + 新 release 可读', async () => {
+    // 推演：re-degrade 与 accept 同清；否则旧 release 残渣在 accept 前仍占 appliedReleases。
+    const STILL_AT = new Date(START + 90_000).toISOString();
+    const STILL_UNTIL = new Date(START + 390_000).toISOString();
+    const STILL_VERIFIER = 's'.repeat(43);
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const oldRelease = await signedLease(ID, 4, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 70_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'old-instance',
+    });
+    const redegrade = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: STILL_AT, generation: 2,
+      claimedUntil: STILL_UNTIL, tokenVerifier: STILL_VERIFIER,
+    });
+    const reissue = await signedLease(ID, 6, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const newRelease = await signedLease(ID, 7, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+      reason: 'new-instance',
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, oldRelease, redegrade, reissue, newRelease]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.releasedLease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: REISSUE_VERIFIER,
+    });
+  });
+
+  test('R4 P1-A① E2E: 连续降级 gen2+gen3 → highWater=3 → claimTask 分配 gen4', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const deg3 = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: GEN3_AT, generation: 3,
+      claimedUntil: GEN3_UNTIL, tokenVerifier: GEN3_VERIFIER,
+    });
+    const durable = taskFromMessages(ID, [...prefix, deg3])!;
+    expect(durable.leaseGenerationHighWater).toBe(3);
+    expect(durable.lease?.leaseGeneration).toBe(1);
+
+    const sent: Array<{ headers?: Record<string, string>; from: string; to: string[]; subject: string; text: string }> = [];
+    const now = Date.parse(CLAIM1_UNTIL);
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input as typeof sent[number]);
+      return { messageId: `<r4-e2e-${sent.length}>` };
+    });
+    clearQueuedEventsForTests();
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(grant.leaseGeneration).toBe(4);
+    const claimSend = [...sent].reverse().find(
+      (row) => row.headers?.['X-OA-Task-Lease-Event'] === 'claim',
+    );
+    expect(claimSend).toBeDefined();
+    const issued = await parseTaskMessageForTests({
+      uid: 5,
+      source: source(claimSend!.from, claimSend!.to[0]!, claimSend!.subject, claimSend!.headers ?? {}),
+      envelope: {
+        from: [{ address: claimSend!.from }],
+        to: [{ address: claimSend!.to[0]! }],
+        subject: claimSend!.subject,
+      },
+      internalDate: new Date(now),
+    } as unknown as FetchMessageObject, ID);
+    expect(issued?.lease && 'generation' in issued.lease ? issued.lease.generation : 0).toBe(4);
+    const rebuilt = taskFromMessages(ID, [...prefix, deg3, issued!]);
+    expect(rebuilt?.lease?.leaseGeneration).toBe(4);
+  });
+
+  test('R4 P1-A②: 多降级后更早代 gen2\' 重评估 → 保 null（不放宽门；高水位写路径已覆盖）', async () => {
+    // 放宽为「降级集合内且 ≤ previousGeneration」会使 prevGen 回退并与更高降级代残渣交错，风险实质 → 保 null。
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const deg3 = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: GEN3_AT, generation: 3,
+      claimedUntil: GEN3_UNTIL, tokenVerifier: GEN3_VERIFIER,
+    });
+    const earlyReissue = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    expect(taskFromMessages(ID, [...prefix, deg3, earlyReissue])).toBeNull();
+  });
+});
+
+describe('#305 R4 P1-1 overlay/journal 决退降级 claim', () => {
+  test('R4 P1-1① RED→绿: durable 降级后 queued 冲突 claim 退休且权威=前窗', async () => {
+    // 亲核：eventIsIndexed 只看 authority/released/expired/lost → 降级 gen2 永不退休 → overlay 复现为活跃权威。
+    const verifier = await liveVerifier();
+    const { claim2, prefix } = await conflictPrefix(verifier);
+    const durable = taskFromMessages(ID, prefix)!;
+    expect(durable.lease?.leaseGeneration).toBe(1);
+
+    clearQueuedEventsForTests();
+    const lease = claim2.lease!;
+    expect(lease.event).toBe('claim');
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(CONFLICT_AT),
+      generation: 2,
+      at: CONFLICT_AT,
+      claimedUntil: CONFLICT_UNTIL,
+      tokenVerifier: CONFLICT_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+      subject: `Lease ${ID}`,
+    });
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease?.leaseGeneration).toBe(1);
+    expect(merged?.lease?.claimedUntil).toBe(CLAIM1_UNTIL);
+    expect(merged?.lease?.tokenVerifier).toBe(verifier);
+    // 私有证据不得进公开投影
+    expect(toTaskView(merged!)).not.toHaveProperty('degradedLeaseClaims');
+    expect(JSON.stringify(toTaskView(merged!))).not.toContain(CONFLICT_VERIFIER);
+    // 该行已退休：再读不得重放
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+    const again = await getTask(ID);
+    expect(again?.lease?.leaseGeneration).toBe(1);
+  });
+
+  test('R4 P1-1②: 非降级 claim overlay 行为逐字不变（权威匹配仍应用/退休）', async () => {
+    const verifier = await liveVerifier();
+    const claim1 = await signedLease(ID, 2, {
+      version: 1, event: 'claim', actor: B,
+      at: CLAIM1_AT, generation: 1,
+      claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
+    });
+    // durable 尚无 claim：queued gen1 应被 overlay 应用为权威
+    const base = taskFromMessages(ID, [submittedRaw()])!;
+    expect(base.lease).toBeUndefined();
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: START,
+      generation: 1,
+      at: CLAIM1_AT,
+      claimedUntil: CLAIM1_UNTIL,
+      tokenVerifier: verifier,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => base);
+    setTaskNowForTests(() => START + 10_000);
+    const withOverlay = await getTask(ID);
+    expect(withOverlay?.lease).toMatchObject({
+      leaseGeneration: 1,
+      claimedUntil: CLAIM1_UNTIL,
+      tokenVerifier: verifier,
+    });
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+
+    // durable 已索引同身份 claim → overlay 退休
+    const indexed = taskFromMessages(ID, [submittedRaw(), claim1])!;
+    setTaskGetForTests(async () => indexed);
+    const afterIndex = await getTask(ID);
+    expect(afterIndex?.lease?.leaseGeneration).toBe(1);
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+  });
+
+  test('R4 P1-1②b: high-water  alone 不得误退身份不符的 queued claim', async () => {
+    // 防误退：仅有高水位=2、降级证据是 CONFLICT，queued 却是另一 verifier → 不得靠代际退休。
+    const OTHER = 'q'.repeat(43);
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const durable = taskFromMessages(ID, prefix)!;
+    expect(durable.leaseGenerationHighWater).toBe(2);
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(CONFLICT_AT),
+      generation: 2,
+      at: CONFLICT_AT,
+      claimedUntil: CONFLICT_UNTIL,
+      tokenVerifier: OTHER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 90_000);
+    await getTask(ID);
+    // 身份不符 → 仍滞后（会被 apply 为活跃——这是未索引异容行的既有行为；关键是不得被 high-water 静默退休）
+    expect(queuedLeaseOverlayCountForTests(ID)).toBe(1);
+  });
+
+  test('R4 P1-1③: journal-on 水合——降级证据身份匹配则决退 accepted claim 行', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const {
+      bootstrapTaskLeaseJournal,
+      journalRecordsFor,
+      resetJournalMemoryForTests,
+      setJournalDataDirForTests,
+      upsertJournalRecord,
+    } = await import('../src/lib/task-lease-journal.ts');
+    const { withTaskLeasePendingJournalForTests } = await import('./support/task-lease-seams.ts');
+
+    await withTaskLeasePendingJournalForTests(true, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'oae-305-j-'));
+      setJournalDataDirForTests(dir);
+      resetJournalMemoryForTests();
+      bootstrapTaskLeaseJournal();
+
+      const verifier = await liveVerifier();
+      const { prefix } = await conflictPrefix(verifier);
+      const durable = taskFromMessages(ID, prefix)!;
+      expect(durable.lease?.leaseGeneration).toBe(1);
+
+      clearQueuedEventsForTests();
+      await upsertJournalRecord({
+        taskId: ID,
+        kind: 'claim',
+        generation: 2,
+        actor: B,
+        at: CONFLICT_AT,
+        fate: 'accepted',
+        claimedUntil: CONFLICT_UNTIL,
+        tokenVerifier: CONFLICT_VERIFIER,
+      });
+      expect(journalRecordsFor(ID).find((r) => r.kind === 'claim' && r.generation === 2)?.fate)
+        .toBe('accepted');
+
+      setTaskGetForTests(async () => durable);
+      setTaskNowForTests(() => START + 90_000);
+      const merged = await getTask(ID);
+      expect(merged?.lease?.leaseGeneration).toBe(1);
+      expect(merged?.lease?.tokenVerifier).toBe(verifier);
+      // 水合路径经 eventIsIndexed → fate=indexed；不得再入 queued 重放
+      expect(queuedLeaseOverlayCountForTests(ID)).toBe(0);
+      expect(journalRecordsFor(ID).find((r) => r.kind === 'claim' && r.generation === 2)?.fate)
+        .toBe('indexed');
+    });
   });
 });
