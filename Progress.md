@@ -807,3 +807,19 @@ N/A。
 - HEAD：`8ee8625175ffc444a7bb59aa411b8be0b3cd0031`
 - 聚焦 14p；filtered 2p；api 1996p；mcp 48p
 - Subagent：`f0335d8c-4a7c-4ba8-a987-421cd9ed89e1` → PASS
+
+## 2026-09-21 · w289x3 R7（afterAll webhook 清理作用域）
+
+### 我们实现了哪些功能？
+1. afterAll 方案 b：文件清理钉 `TEST_DATA_DIR` 后再 `resetWebhooksStoreForTests` + `deleteIdentity`。
+2. filtered 四文件探针（identities + webhooks 三件套）前后一致。
+
+### 我们遇到了哪些错误？
+1. 全量 api #206 偶发 25s flake（隔离复跑绿）。
+
+### 我们是如何解决这些错误的？
+1. flake 隔离照旧。
+
+### 基线与证据
+- HEAD：`7d3b7b3cd049d4f91887d9c408578d339ce8f716`
+- Subagent：`b36d38dd-2fe4-479b-a968-6744e599fda4` → PASS
