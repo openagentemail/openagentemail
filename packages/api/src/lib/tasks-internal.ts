@@ -702,6 +702,62 @@ function isSameAuthenticatedLeaseEvent(a: LeaseEvent, b: LeaseEvent): boolean {
   return canonicalLeaseEvent(a) === canonicalLeaseEvent(b);
 }
 
+/** #285 测试缝：renew 去重键（=canonicalLeaseEvent，与 isSameAuthenticatedLeaseEvent 同源）。 */
+export function leaseRenewDedupKeyForTests(lease: LeaseEvent): string {
+  return canonicalLeaseEvent(lease);
+}
+
+/** #285 测试缝：expiry 回执去重键（代内=claimedUntil，与 isSameLeaseExpiryIdentity 同源）。 */
+export function leaseReceiptDedupKeyForTests(
+  lease: { leaseGeneration?: number; generation?: number; claimedUntil: string },
+): string {
+  return lease.claimedUntil;
+}
+
+/** #285 测试缝：暴露 isSameAuthenticatedLeaseEvent 供键 vs .some() 等价抽验。 */
+export function isSameAuthenticatedLeaseEventForTests(a: LeaseEvent, b: LeaseEvent): boolean {
+  return isSameAuthenticatedLeaseEvent(a, b);
+}
+
+/** #285 测试缝：暴露 isSameLeaseExpiryIdentity 供键 vs .some() 等价抽验。 */
+export function isSameLeaseExpiryIdentityForTests(
+  a: { leaseGeneration?: number; generation?: number; claimedUntil: string },
+  b: { leaseGeneration?: number; generation?: number; claimedUntil: string },
+): boolean {
+  return isSameLeaseExpiryIdentity(a, b);
+}
+
+/**
+ * #285 测试缝：模拟代内「键控 Set + 原地 push」并断言索引与主数组一致。
+ * 生产路径在 taskFromMessages 局部同形实现；无外部数组持有者，无中途裁剪。
+ */
+export function leaseReplayIndexPushConsistentForTests<T>(input: {
+  items: Map<number, T[]>;
+  keys: Map<number, Set<string>>;
+  generation: number;
+  key: string;
+  item: T;
+}): boolean {
+  const { items, keys, generation, key, item } = input;
+  if (keys.get(generation)?.has(key)) return false;
+  let arr = items.get(generation);
+  if (!arr) {
+    arr = [];
+    items.set(generation, arr);
+  }
+  let seen = keys.get(generation);
+  if (!seen) {
+    seen = new Set();
+    keys.set(generation, seen);
+  }
+  arr.push(item);
+  seen.add(key);
+  // 索引与主结构一致性：同代 size 相等且键集合可自数组重建。
+  if (seen.size !== arr.length) return false;
+  if (items.size !== keys.size) return false;
+  return true;
+}
+
 function leaseEventStamp(
   id: string,
   state: TaskState,
@@ -1313,8 +1369,12 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   let firstClaimedAt: string | undefined;
   let lostLease: LostLeaseReceipt | undefined;
   const appliedExpiryReceipts = new Map<number, ExpiredLeaseReceipt[]>();
+  // #285：同代回执去重索引（键=claimedUntil；与主 Map 同生共死，无中途裁剪）。
+  const seenReceiptKeys = new Map<number, Set<string>>();
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
+  // #285：同代 renew 去重索引（键=canonicalLeaseEvent；与主 Map 同生共死）。
+  const seenRenewCanonical = new Map<number, Set<string>>();
   const appliedReleases = new Map<number, ReleaseLeaseEvent>();
   const appliedTombstones = new Map<number, ClaimLostLeaseEvent>();
   // 权威窗身份 = (gen, 续约后最终 claimedUntil)，供迟到回执 M3-3 匹配与
@@ -1329,6 +1389,24 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     const windows = acceptedDeadlineWindows.get(generation) ?? new Set<string>();
     windows.add(claimedUntil);
     acceptedDeadlineWindows.set(generation, windows);
+  };
+  /** #285：确保 map 持有数组后原地 push（插入顺序=可观察面）。 */
+  const pushOwned = <T>(map: Map<number, T[]>, generation: number, item: T): void => {
+    let arr = map.get(generation);
+    if (!arr) {
+      arr = [];
+      map.set(generation, arr);
+    }
+    arr.push(item);
+  };
+  /** #285：代内键控 Set 入账（与 pushOwned 成对调用）。 */
+  const rememberKey = (index: Map<number, Set<string>>, generation: number, key: string): void => {
+    let seen = index.get(generation);
+    if (!seen) {
+      seen = new Set();
+      index.set(generation, seen);
+    }
+    seen.add(key);
   };
   // 传输层精确重复（含 expiry）不进入公开消息序列，也不推进权威。
   const duplicateLeaseMessages = new Set<RawTaskMessage>();
@@ -1348,10 +1426,11 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || !Number.isFinite(Date.parse(lease.claimedUntil))
         || Date.parse(lease.expiredAt) < Date.parse(lease.claimedUntil)
       ) return null;
-      const priorReceipts = appliedExpiryReceipts.get(lease.generation) ?? [];
+      // #285：O(1) 键控去重（键=claimedUntil；代内 gen 恒定，与 isSameLeaseExpiryIdentity 同源）。
       // 同身份精确重复（含传输层重投）幂等 no-op；不同身份不再立即冲突，
       // 落到下方窗匹配裁决（#156 配对规则）。
-      if (priorReceipts.some((prior) => isSameLeaseExpiryIdentity(prior, lease))) {
+      const receiptKey = lease.claimedUntil;
+      if (seenReceiptKeys.get(lease.generation)?.has(receiptKey)) {
         duplicateLeaseMessages.add(message);
         continue;
       }
@@ -1362,7 +1441,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
           expiredAt: lease.expiredAt,
           ...(firstClaimedAt ? { firstClaimedAt } : {}),
         };
-        appliedExpiryReceipts.set(lease.generation, [...priorReceipts, receipt]);
+        pushOwned(appliedExpiryReceipts, lease.generation, receipt);
+        rememberKey(seenReceiptKeys, lease.generation, receiptKey);
         return receipt;
       };
       const matchesCurrentAuthority = !!leaseAuthority?.claimedUntil
@@ -1492,8 +1572,9 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       continue;
     }
     if (lease.event === 'renew') {
-      const priorRenews = appliedRenews.get(lease.generation) ?? [];
-      if (priorRenews.some((prior) => isSameAuthenticatedLeaseEvent(prior, lease))) {
+      // #285：O(1) 键控去重（键=canonicalLeaseEvent；与 isSameAuthenticatedLeaseEvent 同源）。
+      const renewKey = canonicalLeaseEvent(lease);
+      if (seenRenewCanonical.get(lease.generation)?.has(renewKey)) {
         duplicateLeaseMessages.add(message);
         continue;
       }
@@ -1513,7 +1594,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
           || claimedUntil <= Date.parse(leaseAuthority.claimedUntil)
         ) return null;
         leaseAuthority = { ...leaseAuthority, claimedUntil: lease.claimedUntil };
-        appliedRenews.set(lease.generation, [...priorRenews, lease]);
+        pushOwned(appliedRenews, lease.generation, lease);
+        rememberKey(seenRenewCanonical, lease.generation, renewKey);
         recordAcceptedWindow(lease.generation, lease.claimedUntil);
         continue;
       }
@@ -1535,7 +1617,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
         || claimedUntil - generationClaimedAt > TASK_LEASE_GENERATION_MAX_MS
         || claimedUntil - taskClaimedAt > TASK_LEASE_TASK_MAX_MS
       ) return null;
-      appliedRenews.set(lease.generation, [...priorRenews, lease]);
+      pushOwned(appliedRenews, lease.generation, lease);
+      rememberKey(seenRenewCanonical, lease.generation, renewKey);
       recordAcceptedWindow(lease.generation, lease.claimedUntil);
       duplicateLeaseMessages.add(message);
       continue;
