@@ -790,3 +790,20 @@ N/A。
 - HEAD：`7e8acb27b8509bd8fc8405a7ef1b771f687d1646`
 - 聚焦 14p；api 1996p/9s/0f；mcp 48p
 - Subagent：`c8b3a09d-a98e-4406-98d7-592c10aa4d8a` → PASS
+
+## 2026-09-21 · w289x3 R6（#302 dataDir 隔离）
+
+### 我们实现了哪些功能？
+1. #302 改 `config.dataDir` 临时目录；afterEach 恢复+删除；afterAll alice 守卫。
+2. filtered `-t '#302'` 实证真实 `./data/identities.json` 前后不变（exists=false）。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- HEAD：`8ee8625175ffc444a7bb59aa411b8be0b3cd0031`
+- 聚焦 14p；filtered 2p；api 1996p；mcp 48p
+- Subagent：`f0335d8c-4a7c-4ba8-a987-421cd9ed89e1` → PASS
