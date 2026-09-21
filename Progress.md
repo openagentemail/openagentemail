@@ -531,3 +531,18 @@
 - 聚焦 14 pass；全量 1947p/9s/1f(#272 flake)
 - Subagent R2：`6673b8c2-0697-4c6b-9e44-a4baad7f4f2f` → `~/.cursor/projects/home-ops-orca-workspaces-openagentemail-w305/agent-transcripts/6673b8c2-0697-4c6b-9e44-a4baad7f4f2f/`
 - 完工报：`/home/ops/materials/305/completion.md`（含 R2 节）
+
+## 2026-09-21 · w305 #305 R3 降级代复用编号
+
+### 我们实现了哪些功能？
+1. `degradedClaimGenerations` 区分降级证据 vs 已接受证据。
+2. dup gate：已接受异容仍整卡 null；降级异容下落重评估。
+3. generation 门：降级代 `generation===previousGeneration` 可重评；跨代跳号仍 fail-closed。
+4. 重评估：`claimedAt>=权威窗` 接受并清降级标记；`<窗` 再降级、权威不推进。
+5. 边界测试：接受 gen2' 后迟到旧 verifier renew → 保守 null（显式声明）。
+
+### 我们遇到了哪些错误？
+1. R2 证据记账后写路径过期复用 gen2 → dup gate 整卡 null（R1 无此回归）。
+
+### 我们是如何解决这些错误的？
+1. 按上列语义修 + RED→绿；聚焦 18/18；全量 1952p/9s/0f。

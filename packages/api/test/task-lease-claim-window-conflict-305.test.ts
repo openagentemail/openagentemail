@@ -430,3 +430,109 @@ describe('#305 R2 audit 去重表击穿有界', () => {
     }).length).toBe(1);
   });
 });
+
+describe('#305 R3 降级代写路径复用编号', () => {
+  const REISSUE_VERIFIER = 'r'.repeat(43);
+  // 权威窗过后重发（写路径 durableGen=1 → gen2'）
+  const REISSUE_AT = new Date(START + 300_000).toISOString(); // == CLAIM1_UNTIL，at >= 窗
+  const REISSUE_UNTIL = new Date(START + 600_000).toISOString();
+  // 仍落在权威窗内的同代异容重发
+  const STILL_CONFLICT_AT = new Date(START + 90_000).toISOString();
+  const STILL_CONFLICT_UNTIL = new Date(START + 390_000).toISOString();
+  const STILL_CONFLICT_VERIFIER = 's'.repeat(43);
+
+  test('R3①: 降级 gen2 → gen2\'(at≥窗、异容) → 可读且权威推进到 gen2\'', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const reissue = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, reissue]);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt?.lease).toMatchObject({
+      leaseGeneration: 2,
+      claimedUntil: REISSUE_UNTIL,
+      tokenVerifier: REISSUE_VERIFIER,
+      firstClaimedAt: CLAIM1_AT,
+    });
+    // 降级 claim2 仍隐藏；reissue 作为已接受 claim 可见 → handoff + claim1 + gen2'
+    expect(toTaskView(rebuilt!).messages).toHaveLength(3);
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(CONFLICT_AT);
+  });
+
+  test('R3②: 降级 gen2 → gen2\'\'(at<窗、异容) → 仍降级、权威不推进', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const again = await signedLease(ID, 4, {
+      version: 1, event: 'claim', actor: B,
+      at: STILL_CONFLICT_AT, generation: 2,
+      claimedUntil: STILL_CONFLICT_UNTIL, tokenVerifier: STILL_CONFLICT_VERIFIER,
+    });
+    const rebuilt = taskFromMessages(ID, [...prefix, again]);
+    expectAuthorityUnmoved(rebuilt);
+    expect(rebuilt?.lease?.tokenVerifier).toBe(verifier);
+    expect(toTaskView(rebuilt!).messages).toHaveLength(2);
+    expect(JSON.stringify(toTaskView(rebuilt!))).not.toContain(STILL_CONFLICT_AT);
+  });
+
+  test('R3③: 原 verifier 的 renew/release 在重发前到达 → R2 出账保持', async () => {
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renew = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 90_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 420_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const withRenew = taskFromMessages(ID, [...prefix, renew]);
+    expectAuthorityUnmoved(withRenew);
+    expect(toTaskView(withRenew!).messages).toHaveLength(2);
+
+    const release = await signedLease(ID, 4, {
+      version: 1, event: 'release', actor: B,
+      at: new Date(START + 90_000).toISOString(),
+      generation: 2,
+      tokenVerifier: CONFLICT_VERIFIER,
+      reason: 'done',
+    });
+    const withRelease = taskFromMessages(ID, [...prefix, release]);
+    expectAuthorityUnmoved(withRelease);
+    expect(toTaskView(withRelease!).messages).toHaveLength(2);
+  });
+
+  test('R3 边界: 降级 gen2 + 原 verifier renew 后接受 gen2\' → 原 renew 与新权威共存时保守 null', async () => {
+    // 声明边界：证据被 gen2' 覆盖后，旧 verifier 的 historical renew 与新权威同代冲突 → fail-closed
+    const verifier = await liveVerifier();
+    const { prefix } = await conflictPrefix(verifier);
+    const renewOld = await signedLease(ID, 4, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 90_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 420_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER,
+    });
+    const reissue = await signedLease(ID, 5, {
+      version: 1, event: 'claim', actor: B,
+      at: REISSUE_AT, generation: 2,
+      claimedUntil: REISSUE_UNTIL, tokenVerifier: REISSUE_VERIFIER,
+    });
+    // renew 在前、reissue 在后：renew 先 historical 出账；reissue 覆盖证据后权威=gen2'。
+    // 若 renew 仍留在 appliedRenews 且后续路径与新权威冲突——本实现：reissue 接受后旧 renew 已隐藏，线程可读。
+    // 反向边界（reissue 后再来旧 renew）钉死为 null：
+    const afterAccept = taskFromMessages(ID, [...prefix, reissue]);
+    expect(afterAccept?.lease?.leaseGeneration).toBe(2);
+    const lateOldRenew = await signedLease(ID, 6, {
+      version: 1, event: 'renew', actor: B,
+      at: new Date(START + 310_000).toISOString(),
+      generation: 2,
+      claimedUntil: new Date(START + 650_000).toISOString(),
+      tokenVerifier: CONFLICT_VERIFIER, // 旧 verifier，与新权威不符
+    });
+    expect(taskFromMessages(ID, [...prefix, reissue, lateOldRenew])).toBeNull();
+    // renew-before-reissue 线程仍可读（旧 renew 已隐藏）
+    expect(taskFromMessages(ID, [...prefix, renewOld, reissue])?.lease?.leaseGeneration).toBe(2);
+  });
+});

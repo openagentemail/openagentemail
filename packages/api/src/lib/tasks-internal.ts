@@ -1377,6 +1377,8 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
   // #285：同代回执去重索引（键=claimedUntil；与主 Map 同生共死，无中途裁剪）。
   const seenReceiptKeys = new Map<number, Set<string>>();
   const appliedClaims = new Map<number, ClaimLeaseEvent>();
+  /** #305 R3：仅降级出账的 generation（证据≠已接受权威）；与 appliedClaims 同生。 */
+  const degradedClaimGenerations = new Set<number>();
   const appliedRenews = new Map<number, RenewLeaseEvent[]>();
   // #285：同代 renew 去重索引（键=canonicalLeaseEvent；与主 Map 同生共死）。
   const seenRenewCanonical = new Map<number, Set<string>>();
@@ -1524,15 +1526,17 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
     ) return null;
     if (lease.event === 'claim') {
       const priorClaim = appliedClaims.get(lease.generation);
+      const priorIsDegraded = degradedClaimGenerations.has(lease.generation);
       if (priorClaim) {
-        // 同 generation 逐字节相同 → 幂等 no-op；任何字段差异仍 fail-closed。
+        // 同 generation 逐字节相同 → 幂等 no-op；已接受证据字段差异仍 fail-closed。
         if (isSameAuthenticatedLeaseEvent(priorClaim, lease)) {
           duplicateLeaseMessages.add(message);
           continue;
         }
-        return null;
+        // #305 R3：降级证据允许同代异容重评估；已接受证据保持整卡 null。
+        if (!priorIsDegraded) return null;
       }
-      if (appliedTombstones.has(lease.generation)) {
+      if (!priorClaim && appliedTombstones.has(lease.generation)) {
         // 迟到真 claim：只和解历史窗，不复活权威、不覆盖后代。
         const claimedAt = Date.parse(lease.at);
         const claimedUntil = Date.parse(lease.claimedUntil);
@@ -1552,10 +1556,14 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       const claimedUntil = Date.parse(lease.claimedUntil);
       const taskClaimedAt = firstClaimedAt ?? lease.at;
       const taskClaimedAtMs = Date.parse(taskClaimedAt);
-      // 结构类检查仍 fail-closed（state / generation 序 / 时间有限性 / 窗方向）。
+      // 结构类检查仍 fail-closed。降级代重评估：generation === previousGeneration 且标记在案。
+      const isDegradedReeval = !!priorClaim && priorIsDegraded;
+      const generationOk = isDegradedReeval
+        ? lease.generation === previousGeneration
+        : lease.generation === previousGeneration + 1;
       if (
         message.state !== 'working'
-        || lease.generation !== previousGeneration + 1
+        || !generationOk
         || !Number.isFinite(claimedAt)
         || !Number.isFinite(claimedUntil)
         || !Number.isFinite(taskClaimedAtMs)
@@ -1564,16 +1572,15 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       // #305：已鉴权但与残留权威时间窗冲突 → 按无效事件出账（不推进权威、不整卡丢弃）。
       if (leaseAuthority?.claimedUntil && claimedAt < Date.parse(leaseAuthority.claimedUntil)) {
         noteClaimWindowConflictDegraded(id, lease.generation, lease.claimedUntil);
-        // 证据记账：同代后续 renew/release/expired 走 historical / accepted 窗路径，而非整卡 null。
-        // 不写 leaseAuthority / firstClaimedAt（权威仍停前窗）。
+        // 证据记账（降级标记）：同代后续 renew/release/expired 走 historical；可被同代重评估覆盖。
         appliedClaims.set(lease.generation, lease);
         recordAcceptedWindow(lease.generation, lease.claimedUntil);
-        // 代际游标推进（同 tombstone）：否则下一代 claim 仍因 generation 序整卡 null。
-        // 「不推进权威」指 leaseAuthority/firstClaimedAt，不含本游标。
+        degradedClaimGenerations.add(lease.generation);
         previousGeneration = lease.generation;
         duplicateLeaseMessages.add(message);
         continue;
       }
+      // 接受（含降级代重评估通过）：推进权威，清除降级标记。
       firstClaimedAt = taskClaimedAt;
       previousGeneration = lease.generation;
       releasedLease = undefined;
@@ -1587,6 +1594,7 @@ export function taskFromMessages(id: string, raw: RawTaskMessage[]): Task | null
       };
       appliedClaims.set(lease.generation, lease);
       recordAcceptedWindow(lease.generation, lease.claimedUntil);
+      degradedClaimGenerations.delete(lease.generation);
       continue;
     }
     if (lease.event === 'renew') {
