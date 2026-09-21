@@ -2,7 +2,7 @@
 
 The pending-lease journal is opt-in (`TASK_LEASES_PENDING_JOURNAL`, default `false`, requires `TASK_LEASES_ENABLED`). The API **never** creates it on boot. Enabling the flag against a missing journal fails closed (`lease_journal_not_bootstrapped`).
 
-Wire-side release `reason` bound (8_000 chars → ≈10.9KiB `X-OA-Task-Lease-Payload`) and MTA header risk notes: [task-lease-reason-transport.md](task-lease-reason-transport.md).
+Wire-side release `reason` bound (8_000 chars → ASCII ≈10.9KiB `X-OA-Task-Lease-Payload`；非 ASCII 最坏更高：BMP ≈31.3KiB / JSON 转义 ≈62.6KiB 级，见专页) and MTA header risk notes: [task-lease-reason-transport.md](task-lease-reason-transport.md).
 
 ## Genuine first provision only
 

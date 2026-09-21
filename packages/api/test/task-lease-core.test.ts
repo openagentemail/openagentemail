@@ -1763,6 +1763,79 @@ describe('#82 8k release-reason fold corpus', () => {
       },
     }));
   });
+
+  // R3：JSON 转义最坏真实测（与 CJK 同路径：sent headers → payloadValue.length）
+  test('8k NUL reason dual-gate + production payload length (JSON-escape worst-case budget)', async () => {
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = '\u0000'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    expect(reason.length).toBe(TASK_LEASE_REASON_MAX_CHARS);
+    // reason 单字段 stringify 长度（非完整事件体）——文档分层引用
+    const reasonFieldJsonBytes = Buffer.byteLength(JSON.stringify(reason), 'utf8');
+    expect(reasonFieldJsonBytes).toBe(48_002);
+
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-nul-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    // 双闸放行（zod/core 只查 length）
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    // 完整事件 canonical JSON → base64url 实测（权威数字进 docs/task-lease-reason-transport.md）
+    expect(payloadValue.length).toBe(64_242);
+
+    const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+    const serialized = await transport.sendMail({
+      from: releaseInput!.from,
+      to: releaseInput!.to,
+      subject: releaseInput!.subject,
+      text: releaseInput!.text,
+      headers: releaseInput!.headers,
+    });
+    if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 NUL nodemailer must buffer RFC 5322 source');
+    const fetchMsg = {
+      uid: 33,
+      source: serialized.message,
+      envelope: {
+        from: [{ address: releaseInput!.from }],
+        to: [{ address: releaseInput!.to[0] }],
+        subject: releaseInput!.subject,
+      },
+      internalDate: new Date(START),
+    } as unknown as FetchMessageObject;
+    const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+    expect({
+      event: parsed?.lease?.event ?? null,
+      reasonMatch: parsed?.lease?.event === 'release' && parsed.lease.reason === reason,
+      reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason.length : null,
+    }).toEqual({
+      event: 'release',
+      reasonMatch: true,
+      reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+    });
+
+    // 完整事件体字节 ≈ base64url 解码长度
+    const eventJsonBytes = Buffer.from(payloadValue, 'base64url').length;
+    console.info(JSON.stringify({
+      r82NulEscapeBudgetEvidence: {
+        reasonUnits: reason.length,
+        reasonFieldJsonBytes,
+        eventJsonBytes,
+        payloadChars: payloadValue.length,
+        approxKiB: Number((payloadValue.length / 1024).toFixed(2)),
+      },
+    }));
+  });
 });
 
 if (process.env.TASK_LEASES_R6_RED === '1') {

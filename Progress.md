@@ -362,3 +362,20 @@
 - HEAD：`072e2c116008143dd58766d15827372932bb756d`
 - subagent：`d3883c4a-c6f9-46b7-b36f-20a42424ff59` PASS
 - api 1918(+#206 flake复跑绿)；wake 181+typecheck
+
+## 2026-09-21 · wmisc R3（PR #300 P2×2 · JSON 转义真实测）
+
+### 我们实现了哪些功能？
+1. **P2-2**：#82 语料新增 NUL×8000 生产路径用例；权威数字 reasonFieldJsonBytes=48002 / eventJsonBytes=48181 / payloadChars=**64242**（≈62.74KiB）；文档三层账 JSON 转义列改钉实测，删除旧「48002/64112」口径。
+2. **P2-1**：`operator-guide.md` + `task-lease-journal.md` 挂链摘要同步 ASCII/BMP/JSON 转义三层最坏口径。
+
+### 我们遇到了哪些错误？
+1. R2 沿用的「FC 实测 48002/64112」把单字段 stringify 与猜测 wrapper 演算混成同一权威——Codex/FC 确认不自洽。
+
+### 我们是如何解决这些错误的？
+1. 与 CJK 同路径从 `X-OA-Task-Lease-Payload` 读真实 `payloadValue.length=64242`；断言钉死；文档分层写清「单字段 vs 完整事件体+payload」。
+
+### 基线与证据
+- 分支：`wmisc-229-82-199` · PR #300
+- 材料：`/home/ops/materials/229-82-199/completion.md` R3 节
+- #82 聚焦：**4 pass**
