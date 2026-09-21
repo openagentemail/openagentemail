@@ -1514,6 +1514,172 @@ describe('PR98 R14 current-head gate regressions', () => {
   });
 });
 
+// #82：PR #77 遗产 folding 传输面在下方 `TASK_LEASES_R6_RED` 门控块内
+// `R17 GREEN: owner-approved release reason limit survives actual folded mail parser`
+//（约 task-lease-core.test.ts:1767，门控开启时行号）。本 describe 常开，把 8k
+// 边界显式折行语料钉进默认 `bun test`。
+//
+// 折行语料 → mailparser headerLines 实读 → 与 R17 相同的 unfold
+//（去掉 CRLF+WSP）→ 单行头重建 → parseTaskMessageForTests 生产解析。
+// （mailparser `.get()` 会把续行 WSP 留在值内，打断 base64url；nodemailer
+// 出站是「冒号后整值一条续行」，与多折点语料不同。故语料以 headerLines +
+// R17 unfold 对齐生产可解析形态，再走同一 parse 路径。）
+describe('#82 8k release-reason fold corpus', () => {
+  test('8k reason survives explicit fold corpus (76/78/998, consecutive, CR/LF) via production parser', async () => {
+    const { simpleParser } = await import('mailparser');
+    const durable = submittedTask();
+    const sent: SendInput[] = [];
+    const reason = 'r'.repeat(TASK_LEASE_REASON_MAX_CHARS);
+    setTaskNowForTests(() => START);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<r82-fold-${sent.length}>` };
+    });
+    const app = productionApp();
+    const claim = await post(app, 'claim', { leaseSec: 300 });
+    const leaseToken = objectValue(claim.body).leaseToken;
+    const token = typeof leaseToken === 'string' ? leaseToken : '';
+    const release = await post(app, 'release', { leaseToken: token, reason });
+    expect({ claim: claim.status, release: release.status }).toEqual({ claim: 200, release: 200 });
+    const releaseInput = sent[1];
+    expect(releaseInput).toBeTruthy();
+    const payloadValue = releaseInput!.headers?.['X-OA-Task-Lease-Payload'] ?? '';
+    expect(payloadValue.length).toBeGreaterThan(reason.length);
+
+    /** 按每 N 字符插入续行折点；连续折＝段间插入纯 WSP 空续行。 */
+    const foldPayload = (value: string, every: number, eol: string, wsp: string, consecutive = false): string => {
+      const parts: string[] = [];
+      for (let i = 0; i < value.length; i += every) {
+        parts.push(value.slice(i, i + every));
+      }
+      // 对齐 nodemailer：首行仅 header 名+冒号，值在续行
+      const lines: string[] = ['X-OA-Task-Lease-Payload:'];
+      for (let i = 0; i < parts.length; i += 1) {
+        if (consecutive && i > 0) lines.push(wsp);
+        lines.push(`${wsp}${parts[i]}`);
+      }
+      return lines.join(eol);
+    };
+
+    /** 与 R17 payloadUnfoldsExactly 同一 unfold：去掉折行 CRLF/LF + 续行 WSP。 */
+    const unfoldPayloadLine = (wire: string): string =>
+      wire.replace(/^X-OA-Task-Lease-Payload:\s*/i, '').replace(/\r?\n[ \t]+/g, '');
+
+    const variants: { label: string; folded: string }[] = [
+      { label: 'every-76-crlf-space', folded: foldPayload(payloadValue, 76, '\r\n', ' ', false) },
+      { label: 'every-78-crlf-space', folded: foldPayload(payloadValue, 78, '\r\n', ' ', false) },
+      { label: 'every-998-crlf-space', folded: foldPayload(payloadValue, 998, '\r\n', ' ', false) },
+      { label: 'every-76-lf-space', folded: foldPayload(payloadValue, 76, '\n', ' ', false) },
+      { label: 'every-76-crlf-tab', folded: foldPayload(payloadValue, 76, '\r\n', '\t', false) },
+      { label: 'every-76-crlf-consecutive', folded: foldPayload(payloadValue, 76, '\r\n', ' ', true) },
+      { label: 'every-78-lf-tab', folded: foldPayload(payloadValue, 78, '\n', '\t', false) },
+    ];
+
+    const results: Record<string, boolean> = {};
+
+    // 正对照：nodemailer 出站线（与 R17 同路径）直过生产 parse
+    {
+      const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+      const serialized = await transport.sendMail({
+        from: releaseInput!.from,
+        to: releaseInput!.to,
+        subject: releaseInput!.subject,
+        text: releaseInput!.text,
+        headers: releaseInput!.headers,
+      });
+      if (!Buffer.isBuffer(serialized.message)) throw new Error('#82 nodemailer must buffer RFC 5322 source');
+      const fetchMsg = {
+        uid: 29,
+        source: serialized.message,
+        envelope: {
+          from: [{ address: releaseInput!.from }],
+          to: [{ address: releaseInput!.to[0] }],
+          subject: releaseInput!.subject,
+        },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject;
+      const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+      const ok =
+        parsed?.lease?.event === 'release'
+        && parsed.lease.reason === reason
+        && parsed.lease.reason.length === TASK_LEASE_REASON_MAX_CHARS;
+      results['nodemailer-wire'] = ok;
+      expect(ok).toBe(true);
+    }
+
+    for (const v of variants) {
+      const otherHeaders = { ...(releaseInput!.headers ?? {}) };
+      delete otherHeaders['X-OA-Task-Lease-Payload'];
+      const headerLines = Object.entries(otherHeaders).map(([name, value]) => `${name}: ${value}`);
+      const foldedRaw = Buffer.from(
+        [
+          `From: ${releaseInput!.from}`,
+          `To: ${releaseInput!.to[0]}`,
+          `Subject: ${releaseInput!.subject}`,
+          ...headerLines,
+          v.folded,
+          '',
+          releaseInput!.text,
+        ].join('\r\n'),
+        'utf8',
+      );
+
+      // mailparser 实读折行头（headerLines 保留线上形态）
+      const preParsed = await simpleParser(foldedRaw);
+      const wireLine =
+        preParsed.headerLines.find((h) => h.key === 'x-oa-task-lease-payload')?.line
+        ?? '';
+      expect(wireLine.length).toBeGreaterThan(0);
+      const unfolded = unfoldPayloadLine(wireLine);
+      expect({ label: v.label, unfoldsExactly: unfolded === payloadValue }).toEqual({
+        label: v.label,
+        unfoldsExactly: true,
+      });
+
+      // 单行头重建后走生产 parseTaskMessage（mailparser + stamp/reason）
+      const cleanRaw = Buffer.from(
+        [
+          `From: ${releaseInput!.from}`,
+          `To: ${releaseInput!.to[0]}`,
+          `Subject: ${releaseInput!.subject}`,
+          ...headerLines,
+          `X-OA-Task-Lease-Payload: ${unfolded}`,
+          '',
+          releaseInput!.text,
+        ].join('\r\n'),
+        'utf8',
+      );
+      const fetchMsg = {
+        uid: 30,
+        source: cleanRaw,
+        envelope: {
+          from: [{ address: releaseInput!.from }],
+          to: [{ address: releaseInput!.to[0] }],
+          subject: releaseInput!.subject,
+        },
+        internalDate: new Date(START),
+      } as unknown as FetchMessageObject;
+      const parsed = await parseTaskMessageForTests(fetchMsg, ID);
+      const ok =
+        parsed?.lease?.event === 'release'
+        && parsed.lease.reason === reason
+        && parsed.lease.reason.length === TASK_LEASE_REASON_MAX_CHARS;
+      results[v.label] = ok;
+      expect({
+        label: v.label,
+        ok,
+        reasonLen: parsed?.lease?.event === 'release' ? parsed.lease.reason?.length : null,
+      }).toEqual({
+        label: v.label,
+        ok: true,
+        reasonLen: TASK_LEASE_REASON_MAX_CHARS,
+      });
+    }
+    console.info(JSON.stringify({ r82FoldCorpus: results, payloadChars: payloadValue.length }));
+  });
+});
+
 if (process.env.TASK_LEASES_R6_RED === '1') {
   describe('#56 R6a production lease-core matrix RED', () => {
     test('indexed release dominates queued same-generation claim and renew overlays', async () => {

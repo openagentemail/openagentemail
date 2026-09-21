@@ -233,7 +233,10 @@ boundary.
 
 [The MCP reference](../packages/mcp/README.md#task-contracts) explains claim/renew/release,
 approval bounds and the disabled defaults. Before enabling pending journal writes,
-read [task-lease-journal.md](task-lease-journal.md). Do not remove OPEN records to free
+read [task-lease-journal.md](task-lease-journal.md). For the 8_000-character release
+`reason` bound on the wire (`X-OA-Task-Lease-Payload` ≈10.9KiB base64url at max),
+Postfix `header_size_limit`, and commercial-relay header risk notes, read
+[task-lease-reason-transport.md](task-lease-reason-transport.md). Do not remove OPEN records to free
 capacity, infer rejected SMTP delivery from a terminal task, or use first provision
 as a corruption-recovery command. Preserve the documented evidence and rollback rules.
 

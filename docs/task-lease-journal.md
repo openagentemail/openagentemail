@@ -2,6 +2,8 @@
 
 The pending-lease journal is opt-in (`TASK_LEASES_PENDING_JOURNAL`, default `false`, requires `TASK_LEASES_ENABLED`). The API **never** creates it on boot. Enabling the flag against a missing journal fails closed (`lease_journal_not_bootstrapped`).
 
+Wire-side release `reason` bound (8_000 chars → ≈10.9KiB `X-OA-Task-Lease-Payload`) and MTA header risk notes: [task-lease-reason-transport.md](task-lease-reason-transport.md).
+
 ## Genuine first provision only
 
 Run this **once** on a host that has never had `DATA_DIR/task-lease-journal/`. Exclusive `mkdir` fails if the directory already exists (`lease_journal_already_initialized`).
