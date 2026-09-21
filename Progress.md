@@ -584,9 +584,10 @@
 1. 证据换代时清同代 release/renew 残渣（accept + re-degrade 同清）。
 2. 保 tip 门 + 写路径 highWater 覆盖多降级；钉测 gen2'→null。
 3. 重建填充 `degradedLeaseClaims`；`eventIsIndexed` 身份匹配退休；TaskView Omit；①合并权威=前窗+队列空②非降级回归③journal fate=indexed；②b high-water  alone 不误退。
-4. 聚焦 **28 pass**；自审 PASS-WITH-NITS（已补负例/Progress）。
+4. 聚焦 **28 pass**；全量 1961p/9s/1f(#206 flake)；自审 PASS-WITH-NITS（已补②b）。
 
 ### 基线与证据
+- HEAD：`3d61162`
 - 自审 R4：`42f6b61a-fa6d-463c-9c21-48b42e15a284`（P1-A/B）
 - 自审 R4 P1-1：`571c93b9-4815-4299-9e24-e256a3bd86f0`
 - 完工报：`/home/ops/materials/305/completion.md`（R4 节）
