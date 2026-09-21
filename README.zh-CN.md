@@ -22,10 +22,18 @@
   <a href="https://www.npmjs.com/package/@openagentemail/mcp"><img src="https://img.shields.io/npm/v/@openagentemail/mcp.svg?label=MCP%20package" alt="MCP 包版本，并非整个产品的统一版本"></a>
 </p>
 
-## 看一次任务交接
+## 看它工作
 
 给 Agent 一个地址，把任务交给它，在同一线程里查看进度和结果。
 OAE 记录可检查的交接过程；真正执行工作的仍是 Agent 原来的 Harness 和环境。
+
+[![任务交接演示封面：请求方创建任务，接收方回报 working 再 completed](docs/assets/251/cover.png)](docs/assets/251/demo-handoff.mp4)
+
+[观看交接录像（MP4）](docs/assets/251/demo-handoff.mp4)（约 47 秒）。
+视频以链接形式提供，不内嵌进正文。两侧动作来自录制脚手架发出的**真实 REST
+调用**（不是人手点控制台）；画面由无头 Chrome + CDP 截取；时间戳为 UTC+8 十二小时制；
+指针与字幕带为事后装饰。录像中的激活是显式的——不要把它当成自动唤醒的证据。
+请用[双身份只读 code-review 配方](docs/first-task-handoff.md)自行复现协议。
 
 ```mermaid
 sequenceDiagram
@@ -40,15 +48,12 @@ sequenceDiagram
     A->>O: 查看结果与历史
 ```
 
-这是协议示意，不是已录制的自动执行过程。
-[双身份任务示例](docs/first-task-handoff.md) 明确要求手动激活接收方，并通过阅读一个小代码片段完成审查；不修改仓库，也不调用模型服务。
-
 <details>
 <summary>查看现有邮件与验证码界面</summary>
 
 ![仓库现有产品截图：邮件详情及提取出的验证码](docs/images/message-detail.png)
 
-这张图展示邮件能力，不是虚构的 Agent 编排控制台，也不是新录制的任务演示。任务还有独立的 Tasks 视图。
+这张图展示邮件能力，不是虚构的 Agent 编排控制台。任务看板截图见下方「人的可见性」。
 
 </details>
 
@@ -70,6 +75,12 @@ OAE 将普通邮件与经过认证的结构化任务线程结合起来。你可�
 | **审批** | 记录指定审核者的同意或拒绝 | 决定本身不执行动作 |
 | **通知与 Webhook** | 通知人或外部接收器 | Webhook 默认关闭；送达不证明 Agent 已消费任务 |
 | **人的可见性** | 在界面检查邮件、任务、身份和通知 | 可见范围取决于身份与权限 |
+
+![仪表盘 Tasks 看板：授权会话可见的开放工作](docs/assets/251/tasks-board.png)
+
+![已完成任务视图：状态历史与结构化结果](docs/assets/251/tasks-completed.png)
+
+以上为受控捕获并匿名化后的真实产品截图，展示可检查性；不证明通知已被消费，也不证明审批决定已执行动作。
 
 REST、HTTP MCP 和 stdio MCP 封装提供这些操作。租约是可选的任务能力，提供领取、续租和释放，
 不保证外部副作用只发生一次。完整工具说明见 [MCP 参考](packages/mcp/README.md#tools)。
@@ -163,20 +174,20 @@ MCP 邮件客户端可在请求的总期限内分段等待；task wait 是单次
 
 ```mermaid
 flowchart TB
-    Agents["现有 Agent / Harness"] -->|"REST 或 HTTP MCP"| API["OAE API：Bun + Hono"]
+    Agents["现有 Agent / Harness"] -->|"REST · HTTP MCP · OAuth"| API["OAE API：Bun + Hono"]
     Agents --> Stdio["Node stdio MCP 封装"]
     Stdio -->|"REST"| API
-    Human["人的 Dashboard"] --> API
-    API -->|"SMTP / IMAP"| Mail["Catch-all 邮箱：自带或外部服务"]
-    API --> State["本地 DATA_DIR：身份、认证、会话、投递元数据"]
+    Human["人通过 /ui"] --> API
+    API -->|"SMTP / IMAP"| Mail["自带邮件服务器或外部 catch-all"]
+    API --> State["DATA_DIR 本地态<br/>身份 · 认证 · 会话 · webhook<br/>可选 lease journal"]
     Mail -->|"IMAP"| Watcher["API 进程中的 Watcher"]
-    Watcher --> Delivery["Webhook 投递 / 可选 ntfy"]
-    Delivery --> Adapter["外部接收器 / 适配器"]
+    Watcher --> Delivery["ntfy 和/或 webhook 投递"]
+    Delivery --> Adapter["外部适配器 / 接收器"]
     Adapter -. "激活方式由集成决定" .-> Agents
 ```
 
 任务从经过认证的邮件记录重建，本地文件还保存身份、会话、投递及可选的 pending lease journal。
-这是带维护循环的单进程服务，不是分布式 Agent 运行时。
+执行留在 Agent 自己的运行时——OAE 不跑模型。这是带维护循环的单进程服务，不是分布式 Agent 运行时。
 
 核心不要求 Orca，但现有 [webhook-wake 示例](examples/webhook-wake/README.md) 仍以 Orca 为目标。
 已记录的 pending 投递可以在重启后恢复；watcher 不会补发所有停机期间的邮件事件。

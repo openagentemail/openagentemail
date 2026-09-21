@@ -51,7 +51,8 @@
 - 复用现有 Logo，保留可选择的文字、简短导航和少量实用徽章。npm 徽章明确是 MCP package 版本。
 - 架构图使用 GitHub 可渲染的 Mermaid；当前组件与未来方向分开，标出本地状态和外部执行环境。
 - 只使用真实产品截图或明确标为示意的协议图。旧邮件截图说明其用途，不冒充新任务演示。
-- 新的 Tasks 截图和演示必须真实捕获并匿名化；手动激活/adapter 前提不可在剪辑中隐藏。
+- #251 已验素材落在 `docs/assets/251/`（`cover.png`、`demo-handoff.mp4`、`tasks-board.png`、`tasks-completed.png`）：原样入库、不重编码；README「See it work」用封面+相对链到 MP4（视频不进正文）；Tasks 截图挂在 Human visibility 能力组。
+- 新的 Tasks 截图和演示必须真实捕获并匿名化；手动激活/adapter 前提不可在剪辑中隐藏；合成指针/字幕须标明为事后装饰。
 - GitHub README 不承载官网脚本、外部字体或 inline CSS 动效；优先静态封面，不要求循环动画才能理解内容。
 - 新视觉素材验收覆盖浅色、深色和手机阅读；未实际完成 GitHub/UI 验收不得勾选“已验证”。
 - Logo 墙只表达有证据的接入方式，不制造厂商背书，也不把可连接等同于可自动唤醒。
