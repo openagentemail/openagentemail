@@ -206,3 +206,24 @@
 - origin/main：`18dd9421df22b445b93cb4618aa339ceae652156`
 - 分支：`w284-publisher-pin`
 - 材料：`/home/ops/materials/284/completion.md`
+
+## 2026-09-20 · w278（#278 ntfy 去根化·窗前备货）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/lib/notify.ts` `writeServerConfigBody`：生成 `listen-http: ":2587"`（>1024，随 server.yml 生成器走）。
+2. `compose.yaml` ntfy 节三项锁步：`user: "1000:1000"`；ports `127.0.0.1:${NTFY_PORT:-2586}:2587`；healthcheck wget 打 `:2587`；注释保留原意图并标 #278。
+3. `notify-route-cascade.test.ts` 新增 `7d`：断言生成的 server.yml 含 `listen-http: ":2587"`。
+
+### 我们遇到了哪些错误？
+1. 本地无 `.env` 时 `docker compose config` 因 `env_file: .env` 直接失败。
+2. 全量 api 套件预存红：`#206` 25s timeout（与本卡无关，Progress 既有记载）。
+
+### 我们是如何解决这些错误的？
+1. 冒烟用临时 env 软链为项目 `.env`，校验后立即拆除；不落盘、不改真 `.env`。
+2. 预存 flake 记入 completion；不挡合入。窗内执行（chown/up/id 验）留给 FC，本卡不动产线。
+
+### 基线与证据
+- origin/main：`fd4135935c5308e6af4b6a531f529db4b39149e0`
+- 分支：`w278-ntfy-nonroot`
+- 材料：`/home/ops/materials/278/`
+- subagent 自审：`be1c3f15-83dd-4bc6-8243-f2d8b75913f7` · verdict PASS

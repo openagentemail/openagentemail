@@ -199,6 +199,8 @@ services:
     # Pin the major release line rather than a floating latest tag.
     image: binwiederhier/ntfy:v2
     container_name: openagent-ntfy
+    # #278：非 root（与 api/ntfy-provision 同 uid）；listen-http :2587 >1024 才可不特权绑定。
+    user: "1000:1000"
     depends_on:
       ntfy-provision:
         condition: service_completed_successfully
@@ -211,10 +213,12 @@ services:
     ports:
       # Phone delivery may use a deliberate HTTPS reverse proxy. Never publish
       # this Docker port to the internet directly.
-      - "127.0.0.1:${NTFY_PORT:-2586}:80"
+      # #278：宿主机仍 2586；容器内改 :2587（与 server.yml listen-http 锁步）。
+      - "127.0.0.1:${NTFY_PORT:-2586}:2587"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/v1/health"]
+      # #278：探针打容器内 listen-http 端口（原 :80）。
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:2587/v1/health"]
       interval: 30s
       timeout: 5s
       retries: 5
