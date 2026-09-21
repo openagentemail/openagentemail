@@ -14,9 +14,8 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const { createApp } = await import('../src/app.ts');
@@ -558,13 +557,25 @@ describe('#302 approval payload MIME folding', () => {
   const TO = 'rev-302@test.example';
   const EXPIRES = '2026-09-21T00:00:00.000Z';
 
+  // R6：必须改 config.dataDir（非仅 process.env）——config 模块导入时已钉死路径
+  let prevDataDir = '';
+  let tmpDir = '';
+
   beforeEach(() => {
-    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-302-'));
+    prevDataDir = config.dataDir;
+    tmpDir = mkdtempSync(join(tmpdir(), 'oae-302-'));
+    (config as any).dataDir = tmpDir;
     for (const localpart of ['req-302', 'rev-302']) {
       if (!findIdentity(`${localpart}@test.example`)) {
         createIdentity({ localpart, domain: 'test.example', issueToken: false });
       }
     }
+  });
+
+  afterEach(() => {
+    (config as any).dataDir = prevDataDir;
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = '';
   });
 
   test('foldedRaw Approval-Payload survives production parse (strip + strict round-trip)', async () => {
@@ -629,11 +640,13 @@ afterAll(async () => {
   (config.webhooks as any).enabled = false;
   setWebhookDnsLookupForTests(undefined);
   deliveryQueue.cancelAll();
-  // deleteIdentity 必须在 dataDir 仍指向 TEST_DATA_DIR 时执行，避免误删原始 store 身份
-  try {
-    deleteIdentity('alice@test.example');
-  } catch {
-    /* ignore */
+  // R6：仅当仍指向本文件 TEST_DATA_DIR 时清 alice——filtered 跑 #302 不碰真实 store
+  if (config.dataDir === TEST_DATA_DIR) {
+    try {
+      deleteIdentity('alice@test.example');
+    } catch {
+      /* ignore */
+    }
   }
   (config as any).dataDir = originalDataDir;
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
