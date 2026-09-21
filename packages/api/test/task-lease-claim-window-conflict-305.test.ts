@@ -1486,3 +1486,122 @@ describe('#305 R7 pending 降级 follow-on 抑制投影', () => {
     });
   });
 });
+
+describe('#305 R8 矩阵已声明边界钉测（test-only）', () => {
+  const GEN2_AT = new Date(START + 60_000).toISOString();
+  const GEN2_UNTIL = new Date(START + 360_000).toISOString();
+  const GEN2_VERIFIER = 'g'.repeat(43);
+  const RELEASE_AT = new Date(START + 90_000).toISOString();
+
+  test('R8 GAP?-1a: durable gen1 + queue 异容 release(gen2) → 乐观清权威+releasedLease=gen2', async () => {
+    // 声明边界：M1 乐观模型；生产单进程全签下不可达；乱序同批最终一致见 1c。
+    const verifier = await liveVerifier();
+    const claim1 = await signedLease(ID, 2, {
+      version: 1, event: 'claim', actor: B,
+      at: CLAIM1_AT, generation: 1,
+      claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
+    });
+    const durable = taskFromMessages(ID, [submittedRaw(), claim1])!;
+    expect(durable.lease?.leaseGeneration).toBe(1);
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RELEASE_AT),
+      generation: 2,
+      event: 'release',
+      at: RELEASE_AT,
+      tokenVerifier: GEN2_VERIFIER,
+      reason: 'orphan',
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => durable);
+    setTaskNowForTests(() => START + 100_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease).toBeUndefined();
+    expect(merged?.releasedLease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: GEN2_VERIFIER,
+    });
+  });
+
+  test('R8 GAP?-1b: 索引侧 [gen1 claim, gen2 release 无 claim] → 重建 null（fail-closed）', async () => {
+    const verifier = await liveVerifier();
+    const claim1 = await signedLease(ID, 2, {
+      version: 1, event: 'claim', actor: B,
+      at: CLAIM1_AT, generation: 1,
+      claimedUntil: CLAIM1_UNTIL, tokenVerifier: verifier,
+    });
+    const orphanRelease = await signedLease(ID, 3, {
+      version: 1, event: 'release', actor: B,
+      at: RELEASE_AT, generation: 2,
+      tokenVerifier: GEN2_VERIFIER,
+      reason: 'orphan',
+    });
+    expect(taskFromMessages(ID, [submittedRaw(), claim1, orphanRelease])).toBeNull();
+  });
+
+  test('R8 GAP?-1c: 同队列 [gen2 claim, gen2 release] 逐行应用 → 视图=gen2 已释放', async () => {
+    const base = taskFromMessages(ID, [submittedRaw()])!;
+    expect(base.lease).toBeUndefined();
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(GEN2_AT),
+      generation: 2,
+      event: 'claim',
+      at: GEN2_AT,
+      claimedUntil: GEN2_UNTIL,
+      tokenVerifier: GEN2_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(RELEASE_AT),
+      generation: 2,
+      event: 'release',
+      at: RELEASE_AT,
+      tokenVerifier: GEN2_VERIFIER,
+      reason: 'done',
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => base);
+    setTaskNowForTests(() => START + 100_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease).toBeUndefined();
+    expect(merged?.releasedLease).toMatchObject({
+      leaseGeneration: 2,
+      tokenVerifier: GEN2_VERIFIER,
+    });
+  });
+
+  test('R8 GAP?-2: queue 未索引 claim(gen2) → 乐观投影权威=gen2（机制同 CORE overlay）', async () => {
+    const base = taskFromMessages(ID, [submittedRaw()])!;
+    clearQueuedEventsForTests();
+    queueLeaseOverlayForTests({
+      taskId: ID,
+      sentAt: Date.parse(GEN2_AT),
+      generation: 2,
+      event: 'claim',
+      at: GEN2_AT,
+      claimedUntil: GEN2_UNTIL,
+      tokenVerifier: GEN2_VERIFIER,
+      actor: B,
+      from: B,
+      to: A,
+    });
+    setTaskGetForTests(async () => base);
+    setTaskNowForTests(() => START + 70_000);
+    const merged = await getTask(ID);
+    expect(merged?.lease).toMatchObject({
+      leaseGeneration: 2,
+      claimedUntil: GEN2_UNTIL,
+      tokenVerifier: GEN2_VERIFIER,
+    });
+  });
+});

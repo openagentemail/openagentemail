@@ -651,3 +651,20 @@
 - HEAD：`ee49e7095754c44b0b6e2616bce99f774cc2ccb5`
 - 自审 R7：`ac7eb955-9fa2-49b4-a7a7-7f8395f69494` → PASS-WITH-NITS
 - 完工报：`/home/ops/materials/305/completion.md`（R7 节）
+
+## 2026-09-21 · w305 #305 R8（矩阵收口 · test-only）
+
+### 我们实现了哪些功能？
+1. 钉测 GAP?-1a/1b/1c、GAP?-2（乐观 overlay / 索引 fail-closed / 同队列收敛）。
+2. completion + PR「矩阵产物 · 已声明边界」节。
+3. **未改生产代码**；可选证据缺口 5 处本轮未补（缺矩阵原文，避免误判）。
+
+### 我们遇到了哪些错误？
+无（四钉先跑现状均与声明一致）。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- 自审 R8：（填）
+- 完工报：`/home/ops/materials/305/completion.md`（R8 节）
