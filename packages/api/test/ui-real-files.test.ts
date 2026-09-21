@@ -126,11 +126,12 @@ describe('UI real-file manifest (#520-A)', () => {
     // #162+#163：tasks 轮询旧∪新 sync + overview 硬停文案诚实化（纯 UI）。
     // #137 B1-B：页面 call-site 全量迁移后 UI_JS 增长；收口字面 ·/←。
     // #137 B-R4：inbox.unit.* + sentAt 分键后 UI_JS 变更。
+    // #137 B2：语言选择器 cookie 写入 + Settings 组 lang select 样式。
     expect(sha256(UI_JS)).toBe(
-      '4e1d35f556d048d01eef87e96107fa6db416fe85dc59614032d35ee89c4088a5',
+      'ddb5e0b6a4777ae9baeb953d2abdfab4574fb6da5c1cb1421b6aee9e589c63a7',
     );
     expect(sha256(UI_CSS)).toBe(
-      'bccfd50b1660b04dde56701ad2c5d1aae7d0900de4990c0d75a03318f2d06043',
+      '17972c8d27e939a4472b159f36e7b0277b64ce61bcb94efe94adf0b0ed39710b',
     );
   });
 });

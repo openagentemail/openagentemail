@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import type { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { OUTER_CSP, UI_CSS, UI_JS, UI_LOGO_SVG, renderUiHtml } from '../ui/assets.ts';
+import { getUiI18nDict } from '../ui/client/i18n-dicts.ts';
 import { i18nLocaleScript } from '../ui/client/i18n-en.ts';
 import {
   isUiI18nFileLocale,
@@ -51,8 +52,8 @@ function shell(c: Context) {
     'Permissions-Policy',
     'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
   );
-  // en 默认与历史 UI_HTML 逐字节一致；非 en 注入字典件 script。
-  return c.body(renderUiHtml(locale));
+  // en：无 dict → 与历史 UI_HTML 逐字节一致；非 en：真字典填充壳 + 注入 /ui/i18n/:locale.js。
+  return c.body(renderUiHtml(locale, getUiI18nDict(locale)));
 }
 
 function legacyOverviewRedirect(c: Context) {

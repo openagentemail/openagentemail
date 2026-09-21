@@ -380,3 +380,31 @@
 - HEAD：`501fe40603d74575be8616a8c01a243733c4dbf3`
 - 材料：`/home/ops/materials/229-82-199/completion.md` R3 节
 - #82 聚焦：**4 pass**
+
+## 2026-09-21 · w137b2（#137 B2 四语落串 + 语言选择器）
+
+### 我们实现了哪些功能？
+1. 四字典 `i18n-es.ts` / `i18n-ja.ts` / `i18n-ko.ts` / `i18n-zh-cn.ts`（508 键，与 I18N_EN 全等）；术语对齐 `docs/i18n-glossary.md`（补 es/ja/ko 列）。
+2. `i18n-preserved.ts` + 保真扫描测试：产品名标题 / CLI 指令块 / API token·MCP 标签 / 任务状态枚举字面量 —— 四字典值与 en 逐字节相同。
+3. `getUiI18nDict` + `i18nLocaleScript` 真译文；`shell()` 非 en 传 dict → lang + `/ui/i18n/:locale.js`。
+4. Settings 组语言选择器（en/es/ja/ko/zh-CN）：`document.cookie` 写 `oa_lang`（Path=/ui; Max-Age=1y; SameSite=Lax）+ 刷新；零新 API。
+5. ui-oauth 随会话 locale 归一（a 案）；废除 handoff 钉死 zh-CN。
+6. 测试 `ui-i18n-b2.test.ts`；走查单 `materials/137-b2/walkthrough-{es,ja,ko,zh}.md`。
+
+### 我们遇到了哪些错误？
+1. B1 壳模板 allowlist 把语言 option 的 `en/es/ja/ko/zh-CN` 判为未槽化英文。
+2. OAuth 既有测试钉死中文 handoff「已授权」，缺省 locale=en 后红。
+3. UI real-file 金标（UI_JS/UI_CSS sha）因选择器与样式变更需更新。
+4. worktree 缺 `node_modules` → `Cannot find module 'hono/cookie'`。
+
+### 我们是如何解决这些错误的？
+1. R4-③ allowlist 显式加入五 locale 代码（卡规定可见文本=代码本身）。
+2. handoff 断言改为 `/已授权|Authorized/`；zh-CN 路径仍由 cookie/ACL 覆盖。
+3. 更新 `ui-real-files.test.ts` 与 en UI_HTML sha 针脚并注释 #137 B2。
+4. 在 worktree `packages/api` 执行 `bun install`。
+
+### 基线与证据
+- 开工基线 origin/main：`07c75461`
+- 分支：`w137b2-console-locales`
+- 材料：`/home/ops/materials/137-b2/`
+- >600 行预授权：总裁定 #4241

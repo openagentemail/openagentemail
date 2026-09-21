@@ -13,20 +13,20 @@
 | 协议/技术词 | catch-all / OTP / URL / API 字段名 / CLI 命令 / 错误码字面（如 `invalid_cursor`） |
 | 结构性内容 | 代码**语法与标识符**（命令、字段、路径、Mermaid/PlantUML 语法行）——**块内自然语言可译**（参与者标签/消息文案/注释/示例叙述），锚实践=README.zh-CN `## 看一次任务交接` 小节内 Mermaid 时序图（自然语言全译形态；引真实小节名防漂移） |
 
-## 2. 术语表（zh-CN 锚；es/ja/ko 译名待落串时补充列）
+## 2. 术语表（zh-CN 锚；es/ja/ko 随 #137 B2 落串补齐）
 
-| EN（源） | zh-CN（锚） | 备注 |
-|---|---|---|
-| identity（通用实体） | 身份 | 用于 Create/Delete Identity、full identity permissions 等实体语义（README.zh-CN「Agent 身份」用法） |
-| identity address | 身份地址 | 地址语义专用；勿用于实体语境 |
-| task ticket | 任务工单 | |
-| push tier | 推送档位 | |
-| connected apps | 已连接应用 | |
-| claim page | 凭据领取页 | hosted-ops 钱路页 |
-| hosted instance | 托管实例 | |
-| session cookie | 会话 Cookie | Cookie 不译 |
-| Domains | 域名管理 | 控制台导航项 |
-| instance address prefix | 实例地址前缀 | billing 表单字段 |
+| EN（源） | zh-CN（锚） | es | ja | ko | 备注 |
+|---|---|---|---|---|---|
+| identity（通用实体） | 身份 | identidad | アイデンティティ | 아이덴티티 | 用于 Create/Delete Identity、full identity permissions 等实体语义（README.zh-CN「Agent 身份」用法） |
+| identity address | 身份地址 | dirección de identidad | アイデンティティアドレス | 아이덴티티 주소 | 地址语义专用；勿用于实体语境 |
+| task ticket | 任务工单 | ticket de tarea | タスクチケット | 작업 티켓 | |
+| push tier | 推送档位 | nivel de push | プッシュ階層 | 푸시 등급 | |
+| connected apps | 已连接应用 | aplicaciones conectadas | 接続済みアプリ | 연결된 앱 | |
+| claim page | 凭据领取页 | página de reclamación | クレームページ | 클레임 페이지 | hosted-ops 钱路页 |
+| hosted instance | 托管实例 | instancia alojada | ホスト済みインスタンス | 호스팅 인스턴스 | |
+| session cookie | 会话 Cookie | cookie de sesión | セッション Cookie | 세션 Cookie | Cookie 不译 |
+| Domains | 域名管理 | Dominios | ドメイン管理 | 도메인 관리 | 控制台导航项 |
+| instance address prefix | 实例地址前缀 | prefijo de dirección de instancia | インスタンスアドレス接頭辞 | 인스턴스 주소 접두사 | billing 表单字段 |
 
 ## 3. 落串纪律（B2 起）
 
@@ -41,3 +41,4 @@
 - v0.1（同日）：Codex P1 采纳——「代码块整体不译」收窄为「语法与标识符不译、块内自然语言可译」（锚实践=README.zh-CN Mermaid 全译）。
 - v0.2（同日）：CR 2 Minor 采纳——稳定锚；identity 措辞对齐。
 - v0.3（同日）：Codex P1×3+P2 采纳——跨仓更新=主仓 companion PR 强制+合并顺序；规范拼写 OpenAgentEmail 入列；identity（实体）/identity address（地址）拆行；锚改真实小节名「看一次任务交接」。
+- v0.4（2026-09-21）：#137 B2 控制台落串——补齐 es/ja/ko 术语列；保真扫描键见 `packages/api/src/ui/client/i18n-preserved.ts`。

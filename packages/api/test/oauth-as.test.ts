@@ -97,7 +97,8 @@ function authQuery(extra: Record<string, string> = {}) {
 
 /** 同意批准后为 200 过渡页；从可见链接解析回跳 URL。 */
 function redirectFromHandoffHtml(html: string): URL {
-  expect(html).toContain('已授权，正在跳回客户端');
+  // #137 B2：handoff 随会话 locale；缺省 en；zh-CN cookie/ACL 仍见中文
+  expect(html).toMatch(/已授权|Authorized/);
   const m = /href="([^"]+)"/.exec(html);
   expect(m).toBeTruthy();
   const href = m![1]!.replace(/&amp;/g, '&').replace(/&quot;/g, '"');

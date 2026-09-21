@@ -1,8 +1,10 @@
 /**
- * 控制台 en 源字典 + 浏览器运行时件（#137 B1）。
- * 值 = 现串逐字迁移；键名 `面.区.名`。四语译文见 B2。
+ * 控制台 en 源字典 + 浏览器运行时件（#137 B1/B2）。
+ * 值 = 现串逐字迁移；键名 `面.区.名`。四语译文见 B2 字典模块。
  * 由 materials/137-b1 抽取脚本初稿 + 人审固化。
  */
+import type { UiLocale } from '../i18n/resolve-ui-locale.ts';
+import { getUiI18nDict } from './i18n-dicts.ts';
 
 /** en 源字典：服务端（ui-frame）与测试共用。 */
 export const I18N_EN: Record<string, string> = {
@@ -329,6 +331,7 @@ export const I18N_EN: Record<string, string> = {
   "shell.a11y.closeNavigation": "Close navigation",
   "shell.a11y.dashboard": "Dashboard",
   "shell.a11y.inboxAddresses": "Inbox addresses",
+  "shell.a11y.interfaceLanguage": "Interface language",
   "shell.a11y.mailFolders": "Mail folders",
   "shell.a11y.sortAddresses": "Sort addresses",
   "shell.a11y.taskList": "Task list",
@@ -375,6 +378,7 @@ export const I18N_EN: Record<string, string> = {
   "shell.html.giveThisPhoneANameYou": "Give this phone a name you will recognize later. The password is shown once.",
   "shell.html.identity": "Identity",
   "shell.html.identityToken": "Identity token",
+  "shell.html.language": "Language",
   "shell.html.last14Days": "Last 14 days",
   "shell.html.last24Hours": "Last 24 hours",
   "shell.html.last30Days": "Last 30 days",
@@ -616,7 +620,14 @@ export function fillI18nSlots(
   });
 }
 
-/** 字典件响应体：B1 骨架为空对象（真译文 B2）。 */
-export function i18nLocaleScript(_locale: string): string {
-  return 'window.OAE_I18N = {};\n';
+/**
+ * 字典件响应体：B2 真译文；未知 locale 由路由层 404。
+ * 仅 es/ja/ko/zh-CN 会到达此处（en 不设件）。
+ */
+export function i18nLocaleScript(locale: string): string {
+  const dict = getUiI18nDict(locale as UiLocale);
+  if (!dict) {
+    return 'window.OAE_I18N = {};\n';
+  }
+  return 'window.OAE_I18N = ' + embedDict(dict) + ';\n';
 }
