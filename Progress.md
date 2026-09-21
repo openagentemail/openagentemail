@@ -629,5 +629,6 @@
 2. 全量 api 1972p/9s/1f(#206) → 复跑一次留证；mcp 48p。
 
 ### 基线与证据
+- HEAD：`04419f2416331d7d9bdee1e94a05c02da23ce699`
 - 自审 R6：`0e736c72-dd30-49d1-ba4e-4895d04a0172` → PASS-WITH-NITS
 - 完工报：`/home/ops/materials/305/completion.md`（R6 节）
