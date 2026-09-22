@@ -588,8 +588,13 @@ function taskRootEnvelopeHeader(parentTaskId: string): { canonical: string; head
 function readTaskRootEnvelope(value: unknown): { envelope: TaskRootEnvelope; canonical: string } | null {
   if (typeof value !== 'string' || !value) return null;
   try {
-    const bytes = Buffer.from(value, 'base64url');
-    if (!bytes.length || bytes.toString('base64url') !== value) return null;
+    // #313：接受 MIME 中介重折——mailparser 等会把续行 WSP 留在头值内。
+    // base64url 字母表不含空白，删除全部空白无歧义；strip 后仍走严格 round-trip 校验。
+    // 与 readApprovalPayloadHeader / readLeaseEventPayload 同款政策（见 docs/task-lease-reason-transport.md）。
+    const compact = value.replace(/\s+/g, '');
+    if (!compact) return null;
+    const bytes = Buffer.from(compact, 'base64url');
+    if (!bytes.length || bytes.toString('base64url') !== compact) return null;
     const canonical = bytes.toString('utf8');
     const parsed = JSON.parse(canonical) as Record<string, unknown>;
     if (
@@ -1145,6 +1150,10 @@ async function parseTaskMessage(
   const idempotencyRaw = parsed.headers.get('x-oa-task-idempotency-key');
   const approvalEventRaw = parsed.headers.get('x-oa-task-approval-event');
   const approvalDigestRaw = parsed.headers.get('x-oa-task-approval-digest');
+  // #313：接受 MIME 中介重折——digest 为 64 hex，strip 空白无歧义；后 7 使用点一律用 compact。
+  const approvalDigest = typeof approvalDigestRaw === 'string'
+    ? approvalDigestRaw.replace(/\s+/g, '')
+    : approvalDigestRaw;
   const approvalDecisionRaw = parsed.headers.get('x-oa-task-approval-decision');
   const approvalPayloadRaw = parsed.headers.get('x-oa-task-approval-payload');
   const leaseEventRaw = parsed.headers.get('x-oa-task-lease-event');
@@ -1183,11 +1192,11 @@ async function parseTaskMessage(
   if (typeof approvalEventRaw === 'string') {
     if (
       (approvalEventRaw !== 'request' && approvalEventRaw !== 'decision' && approvalEventRaw !== 'expired')
-      || typeof approvalDigestRaw !== 'string' || !APPROVAL_DIGEST_RE.test(approvalDigestRaw)
+      || typeof approvalDigest !== 'string' || !APPROVAL_DIGEST_RE.test(approvalDigest)
       || typeof stamp !== 'string'
     ) return null;
     const payloadHeader = readApprovalPayloadHeader(approvalPayloadRaw);
-    if (!payloadHeader || payloadHeader.payload.event !== approvalEventRaw || payloadHeader.payload.digest !== approvalDigestRaw) return null;
+    if (!payloadHeader || payloadHeader.payload.event !== approvalEventRaw || payloadHeader.payload.digest !== approvalDigest) return null;
     const approvalPayload = payloadHeader.payload;
     const decision = approvalDecisionRaw === 'approved' || approvalDecisionRaw === 'rejected' ? approvalDecisionRaw : undefined;
     if (
@@ -1208,7 +1217,7 @@ async function parseTaskMessage(
         headerState !== 'input-required'
         || decision !== undefined
         || !snapshot
-        || snapshot.digest !== approvalDigestRaw
+        || snapshot.digest !== approvalDigest
         || snapshot.reviewer !== approvalPayload.reviewer
         || snapshot.expiresAt !== approvalPayload.expiresAt
         || snapshot.reviewer !== to
@@ -1222,22 +1231,22 @@ async function parseTaskMessage(
         || !decision
         || !resultDecision
         || resultDecision.decision !== decision
-        || resultDecision.digest !== approvalDigestRaw
+        || resultDecision.digest !== approvalDigest
         || resultDecision.reviewer !== approvalPayload.reviewer
         || resultDecision.decidedAt !== approvalPayload.decidedAt
         || resultDecision.reviewer !== from
       ) return null;
-      approval = { type: 'decision', digest: approvalDigestRaw, decision };
+      approval = { type: 'decision', digest: approvalDigest, decision };
     } else {
       const resultExpiry = readApprovalExpiry(result);
       if (
         headerState !== 'failed'
         || decision !== undefined
         || !resultExpiry
-        || resultExpiry.digest !== approvalDigestRaw
+        || resultExpiry.digest !== approvalDigest
         || resultExpiry.expiredAt !== approvalPayload.expiredAt
       ) return null;
-      approval = { type: 'expired', digest: approvalDigestRaw };
+      approval = { type: 'expired', digest: approvalDigest };
     }
     return {
       uid: message.uid,
