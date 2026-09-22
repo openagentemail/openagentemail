@@ -542,7 +542,7 @@ describe('UI tasks ACL and contract', () => {
       });
       const res = await post(app, `/ui/api/tasks/${TASK_A.id}/remind`, cookie, { from: 'fox@test.example' });
       expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ error: 'smtp_error' });
+      expect(await res.json()).toEqual({ error: 'task_operation_failed' });
     }
     {
       const { app, cookie } = makeApp({ kind: 'identity', address: 'cat@test.example' }, {

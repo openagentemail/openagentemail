@@ -2,7 +2,7 @@
  * 非 Error rejection 归一化 · 路由级正控 + Error 路径守门负控
  *
  * 正控 A：POST /v1/tasks create 段 / post-create 段 — throw undefined / {code:1} ⇒ 非 500、落既有兜底
- * 正控 B：UI task 突变 — 同类非 Error ⇒ 非 500、落 smtp_error
+ * 正控 B：UI task 突变 — 同类非 Error ⇒ 非 500、落 task_operation_failed
  * 守门负控：Error 路径 status + body 逐字节不变
  */
 import { mkdtempSync } from 'node:fs';
@@ -235,7 +235,7 @@ describe('正控 A · POST /v1/tasks 非 Error rejection 消 500', () => {
 describe('正控 B · UI task 突变非 Error rejection 消 500', () => {
   for (const boom of NON_ERROR_BOOMS) {
     const label = boom === undefined ? 'undefined' : '{code:1}';
-    test(`remind throw ${label} → 502 smtp_error（非 500）`, async () => {
+    test(`remind throw ${label} → 502 task_operation_failed（非 500）`, async () => {
       const { app, cookie } = makeUiApp({
         get: mock(async (id: string) => (id === TASK_A.id ? TASK_A : null)),
         remind: mock(async () => { throw boom; }),
@@ -247,7 +247,7 @@ describe('正控 B · UI task 突变非 Error rejection 消 500', () => {
       });
       expect(res.status).not.toBe(500);
       expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ error: 'smtp_error' });
+      expect(await res.json()).toEqual({ error: 'task_operation_failed' });
     });
   }
 });
@@ -340,7 +340,7 @@ describe('守门负控 · Error 路径 status/body 逐字节不变', () => {
     expect(await res.json()).toEqual({ error: 'task_already_terminal' });
   });
 
-  test('UI remind Error(imap_write_failed) → 502 smtp_error', async () => {
+  test('UI remind Error(imap_write_failed) → 502 task_operation_failed', async () => {
     const { app, cookie } = makeUiApp({
       get: mock(async (id: string) => (id === TASK_A.id ? TASK_A : null)),
       remind: mock(async () => { throw new Error('imap_write_failed'); }),
@@ -351,6 +351,6 @@ describe('守门负控 · Error 路径 status/body 逐字节不变', () => {
       body: JSON.stringify({ from: 'fox@test.example' }),
     });
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual({ error: 'smtp_error' });
+    expect(await res.json()).toEqual({ error: 'task_operation_failed' });
   });
 });

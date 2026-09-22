@@ -273,7 +273,7 @@ function journalUnavailableUi(c: Context, err: unknown): Response | null {
 function taskMutationError(c: Context, err: unknown): Response {
   const mapped = journalUnavailableUi(c, err);
   if (mapped) return mapped;
-  // 统一用 errorCode：非 Error rejection 落入既有 smtp_error 502 兜底（消 500）
+  // 统一用 errorCode：非 Error rejection 落入 task_operation_failed 502 兜底（消 500）
   const code = errorCode(err);
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
   if (code === 'task_already_terminal' || code === 'task_lease_required') return c.json({ error: code }, 409);
@@ -292,7 +292,7 @@ function taskMutationError(c: Context, err: unknown): Response {
     return c.json({ error: 'invalid_cursor' }, 400);
   }
   console.warn('[task] ui mutation failed:', errorCode(err));
-  return c.json({ error: 'smtp_error' }, 502);
+  return c.json({ error: 'task_operation_failed' }, 502);
 }
 
 /** 将 NotifyError 折成与 /v1/notify 一致的 JSON 状态码（历史只读路径）。 */
