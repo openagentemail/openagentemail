@@ -272,8 +272,9 @@ describe('webhook-delivery: #294 retry horizon execute-before check (1b\')', () 
         privateTargetGranted: true,
         createdBy: 'admin',
       });
-      // first 在 72h 前；计划钉在 first+72h（=墙钟「现在」）；定时器触发时 now=计划+ε
-      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000;
+      // first 在 72h 前；计划钉在 first+72h；定时器触发时 now=计划+ε
+      // −1 保证 ε≥1ms 确定性；判据区分力不变（旧判据 now>horizon 仍真、新判据 nextAttemptAt>horizon 仍假）
+      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
       const nextAttemptAt = firstAttemptAt + RETRY_HORIZON_SEC * 1000;
       const eventId = 'evt_294_pass_eps';
       scheduleHorizonJob({
