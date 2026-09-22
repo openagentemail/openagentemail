@@ -996,3 +996,16 @@ N/A。
 - focused：`/home/ops/materials/330/focused-20260922T212949Z.txt`
 - 全量首跑：`bun-test-full-20260922T212956Z.txt` sha256 `90b71d9f…`
 - 全量对齐后：`bun-test-full-postalign-20260922T213257Z.txt` sha256 `e1fef46d…`
+
+## 2026-09-22 · w330 收尾（自审 + PR）
+
+### 我们实现了哪些功能？
+1. PR #334 已开（未合并）：https://github.com/openagentemail/openagentemail/pull/334
+2. #330 issue 已贴矩阵摘要 + 证据路径。
+3. 完工件：`/home/ops/materials/330/completion.md`（矩阵 + website 逐字表 + 证据 sha256）。
+
+### 我们遇到了哪些错误？
+1. 无新增施工错误。
+
+### 我们是如何解决这些错误的？
+1. Subagent 独立自审 `077123c5-e23b-49d5-8fbd-7a4367a86800` → **PASS_WITH_NOTES**（红线合规；吞码清单与源码一致）。
