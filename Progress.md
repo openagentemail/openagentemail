@@ -970,3 +970,29 @@ N/A。
 - 基线：`5b7d8d51`（#331）
 - 原始全量输出：`/home/ops/materials/err-normalize/bun-test-full-20260922T195904Z.txt`
 - sha256：`d9b503b094bc686259f336e0ea4f93f998f8cd645b9e0b8eca44f21e6219f06e`
+
+## 2026-09-22 · w330（#330 兜底码语义化）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/routes/tasks.ts` 六处租约/状态路由兜底：`claim`/`lease`/`release`/`claim-lost`/`decision`/`state` 的 `502 {error:'smtp_error'}` → `task_operation_failed`（create 段 `:238` 保留）。
+2. `packages/api/src/routes/ui.ts:295` UI `taskMutationError` 同改；已映射 404/409/429/403/400/journal 503 不动。
+3. 正控+守门负控：`test/task-operation-failed-fallback.test.ts`（7 正控 + 六路由/UI 已映射码 `toEqual`）；对齐 `task-lease-route-contract` / `err-normalize` / `ui-tasks` / `tasks` / `r3-parent-child` 既有期望。
+4. `CHANGELOG.md` Unreleased → Changed 一条；矩阵与 website 逐字表见完工件（不入 docs）。
+5. **未碰**：`tasks-internal.ts`、#332 的 31 处、`mailserver-reconnect.ts`、create `:238`。
+
+### 我们遇到了哪些错误？
+1. 工作树初无 `node_modules` → `Cannot find package 'hono'`。
+2. 全量首跑：两处既有断言仍锁 `smtp_error`（`tasks.test.ts` #241 state 兜底；`r3-parent-child-routes.test.ts` imap_write_failed）+ `#206` 25s 超时 → 3 fail。
+3. 对齐后全量再跑：`2185 pass / 9 skip / 1 fail`——唯一红改为 `#272 dist-build-lock` 压力用例超时（预存墙钟/锁债族，非本卡引入；**未** rerun-to-green）。
+
+### 我们是如何解决这些错误的？
+1. `cd packages/api && bun install`（锁文件未改）。
+2. 将上述两处期望改为 `task_operation_failed`（与生产兜底对齐）；本卡相关 focused 全绿。
+3. 如实落盘两份全量原始输出（首跑 3 红 + 对齐后 1 红），禁重跑刷绿。
+
+### 基线与证据
+- 基线：`bd4678b3`（= main / #333）
+- 功能 commit：`5d82a310`
+- focused：`/home/ops/materials/330/focused-20260922T212949Z.txt`
+- 全量首跑：`bun-test-full-20260922T212956Z.txt` sha256 `90b71d9f…`
+- 全量对齐后：`bun-test-full-postalign-20260922T213257Z.txt` sha256 `e1fef46d…`
