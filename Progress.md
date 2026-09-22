@@ -846,8 +846,10 @@ N/A。
 4. N/A（不生成虚假 pip freeze）。
 
 ### 基线与证据
-- 基线 main：`da9343ca`
-- 分支：`tizerluo/w308`
+- 基线 main：`da9343ca` · HEAD：`98d023814425b2cc9464bd0bbd7880704dfd1c92`
+- 分支：`tizerluo/w308` · PR：https://github.com/openagentemail/openagentemail/pull/318
 - focused：6 pass（308）；305+m2+core 回归绿；R12 适配后绿
 - mcp：48 pass / 0 fail
 - api 全量：2044 pass / 9 skip / 1 fail（list-rate isolate flake；隔离 5 pass）
+- Subagent：`38e5c3c9-a01b-4ac6-8ac5-597822024173` → PASS
+- completion：`/home/ops/materials/308/completion.md`
