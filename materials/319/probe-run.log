@@ -1,0 +1,97 @@
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+#319 probe start 2026-09-22T10:59:49.264Z
+DATA_DIR=/tmp/oae-319-probe-tUVpnN
+from=probe319@test.example
+endpoint_note=任务卡写 POST /v1/messages；本仓发信 schema 落点为 POST /v1/send（messages 无 POST 发信）
+
+===== G1 POST /v1/send + attachments Base64 =====
+[G1] POST /v1/send 携 attachments[]（Base64 content）
+  expected_note: 任务卡预期 400（假定 .strict()）；R0 同口径。实测以本机响应为准。
+  status: 200
+  body: {"queued":true,"messageId":"<probe-319@test.example>","id":"snd_1ba58753789b40394f0b89a8"}
+  note: sendSchema@packages/api/src/routes/send.ts:41-47 无 .strict()
+  note: Zod 默认剥未知键；若 status≠400 则证明 attachments 被静默剥离而非拒收
+
+===== G2 POST /v1/send + attachments URL =====
+[G2] POST /v1/send 携 attachments[]（URL 形态）
+  expected_note: 任务卡预期 400；实测以本机响应为准。
+  status: 200
+  body: {"queued":true,"messageId":"<probe-319@test.example>","id":"snd_21bf7c21a0ce8f20153134d2"}
+  note: 同 G1：无 .strict() 时未知键剥离
+
+===== G3 无附件基线发送 =====
+[G3] 无附件基线 POST /v1/send
+  expected_note: 任务卡写 201；本仓成功码为 200 {queued:true}（见 send.ts 返回）。
+  status: 200
+  body: {"queued":true,"messageId":"<probe-319@test.example>","id":"snd_b1fd3d8433c8f2219532ba5b"}
+  note: SMTP 已 mock；用于证明路由本身可成功，避免「全 400」误读
+
+===== G4 尺寸探针 text/html 1e6 + 16MiB body =====
+[G4a] text 长度 = 1_000_000（schema 上限）
+  expected_note: 应非 400（schema 接受）；SMTP mock 下期望 200
+  status: 200
+  body: {"queued":true,"messageId":"<probe-319@test.example>","id":"snd_e47f83f84634d250e621ad0b"}
+  note: 锚点 sendSchema text max 1_000_000 @ send.ts:45
+[G4b] text 长度 = 1_000_001（超 schema）
+  expected_note: 400 invalid_request
+  status: 400
+  body: {"error":"invalid_request","details":[{"origin":"string","code":"too_big","maximum":1000000,"inclusive":true,"path":["text"],"message":"Too big: expected string to have <=1000000 characters"}]}
+[G4c] html 长度 = 1_000_000（schema 上限）
+  expected_note: 应非 400；期望 200
+  status: 200
+  body: {"queued":true,"messageId":"<probe-319@test.example>","id":"snd_b0baed5f2cb2c98903fabde1"}
+  note: 锚点 sendSchema html max 1_000_000 @ send.ts:46
+[G4d] html 长度 = 1_000_001（超 schema）
+  expected_note: 400 invalid_request
+  status: 400
+  body: {"error":"invalid_request","details":[{"origin":"string","code":"too_big","maximum":1000000,"inclusive":true,"path":["html"],"message":"Too big: expected string to have <=1000000 characters"}]}
+  G4e rawBodyBytes=17825889
+[G4e] 请求体 ≈17 MiB（超 JSON_BODY_LIMIT_BYTES=16MiB）
+  expected_note: 413 request_too_large（解析前拒）
+  status: 413
+  body: {"error":"request_too_large"}
+  note: 锚点 packages/api/src/lib/limits.ts:5；app.ts bodyLimit
+
+===== G5 webhook sink：含附件 MIME → payload 仅 hasAttachments =====
+  delivery_rows=1 last_messageId=31901 hasAttachments_parsed=true
+  payload_body={"id":"evt_probe_319","type":"mail.received","payloadVersion":"v1","createdAt":"2026-09-22T10:59:49.953Z","domain":"test.example","data":{"object":"mail","address":"probe319@test.example","messageId":"31901","cursor":"mail-fcursor-v1.eyJmIjoiaW5ib3giLCJhIjoicHJvYmUzMTlAdGVzdC5leGFtcGxlIiwidCI6MTc5MDA3MTIwMDAwMCwidSI6MzE5MDEsInYiOiI5OSJ9.UCXlOtNoJf_h_0pL6sGxkdKXSpTr5hmQ-PO5XcBwQj0","uid":31901,"uidValidity":99,"receivedAt":"2026-09-22T10:00:00.000Z","from":{"address":"sender@external.example","name":"Sender"},"to":["probe319@test.example"],"cc":[],"subject":"Invoice with attachment","sizeBytes":560,"hasAttachments":true,"unread":true,"containsSecurityCode":false,"containsLink":false,"textPreview":"Please see attached invoice.","securityCodes":[],"links":[]}}
+  data_keys=["object","address","messageId","cursor","uid","uidValidity","receivedAt","from","to","cc","subject","sizeBytes","hasAttachments","unread","containsSecurityCode","containsLink","textPreview","securityCodes","links"]
+  leaked_content_keys=[]
+[G5] webhook：含附件入站 → payload 仅 hasAttachments 元数据
+  expected_note: hasAttachments:true；无附件内容字段
+  status: 0
+  body: {"id":"evt_probe_319","type":"mail.received","payloadVersion":"v1","createdAt":"2026-09-22T10:59:49.953Z","domain":"test.example","data":{"object":"mail","address":"probe319@test.example","messageId":"31901","cursor":"mail-fcursor-v1.eyJmIjoiaW5ib3giLCJhIjoicHJvYmUzMTlAdGVzdC5leGFtcGxlIiwidCI6MTc5MDA3MTIwMDAwMCwidSI6MzE5MDEsInYiOiI5OSJ9.UCXlOtNoJf_h_0pL6sGxkdKXSpTr5hmQ-PO5XcBwQj0","uid":31901,"uidValidity":99,"receivedAt":"2026-09-22T10:00:00.000Z","from":{"address":"sender@external.example","name":"Sender"},"to":["probe319@test.example"],"cc":[],"subject":"Invoice with attachment","sizeBytes":560,"hasAttachments":true,"unread":true,"containsSecurityCode":false,"containsLink":false,"textPreview":"Please see attached invoice.","securityCodes":[],"links":[]}}
+  note: parsed.attachments.length=1
+  note: data.hasAttachments=true
+  note: leaked_content_keys=[]
+  note: 锚点 webhook-sink.ts:227；webhook-delivery.ts:1532 formatMailPayload
+
+===== MCP mail_send 携 attachments[] =====
+[MCP] MCP tools/call mail_send + attachments[]
+  expected_note: 工具 inputSchema 无 attachments；服务端 zod 默认剥未知键（见 mcp-http.test 注释）
+  status: 200
+  body: {"result":{"content":[{"type":"text","text":"{\n  \"queued\": true,\n  \"messageId\": \"<probe-319@test.example>\",\n  \"id\": \"snd_fe1c7ca6ff68fd7640feac42\"\n}"}],"structuredContent":{"queued":true,"messageId":"<probe-319@test.example>","id":"snd_fe1c7ca6ff68fd7640feac42"}},"jsonrpc":"2.0","id":319}
+  note: 锚点 packages/api/src/mcp/tools.ts:531-548
+  note: 无独立附件 MCP 入口
+  mail_send.inputSchema={"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from":{"type":"string","maxLength":320,"pattern":"^[a-z0-9][a-z0-9._-]{0,62}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.?$","description":"Sender address (must be an existing identity)"},"to":{"type":"string","maxLength":320,"pattern":"^[a-z0-9][a-z0-9._-]{0,62}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.?$","description":"Recipient address"},"subject":{"type":"string","maxLength":998,"description":"Subject line"},"text":{"type":"string","maxLength":1000000,"description":"Plain-text body"},"html":{"description":"Optional HTML body","type":"string","maxLength":1000000}},"required":["from","to","subject","text"]}
+[MCP-schema] tools/list 中 mail_send.inputSchema 是否含 attachments
+  expected_note: 不应出现 attachments 属性
+  status: 200
+  body: {"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from":{"type":"string","maxLength":320,"pattern":"^[a-z0-9][a-z0-9._-]{0,62}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.?$","description":"Sender address (must be an existing identity)"},"to":{"type":"string","maxLength":320,"pattern":"^[a-z0-9][a-z0-9._-]{0,62}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.?$","description":"Recipient address"},"subject":{"type":"string","maxLength":998,"description":"Subject line"},"text":{"type":"string","maxLength":1000000,"description":"Plain-text body"},"html":{"description":"Optional HTML body","type":"string","maxLength":1000000}},"required":["from","to","subject","text"]}
+  note: hasAttachmentsProp=false
+
+===== 消息/线程附件下载端点存在性（路由面） =====
+[ROUTE-/v1/messages/31901/attachments/att_1] GET /v1/messages/31901/attachments/att_1
+  expected_note: 无附件下载路由 → 404 或未匹配
+  status: 404
+  body: 404 Not Found
+  note: messages 路由仅 GET /、GET /:id、POST /:id/seen、POST /wait
+[ROUTE-/v1/threads/thr_1/attachments/att_1] GET /v1/threads/thr_1/attachments/att_1
+  expected_note: 无附件下载路由 → 404 或未匹配
+  status: 404
+  body: 404 Not Found
+  note: messages 路由仅 GET /、GET /:id、POST /:id/seen、POST /wait
+
+#319 probe finished 2026-09-22T10:59:50.397Z
+wrote /home/ops/orca/workspaces/openagentemail/w319/materials/319/probe-results.json
+wrote /home/ops/orca/workspaces/openagentemail/w319/materials/319/probe-stdout.txt
