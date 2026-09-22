@@ -897,3 +897,63 @@ describe('#149 Compose CLI compatibility A/B/C', () => {
     }
   });
 });
+
+/** #244 R1：MARK_SEEN_* 须像 SEND_RATE_LIMIT 一样在两份 compose + 示例 env 转发，防再漂。 */
+const MARK_SEEN_COMPOSE_KEYS = [
+  'MARK_SEEN_RATE_LIMIT',
+  'MARK_SEEN_RATE_WINDOW_MS',
+] as const;
+
+describe('#244 R1 Compose mark-seen rate env forwarding', () => {
+  test('两份 compose 均转发 MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS（同 SEND 形）', () => {
+    for (const variant of VARIANTS) {
+      const text = readFileSync(join(REPO_DIR, variant.file), 'utf8');
+      expect(text).toMatch(
+        /MARK_SEEN_RATE_LIMIT:\s*\$\{MARK_SEEN_RATE_LIMIT:-300\}/,
+      );
+      expect(text).toMatch(
+        /MARK_SEEN_RATE_WINDOW_MS:\s*\$\{MARK_SEEN_RATE_WINDOW_MS:-300000\}/,
+      );
+      // 与 SEND_RATE_LIMIT 同在 api.environment 段（非注释行）
+      for (const key of MARK_SEEN_COMPOSE_KEYS) {
+        expect(text).toMatch(new RegExp(`^\\s+${key}:\\s*\\$\\{`, 'm'));
+      }
+    }
+  });
+
+  test('两份 .env 示例均文档化 MARK_SEEN_*（含默认值含义）', () => {
+    for (const variant of VARIANTS) {
+      const example = readFileSync(join(REPO_DIR, variant.example), 'utf8');
+      for (const key of MARK_SEEN_COMPOSE_KEYS) {
+        expect(example.includes(key)).toBe(true);
+      }
+      expect(example).toMatch(/300/);
+      expect(example).toMatch(/300000|5\s*分钟|5 min/i);
+    }
+  });
+
+  test('bundled/api-only：unset 时 compose 插值落到安全默认 300 / 300000', () => {
+    for (const variant of VARIANTS) {
+      const composeFile = join(REPO_DIR, variant.file);
+      const serviceEnv = renderApiServiceEnv({ composeFile, mode: 'env-file' });
+      expect(serviceEnv.MARK_SEEN_RATE_LIMIT).toBe('300');
+      expect(serviceEnv.MARK_SEEN_RATE_WINDOW_MS).toBe('300000');
+    }
+  });
+
+  test('bundled/api-only：显式覆盖经 compose 转发到服务环境', () => {
+    for (const variant of VARIANTS) {
+      const composeFile = join(REPO_DIR, variant.file);
+      const serviceEnv = renderApiServiceEnv({
+        composeFile,
+        mode: 'env-file',
+        webhookVars: {
+          MARK_SEEN_RATE_LIMIT: '450',
+          MARK_SEEN_RATE_WINDOW_MS: '120000',
+        },
+      });
+      expect(serviceEnv.MARK_SEEN_RATE_LIMIT).toBe('450');
+      expect(serviceEnv.MARK_SEEN_RATE_WINDOW_MS).toBe('120000');
+    }
+  });
+});

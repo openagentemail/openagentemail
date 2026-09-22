@@ -128,6 +128,25 @@ describe('#244 mark-seen env fail-safe', () => {
     );
   });
 
+  test('设 env 后解析器读到该值（硬要求②覆盖生效）', () => {
+    const env = {
+      MARK_SEEN_RATE_LIMIT: '450',
+      MARK_SEEN_RATE_WINDOW_MS: '120000',
+    };
+    const limit = resolveMarkSeenRateLimit(env);
+    const windowMs = resolveMarkSeenRateWindowMs(env);
+    // 原始输出：供完工材料摘录「设 env → 解析器读该值」
+    console.log(
+      JSON.stringify({
+        tag: 'MARK_SEEN_ENV_RESOLVE_OK',
+        input: env,
+        resolved: { limit, windowMs },
+      }),
+    );
+    expect(limit).toBe(450);
+    expect(windowMs).toBe(120_000);
+  });
+
   test('checkMarkSeenLimit 误传 limit=0 仍回落默认而非放行无限', () => {
     resetMarkSeenLimits();
     const now = 1_000_000;

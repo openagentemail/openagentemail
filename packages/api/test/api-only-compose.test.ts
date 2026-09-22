@@ -98,3 +98,18 @@ test('#70 API-only docs keep two projects, ports, and secrets isolated outside t
   expect(apiOnlyIntro).toContain('different `-p`');
   expect(compose).toMatch(/compose\.yaml[\s\S]*MUST use an explicitly different -p \/ COMPOSE_PROJECT_NAME/);
 });
+
+test('#244 R1 api-only compose 转发 MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS', () => {
+  expect(compose).toMatch(
+    /MARK_SEEN_RATE_LIMIT:\s*\$\{MARK_SEEN_RATE_LIMIT:-300\}/,
+  );
+  expect(compose).toMatch(
+    /MARK_SEEN_RATE_WINDOW_MS:\s*\$\{MARK_SEEN_RATE_WINDOW_MS:-300000\}/,
+  );
+  expect(composeLines).toContain('MARK_SEEN_RATE_LIMIT: ${MARK_SEEN_RATE_LIMIT:-300}');
+  expect(composeLines).toContain(
+    'MARK_SEEN_RATE_WINDOW_MS: ${MARK_SEEN_RATE_WINDOW_MS:-300000}',
+  );
+  expect(envExample).toContain('MARK_SEEN_RATE_LIMIT=300');
+  expect(envExample).toContain('MARK_SEEN_RATE_WINDOW_MS=300000');
+});
