@@ -74,13 +74,16 @@ const {
   MARK_SEEN_CAPACITY_RETRY_SEC,
   MARK_SEEN_MAX_BUCKETS,
   markSeenBucketCountForTests,
+  markSeenCapacityRetrySec,
   markSeenHasBucketForTests,
+  markSeenMonotonicNow,
   parsePositiveIntEnv,
   resetMarkSeenLimits,
   resetRateLimits,
   resolveMarkSeenRateLimit,
   resolveMarkSeenRateWindowMs,
   seedMarkSeenBucketForTests,
+  setMarkSeenNowForTests,
 } = await import('../src/lib/ratelimit.ts');
 
 const app = createApp();
@@ -303,7 +306,9 @@ describe('#244 R2 mark-seen 桶容量上限与过期回收', () => {
 
     const full = checkMarkSeenLimit('newcomer@test.example', 300, windowMs, now);
     expect(full.allowed).toBe(false);
-    expect(full.retryAfterSec).toBe(MARK_SEEN_CAPACITY_RETRY_SEC);
+    // 容量档按生效窗口推导：60_000ms → 60s（不再写死 300）
+    expect(full.retryAfterSec).toBe(markSeenCapacityRetrySec(windowMs));
+    expect(full.retryAfterSec).toBe(60);
     expect(markSeenHasBucketForTests('cap-1@test.example')).toBe(true);
     expect(markSeenBucketCountForTests()).toBe(MARK_SEEN_MAX_BUCKETS);
 
@@ -331,5 +336,73 @@ describe('#244 R2 mark-seen 桶容量上限与过期回收', () => {
     // 回收后：活桶 1 + 新人 1 = 2（过期全清）
     expect(markSeenBucketCountForTests()).toBe(2);
     expect(markSeenBucketCountForTests()).toBeLessThanOrEqual(MARK_SEEN_MAX_BUCKETS);
+  });
+});
+
+describe('#244 R3 单调钟默认 + 容量档随窗口', () => {
+  test('默认 now 走 markSeenMonotonicNow（生产 performance.now；可注入定值）', async () => {
+    // 源码锚：默认参数绑定单调钟助手，而非 Date.now()
+    const src = await Bun.file(
+      new URL('../src/lib/ratelimit.ts', import.meta.url),
+    ).text();
+    expect(src).toContain('now: number = markSeenMonotonicNow()');
+    expect(src).toMatch(
+      /function markSeenMonotonicNow\(\)[\s\S]*?return performance\.now\(\)/,
+    );
+    expect(src).not.toMatch(
+      /checkMarkSeenLimit\([\s\S]*?now: number = Date\.now\(\)/,
+    );
+
+    // 机制：注入定值后无参 now 的调用使用注入钟
+    resetMarkSeenLimits();
+    setMarkSeenNowForTests(42_000);
+    expect(markSeenMonotonicNow()).toBe(42_000);
+    const r = checkMarkSeenLimit('mono@test.example', 2, 60_000);
+    expect(r.allowed).toBe(true);
+    expect(r.count).toBe(1);
+    // 同注入时刻再调一次仍计入同一窗口
+    expect(checkMarkSeenLimit('mono@test.example', 2, 60_000).allowed).toBe(true);
+    expect(checkMarkSeenLimit('mono@test.example', 2, 60_000).allowed).toBe(false);
+    setMarkSeenNowForTests(null);
+    resetMarkSeenLimits();
+  });
+
+  test('容量档 retryAfterSec 随生效窗口：120s→120、600s→600、默认→300', () => {
+    expect(markSeenCapacityRetrySec(120_000)).toBe(120);
+    expect(markSeenCapacityRetrySec(600_000)).toBe(600);
+    expect(markSeenCapacityRetrySec(DEFAULT_MARK_SEEN_RATE_WINDOW_MS)).toBe(300);
+    expect(MARK_SEEN_CAPACITY_RETRY_SEC).toBe(300);
+    expect(markSeenCapacityRetrySec(500)).toBe(1); // ceil(0.5)=1 下限
+    expect(markSeenCapacityRetrySec(0)).toBe(300); // 非法回落默认窗口
+
+    resetMarkSeenLimits();
+    const now = 11_000_000;
+    for (let i = 0; i < MARK_SEEN_MAX_BUCKETS; i++) {
+      seedMarkSeenBucketForTests(`wcap-${i}@test.example`, [now]);
+    }
+    const w120 = checkMarkSeenLimit('n120@test.example', 300, 120_000, now);
+    expect(w120.allowed).toBe(false);
+    expect(w120.retryAfterSec).toBe(120);
+
+    resetMarkSeenLimits();
+    for (let i = 0; i < MARK_SEEN_MAX_BUCKETS; i++) {
+      seedMarkSeenBucketForTests(`wcap6-${i}@test.example`, [now]);
+    }
+    const w600 = checkMarkSeenLimit('n600@test.example', 300, 600_000, now);
+    expect(w600.allowed).toBe(false);
+    expect(w600.retryAfterSec).toBe(600);
+
+    resetMarkSeenLimits();
+    for (let i = 0; i < MARK_SEEN_MAX_BUCKETS; i++) {
+      seedMarkSeenBucketForTests(`wcapd-${i}@test.example`, [now]);
+    }
+    const wDef = checkMarkSeenLimit(
+      'ndef@test.example',
+      300,
+      DEFAULT_MARK_SEEN_RATE_WINDOW_MS,
+      now,
+    );
+    expect(wDef.allowed).toBe(false);
+    expect(wDef.retryAfterSec).toBe(300);
   });
 });
