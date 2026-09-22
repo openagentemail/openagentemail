@@ -158,6 +158,55 @@ describe('#183 create(wait=true) 响应契约分层', () => {
     expect(text).toBe(JSON.stringify({ error: 'smtp_error' }));
   });
 
+  // #240：路由级正控 —— 创建成功后 wait 段非 journal 异常须返回 wait_failed（非 smtp_error）
+  testOn('2b: create 成功 + wait 非 journal 抛错 → 502 wait_failed + taskId + created', async () => {
+    const createdId = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff';
+    const service = {
+      async create(input: { from: string; to: string; subject: string; body: string }) {
+        return {
+          id: createdId, from: input.from, to: input.to, subject: input.subject,
+          state: 'submitted' as const,
+          createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z',
+          messages: [{
+            id: '1', from: input.from, to: input.to, subject: input.subject,
+            date: '2026-08-24T00:00:00.000Z', state: 'submitted' as const, body: input.body,
+          }],
+        };
+      },
+      async list() { return []; },
+      async listBoard() {
+        return { tasks: [], nextCursor: null, totalApprox: 0, queryNow: '2026-08-24T00:00:00.000Z' };
+      },
+      async get() { return null; },
+      async update() { throw new Error('unused'); },
+      async reply() { throw new Error('unused'); },
+      async remind() { throw new Error('unused'); },
+      async close() { throw new Error('unused'); },
+      // 非 journal 码：走 post-create catch 兜底 → wait_failed
+      async waitForTerminal() { throw new Error('wait_boom_non_journal'); },
+    };
+    const app = new Hono();
+    app.use('*', async (c, next) => {
+      c.set('auth', { kind: 'identity', address: A });
+      await next();
+    });
+    app.route('/v1/tasks', createTaskRoutes({
+      service,
+      findIdentity: (address) => [A, B].includes(address.toLowerCase())
+        ? { address, createdAt: '2026-08-24T00:00:00.000Z' }
+        : undefined,
+    }));
+    const res = await app.request('/v1/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: B, subject: 'Wait boom', body: 'go', wait: true }),
+    });
+    const body = await res.json() as { error?: string; taskId?: string; created?: boolean };
+    expect(res.status).toBe(502);
+    // 精确相等：防多字段；码必须是 wait_failed 而非 smtp_error
+    expect(body).toEqual({ error: 'wait_failed', taskId: createdId, created: true });
+  });
+
   testOn('3: journal crash-hook latch 变体 → 503 + lease_journal_crash_* + taskId', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'oae-cw-latch-'));
     setJournalDataDirForTests(dir);
@@ -297,10 +346,10 @@ describe('#183 create(wait=true) 响应契约分层', () => {
 
   bunTest('5: MCP client 透出 taskId；task_create 工具文案含 id 与勿重新 create', async () => {
     const taskId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-    // 502 body → ApiError.taskId
+    // 502 wait_failed body → ApiError.taskId（#240 对齐新码）
     {
       const client = new OpenAgentEmailClient('http://test.invalid', 'tok', async () =>
-        new Response(JSON.stringify({ error: 'smtp_error', taskId, created: true }), { status: 502 }));
+        new Response(JSON.stringify({ error: 'wait_failed', taskId, created: true }), { status: 502 }));
       let err: unknown;
       try {
         await client.createTask(B, 'x', 'y', true);
@@ -311,7 +360,28 @@ describe('#183 create(wait=true) 响应契约分层', () => {
       const api = err as InstanceType<typeof ApiError>;
       expect(api.status).toBe(502);
       expect(api.taskId).toBe(taskId);
-      expect(api.errorBody).toEqual({ error: 'smtp_error', taskId, created: true });
+      expect(api.errorBody).toEqual({ error: 'wait_failed', taskId, created: true });
+    }
+    // #240：502 wait_failed → 经 task_create handler 包装文案须含 wait_failed 与 taskId
+    {
+      const client = new OpenAgentEmailClient('http://test.invalid', 'tok', async () =>
+        new Response(JSON.stringify({ error: 'wait_failed', taskId, created: true }), { status: 502 }));
+      const server = new McpServer({ name: 'cw-240-wait-failed', version: '0.0.0' });
+      registerOpenAgentEmailTools(server, client);
+      const tool = (server as unknown as {
+        _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<{
+          isError?: boolean; content?: Array<{ text?: string }>;
+        }> }>;
+      })._registeredTools.task_create;
+      const result = await tool.handler({
+        to: B, subject: 'x', body: 'y', wait: true,
+      });
+      expect(result.isError).toBe(true);
+      const text = result.content?.[0]?.text ?? '';
+      expect(text).toContain('wait_failed');
+      expect(text).toContain(taskId);
+      expect(text).toMatch(/task_get/);
+      expect(text).toMatch(/do not call task_create again/i);
     }
     // 503 → 经 task_create handler 包装文案（非 fail() 全局）
     {

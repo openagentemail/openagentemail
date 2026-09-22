@@ -264,7 +264,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: (err as Error).message, taskId: task.id, created: true }, 503);
         }
         console.warn('[task] create post-create/wait failed:', (err as Error).message);
-        return c.json({ error: 'smtp_error', taskId: task.id, created: true }, 502);
+        // SMTP/创建已成功；此处为 wait 段非 journal 异常 —— 用独立码，避免误指 smtp。
+        return c.json({ error: 'wait_failed', taskId: task.id, created: true }, 502);
       }
     })
     .get('/', async (c) => {
