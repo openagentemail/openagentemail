@@ -71,11 +71,16 @@ const {
   checkMarkSeenLimit,
   DEFAULT_MARK_SEEN_RATE_LIMIT,
   DEFAULT_MARK_SEEN_RATE_WINDOW_MS,
+  MARK_SEEN_CAPACITY_RETRY_SEC,
+  MARK_SEEN_MAX_BUCKETS,
+  markSeenBucketCountForTests,
+  markSeenHasBucketForTests,
   parsePositiveIntEnv,
   resetMarkSeenLimits,
   resetRateLimits,
   resolveMarkSeenRateLimit,
   resolveMarkSeenRateWindowMs,
+  seedMarkSeenBucketForTests,
 } = await import('../src/lib/ratelimit.ts');
 
 const app = createApp();
@@ -283,5 +288,48 @@ describe('#244 mark-seen 路由三态', () => {
     expect(flagsCalls.some((c) => c.op === 'remove' && c.uid === 3)).toBe(true);
     const rows = readAuditEvents({ event: 'message.mark_seen', limit: 5 });
     expect(rows.some((r) => r.messageId === '3' && r.seen === 'false')).toBe(true);
+  });
+});
+
+describe('#244 R2 mark-seen 桶容量上限与过期回收', () => {
+  test('塞满活戳 key → 新 caller 容量 429；不驱逐活桶；既有 key 仍可录取', () => {
+    resetMarkSeenLimits();
+    const now = 9_000_000;
+    const windowMs = 60_000;
+    for (let i = 0; i < MARK_SEEN_MAX_BUCKETS; i++) {
+      seedMarkSeenBucketForTests(`cap-${i}@test.example`, [now]);
+    }
+    expect(markSeenBucketCountForTests()).toBe(MARK_SEEN_MAX_BUCKETS);
+
+    const full = checkMarkSeenLimit('newcomer@test.example', 300, windowMs, now);
+    expect(full.allowed).toBe(false);
+    expect(full.retryAfterSec).toBe(MARK_SEEN_CAPACITY_RETRY_SEC);
+    expect(markSeenHasBucketForTests('cap-1@test.example')).toBe(true);
+    expect(markSeenBucketCountForTests()).toBe(MARK_SEEN_MAX_BUCKETS);
+
+    // 已有 key 不受容量守卫（守卫仅新 key）
+    const existing = checkMarkSeenLimit('cap-0@test.example', 300, windowMs, now);
+    expect(existing.allowed).toBe(true);
+  });
+
+  test('塞满过期 key → reclaim 按生效窗口回收，新 caller 放行且 size 有界', () => {
+    resetMarkSeenLimits();
+    const now = 10_000_000;
+    const windowMs = 60_000;
+    const liveKey = 'live@test.example';
+    for (let i = 0; i < MARK_SEEN_MAX_BUCKETS - 1; i++) {
+      // 恰在窗口外：cutoff = now - windowMs，戳 ≤ cutoff 视为过期
+      seedMarkSeenBucketForTests(`expired-${i}@test.example`, [now - windowMs]);
+    }
+    seedMarkSeenBucketForTests(liveKey, [now]);
+    expect(markSeenBucketCountForTests()).toBe(MARK_SEEN_MAX_BUCKETS);
+
+    const admitted = checkMarkSeenLimit('after-reclaim@test.example', 300, windowMs, now);
+    expect(admitted.allowed).toBe(true);
+    expect(markSeenHasBucketForTests(liveKey)).toBe(true);
+    expect(markSeenHasBucketForTests('expired-0@test.example')).toBe(false);
+    // 回收后：活桶 1 + 新人 1 = 2（过期全清）
+    expect(markSeenBucketCountForTests()).toBe(2);
+    expect(markSeenBucketCountForTests()).toBeLessThanOrEqual(MARK_SEEN_MAX_BUCKETS);
   });
 });
