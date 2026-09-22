@@ -24,7 +24,8 @@ process.env.MCP_PUBLIC_URL = 'http://localhost';
 const { afterAll, afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { createApp } = await import('../src/app.ts');
-const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
+const { readAuditEvents, resetAuditForTests, recordAuditEvent, scrubAuditField, AUDIT_ADDRESS_MAX_LEN } =
+  await import('../src/lib/audit.ts');
 const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { createWebhookSubscription } = await import('../src/lib/webhook-store.ts');
@@ -216,6 +217,90 @@ describe('#245 identity.delete 审计（有意删除入口）', () => {
       address: addr,
       actor: 'admin',
     });
+  });
+});
+
+/**
+ * #245 R5：identity.delete 的 address 须覆盖最长受支持身份地址（63+1+253=317），
+ * 不得被默认 scrub 256 静默截断。
+ */
+describe('#245 R5 identity.delete address 审计上限', () => {
+  /** 合法 253 字符域名（每 label ≤63）。 */
+  function maxSupportedDomain(): string {
+    return `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
+  }
+
+  test('>256 身份地址删除 → 审计 address 与传入逐字节相同；控制字符仍被剥', async () => {
+    const domain = maxSupportedDomain();
+    expect(domain.length).toBe(253);
+    const localpart = 'x'.repeat(63);
+    const address = `${localpart}@${domain}`;
+    expect(address.length).toBe(317);
+    expect(address.length).toBeGreaterThan(256);
+    expect(address.length).toBeLessThanOrEqual(AUDIT_ADDRESS_MAX_LEN);
+
+    const prevHad = config.allDomains.has(domain);
+    (config.allDomains as Set<string>).add(domain);
+    try {
+      const created = createIdentity({ localpart, domain })!;
+      expect(created.identity.address).toBe(address);
+
+      const res = await app.request(
+        `/v1/identities/${encodeURIComponent(address)}`,
+        {
+          method: 'DELETE',
+          headers: { authorization: `Bearer ${adminKey}` },
+        },
+      );
+      expect(res.status).toBe(200);
+
+      const rows = identityDeleteRows();
+      expect(rows).toHaveLength(1);
+      // 须与规范地址逐字节相同（无默认 256 截断）
+      expect(rows[0]!.address).toBe(address);
+      expect(rows[0]!.address!.length).toBe(317);
+      expect(Buffer.from(rows[0]!.address!).equals(Buffer.from(address))).toBe(true);
+
+      // 控制字符剥离不变，且剥完后仍不截断到 256
+      const scrubbed = scrubAuditField(
+        `${address.slice(0, 10)}\x00\r\n${address.slice(10)}`,
+        AUDIT_ADDRESS_MAX_LEN,
+      );
+      expect(scrubbed).toBe(address);
+      expect(scrubbed.length).toBe(317);
+    } finally {
+      if (!prevHad) (config.allDomains as Set<string>).delete(domain);
+    }
+  });
+
+  test('边界：恰好 AUDIT_ADDRESS_MAX_LEN 通过；超上限按上限截断', () => {
+    const exact = 'e'.repeat(AUDIT_ADDRESS_MAX_LEN);
+    expect(exact.length).toBe(320);
+    recordAuditEvent({
+      event: 'identity.delete',
+      outcome: 'ok',
+      address: exact,
+      actor: 'admin',
+    });
+    const hitExact = readAuditEvents({ event: 'identity.delete' }).find(
+      (e) => e.address === exact,
+    );
+    expect(hitExact?.address).toBe(exact);
+    expect(hitExact?.address!.length).toBe(AUDIT_ADDRESS_MAX_LEN);
+
+    resetAuditForTests();
+    const over = 'o'.repeat(AUDIT_ADDRESS_MAX_LEN + 40);
+    recordAuditEvent({
+      event: 'identity.delete',
+      outcome: 'ok',
+      address: over,
+      actor: 'admin',
+    });
+    const hitOver = readAuditEvents({ event: 'identity.delete', limit: 1 })[0]!;
+    expect(hitOver.address).toBe(over.slice(0, AUDIT_ADDRESS_MAX_LEN));
+    expect(hitOver.address!.length).toBe(AUDIT_ADDRESS_MAX_LEN);
+    // 默认 256 路径不得再套在 address 上
+    expect(hitOver.address!.length).toBeGreaterThan(256);
   });
 });
 

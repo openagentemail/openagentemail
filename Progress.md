@@ -931,3 +931,18 @@ N/A。
 1. 污染源自理：导入前隔离 + afterAll 还原；两新文件 afterAll 清注入。
 2. 验收：复现×2、5 文件合跑、全量 2092/0 全绿；材料 `/home/ops/materials/244-245/r4-*`。
 3. Subagent：`2346fa9f-0dc5-4516-9897-da40749804a4` → PASS_WITH_NOTES。
+
+## 2026-09-22 · w244 R5（审计 address 上限 320）
+
+### 我们实现了哪些功能？
+1. `audit.ts`：具名常量 `AUDIT_ADDRESS_MAX_LEN=320`；`recordAuditEvent` 的 `address` 分支改用该上限（覆盖 63+1+253=317）。
+2. `parentIdentity` 改用同常量（上限原已 320，行为不变）；其它字段上限不动。
+3. 测试：317 长地址删除逐字节一致 + 控字剥离；恰好 320 / 超 320 截断。
+
+### 我们遇到了哪些错误？
+1. Codex P2：identity.delete 的 address 走默认 scrub 256 → 长地址静默截断。
+2. 全量偶发 `#149 hanging probe` 超时假红（与本修无关，重跑）。
+
+### 我们是如何解决这些错误的？
+1. 引入 AUDIT_ADDRESS_MAX_LEN 专用于 address 分支。
+2. focused 10 pass；全量见材料；Subagent `5bdf7b98-075d-4085-a346-c366e43c8c97` → PASS。
