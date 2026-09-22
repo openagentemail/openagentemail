@@ -710,10 +710,10 @@ export function createUiApiRoutes(
         201,
       );
     } catch (err) {
-      if ((err as Error).message === 'invalid_localpart') {
+      if (errorCode(err) === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
       }
-      if ((err as Error).message === 'invalid_domain') {
+      if (errorCode(err) === 'invalid_domain') {
         c.header('Cache-Control', 'no-store');
         return c.json({ error: 'invalid_domain' }, 400);
       }
@@ -1028,7 +1028,7 @@ export function createUiApiRoutes(
         logInvalidCursorRejectionFor('tasks', err.kind, { cursorTs: err.cursorTs });
         return c.json({ error: 'invalid_cursor' }, 400);
       }
-      const code = (err as Error).message;
+      const code = errorCode(err);
       if (typeof code === 'string' && code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
       throw err;
     }

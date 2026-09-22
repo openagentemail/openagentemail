@@ -317,7 +317,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           logInvalidCursorRejectionFor('tasks', err.kind, { cursorTs: err.cursorTs });
           return c.json({ error: 'invalid_cursor' }, 400);
         }
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'forbidden') return c.json({ error: 'forbidden: task participant required' }, 403);
         throw err;
@@ -376,7 +376,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
@@ -414,7 +414,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
@@ -456,7 +456,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
@@ -484,7 +484,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (
@@ -538,7 +538,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mapped = journalUnavailable(c, err);
         if (mapped) return mapped;
-        const code = (err as Error).message;
+        const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'approval_reviewer_required') return c.json({ error: 'forbidden: approval reviewer required' }, 403);
         if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task') {
@@ -589,13 +589,13 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
       } catch (err) {
         const mappedJournal = journalUnavailable(c, err);
         if (mappedJournal) return mappedJournal;
-        if ((err as Error).message === 'task_already_terminal' || (err as Error).message === 'task_lease_required' || (err as Error).message === 'approval_decision_required') {
-          return c.json({ error: (err as Error).message }, 409);
+        if (errorCode(err) === 'task_already_terminal' || errorCode(err) === 'task_lease_required' || errorCode(err) === 'approval_decision_required') {
+          return c.json({ error: errorCode(err) }, 409);
         }
-        if ((err as Error).message === 'task_participant_required') {
+        if (errorCode(err) === 'task_participant_required') {
           return c.json({ error: 'forbidden: task participant required' }, 403);
         }
-        console.warn('[task] update failed:', (err as Error).message);
+        console.warn('[task] update failed:', errorCode(err));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     });

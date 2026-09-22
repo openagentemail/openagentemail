@@ -34,6 +34,7 @@ import { randomBytes } from 'node:crypto';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
 import { isDelegationScope } from './identities.ts';
+import { errorCode } from './errors.ts';
 
 export const DELEGATION_STORE_SCHEMA_VERSION = 1;
 export const DELEGATION_STORE_FILE = 'delegations.json';
@@ -225,7 +226,7 @@ function loadCache(): StoreCache {
     return storeCache;
   } catch (err) {
     invalidateDelegationStoreCache();
-    if ((err as Error).message === 'delegation_store_corrupt') throw err;
+    if (errorCode(err) === 'delegation_store_corrupt') throw err;
     throw new Error('delegation_store_corrupt', { cause: err });
   }
 }

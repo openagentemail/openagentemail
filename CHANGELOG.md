@@ -4,6 +4,10 @@ All notable changes to this project are documented here, one section per release
 
 ## Unreleased
 
+### Fixed
+
+- **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
+
 ### Changed
 
 - **Tasks: 租约/状态突变兜底码改为 `task_operation_failed`** (#330)：`POST /v1/tasks/:id/{claim,lease,release,claim-lost,decision,state}` 六处与 UI task 突变（`taskMutationError`）在未命中已映射域码时，对外码由 `502 {error:"smtp_error"}` 改为 `502 {error:"task_operation_failed"}`（状态码与 body 形状不变；**已映射域码与状态码一律不变**；`POST /v1/tasks` create 段 pre-create `502 {error:"smtp_error"}` 不变）。这些路径在写入阶段**会投递邮件**（lease journal 投递 / 审批终态投递 / remind / update 通知），**SMTP 投递失败是落入该兜底的成因之一**；该兜底同时收纳未映射/未分类失败（例如 `task_leases_disabled`〔`tasks-internal.ts:3051`〕、`invalid_approval_decision_event`〔`:4225`〕），旧码把它**单一归因 SMTP**、客户端据码判因必错，故改为中性码。客户端若按错误码判因需改判。**合并 ≠ 生效，生效于下次部署窗**。

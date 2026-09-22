@@ -32,6 +32,7 @@ import {
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { config } from './config.ts';
+import { errorCode } from './errors.ts';
 
 export const SEND_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const SEND_LOG_SCHEMA_VERSION = 1;
@@ -616,7 +617,7 @@ function inspectAndRepairSync(): SendLogRecord[] {
         // sidecar 权限失败不否决已隔离
       }
     } catch (err) {
-      sendLogHealthAlert('partial_isolate_failed', { error: (err as Error).message });
+      sendLogHealthAlert('partial_isolate_failed', { error: errorCode(err) });
       throw err;
     }
     sendLogHealthAlert('trailing_partial_isolated', {
@@ -761,7 +762,7 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
       if (liveLineCount < 0) liveLineCount = created ? 1 : -1;
       else liveLineCount += 1;
     } catch (err) {
-      sendLogHealthAlert('persist_failed', { error: (err as Error).message });
+      sendLogHealthAlert('persist_failed', { error: errorCode(err) });
       throw new SendLogPersistError(err);
     }
     return record;
@@ -858,7 +859,7 @@ export function startSendLogMaintenance(): void {
       }
     } catch (err) {
       if (!(err instanceof SendLogCorruptError)) {
-        sendLogHealthAlert('compact_failed', { error: (err as Error).message });
+        sendLogHealthAlert('compact_failed', { error: errorCode(err) });
       }
     }
   };

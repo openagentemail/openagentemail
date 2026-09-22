@@ -7,6 +7,7 @@
 
 import { config } from './config.ts';
 import { deleteMessagesBefore } from './imap.ts';
+import { errorCode } from './errors.ts';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -38,7 +39,7 @@ export function startRetentionLoop(): void {
     try {
       await sweepOnce();
     } catch (err) {
-      console.warn('[retention] sweep failed:', (err as Error).message);
+      console.warn('[retention] sweep failed:', errorCode(err));
     }
   };
 
