@@ -898,3 +898,21 @@ N/A。
 - I/O：`findTaskMessagesCalls` 1 / 2
 - Subagent：`8dc48cdf-91ff-438e-9fd7-b10e2d87dba3` → PASS
 - completion：`/home/ops/materials/308/completion-r1.1.md`
+
+## 2026-09-22 · w308 R1.2（fence age 起算点 = enqueuedAt）
+
+### 我们实现了哪些功能？
+1. `QueuedEvent.enqueuedAt`：`queueEventUntilIndexed` 用 `nowMs()` 记入队时刻。
+2. fence age：`nowFence - (enqueuedAt ?? sentAt)`；`sentAt` 语义零改（读侧 TTL/overlay 不动）。
+3. 测试钉「SMTP 耗时 16min → 立即 re-claim 仍 409」（旧 sentAt 起算会误放行）。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- 基线：`f285124` → 见本次 HEAD
+- focused：13 pass；回归 305/m2/core：158 pass
+- Subagent：`ba805120-57ce-4784-a648-043f47f1bc81` → PASS

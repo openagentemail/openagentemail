@@ -89,9 +89,10 @@ export const TASK_REMIND_COOLDOWN_MS = 15 * 1000;
 /** M1：公共读 lease overlay 重放寿命（自 sentAt）。只约束展示，不删 queued 行。 */
 export const LEASE_OVERLAY_MAX_LIFETIME_MS = 15 * 60 * 1000;
 /**
- * #308：写侧 pending-index fence 行龄上界（自 queued.sentAt）。
+ * #308：写侧 pending-index fence 行龄上界（自 queued.enqueuedAt，缺省回落 sentAt）。
  * 镜像 LEASE_OVERLAY_MAX_LIFETIME_MS / TASK_LEASES_OVERLAY_BOUND 的 15 分钟语义——
  * 超龄 release/renew 不再挡 claim（防回执永久丢失时进程内永久 409）；divergence 由 #305 读侧降级兜底。
+ * R1.2：起算点改为入队时刻，勿用 SMTP 前事件时间戳（慢发送会误超龄）。
  */
 export const CLAIM_FENCE_MAX_MS = LEASE_OVERLAY_MAX_LIFETIME_MS;
 
@@ -2276,6 +2277,12 @@ let claimFenceExpiredCount = 0;
 type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
+  /**
+   * #308 R1.2：入队墙钟（queueEventUntilIndexed 内 nowMs）。
+   * fence 行龄起算点——勿用 sentAt（事件时间戳在 SMTP await 前创建，慢发送会误超龄）。
+   * 缺省时 fence 回落 sentAt（兼容旧注入行）。
+   */
+  enqueuedAt?: number;
   lease?: LeaseEvent;
 };
 
@@ -2876,7 +2883,10 @@ function queueEventUntilIndexed(
   const list = queuedEvents.get(taskId) ?? [];
   list.push({
     message,
+    // sentAt：事件时间（读侧 TTL/overlay 窗口输入——语义零改）
     sentAt: Date.parse(message.date) || nowMs(),
+    // #308 R1.2：fence 行龄起算用入队时刻（SMTP accept 之后）
+    enqueuedAt: nowMs(),
     ...(lease ? { lease } : {}),
   });
   queuedEvents.set(taskId, list);
@@ -3405,7 +3415,8 @@ export async function claimTask(input: {
       if (candidates.length > 0) {
         const fresh: typeof candidates = [];
         for (const row of candidates) {
-          const age = nowFence - row.sentAt;
+          // #308 R1.2：行龄自入队时刻起算（非事件时间戳），防慢 SMTP 误超龄绕过
+          const age = nowFence - (row.enqueuedAt ?? row.sentAt);
           if (age <= CLAIM_FENCE_MAX_MS) {
             fresh.push(row);
           } else {

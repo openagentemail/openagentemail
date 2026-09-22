@@ -202,7 +202,7 @@ describe('#308 write-side fence · release 腿', () => {
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
       .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
 
-    // 推进超过 CLAIM_FENCE_MAX_MS → 超龄放行
+    // 推进超过 CLAIM_FENCE_MAX_MS（自 enqueuedAt）→ 超龄放行
     now = START + 1_000 + CLAIM_FENCE_MAX_MS + 1;
     resetAuditForTests();
     takeClaimFenceExpiredCountForTests();
@@ -219,6 +219,35 @@ describe('#308 write-side fence · release 腿', () => {
     });
     expect(audits[0]!.durationMs).toBeGreaterThan(CLAIM_FENCE_MAX_MS);
     expect(takeClaimFenceExpiredCountForTests()).toBe(1);
+  });
+
+  test('R1.2① SMTP 耗时 16min：enqueuedAt 新鲜 → 立即 re-claim 仍 409', async () => {
+    // 钉住 bug：若用 sentAt（SMTP 前创建）起算，慢发送后入队瞬间即超龄误放行
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      // 模拟慢但成功的 SMTP：事件 at 已钉死，发送期间墙钟推进 16min
+      if (input.headers?.['X-OA-Task-Lease-Event'] === 'release') {
+        now += CLAIM_FENCE_MAX_MS + 60_000;
+      }
+      return { messageId: `<308-slow-smtp-${sent.length}>` };
+    });
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), await parseSent(sent[0]!, 2)])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+
+    now = START + 1_000;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
+    // 此刻 now 已因 SMTP mock 跳到 ~START+1s+16min；sentAt 仍是释放前旧时刻，
+    // 但 enqueuedAt 为入队新时刻 → fence 仍挡
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
   });
 });
 
