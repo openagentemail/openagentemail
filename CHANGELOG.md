@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## v0.9.0 — 2026-09-22
+
+### Added
+
+- **API: scoped permissions —— `identities:create` / `messages:send` + 父子归属** (#275): identity token 可按 scope 授予能力。`identities:create` = 创建**归属子身份**（父域、子 ⊆ 父、白名单、配额 ≤50）；`messages:send` = 以自身或归属子身份发信；既有 `read:messages` 扩展为可读**自身 + 归属子信箱**（list/get/wait）。明确**不授予**：删除 / rotate / push-tier、`canNotifyUser`、给子再授 `identities:create`、伪造 `parentIdentity`、非归属 `from`。子 token 默认：父含 `read:messages` → 子 `[read:messages]`，否则 `[]`。admin / 无 scope / 既有 `read:messages` 路径**零行为变化**（`OPERATION_POLICIES` 仅追加两条）。MCP 与 REST 同源（MCP 执行回环 `/v1` 中间件栈，无直连 store 写路径），新 scope 一处登记两侧同时生效。
+- **Dashboard: 控制台 i18n —— es / ja / ko / zh-CN** (#137 B1-A #292 / B1-B #293 / B2 / 术语表 #299): 控制台 UI 引入字典 + 运行时（shell 槽位 + `resolveUiLocale` 单点）、call-site 全量迁移与**非循环完备性**测试（非白名单裸字面量即红）、四语字典键集全等、locale 选择走 cookie（不新增匿名端点）、`lang` 跟随实际服务内容、shell 响应补 `Vary: Accept-Language`。术语表落 `docs/i18n-glossary.md`（含落串纪律）。
+- **Docs: README 全面改版** (#307): agent 通信 / 任务交接 / 当前架构 / 品牌呈现重写（附 8k 中继实测数字与部署窗 recreate 教训）。
+
+### Fixed
+
+- **Tasks: 一条坏回执不再让整单读不出来** (#308): claim 加 **pending-index fence** —— release/renew 未被吸收时 re-claim 冲突降级为有界；fence age 起算点修正为**入队/接受时刻**（原按事件时间戳起算，上界等于没上界）。
+- **Tasks: 冲突 lease claim 降级时保持任务可读** (#305)。
+- **Headers: 容忍 MIME 重折** (#313): `X-OA-Task-Root` / `Approval-Digest` 经 MIME 中介重折后仍可解析（原直接拒收）。
+- **Webhooks: URL 拒绝详情 + ping 熔断审计对齐 + 折叠容忍** (#289 / #290 / #302)。
+- **Redeliver: 裸 `task_not_found` / `missing_task_id` 映射 404** (#280)。
+- **Tasks: 租约续期 / 回执去重路径索引化** (#285): 原 O(N²) 路径改键控集合（bench slope 0.78，基线 1.998；满链重建 68.6 ms vs 基线 57–70 s）。
+- **Security docs: 工具计数 20→25 + parity 测试** (#287)。
+
+### Changed / Ops
+
+- **Compose: ntfy 以非 root（uid 1000）运行、监听 :2587** (#278): 生成器与 healthcheck / 端口映射同步。**既有实例升级前需先 `chown` `/data/ntfy`，见 README 迁移注记。**
+- **CI: release 通道加固** (#284): `mcp-publisher` 钉 v1.8.1 + 内联 sha256 校验 + 架构守卫；另修幂等与浏览器用例阻断（#234 后续）。
+- **RFC-0002 联邦签名任务** (#59): 纯文档，Status 保持 **Proposed**——批准前修订清单未清空前不得升 Accepted。
+
 ## v0.8.0 — 2026-09-20
 
 ### Added
