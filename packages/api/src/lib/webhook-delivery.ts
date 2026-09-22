@@ -185,6 +185,18 @@ export const MAX_RETRY_SCHEDULE_ATTEMPTS = 11;
 export const MAX_PING_ATTEMPTS = 3;
 export const RETRY_HORIZON_SEC = 259200; // 72 hours in seconds
 
+/**
+ * 执行前 72h horizon 检查（#294 / RFC §8.3）。
+ * 约束的是「本次重试排期」是否超出 firstAttemptAt+72h，而非作业恰在何时被定时器触发。
+ * 因此用 nextAttemptAt 判界：计划钉在恰好 +72h 时，即便 now=计划+ε 也不得临门丢弃。
+ */
+export function isScheduledAttemptBeyondRetryHorizon(
+  nextAttemptAt: number,
+  firstAttemptAt: number,
+): boolean {
+  return nextAttemptAt > firstAttemptAt + RETRY_HORIZON_SEC * 1000;
+}
+
 /** Effective attempt cap for this event type: ping is 3, others follow WEBHOOK_MAX_ATTEMPTS. */
 export function maxAttemptsForEventType(type: WebhookEventType): number {
   if (type === 'webhook.ping') return MAX_PING_ATTEMPTS;
@@ -2225,8 +2237,8 @@ class WebhookDeliveryQueue {
       delete job.probeTokenKey;
     }
 
-    // Check item 2: 72h horizon check for job
-    if (now > job.firstAttemptAt + RETRY_HORIZON_SEC * 1000) {
+    // Check item 2: 72h horizon — 约束排期（nextAttemptAt），非执行墙钟 now（#294 1b'）
+    if (isScheduledAttemptBeyondRetryHorizon(job.nextAttemptAt, job.firstAttemptAt)) {
       this.jobs.delete(key);
       appendDeliveryLogRow({
         ts: new Date().toISOString(),

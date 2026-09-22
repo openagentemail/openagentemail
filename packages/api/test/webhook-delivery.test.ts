@@ -27,6 +27,7 @@ const {
   formatMailPayload,
   formatPingPayload,
   isTerminalDeliveryRow,
+  isScheduledAttemptBeyondRetryHorizon,
   getLatestDeliveryForWebhook,
   latestDeliveryByWebhookId,
   parseRetryAfterSeconds,
@@ -51,6 +52,8 @@ const {
   stopWebhookMaintenance,
   validateWebhookUrlResolution,
   validateWebhookUrlStatic,
+  RETRY_HORIZON_SEC,
+  RETRY_SCHEDULE_OFFSETS_SEC,
 } = await import('../src/lib/webhook-delivery.ts');
 type WebhookDeliveryLogRow = import('../src/lib/webhook-delivery.ts').WebhookDeliveryLogRow;
 
@@ -168,6 +171,323 @@ describe('webhook-delivery: Retry Schedule & Jitter (§8.3)', () => {
     expect(parseRetryAfterSeconds('-1')).toBeUndefined();
     expect(parseRetryAfterSeconds('')).toBeUndefined();
     expect(parseRetryAfterSeconds(null)).toBeUndefined();
+  });
+
+  // #294：pin 值一字不动（OFFSETS[10]=259200）
+  test('#294 ① pin 值回归：OFFSETS[10] 仍为恰好 +259200s', () => {
+    expect(RETRY_SCHEDULE_OFFSETS_SEC[10]).toBe(259200);
+    expect(RETRY_HORIZON_SEC).toBe(259200);
+    const start = 1_000_000;
+    expect(calculateNextAttemptTime(10, start, { randomFn: () => 0.99 })).toBe(start + 259200 * 1000);
+  });
+
+  // #294：纯函数打中 :2229 同源判据
+  test('#294 纯函数：计划=+72h 不超窗；计划=+72h+1s 超窗', () => {
+    const first = 1_000_000;
+    const horizonMs = first + RETRY_HORIZON_SEC * 1000;
+    expect(isScheduledAttemptBeyondRetryHorizon(horizonMs, first)).toBe(false);
+    expect(isScheduledAttemptBeyondRetryHorizon(horizonMs + 1000, first)).toBe(true);
+    // 负控：恰好等于不超；小于不超
+    expect(isScheduledAttemptBeyondRetryHorizon(horizonMs - 1, first)).toBe(false);
+  });
+
+  // #294 ⑤ clamp 回归：抖动路径仍钳到 horizon-1；Retry-After 路径同钳
+  test('#294 ⑤ clamp 回归：抖动与 Retry-After 不得越出 horizon-1', () => {
+    const start = 1_000_000;
+    // attempt 10 最大抖动仍远低于 horizon
+    const t10Hi = calculateNextAttemptTime(9, start, { randomFn: () => 1.0 });
+    expect(t10Hi).toBeLessThan(start + RETRY_HORIZON_SEC * 1000);
+    // Retry-After 路径钳到 first+(horizon-1)s
+    const lateArrival = start + (RETRY_HORIZON_SEC - 10) * 1000;
+    const clamped = calculateNextAttemptTime(1, start, {
+      retryAfterSec: 3600,
+      receivedAtMs: lateArrival,
+    });
+    expect(clamped).toBe(start + (RETRY_HORIZON_SEC - 1) * 1000);
+  });
+});
+
+describe('webhook-delivery: #294 retry horizon execute-before check (1b\')', () => {
+  beforeEach(setupTestDir);
+  afterEach(() => {
+    deliveryQueue.cancelAll();
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+
+  /** 构造可立即触发的 schedule job（nextAttemptAt≈now，延迟 0）。 */
+  function scheduleHorizonJob(opts: {
+    sub: WebhookSubscription;
+    eventId: string;
+    firstAttemptAt: number;
+    nextAttemptAt: number;
+    attempt: number;
+    payloadBuilder?: (currentSub: WebhookSubscription) => { body: string; sensitive: boolean };
+  }): void {
+    deliveryQueue.schedule({
+      webhookId: opts.sub.id,
+      eventId: opts.eventId,
+      runId: 'run_0',
+      deliveryId: `dlv_${opts.eventId}`,
+      type: 'mail.received',
+      payloadBuilder:
+        opts.payloadBuilder ??
+        (() => ({
+          body: JSON.stringify({ id: opts.eventId, type: 'mail.received' }),
+          sensitive: false,
+        })),
+      firstAttemptAt: opts.firstAttemptAt,
+      attempt: opts.attempt,
+      nextAttemptAt: opts.nextAttemptAt,
+      replay: false,
+      address: opts.sub.address,
+      messageId: '1',
+      uidValidity: 1,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt: new Date(opts.firstAttemptAt).toISOString(),
+    });
+  }
+
+  // #294 ② 新行为：计划=+259200s 且 now=+259200s+ε → 执行前检查通过
+  test('#294 ② 计划=+72h 且 now=+72h+ε：执行前检查通过（不丢）', async () => {
+    const hits: number[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async () => {
+        hits.push(Date.now());
+        return new Response('ok', { status: 200 });
+      },
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      // first 在 72h 前；计划钉在 first+72h；定时器触发时 now=计划+ε
+      // −1 保证 ε≥1ms 确定性；判据区分力不变（旧判据 now>horizon 仍真、新判据 nextAttemptAt>horizon 仍假）
+      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
+      const nextAttemptAt = firstAttemptAt + RETRY_HORIZON_SEC * 1000;
+      const eventId = 'evt_294_pass_eps';
+      scheduleHorizonJob({
+        sub,
+        eventId,
+        firstAttemptAt,
+        nextAttemptAt,
+        attempt: 11,
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.outcome === 'success' && r.attempt === 11,
+          ),
+        3000,
+      );
+      const rows = readAllDeliveryLogRows().filter((r) => r.eventId === eventId);
+      expect(rows.some((r) => r.reason === 'retry_horizon_exceeded')).toBe(false);
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      // 实测：触发时墙钟已越过计划（ε>0），旧判据 now>horizon 会误杀
+      expect(hits[0]!).toBeGreaterThan(nextAttemptAt);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  // #294 ② 负控：计划=+259201s → 仍丢
+  test('#294 ② 负控：计划=+72h+1s → retry_horizon_exceeded', async () => {
+    const hits: number[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async () => {
+        hits.push(1);
+        return new Response('ok', { status: 200 });
+      },
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000;
+      // 计划越出 1s → 必须丢
+      const nextAttemptAt = firstAttemptAt + (RETRY_HORIZON_SEC + 1) * 1000;
+      const eventId = 'evt_294_neg_plus1';
+      scheduleHorizonJob({
+        sub,
+        eventId,
+        firstAttemptAt,
+        nextAttemptAt,
+        attempt: 11,
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+          ),
+        3000,
+      );
+      const row = readAllDeliveryLogRows().find(
+        (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+      );
+      expect(row?.outcome).toBe('permanent');
+      expect(row?.attempt).toBe(11);
+      expect(hits).toHaveLength(0);
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  // #294 ③ 直打 retry_horizon_exceeded 路径（原零覆盖）
+  test('#294 ③ horizon 超限路径：直打 retry_horizon_exceeded', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://294-horizon.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000 - 60_000;
+    const nextAttemptAt = firstAttemptAt + RETRY_HORIZON_SEC * 1000 + 30_000;
+    const eventId = 'evt_294_horizon_direct';
+    expect(isScheduledAttemptBeyondRetryHorizon(nextAttemptAt, firstAttemptAt)).toBe(true);
+    scheduleHorizonJob({
+      sub,
+      eventId,
+      firstAttemptAt,
+      nextAttemptAt,
+      attempt: 5,
+    });
+    await waitUntil(
+      () =>
+        readAllDeliveryLogRows().some(
+          (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+        ),
+      3000,
+    );
+    const row = readAllDeliveryLogRows().find((r) => r.eventId === eventId)!;
+    expect(row.outcome).toBe('permanent');
+    expect(row.reason).toBe('retry_horizon_exceeded');
+    expect(row.nextAttemptAt).toBeNull();
+    expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+  });
+
+  // #294 ④ 端到端：第 11 次失败 → 不重排 → dead-letter（terminal retryable）
+  test('#294 ④ 第 11 次执行失败 → calculateNextAttemptTime(11)=null → 不重排', async () => {
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async () => new Response('fail', { status: 500 }),
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    // 提高阈值，避免 threshold 把 retryable 改成 permanent/webhook_disabled
+    const prevThreshold = config.webhooks.disableThreshold;
+    (config.webhooks as any).disableThreshold = 100;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000;
+      const nextAttemptAt = firstAttemptAt + RETRY_HORIZON_SEC * 1000;
+      const eventId = 'evt_294_e2e_dl';
+      expect(calculateNextAttemptTime(11, firstAttemptAt)).toBeNull();
+      scheduleHorizonJob({
+        sub,
+        eventId,
+        firstAttemptAt,
+        nextAttemptAt,
+        attempt: 11,
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.attempt === 11 && r.outcome === 'retryable',
+          ),
+        3000,
+      );
+      const row = readAllDeliveryLogRows().find(
+        (r) => r.eventId === eventId && r.attempt === 11 && r.outcome === 'retryable',
+      )!;
+      expect(row.nextAttemptAt).toBeNull();
+      expect(isTerminalDeliveryRow(row)).toBe(true);
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+      expect(row.reason).not.toBe('retry_horizon_exceeded');
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      (config.webhooks as any).disableThreshold = prevThreshold;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  // #294 ⑤ 重排超窗仍终态（:2271 pool 饱和路径）
+  test('#294 ⑤ 重排超窗：pool 饱和 rescheduleAt 越窗 → retry_horizon_exceeded', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://294-resched.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const oldMax = config.webhooks.maxConcurrent;
+    const oldPoolRetry = config.webhooks.poolRetryMs;
+    (config.webhooks as any).maxConcurrent = 1;
+    (config.webhooks as any).poolRetryMs = 5_000;
+    expect(deliveryLimiter.acquireSlot('blocker_294_resched')).toBe(true);
+    try {
+      // first 距今几乎到窗；poolRetry 5s 会使 rescheduleAt 越窗
+      const firstAttemptAt = Date.now() - RETRY_HORIZON_SEC * 1000 + 1_000;
+      const nextAttemptAt = Date.now(); // 立即触发 → 撞 pool → 重排检查
+      const eventId = 'evt_294_resched_over';
+      scheduleHorizonJob({
+        sub,
+        eventId,
+        firstAttemptAt,
+        nextAttemptAt,
+        attempt: 3,
+      });
+      await waitUntil(
+        () =>
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+          ),
+        3000,
+      );
+      const row = readAllDeliveryLogRows().find((r) => r.eventId === eventId)!;
+      expect(row.outcome).toBe('permanent');
+      expect(row.reason).toBe('retry_horizon_exceeded');
+      expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+    } finally {
+      deliveryQueue.cancelAll();
+      deliveryLimiter.releaseSlot('blocker_294_resched');
+      (config.webhooks as any).maxConcurrent = oldMax;
+      (config.webhooks as any).poolRetryMs = oldPoolRetry;
+    }
   });
 });
 
