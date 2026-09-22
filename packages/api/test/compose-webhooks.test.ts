@@ -904,20 +904,37 @@ const MARK_SEEN_COMPOSE_KEYS = [
   'MARK_SEEN_RATE_WINDOW_MS',
 ] as const;
 
+/** 纯函数：两变量均以 SEND 同形插值出现才算转发到位（负控可删行验证）。 */
+function composeForwardsMarkSeenRate(text: string): boolean {
+  return (
+    /MARK_SEEN_RATE_LIMIT:\s*\$\{MARK_SEEN_RATE_LIMIT:-300\}/.test(text) &&
+    /MARK_SEEN_RATE_WINDOW_MS:\s*\$\{MARK_SEEN_RATE_WINDOW_MS:-300000\}/.test(text)
+  );
+}
+
 describe('#244 R1 Compose mark-seen rate env forwarding', () => {
   test('两份 compose 均转发 MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS（同 SEND 形）', () => {
     for (const variant of VARIANTS) {
       const text = readFileSync(join(REPO_DIR, variant.file), 'utf8');
-      expect(text).toMatch(
-        /MARK_SEEN_RATE_LIMIT:\s*\$\{MARK_SEEN_RATE_LIMIT:-300\}/,
-      );
-      expect(text).toMatch(
-        /MARK_SEEN_RATE_WINDOW_MS:\s*\$\{MARK_SEEN_RATE_WINDOW_MS:-300000\}/,
-      );
+      expect(composeForwardsMarkSeenRate(text)).toBe(true);
       // 与 SEND_RATE_LIMIT 同在 api.environment 段（非注释行）
       for (const key of MARK_SEEN_COMPOSE_KEYS) {
         expect(text).toMatch(new RegExp(`^\\s+${key}:\\s*\\$\\{`, 'm'));
       }
+    }
+  });
+
+  test('负控：从 compose 文本删掉任一 MARK_SEEN 行 → 转发断言必假（防装饰）', () => {
+    for (const variant of VARIANTS) {
+      const text = readFileSync(join(REPO_DIR, variant.file), 'utf8');
+      expect(composeForwardsMarkSeenRate(text)).toBe(true);
+      const withoutLimit = text.replace(/^[ \t]*MARK_SEEN_RATE_LIMIT:[^\n]*\n?/m, '');
+      expect(composeForwardsMarkSeenRate(withoutLimit)).toBe(false);
+      const withoutWindow = text.replace(
+        /^[ \t]*MARK_SEEN_RATE_WINDOW_MS:[^\n]*\n?/m,
+        '',
+      );
+      expect(composeForwardsMarkSeenRate(withoutWindow)).toBe(false);
     }
   });
 
