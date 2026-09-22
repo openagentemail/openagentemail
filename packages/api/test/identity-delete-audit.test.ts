@@ -302,6 +302,37 @@ describe('#245 R5 identity.delete address 审计上限', () => {
     // 默认 256 路径不得再套在 address 上
     expect(hitOver.address!.length).toBeGreaterThan(256);
   });
+
+  // #4512 附条件②：统一 320 后，≤256 输入须与旧默认 256 scrub 逐字节一致
+  test('≤256 地址：落盘与传入逐字节相同（与旧默认 256 scrub 结果一致）', () => {
+    const short = 'short-r5@test.example';
+    expect(short.length).toBeLessThanOrEqual(256);
+    recordAuditEvent({
+      event: 'identity.delete',
+      outcome: 'ok',
+      address: short,
+      actor: 'admin',
+    });
+    const hitShort = readAuditEvents({ event: 'identity.delete', limit: 1 })[0]!;
+    expect(hitShort.address).toBe(short);
+    expect(Buffer.from(hitShort.address!).equals(Buffer.from(short))).toBe(true);
+    expect(hitShort.address).toBe(scrubAuditField(short, 256));
+
+    resetAuditForTests();
+    const exact256 = `u${'v'.repeat(242)}@test.example`; // 1+242+13 = 256
+    expect(exact256.length).toBe(256);
+    recordAuditEvent({
+      event: 'identity.delete',
+      outcome: 'ok',
+      address: exact256,
+      actor: 'admin',
+    });
+    const hit256 = readAuditEvents({ event: 'identity.delete', limit: 1 })[0]!;
+    expect(hit256.address).toBe(exact256);
+    expect(hit256.address!.length).toBe(256);
+    expect(Buffer.from(hit256.address!).equals(Buffer.from(exact256))).toBe(true);
+    expect(hit256.address).toBe(scrubAuditField(exact256, 256));
+  });
 });
 
 describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {

@@ -29,9 +29,9 @@ import { config } from './config.ts';
 export const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
 
 /**
- * 审计 `address` 字段上限（仅用于 recordAuditEvent 的 address 分支）。
- * 覆盖受支持身份地址：63(localpart)+1+253(domain)=317；略留余量到 320。
- * 默认 scrub 256 会静默截断长地址，导致 identity.delete 等行不可辨识。
+ * 审计 `address` 分支统一上限（仅用于 `recordAuditEvent` 的 address 字段；不按事件特判）。
+ * 推导：受支持身份最长 63(localpart)+1+253(domain)=317，加余量 → 320。
+ * 抬升前默认 scrub 256 会静默截断合法长地址；≤256 的输入落盘结果与抬升前逐字节不变。
  */
 export const AUDIT_ADDRESS_MAX_LEN = 320;
 
