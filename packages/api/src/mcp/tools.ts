@@ -663,15 +663,18 @@ export function registerOpenAgentEmailTools(
       } catch (err) {
         // 仅 task_create：已创建后失败补安全重试口径；其他工具不受 fail() 全局耦合。
         if (err instanceof ApiError && err.taskId) {
+          // 显式字段名重包装；message 文案与各字段语义逐字不变
           throw new ApiError(
             err.status,
             `${err.message} taskId=${err.taskId}. Task already created — use task_get or task_list to check status; do not call task_create again.`,
-            err.timeoutSec,
-            err.kind,
-            err.waitHeaderSec,
-            err.bodyError,
-            err.errorBody,
-            err.taskId,
+            {
+              timeoutSec: err.timeoutSec,
+              kind: err.kind,
+              waitHeaderSec: err.waitHeaderSec,
+              bodyError: err.bodyError,
+              errorBody: err.errorBody,
+              taskId: err.taskId,
+            },
           );
         }
         throw err;
