@@ -970,3 +970,55 @@ N/A。
 - 基线：`5b7d8d51`（#331）
 - 原始全量输出：`/home/ops/materials/err-normalize/bun-test-full-20260922T195904Z.txt`
 - sha256：`d9b503b094bc686259f336e0ea4f93f998f8cd645b9e0b8eca44f21e6219f06e`
+
+## 2026-09-22 · w330（#330 兜底码语义化）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/routes/tasks.ts` 六处租约/状态路由兜底：`claim`/`lease`/`release`/`claim-lost`/`decision`/`state` 的 `502 {error:'smtp_error'}` → `task_operation_failed`（create 段 `:238` 保留）。
+2. `packages/api/src/routes/ui.ts:295` UI `taskMutationError` 同改；已映射 404/409/429/403/400/journal 503 不动。
+3. 正控+守门负控：`test/task-operation-failed-fallback.test.ts`（7 正控 + 六路由/UI 已映射码 `toEqual`）；对齐 `task-lease-route-contract` / `err-normalize` / `ui-tasks` / `tasks` / `r3-parent-child` 既有期望。
+4. `CHANGELOG.md` Unreleased → Changed 一条；矩阵与 website 逐字表见完工件（不入 docs）。
+5. **未碰**：`tasks-internal.ts`、#332 的 31 处、`mailserver-reconnect.ts`、create `:238`。
+
+### 我们遇到了哪些错误？
+1. 工作树初无 `node_modules` → `Cannot find package 'hono'`。
+2. 全量首跑：两处既有断言仍锁 `smtp_error`（`tasks.test.ts` #241 state 兜底；`r3-parent-child-routes.test.ts` imap_write_failed）+ `#206` 25s 超时 → 3 fail。
+3. 对齐后全量再跑：`2185 pass / 9 skip / 1 fail`——唯一红改为 `#272 dist-build-lock` 压力用例超时（预存墙钟/锁债族，非本卡引入；**未** rerun-to-green）。
+
+### 我们是如何解决这些错误的？
+1. `cd packages/api && bun install`（锁文件未改）。
+2. 将上述两处期望改为 `task_operation_failed`（与生产兜底对齐）；本卡相关 focused 全绿。
+3. 如实落盘两份全量原始输出（首跑 3 红 + 对齐后 1 红），禁重跑刷绿。
+
+### 基线与证据
+- 基线：`bd4678b3`（= main / #333）
+- 功能 commit：`5d82a310`
+- focused：`/home/ops/materials/330/focused-20260922T212949Z.txt`
+- 全量首跑：`bun-test-full-20260922T212956Z.txt` sha256 `90b71d9f…`
+- 全量对齐后：`bun-test-full-postalign-20260922T213257Z.txt` sha256 `e1fef46d…`
+
+## 2026-09-22 · w330 收尾（自审 + PR）
+
+### 我们实现了哪些功能？
+1. PR #334 已开（未合并）：https://github.com/openagentemail/openagentemail/pull/334
+2. #330 issue 已贴矩阵摘要 + 证据路径。
+3. 完工件：`/home/ops/materials/330/completion.md`（矩阵 + website 逐字表 + 证据 sha256）。
+
+### 我们遇到了哪些错误？
+1. 无新增施工错误。
+
+### 我们是如何解决这些错误的？
+1. Subagent 独立自审 `077123c5-e23b-49d5-8fbd-7a4367a86800` → **PASS_WITH_NOTES**（红线合规；吞码清单与源码一致）。
+
+## 2026-09-22 · w330 R2（Codex P2 文档口径订正）
+
+### 我们实现了哪些功能？
+1. `CHANGELOG.md` Unreleased #330 条目：删除错误「这些路径不发 SMTP」；改为三点准确口径（写入会投递邮件 / SMTP 失败是兜底成因之一 / 同时收纳未映射域码故不可单一归因 SMTP）。
+2. `/home/ops/materials/330/completion.md` §6 website 表最后一行「含义」单元格同步订正（交 Studio 真源须准）。
+3. **生产码 / 测试断言一字未动**（测试注释无「不发 SMTP」照抄）。
+
+### 我们遇到了哪些错误？
+1. 错源在 R0/卡面「这些路由不发任何邮件」——FC 认账；Codex P2 属实。
+
+### 我们是如何解决这些错误的？
+1. 仅修 CHANGELOG + 完工件表行两处文字；独立 commit；Progress 另起独立 commit；重绑六格。

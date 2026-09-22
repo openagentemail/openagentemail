@@ -121,8 +121,8 @@ describe('#83 lease 路由/core 契约', () => {
       const app = appFor({ kind: 'identity', address: RECIPIENT }, service);
       const renew = await post(app, 'lease', { leaseToken: 'opaque' });
       const release = await post(app, 'release', { leaseToken: 'opaque' });
-      expect(renew).toEqual({ status: 502, body: { error: 'smtp_error' } });
-      expect(release).toEqual({ status: 502, body: { error: 'smtp_error' } });
+      expect(renew).toEqual({ status: 502, body: { error: 'task_operation_failed' } });
+      expect(release).toEqual({ status: 502, body: { error: 'task_operation_failed' } });
     });
   });
 

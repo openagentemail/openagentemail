@@ -382,7 +382,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
     .post('/:id/lease', async (c) => {
@@ -424,7 +424,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] renew failed');
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
     .post('/:id/release', async (c) => {
@@ -466,7 +466,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] release failed');
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
     .post('/:id/claim-lost', async (c) => {
@@ -494,7 +494,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           || code === 'task_leases_pending_journal_disabled'
         ) return c.json({ error: code }, 409);
         console.warn('[task] claim-lost failed:', code);
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
     .post('/:id/decision', async (c) => {
@@ -545,7 +545,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: code }, 409);
         }
         console.warn('[task] decision failed:', code);
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
     .post('/:id/state', async (c) => {
@@ -596,7 +596,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: 'forbidden: task participant required' }, 403);
         }
         console.warn('[task] update failed:', (err as Error).message);
-        return c.json({ error: 'smtp_error' }, 502);
+        return c.json({ error: 'task_operation_failed' }, 502);
       }
     });
 }

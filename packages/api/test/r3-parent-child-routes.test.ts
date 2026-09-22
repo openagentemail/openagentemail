@@ -342,7 +342,7 @@ test('R3 journal unavailable maps to 503 on state and decision read and mutation
   const smtpMutation = { ...tasks.taskService, getForAuthorization: async () => parent, update: async () => { throw new Error('imap_write_failed'); } } as TaskService;
   const smtpRes = await post(app(smtpMutation), `/v1/tasks/${PARENT}/state`, { from: A, state: 'working' });
   expect(smtpRes.status).toBe(502);
-  expect(await smtpRes.json()).toEqual({ error: 'smtp_error' });
+  expect(await smtpRes.json()).toEqual({ error: 'task_operation_failed' });
 
   const healthy = { ...tasks.taskService, getForAuthorization: async () => parent } as TaskService;
   const forbidden = await post(app(healthy, C), `/v1/tasks/${PARENT}/state`, { from: C, state: 'working' });

@@ -319,7 +319,7 @@ describe('#241 journalUnavailable typeof 守卫', () => {
       });
       // 硬要求：钉死具体兜底码 502，不许只写 not.toBe(500)
       expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ error: 'smtp_error' });
+      expect(await res.json()).toEqual({ error: 'task_operation_failed' });
     }
   });
 
