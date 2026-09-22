@@ -486,6 +486,17 @@ export function createIdentity(input: {
   // 同址幂等：已存在则返回 null（路由层映射为 address_exists）。
   if (identities.some((i) => i.address === address)) return null;
 
+  // #275 R3 F12b：地址空闲时清理仍指向该址的悬空归属（F2 前存量自愈），与新身份同一次 save
+  let orphaned = 0;
+  const cleaned = identities.map((entry) => {
+    if (entry.parentIdentity === address) {
+      orphaned++;
+      const { parentIdentity: _removed, ...rest } = entry;
+      return rest as Identity;
+    }
+    return entry;
+  });
+
   const issueToken = input.issueToken !== false;
   let token = '';
   let tokenHash: string | undefined;
@@ -505,8 +516,15 @@ export function createIdentity(input: {
     ...(input.scopes !== undefined ? { scopes: [...input.scopes] } : {}),
     ...(parent ? { parentIdentity: parent } : {}),
   };
-  identities.push(identity);
-  save(identities);
+  cleaned.push(identity);
+  save(cleaned);
+  if (orphaned > 0) {
+    recordAuditEvent({
+      event: 'identity.parent_orphaned',
+      address,
+      outcome: 'ok',
+    });
+  }
   return { identity, token };
 }
 
@@ -583,7 +601,7 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
  * 同步级联吊销该身份下全部 OAuth grant + access/refresh 与 Delegation grants。
- * #275 R1：删除前清除所有子身份的 parentIdentity（系统级断开归属，非转移）。
+ * #275 R1/R3：cascades 成功后再构建孤儿副本（不 mutate 缓存对象），防 cascade 失败污染。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
@@ -591,19 +609,10 @@ export function deleteIdentity(address: string): boolean {
   const existed = identities.some((i) => i.address === needle);
   if (!existed) return false;
 
-  // 先断开归属：子存活，parentIdentity 字段清除（防同址重建收养）
-  let orphaned = 0;
-  for (const identity of identities) {
-    if (identity.parentIdentity === needle) {
-      delete identity.parentIdentity;
-      orphaned++;
-    }
-  }
-  const kept = identities.filter((i) => i.address !== needle);
-
   // Webhook cascade first (delete + cancel in-flight + audit). Identity save
   // after that: a failed identity write is retryable, a live subscription after
   // the identity is gone is an exfil channel (§10.5).
+  // #275 R3 F14：cascades 全部成功之前不改任何 Identity 缓存对象
   const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
   for (const wh of deletedWebhooks) {
     if (webhookCancelCallback) {
@@ -624,6 +633,17 @@ export function deleteIdentity(address: string): boolean {
   notifyRouteDeleteCallback?.(needle);
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
+
+  // cascades 成功后：构建 kept（孤儿副本，不 mutate 原对象）
+  let orphaned = 0;
+  const kept = identities
+    .filter((i) => i.address !== needle)
+    .map((i) => {
+      if (i.parentIdentity !== needle) return i;
+      orphaned++;
+      const { parentIdentity: _removed, ...rest } = i;
+      return rest as Identity;
+    });
   save(kept);
   // 归属断开审计：纯标识（被删父地址）；子地址不落载荷
   if (orphaned > 0) {

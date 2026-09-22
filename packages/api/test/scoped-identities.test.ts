@@ -979,4 +979,184 @@ describe('Issue #275: scoped identities create + parent ownership', () => {
       });
     });
   });
+
+  describe('#275 R3 闸变修复', () => {
+    test('F12a: 悬空子 rotate → 400；正常子 rotate 不回归', async () => {
+      const dangling = createIdentity({
+        localpart: 'r3-f12a-dangling',
+        parentIdentity: 'missing-parent@test.example',
+        scopes: ['read:messages'],
+      })!;
+      const bad = await app.request(`/v1/identities/${dangling.identity.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toEqual({
+        error: 'invalid_request',
+        details: 'child identity has no existing parent identity',
+      });
+
+      const parent = await mintParent('r3-f12a-parent', [
+        'identities:create',
+        'read:messages',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r3-f12a-child' }),
+      });
+      expect(childRes.status).toBe(201);
+      const childAddr = ((await childRes.json()) as { address: string }).address;
+      const ok = await app.request(`/v1/identities/${childAddr}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(ok.status).toBe(200);
+    });
+
+    test('F12b: create 同址自愈悬空归属；新身份零继承', async () => {
+      const reclaimLp = 'r3-f12b-reclaim';
+      const reclaimAddr = `${reclaimLp}@${config.domain}`;
+      const stale = createIdentity({
+        localpart: 'r3-f12b-stale',
+        parentIdentity: reclaimAddr,
+        scopes: ['read:messages'],
+      })!;
+      expect(findIdentity(stale.identity.address)?.parentIdentity).toBe(reclaimAddr);
+
+      const created = createIdentity({
+        localpart: reclaimLp,
+        scopes: ['read:messages', 'messages:send', 'identities:create'],
+      })!;
+      expect(created.identity.address).toBe(reclaimAddr);
+      expect(findIdentity(stale.identity.address)?.parentIdentity).toBeUndefined();
+
+      const list = await app.request(`/v1/messages?address=${stale.identity.address}`, {
+        headers: { authorization: `Bearer ${created.token}` },
+      });
+      expect(list.status).toBe(403);
+      const send = await app.request('/v1/send', {
+        method: 'POST',
+        headers: authJson(created.token),
+        body: JSON.stringify({
+          from: stale.identity.address,
+          to: 'rcpt@example.net',
+          subject: 'no-adopt',
+          text: 'x',
+        }),
+      });
+      expect(send.status).toBe(403);
+
+      // ③ 无悬空时 create 行为不变
+      const plain = createIdentity({ localpart: 'r3-f12b-plain' })!;
+      expect(plain.identity.parentIdentity).toBeUndefined();
+      expect(findIdentity(plain.identity.address)?.address).toBe(plain.identity.address);
+    });
+
+    test('F13: body 后重解析 — 删父→401；scopes 收窄后旧能力不放行', async () => {
+      const parent = await mintParent('r3-f13-parent', [
+        'identities:create',
+        'read:messages',
+        'messages:send',
+      ]);
+
+      // ② 分块慢传：body 读完前删父 → 重解析 401，无子产生
+      const encoder = new TextEncoder();
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode('{"localpart":"r3-f13-slow"'));
+          await gate;
+          controller.enqueue(encoder.encode('}'));
+          controller.close();
+        },
+      });
+      const slowPromise = app.request('/v1/identities', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${parent.token}`,
+          'content-type': 'application/json',
+        },
+        body: stream,
+      });
+      await Bun.sleep(30);
+      expect(deleteIdentity(parent.address)).toBe(true);
+      release();
+      const slowRes = await slowPromise;
+      expect(slowRes.status).toBe(401);
+      expect(await slowRes.json()).toEqual({ error: 'unauthorized' });
+      expect(findIdentity(`r3-f13-slow@${config.domain}`)).toBeUndefined();
+
+      // ③ 父 scopes 收窄（当前 live scopes 无 messages:send）→ 403
+      const narrow = await mintParent('r3-f13-narrow', [
+        'identities:create',
+        'read:messages',
+      ]);
+      const exceed = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(narrow.token),
+        body: JSON.stringify({
+          localpart: 'r3-f13-exceed',
+          scopes: ['messages:send'],
+        }),
+      });
+      expect(exceed.status).toBe(403);
+      expect(await exceed.json()).toEqual({
+        error: 'forbidden: scope exceeds parent permissions',
+      });
+
+      // ① 正常创建回归
+      const ok = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(narrow.token),
+        body: JSON.stringify({ localpart: 'r3-f13-ok' }),
+      });
+      expect(ok.status).toBe(201);
+    });
+
+    test('F14: cascade 失败不污染子缓存；正常删除仍清归属', async () => {
+      const { invalidateDelegationStoreCache } = await import('../src/lib/delegations.ts');
+      const parent = createIdentity({
+        localpart: 'r3-f14-parent',
+        scopes: ['identities:create', 'read:messages'],
+      })!;
+      const child = createIdentity({
+        localpart: 'r3-f14-child',
+        parentIdentity: parent.identity.address,
+        scopes: ['read:messages'],
+      })!;
+      expect(findIdentity(child.identity.address)?.parentIdentity).toBe(
+        parent.identity.address,
+      );
+
+      // ① cascade 失败：delegations.json 损坏 → 抛错；子对象未改
+      const delgPath = join(config.dataDir, 'delegations.json');
+      writeFileSync(delgPath, 'CORRUPTED_JSON{', { mode: 0o600 });
+      invalidateDelegationStoreCache();
+      expect(() => deleteIdentity(parent.identity.address)).toThrow(
+        'delegation_store_corrupt',
+      );
+      expect(findIdentity(parent.identity.address)).toBeDefined();
+      expect(findIdentity(child.identity.address)?.parentIdentity).toBe(
+        parent.identity.address,
+      );
+
+      // 修复 store 后正常删除
+      writeFileSync(
+        delgPath,
+        JSON.stringify({ schemaVersion: 1, grants: [] }, null, 2),
+        { mode: 0o600 },
+      );
+      invalidateDelegationStoreCache();
+      expect(deleteIdentity(parent.identity.address)).toBe(true);
+      expect(findIdentity(parent.identity.address)).toBeUndefined();
+      expect(findIdentity(child.identity.address)?.parentIdentity).toBeUndefined();
+    });
+  });
 });

@@ -19,9 +19,10 @@ import {
   type PushContentTier,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
-import { getAuth, getAttribution } from '../lib/auth.ts';
+import { getAuth, getAttribution, resolveAccessToken } from '../lib/auth.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
 import { clientIp } from '../lib/net.ts';
+import { resolveResourceUri } from '../lib/oauth-url.ts';
 
 function classifyScopeChange(
   prev: string[] | undefined,
@@ -261,11 +262,44 @@ export const identitiesRoute = new Hono()
 
     // —— 非 admin 分支：归属子创建（规则写死）——
     if (!isAdmin) {
+      // #275 R3 F13：body 读完后重解析凭据，防慢传期间父被删/rotate 的 stale scopes 快照
+      const header = c.req.header('authorization') ?? '';
+      const bearer = header.startsWith('Bearer ')
+        ? header.slice('Bearer '.length).trim()
+        : '';
+      if (!bearer) {
+        return c.json({ error: 'unauthorized' }, 401);
+      }
+      const origin = new URL(c.req.url).origin;
+      let resource: string | undefined;
+      try {
+        resource = resolveResourceUri(origin);
+      } catch {
+        resource = undefined;
+      }
+      const refreshed = resolveAccessToken(bearer, { resource });
+      if (refreshed.status !== 'ok') {
+        return c.json({ error: 'unauthorized' }, 401);
+      }
+      const liveAuth = refreshed.auth;
+      const liveAttribution = refreshed.attribution;
+      if (liveAttribution?.kind === 'oauth') {
+        return c.json(
+          {
+            error: 'forbidden: child identity creation requires direct identity credentials',
+          },
+          403,
+        );
+      }
+      if (liveAuth.kind !== 'identity' || !liveAuth.scopes?.includes('identities:create')) {
+        return c.json({ error: 'forbidden: admin key required' }, 403);
+      }
+
       // b. canNotifyUser 任何值 → 403
       if (parsed.data.canNotifyUser !== undefined) {
         return c.json({ error: 'forbidden: admin key required for canNotifyUser' }, 403);
       }
-      const parentAddress = auth.address.toLowerCase();
+      const parentAddress = liveAuth.address.toLowerCase();
       const parentDomain = parentAddress.split('@')[1] ?? '';
       // c. 域：省略默认父域；显式且 ≠ 父域 → 400
       if (
@@ -288,7 +322,7 @@ export const identitiesRoute = new Hono()
       const scopeResult = resolveChildCreateScopes(
         bodyHasScopes,
         rawScopes,
-        auth.scopes ?? [],
+        liveAuth.scopes ?? [],
       );
       if (!scopeResult.ok) {
         return c.json(scopeResult.body, scopeResult.status);
@@ -304,7 +338,7 @@ export const identitiesRoute = new Hono()
         const created = createIdentity({
           name: parsed.data.name,
           localpart: parsed.data.localpart,
-          // a. 父=服务端取 auth.address；域默认父域
+          // a. 父=服务端取 liveAuth.address；域默认父域
           domain: parentDomain,
           scopes: scopeResult.scopes,
           parentIdentity: parentAddress,
@@ -502,7 +536,7 @@ export const identitiesRoute = new Hono()
       if (!parsed.success) {
         return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       }
-      // #275 R1 F3：子身份 rotate 施加白名单 + 子⊆父；拒 unscoped 重置
+      // #275 R1 F3 / R3 F12a：子身份 rotate 施加白名单 + 子⊆父；拒 unscoped；父缺失拒
       if (existing.parentIdentity) {
         if (parsed.data.scopes === null) {
           return c.json(
@@ -514,9 +548,18 @@ export const identitiesRoute = new Hono()
           );
         }
         const parent = findIdentity(existing.parentIdentity);
+        if (!parent) {
+          return c.json(
+            {
+              error: 'invalid_request',
+              details: 'child identity has no existing parent identity',
+            },
+            400,
+          );
+        }
         const childResult = resolveChildRotateScopes(
           parsed.data.scopes,
-          parent?.scopes,
+          parent.scopes,
         );
         if (!childResult.ok) {
           return c.json(childResult.body, childResult.status);
