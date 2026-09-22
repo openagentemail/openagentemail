@@ -367,7 +367,7 @@ admin impersonation. Do not enable multiple API writers against the same state.
 - Optional `TASK_LEASES_EXPIRY_AUDIT_M3` (default false) decouples reclaim from expiry-audit SMTP; late matching expiry receipt tolerance is always on.
 - Optional `TASK_LEASES_OVERLAY_BOUND` (default false) stops public list/detail replay of unindexed lease overlay events after 15 minutes.
 - Optional `TASK_LEASES_PENDING_JOURNAL` (default false, requires `TASK_LEASES_ENABLED`) preserves pending generation fences across restart and records or defers expiry-audit work.
-- Even with journal off (production default), `claim` returns **409 `lease_overlay_pending_index`** while a `release`/`renew` has been SMTP-accepted but not yet absorbed into the durable rebuild. Callers should retry after indexing; this is transient, not a deadlock (#308).
+- Even with journal off (production default), `claim` returns **409 `lease_overlay_pending_index`** while a fresh (`≤15 min`) `release`/`renew` has been SMTP-accepted but not yet absorbed into the durable rebuild. Callers should retry after indexing. If the receipt is permanently lost, the fence ages out after **15 minutes** (mirrors `TASK_LEASES_OVERLAY_BOUND`) and claim proceeds; divergence is contained by the #305 read-side degrade (#308).
 
 Production expiry-audit emission remains hard-disabled; these flags do not enable
 it. Read [the journal operating guide](docs/task-lease-journal.md) before provisioning

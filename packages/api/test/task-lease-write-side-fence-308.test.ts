@@ -1,7 +1,8 @@
 /**
  * #308：写侧非 journal pending-index fence——release/renew 已 SMTP accepted
- * 但未被 durable 吸收时，re-claim 返 409 lease_overlay_pending_index（可重试）；
- * 吸收后重试成功（瞬态非死锁）。journal 路径零改；协议零新增。
+ * 但未被 durable 吸收时，fresh（≤CLAIM_FENCE_MAX_MS）行挡 re-claim 为 409；
+ * 吸收后重试成功；超龄（>15min）放行并 audit（防永久丢失回执卡死）。
+ * journal 路径零改；协议零新增。
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,12 +36,15 @@ const {
   setTaskNowForTests,
   setTaskSendMailForTests,
   queuedLeaseOverlayCountForTests,
+  CLAIM_FENCE_MAX_MS,
+  takeClaimFenceExpiredCountForTests,
 } = await import('./support/task-test-seams.ts');
 const {
   parseTaskMessageForTests,
   withTaskLeasePendingJournalForTests,
   withTaskLeasesEnabledForTests,
 } = await import('./support/task-lease-seams.ts');
+const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
 
 /** journal 关 + leases 开：本卡目标路径 */
 const test = (name: string, work: () => void | Promise<void>) =>
@@ -101,6 +105,8 @@ afterEach(() => {
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
   clearQueuedEventsForTests();
+  resetAuditForTests();
+  takeClaimFenceExpiredCountForTests();
 });
 
 describe('#308 write-side fence · release 腿', () => {
@@ -132,7 +138,7 @@ describe('#308 write-side fence · release 腿', () => {
       .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
   });
 
-  test('② 吸收后重试 → 成功（瞬态非死锁）', async () => {
+  test('② 吸收后重试 → 成功', async () => {
     let now = START;
     let durable = submittedTask();
     const sent: SendInput[] = [];
@@ -165,6 +171,47 @@ describe('#308 write-side fence · release 腿', () => {
     expect(again.leaseGeneration).toBe(2);
     expect(again.task.lease?.leaseGeneration).toBe(2);
   });
+
+  test('P1 行龄 >15min → 放行 claim 成功 + audit 恰一条', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<308-rel-age-${sent.length}>` };
+    });
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), await parseSent(sent[0]!, 2)])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+
+    now = START + 1_000;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
+    // fresh 窗内仍 409
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+
+    // 推进超过 CLAIM_FENCE_MAX_MS → 超龄放行
+    now = START + 1_000 + CLAIM_FENCE_MAX_MS + 1;
+    resetAuditForTests();
+    takeClaimFenceExpiredCountForTests();
+    const again = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(again.leaseGeneration).toBe(2);
+    const audits = readAuditEvents({ event: 'task.lease.claim_fence_expired', limit: 10 });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      event: 'task.lease.claim_fence_expired',
+      outcome: 'ok',
+      taskId: ID,
+      leaseGeneration: 1,
+      provenance: 'release',
+    });
+    expect(audits[0]!.durationMs).toBeGreaterThan(CLAIM_FENCE_MAX_MS);
+    expect(takeClaimFenceExpiredCountForTests()).toBe(1);
+  });
 });
 
 describe('#308 write-side fence · renew 腿', () => {
@@ -194,7 +241,7 @@ describe('#308 write-side fence · renew 腿', () => {
       .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
   });
 
-  test('② 吸收后重试 → 成功（窗过期后放行，证明不卡死）', async () => {
+  test('② 吸收后重试 → 成功（窗过期后放行）', async () => {
     let now = START;
     let durable = submittedTask();
     const sent: SendInput[] = [];
@@ -235,6 +282,42 @@ describe('#308 write-side fence · renew 腿', () => {
     const again = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect(again.leaseGeneration).toBe(2);
   });
+
+  test('P1 renew 超龄 → 不再 409（仍可被 lease_already_claimed 挡）', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<308-rnw-age-${sent.length}>` };
+    });
+
+    // 租约窗须长于 CLAIM_FENCE_MAX_MS，否则超龄时窗已过期会直接放行 claim
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 3600 });
+    durable = taskFromMessages(ID, [submittedRaw(), await parseSent(sent[0]!, 2)])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+
+    now = START + 1_000;
+    await renewTask({ id: ID, from: B, leaseToken: grant.leaseToken, leaseSec: 3600 });
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+
+    now = START + 1_000 + CLAIM_FENCE_MAX_MS + 1;
+    resetAuditForTests();
+    // 超龄放行后 overlay renew 仍活窗 → lease_already_claimed（非 pending 码）
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_already_claimed' });
+    const audits = readAuditEvents({ event: 'task.lease.claim_fence_expired', limit: 10 });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      provenance: 'renew',
+      taskId: ID,
+      leaseGeneration: 1,
+    });
+  });
 });
 
 describe('#308 write-side fence · 对照（防误伤）', () => {
@@ -260,5 +343,78 @@ describe('#308 write-side fence · 对照（防误伤）', () => {
     expect(queuedLeaseOverlayCountForTests(ID)).toBeGreaterThan(0);
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
       .rejects.toMatchObject({ message: 'lease_already_claimed' });
+  });
+});
+
+describe('#308 R1 · P2 I/O + P3-1 fail-closed', () => {
+  test('P2 无候选时零额外 durable 查找；有 fresh 候选恰 +1', async () => {
+    let now = START;
+    let durable = submittedTask();
+    let getCalls = 0;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => {
+      getCalls += 1;
+      return durable;
+    });
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<308-io-${sent.length}>` };
+    });
+
+    // 首 claim：无 release/renew 候选 → 仅初始 1 次 get（零 fence durable）
+    getCalls = 0;
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    expect(getCalls).toBe(1);
+
+    durable = taskFromMessages(ID, [submittedRaw(), await parseSent(sent[0]!, 2)])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => {
+      getCalls += 1;
+      return durable;
+    });
+
+    now = START + 1_000;
+    getCalls = 0;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
+    // release 自身也会 get 一次（merge）
+    const afterRelease = getCalls;
+
+    getCalls = 0;
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    // 初始 merge + fence durable = 2
+    expect(getCalls).toBe(2);
+    expect(afterRelease).toBeGreaterThanOrEqual(1);
+  });
+
+  test('P3-1 fresh 候选 + durable null → 409 fail-closed', async () => {
+    let now = START;
+    let durable = submittedTask();
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setTaskGetForTests(async () => durable);
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<308-null-${sent.length}>` };
+    });
+
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), await parseSent(sent[0]!, 2)])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
+
+    now = START + 1_000;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
+    // claim：call1=merge(durable)、call2=fence durable(null) → fail-closed 409
+    let callN = 0;
+    setTaskGetForTests(async () => {
+      callN += 1;
+      return callN === 1 ? durable : null;
+    });
+
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    expect(callN).toBe(2);
   });
 });

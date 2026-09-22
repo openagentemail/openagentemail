@@ -853,3 +853,25 @@ N/A。
 - api 全量：2044 pass / 9 skip / 1 fail（list-rate isolate flake；隔离 5 pass）
 - Subagent：`38e5c3c9-a01b-4ac6-8ac5-597822024173` → PASS
 - completion：`/home/ops/materials/308/completion.md`
+
+## 2026-09-22 · w308 R1（闸变：15min 上界 + I/O + fail-closed）
+
+### 我们实现了哪些功能？
+1. P1：`CLAIM_FENCE_MAX_MS` 镜像 OVERLAY_BOUND 15min；只挡 fresh release/renew；超龄放行 + audit `task.lease.claim_fence_expired`（去重/限频同 #305）。
+2. P2：无候选零 durable I/O；有 fresh 才一次 `getTaskSnapshot(mergeOverlay:false)`。
+3. P3-1：durable null → 409 fail-closed（删 `durable ?? current`）。
+4. P3-2：README×3 + PR #318 描述改为「瞬态 + 15min 上界自愈」，去掉「非死锁」过强承诺。
+5. 测试扩至 10 例（超龄 release/renew、P2 I/O、P3-1）。
+
+### 我们遇到了哪些错误？
+1. renew 超龄测用 leaseSec=300，推进 15min 后窗已过期 → claim 成功而非 `lease_already_claimed`。
+
+### 我们是如何解决这些错误的？
+1. renew 超龄测改 leaseSec=3600，保证超龄时窗仍活。
+
+### 基线与证据
+- 基线：`4e7e0d1` → 见本次提交 HEAD
+- focused 308：10 pass；回归 305/m2/core：155 pass
+- api 全量：2049 pass / 9 skip / 0 fail
+- mcp：48 pass
+- Subagent：`ca06a22d-e089-478d-8680-8390f889f051` → PASS
