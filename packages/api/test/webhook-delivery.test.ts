@@ -2229,7 +2229,70 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     deliveryQueue.cancelAll();
   });
 
-  test('#322 boot 负控：scheduledTime 真正越出 firstAttempt+72h → 仍死信', async () => {
+  test('#322 R1 边界：排期=first+72h、bootTime=排期+ε → 不得死信（与 #294 1b\' 执行前同构）', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://boot-r1-boundary.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    // 排期钉在恰好 +72h；重启落在排期+ε——若用 bootTime 参与 horizon 会误杀（R1 病根）
+    const firstAttemptTs = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
+    const persistedSchedule = firstAttemptTs + RETRY_HORIZON_SEC * 1000; // = first+72h
+    const bootTime = persistedSchedule + 1; // 排期+ε
+    const eventId = 'evt_322_r1_boundary';
+    const eventCreatedAt = new Date(firstAttemptTs).toISOString();
+
+    // 对照执行前路径：同一函数、同一时刻来源（持久化排期，非墙钟）
+    expect(isScheduledAttemptBeyondRetryHorizon(persistedSchedule, firstAttemptTs)).toBe(false);
+    // 负对照：若误用 bootTime 判界则会「超窗」——证明本测钉的是 R1 病根
+    expect(isScheduledAttemptBeyondRetryHorizon(bootTime, firstAttemptTs)).toBe(true);
+
+    appendDeliveryLogRow({
+      ts: new Date(firstAttemptTs).toISOString(),
+      webhookId: sub.id,
+      eventId,
+      runId: 'run_0',
+      deliveryId: 'dlv_322_r1',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(persistedSchedule).toISOString(),
+      reason: null,
+    });
+
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+    // 预期：reconstructed=1, deadLettered=0（不得 retry_horizon_exceeded）
+    expect(result.reconstructed).toBe(1);
+    expect(result.deadLettered).toBe(0);
+    expect(
+      readAllDeliveryLogRows().some(
+        (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+      ),
+    ).toBe(false);
+
+    const job = deliveryQueue.peekJobForTests(sub.id, eventId, 'run_0');
+    expect(job).toBeDefined();
+    expect(job!.firstAttemptAt).toBe(firstAttemptTs);
+    // 定时器 delay 可用 bootTime clamp（立即执行）；horizon 已按持久化排期放过
+    expect(job!.nextAttemptAt).toBe(bootTime);
+    deliveryQueue.cancelAll();
+  });
+
+  test('#322 boot 负控：持久化排期真正越出 firstAttempt+72h → 仍死信', async () => {
     const sub = createWebhookSubscription({
       url: 'https://boot-iso-neg.example/hook',
       address: 'owner@openagent.email',
@@ -2238,10 +2301,10 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       createdBy: 'admin',
     });
     const bootTime = Date.now();
-    const firstAttemptTs = bootTime - (RETRY_HORIZON_SEC + 3600) * 1000; // 73h 前
+    const firstAttemptTs = bootTime - RETRY_HORIZON_SEC * 1000;
+    const persistedBeyond = firstAttemptTs + RETRY_HORIZON_SEC * 1000 + 1000; // 排期=+72h+1s
     const eventCreatedAt = new Date(firstAttemptTs).toISOString();
     const eventId = 'evt_322_beyond';
-    // scheduledTime = max(nextAttemptAt, bootTime) = bootTime > first+72h → 死信
     appendDeliveryLogRow({
       ts: new Date(firstAttemptTs).toISOString(),
       webhookId: sub.id,
@@ -2263,13 +2326,12 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       durationMs: null,
       sensitive: false,
       replay: false,
-      nextAttemptAt: new Date(bootTime - 1000).toISOString(),
+      nextAttemptAt: new Date(persistedBeyond).toISOString(),
       reason: null,
     });
 
-    expect(
-      isScheduledAttemptBeyondRetryHorizon(bootTime, firstAttemptTs),
-    ).toBe(true);
+    // 与执行前同构：判据吃持久化排期
+    expect(isScheduledAttemptBeyondRetryHorizon(persistedBeyond, firstAttemptTs)).toBe(true);
 
     const result = await reconstructPendingDeliveriesAtBoot(bootTime);
     expect(result.reconstructed).toBe(0);

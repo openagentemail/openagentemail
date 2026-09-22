@@ -3267,17 +3267,21 @@ export async function reconstructPendingDeliveriesAtBoot(
       continue;
     }
 
-    // #322 A1/A2：与执行前同构——先派生真实 firstAttemptAt，再算 scheduledTime，
-    // 用 isScheduledAttemptBeyondRetryHorizon（禁墙钟 bootTime vs eventCreatedAt）。
+    // #322 A1/A2：与执行前同构——horizon 判据同一函数；时刻来源=持久化排期（非墙钟）。
+    // #322 R1 / #294 1b'：判界只用 latest.nextAttemptAt 派生值；bootTime clamp 仅用于
+    // 定时器 delay（下方 scheduledTime），不得参与 horizon——否则 attempt 11 钉在恰好
+    // +72h、重启落在排期+ε 时会把有效排期误判超窗而死信。
     const firstAttemptAt = deriveFirstAttemptAtMsFromGroup(groupRows, latest);
-    const nextAttemptMs = latest.nextAttemptAt
-      ? new Date(latest.nextAttemptAt).getTime()
-      : bootTime;
-    const scheduledTime = Math.max(
-      Number.isFinite(nextAttemptMs) ? nextAttemptMs : bootTime,
-      bootTime,
-    );
-    if (isScheduledAttemptBeyondRetryHorizon(scheduledTime, firstAttemptAt)) {
+    let persistedScheduleMs: number;
+    if (latest.nextAttemptAt) {
+      const parsed = new Date(latest.nextAttemptAt).getTime();
+      // 解析失败时与「无排期」同口径，回落 bootTime（无可对照的持久化时刻）
+      persistedScheduleMs = Number.isFinite(parsed) ? parsed : bootTime;
+    } else {
+      // 无 nextAttemptAt：无可持久化排期，回落 bootTime（立刻应跑；注释明说）
+      persistedScheduleMs = bootTime;
+    }
+    if (isScheduledAttemptBeyondRetryHorizon(persistedScheduleMs, firstAttemptAt)) {
       deadLettered++;
       reconstructRetryDelays.delete(key);
       appendDeliveryLogRow({
@@ -3306,6 +3310,9 @@ export async function reconstructPendingDeliveriesAtBoot(
       });
       continue;
     }
+
+    // bootTime clamp：仅服务于定时器 delay（过期排期立即跑），不参与上方 horizon
+    const scheduledTime = Math.max(persistedScheduleMs, bootTime);
 
     // 4. Otherwise pending!
     const sub = getWebhookSubscription(latest.webhookId);
