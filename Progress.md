@@ -669,3 +669,157 @@ N/A。聚焦 **48 pass**；api **1982p/9s/0f**；mcp **48p**。
 - HEAD：`9dd39360f16ce8a625afe979b294af99dffac6ca`
 - 自审 R8：`61c9bee6-d5f7-464c-852d-e89f01558a23` → PASS-WITH-NITS（docs 本轮补齐）
 - 完工报：`/home/ops/materials/305/completion.md`（R8 + 矩阵边界节）
+## 2026-09-21 · w289x3 合批 #289+#290+#302
+
+### 我们实现了哪些功能？
+1. **#289**：`WEBHOOK_URL_REJECT_DETAILS_WHITELIST` 前 8 条；create/update 拒绝响应白名单内附 `details:'<reason>'`，白名单外响应逐字节同现状；两拒绝点 `console.warn` 单行 JSON `{kind:'webhook_url_rejected', reason, address, webhookId?}`，URL 原文不入。
+2. **#290**：`executeWebhookTestProbe` 熔断置位后对齐主路径——补 `webhook.disabled` audit；retryable 就地转 permanent（`reason=webhook_disabled`）；不调 `deliveryQueue.schedule`；RFC §8.5 增补懒清理有意声明（结算时刻死信时间戳）。
+3. **#302**：`readApprovalPayloadHeader` 同款 `value.replace(/\s+/g,'')` 后严格 round-trip；`docs/task-lease-reason-transport.md` 两解析器共述；lease 解析器未动。
+4. 聚焦测试 `packages/api/test/w289x3-batch.test.ts`（10 例）。
+
+### 我们遇到了哪些错误？
+1. 未 `bun install` 时缺 hono，聚焦测试无法启动。
+2. 全量 api 套件 `#206`「直跑无父标记时不动既有 DATA_DIR」偶发 25s 超时（已知 flake；同文件矩阵例绿）。
+
+### 我们是如何解决这些错误的？
+1. `packages/api` + `packages/mcp` 执行 `bun install` 后复跑。
+2. 单文件复跑 `bun test ./test/wait-precedence-r9.test.ts` → 2 pass；完报注明 flake 隔离照旧。
+
+### 基线与证据
+- Baseline：`origin/main` = `6dc43682f6b5855fe0fa081c311b2fd61e177401`
+- 分支：`tizerluo/w289x3`
+- 聚焦：`bun test test/w289x3-batch.test.ts` → **10 pass / 0 fail**
+- 全量 api：`1943 pass / 9 skip / 1 fail`（#206 flake；隔离复跑绿）
+- mcp：`48 pass / 0 fail`
+- Diff：`577 insertions / 18 deletions`（<600）
+- 材料：`/home/ops/materials/289-290-302/`（r0.md + completion.md）
+
+### 交付钉（完工后补）
+- HEAD：`d0949bae8500e1301b755bcd5a3b8ff19d01d838`
+- PR：https://github.com/openagentemail/openagentemail/pull/310
+- Subagent：`b9d1edb7-1a76-4ed0-ab9c-bc4ba71ad000` → PASS（R0 七点）
+- completion：`/home/ops/materials/289-290-302/completion.md`
+
+## 2026-09-21 · w289x3 R2（P1-2 ping 假重复 audit）
+
+### 我们实现了哪些功能？
+1. **R2-1 / P1-2**：`executeWebhookTestProbe` 熔断段改为「已 disabled 则跳过 +1」；仅 `trippedThisAttempt`（本次实际 threshold→disabled）才写 `webhook.disabled` audit + retryable→permanent；中途已禁用则只抑制 attempt-2（permanent/`webhook_disabled`），不重复 audit。
+2. RED：`in-flight ping + manual disable`——audit 恰好 1、计数不 +1、disabledReason 保持 manual、无 attempt-2；既有阈值触发例仍绿。
+3. **R2-2 / P1-1**：malformed_url REST 不可达——本轮**不动路由 schema**，候总指挥裁定。
+
+### 我们遇到了哪些错误？
+1. 首跑 RED 时 import `recordAuditEvent` 与测试体写入竞态 → ReferenceError（复跑即绿）。
+2. 全量 api `#206` 偶发 25s flake（隔离复跑绿）。
+
+### 我们是如何解决这些错误的？
+1. 确认 import 落盘后单测/聚焦复跑全绿。
+2. flake 隔离照旧，完报注明。
+
+### 主路径存量同族（不修）
+主路径 `runExecuteJob`（webhook-delivery.ts ~2437-2459）同款「更新器内守卫 + 外层 `updated?.state === 'disabled'` 终态判定」仍在；#290 红线「不动主路径」，本轮仅修 ping，记债不扩。
+
+### 基线与证据
+- 父头：`d0949bae`
+- 聚焦：11 pass（+1 R2 RED）
+- api：1944p / 9s / #206 flake；隔离 2p
+- mcp：48p
+
+### 交付钉（R2）
+- HEAD：`e7ad15337fc580b0c7112515ffba9b2f1b2c2191`
+- Subagent：`2866aafe-9b6e-4c38-9ff2-9da08719e2b6` → PASS
+
+## 2026-09-21 · w289x3 R3（P1-1 schema a + afterAll + RFC）
+
+### 我们实现了哪些功能？
+1. **A / P1-1 方案 a**：create/update `url` 去掉 `.url()`，保留 `.max(2048)`；`not-a-url` → `invalid_webhook_url` + `details: malformed_url`（create+update）；dns_empty 负控不变；超长仍 `invalid_request`（Item 4 绿）。
+2. **B**：`w289x3-batch.test.ts` afterAll：`deleteIdentity` 先于恢复 `config.dataDir`。
+3. **C**：RFC §8.5 懒清理限定 threshold；明写 manual disable / delete 为 eager `cancelForWebhook`。
+4. **D**：PR #310 描述落痕契约变更 + 主路径同族债三要素。
+
+### 我们遇到了哪些错误？
+1. #206 全量偶发 25s flake（隔离复跑绿）。
+
+### 我们是如何解决这些错误的？
+1. flake 隔离照旧。
+
+### 超长 URL 证据（A-2）
+- `packages/api/test/webhooks-route.test.ts`「Item 4 & Item 8」：`overlongCreate` / `overlongUpdate` 断言 `error === 'invalid_request'` → **pass**（R3 后复跑）。
+
+### 基线与证据
+- 父头：`e7ad1533`
+- HEAD：（完工后补）
+- 聚焦：13 pass
+- api：1946p / 9s / #206 flake
+- mcp：48p
+
+### 交付钉（R3）
+- HEAD：`cfa29f9b5685d7537a3d34088ef901f8c1eed41c`
+- Subagent：`4159a841-6619-4285-a132-5479828a6261` → PASS
+- PR #310 描述已更新（契约变更 + 主路径债）
+
+## 2026-09-21 · w289x3 R4（rebase → origin/main 30155ea0）
+
+### 我们实现了哪些功能？
+1. 提交 Progress 后 rebase 到 `#305` 并入后的 `30155ea0`；Progress 冲突保双侧；其余自动合并。
+2. 自核 a–d 全过；force-with-lease 推送。
+
+### 我们遇到了哪些错误？
+1. 仅 Progress.md content conflict（预期）。
+
+### 我们是如何解决这些错误的？
+1. 保 #305 段 + 本卡 R0–R3 段顺序拼接，去冲突标记。
+
+### 基线与证据
+- HEAD：`5000dbd682f11e84bebc7eebf02cfe3e0b41aa31`
+- 聚焦 13p；api 1995p/9s/0f；mcp 48p
+- 完工件：`/home/ops/materials/289-290-302/completion.md` R4 节
+
+## 2026-09-21 · w289x3 R5（update 空 URL）
+
+### 我们实现了哪些功能？
+1. update 路径 `url` 门改为 `!== undefined`；空串 400 + `malformed_url`。
+2. 测试 create+update `url:""` 同形验收。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- HEAD：`7e8acb27b8509bd8fc8405a7ef1b771f687d1646`
+- 聚焦 14p；api 1996p/9s/0f；mcp 48p
+- Subagent：`c8b3a09d-a98e-4406-98d7-592c10aa4d8a` → PASS
+
+## 2026-09-21 · w289x3 R6（#302 dataDir 隔离）
+
+### 我们实现了哪些功能？
+1. #302 改 `config.dataDir` 临时目录；afterEach 恢复+删除；afterAll alice 守卫。
+2. filtered `-t '#302'` 实证真实 `./data/identities.json` 前后不变（exists=false）。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- HEAD：`8ee8625175ffc444a7bb59aa411b8be0b3cd0031`
+- 聚焦 14p；filtered 2p；api 1996p；mcp 48p
+- Subagent：`f0335d8c-4a7c-4ba8-a987-421cd9ed89e1` → PASS
+
+## 2026-09-21 · w289x3 R7（afterAll webhook 清理作用域）
+
+### 我们实现了哪些功能？
+1. afterAll 方案 b：文件清理钉 `TEST_DATA_DIR` 后再 `resetWebhooksStoreForTests` + `deleteIdentity`。
+2. filtered 四文件探针（identities + webhooks 三件套）前后一致。
+
+### 我们遇到了哪些错误？
+1. 全量 api #206 偶发 25s flake（隔离复跑绿）。
+
+### 我们是如何解决这些错误的？
+1. flake 隔离照旧。
+
+### 基线与证据
+- HEAD：`7d3b7b3cd049d4f91887d9c408578d339ce8f716`
+- Subagent：`b36d38dd-2fe4-479b-a968-6744e599fda4` → PASS

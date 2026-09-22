@@ -40,6 +40,8 @@ import {
   readDeliveryLogRows,
   redeliverWebhookDelivery,
   validateWebhookUrlResolution,
+  logWebhookUrlRejected,
+  webhookUrlRejectionResponseBody,
   type WebhookDeliveryLogRow,
 } from '../lib/webhook-delivery.ts';
 import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
@@ -86,7 +88,7 @@ function redactWebhookSecret(body: unknown): unknown {
 
 const createSchema = z
   .object({
-    url: z.string().url().max(2048),
+    url: z.string().max(2048),
     address: z.string().email(),
     events: z
       .array(z.enum(['mail.received', 'approval.requested']))
@@ -99,7 +101,7 @@ const createSchema = z
 
 const updateSchema = z
   .object({
-    url: z.string().url().max(2048).optional(),
+    url: z.string().max(2048).optional(),
     events: z
       .array(z.enum(['mail.received', 'approval.requested']))
       .min(1, 'events must be non-empty')
@@ -251,14 +253,14 @@ export const webhooksRoute = new Hono()
         allowPrivateTargets: config.webhooks.allowPrivateTargets,
       });
       if (!resolution.valid) {
+        // #289：白名单 details + 拒绝点日志（URL 原文不入）
+        logWebhookUrlRejected({
+          reason: resolution.error,
+          address: targetAddress,
+        });
         return {
           status: 400,
-          body: {
-            error:
-              resolution.code === 'webhook_target_forbidden'
-                ? 'webhook_target_forbidden'
-                : 'invalid_webhook_url',
-          },
+          body: webhookUrlRejectionResponseBody(resolution.code, resolution.error),
         };
       }
 
@@ -508,19 +510,20 @@ export const webhooksRoute = new Hono()
     let urlChanged = false;
     let isPrivateTarget = sub.privateTargetGranted;
 
-    if (parsed.data.url && parsed.data.url !== sub.url) {
+    if (parsed.data.url !== undefined && parsed.data.url !== sub.url) {
       urlChanged = true;
       const resolution = await validateWebhookUrlResolution(parsed.data.url, {
         allowPrivateTargets: config.webhooks.allowPrivateTargets,
       });
       if (!resolution.valid) {
+        // #289：白名单 details + 拒绝点日志（update 带 webhookId）
+        logWebhookUrlRejected({
+          reason: resolution.error,
+          address: sub.address,
+          webhookId: sub.id,
+        });
         return c.json(
-          {
-            error:
-              resolution.code === 'webhook_target_forbidden'
-                ? 'webhook_target_forbidden'
-                : 'invalid_webhook_url',
-          },
+          webhookUrlRejectionResponseBody(resolution.code, resolution.error),
           400,
         );
       }
@@ -531,7 +534,8 @@ export const webhooksRoute = new Hono()
     }
 
     const updated = updateWebhookSubscription(sub.id, (s) => {
-      if (parsed.data.url) s.url = parsed.data.url;
+      // 空串已在上方校验门被拦；此处与 :513 同款用 !== undefined
+      if (parsed.data.url !== undefined) s.url = parsed.data.url;
       if (parsed.data.events) s.events = parsed.data.events;
       if (parsed.data.contentScope) s.contentScope = parsed.data.contentScope;
       if (parsed.data.description !== undefined) s.description = parsed.data.description;
