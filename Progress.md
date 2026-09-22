@@ -823,3 +823,96 @@ N/A。
 ### 基线与证据
 - HEAD：`7d3b7b3cd049d4f91887d9c408578d339ce8f716`
 - Subagent：`b36d38dd-2fe4-479b-a968-6744e599fda4` → PASS
+
+## 2026-09-22 · w308（B2 非 journal pending-index fence）
+
+### 我们实现了哪些功能？
+1. `claimTask`（`tasks-internal.ts`）在 journal 门控 **else** 分支加 pending-index fence：queued 中存在未 durable 吸收的 `release`/`renew` 时抛 `lease_overlay_pending_index`（复用既有 409 码）。
+2. 吸收判定用 `getTaskSnapshot(..., { mergeOverlay: false })` + `eventIsIndexed`（durable 语义，镜像 `mergeQueuedEvents`）。
+3. 新测 `task-lease-write-side-fence-308.test.ts`：release/renew 各一组「pending→409」+「吸收后重试成功」；对照「无 release/renew 零误伤」与「未索引 claim1 → lease_already_claimed」。
+4. 适配 R12 既有「release→reclaim」用例：先吸收 release 再 reclaim（对齐 #308 语义）。
+5. README / README.zh-CN / packages/mcp/README 记明 journal-off 下的瞬态 409 重试窗。
+
+### 我们遇到了哪些错误？
+1. 测试调用 `queuedLeaseOverlayCountForTests()` 未传 `taskId` → 恒为 0。
+2. api 全量：`R12 GREEN: released working task reclaims...` 在 release overlay 未吸收时立即 reclaim → 命中新 fence 409。
+3. api 全量偶发 `list-rate isolate` flake（隔离复跑绿；与本卡无关）。
+4. 本仓库为 Bun/TS，无 Python `requirements.txt` 适用面（依赖由 `packages/*/bun.lock` 管理）。
+
+### 我们是如何解决这些错误的？
+1. 改为 `queuedLeaseOverlayCountForTests(ID)`。
+2. R12 改为 claim/release 均先 `taskFromMessages` 吸收进 durable 再 reclaim；断言语义（gen2 / 鉴权 release 回执）不变。
+3. 隔离复跑确认预存 flake；不纳入本卡修面。
+4. N/A（不生成虚假 pip freeze）。
+
+### 基线与证据
+- 基线 main：`da9343ca` · HEAD：`98d023814425b2cc9464bd0bbd7880704dfd1c92`
+- 分支：`tizerluo/w308` · PR：https://github.com/openagentemail/openagentemail/pull/318
+- focused：6 pass（308）；305+m2+core 回归绿；R12 适配后绿
+- mcp：48 pass / 0 fail
+- api 全量：2044 pass / 9 skip / 1 fail（list-rate isolate flake；隔离 5 pass）
+- Subagent：`38e5c3c9-a01b-4ac6-8ac5-597822024173` → PASS
+- completion：`/home/ops/materials/308/completion.md`
+
+## 2026-09-22 · w308 R1（闸变：15min 上界 + I/O + fail-closed）
+
+### 我们实现了哪些功能？
+1. P1：`CLAIM_FENCE_MAX_MS` 镜像 OVERLAY_BOUND 15min；只挡 fresh release/renew；超龄放行 + audit `task.lease.claim_fence_expired`（去重/限频同 #305）。
+2. P2：无候选零 durable I/O；有 fresh 才一次 `getTaskSnapshot(mergeOverlay:false)`。
+3. P3-1：durable null → 409 fail-closed（删 `durable ?? current`）。
+4. P3-2：README×3 + PR #318 描述改为「瞬态 + 15min 上界自愈」，去掉「非死锁」过强承诺。
+5. 测试扩至 10 例（超龄 release/renew、P2 I/O、P3-1）。
+
+### 我们遇到了哪些错误？
+1. renew 超龄测用 leaseSec=300，推进 15min 后窗已过期 → claim 成功而非 `lease_already_claimed`。
+
+### 我们是如何解决这些错误的？
+1. renew 超龄测改 leaseSec=3600，保证超龄时窗仍活。
+
+### 基线与证据
+- 基线：`4e7e0d1` → HEAD：`65c8d6c56c18cc3ac2a99a9401c88ef5bb6ac1ae`
+- focused 308：10 pass；回归 305/m2/core：155 pass
+- api 全量：2049 pass / 9 skip / 0 fail
+- mcp：48 pass
+- Subagent：`ca06a22d-e089-478d-8680-8390f889f051` → PASS
+- completion：`/home/ops/materials/308/completion-r1.md`
+- PR：https://github.com/openagentemail/openagentemail/pull/318
+
+## 2026-09-22 · w308 R1.1（fox #4428 附则收口）
+
+### 我们实现了哪些功能？
+1. `noteClaimFenceExpiredForTests` 测试缝（镜像 degraded forTests）。
+2. audit 限频 pin：60s 内两异键 count=2/audit=1；>60s 第三键 audit=2。
+3. `setFindTaskMessagesForTests` I/O 机械证据：正常 find=1 / fresh=2（console 原始输出）。
+4. P1 并入上界前多次持续 409；PR 描述补证伪史 + 评论贴 I/O 原始输出。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- 基线：`5f415f6` → 见本次 HEAD
+- focused：12 pass / 0 fail
+- I/O：`findTaskMessagesCalls` 1 / 2
+- Subagent：`8dc48cdf-91ff-438e-9fd7-b10e2d87dba3` → PASS
+- completion：`/home/ops/materials/308/completion-r1.1.md`
+
+## 2026-09-22 · w308 R1.2（fence age 起算点 = enqueuedAt）
+
+### 我们实现了哪些功能？
+1. `QueuedEvent.enqueuedAt`：`queueEventUntilIndexed` 用 `nowMs()` 记入队时刻。
+2. fence age：`nowFence - (enqueuedAt ?? sentAt)`；`sentAt` 语义零改（读侧 TTL/overlay 不动）。
+3. 测试钉「SMTP 耗时 16min → 立即 re-claim 仍 409」（旧 sentAt 起算会误放行）。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- 基线：`f285124` → 见本次 HEAD
+- focused：13 pass；回归 305/m2/core：158 pass
+- Subagent：`ba805120-57ce-4784-a648-043f47f1bc81` → PASS

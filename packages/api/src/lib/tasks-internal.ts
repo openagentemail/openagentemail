@@ -88,6 +88,13 @@ export const TASK_LIST_CACHE_MS = 30 * 1000;
 export const TASK_REMIND_COOLDOWN_MS = 15 * 1000;
 /** M1：公共读 lease overlay 重放寿命（自 sentAt）。只约束展示，不删 queued 行。 */
 export const LEASE_OVERLAY_MAX_LIFETIME_MS = 15 * 60 * 1000;
+/**
+ * #308：写侧 pending-index fence 行龄上界（自 queued.enqueuedAt，缺省回落 sentAt）。
+ * 镜像 LEASE_OVERLAY_MAX_LIFETIME_MS / TASK_LEASES_OVERLAY_BOUND 的 15 分钟语义——
+ * 超龄 release/renew 不再挡 claim（防回执永久丢失时进程内永久 409）；divergence 由 #305 读侧降级兜底。
+ * R1.2：起算点改为入队时刻，勿用 SMTP 前事件时间戳（慢发送会误超龄）。
+ */
+export const CLAIM_FENCE_MAX_MS = LEASE_OVERLAY_MAX_LIFETIME_MS;
 
 const PERIOD_MS: Record<TaskBoardPeriod, number> = {
   '24h': 24 * 60 * 60 * 1000,
@@ -2259,10 +2266,23 @@ const claimWindowConflictDegradedSeen = new Map<string, true>();
 let claimWindowConflictDegradedLastAuditAt = 0;
 /** 首次见键累计（含被限频吞掉未写 audit 的键）；供诊断/测试。 */
 let claimWindowConflictDegradedCount = 0;
+/** #308：fence 超龄放行审计去重；键=taskId:event:generation，有界插入序淘汰。 */
+export const CLAIM_FENCE_EXPIRED_SEEN_CAP = 1024;
+/** #308：进程级 audit 限频（同款 60s），击穿去重表时仍有界。 */
+export const CLAIM_FENCE_EXPIRED_AUDIT_INTERVAL_MS = 60 * 1000;
+const claimFenceExpiredSeen = new Map<string, true>();
+let claimFenceExpiredLastAuditAt = 0;
+let claimFenceExpiredCount = 0;
 
 type QueuedEvent = {
   message: TaskMessage;
   sentAt: number;
+  /**
+   * #308 R1.2：入队墙钟（queueEventUntilIndexed 内 nowMs）。
+   * fence 行龄起算点——勿用 sentAt（事件时间戳在 SMTP await 前创建，慢发送会误超龄）。
+   * 缺省时 fence 回落 sentAt（兼容旧注入行）。
+   */
+  enqueuedAt?: number;
   lease?: LeaseEvent;
 };
 
@@ -2407,12 +2427,23 @@ export function clearQueuedEventsForTests(): void {
   claimWindowConflictDegradedSeen.clear();
   claimWindowConflictDegradedLastAuditAt = 0;
   claimWindowConflictDegradedCount = 0;
+  // #308：fence 超龄放行审计去重器同样清掉。
+  claimFenceExpiredSeen.clear();
+  claimFenceExpiredLastAuditAt = 0;
+  claimFenceExpiredCount = 0;
 }
 
 /** 测试可读：累计首次降级键次数（含限频未落 audit 的键）。 */
 export function takeClaimWindowConflictDegradedCountForTests(): number {
   const n = claimWindowConflictDegradedCount;
   claimWindowConflictDegradedCount = 0;
+  return n;
+}
+
+/** 测试可读：累计首次 fence 超龄放行键次数（含限频未落 audit 的键）。 */
+export function takeClaimFenceExpiredCountForTests(): number {
+  const n = claimFenceExpiredCount;
+  claimFenceExpiredCount = 0;
   return n;
 }
 
@@ -2706,6 +2737,38 @@ function noteClaimWindowConflictDegraded(
   });
 }
 
+/**
+ * #308：写侧 fence 对超龄未吸收 release/renew 放行时记一条 audit。
+ * 同键（taskId:event:generation）进程内只审计一次；另加全局限频。
+ * 行龄落 durationMs；事件类（release|renew）落 provenance；不落 reason 原文。
+ */
+function noteClaimFenceExpired(
+  taskId: string,
+  leaseEvent: 'release' | 'renew',
+  generation: number,
+  ageMs: number,
+): void {
+  const key = `${taskId}:${leaseEvent}:${generation}`;
+  if (claimFenceExpiredSeen.has(key)) return;
+  if (claimFenceExpiredSeen.size >= CLAIM_FENCE_EXPIRED_SEEN_CAP) {
+    const oldest = claimFenceExpiredSeen.keys().next().value;
+    if (oldest !== undefined) claimFenceExpiredSeen.delete(oldest);
+  }
+  claimFenceExpiredSeen.set(key, true);
+  claimFenceExpiredCount += 1;
+  const now = nowMs();
+  if (now - claimFenceExpiredLastAuditAt < CLAIM_FENCE_EXPIRED_AUDIT_INTERVAL_MS) return;
+  claimFenceExpiredLastAuditAt = now;
+  recordAuditEvent({
+    event: 'task.lease.claim_fence_expired',
+    outcome: 'ok',
+    taskId,
+    leaseGeneration: generation,
+    durationMs: ageMs,
+    provenance: leaseEvent,
+  });
+}
+
 /** 测试缝：直打降级审计去重/限频（构造 >cap 击穿无需全量签名重建）。 */
 export function noteClaimWindowConflictDegradedForTests(
   taskId: string,
@@ -2713,6 +2776,16 @@ export function noteClaimWindowConflictDegradedForTests(
   claimedUntil: string,
 ): void {
   noteClaimWindowConflictDegraded(taskId, generation, claimedUntil);
+}
+
+/** 测试缝：直打 #308 fence 超龄放行审计去重/限频（镜像 degraded forTests）。 */
+export function noteClaimFenceExpiredForTests(
+  taskId: string,
+  leaseEvent: 'release' | 'renew',
+  generation: number,
+  ageMs: number,
+): void {
+  noteClaimFenceExpired(taskId, leaseEvent, generation, ageMs);
 }
 
 /**
@@ -2810,7 +2883,10 @@ function queueEventUntilIndexed(
   const list = queuedEvents.get(taskId) ?? [];
   list.push({
     message,
+    // sentAt：事件时间（读侧 TTL/overlay 窗口输入——语义零改）
     sentAt: Date.parse(message.date) || nowMs(),
+    // #308 R1.2：fence 行龄起算用入队时刻（SMTP accept 之后）
+    enqueuedAt: nowMs(),
     ...(lease ? { lease } : {}),
   });
   queuedEvents.set(taskId, list);
@@ -3325,6 +3401,41 @@ export async function claimTask(input: {
       );
       if (blockingMutation) {
         throw new Error('lease_overlay_pending_index');
+      }
+    } else {
+      // #308：release/renew 已 SMTP accepted 但未被 durable 吸收时，re-claim 须等索引——
+      // 镜像 journal 侧 blockingMutation 语义（协议零新增，复用 lease_overlay_pending_index）。
+      // 行龄上界 CLAIM_FENCE_MAX_MS（镜像 OVERLAY_BOUND 15min）：只挡 fresh 行；超龄放行并 audit，
+      // 防回执永久丢失时进程内永久 409。eventIsIndexed 须 durable 语义；durable null → fail-closed。
+      const nowFence = nowMs();
+      const candidates = (queuedEvents.get(current.id) ?? []).filter((row) =>
+        !!row.lease
+        && (row.lease.event === 'release' || row.lease.event === 'renew'));
+      // P2：无候选 → 零 durable I/O（首 claim / 索引后与 main 一致）
+      if (candidates.length > 0) {
+        const fresh: typeof candidates = [];
+        for (const row of candidates) {
+          // #308 R1.2：行龄自入队时刻起算（非事件时间戳），防慢 SMTP 误超龄绕过
+          const age = nowFence - (row.enqueuedAt ?? row.sentAt);
+          if (age <= CLAIM_FENCE_MAX_MS) {
+            fresh.push(row);
+          } else {
+            // 超龄放行：回到乐观信用；divergence 由 #305 读侧降级兜底
+            noteClaimFenceExpired(
+              current.id,
+              row.lease!.event as 'release' | 'renew',
+              row.lease!.generation,
+              age,
+            );
+          }
+        }
+        if (fresh.length > 0) {
+          const durable = await getTaskSnapshot(current.id, { mergeOverlay: false });
+          // P3-1：有 fresh 候选但 durable 不可见 → fail-closed（勿回落 merged current）
+          if (!durable) throw new Error('lease_overlay_pending_index');
+          const blocking = fresh.some((row) => !eventIsIndexed(durable, row));
+          if (blocking) throw new Error('lease_overlay_pending_index');
+        }
       }
     }
     const beforeMaterialization = nowMs();

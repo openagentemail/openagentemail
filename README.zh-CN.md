@@ -215,6 +215,7 @@ claim/renew/release 要求受管接收者身份，不能用 admin 冒充。
 - `TASK_LEASES_EXPIRY_AUDIT_M3` 默认 false，用于解耦 reclaim 与过期审计 SMTP。
 - `TASK_LEASES_OVERLAY_BOUND` 默认 false，将公共 list/detail 的未索引 lease overlay 重放限制为 15 分钟。
 - `TASK_LEASES_PENDING_JOURNAL` 默认 false，依赖 `TASK_LEASES_ENABLED`，跨重启保留 pending generation fence。
+- journal 关闭（生产默认）时，`release`/`renew` 已 SMTP 接受但尚未被 durable 吸收期间，对**行龄 ≤15 分钟**的 fresh 行，`claim` 仍返回 **409 `lease_overlay_pending_index`**（可重试；吸收后即成功）。回执永久丢失属故障场景：**15 分钟上界**后放行（镜像 `TASK_LEASES_OVERLAY_BOUND`）；分歧由 #305 读侧降级兜底（#308）。
 
 生产 expiry-audit emitter 仍被硬禁，打开这些开关不会开启它。
 先读 [journal 指南](docs/task-lease-journal.md)；首次 provision 不是清空或恢复操作。

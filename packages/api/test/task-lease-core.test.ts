@@ -1351,7 +1351,8 @@ describe('#56 R12 remaining P1 gates', () => {
 
   test('R12 GREEN: released working task reclaims only from its authenticated release receipt', async () => {
     let now = START;
-    const durable = submittedTask();
+    // #308：durable 须吸收 release 后才允许 re-claim（pending-index fence）
+    let durable = submittedTask();
     const sent: SendInput[] = [];
     setTaskNowForTests(() => now);
     setTaskGetForTests(async () => durable);
@@ -1360,7 +1361,17 @@ describe('#56 R12 remaining P1 gates', () => {
       return { messageId: `<r12-release-reclaim-${sent.length}>` };
     });
     const first = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    durable = taskFromMessages(ID, [submittedRaw(), (await parsedClaim(sent[0]!, 2))!])!;
+    clearQueuedEventsForTests();
+    setTaskGetForTests(async () => durable);
     const released = await taskService.release!({ id: ID, from: B, leaseToken: first.leaseToken });
+    // 吸收 release，解除 #308 fence；否则立即 re-claim 为 409 lease_overlay_pending_index
+    durable = taskFromMessages(ID, [
+      submittedRaw(),
+      (await parsedClaim(sent[0]!, 2))!,
+      (await parsedClaim(sent[1]!, 3))!,
+    ])!;
+    setTaskGetForTests(async () => durable);
     const reclaimed = await claimTask({ id: ID, from: B, leaseSec: 300 });
     expect({
       releasedWorking: released.state,

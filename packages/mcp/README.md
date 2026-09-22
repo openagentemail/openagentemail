@@ -196,6 +196,7 @@ rebuild. Leases do not undo external effects and do not guarantee exactly-once w
 - Optional `TASK_LEASES_EXPIRY_AUDIT_M3` (default false) decouples reclaim from expiry-audit SMTP. Late matching expiry receipt tolerance is always on.
 - Optional `TASK_LEASES_OVERLAY_BOUND` (default false) stops public list/detail replay of unindexed lease overlay events after 15 minutes.
 - Optional `TASK_LEASES_PENDING_JOURNAL` (default false, requires `TASK_LEASES_ENABLED`) preserves pending generation fences across restart, supports the documented admin `claim_lost` path after 2h, and records/defers expiry-audit work.
+- Even with journal off, `claim` returns **409 `lease_overlay_pending_index`** while a fresh (`≤15 min`) `release`/`renew` is SMTP-accepted but not yet durable-indexed; retry after absorption. Permanently lost receipts age out after **15 minutes** (mirrors overlay bound) and claim proceeds (#308).
 
 Production expiry-audit emission remains hard-disabled. Read the
 [journal guide](https://github.com/openagentemail/openagentemail/blob/main/docs/task-lease-journal.md)
