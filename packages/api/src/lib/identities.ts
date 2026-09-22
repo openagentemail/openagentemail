@@ -28,6 +28,7 @@ import {
   MAX_SCOPE_LENGTH,
   MAX_SCOPES_COUNT,
   isSupportedScope,
+  isDelegationScope,
 } from './identity-scopes.ts';
 import { revokeGrantsForAddress } from './oauth-store.ts';
 import {
@@ -71,8 +72,11 @@ export {
   SUPPORTED_SCOPES,
   SUPPORTED_SCOPES_SET,
   isSupportedScope,
+  DELEGATION_SCOPES,
+  DELEGATION_SCOPES_SET,
+  isDelegationScope,
 } from './identity-scopes.ts';
-export type { SupportedScope } from './identity-scopes.ts';
+export type { SupportedScope, DelegationScope } from './identity-scopes.ts';
 
 export type ScopeValidationResult =
   | { ok: true; scopes: string[] }
@@ -100,6 +104,33 @@ export function validateScopesInput(scopes: unknown): ScopeValidationResult {
     }
     seen.add(item);
     if (!isSupportedScope(item)) {
+      return { ok: false, error: 'unsupported_scope', details: `Unsupported scope: ${item}` };
+    }
+  }
+  return { ok: true, scopes: [...scopes] };
+}
+
+/**
+ * Delegation 专用 scopes 校验（#275 R1 F4）：仅允许 DELEGATION_SCOPES。
+ * 错误形态与 validateScopesInput 对齐（unsupported_scope + details）。
+ */
+export function validateDelegationScopesInput(scopes: unknown): ScopeValidationResult {
+  if (!Array.isArray(scopes)) {
+    return { ok: false, error: 'invalid_request', details: 'scopes must be an array of strings' };
+  }
+  if (scopes.length > MAX_SCOPES_COUNT) {
+    return { ok: false, error: 'invalid_request', details: 'too_many_scopes' };
+  }
+  const seen = new Set<string>();
+  for (const item of scopes) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > MAX_SCOPE_LENGTH) {
+      return { ok: false, error: 'invalid_request', details: 'invalid_scope_format' };
+    }
+    if (seen.has(item)) {
+      return { ok: false, error: 'invalid_request', details: 'duplicate_scope' };
+    }
+    seen.add(item);
+    if (!isDelegationScope(item)) {
       return { ok: false, error: 'unsupported_scope', details: `Unsupported scope: ${item}` };
     }
   }
@@ -552,12 +583,24 @@ export function rotateIdentityToken(address: string, scopes?: string[] | null): 
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
  * 同步级联吊销该身份下全部 OAuth grant + access/refresh 与 Delegation grants。
+ * #275 R1：删除前清除所有子身份的 parentIdentity（系统级断开归属，非转移）。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
   const needle = address.toLowerCase();
+  const existed = identities.some((i) => i.address === needle);
+  if (!existed) return false;
+
+  // 先断开归属：子存活，parentIdentity 字段清除（防同址重建收养）
+  let orphaned = 0;
+  for (const identity of identities) {
+    if (identity.parentIdentity === needle) {
+      delete identity.parentIdentity;
+      orphaned++;
+    }
+  }
   const kept = identities.filter((i) => i.address !== needle);
-  if (kept.length === identities.length) return false;
+
   // Webhook cascade first (delete + cancel in-flight + audit). Identity save
   // after that: a failed identity write is retryable, a live subscription after
   // the identity is gone is an exfil channel (§10.5).
@@ -582,6 +625,14 @@ export function deleteIdentity(address: string): boolean {
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
   save(kept);
+  // 归属断开审计：纯标识（被删父地址）；子地址不落载荷
+  if (orphaned > 0) {
+    recordAuditEvent({
+      event: 'identity.parent_orphaned',
+      address: needle,
+      outcome: 'ok',
+    });
+  }
   return true;
 }
 

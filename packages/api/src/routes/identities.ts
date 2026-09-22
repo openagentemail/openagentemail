@@ -19,7 +19,7 @@ import {
   type PushContentTier,
 } from '../lib/identities.ts';
 import { NotifyError, provisionIdentityNotifications } from '../lib/notify.ts';
-import { getAuth } from '../lib/auth.ts';
+import { getAuth, getAttribution } from '../lib/auth.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
 import { clientIp } from '../lib/net.ts';
 
@@ -102,6 +102,8 @@ function publicIdentity(identity: Identity) {
     pushContentTier: tier,
     ...(tier === 3 ? { pushContentTierWarning: PUSH_TIER3_WARNING } : {}),
     ...(identity.scopes !== undefined ? { scopes: identity.scopes } : {}),
+    // #275 R1 F6：admin list 可见归属（additive）
+    ...(identity.parentIdentity ? { parentIdentity: identity.parentIdentity } : {}),
   };
 }
 
@@ -168,6 +170,61 @@ function resolveChildCreateScopes(
   return { ok: true, scopes };
 }
 
+/**
+ * 子身份 rotate 时的 scopes 约束（#275 R1 F3）：白名单 + 子⊆父。
+ * 不处理 scopes:null（调用方先拒）。
+ */
+function resolveChildRotateScopes(
+  rawScopes: unknown,
+  parentScopes: readonly string[] | undefined,
+):
+  | { ok: true; scopes: string[] }
+  | { ok: false; status: 400 | 403; body: Record<string, unknown> } {
+  if (Array.isArray(rawScopes) && rawScopes.includes('identities:create')) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: 'invalid_request',
+        details: 'identities:create cannot be granted to child identities',
+      },
+    };
+  }
+  const validated = validateScopesInput(rawScopes);
+  if (!validated.ok) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: validated.error, details: validated.details },
+    };
+  }
+  for (const scope of validated.scopes) {
+    if (!CHILD_GRANTABLE_SCOPES_SET.has(scope)) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          details: 'identities:create cannot be granted to child identities',
+        },
+      };
+    }
+  }
+  // 父 unscoped（scopes === undefined）= 全权，白名单内均可；否则子⊆父
+  if (parentScopes !== undefined) {
+    for (const scope of validated.scopes) {
+      if (!parentScopes.includes(scope)) {
+        return {
+          ok: false,
+          status: 403,
+          body: { error: 'forbidden: scope exceeds parent permissions' },
+        };
+      }
+    }
+  }
+  return { ok: true, scopes: validated.scopes };
+}
+
 export const identitiesRoute = new Hono()
   .post('/', async (c) => {
     c.header('Cache-Control', 'no-store');
@@ -175,6 +232,15 @@ export const identitiesRoute = new Hono()
     const isAdmin = auth.kind === 'admin';
     // admin 走原路径；非 admin 必须持 identities:create，否则维持 403 admin required 语义
     if (!isAdmin) {
+      // #275 R1 F1：OAuth 票不得创建子身份（对齐 mail_new_identity OAuth-denied）
+      if (getAttribution(c)?.kind === 'oauth') {
+        return c.json(
+          {
+            error: 'forbidden: child identity creation requires direct identity credentials',
+          },
+          403,
+        );
+      }
       if (auth.kind !== 'identity' || !auth.scopes?.includes('identities:create')) {
         return c.json({ error: 'forbidden: admin key required' }, 403);
       }
@@ -436,7 +502,27 @@ export const identitiesRoute = new Hono()
       if (!parsed.success) {
         return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
       }
-      if (parsed.data.scopes === null) {
+      // #275 R1 F3：子身份 rotate 施加白名单 + 子⊆父；拒 unscoped 重置
+      if (existing.parentIdentity) {
+        if (parsed.data.scopes === null) {
+          return c.json(
+            {
+              error: 'invalid_request',
+              details: 'child identity cannot be reset to an unscoped token',
+            },
+            400,
+          );
+        }
+        const parent = findIdentity(existing.parentIdentity);
+        const childResult = resolveChildRotateScopes(
+          parsed.data.scopes,
+          parent?.scopes,
+        );
+        if (!childResult.ok) {
+          return c.json(childResult.body, childResult.status);
+        }
+        requestedScopes = childResult.scopes;
+      } else if (parsed.data.scopes === null) {
         requestedScopes = null;
       } else {
         const validated = validateScopesInput(parsed.data.scopes);

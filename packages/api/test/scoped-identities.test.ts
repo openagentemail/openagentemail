@@ -75,6 +75,7 @@ const {
   listIdentities,
   resolvePushContentTier,
   setIdentityPushContentTier,
+  deleteIdentity,
 } = await import('../src/lib/identities.ts');
 import type { Identity } from '../src/lib/identities.ts';
 const { resetRateLimits } = await import('../src/lib/ratelimit.ts');
@@ -510,6 +511,280 @@ describe('Issue #275: scoped identities create + parent ownership', () => {
       expect(still.parentIdentity).toBe('parent@test.example');
       expect(still.futureField).toEqual({ from: 'newer-binary' });
       expect(resolvePushContentTier(findIdentity(normal.identity.address)!)).toBe(2);
+    });
+  });
+
+  describe('#275 R1 闸变修复', () => {
+    test('F1: OAuth 票含 identities:create → POST /v1/identities 403；直连身份 token 不受影响', async () => {
+      const parent = await mintParent('r1-oauth-parent', [
+        'identities:create',
+        'read:messages',
+      ]);
+      const { putAccessTokenForTests } = await import('../src/lib/oauth-store.ts');
+      const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
+      const resource = resolveResourceUri('http://localhost')!;
+      const oauthToken = 'oa_r1_oauth_create_token';
+      putAccessTokenForTests({
+        token: oauthToken,
+        grantId: 'grant-r1-oauth-create',
+        address: parent.address,
+        aud: resource,
+        expiresAt: Date.now() + 3600_000,
+        ensureGrant: { clientId: 'client-r1', clientName: 'R1 Client' },
+      });
+      const oauthRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(oauthToken),
+        body: JSON.stringify({ localpart: 'oauth-child-nope' }),
+      });
+      expect(oauthRes.status).toBe(403);
+      expect(await oauthRes.json()).toEqual({
+        error: 'forbidden: child identity creation requires direct identity credentials',
+      });
+      // 直连身份 token 仍可创建
+      const ok = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'oauth-child-ok' }),
+      });
+      expect(ok.status).toBe(201);
+    });
+
+    test('F2: 删父清子归属；同址重建不可收养；wait 中止', async () => {
+      const parent = await mintParent('r1-orphan-parent', [
+        'identities:create',
+        'read:messages',
+        'messages:send',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r1-orphan-child' }),
+      });
+      expect(childRes.status).toBe(201);
+      const child = (await childRes.json()) as { address: string };
+      expect(findIdentity(child.address)?.parentIdentity).toBe(parent.address);
+
+      // ③ 已运行 wait：删父后中止（不返回新邮件）
+      fakeMessages = [];
+      const waitPromise = app.request('/v1/messages/wait', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ address: child.address, timeoutSec: 4 }),
+      });
+      await Bun.sleep(80);
+      expect(deleteIdentity(parent.address)).toBe(true);
+
+      // ① store：子 parentIdentity 已清除
+      expect(findIdentity(child.address)?.parentIdentity).toBeUndefined();
+      expect(countChildren(parent.address)).toBe(0);
+
+      const waitRes = await waitPromise;
+      expect(waitRes.status).toBe(403);
+      expect(await waitRes.json()).toEqual({
+        error: 'forbidden: token is scoped to another address',
+      });
+
+      // ② 同址重建 → 对旧子读/发 403
+      const resurrected = createIdentity({
+        localpart: 'r1-orphan-parent',
+        scopes: ['read:messages', 'messages:send', 'identities:create'],
+      })!;
+      expect(resurrected.identity.address).toBe(parent.address);
+      const list = await app.request(`/v1/messages?address=${child.address}`, {
+        headers: { authorization: `Bearer ${resurrected.token}` },
+      });
+      expect(list.status).toBe(403);
+      const send = await app.request('/v1/send', {
+        method: 'POST',
+        headers: authJson(resurrected.token),
+        body: JSON.stringify({
+          from: child.address,
+          to: 'rcpt@example.net',
+          subject: 'adopt',
+          text: 'x',
+        }),
+      });
+      expect(send.status).toBe(403);
+    });
+
+    test('F3: rotate 子约束 — create/越父/null 拒；合法 ⊆父 → 200', async () => {
+      const parent = await mintParent('r1-rot-parent', [
+        'identities:create',
+        'read:messages',
+        'messages:send',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r1-rot-child', scopes: ['read:messages'] }),
+      });
+      expect(childRes.status).toBe(201);
+      const childAddr = ((await childRes.json()) as { address: string }).address;
+
+      const rotCreate = await app.request(`/v1/identities/${childAddr}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['identities:create'] }),
+      });
+      expect(rotCreate.status).toBe(400);
+      expect(await rotCreate.json()).toEqual({
+        error: 'invalid_request',
+        details: 'identities:create cannot be granted to child identities',
+      });
+
+      // 收窄父 scopes 后越权
+      await app.request(`/v1/identities/${parent.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['identities:create', 'read:messages'] }),
+      });
+      const rotExceed = await app.request(`/v1/identities/${childAddr}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['messages:send'] }),
+      });
+      expect(rotExceed.status).toBe(403);
+      expect(await rotExceed.json()).toEqual({
+        error: 'forbidden: scope exceeds parent permissions',
+      });
+
+      const rotNull = await app.request(`/v1/identities/${childAddr}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: null }),
+      });
+      expect(rotNull.status).toBe(400);
+      expect(await rotNull.json()).toEqual({
+        error: 'invalid_request',
+        details: 'child identity cannot be reset to an unscoped token',
+      });
+
+      const rotOk = await app.request(`/v1/identities/${childAddr}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['read:messages'] }),
+      });
+      expect(rotOk.status).toBe(200);
+      expect(((await rotOk.json()) as { scopes: string[] }).scopes).toEqual(['read:messages']);
+    });
+
+    test('F4: delegation 仅允许 read:messages；messages:send → 400', async () => {
+      const owner = createIdentity({ localpart: 'r1-del-owner' })!;
+      const grantee = createIdentity({ localpart: 'r1-del-grantee' })!;
+      const bad = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({
+          mailbox: owner.identity.address,
+          grantee: grantee.identity.address,
+          scopes: ['messages:send'],
+        }),
+      });
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toEqual({
+        error: 'unsupported_scope',
+        details: 'Unsupported scope: messages:send',
+      });
+      const good = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({
+          mailbox: owner.identity.address,
+          grantee: grantee.identity.address,
+          scopes: ['read:messages'],
+        }),
+      });
+      expect(good.status).toBe(201);
+    });
+
+    test('F5: 归属分支要求 requiredScope；仅 messages:send 不可读子', async () => {
+      const { Hono } = await import('hono');
+      const { forbidUnlessMailboxAccess } = await import('../src/lib/auth.ts');
+      const parent = createIdentity({
+        localpart: 'r1-f5-parent',
+        scopes: ['messages:send'],
+      })!;
+      const child = createIdentity({
+        localpart: 'r1-f5-child',
+        parentIdentity: parent.identity.address,
+        scopes: ['read:messages'],
+      })!;
+      const mini = new Hono();
+      mini.use('*', async (c, next) => {
+        c.set('auth', {
+          kind: 'identity',
+          address: parent.identity.address,
+          scopes: ['messages:send'],
+        });
+        await next();
+      });
+      mini.get('/probe', (c) => {
+        const denied = forbidUnlessMailboxAccess(c, child.identity.address, 'read:messages');
+        if (denied) return denied;
+        return c.json({ ok: true });
+      });
+      const denied = await mini.request('/probe');
+      expect(denied.status).toBe(403);
+
+      // 含 read:messages 可经归属分支
+      const mini2 = new Hono();
+      mini2.use('*', async (c, next) => {
+        c.set('auth', {
+          kind: 'identity',
+          address: parent.identity.address,
+          scopes: ['read:messages'],
+        });
+        await next();
+      });
+      mini2.get('/probe', (c) => {
+        const d = forbidUnlessMailboxAccess(c, child.identity.address, 'read:messages');
+        if (d) return d;
+        return c.json({ ok: true });
+      });
+      expect((await mini2.request('/probe')).status).toBe(200);
+    });
+
+    test('F6: admin list 含 parentIdentity', async () => {
+      const parent = await mintParent('r1-list-parent', [
+        'identities:create',
+        'read:messages',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r1-list-child' }),
+      });
+      expect(childRes.status).toBe(201);
+      const childAddr = ((await childRes.json()) as { address: string }).address;
+      const list = await app.request('/v1/identities', {
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      expect(list.status).toBe(200);
+      const body = (await list.json()) as {
+        identities: Array<{ address: string; parentIdentity?: string }>;
+      };
+      const row = body.identities.find((i) => i.address === childAddr);
+      expect(row?.parentIdentity).toBe(parent.address);
+    });
+
+    test('F7: parentIdentity 审计 scrub maxLen 320', async () => {
+      const { recordAuditEvent, readAuditEvents, scrubAuditField } = await import(
+        '../src/lib/audit.ts'
+      );
+      const long = `${'a'.repeat(300)}@test.example`;
+      expect(long.length).toBeGreaterThan(256);
+      expect(scrubAuditField(long, 320).length).toBe(long.length);
+      expect(scrubAuditField(long, 320).length).toBeLessThanOrEqual(320);
+      recordAuditEvent({
+        event: 'identity.create',
+        address: 'child@test.example',
+        parentIdentity: long,
+        outcome: 'ok',
+      });
+      const events = readAuditEvents({ event: 'identity.create' });
+      const hit = events.find((e) => e.parentIdentity === long);
+      expect(hit?.parentIdentity).toBe(long);
     });
   });
 });

@@ -185,9 +185,9 @@ export function recordAuditEvent(
       && Number.isFinite(partial.leaseGeneration)
       ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
       : {}),
-    // #275：父地址纯标识（邮箱小写字符串），与 address 同款 scrub
+    // #275：父地址纯标识（邮箱）；与 address 同款 scrub，maxLen 320 对齐邮箱上限
     ...(partial.parentIdentity !== undefined
-      ? { parentIdentity: scrubAuditField(partial.parentIdentity) }
+      ? { parentIdentity: scrubAuditField(partial.parentIdentity, 320) }
       : {}),
   };
 

@@ -292,11 +292,13 @@ export function forbidUnlessMailboxAccess(
   if (hasActiveDelegation(targetMailbox, auth.address, requiredScope)) {
     return null;
   }
-  // #275 归属直连：父持 read:messages（由 scope policy 门控）可读子信箱
+  // #275 归属直连：父可读子信箱；纵深防御——scoped 须含 requiredScope（#275 R1 F5）
   if (auth.kind === 'identity') {
     const child = findIdentity(targetMailbox);
     if (child?.parentIdentity === auth.address.toLowerCase()) {
-      return null;
+      if (auth.scopes === undefined || auth.scopes.includes(requiredScope)) {
+        return null;
+      }
     }
   }
   return c.json({ error: 'forbidden: token is scoped to another address' }, 403);

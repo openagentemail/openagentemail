@@ -17,3 +17,15 @@ export function isSupportedScope(scope: string): scope is SupportedScope {
 
 export const MAX_SCOPES_COUNT = 10;
 export const MAX_SCOPE_LENGTH = 64;
+
+/**
+ * Delegation 可授予的 scope 专用白名单（#275 R1 F4）。
+ * 与 SUPPORTED_SCOPES 解耦：扩容身份 scope 不得自动进入 delegation。
+ */
+export const DELEGATION_SCOPES = ['read:messages'] as const;
+export type DelegationScope = (typeof DELEGATION_SCOPES)[number];
+export const DELEGATION_SCOPES_SET = new Set<string>(DELEGATION_SCOPES);
+
+export function isDelegationScope(scope: string): scope is DelegationScope {
+  return DELEGATION_SCOPES_SET.has(scope);
+}
