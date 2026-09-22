@@ -546,17 +546,113 @@ export function isParentOf(parent: string, child: string): boolean {
   return childIdentity.parentIdentity === parent.toLowerCase();
 }
 
-export interface RotateIdentityTokenResult {
-  token: string;
-  prevScopes?: string[];
-  scopes?: string[];
-  identity: Identity;
+/** #275 R4 F15：rotate 原子结果（成功 / 可映射失败） */
+export type RotateIdentityTokenResult =
+  | {
+      ok: true;
+      token: string;
+      prevScopes?: string[];
+      scopes?: string[];
+      identity: Identity;
+    }
+  | { ok: false; error: 'not_found'; status: 404 }
+  | {
+      ok: false;
+      error: 'child_parent_missing';
+      status: 400;
+      details: 'child identity has no existing parent identity';
+    }
+  | {
+      ok: false;
+      error: 'child_scope_invalid';
+      status: 400 | 403;
+      body: { error: string; details?: unknown };
+    };
+
+/**
+ * 子身份 rotate 的 store 层约束（#275 R4 F15；覆盖 REST 空 body / UI 直调）。
+ * scopes === undefined → 仅查父存在；显式 null/数组 → 拒 unscoped + 白名单 + 子⊆父。
+ */
+function enforceChildRotateConstraints(
+  identity: Identity,
+  identities: Identity[],
+  scopes: string[] | null | undefined,
+): Extract<RotateIdentityTokenResult, { ok: false }> | null {
+  if (!identity.parentIdentity) return null;
+  const parent = identities.find((i) => i.address === identity.parentIdentity);
+  if (!parent) {
+    return {
+      ok: false,
+      error: 'child_parent_missing',
+      status: 400,
+      details: 'child identity has no existing parent identity',
+    };
+  }
+  // 保留现有 scopes：不重校验 stale；仅保证父仍在
+  if (scopes === undefined) return null;
+  if (scopes === null) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: {
+        error: 'invalid_request',
+        details: 'child identity cannot be reset to an unscoped token',
+      },
+    };
+  }
+  if (scopes.includes('identities:create')) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: {
+        error: 'invalid_request',
+        details: 'identities:create cannot be granted to child identities',
+      },
+    };
+  }
+  const validated = validateScopesInput(scopes);
+  if (!validated.ok) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: { error: validated.error, details: validated.details },
+    };
+  }
+  for (const scope of validated.scopes) {
+    if (!CHILD_GRANTABLE_SCOPES_SET.has(scope)) {
+      return {
+        ok: false,
+        error: 'child_scope_invalid',
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          details: 'identities:create cannot be granted to child identities',
+        },
+      };
+    }
+  }
+  // 父 unscoped = 全权；否则子⊆父当前 scopes
+  if (parent.scopes !== undefined) {
+    for (const scope of validated.scopes) {
+      if (!parent.scopes.includes(scope)) {
+        return {
+          ok: false,
+          error: 'child_scope_invalid',
+          status: 403,
+          body: { error: 'forbidden: scope exceeds parent permissions' },
+        };
+      }
+    }
+  }
+  return null;
 }
 
 /**
  * Atomically snapshot existing scopes, rotate token, optionally update scopes,
- * and persist. Returns the new plaintext token alongside previous and updated scopes,
- * or null if the address does not exist.
+ * and persist. Returns discriminated ok/error（#275 R4 F15 子约束为全路径最后防线）.
  *
  * All state mutation and snapshotting happen synchronously in the store layer,
  * eliminating any reliance on caller-level snapshot timing ("no intervening await").
@@ -564,11 +660,16 @@ export interface RotateIdentityTokenResult {
 export function rotateIdentityTokenDetailed(
   address: string,
   scopes?: string[] | null,
-): RotateIdentityTokenResult | null {
+): RotateIdentityTokenResult {
   const identities = load();
   const needle = address.toLowerCase();
   const identity = identities.find((i) => i.address === needle);
-  if (!identity) return null;
+  if (!identity) return { ok: false, error: 'not_found', status: 404 };
+
+  // 先拒后改：校验失败不得 revoke / mutate / save
+  const childDenied = enforceChildRotateConstraints(identity, identities, scopes);
+  if (childDenied) return childDenied;
+
   revokeDelegationsOnGranteeTokenRotate(needle);
   const prevScopes = identity.scopes !== undefined ? [...identity.scopes] : undefined;
   const { token, tokenHash } = generateToken();
@@ -579,6 +680,7 @@ export function rotateIdentityTokenDetailed(
   }
   save(identities);
   return {
+    ok: true,
     token,
     prevScopes,
     scopes: identity.scopes !== undefined ? [...identity.scopes] : undefined,
@@ -591,10 +693,11 @@ export function rotateIdentityTokenDetailed(
  * If `scopes` is provided (including empty array), the rotated token is scoped.
  * If `scopes` is omitted/undefined, existing scope restrictions are preserved.
  * Pass null only for an explicit reset to a legacy unscoped/full token.
- * Returns the new plaintext token, or null if the address doesn't exist.
+ * Returns the new plaintext token, or null if not_found / 子约束拒（null 语义保持）.
  */
 export function rotateIdentityToken(address: string, scopes?: string[] | null): string | null {
-  return rotateIdentityTokenDetailed(address, scopes)?.token ?? null;
+  const result = rotateIdentityTokenDetailed(address, scopes);
+  return result.ok ? result.token : null;
 }
 
 /**

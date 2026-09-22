@@ -76,6 +76,8 @@ const {
   resolvePushContentTier,
   setIdentityPushContentTier,
   deleteIdentity,
+  rotateIdentityTokenDetailed,
+  findIdentityByToken,
 } = await import('../src/lib/identities.ts');
 import type { Identity } from '../src/lib/identities.ts';
 const { resetRateLimits } = await import('../src/lib/ratelimit.ts');
@@ -1157,6 +1159,118 @@ describe('Issue #275: scoped identities create + parent ownership', () => {
       expect(deleteIdentity(parent.identity.address)).toBe(true);
       expect(findIdentity(parent.identity.address)).toBeUndefined();
       expect(findIdentity(child.identity.address)?.parentIdentity).toBeUndefined();
+    });
+  });
+
+  describe('#275 R4 闸变修复', () => {
+    test('F15: 空 body 悬空子 rotate → 400；正常子空 body → 200；显式违规不回归', async () => {
+      // ① 悬空子空 body：路由层检查被跳过，store 层兜住
+      const dangling = createIdentity({
+        localpart: 'r4-f15-dangling',
+        parentIdentity: 'ghost-parent@test.example',
+        scopes: ['read:messages'],
+      })!;
+      const emptyBad = await app.request(`/v1/identities/${dangling.identity.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: '',
+      });
+      expect(emptyBad.status).toBe(400);
+      expect(await emptyBad.json()).toEqual({
+        error: 'invalid_request',
+        details: 'child identity has no existing parent identity',
+      });
+      // 拒绝后旧 token 仍可用（未 mutate）
+      expect(findIdentityByToken(dangling.token)).toBeDefined();
+
+      // ③ 正常子空 body → 200 保留 scopes
+      const parent = await mintParent('r4-f15-parent', [
+        'identities:create',
+        'read:messages',
+        'messages:send',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r4-f15-child', scopes: ['read:messages'] }),
+      });
+      expect(childRes.status).toBe(201);
+      const child = (await childRes.json()) as { address: string; token: string };
+      const emptyOk = await app.request(`/v1/identities/${child.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: '',
+      });
+      expect(emptyOk.status).toBe(200);
+      const emptyBody = (await emptyOk.json()) as { token: string; scopes?: string[] };
+      expect(emptyBody.token.startsWith('oa_')).toBe(true);
+      expect(emptyBody.scopes).toEqual(['read:messages']);
+
+      // ④ 显式违规 REST 不回归
+      const rotCreate = await app.request(`/v1/identities/${child.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['identities:create'] }),
+      });
+      expect(rotCreate.status).toBe(400);
+      expect(await rotCreate.json()).toEqual({
+        error: 'invalid_request',
+        details: 'identities:create cannot be granted to child identities',
+      });
+
+      await app.request(`/v1/identities/${parent.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['identities:create', 'read:messages'] }),
+      });
+      const rotExceed = await app.request(`/v1/identities/${child.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: ['messages:send'] }),
+      });
+      expect(rotExceed.status).toBe(403);
+      expect(await rotExceed.json()).toEqual({
+        error: 'forbidden: scope exceeds parent permissions',
+      });
+
+      const rotNull = await app.request(`/v1/identities/${child.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({ scopes: null }),
+      });
+      expect(rotNull.status).toBe(400);
+      expect(await rotNull.json()).toEqual({
+        error: 'invalid_request',
+        details: 'child identity cannot be reset to an unscoped token',
+      });
+
+      // ⑤ admin 非子身份 rotate 不回归
+      const plain = createIdentity({ localpart: 'r4-f15-plain', scopes: ['read:messages'] })!;
+      const plainRot = await app.request(`/v1/identities/${plain.identity.address}/token`, {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: '',
+      });
+      expect(plainRot.status).toBe(200);
+      expect(((await plainRot.json()) as { scopes: string[] }).scopes).toEqual(['read:messages']);
+
+      // store 直调：显式违规同样拒（UI 路径同源）
+      const storeCreate = rotateIdentityTokenDetailed(child.address, ['identities:create']);
+      expect(storeCreate).toMatchObject({
+        ok: false,
+        error: 'child_scope_invalid',
+        status: 400,
+      });
+      const storeNull = rotateIdentityTokenDetailed(child.address, null);
+      expect(storeNull).toMatchObject({
+        ok: false,
+        error: 'child_scope_invalid',
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          details: 'child identity cannot be reset to an unscoped token',
+        },
+      });
     });
   });
 });

@@ -10,7 +10,6 @@ import {
   LOCALPART_RE,
   PUSH_TIER3_WARNING,
   resolvePushContentTier,
-  rotateIdentityToken,
   rotateIdentityTokenDetailed,
   setIdentityPushContentTier,
   type Identity,
@@ -723,8 +722,18 @@ export function createUiApiRoutes(
     const denied = requireUiAdmin(c);
     if (denied) return denied;
     const address = c.req.param('address').toLowerCase();
+    // #275 R4 F15：UI 直调 store；子约束在 rotateIdentityTokenDetailed 内强制
     const rotated = rotateIdentityTokenDetailed(address);
-    if (!rotated) return c.json({ error: 'not_found' }, 404);
+    if (!rotated.ok) {
+      if (rotated.error === 'not_found') return c.json({ error: 'not_found' }, 404);
+      if (rotated.error === 'child_parent_missing') {
+        return c.json(
+          { error: 'invalid_request', details: rotated.details },
+          rotated.status,
+        );
+      }
+      return c.json(rotated.body, rotated.status);
+    }
     const { token, prevScopes, scopes: updatedScopes } = rotated;
     recordAuditEvent({
       event: 'identity.token.rotate',

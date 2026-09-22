@@ -578,8 +578,18 @@ export const identitiesRoute = new Hono()
 
     // Atomic read-modify-write in the store layer snapshots prevScopes, updates token/scopes,
     // and saves in a single operation, eliminating the implicit "no intervening await" assumption.
+    // #275 R4 F15：store 层子约束为最后防线（空 body / 路由检查绕过时仍拒）
     const rotated = rotateIdentityTokenDetailed(address, requestedScopes);
-    if (!rotated) return c.json({ error: 'not_found' }, 404);
+    if (!rotated.ok) {
+      if (rotated.error === 'not_found') return c.json({ error: 'not_found' }, 404);
+      if (rotated.error === 'child_parent_missing') {
+        return c.json(
+          { error: 'invalid_request', details: rotated.details },
+          rotated.status,
+        );
+      }
+      return c.json(rotated.body, rotated.status);
+    }
     const { token, prevScopes, scopes: updatedScopes } = rotated;
 
     const scopeEvent = classifyScopeChange(prevScopes, updatedScopes);
