@@ -3326,6 +3326,18 @@ export async function claimTask(input: {
       if (blockingMutation) {
         throw new Error('lease_overlay_pending_index');
       }
+    } else {
+      // #308：release/renew 已 SMTP accepted 但未被 durable 吸收时，re-claim 须等索引——
+      // 镜像 journal 侧 blockingMutation 语义（协议零新增，复用 lease_overlay_pending_index）。
+      // eventIsIndexed 的 task 参数须为 raw/durable（同 mergeQueuedEvents）；durable 为 null
+      // 仅「任务从未 index」理论边缘——claimTask 前提是任务已存在且 to 匹配，故回落 current 可断言。
+      const durable = await getTaskSnapshot(current.id, { mergeOverlay: false });
+      const blocking = (queuedEvents.get(current.id) ?? []).some((row) =>
+        !!row.lease
+        && (row.lease.event === 'release' || row.lease.event === 'renew')
+        && !eventIsIndexed(durable ?? current, row),
+      );
+      if (blocking) throw new Error('lease_overlay_pending_index');
     }
     const beforeMaterialization = nowMs();
     // This must precede expiry materialization: at the absolute boundary a

@@ -823,3 +823,31 @@ N/A。
 ### 基线与证据
 - HEAD：`7d3b7b3cd049d4f91887d9c408578d339ce8f716`
 - Subagent：`b36d38dd-2fe4-479b-a968-6744e599fda4` → PASS
+
+## 2026-09-22 · w308（B2 非 journal pending-index fence）
+
+### 我们实现了哪些功能？
+1. `claimTask`（`tasks-internal.ts`）在 journal 门控 **else** 分支加 pending-index fence：queued 中存在未 durable 吸收的 `release`/`renew` 时抛 `lease_overlay_pending_index`（复用既有 409 码）。
+2. 吸收判定用 `getTaskSnapshot(..., { mergeOverlay: false })` + `eventIsIndexed`（durable 语义，镜像 `mergeQueuedEvents`）。
+3. 新测 `task-lease-write-side-fence-308.test.ts`：release/renew 各一组「pending→409」+「吸收后重试成功」；对照「无 release/renew 零误伤」与「未索引 claim1 → lease_already_claimed」。
+4. 适配 R12 既有「release→reclaim」用例：先吸收 release 再 reclaim（对齐 #308 语义）。
+5. README / README.zh-CN / packages/mcp/README 记明 journal-off 下的瞬态 409 重试窗。
+
+### 我们遇到了哪些错误？
+1. 测试调用 `queuedLeaseOverlayCountForTests()` 未传 `taskId` → 恒为 0。
+2. api 全量：`R12 GREEN: released working task reclaims...` 在 release overlay 未吸收时立即 reclaim → 命中新 fence 409。
+3. api 全量偶发 `list-rate isolate` flake（隔离复跑绿；与本卡无关）。
+4. 本仓库为 Bun/TS，无 Python `requirements.txt` 适用面（依赖由 `packages/*/bun.lock` 管理）。
+
+### 我们是如何解决这些错误的？
+1. 改为 `queuedLeaseOverlayCountForTests(ID)`。
+2. R12 改为 claim/release 均先 `taskFromMessages` 吸收进 durable 再 reclaim；断言语义（gen2 / 鉴权 release 回执）不变。
+3. 隔离复跑确认预存 flake；不纳入本卡修面。
+4. N/A（不生成虚假 pip freeze）。
+
+### 基线与证据
+- 基线 main：`da9343ca`
+- 分支：`tizerluo/w308`
+- focused：6 pass（308）；305+m2+core 回归绿；R12 适配后绿
+- mcp：48 pass / 0 fail
+- api 全量：2044 pass / 9 skip / 1 fail（list-rate isolate flake；隔离 5 pass）
