@@ -86,6 +86,8 @@ export function registerOpenAgentEmailTools(
     pushContentTierWarning: z.string().optional(),
     token: z.string().optional(),
     scopes: z.array(z.string()).optional(),
+    // #275 R2 F6/F10：admin list 可含归属父地址（additive）
+    parentIdentity: z.string().optional(),
   };
 
   // list / read 真交集。from/to 是服务端可信数据的契约声明（非输入消毒）：

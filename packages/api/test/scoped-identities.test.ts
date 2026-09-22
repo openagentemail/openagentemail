@@ -787,4 +787,196 @@ describe('Issue #275: scoped identities create + parent ownership', () => {
       expect(hit?.parentIdentity).toBe(long);
     });
   });
+
+  describe('#275 R2 闸变修复', () => {
+    test('F9: createDelegation 拒 messages:send；load 剔除后 read 授权不 409', async () => {
+      const {
+        createDelegation,
+        findActiveDelegation,
+        listDelegations,
+        invalidateDelegationStoreCache,
+        DELEGATION_STORE_SCHEMA_VERSION,
+      } = await import('../src/lib/delegations.ts');
+      const owner = createIdentity({ localpart: 'r2-f9-owner' })!;
+      const grantee = createIdentity({ localpart: 'r2-f9-grantee' })!;
+
+      // ① 内部路径仅 messages:send → 过滤后空 → 抛
+      expect(() =>
+        createDelegation({
+          mailbox: owner.identity.address,
+          grantee: grantee.identity.address,
+          scopes: ['messages:send'],
+          createdBy: 'admin',
+        }),
+      ).toThrow(/invalid_scopes/);
+
+      // ② 手工植入含 messages:send 的 grant → load 后不 active
+      const storePath = join(config.dataDir, 'delegations.json');
+      writeFileSync(
+        storePath,
+        JSON.stringify(
+          {
+            schemaVersion: DELEGATION_STORE_SCHEMA_VERSION,
+            grants: [
+              {
+                id: 'delg_r2_send_only',
+                mailbox: owner.identity.address,
+                grantee: grantee.identity.address,
+                scopes: ['messages:send'],
+                createdAt: '2026-09-22T00:00:00Z',
+                createdBy: 'admin',
+                revokedAt: null,
+                revokedBy: null,
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        { mode: 0o600 },
+      );
+      invalidateDelegationStoreCache();
+      expect(listDelegations().some((g) => g.id === 'delg_r2_send_only')).toBe(false);
+      expect(
+        findActiveDelegation(owner.identity.address, grantee.identity.address),
+      ).toBeUndefined();
+
+      // ③ 后续合法 read 授权 → 201 不 409
+      const ok = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: authJson(adminKey),
+        body: JSON.stringify({
+          mailbox: owner.identity.address,
+          grantee: grantee.identity.address,
+          scopes: ['read:messages'],
+        }),
+      });
+      expect(ok.status).toBe(201);
+    });
+
+    test('F10: mail_list_identities 含子 parentIdentity 过 MCP schema', async () => {
+      const parent = await mintParent('r2-f10-parent', [
+        'identities:create',
+        'read:messages',
+      ]);
+      const childRes = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r2-f10-child' }),
+      });
+      expect(childRes.status).toBe(201);
+      const childAddr = ((await childRes.json()) as { address: string }).address;
+
+      async function readMcpJson(res: Response): Promise<unknown> {
+        const text = await res.text();
+        const dataLines = text
+          .split('\n')
+          .filter((line) => line.startsWith('data:') || line.startsWith('data: '));
+        if (dataLines.length > 0) {
+          const last = dataLines[dataLines.length - 1]!;
+          const payload = last.startsWith('data: ') ? last.slice(6) : last.slice(5);
+          return JSON.parse(payload.trim());
+        }
+        return JSON.parse(text);
+      }
+
+      const listTools = await app.request('/mcp', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/list',
+          params: {},
+        }),
+      });
+      expect(listTools.status).toBe(200);
+      const toolsData = (await readMcpJson(listTools)) as {
+        result?: {
+          tools?: Array<{
+            name: string;
+            outputSchema?: { properties?: Record<string, unknown> };
+          }>;
+        };
+      };
+      const listTool = toolsData.result?.tools?.find((t) => t.name === 'mail_list_identities');
+      expect(listTool?.outputSchema?.properties?.identities).toBeDefined();
+      // identities items → parentIdentity optional on identity object
+      const idProps = (
+        listTool?.outputSchema?.properties?.identities as {
+          items?: { properties?: Record<string, unknown> };
+        }
+      )?.items?.properties;
+      expect(idProps).toHaveProperty('parentIdentity');
+
+      const call = await app.request('/mcp', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminKey}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'mail_list_identities', arguments: {} },
+        }),
+      });
+      expect(call.status).toBe(200);
+      const payload = (await readMcpJson(call)) as {
+        result?: {
+          isError?: boolean;
+          structuredContent?: {
+            identities?: Array<{ address: string; parentIdentity?: string }>;
+          };
+        };
+        error?: unknown;
+      };
+      expect(payload.error).toBeUndefined();
+      expect(payload.result?.isError).toBeFalsy();
+      const row = payload.result?.structuredContent?.identities?.find(
+        (i) => i.address === childAddr,
+      );
+      expect(row?.parentIdentity).toBe(parent.address);
+    });
+
+    test('F11: client 序列化 canNotifyUser=false → REST 403（与直连一致）', async () => {
+      const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+      const parent = await mintParent('r2-f11-parent', [
+        'identities:create',
+        'read:messages',
+      ]);
+      let capturedBody: unknown;
+      const client = new OpenAgentEmailClient(
+        'http://test.local',
+        parent.token,
+        (input, init) => {
+          capturedBody = JSON.parse(String(init?.body ?? '{}'));
+          if (input instanceof Request) return app.fetch(new Request(input, init));
+          return app.fetch(new Request(input.toString(), init));
+        },
+      );
+      await expect(
+        client.createIdentity({ localpart: 'r2-f11-child', canNotifyUser: false }),
+      ).rejects.toThrow();
+      expect(capturedBody).toEqual(
+        expect.objectContaining({ localpart: 'r2-f11-child', canNotifyUser: false }),
+      );
+      // 直连 REST 同结果
+      const rest = await app.request('/v1/identities', {
+        method: 'POST',
+        headers: authJson(parent.token),
+        body: JSON.stringify({ localpart: 'r2-f11-rest', canNotifyUser: false }),
+      });
+      expect(rest.status).toBe(403);
+      expect(await rest.json()).toEqual({
+        error: 'forbidden: admin key required for canNotifyUser',
+      });
+    });
+  });
 });

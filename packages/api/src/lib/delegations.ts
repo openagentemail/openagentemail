@@ -1,6 +1,6 @@
 // Single-writer process assumption: Like identities.json, delegations.json assumes a
 // single-writer process and does not support multi-process concurrent mutations on the same DATA_DIR.
-// Scope note: Currently delegations only support 'read:messages' (see SUPPORTED_SCOPES).
+// Scope note: Delegations only support DELEGATION_SCOPES（当前仅 'read:messages'），与 SUPPORTED_SCOPES 解耦。
 // If additional scopes are introduced in the future, all forbidUnlessMailboxAccess call sites must be
 // audited to ensure delegations do not unintentionally grant write or admin capabilities.
 //
@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
-import { isSupportedScope } from './identities.ts';
+import { isDelegationScope } from './identities.ts';
 
 export const DELEGATION_STORE_SCHEMA_VERSION = 1;
 export const DELEGATION_STORE_FILE = 'delegations.json';
@@ -196,18 +196,19 @@ function loadCache(): StoreCache {
     const droppedGrants: DelegationGrant[] = [];
     for (const entry of parsed.grants) {
       const view = rawGrantView(entry as Record<string, unknown>);
-      const scopes = view.scopes.filter((s) => isSupportedScope(s));
+      const scopes = view.scopes.filter((s) => isDelegationScope(s));
       if (scopes.length === 0) {
         // Issue #136 R2：整条剔除必须留痕，不能静默吞掉磁盘上的残留。
+        // #275 R2 F9：谓词为 DELEGATION_SCOPES（非身份 SUPPORTED_SCOPES）
         console.warn(
-          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) dropped at load: no supported scopes in ${JSON.stringify(view.scopes)}`,
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) dropped at load: no delegation scopes in ${JSON.stringify(view.scopes)}`,
         );
         droppedGrants.push(view);
         continue;
       }
       if (scopes.length < view.scopes.length) {
         console.warn(
-          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) scopes narrowed at load: kept ${JSON.stringify(scopes)}, dropped ${JSON.stringify(view.scopes.filter((s) => !isSupportedScope(s)))}`,
+          `[delegations] grant ${view.id} (${view.mailbox} → ${view.grantee}) scopes narrowed at load: kept ${JSON.stringify(scopes)}, dropped ${JSON.stringify(view.scopes.filter((s) => !isDelegationScope(s)))}`,
         );
       }
       grants.push({ ...view, scopes });
@@ -278,7 +279,8 @@ export function createDelegation(params: {
     return existing;
   }
   const rawScopes = params.scopes && params.scopes.length > 0 ? [...params.scopes] : ['read:messages'];
-  const scopes = rawScopes.filter((s) => typeof s === 'string' && isSupportedScope(s));
+  // #275 R2 F9：仅 DELEGATION_SCOPES 可持久化（与路由 validateDelegationScopesInput 对齐）
+  const scopes = rawScopes.filter((s) => typeof s === 'string' && isDelegationScope(s));
   if (scopes.length === 0) {
     throw new Error('invalid_scopes: no supported scopes provided');
   }
