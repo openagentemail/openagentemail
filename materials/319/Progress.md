@@ -7,7 +7,7 @@
 2. 抓取 AgentMail Attachments 官文 dated 快照（2026-09-22T10:58:06Z）与 Composio 2026-09-21 changelog 快照。
 3. 编写并运行受控探针 `probe-attachments.ts`，真打本机 `createApp`：G1–G5 + MCP + 下载路由探测；落 `probe-stdout.txt` / `probe-results.json`。
 4. 写出三列矩阵与 completion（含 Composio 九项附录与第六节事实/代价）。
-5. subagent 自审 `c4c3fbd8-b391-4a81-9569-8d31dacf0755` → PASS_WITH_NITS（已按 nit 补原始摘录并校正行数至合计 203）→ commit/push → 开 PR（#319）。
+5. subagent 自审 `c4c3fbd8-b391-4a81-9569-8d31dacf0755` → PASS_WITH_NITS（已按 nit 补原始摘录并校正行数至合计 **207**）→ commit/push → PR https://github.com/openagentemail/openagentemail/pull/323 。
 
 ### 我们遇到了哪些错误？
 1. 初跑 `createIdentity` 返回值误用为直接含 `address` → `from=undefined` → 全组假 400。
