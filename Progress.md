@@ -870,8 +870,10 @@ N/A。
 1. renew 超龄测改 leaseSec=3600，保证超龄时窗仍活。
 
 ### 基线与证据
-- 基线：`4e7e0d1` → 见本次提交 HEAD
+- 基线：`4e7e0d1` → HEAD：`65c8d6c56c18cc3ac2a99a9401c88ef5bb6ac1ae`
 - focused 308：10 pass；回归 305/m2/core：155 pass
 - api 全量：2049 pass / 9 skip / 0 fail
 - mcp：48 pass
 - Subagent：`ca06a22d-e089-478d-8680-8390f889f051` → PASS
+- completion：`/home/ops/materials/308/completion-r1.md`
+- PR：https://github.com/openagentemail/openagentemail/pull/318
