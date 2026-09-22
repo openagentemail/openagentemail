@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { forbidUnlessAddress, getAuth } from '../lib/auth.ts';
+import { errorCode } from '../lib/errors.ts';
 import {
   createIdentity,
   deleteIdentity,
@@ -263,15 +264,17 @@ function taskActionFrom(c: Context, task: Task, supplied: string | undefined): s
 }
 
 function journalUnavailableUi(c: Context, err: unknown): Response | null {
-  const code = (err as Error).message;
-  if (typeof code === 'string' && code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
+  // 与 tasks.journalUnavailable 同口径：errorCode 哨兵 ''，避免非 Error 读 .message 抛 TypeError
+  const code = errorCode(err);
+  if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
   return null;
 }
 
 function taskMutationError(c: Context, err: unknown): Response {
   const mapped = journalUnavailableUi(c, err);
   if (mapped) return mapped;
-  const code = (err as Error).message;
+  // 统一用 errorCode：非 Error rejection 落入既有 smtp_error 502 兜底（消 500）
+  const code = errorCode(err);
   if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
   if (code === 'task_already_terminal' || code === 'task_lease_required') return c.json({ error: code }, 409);
   if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task' || code === 'approval_decision_required') {
@@ -288,7 +291,7 @@ function taskMutationError(c: Context, err: unknown): Response {
     logInvalidCursorRejectionFor('tasks', err.kind, { cursorTs: err.cursorTs });
     return c.json({ error: 'invalid_cursor' }, 400);
   }
-  console.warn('[task] ui mutation failed:', (err as Error).message);
+  console.warn('[task] ui mutation failed:', errorCode(err));
   return c.json({ error: 'smtp_error' }, 502);
 }
 

@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
+import { errorCode } from '../lib/errors.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
@@ -105,9 +106,8 @@ function canReadTask(c: Context, task: Task): boolean {
 }
 
 function journalUnavailable(c: Context, err: unknown): Response | null {
-  // 前置 string 守卫：非 Error / message 非 string 时返回 null，走既有兜底，避免 startsWith 抛 TypeError 逸出成 app 级 500
-  const raw = (err as { message?: unknown } | null | undefined)?.message;
-  const code = typeof raw === 'string' ? raw : '';
+  // 收敛到 errorCode：非 Error / message 非 string → ''，走既有兜底，避免 startsWith 抛 TypeError
+  const code = errorCode(err);
   if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
   return null;
 }
@@ -225,7 +225,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           });
       } catch (err) {
         // create 段：SMTP/校验失败 — 响应逐字节保持旧行为（502 smtp_error 无 id）。
-        const code = (err as Error).message;
+        // 非 Error rejection 经 errorCode 归一为 ''，落入既有 smtp_error 兜底（消 app 级 500）。
+        const code = errorCode(err);
         if (code === 'invalid_approval_expiry' || code === 'invalid_parent_task_id') return c.json({ error: 'invalid_request' }, 400);
         if (code === 'parent_task_not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'parent_task_sender_not_participant') return c.json({ error: 'forbidden: task participant required' }, 403);
@@ -259,11 +260,12 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         return c.json(taskViewFor(c, waited ?? task, parent), 201);
       } catch (err) {
         // 复用 journalUnavailable 判定（lease_journal_* → 503），body 补身份字段。
+        // 响应值与 warn 统一走 errorCode，避免非 Error rejection 再炸成 500。
         const mapped = journalUnavailable(c, err);
         if (mapped) {
-          return c.json({ error: (err as Error).message, taskId: task.id, created: true }, 503);
+          return c.json({ error: errorCode(err), taskId: task.id, created: true }, 503);
         }
-        console.warn('[task] create post-create/wait failed:', (err as Error).message);
+        console.warn('[task] create post-create/wait failed:', errorCode(err));
         // SMTP/创建已成功；此处为 wait 段非 journal 异常 —— 用独立码，避免误指 smtp。
         return c.json({ error: 'wait_failed', taskId: task.id, created: true }, 502);
       }
