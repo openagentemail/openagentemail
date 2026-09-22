@@ -714,6 +714,46 @@ describe('#313 approval digest MIME folding', () => {
     expect(parsed?.approval).toMatchObject({ type: 'decision', digest, decision: 'approved' });
   });
 
+  // #313 T5c 过期路径：打中 resultExpiry.digest 比较 + expired digest 赋值
+  test('#313 T5c multi-continuation folded digest on expired path', async () => {
+    const { createHmac: hmac } = await import('node:crypto');
+    const digest = approvalActionDigest(ACTION);
+    const expiredAt = '2026-09-21T00:02:00.000Z';
+    // canonicalJson 按 key 排序：digest / event / expiredAt
+    const canonical = `{"digest":"${digest}","event":"expired","expiredAt":"${expiredAt}"}`;
+    const stamp = hmac('sha256', config.taskSigningSecret)
+      .update(`approval-event-v1\n${ID}\nfailed\n${FROM.toLowerCase()}\n${TO.toLowerCase()}\n${canonical}`)
+      .digest('base64url');
+    const payloadHeader = Buffer.from(canonical, 'utf8').toString('base64url');
+    const resultJson = JSON.stringify(
+      { decision: 'expired', digest, expiredAt },
+      null,
+      2,
+    );
+    const source = [
+      `From: ${FROM}`,
+      `To: ${TO}`,
+      `Subject: Fold digest expired`,
+      `X-OA-Task: ${ID}`,
+      `X-OA-Task-State: failed`,
+      `X-OA-Task-Approval-Event: expired`,
+      `X-OA-Task-Approval-Digest: ${digest}`,
+      `X-OA-Task-Approval-Payload: ${payloadHeader}`,
+      `X-OA-Task-Stamp: ${stamp}`,
+      '',
+      `<!-- openagent.email task result -->\n\`\`\`json\n${resultJson}\n\`\`\``,
+    ].join('\r\n');
+    const foldedRaw = source.replace(
+      /^X-OA-Task-Approval-Digest:\s*.+$/m,
+      foldHeaderValue313('X-OA-Task-Approval-Digest', digest, 40),
+    );
+    const parsed = await parseStampedTaskMessageForTests({
+      id: ID, uid: 3, source: foldedRaw, internalDate: expiredAt,
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.approval).toMatchObject({ type: 'expired', digest });
+  });
+
   // #313 T6 负控：折行垃圾 digest → 拒
   test('#313 T6 multi-continuation folded garbage digest still rejected', async () => {
     const source = encodeStampedApprovalRequestForTests({
