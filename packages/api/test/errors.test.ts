@@ -33,4 +33,22 @@ describe('errorCode', () => {
       expect(errorCode(value)).toBe('');
     }
   });
+
+  // Codex P1 / R1：?. 不挡会抛的 getter；取值失败必须哨兵且不逸出
+  test('会抛的 message getter ⇒ \'\' 且不抛', () => {
+    const x = Object.defineProperty({}, 'message', {
+      get() {
+        throw new Error('boom');
+      },
+    });
+    expect(() => errorCode(x)).not.toThrow();
+    expect(errorCode(x)).toBe('');
+  });
+
+  test('revoked Proxy ⇒ \'\' 且不抛', () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(() => errorCode(proxy)).not.toThrow();
+    expect(errorCode(proxy)).toBe('');
+  });
 });

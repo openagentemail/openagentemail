@@ -176,6 +176,15 @@ function makeUiApp(taskServiceOverride: Partial<UiApiDependencies['taskService']
 
 const NON_ERROR_BOOMS: unknown[] = [undefined, { code: 1 }];
 
+/** R1：message 取值本身会抛 —— 映射器经 errorCode try/catch 仍须落既有兜底 */
+function throwingMessageRejection(): unknown {
+  return Object.defineProperty({}, 'message', {
+    get() {
+      throw new Error('boom');
+    },
+  });
+}
+
 describe('正控 A · POST /v1/tasks 非 Error rejection 消 500', () => {
   // create 段既有兜底：502 { error: 'smtp_error' }（无 taskId）
   for (const boom of NON_ERROR_BOOMS) {
@@ -191,6 +200,18 @@ describe('正控 A · POST /v1/tasks 非 Error rejection 消 500', () => {
       expect(text).toBe(JSON.stringify({ error: 'smtp_error' }));
     });
   }
+
+  // R1 可选路由正控：会抛 getter 不得再逸出成 500
+  test('create 段 throw 会抛 message getter → 502 smtp_error（非 500）', async () => {
+    const app = appForTasks(baseService({
+      async create() { throw throwingMessageRejection(); },
+    }));
+    const res = await postCreate(app, { to: B, subject: 'getter boom', body: 'x' });
+    const text = await res.text();
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(502);
+    expect(text).toBe(JSON.stringify({ error: 'smtp_error' }));
+  });
 
   // post-create/wait 段既有兜底：502 { error: 'wait_failed', taskId, created: true }
   for (const boom of NON_ERROR_BOOMS) {
