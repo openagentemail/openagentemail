@@ -90,11 +90,12 @@ export function releaseSendLimit(address: string, reservation: number | undefine
   slidingWindowRelease(buckets, address.toLowerCase(), reservation);
 }
 
-/** 测试辅助：清空 send/审计 以及列表 caller 桶（不改生产配额）。 */
+/** 测试辅助：清空 send/审计 以及列表/mark-seen caller 桶（不改生产配额）。 */
 export function resetRateLimits(): void {
   buckets.clear();
   resetDelegationDeniedAuditLimits();
   resetListMessagesLimits();
+  resetMarkSeenLimits();
 }
 
 /**
@@ -398,4 +399,71 @@ export function listMessagesBucketCountForTests(): number {
 /** 测试辅助：某 key 是否仍在图中（活桶不得被驱逐）。 */
 export function listMessagesHasBucketForTests(key: string): boolean {
   return listMessagesBuckets.has(key);
+}
+
+/**
+ * POST /v1/messages/:id/seen 每-caller 轻量限速（#244）。
+ * 默认 5 分钟 300 次——停机 catch-up 全量标已读属正常用法，不得挡。
+ * env：MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS；非法或缺失回落安全默认
+ * （不得开成无限或 0）。
+ */
+export const DEFAULT_MARK_SEEN_RATE_LIMIT = 300;
+export const DEFAULT_MARK_SEEN_RATE_WINDOW_MS = 300_000;
+
+const markSeenBuckets = new Map<string, number[]>();
+
+/** 解析正整数；非法/缺失/≤0 → 回落 fallback（fail-safe）。 */
+export function parsePositiveIntEnv(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
+/** 读 env 得到 mark-seen 上限（缺失/非法 → 默认 300）。 */
+export function resolveMarkSeenRateLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return parsePositiveIntEnv(env.MARK_SEEN_RATE_LIMIT, DEFAULT_MARK_SEEN_RATE_LIMIT);
+}
+
+/** 读 env 得到 mark-seen 窗口毫秒（缺失/非法 → 默认 5 分钟）。 */
+export function resolveMarkSeenRateWindowMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return parsePositiveIntEnv(
+    env.MARK_SEEN_RATE_WINDOW_MS,
+    DEFAULT_MARK_SEEN_RATE_WINDOW_MS,
+  );
+}
+
+/**
+ * 录取 POST /:id/seen。键=归一地址（与 checkSendLimit 同族）。
+ * 显式传入 limit/windowMs 时跳过 env（测例用）；路由侧用默认解析。
+ * 注意：与 send 不同，此处 limit≤0 不得禁用——调用方须先 resolve* 保证正数。
+ */
+export function checkMarkSeenLimit(
+  address: string,
+  limit: number = resolveMarkSeenRateLimit(),
+  windowMs: number = resolveMarkSeenRateWindowMs(),
+  now: number = Date.now(),
+): RateLimitResult {
+  // 防御：若误传 ≤0，回落默认而非开无限（对齐硬要求 2）
+  const safeLimit = limit > 0 ? limit : DEFAULT_MARK_SEEN_RATE_LIMIT;
+  const safeWindow = windowMs > 0 ? windowMs : DEFAULT_MARK_SEEN_RATE_WINDOW_MS;
+  return slidingWindowCheck(
+    markSeenBuckets,
+    address.toLowerCase(),
+    safeLimit,
+    safeWindow,
+    now,
+  );
+}
+
+/** 测试辅助：清空 mark-seen 桶。 */
+export function resetMarkSeenLimits(): void {
+  markSeenBuckets.clear();
 }
