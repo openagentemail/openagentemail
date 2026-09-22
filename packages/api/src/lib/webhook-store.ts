@@ -334,14 +334,25 @@ export const getWebhookSubscription = getWebhook;
 export const listWebhookSubscriptions = listWebhooks;
 export const deleteWebhookSubscription = deleteWebhook;
 
+/**
+ * 更新订阅记录。
+ *
+ * 显式契约（#312 P3-2）：
+ * - updater 返回 `false` →「无变更」：跳过 `updatedAt` 与 `writeStore`；
+ * - updater 返回 `void` / `undefined` / `true` → 视为已变更：照常刷 `updatedAt` 并落盘。
+ * 既有 10 个调用点未返回 `false` 时行为逐一不变。
+ */
 export function updateWebhookSubscription(
   id: string,
-  updater: (record: WebhookRecord) => void,
+  updater: (record: WebhookRecord) => boolean | void,
 ): WebhookRecord | undefined {
   const file = readStore();
   const idx = file.webhooks.findIndex((w) => w.id === id);
   if (idx < 0) return undefined;
-  updater(file.webhooks[idx]!);
+  const changed = updater(file.webhooks[idx]!);
+  if (changed === false) {
+    return file.webhooks[idx];
+  }
   file.webhooks[idx]!.updatedAt = new Date().toISOString();
   writeStore(file);
   return file.webhooks[idx];

@@ -236,6 +236,26 @@ describe('Webhook MCP Tools & Tool Tiers (§10.7, D17)', () => {
     expect(longUrlBody.error || longUrlBody.result?.isError).toBeTruthy();
   });
 
+  // #312 硬要求②：经 MCP 的坏 URL 拿到 REST 契约（非工具层 zod 错）
+  test('#312 MCP mail_webhook_create not-a-url → REST invalid_webhook_url/malformed_url', async () => {
+    const res = await mcpCall(aliceToken, 'mail_webhook_create', {
+      url: 'not-a-url',
+      address: aliceAddress,
+      events: ['mail.received'],
+    });
+    expect(res.status).toBe(200);
+    const body = await readMcpJson(res);
+    expect(body.result?.isError).toBe(true);
+    const text = String(body.result?.content?.[0]?.text ?? '');
+    // 透传 REST 拒绝体；绝不能是 zod "Invalid url"
+    expect(text).not.toMatch(/Invalid url/i);
+    const parsed = JSON.parse(text) as { error: string; details?: string };
+    expect(parsed).toEqual({
+      error: 'invalid_webhook_url',
+      details: 'malformed_url',
+    });
+  });
+
   afterAll(async () => {
     resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;

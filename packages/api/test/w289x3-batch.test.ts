@@ -551,6 +551,59 @@ describe('#290 ping circuit-breaker aligns with main path', () => {
     const rows = readAllDeliveryLogRows().filter((r) => r.webhookId === sub.id);
     expect(rows.some((r) => r.attempt === 2)).toBe(false);
   });
+
+  // #312 硬要求③：早退漂移回归——manual-disable 竞态结算不得无语义刷 updatedAt
+  test('#312 early-return：已 disabled 早退不漂移 updatedAt', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://ping-noop-drift.example/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    updateWebhookSubscription(sub.id, (s) => {
+      s.state = 'enabled';
+      s.consecutiveFailures = 3;
+    });
+    (config.webhooks as any).disableThreshold = 10;
+
+    let rejectDns!: (err: unknown) => void;
+    setWebhookDnsLookupForTests(
+      () =>
+        new Promise((_, reject) => {
+          rejectDns = reject;
+        }),
+    );
+
+    const enabledSnapshot = getWebhookSubscription(sub.id)!;
+    const probePromise = executeWebhookTestProbe(enabledSnapshot, 'admin');
+    await new Promise((r) => setTimeout(r, 30));
+
+    updateWebhookSubscription(sub.id, (s) => {
+      s.state = 'disabled';
+      s.disabledReason = 'manual';
+    });
+    const pinned = getWebhookSubscription(sub.id)!;
+    expect(pinned.state).toBe('disabled');
+    const updatedAtPinned = pinned.updatedAt;
+
+    // 等一小会儿再放行 DNS，确保 probe 结算走早退分支
+    await new Promise((r) => setTimeout(r, 10));
+    const err: any = new Error('getaddrinfo ENOTFOUND');
+    err.code = 'ENOTFOUND';
+    rejectDns(err);
+
+    const probe = await probePromise;
+    expect(probe.outcome).toBe('permanent');
+    expect(probe.reason).toBe('webhook_disabled');
+
+    const after = getWebhookSubscription(sub.id)!;
+    expect(after.state).toBe('disabled');
+    expect(after.disabledReason).toBe('manual');
+    expect(after.consecutiveFailures).toBe(3);
+    // 早退无变更 → updatedAt 不得漂移
+    expect(after.updatedAt).toBe(updatedAtPinned);
+  });
 });
 
 describe('#302 approval payload MIME folding', () => {

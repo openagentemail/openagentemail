@@ -840,7 +840,8 @@ export function registerOpenAgentEmailTools(
       title: "Create Webhook Subscription",
       description: "Create an outbound webhook subscription. Returns subscription metadata and the displayed signing secret (whs_...). Deny-by-default for OAuth tokens.",
       inputSchema: {
-        url: z.string().url().max(2048).describe("Webhook target URL (https:// required unless private target granted)"),
+        // #312 P3-1：去 .url()、保留 .max(2048)，坏 URL 透传 REST invalid_webhook_url/malformed_url
+        url: z.string().max(2048).describe("Webhook target URL (https:// required unless private target granted)"),
         address: z.string().regex(IDENTITY_ADDRESS_PATTERN).describe("Identity email address to receive events for"),
         events: z
           .array(z.enum(['mail.received', 'approval.requested']))
@@ -862,7 +863,18 @@ export function registerOpenAgentEmailTools(
       outputSchema: webhookCreateOutputSchema,
       annotations: mutatingAnnotations,
     },
-    (params) => callApi(() => client.createWebhook(params)),
+    (params) =>
+      callApi(async () => {
+        try {
+          return await client.createWebhook(params);
+        } catch (err) {
+          // #312：透传 REST 拒绝体，便于 MCP 调用方看到 invalid_webhook_url + details
+          if (err instanceof ApiError && err.errorBody) {
+            throw new Error(JSON.stringify(err.errorBody));
+          }
+          throw err;
+        }
+      }),
   );
 
   tier("mail_webhook_delete", "minimal");

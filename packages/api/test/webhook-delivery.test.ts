@@ -28,6 +28,7 @@ const {
   formatPingPayload,
   isTerminalDeliveryRow,
   isScheduledAttemptBeyondRetryHorizon,
+  deriveFirstAttemptAtMsFromGroup,
   getLatestDeliveryForWebhook,
   latestDeliveryByWebhookId,
   parseRetryAfterSeconds,
@@ -189,6 +190,27 @@ describe('webhook-delivery: Retry Schedule & Jitter (§8.3)', () => {
     expect(isScheduledAttemptBeyondRetryHorizon(horizonMs + 1000, first)).toBe(true);
     // 负控：恰好等于不超；小于不超
     expect(isScheduledAttemptBeyondRetryHorizon(horizonMs - 1, first)).toBe(false);
+  });
+
+  // #322：组内 attempt=1 最早 ts 派生真实 firstAttemptAt；无 attempt=1 时回落 latest.ts
+  test('#322 deriveFirstAttemptAtMsFromGroup：attempt=1 最早 ts；无则回落 latest.ts', () => {
+    const t0 = Date.parse('2026-09-01T00:00:00.000Z');
+    const t1 = Date.parse('2026-09-01T01:00:00.000Z');
+    const latestTs = '2026-09-02T00:00:00.000Z';
+    expect(
+      deriveFirstAttemptAtMsFromGroup(
+        [
+          { attempt: 1, ts: new Date(t1).toISOString() },
+          { attempt: 1, ts: new Date(t0).toISOString() },
+          { attempt: 2, ts: latestTs },
+        ],
+        { ts: latestTs },
+      ),
+    ).toBe(t0);
+    // 回落：组内无 attempt=1
+    expect(
+      deriveFirstAttemptAtMsFromGroup([{ attempt: 2, ts: latestTs }], { ts: latestTs }),
+    ).toBe(Date.parse(latestTs));
   });
 
   // #294 ⑤ clamp 回归：抖动路径仍钳到 horizon-1；Retry-After 路径同钳
@@ -2125,6 +2147,230 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
       setWebhookDnsLookupForTests(undefined);
       deliveryQueue.cancelAll();
     }
+  });
+
+  // #322 验收①②：replay+重启不被更严死信；负控越界仍死信；重建携带真实 firstAttemptAt
+  test('#322 boot：eventCreatedAt 远早但 firstAttempt 未越界 → 重建且 firstAttemptAt=attempt1.ts', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://boot-iso.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    // 旧墙钟判据会以 eventCreatedAt 死信（80h 前）；同构判据看 firstAttempt（10h 前）+ scheduled
+    const eventCreatedAt = new Date(bootTime - 80 * 3600_000).toISOString();
+    const firstAttemptTs = bootTime - 10 * 3600_000;
+    const eventId = 'evt_322_replay_ok';
+    appendDeliveryLogRow({
+      ts: new Date(firstAttemptTs).toISOString(),
+      webhookId: sub.id,
+      eventId,
+      runId: 'run_0',
+      deliveryId: 'dlv_322_a1',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'retryable',
+      status: 500,
+      durationMs: 10,
+      sensitive: false,
+      replay: true, // replay 标记：旧事件经 replay 后重启
+      nextAttemptAt: new Date(bootTime + 60_000).toISOString(),
+      reason: 'server_error',
+    });
+    appendDeliveryLogRow({
+      ts: new Date(bootTime - 9 * 3600_000).toISOString(),
+      webhookId: sub.id,
+      eventId,
+      runId: 'run_0',
+      deliveryId: 'dlv_322_a2',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 2,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: true,
+      nextAttemptAt: new Date(bootTime + 60_000).toISOString(),
+      reason: null,
+    });
+
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+    expect(result.reconstructed).toBe(1);
+    expect(result.deadLettered).toBe(0);
+    expect(
+      readAllDeliveryLogRows().some(
+        (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+      ),
+    ).toBe(false);
+
+    const job = deliveryQueue.peekJobForTests(sub.id, eventId, 'run_0');
+    expect(job).toBeDefined();
+    expect(job!.firstAttemptAt).toBe(firstAttemptTs);
+    // 负控：绝不能静默用 eventCreatedAt
+    expect(job!.firstAttemptAt).not.toBe(Date.parse(eventCreatedAt));
+    deliveryQueue.cancelAll();
+  });
+
+  test('#322 R2 边界：排期=first+72h、boot=排期+ε → 定时器回调后仍成功投递（无 retry_horizon_exceeded）', async () => {
+    // R2：必须等定时器真正回调；peek+cancel 会漏掉「job.nextAttemptAt 被 boot clamp 抬高后执行前误杀」
+    const hits: number[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async () => {
+        hits.push(Date.now());
+        return new Response('ok', { status: 200 });
+      },
+    });
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      // 排期钉在恰好 +72h；boot=排期+ε——若 job.nextAttemptAt 被抬成 bootTime，执行前会误杀
+      const firstAttemptTs = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
+      const persistedSchedule = firstAttemptTs + RETRY_HORIZON_SEC * 1000;
+      const bootTime = persistedSchedule + 1;
+      const eventId = 'evt_322_r2_boundary';
+      const eventCreatedAt = new Date(firstAttemptTs).toISOString();
+
+      // 与执行前同构：同一函数、同一时刻来源（持久化排期）
+      expect(isScheduledAttemptBeyondRetryHorizon(persistedSchedule, firstAttemptTs)).toBe(false);
+      // 负对照：误用 bootTime 作 nextAttemptAt 会超窗
+      expect(isScheduledAttemptBeyondRetryHorizon(bootTime, firstAttemptTs)).toBe(true);
+
+      appendDeliveryLogRow({
+        ts: new Date(firstAttemptTs).toISOString(),
+        webhookId: sub.id,
+        eventId,
+        runId: 'run_0',
+        deliveryId: 'dlv_322_r2',
+        type: 'webhook.ping',
+        address: null,
+        messageId: null,
+        uidValidity: null,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt,
+        attempt: 1,
+        outcome: 'pending',
+        status: null,
+        durationMs: null,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: new Date(persistedSchedule).toISOString(),
+        reason: null,
+      });
+
+      const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+      expect(result.reconstructed).toBe(1);
+      expect(result.deadLettered).toBe(0);
+
+      const job = deliveryQueue.peekJobForTests(sub.id, eventId, 'run_0');
+      expect(job).toBeDefined();
+      expect(job!.firstAttemptAt).toBe(firstAttemptTs);
+      // 语义时刻必须仍是持久化排期（非 bootTime）
+      expect(job!.nextAttemptAt).toBe(persistedSchedule);
+
+      // 等定时器 zero-delay 回调真正执行并命中 mock 端点
+      await waitUntil(
+        () =>
+          hits.length >= 1 &&
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.outcome === 'success',
+          ),
+        3000,
+      );
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(
+        readAllDeliveryLogRows().some(
+          (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+        ),
+      ).toBe(false);
+      // 墙钟已越过排期（ε>0），证明是「过期排期立刻跑」路径
+      expect(hits[0]!).toBeGreaterThan(persistedSchedule);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
+  });
+
+  test('#322 boot 负控：持久化排期真正越出 firstAttempt+72h → 仍死信', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://boot-iso-neg.example/hook',
+      address: 'owner@openagent.email',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const bootTime = Date.now();
+    const firstAttemptTs = bootTime - RETRY_HORIZON_SEC * 1000;
+    const persistedBeyond = firstAttemptTs + RETRY_HORIZON_SEC * 1000 + 1000; // 排期=+72h+1s
+    const eventCreatedAt = new Date(firstAttemptTs).toISOString();
+    const eventId = 'evt_322_beyond';
+    appendDeliveryLogRow({
+      ts: new Date(firstAttemptTs).toISOString(),
+      webhookId: sub.id,
+      eventId,
+      runId: 'run_0',
+      deliveryId: 'dlv_322_neg',
+      type: 'webhook.ping',
+      address: null,
+      messageId: null,
+      uidValidity: null,
+      rfc822MessageId: null,
+      taskId: null,
+      taskCreatedAt: null,
+      expiresInSec: null,
+      eventCreatedAt,
+      attempt: 1,
+      outcome: 'pending',
+      status: null,
+      durationMs: null,
+      sensitive: false,
+      replay: false,
+      nextAttemptAt: new Date(persistedBeyond).toISOString(),
+      reason: null,
+    });
+
+    // 与执行前同构：判据吃持久化排期
+    expect(isScheduledAttemptBeyondRetryHorizon(persistedBeyond, firstAttemptTs)).toBe(true);
+
+    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+    expect(result.reconstructed).toBe(0);
+    expect(result.deadLettered).toBe(1);
+    expect(deliveryQueue.hasQueuedJob(sub.id, eventId)).toBe(false);
+    const row = readAllDeliveryLogRows().find(
+      (r) => r.eventId === eventId && r.outcome === 'permanent',
+    );
+    expect(row?.reason).toBe('retry_horizon_exceeded');
   });
 
   test('R4: background SSRF refusal audit omits ip', async () => {

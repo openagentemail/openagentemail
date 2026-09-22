@@ -197,6 +197,27 @@ export function isScheduledAttemptBeyondRetryHorizon(
   return nextAttemptAt > firstAttemptAt + RETRY_HORIZON_SEC * 1000;
 }
 
+/**
+ * boot 重建用：从组内日志派生真实 firstAttemptAt（#322 / 硬要求①）。
+ * 优先取 attempt===1 行最早 ts（enqueue 时与 job.firstAttemptAt 同墙钟孪生）；
+ * 若组内无 attempt=1 行 → 回落 latest.ts（须在完工报明说；禁止静默改用 eventCreatedAt）。
+ */
+export function deriveFirstAttemptAtMsFromGroup(
+  groupRows: ReadonlyArray<Pick<WebhookDeliveryLogRow, 'attempt' | 'ts'>>,
+  latest: Pick<WebhookDeliveryLogRow, 'ts'>,
+): number {
+  let earliest: number | undefined;
+  for (const row of groupRows) {
+    if (row.attempt !== 1) continue;
+    const ms = Date.parse(row.ts);
+    if (!Number.isFinite(ms)) continue;
+    if (earliest === undefined || ms < earliest) earliest = ms;
+  }
+  if (earliest !== undefined) return earliest;
+  const fallback = Date.parse(latest.ts);
+  return Number.isFinite(fallback) ? fallback : Date.now();
+}
+
 /** Effective attempt cap for this event type: ping is 3, others follow WEBHOOK_MAX_ATTEMPTS. */
 export function maxAttemptsForEventType(type: WebhookEventType): number {
   if (type === 'webhook.ping') return MAX_PING_ATTEMPTS;
@@ -2085,6 +2106,15 @@ class WebhookDeliveryQueue {
     return this.jobs.has(`${webhookId}:${eventId}:${runId}`);
   }
 
+  /** 测试钩：窥视已入队作业（#322 断言重建 firstAttemptAt） */
+  peekJobForTests(
+    webhookId: string,
+    eventId: string,
+    runId: string,
+  ): ScheduledDeliveryJob | undefined {
+    return this.jobs.get(this.jobKey(webhookId, eventId, runId));
+  }
+
   hasQueuedJob(webhookId: string, eventId?: string): boolean {
     for (const job of this.jobs.values()) {
       if (job.webhookId !== webhookId) continue;
@@ -2831,8 +2861,8 @@ export async function executeWebhookTestProbe(
     // （主路径同款终态判定属存量同族，本卡红线不动主路径。）
     let trippedThisAttempt = false;
     updateWebhookSubscription(subscription.id, (s) => {
-      // 已 disabled：跳过整段更新（不加计数、不改 reason）
-      if (s.state === 'disabled') return;
+      // 已 disabled：无变更信号 → 跳过 updatedAt/writeStore（#312 P3-2）
+      if (s.state === 'disabled') return false;
       s.consecutiveFailures = (s.consecutiveFailures ?? 0) + 1;
       if (s.consecutiveFailures >= config.webhooks.disableThreshold) {
         s.state = 'disabled';
@@ -3237,8 +3267,22 @@ export async function reconstructPendingDeliveriesAtBoot(
       continue;
     }
 
-    const createdMs = Date.parse(latest.eventCreatedAt);
-    if (Number.isFinite(createdMs) && bootTime > createdMs + RETRY_HORIZON_SEC * 1000) {
+    // #322 A1/A2：与执行前同构——horizon 判据同一函数；时刻来源=持久化排期（非墙钟）。
+    // #322 R1/R2 / #294 1b'：判界与入队 job.nextAttemptAt 均用持久化排期本身。
+    // 不得 Math.max(..., bootTime)——否则 attempt 11 钉 +72h、boot=排期+ε 时，
+    // 执行前判据会吃到被抬高的 nextAttemptAt 而误杀。schedule() 内部已是
+    // delay=Math.max(0, nextAttemptAt-now)，过期排期自然 0 延迟立刻跑、语义时刻不变。
+    const firstAttemptAt = deriveFirstAttemptAtMsFromGroup(groupRows, latest);
+    let persistedScheduleMs: number;
+    if (latest.nextAttemptAt) {
+      const parsed = new Date(latest.nextAttemptAt).getTime();
+      // 解析失败时与「无排期」同口径，回落 bootTime（无可对照的持久化时刻）
+      persistedScheduleMs = Number.isFinite(parsed) ? parsed : bootTime;
+    } else {
+      // 无 nextAttemptAt：无可持久化排期，回落 bootTime（立刻应跑；注释明说）
+      persistedScheduleMs = bootTime;
+    }
+    if (isScheduledAttemptBeyondRetryHorizon(persistedScheduleMs, firstAttemptAt)) {
       deadLettered++;
       reconstructRetryDelays.delete(key);
       appendDeliveryLogRow({
@@ -3299,12 +3343,6 @@ export async function reconstructPendingDeliveriesAtBoot(
       reconstructRetryDelays.delete(key);
       continue;
     }
-
-    // Calculate scheduled time: max(nextAttemptAt, bootTime)
-    const nextAttemptMs = latest.nextAttemptAt
-      ? new Date(latest.nextAttemptAt).getTime()
-      : bootTime;
-    const scheduledTime = Math.max(nextAttemptMs, bootTime);
 
     // 5. Rebuild payload (§8.6 step 5)
     try {
@@ -3499,6 +3537,7 @@ export async function reconstructPendingDeliveriesAtBoot(
       }
 
       // Reconstructed successfully, enqueue to delivery queue
+      // #322 A2：携带组内派生的真实 firstAttemptAt（非 eventCreatedAt）
       deliveryQueue.schedule({
         webhookId: sub.id,
         eventId: latest.eventId,
@@ -3506,9 +3545,10 @@ export async function reconstructPendingDeliveriesAtBoot(
         deliveryId: latest.deliveryId,
         type: latest.type,
         payloadBuilder,
-        firstAttemptAt: new Date(latest.eventCreatedAt).getTime(),
+        firstAttemptAt,
         attempt: latest.outcome === 'pending' ? latest.attempt : latest.attempt + 1,
-        nextAttemptAt: scheduledTime,
+        // #322 R2：语义时刻=持久化排期；禁 bootTime clamp（schedule 内已 max(0, delay)）
+        nextAttemptAt: persistedScheduleMs,
         replay: latest.replay,
         address: latest.address,
         messageId: latest.messageId,
