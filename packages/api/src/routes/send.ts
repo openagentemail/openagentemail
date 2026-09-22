@@ -5,7 +5,7 @@ import { config } from '../lib/config.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { notifyTrustedAgentDelivery } from '../lib/notify.ts';
 import { sendMail } from '../lib/smtp.ts';
-import { forbidUnlessAddress, getAuth } from '../lib/auth.ts';
+import { forbidUnlessAddress, getAuth, type Auth } from '../lib/auth.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
 import { isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
@@ -27,6 +27,16 @@ import { resolveSendLogSource } from '../lib/send-source.ts';
 import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
 
 const emailField = z.string().email().max(SEND_LOG_EMAIL_MAX_LEN);
+
+/**
+ * 仅 POST /v1/send 用：身份 token 是否以归属子地址发信（#275）。
+ * 不改动通用 forbidUnlessAddress，保持最小爆炸半径。
+ */
+function allowParentSendAsChild(auth: Auth, from: string): boolean {
+  if (auth.kind !== 'identity') return false;
+  const child = findIdentity(from);
+  return child?.parentIdentity === auth.address.toLowerCase();
+}
 
 const sendSchema = z.object({
   from: emailField,
@@ -149,7 +159,11 @@ sendRoute.post('/', async (c) => {
 
   // Identity tokens may only send as themselves.
   const denied = forbidUnlessAddress(c, from);
-  if (denied) return denied;
+  if (denied) {
+    // #275：父对子归属放行（from.parentIdentity === auth.address）
+    const auth = getAuth(c);
+    if (!allowParentSendAsChild(auth, from)) return denied;
+  }
 
   // `from` must be an existing identity on an allowed domain.
   const fromDomain = from.split('@')[1]?.toLowerCase() ?? '';

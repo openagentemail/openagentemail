@@ -28,6 +28,7 @@ import {
   MAX_SCOPE_LENGTH,
   MAX_SCOPES_COUNT,
   isSupportedScope,
+  isDelegationScope,
 } from './identity-scopes.ts';
 import { revokeGrantsForAddress } from './oauth-store.ts';
 import {
@@ -71,8 +72,11 @@ export {
   SUPPORTED_SCOPES,
   SUPPORTED_SCOPES_SET,
   isSupportedScope,
+  DELEGATION_SCOPES,
+  DELEGATION_SCOPES_SET,
+  isDelegationScope,
 } from './identity-scopes.ts';
-export type { SupportedScope } from './identity-scopes.ts';
+export type { SupportedScope, DelegationScope } from './identity-scopes.ts';
 
 export type ScopeValidationResult =
   | { ok: true; scopes: string[] }
@@ -106,6 +110,40 @@ export function validateScopesInput(scopes: unknown): ScopeValidationResult {
   return { ok: true, scopes: [...scopes] };
 }
 
+/**
+ * Delegation 专用 scopes 校验（#275 R1 F4）：仅允许 DELEGATION_SCOPES。
+ * 错误形态与 validateScopesInput 对齐（unsupported_scope + details）。
+ */
+export function validateDelegationScopesInput(scopes: unknown): ScopeValidationResult {
+  if (!Array.isArray(scopes)) {
+    return { ok: false, error: 'invalid_request', details: 'scopes must be an array of strings' };
+  }
+  if (scopes.length > MAX_SCOPES_COUNT) {
+    return { ok: false, error: 'invalid_request', details: 'too_many_scopes' };
+  }
+  const seen = new Set<string>();
+  for (const item of scopes) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > MAX_SCOPE_LENGTH) {
+      return { ok: false, error: 'invalid_request', details: 'invalid_scope_format' };
+    }
+    if (seen.has(item)) {
+      return { ok: false, error: 'invalid_request', details: 'duplicate_scope' };
+    }
+    seen.add(item);
+    if (!isDelegationScope(item)) {
+      return { ok: false, error: 'unsupported_scope', details: `Unsupported scope: ${item}` };
+    }
+  }
+  return { ok: true, scopes: [...scopes] };
+}
+
+/** 每父身份允许的存量子身份上限（#275；父不能删子 → 硬封顶）。 */
+export const MAX_CHILD_IDENTITIES = 50;
+
+/** 非 admin 可授给子身份的 scope 白名单（叠加在「子⊆父」之上；禁 identities:create）。 */
+export const CHILD_GRANTABLE_SCOPES = ['read:messages', 'messages:send'] as const;
+export const CHILD_GRANTABLE_SCOPES_SET = new Set<string>(CHILD_GRANTABLE_SCOPES);
+
 export interface Identity {
   address: string;
   name?: string;
@@ -125,6 +163,11 @@ export interface Identity {
    * When present (including empty array []), privileges are subtractively restricted.
    */
   scopes?: string[];
+  /**
+   * 父身份地址（小写）。仅非 admin 的 scoped create 写入；admin create 不写。
+   * 归属不可转移/重指；悬空（父已删）时判定永假。
+   */
+  parentIdentity?: string;
 }
 
 export function resolvePushContentTier(identity: Pick<Identity, 'pushContentTier'>): PushContentTier {
@@ -164,7 +207,9 @@ function isIdentityShape(value: unknown): value is Record<string, unknown> {
     (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
     (identity.tokenHash === undefined || typeof identity.tokenHash === 'string') &&
     (identity.scopes === undefined ||
-      (Array.isArray(identity.scopes) && identity.scopes.every((s) => typeof s === 'string')))
+      (Array.isArray(identity.scopes) && identity.scopes.every((s) => typeof s === 'string'))) &&
+    // #275：可选父地址；缺省=旧数据；类型错才拒（F94 宽容）
+    (identity.parentIdentity === undefined || typeof identity.parentIdentity === 'string')
   );
 }
 
@@ -409,6 +454,10 @@ export function createIdentity(input: {
   issueToken?: boolean;
   /** Optional token scopes; undefined means full-power identity token. */
   scopes?: string[];
+  /**
+   * 父身份地址（小写）。仅非 admin scoped create 传入；空串/缺省不写字段。
+   */
+  parentIdentity?: string;
 }): { identity: Identity; token: string } | null {
   const identities = load();
   const targetDomain = (input.domain ?? config.domain).toLowerCase().trim();
@@ -437,6 +486,17 @@ export function createIdentity(input: {
   // 同址幂等：已存在则返回 null（路由层映射为 address_exists）。
   if (identities.some((i) => i.address === address)) return null;
 
+  // #275 R3 F12b：地址空闲时清理仍指向该址的悬空归属（F2 前存量自愈），与新身份同一次 save
+  let orphaned = 0;
+  const cleaned = identities.map((entry) => {
+    if (entry.parentIdentity === address) {
+      orphaned++;
+      const { parentIdentity: _removed, ...rest } = entry;
+      return rest as Identity;
+    }
+    return entry;
+  });
+
   const issueToken = input.issueToken !== false;
   let token = '';
   let tokenHash: string | undefined;
@@ -445,6 +505,8 @@ export function createIdentity(input: {
     token = generated.token;
     tokenHash = generated.tokenHash;
   }
+  // 父地址仅非空时落库（admin 路径不传 → 字段缺省）
+  const parent = input.parentIdentity?.toLowerCase().trim();
   const identity: Identity = {
     address,
     ...(input.name ? { name: input.name } : {}),
@@ -452,23 +514,145 @@ export function createIdentity(input: {
     createdAt: new Date().toISOString(),
     ...(tokenHash ? { tokenHash } : {}),
     ...(input.scopes !== undefined ? { scopes: [...input.scopes] } : {}),
+    ...(parent ? { parentIdentity: parent } : {}),
   };
-  identities.push(identity);
-  save(identities);
+  cleaned.push(identity);
+  save(cleaned);
+  if (orphaned > 0) {
+    recordAuditEvent({
+      event: 'identity.parent_orphaned',
+      address,
+      outcome: 'ok',
+    });
+  }
   return { identity, token };
 }
 
-export interface RotateIdentityTokenResult {
-  token: string;
-  prevScopes?: string[];
-  scopes?: string[];
-  identity: Identity;
+/**
+ * 统计某父身份下的存量子身份数（parentIdentity === parent，大小写不敏感）。
+ */
+export function countChildren(parent: string): number {
+  const needle = parent.toLowerCase();
+  return load().filter((i) => i.parentIdentity === needle).length;
+}
+
+/**
+ * 判定 child 是否归属 parent（child.parentIdentity === parent）。
+ * 父/子任一不存在或无归属字段 → false（悬空归属永假）。
+ */
+export function isParentOf(parent: string, child: string): boolean {
+  const childIdentity = findIdentity(child);
+  if (!childIdentity?.parentIdentity) return false;
+  return childIdentity.parentIdentity === parent.toLowerCase();
+}
+
+/** #275 R4 F15：rotate 原子结果（成功 / 可映射失败） */
+export type RotateIdentityTokenResult =
+  | {
+      ok: true;
+      token: string;
+      prevScopes?: string[];
+      scopes?: string[];
+      identity: Identity;
+    }
+  | { ok: false; error: 'not_found'; status: 404 }
+  | {
+      ok: false;
+      error: 'child_parent_missing';
+      status: 400;
+      details: 'child identity has no existing parent identity';
+    }
+  | {
+      ok: false;
+      error: 'child_scope_invalid';
+      status: 400 | 403;
+      body: { error: string; details?: unknown };
+    };
+
+/**
+ * 子身份 rotate 的 store 层约束（#275 R4 F15；覆盖 REST 空 body / UI 直调）。
+ * scopes === undefined → 仅查父存在；显式 null/数组 → 拒 unscoped + 白名单 + 子⊆父。
+ */
+function enforceChildRotateConstraints(
+  identity: Identity,
+  identities: Identity[],
+  scopes: string[] | null | undefined,
+): Extract<RotateIdentityTokenResult, { ok: false }> | null {
+  if (!identity.parentIdentity) return null;
+  const parent = identities.find((i) => i.address === identity.parentIdentity);
+  if (!parent) {
+    return {
+      ok: false,
+      error: 'child_parent_missing',
+      status: 400,
+      details: 'child identity has no existing parent identity',
+    };
+  }
+  // 保留现有 scopes：不重校验 stale；仅保证父仍在
+  if (scopes === undefined) return null;
+  if (scopes === null) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: {
+        error: 'invalid_request',
+        details: 'child identity cannot be reset to an unscoped token',
+      },
+    };
+  }
+  if (scopes.includes('identities:create')) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: {
+        error: 'invalid_request',
+        details: 'identities:create cannot be granted to child identities',
+      },
+    };
+  }
+  const validated = validateScopesInput(scopes);
+  if (!validated.ok) {
+    return {
+      ok: false,
+      error: 'child_scope_invalid',
+      status: 400,
+      body: { error: validated.error, details: validated.details },
+    };
+  }
+  for (const scope of validated.scopes) {
+    if (!CHILD_GRANTABLE_SCOPES_SET.has(scope)) {
+      return {
+        ok: false,
+        error: 'child_scope_invalid',
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          details: 'identities:create cannot be granted to child identities',
+        },
+      };
+    }
+  }
+  // 父 unscoped = 全权；否则子⊆父当前 scopes
+  if (parent.scopes !== undefined) {
+    for (const scope of validated.scopes) {
+      if (!parent.scopes.includes(scope)) {
+        return {
+          ok: false,
+          error: 'child_scope_invalid',
+          status: 403,
+          body: { error: 'forbidden: scope exceeds parent permissions' },
+        };
+      }
+    }
+  }
+  return null;
 }
 
 /**
  * Atomically snapshot existing scopes, rotate token, optionally update scopes,
- * and persist. Returns the new plaintext token alongside previous and updated scopes,
- * or null if the address does not exist.
+ * and persist. Returns discriminated ok/error（#275 R4 F15 子约束为全路径最后防线）.
  *
  * All state mutation and snapshotting happen synchronously in the store layer,
  * eliminating any reliance on caller-level snapshot timing ("no intervening await").
@@ -476,11 +660,16 @@ export interface RotateIdentityTokenResult {
 export function rotateIdentityTokenDetailed(
   address: string,
   scopes?: string[] | null,
-): RotateIdentityTokenResult | null {
+): RotateIdentityTokenResult {
   const identities = load();
   const needle = address.toLowerCase();
   const identity = identities.find((i) => i.address === needle);
-  if (!identity) return null;
+  if (!identity) return { ok: false, error: 'not_found', status: 404 };
+
+  // 先拒后改：校验失败不得 revoke / mutate / save
+  const childDenied = enforceChildRotateConstraints(identity, identities, scopes);
+  if (childDenied) return childDenied;
+
   revokeDelegationsOnGranteeTokenRotate(needle);
   const prevScopes = identity.scopes !== undefined ? [...identity.scopes] : undefined;
   const { token, tokenHash } = generateToken();
@@ -491,6 +680,7 @@ export function rotateIdentityTokenDetailed(
   }
   save(identities);
   return {
+    ok: true,
     token,
     prevScopes,
     scopes: identity.scopes !== undefined ? [...identity.scopes] : undefined,
@@ -503,25 +693,29 @@ export function rotateIdentityTokenDetailed(
  * If `scopes` is provided (including empty array), the rotated token is scoped.
  * If `scopes` is omitted/undefined, existing scope restrictions are preserved.
  * Pass null only for an explicit reset to a legacy unscoped/full token.
- * Returns the new plaintext token, or null if the address doesn't exist.
+ * Returns the new plaintext token, or null if not_found / 子约束拒（null 语义保持）.
  */
 export function rotateIdentityToken(address: string, scopes?: string[] | null): string | null {
-  return rotateIdentityTokenDetailed(address, scopes)?.token ?? null;
+  const result = rotateIdentityTokenDetailed(address, scopes);
+  return result.ok ? result.token : null;
 }
 
 /**
  * Remove an identity (its mail stays in the catch-all until retention
  * sweeps it). Returns false if the address didn't exist.
  * 同步级联吊销该身份下全部 OAuth grant + access/refresh 与 Delegation grants。
+ * #275 R1/R3：cascades 成功后再构建孤儿副本（不 mutate 缓存对象），防 cascade 失败污染。
  */
 export function deleteIdentity(address: string): boolean {
   const identities = load();
   const needle = address.toLowerCase();
-  const kept = identities.filter((i) => i.address !== needle);
-  if (kept.length === identities.length) return false;
+  const existed = identities.some((i) => i.address === needle);
+  if (!existed) return false;
+
   // Webhook cascade first (delete + cancel in-flight + audit). Identity save
   // after that: a failed identity write is retryable, a live subscription after
   // the identity is gone is an exfil channel (§10.5).
+  // #275 R3 F14：cascades 全部成功之前不改任何 Identity 缓存对象
   const deletedWebhooks = cascadeDeleteWebhooksForAddress(needle);
   for (const wh of deletedWebhooks) {
     if (webhookCancelCallback) {
@@ -542,7 +736,26 @@ export function deleteIdentity(address: string): boolean {
   notifyRouteDeleteCallback?.(needle);
   revokeDelegationsForAddress(needle);
   revokeGrantsForAddress(needle);
+
+  // cascades 成功后：构建 kept（孤儿副本，不 mutate 原对象）
+  let orphaned = 0;
+  const kept = identities
+    .filter((i) => i.address !== needle)
+    .map((i) => {
+      if (i.parentIdentity !== needle) return i;
+      orphaned++;
+      const { parentIdentity: _removed, ...rest } = i;
+      return rest as Identity;
+    });
   save(kept);
+  // 归属断开审计：纯标识（被删父地址）；子地址不落载荷
+  if (orphaned > 0) {
+    recordAuditEvent({
+      event: 'identity.parent_orphaned',
+      address: needle,
+      outcome: 'ok',
+    });
+  }
   return true;
 }
 

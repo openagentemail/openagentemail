@@ -276,7 +276,8 @@ export function forbidUnlessAddress(c: Context, address: string) {
  * Check that the caller may access `mailbox` (for read operations):
  * 1. Admin may access any mailbox;
  * 2. Identity may access its own mailbox;
- * 3. Identity may access a mailbox with an active, unrevoked delegation grant.
+ * 3. Identity may access a mailbox with an active, unrevoked delegation grant;
+ * 4. Identity may access a child mailbox it owns (parentIdentity 归属直连，#275 案 A)。
  * Returns null if allowed, or 403 Response if denied.
  */
 export function forbidUnlessMailboxAccess(
@@ -290,6 +291,15 @@ export function forbidUnlessMailboxAccess(
   if (auth.address.toLowerCase() === targetMailbox) return null;
   if (hasActiveDelegation(targetMailbox, auth.address, requiredScope)) {
     return null;
+  }
+  // #275 归属直连：父可读子信箱；纵深防御——scoped 须含 requiredScope（#275 R1 F5）
+  if (auth.kind === 'identity') {
+    const child = findIdentity(targetMailbox);
+    if (child?.parentIdentity === auth.address.toLowerCase()) {
+      if (auth.scopes === undefined || auth.scopes.includes(requiredScope)) {
+        return null;
+      }
+    }
   }
   return c.json({ error: 'forbidden: token is scoped to another address' }, 403);
 }

@@ -67,6 +67,11 @@ export type AuditEvent = {
   taskId?: string;
   /** lease generation 整数（#305；纯标识，非载荷）。 */
   leaseGeneration?: number;
+  /**
+   * 父身份地址（#275 scoped create 审计；纯标识，非载荷）。
+   * 仅 identity.create / identity.scopes.create 在非 admin 创建时可选带上。
+   */
+  parentIdentity?: string;
 };
 
 function auditPath(): string {
@@ -179,6 +184,10 @@ export function recordAuditEvent(
     ...(partial.leaseGeneration !== undefined
       && Number.isFinite(partial.leaseGeneration)
       ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
+      : {}),
+    // #275：父地址纯标识（邮箱）；与 address 同款 scrub，maxLen 320 对齐邮箱上限
+    ...(partial.parentIdentity !== undefined
+      ? { parentIdentity: scrubAuditField(partial.parentIdentity, 320) }
       : {}),
   };
 

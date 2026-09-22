@@ -106,8 +106,8 @@ const app = createApp({ uiEnabled: true });
 
 describe('Issue #114: read-only API token scopes', () => {
   describe('Scope validation and registry', () => {
-    test('SUPPORTED_SCOPES contains read:messages', () => {
-      expect(SUPPORTED_SCOPES).toEqual(['read:messages']);
+    test('SUPPORTED_SCOPES contains read:messages, identities:create, messages:send', () => {
+      expect(SUPPORTED_SCOPES).toEqual(['read:messages', 'identities:create', 'messages:send']);
     });
 
     test('validateScopesInput accepts valid scopes array and empty array', () => {
@@ -1080,7 +1080,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(createTool).toBeDefined();
       expect(createTool?.inputSchema?.properties?.scopes).toMatchObject({
         type: 'array',
-        items: { enum: ['read:messages'] },
+        items: { enum: ['read:messages', 'identities:create', 'messages:send'] },
         maxItems: 10,
       });
 
@@ -1973,34 +1973,42 @@ describe('Issue #114: read-only API token scopes', () => {
 
       // 1. Narrow scopes atomically
       const res1 = rotateIdentityTokenDetailed(addr, []);
-      expect(res1).not.toBeNull();
-      expect(res1!.prevScopes).toEqual(['read:messages']);
-      expect(res1!.scopes).toEqual([]);
-      expect(res1!.token.startsWith('oa_')).toBe(true);
-      expect(findIdentityByToken(res1!.token)?.scopes).toEqual([]);
+      expect(res1.ok).toBe(true);
+      if (!res1.ok) throw new Error('expected ok');
+      expect(res1.prevScopes).toEqual(['read:messages']);
+      expect(res1.scopes).toEqual([]);
+      expect(res1.token.startsWith('oa_')).toBe(true);
+      expect(findIdentityByToken(res1.token)?.scopes).toEqual([]);
 
       // 2. Widen scopes atomically
       const res2 = rotateIdentityTokenDetailed(addr, ['read:messages']);
-      expect(res2).not.toBeNull();
-      expect(res2!.prevScopes).toEqual([]);
-      expect(res2!.scopes).toEqual(['read:messages']);
-      expect(findIdentityByToken(res2!.token)?.scopes).toEqual(['read:messages']);
+      expect(res2.ok).toBe(true);
+      if (!res2.ok) throw new Error('expected ok');
+      expect(res2.prevScopes).toEqual([]);
+      expect(res2.scopes).toEqual(['read:messages']);
+      expect(findIdentityByToken(res2.token)?.scopes).toEqual(['read:messages']);
 
       // 3. Clear scopes atomically (explicit null)
       const res3 = rotateIdentityTokenDetailed(addr, null);
-      expect(res3).not.toBeNull();
-      expect(res3!.prevScopes).toEqual(['read:messages']);
-      expect(res3!.scopes).toBeUndefined();
-      expect(findIdentityByToken(res3!.token)?.scopes).toBeUndefined();
+      expect(res3.ok).toBe(true);
+      if (!res3.ok) throw new Error('expected ok');
+      expect(res3.prevScopes).toEqual(['read:messages']);
+      expect(res3.scopes).toBeUndefined();
+      expect(findIdentityByToken(res3.token)?.scopes).toBeUndefined();
 
       // 4. Preserve scopes atomically (undefined)
       const res4 = rotateIdentityTokenDetailed(addr, undefined);
-      expect(res4).not.toBeNull();
-      expect(res4!.prevScopes).toBeUndefined();
-      expect(res4!.scopes).toBeUndefined();
+      expect(res4.ok).toBe(true);
+      if (!res4.ok) throw new Error('expected ok');
+      expect(res4.prevScopes).toBeUndefined();
+      expect(res4.scopes).toBeUndefined();
 
-      // 5. Non-existent identity returns null
-      expect(rotateIdentityTokenDetailed('ghost@test.example', [])).toBeNull();
+      // 5. Non-existent identity returns not_found
+      expect(rotateIdentityTokenDetailed('ghost@test.example', [])).toEqual({
+        ok: false,
+        error: 'not_found',
+        status: 404,
+      });
       expect(rotateIdentityToken('ghost@test.example', [])).toBeNull();
     });
   });

@@ -65,6 +65,8 @@ export interface Identity {
   pushContentTier?: 1 | 2 | 3;
   pushContentTierWarning?: string;
   scopes?: string[];
+  /** #275：归属父地址（admin list / 子身份）；缺省=顶层身份 */
+  parentIdentity?: string;
 }
 
 export interface MessageSummary {
@@ -445,12 +447,14 @@ export class OpenAgentEmailClient {
     /** 仅创建/轮换响应出现一次 */
     token?: string;
     scopes?: string[];
+    parentIdentity?: string;
   }> {
     const body: Record<string, unknown> = {};
     if (opts.name) body.name = opts.name;
     if (opts.localpart) body.localpart = opts.localpart;
     if (opts.domain) body.domain = opts.domain;
-    if (opts.canNotifyUser) body.canNotifyUser = true;
+    // #275 R2 F11：显式 false 也序列化，与 REST「任何值即拒」语义一致
+    if (opts.canNotifyUser !== undefined) body.canNotifyUser = opts.canNotifyUser;
     if (opts.scopes !== undefined) body.scopes = opts.scopes;
     return this.request("POST", "/v1/identities", body);
   }

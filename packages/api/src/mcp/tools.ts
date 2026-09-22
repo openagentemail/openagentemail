@@ -86,6 +86,8 @@ export function registerOpenAgentEmailTools(
     pushContentTierWarning: z.string().optional(),
     token: z.string().optional(),
     scopes: z.array(z.string()).optional(),
+    // #275 R2 F6/F10：admin list 可含归属父地址（additive）
+    parentIdentity: z.string().optional(),
   };
 
   // list / read 真交集。from/to 是服务端可信数据的契约声明（非输入消毒）：
@@ -343,7 +345,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Create Email Identity",
       description:
-        "Admin only: create a new email identity (mailbox address) on this openagent.email server. Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address and a one-time API token; omit scopes for legacy full identity permissions.",
+        "Create a new email identity (mailbox address) on this openagent.email server. Admin keys create top-level identities (omit scopes for legacy full permissions). Non-admin tokens need identities:create and mint a child identity owned by the caller (parentIdentity set server-side; default child scopes = [read:messages] when the parent holds that scope, else []; child scopes must be ⊆ parent and cannot include identities:create). Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address and a one-time API token.",
       inputSchema: {
         // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
         name: z
@@ -379,7 +381,7 @@ export function registerOpenAgentEmailTools(
           .max(MAX_SCOPES_COUNT)
           .refine((items) => new Set(items).size === items.length, "duplicate scopes are not allowed")
           .optional()
-          .describe("Optional token scopes. Supported: read:messages. Use [] for no API operation permissions; omit for legacy full identity permissions."),
+          .describe("Optional token scopes. Supported: read:messages, identities:create, messages:send. Use [] for no API operation permissions; omit for admin = legacy full identity permissions, for scoped parent = default child scopes ([read:messages] if parent has it, else []). Child creates cannot grant identities:create."),
       },
       outputSchema: identitySchema,
       annotations: mutatingAnnotations,

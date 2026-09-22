@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getAuth, getAttribution } from '../lib/auth.ts';
-import { findIdentity, validateScopesInput } from '../lib/identities.ts';
+import { findIdentity, validateDelegationScopesInput } from '../lib/identities.ts';
 import {
   createDelegation,
   findActiveDelegation,
@@ -51,7 +51,7 @@ export const delegationsRoute = new Hono()
       if (Array.isArray(rawScopes) && rawScopes.length === 0) {
         return c.json({ error: 'invalid_request', details: 'scopes cannot be empty' }, 400);
       }
-      const validated = validateScopesInput(rawScopes);
+      const validated = validateDelegationScopesInput(rawScopes);
       if (validated.ok) {
         requestedScopes = validated.scopes;
       } else {
