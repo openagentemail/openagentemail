@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## Unreleased
+
+### Changed
+
+- **Tasks: post-create wait 失败对外码改为 `wait_failed`** (#240)：`POST /v1/tasks` 在 SMTP/创建已成功后，wait 段非 journal 异常由 `502 {error:"smtp_error", taskId, created:true}` 改为 `502 {error:"wait_failed", taskId, created:true}`（状态码与 body 形状不变）。**仅限**该 post-create wait 失败面；pre-create `502 {error:"smtp_error"}`（无 id）与 journal `503 lease_journal_*` 不变。客户端若按错误码判因需改判；`taskId`/`created` 判据不变。
+
 ## v0.9.0 — 2026-09-22
 
 ### Added
