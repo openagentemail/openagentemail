@@ -33,23 +33,45 @@ export type FetchLike = (
   init?: RequestInit,
 ) => Response | Promise<Response>;
 
+/** ApiError 可选诊断字段（B1：对象参数，避免位置占位错位）。 */
+export type ApiErrorOptions = {
+  /** 408 响应体里的有效 timeoutSec（分块再武装用来观察服务端钳制）。 */
+  timeoutSec?: number;
+  /** 客户端诊断：malformed / early / 总截止。不是新的服务端码。 */
+  kind?: string;
+  waitHeaderSec?: number;
+  bodyError?: string;
+  /** 解析后的错误响应 JSON（create/wait 分层等契约字段从此读取）。 */
+  errorBody?: unknown;
+  /** 错误体中的 taskId（已创建后 wait 失败时服务端透出）。 */
+  taskId?: string;
+};
+
 export class ApiError extends Error {
+  /** 408 响应体里的有效 timeoutSec（分块再武装用来观察服务端钳制）。 */
+  public readonly timeoutSec?: number;
+  /** 客户端诊断：malformed / early / 总截止。不是新的服务端码。 */
+  public readonly kind?: string;
+  public readonly waitHeaderSec?: number;
+  public readonly bodyError?: string;
+  /** 解析后的错误响应 JSON（create/wait 分层等契约字段从此读取）。 */
+  public readonly errorBody?: unknown;
+  /** 错误体中的 taskId（已创建后 wait 失败时服务端透出）。 */
+  public readonly taskId?: string;
+
   constructor(
     public readonly status: number,
     message: string,
-    /** 408 响应体里的有效 timeoutSec（分块再武装用来观察服务端钳制）。 */
-    public readonly timeoutSec?: number,
-    /** 客户端诊断：malformed / early / 总截止。不是新的服务端码。 */
-    public readonly kind?: string,
-    public readonly waitHeaderSec?: number,
-    public readonly bodyError?: string,
-    /** 解析后的错误响应 JSON（create/wait 分层等契约字段从此读取）。 */
-    public readonly errorBody?: unknown,
-    /** 错误体中的 taskId（已创建后 wait 失败时服务端透出）。 */
-    public readonly taskId?: string,
+    opts?: ApiErrorOptions,
   ) {
     super(message);
     this.name = "ApiError";
+    this.timeoutSec = opts?.timeoutSec;
+    this.kind = opts?.kind;
+    this.waitHeaderSec = opts?.waitHeaderSec;
+    this.bodyError = opts?.bodyError;
+    this.errorBody = opts?.errorBody;
+    this.taskId = opts?.taskId;
   }
 }
 
@@ -348,6 +370,7 @@ export class OpenAgentEmailClient {
       // credentials included — into the text when it refuses a URL with
       // userinfo. The failure code is enough to tell the user what broke.
       const code = networkErrorCode(err);
+      // 仅 status + message；无诊断字段（与原位置参数仅两参等价）
       throw new ApiError(
         0,
         `Cannot reach openagent.email API at ${apiUrlForDisplay(this.baseUrl)}` +
@@ -399,35 +422,26 @@ export class OpenAgentEmailClient {
           waitHeaderSec !== undefined &&
           waitHeaderSec === timeoutSec;
         if (!identityOk) {
-          throw new ApiError(
-            408,
-            `Upstream 408 malformed (kind=upstream_408_malformed).`,
+          throw new ApiError(408, `Upstream 408 malformed (kind=upstream_408_malformed).`, {
             timeoutSec,
-            "upstream_408_malformed",
+            kind: "upstream_408_malformed",
             waitHeaderSec,
             bodyError,
-          );
+          });
         }
-        throw new ApiError(
-          408,
-          `Timeout: no matching message arrived in time.`,
+        throw new ApiError(408, `Timeout: no matching message arrived in time.`, {
           timeoutSec,
-          "upstream_timeout",
+          kind: "upstream_timeout",
           waitHeaderSec,
           bodyError,
-        );
+        });
       }
-      // 502/503/429 等：透出 error body JSON 与 taskId，供 tools 安全重试口径使用。
-      throw new ApiError(
-        res.status,
-        `API error ${res.status}: ${serverMsg}`,
-        undefined,
-        undefined,
-        undefined,
-        parseBodyError(data),
-        data,
-        parseBodyTaskId(data),
-      );
+      // 502/503/429 等：透出 error body JSON 与 taskId；原三连 undefined 占位 → 显式字段名
+      throw new ApiError(res.status, `API error ${res.status}: ${serverMsg}`, {
+        bodyError: parseBodyError(data),
+        errorBody: data,
+        taskId: parseBodyTaskId(data),
+      });
     }
 
     return data as T;
@@ -522,11 +536,11 @@ export class OpenAgentEmailClient {
     const parent = opts.signal;
     const internal = new AbortController();
     const throwTotalDeadline = (pollCount: number, observedClamp: number): never => {
+      // 原位置跳过 timeoutSec（undefined）→ B1 省略该字段，等价
       throw new ApiError(
         408,
         `Timeout: no matching message arrived within ${requestedTotal}s (observed per-call clamp ${observedClamp}s, ${pollCount} polls).`,
-        undefined,
-        "total_deadline",
+        { kind: "total_deadline" },
       );
     };
     const throwParentOrInternal = (pollCount: number, observedClamp: number): never => {
@@ -599,14 +613,12 @@ export class OpenAgentEmailClient {
             err.waitHeaderSec === n &&
             elapsed >= n * 1000 - WAIT_TIMEOUT_EARLY_TOLERANCE_MS;
           if (!retryable) {
-            throw new ApiError(
-              408,
-              `Upstream timeout early (kind=upstream_timeout_early).`,
-              n,
-              "upstream_timeout_early",
-              err.waitHeaderSec,
-              err.bodyError,
-            );
+            throw new ApiError(408, `Upstream timeout early (kind=upstream_timeout_early).`, {
+              timeoutSec: n,
+              kind: "upstream_timeout_early",
+              waitHeaderSec: err.waitHeaderSec,
+              bodyError: err.bodyError,
+            });
           }
           if (typeof n === "number" && n > 0 && n < chunkSec) {
             observedClamp = Math.min(observedClamp, n);

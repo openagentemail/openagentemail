@@ -299,3 +299,44 @@ describe('multi-domain task routing and known managed identity', () => {
   });
 });
 
+describe('#241 journalUnavailable typeof 守卫', () => {
+  // 非 Error rejection 不得在映射器内 startsWith 抛 TypeError 逸出成 500；须钉死既有兜底 502
+  // 注：throw undefined 会在本 catch 后续 `(err as Error).message` 再炸（既有链，红线不改）；用例覆盖 string/object
+  test('非 Error rejection（string / object）走 state 突变兜底 502，非 500', async () => {
+    const booms: unknown[] = ['boom', { code: 1 }];
+    for (const boom of booms) {
+      const svc: TaskService = {
+        ...service,
+        async update() {
+          throw boom;
+        },
+      };
+      const res = await appFor({ kind: 'identity', address: A }, svc).request(`/v1/tasks/${ID}/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: A, state: 'working' }),
+      });
+      // 硬要求：钉死具体兜底码 502，不许只写 not.toBe(500)
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: 'smtp_error' });
+    }
+  });
+
+  // Error 路径行为不变：lease_journal_* → 503
+  test('Error(lease_journal_*) 路径仍映射 503（不改 Error 路径）', async () => {
+    const svc: TaskService = {
+      ...service,
+      async update() {
+        throw new Error('lease_journal_lost');
+      },
+    };
+    const res = await appFor({ kind: 'identity', address: A }, svc).request(`/v1/tasks/${ID}/state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: A, state: 'working' }),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'lease_journal_lost' });
+  });
+});
+

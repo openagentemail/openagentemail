@@ -105,7 +105,9 @@ function canReadTask(c: Context, task: Task): boolean {
 }
 
 function journalUnavailable(c: Context, err: unknown): Response | null {
-  const code = (err as Error).message;
+  // 前置 string 守卫：非 Error / message 非 string 时返回 null，走既有兜底，避免 startsWith 抛 TypeError 逸出成 app 级 500
+  const raw = (err as { message?: unknown } | null | undefined)?.message;
+  const code = typeof raw === 'string' ? raw : '';
   if (code.startsWith('lease_journal_')) return c.json({ error: code }, 503);
   return null;
 }
