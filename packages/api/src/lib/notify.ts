@@ -1592,7 +1592,25 @@ export function setAfterCreateRuntimeReaderForTests(fn: (() => void) | null): vo
   afterCreateRuntimeReaderForTests = fn;
 }
 
+/**
+ * @internal 测试缝：整段替换 provisionIdentityNotifications（优先于 live 逻辑）。
+ * #245 rollback 负控须确定性抛错——不得依赖 NTFY_ENABLED / adminPassword 等环境条件
+ *（CI 全量跑测时 config 可能已被其它文件先解析锁定）。
+ */
+let provisionIdentityNotificationsForTests:
+  | ((identity: Identity) => Promise<void>)
+  | null = null;
+
+export function setProvisionIdentityNotificationsForTests(
+  fn: ((identity: Identity) => Promise<void>) | null,
+): void {
+  provisionIdentityNotificationsForTests = fn;
+}
+
 export async function provisionIdentityNotifications(identity: Identity): Promise<void> {
+  if (provisionIdentityNotificationsForTests) {
+    return provisionIdentityNotificationsForTests(identity);
+  }
   if (!config.ntfy.enabled) return;
   if (!config.ntfy.adminPassword) throw new NotifyError('notifications_unconfigured');
   // 新身份一律以完整地址（小写、去尾点）为 agents 键；不因旧 localpart 键存在而跳过。

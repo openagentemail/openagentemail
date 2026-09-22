@@ -103,6 +103,10 @@ services:
       DATA_DIR: /app/data
       # Per-identity send limit (messages/hour, 0 = off):
       SEND_RATE_LIMIT: ${SEND_RATE_LIMIT:-20}
+      # #244：POST /v1/messages/:id/seen 每-caller 限速（默认 300 次 / 5 分钟=300000ms）
+      # 非法/缺失由进程内解析器回落同款安全默认（不得开成 0/无限）
+      MARK_SEEN_RATE_LIMIT: ${MARK_SEEN_RATE_LIMIT:-300}
+      MARK_SEEN_RATE_WINDOW_MS: ${MARK_SEEN_RATE_WINDOW_MS:-300000}
       # Auto-delete mail older than this many days (0 = keep forever):
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
       # H1 / X-Agent：可选验证 slug（与镜像内 SOURCE_COMMIT 同时配置才挂 well-known）

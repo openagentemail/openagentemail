@@ -28,6 +28,13 @@ import { config } from './config.ts';
 /** 超过此大小则 rotate（只保留 audit.jsonl.1 一份）。 */
 export const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
 
+/**
+ * 审计 `address` 分支统一上限（仅用于 `recordAuditEvent` 的 address 字段；不按事件特判）。
+ * 推导：受支持身份最长 63(localpart)+1+253(domain)=317，加余量 → 320。
+ * 抬升前默认 scrub 256 会静默截断合法长地址；≤256 的输入落盘结果与抬升前逐字节不变。
+ */
+export const AUDIT_ADDRESS_MAX_LEN = 320;
+
 /** 审计行 outcome：放行 / 策略拒绝 / 限量 / 执行层错误。 */
 export type AuditOutcome = 'ok' | 'denied' | 'rate_limited' | 'error';
 
@@ -138,7 +145,7 @@ export function recordAuditEvent(
       ? { grantId: scrubAuditField(partial.grantId) }
       : {}),
     ...(partial.address !== undefined
-      ? { address: scrubAuditField(partial.address) }
+      ? { address: scrubAuditField(partial.address, AUDIT_ADDRESS_MAX_LEN) }
       : {}),
     ...(partial.actor !== undefined
       ? { actor: scrubAuditField(partial.actor) }
@@ -185,7 +192,7 @@ export function recordAuditEvent(
       && Number.isFinite(partial.leaseGeneration)
       ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
       : {}),
-    // #275：父地址纯标识（邮箱）；与 address 同款 scrub，maxLen 320 对齐邮箱上限
+    // #275：父地址纯标识（邮箱）；maxLen 320 对齐邮箱上限（不复用 AUDIT_ADDRESS_MAX_LEN：该常量仅 address 分支）
     ...(partial.parentIdentity !== undefined
       ? { parentIdentity: scrubAuditField(partial.parentIdentity, 320) }
       : {}),

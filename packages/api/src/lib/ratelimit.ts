@@ -90,11 +90,12 @@ export function releaseSendLimit(address: string, reservation: number | undefine
   slidingWindowRelease(buckets, address.toLowerCase(), reservation);
 }
 
-/** 测试辅助：清空 send/审计 以及列表 caller 桶（不改生产配额）。 */
+/** 测试辅助：清空 send/审计 以及列表/mark-seen caller 桶（不改生产配额）。 */
 export function resetRateLimits(): void {
   buckets.clear();
   resetDelegationDeniedAuditLimits();
   resetListMessagesLimits();
+  resetMarkSeenLimits();
 }
 
 /**
@@ -398,4 +399,146 @@ export function listMessagesBucketCountForTests(): number {
 /** 测试辅助：某 key 是否仍在图中（活桶不得被驱逐）。 */
 export function listMessagesHasBucketForTests(key: string): boolean {
   return listMessagesBuckets.has(key);
+}
+
+/**
+ * POST /v1/messages/:id/seen 每-caller 轻量限速（#244）。
+ * 默认 5 分钟 300 次——停机 catch-up 全量标已读属正常用法，不得挡。
+ * env：MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS；非法或缺失回落安全默认
+ * （不得开成无限或 0）。
+ * #244 R2：同 list 族——跨 key 桶有上限；仅新 key 满员时懒回收过期桶，不驱逐活戳。
+ * #244 R3：默认时钟走单调流逝（performance.now），墙钟拨动不改窗口；重启清零。
+ *         容量档 Retry-After 按生效窗口 ceil(ms/1000) 推导（下限 1s），不写死 300。
+ */
+export const DEFAULT_MARK_SEEN_RATE_LIMIT = 300;
+export const DEFAULT_MARK_SEEN_RATE_WINDOW_MS = 300_000;
+/** 与 LIST_MESSAGES_MAX_BUCKETS 同量级：防历史 caller 无界涨内存。 */
+export const MARK_SEEN_MAX_BUCKETS = 10_000;
+
+const markSeenBuckets = new Map<string, number[]>();
+let markSeenTestNow: (() => number) | null = null;
+
+/**
+ * mark-seen 限速时钟：默认进程单调流逝毫秒（performance.now）；
+ * 墙钟拨动/NTP/VM 恢复不改窗口；重启清零。测试可整段替换。
+ */
+export function markSeenMonotonicNow(): number {
+  if (markSeenTestNow) return markSeenTestNow();
+  return performance.now();
+}
+
+/** 测试注入/清除 mark-seen 限速时钟。 */
+export function setMarkSeenNowForTests(now: number | (() => number) | null): void {
+  if (now === null) {
+    markSeenTestNow = null;
+    return;
+  }
+  markSeenTestNow = typeof now === 'function' ? now : () => now;
+}
+
+/**
+ * 容量档 Retry-After（秒）：由生效窗口推导 ceil(windowMs/1000)，下限 1。
+ * 窗口 120s → 120；默认 300s → 300；勿再写死与窗口脱钩的常数。
+ */
+export function markSeenCapacityRetrySec(windowMs: number): number {
+  const safe = windowMs > 0 ? windowMs : DEFAULT_MARK_SEEN_RATE_WINDOW_MS;
+  return Math.max(1, Math.ceil(safe / 1000));
+}
+
+/** 默认窗口下的容量档秒数（= markSeenCapacityRetrySec(DEFAULT_…)）。 */
+export const MARK_SEEN_CAPACITY_RETRY_SEC = markSeenCapacityRetrySec(
+  DEFAULT_MARK_SEEN_RATE_WINDOW_MS,
+);
+
+/** 解析正整数；非法/缺失/≤0 → 回落 fallback（fail-safe）。 */
+export function parsePositiveIntEnv(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
+/** 读 env 得到 mark-seen 上限（缺失/非法 → 默认 300）。 */
+export function resolveMarkSeenRateLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return parsePositiveIntEnv(env.MARK_SEEN_RATE_LIMIT, DEFAULT_MARK_SEEN_RATE_LIMIT);
+}
+
+/** 读 env 得到 mark-seen 窗口毫秒（缺失/非法 → 默认 5 分钟）。 */
+export function resolveMarkSeenRateWindowMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return parsePositiveIntEnv(
+    env.MARK_SEEN_RATE_WINDOW_MS,
+    DEFAULT_MARK_SEEN_RATE_WINDOW_MS,
+  );
+}
+
+/**
+ * 仅新 key 触顶时调用：按生效窗口回收空/过期桶，不驱逐仍有活戳的桶。
+ * cutoff 用传入的 windowMs（可配），禁止写死默认常量。
+ */
+export function reclaimExpiredMarkSeenBuckets(now: number, windowMs: number): void {
+  const safeWindow = windowMs > 0 ? windowMs : DEFAULT_MARK_SEEN_RATE_WINDOW_MS;
+  const cutoff = now - safeWindow;
+  for (const [key, stamps] of markSeenBuckets) {
+    const live = stamps.filter((t) => t > cutoff);
+    if (live.length === 0) markSeenBuckets.delete(key);
+    else if (live.length !== stamps.length) markSeenBuckets.set(key, live);
+  }
+}
+
+/**
+ * 录取 POST /:id/seen。键=归一地址（与 checkSendLimit 同族）。
+ * 显式传入 limit/windowMs 时跳过 env（测例用）；路由侧用默认解析。
+ * 注意：与 send 不同，此处 limit≤0 不得禁用——调用方须先 resolve* 保证正数。
+ * 新 key 且桶图已满：先 reclaim（生效窗口），仍满则容量档 429（不驱逐活桶）。
+ * 默认 now = markSeenMonotonicNow()（单调钟）；测例可显式传入定值。
+ */
+export function checkMarkSeenLimit(
+  address: string,
+  limit: number = resolveMarkSeenRateLimit(),
+  windowMs: number = resolveMarkSeenRateWindowMs(),
+  now: number = markSeenMonotonicNow(),
+): RateLimitResult {
+  // 防御：若误传 ≤0，回落默认而非开无限（对齐硬要求 2）
+  const safeLimit = limit > 0 ? limit : DEFAULT_MARK_SEEN_RATE_LIMIT;
+  const safeWindow = windowMs > 0 ? windowMs : DEFAULT_MARK_SEEN_RATE_WINDOW_MS;
+  const key = address.toLowerCase();
+  if (!markSeenBuckets.has(key) && markSeenBuckets.size >= MARK_SEEN_MAX_BUCKETS) {
+    reclaimExpiredMarkSeenBuckets(now, safeWindow);
+    if (markSeenBuckets.size >= MARK_SEEN_MAX_BUCKETS) {
+      return {
+        allowed: false,
+        retryAfterSec: markSeenCapacityRetrySec(safeWindow),
+        count: 0,
+      };
+    }
+  }
+  return slidingWindowCheck(markSeenBuckets, key, safeLimit, safeWindow, now);
+}
+
+/** 测试辅助：清空 mark-seen 桶与测试时钟注入。 */
+export function resetMarkSeenLimits(): void {
+  markSeenBuckets.clear();
+  markSeenTestNow = null;
+}
+
+/** 测试辅助：预置某一 caller 的时间戳（容量/回收矩阵）。 */
+export function seedMarkSeenBucketForTests(key: string, stamps: number[]): void {
+  markSeenBuckets.set(key.toLowerCase(), [...stamps]);
+}
+
+/** 测试辅助：当前桶数。 */
+export function markSeenBucketCountForTests(): number {
+  return markSeenBuckets.size;
+}
+
+/** 测试辅助：某 key 是否仍在图中（活桶不得被驱逐）。 */
+export function markSeenHasBucketForTests(key: string): boolean {
+  return markSeenBuckets.has(key.toLowerCase());
 }

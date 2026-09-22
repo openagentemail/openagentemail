@@ -17,6 +17,7 @@ import { clampWaitSeconds } from '../lib/config.ts';
 import {
   acquireWaitSlot,
   checkListMessagesLimit,
+  checkMarkSeenLimit,
   listMessagesCallerKey,
   releaseWaitSlot,
 } from '../lib/ratelimit.ts';
@@ -130,13 +131,23 @@ export const messagesRoute = new Hono()
     }
     const denied = forbidUnlessAddress(c, parsed.data.address);
     if (denied) return denied;
+    // #244：schema+ACL 之后、IMAP 写之前同步录取；成功路径审计/flags 逐字节不变
+    const auth = getAuth(c);
+    const caller = auth.kind === 'admin' ? 'admin' : auth.address;
+    const seenLimit = checkMarkSeenLimit(caller);
+    if (!seenLimit.allowed) {
+      c.header('Retry-After', String(seenLimit.retryAfterSec));
+      return c.json(
+        { error: 'rate_limited', retryAfterSec: seenLimit.retryAfterSec },
+        429,
+      );
+    }
     const marked = await setMessageSeen(parsed.data.address, id, parsed.data.seen);
     if (!marked) {
       return c.json({ error: 'not_found' }, 404);
     }
     // 仅成功变更记 audit；404/403 不记（对齐既有写路由口径）
     // address 小写归一：与 ui 路由一致；setMessageSeen 入参保持存量行为
-    const auth = getAuth(c);
     recordAuditEvent({
       event: 'message.mark_seen',
       address: parsed.data.address.toLowerCase(),

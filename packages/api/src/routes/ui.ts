@@ -786,9 +786,19 @@ export function createUiApiRoutes(
   routes.delete('/identities/:address', (c) => {
     const denied = requireUiAdmin(c);
     if (denied) return denied;
-    if (!deleteIdentity(c.req.param('address'))) {
+    // #245：仅有意删除成功后记 identity.delete；rollback 路径不经此分支
+    const address = c.req.param('address');
+    if (!deleteIdentity(address)) {
       return c.json({ error: 'not_found' }, 404);
     }
+    const auth = getAuth(c);
+    recordAuditEvent({
+      event: 'identity.delete',
+      outcome: 'ok',
+      address: address.toLowerCase(),
+      // actor 口径对齐 message.mark_seen（seen 路由）
+      actor: auth.kind === 'admin' ? 'admin' : auth.address,
+    });
     return c.json({ deleted: true });
   });
 
