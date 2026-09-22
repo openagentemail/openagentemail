@@ -1,8 +1,8 @@
 /**
  * #245：identity.delete 审计（入口层）——两有意删除入口 + 四 rollback 负控 + 级联 webhook.delete。
  *
- * NTFY_ENABLED=true 且无 admin 密码 → provision 抛 notifications_unconfigured，
- * 触发创建路径 catch 内 deleteIdentity（rollback），不得落 identity.delete。
+ * rollback 负控：经 setProvisionIdentityNotificationsForTests **确定性抛 NotifyError**，
+ * 不依赖 NTFY_ENABLED / adminPassword（CI 全量时 config 可能已被它文件先解析锁定）。
  */
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,16 +20,18 @@ process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-id-del-audit-'));
 process.env.UI_ENABLED = 'true';
 process.env.MCP_PUBLIC_URL = 'http://localhost';
-process.env.NTFY_ENABLED = 'true';
-// 故意不设 NTFY_ADMIN_PASSWORD → provision 失败触发 rollback
 
-const { beforeEach, describe, expect, test } = await import('bun:test');
+const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { createApp } = await import('../src/app.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
 const { config } = await import('../src/lib/config.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { createWebhookSubscription } = await import('../src/lib/webhook-store.ts');
+const {
+  NotifyError,
+  setProvisionIdentityNotificationsForTests,
+} = await import('../src/lib/notify.ts');
 const { s256Challenge } = await import('../src/lib/oauth-pkce.ts');
 const { clearCimdCacheForTests } = await import('../src/lib/oauth-cimd.ts');
 const { resetOAuthStoreCacheForTests } = await import('../src/lib/oauth-store.ts');
@@ -42,6 +44,13 @@ const app = createApp({ uiEnabled: true });
 const CLIENT_ID = 'http://127.0.0.1:9/cimd.json';
 const REDIRECT = 'http://127.0.0.1:54321/callback';
 const RESOURCE = 'http://localhost/mcp';
+
+/** 确定性失败：路由 catch 内 deleteIdentity 必走，与 CI/本地 env 无关。 */
+function forceProvisionFail(): void {
+  setProvisionIdentityNotificationsForTests(async () => {
+    throw new NotifyError('notifications_unconfigured');
+  });
+}
 
 function cimdFetcher() {
   return async () =>
@@ -70,6 +79,11 @@ beforeEach(() => {
   resetAuditForTests();
   clearCimdCacheForTests();
   resetOAuthStoreCacheForTests();
+  setProvisionIdentityNotificationsForTests(null);
+});
+
+afterEach(() => {
+  setProvisionIdentityNotificationsForTests(null);
 });
 
 describe('#245 identity.delete 审计（有意删除入口）', () => {
@@ -202,6 +216,7 @@ describe('#245 identity.delete 审计（有意删除入口）', () => {
 
 describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
   test('1) identities.ts admin 创建 rollback：provision 失败 → 无 identity.delete', async () => {
+    forceProvisionFail();
     const res = await app.request('/v1/identities', {
       method: 'POST',
       headers: {
@@ -210,6 +225,8 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
       },
       body: JSON.stringify({ localpart: 'rb-admin-prov' }),
     });
+    // 不得是 201：钩子必须拦住创建成功路径
+    expect(res.status).not.toBe(201);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'notifications_unconfigured' });
     expect(findIdentity('rb-admin-prov@test.example')).toBeUndefined();
@@ -217,6 +234,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
   });
 
   test('2) identities.ts 子身份创建 rollback：provision 失败 → 无 identity.delete', async () => {
+    forceProvisionFail();
     const parent = createIdentity({
       localpart: 'rb-parent',
       scopes: ['identities:create', 'read:messages'],
@@ -229,6 +247,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
       },
       body: JSON.stringify({ localpart: 'rb-child-prov' }),
     });
+    expect(res.status).not.toBe(201);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'notifications_unconfigured' });
     expect(findIdentity('rb-child-prov@test.example')).toBeUndefined();
@@ -236,6 +255,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
   });
 
   test('3) ui.ts 创建 rollback：provision 失败 → 无 identity.delete', async () => {
+    forceProvisionFail();
     const store = new UiSessionStore({
       resolveToken: (token) => (token === 'adm' ? { kind: 'admin' } : null),
     });
@@ -270,6 +290,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
       },
       body: JSON.stringify({ localpart: 'rb-ui-prov' }),
     });
+    expect(res.status).not.toBe(201);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'notifications_unconfigured' });
     expect(findIdentity('rb-ui-prov@test.example')).toBeUndefined();
@@ -277,6 +298,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
   });
 
   test('4) ui-oauth.ts 同意页创建 rollback：provision 失败 → 无 identity.delete', async () => {
+    forceProvisionFail();
     const oauthApp = createApp({
       uiEnabled: true,
       oauth: { cimdFetcher: cimdFetcher() },
@@ -334,6 +356,7 @@ describe('#245 rollback 负控（4 处不得产生 identity.delete）', () => {
       redirect: 'manual',
     });
     // provision 失败回同意页（400）并带错误文案；身份不得残留；不得记 identity.delete
+    expect(res.status).not.toBe(201);
     expect(res.status).toBe(400);
     const html = await res.text();
     expect(html).toMatch(/[Nn]otification provisioning failed|identity was not created/);
