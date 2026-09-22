@@ -21,7 +21,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-id-del-audit-'));
 process.env.UI_ENABLED = 'true';
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 
-const { afterEach, beforeEach, describe, expect, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, test } = await import('bun:test');
 const { Hono } = await import('hono');
 const { createApp } = await import('../src/app.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
@@ -83,6 +83,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setProvisionIdentityNotificationsForTests(null);
+});
+
+// #244 R4：文件级清理 provision 注入缝，避免合跑泄漏
+afterAll(() => {
   setProvisionIdentityNotificationsForTests(null);
 });
 

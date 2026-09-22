@@ -21,6 +21,42 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import { afterAll, describe, expect, test } from 'bun:test';
 
+/**
+ * #244 R4：本文件 import config.ts 会锁定模块级单例。
+ * 若未先设 DATA_DIR，单例落在共享 ./data，后继套件（identity-delete / mark-seen）
+ * 的 mkdtemp DATA_DIR 失效 → 固定 localpart 地址冲突 / 密钥未入单例。
+ * 导入前：隔离 DATA_DIR + 补齐签名密钥；afterAll：还原 env 快照并清理自建目录。
+ */
+const ENV_KEYS_TO_RESTORE = [
+  'DATA_DIR',
+  'MARK_SEEN_RATE_LIMIT',
+  'MARK_SEEN_RATE_WINDOW_MS',
+  'WEBHOOK_SIGNING_SECRET',
+  'TASK_SIGNING_SECRET',
+] as const;
+const ENV_SNAPSHOT: Record<(typeof ENV_KEYS_TO_RESTORE)[number], string | undefined> = {
+  DATA_DIR: process.env.DATA_DIR,
+  MARK_SEEN_RATE_LIMIT: process.env.MARK_SEEN_RATE_LIMIT,
+  MARK_SEEN_RATE_WINDOW_MS: process.env.MARK_SEEN_RATE_WINDOW_MS,
+  WEBHOOK_SIGNING_SECRET: process.env.WEBHOOK_SIGNING_SECRET,
+  TASK_SIGNING_SECRET: process.env.TASK_SIGNING_SECRET,
+};
+
+/** 仅当尚无先行套件锁过 DATA_DIR 时自建隔离目录（并在 afterAll 删除）。 */
+const COMPOSE_WEBHOOKS_OWNED_DATA_DIR: string | null = process.env.DATA_DIR
+  ? null
+  : mkdtempSync(join(tmpdir(), 'oae-149-compose-data-'));
+if (COMPOSE_WEBHOOKS_OWNED_DATA_DIR) {
+  process.env.DATA_DIR = COMPOSE_WEBHOOKS_OWNED_DATA_DIR;
+}
+// 与 identity-delete-audit 同形密钥：合跑时单例已锁定，后继套件 process.env 补写无效
+if (!process.env.WEBHOOK_SIGNING_SECRET) {
+  process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
+}
+if (!process.env.TASK_SIGNING_SECRET) {
+  process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
+}
+
 const { parseConfig } = await import('../src/lib/config.ts');
 
 const REPO_DIR = join(import.meta.dir, '..', '..', '..');
@@ -304,6 +340,15 @@ const BACKEND_DISCOVERY = (() => {
 
 afterAll(() => {
   rmSync(BACKEND_HELPER_DIR, { recursive: true, force: true });
+  // #244 R4：清理自建 DATA_DIR，并还原导入前 env 快照（含 MARK_SEEN_*）
+  if (COMPOSE_WEBHOOKS_OWNED_DATA_DIR) {
+    rmSync(COMPOSE_WEBHOOKS_OWNED_DATA_DIR, { recursive: true, force: true });
+  }
+  for (const key of ENV_KEYS_TO_RESTORE) {
+    const prev = ENV_SNAPSHOT[key];
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
 });
 
 /** Restore selected-backend discovery, require the PATH helper, then exec real Compose. */
@@ -913,6 +958,12 @@ function composeForwardsMarkSeenRate(text: string): boolean {
 }
 
 describe('#244 R1 Compose mark-seen rate env forwarding', () => {
+  // #244 R4：render 走 env-file/子进程，不应写 process.env；仍 fortify 清理注入缝
+  afterAll(() => {
+    delete process.env.MARK_SEEN_RATE_LIMIT;
+    delete process.env.MARK_SEEN_RATE_WINDOW_MS;
+  });
+
   test('两份 compose 均转发 MARK_SEEN_RATE_LIMIT / MARK_SEEN_RATE_WINDOW_MS（同 SEND 形）', () => {
     for (const variant of VARIANTS) {
       const text = readFileSync(join(REPO_DIR, variant.file), 'utf8');

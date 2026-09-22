@@ -16,7 +16,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-seen-rate-'));
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 
-const { beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 let fakeMessages: any[] = [];
 let flagsCalls: { op: 'add' | 'remove'; uid: number; flags: string[] }[] = [];
@@ -111,6 +111,12 @@ beforeEach(() => {
   resetMarkSeenLimits();
   flagsCalls = [];
   fakeMessages = [];
+});
+
+// #244 R4：文件级清理注入缝，避免合跑泄漏单调钟 / 桶状态
+afterAll(() => {
+  setMarkSeenNowForTests(null);
+  resetMarkSeenLimits();
 });
 
 describe('#244 mark-seen env fail-safe', () => {
