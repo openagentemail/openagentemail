@@ -29,7 +29,7 @@ import { config } from './config.ts';
 export const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
 
 /**
- * 审计 `address`（及同形邮箱标识）上限。
+ * 审计 `address` 字段上限（仅用于 recordAuditEvent 的 address 分支）。
  * 覆盖受支持身份地址：63(localpart)+1+253(domain)=317；略留余量到 320。
  * 默认 scrub 256 会静默截断长地址，导致 identity.delete 等行不可辨识。
  */
@@ -192,14 +192,9 @@ export function recordAuditEvent(
       && Number.isFinite(partial.leaseGeneration)
       ? { leaseGeneration: Math.trunc(partial.leaseGeneration) }
       : {}),
-    // #275：父地址纯标识（邮箱）；与 address 同用 AUDIT_ADDRESS_MAX_LEN
+    // #275：父地址纯标识（邮箱）；maxLen 320 对齐邮箱上限（不复用 AUDIT_ADDRESS_MAX_LEN：该常量仅 address 分支）
     ...(partial.parentIdentity !== undefined
-      ? {
-          parentIdentity: scrubAuditField(
-            partial.parentIdentity,
-            AUDIT_ADDRESS_MAX_LEN,
-          ),
-        }
+      ? { parentIdentity: scrubAuditField(partial.parentIdentity, 320) }
       : {}),
   };
 
