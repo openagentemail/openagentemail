@@ -1022,3 +1022,31 @@ N/A。
 
 ### 我们是如何解决这些错误的？
 1. 仅修 CHANGELOG + 完工件表行两处文字；独立 commit；Progress 另起独立 commit；重绑六格。
+
+## 2026-09-22 · w332 · #332 族外 31 处 `(err as Error).message` → `errorCode()`
+
+### 我们实现了哪些功能？
+1. 全仓剩余 31 处裸读 `(err as Error).message` / `(logError as Error).message` 统一改为 `errorCode(err)`（`packages/api/src/lib/errors.ts`，#333 已落地 helper）。
+2. 覆盖文件（11）：`lib/retention.ts`、`send-log.ts`、`notify.ts`、`notification-log.ts`、`imap.ts`、`delegations.ts`、`identities.ts`、`oauth-store.ts`、`routes/tasks.ts`、`routes/ui.ts`、`routes/identities.ts`（各加既有风格 import）。
+3. 新增 `packages/api/test/err-normalize-332.test.ts`：A 簇路由非 Error 正控 + state 409/403 负控；B 簇日志/告警不抛；C 簇 `*_store_corrupt` 非 Error 包装。
+4. `CHANGELOG.md` Unreleased Fixed 一句内部健壮性说明（对外码零变更）。
+5. 未动：`errorCode()` 自身、`mailserver-reconnect.ts`、`tasks.ts:238`、#330 七处兜底、`tasks-internal.ts`、`docs/`。`ui.ts:1031` 的 `typeof code === 'string'` 守卫**保留**（改后恒真，行为不变）。
+
+### 我们遇到了哪些错误？
+1. 本机 `packages/api` 无 `node_modules`（缺 hono）→ 测试无法启动。
+2. notify 正控在与 `notification-log.test.ts` 同跑时失败：他文件先 import 导致 `NTFY_ENABLED` 默认 false，`notifyTrustedAgentDelivery` 早退。
+3. 依赖完整 ntfy 配置的 `publishOnce` append 告警用例在他套件污染下抛 `notifications_unconfigured`。
+4. imap 用 `setWaitMailserverResolverForTests(throw undefined)` 未命中目标 catch（实际 warn 为 TLS servername Error）。
+
+### 我们是如何解决这些错误的？
+1. 在 `packages/api` 执行 `bun install`。
+2. notify 用例内钉死 `config.ntfy.enabled=true` / `pushPolicy='all'`，并确保 fox identity 存在。
+3. 删除脆弱的 publishOnce 用例；`notify.ts` 文件级正控保留 trusted-agent warn 一条（B 簇逐文件 ≥1 已满足）。
+4. 改为 `spyOn(withMailserverReconnect).mockImplementation(() => { throw undefined })` 命中 IDLE catch。
+
+### 基线与证据
+- 基线：`8a270026`（= 开工时 main）
+- 功能提交：`3136356`
+- focused：`/home/ops/materials/332/focused-20260922T230606Z.txt` sha256 `82c2aef628c3d7b934aaed9ccfcc3a485b9fed598d0a31a4b15bbb930b425669` → **210 pass / 0 fail**
+- 全量：`/home/ops/materials/332/full-20260922T230614Z.txt` sha256 `3e3dc2b36339acf8c6a1ce7c06d506c157dd5d60c0e3a214b4c4288c08d9aff1` → **2214 pass / 9 skip / 0 fail**（基线预期 2186 pass；增量含本卡用例）
+- 对外零变更证据：`/home/ops/materials/332/zero-api-shape-evidence.txt` sha256 `f14ee5d04d4208868e69f1e7e102fcb57f30c84e8bdd25792c623dd96e1f33f8`
