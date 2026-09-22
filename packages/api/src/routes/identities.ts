@@ -6,13 +6,15 @@ import {
   deleteIdentity,
   findIdentity,
   listIdentities,
-  rotateIdentityToken,
   rotateIdentityTokenDetailed,
   resolvePushContentTier,
   setIdentityPushContentTier,
   validateScopesInput,
+  countChildren,
   LOCALPART_RE,
   PUSH_TIER3_WARNING,
+  MAX_CHILD_IDENTITIES,
+  CHILD_GRANTABLE_SCOPES_SET,
   type Identity,
   type PushContentTier,
 } from '../lib/identities.ts';
@@ -74,6 +76,7 @@ const rotateTokenSchema = z
 
 // Identity management is admin-only: identity tokens may not mint, list or
 // delete identities (that would let a leaked token escalate sideways).
+// #275：POST / 例外——持 identities:create 的 scoped 身份可创建归属子（见下方分支）。
 function requireAdmin(c: Context) {
   if (getAuth(c).kind !== 'admin') {
     return c.json({ error: 'forbidden: admin key required' }, 403);
@@ -102,11 +105,80 @@ function publicIdentity(identity: Identity) {
   };
 }
 
+/**
+ * 非 admin 子身份 scopes 解析：默认 / 白名单 / 子⊆父机械强制。
+ * 返回已解析 scopes，或 HTTP 错误响应体+状态。
+ */
+function resolveChildCreateScopes(
+  bodyHasScopes: boolean,
+  rawScopes: unknown,
+  parentScopes: readonly string[],
+):
+  | { ok: true; scopes: string[] }
+  | { ok: false; status: 400 | 403; body: Record<string, unknown> } {
+  let scopes: string[];
+  if (!bodyHasScopes) {
+    // 默认：父含 read:messages → [read:messages]，否则 []
+    scopes = parentScopes.includes('read:messages') ? ['read:messages'] : [];
+  } else {
+    // 二层嵌套禁令：显式授 identities:create → 400（先于通用校验，固定文案）
+    if (Array.isArray(rawScopes) && rawScopes.includes('identities:create')) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          details: 'identities:create cannot be granted to child identities',
+        },
+      };
+    }
+    const validated = validateScopesInput(rawScopes);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        status: 400,
+        body: { error: validated.error, details: validated.details },
+      };
+    }
+    // 白名单：仅 read:messages / messages:send（叠加在子⊆父之上）
+    for (const scope of validated.scopes) {
+      if (!CHILD_GRANTABLE_SCOPES_SET.has(scope)) {
+        return {
+          ok: false,
+          status: 400,
+          body: {
+            error: 'invalid_request',
+            details: 'identities:create cannot be granted to child identities',
+          },
+        };
+      }
+    }
+    scopes = validated.scopes;
+  }
+  // 核心安全不变量：子的每一项必须在父自身 scopes 集合内
+  for (const scope of scopes) {
+    if (!parentScopes.includes(scope)) {
+      return {
+        ok: false,
+        status: 403,
+        body: { error: 'forbidden: scope exceeds parent permissions' },
+      };
+    }
+  }
+  return { ok: true, scopes };
+}
+
 export const identitiesRoute = new Hono()
   .post('/', async (c) => {
     c.header('Cache-Control', 'no-store');
-    const denied = requireAdmin(c);
-    if (denied) return denied;
+    const auth = getAuth(c);
+    const isAdmin = auth.kind === 'admin';
+    // admin 走原路径；非 admin 必须持 identities:create，否则维持 403 admin required 语义
+    if (!isAdmin) {
+      if (auth.kind !== 'identity' || !auth.scopes?.includes('identities:create')) {
+        return c.json({ error: 'forbidden: admin key required' }, 403);
+      }
+    }
     let body: unknown = {};
     const text = await c.req.text();
     if (text.trim().length > 0) {
@@ -120,6 +192,113 @@ export const identitiesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
+
+    // —— 非 admin 分支：归属子创建（规则写死）——
+    if (!isAdmin) {
+      // b. canNotifyUser 任何值 → 403
+      if (parsed.data.canNotifyUser !== undefined) {
+        return c.json({ error: 'forbidden: admin key required for canNotifyUser' }, 403);
+      }
+      const parentAddress = auth.address.toLowerCase();
+      const parentDomain = parentAddress.split('@')[1] ?? '';
+      // c. 域：省略默认父域；显式且 ≠ 父域 → 400
+      if (
+        parsed.data.domain !== undefined &&
+        parsed.data.domain.toLowerCase().trim() !== parentDomain
+      ) {
+        return c.json(
+          {
+            error: 'invalid_domain',
+            details: 'child identity must share the parent identity domain',
+          },
+          400,
+        );
+      }
+      const bodyHasScopes =
+        body !== null && typeof body === 'object' && 'scopes' in (body as object);
+      const rawScopes = bodyHasScopes
+        ? (body as Record<string, unknown>).scopes
+        : undefined;
+      const scopeResult = resolveChildCreateScopes(
+        bodyHasScopes,
+        rawScopes,
+        auth.scopes ?? [],
+      );
+      if (!scopeResult.ok) {
+        return c.json(scopeResult.body, scopeResult.status);
+      }
+      // g. 配额：创建前数存量 ≥50 → 403
+      if (countChildren(parentAddress) >= MAX_CHILD_IDENTITIES) {
+        return c.json(
+          { error: 'child_limit_reached', limit: MAX_CHILD_IDENTITIES },
+          403,
+        );
+      }
+      try {
+        const created = createIdentity({
+          name: parsed.data.name,
+          localpart: parsed.data.localpart,
+          // a. 父=服务端取 auth.address；域默认父域
+          domain: parentDomain,
+          scopes: scopeResult.scopes,
+          parentIdentity: parentAddress,
+        });
+        if (!created) {
+          return c.json({ error: 'address_exists' }, 409);
+        }
+        const { identity, token } = created;
+        try {
+          // h. provision 照旧；失败回滚删身份
+          await provisionIdentityNotifications(identity);
+        } catch (err) {
+          deleteIdentity(identity.address);
+          if (err instanceof NotifyError) {
+            return c.json({ error: err.code }, 503);
+          }
+          throw err;
+        }
+        // i. 审计加 parentIdentity（白名单最小扩展）
+        if (bodyHasScopes) {
+          recordAuditEvent({
+            event: 'identity.scopes.create',
+            address: identity.address,
+            outcome: 'ok',
+            scopes: scopeResult.scopes,
+            parentIdentity: parentAddress,
+            ip: clientIp(c),
+          });
+        } else {
+          recordAuditEvent({
+            event: 'identity.create',
+            address: identity.address,
+            outcome: 'ok',
+            parentIdentity: parentAddress,
+            ip: clientIp(c),
+          });
+        }
+        return c.json(
+          {
+            address: identity.address,
+            ...(identity.name ? { name: identity.name } : {}),
+            pushContentTier: resolvePushContentTier(identity),
+            ...(identity.scopes !== undefined ? { scopes: identity.scopes } : {}),
+            token,
+          },
+          201,
+        );
+      } catch (err) {
+        if ((err as Error).message === 'invalid_localpart') {
+          return c.json({ error: 'invalid_localpart' }, 400);
+        }
+        if ((err as Error).message === 'invalid_domain') {
+          c.header('Cache-Control', 'no-store');
+          return c.json({ error: 'invalid_domain' }, 400);
+        }
+        throw err;
+      }
+    }
+
+    // —— admin 原路径（零变化）——
     let requestedScopes: string[] | undefined = undefined;
     if (body && typeof body === 'object' && 'scopes' in body) {
       const validated = validateScopesInput((body as Record<string, unknown>).scopes);

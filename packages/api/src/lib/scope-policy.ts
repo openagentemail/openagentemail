@@ -40,10 +40,26 @@ export const OPERATION_POLICIES: readonly OperationPolicy[] = [
     requiredScope: 'read:messages',
     matches: (method, path) => method === 'GET' && /^\/v1\/delegations\/[^/]+$/.test(path),
   },
+  // #275：scoped 父凭据可创建归属子身份（单层；路由层再强制子⊆父与白名单）
+  {
+    id: 'identities:create',
+    requiredScope: 'identities:create',
+    matches: (method, path) => method === 'POST' && path === '/v1/identities',
+  },
+  // #275：scoped 凭据可对自身或归属子身份发信（路由层再校验归属）
+  {
+    id: 'messages:send',
+    requiredScope: 'messages:send',
+    matches: (method, path) => method === 'POST' && path === '/v1/send',
+  },
 ];
 
 // Note on future expansion: If SUPPORTED_SCOPES is extended beyond 'read:messages',
 // audit all forbidUnlessMailboxAccess call sites to ensure delegation remains strictly read-only.
+//
+// #275 scopes（追加，不改既有 read 语义）：
+// - identities:create → POST /v1/identities（非 admin 创建归属子；删/rotate/push-tier 仍 admin-only）
+// - messages:send → POST /v1/send（自身或 parentIdentity 归属的子 from）
 
 /**
  * Centralized scope policy enforcement middleware for all /v1/* REST routes.

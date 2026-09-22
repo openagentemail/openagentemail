@@ -106,8 +106,8 @@ const app = createApp({ uiEnabled: true });
 
 describe('Issue #114: read-only API token scopes', () => {
   describe('Scope validation and registry', () => {
-    test('SUPPORTED_SCOPES contains read:messages', () => {
-      expect(SUPPORTED_SCOPES).toEqual(['read:messages']);
+    test('SUPPORTED_SCOPES contains read:messages, identities:create, messages:send', () => {
+      expect(SUPPORTED_SCOPES).toEqual(['read:messages', 'identities:create', 'messages:send']);
     });
 
     test('validateScopesInput accepts valid scopes array and empty array', () => {
@@ -1080,7 +1080,7 @@ describe('Issue #114: read-only API token scopes', () => {
       expect(createTool).toBeDefined();
       expect(createTool?.inputSchema?.properties?.scopes).toMatchObject({
         type: 'array',
-        items: { enum: ['read:messages'] },
+        items: { enum: ['read:messages', 'identities:create', 'messages:send'] },
         maxItems: 10,
       });
 

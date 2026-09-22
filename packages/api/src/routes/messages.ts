@@ -21,6 +21,7 @@ import {
   releaseWaitSlot,
 } from '../lib/ratelimit.ts';
 import { hasActiveDelegation } from '../lib/delegations.ts';
+import { isParentOf } from '../lib/identities.ts';
 import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
 
 const listQuerySchema = z.object({
@@ -165,8 +166,11 @@ export const messagesRoute = new Hono()
     const caller = auth.kind === 'admin' ? 'admin' : auth.address.toLowerCase();
     const isDelegate =
       auth.kind === 'identity' && auth.address.toLowerCase() !== address.toLowerCase();
+    // #275：父 wait 子信箱时，归属直连与 delegation 同等续等（不得因无 delegation 即时中止）
     const shouldContinue = isDelegate
-      ? () => hasActiveDelegation(address, auth.address, 'read:messages')
+      ? () =>
+          hasActiveDelegation(address, auth.address, 'read:messages') ||
+          isParentOf(auth.address, address)
       : undefined;
 
     // schema 仍允许 ≤600（历史客户端）；服务端静默钳到 MCP_MAX_WAIT_SECONDS

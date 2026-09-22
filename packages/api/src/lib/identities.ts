@@ -106,6 +106,13 @@ export function validateScopesInput(scopes: unknown): ScopeValidationResult {
   return { ok: true, scopes: [...scopes] };
 }
 
+/** 每父身份允许的存量子身份上限（#275；父不能删子 → 硬封顶）。 */
+export const MAX_CHILD_IDENTITIES = 50;
+
+/** 非 admin 可授给子身份的 scope 白名单（叠加在「子⊆父」之上；禁 identities:create）。 */
+export const CHILD_GRANTABLE_SCOPES = ['read:messages', 'messages:send'] as const;
+export const CHILD_GRANTABLE_SCOPES_SET = new Set<string>(CHILD_GRANTABLE_SCOPES);
+
 export interface Identity {
   address: string;
   name?: string;
@@ -125,6 +132,11 @@ export interface Identity {
    * When present (including empty array []), privileges are subtractively restricted.
    */
   scopes?: string[];
+  /**
+   * 父身份地址（小写）。仅非 admin 的 scoped create 写入；admin create 不写。
+   * 归属不可转移/重指；悬空（父已删）时判定永假。
+   */
+  parentIdentity?: string;
 }
 
 export function resolvePushContentTier(identity: Pick<Identity, 'pushContentTier'>): PushContentTier {
@@ -164,7 +176,9 @@ function isIdentityShape(value: unknown): value is Record<string, unknown> {
     (identity.canNotifyUser === undefined || typeof identity.canNotifyUser === 'boolean') &&
     (identity.tokenHash === undefined || typeof identity.tokenHash === 'string') &&
     (identity.scopes === undefined ||
-      (Array.isArray(identity.scopes) && identity.scopes.every((s) => typeof s === 'string')))
+      (Array.isArray(identity.scopes) && identity.scopes.every((s) => typeof s === 'string'))) &&
+    // #275：可选父地址；缺省=旧数据；类型错才拒（F94 宽容）
+    (identity.parentIdentity === undefined || typeof identity.parentIdentity === 'string')
   );
 }
 
@@ -409,6 +423,10 @@ export function createIdentity(input: {
   issueToken?: boolean;
   /** Optional token scopes; undefined means full-power identity token. */
   scopes?: string[];
+  /**
+   * 父身份地址（小写）。仅非 admin scoped create 传入；空串/缺省不写字段。
+   */
+  parentIdentity?: string;
 }): { identity: Identity; token: string } | null {
   const identities = load();
   const targetDomain = (input.domain ?? config.domain).toLowerCase().trim();
@@ -445,6 +463,8 @@ export function createIdentity(input: {
     token = generated.token;
     tokenHash = generated.tokenHash;
   }
+  // 父地址仅非空时落库（admin 路径不传 → 字段缺省）
+  const parent = input.parentIdentity?.toLowerCase().trim();
   const identity: Identity = {
     address,
     ...(input.name ? { name: input.name } : {}),
@@ -452,10 +472,29 @@ export function createIdentity(input: {
     createdAt: new Date().toISOString(),
     ...(tokenHash ? { tokenHash } : {}),
     ...(input.scopes !== undefined ? { scopes: [...input.scopes] } : {}),
+    ...(parent ? { parentIdentity: parent } : {}),
   };
   identities.push(identity);
   save(identities);
   return { identity, token };
+}
+
+/**
+ * 统计某父身份下的存量子身份数（parentIdentity === parent，大小写不敏感）。
+ */
+export function countChildren(parent: string): number {
+  const needle = parent.toLowerCase();
+  return load().filter((i) => i.parentIdentity === needle).length;
+}
+
+/**
+ * 判定 child 是否归属 parent（child.parentIdentity === parent）。
+ * 父/子任一不存在或无归属字段 → false（悬空归属永假）。
+ */
+export function isParentOf(parent: string, child: string): boolean {
+  const childIdentity = findIdentity(child);
+  if (!childIdentity?.parentIdentity) return false;
+  return childIdentity.parentIdentity === parent.toLowerCase();
 }
 
 export interface RotateIdentityTokenResult {

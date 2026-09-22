@@ -3,8 +3,11 @@
  * MCP stdio 客户端只应拉这份，禁止经 identities.ts 把 parseConfig 打进 bundle。
  */
 
-/** 身份 token 一等支持的 scope。 */
-export const SUPPORTED_SCOPES = ['read:messages'] as const;
+/**
+ * 身份 token 一等支持的 scope。
+ * 顺序：read 在前；其后为创建子身份 / 以归属子发信。
+ */
+export const SUPPORTED_SCOPES = ['read:messages', 'identities:create', 'messages:send'] as const;
 export type SupportedScope = (typeof SUPPORTED_SCOPES)[number];
 export const SUPPORTED_SCOPES_SET = new Set<string>(SUPPORTED_SCOPES);
 
