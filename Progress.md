@@ -1050,3 +1050,19 @@ N/A。
 - focused：`/home/ops/materials/332/focused-20260922T230606Z.txt` sha256 `82c2aef628c3d7b934aaed9ccfcc3a485b9fed598d0a31a4b15bbb930b425669` → **210 pass / 0 fail**
 - 全量：`/home/ops/materials/332/full-20260922T230614Z.txt` sha256 `3e3dc2b36339acf8c6a1ce7c06d506c157dd5d60c0e3a214b4c4288c08d9aff1` → **2214 pass / 9 skip / 0 fail**（基线预期 2186 pass；增量含本卡用例）
 - 对外零变更证据：`/home/ops/materials/332/zero-api-shape-evidence.txt` sha256 `f14ee5d04d4208868e69f1e7e102fcb57f30c84e8bdd25792c623dd96e1f33f8`
+
+## 2026-09-22 · w332 · #335 R3（CR 夹具确定性）
+
+### 我们实现了哪些功能？
+1. 删掉 `err-normalize-332.test.ts` C 簇 identities 用例中「`good+' '` 后再写回 `good`」那一行，断言期间保持 **size 不同**，确定性打穿 `load()` 缓存键。
+2. 补一句中文注释说明失效依据是 **size**。
+3. 全文件自查：delegations/oauth 用显式 `invalidate*ForTests`；corrupt-JSON 负控断言期间内容/size 均不同——无同类不确定性。
+
+### 我们遇到了哪些错误？
+无（CR 指出的是潜在夹具不确定性，本机未复现红）。
+
+### 我们是如何解决这些错误的？
+按 FC R3：只删复原行 + 注释；生产码不动。
+
+### 证据
+- 测试：`/home/ops/materials/332/r3-focused-20260922T232245Z.txt` sha256 `e2579f9b55a3aa82e2ea44fec8f170ef88612c85743afc24de8706d0de273ea1` → 28 pass / 0 fail
