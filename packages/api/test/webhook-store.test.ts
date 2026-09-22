@@ -27,6 +27,7 @@ const {
   saveRotateIdempotency,
   saveWebhook,
   setWebhooksFailClosedForTests,
+  updateWebhookSubscription,
   webhookStoreHasForbiddenSecretKey,
   WebhookForbiddenSecretError,
   WebhookStoreCorruptError,
@@ -312,5 +313,42 @@ describe('webhook-store storage conventions (§10.5, §14 item 5)', () => {
     // Global limit
     expect(checkSubscriptionLimits('bob@test.example', 4, 4).allowed).toBe(false);
     expect(checkSubscriptionLimits('bob@test.example', 4, 4).reason).toBe('instance_limit');
+  });
+
+  // #312 P3-2：updater 返回 false → 跳过 updatedAt + writeStore；void 仍写盘
+  test('#312 updateWebhookSubscription：false=无变更跳过写盘；void=照常刷 updatedAt', async () => {
+    const { createWebhookSubscription, getWebhookSubscription, WEBHOOK_STORE_FILE } =
+      await import('../src/lib/webhook-store.ts');
+    const { join } = await import('node:path');
+    const { statSync, readFileSync } = await import('node:fs');
+
+    const sub = createWebhookSubscription({
+      url: 'https://noop.example/hook',
+      address: 'alice@test.example',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      createdBy: 'admin',
+    });
+    const before = getWebhookSubscription(sub.id)!;
+    const storeFile = join(TEST_DATA_DIR, WEBHOOK_STORE_FILE);
+    const mtimeBefore = statSync(storeFile).mtimeMs;
+    const bytesBefore = readFileSync(storeFile);
+
+    // 无变更信号
+    const returned = updateWebhookSubscription(sub.id, () => false);
+    expect(returned?.updatedAt).toBe(before.updatedAt);
+    expect(getWebhookSubscription(sub.id)?.updatedAt).toBe(before.updatedAt);
+    expect(statSync(storeFile).mtimeMs).toBe(mtimeBefore);
+    expect(Buffer.compare(readFileSync(storeFile), bytesBefore)).toBe(0);
+
+    // void → 仍写盘
+    await new Promise((r) => setTimeout(r, 5));
+    updateWebhookSubscription(sub.id, (s) => {
+      s.consecutiveFailures = 1;
+    });
+    const after = getWebhookSubscription(sub.id)!;
+    expect(after.consecutiveFailures).toBe(1);
+    expect(after.updatedAt).not.toBe(before.updatedAt);
+    expect(statSync(storeFile).mtimeMs).toBeGreaterThanOrEqual(mtimeBefore);
   });
 });
