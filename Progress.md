@@ -877,3 +877,24 @@ N/A。
 - Subagent：`ca06a22d-e089-478d-8680-8390f889f051` → PASS
 - completion：`/home/ops/materials/308/completion-r1.md`
 - PR：https://github.com/openagentemail/openagentemail/pull/318
+
+## 2026-09-22 · w308 R1.1（fox #4428 附则收口）
+
+### 我们实现了哪些功能？
+1. `noteClaimFenceExpiredForTests` 测试缝（镜像 degraded forTests）。
+2. audit 限频 pin：60s 内两异键 count=2/audit=1；>60s 第三键 audit=2。
+3. `setFindTaskMessagesForTests` I/O 机械证据：正常 find=1 / fresh=2（console 原始输出）。
+4. P1 并入上界前多次持续 409；PR 描述补证伪史 + 评论贴 I/O 原始输出。
+
+### 我们遇到了哪些错误？
+无。
+
+### 我们是如何解决这些错误的？
+N/A。
+
+### 基线与证据
+- 基线：`5f415f6` → 见本次 HEAD
+- focused：12 pass / 0 fail
+- I/O：`findTaskMessagesCalls` 1 / 2
+- Subagent：`8dc48cdf-91ff-438e-9fd7-b10e2d87dba3` → PASS
+- completion：`/home/ops/materials/308/completion-r1.1.md`

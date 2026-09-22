@@ -2771,6 +2771,16 @@ export function noteClaimWindowConflictDegradedForTests(
   noteClaimWindowConflictDegraded(taskId, generation, claimedUntil);
 }
 
+/** 测试缝：直打 #308 fence 超龄放行审计去重/限频（镜像 degraded forTests）。 */
+export function noteClaimFenceExpiredForTests(
+  taskId: string,
+  leaseEvent: 'release' | 'renew',
+  generation: number,
+  ageMs: number,
+): void {
+  noteClaimFenceExpired(taskId, leaseEvent, generation, ageMs);
+}
+
 /**
  * 公共读停播过滤：只改返回视图，不删 queuedEvents。
  * 同一 generation 的 claim/renew/release/expired 并成一组，

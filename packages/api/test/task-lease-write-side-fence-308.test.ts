@@ -45,6 +45,7 @@ const {
   withTaskLeasesEnabledForTests,
 } = await import('./support/task-lease-seams.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
+const { setFindTaskMessagesForTests } = await import('../src/lib/tasks-internal.ts');
 
 /** journal 关 + leases 开：本卡目标路径 */
 const test = (name: string, work: () => void | Promise<void>) =>
@@ -104,6 +105,7 @@ afterEach(() => {
   setTaskNowForTests(null);
   setTaskGetForTests(null);
   setTaskSendMailForTests(null);
+  setFindTaskMessagesForTests(null);
   clearQueuedEventsForTests();
   resetAuditForTests();
   takeClaimFenceExpiredCountForTests();
@@ -190,7 +192,13 @@ describe('#308 write-side fence · release 腿', () => {
 
     now = START + 1_000;
     await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
-    // fresh 窗内仍 409
+    // 上界前多次尝试持续 409（附则4④）
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    now = START + 1_000 + Math.floor(CLAIM_FENCE_MAX_MS / 2);
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    now = START + 1_000 + CLAIM_FENCE_MAX_MS; // 边界：age === MAX 仍 fresh（<=）
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
       .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
 
@@ -416,5 +424,84 @@ describe('#308 R1 · P2 I/O + P3-1 fail-closed', () => {
     await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
       .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
     expect(callN).toBe(2);
+  });
+});
+
+describe('#308 R1.1 · audit 限频 pin（附则4③）', () => {
+  test('60s 窗内两异键：count=2 但 audit 恰 1；>60s 第三键 → audit 第 2 条', async () => {
+    const {
+      noteClaimFenceExpiredForTests,
+      CLAIM_FENCE_EXPIRED_AUDIT_INTERVAL_MS: interval,
+      takeClaimFenceExpiredCountForTests: takeCount,
+    } = await import('../src/lib/tasks-internal.ts');
+
+    let now = START;
+    setTaskNowForTests(() => now);
+    resetAuditForTests();
+    clearQueuedEventsForTests();
+    takeCount();
+
+    // 两不同键（异 taskId）在限频窗内先后放行
+    noteClaimFenceExpiredForTests('308a0001-056e-47c1-a65c-b29d39f66b83', 'release', 1, CLAIM_FENCE_MAX_MS + 1);
+    noteClaimFenceExpiredForTests('308a0002-056e-47c1-a65c-b29d39f66b83', 'renew', 2, CLAIM_FENCE_MAX_MS + 2);
+    expect(takeCount()).toBe(2);
+    expect(readAuditEvents({ event: 'task.lease.claim_fence_expired', limit: 20 })).toHaveLength(1);
+
+    // 推进超过限频窗后第三键 → 第 2 条 audit
+    now = START + interval + 1;
+    noteClaimFenceExpiredForTests('308a0003-056e-47c1-a65c-b29d39f66b83', 'release', 3, CLAIM_FENCE_MAX_MS + 3);
+    expect(takeCount()).toBe(1);
+    expect(readAuditEvents({ event: 'task.lease.claim_fence_expired', limit: 20 })).toHaveLength(2);
+  });
+});
+
+describe('#308 R1.1 · findTaskMessages I/O 机械证据（附则1）', () => {
+  test('正常路径 find=1；fresh 候选 claim find=2（原始计数打印）', async () => {
+    // 不用 setTaskGetForTests——走 IMAP 查找层，与 main 同路径
+    setTaskGetForTests(null);
+    let now = START;
+    let messages: RawTaskMessage[] = [submittedRaw()];
+    let findCalls = 0;
+    const sent: SendInput[] = [];
+    setTaskNowForTests(() => now);
+    setFindTaskMessagesForTests(async () => {
+      findCalls += 1;
+      return { hadMatchingRows: true, messages };
+    });
+    setTaskSendMailForTests(async (input) => {
+      sent.push(input);
+      return { messageId: `<308-find-io-${sent.length}>` };
+    });
+
+    // —— 正常首 claim：无 release/renew 候选 → findTaskMessages = 1（与 main 逐字一致）——
+    findCalls = 0;
+    const grant = await claimTask({ id: ID, from: B, leaseSec: 300 });
+    // 机械证据原始输出（验收点：贴 completion / PR 评论）
+    console.log(JSON.stringify({
+      tag: '308-r1.1-io-evidence',
+      path: 'claim_no_candidate',
+      findTaskMessagesCalls: findCalls,
+      expect: 1,
+    }));
+    expect(findCalls).toBe(1);
+    expect(grant.leaseGeneration).toBe(1);
+
+    // 吸收 claim；清 overlay；再 release 留下 pending
+    messages = [submittedRaw(), await parseSent(sent[0]!, 2)];
+    clearQueuedEventsForTests();
+    now = START + 1_000;
+    await releaseTask({ id: ID, from: B, leaseToken: grant.leaseToken, reason: 'handoff' });
+
+    // —— fresh 候选 re-claim：merge + fence durable = 2 ——
+    findCalls = 0;
+    await expect(claimTask({ id: ID, from: B, leaseSec: 300 }))
+      .rejects.toMatchObject({ message: 'lease_overlay_pending_index' });
+    console.log(JSON.stringify({
+      tag: '308-r1.1-io-evidence',
+      path: 'claim_fresh_release_pending',
+      findTaskMessagesCalls: findCalls,
+      expect: 2,
+    }));
+    expect(findCalls).toBe(2);
   });
 });
