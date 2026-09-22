@@ -3268,9 +3268,10 @@ export async function reconstructPendingDeliveriesAtBoot(
     }
 
     // #322 A1/A2：与执行前同构——horizon 判据同一函数；时刻来源=持久化排期（非墙钟）。
-    // #322 R1 / #294 1b'：判界只用 latest.nextAttemptAt 派生值；bootTime clamp 仅用于
-    // 定时器 delay（下方 scheduledTime），不得参与 horizon——否则 attempt 11 钉在恰好
-    // +72h、重启落在排期+ε 时会把有效排期误判超窗而死信。
+    // #322 R1/R2 / #294 1b'：判界与入队 job.nextAttemptAt 均用持久化排期本身。
+    // 不得 Math.max(..., bootTime)——否则 attempt 11 钉 +72h、boot=排期+ε 时，
+    // 执行前判据会吃到被抬高的 nextAttemptAt 而误杀。schedule() 内部已是
+    // delay=Math.max(0, nextAttemptAt-now)，过期排期自然 0 延迟立刻跑、语义时刻不变。
     const firstAttemptAt = deriveFirstAttemptAtMsFromGroup(groupRows, latest);
     let persistedScheduleMs: number;
     if (latest.nextAttemptAt) {
@@ -3310,9 +3311,6 @@ export async function reconstructPendingDeliveriesAtBoot(
       });
       continue;
     }
-
-    // bootTime clamp：仅服务于定时器 delay（过期排期立即跑），不参与上方 horizon
-    const scheduledTime = Math.max(persistedScheduleMs, bootTime);
 
     // 4. Otherwise pending!
     const sub = getWebhookSubscription(latest.webhookId);
@@ -3549,7 +3547,8 @@ export async function reconstructPendingDeliveriesAtBoot(
         payloadBuilder,
         firstAttemptAt,
         attempt: latest.outcome === 'pending' ? latest.attempt : latest.attempt + 1,
-        nextAttemptAt: scheduledTime,
+        // #322 R2：语义时刻=持久化排期；禁 bootTime clamp（schedule 内已 max(0, delay)）
+        nextAttemptAt: persistedScheduleMs,
         replay: latest.replay,
         address: latest.address,
         messageId: latest.messageId,

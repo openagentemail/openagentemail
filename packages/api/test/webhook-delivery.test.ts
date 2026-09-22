@@ -2229,67 +2229,97 @@ describe('webhook-delivery: Boot Reconstruction (§8.6, Item 9, §14 item 15)', 
     deliveryQueue.cancelAll();
   });
 
-  test('#322 R1 边界：排期=first+72h、bootTime=排期+ε → 不得死信（与 #294 1b\' 执行前同构）', async () => {
-    const sub = createWebhookSubscription({
-      url: 'https://boot-r1-boundary.example/hook',
-      address: 'owner@openagent.email',
-      events: ['mail.received'],
-      contentScope: 'metadata',
-      createdBy: 'admin',
+  test('#322 R2 边界：排期=first+72h、boot=排期+ε → 定时器回调后仍成功投递（无 retry_horizon_exceeded）', async () => {
+    // R2：必须等定时器真正回调；peek+cancel 会漏掉「job.nextAttemptAt 被 boot clamp 抬高后执行前误杀」
+    const hits: number[] = [];
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async () => {
+        hits.push(Date.now());
+        return new Response('ok', { status: 200 });
+      },
     });
-    // 排期钉在恰好 +72h；重启落在排期+ε——若用 bootTime 参与 horizon 会误杀（R1 病根）
-    const firstAttemptTs = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
-    const persistedSchedule = firstAttemptTs + RETRY_HORIZON_SEC * 1000; // = first+72h
-    const bootTime = persistedSchedule + 1; // 排期+ε
-    const eventId = 'evt_322_r1_boundary';
-    const eventCreatedAt = new Date(firstAttemptTs).toISOString();
+    const prevAllow = config.webhooks.allowPrivateTargets;
+    (config.webhooks as any).allowPrivateTargets = true;
+    try {
+      const sub = createWebhookSubscription({
+        url: `http://127.0.0.1:${server.port}/hook`,
+        address: 'owner@openagent.email',
+        events: ['mail.received'],
+        contentScope: 'metadata',
+        privateTargetGranted: true,
+        createdBy: 'admin',
+      });
+      // 排期钉在恰好 +72h；boot=排期+ε——若 job.nextAttemptAt 被抬成 bootTime，执行前会误杀
+      const firstAttemptTs = Date.now() - RETRY_HORIZON_SEC * 1000 - 1;
+      const persistedSchedule = firstAttemptTs + RETRY_HORIZON_SEC * 1000;
+      const bootTime = persistedSchedule + 1;
+      const eventId = 'evt_322_r2_boundary';
+      const eventCreatedAt = new Date(firstAttemptTs).toISOString();
 
-    // 对照执行前路径：同一函数、同一时刻来源（持久化排期，非墙钟）
-    expect(isScheduledAttemptBeyondRetryHorizon(persistedSchedule, firstAttemptTs)).toBe(false);
-    // 负对照：若误用 bootTime 判界则会「超窗」——证明本测钉的是 R1 病根
-    expect(isScheduledAttemptBeyondRetryHorizon(bootTime, firstAttemptTs)).toBe(true);
+      // 与执行前同构：同一函数、同一时刻来源（持久化排期）
+      expect(isScheduledAttemptBeyondRetryHorizon(persistedSchedule, firstAttemptTs)).toBe(false);
+      // 负对照：误用 bootTime 作 nextAttemptAt 会超窗
+      expect(isScheduledAttemptBeyondRetryHorizon(bootTime, firstAttemptTs)).toBe(true);
 
-    appendDeliveryLogRow({
-      ts: new Date(firstAttemptTs).toISOString(),
-      webhookId: sub.id,
-      eventId,
-      runId: 'run_0',
-      deliveryId: 'dlv_322_r1',
-      type: 'webhook.ping',
-      address: null,
-      messageId: null,
-      uidValidity: null,
-      rfc822MessageId: null,
-      taskId: null,
-      taskCreatedAt: null,
-      expiresInSec: null,
-      eventCreatedAt,
-      attempt: 1,
-      outcome: 'pending',
-      status: null,
-      durationMs: null,
-      sensitive: false,
-      replay: false,
-      nextAttemptAt: new Date(persistedSchedule).toISOString(),
-      reason: null,
-    });
+      appendDeliveryLogRow({
+        ts: new Date(firstAttemptTs).toISOString(),
+        webhookId: sub.id,
+        eventId,
+        runId: 'run_0',
+        deliveryId: 'dlv_322_r2',
+        type: 'webhook.ping',
+        address: null,
+        messageId: null,
+        uidValidity: null,
+        rfc822MessageId: null,
+        taskId: null,
+        taskCreatedAt: null,
+        expiresInSec: null,
+        eventCreatedAt,
+        attempt: 1,
+        outcome: 'pending',
+        status: null,
+        durationMs: null,
+        sensitive: false,
+        replay: false,
+        nextAttemptAt: new Date(persistedSchedule).toISOString(),
+        reason: null,
+      });
 
-    const result = await reconstructPendingDeliveriesAtBoot(bootTime);
-    // 预期：reconstructed=1, deadLettered=0（不得 retry_horizon_exceeded）
-    expect(result.reconstructed).toBe(1);
-    expect(result.deadLettered).toBe(0);
-    expect(
-      readAllDeliveryLogRows().some(
-        (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
-      ),
-    ).toBe(false);
+      const result = await reconstructPendingDeliveriesAtBoot(bootTime);
+      expect(result.reconstructed).toBe(1);
+      expect(result.deadLettered).toBe(0);
 
-    const job = deliveryQueue.peekJobForTests(sub.id, eventId, 'run_0');
-    expect(job).toBeDefined();
-    expect(job!.firstAttemptAt).toBe(firstAttemptTs);
-    // 定时器 delay 可用 bootTime clamp（立即执行）；horizon 已按持久化排期放过
-    expect(job!.nextAttemptAt).toBe(bootTime);
-    deliveryQueue.cancelAll();
+      const job = deliveryQueue.peekJobForTests(sub.id, eventId, 'run_0');
+      expect(job).toBeDefined();
+      expect(job!.firstAttemptAt).toBe(firstAttemptTs);
+      // 语义时刻必须仍是持久化排期（非 bootTime）
+      expect(job!.nextAttemptAt).toBe(persistedSchedule);
+
+      // 等定时器 zero-delay 回调真正执行并命中 mock 端点
+      await waitUntil(
+        () =>
+          hits.length >= 1 &&
+          readAllDeliveryLogRows().some(
+            (r) => r.eventId === eventId && r.outcome === 'success',
+          ),
+        3000,
+      );
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(
+        readAllDeliveryLogRows().some(
+          (r) => r.eventId === eventId && r.reason === 'retry_horizon_exceeded',
+        ),
+      ).toBe(false);
+      // 墙钟已越过排期（ε>0），证明是「过期排期立刻跑」路径
+      expect(hits[0]!).toBeGreaterThan(persistedSchedule);
+    } finally {
+      (config.webhooks as any).allowPrivateTargets = prevAllow;
+      server.stop(true);
+      deliveryQueue.cancelAll();
+    }
   });
 
   test('#322 boot 负控：持久化排期真正越出 firstAttempt+72h → 仍死信', async () => {
