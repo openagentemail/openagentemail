@@ -678,9 +678,8 @@ describe('#332 C · *_store_corrupt 非 Error 输入', () => {
   test('identities：readFileSync throw undefined → 包装 Error(identity_store_corrupt)，非 TypeError/非 rethrow undefined', () => {
     const path = join(config.dataDir, 'identities.json');
     const good = fs.readFileSync(path, 'utf8');
-    // 改 mtime/内容迫使 cache miss；再用 spy 让后续 read 抛非 Error
+    // 保持 good+' ' 至断言结束：靠 size 变化确定性打穿 load() 缓存（勿复原 size，否则粗粒度 fs 上可能仍命中缓存）
     writeFileSync(path, good + ' ');
-    writeFileSync(path, good);
     const original = fs.readFileSync.bind(fs);
     const spy = spyOn(fs, 'readFileSync').mockImplementation((p: any, encoding?: any) => {
       if (String(p).includes('identities.json')) throw undefined as never;
