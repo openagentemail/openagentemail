@@ -43,6 +43,8 @@ const { createIdentity, deleteIdentity } = await import('../src/lib/identities.t
 const { readAuditEvents, recordAuditEvent } = await import('../src/lib/audit.ts');
 const {
   encodeStampedApprovalRequestForTests,
+  encodeStampedApprovalDecisionForTests,
+  approvalActionDigest,
   parseStampedTaskMessageForTests,
 } = await import('../src/lib/tasks-internal.ts');
 const { findIdentity } = await import('../src/lib/identities.ts');
@@ -630,6 +632,98 @@ describe('#302 approval payload MIME folding', () => {
       uid: 1,
       source: bad,
       internalDate: '2026-09-21T00:00:00.000Z',
+    });
+    expect(parsed).toBeNull();
+  });
+});
+
+/** #313：显式 MIME 折行——每 every 字符插入 CRLF+WSP */
+function foldHeaderValue313(name: string, value: string, every: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < value.length; i += every) parts.push(value.slice(i, i + every));
+  return [`${name}:`, ...parts.map((p) => ` ${p}`)].join('\r\n');
+}
+
+describe('#313 approval digest MIME folding', () => {
+  const ID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
+  const FROM = 'req-313@test.example';
+  const TO = 'rev-313@test.example';
+  const EXPIRES = '2026-09-21T00:00:00.000Z';
+  const ACTION = { type: 'change', name: 'review', arguments: { note: '313' } };
+
+  let prevDataDir = '';
+  let tmpDir = '';
+
+  beforeEach(() => {
+    prevDataDir = config.dataDir;
+    tmpDir = mkdtempSync(join(tmpdir(), 'oae-313-'));
+    (config as any).dataDir = tmpDir;
+    for (const localpart of ['req-313', 'rev-313']) {
+      if (!findIdentity(`${localpart}@test.example`)) {
+        createIdentity({ localpart, domain: 'test.example', issueToken: false });
+      }
+    }
+  });
+
+  afterEach(() => {
+    (config as any).dataDir = prevDataDir;
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = '';
+  });
+
+  // #313 T5：多续行折 digest → 解析成功（打中 :1186 regex / :1190 payload 比较 / :1211 snapshot）
+  test('#313 T5 multi-continuation folded Approval-Digest survives production parse', async () => {
+    const source = encodeStampedApprovalRequestForTests({
+      id: ID, from: FROM, to: TO, subject: 'Fold digest T5',
+      body: 'please review', action: ACTION, expiresAt: EXPIRES,
+    });
+    const match = source.match(/^X-OA-Task-Approval-Digest:\s*(.+)$/m);
+    expect(match?.[1]).toBeTruthy();
+    const digestValue = match![1]!;
+    expect(digestValue).toMatch(/^[a-f0-9]{64}$/);
+    // two-cont-40：64 hex 按 40 切 → 2 续行 → mailparser 留空白 → 修前 regex FAIL
+    const foldedRaw = source.replace(
+      /^X-OA-Task-Approval-Digest:\s*.+$/m,
+      foldHeaderValue313('X-OA-Task-Approval-Digest', digestValue, 40),
+    );
+    const parsed = await parseStampedTaskMessageForTests({
+      id: ID, uid: 1, source: foldedRaw, internalDate: '2026-09-21T00:00:00.000Z',
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.approval).toMatchObject({ type: 'request' });
+    expect(parsed?.state).toBe('input-required');
+    // 断言 digest 还原为原 hex（打中 :1211 snapshot.digest === compact）
+    expect((parsed?.approval as { snapshot?: { digest?: string } })?.snapshot?.digest).toBe(digestValue);
+  });
+
+  // #313 T5 决策路径：打中 :1225 resultDecision 比较 + :1230 digest 赋值
+  test('#313 T5b multi-continuation folded digest on decision path', async () => {
+    const digest = approvalActionDigest(ACTION);
+    const source = encodeStampedApprovalDecisionForTests({
+      id: ID, from: TO, to: FROM, subject: 'Fold digest decision',
+      digest, decision: 'approved', decidedAt: '2026-09-21T00:01:00.000Z',
+    });
+    const foldedRaw = source.replace(
+      /^X-OA-Task-Approval-Digest:\s*.+$/m,
+      foldHeaderValue313('X-OA-Task-Approval-Digest', digest, 40),
+    );
+    const parsed = await parseStampedTaskMessageForTests({
+      id: ID, uid: 2, source: foldedRaw, internalDate: '2026-09-21T00:01:00.000Z',
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.approval).toMatchObject({ type: 'decision', digest, decision: 'approved' });
+  });
+
+  // #313 T6 负控：折行垃圾 digest → 拒
+  test('#313 T6 multi-continuation folded garbage digest still rejected', async () => {
+    const source = encodeStampedApprovalRequestForTests({
+      id: ID, from: FROM, to: TO, subject: 'Garbage digest T6',
+      body: 'please review', action: ACTION, expiresAt: EXPIRES,
+    });
+    const garbage = foldHeaderValue313('X-OA-Task-Approval-Digest', '!!!!not-a-digest!!!!not-a-digest!!!!not-a-digest!!!!', 20);
+    const bad = source.replace(/^X-OA-Task-Approval-Digest:\s*.+$/m, garbage);
+    const parsed = await parseStampedTaskMessageForTests({
+      id: ID, uid: 1, source: bad, internalDate: '2026-09-21T00:00:00.000Z',
     });
     expect(parsed).toBeNull();
   });

@@ -191,6 +191,82 @@ test('ordinary and approval parented roots rebuild through production parser, in
   expect(tasks.taskFromMessages(approval.id, [foldedRaw!])).toMatchObject({ parentTaskId: PARENT, kind: 'approval' });
 });
 
+/** #313：显式 MIME 折行——每 every 字符插入 CRLF+WSP（≥2 续行时 mailparser 会留空白） */
+function foldHeaderValue(name: string, value: string, every: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < value.length; i += every) parts.push(value.slice(i, i + every));
+  return [`${name}:`, ...parts.map((p) => ` ${p}`)].join('\r\n');
+}
+
+// #313 T1：多续行折 root（40/30 列）→ 解析成功、parentTaskId 保留、stamp 校验通过
+test('#313 T1 multi-continuation folded root survives production parse (40/30 cols)', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  const sent = capture();
+  const ordinary = await tasks.createTask({
+    from: FROM, to: TO, subject: 'Folded root T1', body: 'body', parentTaskId: PARENT,
+  } as Parameters<typeof tasks.createTask>[0]);
+  const rootHeader = (sent[0]!.headers ?? {})['X-OA-Task-Root']!;
+  expect(rootHeader.length).toBeGreaterThan(60);
+  for (const every of [40, 30] as const) {
+    const folded = rfc822(sent[0]!).replace(
+      /^X-OA-Task-Root:\s*.+$/m,
+      foldHeaderValue('X-OA-Task-Root', rootHeader, every),
+    );
+    const raw = await parse(ordinary.id, folded);
+    expect(raw).not.toBeNull();
+    expect(raw).toMatchObject({ parentTaskId: PARENT, state: 'submitted' });
+    expect(tasks.taskFromMessages(ordinary.id, [raw!])).toMatchObject({
+      parentTaskId: PARENT, state: 'submitted',
+    });
+  }
+});
+
+// #313 T2 负控：多续行折垃圾 root（!!!!）→ 仍拒
+test('#313 T2 multi-continuation folded garbage root (!!!!) still rejected', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  const sent = capture();
+  const ordinary = await tasks.createTask({
+    from: FROM, to: TO, subject: 'Garbage root T2', body: 'body', parentTaskId: PARENT,
+  } as Parameters<typeof tasks.createTask>[0]);
+  const garbage = foldHeaderValue('X-OA-Task-Root', '!!!!!!!!!!!!!!!!', 4);
+  const bad = rfc822(sent[0]!).replace(/^X-OA-Task-Root:\s*.+$/m, garbage);
+  expect(await parse(ordinary.id, bad)).toBeNull();
+});
+
+// #313 T3 负控：折行 + 篡改内容（canonical 不符）→ 仍拒
+test('#313 T3 folded root with noncanonical payload still rejected', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  const sent = capture();
+  const ordinary = await tasks.createTask({
+    from: FROM, to: TO, subject: 'Noncanonical fold T3', body: 'body', parentTaskId: PARENT,
+  } as Parameters<typeof tasks.createTask>[0]);
+  // 键序颠倒 → decode 后 canonical 相等性失败（签名绑定 root.canonical 不变）
+  const noncanonical = Buffer.from(`{"parentTaskId":"${PARENT}","version":2}`, 'utf8').toString('base64url');
+  const folded = rfc822(sent[0]!).replace(
+    /^X-OA-Task-Root:\s*.+$/m,
+    foldHeaderValue('X-OA-Task-Root', noncanonical, 40),
+  );
+  expect(await parse(ordinary.id, folded)).toBeNull();
+});
+
+// #313 T4 回归：单续行折 root（既有 :178 同族）与未折 canonical 全绿
+test('#313 T4 single-fold and unfolded canonical root still green', async () => {
+  taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
+  const sent = capture();
+  const ordinary = await tasks.createTask({
+    from: FROM, to: TO, subject: 'T4 regression', body: 'body', parentTaskId: PARENT,
+  } as Parameters<typeof tasks.createTask>[0]);
+  const source = rfc822(sent[0]!);
+  const unfolded = await parse(ordinary.id, source);
+  expect(unfolded).not.toBeNull();
+  expect(tasks.taskFromMessages(ordinary.id, [unfolded!])).toMatchObject({ parentTaskId: PARENT });
+  // 单续行：整值挪到下一行（mailparser 不留空白——既有 :178 同形）
+  const singleFold = source.replace(/^X-OA-Task-Root: (.*)$/m, 'X-OA-Task-Root:\r\n $1');
+  const singleRaw = await parse(ordinary.id, singleFold);
+  expect(singleRaw).not.toBeNull();
+  expect(tasks.taskFromMessages(ordinary.id, [singleRaw!])).toMatchObject({ parentTaskId: PARENT });
+});
+
 test('parser rejects tampered, noncanonical, naked, and later relationship-bearing records', async () => {
   taskSeams.setTaskNowForTests(() => Date.parse('2026-08-30T00:00:00.000Z'));
   const sent = capture();
