@@ -946,3 +946,27 @@ N/A。
 ### 我们是如何解决这些错误的？
 1. 引入 AUDIT_ADDRESS_MAX_LEN 专用于 address 分支。
 2. focused 10 pass；全量见材料；Subagent `5bdf7b98-075d-4085-a346-c366e43c8c97` → PASS。
+
+## 2026-09-22 · werrn（非 Error rejection 归一化 · 只消 500）
+
+### 我们实现了哪些功能？
+1. 新增 `packages/api/src/lib/errors.ts`：`errorCode(err)`，哨兵 `''`，与 `tasks.journalUnavailable` 历史 `typeof raw === 'string' ? raw : ''` 同语义。
+2. `routes/ui.ts`：`journalUnavailableUi` / `taskMutationError` 三读点改用 `errorCode`（基线约 `:266/:274/:291` → 现约 `:268/:277/:294`）。
+3. `routes/tasks.ts`：create 段 catch、post-create journal 503 响应值、post-create warn 三读点改用 `errorCode`；`journalUnavailable` 收敛到同一 helper（基线约 `:228/:264/:266` → 现约 `:229/:266/:268`）。
+4. 测试：`errors.test.ts`（helper 单测）+ `err-normalize-rejections.test.ts`（正控 A create/post-create、正控 B UI remind、Error 路径守门负控逐字节）。
+5. **未改对外错误码**；其余 31 处 `(err as Error).message` 不碰（#332）。
+
+### 我们遇到了哪些错误？
+1. 工作树初无 `node_modules`，`bun test` 报 `Cannot find package 'hono'` → `bun install` 后恢复。
+2. 全量 `bun test`：`#206 R9 撤销/断开优先级 > 直跑无父标记时不动既有 DATA_DIR` 超时 25s 假红（与本卡无关；**未** rerun-to-green）。
+3. 曾误想把 `undefined` 加进 `#241` state 突变用例——该 catch 后续读点仍属 #332，会红；已撤回。
+
+### 我们是如何解决这些错误的？
+1. 在 `packages/api` 执行 `bun install`（锁文件未改、node_modules gitignore）。
+2. 如实记入材料与完工件；结果 **2122 pass / 9 skip / 1 fail**（基线 2104/9/0；+18 为本卡新测）。
+3. `#241` 注释改为标明 state 路径仍有 #332 债；正控 `undefined` 只钉在本卡映射器族用例。
+
+### 基线与证据
+- 基线：`5b7d8d51`（#331）
+- 原始全量输出：`/home/ops/materials/err-normalize/bun-test-full-20260922T195904Z.txt`
+- sha256：`d9b503b094bc686259f336e0ea4f93f998f8cd645b9e0b8eca44f21e6219f06e`

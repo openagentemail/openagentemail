@@ -301,7 +301,8 @@ describe('multi-domain task routing and known managed identity', () => {
 
 describe('#241 journalUnavailable typeof 守卫', () => {
   // 非 Error rejection 不得在映射器内 startsWith 抛 TypeError 逸出成 500；须钉死既有兜底 502
-  // 注：throw undefined 会在本 catch 后续 `(err as Error).message` 再炸（既有链，红线不改）；用例覆盖 string/object
+  // 注：state 突变 catch 后续仍有 `(err as Error).message` 读点（#332 扫描债）；
+  // throw undefined 仍可能在那些读点炸——本卡只修 create/post-create/ui 映射器族，此处继续覆盖 string/object
   test('非 Error rejection（string / object）走 state 突变兜底 502，非 500', async () => {
     const booms: unknown[] = ['boom', { code: 1 }];
     for (const boom of booms) {
