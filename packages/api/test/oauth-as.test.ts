@@ -246,8 +246,13 @@ describe('完整授权流', () => {
       { headers: { authorization: `Bearer ${tokens.access_token}` } },
     );
     expect(v1.status).not.toBe(403);
-    // IMAP 在单测环境常不可达 → 500 可接受；关键是过了 bearerAuth
-    expect([200, 500, 503]).toContain(v1.status);
+    // IMAP 不可用时首屏即可走 400 invalid_cursor（见 lib/imap.ts:849-852）；
+    // 500/503 仍为可达性失败；200 为正常。白名单含 400 时必须钉死 error，防洗白其它 400。
+    expect([200, 400, 500, 503]).toContain(v1.status);
+    if (v1.status === 400) {
+      const body = (await v1.json()) as { error?: string };
+      expect(body.error).toBe('invalid_cursor');
+    }
 
     // 经 MCP 工具回环再打一次（同源断言）
     const toolCall = await app.request('http://localhost/mcp', {
