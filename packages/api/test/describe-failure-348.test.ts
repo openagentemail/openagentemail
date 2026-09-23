@@ -19,6 +19,8 @@ const {
   describeFailure,
   describeFailureStack,
   scrubPayload,
+  scrubLinePayload,
+  scrubBlockPayload,
   redactSecrets,
   streamRedact,
   containsAnySecret,
@@ -104,13 +106,14 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(out).not.toContain(secret);
   });
 
-  // ⑦ 盘文本路径：scrubPayload + 真实 U+0001 + 保换行 + 有界
-  test('⑦ 盘文本路径 scrubPayload：含 U+0001 行 ⇒ 不含 \\u0001 口令；保换行；有界', () => {
+  // ⑦ 盘文本路径：默认 line 模式（磁盘行 → 单行转义防日志注入）
+  test('⑦ 盘文本路径 scrubPayload：含 U+0001 行 ⇒ 不含 \\u0001 口令；line 转义；有界', () => {
     const secret = '\\u0001';
     const diskLine = 'bad-json ' + '\u0001' + ' more\nstill';
     const out = scrubPayload(diskLine.slice(0, 100), [secret], DESCRIBE_FAILURE_MAX);
     expect(out).not.toContain(secret);
-    expect(out).toContain('\n'); // escapeBlock 保换行
+    expect(out).toContain('\\n'); // 默认 line：真实换行转义
+    expect(out).not.toContain('\n');
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
   });
 
@@ -286,5 +289,38 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     const bigOut = describeFailureStack(big, []);
     expect(bigOut).toContain(TRUNC_MARK);
     expect(bigOut.endsWith(TRUNC_MARK)).toBe(true);
+  });
+
+  // FC R3：串面单行不变量 + 对象面保换行 + 模式显式
+  test('FC R3：串面 describeFailure 单行 —— 真实 \\n 转义为 \\\\n', () => {
+    const out = describeFailure(new Error('line1\nline2'), []);
+    expect(out).not.toContain('\n');
+    expect(out).toContain('\\n');
+    expect(out).toBe('line1\\nline2');
+  });
+
+  test('FC R3：对象面 describeFailureStack 仍保留真实换行', () => {
+    const err = new Error('m');
+    err.stack = 'Error: m\n    at frame (/x.ts:1:1)\n    at next';
+    const out = describeFailureStack(err, []);
+    expect(out).toContain('\n');
+    expect(out).not.toContain('\\n');
+  });
+
+  test('FC R3：模式显式 —— scrubLinePayload vs scrubBlockPayload 换行行为分叉', () => {
+    const sample = 'a\nb\tc';
+    const lineOut = scrubLinePayload(sample, [], DESCRIBE_FAILURE_MAX);
+    const blockOut = scrubBlockPayload(sample, [], DESCRIBE_FAILURE_STACK_MAX);
+    expect(lineOut).toBe('a\\nb\\tc');
+    expect(lineOut).not.toContain('\n');
+    expect(lineOut).not.toContain('\t');
+    expect(blockOut).toBe('a\nb\tc');
+    expect(blockOut).toContain('\n');
+    expect(blockOut).toContain('\t');
+    // 入口分别走对应封装
+    expect(describeFailure(new Error(sample), [])).toBe(lineOut);
+    const err = new Error('x');
+    err.stack = sample;
+    expect(describeFailureStack(err, [])).toBe(blockOut);
   });
 });

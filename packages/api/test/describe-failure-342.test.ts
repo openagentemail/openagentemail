@@ -302,10 +302,10 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(redactSecrets(withNl, ['x'])).toBe('a\nb');
     expect(redactSecrets(withNl, ['x'])).toContain('\n');
     expect(redactSecrets(withNl, ['x'])).not.toContain('\\n');
-    // scrubPayload 用 escapeBlock：LF 保留字面（与历史 escapeLine 单行化不同；#348 对齐）
+    // scrubPayload line 模式：LF → \\n（#342 单行不变量）
     const viaDescribe = describeFailure(new Error('a\nb'), []);
-    expect(viaDescribe).toContain('\n');
-    expect(viaDescribe).not.toContain('\\n');
+    expect(viaDescribe).toContain('\\n');
+    expect(viaDescribe).not.toContain('\n');
   });
 
   // —— 五机制反例 ——————————————————————————
@@ -403,13 +403,13 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(describeFailure(new Error('section'), [])).toBe('section');
   });
 
-  test('控制符转义：C0 / DEL / C1 / U+2028 在脱敏之后（LF 保留字面）', () => {
+  test('单行化：C0 / DEL / C1 / U+2028 在脱敏之后（LF → \\n）', () => {
     const out = describeFailure(new Error('pre\nsecret\npost'), ['secret']);
     expect(out).not.toContain('secret');
     expect(out).toContain('[redacted]');
-    // scrubPayload → escapeBlock：换行保留字面
-    expect(out).toContain('\n');
-    expect(out).not.toContain('\\n');
+    // line 模式：换行转义为 \\n（#342 单行不变量）
+    expect(out).toContain('\\n');
+    expect(out).not.toContain('\n');
     expect(describeFailure(new Error(`pre\u007fpost`), [])).toBe('pre\\u007fpost');
     expect(describeFailure(new Error(`pre\u009bpost`), [])).toBe('pre\\u009bpost');
   });

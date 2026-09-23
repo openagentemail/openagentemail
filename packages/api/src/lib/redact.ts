@@ -2,15 +2,18 @@
  * 日志/告警载荷面：唯一组合原语 scrubPayload；三入口均走它。
  *
  * 发射路径（#348 / design.md R1–R4）：
- *   ① slice(LIMIT) → ② redactField → ③ escapeBlock → ④ redactField(+MARK)
- *   → ⑤ slice(输出顶) → ⑥ trimTrailingSecretPrefix → ⑦ containsAnySecret? '' : w
+ *   ① slice → ② redactField → ③ escape(line|block) → ④ redactField(+MARK)
+ *   → ⑤ slice → ⑥ trimTrailingSecretPrefix → ⑦ containsAnySecret? '' : w
+ *
+ * 转义模式（显式，禁隐式耦合）：
+ *   - `line`：LF/CR/TAB → `\\n`/`\\r`/`\\t`（串面单行不变量；盘文本默认）
+ *   - `block`：保留 LF/CR/TAB 字面（对象面 stack 可读）
  *
  * LIMIT 语义：
- *   - 字符串面：`ERROR_DETAIL_MAX`（200）＝输入界；输出不按 200 硬切，
- *     由展开因子可证每字段 ≤200×max(6,10)=2000，三字段+2 空格 ⇒ ≤6002。
+ *   - 字符串面：`ERROR_DETAIL_MAX`（200）＝输入界；输出硬顶＝展开因子 2000。
  *   - 对象面：`DESCRIBE_FAILURE_STACK_MAX`（8204）＝输出顶；输入界＝8204−|MARK|
- *     （＝STACK_MAX 8192）。needsMark＝输入侧截断 || 输出侧截断；标记预留后追加。
- *   - 盘文本面：默认 LIMIT=6002（或调用方传入）。
+ *     （＝STACK_MAX 8192）。needsMark＝输入侧截断 || 输出侧截断。
+ *   - 盘文本面：默认 limit=6002、mode=`line`（磁盘行前 100 字，走单行转义防日志注入）。
  *
  * 不变量：串面 join ≤6002 / 对象面 ≤8204；不含完整密钥；尾部非真前缀；永不抛。
  * 对外错误码/状态码/body 不经本模块；errorCode 在 errors.ts，一字不动。
@@ -237,7 +240,7 @@ export function escapeLine(text: string): string {
 
 /**
  * 多行块转义：与 escapeLine 同一 needsUnicodeEscape 判据，
- * 但【保留 \\n / \\r / \\t 字面】——对象面 / 盘文本 / scrubPayload 所用。
+ * 但【保留 \\n / \\r / \\t 字面】——对象面 block 模式所用。
  */
 export function escapeBlock(text: string): string {
   let out = '';
@@ -253,6 +256,9 @@ export function escapeBlock(text: string): string {
   }
   return out;
 }
+
+/** 转义模式：line＝单行（串面/盘文本）；block＝保换行（对象面） */
+export type ScrubEscapeMode = 'line' | 'block';
 
 // —— scrubPayload 附属小件（R2 / R4）—————————————————
 
@@ -296,48 +302,46 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
 /**
  * 唯一组合原语（#348）：三入口共用发射路径。
  *
- *   ① b = slice(text, inputLimit)               // 见下：LIMIT 语义
+ *   ① b = slice(text, inputLimit)
  *   ② r = redactField(b, secrets)
- *   ③ t = escapeBlock(r)
+ *   ③ t = escapeLine|escapeBlock(r)   // 由 mode 显式选择
  *   ④ 若需截断标记：先切到 outputCap−|MARK|，再追加 MARK，然后 redactField
- *   ⑤ v = slice(u, outputCap)                   // 不得吃掉完整 MARK；剔半个 `\uXXXX`
+ *   ⑤ v = slice(u, outputCap)
  *   ⑥ w = trimTrailingSecretPrefix(v, secrets)
- *   ⑦ if containsAnySecret(w): return ''        // R4 兜底＝空串
+ *   ⑦ if containsAnySecret(w): return ''
  *   return w
  *
- * @param limit
- *   - 字符串面：`ERROR_DETAIL_MAX`(200)＝**输入界**；输出硬顶＝展开因子 2000。
- *   - 对象面：`DESCRIBE_FAILURE_STACK_MAX`(8204)＝**输出顶**（含标记预算）；
- *     **输入界**＝limit−|MARK|（＝STACK_MAX 8192）。
- *     `needsMark`＝(输入侧截断 || 输出侧截断)；任一次裁剪都必须出标记。
+ * @param limit 见文件头 LIMIT 语义
+ * @param mode  `line`（默认：串面/盘文本）| `block`（对象面）——显式，不靠 limit 魔数分面
  */
 export function scrubPayload(
   text: string,
   secrets: string[] = configuredSecrets(),
   limit: number = DESCRIBE_FAILURE_MAX,
+  mode: ScrubEscapeMode = 'line',
 ): string {
   try {
     const secretList = secrets.filter(Boolean);
     const markLen = TRUNCATED_MARK.length;
-    const stringFace = limit <= ERROR_DETAIL_MAX;
+    const isLine = mode === 'line';
 
-    // ① 输入有界：串面＝limit；对象面＝limit−|MARK|（为标记预留，使 >STACK_MAX 必截断）
-    const inputLimit = stringFace ? limit : Math.max(0, limit - markLen);
+    // ① 输入有界：line＝limit；block＝limit−|MARK|（为标记预留）
+    const inputLimit = isLine ? limit : Math.max(0, limit - markLen);
     const truncatedAtInput = text.length > inputLimit;
     const b = truncatedAtInput ? text.slice(0, inputLimit) : text;
 
     // ② 第一遍：清原文中的完整密钥
     const r = redactField(b, secretList);
 
-    // ③ 转义（可能生成密钥文本形态）
-    const t = escapeBlock(r);
+    // ③ 转义（显式 mode；可能生成密钥文本形态）
+    const t = isLine ? escapeLine(r) : escapeBlock(r);
 
-    // 输出硬顶：串面 → 展开因子 2000；对象面 → limit（8204）
-    const outputCap = stringFace ? DESCRIBE_FAILURE_FIELD_MAX : limit;
+    // 输出硬顶：line → 展开因子 2000；block → limit（8204）
+    const outputCap = isLine ? DESCRIBE_FAILURE_FIELD_MAX : limit;
 
-    // ④ needsMark＝输入侧截断 || 输出侧截断（转义后超 outputCap）
+    // ④ needsMark＝输入侧截断 || 输出侧截断（仅 block / 对象面）
     const truncatedAtOutput = t.length > outputCap;
-    const needsMark = !stringFace && (truncatedAtInput || truncatedAtOutput);
+    const needsMark = !isLine && (truncatedAtInput || truncatedAtOutput);
     let forSecond: string;
     if (needsMark) {
       const bodyBudget = Math.max(0, outputCap - markLen);
@@ -379,6 +383,24 @@ export function scrubPayload(
   }
 }
 
+/** 串面/盘文本薄封装：显式 line 模式 */
+export function scrubLinePayload(
+  text: string,
+  secrets: string[] = configuredSecrets(),
+  limit: number = DESCRIBE_FAILURE_MAX,
+): string {
+  return scrubPayload(text, secrets, limit, 'line');
+}
+
+/** 对象面薄封装：显式 block 模式 */
+export function scrubBlockPayload(
+  text: string,
+  secrets: string[] = configuredSecrets(),
+  limit: number = DESCRIBE_FAILURE_STACK_MAX,
+): string {
+  return scrubPayload(text, secrets, limit, 'block');
+}
+
 // —— 取串 / 哨兵 ————————————————————————————————
 
 /** 安全读字符串字段；抛或缺席 ⇒ undefined */
@@ -402,11 +424,11 @@ function readNumberField(obj: object, key: string): number | undefined {
 }
 
 /**
- * 对单字段跑 scrubPayload：LIMIT＝ERROR_DETAIL_MAX（输入界 200）。
+ * 对单字段跑 scrubPayload：LIMIT＝ERROR_DETAIL_MAX（输入界 200），mode＝line。
  * join 之前调用，保证禁止跨字段匹配（J1）；展开因子 ⇒ 每字段 ≤2000 ⇒ join ≤6002。
  */
 function processField(raw: string, secrets: string[]): string {
-  return scrubPayload(raw, secrets, ERROR_DETAIL_MAX);
+  return scrubLinePayload(raw, secrets, ERROR_DETAIL_MAX);
 }
 
 /**
@@ -508,8 +530,8 @@ export function describeFailureStack(err: unknown, secrets?: string[]): string {
     }
 
     const raw = stackText !== undefined ? stackText : describeFailure(err, secrets);
-    // 对象面 LIMIT＝8204（输入界＝输出顶；截断时预留 MARK）
-    return scrubPayload(raw, secretList, DESCRIBE_FAILURE_STACK_MAX);
+    // 对象面：显式 block 模式（保换行）；LIMIT＝8204
+    return scrubBlockPayload(raw, secretList, DESCRIBE_FAILURE_STACK_MAX);
   } catch {
     return '[unreadable]';
   }

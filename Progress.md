@@ -1278,3 +1278,24 @@ N/A。
 
 ### 证据
 - 见 focused/full-fc-r2 留件与 `evidence/fc-r2-measured.json`
+
+## 2026-09-23 · w348 FC R3（串面单行不变量 + 转义模式显式化）
+
+### 我们实现了哪些功能？
+1. `scrubPayload(..., mode: 'line'|'block')` 显式分面；`scrubLinePayload` / `scrubBlockPayload` 薄封装。
+2. 串面 → line（恢复 #342 `\n`→`\\n` 单行不变量）；对象面 → block；盘文本默认 line（防日志注入；PR 注明理由）。
+3. 测试：串面单行 / 对象面保换行 / 两封装行为分叉；R2 窗口与 P1 上界回归。
+
+### 我们遇到了哪些错误？
+1. ZCode P1：串面被对象面 `escapeBlock` 覆盖 ⇒ 真实换行泄漏（日志注入面）。
+
+### 我们是如何解决这些错误的？
+1. 转义模式显式参数，不再靠 limit 魔数隐式分面。
+
+### 不修只记
+- ZCode P3 串面静默截断/J4：#342 已声明行为
+- R4 空串不可区分：观察，可归 #347 类债
+- test/tmp-webhook-delivery 未跟踪：既有 webhook-delivery 测试产物，非本卡
+
+### 证据
+- 见 focused/full-fc-r3 留件与 `evidence/fc-r3-measured.json`
