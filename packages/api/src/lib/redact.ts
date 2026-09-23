@@ -53,22 +53,40 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
   }
 }
 
-/** 单趟取前 n 个码点，不满则原样；不物化超量尾部 */
-function takeCodePoints(text: string, n: number): string {
-  if (n <= 0) return '';
+/** 单趟取前 n 个码点；返回是否因超预算而截断（未截断则勿做边界 scrub，以免误剥合法文） */
+function takeCodePointsBounded(text: string, n: number): { text: string; truncated: boolean } {
+  if (n <= 0) {
+    let has = false;
+    for (const _ of text) {
+      has = true;
+      break;
+    }
+    return { text: '', truncated: has };
+  }
   let out = '';
   let c = 0;
+  let truncated = false;
   for (const ch of text) {
-    if (c >= n) break;
+    if (c >= n) {
+      truncated = true;
+      break;
+    }
     out += ch;
     c += 1;
   }
-  return out;
+  return { text: out, truncated };
+}
+
+/** 单趟取前 n 个码点，不满则原样；不物化超量尾部 */
+function takeCodePoints(text: string, n: number): string {
+  return takeCodePointsBounded(text, n).text;
 }
 
 /**
- * 日志专用：有界截取 code/message → **每字段**先剥边界密钥真前缀 → join → 再剥 → redact → 再剥。
+ * 日志专用：有界截取 code/message → **仅当该字段实际截断**时剥边界密钥真前缀 → join →
+ * （任一字段截断时）再剥 → redact → 再剥。
  * 防：①截断切开长密钥后短密钥误匹配留下碎片；②多字段 join 后半截落行中逃脱行尾 scrub；③超大 code 无界分配。
+ * 未截断时不做边界 scrub，避免合法诊断文（如 `status` 遇密钥 `secret`）被误剥。
  * 不改变 `describeFailure` 既有语义；永不抛。
  */
 export function describeFailureBounded(
@@ -84,11 +102,13 @@ export function describeFailureBounded(
     let code: string | undefined;
     let responseCode: string | undefined;
     let message: string | undefined;
+    let anyTruncated = false;
     try {
       // code 与 message 同等有界，避免大 code 绕过预算
-      // 截断后先做字段级尾缀 scrub：多字段 join 后半截密钥会落在行中，行尾 scrub 够不着
       if (typeof e.code === 'string' && e.code) {
-        code = scrubTrailingSecretPrefix(takeCodePoints(e.code, budget), secs);
+        const taken = takeCodePointsBounded(e.code, budget);
+        code = taken.truncated ? scrubTrailingSecretPrefix(taken.text, secs) : taken.text;
+        anyTruncated = anyTruncated || taken.truncated;
       }
     } catch { /* ignore */ }
     try {
@@ -97,7 +117,9 @@ export function describeFailureBounded(
     try {
       const raw = e.message;
       if (typeof raw === 'string' && raw) {
-        message = scrubTrailingSecretPrefix(takeCodePoints(raw, budget), secs);
+        const taken = takeCodePointsBounded(raw, budget);
+        message = taken.truncated ? scrubTrailingSecretPrefix(taken.text, secs) : taken.text;
+        anyTruncated = anyTruncated || taken.truncated;
       }
     } catch { /* ignore */ }
     const parts = [code, responseCode, message].filter((p): p is string => Boolean(p));
@@ -106,15 +128,19 @@ export function describeFailureBounded(
       line = parts.join(' ');
     } else {
       try {
-        line = scrubTrailingSecretPrefix(takeCodePoints(String(err), budget), secs);
+        const taken = takeCodePointsBounded(String(err), budget);
+        line = taken.truncated ? scrubTrailingSecretPrefix(taken.text, secs) : taken.text;
+        anyTruncated = anyTruncated || taken.truncated;
       } catch {
         return '[unreadable]';
       }
     }
-    // 脱敏前先剥「非完整密钥」的尾缀，避免短密钥在长密钥残段上误匹配
-    line = scrubTrailingSecretPrefix(line, secs);
+    // 仅截断路径需要边界 scrub；未截断时 redactSecrets 已覆盖整串密钥
+    if (anyTruncated) {
+      line = scrubTrailingSecretPrefix(line, secs);
+    }
     line = redactSecrets(line, secs);
-    return scrubTrailingSecretPrefix(line, secs);
+    return anyTruncated ? scrubTrailingSecretPrefix(line, secs) : line;
   } catch {
     return '[unreadable]';
   }

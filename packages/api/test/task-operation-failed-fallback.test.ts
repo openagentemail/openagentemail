@@ -355,6 +355,12 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     expect(out.includes(secret.slice(0, 50))).toBe(false);
   });
 
+  // #340 R6c 清 Codex P2：未截断时不得以密钥真前缀误剥合法诊断文
+  test('describeFailureBounded 未截断 ⇒ 不以密钥前缀误剥合法文', () => {
+    expect(describeFailureBounded(new Error('status'), 400, ['secret', 'imap-pass'])).toBe('status');
+    expect(describeFailureBounded(new Error('ok'), 400, ['secret'])).toBe('ok');
+  });
+
   // #340 R5.2：有界脱敏 —— 多兆 message 不得 O(n) 拖垮 warn 路径
   test('POST /:id/lease 多兆 message ⇒ warn 有界且快', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
