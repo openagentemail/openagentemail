@@ -20,10 +20,10 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-// 隔离目录：不与其它套件共享 DATA_DIR
+// 隔离目录：本套件自用 DATA_DIR，不与其它套件共享
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-err-332-'));
 process.env.TASK_LEASES_ENABLED = 'true';
-// 不在模块顶置 NTFY_ENABLED：避免抢先 import config 时把全套件默认改成 true（跨套件卫生）
+// 不在模块顶置 NTFY_ENABLED：避免抢先 import config 时把默认改成 true
 process.env.NTFY_ADMIN_PASSWORD = 'ntfy-admin-secret';
 process.env.NOTIFY_PUBLIC_URL = 'https://notify.test';
 process.env.NODE_ENV = 'test';
@@ -82,18 +82,15 @@ const NOW = '2026-08-24T00:00:00.000Z';
 const ORIGIN = { origin: 'http://localhost' };
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 
-// ── Item 3 跨套件自清：保存原生定时器与 ntfy 快照，跟踪本套件启动的循环 ──
+// ── Item 3 自清：跟踪本套件启动的 maintenance/retention 定时器 ──
+// real* 仅供 trackTimersDuring / clearTrackedTimers 调度与清理；
+// 不在 afterEach/afterAll 无条件写回 globalThis（避免用模块加载时的陈旧引用覆盖共享全局）。
 const realSetTimeout = globalThis.setTimeout.bind(globalThis);
 const realSetInterval = globalThis.setInterval.bind(globalThis);
 const realClearTimeout = globalThis.clearTimeout.bind(globalThis);
 const realClearInterval = globalThis.clearInterval.bind(globalThis);
 const trackedTimeouts = new Set<ReturnType<typeof setTimeout>>();
 const trackedIntervals = new Set<ReturnType<typeof setInterval>>();
-/** import 后立刻冻结的 ntfy 快照，afterAll 还原，避免污染并行套件 */
-const ntfySnapshot = {
-  enabled: config.ntfy.enabled,
-  pushPolicy: config.ntfy.pushPolicy,
-};
 
 /** 清掉本套件跟踪到的 maintenance / retention 定时器 */
 function clearTrackedTimers(): void {
@@ -103,15 +100,10 @@ function clearTrackedTimers(): void {
   trackedIntervals.clear();
 }
 
-/** 还原 config.ntfy 到本文件 import 时的快照 */
-function restoreNtfyConfig(): void {
-  (config.ntfy as { enabled: boolean }).enabled = ntfySnapshot.enabled;
-  (config.ntfy as { pushPolicy: typeof ntfySnapshot.pushPolicy }).pushPolicy = ntfySnapshot.pushPolicy;
-}
-
 /**
  * 启动 maintenance/retention 时临时包装 setTimeout/setInterval，
- * 记录句柄以便 afterEach 停掉循环——不改生产码、不加 stop 探针。
+ * 记录句柄以便 afterEach 停掉循环；finally 还原**当时**的 prev（不碰陈旧快照）。
+ * 不改生产码、不加 stop 探针。
  */
 function trackTimersDuring<T>(fn: () => T): T {
   const prevTimeout = globalThis.setTimeout;
@@ -137,7 +129,7 @@ function trackTimersDuring<T>(fn: () => T): T {
   }
 }
 
-/** 身份建在本文件隔离 DATA_DIR，不在模块顶裸跑（避免与其它套件抢状态） */
+/** 身份建在本文件隔离 DATA_DIR，不在模块顶裸跑 */
 beforeAll(() => {
   for (const localpart of ['alpha', 'bravo', 'fox', 'owl']) {
     if (!findIdentity(`${localpart}@test.example`)) {
@@ -156,22 +148,12 @@ afterEach(() => {
   resetNotificationLogForTests();
   resetNotificationStateForTests();
   setWaitMailserverResolverForTests(undefined);
-  // 停掉本用例启动的循环 + 还原 ntfy / 原生定时器入口
+  // 只清本套件跟踪到的循环句柄；不定时器/ntfy 无条件写回（由用例内保存当时值）
   clearTrackedTimers();
-  restoreNtfyConfig();
-  globalThis.setTimeout = realSetTimeout;
-  globalThis.setInterval = realSetInterval;
-  globalThis.clearTimeout = realClearTimeout;
-  globalThis.clearInterval = realClearInterval;
 });
 
 afterAll(() => {
   clearTrackedTimers();
-  restoreNtfyConfig();
-  globalThis.setTimeout = realSetTimeout;
-  globalThis.setInterval = realSetInterval;
-  globalThis.clearTimeout = realClearTimeout;
-  globalThis.clearInterval = realClearInterval;
 });
 
 function unused(): never {
@@ -667,7 +649,9 @@ describe('#332 B · notification-log 告警路径非 Error 不抛', () => {
 
 describe('#332 B · notify 告警/warn 路径非 Error 不抛', () => {
   test('notifyTrustedAgentDelivery：publish reject undefined → warn 载荷非空含类型标记且不抛', async () => {
-    // 用例内钉死 ntfy，afterEach 还原快照（不顶置 NTFY_ENABLED）
+    // 只在本用例 mutate：进用例前记下**当时**值，finally 还原（不用模块加载陈旧快照）
+    const prevEnabled = config.ntfy.enabled;
+    const prevPolicy = config.ntfy.pushPolicy;
     (config.ntfy as { enabled: boolean }).enabled = true;
     (config.ntfy as { pushPolicy: string }).pushPolicy = 'all';
     if (!findIdentity('fox@test.example')) createIdentity({ localpart: 'fox', issueToken: false });
@@ -691,7 +675,8 @@ describe('#332 B · notify 告警/warn 路径非 Error 不抛', () => {
     } finally {
       pubSpy.mockRestore();
       warnSpy.mockRestore();
-      restoreNtfyConfig();
+      (config.ntfy as { enabled: boolean }).enabled = prevEnabled;
+      (config.ntfy as { pushPolicy: typeof prevPolicy }).pushPolicy = prevPolicy;
     }
   });
 });
