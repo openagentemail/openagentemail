@@ -1116,3 +1116,22 @@ N/A。
 - 并跑（332+send-log+notification-log+notify+cascade）：`suite-parallel-hygiene.txt` → **168 pass / 0 fail**
 - 全量：`full-suite.txt` → **2235 pass / 9 skip / 0 fail**（基线 2229 + helper 单测 +6）
 - 独立自审：agent `7992ff93-861f-4c2f-9d29-c97b0c2c72f0` → **PASS**
+
+## 2026-09-23 · w338 R4（#339 修 Codex P1×2：去掉无条件陈旧快照还原）
+
+### 我们实现了哪些功能？
+1. 删掉 `err-normalize-332.test.ts` 的 `afterEach`/`afterAll` 里对 `globalThis.setTimeout/setInterval/clearTimeout/clearInterval` 的无条件写回（不再用模块加载时的 `real*` 覆盖共享全局）。
+2. 去掉基于 import 时冻结的 `ntfySnapshot` / `restoreNtfyConfig()`；ntfy 仅在真正 mutate 的用例内保存**当时**值并在 `finally` 还原。
+3. 保留 `clearTrackedTimers()`、`trackTimersDuring`（finally 还原当时 prev）、`*ForTests(null)`、`beforeAll` 隔离身份。
+4. 注释改为「避免用陈旧快照覆盖共享全局」（不写「并行套件」）。**生产码零改动**。
+
+### 我们遇到了哪些错误？
+无施工红。
+
+### 我们是如何解决这些错误的？
+按 FC R4：最小修清理逻辑；Item 3 验收单独跑 + 并跑 + 全量一次留件。
+
+### 证据
+- focused：`/home/ops/materials/debt-small-card/r4-focused-332.txt` sha256 `70dbfbcdf85030b2c5e802d6efba4081ca3fc3fe5c4eb982da1eb11c54ba0a8e` → 28 pass / 0 fail
+- 并跑：`r4-suite-parallel-hygiene.txt` sha256 `ee4071e8c10621559ed37af5d1e94876de10aa5d5abd53ead59e796346be9bca` → 168 pass / 0 fail
+- 全量：`r4-full-suite.txt` sha256 `f1b8c8569f9a7f2e67c58b9869929d1f027f0247f44c1902cfabc600d7d36a85` → **2235 pass / 9 skip / 0 fail**
