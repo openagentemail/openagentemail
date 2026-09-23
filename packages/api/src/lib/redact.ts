@@ -87,17 +87,20 @@ export function streamRedact(text: string, secrets: string[]): string {
     pending = [];
     const L = matchedEnd;
     matchedEnd = 0;
+    // 回放块插到队首（I7）：原文更早的字符必须先于队列残余处理，禁止 append 换序
+    const prependReplay = (chars: string[]) => {
+      if (chars.length === 0) return;
+      queue.unshift(...chars);
+    };
     if (L > 0) {
       out.push(REDACTED);
-      for (let i = L; i < body.length; i++) queue.push(body[i]!);
-      for (const ch of extraChars) queue.push(ch);
+      prependReplay(body.slice(L).concat(extraChars));
     } else if (body.length === 0) {
       // 已证非任何密钥首字符：字面产出，禁止重喂（防死循环）
       for (const ch of extraChars) out.push(ch);
     } else {
       out.push(body[0]!);
-      for (let i = 1; i < body.length; i++) queue.push(body[i]!);
-      for (const ch of extraChars) queue.push(ch);
+      prependReplay(body.slice(1).concat(extraChars));
     }
   }
 
@@ -161,7 +164,7 @@ export function redactSecrets(text: string, secrets: string[] = configuredSecret
 
 // —— 单行转义（仅 describeFailure 末步）———————————————
 
-/** C0 / U+0085 / U+2028 / U+2029 → 可读转义；不剥离、不截断 */
+/** C0 / DEL+C1(U+007F–U+009F) / U+2028 / U+2029 → 可读转义；不剥离、不截断 */
 export function escapeLine(text: string): string {
   let out = '';
   for (let i = 0; i < text.length; i++) {
@@ -172,7 +175,8 @@ export function escapeLine(text: string): string {
       out += '\\r';
     } else if (code === 0x09) {
       out += '\\t';
-    } else if (code <= 0x1f || code === 0x85) {
+    } else if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+      // C0 + DEL/C1（含 U+0085 NEL、U+009B CSI）；最坏每码元 6 字符 ⇒ 上界仍 ≤6020
       out += `\\u${code.toString(16).padStart(4, '0')}`;
     } else if (code === 0x2028 || code === 0x2029) {
       out += `\\u${code.toString(16).padStart(4, '0')}`;
