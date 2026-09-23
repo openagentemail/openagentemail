@@ -1,9 +1,10 @@
 /**
  * 日志/告警载荷面：唯一组合原语 scrubPayload；三入口均走它。
  *
- * 发射路径（#348 / design.md R1–R4）：
- *   ① slice → ② redactField → ③ escape(line|block) → ④ redactField(+MARK)
- *   → ⑤ slice → ⑥ trimTrailingSecretPrefix → ⑦ containsAnySecret? '' : w
+ * 发射路径（#348 / design.md R1–R8）：
+ *   ① slice → ② redactField(原文族) → ③ escape(line|block)
+ *   → ④ redactField(原文∪转义族) → ⑤ slice
+ *   → ⑥ trimTrailing…AfterEscape → ⑦ containsAnySecret(原文∪转义族)? '' : w
  *
  * 转义模式（显式，禁隐式耦合）：
  *   - `line`：LF/CR/TAB → `\\n`/`\\r`/`\\t`（串面单行不变量；盘文本默认）
@@ -300,16 +301,107 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
 }
 
 /**
+ * 转义后判定用的密钥族：原文 ∪ mode 同函数转义后的整钥。
+ * 仅用于 ④ 第二遍脱敏与 ⑦ 完整密钥检查；② 第一遍仍只用原文族。
+ */
+function secretsForPostEscape(
+  secrets: string[],
+  escapeFn: (s: string) => string,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const s of secrets) {
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    const esc = escapeFn(s);
+    if (esc && !seen.has(esc)) {
+      seen.add(esc);
+      out.push(esc);
+    }
+  }
+  return out;
+}
+
+function peeledExposesRawSecretPrefix(peeled: string, secrets: string[]): boolean {
+  for (const s of secrets) {
+    if (!s || s.length < 2) continue;
+    for (let len = 1; len < s.length; len++) {
+      if (peeled.endsWith(s.slice(0, len))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * R8：转义后尾部回退——优先整段剥最长 escape(真前缀)/原文真前缀/escape(整钥)真前缀；
+ * 否则若尾部 `\\n` 等或裸 LF 剥掉后露出原文真前缀，先剥记号再继续。
+ */
+function trimTrailingSecretPrefixAfterEscape(
+  text: string,
+  secrets: string[],
+  escapeFn: (s: string) => string,
+): string {
+  let out = text;
+  const maxSteps = text.length + 8;
+  let steps = 0;
+  while (out.length > 0 && steps++ < maxSteps) {
+    let longest = 0;
+    for (const s of secrets) {
+      if (!s || s.length < 2) continue;
+      for (let len = 1; len < s.length; len++) {
+        const rawPref = s.slice(0, len);
+        if (out.endsWith(rawPref) && rawPref.length > longest) longest = rawPref.length;
+        const escPref = escapeFn(rawPref);
+        if (escPref && out.endsWith(escPref) && escPref.length > longest) {
+          longest = escPref.length;
+        }
+      }
+      const esc = escapeFn(s);
+      if (esc.length >= 2) {
+        for (let len = 1; len < esc.length; len++) {
+          const p = esc.slice(0, len);
+          if (out.endsWith(p) && p.length > longest) longest = p.length;
+        }
+      }
+    }
+    if (longest > 0) {
+      out = out.slice(0, -longest);
+      continue;
+    }
+
+    const escTok = /(\\n|\\r|\\t|\\u[0-9a-fA-F]{4})$/.exec(out);
+    if (escTok) {
+      const peeled = out.slice(0, -escTok[1]!.length);
+      if (peeledExposesRawSecretPrefix(peeled, secrets)) {
+        out = peeled;
+        continue;
+      }
+    }
+    const last = out.length > 0 ? out.charCodeAt(out.length - 1) : -1;
+    if (last === 0x0a || last === 0x0d || last === 0x09) {
+      const peeled = out.slice(0, -1);
+      if (peeledExposesRawSecretPrefix(peeled, secrets)) {
+        out = peeled;
+        continue;
+      }
+    }
+    break;
+  }
+  return out;
+}
+
+/**
  * 唯一组合原语（#348）：三入口共用发射路径。
  *
  *   ① b = slice(text, inputLimit)
- *   ② r = redactField(b, secrets)
- *   ③ t = escapeLine|escapeBlock(r)   // 由 mode 显式选择
- *   ④ uProbe = redactField(t)；needsMark 按输入截断或 t/uProbe 超限重算
- *      若 needsMark：body=slice(t, cap−|MARK|)+MARK → 再 redactField（R1）
- *   ⑤ v = slice(u, outputCap)         // 不得吃掉完整 MARK
- *   ⑥ w = trimTrailingSecretPrefix(v, secrets)
- *   ⑦ if containsAnySecret(w): return ''
+ *   ② r = redactField(b, secrets)          // 原文密钥族
+ *   ③ t = escapeLine|escapeBlock(r)
+ *   ④ postSecrets = secrets ∪ escape(secrets)；uProbe = redactField(t, postSecrets)
+ *      needsMark 按最终长度重算；若需标：body+MARK → 再 redactField(postSecrets)（R1）
+ *   ⑤ v = slice(u, outputCap)              // 不得吃掉完整 MARK
+ *   ⑥ w = trimTrailing…AfterEscape(v)      // 含 escape(真前缀)（R8）
+ *   ⑦ if containsAnySecret(w, postSecrets): return ''
  *   return w
  *
  * @param limit 见文件头 LIMIT 语义
@@ -325,25 +417,26 @@ export function scrubPayload(
     const secretList = secrets.filter(Boolean);
     const markLen = TRUNCATED_MARK.length;
     const isLine = mode === 'line';
+    const escapeFn = isLine ? escapeLine : escapeBlock;
+    // 转义后族：④脱敏与⑦完整钥检查；尾部另见 escape(真前缀)（R8）
+    const postSecrets = secretsForPostEscape(secretList, escapeFn);
 
     // ① 输入有界：line＝limit；block＝limit−|MARK|（为标记预留）
     const inputLimit = isLine ? limit : Math.max(0, limit - markLen);
     const truncatedAtInput = text.length > inputLimit;
     const b = truncatedAtInput ? text.slice(0, inputLimit) : text;
 
-    // ② 第一遍：清原文中的完整密钥
+    // ② 第一遍：清原文中的完整密钥（只用原文族，避免误伤）
     const r = redactField(b, secretList);
 
     // ③ 转义（显式 mode；可能生成密钥文本形态）
-    const t = isLine ? escapeLine(r) : escapeBlock(r);
+    const t = escapeFn(r);
 
     // 输出硬顶：line → 展开因子 2000；block → limit（8204）
     const outputCap = isLine ? DESCRIBE_FAILURE_FIELD_MAX : limit;
 
-    // ④ 先对转义结果做第二遍脱敏探针（无标记），再按最终长度重算 needsMark。
-    //    否则「转义后未超限、二遍脱敏膨胀后超限」会静默硬切且不标（FC R5）。
-    //    标记仍在最后一次脱敏之前并入（R1）。
-    const uProbe = redactField(t, secretList);
+    // ④ 第二遍脱敏用 postSecrets；needsMark 按探针后长度重算（R5）
+    const uProbe = redactField(t, postSecrets);
     const truncatedAtOutput = t.length > outputCap || uProbe.length > outputCap;
     const needsMark = !isLine && (truncatedAtInput || truncatedAtOutput);
 
@@ -353,8 +446,8 @@ export function scrubPayload(
       let body = t.length > bodyBudget ? t.slice(0, bodyBudget) : t;
       // Codex P2：剔半个 `\uXXXX` / 孤立 `\`
       body = body.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
-      // 最后一次脱敏：主体 + MARK 一并管辖
-      u = redactField(body + TRUNCATED_MARK, secretList);
+      // 最后一次脱敏：主体 + MARK 一并管辖（R1）
+      u = redactField(body + TRUNCATED_MARK, postSecrets);
     } else {
       u = uProbe;
     }
@@ -376,11 +469,11 @@ export function scrubPayload(
       }
     }
 
-    // ⑥ 尾部单调回退至非真前缀（只删不增）
-    const w = trimTrailingSecretPrefix(v, secretList);
+    // ⑥ 尾部回退：覆盖 escape(原文真前缀) 与 escape(整钥) 真前缀（R8）
+    const w = trimTrailingSecretPrefixAfterEscape(v, secretList, escapeFn);
 
-    // ⑦ R4 后置检查：不满足 ⇒ 空串兜底（不迭代替换）
-    if (containsAnySecret(w, secretList)) return '';
+    // ⑦ R4 后置检查：原文或转义整钥仍在 ⇒ 空串兜底
+    if (containsAnySecret(w, postSecrets)) return '';
     return w;
   } catch {
     // 发射路径永不抛；极端失败视同不可读 → 空串（与 R4 同形、无密钥）

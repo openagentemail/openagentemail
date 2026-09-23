@@ -439,4 +439,32 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(out).not.toMatch(/\n/);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
   });
+
+  // FC R8：转义后尾前缀须按 escape(密钥族) 判定
+  test('FC R8：口令含真实换行 + 尾 ab\\n ⇒ 不得以转义前缀结尾', () => {
+    const secret = 'abc\nXYZ';
+    const out = describeFailure(new Error('x'.repeat(196) + 'ab\n'), [secret]);
+    expect(out.endsWith('ab\\n')).toBe(false);
+    expect(out).not.toMatch(/ab\\n$/);
+    // 更长前缀 abc\\nX 亦须削
+    const outLong = describeFailure(new Error('x'.repeat(193) + 'abc\nX'), [secret]);
+    expect(outLong.endsWith('abc\\nX')).toBe(false);
+    expect(outLong).not.toMatch(/abc\\nX$/);
+  });
+
+  test('FC R8：对象面 stack 尾为密钥转义前缀 ⇒ 同样削掉', () => {
+    const secret = 'abc\nXYZ';
+    const err = new Error('obj');
+    err.stack = 'z'.repeat(100) + 'ab\n';
+    const out = describeFailureStack(err, [secret]);
+    expect(out.endsWith('ab\\n')).toBe(false);
+    expect(out.endsWith('ab\n')).toBe(false);
+  });
+
+  test('FC R8：无关口令时尾 ab\\n 不得误伤', () => {
+    const out = describeFailure(new Error('x'.repeat(196) + 'ab\n'), [
+      'unrelated-secret',
+    ]);
+    expect(out.endsWith('ab\\n')).toBe(true);
+  });
 });

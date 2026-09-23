@@ -1363,3 +1363,19 @@ N/A。
 
 ### 证据
 - focused/full-fc-r7 留件
+
+## 2026-09-23 · w348 FC R8（转义后密钥族接入 ④⑦ + 尾前缀）
+
+### 我们实现了哪些功能？
+1. `postSecrets = secrets ∪ escape(secrets)`：④ 第二遍脱敏与 ⑦ `containsAnySecret` 使用；② 仍只用原文族。
+2. `trimTrailingSecretPrefixAfterEscape`：削 escape(真前缀)/escape(整钥)真前缀；若尾 `\\n` 等剥掉后露出原文真前缀则先剥记号（闭合 CR `ab\\n` 例）。
+3. 测试：CR 例 + 更长前缀 + 对象面 + 无关口令不误伤。
+
+### 我们遇到了哪些错误？
+1. CR：line 模式下口令含真实换行时，转义后尾前缀用原文族判定 ⇒ `…ab\\n` 残留，违背尾前缀不变量。
+
+### 我们是如何解决这些错误的？
+1. 转义后判定改用转义语义；`ab\\n` 虽非 `escape(整钥)` 的字节前缀，但剥 `\\n` 后露出原文真前缀 `ab`，一并削掉。
+
+### 证据
+- focused/full-fc-r8 留件与 `evidence/fc-r8-measured.json`
