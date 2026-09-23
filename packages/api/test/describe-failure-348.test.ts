@@ -1,0 +1,542 @@
+/**
+ * #348：发射路径收敛 — 9 实例逐条 + 4 不变量 + grep 禁手工直连。
+ * 设计：/home/ops/materials/log-face-r5/design.md
+ */
+import { describe, expect, test } from 'bun:test';
+import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+} from './support/log-face-scan.ts';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'imap-secret';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'smtp-secret';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-348-'));
+
+const {
+  describeFailure,
+  describeFailureStack,
+  scrubPayload,
+  scrubLinePayload,
+  scrubBlockPayload,
+  redactSecrets,
+  streamRedact,
+  containsAnySecret,
+  trimTrailingSecretPrefix,
+  DESCRIBE_FAILURE_MAX,
+  DESCRIBE_FAILURE_STACK_MAX,
+  STACK_MAX,
+} = await import('../src/lib/redact.ts');
+
+const TRUNC_MARK = '…[truncated]';
+
+/** 尾部是否构成任一密钥真前缀 */
+function hasProperPrefixTail(text: string, secrets: string[]): boolean {
+  for (const s of secrets) {
+    if (!s || s.length < 2) continue;
+    for (let len = 1; len < s.length; len++) {
+      if (text.endsWith(s.slice(0, len))) return true;
+    }
+  }
+  return false;
+}
+
+describe('scrubPayload · #348 九实例 + 不变量', () => {
+  // ① ORDER：整行替换后再削尾 — 尾部回退在只删不增阶段
+  test('① ORDER：redactSecrets(aaaba, [aa,aaabb]) 不含明文 aa', () => {
+    const out = redactSecrets('aaaba', ['aa', 'aaabb']);
+    expect(out).not.toContain('aa');
+    expect(out).toBe('[redacted]ab');
+  });
+
+  // ② SUFFIX-REMATCH：余段重喂
+  test('② SUFFIX-REMATCH：streamRedact(abcxabc) 恰为 [redacted]', () => {
+    const out = streamRedact('abcxabc', ['abc', 'abcxabcq']);
+    expect(out).toBe('[redacted]');
+    expect(out).not.toContain('abc');
+  });
+
+  // ③ FIELD-BOUNDARY：字段边界半分
+  test('③ FIELD-BOUNDARY：code 截断后 sec 不进日志', () => {
+    const code = 'x'.repeat(197) + 'secret123';
+    const err = Object.assign(new Error('boom'), { code, responseCode: 550 });
+    const out = describeFailure(err, ['secret123']);
+    expect(out).not.toContain('sec');
+    expect(out).not.toContain('secret123');
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+  });
+
+  // ④⑥⑧ 转义生成密钥：口令 '\\u0001' + 真实 U+0001
+  test('④ 字符串面 describeFailure：口令 \\u0001 + 真实 U+0001 ⇒ 不含口令', () => {
+    const secret = '\\u0001';
+    const err = new Error('boom ' + '\u0001' + ' tail');
+    const out = describeFailure(err, [secret]);
+    expect(out).not.toContain(secret);
+  });
+
+  test('⑥ 对象面 stack 为空：口令 \\u0001 ⇒ 不含口令', () => {
+    const secret = '\\u0001';
+    const err = new Error('boom ' + '\u0001' + ' tail');
+    err.stack = '';
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(secret);
+  });
+
+  test('⑧ 对象面 stack getter 抛：口令 \\u0001 ⇒ 不含口令', () => {
+    const secret = '\\u0001';
+    const err = new Error('boom ' + '\u0001' + ' tail');
+    Object.defineProperty(err, 'stack', {
+      get() {
+        throw new Error('stack boom');
+      },
+      configurable: true,
+    });
+    expect(() => describeFailureStack(err, [secret])).not.toThrow();
+    expect(describeFailureStack(err, [secret])).not.toContain(secret);
+  });
+
+  // ⑤ 标记等于密钥
+  test('⑤ 口令＝…[truncated] + 触发截断 ⇒ 不含该口令', () => {
+    const secret = TRUNC_MARK;
+    const err = new Error('mark');
+    err.stack = 'x'.repeat(STACK_MAX + 100);
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(secret);
+  });
+
+  // ⑦ 盘文本路径：默认 line 模式（磁盘行 → 单行转义防日志注入）
+  test('⑦ 盘文本路径 scrubPayload：含 U+0001 行 ⇒ 不含 \\u0001 口令；line 转义；有界', () => {
+    const secret = '\\u0001';
+    const diskLine = 'bad-json ' + '\u0001' + ' more\nstill';
+    const out = scrubPayload(diskLine.slice(0, 100), [secret], DESCRIBE_FAILURE_MAX);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('\\n'); // 默认 line：真实换行转义
+    expect(out).not.toContain('\n');
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+  });
+
+  // ⑨ 替换产物拼回密钥 → R4 空串兜底
+  test('⑨ 替换产物拼回：foobarbar + [foo,[redacted]bar] ⇒ 不含 [redacted]bar', () => {
+    const secrets = ['foo', '[redacted]bar'];
+    const err = new Error('x');
+    err.stack = 'foobarbar';
+    const out = describeFailureStack(err, secrets);
+    expect(out).not.toContain('[redacted]bar');
+    // R4：若仍含完整密钥则兜底空串
+    if (containsAnySecret(out, secrets)) {
+      expect(out).toBe('');
+    }
+  });
+
+  // Codex P2：截断点落在 \uXXXX 内不得留孤立反斜杠
+  test('Codex P2：截断点落在 \\uXXXX 内 ⇒ 不得留孤立反斜杠', () => {
+    const err = new Error('p2');
+    err.stack = 'x' + '\x01'.repeat(STACK_MAX - 1);
+    const out = describeFailureStack(err, []);
+    expect(out).not.toMatch(/\\u[0-9a-fA-F]{0,3}$/);
+    expect(out.endsWith('\\')).toBe(false);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // —— 4 不变量 ——————————————————————————
+
+  test('不变量：|输出|≤LIMIT / 无完整密钥 / 尾非真前缀 / 永不抛', () => {
+    const secrets = ['secret123', TRUNC_MARK, '\\u0001', 'foo', '[redacted]bar'];
+    const cases: Array<() => string> = [
+      () => describeFailure(Object.assign(new Error('boom'), { code: 'x'.repeat(197) + 'secret123', responseCode: 550 }), ['secret123']),
+      () => {
+        const e = new Error('boom ' + '\u0001');
+        e.stack = 's'.repeat(STACK_MAX + 10);
+        return describeFailureStack(e, secrets);
+      },
+      () => scrubPayload('line ' + '\u0001' + ' end', ['\\u0001'], DESCRIBE_FAILURE_MAX),
+      () => {
+        const e = new Error('foobarbar');
+        e.stack = 'foobarbar';
+        return describeFailureStack(e, ['foo', '[redacted]bar']);
+      },
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return describeFailure(proxy, secrets);
+      },
+      () => {
+        const boom = new Error('m');
+        Object.defineProperty(boom, 'stack', {
+          get() {
+            throw new Error('no');
+          },
+        });
+        return describeFailureStack(boom, secrets);
+      },
+    ];
+
+    for (const run of cases) {
+      expect(run).not.toThrow();
+      const out = run();
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+      for (const s of secrets) {
+        if (s) expect(out).not.toContain(s);
+      }
+      expect(hasProperPrefixTail(out, secrets)).toBe(false);
+      expect(trimTrailingSecretPrefix(out, secrets)).toBe(out);
+    }
+
+    // 字符串面上界特钉
+    const strOut = describeFailure(new Error('z'.repeat(500)), ['z']);
+    expect(strOut.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+  });
+
+  test('grep：禁止 escapeLine(redactSecrets(...)) 直接嵌套', () => {
+    const srcRoot = join(import.meta.dir, '../src');
+    const files: string[] = [];
+    function walk(dir: string) {
+      for (const name of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, name.name);
+        if (name.isDirectory()) walk(p);
+        else if (name.name.endsWith('.ts')) files.push(p);
+      }
+    }
+    walk(srcRoot);
+    const hits: string[] = [];
+    const nestRe = /escapeLine\s*\(\s*redactSecrets\s*\(/g;
+    for (const file of files) {
+      const rel = file.slice(srcRoot.length + 1);
+      const text = readFileSync(file, 'utf8');
+      let m: RegExpExecArray | null;
+      while ((m = nestRe.exec(text))) {
+        hits.push(`${rel}:${text.slice(0, m.index).split('\n').length}`);
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+
+  test('盘文本调用点写法：webhook-delivery 走 scrubPayload + describeFailureStack', () => {
+    const text = readFileSync(
+      join(import.meta.dir, '../src/lib/webhook-delivery.ts'),
+      'utf8',
+    );
+    expect(text).toMatch(/scrubPayload\s*\(\s*(line|trimmed)\.slice\s*\(\s*0\s*,\s*100\s*\)\s*\)/);
+    expect(text).toMatch(/corrupted delivery log line[\s\S]{0,200}describeFailureStack\s*\(\s*err\s*\)/);
+    expect(text).not.toMatch(/escapeLine\s*\(\s*redactSecrets\s*\(/);
+  });
+
+  // FC R1 P1：膨胀输入双/三字段 —— 输入远超 200，join 仍 ≤6002
+  test('FC P1：NUL×1000 双字段 + 密钥 0 ⇒ 长度 ≤6002', () => {
+    const nul = '\u0000'.repeat(1000);
+    const err = Object.assign(new Error(nul), { code: nul });
+    const out = describeFailure(err, ['0']);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+    expect(out.length).toBeLessThanOrEqual(6002);
+  });
+
+  test('FC P1：NUL×1000 三字段（code+responseCode+message）+ 密钥 0 ⇒ ≤6002', () => {
+    const nul = '\u0000'.repeat(1000);
+    const err = Object.assign(new Error(nul), { code: nul, responseCode: 550 });
+    const out = describeFailure(err, ['0']);
+    expect(out.length).toBeLessThanOrEqual(6002);
+  });
+
+  // FC R1 P2：9000 字符 stack 必须以 …[truncated] 结尾且 ≤8204；⑤ 标记=密钥仍被吞
+  test('FC P2：stack×9000 ⇒ 尾部为截断标记且 ≤8204', () => {
+    const err = new Error('mark-retain');
+    err.stack = 'x'.repeat(9000);
+    const out = describeFailureStack(err, []);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+  });
+
+  test('FC P2：标记=密钥场景仍被吞（⑤ 保持）', () => {
+    const secret = TRUNC_MARK;
+    const err = new Error('mark-as-secret');
+    err.stack = 'x'.repeat(9000);
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // FC R2：钉死 8193–8204 无膨胀窗口 —— 输入 > STACK_MAX 必须有标记
+  test('FC R2：x×8193/8196/8200/8204 ⇒ 必须含截断标记', () => {
+    for (const n of [8193, 8196, 8200, 8204] as const) {
+      const err = new Error(`win-${n}`);
+      err.stack = 'x'.repeat(n);
+      const out = describeFailureStack(err, []);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.endsWith(TRUNC_MARK)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    }
+  });
+
+  test('FC R2：x×8192（未截断）⇒ 不得出现截断标记', () => {
+    const err = new Error('exact-stack-max');
+    err.stack = 'x'.repeat(STACK_MAX);
+    const out = describeFailureStack(err, []);
+    expect(out).not.toContain(TRUNC_MARK);
+    expect(out.length).toBe(STACK_MAX);
+  });
+
+  test('FC R2：膨胀路径回归 —— NUL×8192 与 x×9000 仍含标记', () => {
+    const nulErr = new Error('nul-exp');
+    nulErr.stack = '\u0000'.repeat(STACK_MAX);
+    const nulOut = describeFailureStack(nulErr, []);
+    expect(nulOut).toContain(TRUNC_MARK);
+    expect(nulOut.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+
+    const big = new Error('x9k');
+    big.stack = 'x'.repeat(9000);
+    const bigOut = describeFailureStack(big, []);
+    expect(bigOut).toContain(TRUNC_MARK);
+    expect(bigOut.endsWith(TRUNC_MARK)).toBe(true);
+  });
+
+  // FC R3：串面单行不变量 + 对象面保换行 + 模式显式
+  test('FC R3：串面 describeFailure 单行 —— 真实 \\n 转义为 \\\\n', () => {
+    const out = describeFailure(new Error('line1\nline2'), []);
+    expect(out).not.toContain('\n');
+    expect(out).toContain('\\n');
+    expect(out).toBe('line1\\nline2');
+  });
+
+  test('FC R3：对象面 describeFailureStack 仍保留真实换行', () => {
+    const err = new Error('m');
+    err.stack = 'Error: m\n    at frame (/x.ts:1:1)\n    at next';
+    const out = describeFailureStack(err, []);
+    expect(out).toContain('\n');
+    expect(out).not.toContain('\\n');
+  });
+
+  test('FC R3：模式显式 —— scrubLinePayload vs scrubBlockPayload 换行行为分叉', () => {
+    const sample = 'a\nb\tc';
+    const lineOut = scrubLinePayload(sample, [], DESCRIBE_FAILURE_MAX);
+    const blockOut = scrubBlockPayload(sample, [], DESCRIBE_FAILURE_STACK_MAX);
+    expect(lineOut).toBe('a\\nb\\tc');
+    expect(lineOut).not.toContain('\n');
+    expect(lineOut).not.toContain('\t');
+    expect(blockOut).toBe('a\nb\tc');
+    expect(blockOut).toContain('\n');
+    expect(blockOut).toContain('\t');
+    // 入口分别走对应封装
+    expect(describeFailure(new Error(sample), [])).toBe(lineOut);
+    const err = new Error('x');
+    err.stack = sample;
+    expect(describeFailureStack(err, [])).toBe(blockOut);
+  });
+
+  // FC R4：扫描器不得被「混合调用」绕过（删整段 describeFailure* 豁免捷径）
+  test('FC R4：混合调用 describeFailureStack(err), err ⇒ 必须判为裸用', () => {
+    // 直接参数判定（J8 / ⑨ 共用 isObjectFaceBareArgs）
+    expect(
+      isObjectFaceBareArgs("'[x] failed:', describeFailureStack(err), err"),
+    ).toBe(true);
+    expect(isObjectFaceBareArgs('describeFailure(err), err')).toBe(true);
+    expect(isObjectFaceBareArgs('describeFailureStack(err), detail')).toBe(true);
+    // 正常单入口不得误报
+    expect(isObjectFaceBareArgs("'[x] failed:', describeFailureStack(err)")).toBe(
+      false,
+    );
+    expect(isObjectFaceBareArgs('describeFailure(err)')).toBe(false);
+    // 经 extractConsoleCalls 走与 J8/⑨ 相同路径
+    const mixedSrc = `console.error('[x] failed:', describeFailureStack(err), err);`;
+    const okSrc = `console.error('[x] failed:', describeFailureStack(err));`;
+    const mixed = extractConsoleCalls(mixedSrc);
+    const ok = extractConsoleCalls(okSrc);
+    expect(mixed).toHaveLength(1);
+    expect(ok).toHaveLength(1);
+    expect(isObjectFaceBareArgs(mixed[0]!.args)).toBe(true);
+    expect(isObjectFaceBareArgs(ok[0]!.args)).toBe(false);
+  });
+
+  // FC R5：第二遍脱敏膨胀后超限必须打标（needsMark 在增长之后重算）
+  test('FC R5：\\x01×1000/1364 + 口令 \\\\u0001 ⇒ 必须含截断标记', () => {
+    const secret = '\\u0001';
+    for (const n of [1000, 1364] as const) {
+      const err = new Error(`r5-${n}`);
+      err.stack = '\u0001'.repeat(n);
+      const out = describeFailureStack(err, [secret]);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.endsWith(TRUNC_MARK)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+      expect(out).not.toContain(secret);
+    }
+  });
+
+  test('FC R5：\\x01×100 + 口令 \\\\u0001（未超限）⇒ 不得含标记', () => {
+    const secret = '\\u0001';
+    const err = new Error('r5-under');
+    err.stack = '\u0001'.repeat(100);
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(TRUNC_MARK);
+    expect(out.length).toBeLessThan(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out).not.toContain(secret);
+  });
+
+  test('FC R5：\\x01×1400/2000 + 口令 \\\\u0001 ⇒ 含标记（回归）', () => {
+    const secret = '\\u0001';
+    for (const n of [1400, 2000] as const) {
+      const err = new Error(`r5-big-${n}`);
+      err.stack = '\u0001'.repeat(n);
+      const out = describeFailureStack(err, [secret]);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    }
+  });
+
+  // FC R6：守卫须抓直接错误表达式（String(err) / .message / .stack / as 转型）
+  test('FC R6：String(err) / (err as Error).message ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'failed:', String(err)")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', (err as Error).message")).toBe(true);
+  });
+
+  test('FC R6：err.message / err.stack ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'failed:', err.message")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', err.stack")).toBe(true);
+  });
+
+  test('FC R6：不得误报 describeFailure* / String(code)', () => {
+    expect(isObjectFaceBareArgs('describeFailure(err)')).toBe(false);
+    expect(isObjectFaceBareArgs('describeFailureStack(err)')).toBe(false);
+    expect(isObjectFaceBareArgs("'failed:', String(code)")).toBe(false);
+  });
+
+  // FC R7：可选链 ?.message / ?.stack 亦须判裸用；非 err 变量不得误报
+  test('FC R7：err?.message / err?.stack / (err as Error)?.message ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'x:', err?.message")).toBe(true);
+    expect(isObjectFaceBareArgs("'x:', err?.stack")).toBe(true);
+    expect(isObjectFaceBareArgs("'x:', (err as Error)?.message")).toBe(true);
+  });
+
+  test('FC R7：不得误报 String(code) / code?.value；R6 回归', () => {
+    expect(isObjectFaceBareArgs("'failed:', String(code)")).toBe(false);
+    expect(isObjectFaceBareArgs("'x:', code?.value")).toBe(false);
+    expect(isObjectFaceBareArgs("'failed:', String(err)")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', err.message")).toBe(true);
+  });
+
+  test('FC R7：boot reconstruction transient warn 走 describeFailure（串面）', () => {
+    const text = readFileSync(
+      join(import.meta.dir, '../src/lib/webhook-delivery.ts'),
+      'utf8',
+    );
+    expect(text).toMatch(
+      /boot reconstruction transient failure[\s\S]{0,280}describeFailure\s*\(\s*err\s*\)/,
+    );
+    expect(text).not.toMatch(
+      /boot reconstruction transient failure[\s\S]{0,280}err\s*\?\.\s*message/,
+    );
+  });
+
+  test('FC R7：describeFailure 病态 message ⇒ 有界 + 脱敏 + 单行', () => {
+    const secret = 'smtp-secret';
+    const err = new Error(`${secret}\n${'x'.repeat(9000)}`);
+    const out = describeFailure(err, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out).not.toMatch(/\n/);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+  });
+
+  // FC R8：转义后尾前缀须按 escape(密钥族) 判定
+  test('FC R8：口令含真实换行 + 尾 ab\\n ⇒ 不得以转义前缀结尾', () => {
+    const secret = 'abc\nXYZ';
+    const out = describeFailure(new Error('x'.repeat(196) + 'ab\n'), [secret]);
+    expect(out.endsWith('ab\\n')).toBe(false);
+    expect(out).not.toMatch(/ab\\n$/);
+    // 更长前缀 abc\\nX 亦须削
+    const outLong = describeFailure(new Error('x'.repeat(193) + 'abc\nX'), [secret]);
+    expect(outLong.endsWith('abc\\nX')).toBe(false);
+    expect(outLong).not.toMatch(/abc\\nX$/);
+  });
+
+  test('FC R8：对象面 stack 尾为密钥转义前缀 ⇒ 同样削掉', () => {
+    const secret = 'abc\nXYZ';
+    const err = new Error('obj');
+    err.stack = 'z'.repeat(100) + 'ab\n';
+    const out = describeFailureStack(err, [secret]);
+    expect(out.endsWith('ab\\n')).toBe(false);
+    expect(out.endsWith('ab\n')).toBe(false);
+  });
+
+  test('FC R8：无关口令时尾 ab\\n 不得误伤', () => {
+    const out = describeFailure(new Error('x'.repeat(196) + 'ab\n'), [
+      'unrelated-secret',
+    ]);
+    expect(out.endsWith('ab\\n')).toBe(true);
+  });
+
+  // FC R9/R10：长口令线性预计算 + 截断标记不被尾削吃掉
+  // R10 P1：不用绝对 50ms 墙钟（慢 CI flaky）；改用两档规模伸缩性判据
+  test('FC R10 P1：短消息口令 4K→16K 伸缩性（非绝对墙钟）', () => {
+    // 理由：共享/冷启动 runner 上绝对阈值必然偶发失败；抓的是平方级性质
+    const msg = 'short message';
+    const medianMs = (secretLen: number, rounds = 5): number => {
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const err = new Error(msg);
+        const t0 = performance.now();
+        describeFailure(err, ['p'.repeat(secretLen)]);
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      return samples[Math.floor(samples.length / 2)]!;
+    };
+    const t4k = medianMs(4000);
+    const t16k = medianMs(16000);
+    // 小规模绝对上界（宽松，防挂死）；主判据＝伸缩性
+    expect(t4k).toBeLessThan(500);
+    // 线性预计算下 16K/4K≈4；给宽裕倍数 8 抓平方级回潮
+    expect(t16k).toBeLessThanOrEqual(8 * t4k + 1e-9);
+  });
+
+  test('FC R9：口令 ted]xyz + stack×9000 ⇒ 尾部完整截断标记', () => {
+    const err = new Error('mark-keep');
+    err.stack = 'x'.repeat(9000);
+    const out = describeFailureStack(err, ['ted]xyz']);
+    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+    expect(out).toContain(TRUNC_MARK);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // R10 P2-1：长口令 + 长 stack 路径须近线性（增量自动机）
+  test('FC R10 P2-1：口令 p×16k + stack p×2048/4096/8192 伸缩性', () => {
+    const secret = 'p'.repeat(16_000);
+    const medianMs = (n: number, rounds = 3): number => {
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const err = new Error('stack-perf');
+        err.stack = 'p'.repeat(n);
+        const t0 = performance.now();
+        describeFailureStack(err, [secret]);
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      return samples[Math.floor(samples.length / 2)]!;
+    };
+    const t2k = medianMs(2048);
+    const t4k = medianMs(4096);
+    const t8k = medianMs(8192);
+    // 留原始耗时到断言消息，便于留件对照
+    expect(t2k, `t2048=${t2k}`).toBeLessThan(500);
+    // 近线性：8192/2048=4；宽裕倍数 20（抓 O(n·L) 回潮）
+    expect(t8k, `t8192=${t8k} t2048=${t2k}`).toBeLessThanOrEqual(20 * t2k + 1e-9);
+    expect(t4k, `t4096=${t4k}`).toBeLessThanOrEqual(12 * t2k + 1e-9);
+  });
+
+  // R10 P2-2：block limit < |MARK| 时输出仍 ≤ limit（省略标记）
+  test('FC R10 P2-2：block limit 5/10/12/13 ⇒ 输出恒 ≤ limit；≥12 含完整标记', () => {
+    const text = 'x'.repeat(100);
+    for (const lim of [5, 10, 12, 13] as const) {
+      const out = scrubPayload(text, [], lim, 'block');
+      expect(out.length, `limit=${lim} len=${out.length}`).toBeLessThanOrEqual(lim);
+    }
+    expect(scrubPayload(text, [], 12, 'block').endsWith(TRUNC_MARK)).toBe(true);
+    expect(scrubPayload(text, [], 13, 'block').endsWith(TRUNC_MARK)).toBe(true);
+    // 装不下完整标记时省略（上限优先），不得越界到 12
+    expect(scrubPayload(text, [], 5, 'block')).not.toContain(TRUNC_MARK);
+    expect(scrubPayload(text, [], 10, 'block')).not.toContain(TRUNC_MARK);
+  });
+});

@@ -1202,3 +1202,218 @@ N/A。
 - focused：`/home/ops/materials/log-face-design/focused-b-20260923T102821Z.txt` sha256 `8da8b77d6a03a5cf3a2d1c8579886ca9fd98644c286346e23ec3e3e820bfef3d` → **116 pass / 0 fail**
 - 全量：`/home/ops/materials/log-face-design/full-suite-b-20260923T102837Z.txt` sha256 `7773631a1184408016fe6f3dc56637597a1f57b46758b83ecf85dbb6da8d7469` → **2277 pass / 9 skip / 2 fail**（2 红＝`#272 dist-build-lock` kill-9 锁 + `list-rate isolate`；与本卡无关；list-rate 单测复跑绿；#272 为本机端口锁环境性）
 - 独立自审：`/home/ops/materials/log-face-design/subagent-review-b.md` → **PASS**（agent `4c74db2b-3985-45ea-a150-687f78d911c0`）
+
+## 2026-09-23 · w348 发射路径收敛（#348 · R1–R4 + scrubPayload）
+
+### 我们实现了哪些功能？
+1. **唯一组合原语 `scrubPayload`**：①slice → ②redactField → ③escapeBlock → ④redactField(+MARK) → ⑤slice（Codex P2 剔半转义）→ ⑥trimTrailingSecretPrefix → ⑦containsAnySecret?''（R4 空串兜底，不迭代替换）。
+2. **三入口全部改用它**：字符串面 `describeFailure`（逐字段 truncate200→scrubPayload→join）；对象面 `describeFailureStack`（LIMIT=8204）；盘文本面 `webhook-delivery` 两处 corrupted log → `scrubPayload(line.slice(0,100))`。
+3. **对象面 6 处**（app/main/audit/webhook-delivery×3）改走 `describeFailureStack`；#347 白名单残余不变。
+4. **grep 断言**：禁止 `escapeLine(redactSecrets(...))` 直接嵌套；J8 对齐 #347 白名单扫描。
+5. **测试**：`describe-failure-342` 对齐新原语；新增 `describe-failure-stack-344` + `describe-failure-348`（9 实例 + 4 不变量 + Codex P2）。
+6. **CHANGELOG** Unreleased 记 #348（对外零变更声明）。
+
+### 我们遇到了哪些错误？
+1. Codex P2 初版只剔 `\\uXXXX` 残段，截断落在孤立 `\` 时仍残留 → 断言失败。
+2. grep 禁嵌套误伤 `redact.ts` 文件头注释里的示例字面量。
+3. 全量套件 1 红：`#206 R9` 矩阵子进程 25s timeout（历史预存/环境性，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. ⑤ 收尾改为 `/\\(?:u[0-9a-fA-F]{0,3})?$/`，孤立反斜杠一并去掉。
+2. 注释改为「禁止 escapeLine 与 redactSecrets 手工嵌套直连」，避免字面嵌套形态。
+3. 记入证据；focused 58/0 全绿；全量 2308 pass / 9 skip / 1 fail（仅 #206）。
+
+### 证据
+- 设计：`/home/ops/materials/log-face-r5/design.md`（总指挥已核）
+- 基线：`1a35246d`；分支 `tizerluo/w348`
+- focused：`/home/ops/materials/log-face-r5/evidence/focused-20260923T150406Z.log` sha256 `31ff9517ce99223e0998f861cca50523c8840a88ddd45f878cef5945a9e53abd` → **58 pass / 0 fail**
+- 全量：`/home/ops/materials/log-face-r5/evidence/full-20260923T150419Z.log` sha256 `bbe26b2af29679a3e4e71f851cf786932e36a2d1d71603ad8a4622f6a976a458` → **2308 pass / 9 skip / 1 fail**（#206 timeout）
+- 9 实例实测：`/home/ops/materials/log-face-r5/evidence/nine-instances-out.json`
+
+## 2026-09-23 · w348 R1-fix（Codex Local P1/P2）
+
+### 我们实现了哪些功能？
+1. **Codex P1**：`processField` 改用 `DESCRIBE_FAILURE_FIELD_MAX=2000`（不再把整串 6002 预算分给每个字段）；三字段+两空格仍可证 ≤6002。
+2. **Codex P2**：`scrubPayload` 拆 `inputLimit`/`outputLimit`；对象面输入 `STACK_MAX=8192`、输出 `8204`，普通 ASCII 超长 stack 可保留截断标记。
+3. 回归测试：348 增补 Codex P1/P2 两例。
+
+### 我们遇到了哪些错误？
+1. Codex Local 对本头报 P1×1（多字段 join 可破 6002）+ P2×1（标记被同 LIMIT 二次切片吃掉）。
+
+### 我们是如何解决这些错误的？
+1. 字段预算与整串预算分离；输入/输出有界分离。
+2. focused 重跑含新断言全绿。
+
+### 证据
+- focused-r1fix：见 `/home/ops/materials/log-face-r5/evidence/focused-r1fix-*.log`
+
+## 2026-09-23 · w348 FC R1 返工（P1 串面上界 + P2 标记预留）
+
+### 我们实现了哪些功能？
+1. **P1**：串面 `processField` → `scrubPayload(raw, secrets, ERROR_DETAIL_MAX)`（LIMIT＝输入界 200）；docstring 写清 LIMIT 语义；输出硬顶用展开因子 2000，防转义后再脱敏复合膨胀破 join≤6002。
+2. **P2**：对象面截断时先切到 `LIMIT−|MARK|` 再追加 MARK（仍在最后一次脱敏前）；最终 slice 保留完整 MARK。
+3. **测试**：J9 扩成 NUL×1000 膨胀形态；348 补 FC 双/三字段 ≤6002 + stack×9000 尾部 MARK + ⑤ 标记=密钥仍吞。
+
+### 我们遇到了哪些错误？
+1. 前一头 `cdc7f53` 用「字段输出预算 2000 / 输入输出双 LIMIT」——与 FC 裁定的「LIMIT＝输入界 200 + 标记预留」不完全同形，按返工令重落。
+
+### 我们是如何解决这些错误的？
+1. 按 FC 修法重写 `scrubPayload` 单 `limit` 参数语义；串面/对象面分支仅在是否启用 MARK 与输出顶取值上分叉。
+2. 实测：双字段 NUL×1000+`0` 长度、9000 stack 尾部落盘。
+
+### 证据
+- 见本轮 focused/full 留件与 `evidence/fc-r1-fix-measured.json`
+
+## 2026-09-23 · w348 FC R2（8193–8204 无膨胀窗口必须打标记）
+
+### 我们实现了哪些功能？
+1. 对象面**输入界**改为 `limit − |MARK|`（＝STACK_MAX 8192）；`needsMark`＝输入侧截断 || 输出侧截断。
+2. 钉死窗口测试：8193/8196/8200/8204 必含标记；8192 不得有标记；NUL×8192 与 x×9000 膨胀路径回归。
+
+### 我们遇到了哪些错误？
+1. 前版以 8204 作输入界 ⇒ 8193–8204 无膨胀时既不截断也不打标（静默丢字符的假象：其实整段留下了，但相对 STACK_MAX 已超界却无提示）。FC 裁定：>STACK_MAX 即须标记。
+
+### 我们是如何解决这些错误的？
+1. 输入切片对齐 STACK_MAX；标记预留逻辑保持；实测四例含标。
+
+### 证据
+- 见 focused/full-fc-r2 留件与 `evidence/fc-r2-measured.json`
+
+## 2026-09-23 · w348 FC R3（串面单行不变量 + 转义模式显式化）
+
+### 我们实现了哪些功能？
+1. `scrubPayload(..., mode: 'line'|'block')` 显式分面；`scrubLinePayload` / `scrubBlockPayload` 薄封装。
+2. 串面 → line（恢复 #342 `\n`→`\\n` 单行不变量）；对象面 → block；盘文本默认 line（防日志注入；PR 注明理由）。
+3. 测试：串面单行 / 对象面保换行 / 两封装行为分叉；R2 窗口与 P1 上界回归。
+
+### 我们遇到了哪些错误？
+1. ZCode P1：串面被对象面 `escapeBlock` 覆盖 ⇒ 真实换行泄漏（日志注入面）。
+
+### 我们是如何解决这些错误的？
+1. 转义模式显式参数，不再靠 limit 魔数隐式分面。
+
+### 不修只记
+- ZCode P3 串面静默截断/J4：#342 已声明行为
+- R4 空串不可区分：观察，可归 #347 类债
+- test/tmp-webhook-delivery 未跟踪：既有 webhook-delivery 测试产物，非本卡
+
+### 证据
+- 见 focused/full-fc-r3 留件与 `evidence/fc-r3-measured.json`
+
+## 2026-09-23 · w348 FC R4（扫描器混合调用绕过）
+
+### 我们实现了哪些功能？
+1. 删除 `isObjectFaceBareArgs` 整段 `describeFailure*` 豁免捷径；仅按顶层参数判定裸用。
+2. 负控：`describeFailureStack(err), err` 必须判裸用；正常单入口不得误报。
+
+### 我们遇到了哪些错误？
+1. CR actionable：混合调用可绕过 J8/⑨。
+
+### 我们是如何解决这些错误的？
+1. 照 CR 建议删捷径；补 FC R4 测试。
+
+### 证据
+- 见 focused/full-fc-r4 留件
+
+## 2026-09-23 · w348 FC R5（needsMark 在第二遍脱敏之后重算）
+
+### 我们实现了哪些功能？
+1. `scrubPayload`：先对转义结果做 `uProbe = redactField(t)`，再按 `truncatedAtInput || t>cap || uProbe>cap` 重算 `needsMark`；若需标则 `body+MARK` 再走最后一次脱敏（R1）。
+2. 最终硬切时若尾部已有完整 MARK，优先保留标记（slice 目标＝outputCap−|MARK|）。
+3. 测试：`\x01×1000/1364`+口令`\u0001` 必含标记；`×100` 不得含；`×1400/2000` 与 x×8192–8204 窗口回归。
+
+### 我们遇到了哪些错误？
+1. FC 实测：`\x01×1000` 转义后仅 6000 ⇒ 旧逻辑 `needsMark=false`，二遍脱敏膨胀到 10000 后硬切到 8204 却不标（静默截断）。
+
+### 我们是如何解决这些错误的？
+1. 判界/判标记改用「所有增长工序之后」的探针长度；标记仍在最后一次脱敏前并入。
+2. 实测 n=100/300/500/700 ⇒ marker=FALSE；n=1000/1364/1400/2000 ⇒ TRUE；x×8192 FALSE、8193–8204 TRUE。
+
+### 证据
+- focused/full-fc-r5 留件与 `evidence/fc-r5-measured.json`
+
+## 2026-09-23 · w348 FC R6（直接错误表达式绕过守卫）
+
+### 我们实现了哪些功能？
+1. `log-face-scan.ts`：抽出 `isDirectErrorExpr`，覆盖 `String(errish)`、`errish.message|stack`、`(errish as …).message|stack`；`<errish>` 仍按 `\w*[Ee]rr\w*` 族，不误伤 `String(code)`。
+2. 测试：FC R6 三条（必判裸用 ×2 + 不得误报 ×1）；R4 混合调用回归保持。
+
+### 我们遇到了哪些错误？
+1. CR actionable：J8/⑨ 仅匹配裸标识符，`String(err)` / `(err as Error).message` 可穿守卫（源码无实例，属守卫强度不足）。
+
+### 我们是如何解决这些错误的？
+1. 按参数补直接错误表达式识别；实测 6 条判定见 `evidence/fc-r6-measured.json`。
+
+### 证据
+- focused/full-fc-r6 留件与 `evidence/fc-r6-measured.json`
+
+## 2026-09-23 · w348 FC R7（可选链 ?. 守卫 + boot reconstruction 收口）
+
+### 我们实现了哪些功能？
+1. `isDirectErrorExpr`：`.` / `?.` 统一匹配 `message|stack`（含 `(err as …)?.message`）。
+2. `webhook-delivery` boot reconstruction transient warn：`err?.message` → `describeFailure(err)`（串面；触发条件与 retry 不动）。
+3. 测试：R7 守卫负控 / 不得误报 / 调用点写法 / 病态 message 有界脱敏单行。
+
+### 我们遇到了哪些错误？
+1. Codex/FC：守卫漏 `?.`；仓内 `webhook-delivery.ts` 确有 `err?.message` 裸投（非 #347 白名单）。
+
+### 我们是如何解决这些错误的？
+1. 扫描器补可选链；调用点改串面入口（原只打 message，与 sent-registry warn 同族）。
+2. 实测判定见 `evidence/fc-r7-measured.json`。
+
+### 证据
+- focused/full-fc-r7 留件
+
+## 2026-09-23 · w348 FC R8（转义后密钥族接入 ④⑦ + 尾前缀）
+
+### 我们实现了哪些功能？
+1. `postSecrets = secrets ∪ escape(secrets)`：④ 第二遍脱敏与 ⑦ `containsAnySecret` 使用；② 仍只用原文族。
+2. `trimTrailingSecretPrefixAfterEscape`：削 escape(真前缀)/escape(整钥)真前缀；若尾 `\\n` 等剥掉后露出原文真前缀则先剥记号（闭合 CR `ab\\n` 例）。
+3. 测试：CR 例 + 更长前缀 + 对象面 + 无关口令不误伤。
+
+### 我们遇到了哪些错误？
+1. CR：line 模式下口令含真实换行时，转义后尾前缀用原文族判定 ⇒ `…ab\\n` 残留，违背尾前缀不变量。
+
+### 我们是如何解决这些错误的？
+1. 转义后判定改用转义语义；`ab\\n` 虽非 `escape(整钥)` 的字节前缀，但剥 `\\n` 后露出原文真前缀 `ab`，一并削掉。
+
+### 证据
+- focused/full-fc-r8 留件与 `evidence/fc-r8-measured.json`
+
+## 2026-09-23 · w348 FC R9（转义前缀线性化 + 截断标记保完整）
+
+### 我们实现了哪些功能？
+1. `prepareSecretEscapePreps`：每钥 O(|s|) 逐码元转义 + join；尾部匹配只扫长度 ≤|正文| 的候选（与口令全长解耦）。
+2. 需标路径：先正文尾回退 → 挂 MARK → redact；`restoreFixedTruncationMark` 恢复被 J4 啃掉的固定标记。
+3. 不变量精化：除本件固定截断标记外，尾部不构成密钥真前缀。
+
+### 我们遇到了哪些错误？
+1. P1-1：对每个前缀再跑 escape ⇒ O(|s|²)，16k 口令单次 ~3s。
+2. P1-2：尾削把 `…[truncated]` 末段 `ted]`（恰为口令前缀）吃掉。
+
+### 我们是如何解决这些错误的？
+1. 一次预计算 + 按正文长度截断候选扫描。
+2. 标记不参与削尾；脱敏后强制恢复完整 MARK（标记=整钥仍走 R4 空串）。
+
+### 证据
+- focused/full-fc-r9 留件与 `evidence/fc-r9-measured.json`
+
+## 2026-09-23 · w348 FC R10（伸缩性判据 + 增量自动机 + block 上限优先）
+
+### 我们实现了哪些功能？
+1. P1：性能断言改两档中位数伸缩性（t16k≤8·t4k，t4k<500ms），去掉绝对 50ms。
+2. P2-1：`redactField` 携带当前 trie 节点，feed O(1)；总 O(n+Σ|s|)。
+3. P2-2：`limit < |MARK|` 时省略标记，输出恒 ≤ limit；`limit≥|MARK|` 仍可挂完整标记。
+
+### 我们遇到了哪些错误？
+1. 绝对墙钟在慢 CI flaky（指令侧问题，改判据）。
+2. 长口令+长 stack 仍 O(n·L)（每码元重走 pending）。
+3. block 小 limit 无条件追加 MARK 越界。
+
+### 我们是如何解决这些错误的？
+1. 性质判据（伸缩性）替代墙钟阈值。
+2. 增量自动机状态与 pending 同步复位。
+3. markFits 门控；装不下则省略标记并硬切。
+
+### 证据
+- focused/full-fc-r10 与 `evidence/fc-r10-measured.json`

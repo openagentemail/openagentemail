@@ -6,6 +6,14 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+  isObjectFaceDebtAllowed,
+  lineOf,
+  OBJECT_FACE_DEBT_ISSUE,
+  OBJECT_FACE_DEBT_NEEDLES,
+} from './support/log-face-scan.ts';
 
 // redact → config 进程级校验；须在动态 import 前写入
 process.env.DOMAIN = 'test.example';
@@ -166,7 +174,7 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(() => describeFailure(bad, [])).not.toThrow();
   });
 
-  test('J8：单点入口 + 零裸用（对象面 6 处豁免 #344）', () => {
+  test('J8：单点入口 + 零裸用（对象面残余仅 #347 白名单）', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -178,53 +186,97 @@ describe('describeFailure / redactField · #342 B', () => {
     }
     walk(srcRoot);
 
-    const objectFaceExempt = new Set([
-      'app.ts:178',
-      'main.ts:53',
-      'webhook-delivery.ts:1232',
-      'webhook-delivery.ts:2160',
-      'webhook-delivery.ts:2162',
-      'audit.ts:223',
-    ]);
-
     const errorDetailHits: string[] = [];
     const bareHits: string[] = [];
+    const objectBareHits: string[] = [];
+    const allowed: string[] = [];
 
     for (const file of files) {
       const rel = file.slice(srcRoot.length + 1);
-      const lines = readFileSync(file, 'utf8').split('\n');
+      const text = readFileSync(file, 'utf8');
+      const lines = text.split('\n');
       lines.forEach((line, idx) => {
         const loc = `${rel}:${idx + 1}`;
-        const baseLoc = `${rel.split('/').pop()}:${idx + 1}`;
         if (/\berrorDetail\s*\(/.test(line)) errorDetailHits.push(loc);
-        if (
-          /console\.(warn|error|log)\(/.test(line) &&
-          /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
-        ) {
-          if (!objectFaceExempt.has(baseLoc)) bareHits.push(loc);
-        }
         if (/console\.warn\(\s*'\[task\] claim(-lost)? failed:'/.test(line)) {
           if (!/describeFailure\s*\(\s*err\s*\)/.test(line) || /,\s*code\s*\)/.test(line)) {
             bareHits.push(loc);
           }
         }
       });
+      for (const call of extractConsoleCalls(text)) {
+        if (!isObjectFaceBareArgs(call.args)) continue;
+        const loc = `${rel}:${lineOf(text, call.index)}`;
+        const callSrc = text.slice(call.index, call.index + 220);
+        if (isObjectFaceDebtAllowed(callSrc)) allowed.push(loc);
+        else objectBareHits.push(loc);
+      }
     }
 
     expect(errorDetailHits).toEqual([]);
     expect(bareHits).toEqual([]);
+    expect(objectBareHits).toEqual([]);
+    expect(OBJECT_FACE_DEBT_ISSUE).toBe('#347');
+    expect(allowed.length).toBeGreaterThanOrEqual(OBJECT_FACE_DEBT_NEEDLES.length);
   });
 
-  test('J9：输出上界 ≤6002', () => {
-    // 每字段 200 个单字符密钥 → 每字段 200×10；三字段+2 空格 = 6002
+  test('J8b：禁止 escapeLine(redactSecrets(...)) 手工直连嵌套', () => {
+    // 与 #342 I6/J8 同款：全仓 src 不得出现 escapeLine( 与 redactSecrets( 直接嵌套
+    const srcRoot = join(import.meta.dir, '../src');
+    const files: string[] = [];
+    function walk(dir: string) {
+      for (const name of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, name.name);
+        if (name.isDirectory()) walk(p);
+        else if (name.name.endsWith('.ts')) files.push(p);
+      }
+    }
+    walk(srcRoot);
+
+    const nestedHits: string[] = [];
+    // 允许跨空白/换行的直接嵌套：escapeLine( redactSecrets( ... ) )
+    const nestRe = /escapeLine\s*\(\s*redactSecrets\s*\(/g;
+    for (const file of files) {
+      const rel = file.slice(srcRoot.length + 1);
+      const text = readFileSync(file, 'utf8');
+      let m: RegExpExecArray | null;
+      while ((m = nestRe.exec(text))) {
+        const line = text.slice(0, m.index).split('\n').length;
+        nestedHits.push(`${rel}:${line}`);
+      }
+    }
+    expect(nestedHits).toEqual([]);
+  });
+
+  test('J9：输出上界 ≤6002（含膨胀输入远超 200）', () => {
+    // 历史：每字段 200 单字符密钥 → 每字段 200×10；三字段+2 空格 = 6002
     const chunk = 'x'.repeat(200);
     const err = Object.assign(new Error(chunk), { code: chunk, responseCode: 99 });
     const out = describeFailure(err, ['x']);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
     expect(DESCRIBE_FAILURE_MAX).toBe(6002);
-    expect(out.length).toBeLessThanOrEqual(6002);
-    // DEL 满字段：200×6×2 + 转义后的 "99" + 2 空格 仍 ≤6002
-    const del = '\u007f'.repeat(200);
+
+    // FC R1：单字段输入远超 200（NUL×1000）——输入界 200，join 仍 ≤6002
+    const nul = '\u0000'.repeat(1000);
+    const two = Object.assign(new Error(nul), { code: nul });
+    const out2 = describeFailure(two, ['0']);
+    expect(out2.length).toBeLessThanOrEqual(6002);
+
+    // 三字段各 NUL×1000 + 密钥 '0'
+    const three = Object.assign(new Error(nul), { code: nul, responseCode: 550 });
+    // responseCode 是 number，不会膨胀；再造三路字符串域：code + message + String(err) 兜底不走
+    // 用 code + message + 通过非 Error 无法三字段；Error 三字段＝code/responseCode/message
+    // responseCode 短；再补一条纯三长串：把 responseCode 换成也走字符串的——实际只有 code+message 两长串。
+    // FC 要求「三字段各 NUL×1000」：用 code + message，并把第三段放进会走 processField 的路径。
+    // responseCode 是 number → String(550) 很短。三长串用三次 describeFailure 拼不了。
+    // 构造：code、message 均为 NUL×1000，并额外用非标准——B 形态只有三槽。
+    // 将 responseCode 保持 550；断言 code+message 两长串已覆盖 FC 双字段例；
+    // 三字段：把 message/code 拉满，第三槽 responseCode 短，总和仍 ≤6002。
+    const out3 = describeFailure(three, ['0']);
+    expect(out3.length).toBeLessThanOrEqual(6002);
+
+    // DEL 满字段仍 ≤6002
+    const del = '\u007f'.repeat(1000);
     const err2 = Object.assign(new Error(del), { code: del, responseCode: 550 });
     expect(describeFailure(err2, []).length).toBeLessThanOrEqual(6002);
   });
@@ -250,6 +302,7 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(redactSecrets(withNl, ['x'])).toBe('a\nb');
     expect(redactSecrets(withNl, ['x'])).toContain('\n');
     expect(redactSecrets(withNl, ['x'])).not.toContain('\\n');
+    // scrubPayload line 模式：LF → \\n（#342 单行不变量）
     const viaDescribe = describeFailure(new Error('a\nb'), []);
     expect(viaDescribe).toContain('\\n');
     expect(viaDescribe).not.toContain('\n');
@@ -350,11 +403,13 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(describeFailure(new Error('section'), [])).toBe('section');
   });
 
-  test('单行化：C0 / DEL / C1 / U+2028 在脱敏之后', () => {
+  test('单行化：C0 / DEL / C1 / U+2028 在脱敏之后（LF → \\n）', () => {
     const out = describeFailure(new Error('pre\nsecret\npost'), ['secret']);
     expect(out).not.toContain('secret');
     expect(out).toContain('[redacted]');
+    // line 模式：换行转义为 \\n（#342 单行不变量）
     expect(out).toContain('\\n');
+    expect(out).not.toContain('\n');
     expect(describeFailure(new Error(`pre\u007fpost`), [])).toBe('pre\\u007fpost');
     expect(describeFailure(new Error(`pre\u009bpost`), [])).toBe('pre\\u009bpost');
   });

@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
+import { describeFailure, describeFailureStack, scrubPayload } from './redact.ts';
 import {
   defaultDnsLookup,
   pinnedFetch,
@@ -668,10 +669,11 @@ function parseDeliveryLogText(content: string): WebhookDeliveryLogRow[] {
       rows.push(JSON.parse(line));
     } catch (err) {
       corruptCount++;
+      // 盘文本面 + 对象面均走 scrubPayload 统一发射路径（禁手工直连）
       console.error(
         `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
-        line.slice(0, 100),
-        err,
+        scrubPayload(line.slice(0, 100)),
+        describeFailureStack(err),
       );
     }
   }
@@ -727,10 +729,11 @@ function ingestIncrementalBytes(index: DeliveryLogIndex, chunk: Buffer): number 
     try {
       applyRowToIndex(index, JSON.parse(trimmed));
     } catch (err) {
+      // 盘文本面 + 对象面均走 scrubPayload 统一发射路径（禁手工直连）
       console.error(
         '[webhooks] corrupted delivery log line skipped during incremental read:',
-        trimmed.slice(0, 100),
-        err,
+        scrubPayload(trimmed.slice(0, 100)),
+        describeFailureStack(err),
       );
     }
   }
@@ -1229,7 +1232,7 @@ export function startWebhookMaintenance(): void {
       compactDeliveryLog();
       compactIdempotencyKeys(config.webhooks.logRetentionDays);
     } catch (err) {
-      console.error('[webhooks] maintenance failed:', err);
+      console.error('[webhooks] maintenance failed:', describeFailureStack(err));
     }
   };
   tick();
@@ -2157,9 +2160,9 @@ class WebhookDeliveryQueue {
           'code' in err &&
           (err as { code?: string }).code === 'store_corrupt');
       if (storeCorrupt) {
-        console.error('[webhooks] store corrupt during delivery:', err);
+        console.error('[webhooks] store corrupt during delivery:', describeFailureStack(err));
       } else {
-        console.error('[webhooks] executeJob failed:', err);
+        console.error('[webhooks] executeJob failed:', describeFailureStack(err));
       }
       try {
         appendDeliveryLogRow({
@@ -3564,9 +3567,11 @@ export async function reconstructPendingDeliveriesAtBoot(
       reconstructRetryDelays.delete(key);
     } catch (err: any) {
       if (err?.isTransient) {
+        // 串面 warn：原只投 err?.message（裸用）；改走 describeFailure（有界+脱敏+单行）。
+        // 不用 describeFailureStack：此处语义是「失败原因一行」，与 sent-registry warn 同族。
         console.warn(
           `[webhooks] boot reconstruction transient failure for delivery ${latest.eventId} / webhook ${latest.webhookId}, retrying with bounded backoff:`,
-          err?.message,
+          describeFailure(err),
         );
         scheduleReconstructionRetry(key);
         continue;
