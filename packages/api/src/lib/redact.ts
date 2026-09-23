@@ -34,16 +34,23 @@ export function redactSecrets(text: string, secrets: string[] = configuredSecret
 /**
  * One-line description of a failure: SMTP/adapter code, response code and
  * message, with configured secrets scrubbed.
+ *
+ * 永不抛：病态 rejection（会抛 getter / revoked Proxy / 不可字符串化）⇒ `[unreadable]`。
+ * 正常输入行为与历史逐字节一致。
  */
 export function describeFailure(err: unknown, secrets?: string[]): string {
-  const e = (err ?? {}) as { message?: unknown; code?: unknown; responseCode?: unknown };
-  const parts = [
-    typeof e.code === 'string' ? e.code : undefined,
-    typeof e.responseCode === 'number' ? String(e.responseCode) : undefined,
-    typeof e.message === 'string' && e.message ? e.message : undefined,
-  ].filter((part): part is string => Boolean(part));
-  const line = parts.length > 0 ? parts.join(' ') : String(err);
-  return secrets ? redactSecrets(line, secrets) : redactSecrets(line);
+  try {
+    const e = (err ?? {}) as { message?: unknown; code?: unknown; responseCode?: unknown };
+    const parts = [
+      typeof e.code === 'string' ? e.code : undefined,
+      typeof e.responseCode === 'number' ? String(e.responseCode) : undefined,
+      typeof e.message === 'string' && e.message ? e.message : undefined,
+    ].filter((part): part is string => Boolean(part));
+    const line = parts.length > 0 ? parts.join(' ') : String(err);
+    return secrets ? redactSecrets(line, secrets) : redactSecrets(line);
+  } catch {
+    return '[unreadable]';
+  }
 }
 
 /** 单趟取前 n 个码点，不满则原样；不物化超量尾部 */

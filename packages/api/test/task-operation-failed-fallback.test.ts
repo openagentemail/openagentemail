@@ -365,7 +365,8 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     });
   });
 
-  // #340 R5.1：describeFailure 对会抛 getter 可能抛 —— warn 不得把 502 抬成 500
+  // #340 R5.1 / R6：病态 reject 不得把 renew/release 的 502 抬成 500
+  // （R6：describeFailure 本体永不抛；本仓 warn 走 describeFailureBounded，同样不得逸出）
   for (const row of [
     { name: 'lease' as const, path: 'lease', body: { leaseToken: 'opaque' }, tag: '[task] renew failed' },
     { name: 'release' as const, path: 'release', body: { leaseToken: 'opaque' }, tag: '[task] release failed' },
@@ -391,6 +392,30 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
           expect(hit).toBeTruthy();
           expect(typeof hit?.[1]).toBe('string');
           expect(String(hit?.[1]).length).toBeGreaterThan(0);
+        } finally {
+          warnSpy.mockRestore();
+        }
+      });
+    });
+
+    test(`POST /:id/${row.name} revoked Proxy ⇒ 仍 502，warn 不炸`, async () => {
+      await withTaskLeasesEnabledForTests(true, async () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        const warns: unknown[][] = [];
+        const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+          warns.push(args);
+        });
+        try {
+          const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+            async renew() { throw proxy; },
+            async release() { throw proxy; },
+          }));
+          const res = await postJson(app, `/v1/tasks/${ID}/${row.path}`, row.body);
+          expect(res.status).toBe(502);
+          expect(res.body).toEqual({ error: 'task_operation_failed' });
+          const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes(row.tag));
+          expect(hit).toBeTruthy();
         } finally {
           warnSpy.mockRestore();
         }

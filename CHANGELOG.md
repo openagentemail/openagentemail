@@ -6,6 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **API: `describeFailure` 永不抛** (#340 R6)：`lib/redact.ts` 本体包 try/catch，病态 rejection（会抛 getter / revoked Proxy / 不可字符串化）回落 `[unreadable]`；正常输入逐字节不变。`send.ts` 与其它调用点自动受益。**属内部日志面**。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: renew/release 兜底 warn 脱敏有界 + `errorDetail` 诊断收紧** (#340)：`POST /v1/tasks/:id/{lease,release}` 兜底 `console.warn` 走 `boundDetail(describeFailure(err))`（先脱敏再截断单行，与 `send.ts` 邮件栈约定一致）；`errorDetail` 对 duck `{message}` 保留可读载荷、控制/行分隔符转义为单行、单趟按码点截断（N=200）。**属内部日志/告警面**；`errorCode()` 语义不变。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 
