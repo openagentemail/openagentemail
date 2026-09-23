@@ -1159,3 +1159,26 @@ N/A。
 - focused：`/home/ops/materials/debt-batch-2/focused-20260923T053314Z.txt` sha256 `dcc88aa5eba06bf373f7a27ff303fa98f1482ad20354530c5fc9c7fdfa521ba3` → **77 pass / 0 fail**
 - 全量：`/home/ops/materials/debt-batch-2/full-suite-20260923T053322Z.txt` sha256 `58be28bf4bcc024eb2e115ddef0af462b6595aedc52bdaa69c0ff3e4b7975cc9` → **2240 pass / 9 skip / 0 fail**（基线 2235 + 本卡新增）
 - 独立自审：agent `eb06bfc2-aa25-4093-93e4-e3a19cb779bd` → **PASS**
+
+## 2026-09-23 · w340 R5（#341 修 Codex P1×3：脱敏/行分隔/单趟有界）
+
+### 我们实现了哪些功能？
+1. **P1-1**：`tasks.ts` renew/release warn 改为 `boundDetail(describeFailure(err))`（先脱敏再截断单行；与 `send.ts` 同约定）。不再把 `errorCode` 原文无界进日志。
+2. **P1-2**：`boundDetail` 转义 U+2028 / U+2029 / U+0085（及既有 C0/`\n\r\t`），输出无行分隔字符。
+3. **P1-3**：抽出导出 `boundDetail`：单趟边转义边按输出码点收集，满 N=200 即停；`errorDetail` 内部复用。不 `Array.from(整串)`、不先整串拼接。
+4. **测试**：C1 两处 warn 脱敏+单行+有界（夹具钉死 `config.smtp.pass`）；C2 U+2028 族；多兆（4MiB）有界+耗时落盘；既有断言未削弱；claim 503 守门不动。
+
+### 我们遇到了哪些错误？
+1. 全量首跑：C1 脱敏二测红——夹具用 `process.env.SMTP_PASS`，而套件内其它测试已 mutate `config.smtp.pass`（甚至为单字符 `x`），导致 `[redacted]` 来自误替换、明文 marker 仍在。
+2. 全量仍见 `#206` 墙钟超时 1 红（已知族债；本卡不销）。
+
+### 我们是如何解决这些错误的？
+1. 用例内钉死唯一 `config.smtp.pass` marker，finally 还原；不依赖 env 与共享 config 陈旧值。
+2. `#206` 如实报、不 rerun-to-green、不扩面。
+
+### 证据
+- R5 代码 commit：`b0d9c5b`
+- focused（修夹具后）：`/home/ops/materials/debt-batch-2/r5-focused-after-fix-20260923T055447Z.txt` sha256 `f1e808295cc7ea4fcc86e076787fc4686e77658060a17c2ca45bc75f3cb962ef` → 82 pass / 0 fail
+- 全量（修夹具后）：`r5-full-suite-after-fix-20260923T055447Z.txt` sha256 `a01f3137557f04426dabf9e1591157896609a5f80f1b804141120faa31383f6e` → **2244 pass / 9 skip / 1 fail**（唯 `#206` 墙钟）
+- 全量首跑红件保留：`r5-full-suite-20260923T055054Z.txt`（夹具污染，未覆盖）
+- mega 耗时：`[errorDetail mega] bytes=4194304 ms=0.377`（见全量日志）
