@@ -167,19 +167,34 @@ describe('scrubPayload · #350 A/B', () => {
   });
 
   test('A3：尾部全 a（自重叠口令）— 输出与耗时；R9 尾前缀不变量', () => {
+    // CR-3：与 A1 同法——先预热一次，再多轮取 median（禁冷单次比热单次，CI GC 可越线）。
+    // 构造：secret='a'×1024+'b'；长 text='a'×4096、短 text='a'×512；mode=block；limit=8204
+    // K=20：长度比 8×，理论近线性；×2.5 环境余量（与 A1 同量级）。
     const L = 1024;
     const sec = 'a'.repeat(L) + 'b';
-    const txt = 'a'.repeat(4096);
-    const t0 = performance.now();
-    const out = scrubPayload(txt, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
-    const ms = performance.now() - t0;
-    expect(out, `ms=${ms.toFixed(2)} out=${JSON.stringify(out.slice(0, 40))}`).toBe('');
-    const tShort0 = performance.now();
-    scrubPayload('a'.repeat(512), [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
-    const msShort = performance.now() - tShort0;
-    expect(ms, `ms=${ms.toFixed(2)} msShort=${msShort.toFixed(2)}`).toBeLessThanOrEqual(
-      20 * Math.max(msShort, 1e-6),
-    );
+    const txtLong = 'a'.repeat(4096);
+    const txtShort = 'a'.repeat(512);
+    // 预热（不计样）
+    scrubPayload(txtLong, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+    scrubPayload(txtShort, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+    const samplesLong: number[] = [];
+    const samplesShort: number[] = [];
+    let out = '';
+    for (let i = 0; i < 5; i++) {
+      const t0 = performance.now();
+      out = scrubPayload(txtLong, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+      samplesLong.push(performance.now() - t0);
+      const t1 = performance.now();
+      scrubPayload(txtShort, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+      samplesShort.push(performance.now() - t1);
+    }
+    const medLong = medianMs(samplesLong);
+    const medShort = medianMs(samplesShort);
+    const msg =
+      `medLong=${medLong.toFixed(2)} samplesLong=[${samplesLong.map((x) => x.toFixed(1)).join(',')}] ` +
+      `medShort=${medShort.toFixed(2)} samplesShort=[${samplesShort.map((x) => x.toFixed(1)).join(',')}] K=20`;
+    expect(out, msg).toBe('');
+    expect(medLong, msg).toBeLessThanOrEqual(20 * Math.max(medShort, 1e-6));
   });
 
   // —— B：单码元密钥的转义形态被红 + 不误伤 ——————————————
@@ -375,6 +390,26 @@ describe('scrubPayload · #350 A/B', () => {
     const out = describeFailure(err, [secret]);
     expect(out, `out=${JSON.stringify(out)}`).toBe('');
     expect(out).not.toContain(secret);
+  });
+
+  test('CR-2 正控①：join 拼出转义整钥 b\\n 族 ⇒ 回退空串', () => {
+    // secret=' b\n'；line 转义整钥=' b\\n'；code=' '→'' 仍入 parts；message='b\\n'
+    // join ⇒ ' b\\n'＝转义整钥；终检须用原文∪转义族（与 scrubPayload ⑦ 同形）
+    const secret = ' b\n';
+    const err = Object.assign(new Error('b\\n'), { code: ' ' });
+    const out = describeFailure(err, [secret]);
+    expect(out, `out=${JSON.stringify(out)}`).toBe('');
+    expect(out).not.toBe(' b\\n');
+  });
+
+  test('CR-2 正控②：join 拼出转义整钥 \\n 族 ⇒ 回退空串', () => {
+    // FC 确切：secret=' \n'；code=' '；message='\n'（真换行 → line 转义为 \\n）
+    // join ⇒ ' \\n'＝转义整钥 ⇒ 终检回退 ''
+    const secret = ' \n';
+    const err = Object.assign(new Error('\n'), { code: ' ' });
+    const out = describeFailure(err, [secret]);
+    expect(out, `out=${JSON.stringify(out)}`).toBe('');
+    expect(out).not.toBe(' \\n');
   });
 
   test('P3-1 负控：正常三字段不得被误回退', () => {

@@ -141,9 +141,13 @@ function buildTrie(secrets: string[]): TrieNode {
  * - 失配保序：失败链推进；超出 fail 后缀的前缀段从根消化，**后缀留在 held**（禁整段 rem 回灌）
  * - 域尾：先对已成匹配发 [redacted]，余部一律丢弃（J4，永不字面倾倒）
  *
- * 复杂度（#350 A）：建 trie+失败链 O(Σ|s|)；每码元摊还 O(1) 次转移/失败推进
- * （周期共振族：fail 后 skip>0 时只把 extras 从根消化并恢复后缀，不得 `prepend(extras||rem)`；
- *  自重叠族：skip==0 只沿 fail 推进）⇒ 总时间 O(n + Σ|s|)。
+ * 复杂度（#350 A，事实声明，非无条件上界）：
+ * - 建 trie+失败链 O(Σ|s|)；无「一钥为另一钥前缀」时，每码元摊还 O(1) ⇒ **O(n + Σ|s|)**
+ *   （周期共振 / 自重叠等已线性化族走 fail 快路径或 skip==0 推进）。
+ * - 「一钥为另一钥前缀」族（例 secrets `['ab','ab'×k]` + text `'ab'×4095+'c'`，block/8204）
+ *   当前仍为 **Θ(n·L)**（已知性能债，独立 issue 由 FC 开）：
+ *   本实现 k=512/1024/4096 ⇒ 20.6 / 54.5 / 712.6 ms；
+ *   同构造基线 `ec3a871f` ⇒ 40.3 / 111.3 / 1536.2 ms（**非回退**，本实现约 2× 快，但未线性）。
  */
 export function redactField(text: string, secrets: string[]): string {
   const filtered = secrets.filter(Boolean);
@@ -893,9 +897,11 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
 
     // J1：join 在脱敏之后；禁止跨字段匹配
     const joined = parts.join(' ');
-    // #350 ZCode P3-1：join 后整串终检（与单字段 scrubPayload ⑦ 同形）
-    // 密钥族＝传入 processField 的同一 secretList；命中 ⇒ 空串（R4 既有 fallback 族，不新造文案）
-    if (containsAnySecret(joined, secretList)) return '';
+    // #350 ZCode P3-1 / CR-2：join 后终检与 scrubPayload ⑦ **同形**——密钥族＝原文 ∪ line 转义整钥
+    // （describeFailure 字段走 scrubLinePayload）；一次性构造，勿每字段重算；命中 ⇒ ''（R4 族）
+    const joinPreps = prepareSecretEscapePreps(secretList, 'line');
+    const joinSecrets = secretsForPostEscape(secretList, joinPreps);
+    if (containsAnySecret(joined, joinSecrets)) return '';
     return joined;
   } catch {
     // 极端兜底：整条流水线不得逸出
