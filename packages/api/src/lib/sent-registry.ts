@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { config } from './config.ts';
+import { describeFailure } from './redact.ts';
 
 /** FIFO 上限：超出则淘汰最旧记录。 */
 export const SENT_REGISTRY_MAX_ENTRIES = 20_000;
@@ -161,10 +162,8 @@ function loadFromDisk(): void {
     prune(Date.now());
   } catch (err) {
     // 判不可信：空 registry。抛错会击穿 Inbox/详情整条读路径。
-    console.warn(
-      '[sent-registry] corrupt, treating as empty:',
-      err instanceof Error ? err.message : String(err),
-    );
+    // 日志载荷走唯一入口（有界+脱敏+单行）；与 :198/:228 同族
+    console.warn('[sent-registry] corrupt, treating as empty:', describeFailure(err));
     quarantineCorrupt(path);
     adoptEmptyRegistry();
   }
@@ -195,7 +194,7 @@ function persist(): void {
     }
   } catch (err) {
     // 写盘失败不得抛给 sendMail：SMTP 已接受时抛错会 502 → 调用方重试 → 重复外发。
-    console.warn('[sent-registry] persist failed:', err instanceof Error ? err.message : String(err));
+    console.warn('[sent-registry] persist failed:', describeFailure(err));
   }
 }
 
@@ -225,7 +224,7 @@ export function recordSentMessageIdAfterSend(rawId: string, from: string): void 
   try {
     recordSentMessageId(rawId, from);
   } catch (err) {
-    console.warn('[sent-registry] record after send failed:', err instanceof Error ? err.message : String(err));
+    console.warn('[sent-registry] record after send failed:', describeFailure(err));
   }
 }
 

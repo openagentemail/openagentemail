@@ -6,6 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **API: 日志/告警载荷面统一为 `describeFailure`（单趟流式脱敏 + 逐字段先有界）** (#342)：`errorDetail` 并入并删除；`code`/`responseCode`/`message`/`String(err)` 兜底各先截 200 → join → 单趟多密钥脱敏 → C0/U+0085/U+2028/U+2029 单行转义；永不抛。调用点含原 `errorDetail` 11 处、`send.ts`、`sent-registry` 字符串告警。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**（本卡只动日志与告警载荷面）。对象面 `console.error(..., err)` 6 处记债 #344。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 
 ### Changed

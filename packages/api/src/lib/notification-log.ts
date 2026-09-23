@@ -26,7 +26,7 @@ import {
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { config } from './config.ts';
-import { errorDetail } from './errors.ts';
+import { describeFailure } from './redact.ts';
 
 /** 保留窗口：30 天。查询与清理共用，避免定时任务延迟泄漏过期行。 */
 export const NOTIFICATION_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -424,7 +424,7 @@ function inspectAndRepairSync(): NotificationLogRecord[] {
       }
     } catch (err) {
       notificationLogHealthAlert('partial_isolate_failed', {
-        error: errorDetail(err),
+        error: describeFailure(err),
       });
       // sidecar 未持久成功：中止 repair，原文件一字不动，绝不丢掉尾行。
       throw err;
@@ -876,7 +876,7 @@ export function startNotificationLogMaintenance(): void {
       }
     } catch (err) {
       if (!(err instanceof NotificationLogCorruptError)) {
-        notificationLogHealthAlert('compact_failed', { error: errorDetail(err) });
+        notificationLogHealthAlert('compact_failed', { error: describeFailure(err) });
       }
     }
   };

@@ -1,10 +1,23 @@
 /**
- * errorCode / errorDetail 单测。
- * - errorCode：非 Error rejection 归一化哨兵语义（路由映射用）
- * - errorDetail：日志/告警载荷诊断文本（永不空类型标记 / 永不抛）
+ * errorCode / describeFailure（原 errorDetail 契约迁入 redact.ts）单测。
+ * - errorCode：非 Error rejection 归一化哨兵语义（路由映射用）——一字不动
+ * - describeFailure：日志/告警载荷（类型化标记 / 有界 / 脱敏 / 单行 / 永不抛）
  */
 import { describe, expect, test } from 'bun:test';
-import { errorCode, errorDetail } from '../src/lib/errors.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+process.env.DOMAIN = 'test.example';
+process.env.API_KEYS = 'admin-key';
+process.env.IMAP_USER = 'agent@test.example';
+process.env.IMAP_PASS = 'imap-secret';
+process.env.SMTP_USER = 'agent@test.example';
+process.env.SMTP_PASS = 'smtp-secret';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-errors-'));
+
+const { errorCode } = await import('../src/lib/errors.ts');
+const { describeFailure } = await import('../src/lib/redact.ts');
 
 describe('errorCode', () => {
   test('Error(\'x\') ⇒ \'x\'', () => {
@@ -17,6 +30,7 @@ describe('errorCode', () => {
 
   test('带字符串 message 的 duck 对象 ⇒ 取其 message', () => {
     expect(errorCode({ message: 'duck' })).toBe('duck');
+    expect(errorCode({ message: 1 })).toBe('');
   });
 
   // 非 Error / 无字符串 message → 哨兵 ''；且不得抛任何异常
@@ -54,9 +68,10 @@ describe('errorCode', () => {
   });
 });
 
-describe('errorDetail', () => {
+describe('describeFailure（承接原 errorDetail 契约）', () => {
+  // 传 [] 避免配置密码误伤断言
   test('Error(\'x\') ⇒ \'x\'', () => {
-    expect(errorDetail(new Error('x'))).toBe('x');
+    expect(describeFailure(new Error('x'), [])).toBe('x');
   });
 
   test('undefined / null / 42 / {} / \'str\' ⇒ 各自类型化文本且非空', () => {
@@ -68,8 +83,8 @@ describe('errorDetail', () => {
       { input: 'str', includes: 'non-error:string' },
     ];
     for (const { input, includes } of cases) {
-      expect(() => errorDetail(input)).not.toThrow();
-      const out = errorDetail(input);
+      expect(() => describeFailure(input, [])).not.toThrow();
+      const out = describeFailure(input, []);
       expect(out.length).toBeGreaterThan(0);
       expect(out).toContain(includes);
     }
@@ -77,34 +92,33 @@ describe('errorDetail', () => {
 
   test('会抛的 message getter（Error 实例）⇒ [unreadable] 且不抛', () => {
     const err = new Error('x');
-    // 覆盖实例 message 为会抛 getter（构造器写入的 data 属性会挡住原型 getter）
     Object.defineProperty(err, 'message', {
       configurable: true,
       get() {
         throw new Error('boom');
       },
     });
-    expect(() => errorDetail(err)).not.toThrow();
-    expect(errorDetail(err)).toBe('[unreadable]');
+    expect(() => describeFailure(err, [])).not.toThrow();
+    expect(describeFailure(err, [])).toBe('[unreadable]');
   });
 
   test('revoked Proxy ⇒ [unreadable] 且不抛', () => {
     const { proxy, revoke } = Proxy.revocable({}, {});
     revoke();
-    expect(() => errorDetail(proxy)).not.toThrow();
-    expect(errorDetail(proxy)).toBe('[unreadable]');
+    expect(() => describeFailure(proxy, [])).not.toThrow();
+    expect(describeFailure(proxy, [])).toBe('[unreadable]');
   });
 
   test('超长 Error.message 截断到 200', () => {
     const long = 'a'.repeat(500);
-    const out = errorDetail(new Error(long));
+    const out = describeFailure(new Error(long), []);
     expect(out.length).toBe(200);
     expect(out).toBe('a'.repeat(200));
   });
 
   test('超长非 Error 字符串截断到 200', () => {
     const long = 'b'.repeat(500);
-    const out = errorDetail(long);
+    const out = describeFailure(long, []);
     expect(out.length).toBe(200);
     expect(out.startsWith('[non-error:string:')).toBe(true);
   });

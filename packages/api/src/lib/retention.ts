@@ -7,7 +7,7 @@
 
 import { config } from './config.ts';
 import { deleteMessagesBefore } from './imap.ts';
-import { errorDetail } from './errors.ts';
+import { describeFailure } from './redact.ts';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -39,7 +39,7 @@ export function startRetentionLoop(): void {
     try {
       await sweepOnce();
     } catch (err) {
-      console.warn('[retention] sweep failed:', errorDetail(err));
+      console.warn('[retention] sweep failed:', describeFailure(err));
     }
   };
 
