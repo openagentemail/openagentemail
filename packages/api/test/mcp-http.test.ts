@@ -1029,3 +1029,45 @@ describe('MCP registered task handlers execute through the production HTTP trans
     });
   });
 });
+
+
+/** #324：mail_send inputSchema.strict()——未知键工具报错且不发信 */
+describe('MCP mail_send 未知键拒绝（#324）', () => {
+  test('tools/list 广告 mail_send additionalProperties:false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; inputSchema?: { additionalProperties?: boolean } }> };
+    };
+    const tool = body.result?.tools?.find((t) => t.name === 'mail_send');
+    expect(tool, 'missing mail_send').toBeTruthy();
+    expect(tool?.inputSchema?.additionalProperties).toBe(false);
+  });
+
+  test('mail_send 带 attachments → 工具报错且信件不发出', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp-strict-att' })!;
+    const res = await mcpRequest(token, 'tools/call', {
+      name: 'mail_send',
+      arguments: {
+        from: identity.address,
+        to: 'recipient@example.net',
+        subject: 'hello',
+        text: 'body',
+        attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', encoding: 'base64' }],
+      },
+    });
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> };
+    };
+    const text = JSON.stringify(body);
+    // SDK 校验失败：JSON-RPC error 或 isError；绝非 queued 成功
+    expect(body.error || body.result?.isError).toBeTruthy();
+    expect(body.result?.structuredContent?.queued).toBeUndefined();
+    expect(text).not.toContain('"queued":true');
+    // 须为输入校验失败，而非静默剥键后走到 SMTP
+    expect(text).not.toMatch(/smtp_error/i);
+    expect(/unrecognized|invalid (input|argument)|-32602|attachments/i.test(text)).toBe(true);
+  });
+});

@@ -203,3 +203,104 @@ describe('出站登记 sent registry', () => {
     });
   });
 });
+
+/** #324：sendSchema.strict()——未知键显式 400，合法五键行为不变 */
+describe('POST /v1/send 未知键拒绝（#324）', () => {
+  /** 断言 400 invalid_request 且 details 含 unrecognized_keys 点名给定键 */
+  function expectUnrecognizedKeys(
+    body: { error?: string; details?: Array<{ code?: string; keys?: string[] }> },
+    key: string,
+  ) {
+    expect(body.error).toBe('invalid_request');
+    const issue = body.details?.find((d) => d.code === 'unrecognized_keys');
+    expect(issue).toBeTruthy();
+    expect(issue?.keys).toContain(key);
+  }
+
+  test('attachments（Base64 content 形态）→ 400 unrecognized_keys', async () => {
+    createIdentity({ localpart: 'strict-att-b64' });
+    resetRateLimits();
+    sendMail.mockClear();
+    const response = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: 'strict-att-b64@test.example',
+        to: 'recipient@example.net',
+        subject: 'hello',
+        text: 'body',
+        attachments: [{ filename: 'a.txt', content: 'aGVsbG8=', encoding: 'base64' }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    expectUnrecognizedKeys(await response.json(), 'attachments');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  test('attachments（url 形态）→ 400 unrecognized_keys', async () => {
+    createIdentity({ localpart: 'strict-att-url' });
+    resetRateLimits();
+    sendMail.mockClear();
+    const response = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: 'strict-att-url@test.example',
+        to: 'recipient@example.net',
+        subject: 'hello',
+        text: 'body',
+        attachments: [{ filename: 'a.txt', url: 'https://example.com/a.txt' }],
+      }),
+    });
+    expect(response.status).toBe(400);
+    expectUnrecognizedKeys(await response.json(), 'attachments');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  test('拼错字段 subjct → 400 unrecognized_keys（同族）', async () => {
+    createIdentity({ localpart: 'strict-typo' });
+    resetRateLimits();
+    sendMail.mockClear();
+    const response = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: 'strict-typo@test.example',
+        to: 'recipient@example.net',
+        subjct: 'hello',
+        text: 'body',
+      }),
+    });
+    expect(response.status).toBe(400);
+    expectUnrecognizedKeys(await response.json(), 'subjct');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  test('合法五键件 → 200 queued 行为不变', async () => {
+    resetSentRegistryForTests();
+    resetRateLimits();
+    createIdentity({ localpart: 'strict-ok' });
+    sendMail.mockClear();
+    sendMail.mockImplementation(async () => ({ messageId: '<strict-ok@test.example>' }));
+    const response = await app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from: 'strict-ok@test.example',
+        to: 'recipient@example.net',
+        subject: 'hello',
+        text: 'body',
+        html: '<p>body</p>',
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      queued: true,
+      messageId: '<strict-ok@test.example>',
+    });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
+  });
+});

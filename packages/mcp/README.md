@@ -92,7 +92,7 @@ this table is the human reference rather than a second protocol implementation.
 | `mail_read_message(address, id)` | Message body, OTP codes/links and source classification; `id` is the message UID, not a task UUID |
 | `mail_mark_seen(address, id, seen?)` | Mark read/unread for all mailbox consumers; prefer consumer-specific REST `?since=` cursors for independent progress; reading itself never changes Seen |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Wait for a matching unread message; requested total defaults to 120s, schema max 600s; see server-segment limits below |
-| `mail_send(from, to, subject, text, html?)` | Send as a permitted existing identity; SMTP queued/accepted does not mean delivered |
+| `mail_send(from, to, subject, text, html?)` | Send as a permitted existing identity; SMTP queued/accepted does not mean delivered; unknown keys → 400 `invalid_request` (`unrecognized_keys`) |
 
 ### Tasks and approvals
 
