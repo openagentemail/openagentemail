@@ -154,4 +154,42 @@ describe('scrubPayload · #350 A/B', () => {
     expect(out.endsWith('\\')).toBe(false);
     expect(out).toBe('body');
   });
+
+  // —— ZCode P3-1：describeFailure join 后整串终检 ——————————
+
+  test('P3-1 正控：join 跨字段拼出完整密钥 ⇒ 回退空串（R4 族）', () => {
+    // 构造（可达）：密钥以空格开头「 b」；code=' ' 为真前缀 ⇒ 单字段尾削成 ''；
+    // message='b' 自身不成完整钥；join(' ') ⇒ ' b'＝完整密钥 ⇒ 终检命中。
+    // （经典「ESE cret」在 R2 尾削下 join 结果为「 cret」≠密钥，故另选此前缀形态。）
+    const secret = ' b';
+    const err = Object.assign(new Error('b'), { code: ' ' });
+    const out = describeFailure(err, [secret]);
+    expect(out, `out=${JSON.stringify(out)}`).toBe('');
+    expect(out).not.toContain(secret);
+  });
+
+  test('P3-1 负控：正常三字段不得被误回退', () => {
+    const err = Object.assign(new Error('boom-message-ok'), {
+      code: 'ECONNRESET',
+      responseCode: 550,
+    });
+    const out = describeFailure(err, ['unrelated-secret-xyz']);
+    expect(out).toContain('ECONNRESET');
+    expect(out).toContain('550');
+    expect(out).toContain('boom-message-ok');
+    expect(out).not.toBe('');
+    expect(out).not.toBe('[unreadable]');
+  });
+
+  test('P3-1 负控：长 message 有界且不误回退', () => {
+    const err = Object.assign(new Error('m'.repeat(500)), {
+      code: 'c'.repeat(50),
+      responseCode: 421,
+    });
+    const out = describeFailure(err, ['no-match-secret']);
+    expect(out.length).toBeGreaterThan(0);
+    expect(out).not.toBe('');
+    expect(out).toContain('421');
+    expect(out.length).toBeLessThanOrEqual(6002);
+  });
 });

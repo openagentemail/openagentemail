@@ -821,7 +821,11 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
     }
 
     // J1：join 在脱敏之后；禁止跨字段匹配
-    return parts.join(' ');
+    const joined = parts.join(' ');
+    // #350 ZCode P3-1：join 后整串终检（与单字段 scrubPayload ⑦ 同形）
+    // 密钥族＝传入 processField 的同一 secretList；命中 ⇒ 空串（R4 既有 fallback 族，不新造文案）
+    if (containsAnySecret(joined, secretList)) return '';
+    return joined;
   } catch {
     // 极端兜底：整条流水线不得逸出
     return '[unreadable]';
