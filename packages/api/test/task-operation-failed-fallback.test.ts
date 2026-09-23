@@ -295,6 +295,33 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     });
   }
 
+  // #340 R5.2：有界脱敏 —— 多兆 message 不得 O(n) 拖垮 warn 路径
+  test('POST /:id/lease 多兆 message ⇒ warn 有界且快', async () => {
+    await withTaskLeasesEnabledForTests(true, async () => {
+      const mega = 'm'.repeat(3 * 1024 * 1024);
+      const warns: unknown[][] = [];
+      const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warns.push(args);
+      });
+      try {
+        const t0 = performance.now();
+        const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+          async renew() { throw new Error(mega); },
+        }));
+        const res = await postJson(app, `/v1/tasks/${ID}/lease`, { leaseToken: 'opaque' });
+        const ms = performance.now() - t0;
+        expect(res.status).toBe(502);
+        const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('[task] renew failed'));
+        expect(hit).toBeTruthy();
+        expect(Array.from(String(hit?.[1] ?? '')).length).toBeLessThanOrEqual(200);
+        console.log(`[lease warn mega] bytes=${mega.length} ms=${ms.toFixed(3)}`);
+        expect(ms).toBeLessThan(2000);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
   // #340 R5.1：describeFailure 对会抛 getter 可能抛 —— warn 不得把 502 抬成 500
   for (const row of [
     { name: 'lease' as const, path: 'lease', body: { leaseToken: 'opaque' }, tag: '[task] renew failed' },

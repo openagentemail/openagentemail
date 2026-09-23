@@ -183,4 +183,16 @@ describe('errorDetail', () => {
     expect(() => boundDetail(mega)).not.toThrow();
     expect(Array.from(boundDetail(mega)).length).toBe(ERROR_DETAIL_MAX);
   });
+
+  test('duck 超长 message ⇒ 有界、不物化全串拼接', () => {
+    const mega = 'z'.repeat(3 * 1024 * 1024);
+    const t0 = performance.now();
+    expect(() => errorDetail({ message: mega })).not.toThrow();
+    const out = errorDetail({ message: mega });
+    const ms = performance.now() - t0;
+    expect(out.startsWith('[non-error:object:')).toBe(true);
+    expect(Array.from(out).length).toBe(ERROR_DETAIL_MAX);
+    console.log(`[errorDetail duck-mega] bytes=${mega.length} ms=${ms.toFixed(3)}`);
+    expect(ms).toBeLessThan(500);
+  });
 });

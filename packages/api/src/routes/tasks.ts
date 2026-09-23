@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
 import { boundDetail, errorCode } from '../lib/errors.ts';
-import { describeFailure } from '../lib/redact.ts';
+import { describeFailureBounded } from '../lib/redact.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
@@ -114,13 +114,12 @@ function journalUnavailable(c: Context, err: unknown): Response | null {
 }
 
 /**
- * 租约兜底 warn 载荷：先脱敏再有界单行。
- * describeFailure 对会抛 getter / revoked Proxy 可能抛——必须吞掉，
- * 不得打断外层 catch 的 502 task_operation_failed 契约。
+ * 租约兜底 warn 载荷：有界脱敏（describeFailureBounded）再 boundDetail 单行。
+ * 永不抛——不得打断外层 catch 的 502 task_operation_failed 契约。
  */
 function taskFailureLogDetail(err: unknown): string {
   try {
-    return boundDetail(describeFailure(err));
+    return boundDetail(describeFailureBounded(err));
   } catch {
     return '[unreadable]';
   }

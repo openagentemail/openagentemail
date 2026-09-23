@@ -45,3 +45,61 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
   const line = parts.length > 0 ? parts.join(' ') : String(err);
   return secrets ? redactSecrets(line, secrets) : redactSecrets(line);
 }
+
+/** 单趟取前 n 个码点，不满则原样；不物化超量尾部 */
+function takeCodePoints(text: string, n: number): string {
+  if (n <= 0) return '';
+  let out = '';
+  let c = 0;
+  for (const ch of text) {
+    if (c >= n) break;
+    out += ch;
+    c += 1;
+  }
+  return out;
+}
+
+/**
+ * 日志专用：在脱敏前先按码点截取 message 前缀（预算 = maxMessagePts + 最长密钥），
+ * 保证多兆适配器 message 下内存/时间有界；**仍先脱敏再交给调用方 boundDetail**。
+ * 不改变 `describeFailure` 既有语义；本函数永不抛。
+ */
+export function describeFailureBounded(
+  err: unknown,
+  maxMessagePts = 400,
+  secrets?: string[],
+): string {
+  try {
+    const secs = secrets ?? configuredSecrets();
+    const maxSecretLen = secs.reduce((m, s) => Math.max(m, s ? s.length : 0), 0);
+    const budget = Math.max(0, maxMessagePts) + maxSecretLen;
+    const e = (err ?? {}) as { message?: unknown; code?: unknown; responseCode?: unknown };
+    let code: string | undefined;
+    let responseCode: string | undefined;
+    let message: string | undefined;
+    try {
+      if (typeof e.code === 'string') code = e.code;
+    } catch { /* ignore */ }
+    try {
+      if (typeof e.responseCode === 'number') responseCode = String(e.responseCode);
+    } catch { /* ignore */ }
+    try {
+      const raw = e.message;
+      if (typeof raw === 'string' && raw) message = takeCodePoints(raw, budget);
+    } catch { /* ignore */ }
+    const parts = [code, responseCode, message].filter((p): p is string => Boolean(p));
+    let line: string;
+    if (parts.length > 0) {
+      line = parts.join(' ');
+    } else {
+      try {
+        line = takeCodePoints(String(err), budget);
+      } catch {
+        return '[unreadable]';
+      }
+    }
+    return redactSecrets(line, secs);
+  } catch {
+    return '[unreadable]';
+  }
+}

@@ -22,6 +22,19 @@ export function errorCode(err: unknown): string {
 /** 日志/告警载荷诊断文本截断上限（输出码点） */
 export const ERROR_DETAIL_MAX = 200;
 
+/** 单趟取前 n 个码点；不物化超量尾部 */
+function takeCodePoints(text: string, n: number): string {
+  if (n <= 0) return '';
+  let out = '';
+  let c = 0;
+  for (const ch of text) {
+    if (c >= n) break;
+    out += ch;
+    c += 1;
+  }
+  return out;
+}
+
 /**
  * 单趟有界化：边遍历边转义控制/行分隔符，收集满 N 个**输出**码点即停。
  *
@@ -29,7 +42,7 @@ export const ERROR_DETAIL_MAX = 200;
  * - `\n`/`\r`/`\t` → `\\n`/`\\r`/`\\t`；其余 C0、U+0085、U+2028、U+2029 → `\\uXXXX`
  * - **永不抛**（取值/遍历异常 ⇒ `[unreadable]`）
  *
- * 供 `errorDetail` 与路由 warn（先 `describeFailure` 脱敏后再调用）复用。
+ * 供 `errorDetail` 与路由 warn（先有界脱敏后再调用）复用。
  */
 export function boundDetail(text: string, max: number = ERROR_DETAIL_MAX): string {
   try {
@@ -64,7 +77,7 @@ export function boundDetail(text: string, max: number = ERROR_DETAIL_MAX): strin
  * 日志/告警载荷用：从未知值安全取出可诊断文本。
  *
  * - `Error` ⇒ `.message`（转义控制符后截断至 200 码点）
- * - duck 对象带字符串 `message` ⇒ `[non-error:object:<msg>]`（来源可辨）
+ * - duck 对象带字符串 `message` ⇒ `[non-error:object:<msg>]`（来源可辨；msg 先有界再拼接）
  * - 其它非 Error ⇒ 类型化文本（如 `[non-error:undefined]`），永不空
  * - 取值失败（会抛的 message getter / revoked Proxy）⇒ `[unreadable]`
  * - **永不抛异常**（与 `errorCode` 不同：本函数只供日志/告警，不参与路由映射）
@@ -83,17 +96,18 @@ export function errorDetail(err: unknown): string {
     if (err === undefined) return '[non-error:undefined]';
     if (err === null) return '[non-error:null]';
     const t = typeof err;
-    if (t === 'string') return boundDetail(`[non-error:string:${err}]`);
+    // 嵌入正文前先 takeCodePoints，避免模板插值物化多兆串
+    if (t === 'string') return boundDetail(`[non-error:string:${takeCodePoints(err, ERROR_DETAIL_MAX)}]`);
     if (t === 'number') return boundDetail(`[non-error:number:${err}]`);
     if (t === 'boolean') return `[non-error:boolean:${err}]`;
     if (t === 'bigint') return boundDetail(`[non-error:bigint:${err}]`);
-    if (t === 'symbol') return boundDetail(`[non-error:symbol:${String(err)}]`);
+    if (t === 'symbol') return boundDetail(`[non-error:symbol:${takeCodePoints(String(err), ERROR_DETAIL_MAX)}]`);
     if (t === 'function') return '[non-error:function]';
     // object：在类型化回退之前先读字符串 message（与 errorCode 同款守卫）
     try {
       const raw = (err as { message?: unknown } | null | undefined)?.message;
       if (typeof raw === 'string') {
-        return boundDetail(`[non-error:object:${raw}]`);
+        return boundDetail(`[non-error:object:${takeCodePoints(raw, ERROR_DETAIL_MAX)}]`);
       }
     } catch {
       // 取值失败仍回退类型文本（不升为 [unreadable]——外层仍可辨为 object）
