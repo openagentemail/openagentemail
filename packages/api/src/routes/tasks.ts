@@ -380,6 +380,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
+        // 服务层 assertTaskLeasesEnabled 同码：与路由入口守卫逐字节对齐为 409
+        if (code === 'task_leases_disabled') return c.json({ error: 'task_leases_disabled' }, 409);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'task_operation_failed' }, 502);
@@ -419,6 +421,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
+        // 服务层 assertTaskLeasesEnabled 同码：与路由入口守卫逐字节对齐为 409
+        if (code === 'task_leases_disabled') return c.json({ error: 'task_leases_disabled' }, 409);
         // lease_already_released 为不可达死映射：core 对已释放 lease 发 stale_lease（错 token/reason）或 200 幂等成功。
         if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
@@ -461,6 +465,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_recipient_required') return c.json({ error: 'forbidden: task recipient required' }, 403);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds' || code === 'invalid_request') return c.json({ error: 'invalid_request' }, 400);
+        // 服务层 assertTaskLeasesEnabled 同码：与路由入口守卫逐字节对齐为 409
+        if (code === 'task_leases_disabled') return c.json({ error: 'task_leases_disabled' }, 409);
         // 同上：不映射 core 不会发出的 lease_already_released。
         if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
@@ -487,6 +493,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         const code = errorCode(err);
         if (code === 'not_found') return c.json({ error: 'not_found' }, 404);
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
+        // 服务层 assertTaskLeasesEnabled 同码：与路由入口守卫逐字节对齐为 409
+        if (code === 'task_leases_disabled') return c.json({ error: 'task_leases_disabled' }, 409);
         if (
           code === 'task_not_claimable'
           || code === 'lease_claim_lost_too_early'
@@ -544,6 +552,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'task_expired' || code === 'task_already_decided' || code === 'not_approval_task') {
           return c.json({ error: code }, 409);
         }
+        // decision 载荷与存档审批记录不一致：冲突族，回显域码 409（非格式错）
+        if (code === 'invalid_approval_decision_event') return c.json({ error: 'invalid_approval_decision_event' }, 409);
         console.warn('[task] decision failed:', code);
         return c.json({ error: 'task_operation_failed' }, 502);
       }
