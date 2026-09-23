@@ -1397,3 +1397,23 @@ N/A。
 
 ### 证据
 - focused/full-fc-r9 留件与 `evidence/fc-r9-measured.json`
+
+## 2026-09-23 · w348 FC R10（伸缩性判据 + 增量自动机 + block 上限优先）
+
+### 我们实现了哪些功能？
+1. P1：性能断言改两档中位数伸缩性（t16k≤8·t4k，t4k<500ms），去掉绝对 50ms。
+2. P2-1：`redactField` 携带当前 trie 节点，feed O(1)；总 O(n+Σ|s|)。
+3. P2-2：`limit < |MARK|` 时省略标记，输出恒 ≤ limit；`limit≥|MARK|` 仍可挂完整标记。
+
+### 我们遇到了哪些错误？
+1. 绝对墙钟在慢 CI flaky（指令侧问题，改判据）。
+2. 长口令+长 stack 仍 O(n·L)（每码元重走 pending）。
+3. block 小 limit 无条件追加 MARK 越界。
+
+### 我们是如何解决这些错误的？
+1. 性质判据（伸缩性）替代墙钟阈值。
+2. 增量自动机状态与 pending 同步复位。
+3. markFits 门控；装不下则省略标记并硬切。
+
+### 证据
+- focused/full-fc-r10 与 `evidence/fc-r10-measured.json`

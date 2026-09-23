@@ -83,28 +83,14 @@ function buildTrie(secrets: string[]): TrieNode {
   return root;
 }
 
-/** 从根走 pending；不可达返回 null。maxEnd=路径上最长终点；canExtend=仍有子边 */
-function walkTrie(
-  root: TrieNode,
-  pending: string[],
-): { maxEnd: number; canExtend: boolean } | null {
-  let node = root;
-  let maxEnd = 0;
-  for (const ch of pending) {
-    const next = node.children.get(ch);
-    if (!next) return null;
-    node = next;
-    if (node.endLen > maxEnd) maxEnd = node.endLen;
-  }
-  return { maxEnd, canExtend: node.children.size > 0 };
-}
-
 /**
  * 域原语：单字段匹配域内脱敏（J3+J4+J5）。
  * - 最长密钥优先 + hold
  * - 重放保序（队首插入，J5）
  * - 域尾：先对已成匹配发 [redacted]，余部一律丢弃（J4，永不字面倾倒）
- * |pending| ≤ L_max+1：再长必不可达 → resolveFailure 收缩；每次再 feed 前缓冲严格变短。
+ *
+ * 复杂度（R10）：携带当前 trie 节点，每码元转移 O(1)；失败回放使每码元摊还
+ * O(1) 次再入队 ⇒ 总时间 O(n + Σ|s|)（含建 trie），**不再**每码元从根重走 pending（原 O(n·L)）。
  */
 export function redactField(text: string, secrets: string[]): string {
   const filtered = secrets.filter(Boolean);
@@ -114,14 +100,21 @@ export function redactField(text: string, secrets: string[]): string {
 
   let pending: string[] = [];
   let matchedEnd = 0;
+  /** 当前自动机状态（pending 路径终点）；与 pending 同步复位 */
+  let node: TrieNode = root;
   const out: string[] = [];
   const queue: string[] = [];
 
+  function resetAutomaton(): void {
+    pending = [];
+    matchedEnd = 0;
+    node = root;
+  }
+
   function resolveFailure(extraChars: string[]): void {
     const body = pending;
-    pending = [];
     const L = matchedEnd;
-    matchedEnd = 0;
+    resetAutomaton();
     // J5：回放块插到队首，保证原文更早字符先于队列残余
     const prependReplay = (chars: string[]) => {
       if (chars.length === 0) return;
@@ -140,23 +133,22 @@ export function redactField(text: string, secrets: string[]): string {
   }
 
   function feed(ch: string): void {
-    pending.push(ch);
-    const walked = walkTrie(root, pending);
-    if (!walked) {
-      pending.pop();
+    const next = node.children.get(ch);
+    if (!next) {
       resolveFailure([ch]);
       return;
     }
-    matchedEnd = walked.maxEnd;
+    pending.push(ch);
+    node = next;
+    if (node.endLen > matchedEnd) matchedEnd = node.endLen;
     // hold：已完成短钥但仍是更长钥真前缀
-    if (matchedEnd > 0 && walked.canExtend) return;
+    if (matchedEnd > 0 && node.children.size > 0) return;
     if (matchedEnd > 0) {
       out.push(REDACTED);
-      pending = [];
-      matchedEnd = 0;
+      resetAutomaton();
       return;
     }
-    // 仅真前缀：继续攒（|pending| ≤ L_max；再长必不可达）
+    // 仅真前缀：继续攒
   }
 
   function drainQueue(): void {
@@ -174,8 +166,7 @@ export function redactField(text: string, secrets: string[]): string {
   if (matchedEnd > 0) {
     out.push(REDACTED);
   }
-  pending = [];
-  matchedEnd = 0;
+  resetAutomaton();
 
   return out.join('');
 }
@@ -492,8 +483,9 @@ export function scrubPayload(
     const postSecrets = secretsForPostEscape(secretList, secretPreps);
     const escapeFn = isLine ? escapeLine : escapeBlock;
 
-    // ① 输入有界：line＝limit；block＝limit−|MARK|（为标记预留）
-    const inputLimit = isLine ? limit : Math.max(0, limit - markLen);
+    // ① 输入有界：line＝limit；block＝能装下标记时 limit−|MARK|，否则 limit（R10 上限优先）
+    const markFits = !isLine && limit >= markLen;
+    const inputLimit = isLine ? limit : markFits ? limit - markLen : Math.max(0, limit);
     const truncatedAtInput = text.length > inputLimit;
     const b = truncatedAtInput ? text.slice(0, inputLimit) : text;
 
@@ -503,13 +495,15 @@ export function scrubPayload(
     // ③ 转义（显式 mode；可能生成密钥文本形态）
     const t = escapeFn(r);
 
-    // 输出硬顶：line → 展开因子 2000；block → limit（8204）
-    const outputCap = isLine ? DESCRIBE_FAILURE_FIELD_MAX : limit;
+    // 输出硬顶：line → 展开因子 2000；block → limit（调用方传入）
+    const outputCap = isLine ? DESCRIBE_FAILURE_FIELD_MAX : Math.max(0, limit);
 
-    // ④ 第二遍脱敏用 postSecrets；needsMark 按探针后长度重算（R5）
+    // ④ 第二遍脱敏用 postSecrets；needsMark 要求装得下完整标记（R10）
     const uProbe = redactField(t, postSecrets);
     const truncatedAtOutput = t.length > outputCap || uProbe.length > outputCap;
-    const needsMark = !isLine && (truncatedAtInput || truncatedAtOutput);
+    // R10：limit < |MARK| 时省略标记（上限优先，输出必须 ≤ limit），不无条件追加
+    const needsMark =
+      !isLine && markFits && (truncatedAtInput || truncatedAtOutput);
 
     let u: string;
     if (needsMark) {
@@ -526,6 +520,12 @@ export function scrubPayload(
       u = restoreFixedTruncationMark(u, markLen, outputCap, secretPreps);
     } else {
       u = trimTrailingSecretPrefixAfterEscape(uProbe, secretPreps);
+      // 无标路径（含 limit < |MARK|）：硬切到 outputCap，保证 ≤ limit
+      if (u.length > outputCap) {
+        u = u.slice(0, outputCap).replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
+        u = trimTrailingSecretPrefixAfterEscape(u, secretPreps);
+        if (u.length > outputCap) u = u.slice(0, outputCap);
+      }
     }
 
     // ⑤ 最终上界；有标时保完整 MARK

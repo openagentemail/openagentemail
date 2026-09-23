@@ -6,7 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
-- **API: 日志面发射路径收敛为唯一原语 `scrubPayload`（R1–R9）** (#348)：新增导出 `scrubPayload`（显式 `mode ∈ {line,block}`）及薄封装。串面 `describeFailure`→**line**；对象面 `describeFailureStack`→**block**；盘文本默认 **line**。R4–R8 既有收敛保留。**R9**：密钥转义前缀预计算改为 **Σ O(|s|)** 逐码元累加（禁止对每个前缀再跑 escape）；尾部回退**先削正文再挂固定截断标记**（标记无条件保留，免 J4/`ted]xyz` 啃标）；不变量精化为「除本件固定标记外尾非密钥真前缀」。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**。设计：`/home/ops/materials/log-face-r5/design.md`。**合并 ≠ 生效，生效于下次部署窗**。
+- **API: 日志面发射路径收敛为唯一原语 `scrubPayload`（R1–R10）** (#348)：新增导出 `scrubPayload`（显式 `mode ∈ {line,block}`）及薄封装。串面/对象面/盘文本三入口共用。**R10**：`redactField` 携带 trie 节点增量转移（总 O(n+Σ|s|)，禁每码元重走 pending）；block 在 `limit < |MARK|` 时**省略标记、输出恒 ≤ limit**；性能断言改**伸缩性**（禁绝对 50ms 墙钟）。R9 及更早收敛保留。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**。设计：`/home/ops/materials/log-face-r5/design.md`。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 日志/告警载荷面统一为 `describeFailure`（B 形态：逐字段独立域）** (#342)：`errorDetail` 并入并删除；每字段 **取串 → 有界200 → `redactField`（域内最长优先 + 域尾丢弃）→ `escapeLine`**，**然后** `join(' ')`（**禁止跨字段匹配**）。转义段＝C0/**DEL+C1(U+007F–U+009F)**/U+2028/U+2029/**bidi U+202A–U+202E·U+2066–U+2069**；输出可证 ≤6002；永不抛。调用点含原 `errorDetail` 11 处、`send.ts`、`sent-registry` 字符串告警、**`tasks` claim/claim-lost 兜底 warn**。**已声明行为差异**：字段尾恰为密钥真前缀时有意丢弃（J4）。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**（本卡只动日志与告警载荷面）。对象面 6 处由 #348 收口（原记债 #344）。设计：`design-b.md`；旧跨字段形态头 `3872b0b` 留作反例素材、不予合并。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 

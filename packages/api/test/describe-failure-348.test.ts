@@ -468,15 +468,28 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(out.endsWith('ab\\n')).toBe(true);
   });
 
-  // FC R9：长口令线性预计算 + 截断标记不被尾削吃掉
-  test('FC R9：口令 16k + 短消息 ⇒ 单次发射 < 50ms', () => {
-    const secret = 'p'.repeat(16_000);
-    const err = new Error('short message');
-    const t0 = performance.now();
-    const out = describeFailure(err, [secret]);
-    const ms = performance.now() - t0;
-    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
-    expect(ms).toBeLessThan(50);
+  // FC R9/R10：长口令线性预计算 + 截断标记不被尾削吃掉
+  // R10 P1：不用绝对 50ms 墙钟（慢 CI flaky）；改用两档规模伸缩性判据
+  test('FC R10 P1：短消息口令 4K→16K 伸缩性（非绝对墙钟）', () => {
+    // 理由：共享/冷启动 runner 上绝对阈值必然偶发失败；抓的是平方级性质
+    const msg = 'short message';
+    const medianMs = (secretLen: number, rounds = 5): number => {
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const err = new Error(msg);
+        const t0 = performance.now();
+        describeFailure(err, ['p'.repeat(secretLen)]);
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      return samples[Math.floor(samples.length / 2)]!;
+    };
+    const t4k = medianMs(4000);
+    const t16k = medianMs(16000);
+    // 小规模绝对上界（宽松，防挂死）；主判据＝伸缩性
+    expect(t4k).toBeLessThan(500);
+    // 线性预计算下 16K/4K≈4；给宽裕倍数 8 抓平方级回潮
+    expect(t16k).toBeLessThanOrEqual(8 * t4k + 1e-9);
   });
 
   test('FC R9：口令 ted]xyz + stack×9000 ⇒ 尾部完整截断标记', () => {
@@ -486,5 +499,44 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(out.endsWith(TRUNC_MARK)).toBe(true);
     expect(out).toContain(TRUNC_MARK);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // R10 P2-1：长口令 + 长 stack 路径须近线性（增量自动机）
+  test('FC R10 P2-1：口令 p×16k + stack p×2048/4096/8192 伸缩性', () => {
+    const secret = 'p'.repeat(16_000);
+    const medianMs = (n: number, rounds = 3): number => {
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const err = new Error('stack-perf');
+        err.stack = 'p'.repeat(n);
+        const t0 = performance.now();
+        describeFailureStack(err, [secret]);
+        samples.push(performance.now() - t0);
+      }
+      samples.sort((a, b) => a - b);
+      return samples[Math.floor(samples.length / 2)]!;
+    };
+    const t2k = medianMs(2048);
+    const t4k = medianMs(4096);
+    const t8k = medianMs(8192);
+    // 留原始耗时到断言消息，便于留件对照
+    expect(t2k, `t2048=${t2k}`).toBeLessThan(500);
+    // 近线性：8192/2048=4；宽裕倍数 20（抓 O(n·L) 回潮）
+    expect(t8k, `t8192=${t8k} t2048=${t2k}`).toBeLessThanOrEqual(20 * t2k + 1e-9);
+    expect(t4k, `t4096=${t4k}`).toBeLessThanOrEqual(12 * t2k + 1e-9);
+  });
+
+  // R10 P2-2：block limit < |MARK| 时输出仍 ≤ limit（省略标记）
+  test('FC R10 P2-2：block limit 5/10/12/13 ⇒ 输出恒 ≤ limit；≥12 含完整标记', () => {
+    const text = 'x'.repeat(100);
+    for (const lim of [5, 10, 12, 13] as const) {
+      const out = scrubPayload(text, [], lim, 'block');
+      expect(out.length, `limit=${lim} len=${out.length}`).toBeLessThanOrEqual(lim);
+    }
+    expect(scrubPayload(text, [], 12, 'block').endsWith(TRUNC_MARK)).toBe(true);
+    expect(scrubPayload(text, [], 13, 'block').endsWith(TRUNC_MARK)).toBe(true);
+    // 装不下完整标记时省略（上限优先），不得越界到 12
+    expect(scrubPayload(text, [], 5, 'block')).not.toContain(TRUNC_MARK);
+    expect(scrubPayload(text, [], 10, 'block')).not.toContain(TRUNC_MARK);
   });
 });
