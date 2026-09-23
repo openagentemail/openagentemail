@@ -1331,3 +1331,18 @@ N/A。
 
 ### 证据
 - focused/full-fc-r5 留件与 `evidence/fc-r5-measured.json`
+
+## 2026-09-23 · w348 FC R6（直接错误表达式绕过守卫）
+
+### 我们实现了哪些功能？
+1. `log-face-scan.ts`：抽出 `isDirectErrorExpr`，覆盖 `String(errish)`、`errish.message|stack`、`(errish as …).message|stack`；`<errish>` 仍按 `\w*[Ee]rr\w*` 族，不误伤 `String(code)`。
+2. 测试：FC R6 三条（必判裸用 ×2 + 不得误报 ×1）；R4 混合调用回归保持。
+
+### 我们遇到了哪些错误？
+1. CR actionable：J8/⑨ 仅匹配裸标识符，`String(err)` / `(err as Error).message` 可穿守卫（源码无实例，属守卫强度不足）。
+
+### 我们是如何解决这些错误的？
+1. 按参数补直接错误表达式识别；实测 6 条判定见 `evidence/fc-r6-measured.json`。
+
+### 证据
+- focused/full-fc-r6 留件与 `evidence/fc-r6-measured.json`

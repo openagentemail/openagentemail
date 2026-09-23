@@ -98,15 +98,43 @@ function splitTopLevelArgs(args: string): string[] {
   return parts;
 }
 
+/** 变量名族：含 Err/err 的标识符（与历史 `\w*[Ee]rr\w*` 一致） */
+const ERRISH_IDENT = /^\w*[Ee]rr\w*$/;
+
 /**
- * 是否为对象面裸用：顶层参数中**任一**恰为 `\w*[Ee]rr\w*` 或 `detail`。
+ * 单参数是否为「直接错误表达式」（未走 describeFailure* 的泄漏面）。
+ * 覆盖：裸 errish / detail、String(errish)、errish.message|stack、
+ * (errish as …).message|stack。非 err 名（如 String(code)）不命中。
+ */
+export function isDirectErrorExpr(param: string): boolean {
+  const p = param.trim();
+  if (/^detail$/.test(p)) return true;
+  if (ERRISH_IDENT.test(p)) return true;
+
+  // String(<errish>)
+  const asString = /^String\s*\(\s*(\w+)\s*\)$/.exec(p);
+  if (asString && ERRISH_IDENT.test(asString[1]!)) return true;
+
+  // <errish>.message | <errish>.stack
+  const asProp = /^(\w+)\s*\.\s*(message|stack)$/.exec(p);
+  if (asProp && ERRISH_IDENT.test(asProp[1]!)) return true;
+
+  // (<errish> as …).message | (<errish> as …).stack
+  const asCast = /^\(\s*(\w+)\s+as\s+[^)]+\)\s*\.\s*(message|stack)$/.exec(p);
+  if (asCast && ERRISH_IDENT.test(asCast[1]!)) return true;
+
+  return false;
+}
+
+/**
+ * 是否为对象面裸用：顶层参数中**任一**为直接错误表达式。
  * 按参数判定（不看整段是否含 describeFailure*）——避免
- * `describeFailureStack(err), err` 这类混合调用被整段捷径豁免。
+ * `describeFailureStack(err), err` 这类混合调用被整段捷径豁免；
+ * 亦覆盖 String(err) / (err as Error).message 等绕过（FC R6）。
  */
 export function isObjectFaceBareArgs(args: string): boolean {
   for (const p of splitTopLevelArgs(args)) {
-    if (/^detail$/.test(p)) return true;
-    if (/^\w*[Ee]rr\w*$/.test(p)) return true;
+    if (isDirectErrorExpr(p)) return true;
   }
   return false;
 }

@@ -386,4 +386,21 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
       expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
     }
   });
+
+  // FC R6：守卫须抓直接错误表达式（String(err) / .message / .stack / as 转型）
+  test('FC R6：String(err) / (err as Error).message ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'failed:', String(err)")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', (err as Error).message")).toBe(true);
+  });
+
+  test('FC R6：err.message / err.stack ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'failed:', err.message")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', err.stack")).toBe(true);
+  });
+
+  test('FC R6：不得误报 describeFailure* / String(code)', () => {
+    expect(isObjectFaceBareArgs('describeFailure(err)')).toBe(false);
+    expect(isObjectFaceBareArgs('describeFailureStack(err)')).toBe(false);
+    expect(isObjectFaceBareArgs("'failed:', String(code)")).toBe(false);
+  });
 });
