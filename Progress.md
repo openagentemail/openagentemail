@@ -1066,3 +1066,29 @@ N/A。
 
 ### 证据
 - 测试：`/home/ops/materials/332/r3-focused-20260922T232245Z.txt` sha256 `e2579f9b55a3aa82e2ea44fec8f170ef88612c85743afc24de8706d0de273ea1` → 28 pass / 0 fail
+
+## 2026-09-22 · w336（#336 两条被吞域码归位 409）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/routes/tasks.ts` 四个租约 catch（`claim`/`lease`/`release`/`claim-lost`）各加：`task_leases_disabled` → `409` 同码（与入口守卫对齐）。
+2. 同文件 `decision` catch 加：`invalid_approval_decision_event` → `409` 同码（decision 冲突族）。
+3. 中性兜底 `502 {error:'task_operation_failed'}` **保留**（未映射失败仍落此）。
+4. 正控+守门：`test/task-domain-code-remap-336.test.ts`（5 正控 + 五路由兜底负控 + decision 既有 5 码）；复用 `#330` fallback 验控表。
+5. `CHANGELOG.md` Unreleased → Changed 一条（归位 + 兜底保留 + 合并≠生效）。
+6. **未碰**：`tasks-internal.ts`、`errors.ts`、`ui.ts`、`docs/api.md`、`task-lease-core-gate.test.ts`、#330 兜底本身。
+
+### 我们遇到了哪些错误？
+1. 工作树初无 `packages/api/node_modules` → focused 首跑 `Cannot find package 'hono'`（3 fail / 3 errors）。
+2. 无其它施工红；全量一次绿。
+
+### 我们是如何解决这些错误的？
+1. `cd packages/api && bun install`（锁文件未改）；重跑 focused 落新日志（首跑失败日志保留不覆盖）。
+2. 全量 `2229 pass / 9 skip / 0 fail`（基线 2214 + 本卡增量约 15）。
+
+### 基线与证据
+- 基线：`4dfe66ab`（= main / #335）
+- 功能 commit：`3a1e770`
+- focused（install 后）：`/home/ops/materials/domain-code-mapping/focused-336-2026-09-23T01:03:03Z.log` sha256 `088634b5e8d3cb971f53f5319cf6798a35f9ff6288f80fc5d52fbd89d7bd38a4` → **77 pass / 0 fail**
+- focused（缺依赖首跑，保留）：`focused-336-2026-09-23T01:02:46Z.log` sha256 `cdd7ea175d81438393cb6fdd37d33c52c64e59181ca003a5baf3444729f21a28`
+- 全量：`/home/ops/materials/domain-code-mapping/full-336-2026-09-23T01:03:14Z.log` sha256 `63eb5c2e2fe5050a8dfe797c9b65666f7c52c1948cae4eb469825846001c7063` → **2229 pass / 9 skip / 0 fail**
+- 独立自审：agent `097a6052-2cdb-4c2b-9559-572cff56b7d4` → **PASS_WITH_NOTES**（#330 CHANGELOG 历史举例叠写易误读；lease 映射插入位与 claim 略不齐——非红线）
