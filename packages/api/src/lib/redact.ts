@@ -60,9 +60,9 @@ function takeCodePoints(text: string, n: number): string {
 }
 
 /**
- * 日志专用：在脱敏前先按码点截取 message 前缀（预算 = maxMessagePts + 最长密钥），
- * 脱敏后再剥掉「落在截断边界上的密钥真前缀」尾缀，避免半截密钥入日志；
- * **仍先脱敏再交给调用方 boundDetail**。不改变 `describeFailure` 既有语义；永不抛。
+ * 日志专用：有界截取 code/message → 先剥边界密钥真前缀 → 再 redactSecrets → 再剥一次。
+ * 防：①截断切开长密钥后短密钥误匹配留下碎片；②超大 code 无界分配。
+ * 不改变 `describeFailure` 既有语义；永不抛。
  */
 export function describeFailureBounded(
   err: unknown,
@@ -78,7 +78,8 @@ export function describeFailureBounded(
     let responseCode: string | undefined;
     let message: string | undefined;
     try {
-      if (typeof e.code === 'string') code = e.code;
+      // code 与 message 同等有界，避免大 code 绕过预算
+      if (typeof e.code === 'string' && e.code) code = takeCodePoints(e.code, budget);
     } catch { /* ignore */ }
     try {
       if (typeof e.responseCode === 'number') responseCode = String(e.responseCode);
@@ -98,26 +99,31 @@ export function describeFailureBounded(
         return '[unreadable]';
       }
     }
-    // 先整段替换完整密钥，再剥边界上未匹配的密钥真前缀（防半截泄露）
-    return scrubTrailingSecretPrefix(redactSecrets(line, secs), secs);
+    // 脱敏前先剥「非完整密钥」的尾缀，避免短密钥在长密钥残段上误匹配
+    line = scrubTrailingSecretPrefix(line, secs);
+    line = redactSecrets(line, secs);
+    return scrubTrailingSecretPrefix(line, secs);
   } catch {
     return '[unreadable]';
   }
 }
 
 /**
- * 若 text 以某配置密钥的真前缀结尾（截断切开密钥时），剥掉该尾缀。
+ * 若 text 以某配置密钥的真前缀结尾（且该前缀本身不是另一完整密钥），剥掉该尾缀。
  * 最长密钥优先；可叠剥多次。
  */
 function scrubTrailingSecretPrefix(text: string, secrets: string[]): string {
+  const fullSecrets = new Set([...secrets].filter(Boolean));
   let out = text;
   let changed = true;
   while (changed) {
     changed = false;
-    for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    for (const secret of [...fullSecrets].sort((a, b) => b.length - a.length)) {
       const maxLen = Math.min(secret.length - 1, out.length);
       for (let len = maxLen; len >= 1; len--) {
-        if (out.endsWith(secret.slice(0, len))) {
+        const suf = secret.slice(0, len);
+        // 完整短密钥留给 redactSecrets；只剥「非完整密钥」的真前缀
+        if (out.endsWith(suf) && !fullSecrets.has(suf)) {
           out = out.slice(0, -len);
           changed = true;
           break;

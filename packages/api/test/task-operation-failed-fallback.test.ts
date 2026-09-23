@@ -310,6 +310,34 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     expect(Array.from(out).length).toBeLessThanOrEqual(ERROR_DETAIL_MAX);
   });
 
+  // #340 R5.4：重叠密钥（长含短）+ 截断切开长密钥 ⇒ 短密钥误匹配不得留碎片
+  test('describeFailureBounded 重叠密钥边界 ⇒ 无长密钥碎片', () => {
+    const longSecret = 'PASSWORD123';
+    const shortSecret = 'PASS';
+    // 预算切在长密钥中部：…PASSWORD123 被切成 …PASSWOR
+    const filler = 'x'.repeat(390);
+    const msg = filler + longSecret;
+    const redacted = describeFailureBounded(new Error(msg), 400, [longSecret, shortSecret]);
+    const out = boundDetail(redacted);
+    expect(out.includes(longSecret)).toBe(false);
+    expect(out.includes(shortSecret)).toBe(false);
+    // 典型误匹配残留：短密钥替换后留下 WOR 一类碎片
+    expect(out.includes('WOR')).toBe(false);
+    expect(out.includes('PASSWORD')).toBe(false);
+  });
+
+  // #340 R5.4：超大 code 亦须有界
+  test('describeFailureBounded 超大 code ⇒ 有界', () => {
+    const bigCode = 'C'.repeat(2 * 1024 * 1024);
+    const err = { code: bigCode, message: 'x' };
+    const t0 = performance.now();
+    const out = boundDetail(describeFailureBounded(err, 400, ['nosecret']));
+    const ms = performance.now() - t0;
+    expect(Array.from(out).length).toBeLessThanOrEqual(ERROR_DETAIL_MAX);
+    expect(ms).toBeLessThan(500);
+    console.log(`[bounded code mega] bytes=${bigCode.length} ms=${ms.toFixed(3)}`);
+  });
+
   // #340 R5.2：有界脱敏 —— 多兆 message 不得 O(n) 拖垮 warn 路径
   test('POST /:id/lease 多兆 message ⇒ warn 有界且快', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
