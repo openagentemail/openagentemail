@@ -1199,3 +1199,24 @@ N/A。
 - commit：见本轮 HEAD
 - focused：`r5.1-focused-20260923T061435Z.txt` sha256 `78f1c7814e418066ef1ebb5190b270b853184525f8ac1d4aae5d807e538f6730` → 84 pass
 - 全量：`r5.1-full-suite-20260923T061435Z.txt` sha256 `2eb663462e086baa6cccc5a61d12aa9fd88845b34e7eef264f984e5102d42306` → **2247 pass / 9 skip / 0 fail**
+
+## 2026-09-23 · w340 R5.2（#341 修 Codex P1×2：有界脱敏 + duck 不物化）
+
+### 我们实现了哪些功能？
+1. 新增 `describeFailureBounded`（`redact.ts`）：脱敏前单趟截取 message 前缀（预算=N+最长密钥）；`describeFailure` 语义不动。
+2. `taskFailureLogDetail` 改走 `boundDetail(describeFailureBounded(err))`。
+3. `errorDetail` duck/string：先 `takeCodePoints` 再拼 `[non-error:…]` 前缀，避免模板物化多兆串。
+
+### 我们遇到了哪些错误？
+1. Codex 在 `0ca2fbb` 上新 P1×2（describeFailure 全串脱敏 / duck 全串拼接）属实。
+2. 插入 mega 测例时误断 for 循环语法 → 全量 1 error（件保留）；已补回。
+3. `#206` 墙钟超时偶发 1 红（如实报）。
+
+### 我们是如何解决这些错误的？
+1. 有界脱敏新导出 + duck 前缀截取；测例补 duck-mega / lease-warn-mega。
+2. 语法修复后全量本卡绿。
+
+### 证据
+- focused：`r5.2b-focused-20260923T063152Z.txt` sha256 `55c035abb87055bd062a2a28214797c71c4bae090cbef896807442bee2d22a32` → 86 pass
+- 全量：`r5.2b-full-suite-20260923T063152Z.txt` sha256 `048145a3ca8b0dc98744f33ae3a04f3b689df2686ecdff77fe41231413f9338a` → **2248 pass / 9 skip / 1 fail**（唯 `#206`）
+- mega：`duck-mega ms=0.447` / `lease warn mega ms=0.715`
