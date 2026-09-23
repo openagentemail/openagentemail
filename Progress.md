@@ -1117,6 +1117,27 @@ N/A。
 - 全量：`full-suite.txt` → **2235 pass / 9 skip / 0 fail**（基线 2229 + helper 单测 +6）
 - 独立自审：agent `7992ff93-861f-4c2f-9d29-c97b0c2c72f0` → **PASS**
 
+## 2026-09-23 · w340split（#340 拆分只带 C3：claim `lease_service_unavailable` → 503）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/routes/tasks.ts`：`POST /v1/tasks/:id/claim` catch 补一行映射——`lease_service_unavailable` → `503 {error:'lease_service_unavailable'}`（与 `lease`/`release`/`claim-lost` 兄弟路由逐字节一致）。
+2. **契约变更面（仅此一码、仅此一条路由）**：`claim` 遇该码由 **`502 {error:'task_operation_failed'}` → `503 {error:'lease_service_unavailable'}`**；其它码与其它路由不动。**合并 ≠ 生效，生效于下次部署窗**。
+3. 正控+守门：`test/task-claim-lease-unavailable-340.test.ts`（1 正控 + claim 其余已映射码/journal/未映射兜底 + 兄弟三路由 LSU→503 不动）。
+4. `CHANGELOG.md` Unreleased → Changed 单列该契约变更 +「合并 ≠ 生效」。
+5. **未碰（红线）**：`lib/redact.ts`、`lib/errors.ts`、`send.ts`、`docs/`、renew/release `console.warn` 载荷、任何 R7（`describeFailureBounded` / `errorDetail` 等）。
+
+### 我们遇到了哪些错误？
+无施工红；focused 与全量一次绿。
+
+### 我们是如何解决这些错误的？
+不适用（无红）。
+
+### 基线与证据
+- 基线：`64e35527`（= main）
+- focused：`/home/ops/materials/debt-batch-2-split/focused-340-c3-2026-09-23T07:43:10Z.log` sha256 `93ecb1dce2bdb2e4ec7c7eda45a4256a463b33dab6f526c878bb5b1e83ba8b2c` → **14 pass / 0 fail**
+- 全量：`/home/ops/materials/debt-batch-2-split/full-340-c3-2026-09-23T07:43:19Z.log` sha256 `582a317b0543cdd6a7e8a836a22cf90d59f77623a6a570e8592d60e9f6d63a4a` → **2249 pass / 9 skip / 0 fail**（基线 2235 + 本卡 +14）
+- 独立自审：agent `afa822f6-8724-4b43-b27d-f4b1d9daf9d7` → **PASS_WITH_NOTES**（NOTES=审时测试文件尚未 staged；合入前已 `git add`）
+
 ## 2026-09-23 · w338 R4（#339 修 Codex P1×2：去掉无条件陈旧快照还原）
 
 ### 我们实现了哪些功能？
