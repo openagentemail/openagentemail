@@ -22,7 +22,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-tof-fallback-'));
 process.env.TASK_LEASES_ENABLED = 'true';
 process.env.NODE_ENV = 'test';
 
-const { afterEach, describe, expect, mock, test } = await import('bun:test');
+const { afterEach, describe, expect, mock, spyOn, test } = await import('bun:test');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -206,25 +206,48 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     });
   });
 
+  // #340 C1：既有兜底路径已命中 warn；补断言载荷带 errorCode（与 claim 同族）
   test('POST /:id/lease 未映射码 → 502 task_operation_failed', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
-      const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
-        async renew() { throw new Error(UNMAPPED); },
-      }));
-      const res = await postJson(app, `/v1/tasks/${ID}/lease`, { leaseToken: 'opaque' });
-      expect(res.status).toBe(502);
-      expect(res.body).toEqual({ error: 'task_operation_failed' });
+      const warns: unknown[][] = [];
+      const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warns.push(args);
+      });
+      try {
+        const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+          async renew() { throw new Error(UNMAPPED); },
+        }));
+        const res = await postJson(app, `/v1/tasks/${ID}/lease`, { leaseToken: 'opaque' });
+        expect(res.status).toBe(502);
+        expect(res.body).toEqual({ error: 'task_operation_failed' });
+        const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('[task] renew failed'));
+        expect(hit).toBeTruthy();
+        expect(hit?.[1]).toBe(UNMAPPED);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
   test('POST /:id/release 未映射码 → 502 task_operation_failed', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
-      const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
-        async release() { throw new Error(UNMAPPED); },
-      }));
-      const res = await postJson(app, `/v1/tasks/${ID}/release`, { leaseToken: 'opaque' });
-      expect(res.status).toBe(502);
-      expect(res.body).toEqual({ error: 'task_operation_failed' });
+      const warns: unknown[][] = [];
+      const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warns.push(args);
+      });
+      try {
+        const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+          async release() { throw new Error(UNMAPPED); },
+        }));
+        const res = await postJson(app, `/v1/tasks/${ID}/release`, { leaseToken: 'opaque' });
+        expect(res.status).toBe(502);
+        expect(res.body).toEqual({ error: 'task_operation_failed' });
+        const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('[task] release failed'));
+        expect(hit).toBeTruthy();
+        expect(hit?.[1]).toBe(UNMAPPED);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
@@ -282,6 +305,8 @@ describe('#330 守门负控 · claim 已映射码逐字节', () => {
     { code: 'invalid_lease_seconds', status: 400, body: { error: 'invalid_request' } },
     { code: 'not_found', status: 404, body: { error: 'not_found' } },
     { code: 'lease_recipient_required', status: 403, body: { error: 'forbidden: task recipient required' } },
+    // #340 C3：与 lease/release/claim-lost 同族归位（旧 502 → 新 503）
+    { code: 'lease_service_unavailable', status: 503, body: { error: 'lease_service_unavailable' } },
   ];
   for (const row of cases) {
     test(`claim ${row.code} → ${row.status} ${JSON.stringify(row.body)}`, async () => {

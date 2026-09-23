@@ -55,6 +55,7 @@ describe('errorCode', () => {
 });
 
 describe('errorDetail', () => {
+  // —— 既有断言（#338；不得削弱）——
   test('Error(\'x\') ⇒ \'x\'', () => {
     expect(errorDetail(new Error('x'))).toBe('x');
   });
@@ -107,5 +108,48 @@ describe('errorDetail', () => {
     const out = errorDetail(long);
     expect(out.length).toBe(200);
     expect(out.startsWith('[non-error:string:')).toBe(true);
+  });
+
+  // —— #340 C2 新增 ——
+  test('duck {message:\'x\'} ⇒ 输出含 x 且来源可辨为 object message', () => {
+    expect(() => errorDetail({ message: 'smtp down' })).not.toThrow();
+    const out = errorDetail({ message: 'smtp down' });
+    expect(out).toContain('smtp down');
+    // 形态须能看出取自 duck 对象的 message（非裸 smtp down、非纯 [non-error:object]）
+    expect(out).toContain('non-error:object');
+    expect(out).toBe('[non-error:object:smtp down]');
+  });
+
+  test('含 \\n/\\r/\\t/C0 的输入 ⇒ 转义形态且单行', () => {
+    const raw = 'a\nb\rc\td\u0001e';
+    const out = errorDetail(new Error(raw));
+    expect(out).toBe('a\\nb\\rc\\td\\u0001e');
+    // 输出不得含真实换行/回车/制表（单行）
+    expect(out.includes('\n')).toBe(false);
+    expect(out.includes('\r')).toBe(false);
+    expect(out.includes('\t')).toBe(false);
+    expect(out.includes('\u0001')).toBe(false);
+  });
+
+  test('含 emoji 的超长输入 ⇒ 按码点截断且无孤立代理对', () => {
+    // 😀 = U+1F600，UTF-16 两码元；按码元 slice 会切裂
+    const unit = '😀';
+    const long = unit.repeat(250); // 250 码点 = 500 UTF-16 码元，须截到 200 码点
+    const out = errorDetail(new Error(long));
+    expect(Array.from(out).length).toBe(200);
+    // 无替换字符、无奇数长度代理残留：每个码点应是完整 emoji
+    expect(out.includes('\uFFFD')).toBe(false);
+    expect(Array.from(out).every((ch) => ch === unit)).toBe(true);
+  });
+
+  // duck 会抛 getter 仍不抛，回退类型文本
+  test('duck 会抛 message getter ⇒ [non-error:object] 且不抛', () => {
+    const x = Object.defineProperty({}, 'message', {
+      get() {
+        throw new Error('boom');
+      },
+    });
+    expect(() => errorDetail(x)).not.toThrow();
+    expect(errorDetail(x)).toBe('[non-error:object]');
   });
 });

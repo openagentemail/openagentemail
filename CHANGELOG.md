@@ -6,10 +6,12 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **API: renew/release 兜底 warn 补错误码 + `errorDetail` 诊断收紧** (#340)：`POST /v1/tasks/:id/{lease,release}` 兜底 `console.warn` 补 `errorCode(err)`（与 claim 同族）；`errorDetail` 对 duck `{message}` 保留可读载荷、控制字符转义为单行、按码点截断（N=200）。**属内部日志/告警面**；`errorCode()` 语义不变。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 
 ### Changed
 
+- **Tasks: `POST /v1/tasks/:id/claim` 遇 `lease_service_unavailable` 由 502 归位为 503** (#340)：与同族 `lease` / `release` / `claim-lost` 逐字节对齐为 `503 {error:"lease_service_unavailable"}`（条件＝服务层抛该码，例如 claim 能力缺失）；**其余已映射码与中性兜底 `502 {error:"task_operation_failed"}` 不变**。**合并 ≠ 生效，生效于下次部署窗**。
 - **Tasks: 两条被吞域码由兜底归位为 409 同码** (#336)：`task_leases_disabled`（`POST /v1/tasks/:id/{claim,lease,release,claim-lost}` 服务层路径）与 `invalid_approval_decision_event`（`POST /v1/tasks/:id/decision`）由 `502 {error:"task_operation_failed"}` 归位为 **`409` 且 body 回显同码**（与入口守卫 / decision 冲突族对齐）。**中性兜底 `task_operation_failed` 本身保留**，仍收纳未映射失败。**合并 ≠ 生效，生效于下次部署窗**。
 - **Tasks: 租约/状态突变兜底码改为 `task_operation_failed`** (#330)：`POST /v1/tasks/:id/{claim,lease,release,claim-lost,decision,state}` 六处与 UI task 突变（`taskMutationError`）在未命中已映射域码时，对外码由 `502 {error:"smtp_error"}` 改为 `502 {error:"task_operation_failed"}`（状态码与 body 形状不变；**已映射域码与状态码一律不变**；`POST /v1/tasks` create 段 pre-create `502 {error:"smtp_error"}` 不变）。这些路径在写入阶段**会投递邮件**（lease journal 投递 / 审批终态投递 / remind / update 通知），**SMTP 投递失败是落入该兜底的成因之一**；该兜底同时收纳未映射/未分类失败，旧码把它**单一归因 SMTP**、客户端据码判因必错，故改为中性码。客户端若按错误码判因需改判。**合并 ≠ 生效，生效于下次部署窗**。
 - **Tasks: post-create wait 失败对外码改为 `wait_failed`** (#240)：`POST /v1/tasks` 在 SMTP/创建已成功后，wait 段非 journal 异常由 `502 {error:"smtp_error", taskId, created:true}` 改为 `502 {error:"wait_failed", taskId, created:true}`（状态码与 body 形状不变）。**仅限**该 post-create wait 失败面；pre-create `502 {error:"smtp_error"}`（无 id）与 journal `503 lease_journal_*` 不变。客户端若按错误码判因需改判；`taskId`/`created` 判据不变。
