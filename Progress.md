@@ -1135,3 +1135,27 @@ N/A。
 - focused：`/home/ops/materials/debt-small-card/r4-focused-332.txt` sha256 `70dbfbcdf85030b2c5e802d6efba4081ca3fc3fe5c4eb982da1eb11c54ba0a8e` → 28 pass / 0 fail
 - 并跑：`r4-suite-parallel-hygiene.txt` sha256 `ee4071e8c10621559ed37af5d1e94876de10aa5d5abd53ead59e796346be9bca` → 168 pass / 0 fail
 - 全量：`r4-full-suite.txt` sha256 `f1b8c8569f9a7f2e67c58b9869929d1f027f0247f44c1902cfabc600d7d36a85` → **2235 pass / 9 skip / 0 fail**
+
+## 2026-09-23 · w340 · 债表批 2（#340：C1 日志补码 + C2 errorDetail 收紧 + C3 claim 归位）
+
+### 我们实现了哪些功能？
+1. **C1**：`packages/api/src/routes/tasks.ts` renew/release 兜底 `console.warn` 补 `errorCode(err)`（与 #339 后同族 claim 读法一致，对非 Error 安全）。
+2. **C2**：`packages/api/src/lib/errors.ts` 的 `errorDetail`：① duck `{message}` 在类型化回退前读字符串 → `[non-error:object:<msg>]`；② 控制字符转义为单行（`\n`/`\r`/`\t`/其余 C0→`\uXXXX`）；③ `truncateDetail` 按码点截断 N=200。`errorCode()` 一字不动；永不抛承诺保持。
+3. **C3**：`POST /v1/tasks/:id/claim` catch 加 `lease_service_unavailable` → `503 {error:'lease_service_unavailable'}`（与 lease/release/claim-lost 逐字节一致）。**契约变更面**：旧 502 `task_operation_failed` → 新 503 同码。
+4. **测试**：`errors.test.ts` 既有 9 条未削弱 + 新 duck/转义/emoji 码点 + duck 会抛 getter；`task-operation-failed-fallback.test.ts` 补 renew/release warn 载荷断言 + claim lease_service_unavailable 正控 + 未映射兜底守门。
+5. **CHANGELOG** Unreleased：C1/C2 Fixed（内部日志面）+ C3 Changed 单列 502→503；均注「合并 ≠ 生效，生效于下次部署窗」。
+
+### 我们遇到了哪些错误？
+1. focused 首跑：emoji 测例 `repeat(150)` 不足 200 码点 → 期望 200 实得 150。
+2. focused 首跑：`task-operation-failed-fallback` 缺 `hono`（工作树无 `node_modules`）。
+
+### 我们是如何解决这些错误的？
+1. 改为 `repeat(250)`，断言 `Array.from(out).length === 200` 且无孤立代理对。
+2. `cd packages/api && bun install`（锁文件未改）；重跑 focused 全绿。
+
+### 基线与证据
+- 基线：`64e35527`（= main / #339）
+- 代码 commit：`2ce9760`
+- focused：`/home/ops/materials/debt-batch-2/focused-20260923T053314Z.txt` sha256 `dcc88aa5eba06bf373f7a27ff303fa98f1482ad20354530c5fc9c7fdfa521ba3` → **77 pass / 0 fail**
+- 全量：`/home/ops/materials/debt-batch-2/full-suite-20260923T053322Z.txt` sha256 `58be28bf4bcc024eb2e115ddef0af462b6595aedc52bdaa69c0ff3e4b7975cc9` → **2240 pass / 9 skip / 0 fail**（基线 2235 + 本卡新增）
+- 独立自审：agent `eb06bfc2-aa25-4093-93e4-e3a19cb779bd` → **PASS**
