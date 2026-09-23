@@ -1,12 +1,20 @@
 /**
  * #344 对象面：describeFailureStack — 保 stack + 有界 + 脱敏 + 永不抛。
- * 设计：materials/obj-face-344/r0.md（四裁点已批）。
+ * 设计：materials/obj-face-344/r0.md；R1：外层截断为最终上界 + J8 声明精确化。
  */
-import { describe, expect, test, spyOn } from 'bun:test';
+import { afterAll, describe, expect, test, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
-import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+  isObjectFaceDebtAllowed,
+  lineOf,
+  OBJECT_FACE_DEBT_ISSUE,
+  OBJECT_FACE_DEBT_NEEDLES,
+} from './support/log-face-scan.ts';
 
 // redact → config 进程级校验；须在动态 import 前写入
 process.env.DOMAIN = 'test.example';
@@ -15,7 +23,8 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-344-'));
+const DATA_DIR_344 = mkdtempSync(join(tmpdir(), 'oae-344-'));
+process.env.DATA_DIR = DATA_DIR_344;
 
 const {
   describeFailure,
@@ -23,10 +32,19 @@ const {
   escapeLine,
   escapeBlock,
   STACK_MAX,
+  DESCRIBE_FAILURE_STACK_MAX,
 } = await import('../src/lib/redact.ts');
 
-/** 截断标记长度（脱敏后追加） */
+/** 截断标记（与实现同源） */
 const TRUNC_MARK = '…[truncated]';
+
+afterAll(() => {
+  try {
+    rmSync(DATA_DIR_344, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+});
 
 describe('describeFailureStack · #344', () => {
   // ① 密钥出现在 message 与各 stack frame ⇒ 全部被红
@@ -45,14 +63,39 @@ describe('describeFailureStack · #344', () => {
     expect(out).toContain('\n');
   });
 
-  // ② 巨大 stack ⇒ 有界（≤ STACK_MAX + 标记长度）
-  test('② 巨大 stack 有界 ≤ STACK_MAX + 标记', () => {
+  // ② 巨大 stack ⇒ 有界（最终输出 ≤ STACK_MAX + 标记）
+  test('② 巨大 stack 有界 ≤ DESCRIBE_FAILURE_STACK_MAX', () => {
     const err = new Error('huge');
     err.stack = 'Error: huge\n' + 'x'.repeat(STACK_MAX + 50_000);
     const out = describeFailureStack(err, []);
-    expect(out.length).toBeLessThanOrEqual(STACK_MAX + TRUNC_MARK.length);
+    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(STACK_MAX + TRUNC_MARK.length);
+    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(8204);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
     expect(out.endsWith(TRUNC_MARK)).toBe(true);
     expect(STACK_MAX).toBe(8192);
+  });
+
+  // ②b R1：转义膨胀输入下上界仍成立
+  test('②b R1：C0 转义膨胀（\\x01×8192）⇒ 输出 ≤ 8204', () => {
+    const err = new Error('esc');
+    err.stack = '\x01'.repeat(STACK_MAX);
+    const out = describeFailureStack(err, []);
+    // 无外层截断前会 6×；外层截断后必须落在可证上界内
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+    // 半转义不得残留
+    expect(out.replace(TRUNC_MARK, '')).not.toMatch(/\\u[0-9a-fA-F]{0,3}$/);
+  });
+
+  // ②c R1：脱敏膨胀输入下上界仍成立
+  test('②c R1：单字符密钥脱敏膨胀（z×8192）⇒ 输出 ≤ 8204', () => {
+    const err = new Error('red');
+    err.stack = 'z'.repeat(STACK_MAX);
+    const out = describeFailureStack(err, ['z']);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+    expect(out).not.toContain('z'); // 密钥已红；标记/替代串不含 z
+    expect(out).toContain('[redacted]');
   });
 
   // ③ 截断边界处半截密钥不泄（J4）
@@ -87,14 +130,12 @@ describe('describeFailureStack · #344', () => {
       get() {
         throw new Error('revoked');
       },
-      // instanceof Error 可能走 getPrototypeOf；一并炸掉
       getPrototypeOf() {
         throw new Error('revoked-proto');
       },
     });
     expect(() => describeFailureStack(proxy, [])).not.toThrow();
     const out = describeFailureStack(proxy, []);
-    // 极端不可读 ⇒ [unreadable] 或类型化哨兵
     expect(out === '[unreadable]' || out.startsWith('[non-error:')).toBe(true);
   });
 
@@ -115,8 +156,7 @@ describe('describeFailureStack · #344', () => {
   test('⑥ 非换行控制符 / DEL+C1 / U+2028·2029 / bidi 照转义', () => {
     const err = new Error('ctl');
     err.stack =
-      'Error: ctl\n' +
-      `pre\u0001mid\u007f\u009b\u2028\u2029\u202e\u2066post`;
+      'Error: ctl\n' + `pre\u0001mid\u007f\u009b\u2028\u2029\u202e\u2066post`;
     const out = describeFailureStack(err, []);
     expect(out).toContain('\\u0001');
     expect(out).toContain('\\u007f');
@@ -125,7 +165,6 @@ describe('describeFailureStack · #344', () => {
     expect(out).toContain('\\u2029');
     expect(out).toContain('\\u202e');
     expect(out).toContain('\\u2066');
-    // 同源：escapeBlock 与 escapeLine 对非 LF/CR/TAB 一致
     const sample = 'a\u0001b\u202Ec';
     expect(escapeBlock(sample)).toBe(escapeLine(sample).replace(/\\n/g, '\n'));
     expect(escapeBlock('a\nb\tc')).toBe('a\nb\tc');
@@ -139,7 +178,6 @@ describe('describeFailureStack · #344', () => {
     expect(describeFailureStack(42, [])).toBe('[non-error:number:42]');
     expect(describeFailureStack('str', [])).toBe('[non-error:string:str]');
     expect(describeFailureStack({}, [])).toBe('[non-error:object]');
-    // Error 但无 stack / 空 stack
     const empty = new Error('only-msg');
     empty.stack = '';
     expect(describeFailureStack(empty, [])).toBe(describeFailure(empty, []));
@@ -160,24 +198,22 @@ describe('describeFailureStack · #344', () => {
     for (const r of required) {
       const text = readFileSync(join(srcRoot, r.rel), 'utf8');
       const line = text.split('\n').find((l) => l.includes(r.prefix));
-      expect(line, `missing prefix ${r.prefix} in ${r.rel}`).toBeTruthy();
+      expect(line).toBeTruthy();
       expect(line!).toMatch(/describeFailureStack\s*\(\s*err\s*\)/);
       expect(line!).not.toMatch(/,\s*err\s*\)\s*;?\s*$/);
       hits.push(`${r.rel}:${r.prefix}`);
     }
     expect(hits).toHaveLength(6);
 
-    // 载荷属性（与调用点同一入口）
     const secret = 'callSiteSecret42';
     const err = new Error(`payload ${secret}`);
     err.stack = `Error: payload ${secret}\n    at site (/x.ts:1:1)\n    at next`;
     const payload = describeFailureStack(err, [secret]);
-    expect(payload.length).toBeLessThanOrEqual(STACK_MAX + TRUNC_MARK.length);
+    expect(payload.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
     expect(payload).not.toContain(secret);
     expect(payload).toContain('[redacted]');
     expect(payload).toContain('\n');
 
-    // 运行时：app.onError 实投 console.error；调用点不传 secrets ⇒ 用配置密钥
     const { config } = await import('../src/lib/config.ts');
     const cfgSecret = config.smtp.pass;
     const { createApp } = await import('../src/app.ts');
@@ -202,12 +238,11 @@ describe('describeFailureStack · #344', () => {
       expect(p).not.toContain(cfgSecret);
       expect(p).toContain('[redacted]');
       expect(p).toContain('\n');
-      expect(p.length).toBeLessThanOrEqual(STACK_MAX + TRUNC_MARK.length);
+      expect(p.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
     } finally {
       spy.mockRestore();
     }
 
-    // 运行时：audit append 失败 —— mock fs 写入抛错（不污染共享 DATA_DIR）
     const { recordAuditEvent } = await import('../src/lib/audit.ts');
     const boom = Object.assign(new Error('EISDIR: illegal operation on a directory'), {
       code: 'EISDIR',
@@ -233,9 +268,9 @@ describe('describeFailureStack · #344', () => {
       );
       expect(hit).toBeTruthy();
       const p = String(hit![1] ?? '');
-      expect(p).not.toContain('\\n'); // 换行保留字面
+      expect(p).not.toContain('\\n');
       expect(p).toContain('\n');
-      expect(p.length).toBeLessThanOrEqual(STACK_MAX + TRUNC_MARK.length);
+      expect(p.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
       expect(p).toContain('EISDIR');
     } finally {
       auditSpy.mockRestore();
@@ -244,8 +279,8 @@ describe('describeFailureStack · #344', () => {
     }
   });
 
-  // ⑨ 零豁免断言（跨卡联动；与 describe-failure-342 J8 同口径复核）
-  test('⑨ I6/J8 零豁免：字符串面与对象面均无裸用', () => {
+  // ⑨ 声明精确化：#344 六处已收口；全仓对象面裸用仅 #347 白名单
+  test('⑨ I6/J8：#344 六处已收口；对象面残余仅 #347 白名单', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -257,27 +292,21 @@ describe('describeFailureStack · #344', () => {
     }
     walk(srcRoot);
 
-    const bareHits: string[] = [];
+    const objectBareHits: string[] = [];
+    const allowed: string[] = [];
     for (const file of files) {
       const rel = file.slice(srcRoot.length + 1);
-      const lines = readFileSync(file, 'utf8').split('\n');
-      lines.forEach((line, idx) => {
-        const loc = `${rel}:${idx + 1}`;
-        if (
-          /console\.(warn|error|log)\(/.test(line) &&
-          /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
-        ) {
-          bareHits.push(loc);
-        }
-        if (
-          /console\.(warn|error|log)\(/.test(line) &&
-          /,\s*err\s*\)/.test(line) &&
-          !/describeFailure(Stack)?\s*\(\s*err\s*\)/.test(line)
-        ) {
-          bareHits.push(loc);
-        }
-      });
+      const text = readFileSync(file, 'utf8');
+      for (const call of extractConsoleCalls(text)) {
+        if (!isObjectFaceBareArgs(call.args)) continue;
+        const loc = `${rel}:${lineOf(text, call.index)}`;
+        const callSrc = text.slice(call.index, call.index + 220);
+        if (isObjectFaceDebtAllowed(callSrc)) allowed.push(loc);
+        else objectBareHits.push(loc);
+      }
     }
-    expect(bareHits).toEqual([]);
+    expect(objectBareHits).toEqual([]);
+    expect(OBJECT_FACE_DEBT_ISSUE).toBe('#347');
+    expect(allowed.length).toBeGreaterThanOrEqual(OBJECT_FACE_DEBT_NEEDLES.length);
   });
 });

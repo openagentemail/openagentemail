@@ -15,11 +15,14 @@ export const ERROR_DETAIL_MAX = 200;
 /** B 形态可证输出上界：每字段 ≤2000，两空格 ⇒ ≤6002 */
 export const DESCRIBE_FAILURE_MAX = 6002;
 
-/** 对象面 stack 文本上界（码元 / UTF-16 单位；#344 裁点 STACK_MAX=8192） */
+/** 对象面 stack 文本 / 最终输出上界（码元；#344 裁点 STACK_MAX=8192） */
 export const STACK_MAX = 8192;
 
-/** 截断后追加的固定标记（脱敏之后追加；标记本身不含密钥） */
+/** 截断后追加的固定标记（脱敏·转义之后追加；标记本身不含密钥） */
 const TRUNCATED_MARK = '…[truncated]';
+
+/** 可证最终输出上界：STACK_MAX + 标记长度（外层截断后才追加标记） */
+export const DESCRIBE_FAILURE_STACK_MAX = STACK_MAX + TRUNCATED_MARK.length;
 
 /** 替换标记（不回喂自动机） */
 const REDACTED = '[redacted]';
@@ -341,10 +344,20 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
 }
 
 /**
- * 对象面唯一入口（#344）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
+ * 对象面唯一入口（#344 / R1）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
  *
- * 流水线：取 stack 串 → 有界 STACK_MAX → redactField（整段单域）→ escapeBlock
- * → 若截断则尾部追加 `…[truncated]`（脱敏之后）。
+ * 流水线：
+ *   1) 取 stack 串
+ *   2) **内层守卫**：截到 STACK_MAX（约束脱敏/转义 CPU）
+ *   3) redactField（整段单域）
+ *   4) escapeBlock
+ *   5) **外层截断**：STACK_MAX 是**最终输出**上限（转义/脱敏膨胀后仍成立）
+ *   6) 若内层或外层发生过截断 ⇒ 尾部追加 `…[truncated]`
+ *
+ * 为何「先脱敏再重截」不破坏安全：最终截断作用在**已脱敏、已转义**的文本上——
+ * 完整密钥已被吞、转义产物是 `\uXXXX` 文本形态、转义**不会生成**密钥字符 ⇒
+ * 截断**不可能**留下密钥或其真前缀。
+ *
  * stack 缺席/非串/空/会抛 ⇒ 退化为 describeFailure 单行文本。
  */
 export function describeFailureStack(err: unknown, secrets?: string[]): string {
@@ -370,9 +383,9 @@ export function describeFailureStack(err: unknown, secrets?: string[]): string {
       return describeFailure(err, secrets);
     }
 
-    // 2) 先有界
-    const didTruncate = stackText.length > STACK_MAX;
-    const bounded = didTruncate ? stackText.slice(0, STACK_MAX) : stackText;
+    // 2) 内层守卫：先截输入，约束 redact/escape 工作量
+    const inputTruncated = stackText.length > STACK_MAX;
+    const bounded = inputTruncated ? stackText.slice(0, STACK_MAX) : stackText;
 
     // 3) 域内脱敏（整段 stack 含换行＝单域；密钥含 \n 亦可匹配）
     const redacted = redactField(bounded, secretList);
@@ -380,8 +393,16 @@ export function describeFailureStack(err: unknown, secrets?: string[]): string {
     // 4) 转义（保留 \n/\r/\t 字面）
     let out = escapeBlock(redacted);
 
-    // 5) 截断标记在脱敏之后追加（标记不含密钥）
-    if (didTruncate) out += TRUNCATED_MARK;
+    // 5) 外层截断：STACK_MAX = 最终输出上限（覆盖转义 6× / 脱敏 10× 膨胀）
+    let outputTruncated = false;
+    if (out.length > STACK_MAX) {
+      // 去掉落在截断点的半个 `\uXXXX`（\u 后不足 4 位 hex）
+      out = out.slice(0, STACK_MAX).replace(/\\u[0-9a-fA-F]{0,3}$/, '');
+      outputTruncated = true;
+    }
+
+    // 6) 截断标记在脱敏·转义·外层截断之后追加（标记不含密钥）
+    if (inputTruncated || outputTruncated) out += TRUNCATED_MARK;
 
     return out;
   } catch {

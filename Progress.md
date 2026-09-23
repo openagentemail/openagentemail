@@ -1228,3 +1228,25 @@ N/A。
 - 全量：`/home/ops/materials/obj-face-344/full-suite-20260923T123440Z.txt` sha256 `865b76e6c29c1cbfa723629dacb5c7ffe8c280bbba576ca76930b2ce80992592` → **2287 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout，与本卡无关、历史已知）
 - 独立自审：见 `materials/obj-face-344/subagent-review.md`（agent `13e89af5-ed18-4b3a-8d72-e6b12c98e027`）
 - 早次全量红证（⑧ DATA_DIR 污染，已修）：`full-suite-20260923T123052Z.txt` sha256 `4a93de2bab83c51ddfc8bc587dbd851b3e95386d8368fa7e98309525ef5a47db`（一次落盘不覆盖）
+
+## 2026-09-23 · w344 R1（#344 · ZCode P1 上界记账 + P2 声明精确化）
+
+### 我们实现了哪些功能？
+1. **P1**：`STACK_MAX=8192` 改为**最终输出上限**——保留内层输入守卫，**外层**在 `redactField`+`escapeBlock` 后再截到 8192，剔半个 `\uXXXX`，再追加 `…[truncated]`；可证上界 **DESCRIBE_FAILURE_STACK_MAX=8204**；注释写明「先脱敏再重截」安全论证。
+2. **P1 测试**：②b `\x01`×8192、②c `z`×8192+密钥（膨胀钉死上界）。
+3. **P2**：J8/⑨ 扫描升级为跨行括号匹配 + `\w*[Ee]rr\w*`/`detail`；声明改为「**#344 六处已收口**；残余白名单 **#347**」。
+4. 记债 issue **#347**（对象面裸用 + 转义判据缺口 LRM/RLM/ALM/零宽）。
+5. **未写**「全仓对象面零裸用」。
+
+### 我们遇到了哪些错误？
+1. ②c 初用密钥 `a`，但 `[redacted]` 含字母 `a` ⇒ `not.toContain('a')` 假红。
+
+### 我们是如何解决这些错误的？
+1. 改用单字符密钥 `z`（不出现在替代标记中）。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r1-20260923T125853Z.txt` sha256 `3b5ab4e8aa351c9063597c79663c756a72de4ad5ad5c25c0285449fdc367aa94` → **39 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r1-20260923T125853Z.txt` sha256 `ef12a60b7527d9f91e9d8c0b297124ed11ca83475e3334210d706777c8cc0acd` → **2290 pass / 9 skip / 0 fail**
+- 膨胀探针：`expansion-probe-r1-20260923T125853Z.txt` sha256 `386fba651f07176f202b12ca32fa07438799e3a2be08b9926b5b1dc32f0940fc` → A_c0=8202 / C_redact_z=8204（均 ≤8204）
+- 记债：https://github.com/openagentemail/openagentemail/issues/347
+- 独立自审：`subagent-review-r1.md`（agent `2e8a7271-da09-4265-897d-4e311d82286d`）
