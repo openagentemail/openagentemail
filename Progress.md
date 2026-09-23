@@ -1239,3 +1239,20 @@ N/A。
 ### 证据
 - focused：`r5.3d-focused-20260923T065300Z.txt` sha256 `8cb4c352209054502a3642383c0096f8bc10b3281a0253a6cdb4a81e15f0b5df` → 87 pass
 - 全量：`r5.3d-full-suite-20260923T065300Z.txt` sha256 `bc18074dc53fa8df1e8b16693c0bc4faf8fa7b9290eb2390151a042459247a7c` → **2249 pass / 9 skip / 1 fail**（`#272` 墙钟）
+
+## 2026-09-23 · w340 R5.4（#341 修 Codex：重叠密钥 + 有界 code）
+
+### 我们实现了哪些功能？
+1. `scrubTrailingSecretPrefix` 在 `redactSecrets` **之前**也跑；且不剥「本身是完整短密钥」的尾缀。
+2. `code` 与 `message` 同等 `takeCodePoints` 有界。
+3. 测例：重叠密钥边界无碎片；超大 code 有界+耗时。
+
+### 我们遇到了哪些错误？
+1. Codex 在 `54cc3bf` 上 P1×2（重叠密钥误匹配 / 大 code 无界）属实。
+
+### 我们是如何解决这些错误的？
+1. 先 scrub 再 redact 再 scrub；code 纳入预算。
+
+### 证据
+- focused：`r5.4-focused-20260923T070631Z.txt` sha256 `65a688bdf66dca02c04ad0ef9ca5f979c0715e8eb4121c40de033ccb23d66650` → 89 pass
+- 全量：`r5.4-full-suite-20260923T070631Z.txt` sha256 `8a5aa35583c2abb8144f26a7f5cfea975417eab56d382355ace273ae08db050c` → **2252 pass / 9 skip / 0 fail**
