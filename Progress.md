@@ -1202,3 +1202,29 @@ N/A。
 - focused：`/home/ops/materials/log-face-design/focused-b-20260923T102821Z.txt` sha256 `8da8b77d6a03a5cf3a2d1c8579886ca9fd98644c286346e23ec3e3e820bfef3d` → **116 pass / 0 fail**
 - 全量：`/home/ops/materials/log-face-design/full-suite-b-20260923T102837Z.txt` sha256 `7773631a1184408016fe6f3dc56637597a1f57b46758b83ecf85dbb6da8d7469` → **2277 pass / 9 skip / 2 fail**（2 红＝`#272 dist-build-lock` kill-9 锁 + `list-rate isolate`；与本卡无关；list-rate 单测复跑绿；#272 为本机端口锁环境性）
 - 独立自审：`/home/ops/materials/log-face-design/subagent-review-b.md` → **PASS**（agent `4c74db2b-3985-45ea-a150-687f78d911c0`）
+
+## 2026-09-23 · w344（#344 对象面统一：describeFailureStack）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/lib/redact.ts`：新增 **`describeFailureStack(err, secrets?)`**——取 `err.stack`（非空串）→ 有界 **STACK_MAX=8192** → `redactField`（整段 stack 单域）→ `escapeBlock` → 截断则尾部 `…[truncated]`（脱敏之后）；否则退化为 `describeFailure`。
+2. **同源转义**：抽出 `needsUnicodeEscape` / `unicodeEscape`；`escapeLine` 与新导出 `escapeBlock` 共用（后者保留 `\n`/`\r`/`\t` 字面）。**不引入第二份脱敏/转义实现**。
+3. **6 处调用点**改 `console.error(<前缀>, describeFailureStack(err))`：`app.ts` / `main.ts` / `webhook-delivery.ts`×3 / `audit.ts`。
+4. **跨卡联动**：`describe-failure-342.test.ts` J8 由「对象面 6 处豁免」改为**零豁免**（字符串面 + 对象面均只允许 `describeFailure` / `describeFailureStack`）。
+5. 新测 `describe-failure-stack-344.test.ts`（测试清单 ①–⑨ 逐条落）。
+6. `CHANGELOG.md` Unreleased Fixed 增 #344 条；#342 条改注「对象面豁免由 #344 收口」。
+7. **未碰**：`errorCode` / 对外错误码·状态码·body / `docs/` / #341 R7。
+
+### 我们遇到了哪些错误？
+1. 调用点运行时断言初用自定义密钥，但调用点不传 `secrets` ⇒ 只红配置邮箱密码，自定义密钥未红 → 断言失败。
+2. 全量套件中 ⑧ 的 audit 路径用「把 `audit.jsonl` 占成目录」逼 EISDIR，但共享 `config.dataDir` 上常已有真实文件 ⇒ `mkdir` 失败且写入成功 ⇒ `console.error` 未触发。
+
+### 我们是如何解决这些错误的？
+1. 运行时改用 `config.smtp.pass` 作泄露探针；单元侧仍用显式 `secrets` 覆盖 ①–⑦。
+2. audit 运行时改为 `spyOn(fs, writeFileSync/appendFileSync)` 抛带 stack 的 EISDIR，**不污染共享 DATA_DIR**。
+
+### 证据
+- 设计 / R0：`/home/ops/materials/obj-face-344/r0.md`（四裁点已批）
+- focused：`/home/ops/materials/obj-face-344/focused-20260923T123440Z.txt` sha256 `1c2f61e04241630b2db2ea3472715a6f7fb453b09772a80f633bc7996243fc7c` → **37 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-20260923T123440Z.txt` sha256 `865b76e6c29c1cbfa723629dacb5c7ffe8c280bbba576ca76930b2ce80992592` → **2287 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout，与本卡无关、历史已知）
+- 独立自审：见 `materials/obj-face-344/subagent-review.md`（agent `13e89af5-ed18-4b3a-8d72-e6b12c98e027`）
+- 早次全量红证（⑧ DATA_DIR 污染，已修）：`full-suite-20260923T123052Z.txt` sha256 `4a93de2bab83c51ddfc8bc587dbd851b3e95386d8368fa7e98309525ef5a47db`（一次落盘不覆盖）

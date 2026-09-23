@@ -1,9 +1,9 @@
 /**
- * 日志/告警载荷面：唯一入口 describeFailure。
+ * 日志/告警载荷面：字符串入口 describeFailure；对象面（保 stack）入口 describeFailureStack。
  *
- * B 形态流水线（design-b.md）：
- *   逐字段 取串 → 有界(200) → redactField（域内脱敏 + 域尾丢弃）→ escapeLine
- *   然后 join(' ')（禁止跨字段匹配）
+ * B 形态流水线（design-b.md / #344 R0）：
+ *   字符串面：逐字段 取串 → 有界(200) → redactField → escapeLine → join(' ')
+ *   对象面：取 stack → 有界(STACK_MAX) → redactField（整段单域）→ escapeBlock → 截断标记
  * 不变量 J1–J9；对外错误码/状态码/body 不经本模块；errorCode 在 errors.ts，一字不动。
  */
 
@@ -14,6 +14,12 @@ export const ERROR_DETAIL_MAX = 200;
 
 /** B 形态可证输出上界：每字段 ≤2000，两空格 ⇒ ≤6002 */
 export const DESCRIBE_FAILURE_MAX = 6002;
+
+/** 对象面 stack 文本上界（码元 / UTF-16 单位；#344 裁点 STACK_MAX=8192） */
+export const STACK_MAX = 8192;
+
+/** 截断后追加的固定标记（脱敏之后追加；标记本身不含密钥） */
+const TRUNCATED_MARK = '…[truncated]';
 
 /** 替换标记（不回喂自动机） */
 const REDACTED = '[redacted]';
@@ -167,11 +173,31 @@ export function redactSecrets(text: string, secrets: string[] = configuredSecret
   return redactField(text, secrets);
 }
 
-// —— 单行转义（每字段脱敏之后）———————————————
+// —— 转义（escapeLine / escapeBlock 同源判据，禁止复制第二份）———————————————
 
 /**
- * C0 / DEL+C1(U+007F–U+009F) / U+2028/U+2029 /
- * bidi/格式符 U+202A–U+202E、U+2066–U+2069 → 可读转义；不剥离、不截断。
+ * 同源转义判据：除 LF/CR/TAB 外是否需写成 `\uXXXX`。
+ * C0（其余）/ DEL+C1(U+007F–U+009F) / U+2028·U+2029 /
+ * bidi U+202A–U+202E、U+2066–U+2069。
+ * LF/CR/TAB 由 escapeLine（写成 \\n/\\r/\\t）与 escapeBlock（保留字面）各自处理。
+ */
+function needsUnicodeEscape(code: number): boolean {
+  if (code === 0x0a || code === 0x0d || code === 0x09) return false;
+  if (code <= 0x1f) return true; // 其余 C0
+  if (code >= 0x7f && code <= 0x9f) return true; // DEL + C1（含 NEL/CSI）
+  if (code === 0x2028 || code === 0x2029) return true;
+  if (code >= 0x202a && code <= 0x202e) return true; // bidi 嵌入/覆盖
+  if (code >= 0x2066 && code <= 0x2069) return true; // bidi isolate
+  return false;
+}
+
+function unicodeEscape(code: number): string {
+  return `\\u${code.toString(16).padStart(4, '0')}`;
+}
+
+/**
+ * 单行转义：LF/CR/TAB → `\\n`/`\\r`/`\\t`；其余 needsUnicodeEscape → `\uXXXX`。
+ * 不剥离、不截断。
  */
 export function escapeLine(text: string): string {
   let out = '';
@@ -183,17 +209,27 @@ export function escapeLine(text: string): string {
       out += '\\r';
     } else if (code === 0x09) {
       out += '\\t';
-    } else if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
-      // C0 + DEL/C1（含 U+0085 NEL、U+009B CSI）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code === 0x2028 || code === 0x2029) {
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code >= 0x202a && code <= 0x202e) {
-      // bidi 嵌入/覆盖（U+202A–U+202E）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code >= 0x2066 && code <= 0x2069) {
-      // bidi isolate（U+2066–U+2069）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
+    } else if (needsUnicodeEscape(code)) {
+      out += unicodeEscape(code);
+    } else {
+      out += text[i]!;
+    }
+  }
+  return out;
+}
+
+/**
+ * 多行块转义（#344）：与 escapeLine 同一 needsUnicodeEscape 判据，
+ * 但【保留 \\n / \\r / \\t 字面】——stack 可用性所在。
+ */
+export function escapeBlock(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x0a || code === 0x0d || code === 0x09) {
+      out += text[i]!; // 保留换行/回车/制表字面
+    } else if (needsUnicodeEscape(code)) {
+      out += unicodeEscape(code);
     } else {
       out += text[i]!;
     }
@@ -300,6 +336,55 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
     return parts.join(' ');
   } catch {
     // 极端兜底：整条流水线不得逸出
+    return '[unreadable]';
+  }
+}
+
+/**
+ * 对象面唯一入口（#344）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
+ *
+ * 流水线：取 stack 串 → 有界 STACK_MAX → redactField（整段单域）→ escapeBlock
+ * → 若截断则尾部追加 `…[truncated]`（脱敏之后）。
+ * stack 缺席/非串/空/会抛 ⇒ 退化为 describeFailure 单行文本。
+ */
+export function describeFailureStack(err: unknown, secrets?: string[]): string {
+  try {
+    const secretList = secrets === undefined ? configuredSecrets() : secrets;
+
+    // 1) 取串（永不抛）：err.stack 为非空字符串 ⇒ 用它；否则退化
+    let stackText: string | undefined;
+    try {
+      if (err instanceof Error) {
+        try {
+          const s = err.stack;
+          if (typeof s === 'string' && s.length > 0) stackText = s;
+        } catch {
+          stackText = undefined;
+        }
+      }
+    } catch {
+      stackText = undefined;
+    }
+
+    if (stackText === undefined) {
+      return describeFailure(err, secrets);
+    }
+
+    // 2) 先有界
+    const didTruncate = stackText.length > STACK_MAX;
+    const bounded = didTruncate ? stackText.slice(0, STACK_MAX) : stackText;
+
+    // 3) 域内脱敏（整段 stack 含换行＝单域；密钥含 \n 亦可匹配）
+    const redacted = redactField(bounded, secretList);
+
+    // 4) 转义（保留 \n/\r/\t 字面）
+    let out = escapeBlock(redacted);
+
+    // 5) 截断标记在脱敏之后追加（标记不含密钥）
+    if (didTruncate) out += TRUNCATED_MARK;
+
+    return out;
+  } catch {
     return '[unreadable]';
   }
 }

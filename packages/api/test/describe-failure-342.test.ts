@@ -166,7 +166,7 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(() => describeFailure(bad, [])).not.toThrow();
   });
 
-  test('J8：单点入口 + 零裸用（对象面 6 处豁免 #344）', () => {
+  test('J8：单点入口 + 零裸用（字符串面与对象面均无裸用；零豁免）', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -178,15 +178,6 @@ describe('describeFailure / redactField · #342 B', () => {
     }
     walk(srcRoot);
 
-    const objectFaceExempt = new Set([
-      'app.ts:178',
-      'main.ts:53',
-      'webhook-delivery.ts:1232',
-      'webhook-delivery.ts:2160',
-      'webhook-delivery.ts:2162',
-      'audit.ts:223',
-    ]);
-
     const errorDetailHits: string[] = [];
     const bareHits: string[] = [];
 
@@ -195,13 +186,21 @@ describe('describeFailure / redactField · #342 B', () => {
       const lines = readFileSync(file, 'utf8').split('\n');
       lines.forEach((line, idx) => {
         const loc = `${rel}:${idx + 1}`;
-        const baseLoc = `${rel.split('/').pop()}:${idx + 1}`;
         if (/\berrorDetail\s*\(/.test(line)) errorDetailHits.push(loc);
+        // 字符串面：不得裸拼 err.message / String(err)
         if (
           /console\.(warn|error|log)\(/.test(line) &&
           /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
         ) {
-          if (!objectFaceExempt.has(baseLoc)) bareHits.push(loc);
+          bareHits.push(loc);
+        }
+        // 对象面：console.* 第二参不得直投 err；只允许 describeFailure / describeFailureStack
+        if (
+          /console\.(warn|error|log)\(/.test(line) &&
+          /,\s*err\s*\)/.test(line) &&
+          !/describeFailure(Stack)?\s*\(\s*err\s*\)/.test(line)
+        ) {
+          bareHits.push(loc);
         }
         if (/console\.warn\(\s*'\[task\] claim(-lost)? failed:'/.test(line)) {
           if (!/describeFailure\s*\(\s*err\s*\)/.test(line) || /,\s*code\s*\)/.test(line)) {

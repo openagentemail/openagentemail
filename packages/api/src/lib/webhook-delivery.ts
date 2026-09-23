@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
+import { describeFailureStack } from './redact.ts';
 import {
   defaultDnsLookup,
   pinnedFetch,
@@ -1229,7 +1230,7 @@ export function startWebhookMaintenance(): void {
       compactDeliveryLog();
       compactIdempotencyKeys(config.webhooks.logRetentionDays);
     } catch (err) {
-      console.error('[webhooks] maintenance failed:', err);
+      console.error('[webhooks] maintenance failed:', describeFailureStack(err));
     }
   };
   tick();
@@ -2157,9 +2158,9 @@ class WebhookDeliveryQueue {
           'code' in err &&
           (err as { code?: string }).code === 'store_corrupt');
       if (storeCorrupt) {
-        console.error('[webhooks] store corrupt during delivery:', err);
+        console.error('[webhooks] store corrupt during delivery:', describeFailureStack(err));
       } else {
-        console.error('[webhooks] executeJob failed:', err);
+        console.error('[webhooks] executeJob failed:', describeFailureStack(err));
       }
       try {
         appendDeliveryLogRow({
