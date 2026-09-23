@@ -37,6 +37,7 @@ import {
 } from './delegations.ts';
 import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
 import { recordAuditEvent } from './audit.ts';
+import { errorCode } from './errors.ts';
 
 export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
 let webhookCancelCallback: WebhookCancelCallback | undefined;
@@ -341,7 +342,7 @@ function load(): Identity[] {
     return storeCache.identities;
   } catch (err) {
     invalidateStoreCache();
-    if ((err as Error).message === 'identity_store_corrupt') throw err;
+    if (errorCode(err) === 'identity_store_corrupt') throw err;
     // Fail closed. Treating a damaged store as empty looks harmless until the
     // next create/rotate saves over it: every existing identity and token is
     // gone. The message carries no file content on purpose.

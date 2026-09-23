@@ -15,6 +15,7 @@ import {
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { config } from './config.ts';
+import { errorCode } from './errors.ts';
 
 export const CODE_TTL_MS = 10 * 60 * 1000;
 export const ACCESS_TTL_MS = 60 * 60 * 1000;
@@ -313,7 +314,7 @@ function loadStore(opts: LoadStoreOptions): OAuthStoreFile {
     } else {
       rawCache = undefined;
     }
-    if ((err as Error).message === 'oauth_store_corrupt') throw err;
+    if (errorCode(err) === 'oauth_store_corrupt') throw err;
     // 损坏 fail-closed：绝不当空库写回，避免抹掉全部授权。
     throw new Error('oauth_store_corrupt');
   }

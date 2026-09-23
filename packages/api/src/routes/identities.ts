@@ -23,6 +23,7 @@ import { getAuth, getAttribution, resolveAccessToken } from '../lib/auth.ts';
 import { recordAuditEvent } from '../lib/audit.ts';
 import { clientIp } from '../lib/net.ts';
 import { resolveResourceUri } from '../lib/oauth-url.ts';
+import { errorCode } from '../lib/errors.ts';
 
 function classifyScopeChange(
   prev: string[] | undefined,
@@ -387,10 +388,10 @@ export const identitiesRoute = new Hono()
           201,
         );
       } catch (err) {
-        if ((err as Error).message === 'invalid_localpart') {
+        if (errorCode(err) === 'invalid_localpart') {
           return c.json({ error: 'invalid_localpart' }, 400);
         }
-        if ((err as Error).message === 'invalid_domain') {
+        if (errorCode(err) === 'invalid_domain') {
           c.header('Cache-Control', 'no-store');
           return c.json({ error: 'invalid_domain' }, 400);
         }
@@ -459,10 +460,10 @@ export const identitiesRoute = new Hono()
         201,
       );
     } catch (err) {
-      if ((err as Error).message === 'invalid_localpart') {
+      if (errorCode(err) === 'invalid_localpart') {
         return c.json({ error: 'invalid_localpart' }, 400);
       }
-      if ((err as Error).message === 'invalid_domain') {
+      if (errorCode(err) === 'invalid_domain') {
         c.header('Cache-Control', 'no-store');
         return c.json({ error: 'invalid_domain' }, 400);
       }

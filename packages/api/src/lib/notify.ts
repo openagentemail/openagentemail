@@ -42,6 +42,7 @@ import {
   type NtfyUserDeleteResult,
 } from './notification-devices.ts';
 import { encodeQrModules } from './qr-byte.ts';
+import { errorCode } from './errors.ts';
 
 export type NotifyLevel = 'urgent' | 'normal' | 'low';
 export type NotifyTarget = 'user' | `agent:${string}`;
@@ -1438,7 +1439,7 @@ export class NtfyNotificationService implements NotifyService {
       notificationLogHealthAlert('append_failed_delivery_failure', {
         source: input.source ?? 'manual',
         logicalChannel,
-        error: (logError as Error).message,
+        error: errorCode(logError),
       });
     }
   }
@@ -1524,7 +1525,7 @@ export class NtfyNotificationService implements NotifyService {
       notificationLogHealthAlert('append_failed_after_delivery', {
         source: input.source ?? 'manual',
         logicalChannel,
-        error: (err as Error).message,
+        error: errorCode(err),
       });
     }
     return { target: input.target, title: input.title, level: input.level };
@@ -1710,7 +1711,7 @@ export async function notifyTrustedAgentDelivery(address: string): Promise<void>
   } catch (err) {
     // Mail already made it to SMTP; notification delivery must not turn a
     // successful send into a false failure. The operator still gets a signal.
-    console.warn('[notify] trusted agent delivery failed:', (err as Error).message);
+    console.warn('[notify] trusted agent delivery failed:', errorCode(err));
   }
 }
 
