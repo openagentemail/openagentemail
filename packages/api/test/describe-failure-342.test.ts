@@ -6,6 +6,14 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+  isObjectFaceDebtAllowed,
+  lineOf,
+  OBJECT_FACE_DEBT_ISSUE,
+  OBJECT_FACE_DEBT_NEEDLES,
+} from './support/log-face-scan.ts';
 
 // redact → config 进程级校验；须在动态 import 前写入
 process.env.DOMAIN = 'test.example';
@@ -166,7 +174,7 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(() => describeFailure(bad, [])).not.toThrow();
   });
 
-  test('J8：单点入口 + 零裸用（对象面 6 处豁免 #344）', () => {
+  test('J8：单点入口 + 零裸用（对象面残余仅 #347 白名单）', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -178,41 +186,66 @@ describe('describeFailure / redactField · #342 B', () => {
     }
     walk(srcRoot);
 
-    const objectFaceExempt = new Set([
-      'app.ts:178',
-      'main.ts:53',
-      'webhook-delivery.ts:1232',
-      'webhook-delivery.ts:2160',
-      'webhook-delivery.ts:2162',
-      'audit.ts:223',
-    ]);
-
     const errorDetailHits: string[] = [];
     const bareHits: string[] = [];
+    const objectBareHits: string[] = [];
+    const allowed: string[] = [];
 
     for (const file of files) {
       const rel = file.slice(srcRoot.length + 1);
-      const lines = readFileSync(file, 'utf8').split('\n');
+      const text = readFileSync(file, 'utf8');
+      const lines = text.split('\n');
       lines.forEach((line, idx) => {
         const loc = `${rel}:${idx + 1}`;
-        const baseLoc = `${rel.split('/').pop()}:${idx + 1}`;
         if (/\berrorDetail\s*\(/.test(line)) errorDetailHits.push(loc);
-        if (
-          /console\.(warn|error|log)\(/.test(line) &&
-          /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
-        ) {
-          if (!objectFaceExempt.has(baseLoc)) bareHits.push(loc);
-        }
         if (/console\.warn\(\s*'\[task\] claim(-lost)? failed:'/.test(line)) {
           if (!/describeFailure\s*\(\s*err\s*\)/.test(line) || /,\s*code\s*\)/.test(line)) {
             bareHits.push(loc);
           }
         }
       });
+      for (const call of extractConsoleCalls(text)) {
+        if (!isObjectFaceBareArgs(call.args)) continue;
+        const loc = `${rel}:${lineOf(text, call.index)}`;
+        const callSrc = text.slice(call.index, call.index + 220);
+        if (isObjectFaceDebtAllowed(callSrc)) allowed.push(loc);
+        else objectBareHits.push(loc);
+      }
     }
 
     expect(errorDetailHits).toEqual([]);
     expect(bareHits).toEqual([]);
+    expect(objectBareHits).toEqual([]);
+    expect(OBJECT_FACE_DEBT_ISSUE).toBe('#347');
+    expect(allowed.length).toBeGreaterThanOrEqual(OBJECT_FACE_DEBT_NEEDLES.length);
+  });
+
+  test('J8b：禁止 escapeLine(redactSecrets(...)) 手工直连嵌套', () => {
+    // 与 #342 I6/J8 同款：全仓 src 不得出现 escapeLine( 与 redactSecrets( 直接嵌套
+    const srcRoot = join(import.meta.dir, '../src');
+    const files: string[] = [];
+    function walk(dir: string) {
+      for (const name of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, name.name);
+        if (name.isDirectory()) walk(p);
+        else if (name.name.endsWith('.ts')) files.push(p);
+      }
+    }
+    walk(srcRoot);
+
+    const nestedHits: string[] = [];
+    // 允许跨空白/换行的直接嵌套：escapeLine( redactSecrets( ... ) )
+    const nestRe = /escapeLine\s*\(\s*redactSecrets\s*\(/g;
+    for (const file of files) {
+      const rel = file.slice(srcRoot.length + 1);
+      const text = readFileSync(file, 'utf8');
+      let m: RegExpExecArray | null;
+      while ((m = nestRe.exec(text))) {
+        const line = text.slice(0, m.index).split('\n').length;
+        nestedHits.push(`${rel}:${line}`);
+      }
+    }
+    expect(nestedHits).toEqual([]);
   });
 
   test('J9：输出上界 ≤6002', () => {
@@ -250,9 +283,10 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(redactSecrets(withNl, ['x'])).toBe('a\nb');
     expect(redactSecrets(withNl, ['x'])).toContain('\n');
     expect(redactSecrets(withNl, ['x'])).not.toContain('\\n');
+    // scrubPayload 用 escapeBlock：LF 保留字面（与历史 escapeLine 单行化不同；#348 对齐）
     const viaDescribe = describeFailure(new Error('a\nb'), []);
-    expect(viaDescribe).toContain('\\n');
-    expect(viaDescribe).not.toContain('\n');
+    expect(viaDescribe).toContain('\n');
+    expect(viaDescribe).not.toContain('\\n');
   });
 
   // —— 五机制反例 ——————————————————————————
@@ -350,11 +384,13 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(describeFailure(new Error('section'), [])).toBe('section');
   });
 
-  test('单行化：C0 / DEL / C1 / U+2028 在脱敏之后', () => {
+  test('控制符转义：C0 / DEL / C1 / U+2028 在脱敏之后（LF 保留字面）', () => {
     const out = describeFailure(new Error('pre\nsecret\npost'), ['secret']);
     expect(out).not.toContain('secret');
     expect(out).toContain('[redacted]');
-    expect(out).toContain('\\n');
+    // scrubPayload → escapeBlock：换行保留字面
+    expect(out).toContain('\n');
+    expect(out).not.toContain('\\n');
     expect(describeFailure(new Error(`pre\u007fpost`), [])).toBe('pre\\u007fpost');
     expect(describeFailure(new Error(`pre\u009bpost`), [])).toBe('pre\\u009bpost');
   });

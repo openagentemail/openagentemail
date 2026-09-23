@@ -1202,3 +1202,30 @@ N/A。
 - focused：`/home/ops/materials/log-face-design/focused-b-20260923T102821Z.txt` sha256 `8da8b77d6a03a5cf3a2d1c8579886ca9fd98644c286346e23ec3e3e820bfef3d` → **116 pass / 0 fail**
 - 全量：`/home/ops/materials/log-face-design/full-suite-b-20260923T102837Z.txt` sha256 `7773631a1184408016fe6f3dc56637597a1f57b46758b83ecf85dbb6da8d7469` → **2277 pass / 9 skip / 2 fail**（2 红＝`#272 dist-build-lock` kill-9 锁 + `list-rate isolate`；与本卡无关；list-rate 单测复跑绿；#272 为本机端口锁环境性）
 - 独立自审：`/home/ops/materials/log-face-design/subagent-review-b.md` → **PASS**（agent `4c74db2b-3985-45ea-a150-687f78d911c0`）
+
+## 2026-09-23 · w348 发射路径收敛（#348 · R1–R4 + scrubPayload）
+
+### 我们实现了哪些功能？
+1. **唯一组合原语 `scrubPayload`**：①slice → ②redactField → ③escapeBlock → ④redactField(+MARK) → ⑤slice（Codex P2 剔半转义）→ ⑥trimTrailingSecretPrefix → ⑦containsAnySecret?''（R4 空串兜底，不迭代替换）。
+2. **三入口全部改用它**：字符串面 `describeFailure`（逐字段 truncate200→scrubPayload→join）；对象面 `describeFailureStack`（LIMIT=8204）；盘文本面 `webhook-delivery` 两处 corrupted log → `scrubPayload(line.slice(0,100))`。
+3. **对象面 6 处**（app/main/audit/webhook-delivery×3）改走 `describeFailureStack`；#347 白名单残余不变。
+4. **grep 断言**：禁止 `escapeLine(redactSecrets(...))` 直接嵌套；J8 对齐 #347 白名单扫描。
+5. **测试**：`describe-failure-342` 对齐新原语；新增 `describe-failure-stack-344` + `describe-failure-348`（9 实例 + 4 不变量 + Codex P2）。
+6. **CHANGELOG** Unreleased 记 #348（对外零变更声明）。
+
+### 我们遇到了哪些错误？
+1. Codex P2 初版只剔 `\\uXXXX` 残段，截断落在孤立 `\` 时仍残留 → 断言失败。
+2. grep 禁嵌套误伤 `redact.ts` 文件头注释里的示例字面量。
+3. 全量套件 1 红：`#206 R9` 矩阵子进程 25s timeout（历史预存/环境性，与本卡无关）。
+
+### 我们是如何解决这些错误的？
+1. ⑤ 收尾改为 `/\\(?:u[0-9a-fA-F]{0,3})?$/`，孤立反斜杠一并去掉。
+2. 注释改为「禁止 escapeLine 与 redactSecrets 手工嵌套直连」，避免字面嵌套形态。
+3. 记入证据；focused 58/0 全绿；全量 2308 pass / 9 skip / 1 fail（仅 #206）。
+
+### 证据
+- 设计：`/home/ops/materials/log-face-r5/design.md`（总指挥已核）
+- 基线：`1a35246d`；分支 `tizerluo/w348`
+- focused：`/home/ops/materials/log-face-r5/evidence/focused-20260923T150406Z.log` sha256 `31ff9517ce99223e0998f861cca50523c8840a88ddd45f878cef5945a9e53abd` → **58 pass / 0 fail**
+- 全量：`/home/ops/materials/log-face-r5/evidence/full-20260923T150419Z.log` sha256 `bbe26b2af29679a3e4e71f851cf786932e36a2d1d71603ad8a4622f6a976a458` → **2308 pass / 9 skip / 1 fail**（#206 timeout）
+- 9 实例实测：`/home/ops/materials/log-face-r5/evidence/nine-instances-out.json`

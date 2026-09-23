@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { config } from './config.ts';
+import { describeFailureStack } from './redact.ts';
 
 /** 超过此大小则 rotate（只保留 audit.jsonl.1 一份）。 */
 export const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
@@ -220,7 +221,8 @@ export function recordAuditEvent(
       // best effort
     }
   } catch (err) {
-    console.error('[audit] append failed:', err);
+    // 对象面：stack 走 scrubPayload 统一发射路径
+    console.error('[audit] append failed:', describeFailureStack(err));
   }
 }
 

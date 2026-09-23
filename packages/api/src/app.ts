@@ -9,6 +9,7 @@ import {
 } from './lib/auth.ts';
 import { config } from './lib/config.ts';
 import { JSON_BODY_LIMIT_BYTES } from './lib/limits.ts';
+import { describeFailureStack } from './lib/redact.ts';
 import { scopePolicyMiddleware } from './lib/scope-policy.ts';
 import {
   UiSessionStore,
@@ -175,7 +176,8 @@ export function createApp(options: AppOptions = {}): Hono {
   }
 
   app.onError((err, c) => {
-    console.error('[api] unhandled error:', err);
+    // 对象面：stack 走 scrubPayload 统一发射路径
+    console.error('[api] unhandled error:', describeFailureStack(err));
     return c.json({ error: 'internal_error' }, 500);
   });
 
