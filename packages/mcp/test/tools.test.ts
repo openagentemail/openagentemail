@@ -11,7 +11,8 @@ type SchemaMap = Record<string, { safeParse(value: unknown): { success: boolean;
 type ToolConfig = {
   title?: string;
   description?: string;
-  inputSchema?: SchemaMap;
+  // raw shape 或完整 z.object(...).strict()（#324 mail_send）均可能
+  inputSchema?: SchemaMap | z.ZodObject<z.ZodRawShape>;
   outputSchema?: SchemaMap;
   annotations?: {
     readOnlyHint?: boolean;
@@ -22,13 +23,23 @@ type ToolConfig = {
   };
 };
 
+/**
+ * 测试桩：把 inputSchema 归一成字段 map。
+ * ZodObject → 取其 .shape；否则按原 raw shape 使用（其他工具路径不变）。
+ */
+function toFieldMap(schema: ToolConfig["inputSchema"]): SchemaMap {
+  if (!schema) return {};
+  if (schema instanceof z.ZodObject) return schema.shape as SchemaMap;
+  return schema as SchemaMap;
+}
+
 const toolSchemas = new Map<string, SchemaMap>();
 const toolConfigs = new Map<string, ToolConfig>();
 
 class FakeMcpServer {
   registerTool(name: string, config: ToolConfig) {
     toolConfigs.set(name, config);
-    toolSchemas.set(name, config.inputSchema ?? {});
+    toolSchemas.set(name, toFieldMap(config.inputSchema));
   }
 
   async connect() {}
