@@ -6,6 +6,10 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+} from './support/log-face-scan.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -322,5 +326,29 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     const err = new Error('x');
     err.stack = sample;
     expect(describeFailureStack(err, [])).toBe(blockOut);
+  });
+
+  // FC R4：扫描器不得被「混合调用」绕过（删整段 describeFailure* 豁免捷径）
+  test('FC R4：混合调用 describeFailureStack(err), err ⇒ 必须判为裸用', () => {
+    // 直接参数判定（J8 / ⑨ 共用 isObjectFaceBareArgs）
+    expect(
+      isObjectFaceBareArgs("'[x] failed:', describeFailureStack(err), err"),
+    ).toBe(true);
+    expect(isObjectFaceBareArgs('describeFailure(err), err')).toBe(true);
+    expect(isObjectFaceBareArgs('describeFailureStack(err), detail')).toBe(true);
+    // 正常单入口不得误报
+    expect(isObjectFaceBareArgs("'[x] failed:', describeFailureStack(err)")).toBe(
+      false,
+    );
+    expect(isObjectFaceBareArgs('describeFailure(err)')).toBe(false);
+    // 经 extractConsoleCalls 走与 J8/⑨ 相同路径
+    const mixedSrc = `console.error('[x] failed:', describeFailureStack(err), err);`;
+    const okSrc = `console.error('[x] failed:', describeFailureStack(err));`;
+    const mixed = extractConsoleCalls(mixedSrc);
+    const ok = extractConsoleCalls(okSrc);
+    expect(mixed).toHaveLength(1);
+    expect(ok).toHaveLength(1);
+    expect(isObjectFaceBareArgs(mixed[0]!.args)).toBe(true);
+    expect(isObjectFaceBareArgs(ok[0]!.args)).toBe(false);
   });
 });

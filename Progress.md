@@ -1299,3 +1299,18 @@ N/A。
 
 ### 证据
 - 见 focused/full-fc-r3 留件与 `evidence/fc-r3-measured.json`
+
+## 2026-09-23 · w348 FC R4（扫描器混合调用绕过）
+
+### 我们实现了哪些功能？
+1. 删除 `isObjectFaceBareArgs` 整段 `describeFailure*` 豁免捷径；仅按顶层参数判定裸用。
+2. 负控：`describeFailureStack(err), err` 必须判裸用；正常单入口不得误报。
+
+### 我们遇到了哪些错误？
+1. CR actionable：混合调用可绕过 J8/⑨。
+
+### 我们是如何解决这些错误的？
+1. 照 CR 建议删捷径；补 FC R4 测试。
+
+### 证据
+- 见 focused/full-fc-r4 留件

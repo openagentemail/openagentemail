@@ -99,11 +99,11 @@ function splitTopLevelArgs(args: string): string[] {
 }
 
 /**
- * 是否为对象面裸用：顶层参数恰为 `\w*[Ee]rr\w*` 或 `detail`，
- * 且整段 args 未走 describeFailure / describeFailureStack。
+ * 是否为对象面裸用：顶层参数中**任一**恰为 `\w*[Ee]rr\w*` 或 `detail`。
+ * 按参数判定（不看整段是否含 describeFailure*）——避免
+ * `describeFailureStack(err), err` 这类混合调用被整段捷径豁免。
  */
 export function isObjectFaceBareArgs(args: string): boolean {
-  if (/describeFailure(Stack)?\s*\(/.test(args)) return false;
   for (const p of splitTopLevelArgs(args)) {
     if (/^detail$/.test(p)) return true;
     if (/^\w*[Ee]rr\w*$/.test(p)) return true;
