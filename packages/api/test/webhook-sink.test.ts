@@ -8,8 +8,9 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const { config } = await import('../src/lib/config.ts');
 const { createWebhookSink } = await import('../src/lib/webhook-sink.ts');
@@ -26,7 +27,8 @@ const { isSinkServiceFailure } = await import('../src/lib/event-dispatcher.ts');
 import type { ApprovalTask } from '../src/lib/tasks-internal.ts';
 import type { MailReceivedEvent } from '../src/lib/event-dispatcher.ts';
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-sink');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-webhook-sink-'));
 const originalDataDir = config.dataDir;
 
 function setupTestDir(): void {

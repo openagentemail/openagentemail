@@ -8,8 +8,9 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const { config } = await import('../src/lib/config.ts');
 const {
@@ -35,7 +36,8 @@ const {
   WEBHOOK_IDEMPOTENCY_MAX_RECORDS,
 } = await import('../src/lib/webhook-store.ts');
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-store');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-webhook-store-'));
 const originalDataDir = config.dataDir;
 
 function setupTestDir(): void {

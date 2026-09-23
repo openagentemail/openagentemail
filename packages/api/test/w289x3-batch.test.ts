@@ -49,7 +49,8 @@ const {
 } = await import('../src/lib/tasks-internal.ts');
 const { findIdentity } = await import('../src/lib/identities.ts');
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-w289x3-batch');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-w289x3-batch-'));
 const originalDataDir = config.dataDir;
 let app: ReturnType<typeof createApp>;
 const adminKey = [...config.apiKeys][0] || 'test-key';

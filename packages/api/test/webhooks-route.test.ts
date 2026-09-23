@@ -8,8 +8,9 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const { createApp } = await import('../src/app.ts');
 const { config } = await import('../src/lib/config.ts');
@@ -44,7 +45,8 @@ const {
 const { readAuditEvents } = await import('../src/lib/audit.ts');
 const { setTaskGetForTests } = await import('../src/lib/tasks-internal.ts');
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhooks-route');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-webhooks-route-'));
 const originalDataDir = config.dataDir;
 
 let app: ReturnType<typeof createApp>;

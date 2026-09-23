@@ -9,8 +9,9 @@ process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const { config } = await import('../src/lib/config.ts');
 const {
@@ -70,7 +71,8 @@ const { readAuditEvents } = await import('../src/lib/audit.ts');
 const { setTaskGetForTests } = await import('../src/lib/tasks-internal.ts');
 type WebhookSubscription = import('../src/lib/webhook-store.ts').WebhookSubscription;
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-delivery');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-webhook-delivery-'));
 const originalDataDir = config.dataDir;
 
 function setupTestDir(): void {

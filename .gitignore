@@ -10,5 +10,8 @@ dist/
 .dist-build.lock/
 output/playwright/
 
+# #350 E1：测试期仓树内 tmp 兜底（E2 已改系统临时目录；本行防回潮）
+packages/api/test/tmp-*/
+
 # OS noise
 .DS_Store
