@@ -1182,3 +1182,20 @@ N/A。
 - 全量（修夹具后）：`r5-full-suite-after-fix-20260923T055447Z.txt` sha256 `a01f3137557f04426dabf9e1591157896609a5f80f1b804141120faa31383f6e` → **2244 pass / 9 skip / 1 fail**（唯 `#206` 墙钟）
 - 全量首跑红件保留：`r5-full-suite-20260923T055054Z.txt`（夹具污染，未覆盖）
 - mega 耗时：`[errorDetail mega] bytes=4194304 ms=0.377`（见全量日志）
+
+## 2026-09-23 · w340 R5.1（#341 修 Codex/Muse：warn 路径永不抛）
+
+### 我们实现了哪些功能？
+1. `taskFailureLogDetail(err)`：`boundDetail(describeFailure(err))` 外包 try/catch，失败回落 `[unreadable]`，保证 renew/release catch 仍稳返 `502 task_operation_failed`。
+2. 测试：会抛 message getter 注入 ⇒ 仍 502 + warn 有非空载荷。
+
+### 我们遇到了哪些错误？
+1. R5 头 `415ce7e` 上 Codex ⚠️ P1×1 + Muse ⚠️ P1×2（同根：`describeFailure` 无守卫进 catch warn）。
+
+### 我们是如何解决这些错误的？
+1. 调用点硬化（不改 `describeFailure` 既有导出语义）；负控锁 502。
+
+### 证据
+- commit：见本轮 HEAD
+- focused：`r5.1-focused-20260923T061435Z.txt` sha256 `78f1c7814e418066ef1ebb5190b270b853184525f8ac1d4aae5d807e538f6730` → 84 pass
+- 全量：`r5.1-full-suite-20260923T061435Z.txt` sha256 `2eb663462e086baa6cccc5a61d12aa9fd88845b34e7eef264f984e5102d42306` → **2247 pass / 9 skip / 0 fail**
