@@ -1277,3 +1277,21 @@ N/A。
 - 功能 commit：`bd99ade`
 - focused：`/home/ops/materials/debt-batch-2/r6-focused-20260923T071040Z.txt` sha256 `acc6a27c231f9bd7715dc762f1b9470941a1b42c8bdf9ece27a3579ad4d20a4c` → **92 pass / 0 fail**
 - 全量：`r6-full-suite-20260923T071040Z.txt` sha256 `48725393a7f8b0ccd1e8ff2649719fe5ae8ed54bffdb8d21c81054c9ee828673` → **2261 pass / 9 skip / 0 fail**
+
+## 2026-09-23 · w340 R6b（#341 清 Codex：多字段截断字段级 scrub）
+
+### 我们实现了哪些功能？
+1. `describeFailureBounded`：`code`/`message`（及裸 `String(err)`）在 `takeCodePoints` 后、`join` 前各自 `scrubTrailingSecretPrefix`，避免半截密钥因后续字段落到行中而逃脱行尾 scrub。
+2. 测例：`code=secret×4+filler+secret` + `message:'tail'` ⇒ 原串与 `boundDetail` 均无完整/半截明文。
+
+### 我们遇到了哪些错误？
+1. R6 头 `4a34aef` 上 Codex ⚠️ P1×1（多字段截断碎片）属实。
+2. 全量 1 红：`#149` Compose CLI hanging probe 墙钟（如实报，禁 rerun-to-green）。
+
+### 我们是如何解决这些错误的？
+1. 字段级 scrub；范围仍只动 `lib/redact.ts` + 测试。
+
+### 证据
+- 功能 commit：见本轮 HEAD 前一颗
+- focused：`/home/ops/materials/debt-batch-2/r6b-focused-20260923T073017Z.txt` sha256 `83947da8f43478f93b954969275b6236fb3323d295e44277b77595151994f095` → **79 pass / 0 fail**
+- 全量：`r6b-full-suite-20260923T073017Z.txt` sha256 `e0f579c42264c0debd6d76e0cffa0f75b3fbde90c4eedb65d195c327901ffd9d` → **2261 pass / 9 skip / 1 fail**（唯 `#149`）
