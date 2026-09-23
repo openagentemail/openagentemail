@@ -1177,3 +1177,28 @@ N/A。
 ### 证据（施工中填）
 - 设计：`/home/ops/materials/log-face-design/design.md`（R3 核过）
 - focused / 全量：见 completion 与 materials 落盘
+
+## 2026-09-23 · w342 B 形态（#342 · design-b.md 核过放行）
+
+### 我们实现了哪些功能？
+1. **形态变更**：跨字段整行流式 → **逐字段独立域**。流水线＝每字段 `取串 → 有界200 → redactField → escapeLine`，**然后** `join(' ')`（禁止跨字段匹配，J1）。
+2. **域原语 `redactField`**：域内最长优先 + hold；**J4 域尾一律丢弃**（已成匹配发 `[redacted]`，余部永不字面倾倒）；**J5 保序重放**（队首插入）。
+3. **删除**旧 `finish()`「否则整段字面输出」分支（闭 Codex/ZCode/CR 所指域尾余段 P1）。
+4. **`escapeLine` 扩 bidi**：U+202A–U+202E、U+2066–U+2069（与既有 C0/C1/LS/PS 合成）。
+5. **`redactSecrets`**＝同一域原语薄包装；`streamRedact` 别名保留。
+6. **调用点不变**（11+send+sent-registry+tasks claim/claim-lost 自动受益）。
+7. **测试**：J1–J9（J9≤6002）+ 五机制 + 三反例（域尾余段 / 截断前缀 / bidi）+ 兼容负控 + **已声明行为差异**（字段尾真前缀有意丢弃）。
+8. **CHANGELOG** 改写 #342 条目为 B 形态；**追加提交**（不 force-push / 不改写 `3872b0b` 史）。
+
+### 我们遇到了哪些错误？
+1. J1/机制3/机制4 初测误期望跨字段密钥「原文保留」；实测前字段恰为含空格密钥的真前缀 ⇒ J4 丢空 ⇒ 输出 `' cret'` / `' TAIL'`（闭合论证 §三.4 的直接表现，非缺陷）。
+
+### 我们是如何解决这些错误的？
+1. 修正测试期望为 J4 丢弃后的精确输出，并断言不得整行 `[redacted]`、不得含完整跨界密钥。
+
+### 证据
+- 设计：`/home/ops/materials/log-face-design/design-b.md`（总指挥 2026-09-23 10:22:49Z 核过）
+- 反例素材头：`3872b0b`（冻结保留、不予合并）
+- focused：`/home/ops/materials/log-face-design/focused-b-20260923T102821Z.txt` sha256 `8da8b77d6a03a5cf3a2d1c8579886ca9fd98644c286346e23ec3e3e820bfef3d` → **116 pass / 0 fail**
+- 全量：`/home/ops/materials/log-face-design/full-suite-b-20260923T102837Z.txt` sha256 `7773631a1184408016fe6f3dc56637597a1f57b46758b83ecf85dbb6da8d7469` → **2277 pass / 9 skip / 2 fail**（2 红＝`#272 dist-build-lock` kill-9 锁 + `list-rate isolate`；与本卡无关；list-rate 单测复跑绿；#272 为本机端口锁环境性）
+- 独立自审：`/home/ops/materials/log-face-design/subagent-review-b.md` → **PASS**（agent `4c74db2b-3985-45ea-a150-687f78d911c0`）

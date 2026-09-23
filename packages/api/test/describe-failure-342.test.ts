@@ -1,13 +1,13 @@
 /**
- * #342 日志面唯一入口：I1–I7 / 五机制 / 终止性 / 兼容负控。
- * 设计见 issue #342 / log-face-design（R3–R5）。
+ * #342 B 形态：J1–J9 / 五机制 / 三反例 / 终止性 / 兼容负控 / 已声明行为差异。
+ * 设计见 materials/log-face-design/design-b.md。
  */
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// redact → config 进程级校验；须在动态 import 前写入（勿用 ??=，避免空串占位）
+// redact → config 进程级校验；须在动态 import 前写入
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
 process.env.IMAP_USER = 'agent@test.example';
@@ -16,11 +16,17 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-342-'));
 
-const { describeFailure, redactSecrets, streamRedact, escapeLine, ERROR_DETAIL_MAX } = await import(
-  '../src/lib/redact.ts'
-);
+const {
+  describeFailure,
+  redactSecrets,
+  redactField,
+  streamRedact,
+  escapeLine,
+  ERROR_DETAIL_MAX,
+  DESCRIBE_FAILURE_MAX,
+} = await import('../src/lib/redact.ts');
 
-describe('describeFailure / streamRedact · #342', () => {
+describe('describeFailure / redactField · #342 B', () => {
   // —— 终止性 ——————————————————————————————
 
   test('T-term-1：602 全不匹配必须终止且输出逐字节不变', () => {
@@ -30,8 +36,8 @@ describe('describeFailure / streamRedact · #342', () => {
     const ms = performance.now() - t0;
     expect(out).toBe(input);
     expect(out.length).toBe(602);
-    expect(out.length).toBeLessThanOrEqual(6020);
-    // 耗时留件由运行侧产出；测试内仅宽松上界（CI 无 /home/ops 写权）
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+    // 耗时留件由运行侧产出；测试内仅宽松上界（CI 无本机专用路径写权）
     expect(ms).toBeLessThan(5_000);
   });
 
@@ -59,8 +65,8 @@ describe('describeFailure / streamRedact · #342', () => {
     }
   });
 
-  // I7：除被红吞掉的字符外，残段相对顺序与原文一致
-  test('I7：顺序保持（残段顺序＝原文去掉密钥出现后的顺序）', () => {
+  // J5：除被红吞掉的字符外，残段相对顺序与原文一致
+  test('J5：顺序保持（残段顺序＝原文去掉密钥出现后的顺序）', () => {
     const cases: Array<{ input: string; secrets: string[]; expect: string }> = [
       { input: 'hello', secrets: ['xyz'], expect: 'hello' },
       { input: 'a=secret b=secretlong', secrets: ['secret', 'secretlong'], expect: 'a=[redacted] b=[redacted]' },
@@ -71,12 +77,10 @@ describe('describeFailure / streamRedact · #342', () => {
     for (const row of cases) {
       expect(redactSecrets(row.input, row.secrets)).toBe(row.expect);
     }
-    // 属性：输出去掉 [redacted] 后，是原文删去若干互不重叠子串后的子序列
     const input = 'prefix-aa-mid-aaabb-suffix';
     const secrets = ['aa', 'aaabb'];
     const out = redactSecrets(input, secrets);
     const residual = out.split('[redacted]').join('');
-    // residual 须为 input 的子序列（相对顺序）
     let j = 0;
     for (let i = 0; i < residual.length; i++) {
       while (j < input.length && input[j] !== residual[i]) j++;
@@ -87,57 +91,57 @@ describe('describeFailure / streamRedact · #342', () => {
     expect(out).not.toContain('aaabb');
   });
 
-  // —— I1–I6 正控 ——————————————————————————
+  // —— J1–J9 正控 ——————————————————————————
 
-  test('I1：逐字段先有界（超长 code/message 各自 ≤200）', () => {
+  test('J1：独立域 — join 在脱敏之后，禁止跨字段匹配', () => {
+    // 密钥 'ESE cret' 跨边界：前字段 ESE 恰为真前缀 ⇒ J4 丢弃；后字段 cret 单独不成钥
+    // ⇒ 不得整行 [redacted]；亦不得因 join 后二次匹配而拼回密钥
+    const err = Object.assign(new Error('cret'), { code: 'ESE' });
+    const out = describeFailure(err, ['ESE cret']);
+    expect(out).toBe(' cret'); // code 域被 J4 丢空后仍占位 join
+    expect(out).not.toBe('[redacted]');
+    expect(out).not.toContain('ESE cret');
+    expect(out).not.toContain('ESE');
+  });
+
+  test('J2：逐字段先有界（超长 code/message 各自 ≤200）', () => {
     const err = Object.assign(new Error('m'.repeat(500)), {
       code: 'c'.repeat(500),
       responseCode: 550,
     });
     const out = describeFailure(err, []);
-    // 转义后仍按字段截断前的码元计：三字段+空格，无 C0 时长度 = 200+1+3+1+200
     expect(out.length).toBe(200 + 1 + String(550).length + 1 + 200);
     expect(out.startsWith('c'.repeat(200))).toBe(true);
     expect(out.endsWith('m'.repeat(200))).toBe(true);
+    expect(ERROR_DETAIL_MAX).toBe(200);
   });
 
-  test('I2：脱敏结果不被再截断（短密钥替换变长仍完整保留标记）', () => {
-    const out = describeFailure(new Error('x'), ['x']);
-    expect(out).toContain('[redacted]');
-    expect(out).not.toContain('x');
-    // 标记完整，无被 slice 砍半
-    expect(out.includes('[redacte')).toBe(true);
-    expect(out.includes('[redacted]')).toBe(true);
-  });
-
-  test('I3：redactSecrets 为 streamRedact 薄包装（无第二份实现 / 不含转义）', () => {
-    // 正控：与 streamRedact 逐字节等价（含空串与含密钥样本）
-    const samples = ['a=secret b=secretlong', 'plain', 'abx', '', 'HEAD SECRET TAIL'];
-    const secrets = ['secret', 'secretlong', 'ab', 'abc', 'SECRET'];
-    for (const s of samples) {
-      expect(redactSecrets(s, secrets)).toBe(streamRedact(s, secrets));
-    }
-    expect(redactSecrets('a=secret b=secretlong', ['secret', 'secretlong'])).toBe(
+  test('J3：域内单趟 + 最长优先 + hold', () => {
+    expect(redactField('a=secret b=secretlong', ['secret', 'secretlong'])).toBe(
       'a=[redacted] b=[redacted]',
     );
-    // 负控：不含单行转义 —— 原始换行须保留；describeFailure 同行须已转义
-    const withNl = 'a\nb';
-    expect(redactSecrets(withNl, ['x'])).toBe('a\nb');
-    expect(redactSecrets(withNl, ['x'])).toContain('\n');
-    expect(redactSecrets(withNl, ['x'])).not.toContain('\\n');
-    const viaDescribe = describeFailure(new Error('a\nb'), []);
-    expect(viaDescribe).toContain('\\n');
-    expect(viaDescribe).not.toContain('\n');
+    expect(redactField('abx', ['ab', 'abc'])).toBe('[redacted]x');
+    expect(redactField('abcd', ['ab', 'abc'])).toBe('[redacted]d');
   });
 
-  test('I4：跨字段拼接处半截由整行流式匹配', () => {
-    // 密钥含空格 ⇒ 跨 code/message 边界的拼接串可被整行一次红掉
-    const err = Object.assign(new Error('cret'), { code: 'ESE' });
-    expect(describeFailure(err, ['ESE cret'])).toBe('[redacted]');
-    expect(redactSecrets('HEAD SECRET TAIL', ['SECRET'])).toBe('HEAD [redacted] TAIL');
+  test('J4：域尾一律丢弃 — 永不字面倾倒待定缓冲', () => {
+    // 域尾余段（Codex P1-1）：已成匹配后余部丢弃
+    expect(redactField('abcxabc', ['abc', 'abcxabcq'])).toBe('[redacted]');
+    expect(redactField('abcxabc', ['abc', 'abcxabcq'])).not.toContain('abc');
+    // 域尾真前缀丢弃
+    expect(redactField('xxsec', ['secret123'])).toBe('xx');
+    expect(redactField('xxsec', ['secret123'])).not.toContain('sec');
   });
 
-  test('I5：永不抛（getter / revoked Proxy / 非字符串化）', () => {
+  test('J6：转义段含 bidi/格式符（脱敏之后）', () => {
+    expect(escapeLine('a\u202Eb\u2066c')).toBe('a\\u202eb\\u2066c');
+    expect(escapeLine('a\nb')).toBe('a\\nb');
+    expect(escapeLine(`x\u2028y`)).toBe('x\\u2028y');
+    expect(escapeLine(`a\u007fb`)).toBe('a\\u007fb');
+    expect(escapeLine(`x\u009by`)).toBe('x\\u009by');
+  });
+
+  test('J7：永不抛（getter / revoked Proxy / 非字符串化）', () => {
     const boom = new Error('x');
     Object.defineProperty(boom, 'message', {
       configurable: true,
@@ -151,6 +155,7 @@ describe('describeFailure / streamRedact · #342', () => {
     const { proxy, revoke } = Proxy.revocable({}, {});
     revoke();
     expect(() => describeFailure(proxy, [])).not.toThrow();
+    // instanceof 触碰 revoked Proxy 原型链 ⇒ 落入 [unreadable]
     expect(describeFailure(proxy, [])).toBe('[unreadable]');
 
     const bad = {
@@ -161,7 +166,7 @@ describe('describeFailure / streamRedact · #342', () => {
     expect(() => describeFailure(bad, [])).not.toThrow();
   });
 
-  test('I6：字符串面无裸 errorDetail / 裸 String(err) 日志；对象面 6 处豁免 #344', () => {
+  test('J8：单点入口 + 零裸用（对象面 6 处豁免 #344）', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -173,7 +178,6 @@ describe('describeFailure / streamRedact · #342', () => {
     }
     walk(srcRoot);
 
-    // 对象面 6 处：console.error(..., err) 整对象 —— 记债 #344，本卡精确豁免
     const objectFaceExempt = new Set([
       'app.ts:178',
       'main.ts:53',
@@ -193,14 +197,12 @@ describe('describeFailure / streamRedact · #342', () => {
         const loc = `${rel}:${idx + 1}`;
         const baseLoc = `${rel.split('/').pop()}:${idx + 1}`;
         if (/\berrorDetail\s*\(/.test(line)) errorDetailHits.push(loc);
-        // 裸：err.message / String(err) 进入 console.* 同一行（粗检）
         if (
           /console\.(warn|error|log)\(/.test(line) &&
           /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
         ) {
           if (!objectFaceExempt.has(baseLoc)) bareHits.push(loc);
         }
-        // R4 微扩②：claim / claim-lost 兜底 warn 必须走 describeFailure，禁止打 code 原文
         if (/console\.warn\(\s*'\[task\] claim(-lost)? failed:'/.test(line)) {
           if (!/describeFailure\s*\(\s*err\s*\)/.test(line) || /,\s*code\s*\)/.test(line)) {
             bareHits.push(loc);
@@ -213,14 +215,56 @@ describe('describeFailure / streamRedact · #342', () => {
     expect(bareHits).toEqual([]);
   });
 
+  test('J9：输出上界 ≤6002', () => {
+    // 每字段 200 个单字符密钥 → 每字段 200×10；三字段+2 空格 = 6002
+    const chunk = 'x'.repeat(200);
+    const err = Object.assign(new Error(chunk), { code: chunk, responseCode: 99 });
+    const out = describeFailure(err, ['x']);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+    expect(DESCRIBE_FAILURE_MAX).toBe(6002);
+    expect(out.length).toBeLessThanOrEqual(6002);
+    // DEL 满字段：200×6×2 + 转义后的 "99" + 2 空格 仍 ≤6002
+    const del = '\u007f'.repeat(200);
+    const err2 = Object.assign(new Error(del), { code: del, responseCode: 550 });
+    expect(describeFailure(err2, []).length).toBeLessThanOrEqual(6002);
+  });
+
+  test('I2/脱敏后不截断：短密钥替换变长仍完整保留标记', () => {
+    const out = describeFailure(new Error('x'), ['x']);
+    expect(out).toContain('[redacted]');
+    expect(out).not.toContain('x');
+    expect(out.includes('[redacted]')).toBe(true);
+  });
+
+  test('redactSecrets 为 redactField 薄包装（无第二份实现 / 不含转义）', () => {
+    const samples = ['a=secret b=secretlong', 'plain', 'abx', '', 'HEAD SECRET TAIL'];
+    const secrets = ['secret', 'secretlong', 'ab', 'abc', 'SECRET'];
+    for (const s of samples) {
+      expect(redactSecrets(s, secrets)).toBe(redactField(s, secrets));
+      expect(streamRedact(s, secrets)).toBe(redactField(s, secrets));
+    }
+    expect(redactSecrets('a=secret b=secretlong', ['secret', 'secretlong'])).toBe(
+      'a=[redacted] b=[redacted]',
+    );
+    const withNl = 'a\nb';
+    expect(redactSecrets(withNl, ['x'])).toBe('a\nb');
+    expect(redactSecrets(withNl, ['x'])).toContain('\n');
+    expect(redactSecrets(withNl, ['x'])).not.toContain('\\n');
+    const viaDescribe = describeFailure(new Error('a\nb'), []);
+    expect(viaDescribe).toContain('\\n');
+    expect(viaDescribe).not.toContain('\n');
+  });
+
   // —— 五机制反例 ——————————————————————————
 
-  test('机制1：重叠密钥最长优先 + hold 延长失败', () => {
+  test('机制1：重叠密钥最长优先 + hold（含 R5 aaaba）', () => {
     expect(redactSecrets('a=secret b=secretlong', ['secret', 'secretlong'])).toBe(
       'a=[redacted] b=[redacted]',
     );
     expect(redactSecrets('abx', ['ab', 'abc'])).toBe('[redacted]x');
     expect(redactSecrets('abcd', ['ab', 'abc'])).toBe('[redacted]d');
+    expect(redactSecrets('aaaba', ['aa', 'aaabb'])).toBe('[redacted]ab');
+    expect(redactSecrets('aaaba', ['aa', 'aaabb'])).not.toContain('aa');
   });
 
   test('机制2：单字段无界先截再红', () => {
@@ -229,23 +273,30 @@ describe('describeFailure / streamRedact · #342', () => {
     const t0 = performance.now();
     const out = describeFailure(err, [secret]);
     const ms = performance.now() - t0;
-    expect(out.length).toBeLessThanOrEqual(6020);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
     expect(out).not.toContain(secret);
-    // 截断后可能不含完整密钥 → 仍不得抛、须有界
     expect(ms).toBeLessThan(5_000);
-    expect(ERROR_DETAIL_MAX).toBe(200);
   });
 
-  test('机制3：多字段拼接后半截由整行流式处理', () => {
+  test('机制3：多字段拼接处半截 — B 下结构性消失（join 后不再匹配）', () => {
+    // 跨边界密钥：前域真前缀 J4 丢弃 ⇒ 融合不可能（闭合论证 §三.4）
     const err = Object.assign(new Error('cret'), { code: 'ESE' });
-    // "ESE cret" — 若密钥为 "ESE cret"
-    expect(describeFailure(err, ['ESE cret'])).toBe('[redacted]');
+    expect(describeFailure(err, ['ESE cret'])).toBe(' cret');
+    expect(describeFailure(err, ['ESE cret'])).not.toContain('ESE');
+    // 截断制造的域尾前缀由 J4 丢弃（见三反例 b）
+    const code = 'x'.repeat(197) + 'secret123';
+    const err2 = Object.assign(new Error('boom'), { code, responseCode: 550 });
+    const out2 = describeFailure(err2, ['secret123']);
+    expect(out2).not.toContain('sec');
+    expect(out2).not.toContain('secret');
   });
 
-  test('机制4：无字段级先 scrub（R6b）——只 join 后单趟', () => {
-    // 若字段级先 scrub，截断 code 后再 join 会另生边界；此处整行一次红
+  test('机制4：无「字段级先 scrub 再 join 后再 scrub」（R6b）— 仅逐字段完整流水线', () => {
+    // join 之后不再有匹配动作；前域 HEAD 为 'HEAD TAIL' 真前缀 ⇒ J4 丢弃
     const err = Object.assign(new Error('TAIL'), { code: 'HEAD' });
-    expect(describeFailure(err, ['HEAD TAIL'])).toBe('[redacted]');
+    expect(describeFailure(err, ['HEAD TAIL'])).toBe(' TAIL');
+    expect(describeFailure(err, ['HEAD TAIL'])).not.toBe('[redacted]');
+    expect(describeFailure(err, ['HEAD TAIL'])).not.toContain('HEAD TAIL');
   });
 
   test('机制5：未截断字段同样走脱敏（R6c）', () => {
@@ -253,9 +304,35 @@ describe('describeFailure / streamRedact · #342', () => {
     expect(describeFailure(err, ['secretxx'])).toBe('short [redacted]');
   });
 
-  // —— 兼容 / 转义 / 哨兵 ————————————————————
+  // —— 三条新反例回归 ————————————————————
 
-  test('兼容负控：无密钥时三字段输出与历史 join 逐字节一致', () => {
+  test('反例a：域尾余段 — abcxabc ⇒ 恰 [redacted]，不得含明文 abc', () => {
+    expect(redactField('abcxabc', ['abc', 'abcxabcq'])).toBe('[redacted]');
+    expect(streamRedact('abcxabc', ['abc', 'abcxabcq'])).toBe('[redacted]');
+    expect(redactField('abcxabc', ['abc', 'abcxabcq'])).not.toContain('abc');
+  });
+
+  test('反例b：截断域尾前缀 — code 截断后 sec 不得进日志', () => {
+    const code = 'x'.repeat(197) + 'secret123';
+    const err = Object.assign(new Error('boom'), { code, responseCode: 550 });
+    const out = describeFailure(err, ['secret123']);
+    expect(out).not.toContain('sec');
+    expect(out).not.toContain('secret123');
+    // 精确：197 个 x + 空格 + 550 + 空格 + boom（sec 被 J4 丢弃）
+    expect(out).toBe(`${'x'.repeat(197)} 550 boom`);
+  });
+
+  test('反例c：bidi 转义 + describeFailure 侧回归', () => {
+    expect(escapeLine('a\u202Eb\u2066c')).toBe('a\\u202eb\\u2066c');
+    expect(describeFailure(new Error('a\u202Eb\u2066c'), [])).toBe('a\\u202eb\\u2066c');
+    expect(describeFailure(new Error('pre\u202Esecret\u2066post'), ['secret'])).toBe(
+      'pre\\u202e[redacted]\\u2066post',
+    );
+  });
+
+  // —— 兼容 / 已声明差异 / 哨兵 ————————————————————
+
+  test('兼容负控：无密钥、无控制符、字段尾非真前缀 ⇒ 与历史逐字节一致', () => {
     const err = Object.assign(new Error('Mailbox unavailable'), {
       code: 'EENVELOPE',
       responseCode: 550,
@@ -263,32 +340,23 @@ describe('describeFailure / streamRedact · #342', () => {
     expect(describeFailure(err, [])).toBe('EENVELOPE 550 Mailbox unavailable');
   });
 
-  test('单行化：C0 / U+2028 转义在脱敏之后', () => {
-    expect(escapeLine('a\nb')).toBe('a\\nb');
-    expect(escapeLine(`x\u2028y`)).toBe('x\\u2028y');
-    // 密钥含换行：先红再转义，不得因先转义而漏红
+  test('已声明行为差异：字段尾恰为密钥真前缀 ⇒ 有意少若干字符（J4 直接代价，非缺陷）', () => {
+    // message 以 secret123 的真前缀 "sec" 结尾 ⇒ 域尾丢弃 "sec"
+    const err = new Error('auth failed: sec');
+    const out = describeFailure(err, ['secret123']);
+    expect(out).toBe('auth failed: ');
+    expect(out).not.toContain('sec');
+    // 源文本自带的无关前缀子串不在闭合范围（诚实边界）：无密钥配置时保留
+    expect(describeFailure(new Error('section'), [])).toBe('section');
+  });
+
+  test('单行化：C0 / DEL / C1 / U+2028 在脱敏之后', () => {
     const out = describeFailure(new Error('pre\nsecret\npost'), ['secret']);
     expect(out).not.toContain('secret');
     expect(out).toContain('[redacted]');
     expect(out).toContain('\\n');
-  });
-
-  // R4 微扩①：DEL + C1（含 CSI U+009B）；上界仍 ≤6020
-  test('单行化：DEL(U+007F) 与 C1(U+009B) 转义为 \\uXXXX', () => {
-    expect(escapeLine(`a\u007fb`)).toBe('a\\u007fb');
-    expect(escapeLine(`x\u009by`)).toBe('x\\u009by');
     expect(describeFailure(new Error(`pre\u007fpost`), [])).toBe('pre\\u007fpost');
     expect(describeFailure(new Error(`pre\u009bpost`), [])).toBe('pre\\u009bpost');
-  });
-
-  test('单行化：含 DEL/C1 的满字段输出仍 ≤6020', () => {
-    // 每字段 200 个 DEL → 转义后每字段 200*6；三字段+2 空格 ≈ 3602 ≤ 6020
-    const chunk = '\u007f'.repeat(200);
-    const err = Object.assign(new Error(chunk), { code: chunk, responseCode: 550 });
-    const out = describeFailure(err, []);
-    expect(out.length).toBeLessThanOrEqual(6020);
-    expect(out).toContain('\\u007f');
-    expect(out).not.toContain('\u007f');
   });
 
   test('非 Error 类型化哨兵（原 errorDetail 契约）', () => {
