@@ -382,6 +382,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'lease_already_claimed' || code === 'task_not_claimable' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') return c.json({ error: code }, 409);
         // 服务层 assertTaskLeasesEnabled 同码：与路由入口守卫逐字节对齐为 409
         if (code === 'task_leases_disabled') return c.json({ error: 'task_leases_disabled' }, 409);
+        // 与 lease/release/claim-lost 兄弟路由逐字节一致：缺服务实现 → 503
+        if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
         console.warn('[task] claim failed:', code);
         return c.json({ error: 'task_operation_failed' }, 502);
