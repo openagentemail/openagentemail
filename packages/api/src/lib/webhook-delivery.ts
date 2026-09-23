@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
+import { describeFailureStack, escapeLine, redactSecrets } from './redact.ts';
 import {
   defaultDnsLookup,
   pinnedFetch,
@@ -668,10 +669,11 @@ function parseDeliveryLogText(content: string): WebhookDeliveryLogRow[] {
       rows.push(JSON.parse(line));
     } catch (err) {
       corruptCount++;
+      // 盘文本走字符串面（有界已 slice）；err 走对象面统一入口
       console.error(
         `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
-        line.slice(0, 100),
-        err,
+        escapeLine(redactSecrets(line.slice(0, 100))),
+        describeFailureStack(err),
       );
     }
   }
@@ -729,8 +731,8 @@ function ingestIncrementalBytes(index: DeliveryLogIndex, chunk: Buffer): number 
     } catch (err) {
       console.error(
         '[webhooks] corrupted delivery log line skipped during incremental read:',
-        trimmed.slice(0, 100),
-        err,
+        escapeLine(redactSecrets(trimmed.slice(0, 100))),
+        describeFailureStack(err),
       );
     }
   }
@@ -1229,7 +1231,7 @@ export function startWebhookMaintenance(): void {
       compactDeliveryLog();
       compactIdempotencyKeys(config.webhooks.logRetentionDays);
     } catch (err) {
-      console.error('[webhooks] maintenance failed:', err);
+      console.error('[webhooks] maintenance failed:', describeFailureStack(err));
     }
   };
   tick();
@@ -2157,9 +2159,9 @@ class WebhookDeliveryQueue {
           'code' in err &&
           (err as { code?: string }).code === 'store_corrupt');
       if (storeCorrupt) {
-        console.error('[webhooks] store corrupt during delivery:', err);
+        console.error('[webhooks] store corrupt during delivery:', describeFailureStack(err));
       } else {
-        console.error('[webhooks] executeJob failed:', err);
+        console.error('[webhooks] executeJob failed:', describeFailureStack(err));
       }
       try {
         appendDeliveryLogRow({

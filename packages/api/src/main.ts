@@ -21,6 +21,7 @@
  */
 
 import { config } from './lib/config.ts';
+import { describeFailureStack } from './lib/redact.ts';
 import { initializeNotifications } from './lib/notify.ts';
 import { inspectDeviceRegistryAtBoot } from './lib/notification-devices.ts';
 import { startNotificationWatcher } from './lib/notification-watcher.ts';
@@ -50,7 +51,7 @@ if ((config.ntfy.enabled && config.ntfy.pushPolicy !== 'none') || config.webhook
 if (config.webhooks.enabled) {
   startWebhookMaintenance();
   void reconstructPendingDeliveriesAtBoot().catch((err) => {
-    console.error('[webhooks] boot reconstruction failed:', err);
+    console.error('[webhooks] boot reconstruction failed:', describeFailureStack(err));
   });
 }
 

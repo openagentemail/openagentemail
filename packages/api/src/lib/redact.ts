@@ -1,9 +1,16 @@
 /**
- * 日志/告警载荷面：唯一入口 describeFailure。
+ * 日志/告警载荷面：字符串入口 describeFailure；对象面（保 stack）入口 describeFailureStack。
  *
- * B 形态流水线（design-b.md）：
- *   逐字段 取串 → 有界(200) → redactField（域内脱敏 + 域尾丢弃）→ escapeLine
- *   然后 join(' ')（禁止跨字段匹配）
+ * B 形态流水线（design-b.md / #344）：
+ *   字符串面：逐字段 取串 → 有界(200) → redactField → escapeLine → join(' ')
+ *   对象面（两分支共用同一条，#344 R3）：
+ *     取串 → 有界 → redact → escapeBlock → **并入截断标记** → **再 redact**
+ *     → 截到 STACK_MAX → 尾部真前缀回退
+ *
+ * 家族知识（#342/#344 · 每一步都要问：这一步会不会造出或漏掉密钥）：
+ *   ORDER（整行 vs 逐字段）· SUFFIX-REMATCH（余段不重喂）· FIELD-BOUNDARY（字段边界）·
+ *   转义生成密钥 · 标记等于密钥 · 回退分支绕过第二遍脱敏。
+ *
  * 不变量 J1–J9；对外错误码/状态码/body 不经本模块；errorCode 在 errors.ts，一字不动。
  */
 
@@ -14,6 +21,18 @@ export const ERROR_DETAIL_MAX = 200;
 
 /** B 形态可证输出上界：每字段 ≤2000，两空格 ⇒ ≤6002 */
 export const DESCRIBE_FAILURE_MAX = 6002;
+
+/** 对象面 stack 文本 / 最终输出上界（码元；#344 裁点 STACK_MAX=8192） */
+export const STACK_MAX = 8192;
+
+/**
+ * 截断标记：在 escape 之后、第二遍 redact 之前并入，使「标记恰等于口令」也被脱敏管辖。
+ * 最终输出再截到 STACK_MAX（标记长度计入上界；可能被切片/回退吃掉，不补齐）。
+ */
+const TRUNCATED_MARK = '…[truncated]';
+
+/** 可证最终输出上界：|w| ≤ STACK_MAX（标记已计入切片前文本） */
+export const DESCRIBE_FAILURE_STACK_MAX = STACK_MAX;
 
 /** 替换标记（不回喂自动机） */
 const REDACTED = '[redacted]';
@@ -167,11 +186,31 @@ export function redactSecrets(text: string, secrets: string[] = configuredSecret
   return redactField(text, secrets);
 }
 
-// —— 单行转义（每字段脱敏之后）———————————————
+// —— 转义（escapeLine / escapeBlock 同源判据，禁止复制第二份）———————————————
 
 /**
- * C0 / DEL+C1(U+007F–U+009F) / U+2028/U+2029 /
- * bidi/格式符 U+202A–U+202E、U+2066–U+2069 → 可读转义；不剥离、不截断。
+ * 同源转义判据：除 LF/CR/TAB 外是否需写成 `\uXXXX`。
+ * C0（其余）/ DEL+C1(U+007F–U+009F) / U+2028·U+2029 /
+ * bidi U+202A–U+202E、U+2066–U+2069。
+ * LF/CR/TAB 由 escapeLine（写成 \\n/\\r/\\t）与 escapeBlock（保留字面）各自处理。
+ */
+function needsUnicodeEscape(code: number): boolean {
+  if (code === 0x0a || code === 0x0d || code === 0x09) return false;
+  if (code <= 0x1f) return true; // 其余 C0
+  if (code >= 0x7f && code <= 0x9f) return true; // DEL + C1（含 NEL/CSI）
+  if (code === 0x2028 || code === 0x2029) return true;
+  if (code >= 0x202a && code <= 0x202e) return true; // bidi 嵌入/覆盖
+  if (code >= 0x2066 && code <= 0x2069) return true; // bidi isolate
+  return false;
+}
+
+function unicodeEscape(code: number): string {
+  return `\\u${code.toString(16).padStart(4, '0')}`;
+}
+
+/**
+ * 单行转义：LF/CR/TAB → `\\n`/`\\r`/`\\t`；其余 needsUnicodeEscape → `\uXXXX`。
+ * 不剥离、不截断。
  */
 export function escapeLine(text: string): string {
   let out = '';
@@ -183,17 +222,27 @@ export function escapeLine(text: string): string {
       out += '\\r';
     } else if (code === 0x09) {
       out += '\\t';
-    } else if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
-      // C0 + DEL/C1（含 U+0085 NEL、U+009B CSI）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code === 0x2028 || code === 0x2029) {
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code >= 0x202a && code <= 0x202e) {
-      // bidi 嵌入/覆盖（U+202A–U+202E）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else if (code >= 0x2066 && code <= 0x2069) {
-      // bidi isolate（U+2066–U+2069）
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
+    } else if (needsUnicodeEscape(code)) {
+      out += unicodeEscape(code);
+    } else {
+      out += text[i]!;
+    }
+  }
+  return out;
+}
+
+/**
+ * 多行块转义（#344）：与 escapeLine 同一 needsUnicodeEscape 判据，
+ * 但【保留 \\n / \\r / \\t 字面】——stack 可用性所在。
+ */
+export function escapeBlock(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x0a || code === 0x0d || code === 0x09) {
+      out += text[i]!; // 保留换行/回车/制表字面
+    } else if (needsUnicodeEscape(code)) {
+      out += unicodeEscape(code);
     } else {
       out += text[i]!;
     }
@@ -300,6 +349,117 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
     return parts.join(' ');
   } catch {
     // 极端兜底：整条流水线不得逸出
+    return '[unreadable]';
+  }
+}
+
+/**
+ * 输出尾部是否为任一密钥的非空真前缀（不含完整密钥本身）。
+ * 单字符密钥无非空真前缀 ⇒ 永不触发。
+ */
+function hasSecretProperPrefixTail(text: string, secrets: string[]): boolean {
+  for (const s of secrets) {
+    if (!s || s.length < 2) continue;
+    for (let len = 1; len < s.length; len++) {
+      if (text.endsWith(s.slice(0, len))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 尾部前缀感知：若尾部是任一密钥真前缀，自尾单调回退直至不再是。
+ * 终止性：每次至少去掉 1 码元、单调收缩 ⇒ 必终止。
+ * 可能吃掉截断标记尾部（允许；吃光亦不强求补齐）。
+ */
+function retreatSecretPrefixTail(text: string, secrets: string[]): string {
+  let out = text;
+  while (out.length > 0 && hasSecretProperPrefixTail(out, secrets)) {
+    out = out.slice(0, -1);
+  }
+  return out;
+}
+
+/**
+ * 对象面统一流水线（#344 R3）：stack 分支与无-stack 回退分支共用。
+ *
+ *   ① bound(raw, STACK_MAX)           — 约束 CPU
+ *   ② r = redactField(①)              — 清完整密钥（原文）
+ *   ③ t = escapeBlock(r)              — 转义（可能生成密钥字面）
+ *   ④ x = t + (截断? MARK : '')        — ★ 标记在此并入，纳入后续脱敏
+ *   ⑤ u = redactField(x)              — 清「转义生成」与「标记=密钥」
+ *   ⑥ v = slice(u, STACK_MAX)         — 最终上界（含标记）
+ *   ⑦ w = retreatSecretPrefixTail(v)  — 尾部非任何密钥真前缀
+ *
+ * 不变量（可证）：
+ *   |w| ≤ STACK_MAX（⑥ 定、⑦ 只减）；
+ *   w 不含任何完整密钥（② 清原文、⑤ 清转义/标记所生成者、⑥⑦ 只删不增）；
+ *   w 尾部不是任何密钥真前缀（⑦）。
+ *
+ * 家族知识：每一步都要问「会不会造出或漏掉密钥」——已收集：ORDER / SUFFIX-REMATCH /
+ * FIELD-BOUNDARY / 转义生成密钥 / 标记等于密钥 / 回退分支绕过第二遍。
+ */
+function scrubObjectFaceText(
+  raw: string,
+  secrets: string[],
+  inputTruncated: boolean,
+): string {
+  // ① 已由调用方 bound；此处再保险一次
+  const bounded = raw.length > STACK_MAX ? raw.slice(0, STACK_MAX) : raw;
+  const truncatedAtInput = inputTruncated || raw.length > STACK_MAX;
+
+  // ② 第一遍脱敏：清完整密钥
+  const redacted = redactField(bounded, secrets);
+
+  // ③ 转义（可能把控制符写成 `\uXXXX` 字面 = 密钥形态）
+  const escaped = escapeBlock(redacted);
+
+  // ④ 标记并入（输入截断，或转义后已超上界——否则 ⑥ 静默切片无标记）
+  const needsMark = truncatedAtInput || escaped.length > STACK_MAX;
+  const withMark = needsMark ? escaped + TRUNCATED_MARK : escaped;
+
+  // ⑤ 第二遍脱敏：吞转义生成的密钥，以及「标记恰等于口令」
+  let out = redactField(withMark, secrets);
+
+  // ⑥ 最终上界（剔半个 `\uXXXX`）
+  if (out.length > STACK_MAX) {
+    out = out.slice(0, STACK_MAX).replace(/\\u[0-9a-fA-F]{0,3}$/, '');
+  }
+
+  // ⑦ 尾部真前缀回退
+  return retreatSecretPrefixTail(out, secrets);
+}
+
+/**
+ * 对象面唯一入口（#344 / R3）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
+ *
+ * stack 缺席/非串/空/会抛 ⇒ 取 describeFailure 单行文本为 raw，**仍走同一条** scrub 流水线
+ * （不得直接返回 describeFailure——否则绕过第二遍脱敏，转义生成密钥洞复现）。
+ */
+export function describeFailureStack(err: unknown, secrets?: string[]): string {
+  try {
+    const secretList = secrets === undefined ? configuredSecrets() : secrets;
+
+    // 取串（永不抛）：err.stack 为非空字符串 ⇒ 用它；否则退化为 describeFailure 文本
+    let stackText: string | undefined;
+    try {
+      if (err instanceof Error) {
+        try {
+          const s = err.stack;
+          if (typeof s === 'string' && s.length > 0) stackText = s;
+        } catch {
+          stackText = undefined;
+        }
+      }
+    } catch {
+      stackText = undefined;
+    }
+
+    const raw = stackText !== undefined ? stackText : describeFailure(err, secrets);
+    const inputTruncated = raw.length > STACK_MAX;
+    const bounded = inputTruncated ? raw.slice(0, STACK_MAX) : raw;
+    return scrubObjectFaceText(bounded, secretList, inputTruncated);
+  } catch {
     return '[unreadable]';
   }
 }

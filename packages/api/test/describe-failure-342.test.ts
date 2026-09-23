@@ -6,6 +6,14 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  extractConsoleCalls,
+  isObjectFaceBareArgs,
+  isObjectFaceDebtAllowed,
+  lineOf,
+  OBJECT_FACE_DEBT_ISSUE,
+  OBJECT_FACE_DEBT_NEEDLES,
+} from './support/log-face-scan.ts';
 
 // redact → config 进程级校验；须在动态 import 前写入
 process.env.DOMAIN = 'test.example';
@@ -166,7 +174,7 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(() => describeFailure(bad, [])).not.toThrow();
   });
 
-  test('J8：单点入口 + 零裸用（对象面 6 处豁免 #344）', () => {
+  test('J8：单点入口 — #344 六处已收口；对象面残余白名单=#347', () => {
     const srcRoot = join(import.meta.dir, '../src');
     const files: string[] = [];
     function walk(dir: string) {
@@ -178,41 +186,52 @@ describe('describeFailure / redactField · #342 B', () => {
     }
     walk(srcRoot);
 
-    const objectFaceExempt = new Set([
-      'app.ts:178',
-      'main.ts:53',
-      'webhook-delivery.ts:1232',
-      'webhook-delivery.ts:2160',
-      'webhook-delivery.ts:2162',
-      'audit.ts:223',
-    ]);
-
     const errorDetailHits: string[] = [];
-    const bareHits: string[] = [];
+    const stringBareHits: string[] = [];
+    const objectBareHits: string[] = [];
+    const allowedObjectHits: string[] = [];
 
     for (const file of files) {
       const rel = file.slice(srcRoot.length + 1);
-      const lines = readFileSync(file, 'utf8').split('\n');
+      const text = readFileSync(file, 'utf8');
+      const lines = text.split('\n');
       lines.forEach((line, idx) => {
         const loc = `${rel}:${idx + 1}`;
-        const baseLoc = `${rel.split('/').pop()}:${idx + 1}`;
         if (/\berrorDetail\s*\(/.test(line)) errorDetailHits.push(loc);
+        // 字符串面（同行）：不得裸拼 err.message / String(err)
         if (
           /console\.(warn|error|log)\(/.test(line) &&
           /(err as Error\)?\.message|err instanceof Error \? err\.message|String\(err\))/.test(line)
         ) {
-          if (!objectFaceExempt.has(baseLoc)) bareHits.push(loc);
+          stringBareHits.push(loc);
         }
         if (/console\.warn\(\s*'\[task\] claim(-lost)? failed:'/.test(line)) {
           if (!/describeFailure\s*\(\s*err\s*\)/.test(line) || /,\s*code\s*\)/.test(line)) {
-            bareHits.push(loc);
+            stringBareHits.push(loc);
           }
         }
       });
+
+      // 对象面：跨行括号匹配；变量名 \w*[Ee]rr\w* 或 detail
+      for (const call of extractConsoleCalls(text)) {
+        if (!isObjectFaceBareArgs(call.args)) continue;
+        const loc = `${rel}:${lineOf(text, call.index)}`;
+        const callSrc = text.slice(call.index, call.index + 200);
+        if (isObjectFaceDebtAllowed(callSrc)) {
+          allowedObjectHits.push(loc);
+        } else {
+          objectBareHits.push(loc);
+        }
+      }
     }
 
     expect(errorDetailHits).toEqual([]);
-    expect(bareHits).toEqual([]);
+    expect(stringBareHits).toEqual([]);
+    // 非白名单对象面裸用必须为 0；白名单 = #347 清单
+    expect(objectBareHits).toEqual([]);
+    expect(OBJECT_FACE_DEBT_ISSUE).toBe('#347');
+    // 白名单针头均应命中至少一次（防清单空洞）
+    expect(allowedObjectHits.length).toBeGreaterThanOrEqual(OBJECT_FACE_DEBT_NEEDLES.length);
   });
 
   test('J9：输出上界 ≤6002', () => {

@@ -1202,3 +1202,92 @@ N/A。
 - focused：`/home/ops/materials/log-face-design/focused-b-20260923T102821Z.txt` sha256 `8da8b77d6a03a5cf3a2d1c8579886ca9fd98644c286346e23ec3e3e820bfef3d` → **116 pass / 0 fail**
 - 全量：`/home/ops/materials/log-face-design/full-suite-b-20260923T102837Z.txt` sha256 `7773631a1184408016fe6f3dc56637597a1f57b46758b83ecf85dbb6da8d7469` → **2277 pass / 9 skip / 2 fail**（2 红＝`#272 dist-build-lock` kill-9 锁 + `list-rate isolate`；与本卡无关；list-rate 单测复跑绿；#272 为本机端口锁环境性）
 - 独立自审：`/home/ops/materials/log-face-design/subagent-review-b.md` → **PASS**（agent `4c74db2b-3985-45ea-a150-687f78d911c0`）
+
+## 2026-09-23 · w344（#344 对象面统一：describeFailureStack）
+
+### 我们实现了哪些功能？
+1. `packages/api/src/lib/redact.ts`：新增 **`describeFailureStack(err, secrets?)`**——取 `err.stack`（非空串）→ 有界 **STACK_MAX=8192** → `redactField`（整段 stack 单域）→ `escapeBlock` → 截断则尾部 `…[truncated]`（脱敏之后）；否则退化为 `describeFailure`。
+2. **同源转义**：抽出 `needsUnicodeEscape` / `unicodeEscape`；`escapeLine` 与新导出 `escapeBlock` 共用（后者保留 `\n`/`\r`/`\t` 字面）。**不引入第二份脱敏/转义实现**。
+3. **6 处调用点**改 `console.error(<前缀>, describeFailureStack(err))`：`app.ts` / `main.ts` / `webhook-delivery.ts`×3 / `audit.ts`。
+4. **跨卡联动**：`describe-failure-342.test.ts` J8 由「对象面 6 处豁免」改为**零豁免**（字符串面 + 对象面均只允许 `describeFailure` / `describeFailureStack`）。
+5. 新测 `describe-failure-stack-344.test.ts`（测试清单 ①–⑨ 逐条落）。
+6. `CHANGELOG.md` Unreleased Fixed 增 #344 条；#342 条改注「对象面豁免由 #344 收口」。
+7. **未碰**：`errorCode` / 对外错误码·状态码·body / `docs/` / #341 R7。
+
+### 我们遇到了哪些错误？
+1. 调用点运行时断言初用自定义密钥，但调用点不传 `secrets` ⇒ 只红配置邮箱密码，自定义密钥未红 → 断言失败。
+2. 全量套件中 ⑧ 的 audit 路径用「把 `audit.jsonl` 占成目录」逼 EISDIR，但共享 `config.dataDir` 上常已有真实文件 ⇒ `mkdir` 失败且写入成功 ⇒ `console.error` 未触发。
+
+### 我们是如何解决这些错误的？
+1. 运行时改用 `config.smtp.pass` 作泄露探针；单元侧仍用显式 `secrets` 覆盖 ①–⑦。
+2. audit 运行时改为 `spyOn(fs, writeFileSync/appendFileSync)` 抛带 stack 的 EISDIR，**不污染共享 DATA_DIR**。
+
+### 证据
+- 设计 / R0：`/home/ops/materials/obj-face-344/r0.md`（四裁点已批）
+- focused：`/home/ops/materials/obj-face-344/focused-20260923T123440Z.txt` sha256 `1c2f61e04241630b2db2ea3472715a6f7fb453b09772a80f633bc7996243fc7c` → **37 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-20260923T123440Z.txt` sha256 `865b76e6c29c1cbfa723629dacb5c7ffe8c280bbba576ca76930b2ce80992592` → **2287 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout，与本卡无关、历史已知）
+- 独立自审：见 `materials/obj-face-344/subagent-review.md`（agent `13e89af5-ed18-4b3a-8d72-e6b12c98e027`）
+- 早次全量红证（⑧ DATA_DIR 污染，已修）：`full-suite-20260923T123052Z.txt` sha256 `4a93de2bab83c51ddfc8bc587dbd851b3e95386d8368fa7e98309525ef5a47db`（一次落盘不覆盖）
+
+## 2026-09-23 · w344 R1（#344 · ZCode P1 上界记账 + P2 声明精确化）
+
+### 我们实现了哪些功能？
+1. **P1**：`STACK_MAX=8192` 改为**最终输出上限**——保留内层输入守卫，**外层**在 `redactField`+`escapeBlock` 后再截到 8192，剔半个 `\uXXXX`，再追加 `…[truncated]`；可证上界 **DESCRIBE_FAILURE_STACK_MAX=8204**；注释写明「先脱敏再重截」安全论证。
+2. **P1 测试**：②b `\x01`×8192、②c `z`×8192+密钥（膨胀钉死上界）。
+3. **P2**：J8/⑨ 扫描升级为跨行括号匹配 + `\w*[Ee]rr\w*`/`detail`；声明改为「**#344 六处已收口**；残余白名单 **#347**」。
+4. 记债 issue **#347**（对象面裸用 + 转义判据缺口 LRM/RLM/ALM/零宽）。
+5. **未写**「全仓对象面零裸用」。
+
+### 我们遇到了哪些错误？
+1. ②c 初用密钥 `a`，但 `[redacted]` 含字母 `a` ⇒ `not.toContain('a')` 假红。
+
+### 我们是如何解决这些错误的？
+1. 改用单字符密钥 `z`（不出现在替代标记中）。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r1-20260923T125853Z.txt` sha256 `3b5ab4e8aa351c9063597c79663c756a72de4ad5ad5c25c0285449fdc367aa94` → **39 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r1-20260923T125853Z.txt` sha256 `ef12a60b7527d9f91e9d8c0b297124ed11ca83475e3334210d706777c8cc0acd` → **2290 pass / 9 skip / 0 fail**
+- 膨胀探针：`expansion-probe-r1-20260923T125853Z.txt` sha256 `386fba651f07176f202b12ca32fa07438799e3a2be08b9926b5b1dc32f0940fc` → A_c0=8202 / C_redact_z=8204（均 ≤8204）
+- 记债：https://github.com/openagentemail/openagentemail/issues/347
+- 独立自审：`subagent-review-r1.md`（agent `2e8a7271-da09-4265-897d-4e311d82286d`）
+
+## 2026-09-23 · w344 R2（转义再生密钥 + 截断尾部前缀回退）
+
+### 我们实现了哪些功能？
+1. **①**：`escapeBlock` 后再跑一遍 `redactField`——吞掉转义「生成」的密钥字面（如口令=`\u0001`、源含真实 `\x01`）。
+2. **②**：外层截断后尾部前缀感知回退（J4 延伸；终止性=每次少 1 码元）；标记后再回退一次（可吃标记）。
+3. 回归：②d 转义再生 / ②e Codex 边界尾不得 `secr`；保留 ②b/②c 膨胀上界。
+
+### 我们遇到了哪些错误？
+无施工红。
+
+### 我们是如何解决这些错误的？
+不适用。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r2-20260923T131605Z.txt` sha256 `7a97a1fc0440791aa06f1ecabff77edb3b2a42bff360e8a197d8e1820a15ca92` → **41 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r2-20260923T131605Z.txt` sha256 `9dcd5585bed4dd880cec1a2b4796e05461d9d5215a14e2bdb4a634b83227ab63` → **2291 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout flake，与本卡无关、R0 同族）
+- 回归探针：`/home/ops/materials/obj-face-344/r2-regressions-20260923T131605Z.txt` sha256 `ba3ec10fb03e0cc9afc4f50e188c39bd13997a595a633afe02a6e33bcb7e054d` → ②d `out="boom [redacted] tail"` / ②e `ends_secr=false` / A=8202 C=8204
+- 独立自审：`subagent-review-r2.md` → **PASS**（agent `d021ed39-bc66-4761-9d45-c01b57be2551`）
+
+## 2026-09-23 · w344 R3（统一流水线：标记纳入第二遍脱敏 + 回退共用 + webhook 2 处）
+
+### 我们实现了哪些功能？
+1. **统一流水线** `scrubObjectFaceText`：①有界 → ②redact → ③escapeBlock → ④**并入 MARK** → ⑤再 redact → ⑥slice(STACK_MAX) → ⑦尾部前缀回退；stack / 无-stack 两分支共用。
+2. **洞①**：标记=口令时不再于脱敏后追加；**洞②**：无 stack 回退不再直返 `describeFailure`。
+3. **上界**：`DESCRIBE_FAILURE_STACK_MAX = STACK_MAX`（8192）；标记计入切片前。
+4. **webhook-delivery** 两处 corrupted delivery log：盘文本 `escapeLine(redactSecrets(...))`，err → `describeFailureStack`；白名单去掉该针头。
+5. 回归 ②f/②g/②h；#347 正文同步残余清单。
+
+### 我们遇到了哪些错误？
+1. 旧测 ②/③ 仍断言 `endsWith(…[truncated])`——新流水线切片常吃掉标记 ⇒ 假红。
+
+### 我们是如何解决这些错误的？
+1. 改为只钉 `|out|≤STACK_MAX` 与无密钥；不要求标记保留。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r3-20260923T133830Z.txt` sha256 `a48505f47a11a25e3e0b1b7d00ffa5235f46c418c159b8b5d2a2867a0fae3b98` → **44 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r3-20260923T133830Z.txt` sha256 `ef5a10d62351c07b111cdf545babafc1a40c8e7ead9dd22e26fa2df532b396af` → **2295 pass / 9 skip / 0 fail**
+- 回归探针：`/home/ops/materials/obj-face-344/r3-regressions-20260923T133830Z.txt` sha256 `d0aba33002294cb6d593ea2f7aefc8159e770a26ea4e59690d439972d34998df` → mark含口令=false / fallback=`boom [redacted] tail` / A=8190 C=8192
+- 独立自审：`subagent-review-r3.md` → **PASS**（agent `a8c6d357-378a-4f64-b8db-d3e6a2bc4ca3`）
+- 白名单剩余：`failed to write executeJob dead letter`；`[send-log|notification-log|notification-devices] HIGH:`（#347）
