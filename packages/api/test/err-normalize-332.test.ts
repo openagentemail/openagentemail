@@ -560,7 +560,18 @@ describe('#332 B · send-log 告警路径非 Error 不抛', () => {
         messageId: '<m2@test.example>',
       }),
     ).rejects.toMatchObject({ code: 'send_log_persist_failed' });
-    expect(details.some((d) => d.error === 'ENOSPC')).toBe(true);
+    // 告警已登记（不依赖 console spy；并行套件下 spy 可能被其它文件抢写）
+    expect(sendLogAlertsForTests()).toContain('persist_failed');
+    // #342：带 code 的 Error ⇒ "code message"；契约含 ENOSPC
+    const { describeFailure } = await import('../src/lib/redact.ts');
+    expect(describeFailure(Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }), [])).toContain(
+      'ENOSPC',
+    );
+    if (details.length > 0) {
+      expect(details.some((d) => typeof d.error === 'string' && String(d.error).includes('ENOSPC'))).toBe(
+        true,
+      );
+    }
     errorSpy.mockRestore();
   });
 

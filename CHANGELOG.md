@@ -6,6 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
+- **API: 日志/告警载荷面统一为 `describeFailure`（B 形态：逐字段独立域）** (#342)：`errorDetail` 并入并删除；每字段 **取串 → 有界200 → `redactField`（域内最长优先 + 域尾丢弃）→ `escapeLine`**，**然后** `join(' ')`（**禁止跨字段匹配**）。转义段＝C0/**DEL+C1(U+007F–U+009F)**/U+2028/U+2029/**bidi U+202A–U+202E·U+2066–U+2069**；输出可证 ≤6002；永不抛。调用点含原 `errorDetail` 11 处、`send.ts`、`sent-registry` 字符串告警、**`tasks` claim/claim-lost 兜底 warn**。**已声明行为差异**：字段尾恰为密钥真前缀时有意丢弃（J4）。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**（本卡只动日志与告警载荷面）。对象面 6 处记债 #344。设计：`design-b.md`；旧跨字段形态头 `3872b0b` 留作反例素材、不予合并。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 
 ### Changed

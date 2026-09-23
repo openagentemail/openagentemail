@@ -22,7 +22,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-tof-fallback-'));
 process.env.TASK_LEASES_ENABLED = 'true';
 process.env.NODE_ENV = 'test';
 
-const { afterEach, describe, expect, mock, test } = await import('bun:test');
+const { afterEach, describe, expect, mock, spyOn, test } = await import('bun:test');
 const { createTaskRoutes } = await import('../src/routes/tasks.ts');
 const { UiSessionStore } = await import('../src/lib/ui-session.ts');
 const { createUiApiRoutes } = await import('../src/routes/ui.ts');
@@ -527,5 +527,72 @@ describe('#330 守门负控 · UI taskMutationError 已映射族逐字节', () =
     expect(await remindThrows('lease_journal_corrupt')).toEqual({
       status: 503, body: { error: 'lease_journal_corrupt' },
     });
+  });
+});
+
+// #342 R4 微扩②：claim / claim-lost 兜底 warn 载荷走 describeFailure（有界+脱敏+单行）
+describe('#342 R4 · claim/claim-lost 兜底 warn 载荷', () => {
+  async function pathologicalMessage(): Promise<{ secret: string; long: string }> {
+    const { config } = await import('../src/lib/config.ts');
+    const secret = config.smtp.pass;
+    return { secret, long: `leak-${secret}-` + 'z'.repeat(400) };
+  }
+
+  test('claim 未映射病态 reject：warn 载荷有界+脱敏+单行，映射仍 502', async () => {
+    const { secret: SECRET, long: LONG } = await pathologicalMessage();
+    const warns: unknown[][] = [];
+    const spy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warns.push(args);
+    });
+    try {
+      await withTaskLeasesEnabledForTests(true, async () => {
+        const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+          async claim() { throw new Error(LONG); },
+        }));
+        const res = await postJson(app, `/v1/tasks/${ID}/claim`, { leaseSec: 300 });
+        expect(res.status).toBe(502);
+        expect(res.body).toEqual({ error: 'task_operation_failed' });
+      });
+      const hit = warns.find((a) => typeof a[0] === 'string' && String(a[0]).includes('[task] claim failed:'));
+      expect(hit).toBeTruthy();
+      const payload = String(hit![1] ?? '');
+      expect(LONG.length).toBeGreaterThan(200); // 输入超字段上界
+      expect(payload.length).toBeLessThanOrEqual(6020); // 输出可证上界（短钥替换可略胀过 200）
+      expect(payload.length).toBeLessThan(LONG.length); // 相对原文已截断
+      expect(payload).not.toContain(SECRET);
+      expect(payload).toContain('[redacted]');
+      expect(payload).not.toContain('\n');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('claim-lost 未映射病态 reject：warn 载荷有界+脱敏+单行，映射仍 502', async () => {
+    const { secret: SECRET, long: LONG } = await pathologicalMessage();
+    const warns: unknown[][] = [];
+    const spy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warns.push(args);
+    });
+    try {
+      await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {
+        const app = appFor({ kind: 'admin' }, baseService({
+          async claimLost() { throw new Error(LONG); },
+        }));
+        const res = await postJson(app, `/v1/tasks/${ID}/claim-lost`);
+        expect(res.status).toBe(502);
+        expect(res.body).toEqual({ error: 'task_operation_failed' });
+      }));
+      const hit = warns.find((a) => typeof a[0] === 'string' && String(a[0]).includes('[task] claim-lost failed:'));
+      expect(hit).toBeTruthy();
+      const payload = String(hit![1] ?? '');
+      expect(LONG.length).toBeGreaterThan(200);
+      expect(payload.length).toBeLessThanOrEqual(6020);
+      expect(payload.length).toBeLessThan(LONG.length);
+      expect(payload).not.toContain(SECRET);
+      expect(payload).toContain('[redacted]');
+      expect(payload).not.toContain('\n');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

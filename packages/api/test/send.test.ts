@@ -111,8 +111,10 @@ describe('SMTP 错误脱敏', () => {
   test('redactSecrets 对非字符串输入和空密码不炸', () => {
     expect(redactSecrets('', ['smtp-secret'])).toBe('');
     expect(redactSecrets('keep me', ['x'])).toBe('keep me');
-    expect(describeFailure('plain string failure')).toContain('plain string failure');
-    expect(describeFailure(undefined)).toBeTypeOf('string');
+    // #342：非 Error 改类型化哨兵（原 String(err)）；仍须含原文字面量且永不抛
+    expect(describeFailure('plain string failure', [])).toContain('plain string failure');
+    expect(describeFailure('plain string failure', [])).toContain('non-error:string');
+    expect(describeFailure(undefined, [])).toBe('[non-error:undefined]');
   });
 });
 

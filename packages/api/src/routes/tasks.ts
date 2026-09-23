@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
 import { errorCode } from '../lib/errors.ts';
+import { describeFailure } from '../lib/redact.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
@@ -385,7 +386,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         // 与 lease/release/claim-lost 兄弟路由逐字节一致：缺服务实现 → 503
         if (code === 'lease_service_unavailable') return c.json({ error: 'lease_service_unavailable' }, 503);
         if (code === 'invalid_lease_seconds') return c.json({ error: 'invalid_request' }, 400);
-        console.warn('[task] claim failed:', code);
+        // 日志载荷走唯一入口；code 仍只供上方映射分支使用（一字不动）
+        console.warn('[task] claim failed:', describeFailure(err));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
@@ -503,7 +505,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           || code === 'lease_claim_lost_not_eligible'
           || code === 'task_leases_pending_journal_disabled'
         ) return c.json({ error: code }, 409);
-        console.warn('[task] claim-lost failed:', code);
+        // 日志载荷走唯一入口；code 仍只供上方映射分支使用（一字不动）
+        console.warn('[task] claim-lost failed:', describeFailure(err));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
