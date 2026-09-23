@@ -31,6 +31,7 @@ describe('scrubPayload · #350 A/B', () => {
   // —— A：病态失败回放线性化（伸缩性判据，禁绝对墙钟）———————
 
   test('A1：口令 a×L+b + 正文全 a；L=256/1024/4096 近线性（中位数伸缩）', () => {
+    // 构造：secret='a'×L+'b'；text='a'×8192；mode=block；limit=8204
     const n = 8192;
     const run = (L: number, rounds = 5): { med: number; samples: number[]; outLen: number } => {
       const sec = 'a'.repeat(L) + 'b';
@@ -48,22 +49,19 @@ describe('scrubPayload · #350 A/B', () => {
     const r256 = run(256);
     const r1024 = run(1024);
     const r4096 = run(4096);
-    // 留原始耗时到断言消息（必测留件）
     const msg =
       `L256 med=${r256.med.toFixed(2)} samples=[${r256.samples.map((x) => x.toFixed(1)).join(',')}] outLen=${r256.outLen}; ` +
       `L1024 med=${r1024.med.toFixed(2)} samples=[${r1024.samples.map((x) => x.toFixed(1)).join(',')}] outLen=${r1024.outLen}; ` +
       `L4096 med=${r4096.med.toFixed(2)} samples=[${r4096.samples.map((x) => x.toFixed(1)).join(',')}] outLen=${r4096.outLen}`;
-    // 伸缩性：L 放大 16×（256→4096）时耗时不得按 Θ(n·L) 放大；宽裕倍数 K=20
-    // （线性下期望 ~16× 量级以内；Θ(n·L) 回潮会远超）
     expect(r4096.med, msg).toBeLessThanOrEqual(20 * Math.max(r256.med, 1e-6));
-    // 1024/256=4；宽裕 K=12
     expect(r1024.med, msg).toBeLessThanOrEqual(12 * Math.max(r256.med, 1e-6));
   });
 
-  test('A1b：共振形态 ab×N 正文/口令 — 1024→4096 伸缩性', () => {
-    const run = (rep: number, rounds = 5): number => {
-      const sec = 'ab'.repeat(rep);
-      const txt = 'ab'.repeat(rep);
+  test('A1-period：密钥 ab×k × 文本 ab×4095+c（ZCode/FC 周期共振精确构造）', () => {
+    // 构造：secret='ab'×k；text='ab'×4095+'c'（len=8191）；mode=block；limit=8204
+    const txt = 'ab'.repeat(4095) + 'c';
+    const run = (k: number, rounds = 5): number => {
+      const sec = 'ab'.repeat(k);
       const samples: number[] = [];
       for (let i = 0; i < rounds; i++) {
         const t0 = performance.now();
@@ -72,23 +70,71 @@ describe('scrubPayload · #350 A/B', () => {
       }
       return medianMs(samples);
     };
-    const med1k = run(1024);
-    const med4k = run(4096);
-    const msg = `ab×4096 med=${med4k.toFixed(2)} ab×1024 med=${med1k.toFixed(2)}`;
-    // 规模比 4；宽裕 K=12（抓 Θ(n·L) 回潮）
-    expect(med4k, msg).toBeLessThanOrEqual(12 * Math.max(med1k, 1e-6));
+    const m64 = run(64);
+    const m1024 = run(1024);
+    const m4096 = run(4096);
+    const msg = `k64=${m64.toFixed(2)} k1024=${m1024.toFixed(2)} k4096=${m4096.toFixed(2)} textLen=${txt.length}`;
+    // 主判据：1024→4096（×4），K=12；k=64 过短易被固定开销主导，只留原始耗时
+    expect(m4096, msg).toBeLessThanOrEqual(12 * Math.max(m1024, 1e-6));
+    // 辅判据：64→4096 不得呈 Θ(n²)（原 ~2000ms）；宽裕 K=100 覆盖 O(|s|) 建 trie
+    expect(m4096, msg).toBeLessThanOrEqual(100 * Math.max(m64, 1e-6));
   });
 
-  test('A3：尾部全 a — 输出与耗时；R9 尾前缀不变量', () => {
+  test('A1-period-n：固定密钥 ab×4096 × 文本 ab×reps+c 伸缩', () => {
+    // 构造：secret='ab'×4096；text='ab'×reps+'c'；reps∈{256,1024,4095}
+    const sec = 'ab'.repeat(4096);
+    const run = (reps: number, rounds = 5): number => {
+      const txt = 'ab'.repeat(reps) + 'c';
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const t0 = performance.now();
+        scrubPayload(txt, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+        samples.push(performance.now() - t0);
+      }
+      return medianMs(samples);
+    };
+    const m256 = run(256);
+    const m1024 = run(1024);
+    const m4095 = run(4095);
+    const msg = `reps256=${m256.toFixed(2)} reps1024=${m1024.toFixed(2)} reps4095=${m4095.toFixed(2)}`;
+    // 文本规模约 16×（513→8191）；K=20
+    expect(m4095, msg).toBeLessThanOrEqual(20 * Math.max(m256, 1e-6));
+  });
+
+  test('A3-tail-leg：a+b×(L−1) / a+c×(L−1) × 文本 a×8192', () => {
+    // 构造：secret='a'+'b'×(L-1) 或 'a'+'c'×(L-1)；text='a'×8192；mode=block；limit=8204
+    const txt = 'a'.repeat(8192);
+    const run = (filler: string, L: number, rounds = 5): number => {
+      const sec = 'a' + filler.repeat(L - 1);
+      const samples: number[] = [];
+      for (let i = 0; i < rounds; i++) {
+        const t0 = performance.now();
+        scrubPayload(txt, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
+        samples.push(performance.now() - t0);
+      }
+      return medianMs(samples);
+    };
+    const b1024 = run('b', 1024);
+    const b4096 = run('b', 4096);
+    const b8192 = run('b', 8192);
+    const c1024 = run('c', 1024);
+    const c8192 = run('c', 8192);
+    const msg =
+      `a+b:1024=${b1024.toFixed(2)} 4096=${b4096.toFixed(2)} 8192=${b8192.toFixed(2)}; ` +
+      `a+c:1024=${c1024.toFixed(2)} 8192=${c8192.toFixed(2)}`;
+    // L×8；K=20
+    expect(b8192, msg).toBeLessThanOrEqual(20 * Math.max(b1024, 1e-6));
+    expect(c8192, msg).toBeLessThanOrEqual(20 * Math.max(c1024, 1e-6));
+  });
+
+  test('A3：尾部全 a（自重叠口令）— 输出与耗时；R9 尾前缀不变量', () => {
     const L = 1024;
     const sec = 'a'.repeat(L) + 'b';
     const txt = 'a'.repeat(4096);
     const t0 = performance.now();
     const out = scrubPayload(txt, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
     const ms = performance.now() - t0;
-    // 尾退削掉真前缀 ⇒ 全 a 被削空（与探针债1 行为一致）
     expect(out, `ms=${ms.toFixed(2)} out=${JSON.stringify(out.slice(0, 40))}`).toBe('');
-    // 短对照伸缩：n=512 vs n=4096，宽裕 K=20
     const tShort0 = performance.now();
     scrubPayload('a'.repeat(512), [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
     const msShort = performance.now() - tShort0;

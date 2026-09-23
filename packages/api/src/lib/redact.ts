@@ -138,12 +138,12 @@ function buildTrie(secrets: string[]): TrieNode {
 /**
  * 域原语：单字段匹配域内脱敏（J3+J4+J5）。
  * - 最长密钥优先 + hold
- * - 失配保序：失败链 O(1) 摊还推进；仅在 fail 跨越 >1 深度时把残余码元入队（头指针队列）
+ * - 失配保序：失败链推进；超出 fail 后缀的前缀段从根消化，**后缀留在 held**（禁整段 rem 回灌）
  * - 域尾：先对已成匹配发 [redacted]，余部一律丢弃（J4，永不字面倾倒）
  *
- * 复杂度（#350 A）：建 trie+失败链 O(Σ|s|)；喂每个输入码元摊还 O(1) 次转移/失败推进
- * （每码元至多入队/出队常数次，失败链每步至少缩短深度或产出 1 码元）⇒ 总时间 O(n + Σ|s|)。
- * **不再**「失配整段 pending 回灌再从根重走」（原病态 Θ(n·L)）。
+ * 复杂度（#350 A）：建 trie+失败链 O(Σ|s|)；每码元摊还 O(1) 次转移/失败推进
+ * （周期共振族：fail 后 skip>0 时只把 extras 从根消化并恢复后缀，不得 `prepend(extras||rem)`；
+ *  自重叠族：skip==0 只沿 fail 推进）⇒ 总时间 O(n + Σ|s|)。
  */
 export function redactField(text: string, secrets: string[]): string {
   const filtered = secrets.filter(Boolean);
@@ -197,10 +197,34 @@ export function redactField(text: string, secrets: string[]): string {
     for (let i = 0; i < rest.length; i++) queue.push(rest[i]!);
   }
 
+  /**
+   * 从根消化 extras（慢路径）。隔离队列；返回是否回到根空 held。
+   */
+  function digestExtrasFromRoot(extras: string[]): boolean {
+    if (extras.length === 0) return heldLen() === 0 && node === root && matchedEnd === 0;
+    const savedRest: string[] = [];
+    for (let i = queueHead; i < queue.length; i++) savedRest.push(queue[i]!);
+    queue.length = 0;
+    queueHead = 0;
+
+    resetAutomaton();
+    for (let i = 0; i < extras.length; i++) queue.push(extras[i]!);
+    while (queueHead < queue.length) {
+      const c = queue[queueHead++]!;
+      feed(c);
+      compactQueue();
+    }
+    const clean = heldLen() === 0 && node === root && matchedEnd === 0;
+
+    queue.length = 0;
+    queueHead = 0;
+    for (let i = 0; i < savedRest.length; i++) queue.push(savedRest[i]!);
+    return clean;
+  }
+
   function resolveFailure(ch: string): void {
     const L = matchedEnd;
     if (L > 0) {
-      // 已成匹配：红掉路径前 L 码元；残余 + 失配码元入队从根重喂（语义同旧回放）
       out.push(REDACTED);
       const rem: string[] = [];
       for (let i = heldHead + L; i < held.length; i++) rem.push(held[i]!);
@@ -210,38 +234,63 @@ export function redactField(text: string, secrets: string[]): string {
       return;
     }
 
-    if (heldLen() === 0) {
-      // 已在根且非任何密钥首字符：字面产出，禁止重喂（防死循环）
-      out.push(ch);
-      return;
-    }
+    // L==0：循环「产出 1 + fail」；禁止 rem 整段回灌；周期族走快路径避免 O(n) 拷贝
+    while (true) {
+      if (node.children.has(ch)) {
+        prependChars([ch]);
+        return;
+      }
+      if (heldLen() === 0 || node === root) {
+        out.push(ch);
+        resetAutomaton();
+        return;
+      }
 
-    // L==0：产出路径首码元，沿失败链推进（自重叠前缀摊还 O(1)；禁止整段回灌）
-    out.push(held[heldHead]!);
-    heldHead++;
-    const next = node.fail ?? root;
-    node = next;
-    matchedEnd = node.pathMaxEnd;
+      out.push(held[heldHead++]!);
+      node = node.fail ?? root;
+      matchedEnd = node.pathMaxEnd;
 
-    // 失败链若一次跨过多层，后缀长度会短于 held —— 多出的前缀残段必须从根重喂
-    // （可能是另一密钥起点，如 pending=abc / 密钥=abcd+bc）。此支路≠债1病态：
-    // 无自重叠时 extras 从根通常立即失配并产出，每码元至多入队常数次 ⇒ 仍摊还 O(n)；
-    // 自重叠病态走上方 skip==0 分支，只沿 fail 推进、禁止整段 pending 回灌。
-    const skip = heldLen() - node.depth;
-    if (skip > 0) {
-      const extras: string[] = [];
-      for (let i = 0; i < skip; i++) extras.push(held[heldHead++]!);
-      const rem: string[] = [];
-      for (let i = heldHead; i < held.length; i++) rem.push(held[i]!);
-      resetAutomaton();
-      prependChars(extras.concat(rem, [ch]));
+      const skip = heldLen() - node.depth;
+      if (skip > 0) {
+        const extras: string[] = [];
+        for (let i = 0; i < skip; i++) extras.push(held[heldHead++]!);
+        // held 现与 fail 后缀对齐
+
+        // 快路径：extras 在根上均无出边 ⇒ 字面产出，保留后缀（(ab)* 周期族主路径）
+        let rootSafe = true;
+        for (let i = 0; i < extras.length; i++) {
+          if (root.children.has(extras[i]!)) {
+            rootSafe = false;
+            break;
+          }
+        }
+        if (rootSafe) {
+          for (let i = 0; i < extras.length; i++) out.push(extras[i]!);
+          compactHeld();
+          continue; // 重试 ch，后缀仍在 held
+        }
+
+        // 慢路径：extras 可能打开其它密钥（如 bc）——从根消化
+        const remChars: string[] = [];
+        for (let i = heldHead; i < held.length; i++) remChars.push(held[i]!);
+        const remNode = node;
+        const remMatched = matchedEnd;
+
+        const clean = digestExtrasFromRoot(extras);
+        if (clean) {
+          held.length = 0;
+          heldHead = 0;
+          for (let i = 0; i < remChars.length; i++) held.push(remChars[i]!);
+          node = remNode;
+          matchedEnd = remMatched;
+          compactHeld();
+          continue;
+        }
+        prependChars(remChars.concat([ch]));
+        return;
+      }
       compactHeld();
-      return;
     }
-
-    // held 与 node.depth 对齐：原地重试失配码元（不入队整段 pending）
-    compactHeld();
-    prependChars([ch]);
   }
 
   function feed(ch: string): void {
@@ -466,8 +515,35 @@ function outEndsWithPrefix(out: string, s: string, len: number): boolean {
 }
 
 /**
+ * 正文尾部最长「密钥真前缀」长度（单钥）。
+ * 从长到短；失配于 i>0 时跳到候选 i；i==0 时跳到「后缀以 s[0] 开头」的次长候选（禁逐次 len--）。
+ */
+function properPrefixAsSuffixLen(out: string, s: string): number {
+  if (s.length < 2 || out.length === 0) return 0;
+  let len = Math.min(s.length - 1, out.length);
+  const s0 = s.charCodeAt(0);
+  while (len >= 1) {
+    let i = 0;
+    const start = out.length - len;
+    while (i < len && out.charCodeAt(start + i) === s.charCodeAt(i)) i++;
+    if (i === len) return len;
+    if (i > 0) {
+      len = i;
+      continue;
+    }
+    // i==0：本窗口首码元不匹配；跳到更短且窗口首码元 == s[0] 的最大 len
+    let next = 0;
+    for (let j = 1; j < len; j++) {
+      if (out.charCodeAt(out.length - j) === s0) next = j;
+    }
+    len = next;
+  }
+  return 0;
+}
+
+/**
  * 正文尾部最长「密钥真前缀」长度（原文或转义整钥）。
- * 候选长度上限 = min(|s|-1, |out|) ⇒ 与口令全长解耦；单次 O(Σ min(|s|,|out|))。
+ * 单次 O(Σ longest_k)；整段 trim 总削量 ≤|out| ⇒ 目标病态 O(n) 而非 Θ(n·L)。
  */
 function longestPostEscapePrefixLen(
   out: string,
@@ -475,24 +551,11 @@ function longestPostEscapePrefixLen(
 ): number {
   let longest = 0;
   for (const { raw, esc } of preps) {
-    if (raw.length >= 2) {
-      const maxRaw = Math.min(raw.length - 1, out.length);
-      // 从长到短，命中即停（本钥）
-      for (let len = maxRaw; len > longest; len--) {
-        if (outEndsWithPrefix(out, raw, len)) {
-          longest = len;
-          break;
-        }
-      }
-    }
-    if (esc.length >= 2 && esc !== raw) {
-      const maxEsc = Math.min(esc.length - 1, out.length);
-      for (let len = maxEsc; len > longest; len--) {
-        if (outEndsWithPrefix(out, esc, len)) {
-          longest = len;
-          break;
-        }
-      }
+    const nRaw = properPrefixAsSuffixLen(out, raw);
+    if (nRaw > longest) longest = nRaw;
+    if (esc !== raw) {
+      const nEsc = properPrefixAsSuffixLen(out, esc);
+      if (nEsc > longest) longest = nEsc;
     }
   }
   return longest;
@@ -500,7 +563,6 @@ function longestPostEscapePrefixLen(
 
 /**
  * 剥掉尾部转义记号后，正文是否以某密钥原文真前缀结尾。
- * 匹配长度上限为 peeled.length ⇒ 单次 O(Σ min(|s|,|peeled|))。
  */
 function peeledExposesRawSecretPrefix(
   peeled: string,
@@ -508,12 +570,7 @@ function peeledExposesRawSecretPrefix(
 ): boolean {
   if (!peeled) return false;
   for (const { raw } of preps) {
-    if (raw.length < 2) continue;
-    const maxLen = Math.min(raw.length - 1, peeled.length);
-    // 从长到短：命中即真；与 longest 同族，避免短口令无关的平方扫
-    for (let len = maxLen; len >= 1; len--) {
-      if (outEndsWithPrefix(peeled, raw, len)) return true;
-    }
+    if (properPrefixAsSuffixLen(peeled, raw) > 0) return true;
   }
   return false;
 }
@@ -525,12 +582,9 @@ function peeledExposesRawSecretPrefix(
  * 输出尾部不构成任何密钥真前缀。标记是发射路径写入的已知固定串，不承载载荷，
  * 不得当作载荷尾部来削（否则会破坏「已截断」指示，见口令 `ted]xyz` 反例）。
  *
- * 复杂度（#350 A3）——单步 O(Σ min(|s|,|out|)) + 有效步数上界：
- * - 每步至少削去 longest≥1 个码元，或剥一层转义记号，或 break；
- * - 步数 ≤ |text|+8；
- * - 对「尾部全相同字符 + 口令 a×L+b」：每步 longest = min(L,|out|)，约 |out|/L 步，
- *   每步比较量 O(L)，合计 O(|out|) = O(n)，**不再**逐步 O(L)·(|out|) 从 len=1 扫到 L
- *   （原 Θ(n·L) 第二条腿）。论证：从长到短命中即停 ⇒ 单步比较 ≤ O(L)，总削量 ≤ n。
+ * 复杂度（#350 A3）：每步削 ≥1；求最长用失配跳跃。
+ * - 自重叠大块削（a×L+b）：longest≈L，总 O(n)
+ * - 尾退腿（a+b×(L−1)、正文全 a）：longest=1 且跳跃后 O(1)，总 O(n)
  */
 function trimTrailingSecretPrefixAfterEscape(
   text: string,
