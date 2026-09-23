@@ -37,6 +37,9 @@ const {
 } = await import('./support/task-test-seams.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { config } = await import('../src/lib/config.ts');
+const { boundDetail } = await import('../src/lib/errors.ts');
+const { describeFailureBounded } = await import('../src/lib/redact.ts');
+const { ERROR_DETAIL_MAX } = await import('../src/lib/errors.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
 const REQUESTER = 'alpha@test.example';
@@ -294,6 +297,18 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
       });
     });
   }
+
+  // #340 R5.3：重复长密钥截断边界不得泄露半截明文（Codex P1）
+  test('describeFailureBounded 重复长密钥边界 ⇒ 无半截明文', () => {
+    const secret = 'K'.repeat(100);
+    const msg = secret.repeat(4) + 'f'.repeat(50) + secret;
+    const redacted = describeFailureBounded(new Error(msg), 400, [secret, 'unrelated-imap']);
+    const out = boundDetail(redacted);
+    expect(out).toContain('[redacted]');
+    expect(out.includes(secret)).toBe(false);
+    expect(out.includes(secret.slice(0, 50))).toBe(false);
+    expect(Array.from(out).length).toBeLessThanOrEqual(ERROR_DETAIL_MAX);
+  });
 
   // #340 R5.2：有界脱敏 —— 多兆 message 不得 O(n) 拖垮 warn 路径
   test('POST /:id/lease 多兆 message ⇒ warn 有界且快', async () => {

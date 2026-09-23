@@ -61,8 +61,8 @@ function takeCodePoints(text: string, n: number): string {
 
 /**
  * 日志专用：在脱敏前先按码点截取 message 前缀（预算 = maxMessagePts + 最长密钥），
- * 保证多兆适配器 message 下内存/时间有界；**仍先脱敏再交给调用方 boundDetail**。
- * 不改变 `describeFailure` 既有语义；本函数永不抛。
+ * 脱敏后再剥掉「落在截断边界上的密钥真前缀」尾缀，避免半截密钥入日志；
+ * **仍先脱敏再交给调用方 boundDetail**。不改变 `describeFailure` 既有语义；永不抛。
  */
 export function describeFailureBounded(
   err: unknown,
@@ -98,8 +98,33 @@ export function describeFailureBounded(
         return '[unreadable]';
       }
     }
-    return redactSecrets(line, secs);
+    // 先整段替换完整密钥，再剥边界上未匹配的密钥真前缀（防半截泄露）
+    return scrubTrailingSecretPrefix(redactSecrets(line, secs), secs);
   } catch {
     return '[unreadable]';
   }
+}
+
+/**
+ * 若 text 以某配置密钥的真前缀结尾（截断切开密钥时），剥掉该尾缀。
+ * 最长密钥优先；可叠剥多次。
+ */
+function scrubTrailingSecretPrefix(text: string, secrets: string[]): string {
+  let out = text;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) {
+      const maxLen = Math.min(secret.length - 1, out.length);
+      for (let len = maxLen; len >= 1; len--) {
+        if (out.endsWith(secret.slice(0, len))) {
+          out = out.slice(0, -len);
+          changed = true;
+          break;
+        }
+      }
+      if (changed) break;
+    }
+  }
+  return out;
 }
