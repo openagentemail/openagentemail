@@ -46,7 +46,7 @@ import {
   waitMonotonicNow,
   type WaitMonotonicMs,
 } from './wait-clock.ts';
-import { errorCode } from './errors.ts';
+import { errorDetail } from './errors.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -1476,7 +1476,7 @@ export async function waitForMessage(
       throwIfDisconnectShaped(shouldContinue, signal, err);
     }
     // 代际失败不是断线，禁止吞成轮询/超时（2269 wait → 400 invalid_cursor）。
-    console.warn('[imap] IDLE wait failed, falling back to polling:', errorCode(err));
+    console.warn('[imap] IDLE wait failed, falling back to polling:', errorDetail(err));
     return waitWithPolling(address, filters, deadline, shouldContinue, signal);
   }
 }
@@ -1601,7 +1601,7 @@ async function waitWithPolling(
       if (isDisconnectShaped(err, signal)) {
         throwIfDisconnectShaped(shouldContinue, signal, err);
       }
-      console.warn('[imap] poll failed:', errorCode(err));
+      console.warn('[imap] poll failed:', errorDetail(err));
     }
     const remaining = Math.floor(deadline - waitMonotonicNow());
     if (remaining <= 0) break;

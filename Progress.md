@@ -1092,3 +1092,46 @@ N/A。
 - focused（缺依赖首跑，保留）：`focused-336-2026-09-23T01:02:46Z.log` sha256 `cdd7ea175d81438393cb6fdd37d33c52c64e59181ca003a5baf3444729f21a28`
 - 全量：`/home/ops/materials/domain-code-mapping/full-336-2026-09-23T01:03:14Z.log` sha256 `63eb5c2e2fe5050a8dfe797c9b65666f7c52c1948cae4eb469825846001c7063` → **2229 pass / 9 skip / 0 fail**
 - 独立自审：agent `097a6052-2cdb-4c2b-9559-572cff56b7d4` → **PASS_WITH_NOTES**（#330 CHANGELOG 历史举例叠写易误读；lease 映射插入位与 claim 略不齐——非红线）
+
+## 2026-09-23 · w338（#338 债行小卡：CHANGELOG 对齐 + errorDetail 载荷 + 新测卫生）
+
+### 我们实现了哪些功能？
+1. **Item 1**：`CHANGELOG.md` Unreleased `#330` 条目去例——删掉「例如 `task_leases_disabled` / `invalid_approval_decision_event`」括号例，保留「该兜底同时收纳未映射/未分类失败」语义句（与 website#92 一致）；`git diff` 只动该一行。
+2. **Item 2**：`packages/api/src/lib/errors.ts` 新增 sibling `errorDetail(err: unknown): string`（Error⇒message；非 Error⇒`[non-error:…]` 类型化文本；取值失败⇒`[unreadable]`；截断 N=200；永不抛）。`errorCode()` 一字不动。
+3. **Item 2 落点 11 处**（载荷由 `errorCode`→`errorDetail`）：`send-log.ts`×3、`notification-log.ts`×2、`notify.ts`×3、`retention.ts`×1、`imap.ts`×2。未改 routes warn 面。
+4. **Item 2 测试**：`errors.test.ts` 增 `errorDetail` 单测；`err-normalize-332.test.ts` B 簇五面断言改为「载荷非空且含类型标记」。
+5. **Item 3**：`err-normalize-332.test.ts` 测试内自清——不顶置 `NTFY_ENABLED`、`ntfySnapshot`/`restoreNtfyConfig`、timer 跟踪停 maintenance/retention 循环、还原 `setTimeout`/`setInterval`、身份 `beforeAll` + 隔离 `DATA_DIR`。未加生产 stop 探针。
+
+### 我们遇到了哪些错误？
+1. 工作树初无 `packages/api/node_modules` → focused 首跑 `Cannot find package 'hono'`（err-normalize-332 1 error）。
+2. 无其它施工红；并跑与全量一次绿。
+
+### 我们是如何解决这些错误的？
+1. `cd packages/api && bun install`（锁文件未改）；重跑 focused 全绿。
+2. Item 3 纯测试自清即可停循环，无需生产侧 stop 探针（未报 FC 扩面）。
+
+### 基线与证据
+- 基线：`eef36dc5`（= main / #337）
+- focused：`/home/ops/materials/debt-small-card/focused-helper-332.txt` → **40 pass / 0 fail**
+- 并跑（332+send-log+notification-log+notify+cascade）：`suite-parallel-hygiene.txt` → **168 pass / 0 fail**
+- 全量：`full-suite.txt` → **2235 pass / 9 skip / 0 fail**（基线 2229 + helper 单测 +6）
+- 独立自审：agent `7992ff93-861f-4c2f-9d29-c97b0c2c72f0` → **PASS**
+
+## 2026-09-23 · w338 R4（#339 修 Codex P1×2：去掉无条件陈旧快照还原）
+
+### 我们实现了哪些功能？
+1. 删掉 `err-normalize-332.test.ts` 的 `afterEach`/`afterAll` 里对 `globalThis.setTimeout/setInterval/clearTimeout/clearInterval` 的无条件写回（不再用模块加载时的 `real*` 覆盖共享全局）。
+2. 去掉基于 import 时冻结的 `ntfySnapshot` / `restoreNtfyConfig()`；ntfy 仅在真正 mutate 的用例内保存**当时**值并在 `finally` 还原。
+3. 保留 `clearTrackedTimers()`、`trackTimersDuring`（finally 还原当时 prev）、`*ForTests(null)`、`beforeAll` 隔离身份。
+4. 注释改为「避免用陈旧快照覆盖共享全局」（不写「并行套件」）。**生产码零改动**。
+
+### 我们遇到了哪些错误？
+无施工红。
+
+### 我们是如何解决这些错误的？
+按 FC R4：最小修清理逻辑；Item 3 验收单独跑 + 并跑 + 全量一次留件。
+
+### 证据
+- focused：`/home/ops/materials/debt-small-card/r4-focused-332.txt` sha256 `70dbfbcdf85030b2c5e802d6efba4081ca3fc3fe5c4eb982da1eb11c54ba0a8e` → 28 pass / 0 fail
+- 并跑：`r4-suite-parallel-hygiene.txt` sha256 `ee4071e8c10621559ed37af5d1e94876de10aa5d5abd53ead59e796346be9bca` → 168 pass / 0 fail
+- 全量：`r4-full-suite.txt` sha256 `f1b8c8569f9a7f2e67c58b9869929d1f027f0247f44c1902cfabc600d7d36a85` → **2235 pass / 9 skip / 0 fail**
