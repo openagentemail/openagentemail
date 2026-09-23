@@ -246,6 +246,19 @@ export function redactField(text: string, secrets: string[]): string {
         return;
       }
 
+      // fail 链可能落到另一已完成密钥节点（pathMaxEnd>0）；须先消化匹配，
+      // 不得继续逐字产出（否则如 babc+['ab','babx'] 漏红，靠 ⑦ 整行降空）
+      if (matchedEnd > 0) {
+        const Lmatch = matchedEnd;
+        out.push(REDACTED);
+        const rem: string[] = [];
+        for (let i = heldHead + Lmatch; i < held.length; i++) rem.push(held[i]!);
+        rem.push(ch);
+        resetAutomaton();
+        prependChars(rem);
+        return;
+      }
+
       out.push(held[heldHead++]!);
       node = node.fail ?? root;
       matchedEnd = node.pathMaxEnd;
@@ -516,7 +529,9 @@ function outEndsWithPrefix(out: string, s: string, len: number): boolean {
 
 /**
  * 正文尾部最长「密钥真前缀」长度（单钥）。
- * 从长到短；失配于 i>0 时跳到候选 i；i==0 时跳到「后缀以 s[0] 开头」的次长候选（禁逐次 len--）。
+ * 从长到短；i==0 时跳到「后缀以 s[0] 开头」的次长候选。
+ * i>0 失配时：窗口前缀 ≠ 串后缀，**不可**直接 len=i（会漏检更短真后缀）；
+ * 仅当 out 真以 s[0..i) 结尾时才能收束到 i，否则 len--。
  */
 function properPrefixAsSuffixLen(out: string, s: string): number {
   if (s.length < 2 || out.length === 0) return 0;
@@ -528,7 +543,9 @@ function properPrefixAsSuffixLen(out: string, s: string): number {
     while (i < len && out.charCodeAt(start + i) === s.charCodeAt(i)) i++;
     if (i === len) return len;
     if (i > 0) {
-      len = i;
+      // 后缀对齐校验：通过则 i 即为合法真前缀长；否则逐档回退
+      if (outEndsWithPrefix(out, s, i)) return i;
+      len--;
       continue;
     }
     // i==0：本窗口首码元不匹配；跳到更短且窗口首码元 == s[0] 的最大 len

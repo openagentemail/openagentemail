@@ -18,6 +18,10 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-350-'));
 const {
   scrubPayload,
   describeFailure,
+  redactField,
+  redactSecrets,
+  escapeLine,
+  escapeBlock,
   DESCRIBE_FAILURE_STACK_MAX,
 } = await import('../src/lib/redact.ts');
 
@@ -213,12 +217,136 @@ describe('scrubPayload · #350 A/B', () => {
     expect(out).toBe('body');
   });
 
+  // —— R3：Codex P1 确切构造 + 差分不变量 ——————————
+
+  test('R3 P1-1：fail 链落到已完成密钥 — babc / babcbabx（基线对照）', () => {
+    // FC 亲核：基线 ec3a871f ⇒ b[redacted]c / b[redacted]c[redacted]；
+    // 回归头曾漏红（babc 原文 / scrub 靠 ⑦ 降空）
+    expect(redactField('babc', ['ab', 'babx'])).toBe('b[redacted]c');
+    expect(redactSecrets('babc', ['ab', 'babx'])).toBe('b[redacted]c');
+    expect(redactField('babcbabx', ['ab', 'babx'])).toBe('b[redacted]c[redacted]');
+    expect(scrubPayload('babc', ['ab', 'babx'], 8204, 'block')).toBe('b[redacted]c');
+  });
+
+  test('R3 P1-2：尾退失配跳跃不得漏检转义真前缀', () => {
+    // FC 确切构造：密钥 '\\u0001abcdefF'；mode=block；limit=26；
+    // 载荷 "xxx\\x\\u0001abcQ" ⇒ 基线削成 "xxx\\x…[truncated]"（尾非转义真前缀）
+    const sec = '\u0001abcdefF';
+    const payload = 'xxx\\x\\u0001abcQ';
+    const out = scrubPayload(payload, [sec], 26, 'block');
+    expect(out, `out=${JSON.stringify(out)}`).toBe('xxx\\x…[truncated]');
+    const body = out.endsWith('…[truncated]') ? out.slice(0, -'…[truncated]'.length) : out;
+    const escSec = escapeBlock(sec);
+    // 正文尾不得为转义钥真前缀
+    for (let len = 1; len < escSec.length; len++) {
+      expect(body.endsWith(escSec.slice(0, len)), `escPrefix len=${len}`).toBe(false);
+    }
+  });
+
+  test('R3 差分不变量：语料上 redact/scrub ≥ 基线契约', () => {
+    // 形状覆盖：重叠 / 多密钥 / 长短前缀 / 周期共振 / 单码元 / B 转义 / 截断边界
+    const MARK = '…[truncated]';
+    /** 输出不含任何完整密钥（原文族；忽略 [redacted] 占位内的偶然子串） */
+    const noFullSecret = (out: string, secrets: string[]): void => {
+      const plain = out.split('[redacted]').join('');
+      for (const s of secrets) {
+        if (!s) continue;
+        expect(
+          plain.includes(s),
+          `full secret leaked: ${JSON.stringify(s)} in ${JSON.stringify(out)}`,
+        ).toBe(false);
+      }
+    };
+    /** 尾部（除固定 MARK）不构成任何密钥真前缀（原文 ∪ 转义） */
+    const noTailProperPrefix = (
+      out: string,
+      secrets: string[],
+      mode: 'line' | 'block',
+    ): void => {
+      const body = out.endsWith(MARK) ? out.slice(0, -MARK.length) : out;
+      if (!body) return;
+      const escFn = mode === 'line' ? escapeLine : escapeBlock;
+      for (const s of secrets) {
+        if (!s) continue;
+        const esc = escFn(s);
+        // 原文与转义整钥均查真前缀（单码元原文无真前缀；其转义形态仍须查）
+        for (const cand of s === esc ? [s] : [s, esc]) {
+          if (cand.length < 2) continue;
+          const maxLen = Math.min(cand.length - 1, body.length);
+          for (let len = 1; len <= maxLen; len++) {
+            expect(
+              body.endsWith(cand.slice(0, len)),
+              `tail proper prefix len=${len} cand=${JSON.stringify(cand.slice(0, len))} bodyTail=${JSON.stringify(body.slice(-Math.min(40, body.length)))}`,
+            ).toBe(false);
+          }
+        }
+      }
+    };
+
+    type Case = {
+      label: string;
+      text: string;
+      secrets: string[];
+      mode?: 'line' | 'block';
+      limit?: number;
+    };
+    const cases: Case[] = [
+      // 重叠匹配（ORDER / foobar）
+      { label: 'overlap-aaaba', text: 'aaaba', secrets: ['aa', 'aaabb'] },
+      { label: 'overlap-abcxabc', text: 'abcxabc', secrets: ['abc'] },
+      { label: 'overlap-foobarbar', text: 'foobarbar', secrets: ['foo', 'bar', 'foobar'] },
+      // 多密钥 + fail 链完成节点（P1-1）
+      { label: 'multi-babc', text: 'babc', secrets: ['ab', 'babx'] },
+      { label: 'multi-babcbabx', text: 'babcbabx', secrets: ['ab', 'babx'] },
+      // 长短密钥前缀关系（避免单码元与 [redacted] 子串撞车的伪阳性）
+      { label: 'prefix-ab-abcd', text: 'xxabcdyy', secrets: ['ab', 'abcd'] },
+      { label: 'prefix-xy-xyz', text: 'zxyxyzx', secrets: ['xy', 'xyz'] },
+      // 周期共振
+      { label: 'period-ab', text: 'ab'.repeat(32) + 'c', secrets: ['ab'.repeat(8)] },
+      // 单码元 / B 转义形态
+      { label: 'unit-lf-esc', text: 'line1\\nline2', secrets: ['\n'], mode: 'line', limit: 6002 },
+      { label: 'unit-c0-esc', text: 'pre\\u0001suf', secrets: ['\u0001'], mode: 'line', limit: 6002 },
+      // 截断边界（P1-2 形态）
+      {
+        label: 'trunc-esc-prefix',
+        text: 'xxx\\x\\u0001abcQ',
+        secrets: ['\u0001abcdefF'],
+        mode: 'block',
+        limit: 26,
+      },
+      {
+        label: 'trunc-self-a',
+        text: 'a'.repeat(40),
+        secrets: ['a'.repeat(8) + 'b'],
+        mode: 'block',
+        limit: 26,
+      },
+    ];
+
+    for (const c of cases) {
+      const mode = c.mode ?? 'block';
+      const limit = c.limit ?? 8204;
+      const fieldOut = redactField(c.text, c.secrets);
+      noFullSecret(fieldOut, c.secrets);
+      const secretsOut = redactSecrets(c.text, c.secrets);
+      expect(secretsOut).toBe(fieldOut);
+      noFullSecret(secretsOut, c.secrets);
+
+      const scrubbed = scrubPayload(c.text, c.secrets, limit, mode);
+      noFullSecret(scrubbed, c.secrets);
+      noTailProperPrefix(scrubbed, c.secrets, mode);
+      // 不得靠 ⑦ 把本可保留诊断的行整段降空（P1-1 scrub 回归）
+      if (c.label === 'multi-babc') {
+        expect(scrubbed, 'scrub babc must keep baseline shape').toBe('b[redacted]c');
+      }
+    }
+  });
+
   // —— ZCode P3-1：describeFailure join 后整串终检 ——————————
 
   test('P3-1 正控：join 跨字段拼出完整密钥 ⇒ 回退空串（R4 族）', () => {
     // 构造（可达）：密钥以空格开头「 b」；code=' ' 为真前缀 ⇒ 单字段尾削成 ''；
     // message='b' 自身不成完整钥；join(' ') ⇒ ' b'＝完整密钥 ⇒ 终检命中。
-    // （经典「ESE cret」在 R2 尾削下 join 结果为「 cret」≠密钥，故另选此前缀形态。）
     const secret = ' b';
     const err = Object.assign(new Error('b'), { code: ' ' });
     const out = describeFailure(err, [secret]);
