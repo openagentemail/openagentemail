@@ -1220,3 +1220,22 @@ N/A。
 - focused：`r5.2b-focused-20260923T063152Z.txt` sha256 `55c035abb87055bd062a2a28214797c71c4bae090cbef896807442bee2d22a32` → 86 pass
 - 全量：`r5.2b-full-suite-20260923T063152Z.txt` sha256 `048145a3ca8b0dc98744f33ae3a04f3b689df2686ecdff77fe41231413f9338a` → **2248 pass / 9 skip / 1 fail**（唯 `#206`）
 - mega：`duck-mega ms=0.447` / `lease warn mega ms=0.715`
+
+## 2026-09-23 · w340 R5.3（#341 修 Codex：边界半截密钥）
+
+### 我们实现了哪些功能？
+1. `describeFailureBounded` 在 `redactSecrets` 后调用 `scrubTrailingSecretPrefix`：剥掉落在截断边界上的密钥真前缀。
+2. 测例：100 码点密钥×4 + filler + 再密钥 ⇒ 输出无完整/半截明文，含 `[redacted]`。
+
+### 我们遇到了哪些错误？
+1. Codex 在 `6c07b6d` 上 P1：先截后脱敏可泄露半截密钥（属实）。
+2. `errors.test.ts` 直接 import `redact` 会拉 `config` 要 env（Bun hoist import）⇒ 测例迁到已有 env 的 fallback 文件。
+3. 全量偶发 `#272` / `#206` 墙钟 1 红（如实报）。
+
+### 我们是如何解决这些错误的？
+1. 边界尾缀剥离 + 复现测例。
+2. 不在无 env 的 helper 单测里静态 import redact。
+
+### 证据
+- focused：`r5.3d-focused-20260923T065300Z.txt` sha256 `8cb4c352209054502a3642383c0096f8bc10b3281a0253a6cdb4a81e15f0b5df` → 87 pass
+- 全量：`r5.3d-full-suite-20260923T065300Z.txt` sha256 `bc18074dc53fa8df1e8b16693c0bc4faf8fa7b9290eb2390151a042459247a7c` → **2249 pass / 9 skip / 1 fail**（`#272` 墙钟）
