@@ -59,25 +59,37 @@ describe('scrubPayload · #350 A/B', () => {
 
   test('A1-period：密钥 ab×k × 文本 ab×4095+c（ZCode/FC 周期共振精确构造）', () => {
     // 构造：secret='ab'×k；text='ab'×4095+'c'（len=8191）；mode=block；limit=8204
+    // 判据重校（R2）：弃用 k=64 作锚（固定开销主导，全量负载下 K=100 结构性误判）。
+    // 改以量级可比档 k=1024↔4096 交错采样取中位数；主判据 ×4 规模 K=12；
+    // 绊线：旧病态 ~2000ms 不得复现（宽裕绝对上界兜底，非唯一判据）。
     const txt = 'ab'.repeat(4095) + 'c';
-    const run = (k: number, rounds = 5): number => {
-      const sec = 'ab'.repeat(k);
-      const samples: number[] = [];
-      for (let i = 0; i < rounds; i++) {
-        const t0 = performance.now();
-        scrubPayload(txt, [sec], DESCRIBE_FAILURE_STACK_MAX, 'block');
-        samples.push(performance.now() - t0);
-      }
-      return medianMs(samples);
-    };
-    const m64 = run(64);
-    const m1024 = run(1024);
-    const m4096 = run(4096);
-    const msg = `k64=${m64.toFixed(2)} k1024=${m1024.toFixed(2)} k4096=${m4096.toFixed(2)} textLen=${txt.length}`;
-    // 主判据：1024→4096（×4），K=12；k=64 过短易被固定开销主导，只留原始耗时
+    const sec1024 = 'ab'.repeat(1024);
+    const sec4096 = 'ab'.repeat(4096);
+    const samples1024: number[] = [];
+    const samples4096: number[] = [];
+    // 交错采样：同轮交替测两档，消除全量套件下的漂移
+    for (let i = 0; i < 7; i++) {
+      let t0 = performance.now();
+      scrubPayload(txt, [sec1024], DESCRIBE_FAILURE_STACK_MAX, 'block');
+      samples1024.push(performance.now() - t0);
+      t0 = performance.now();
+      scrubPayload(txt, [sec4096], DESCRIBE_FAILURE_STACK_MAX, 'block');
+      samples4096.push(performance.now() - t0);
+    }
+    const m1024 = medianMs(samples1024);
+    const m4096 = medianMs(samples4096);
+    // 报告档（不作比率锚）：顺带采一次 k=64，便于证据对照
+    const t64 = performance.now();
+    scrubPayload(txt, ['ab'.repeat(64)], DESCRIBE_FAILURE_STACK_MAX, 'block');
+    const k64Once = performance.now() - t64;
+    const msg =
+      `k64_once=${k64Once.toFixed(2)} k1024=${m1024.toFixed(2)} k4096=${m4096.toFixed(2)} ` +
+      `textLen=${txt.length} samples1024=[${samples1024.map((x) => x.toFixed(1)).join(',')}] ` +
+      `samples4096=[${samples4096.map((x) => x.toFixed(1)).join(',')}]`;
+    // 主判据：量级可比档 ×4（1024→4096），K=12
     expect(m4096, msg).toBeLessThanOrEqual(12 * Math.max(m1024, 1e-6));
-    // 辅判据：64→4096 不得呈 Θ(n²)（原 ~2000ms）；宽裕 K=100 覆盖 O(|s|) 建 trie
-    expect(m4096, msg).toBeLessThanOrEqual(100 * Math.max(m64, 1e-6));
+    // 绊线：旧 Θ(n²) 病态 ~2000ms；宽裕上界兜底（非唯一判据）
+    expect(m4096, msg).toBeLessThan(500);
   });
 
   test('A1-period-n：固定密钥 ab×4096 × 文本 ab×reps+c 伸缩', () => {
