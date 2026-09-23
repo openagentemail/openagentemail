@@ -403,4 +403,40 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(isObjectFaceBareArgs('describeFailureStack(err)')).toBe(false);
     expect(isObjectFaceBareArgs("'failed:', String(code)")).toBe(false);
   });
+
+  // FC R7：可选链 ?.message / ?.stack 亦须判裸用；非 err 变量不得误报
+  test('FC R7：err?.message / err?.stack / (err as Error)?.message ⇒ 必须判为裸用', () => {
+    expect(isObjectFaceBareArgs("'x:', err?.message")).toBe(true);
+    expect(isObjectFaceBareArgs("'x:', err?.stack")).toBe(true);
+    expect(isObjectFaceBareArgs("'x:', (err as Error)?.message")).toBe(true);
+  });
+
+  test('FC R7：不得误报 String(code) / code?.value；R6 回归', () => {
+    expect(isObjectFaceBareArgs("'failed:', String(code)")).toBe(false);
+    expect(isObjectFaceBareArgs("'x:', code?.value")).toBe(false);
+    expect(isObjectFaceBareArgs("'failed:', String(err)")).toBe(true);
+    expect(isObjectFaceBareArgs("'failed:', err.message")).toBe(true);
+  });
+
+  test('FC R7：boot reconstruction transient warn 走 describeFailure（串面）', () => {
+    const text = readFileSync(
+      join(import.meta.dir, '../src/lib/webhook-delivery.ts'),
+      'utf8',
+    );
+    expect(text).toMatch(
+      /boot reconstruction transient failure[\s\S]{0,280}describeFailure\s*\(\s*err\s*\)/,
+    );
+    expect(text).not.toMatch(
+      /boot reconstruction transient failure[\s\S]{0,280}err\s*\?\.\s*message/,
+    );
+  });
+
+  test('FC R7：describeFailure 病态 message ⇒ 有界 + 脱敏 + 单行', () => {
+    const secret = 'smtp-secret';
+    const err = new Error(`${secret}\n${'x'.repeat(9000)}`);
+    const out = describeFailure(err, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out).not.toMatch(/\n/);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+  });
 });

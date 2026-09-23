@@ -1346,3 +1346,20 @@ N/A。
 
 ### 证据
 - focused/full-fc-r6 留件与 `evidence/fc-r6-measured.json`
+
+## 2026-09-23 · w348 FC R7（可选链 ?. 守卫 + boot reconstruction 收口）
+
+### 我们实现了哪些功能？
+1. `isDirectErrorExpr`：`.` / `?.` 统一匹配 `message|stack`（含 `(err as …)?.message`）。
+2. `webhook-delivery` boot reconstruction transient warn：`err?.message` → `describeFailure(err)`（串面；触发条件与 retry 不动）。
+3. 测试：R7 守卫负控 / 不得误报 / 调用点写法 / 病态 message 有界脱敏单行。
+
+### 我们遇到了哪些错误？
+1. Codex/FC：守卫漏 `?.`；仓内 `webhook-delivery.ts` 确有 `err?.message` 裸投（非 #347 白名单）。
+
+### 我们是如何解决这些错误的？
+1. 扫描器补可选链；调用点改串面入口（原只打 message，与 sent-registry warn 同族）。
+2. 实测判定见 `evidence/fc-r7-measured.json`。
+
+### 证据
+- focused/full-fc-r7 留件

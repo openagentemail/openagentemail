@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
-import { describeFailureStack, scrubPayload } from './redact.ts';
+import { describeFailure, describeFailureStack, scrubPayload } from './redact.ts';
 import {
   defaultDnsLookup,
   pinnedFetch,
@@ -3567,9 +3567,11 @@ export async function reconstructPendingDeliveriesAtBoot(
       reconstructRetryDelays.delete(key);
     } catch (err: any) {
       if (err?.isTransient) {
+        // 串面 warn：原只投 err?.message（裸用）；改走 describeFailure（有界+脱敏+单行）。
+        // 不用 describeFailureStack：此处语义是「失败原因一行」，与 sent-registry warn 同族。
         console.warn(
           `[webhooks] boot reconstruction transient failure for delivery ${latest.eventId} / webhook ${latest.webhookId}, retrying with bounded backoff:`,
-          err?.message,
+          describeFailure(err),
         );
         scheduleReconstructionRetry(key);
         continue;

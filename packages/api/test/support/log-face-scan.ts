@@ -103,8 +103,8 @@ const ERRISH_IDENT = /^\w*[Ee]rr\w*$/;
 
 /**
  * 单参数是否为「直接错误表达式」（未走 describeFailure* 的泄漏面）。
- * 覆盖：裸 errish / detail、String(errish)、errish.message|stack、
- * (errish as …).message|stack。非 err 名（如 String(code)）不命中。
+ * 覆盖：裸 errish / detail、String(errish)、errish[.|?.]message|stack、
+ * (errish as …)[.|?.]message|stack。非 err 名（如 String(code) / code?.value）不命中。
  */
 export function isDirectErrorExpr(param: string): boolean {
   const p = param.trim();
@@ -115,12 +115,12 @@ export function isDirectErrorExpr(param: string): boolean {
   const asString = /^String\s*\(\s*(\w+)\s*\)$/.exec(p);
   if (asString && ERRISH_IDENT.test(asString[1]!)) return true;
 
-  // <errish>.message | <errish>.stack
-  const asProp = /^(\w+)\s*\.\s*(message|stack)$/.exec(p);
+  // <errish>.message|stack 或 <errish>?.message|stack（FC R7 可选链）
+  const asProp = /^(\w+)\s*\??\.\s*(message|stack)$/.exec(p);
   if (asProp && ERRISH_IDENT.test(asProp[1]!)) return true;
 
-  // (<errish> as …).message | (<errish> as …).stack
-  const asCast = /^\(\s*(\w+)\s+as\s+[^)]+\)\s*\.\s*(message|stack)$/.exec(p);
+  // (<errish> as …).message|stack 或 (<errish> as …)?.message|stack
+  const asCast = /^\(\s*(\w+)\s+as\s+[^)]+\)\s*\??\.\s*(message|stack)$/.exec(p);
   if (asCast && ERRISH_IDENT.test(asCast[1]!)) return true;
 
   return false;
@@ -130,7 +130,7 @@ export function isDirectErrorExpr(param: string): boolean {
  * 是否为对象面裸用：顶层参数中**任一**为直接错误表达式。
  * 按参数判定（不看整段是否含 describeFailure*）——避免
  * `describeFailureStack(err), err` 这类混合调用被整段捷径豁免；
- * 亦覆盖 String(err) / (err as Error).message 等绕过（FC R6）。
+ * 亦覆盖 String(err) / err?.message 等绕过（FC R6/R7）。
  */
 export function isObjectFaceBareArgs(args: string): boolean {
   for (const p of splitTopLevelArgs(args)) {
