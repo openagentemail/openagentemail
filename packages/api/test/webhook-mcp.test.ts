@@ -9,8 +9,9 @@ process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.UI_ENABLED = 'false';
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const { createApp } = await import('../src/app.ts');
 const { config } = await import('../src/lib/config.ts');
@@ -37,7 +38,8 @@ const {
 } = await import('../src/lib/tool-tiers.ts');
 const { resolveResourceUri } = await import('../src/lib/oauth-url.ts');
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-webhook-mcp');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-webhook-mcp-'));
 const originalDataDir = config.dataDir;
 const MCP_ACCEPT = 'application/json, text/event-stream';
 

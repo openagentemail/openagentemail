@@ -55,16 +55,33 @@ function configuredSecrets(): string[] {
   return [config.smtp.pass, config.imap.pass];
 }
 
-// —— trie：单趟多密钥，最长完成匹配优先 ————————————————
+// —— trie + AC 失败链：单趟多密钥，最长完成匹配优先 ——————————
 
 type TrieNode = {
   children: Map<string, TrieNode>;
   /** 若本节点是某密钥终点，为其长度；否则 0 */
   endLen: number;
+  /** 根到本节点路径上的 max(endLen)（仅直接路径，不含输出链后缀匹配） */
+  pathMaxEnd: number;
+  /** 节点深度（= 路径码元数） */
+  depth: number;
+  /**
+   * AC 失败链：path[1..] 经「转移+失败」从根可达的状态。
+   * 与经典 fail 同构；用于失配时 O(1) 摊还推进，禁止整段 pending 回放重走。
+   */
+  fail: TrieNode | null;
 };
 
 function buildTrie(secrets: string[]): TrieNode {
-  const root: TrieNode = { children: new Map(), endLen: 0 };
+  const root: TrieNode = {
+    children: new Map(),
+    endLen: 0,
+    pathMaxEnd: 0,
+    depth: 0,
+    fail: null,
+  };
+  root.fail = root;
+
   for (const secret of secrets) {
     if (!secret) continue;
     let node = root;
@@ -73,24 +90,64 @@ function buildTrie(secrets: string[]): TrieNode {
       const ch = secret[i]!;
       let next = node.children.get(ch);
       if (!next) {
-        next = { children: new Map(), endLen: 0 };
+        next = {
+          children: new Map(),
+          endLen: 0,
+          pathMaxEnd: 0,
+          depth: node.depth + 1,
+          fail: null,
+        };
         node.children.set(ch, next);
       }
       node = next;
     }
     if (secret.length > node.endLen) node.endLen = secret.length;
   }
+
+  // 补 pathMaxEnd（建边后再扫一遍，避免插入顺序影响）
+  const bfs: TrieNode[] = [root];
+  for (let qi = 0; qi < bfs.length; qi++) {
+    const n = bfs[qi]!;
+    for (const child of n.children.values()) {
+      child.pathMaxEnd = Math.max(child.endLen, n.pathMaxEnd);
+      bfs.push(child);
+    }
+  }
+
+  // BFS 建失败链：child.fail = transition(parent.fail, edge)
+  // transition：沿 fail 走到有边或根；根无边则停在根（头指针，禁 shift 搬移）
+  const failQ: TrieNode[] = [];
+  let failQHead = 0;
+  for (const child of root.children.values()) {
+    child.fail = root;
+    failQ.push(child);
+  }
+  while (failQHead < failQ.length) {
+    const n = failQ[failQHead++]!;
+    for (const [ch, child] of n.children) {
+      let f = n.fail!;
+      while (f !== root && !f.children.has(ch)) f = f.fail!;
+      child.fail = f.children.get(ch) ?? root;
+      failQ.push(child);
+    }
+  }
+
   return root;
 }
 
 /**
  * 域原语：单字段匹配域内脱敏（J3+J4+J5）。
  * - 最长密钥优先 + hold
- * - 重放保序（队首插入，J5）
+ * - 失配保序：失败链推进；超出 fail 后缀的前缀段从根消化，**后缀留在 held**（禁整段 rem 回灌）
  * - 域尾：先对已成匹配发 [redacted]，余部一律丢弃（J4，永不字面倾倒）
  *
- * 复杂度（R10）：携带当前 trie 节点，每码元转移 O(1)；失败回放使每码元摊还
- * O(1) 次再入队 ⇒ 总时间 O(n + Σ|s|)（含建 trie），**不再**每码元从根重走 pending（原 O(n·L)）。
+ * 复杂度（#350 A，事实声明，非无条件上界）：
+ * - 建 trie+失败链 O(Σ|s|)；无「一钥为另一钥前缀」时，每码元摊还 O(1) ⇒ **O(n + Σ|s|)**
+ *   （周期共振 / 自重叠等已线性化族走 fail 快路径或 skip==0 推进）。
+ * - 「一钥为另一钥前缀」族（例 secrets `['ab','ab'×k]` + text `'ab'×4095+'c'`，block/8204）
+ *   当前仍为 **Θ(n·L)**（已知性能债，独立 issue 由 FC 开）：
+ *   本实现 k=512/1024/4096 ⇒ 20.6 / 54.5 / 712.6 ms；
+ *   同构造基线 `ec3a871f` ⇒ 40.3 / 111.3 / 1536.2 ms（**非回退**，本实现约 2× 快，但未线性）。
  */
 export function redactField(text: string, secrets: string[]): string {
   const filtered = secrets.filter(Boolean);
@@ -98,47 +155,168 @@ export function redactField(text: string, secrets: string[]): string {
   // 无密钥：原文返回（兼容负控逐字节）
   if (filtered.length === 0) return text;
 
-  let pending: string[] = [];
+  /** 当前路径上已吞、尚未产出的码元（与 node.depth 对齐；头指针避免 shift 搬移） */
+  const held: string[] = [];
+  let heldHead = 0;
   let matchedEnd = 0;
-  /** 当前自动机状态（pending 路径终点）；与 pending 同步复位 */
   let node: TrieNode = root;
   const out: string[] = [];
+  /** 待喂码元队列（头指针；J5 残余保序插队） */
   const queue: string[] = [];
+  let queueHead = 0;
+
+  function heldLen(): number {
+    return held.length - heldHead;
+  }
+
+  function compactHeld(): void {
+    if (heldHead > 64 && heldHead * 2 > held.length) {
+      held.splice(0, heldHead);
+      heldHead = 0;
+    }
+  }
+
+  function compactQueue(): void {
+    if (queueHead > 64 && queueHead * 2 > queue.length) {
+      queue.splice(0, queueHead);
+      queueHead = 0;
+    }
+  }
 
   function resetAutomaton(): void {
-    pending = [];
+    held.length = 0;
+    heldHead = 0;
     matchedEnd = 0;
     node = root;
   }
 
-  function resolveFailure(extraChars: string[]): void {
-    const body = pending;
-    const L = matchedEnd;
+  /** 队首插入（保序：更早码元先处理） */
+  function prependChars(chars: string[]): void {
+    if (chars.length === 0) return;
+    // 头指针队列：把未消费段与新前缀拼成新底层数组，避免 unshift 搬移
+    const rest = queue.slice(queueHead);
+    queue.length = 0;
+    queueHead = 0;
+    for (let i = 0; i < chars.length; i++) queue.push(chars[i]!);
+    for (let i = 0; i < rest.length; i++) queue.push(rest[i]!);
+  }
+
+  /**
+   * 从根消化 extras（慢路径）。隔离队列；返回是否回到根空 held。
+   */
+  function digestExtrasFromRoot(extras: string[]): boolean {
+    if (extras.length === 0) return heldLen() === 0 && node === root && matchedEnd === 0;
+    const savedRest: string[] = [];
+    for (let i = queueHead; i < queue.length; i++) savedRest.push(queue[i]!);
+    queue.length = 0;
+    queueHead = 0;
+
     resetAutomaton();
-    // J5：回放块插到队首，保证原文更早字符先于队列残余
-    const prependReplay = (chars: string[]) => {
-      if (chars.length === 0) return;
-      queue.unshift(...chars);
-    };
+    for (let i = 0; i < extras.length; i++) queue.push(extras[i]!);
+    while (queueHead < queue.length) {
+      const c = queue[queueHead++]!;
+      feed(c);
+      compactQueue();
+    }
+    const clean = heldLen() === 0 && node === root && matchedEnd === 0;
+
+    queue.length = 0;
+    queueHead = 0;
+    for (let i = 0; i < savedRest.length; i++) queue.push(savedRest[i]!);
+    return clean;
+  }
+
+  function resolveFailure(ch: string): void {
+    const L = matchedEnd;
     if (L > 0) {
       out.push(REDACTED);
-      prependReplay(body.slice(L).concat(extraChars));
-    } else if (body.length === 0) {
-      // 已证非任何密钥首字符：字面产出，禁止重喂（防死循环）
-      for (const ch of extraChars) out.push(ch);
-    } else {
-      out.push(body[0]!);
-      prependReplay(body.slice(1).concat(extraChars));
+      const rem: string[] = [];
+      for (let i = heldHead + L; i < held.length; i++) rem.push(held[i]!);
+      rem.push(ch);
+      resetAutomaton();
+      prependChars(rem);
+      return;
+    }
+
+    // L==0：循环「产出 1 + fail」；禁止 rem 整段回灌；周期族走快路径避免 O(n) 拷贝
+    while (true) {
+      if (node.children.has(ch)) {
+        prependChars([ch]);
+        return;
+      }
+      if (heldLen() === 0 || node === root) {
+        out.push(ch);
+        resetAutomaton();
+        return;
+      }
+
+      // fail 链可能落到另一已完成密钥节点（pathMaxEnd>0）；须先消化匹配，
+      // 不得继续逐字产出（否则如 babc+['ab','babx'] 漏红，靠 ⑦ 整行降空）
+      if (matchedEnd > 0) {
+        const Lmatch = matchedEnd;
+        out.push(REDACTED);
+        const rem: string[] = [];
+        for (let i = heldHead + Lmatch; i < held.length; i++) rem.push(held[i]!);
+        rem.push(ch);
+        resetAutomaton();
+        prependChars(rem);
+        return;
+      }
+
+      out.push(held[heldHead++]!);
+      node = node.fail ?? root;
+      matchedEnd = node.pathMaxEnd;
+
+      const skip = heldLen() - node.depth;
+      if (skip > 0) {
+        const extras: string[] = [];
+        for (let i = 0; i < skip; i++) extras.push(held[heldHead++]!);
+        // held 现与 fail 后缀对齐
+
+        // 快路径：extras 在根上均无出边 ⇒ 字面产出，保留后缀（(ab)* 周期族主路径）
+        let rootSafe = true;
+        for (let i = 0; i < extras.length; i++) {
+          if (root.children.has(extras[i]!)) {
+            rootSafe = false;
+            break;
+          }
+        }
+        if (rootSafe) {
+          for (let i = 0; i < extras.length; i++) out.push(extras[i]!);
+          compactHeld();
+          continue; // 重试 ch，后缀仍在 held
+        }
+
+        // 慢路径：extras 可能打开其它密钥（如 bc）——从根消化
+        const remChars: string[] = [];
+        for (let i = heldHead; i < held.length; i++) remChars.push(held[i]!);
+        const remNode = node;
+        const remMatched = matchedEnd;
+
+        const clean = digestExtrasFromRoot(extras);
+        if (clean) {
+          held.length = 0;
+          heldHead = 0;
+          for (let i = 0; i < remChars.length; i++) held.push(remChars[i]!);
+          node = remNode;
+          matchedEnd = remMatched;
+          compactHeld();
+          continue;
+        }
+        prependChars(remChars.concat([ch]));
+        return;
+      }
+      compactHeld();
     }
   }
 
   function feed(ch: string): void {
     const next = node.children.get(ch);
     if (!next) {
-      resolveFailure([ch]);
+      resolveFailure(ch);
       return;
     }
-    pending.push(ch);
+    held.push(ch);
     node = next;
     if (node.endLen > matchedEnd) matchedEnd = node.endLen;
     // hold：已完成短钥但仍是更长钥真前缀
@@ -152,8 +330,10 @@ export function redactField(text: string, secrets: string[]): string {
   }
 
   function drainQueue(): void {
-    while (queue.length > 0) {
-      feed(queue.shift()!);
+    while (queueHead < queue.length) {
+      const ch = queue[queueHead++]!;
+      feed(ch);
+      compactQueue();
     }
   }
 
@@ -296,6 +476,8 @@ type SecretEscapePrep = {
 /**
  * 预计算每个密钥的转义整串。
  * 复杂度：Σ O(|s|)——逐码元 escapeCodeUnit + join；**禁止**对每个前缀再跑 escape（原为 O(|s|²)）。
+ * #350 B：单码元密钥也要进转义族（line 下 \\n/\\r/\\t、\\uXXXX 等字面形态须被 ④ 红掉）；
+ * 仅跳过空串；esc===raw 时由 secretsForPostEscape 去重。
  */
 function prepareSecretEscapePreps(
   secrets: string[],
@@ -303,7 +485,7 @@ function prepareSecretEscapePreps(
 ): SecretEscapePrep[] {
   const preps: SecretEscapePrep[] = [];
   for (const s of secrets) {
-    if (!s || s.length < 2) continue;
+    if (!s) continue; // 空串跳过；单码元密钥保留（#350 B）
     const pieces = new Array<string>(s.length);
     for (let i = 0; i < s.length; i++) {
       pieces[i] = escapeCodeUnit(s.charCodeAt(i), mode);
@@ -338,26 +520,51 @@ function secretsForPostEscape(
 }
 
 /**
- * 剥掉尾部转义记号后，正文是否以某密钥原文真前缀结尾。
- * 匹配长度上限为 peeled.length（与口令全长无关）⇒ 单次 O(Σ min(|s|,|peeled|))。
+ * out 是否以 s 的前 len 码元结尾（不分配 slice）。
  */
-function peeledExposesRawSecretPrefix(
-  peeled: string,
-  preps: SecretEscapePrep[],
-): boolean {
-  if (!peeled) return false;
-  for (const { raw } of preps) {
-    const maxLen = Math.min(raw.length - 1, peeled.length);
-    for (let len = 1; len <= maxLen; len++) {
-      if (peeled.endsWith(raw.slice(0, len))) return true;
-    }
+function outEndsWithPrefix(out: string, s: string, len: number): boolean {
+  if (len <= 0 || len > out.length || len > s.length) return false;
+  const start = out.length - len;
+  for (let i = 0; i < len; i++) {
+    if (out.charCodeAt(start + i) !== s.charCodeAt(i)) return false;
   }
-  return false;
+  return true;
 }
 
 /**
- * 正文尾部最长「密钥真前缀」匹配长度（原文或转义整钥的真前缀）。
- * 只检查长度 ≤ |out| 的候选 ⇒ 与口令全长解耦，避免 O(|s|²)。
+ * 正文尾部最长「密钥真前缀」长度（单钥）。
+ * 从长到短；i==0 时跳到「后缀以 s[0] 开头」的次长候选。
+ * i>0 失配时：窗口前缀 ≠ 串后缀，**不可**直接 len=i（会漏检更短真后缀）；
+ * 仅当 out 真以 s[0..i) 结尾时才能收束到 i，否则 len--。
+ */
+function properPrefixAsSuffixLen(out: string, s: string): number {
+  if (s.length < 2 || out.length === 0) return 0;
+  let len = Math.min(s.length - 1, out.length);
+  const s0 = s.charCodeAt(0);
+  while (len >= 1) {
+    let i = 0;
+    const start = out.length - len;
+    while (i < len && out.charCodeAt(start + i) === s.charCodeAt(i)) i++;
+    if (i === len) return len;
+    if (i > 0) {
+      // 后缀对齐校验：通过则 i 即为合法真前缀长；否则逐档回退
+      if (outEndsWithPrefix(out, s, i)) return i;
+      len--;
+      continue;
+    }
+    // i==0：本窗口首码元不匹配；跳到更短且窗口首码元 == s[0] 的最大 len
+    let next = 0;
+    for (let j = 1; j < len; j++) {
+      if (out.charCodeAt(out.length - j) === s0) next = j;
+    }
+    len = next;
+  }
+  return 0;
+}
+
+/**
+ * 正文尾部最长「密钥真前缀」长度（原文或转义整钥）。
+ * 单次 O(Σ longest_k)；整段 trim 总削量 ≤|out| ⇒ 目标病态 O(n) 而非 Θ(n·L)。
  */
 function longestPostEscapePrefixLen(
   out: string,
@@ -365,16 +572,28 @@ function longestPostEscapePrefixLen(
 ): number {
   let longest = 0;
   for (const { raw, esc } of preps) {
-    const maxRaw = Math.min(raw.length - 1, out.length);
-    for (let len = 1; len <= maxRaw; len++) {
-      if (out.endsWith(raw.slice(0, len)) && len > longest) longest = len;
-    }
-    const maxEsc = Math.min(esc.length - 1, out.length);
-    for (let len = 1; len <= maxEsc; len++) {
-      if (out.endsWith(esc.slice(0, len)) && len > longest) longest = len;
+    const nRaw = properPrefixAsSuffixLen(out, raw);
+    if (nRaw > longest) longest = nRaw;
+    if (esc !== raw) {
+      const nEsc = properPrefixAsSuffixLen(out, esc);
+      if (nEsc > longest) longest = nEsc;
     }
   }
   return longest;
+}
+
+/**
+ * 剥掉尾部转义记号后，正文是否以某密钥原文真前缀结尾。
+ */
+function peeledExposesRawSecretPrefix(
+  peeled: string,
+  preps: SecretEscapePrep[],
+): boolean {
+  if (!peeled) return false;
+  for (const { raw } of preps) {
+    if (properPrefixAsSuffixLen(peeled, raw) > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -383,6 +602,10 @@ function longestPostEscapePrefixLen(
  * 不变量（R9 精化）：输出不含任何完整密钥；且**除本件固定截断标记外**，
  * 输出尾部不构成任何密钥真前缀。标记是发射路径写入的已知固定串，不承载载荷，
  * 不得当作载荷尾部来削（否则会破坏「已截断」指示，见口令 `ted]xyz` 反例）。
+ *
+ * 复杂度（#350 A3）：每步削 ≥1；求最长用失配跳跃。
+ * - 自重叠大块削（a×L+b）：longest≈L，总 O(n)
+ * - 尾退腿（a+b×(L−1)、正文全 a）：longest=1 且跳跃后 O(1)，总 O(n)
  */
 function trimTrailingSecretPrefixAfterEscape(
   text: string,
@@ -673,7 +896,13 @@ export function describeFailure(err: unknown, secrets?: string[]): string {
     }
 
     // J1：join 在脱敏之后；禁止跨字段匹配
-    return parts.join(' ');
+    const joined = parts.join(' ');
+    // #350 ZCode P3-1 / CR-2：join 后终检与 scrubPayload ⑦ **同形**——密钥族＝原文 ∪ line 转义整钥
+    // （describeFailure 字段走 scrubLinePayload）；一次性构造，勿每字段重算；命中 ⇒ ''（R4 族）
+    const joinPreps = prepareSecretEscapePreps(secretList, 'line');
+    const joinSecrets = secretsForPostEscape(secretList, joinPreps);
+    if (containsAnySecret(joined, joinSecrets)) return '';
+    return joined;
   } catch {
     // 极端兜底：整条流水线不得逸出
     return '[unreadable]';

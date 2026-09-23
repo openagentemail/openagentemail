@@ -21,8 +21,9 @@ process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHmac, randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type {
   InvalidCursorFamily,
   InvalidCursorShape,
@@ -66,7 +67,8 @@ const {
 const { SEND_LOG_RETENTION_MS, InvalidSendCursorError, encodeSendLogCursorForTests } =
   await import('../src/lib/send-log.ts');
 
-const TEST_DATA_DIR = join(import.meta.dir, 'tmp-invalid-cursor-obs');
+// #350 E2：系统临时目录，避免仓树内落未跟踪 tmp-*
+const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-invalid-cursor-obs-'));
 const originalDataDir = config.dataDir;
 const adminKey = [...config.apiKeys][0] || 'test-key';
 
