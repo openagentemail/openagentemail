@@ -305,8 +305,9 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
  *   ① b = slice(text, inputLimit)
  *   ② r = redactField(b, secrets)
  *   ③ t = escapeLine|escapeBlock(r)   // 由 mode 显式选择
- *   ④ 若需截断标记：先切到 outputCap−|MARK|，再追加 MARK，然后 redactField
- *   ⑤ v = slice(u, outputCap)
+ *   ④ uProbe = redactField(t)；needsMark 按输入截断或 t/uProbe 超限重算
+ *      若 needsMark：body=slice(t, cap−|MARK|)+MARK → 再 redactField（R1）
+ *   ⑤ v = slice(u, outputCap)         // 不得吃掉完整 MARK
  *   ⑥ w = trimTrailingSecretPrefix(v, secrets)
  *   ⑦ if containsAnySecret(w): return ''
  *   return w
@@ -339,20 +340,24 @@ export function scrubPayload(
     // 输出硬顶：line → 展开因子 2000；block → limit（8204）
     const outputCap = isLine ? DESCRIBE_FAILURE_FIELD_MAX : limit;
 
-    // ④ needsMark＝输入侧截断 || 输出侧截断（仅 block / 对象面）
-    const truncatedAtOutput = t.length > outputCap;
+    // ④ 先对转义结果做第二遍脱敏探针（无标记），再按最终长度重算 needsMark。
+    //    否则「转义后未超限、二遍脱敏膨胀后超限」会静默硬切且不标（FC R5）。
+    //    标记仍在最后一次脱敏之前并入（R1）。
+    const uProbe = redactField(t, secretList);
+    const truncatedAtOutput = t.length > outputCap || uProbe.length > outputCap;
     const needsMark = !isLine && (truncatedAtInput || truncatedAtOutput);
-    let forSecond: string;
+
+    let u: string;
     if (needsMark) {
       const bodyBudget = Math.max(0, outputCap - markLen);
       let body = t.length > bodyBudget ? t.slice(0, bodyBudget) : t;
       // Codex P2：剔半个 `\uXXXX` / 孤立 `\`
       body = body.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
-      forSecond = body + TRUNCATED_MARK;
+      // 最后一次脱敏：主体 + MARK 一并管辖
+      u = redactField(body + TRUNCATED_MARK, secretList);
     } else {
-      forSecond = t;
+      u = uProbe;
     }
-    const u = redactField(forSecond, secretList);
 
     // ⑤ 最终上界；不得吃掉完整截断标记（标记=密钥被脱敏吞掉则另当别论）
     let v = u;

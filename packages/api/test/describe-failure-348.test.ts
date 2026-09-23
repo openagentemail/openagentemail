@@ -351,4 +351,39 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(isObjectFaceBareArgs(mixed[0]!.args)).toBe(true);
     expect(isObjectFaceBareArgs(ok[0]!.args)).toBe(false);
   });
+
+  // FC R5：第二遍脱敏膨胀后超限必须打标（needsMark 在增长之后重算）
+  test('FC R5：\\x01×1000/1364 + 口令 \\\\u0001 ⇒ 必须含截断标记', () => {
+    const secret = '\\u0001';
+    for (const n of [1000, 1364] as const) {
+      const err = new Error(`r5-${n}`);
+      err.stack = '\u0001'.repeat(n);
+      const out = describeFailureStack(err, [secret]);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.endsWith(TRUNC_MARK)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+      expect(out).not.toContain(secret);
+    }
+  });
+
+  test('FC R5：\\x01×100 + 口令 \\\\u0001（未超限）⇒ 不得含标记', () => {
+    const secret = '\\u0001';
+    const err = new Error('r5-under');
+    err.stack = '\u0001'.repeat(100);
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(TRUNC_MARK);
+    expect(out.length).toBeLessThan(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out).not.toContain(secret);
+  });
+
+  test('FC R5：\\x01×1400/2000 + 口令 \\\\u0001 ⇒ 含标记（回归）', () => {
+    const secret = '\\u0001';
+    for (const n of [1400, 2000] as const) {
+      const err = new Error(`r5-big-${n}`);
+      err.stack = '\u0001'.repeat(n);
+      const out = describeFailureStack(err, [secret]);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    }
+  });
 });

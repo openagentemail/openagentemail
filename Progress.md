@@ -1314,3 +1314,20 @@ N/A。
 
 ### 证据
 - 见 focused/full-fc-r4 留件
+
+## 2026-09-23 · w348 FC R5（needsMark 在第二遍脱敏之后重算）
+
+### 我们实现了哪些功能？
+1. `scrubPayload`：先对转义结果做 `uProbe = redactField(t)`，再按 `truncatedAtInput || t>cap || uProbe>cap` 重算 `needsMark`；若需标则 `body+MARK` 再走最后一次脱敏（R1）。
+2. 最终硬切时若尾部已有完整 MARK，优先保留标记（slice 目标＝outputCap−|MARK|）。
+3. 测试：`\x01×1000/1364`+口令`\u0001` 必含标记；`×100` 不得含；`×1400/2000` 与 x×8192–8204 窗口回归。
+
+### 我们遇到了哪些错误？
+1. FC 实测：`\x01×1000` 转义后仅 6000 ⇒ 旧逻辑 `needsMark=false`，二遍脱敏膨胀到 10000 后硬切到 8204 却不标（静默截断）。
+
+### 我们是如何解决这些错误的？
+1. 判界/判标记改用「所有增长工序之后」的探针长度；标记仍在最后一次脱敏前并入。
+2. 实测 n=100/300/500/700 ⇒ marker=FALSE；n=1000/1364/1400/2000 ⇒ TRUE；x×8192 FALSE、8193–8204 TRUE。
+
+### 证据
+- focused/full-fc-r5 留件与 `evidence/fc-r5-measured.json`
