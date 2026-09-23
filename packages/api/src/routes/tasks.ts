@@ -113,6 +113,19 @@ function journalUnavailable(c: Context, err: unknown): Response | null {
   return null;
 }
 
+/**
+ * 租约兜底 warn 载荷：先脱敏再有界单行。
+ * describeFailure 对会抛 getter / revoked Proxy 可能抛——必须吞掉，
+ * 不得打断外层 catch 的 502 task_operation_failed 契约。
+ */
+function taskFailureLogDetail(err: unknown): string {
+  try {
+    return boundDetail(describeFailure(err));
+  } catch {
+    return '[unreadable]';
+  }
+}
+
 /** Relationship edges are independently ACL-scoped; the base task stays readable. */
 function taskViewFor(c: Context, task: Task, parent: Task | null | undefined) {
   const view = toTaskView(task);
@@ -430,7 +443,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: code }, 409);
         }
         // 日志载荷：先脱敏（仓内邮件栈约定）再有界单行；路由判定仍用上方 errorCode
-        console.warn('[task] renew failed:', boundDetail(describeFailure(err)));
+        console.warn('[task] renew failed:', taskFailureLogDetail(err));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
@@ -475,7 +488,7 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
           return c.json({ error: code }, 409);
         }
         // 日志载荷：先脱敏再有界单行（与 renew / send.ts describeFailure 同约定）
-        console.warn('[task] release failed:', boundDetail(describeFailure(err)));
+        console.warn('[task] release failed:', taskFailureLogDetail(err));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
