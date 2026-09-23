@@ -253,4 +253,38 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(out).not.toContain(secret);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
   });
+
+  // FC R2：钉死 8193–8204 无膨胀窗口 —— 输入 > STACK_MAX 必须有标记
+  test('FC R2：x×8193/8196/8200/8204 ⇒ 必须含截断标记', () => {
+    for (const n of [8193, 8196, 8200, 8204] as const) {
+      const err = new Error(`win-${n}`);
+      err.stack = 'x'.repeat(n);
+      const out = describeFailureStack(err, []);
+      expect(out).toContain(TRUNC_MARK);
+      expect(out.endsWith(TRUNC_MARK)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    }
+  });
+
+  test('FC R2：x×8192（未截断）⇒ 不得出现截断标记', () => {
+    const err = new Error('exact-stack-max');
+    err.stack = 'x'.repeat(STACK_MAX);
+    const out = describeFailureStack(err, []);
+    expect(out).not.toContain(TRUNC_MARK);
+    expect(out.length).toBe(STACK_MAX);
+  });
+
+  test('FC R2：膨胀路径回归 —— NUL×8192 与 x×9000 仍含标记', () => {
+    const nulErr = new Error('nul-exp');
+    nulErr.stack = '\u0000'.repeat(STACK_MAX);
+    const nulOut = describeFailureStack(nulErr, []);
+    expect(nulOut).toContain(TRUNC_MARK);
+    expect(nulOut.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+
+    const big = new Error('x9k');
+    big.stack = 'x'.repeat(9000);
+    const bigOut = describeFailureStack(big, []);
+    expect(bigOut).toContain(TRUNC_MARK);
+    expect(bigOut.endsWith(TRUNC_MARK)).toBe(true);
+  });
 });

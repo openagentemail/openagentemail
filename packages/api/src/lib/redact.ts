@@ -5,11 +5,11 @@
  *   ① slice(LIMIT) → ② redactField → ③ escapeBlock → ④ redactField(+MARK)
  *   → ⑤ slice(输出顶) → ⑥ trimTrailingSecretPrefix → ⑦ containsAnySecret? '' : w
  *
- * LIMIT 语义（输入界）：
- *   - 字符串面：`ERROR_DETAIL_MAX`（200）。输入先切到 200；输出不按 200 硬切，
+ * LIMIT 语义：
+ *   - 字符串面：`ERROR_DETAIL_MAX`（200）＝输入界；输出不按 200 硬切，
  *     由展开因子可证每字段 ≤200×max(6,10)=2000，三字段+2 空格 ⇒ ≤6002。
- *   - 对象面：`DESCRIBE_FAILURE_STACK_MAX`（8204）。超长时先切到 LIMIT−|MARK| 再追加 MARK
- *     （标记仍在最后一次脱敏之前，R1）；最终 |out|≤LIMIT 且截断时标记不被最终 slice 吃掉。
+ *   - 对象面：`DESCRIBE_FAILURE_STACK_MAX`（8204）＝输出顶；输入界＝8204−|MARK|
+ *     （＝STACK_MAX 8192）。needsMark＝输入侧截断 || 输出侧截断；标记预留后追加。
  *   - 盘文本面：默认 LIMIT=6002（或调用方传入）。
  *
  * 不变量：串面 join ≤6002 / 对象面 ≤8204；不含完整密钥；尾部非真前缀；永不抛。
@@ -296,7 +296,7 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
 /**
  * 唯一组合原语（#348）：三入口共用发射路径。
  *
- *   ① b = slice(text, limit)                    // LIMIT＝输入界
+ *   ① b = slice(text, inputLimit)               // 见下：LIMIT 语义
  *   ② r = redactField(b, secrets)
  *   ③ t = escapeBlock(r)
  *   ④ 若需截断标记：先切到 outputCap−|MARK|，再追加 MARK，然后 redactField
@@ -305,10 +305,11 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
  *   ⑦ if containsAnySecret(w): return ''        // R4 兜底＝空串
  *   return w
  *
- * @param limit 输入有界（码元）。
- *   字符串面传 `ERROR_DETAIL_MAX`(200)；对象面传 `DESCRIBE_FAILURE_STACK_MAX`(8204)。
- *   输出顶：串面用展开因子硬顶 `DESCRIBE_FAILURE_FIELD_MAX`(2000)；
- *   对象面用 limit 本身，截断时预留 MARK。
+ * @param limit
+ *   - 字符串面：`ERROR_DETAIL_MAX`(200)＝**输入界**；输出硬顶＝展开因子 2000。
+ *   - 对象面：`DESCRIBE_FAILURE_STACK_MAX`(8204)＝**输出顶**（含标记预算）；
+ *     **输入界**＝limit−|MARK|（＝STACK_MAX 8192）。
+ *     `needsMark`＝(输入侧截断 || 输出侧截断)；任一次裁剪都必须出标记。
  */
 export function scrubPayload(
   text: string,
@@ -318,10 +319,12 @@ export function scrubPayload(
   try {
     const secretList = secrets.filter(Boolean);
     const markLen = TRUNCATED_MARK.length;
+    const stringFace = limit <= ERROR_DETAIL_MAX;
 
-    // ① 输入先有界（LIMIT＝输入界）
-    const truncatedAtInput = text.length > limit;
-    const b = truncatedAtInput ? text.slice(0, limit) : text;
+    // ① 输入有界：串面＝limit；对象面＝limit−|MARK|（为标记预留，使 >STACK_MAX 必截断）
+    const inputLimit = stringFace ? limit : Math.max(0, limit - markLen);
+    const truncatedAtInput = text.length > inputLimit;
+    const b = truncatedAtInput ? text.slice(0, inputLimit) : text;
 
     // ② 第一遍：清原文中的完整密钥
     const r = redactField(b, secretList);
@@ -329,13 +332,12 @@ export function scrubPayload(
     // ③ 转义（可能生成密钥文本形态）
     const t = escapeBlock(r);
 
-    // 输出硬顶：串面（limit≤200）→ 展开因子 2000；对象面 → limit（含标记预算）
-    const stringFace = limit <= ERROR_DETAIL_MAX;
+    // 输出硬顶：串面 → 展开因子 2000；对象面 → limit（8204）
     const outputCap = stringFace ? DESCRIBE_FAILURE_FIELD_MAX : limit;
 
-    // ④ 标记：仅对象面启用；先切到 outputCap−|MARK| 再追加（R1：标记在最后一次脱敏之前）
-    const needsMark =
-      !stringFace && (truncatedAtInput || t.length > outputCap);
+    // ④ needsMark＝输入侧截断 || 输出侧截断（转义后超 outputCap）
+    const truncatedAtOutput = t.length > outputCap;
+    const needsMark = !stringFace && (truncatedAtInput || truncatedAtOutput);
     let forSecond: string;
     if (needsMark) {
       const bodyBudget = Math.max(0, outputCap - markLen);
