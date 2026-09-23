@@ -3,9 +3,11 @@
  * 声明口径：「本卡 6 处已收口；其余白名单钉 #347」。
  */
 
-/** #347 记债白名单：针头字符串（不钉行号，防漂移） */
+/** #347 记债白名单：针头字符串（不钉行号，防漂移）
+ * R3 已收口 webhook-delivery 两处 corrupted delivery log（盘文本+err）；
+ * 残余：dead-letter logErr + 三处 HIGH alert 的 detail 对象面。
+ */
 export const OBJECT_FACE_DEBT_NEEDLES = [
-  'corrupted delivery log line', // webhook-delivery 整文件读 + 增量读两处
   'failed to write executeJob dead letter',
   '[send-log] HIGH:',
   '[notification-log] HIGH:',

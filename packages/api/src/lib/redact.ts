@@ -3,8 +3,14 @@
  *
  * B 形态流水线（design-b.md / #344）：
  *   字符串面：逐字段 取串 → 有界(200) → redactField → escapeLine → join(' ')
- *   对象面：取 stack → 内层有界 → redactField → escapeBlock → **再 redactField**
- *            → 外层截断 → 尾部前缀回退 → 截断标记
+ *   对象面（两分支共用同一条，#344 R3）：
+ *     取串 → 有界 → redact → escapeBlock → **并入截断标记** → **再 redact**
+ *     → 截到 STACK_MAX → 尾部真前缀回退
+ *
+ * 家族知识（#342/#344 · 每一步都要问：这一步会不会造出或漏掉密钥）：
+ *   ORDER（整行 vs 逐字段）· SUFFIX-REMATCH（余段不重喂）· FIELD-BOUNDARY（字段边界）·
+ *   转义生成密钥 · 标记等于密钥 · 回退分支绕过第二遍脱敏。
+ *
  * 不变量 J1–J9；对外错误码/状态码/body 不经本模块；errorCode 在 errors.ts，一字不动。
  */
 
@@ -19,11 +25,14 @@ export const DESCRIBE_FAILURE_MAX = 6002;
 /** 对象面 stack 文本 / 最终输出上界（码元；#344 裁点 STACK_MAX=8192） */
 export const STACK_MAX = 8192;
 
-/** 截断后追加的固定标记（脱敏·转义之后追加；标记本身不含密钥） */
+/**
+ * 截断标记：在 escape 之后、第二遍 redact 之前并入，使「标记恰等于口令」也被脱敏管辖。
+ * 最终输出再截到 STACK_MAX（标记长度计入上界；可能被切片/回退吃掉，不补齐）。
+ */
 const TRUNCATED_MARK = '…[truncated]';
 
-/** 可证最终输出上界：STACK_MAX + 标记长度（外层截断后才追加标记） */
-export const DESCRIBE_FAILURE_STACK_MAX = STACK_MAX + TRUNCATED_MARK.length;
+/** 可证最终输出上界：|w| ≤ STACK_MAX（标记已计入切片前文本） */
+export const DESCRIBE_FAILURE_STACK_MAX = STACK_MAX;
 
 /** 替换标记（不回喂自动机） */
 const REDACTED = '[redacted]';
@@ -359,7 +368,7 @@ function hasSecretProperPrefixTail(text: string, secrets: string[]): boolean {
 }
 
 /**
- * 截断后尾部前缀感知：若尾部是任一密钥真前缀，自尾单调回退直至不再是。
+ * 尾部前缀感知：若尾部是任一密钥真前缀，自尾单调回退直至不再是。
  * 终止性：每次至少去掉 1 码元、单调收缩 ⇒ 必终止。
  * 可能吃掉截断标记尾部（允许；吃光亦不强求补齐）。
  */
@@ -372,30 +381,66 @@ function retreatSecretPrefixTail(text: string, secrets: string[]): string {
 }
 
 /**
- * 对象面唯一入口（#344 / R2）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
+ * 对象面统一流水线（#344 R3）：stack 分支与无-stack 回退分支共用。
  *
- * 流水线：
- *   1) 取 stack 串
- *   2) **内层守卫**：截到 STACK_MAX（约束脱敏/转义 CPU）
- *   3) redactField（整段单域）
- *   4) escapeBlock
- *   5) **再 redactField**——转义会把控制符写成 `\uXXXX` 字面；若口令字面量恰为该形态，
- *      转义会「生成」完整密钥（脱敏已跑完）。第二遍吞掉变换后产物。
- *   6) **外层截断**：STACK_MAX = 最终输出上限（两遍脱敏 + 转义膨胀均计入）
- *   7) **尾部前缀回退**（截断点）
- *   8) 若发生过截断 ⇒ 追加 `…[truncated]`
- *   9) 标记后再回退一次（可吃标记尾；吃光不补齐）
+ *   ① bound(raw, STACK_MAX)           — 约束 CPU
+ *   ② r = redactField(①)              — 清完整密钥（原文）
+ *   ③ t = escapeBlock(r)              — 转义（可能生成密钥字面）
+ *   ④ x = t + (截断? MARK : '')        — ★ 标记在此并入，纳入后续脱敏
+ *   ⑤ u = redactField(x)              — 清「转义生成」与「标记=密钥」
+ *   ⑥ v = slice(u, STACK_MAX)         — 最终上界（含标记）
+ *   ⑦ w = retreatSecretPrefixTail(v)  — 尾部非任何密钥真前缀
  *
- * 为何外层截断安全：作用在已（两遍）脱敏·已转义文本上；完整密钥已被吞；
- * 截断本身不生成密钥序列；尾部回退再清真前缀。
+ * 不变量（可证）：
+ *   |w| ≤ STACK_MAX（⑥ 定、⑦ 只减）；
+ *   w 不含任何完整密钥（② 清原文、⑤ 清转义/标记所生成者、⑥⑦ 只删不增）；
+ *   w 尾部不是任何密钥真前缀（⑦）。
  *
- * stack 缺席/非串/空/会抛 ⇒ 退化为 describeFailure 单行文本。
+ * 家族知识：每一步都要问「会不会造出或漏掉密钥」——已收集：ORDER / SUFFIX-REMATCH /
+ * FIELD-BOUNDARY / 转义生成密钥 / 标记等于密钥 / 回退分支绕过第二遍。
+ */
+function scrubObjectFaceText(
+  raw: string,
+  secrets: string[],
+  inputTruncated: boolean,
+): string {
+  // ① 已由调用方 bound；此处再保险一次
+  const bounded = raw.length > STACK_MAX ? raw.slice(0, STACK_MAX) : raw;
+  const truncatedAtInput = inputTruncated || raw.length > STACK_MAX;
+
+  // ② 第一遍脱敏：清完整密钥
+  const redacted = redactField(bounded, secrets);
+
+  // ③ 转义（可能把控制符写成 `\uXXXX` 字面 = 密钥形态）
+  const escaped = escapeBlock(redacted);
+
+  // ④ 标记并入（输入截断，或转义后已超上界——否则 ⑥ 静默切片无标记）
+  const needsMark = truncatedAtInput || escaped.length > STACK_MAX;
+  const withMark = needsMark ? escaped + TRUNCATED_MARK : escaped;
+
+  // ⑤ 第二遍脱敏：吞转义生成的密钥，以及「标记恰等于口令」
+  let out = redactField(withMark, secrets);
+
+  // ⑥ 最终上界（剔半个 `\uXXXX`）
+  if (out.length > STACK_MAX) {
+    out = out.slice(0, STACK_MAX).replace(/\\u[0-9a-fA-F]{0,3}$/, '');
+  }
+
+  // ⑦ 尾部真前缀回退
+  return retreatSecretPrefixTail(out, secrets);
+}
+
+/**
+ * 对象面唯一入口（#344 / R3）：保住 stack（多行）同时有界 + 脱敏 + 永不抛。
+ *
+ * stack 缺席/非串/空/会抛 ⇒ 取 describeFailure 单行文本为 raw，**仍走同一条** scrub 流水线
+ * （不得直接返回 describeFailure——否则绕过第二遍脱敏，转义生成密钥洞复现）。
  */
 export function describeFailureStack(err: unknown, secrets?: string[]): string {
   try {
     const secretList = secrets === undefined ? configuredSecrets() : secrets;
 
-    // 1) 取串（永不抛）：err.stack 为非空字符串 ⇒ 用它；否则退化
+    // 取串（永不抛）：err.stack 为非空字符串 ⇒ 用它；否则退化为 describeFailure 文本
     let stackText: string | undefined;
     try {
       if (err instanceof Error) {
@@ -410,43 +455,10 @@ export function describeFailureStack(err: unknown, secrets?: string[]): string {
       stackText = undefined;
     }
 
-    if (stackText === undefined) {
-      return describeFailure(err, secrets);
-    }
-
-    // 2) 内层守卫：先截输入，约束 redact/escape 工作量
-    const inputTruncated = stackText.length > STACK_MAX;
-    const bounded = inputTruncated ? stackText.slice(0, STACK_MAX) : stackText;
-
-    // 3) 域内脱敏（整段 stack 含换行＝单域）
-    const redacted = redactField(bounded, secretList);
-
-    // 4) 转义（保留 \n/\r/\t 字面）
-    const escaped = escapeBlock(redacted);
-
-    // 5) 转义后再脱敏一遍（吞掉转义「生成」的密钥字面形态，如口令="\\u0001"）
-    let out = redactField(escaped, secretList);
-
-    // 6) 外层截断：STACK_MAX = 最终输出上限
-    let outputTruncated = false;
-    if (out.length > STACK_MAX) {
-      // 去掉落在截断点的半个 `\uXXXX`（\u 后不足 4 位 hex）
-      out = out.slice(0, STACK_MAX).replace(/\\u[0-9a-fA-F]{0,3}$/, '');
-      outputTruncated = true;
-    }
-
-    // 7) 尾部前缀回退（截断点处；再追加标记）
-    //    注：如 Codex 例 secr 在源文本中本就可见（前缀被 X 证伪后按设计字面吐出）；
-    //    本步是让「输出尾部不得构成密钥真前缀」在截断后也字面成立。
-    out = retreatSecretPrefixTail(out, secretList);
-
-    // 8) 截断标记（标记本身不含密钥）
-    if (inputTruncated || outputTruncated) out += TRUNCATED_MARK;
-
-    // 9) 标记追加后再回退一次（可吃掉标记尾；吃光不补齐）
-    out = retreatSecretPrefixTail(out, secretList);
-
-    return out;
+    const raw = stackText !== undefined ? stackText : describeFailure(err, secrets);
+    const inputTruncated = raw.length > STACK_MAX;
+    const bounded = inputTruncated ? raw.slice(0, STACK_MAX) : raw;
+    return scrubObjectFaceText(bounded, secretList, inputTruncated);
   } catch {
     return '[unreadable]';
   }

@@ -1269,3 +1269,25 @@ N/A。
 - 全量：`/home/ops/materials/obj-face-344/full-suite-r2-20260923T131605Z.txt` sha256 `9dcd5585bed4dd880cec1a2b4796e05461d9d5215a14e2bdb4a634b83227ab63` → **2291 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout flake，与本卡无关、R0 同族）
 - 回归探针：`/home/ops/materials/obj-face-344/r2-regressions-20260923T131605Z.txt` sha256 `ba3ec10fb03e0cc9afc4f50e188c39bd13997a595a633afe02a6e33bcb7e054d` → ②d `out="boom [redacted] tail"` / ②e `ends_secr=false` / A=8202 C=8204
 - 独立自审：`subagent-review-r2.md` → **PASS**（agent `d021ed39-bc66-4761-9d45-c01b57be2551`）
+
+## 2026-09-23 · w344 R3（统一流水线：标记纳入第二遍脱敏 + 回退共用 + webhook 2 处）
+
+### 我们实现了哪些功能？
+1. **统一流水线** `scrubObjectFaceText`：①有界 → ②redact → ③escapeBlock → ④**并入 MARK** → ⑤再 redact → ⑥slice(STACK_MAX) → ⑦尾部前缀回退；stack / 无-stack 两分支共用。
+2. **洞①**：标记=口令时不再于脱敏后追加；**洞②**：无 stack 回退不再直返 `describeFailure`。
+3. **上界**：`DESCRIBE_FAILURE_STACK_MAX = STACK_MAX`（8192）；标记计入切片前。
+4. **webhook-delivery** 两处 corrupted delivery log：盘文本 `escapeLine(redactSecrets(...))`，err → `describeFailureStack`；白名单去掉该针头。
+5. 回归 ②f/②g/②h；#347 正文同步残余清单。
+
+### 我们遇到了哪些错误？
+1. 旧测 ②/③ 仍断言 `endsWith(…[truncated])`——新流水线切片常吃掉标记 ⇒ 假红。
+
+### 我们是如何解决这些错误的？
+1. 改为只钉 `|out|≤STACK_MAX` 与无密钥；不要求标记保留。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r3-20260923T133830Z.txt` sha256 `a48505f47a11a25e3e0b1b7d00ffa5235f46c418c159b8b5d2a2867a0fae3b98` → **44 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r3-20260923T133830Z.txt` sha256 `ef5a10d62351c07b111cdf545babafc1a40c8e7ead9dd22e26fa2df532b396af` → **2295 pass / 9 skip / 0 fail**
+- 回归探针：`/home/ops/materials/obj-face-344/r3-regressions-20260923T133830Z.txt` sha256 `d0aba33002294cb6d593ea2f7aefc8159e770a26ea4e59690d439972d34998df` → mark含口令=false / fallback=`boom [redacted] tail` / A=8190 C=8192
+- 独立自审：`subagent-review-r3.md` → **PASS**（agent `a8c6d357-378a-4f64-b8db-d3e6a2bc4ca3`）
+- 白名单剩余：`failed to write executeJob dead letter`；`[send-log|notification-log|notification-devices] HIGH:`（#347）

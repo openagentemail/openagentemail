@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { config } from './config.ts';
 import { recordAuditEvent } from './audit.ts';
-import { describeFailureStack } from './redact.ts';
+import { describeFailureStack, escapeLine, redactSecrets } from './redact.ts';
 import {
   defaultDnsLookup,
   pinnedFetch,
@@ -669,10 +669,11 @@ function parseDeliveryLogText(content: string): WebhookDeliveryLogRow[] {
       rows.push(JSON.parse(line));
     } catch (err) {
       corruptCount++;
+      // 盘文本走字符串面（有界已 slice）；err 走对象面统一入口
       console.error(
         `[webhooks] corrupted delivery log line ${i + 1} skipped:`,
-        line.slice(0, 100),
-        err,
+        escapeLine(redactSecrets(line.slice(0, 100))),
+        describeFailureStack(err),
       );
     }
   }
@@ -730,8 +731,8 @@ function ingestIncrementalBytes(index: DeliveryLogIndex, chunk: Buffer): number 
     } catch (err) {
       console.error(
         '[webhooks] corrupted delivery log line skipped during incremental read:',
-        trimmed.slice(0, 100),
-        err,
+        escapeLine(redactSecrets(trimmed.slice(0, 100))),
+        describeFailureStack(err),
       );
     }
   }

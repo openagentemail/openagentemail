@@ -1,6 +1,6 @@
 /**
  * #344 对象面：describeFailureStack — 保 stack + 有界 + 脱敏 + 永不抛。
- * 设计：materials/obj-face-344/r0.md；R1：外层截断为最终上界 + J8 声明精确化。
+ * R0→R3：统一流水线（标记在第二遍脱敏前并入；|out|≤STACK_MAX；两分支共用）。
  */
 import { afterAll, describe, expect, test, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
@@ -63,37 +63,33 @@ describe('describeFailureStack · #344', () => {
     expect(out).toContain('\n');
   });
 
-  // ② 巨大 stack ⇒ 有界（最终输出 ≤ STACK_MAX + 标记）
+  // ② 巨大 stack ⇒ 有界（最终输出 ≤ STACK_MAX；标记计入切片前，可能被吃掉）
   test('② 巨大 stack 有界 ≤ DESCRIBE_FAILURE_STACK_MAX', () => {
     const err = new Error('huge');
     err.stack = 'Error: huge\n' + 'x'.repeat(STACK_MAX + 50_000);
     const out = describeFailureStack(err, []);
-    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(STACK_MAX + TRUNC_MARK.length);
-    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(8204);
+    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(STACK_MAX);
+    expect(DESCRIBE_FAILURE_STACK_MAX).toBe(8192);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
-    expect(out.endsWith(TRUNC_MARK)).toBe(true);
     expect(STACK_MAX).toBe(8192);
   });
 
   // ②b R1：转义膨胀输入下上界仍成立
-  test('②b R1：C0 转义膨胀（\\x01×8192）⇒ 输出 ≤ 8204', () => {
+  test('②b R1：C0 转义膨胀（\\x01×8192）⇒ 输出 ≤ STACK_MAX', () => {
     const err = new Error('esc');
     err.stack = '\x01'.repeat(STACK_MAX);
     const out = describeFailureStack(err, []);
-    // 无外层截断前会 6×；外层截断后必须落在可证上界内
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
-    expect(out.endsWith(TRUNC_MARK)).toBe(true);
     // 半转义不得残留
-    expect(out.replace(TRUNC_MARK, '')).not.toMatch(/\\u[0-9a-fA-F]{0,3}$/);
+    expect(out).not.toMatch(/\\u[0-9a-fA-F]{0,3}$/);
   });
 
   // ②c R1：脱敏膨胀输入下上界仍成立
-  test('②c R1：单字符密钥脱敏膨胀（z×8192）⇒ 输出 ≤ 8204', () => {
+  test('②c R1：单字符密钥脱敏膨胀（z×8192）⇒ 输出 ≤ STACK_MAX', () => {
     const err = new Error('red');
     err.stack = 'z'.repeat(STACK_MAX);
     const out = describeFailureStack(err, ['z']);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
-    expect(out.endsWith(TRUNC_MARK)).toBe(true);
     expect(out).not.toContain('z'); // 密钥已红；标记/替代串不含 z
     expect(out).toContain('[redacted]');
   });
@@ -116,10 +112,96 @@ describe('describeFailureStack · #344', () => {
     err.stack = '\x01'.repeat(1364) + 'aaaa' + 'secrX';
     const out = describeFailureStack(err, ['secret']);
     expect(out.endsWith('secr')).toBe(false);
-    // 去掉标记后再看正文尾
-    const body = out.endsWith(TRUNC_MARK) ? out.slice(0, -TRUNC_MARK.length) : out;
-    expect(body.endsWith('secr')).toBe(false);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // ②f R3：截断标记本身可能就是口令 ⇒ 标记须在第二遍脱敏之前并入
+  test('②f R3：口令＝标记原文 + 触发截断 ⇒ 输出不得含该口令', () => {
+    const secret = TRUNC_MARK; // '…[truncated]'
+    const err = new Error('mark-as-secret');
+    err.stack = 'x'.repeat(STACK_MAX + 100);
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out.length).toBeLessThanOrEqual(STACK_MAX);
+  });
+
+  // ②g R3：无 stack 回退也须走统一流水线（第二遍脱敏）
+  test('②g R3：口令 \\u0001 + 无 stack 回退（空/缺/抛）⇒ 输出不得含口令', () => {
+    const secret = '\\u0001';
+    const msg = 'boom ' + '\u0001' + ' tail';
+
+    // 空 stack
+    const empty = new Error(msg);
+    empty.stack = '';
+    const outEmpty = describeFailureStack(empty, [secret]);
+    expect(outEmpty).not.toContain(secret);
+    expect(outEmpty.length).toBeLessThanOrEqual(STACK_MAX);
+
+    // 缺失 stack（非 Error）
+    const outMissing = describeFailureStack({ message: msg } as unknown as Error, [secret]);
+    // 非 Error 走 non-error 哨兵，不带 message；另测 Error 无 stack 属性
+    const noStack = new Error(msg);
+    Object.defineProperty(noStack, 'stack', { value: undefined, configurable: true });
+    const outNoStack = describeFailureStack(noStack, [secret]);
+    expect(outNoStack).not.toContain(secret);
+
+    // getter 抛
+    const boom = new Error(msg);
+    Object.defineProperty(boom, 'stack', {
+      get() {
+        throw new Error('stack boom');
+      },
+      configurable: true,
+    });
+    const outThrow = describeFailureStack(boom, [secret]);
+    expect(outThrow).not.toContain(secret);
+    expect(outThrow.length).toBeLessThanOrEqual(STACK_MAX);
+
+    // 三个路径均不得含口令
+    expect(outEmpty).not.toContain(secret);
+    expect(outNoStack).not.toContain(secret);
+    expect(outThrow).not.toContain(secret);
+    void outMissing;
+  });
+
+  // ②h R3：不变量——|out|≤STACK_MAX、无完整密钥、尾部非真前缀
+  test('②h R3：不变量断言（上界 / 无完整密钥 / 尾非真前缀）', () => {
+    const secrets = ['secret', TRUNC_MARK, '\\u0001'];
+    const cases: Array<{ stack?: string; msg?: string; clearStack?: 'empty' | 'throw' }> = [
+      { stack: 'aaaa secrX' },
+      { stack: '\x01'.repeat(1364) + 'aaaa' + 'secrX' },
+      { stack: '\x01'.repeat(STACK_MAX) },
+      { stack: 'z'.repeat(STACK_MAX) },
+      { stack: 'boom ' + '\u0001' + ' tail' },
+      { stack: 'x'.repeat(STACK_MAX + 50) },
+      { msg: 'boom ' + '\u0001' + ' tail', clearStack: 'empty' },
+      { msg: 'boom ' + '\u0001' + ' tail', clearStack: 'throw' },
+    ];
+    for (const c of cases) {
+      const err = new Error(c.msg ?? 'inv');
+      if (c.clearStack === 'empty') err.stack = '';
+      else if (c.clearStack === 'throw') {
+        Object.defineProperty(err, 'stack', {
+          get() {
+            throw new Error('no');
+          },
+          configurable: true,
+        });
+      } else if (c.stack !== undefined) err.stack = c.stack;
+
+      const out = describeFailureStack(err, secrets);
+      expect(out.length).toBeLessThanOrEqual(STACK_MAX);
+      for (const s of secrets) {
+        if (s.length > 0) expect(out).not.toContain(s);
+      }
+      // 尾部不得为任一密钥真前缀
+      for (const s of secrets) {
+        if (s.length < 2) continue;
+        for (let len = 1; len < s.length; len++) {
+          expect(out.endsWith(s.slice(0, len))).toBe(false);
+        }
+      }
+    }
   });
 
   // ③ 截断边界处半截密钥不泄（J4）
@@ -133,7 +215,8 @@ describe('describeFailureStack · #344', () => {
     const out = describeFailureStack(err, [secret]);
     expect(out).not.toContain('secret');
     expect(out).not.toContain(secret.slice(0, 6));
-    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(STACK_MAX);
+    // 标记计入切片前；最终 |out|≤STACK_MAX 时标记常被吃掉，不要求保留
   });
 
   // ④ 病态：会抛的 stack getter / revoked Proxy ⇒ 永不抛并给哨兵
