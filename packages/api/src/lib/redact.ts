@@ -1,10 +1,10 @@
 /**
  * 日志/告警载荷面：唯一组合原语 scrubPayload；三入口均走它。
  *
- * 发射路径（#348 / design.md R1–R8）：
+ * 发射路径（#348 / design.md R1–R9）：
  *   ① slice → ② redactField(原文族) → ③ escape(line|block)
- *   → ④ redactField(原文∪转义族) → ⑤ slice
- *   → ⑥ trimTrailing…AfterEscape → ⑦ containsAnySecret(原文∪转义族)? '' : w
+ *   → ④ redactField(原文∪转义族)；需标则先削正文尾再挂 MARK 后脱敏并恢复固定 MARK
+ *   → ⑤ slice（保 MARK）→ ⑦ containsAnySecret?
  *
  * 转义模式（显式，禁隐式耦合）：
  *   - `line`：LF/CR/TAB → `\\n`/`\\r`/`\\t`（串面单行不变量；盘文本默认）
@@ -16,7 +16,8 @@
  *     （＝STACK_MAX 8192）。needsMark＝输入侧截断 || 输出侧截断。
  *   - 盘文本面：默认 limit=6002、mode=`line`（磁盘行前 100 字，走单行转义防日志注入）。
  *
- * 不变量：串面 join ≤6002 / 对象面 ≤8204；不含完整密钥；尾部非真前缀；永不抛。
+ * 不变量：串面 join ≤6002 / 对象面 ≤8204；不含完整密钥；
+ * 除本件固定截断标记外尾部非密钥真前缀（R9）；永不抛。
  * 对外错误码/状态码/body 不经本模块；errorCode 在 errors.ts，一字不动。
  */
 
@@ -217,24 +218,25 @@ function unicodeEscape(code: number): string {
 }
 
 /**
+ * 单码元转义（与 escapeLine / escapeBlock 同判据）。
+ * 供密钥前缀增量构造复用，避免对每个前缀整串再跑一遍 escape。
+ */
+function escapeCodeUnit(code: number, mode: ScrubEscapeMode): string {
+  if (code === 0x0a) return mode === 'line' ? '\\n' : '\n';
+  if (code === 0x0d) return mode === 'line' ? '\\r' : '\r';
+  if (code === 0x09) return mode === 'line' ? '\\t' : '\t';
+  if (needsUnicodeEscape(code)) return unicodeEscape(code);
+  return String.fromCharCode(code);
+}
+
+/**
  * 单行转义：LF/CR/TAB → `\\n`/`\\r`/`\\t`；其余 needsUnicodeEscape → `\uXXXX`。
  * 不剥离、不截断。保留导出供测试/历史对照；发射路径请走 scrubPayload。
  */
 export function escapeLine(text: string): string {
   let out = '';
   for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x0a) {
-      out += '\\n';
-    } else if (code === 0x0d) {
-      out += '\\r';
-    } else if (code === 0x09) {
-      out += '\\t';
-    } else if (needsUnicodeEscape(code)) {
-      out += unicodeEscape(code);
-    } else {
-      out += text[i]!;
-    }
+    out += escapeCodeUnit(text.charCodeAt(i), 'line');
   }
   return out;
 }
@@ -246,14 +248,7 @@ export function escapeLine(text: string): string {
 export function escapeBlock(text: string): string {
   let out = '';
   for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x0a || code === 0x0d || code === 0x09) {
-      out += text[i]!; // 保留换行/回车/制表字面
-    } else if (needsUnicodeEscape(code)) {
-      out += unicodeEscape(code);
-    } else {
-      out += text[i]!;
-    }
+    out += escapeCodeUnit(text.charCodeAt(i), 'block');
   }
   return out;
 }
@@ -261,7 +256,7 @@ export function escapeBlock(text: string): string {
 /** 转义模式：line＝单行（串面/盘文本）；block＝保换行（对象面） */
 export type ScrubEscapeMode = 'line' | 'block';
 
-// —— scrubPayload 附属小件（R2 / R4）—————————————————
+// —— scrubPayload 附属小件（R2 / R4 / R8 / R9）—————————————————
 
 /**
  * 输出是否含任一完整密钥（子串）。空串密钥忽略。
@@ -300,13 +295,40 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
   return out;
 }
 
+/** 密钥在转义后域的预计算结果（R9：每钥只转义一次） */
+type SecretEscapePrep = {
+  raw: string;
+  /** escape(raw)，一次性构造 */
+  esc: string;
+};
+
 /**
- * 转义后判定用的密钥族：原文 ∪ mode 同函数转义后的整钥。
+ * 预计算每个密钥的转义整串。
+ * 复杂度：Σ O(|s|)——逐码元 escapeCodeUnit + join；**禁止**对每个前缀再跑 escape（原为 O(|s|²)）。
+ */
+function prepareSecretEscapePreps(
+  secrets: string[],
+  mode: ScrubEscapeMode,
+): SecretEscapePrep[] {
+  const preps: SecretEscapePrep[] = [];
+  for (const s of secrets) {
+    if (!s || s.length < 2) continue;
+    const pieces = new Array<string>(s.length);
+    for (let i = 0; i < s.length; i++) {
+      pieces[i] = escapeCodeUnit(s.charCodeAt(i), mode);
+    }
+    preps.push({ raw: s, esc: pieces.join('') });
+  }
+  return preps;
+}
+
+/**
+ * 转义后判定用的密钥族：原文 ∪ 预计算转义整钥。
  * 仅用于 ④ 第二遍脱敏与 ⑦ 完整密钥检查；② 第一遍仍只用原文族。
  */
 function secretsForPostEscape(
   secrets: string[],
-  escapeFn: (s: string) => string,
+  preps: SecretEscapePrep[],
 ): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -314,57 +336,72 @@ function secretsForPostEscape(
     if (!s || seen.has(s)) continue;
     seen.add(s);
     out.push(s);
-    const esc = escapeFn(s);
-    if (esc && !seen.has(esc)) {
-      seen.add(esc);
-      out.push(esc);
+  }
+  for (const p of preps) {
+    if (p.esc && !seen.has(p.esc)) {
+      seen.add(p.esc);
+      out.push(p.esc);
     }
   }
   return out;
 }
 
-function peeledExposesRawSecretPrefix(peeled: string, secrets: string[]): boolean {
-  for (const s of secrets) {
-    if (!s || s.length < 2) continue;
-    for (let len = 1; len < s.length; len++) {
-      if (peeled.endsWith(s.slice(0, len))) return true;
+/**
+ * 剥掉尾部转义记号后，正文是否以某密钥原文真前缀结尾。
+ * 匹配长度上限为 peeled.length（与口令全长无关）⇒ 单次 O(Σ min(|s|,|peeled|))。
+ */
+function peeledExposesRawSecretPrefix(
+  peeled: string,
+  preps: SecretEscapePrep[],
+): boolean {
+  if (!peeled) return false;
+  for (const { raw } of preps) {
+    const maxLen = Math.min(raw.length - 1, peeled.length);
+    for (let len = 1; len <= maxLen; len++) {
+      if (peeled.endsWith(raw.slice(0, len))) return true;
     }
   }
   return false;
 }
 
 /**
- * R8：转义后尾部回退——优先整段剥最长 escape(真前缀)/原文真前缀/escape(整钥)真前缀；
- * 否则若尾部 `\\n` 等或裸 LF 剥掉后露出原文真前缀，先剥记号再继续。
+ * 正文尾部最长「密钥真前缀」匹配长度（原文或转义整钥的真前缀）。
+ * 只检查长度 ≤ |out| 的候选 ⇒ 与口令全长解耦，避免 O(|s|²)。
+ */
+function longestPostEscapePrefixLen(
+  out: string,
+  preps: SecretEscapePrep[],
+): number {
+  let longest = 0;
+  for (const { raw, esc } of preps) {
+    const maxRaw = Math.min(raw.length - 1, out.length);
+    for (let len = 1; len <= maxRaw; len++) {
+      if (out.endsWith(raw.slice(0, len)) && len > longest) longest = len;
+    }
+    const maxEsc = Math.min(esc.length - 1, out.length);
+    for (let len = 1; len <= maxEsc; len++) {
+      if (out.endsWith(esc.slice(0, len)) && len > longest) longest = len;
+    }
+  }
+  return longest;
+}
+
+/**
+ * R8/R9：在**正文**上做转义后尾部回退（不含本件固定截断标记）。
+ *
+ * 不变量（R9 精化）：输出不含任何完整密钥；且**除本件固定截断标记外**，
+ * 输出尾部不构成任何密钥真前缀。标记是发射路径写入的已知固定串，不承载载荷，
+ * 不得当作载荷尾部来削（否则会破坏「已截断」指示，见口令 `ted]xyz` 反例）。
  */
 function trimTrailingSecretPrefixAfterEscape(
   text: string,
-  secrets: string[],
-  escapeFn: (s: string) => string,
+  preps: SecretEscapePrep[],
 ): string {
   let out = text;
   const maxSteps = text.length + 8;
   let steps = 0;
   while (out.length > 0 && steps++ < maxSteps) {
-    let longest = 0;
-    for (const s of secrets) {
-      if (!s || s.length < 2) continue;
-      for (let len = 1; len < s.length; len++) {
-        const rawPref = s.slice(0, len);
-        if (out.endsWith(rawPref) && rawPref.length > longest) longest = rawPref.length;
-        const escPref = escapeFn(rawPref);
-        if (escPref && out.endsWith(escPref) && escPref.length > longest) {
-          longest = escPref.length;
-        }
-      }
-      const esc = escapeFn(s);
-      if (esc.length >= 2) {
-        for (let len = 1; len < esc.length; len++) {
-          const p = esc.slice(0, len);
-          if (out.endsWith(p) && p.length > longest) longest = p.length;
-        }
-      }
-    }
+    const longest = longestPostEscapePrefixLen(out, preps);
     if (longest > 0) {
       out = out.slice(0, -longest);
       continue;
@@ -373,7 +410,7 @@ function trimTrailingSecretPrefixAfterEscape(
     const escTok = /(\\n|\\r|\\t|\\u[0-9a-fA-F]{4})$/.exec(out);
     if (escTok) {
       const peeled = out.slice(0, -escTok[1]!.length);
-      if (peeledExposesRawSecretPrefix(peeled, secrets)) {
+      if (peeledExposesRawSecretPrefix(peeled, preps)) {
         out = peeled;
         continue;
       }
@@ -381,7 +418,7 @@ function trimTrailingSecretPrefixAfterEscape(
     const last = out.length > 0 ? out.charCodeAt(out.length - 1) : -1;
     if (last === 0x0a || last === 0x0d || last === 0x09) {
       const peeled = out.slice(0, -1);
-      if (peeledExposesRawSecretPrefix(peeled, secrets)) {
+      if (peeledExposesRawSecretPrefix(peeled, preps)) {
         out = peeled;
         continue;
       }
@@ -392,15 +429,48 @@ function trimTrailingSecretPrefixAfterEscape(
 }
 
 /**
+ * R9：从可能被 J4 啃过的串上恢复本件固定截断标记。
+ * - 若已以完整 MARK 结尾：只对正文做尾前缀回退，再挂回 MARK
+ * - 否则：去掉尾部「MARK 的真前缀」残段（J4 丢掉的后缀），正文回退后挂回完整 MARK
+ */
+function restoreFixedTruncationMark(
+  text: string,
+  markLen: number,
+  outputCap: number,
+  preps: SecretEscapePrep[],
+): string {
+  let body = text;
+  if (body.endsWith(TRUNCATED_MARK)) {
+    body = body.slice(0, body.length - markLen);
+  } else {
+    // 去掉 MARK 真前缀残段（最长优先）
+    for (let len = markLen - 1; len >= 1; len--) {
+      if (body.endsWith(TRUNCATED_MARK.slice(0, len))) {
+        body = body.slice(0, -len);
+        break;
+      }
+    }
+  }
+  body = trimTrailingSecretPrefixAfterEscape(body, preps);
+  const bodyBudget = Math.max(0, outputCap - markLen);
+  if (body.length > bodyBudget) {
+    body = body.slice(0, bodyBudget).replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
+    body = trimTrailingSecretPrefixAfterEscape(body, preps);
+  }
+  return body + TRUNCATED_MARK;
+}
+
+/**
  * 唯一组合原语（#348）：三入口共用发射路径。
  *
  *   ① b = slice(text, inputLimit)
  *   ② r = redactField(b, secrets)          // 原文密钥族
  *   ③ t = escapeLine|escapeBlock(r)
  *   ④ postSecrets = secrets ∪ escape(secrets)；uProbe = redactField(t, postSecrets)
- *      needsMark 按最终长度重算；若需标：body+MARK → 再 redactField(postSecrets)（R1）
+ *      needsMark 按最终长度重算；
+ *      若需标：**先**在正文上尾部回退，**再**追加 MARK，然后 redactField（R1+R9）
  *   ⑤ v = slice(u, outputCap)              // 不得吃掉完整 MARK
- *   ⑥ w = trimTrailing…AfterEscape(v)      // 含 escape(真前缀)（R8）
+ *   ⑥ 无标：对全文尾部回退；有标：只回退正文再挂回 MARK（标记无条件保留）
  *   ⑦ if containsAnySecret(w, postSecrets): return ''
  *   return w
  *
@@ -417,9 +487,10 @@ export function scrubPayload(
     const secretList = secrets.filter(Boolean);
     const markLen = TRUNCATED_MARK.length;
     const isLine = mode === 'line';
+    // R9：每钥 O(|s|) 预计算转义整串，供 ④⑦ 与尾部回退复用
+    const secretPreps = prepareSecretEscapePreps(secretList, mode);
+    const postSecrets = secretsForPostEscape(secretList, secretPreps);
     const escapeFn = isLine ? escapeLine : escapeBlock;
-    // 转义后族：④脱敏与⑦完整钥检查；尾部另见 escape(真前缀)（R8）
-    const postSecrets = secretsForPostEscape(secretList, escapeFn);
 
     // ① 输入有界：line＝limit；block＝limit−|MARK|（为标记预留）
     const inputLimit = isLine ? limit : Math.max(0, limit - markLen);
@@ -446,31 +517,38 @@ export function scrubPayload(
       let body = t.length > bodyBudget ? t.slice(0, bodyBudget) : t;
       // Codex P2：剔半个 `\uXXXX` / 孤立 `\`
       body = body.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
-      // 最后一次脱敏：主体 + MARK 一并管辖（R1）
+      // R9：先在正文上满足尾前缀不变量，再追加固定标记（标记不参与削尾）
+      body = trimTrailingSecretPrefixAfterEscape(body, secretPreps);
+      // 最后一次脱敏：主体 + MARK 一并管辖（R1）；标记=整钥时由 R4 空串兜底
       u = redactField(body + TRUNCATED_MARK, postSecrets);
+      // R9：J4 可能把标记后缀（恰为某密钥真前缀，如 ted]）当域尾丢掉。
+      // 固定标记无条件恢复；整钥=标记的情形仍由 ⑦ containsAnySecret → ''。
+      u = restoreFixedTruncationMark(u, markLen, outputCap, secretPreps);
     } else {
-      u = uProbe;
+      u = trimTrailingSecretPrefixAfterEscape(uProbe, secretPreps);
     }
 
-    // ⑤ 最终上界；不得吃掉完整截断标记（标记=密钥被脱敏吞掉则另当别论）
+    // ⑤ 最终上界；有标时保完整 MARK
     let v = u;
     if (v.length > outputCap) {
       if (v.endsWith(TRUNCATED_MARK) && outputCap >= markLen) {
-        const withoutMark = v.slice(0, v.length - markLen);
+        let body = v.slice(0, v.length - markLen);
         const bodyBudget = outputCap - markLen;
-        let body =
-          withoutMark.length > bodyBudget
-            ? withoutMark.slice(0, bodyBudget)
-            : withoutMark;
+        if (body.length > bodyBudget) body = body.slice(0, bodyBudget);
         body = body.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
+        body = trimTrailingSecretPrefixAfterEscape(body, secretPreps);
         v = body + TRUNCATED_MARK;
       } else {
         v = v.slice(0, outputCap).replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
+        if (!needsMark) {
+          v = trimTrailingSecretPrefixAfterEscape(v, secretPreps);
+        } else {
+          v = restoreFixedTruncationMark(v, markLen, outputCap, secretPreps);
+        }
       }
     }
 
-    // ⑥ 尾部回退：覆盖 escape(原文真前缀) 与 escape(整钥) 真前缀（R8）
-    const w = trimTrailingSecretPrefixAfterEscape(v, secretList, escapeFn);
+    const w = v;
 
     // ⑦ R4 后置检查：原文或转义整钥仍在 ⇒ 空串兜底
     if (containsAnySecret(w, postSecrets)) return '';

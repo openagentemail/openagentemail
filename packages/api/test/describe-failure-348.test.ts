@@ -467,4 +467,24 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     ]);
     expect(out.endsWith('ab\\n')).toBe(true);
   });
+
+  // FC R9：长口令线性预计算 + 截断标记不被尾削吃掉
+  test('FC R9：口令 16k + 短消息 ⇒ 单次发射 < 50ms', () => {
+    const secret = 'p'.repeat(16_000);
+    const err = new Error('short message');
+    const t0 = performance.now();
+    const out = describeFailure(err, [secret]);
+    const ms = performance.now() - t0;
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+    expect(ms).toBeLessThan(50);
+  });
+
+  test('FC R9：口令 ted]xyz + stack×9000 ⇒ 尾部完整截断标记', () => {
+    const err = new Error('mark-keep');
+    err.stack = 'x'.repeat(9000);
+    const out = describeFailureStack(err, ['ted]xyz']);
+    expect(out.endsWith(TRUNC_MARK)).toBe(true);
+    expect(out).toContain(TRUNC_MARK);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
 });

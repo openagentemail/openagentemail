@@ -1379,3 +1379,21 @@ N/A。
 
 ### 证据
 - focused/full-fc-r8 留件与 `evidence/fc-r8-measured.json`
+
+## 2026-09-23 · w348 FC R9（转义前缀线性化 + 截断标记保完整）
+
+### 我们实现了哪些功能？
+1. `prepareSecretEscapePreps`：每钥 O(|s|) 逐码元转义 + join；尾部匹配只扫长度 ≤|正文| 的候选（与口令全长解耦）。
+2. 需标路径：先正文尾回退 → 挂 MARK → redact；`restoreFixedTruncationMark` 恢复被 J4 啃掉的固定标记。
+3. 不变量精化：除本件固定截断标记外，尾部不构成密钥真前缀。
+
+### 我们遇到了哪些错误？
+1. P1-1：对每个前缀再跑 escape ⇒ O(|s|²)，16k 口令单次 ~3s。
+2. P1-2：尾削把 `…[truncated]` 末段 `ted]`（恰为口令前缀）吃掉。
+
+### 我们是如何解决这些错误的？
+1. 一次预计算 + 按正文长度截断候选扫描。
+2. 标记不参与削尾；脱敏后强制恢复完整 MARK（标记=整钥仍走 R4 空串）。
+
+### 证据
+- focused/full-fc-r9 留件与 `evidence/fc-r9-measured.json`
