@@ -1256,3 +1256,24 @@ N/A。
 ### 证据
 - focused：`r5.4-focused-20260923T070631Z.txt` sha256 `65a688bdf66dca02c04ad0ef9ca5f979c0715e8eb4121c40de033ccb23d66650` → 89 pass
 - 全量：`r5.4-full-suite-20260923T070631Z.txt` sha256 `8a5aa35583c2abb8144f26a7f5cfea975417eab56d382355ace273ae08db050c` → **2252 pass / 9 skip / 0 fail**
+
+## 2026-09-23 · w340 R6（#341 总指挥择 B：describeFailure 本体永不抛）
+
+### 我们实现了哪些功能？
+1. `lib/redact.ts` `describeFailure` 本体包 try/catch：病态 rejection（会抛 message/code getter、revoked Proxy、不可字符串化）⇒ 返回 `[unreadable]`；正常输入逐字节不变。
+2. 单测 `packages/api/test/describe-failure.test.ts`：四病态 + 三负控（全有 / 仅 message / 裸字符串）。
+3. 路由守门：`task-operation-failed-fallback.test.ts` renew/release 追加 revoked Proxy 注入 ⇒ 仍 `502 {error:'task_operation_failed'}`（既有会抛 getter 用例保留）。
+4. CHANGELOG Unreleased Fixed 补一句；**未改** `routes/**` / `errors.ts` / `errorCode`/`errorDetail`；`send.ts:232` 由本体 harden 自动受益。
+
+### 我们遇到了哪些错误？
+1. 无实现错误。Bun 静态 import 会 hoist 拉 `config` 要 env ⇒ 单测改动态 import（同 send.test.ts 口径）。
+2. 上一轮自发推 R5.1 越权已记档；本轮严格等令；R6 完工动作含推头绑六格。
+
+### 我们是如何解决这些错误的？
+1. `describe-failure.test.ts` 先设 env 再 `await import('bun:test')` / `await import('../src/lib/redact.ts')`。
+2. 范围死守本体 + 测试 + CHANGELOG；不碰调用点。
+
+### 证据
+- 功能 commit：`bd99ade`
+- focused：`/home/ops/materials/debt-batch-2/r6-focused-20260923T071040Z.txt` sha256 `acc6a27c231f9bd7715dc762f1b9470941a1b42c8bdf9ece27a3579ad4d20a4c` → **92 pass / 0 fail**
+- 全量：`r6-full-suite-20260923T071040Z.txt` sha256 `48725393a7f8b0ccd1e8ff2649719fe5ae8ed54bffdb8d21c81054c9ee828673` → **2261 pass / 9 skip / 0 fail**
