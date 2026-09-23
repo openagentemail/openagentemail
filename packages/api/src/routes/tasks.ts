@@ -3,7 +3,8 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import { getAuth } from '../lib/auth.ts';
 import { config } from '../lib/config.ts';
-import { errorCode } from '../lib/errors.ts';
+import { boundDetail, errorCode } from '../lib/errors.ts';
+import { describeFailure } from '../lib/redact.ts';
 import { findIdentity } from '../lib/identities.ts';
 import { taskLeasePendingJournalEnabled, taskLeasesEnabled } from '../lib/task-lease-gate.ts';
 import { acquireWaitSlot, releaseWaitSlot } from '../lib/ratelimit.ts';
@@ -428,7 +429,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_tenure_exhausted' || code === 'lease_task_cap_exhausted' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
-        console.warn('[task] renew failed:', errorCode(err));
+        // 日志载荷：先脱敏（仓内邮件栈约定）再有界单行；路由判定仍用上方 errorCode
+        console.warn('[task] renew failed:', boundDetail(describeFailure(err)));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })
@@ -472,7 +474,8 @@ export function createTaskRoutes(options: TaskRouteOptions = {}) {
         if (code === 'stale_lease' || code === 'task_not_claimable' || code === 'task_already_terminal' || code === 'lease_overlay_pending_index') {
           return c.json({ error: code }, 409);
         }
-        console.warn('[task] release failed:', errorCode(err));
+        // 日志载荷：先脱敏再有界单行（与 renew / send.ts describeFailure 同约定）
+        console.warn('[task] release failed:', boundDetail(describeFailure(err)));
         return c.json({ error: 'task_operation_failed' }, 502);
       }
     })

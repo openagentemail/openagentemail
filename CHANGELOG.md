@@ -6,7 +6,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
-- **API: renew/release 兜底 warn 补错误码 + `errorDetail` 诊断收紧** (#340)：`POST /v1/tasks/:id/{lease,release}` 兜底 `console.warn` 补 `errorCode(err)`（与 claim 同族）；`errorDetail` 对 duck `{message}` 保留可读载荷、控制字符转义为单行、按码点截断（N=200）。**属内部日志/告警面**；`errorCode()` 语义不变。**合并 ≠ 生效，生效于下次部署窗**。
+- **API: renew/release 兜底 warn 脱敏有界 + `errorDetail` 诊断收紧** (#340)：`POST /v1/tasks/:id/{lease,release}` 兜底 `console.warn` 走 `boundDetail(describeFailure(err))`（先脱敏再截断单行，与 `send.ts` 邮件栈约定一致）；`errorDetail` 对 duck `{message}` 保留可读载荷、控制/行分隔符转义为单行、单趟按码点截断（N=200）。**属内部日志/告警面**；`errorCode()` 语义不变。**合并 ≠ 生效，生效于下次部署窗**。
 - **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
 
 ### Changed

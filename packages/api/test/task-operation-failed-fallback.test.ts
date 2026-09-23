@@ -36,6 +36,7 @@ const {
   setTaskSendMailForTests,
 } = await import('./support/task-test-seams.ts');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
+const { config } = await import('../src/lib/config.ts');
 
 const ID = '0fdc3207-056e-47c1-a65c-b29d39f66b83';
 const REQUESTER = 'alpha@test.example';
@@ -206,7 +207,7 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     });
   });
 
-  // #340 C1：既有兜底路径已命中 warn；补断言载荷带 errorCode（与 claim 同族）
+  // #340 C1 / R5：既有兜底路径已命中 warn；载荷 = boundDetail(describeFailure(err))
   test('POST /:id/lease 未映射码 → 502 task_operation_failed', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {
       const warns: unknown[][] = [];
@@ -222,6 +223,7 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
         expect(res.body).toEqual({ error: 'task_operation_failed' });
         const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('[task] renew failed'));
         expect(hit).toBeTruthy();
+        // describeFailure(Error(UNMAPPED)) ⇒ message 原文；无密钥时与 UNMAPPED 同
         expect(hit?.[1]).toBe(UNMAPPED);
       } finally {
         warnSpy.mockRestore();
@@ -250,6 +252,48 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
       }
     });
   });
+
+  // #340 R5 P1-1：脱敏 / 单行 / 有界（两处 warn 对称）
+  // 夹具钉死 config.smtp.pass：全量套件里其它文件可能 mutate 过该字段
+  for (const row of [
+    { name: 'lease' as const, path: 'lease', body: { leaseToken: 'opaque' }, tag: '[task] renew failed' },
+    { name: 'release' as const, path: 'release', body: { leaseToken: 'opaque' }, tag: '[task] release failed' },
+  ]) {
+    test(`POST /:id/${row.name} warn 载荷脱敏+单行+有界`, async () => {
+      await withTaskLeasesEnabledForTests(true, async () => {
+        const marker = 'r5-warn-secret-marker-unique';
+        const prevSmtp = config.smtp.pass;
+        const prevImap = config.imap.pass;
+        (config.smtp as { pass: string }).pass = marker;
+        (config.imap as { pass: string }).pass = 'r5-imap-unrelated';
+        const warns: unknown[][] = [];
+        const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+          warns.push(args);
+        });
+        try {
+          const msg = `boom\nwith ${marker} and pad-${'x'.repeat(400)}`;
+          const app = appFor({ kind: 'identity', address: RECIPIENT }, baseService({
+            async renew() { throw new Error(msg); },
+            async release() { throw new Error(msg); },
+          }));
+          const res = await postJson(app, `/v1/tasks/${ID}/${row.path}`, row.body);
+          expect(res.status).toBe(502);
+          expect(res.body).toEqual({ error: 'task_operation_failed' });
+          const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes(row.tag));
+          expect(hit).toBeTruthy();
+          const payload = String(hit?.[1] ?? '');
+          expect(payload).toContain('[redacted]');
+          expect(payload.includes(marker)).toBe(false);
+          expect(payload.includes('\n')).toBe(false);
+          expect(Array.from(payload).length).toBeLessThanOrEqual(200);
+        } finally {
+          warnSpy.mockRestore();
+          (config.smtp as { pass: string }).pass = prevSmtp;
+          (config.imap as { pass: string }).pass = prevImap;
+        }
+      });
+    });
+  }
 
   test('POST /:id/claim-lost 未映射码 → 502 task_operation_failed', async () => {
     await withTaskLeasesEnabledForTests(true, () => withTaskLeasePendingJournalForTests(true, async () => {

@@ -4,7 +4,7 @@
  * - errorDetail：日志/告警载荷诊断文本（永不空类型标记 / 永不抛）
  */
 import { describe, expect, test } from 'bun:test';
-import { errorCode, errorDetail } from '../src/lib/errors.ts';
+import { boundDetail, errorCode, errorDetail, ERROR_DETAIL_MAX } from '../src/lib/errors.ts';
 
 describe('errorCode', () => {
   test('Error(\'x\') ⇒ \'x\'', () => {
@@ -151,5 +151,36 @@ describe('errorDetail', () => {
     });
     expect(() => errorDetail(x)).not.toThrow();
     expect(errorDetail(x)).toBe('[non-error:object]');
+  });
+
+  // —— #340 R5 P1-2 / P1-3 ——
+  test('含 U+2028/U+2029/U+0085 ⇒ 转义且无行分隔字符', () => {
+    const raw = `a\u2028b\u2029c\u0085d`;
+    const out = errorDetail(new Error(raw));
+    expect(out).toBe('a\\u2028b\\u2029c\\u0085d');
+    expect(/\p{Zl}|\p{Zp}|\u0085/u.test(out)).toBe(false);
+    expect(out.includes('\u2028')).toBe(false);
+    expect(out.includes('\u2029')).toBe(false);
+    expect(out.includes('\u0085')).toBe(false);
+  });
+
+  test('多兆字节 message ⇒ 有界、不抛、耗时合理', () => {
+    // 约 4 MiB ASCII；单趟须在读满 N 码点后停，不得物化全串转义副本
+    const mega = 'a'.repeat(4 * 1024 * 1024);
+    const t0 = performance.now();
+    expect(() => errorDetail(new Error(mega))).not.toThrow();
+    const out = errorDetail(new Error(mega));
+    const ms = performance.now() - t0;
+    expect(Array.from(out).length).toBe(ERROR_DETAIL_MAX);
+    expect(out).toBe('a'.repeat(ERROR_DETAIL_MAX));
+    // 有界路径应远快于整串扫描；给宽松上限防 CI 抖动，并落原始耗时到 stdout 留证
+    console.log(`[errorDetail mega] bytes=${mega.length} ms=${ms.toFixed(3)}`);
+    expect(ms).toBeLessThan(500);
+  });
+
+  test('boundDetail 对超长输入单趟有界', () => {
+    const mega = 'x'.repeat(2 * 1024 * 1024);
+    expect(() => boundDetail(mega)).not.toThrow();
+    expect(Array.from(boundDetail(mega)).length).toBe(ERROR_DETAIL_MAX);
   });
 });
