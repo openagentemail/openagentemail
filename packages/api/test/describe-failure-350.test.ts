@@ -2,8 +2,8 @@
  * #350：scrubPayload 余债收口 — A 失败链线性化 / B 单码元转义钥 / 不误伤。
  * 行为回归沿用 #348 套件；本文件补性能伸缩性与 B 面逐条。
  */
-import { describe, expect, test } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,7 +13,12 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-350-'));
+// E / Codex P2：文件作用域可见，afterAll 清理，禁每跑泄漏一个 /tmp/oae-350-*
+const dataDir350 = mkdtempSync(join(tmpdir(), 'oae-350-'));
+process.env.DATA_DIR = dataDir350;
+afterAll(() => {
+  rmSync(dataDir350, { recursive: true, force: true });
+});
 
 const {
   scrubPayload,
