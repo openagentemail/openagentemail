@@ -219,4 +219,23 @@ describe('scrubPayload · #348 九实例 + 不变量', () => {
     expect(text).toMatch(/corrupted delivery log line[\s\S]{0,200}describeFailureStack\s*\(\s*err\s*\)/);
     expect(text).not.toMatch(/escapeLine\s*\(\s*redactSecrets\s*\(/);
   });
+
+  // Codex Local P1：逐字段不得用满 6002，join 后须 ≤6002
+  test('Codex P1：多字段 NUL 转义膨胀后 join 仍 ≤6002', () => {
+    const nul = '\u0000'.repeat(200);
+    const err = Object.assign(new Error(nul), { code: nul, responseCode: 550 });
+    const out = describeFailure(err, ['0']); // '0' 出现在 \\u0000 转义里会被红
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
+    expect(DESCRIBE_FAILURE_MAX).toBe(6002);
+  });
+
+  // Codex Local P2：输入 8192 / 输出 8204 → 普通 ASCII 超长 stack 应保留截断标记
+  test('Codex P2：普通 ASCII 超长 stack 保留截断标记（input 8192 / out 8204）', () => {
+    const err = new Error('mark-retain');
+    err.stack = 'y'.repeat(STACK_MAX + 50);
+    const out = describeFailureStack(err, []);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+    expect(out).toContain(TRUNC_MARK);
+    expect(out.length).toBeGreaterThan(STACK_MAX); // 标记使输出可超过 8192、仍 ≤8204
+  });
 });

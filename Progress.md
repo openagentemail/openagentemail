@@ -1229,3 +1229,20 @@ N/A。
 - focused：`/home/ops/materials/log-face-r5/evidence/focused-20260923T150406Z.log` sha256 `31ff9517ce99223e0998f861cca50523c8840a88ddd45f878cef5945a9e53abd` → **58 pass / 0 fail**
 - 全量：`/home/ops/materials/log-face-r5/evidence/full-20260923T150419Z.log` sha256 `bbe26b2af29679a3e4e71f851cf786932e36a2d1d71603ad8a4622f6a976a458` → **2308 pass / 9 skip / 1 fail**（#206 timeout）
 - 9 实例实测：`/home/ops/materials/log-face-r5/evidence/nine-instances-out.json`
+
+## 2026-09-23 · w348 R1-fix（Codex Local P1/P2）
+
+### 我们实现了哪些功能？
+1. **Codex P1**：`processField` 改用 `DESCRIBE_FAILURE_FIELD_MAX=2000`（不再把整串 6002 预算分给每个字段）；三字段+两空格仍可证 ≤6002。
+2. **Codex P2**：`scrubPayload` 拆 `inputLimit`/`outputLimit`；对象面输入 `STACK_MAX=8192`、输出 `8204`，普通 ASCII 超长 stack 可保留截断标记。
+3. 回归测试：348 增补 Codex P1/P2 两例。
+
+### 我们遇到了哪些错误？
+1. Codex Local 对本头报 P1×1（多字段 join 可破 6002）+ P2×1（标记被同 LIMIT 二次切片吃掉）。
+
+### 我们是如何解决这些错误的？
+1. 字段预算与整串预算分离；输入/输出有界分离。
+2. focused 重跑含新断言全绿。
+
+### 证据
+- focused-r1fix：见 `/home/ops/materials/log-face-r5/evidence/focused-r1fix-*.log`

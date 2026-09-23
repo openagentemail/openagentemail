@@ -19,10 +19,13 @@ import { config } from './config.ts';
 /** 逐字段诊断文本上界（码元 / UTF-16 单位，与历史 ERROR_DETAIL_MAX 一致） */
 export const ERROR_DETAIL_MAX = 200;
 
-/** 字符串面可证输出上界：每字段经流水线后 join ⇒ ≤6002 */
+/** 字符串面可证输出上界：每字段 ≤2000，两空格 ⇒ ≤6002 */
 export const DESCRIBE_FAILURE_MAX = 6002;
 
-/** 对象面 stack 输入/切片参考上界（码元；#344 裁点） */
+/** 单字段经 scrubPayload 后上界（历史：200 码元最坏膨胀至 ≤2000） */
+export const DESCRIBE_FAILURE_FIELD_MAX = 2000;
+
+/** 对象面 stack 输入有界（码元；#344 裁点） */
 export const STACK_MAX = 8192;
 
 /**
@@ -292,28 +295,30 @@ export function trimTrailingSecretPrefix(text: string, secrets: string[]): strin
 /**
  * 唯一组合原语（#348）：三入口共用发射路径。
  *
- *   ① b = slice(text, limit)
+ *   ① b = slice(text, inputLimit)
  *   ② r = redactField(b, secrets)
  *   ③ t = escapeBlock(r)
  *   ④ u = redactField(t + MARK_if_truncated, secrets)
- *   ⑤ v = slice(u, limit)          // Codex P2：剔半个 `\uXXXX`
+ *   ⑤ v = slice(u, outputLimit)     // Codex P2：剔半个 `\uXXXX`
  *   ⑥ w = trimTrailingSecretPrefix(v, secrets)
  *   ⑦ if containsAnySecret(w): return ''   // R4 兜底＝空串
  *   return w
  *
- * @param limit 字符串面 6002 / 对象面 8204；默认字符串面
+ * @param outputLimit 最终输出上界（字符串面字段 2000 / 整串 6002 / 对象面 8204）
+ * @param inputLimit  输入有界（对象面用 STACK_MAX=8192，使标记能落在 8204 输出预算内；默认＝outputLimit）
  */
 export function scrubPayload(
   text: string,
   secrets: string[] = configuredSecrets(),
-  limit: number = DESCRIBE_FAILURE_MAX,
+  outputLimit: number = DESCRIBE_FAILURE_MAX,
+  inputLimit: number = outputLimit,
 ): string {
   try {
     const secretList = secrets.filter(Boolean);
 
-    // ① 输入先有界（约束 CPU）
-    const truncatedAtInput = text.length > limit;
-    const b = truncatedAtInput ? text.slice(0, limit) : text;
+    // ① 输入先有界（约束 CPU；对象面 inputLimit=8192 < outputLimit=8204 以保留标记位）
+    const truncatedAtInput = text.length > inputLimit;
+    const b = truncatedAtInput ? text.slice(0, inputLimit) : text;
 
     // ② 第一遍：清原文中的完整密钥
     const r = redactField(b, secretList);
@@ -322,14 +327,14 @@ export function scrubPayload(
     const t = escapeBlock(r);
 
     // ④ 标记并入后第二遍脱敏（转义生成者 + 标记恰等于口令）
-    const needsMark = truncatedAtInput || t.length > limit;
+    const needsMark = truncatedAtInput || t.length > outputLimit;
     const withMark = needsMark ? t + TRUNCATED_MARK : t;
     const u = redactField(withMark, secretList);
 
     // ⑤ 最终上界；截断点落在 `\uXXXX` 内时去掉残段（含孤立 `\`，Codex P2）
     let v = u;
-    if (v.length > limit) {
-      v = v.slice(0, limit).replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
+    if (v.length > outputLimit) {
+      v = v.slice(0, outputLimit).replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, '');
     }
 
     // ⑥ 尾部单调回退至非真前缀（只删不增）
@@ -367,11 +372,11 @@ function readNumberField(obj: object, key: string): number | undefined {
 }
 
 /**
- * 对单字段跑 scrubPayload（先有界 200）。
- * join 之前调用，保证禁止跨字段匹配（J1）。
+ * 对单字段跑 scrubPayload（先有界 200；字段输出上界 2000）。
+ * join 之前调用，保证禁止跨字段匹配（J1）；三字段+两空格 ⇒ ≤6002。
  */
 function processField(raw: string, secrets: string[]): string {
-  return scrubPayload(truncateDetail(raw), secrets, DESCRIBE_FAILURE_MAX);
+  return scrubPayload(truncateDetail(raw), secrets, DESCRIBE_FAILURE_FIELD_MAX);
 }
 
 /**
@@ -473,7 +478,8 @@ export function describeFailureStack(err: unknown, secrets?: string[]): string {
     }
 
     const raw = stackText !== undefined ? stackText : describeFailure(err, secrets);
-    return scrubPayload(raw, secretList, DESCRIBE_FAILURE_STACK_MAX);
+    // 输入有界 STACK_MAX=8192；输出有界 8204（为截断标记留位）
+    return scrubPayload(raw, secretList, DESCRIBE_FAILURE_STACK_MAX, STACK_MAX);
   } catch {
     return '[unreadable]';
   }
