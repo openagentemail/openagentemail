@@ -98,6 +98,30 @@ describe('describeFailureStack · #344', () => {
     expect(out).toContain('[redacted]');
   });
 
+  // ②d R2：转义会「生成」密钥字面形态 ⇒ 第二遍脱敏必须吞掉
+  test('②d R2：口令字面 \\u0001 + 源含真实 \\x01 ⇒ 输出不得含口令', () => {
+    const secret = '\\u0001'; // 6 码元：反斜杠 u 0 0 0 1
+    const err = new Error('esc-gen');
+    err.stack = 'boom ' + '\u0001' + ' tail';
+    const out = describeFailureStack(err, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
+  // ②e R2：截断后尾部不得以密钥真前缀结尾（加固；源文本中该前缀本就可见）
+  test('②e R2：Codex 边界例截断后尾部不得以 secr 结尾', () => {
+    // 诚实边界：secr 在源文本中本就可见（前缀被 X 证伪后按设计字面吐出）；
+    // 本项只钉「截断后的输出尾部」不得再以 secr 结尾。
+    const err = new Error('bound');
+    err.stack = '\x01'.repeat(1364) + 'aaaa' + 'secrX';
+    const out = describeFailureStack(err, ['secret']);
+    expect(out.endsWith('secr')).toBe(false);
+    // 去掉标记后再看正文尾
+    const body = out.endsWith(TRUNC_MARK) ? out.slice(0, -TRUNC_MARK.length) : out;
+    expect(body.endsWith('secr')).toBe(false);
+    expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_STACK_MAX);
+  });
+
   // ③ 截断边界处半截密钥不泄（J4）
   test('③ 截断点恰落在密钥真前缀 ⇒ 输出不含该前缀', () => {
     const secret = 'secret1234567890';

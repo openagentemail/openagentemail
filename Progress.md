@@ -1250,3 +1250,22 @@ N/A。
 - 膨胀探针：`expansion-probe-r1-20260923T125853Z.txt` sha256 `386fba651f07176f202b12ca32fa07438799e3a2be08b9926b5b1dc32f0940fc` → A_c0=8202 / C_redact_z=8204（均 ≤8204）
 - 记债：https://github.com/openagentemail/openagentemail/issues/347
 - 独立自审：`subagent-review-r1.md`（agent `2e8a7271-da09-4265-897d-4e311d82286d`）
+
+## 2026-09-23 · w344 R2（转义再生密钥 + 截断尾部前缀回退）
+
+### 我们实现了哪些功能？
+1. **①**：`escapeBlock` 后再跑一遍 `redactField`——吞掉转义「生成」的密钥字面（如口令=`\u0001`、源含真实 `\x01`）。
+2. **②**：外层截断后尾部前缀感知回退（J4 延伸；终止性=每次少 1 码元）；标记后再回退一次（可吃标记）。
+3. 回归：②d 转义再生 / ②e Codex 边界尾不得 `secr`；保留 ②b/②c 膨胀上界。
+
+### 我们遇到了哪些错误？
+无施工红。
+
+### 我们是如何解决这些错误的？
+不适用。
+
+### 证据
+- focused：`/home/ops/materials/obj-face-344/focused-r2-20260923T131605Z.txt` sha256 `7a97a1fc0440791aa06f1ecabff77edb3b2a42bff360e8a197d8e1820a15ca92` → **41 pass / 0 fail**
+- 全量：`/home/ops/materials/obj-face-344/full-suite-r2-20260923T131605Z.txt` sha256 `9dcd5585bed4dd880cec1a2b4796e05461d9d5215a14e2bdb4a634b83227ab63` → **2291 pass / 9 skip / 1 fail**（1 红＝`#206 R9` 25s timeout flake，与本卡无关、R0 同族）
+- 回归探针：`/home/ops/materials/obj-face-344/r2-regressions-20260923T131605Z.txt` sha256 `ba3ec10fb03e0cc9afc4f50e188c39bd13997a595a633afe02a6e33bcb7e054d` → ②d `out="boom [redacted] tail"` / ②e `ends_secr=false` / A=8202 C=8204
+- 独立自审：`subagent-review-r2.md` → **PASS**（agent `d021ed39-bc66-4761-9d45-c01b57be2551`）
