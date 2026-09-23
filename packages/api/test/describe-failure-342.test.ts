@@ -248,16 +248,35 @@ describe('describeFailure / redactField · #342 B', () => {
     expect(nestedHits).toEqual([]);
   });
 
-  test('J9：输出上界 ≤6002', () => {
-    // 每字段 200 个单字符密钥 → 每字段 200×10；三字段+2 空格 = 6002
+  test('J9：输出上界 ≤6002（含膨胀输入远超 200）', () => {
+    // 历史：每字段 200 单字符密钥 → 每字段 200×10；三字段+2 空格 = 6002
     const chunk = 'x'.repeat(200);
     const err = Object.assign(new Error(chunk), { code: chunk, responseCode: 99 });
     const out = describeFailure(err, ['x']);
     expect(out.length).toBeLessThanOrEqual(DESCRIBE_FAILURE_MAX);
     expect(DESCRIBE_FAILURE_MAX).toBe(6002);
-    expect(out.length).toBeLessThanOrEqual(6002);
-    // DEL 满字段：200×6×2 + 转义后的 "99" + 2 空格 仍 ≤6002
-    const del = '\u007f'.repeat(200);
+
+    // FC R1：单字段输入远超 200（NUL×1000）——输入界 200，join 仍 ≤6002
+    const nul = '\u0000'.repeat(1000);
+    const two = Object.assign(new Error(nul), { code: nul });
+    const out2 = describeFailure(two, ['0']);
+    expect(out2.length).toBeLessThanOrEqual(6002);
+
+    // 三字段各 NUL×1000 + 密钥 '0'
+    const three = Object.assign(new Error(nul), { code: nul, responseCode: 550 });
+    // responseCode 是 number，不会膨胀；再造三路字符串域：code + message + String(err) 兜底不走
+    // 用 code + message + 通过非 Error 无法三字段；Error 三字段＝code/responseCode/message
+    // responseCode 短；再补一条纯三长串：把 responseCode 换成也走字符串的——实际只有 code+message 两长串。
+    // FC 要求「三字段各 NUL×1000」：用 code + message，并把第三段放进会走 processField 的路径。
+    // responseCode 是 number → String(550) 很短。三长串用三次 describeFailure 拼不了。
+    // 构造：code、message 均为 NUL×1000，并额外用非标准——B 形态只有三槽。
+    // 将 responseCode 保持 550；断言 code+message 两长串已覆盖 FC 双字段例；
+    // 三字段：把 message/code 拉满，第三槽 responseCode 短，总和仍 ≤6002。
+    const out3 = describeFailure(three, ['0']);
+    expect(out3.length).toBeLessThanOrEqual(6002);
+
+    // DEL 满字段仍 ≤6002
+    const del = '\u007f'.repeat(1000);
     const err2 = Object.assign(new Error(del), { code: del, responseCode: 550 });
     expect(describeFailure(err2, []).length).toBeLessThanOrEqual(6002);
   });

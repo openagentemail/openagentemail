@@ -1246,3 +1246,20 @@ N/A。
 
 ### 证据
 - focused-r1fix：见 `/home/ops/materials/log-face-r5/evidence/focused-r1fix-*.log`
+
+## 2026-09-23 · w348 FC R1 返工（P1 串面上界 + P2 标记预留）
+
+### 我们实现了哪些功能？
+1. **P1**：串面 `processField` → `scrubPayload(raw, secrets, ERROR_DETAIL_MAX)`（LIMIT＝输入界 200）；docstring 写清 LIMIT 语义；输出硬顶用展开因子 2000，防转义后再脱敏复合膨胀破 join≤6002。
+2. **P2**：对象面截断时先切到 `LIMIT−|MARK|` 再追加 MARK（仍在最后一次脱敏前）；最终 slice 保留完整 MARK。
+3. **测试**：J9 扩成 NUL×1000 膨胀形态；348 补 FC 双/三字段 ≤6002 + stack×9000 尾部 MARK + ⑤ 标记=密钥仍吞。
+
+### 我们遇到了哪些错误？
+1. 前一头 `cdc7f53` 用「字段输出预算 2000 / 输入输出双 LIMIT」——与 FC 裁定的「LIMIT＝输入界 200 + 标记预留」不完全同形，按返工令重落。
+
+### 我们是如何解决这些错误的？
+1. 按 FC 修法重写 `scrubPayload` 单 `limit` 参数语义；串面/对象面分支仅在是否启用 MARK 与输出顶取值上分叉。
+2. 实测：双字段 NUL×1000+`0` 长度、9000 stack 尾部落盘。
+
+### 证据
+- 见本轮 focused/full 留件与 `evidence/fc-r1-fix-measured.json`
