@@ -338,6 +338,23 @@ describe('#330 正控 · 七处兜底 → 502 task_operation_failed', () => {
     console.log(`[bounded code mega] bytes=${bigCode.length} ms=${ms.toFixed(3)}`);
   });
 
+  // #340 R6 清 Codex P1：多字段时截断 code 尾缀不得因后续 message 落行中而逃脱 scrub
+  test('describeFailureBounded 多字段截断 code 尾缀 ⇒ 无半截明文', () => {
+    const secret = 'K'.repeat(100);
+    // budget=500：切在末尾密钥中部 ⇒ 字段尾为真前缀；join message 后该前缀不再在行尾
+    const code = secret.repeat(4) + 'f'.repeat(50) + secret;
+    const redacted = describeFailureBounded(
+      { code, message: 'tail' },
+      400,
+      [secret, 'unrelated-imap'],
+    );
+    expect(redacted.includes(secret)).toBe(false);
+    expect(redacted.includes(secret.slice(0, 50))).toBe(false);
+    const out = boundDetail(redacted);
+    expect(out.includes(secret)).toBe(false);
+    expect(out.includes(secret.slice(0, 50))).toBe(false);
+  });
+
   // #340 R5.2：有界脱敏 —— 多兆 message 不得 O(n) 拖垮 warn 路径
   test('POST /:id/lease 多兆 message ⇒ warn 有界且快', async () => {
     await withTaskLeasesEnabledForTests(true, async () => {

@@ -67,8 +67,8 @@ function takeCodePoints(text: string, n: number): string {
 }
 
 /**
- * 日志专用：有界截取 code/message → 先剥边界密钥真前缀 → 再 redactSecrets → 再剥一次。
- * 防：①截断切开长密钥后短密钥误匹配留下碎片；②超大 code 无界分配。
+ * 日志专用：有界截取 code/message → **每字段**先剥边界密钥真前缀 → join → 再剥 → redact → 再剥。
+ * 防：①截断切开长密钥后短密钥误匹配留下碎片；②多字段 join 后半截落行中逃脱行尾 scrub；③超大 code 无界分配。
  * 不改变 `describeFailure` 既有语义；永不抛。
  */
 export function describeFailureBounded(
@@ -86,14 +86,19 @@ export function describeFailureBounded(
     let message: string | undefined;
     try {
       // code 与 message 同等有界，避免大 code 绕过预算
-      if (typeof e.code === 'string' && e.code) code = takeCodePoints(e.code, budget);
+      // 截断后先做字段级尾缀 scrub：多字段 join 后半截密钥会落在行中，行尾 scrub 够不着
+      if (typeof e.code === 'string' && e.code) {
+        code = scrubTrailingSecretPrefix(takeCodePoints(e.code, budget), secs);
+      }
     } catch { /* ignore */ }
     try {
       if (typeof e.responseCode === 'number') responseCode = String(e.responseCode);
     } catch { /* ignore */ }
     try {
       const raw = e.message;
-      if (typeof raw === 'string' && raw) message = takeCodePoints(raw, budget);
+      if (typeof raw === 'string' && raw) {
+        message = scrubTrailingSecretPrefix(takeCodePoints(raw, budget), secs);
+      }
     } catch { /* ignore */ }
     const parts = [code, responseCode, message].filter((p): p is string => Boolean(p));
     let line: string;
@@ -101,7 +106,7 @@ export function describeFailureBounded(
       line = parts.join(' ');
     } else {
       try {
-        line = takeCodePoints(String(err), budget);
+        line = scrubTrailingSecretPrefix(takeCodePoints(String(err), budget), secs);
       } catch {
         return '[unreadable]';
       }
