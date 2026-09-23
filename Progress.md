@@ -1295,3 +1295,20 @@ N/A。
 - 功能 commit：见本轮 HEAD 前一颗
 - focused：`/home/ops/materials/debt-batch-2/r6b-focused-20260923T073017Z.txt` sha256 `83947da8f43478f93b954969275b6236fb3323d295e44277b77595151994f095` → **79 pass / 0 fail**
 - 全量：`r6b-full-suite-20260923T073017Z.txt` sha256 `e0f579c42264c0debd6d76e0cffa0f75b3fbde90c4eedb65d195c327901ffd9d` → **2261 pass / 9 skip / 1 fail**（唯 `#149`）
+
+## 2026-09-23 · w340 R6c（#341 清 Codex：仅截断后 scrub）
+
+### 我们实现了哪些功能？
+1. `takeCodePointsBounded` 回报是否截断；`describeFailureBounded` **仅截断字段**做 `scrubTrailingSecretPrefix`，行级 scrub 亦 gated by `anyTruncated`。
+2. 负控：`Error('status')` + 密钥 `secret` ⇒ 仍为 `status`（不误剥）。
+
+### 我们遇到了哪些错误？
+1. R6b 头 `c6ebedb` 上 Codex ⚠️ P2×1（未截断误剥）属实。
+2. 全量 1 红：`#206` 墙钟（如实报）。
+
+### 我们是如何解决这些错误的？
+1. 截断标志门控 scrub；仍只动 `lib/redact.ts` + 测试。
+
+### 证据
+- focused：`/home/ops/materials/debt-batch-2/r6c-focused-20260923T074627Z.txt` sha256 `e8a91aa3757e9d3b8e9c7df6a2cad4b339a65151989c28ca20b636e388cb55cb` → **80 pass**
+- 全量：`r6c-full-suite-20260923T074627Z.txt` sha256 `79cbd26f906ab45686e900d4bd5e36b923f8bd92733645dcd6924a48fe9b96b9` → **2262 pass / 9 skip / 1 fail**（唯 `#206`）
