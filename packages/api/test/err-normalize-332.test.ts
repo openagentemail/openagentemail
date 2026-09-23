@@ -8,7 +8,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import './support/ui-i18n-shim.ts';
 import { Hono } from 'hono';
 import type { Task, TaskService } from '../src/lib/tasks.ts';
@@ -20,9 +20,10 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+// 隔离目录：不与其它套件共享 DATA_DIR
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-err-332-'));
 process.env.TASK_LEASES_ENABLED = 'true';
-process.env.NTFY_ENABLED = 'true';
+// 不在模块顶置 NTFY_ENABLED：避免抢先 import config 时把全套件默认改成 true（跨套件卫生）
 process.env.NTFY_ADMIN_PASSWORD = 'ntfy-admin-secret';
 process.env.NOTIFY_PUBLIC_URL = 'https://notify.test';
 process.env.NODE_ENV = 'test';
@@ -81,9 +82,69 @@ const NOW = '2026-08-24T00:00:00.000Z';
 const ORIGIN = { origin: 'http://localhost' };
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 
-for (const localpart of ['alpha', 'bravo', 'fox', 'owl']) {
-  if (!findIdentity(`${localpart}@test.example`)) createIdentity({ localpart, issueToken: false });
+// ── Item 3 跨套件自清：保存原生定时器与 ntfy 快照，跟踪本套件启动的循环 ──
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const realSetInterval = globalThis.setInterval.bind(globalThis);
+const realClearTimeout = globalThis.clearTimeout.bind(globalThis);
+const realClearInterval = globalThis.clearInterval.bind(globalThis);
+const trackedTimeouts = new Set<ReturnType<typeof setTimeout>>();
+const trackedIntervals = new Set<ReturnType<typeof setInterval>>();
+/** import 后立刻冻结的 ntfy 快照，afterAll 还原，避免污染并行套件 */
+const ntfySnapshot = {
+  enabled: config.ntfy.enabled,
+  pushPolicy: config.ntfy.pushPolicy,
+};
+
+/** 清掉本套件跟踪到的 maintenance / retention 定时器 */
+function clearTrackedTimers(): void {
+  for (const id of trackedTimeouts) realClearTimeout(id);
+  trackedTimeouts.clear();
+  for (const id of trackedIntervals) realClearInterval(id);
+  trackedIntervals.clear();
 }
+
+/** 还原 config.ntfy 到本文件 import 时的快照 */
+function restoreNtfyConfig(): void {
+  (config.ntfy as { enabled: boolean }).enabled = ntfySnapshot.enabled;
+  (config.ntfy as { pushPolicy: typeof ntfySnapshot.pushPolicy }).pushPolicy = ntfySnapshot.pushPolicy;
+}
+
+/**
+ * 启动 maintenance/retention 时临时包装 setTimeout/setInterval，
+ * 记录句柄以便 afterEach 停掉循环——不改生产码、不加 stop 探针。
+ */
+function trackTimersDuring<T>(fn: () => T): T {
+  const prevTimeout = globalThis.setTimeout;
+  const prevInterval = globalThis.setInterval;
+  globalThis.setTimeout = ((handler: TimerHandler, ms?: number, ...args: unknown[]) => {
+    const id = realSetTimeout(handler as never, ms as never, ...args);
+    trackedTimeouts.add(id);
+    return id;
+  }) as typeof setTimeout;
+  // 保留 .unref 等属性（Bun Timer）
+  Object.assign(globalThis.setTimeout, realSetTimeout);
+  globalThis.setInterval = ((handler: TimerHandler, ms?: number, ...args: unknown[]) => {
+    const id = realSetInterval(handler as never, ms as never, ...args);
+    trackedIntervals.add(id);
+    return id;
+  }) as typeof setInterval;
+  Object.assign(globalThis.setInterval, realSetInterval);
+  try {
+    return fn();
+  } finally {
+    globalThis.setTimeout = prevTimeout;
+    globalThis.setInterval = prevInterval;
+  }
+}
+
+/** 身份建在本文件隔离 DATA_DIR，不在模块顶裸跑（避免与其它套件抢状态） */
+beforeAll(() => {
+  for (const localpart of ['alpha', 'bravo', 'fox', 'owl']) {
+    if (!findIdentity(`${localpart}@test.example`)) {
+      createIdentity({ localpart, issueToken: false });
+    }
+  }
+});
 
 afterEach(() => {
   setTaskNowForTests(null);
@@ -95,6 +156,22 @@ afterEach(() => {
   resetNotificationLogForTests();
   resetNotificationStateForTests();
   setWaitMailserverResolverForTests(undefined);
+  // 停掉本用例启动的循环 + 还原 ntfy / 原生定时器入口
+  clearTrackedTimers();
+  restoreNtfyConfig();
+  globalThis.setTimeout = realSetTimeout;
+  globalThis.setInterval = realSetInterval;
+  globalThis.clearTimeout = realClearTimeout;
+  globalThis.clearInterval = realClearInterval;
+});
+
+afterAll(() => {
+  clearTrackedTimers();
+  restoreNtfyConfig();
+  globalThis.setTimeout = realSetTimeout;
+  globalThis.setInterval = realSetInterval;
+  globalThis.clearTimeout = realClearTimeout;
+  globalThis.clearInterval = realClearInterval;
 });
 
 function unused(): never {
@@ -445,7 +522,7 @@ describe('#332 A · UI tasks 板 / identities create', () => {
 });
 
 // ──────────────────────────────────────────────
-// B 簇 · 日志/告警遇非 Error 不抛，且告警/日志被调用
+// B 簇 · 日志/告警遇非 Error 不抛，且告警/日志载荷含类型标记（errorDetail）
 // ──────────────────────────────────────────────
 
 describe('#332 B · send-log 告警路径非 Error 不抛', () => {
@@ -453,7 +530,7 @@ describe('#332 B · send-log 告警路径非 Error 不抛', () => {
     resetSendLogForTests();
   });
 
-  test('persist_failed：persistHook throw undefined → 告警调用且 error:\'\'、不抛 TypeError', async () => {
+  test('persist_failed：persistHook throw undefined → 告警载荷非空含类型标记、不抛 TypeError', async () => {
     const details: Record<string, unknown>[] = [];
     const errorSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
       if (typeof args[0] === 'string' && args[0].includes('persist_failed') && args[1] && typeof args[1] === 'object') {
@@ -474,7 +551,10 @@ describe('#332 B · send-log 告警路径非 Error 不抛', () => {
       }),
     ).rejects.toBeTruthy();
     expect(sendLogAlertsForTests()).toContain('persist_failed');
-    expect(details.some((d) => d.error === '')).toBe(true);
+    // #338：errorDetail 载荷非空且含类型标记
+    const hit = details.find((d) => typeof d.error === 'string' && String(d.error).includes('non-error:'));
+    expect(hit).toBeTruthy();
+    expect(String(hit?.error).length).toBeGreaterThan(0);
     errorSpy.mockRestore();
   });
 
@@ -525,7 +605,8 @@ describe('#332 B · send-log 告警路径非 Error 不抛', () => {
     setSendLogPersistHookForTests(() => {
       throw undefined;
     });
-    startSendLogMaintenance();
+    // 跟踪 maintenance 定时器，用例结束 afterEach 清掉
+    trackTimersDuring(() => startSendLogMaintenance());
     // maintenance 立即 tick；等队列跑完
     await Bun.sleep(80);
     try {
@@ -533,7 +614,8 @@ describe('#332 B · send-log 告警路径非 Error 不抛', () => {
     } catch {
       // persist 失败可能从 compact 直接抛；maintenance 路径应已告警
     }
-    expect(details.some((d) => d.error === '') || sendLogAlertsForTests().includes('compact_failed') || sendLogAlertsForTests().includes('persist_failed')).toBe(true);
+    const typed = details.some((d) => typeof d.error === 'string' && String(d.error).includes('non-error:'));
+    expect(typed || sendLogAlertsForTests().includes('compact_failed') || sendLogAlertsForTests().includes('persist_failed')).toBe(true);
     errorSpy.mockRestore();
     setSendLogPersistHookForTests(null);
     setSendLogNowForTests(null);
@@ -545,7 +627,7 @@ describe('#332 B · notification-log 告警路径非 Error 不抛', () => {
     resetNotificationLogForTests();
   });
 
-  test('compact_failed：maintenance 遇非 Error → 告警 error:\'\' 且不抛出循环', async () => {
+  test('compact_failed：maintenance 遇非 Error → 告警载荷非空含类型标记且不抛出循环', async () => {
     const details: Record<string, unknown>[] = [];
     const errorSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
       if (typeof args[0] === 'string' && String(args[0]).includes('compact_failed') && args[1] && typeof args[1] === 'object') {
@@ -568,7 +650,7 @@ describe('#332 B · notification-log 告警路径非 Error 不抛', () => {
     setNotificationLogPersistHookForTests(() => {
       throw undefined;
     });
-    expect(() => startNotificationLogMaintenance()).not.toThrow();
+    expect(() => trackTimersDuring(() => startNotificationLogMaintenance())).not.toThrow();
     await Bun.sleep(80);
     // 直接 compact 也会走同一告警（若 maintenance 已吞掉）；断言告警载荷
     try {
@@ -576,16 +658,16 @@ describe('#332 B · notification-log 告警路径非 Error 不抛', () => {
     } catch {
       // ignore
     }
-    expect(details.some((d) => d.error === '')).toBe(true);
+    const hit = details.find((d) => typeof d.error === 'string' && String(d.error).includes('non-error:'));
+    expect(hit).toBeTruthy();
+    expect(String(hit?.error).length).toBeGreaterThan(0);
     errorSpy.mockRestore();
   });
 });
 
 describe('#332 B · notify 告警/warn 路径非 Error 不抛', () => {
-  test('notifyTrustedAgentDelivery：publish reject undefined → warn 含 \'\' 且不抛', async () => {
-    // 全量并发下其他套件可能先 import config（NTFY_ENABLED 默认 false）；本用例钉死开启
-    const prevEnabled = config.ntfy.enabled;
-    const prevPolicy = config.ntfy.pushPolicy;
+  test('notifyTrustedAgentDelivery：publish reject undefined → warn 载荷非空含类型标记且不抛', async () => {
+    // 用例内钉死 ntfy，afterEach 还原快照（不顶置 NTFY_ENABLED）
     (config.ntfy as { enabled: boolean }).enabled = true;
     (config.ntfy as { pushPolicy: string }).pushPolicy = 'all';
     if (!findIdentity('fox@test.example')) createIdentity({ localpart: 'fox', issueToken: false });
@@ -602,18 +684,20 @@ describe('#332 B · notify 告警/warn 路径非 Error 不抛', () => {
       await expect(notifyTrustedAgentDelivery('fox@test.example')).resolves.toBeUndefined();
       const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('trusted agent delivery failed'));
       expect(hit).toBeTruthy();
-      expect(hit?.[1]).toBe('');
+      // #338：errorDetail 类型化文本，非空
+      expect(typeof hit?.[1]).toBe('string');
+      expect(String(hit?.[1]).length).toBeGreaterThan(0);
+      expect(String(hit?.[1])).toContain('non-error:');
     } finally {
       pubSpy.mockRestore();
       warnSpy.mockRestore();
-      (config.ntfy as { enabled: boolean }).enabled = prevEnabled;
-      (config.ntfy as { pushPolicy: typeof prevPolicy }).pushPolicy = prevPolicy;
+      restoreNtfyConfig();
     }
   });
 });
 
 describe('#332 B · retention 日志路径非 Error 不抛', () => {
-  test('sweep tick：deleteMessagesBefore throw undefined → warn 含 \'\' 且 tick 不抛', async () => {
+  test('sweep tick：deleteMessagesBefore throw undefined → warn 载荷非空含类型标记且 tick 不抛', async () => {
     if (config.retentionDays <= 0) {
       // 环境禁用时跳过（本卡夹具默认 30）
       return;
@@ -625,20 +709,34 @@ describe('#332 B · retention 日志路径非 Error 不抛', () => {
     const delSpy = spyOn(imapLib, 'deleteMessagesBefore').mockImplementation(async () => {
       throw undefined;
     });
-    const origSetTimeout = globalThis.setTimeout;
-    // 把 60s grace 压成立即
+    // 把 60s grace 压成立即，并跟踪 interval/timeout 以便自清
+    const prevTimeout = globalThis.setTimeout;
     globalThis.setTimeout = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
       const delay = typeof ms === 'number' && ms >= 60_000 ? 0 : (ms ?? 0);
-      return origSetTimeout(fn as never, delay, ...args);
+      const id = realSetTimeout(fn as never, delay, ...args);
+      trackedTimeouts.add(id);
+      return id;
     }) as typeof setTimeout;
+    Object.assign(globalThis.setTimeout, realSetTimeout);
+    const prevInterval = globalThis.setInterval;
+    globalThis.setInterval = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+      const id = realSetInterval(fn as never, ms as never, ...args);
+      trackedIntervals.add(id);
+      return id;
+    }) as typeof setInterval;
+    Object.assign(globalThis.setInterval, realSetInterval);
     try {
       expect(() => startRetentionLoop()).not.toThrow();
       await Bun.sleep(80);
       const hit = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('[retention] sweep failed'));
       expect(hit).toBeTruthy();
-      expect(hit?.[1]).toBe('');
+      expect(typeof hit?.[1]).toBe('string');
+      expect(String(hit?.[1]).length).toBeGreaterThan(0);
+      expect(String(hit?.[1])).toContain('non-error:');
     } finally {
-      globalThis.setTimeout = origSetTimeout;
+      globalThis.setTimeout = prevTimeout;
+      globalThis.setInterval = prevInterval;
+      clearTrackedTimers();
       delSpy.mockRestore();
       warnSpy.mockRestore();
     }
@@ -646,7 +744,7 @@ describe('#332 B · retention 日志路径非 Error 不抛', () => {
 });
 
 describe('#332 B · imap IDLE/poll warn 非 Error 不抛', () => {
-  test('waitForMessage：withMailserverReconnect reject undefined → IDLE warn 含 \'\' 后回退不炸', async () => {
+  test('waitForMessage：withMailserverReconnect reject undefined → IDLE warn 载荷非空含类型标记后回退不炸', async () => {
     const reconnect = await import('../src/lib/mailserver-reconnect.ts');
     const warns: unknown[][] = [];
     const warnSpy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
@@ -662,7 +760,10 @@ describe('#332 B · imap IDLE/poll warn 非 Error 不抛', () => {
       const idle = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('IDLE wait failed'));
       const poll = warns.find((w) => typeof w[0] === 'string' && String(w[0]).includes('poll failed'));
       expect(idle || poll).toBeTruthy();
-      expect((idle ?? poll)?.[1]).toBe('');
+      const payload = (idle ?? poll)?.[1];
+      expect(typeof payload).toBe('string');
+      expect(String(payload).length).toBeGreaterThan(0);
+      expect(String(payload)).toContain('non-error:');
     } finally {
       spy.mockRestore();
       warnSpy.mockRestore();
