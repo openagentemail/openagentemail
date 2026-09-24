@@ -137,6 +137,7 @@ Private / loopback targets need an **admin** token and
    `uidValidity` parameter (product-side limit). A mailbox rebuild in that window
    can still mis-read. Closing it needs a product MCP change or a receiver that
    owns the read path (see [`examples/webhook-wake/`](../examples/webhook-wake/)).
+   Tracked upstream as issue #362.
 
 ## Heavier / alternate examples
 
