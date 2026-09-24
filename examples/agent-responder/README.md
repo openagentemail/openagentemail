@@ -23,7 +23,11 @@ Secrets stay in env / wrangler secrets — never commit them.
 prompt-injection against that agent can send mail as the identity. Harden with
 a human-approval gate if that risk is unacceptable. Template A deliberately
 does **not** put `subject` into the CLI prompt or child env — the agent must
-fetch the message itself via MCP.
+fetch the message itself via MCP. There is also a **generation TOCTOU** between
+the receiver's `uidValidity` pre-check and the agent's later MCP read (MCP has
+no generation parameter); a mailbox rebuild in that window can mis-read — fix
+requires a product MCP change or [`webhook-wake`](../webhook-wake/) owning the
+read path.
 
 ## MCP one-time registration
 

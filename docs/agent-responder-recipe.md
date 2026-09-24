@@ -132,6 +132,11 @@ Private / loopback targets need an **admin** token and
    see [`examples/webhook-wake/`](../examples/webhook-wake/).
 7. Cap unauthenticated request bodies (template A: 256KiB → `413`) and dedupe on
    `X-OAE-Delivery` where practical (A: in-memory LRU; B: optional `DEDUPE_KV`).
+8. **Generation TOCTOU remains.** Template A pre-checks `uidValidity` before
+   spawn, but the agent later reads via MCP `mail_read_message` which has **no**
+   `uidValidity` parameter (product-side limit). A mailbox rebuild in that window
+   can still mis-read. Closing it needs a product MCP change or a receiver that
+   owns the read path (see [`examples/webhook-wake/`](../examples/webhook-wake/)).
 
 ## Heavier / alternate examples
 

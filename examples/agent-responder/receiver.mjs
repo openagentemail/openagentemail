@@ -89,6 +89,20 @@ function verify(header, rawBody) {
 }
 
 /**
+ * 从 webhook from.address 取出可发信用邮箱。
+ * 裸地址直用；"Name <email>" 取尖括号内；无法解析 → null（毒事件）。
+ */
+function parseSender(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  const angle = s.match(/<([^<>@\s]+@[^<>@\s]+)>/);
+  const candidate = (angle ? angle[1] : s).trim();
+  if (!/^[^\s@<>]+@[^\s@<>]+$/.test(candidate)) return null;
+  return candidate.toLowerCase();
+}
+
+/**
  * spawn 前 REST 代际核对（MCP mail_read_message 无 uidValidity）。
  * uidValidity 缺失则跳过预检直接放行——metadata 偶发无代际时仍可唤醒 agent。
  * 非 2xx / stale_message_generation → false（调用方 200 不 spawn）。
@@ -217,6 +231,18 @@ createServer((req, res) => {
         res.writeHead(200).end('ok');
         return;
       }
+      const sender = parseSender(from?.address);
+      if (!sender) {
+        console.error('[receiver] poison from: unparseable sender, ack without spawn');
+        res.writeHead(200).end('ok');
+        return;
+      }
+      // self-addressed: 防回信环（回自己箱会再触发 mail.received）
+      if (sender === String(address).toLowerCase()) {
+        console.error('[receiver] self-addressed: skip spawn (loop guard)');
+        res.writeHead(200).end('ok');
+        return;
+      }
       // 只传 messageId/address，不内联 subject——agent 经 MCP 自取全文
       const prompt =
         `You received mail at ${address} (messageId=${messageId}). ` +
@@ -239,7 +265,12 @@ createServer((req, res) => {
       }
 
       let settled = false;
-      const child = spawnHeadless(prompt, { messageId, address, from, uidValidity });
+      const child = spawnHeadless(prompt, {
+        messageId,
+        address,
+        from: { address: sender },
+        uidValidity,
+      });
       child.on('spawn', () => {
         if (settled) return;
         settled = true;
