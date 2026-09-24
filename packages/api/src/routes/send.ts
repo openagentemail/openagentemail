@@ -31,6 +31,8 @@ const emailField = z.string().email().max(SEND_LOG_EMAIL_MAX_LEN);
 /**
  * 仅 POST /v1/send 用：身份 token 是否以归属子地址发信（#275）。
  * 不改动通用 forbidUnlessAddress，保持最小爆炸半径。
+ * #317：有意不查 attribution——OAuth 视同父身份本人（语义钉见
+ * docs/security.md「OAuth access tokens」节），勿当遗漏修掉。
  */
 function allowParentSendAsChild(auth: Auth, from: string): boolean {
   if (auth.kind !== 'identity') return false;

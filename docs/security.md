@@ -136,6 +136,8 @@ Catch-all 信箱里，身份之间的读边界是**精确整邮箱**匹配（禁
 ## OAuth access tokens（P3 AS）
 
 - OAuth 票**永远是 identity 级**，不能经授权流获得 admin。
+- **票 = 父身份本人全能力（语义钉，#317）**：`/v1` 按 `kind:'identity'` 处理并继承身份当前落盘的 scopes（`lib/auth.ts:172-178`）；**含以归属子地址发信**（`routes/send.ts` `allowParentSendAsChild` 不查 attribution）**与读子信箱**（`lib/auth.ts` `forbidUnlessMailboxAccess` 归属分支不区分 attribution）——「OAuth 视同父身份本人」为**有意决策**：在「用凭证的面」票持父 identity 级权限（含以父地址发信），父子同域同声誉，不构成权限等级跃升。**例外边界同为有意**（「造凭证/管凭证的面」一律拒 OAuth 票）：子身份创建（`routes/identities.ts:241/:290`）、delegation 管理（`routes/delegations.ts:89/:247`）、**webhook 订阅管理（`routes/webhooks.ts` `forbidOAuthMutation`）与签名密钥读取（`forbidOAuthRead`）**；「用凭证的面」（发信/读子归属）放行。**变更闸**：将来任何「更窄的票」设计与本语义正面冲突，须先经显式裁决（RFC/业主拍板），不得静默收窄；本节为该语义唯一钉。
+- **子身份 50 配额（#317 声明）**：在支持的单写进程部署中（见「DATA_DIR 单写者约定」），`countChildren` 检查与 `createIdentity` 同为同步操作、检查与创建之间无 `await`（`routes/identities.ts:332-339`）⇒ **进程内不可越过 50（实为硬上限）**；竞态窗口仅存在于明确不支持的多进程共享 `DATA_DIR` 场景。裁定「接受并声明」不变：本设计不引入原子计数，多进程语义不在支持面内。
 - access / refresh / code 只存 SHA-256 哈希（`DATA_DIR/oauth.json`，0600）；access 默认 1h，refresh 30d 且轮换即作废旧票。
 - 令牌绑定 RFC 8707 `resource`（本机 `{base}/mcp`）；aud 不符 → 403。
 - CIMD SSRF：默认（`OAE_PUBLIC_EDGE=false`）部署在 loopback/tailnet，放行 RFC1918/CGNAT/loopback/ULA；**永拒** `169.254.0.0/16`、`0.0.0.0/8`、`fe80::/10`（与 IPv4 链路本地对齐）、`fd00:ec2::/16`（AWS IMDS IPv6，如 `fd00:ec2::254`）。含 IPv4-mapped（含 URL 规范化后的 `::ffff:a9fe:a9fe` 形）。连接时 lookup 钉死解析结果，消除校验/fetch 间 DNS-rebinding TOCTOU。公网部署设 `OAE_PUBLIC_EDGE=true` 关闭私网放行（见下节）。

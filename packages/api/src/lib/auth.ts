@@ -293,6 +293,8 @@ export function forbidUnlessMailboxAccess(
     return null;
   }
   // #275 归属直连：父可读子信箱；纵深防御——scoped 须含 requiredScope（#275 R1 F5）
+  // #317：归属分支有意不区分 attribution（OAuth 视同父身份本人，语义钉见
+  // docs/security.md「OAuth access tokens」节），勿当遗漏修掉。
   if (auth.kind === 'identity') {
     const child = findIdentity(targetMailbox);
     if (child?.parentIdentity === auth.address.toLowerCase()) {
