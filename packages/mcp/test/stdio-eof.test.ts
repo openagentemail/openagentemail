@@ -58,7 +58,8 @@ test("#357 stdio：stdin EOF 后进程退出（2.1.0 实测）", async () => {
       if (/openagentemail-mcp connected/.test(stderr)) endStdinOnce();
     });
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
-    child.on("exit", (code, signal) => finish(code, signal));
+    // close：stdio 流关闭后触发（exit 不保证 stdout 已冲完，CI 可假红）
+    child.on("close", (code, signal) => finish(code, signal));
     child.stdin.write(`${JSON.stringify({
       jsonrpc: "2.0", id: 1, method: "initialize",
       params: {
