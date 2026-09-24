@@ -19,7 +19,7 @@
     "gold:ui": "bun run scripts/compare-ui-gold.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.1.0",
     "hono": "^4.6.14",
     "imapflow": "^1.0.186",
     "mailparser": "^3.7.2",
