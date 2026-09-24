@@ -1100,20 +1100,19 @@ describe('MCP SDK 2.1.0 边界（#357）', () => {
       body,
     });
 
-  test('a: body >4MiB → 413；schema 合法最大件 mail_send → queued', async () => {
+  test('a: body >16MiB → request_too_large；CJK ~6MB 合法件 → queued', async () => {
+    // 过限腿：命中我方 Hono bodyLimit（与 /v1 同形）；SDK 层 413 因 maxRequestBodySize=16MiB 不可达
     const overBody = JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'tools/list',
-      params: { pad: 'x'.repeat(4 * MiB + 1) },
+      params: { pad: 'x'.repeat(16 * MiB + 1) },
     });
-    expect(Buffer.byteLength(overBody)).toBeGreaterThan(4 * MiB);
+    expect(Buffer.byteLength(overBody)).toBeGreaterThan(16 * MiB);
     const over = await post(adminKey, overBody);
     expect(over.status).toBe(413);
-    const overJson = (await over.json()) as { error?: { code?: number; message?: string } };
-    expect(overJson.error?.code).toBe(-32000);
-    expect(overJson.error?.message).toMatch(/Payload Too Large|4194304/);
+    expect(await over.json()).toEqual({ error: 'request_too_large' });
 
-    // R1：text/html 各 ≤1M（schema 合法），合计 ~2.2MB < 4MiB；断到 RPC 成功层（非仅 HTTP 200）
-    sendMailMock.mockImplementation(async () => ({ messageId: '<sdk21-r1@test.example>' }));
+    // 合法大件腿：CJK 多字节（每字 3B）×2×~1M 字符 ≈ 6MB，落 (4MiB,16MiB]——证两门分裂已消
+    sendMailMock.mockImplementation(async () => ({ messageId: '<sdk21-r2@test.example>' }));
     const { token, identity } = createIdentity({ localpart: 'sdk21-big' })!;
     const underBody = JSON.stringify({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
@@ -1121,14 +1120,14 @@ describe('MCP SDK 2.1.0 边界（#357）', () => {
         name: 'mail_send',
         arguments: {
           from: identity.address, to: 'sink@example.net', subject: 'big',
-          text: 't'.repeat(999_999),
-          html: 'h'.repeat(999_999),
+          text: '測'.repeat(999_999),
+          html: 'あ'.repeat(999_999),
         },
       },
     });
-    expect(Buffer.byteLength(underBody)).toBeLessThan(4 * MiB);
-    // text+html 各 ~1M ASCII ≈ 2.0MB 体（无 JSON 转义膨胀）；须明显大于小件
-    expect(Buffer.byteLength(underBody)).toBeGreaterThan(1.9 * MiB);
+    const underBytes = Buffer.byteLength(underBody);
+    expect(underBytes).toBeGreaterThan(4 * MiB);
+    expect(underBytes).toBeLessThanOrEqual(16 * MiB);
     const under = await post(token, underBody);
     expect(under.status).toBe(200);
     const underJson = (await readMcpJson(under)) as {
