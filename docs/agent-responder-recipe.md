@@ -67,7 +67,7 @@ Matches `packages/api/src/lib/webhook-signing.ts` / RFC-0001:
 | Header | `X-OAE-Signature: t=<unixSec>,v1=<hex>[,v1=…]` |
 | Signed payload | `${t}.${rawBody}` (UTF-8 timestamp + `.` + **raw body bytes**) |
 | Key | Displayed secret `whs_<64hex>` as **ASCII bytes, prefix included** |
-| Tolerance | ±300 seconds |
+| Tolerance | default ±300s (`WEBHOOK_TIMESTAMP_TOLERANCE_SEC` on the instance) |
 | Order | **Verify first**, then `JSON.parse` |
 | Also present | `X-OAE-Event`, `X-OAE-Delivery` (routing aids; still verify the body) |
 

@@ -11,11 +11,19 @@ OpenAgent.email does **not** run an LLM inside the product for you.
 | `OPENAGENTEMAIL_API_KEY` | ✓ (child env) | ✓ | Identity token for MCP/REST |
 | `HEADLESS_CMD` | ✓ | — | Default `kimi -p`; set `claude -p` to swap |
 | `PORT` | ✓ (default 8787) | — | Local listen port |
+| `HOST` | ✓ (default `0.0.0.0`) | — | Bind address; use `127.0.0.1` for local-only |
 | `LLM_API_URL` / `LLM_API_KEY` | — | ✓ | OpenAI-compatible chat endpoint |
 | `LLM_MODEL` | — | optional | Default `gpt-4o-mini` |
 | `DEDUPE_KV` | — | optional KV | **Unbound = no dedupe** (at-least-once may double-reply) |
+| Concurrency | in-process cap **1** (queue) | Worker isolate | **Before production, add concurrency limits / dedupe / rate limits — see [`examples/webhook-wake`](../webhook-wake/)** |
 
 Secrets stay in env / wrangler secrets — never commit them.
+
+**Risk (template A):** the spawned agent holds send credentials. A successful
+prompt-injection against that agent can send mail as the identity. Harden with
+a human-approval gate if that risk is unacceptable. Template A deliberately
+does **not** put `subject` into the CLI prompt or child env — the agent must
+fetch the message itself via MCP.
 
 ## MCP one-time registration
 
@@ -50,6 +58,7 @@ export OPENAGENTEMAIL_API_URL='http://localhost:3100'
 export OPENAGENTEMAIL_API_KEY='oa_…'
 # E2E often points HEADLESS_CMD at a deterministic REST reply script instead of a live LLM CLI
 export HEADLESS_CMD='kimi -p'
+# optional: HOST=127.0.0.1 for loopback-only bind
 node examples/agent-responder/receiver.mjs
 ```
 

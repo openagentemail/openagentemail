@@ -140,7 +140,12 @@ export default {
       }),
     });
     if (!llmRes.ok) return new Response('llm_error', { status: 502 });
-    const llmJson = await llmRes.json();
+    let llmJson;
+    try {
+      llmJson = await llmRes.json();
+    } catch {
+      return new Response('llm_error', { status: 502 }); // 解析失败不裸抛
+    }
     const replyText = llmJson?.choices?.[0]?.message?.content?.trim() || 'Thanks — received.';
 
     const sendRes = await fetch(`${api}/v1/send`, {
