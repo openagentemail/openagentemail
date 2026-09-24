@@ -40,6 +40,8 @@ const MAX_INFLIGHT = 1;
 const MAX_QUEUE = Number(process.env.MAX_QUEUE ?? 32);
 // 子进程超时（默认 5min）；超时 kill + release——模板级取舍
 const CHILD_TIMEOUT_MS = Number(process.env.CHILD_TIMEOUT_MS ?? 300_000);
+// 代际预检 fetch 超时：API 挂起时不得永久占槽（abort → catch → 'error' → 500）
+const GEN_CHECK_TIMEOUT_MS = 10_000;
 
 if (!SECRET.startsWith('whs_')) {
   console.error('Set WEBHOOK_SIGNING_SECRET to the displayed whs_… secret.');
@@ -123,6 +125,7 @@ async function checkGeneration(address, messageId, uidValidity) {
   try {
     const res = await fetch(`${API_URL}/v1/messages/${encodeURIComponent(messageId)}?${q}`, {
       headers: { authorization: `Bearer ${API_KEY}` },
+      signal: AbortSignal.timeout(GEN_CHECK_TIMEOUT_MS),
     });
     if (res.ok) return 'ok';
     const text = await res.text();

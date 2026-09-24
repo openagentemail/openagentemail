@@ -255,7 +255,9 @@ export default {
 
     // 先 ack：投递超时默认 10s，慢 LLM 必须后台跑。
     // waitUntil 内失败不再有机会改响应 = 已声明的 best-effort；重投重复由 KV/文档兜底。
-    const work = processMail(env, data, eventKey, sender).catch(() => {});
+    const work = processMail(env, data, eventKey, sender).catch((err) =>
+      console.error('[worker] background processing failed:', err instanceof Error ? err.message : err),
+    );
     if (ctx && typeof ctx.waitUntil === 'function') {
       ctx.waitUntil(work);
     } else {
