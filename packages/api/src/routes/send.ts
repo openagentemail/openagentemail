@@ -38,13 +38,14 @@ function allowParentSendAsChild(auth: Auth, from: string): boolean {
   return child?.parentIdentity === auth.address.toLowerCase();
 }
 
+// #324：未知键拒绝（.strict），避免静默剥离 attachments 等同族键
 const sendSchema = z.object({
   from: emailField,
   to: z.union([emailField, z.array(emailField).min(1).max(50)]),
   subject: z.string().max(998),
   text: z.string().max(1_000_000),
   html: z.string().max(1_000_000).optional(),
-});
+}).strict();
 
 const historyQuerySchema = z.object({
   address: emailField.optional(),

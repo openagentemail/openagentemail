@@ -527,20 +527,22 @@ export function registerOpenAgentEmailTools(
   );
 
   tier("mail_send", "contained");
+  // #324：与 REST sendSchema 同治——z.object(...).strict()，广告 additionalProperties:false
   server.registerTool(
     "mail_send",
     {
       title: "Send Email",
       description:
         "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
-      inputSchema: {
+      inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
         subject: z.string().max(998).describe("Subject line"),
         text: z.string().max(1_000_000).describe("Plain-text body"),
         html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
-      },
-      outputSchema: sendOutputSchema,
+      }).strict(),
+      // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
+      outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
     ({ from, to, subject, text, html }) =>
