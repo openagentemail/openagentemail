@@ -387,6 +387,7 @@ undo external file changes, commits or other side effects.
 | Connect a client / inspect tool permissions | [Client guide](docs/mcp-clients.md) · [MCP tool reference](packages/mcp/README.md) |
 | Integrate HTTP APIs or outbound events | [REST reference](docs/api.md) · [Webhook specification](docs/rfcs/0001-outbound-webhooks.md) |
 | Explore external wakeup and framework integration | [Orca wake example](examples/webhook-wake/README.md) · [Adapter examples](examples/adapters/README.md) |
+| Webhook → headless agent reply (recipe + templates) | [Agent responder recipe](docs/agent-responder-recipe.md) · [Templates](examples/agent-responder/README.md) |
 | Understand exposure and privacy | [Security guide](docs/security.md) · [Report a vulnerability](SECURITY.md) |
 
 Framework examples and local fixtures are not evidence of a production end-to-end
