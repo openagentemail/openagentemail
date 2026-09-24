@@ -36,7 +36,7 @@ replying to yourself; two auto-responders (A↔B) can still loop and burn LLM
 quota on both sides — mitigate with a human-approval gate and/or a per-thread
 reply budget. Standard suppression (RFC 3834 `Auto-Submitted`) needs product
 support; current webhook events and message-read details do not expose that
-field.
+field. Tracked upstream as issue #363.
 
 ## MCP one-time registration
 
