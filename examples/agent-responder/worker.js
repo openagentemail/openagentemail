@@ -15,6 +15,8 @@
 const TOLERANCE_SEC = 300;
 const BODY_PROMPT_CHARS = 4000;
 const DEDUPE_TTL_SEC = 86400;
+// 与 receiver 同规格：未认证方可打满内存；256KiB 盖住 metadata 档 webhook 体
+const MAX_BODY_BYTES = 256 * 1024;
 
 /** WebCrypto HMAC-SHA256 → 小写 hex；payload = `${t}.${rawBody}` */
 async function hmacHex(secret, payload) {
@@ -55,17 +57,57 @@ async function verifySignature(header, rawBody, secret) {
 }
 
 /**
- * best-effort 去重：KV 无跨 isolate 原子 claim，check-then-set 重叠重投仍可能双发。
- * 要原子去重请上 Durable Objects / webhook-wake。
+ * 流式读请求体并累计字节；超 MAX_BODY_BYTES → 413。
+ * 有 Content-Length 且已超限则预拒，避免开流。
  */
-async function kvGetSeen(env, deliveryId) {
-  if (!deliveryId || !env.DEDUPE_KV) return false;
-  return Boolean(await env.DEDUPE_KV.get(deliveryId));
+async function readBodyLimited(request) {
+  const cl = request.headers.get('content-length');
+  if (cl != null && cl !== '') {
+    const n = Number.parseInt(cl, 10);
+    if (Number.isFinite(n) && n > MAX_BODY_BYTES) {
+      return { error: new Response('payload too large', { status: 413 }) };
+    }
+  }
+  if (!request.body) return { text: '' };
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+      return { error: new Response('payload too large', { status: 413 }) };
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(size);
+  let offset = 0;
+  for (const c of chunks) {
+    buf.set(c, offset);
+    offset += c.byteLength;
+  }
+  return { text: new TextDecoder().decode(buf) };
 }
 
-async function kvPutSeen(env, deliveryId) {
-  if (!deliveryId || !env.DEDUPE_KV) return;
-  await env.DEDUPE_KV.put(deliveryId, '1', { expirationTtl: DEDUPE_TTL_SEC });
+/**
+ * best-effort 去重：KV 无跨 isolate 原子 claim，check-then-set 重叠重投仍可能双发。
+ * 键=验签后 body.id（缺则回退 X-OAE-Delivery）——人工重投同 evt 会换新 delivery 头。
+ * 要原子去重请上 Durable Objects / webhook-wake。
+ */
+async function kvGetSeen(env, eventKey) {
+  if (!eventKey || !env.DEDUPE_KV) return false;
+  return Boolean(await env.DEDUPE_KV.get(eventKey));
+}
+
+async function kvPutSeen(env, eventKey) {
+  if (!eventKey || !env.DEDUPE_KV) return;
+  await env.DEDUPE_KV.put(eventKey, '1', { expirationTtl: DEDUPE_TTL_SEC });
 }
 
 /**
@@ -103,7 +145,7 @@ async function fetchMailBody(api, key, address, messageId, uidValidity) {
 }
 
 /** 取信→LLM→send；在 waitUntil 内跑，失败无法改已返回的 200 */
-async function processMail(env, data, deliveryId, sender) {
+async function processMail(env, data, eventKey, sender) {
   const { address, messageId, subject, uidValidity } = data;
   const api = String(env.OPENAGENTEMAIL_API_URL ?? '').replace(/\/+$/, '');
   const mailText = await fetchMailBody(
@@ -159,13 +201,15 @@ async function processMail(env, data, deliveryId, sender) {
     }),
   });
   if (!sendRes.ok) return;
-  await kvPutSeen(env, deliveryId);
+  await kvPutSeen(env, eventKey);
 }
 
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== 'POST') return new Response('not found', { status: 404 });
-    const rawBody = await request.text();
+    const limited = await readBodyLimited(request);
+    if (limited.error) return limited.error;
+    const rawBody = limited.text;
     const secret = env.WEBHOOK_SIGNING_SECRET ?? '';
     if (!secret.startsWith('whs_')) return new Response('misconfigured', { status: 500 });
     // 先验签再解 JSON
@@ -179,8 +223,12 @@ export default {
       return new Response('bad json', { status: 400 });
     }
     if (body?.type !== 'mail.received') return new Response('ok'); // ping 等：验通即可
-    const deliveryId = request.headers.get('X-OAE-Delivery');
-    if (await kvGetSeen(env, deliveryId)) return new Response('ok');
+    // 去重键：验签后 body.id；缺则回退 delivery 头（人工重投同 evt 换头）
+    const eventKey =
+      typeof body.id === 'string' && body.id
+        ? body.id
+        : request.headers.get('X-OAE-Delivery');
+    if (await kvGetSeen(env, eventKey)) return new Response('ok');
 
     const data = body.data ?? {};
     const { address, messageId, from } = data;
@@ -199,7 +247,7 @@ export default {
 
     // 先 ack：投递超时默认 10s，慢 LLM 必须后台跑。
     // waitUntil 内失败不再有机会改响应 = 已声明的 best-effort；重投重复由 KV/文档兜底。
-    const work = processMail(env, data, deliveryId, sender).catch(() => {});
+    const work = processMail(env, data, eventKey, sender).catch(() => {});
     if (ctx && typeof ctx.waitUntil === 'function') {
       ctx.waitUntil(work);
     } else {
