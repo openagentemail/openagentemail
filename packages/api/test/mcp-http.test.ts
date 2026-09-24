@@ -16,7 +16,10 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-mcp-http-'));
 process.env.UI_ENABLED = 'false';
 process.env.TASK_LEASES_ENABLED = 'true';
 
-const { describe, expect, test: bunTest } = await import('bun:test');
+const { describe, expect, test: bunTest, mock } = await import('bun:test');
+// #357 R1：合法大件 mail_send 须 SMTP 成功才能断到 queued（与 send.test 同款 mock）
+const sendMailMock = mock(async () => ({ messageId: '<sdk21-r1@test.example>' }));
+mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 const { createApp } = await import('../src/app.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { setTaskNowForTests } = await import('./support/task-test-seams.ts');
@@ -29,6 +32,14 @@ const {
   allowInsecureIssuerUrl,
   mcpAuthMetadataOptions,
 } = await import('../src/mcp/http.ts');
+const {
+  PROTOCOL_VERSION_META_KEY,
+  CLIENT_INFO_META_KEY,
+  CLIENT_CAPABILITIES_META_KEY,
+} = await import('@modelcontextprotocol/server');
+const { putAccessTokenForTests, resetOAuthStoreCacheForTests } = await import(
+  '../src/lib/oauth-store.ts'
+);
 const adminKey = [...config.apiKeys][0]!;
 
 const app = createApp({ uiEnabled: false });
@@ -1069,5 +1080,124 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
     // 须为输入校验失败，而非静默剥键后走到 SMTP
     expect(text).not.toMatch(/smtp_error/i);
     expect(/unrecognized|invalid (input|argument)|-32602|attachments/i.test(text)).toBe(true);
+  });
+});
+
+/**
+ * #357：MCP SDK 2.1.0 边界钉版（断言以实测落）。未采用 scopeChallenge（tier 等价）；DPoP 未验证·未启用。
+ */
+describe('MCP SDK 2.1.0 边界（#357）', () => {
+  const MiB = 1024 * 1024;
+  const post = (token: string, body: string, extra: Record<string, string> = {}) =>
+    app.request('/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: MCP_ACCEPT,
+        ...extra,
+      },
+      body,
+    });
+
+  test('a: body >16MiB → request_too_large；CJK ~6MB 合法件 → queued', async () => {
+    // 过限腿：命中我方 Hono bodyLimit（与 /v1 同形）；SDK 层 413 因 maxRequestBodySize=16MiB 不可达
+    const overBody = JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'tools/list',
+      params: { pad: 'x'.repeat(16 * MiB + 1) },
+    });
+    expect(Buffer.byteLength(overBody)).toBeGreaterThan(16 * MiB);
+    const over = await post(adminKey, overBody);
+    expect(over.status).toBe(413);
+    expect(await over.json()).toEqual({ error: 'request_too_large' });
+
+    // 合法大件腿：CJK 多字节（每字 3B）×2×~1M 字符 ≈ 6MB，落 (4MiB,16MiB]——证两门分裂已消
+    sendMailMock.mockImplementation(async () => ({ messageId: '<sdk21-r2@test.example>' }));
+    const { token, identity } = createIdentity({ localpart: 'sdk21-big' })!;
+    const underBody = JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: {
+        name: 'mail_send',
+        arguments: {
+          from: identity.address, to: 'sink@example.net', subject: 'big',
+          text: '測'.repeat(999_999),
+          html: 'あ'.repeat(999_999),
+        },
+      },
+    });
+    const underBytes = Buffer.byteLength(underBody);
+    expect(underBytes).toBeGreaterThan(4 * MiB);
+    expect(underBytes).toBeLessThanOrEqual(16 * MiB);
+    const under = await post(token, underBody);
+    expect(under.status).toBe(200);
+    const underJson = (await readMcpJson(under)) as {
+      error?: unknown;
+      result?: { isError?: boolean; structuredContent?: { queued?: boolean } };
+    };
+    expect(underJson.error).toBeUndefined();
+    expect(underJson.result?.isError).toBeFalsy();
+    expect(underJson.result?.structuredContent?.queued).toBe(true);
+  });
+
+  test('b: modern-envelope 缺头/不一致头 → 400（实测 -32020）', async () => {
+    const modernBody = JSON.stringify({
+      jsonrpc: '2.0', id: 10, method: 'tools/list',
+      params: {
+        _meta: {
+          [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+          [CLIENT_INFO_META_KEY]: { name: 'sdk21-hdr', version: '0.0.0' },
+          [CLIENT_CAPABILITIES_META_KEY]: {},
+        },
+      },
+    });
+    const missing = await post(adminKey, modernBody);
+    expect(missing.status).toBe(400);
+    const missingJson = (await missing.json()) as { error?: { code?: number; message?: string } };
+    expect(missingJson.error?.code).toBe(-32020);
+    expect(missingJson.error?.message).toMatch(/MCP-Protocol-Version|absent|disagree/i);
+
+    const mismatch = await post(adminKey, modernBody, { 'mcp-protocol-version': '2025-06-18' });
+    expect(mismatch.status).toBe(400);
+    const mismatchJson = (await mismatch.json()) as { error?: { code?: number; message?: string } };
+    expect(mismatchJson.error?.code).toBe(-32020);
+    expect(mismatchJson.error?.message).toMatch(/disagree|2026-07-28|2025-06-18/);
+  });
+
+  test('c: batch 数组仍 batch_not_supported（先行于 SDK cap 100）', async () => {
+    const res = await post(
+      adminKey,
+      JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }]),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe('batch_not_supported');
+  });
+
+  test('e: OAuth aud 不符 403 / critical 工具 OAuth 403 不变', async () => {
+    // 声明：未采用 SDK scopeChallenge；critical→OAuth 403 由自有 tier 层等价覆盖
+    resetOAuthStoreCacheForTests();
+    const { identity } = createIdentity({ localpart: 'sdk21-oauth' })!;
+    const badAud = 'sdk21-bad-aud-token-32bytes-pad!!';
+    putAccessTokenForTests({
+      token: badAud, grantId: 'g-sdk21-bad-aud', address: identity.address,
+      aud: 'http://evil.example/mcp', expiresAt: Date.now() + 3_600_000,
+      ensureGrant: { clientId: 'https://c.example', clientName: 'c' },
+    });
+    const audRes = await mcpRequest(badAud, 'tools/list');
+    expect(audRes.status).toBe(403);
+    expect(((await audRes.json()) as { error: string }).error).toBe('invalid_audience');
+
+    const oauthTok = 'sdk21-good-aud-token-32bytes-pad!';
+    putAccessTokenForTests({
+      token: oauthTok, grantId: 'g-sdk21-good-aud', address: identity.address,
+      aud: 'http://localhost/mcp', expiresAt: Date.now() + 3_600_000,
+      ensureGrant: { clientId: 'https://c.example', clientName: 'c' },
+    });
+    const crit = await mcpRequest(oauthTok, 'tools/call', {
+      name: 'mail_new_identity', arguments: { localpart: 'sdk21-deny' },
+    });
+    expect(crit.status).toBe(403);
+    const critBody = (await crit.json()) as { error: string; tier?: string };
+    expect(critBody.error).toBe('forbidden_tier');
+    expect(critBody.tier).toBe('critical');
   });
 });

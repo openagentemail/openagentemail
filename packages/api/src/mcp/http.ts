@@ -234,6 +234,8 @@ export function registerMcpHttpRoutes(app: Hono, options: McpHttpOptions): void 
       legacy: "stateless",
       // 工具调用无中途通知需求；json 模式便于测试与网关。
       responseMode: "json",
+      // #357 R2 / fx #4846：与 Hono /v1 同一 16MiB 边界，拒绝上游默认 4MiB 收窄造成两门分裂。
+      maxRequestBodySize: JSON_BODY_LIMIT_BYTES,
     },
   );
 
