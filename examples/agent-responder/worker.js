@@ -113,6 +113,7 @@ async function kvPutSeen(env, eventKey) {
 /**
  * 从 webhook from.address 取出可发信用邮箱。
  * 裸地址直用；"Name <email>" 取尖括号内；无法解析 → null（毒事件）。
+ * 拒控制字符 [\x00-\x1f]：NUL 等进 env/头会截断或抛错。
  */
 function parseSender(raw) {
   if (typeof raw !== 'string') return null;
@@ -120,7 +121,7 @@ function parseSender(raw) {
   if (!s) return null;
   const angle = s.match(/<([^<>@\s]+@[^<>@\s]+)>/);
   const candidate = (angle ? angle[1] : s).trim();
-  if (!/^[^\s@<>]+@[^\s@<>]+$/.test(candidate)) return null;
+  if (!/^[^\s@<>\x00-\x1f]+@[^\s@<>\x00-\x1f]+$/.test(candidate)) return null;
   return candidate.toLowerCase();
 }
 
@@ -178,11 +179,15 @@ async function processMail(env, data, eventKey, sender) {
       messages: [{ role: 'user', content: contentParts.join(' ') }],
     }),
   });
-  if (!llmRes.ok) return;
+  if (!llmRes.ok) {
+    console.error(`[worker] LLM non-2xx status=${llmRes.status}`);
+    return;
+  }
   let llmJson;
   try {
     llmJson = await llmRes.json();
-  } catch {
+  } catch (err) {
+    console.error('[worker] LLM json parse failed:', err instanceof Error ? err.message : err);
     return;
   }
   const replyText = llmJson?.choices?.[0]?.message?.content?.trim() || 'Thanks — received.';
@@ -200,7 +205,10 @@ async function processMail(env, data, eventKey, sender) {
       text: replyText,
     }),
   });
-  if (!sendRes.ok) return;
+  if (!sendRes.ok) {
+    console.error(`[worker] send non-2xx status=${sendRes.status}`);
+    return;
+  }
   await kvPutSeen(env, eventKey);
 }
 

@@ -7,15 +7,17 @@ OpenAgent.email does **not** run an LLM inside the product for you.
 | Variable | A (`receiver.mjs`) | B (`worker.js`) | Notes |
 | --- | --- | --- | --- |
 | `WEBHOOK_SIGNING_SECRET` | ✓ (receiver only) | ✓ | Displayed `whs_<64hex>` (prefix is part of the key); **not** passed to child CLI |
-| `OPENAGENTEMAIL_API_URL` | ✓ | ✓ | API base, no trailing slash |
+| `OPENAGENTEMAIL_API_URL` | ✓ | ✓ | API base, no trailing slash. **Remote must be https** (Bearer token crosses the wire in cleartext otherwise) |
 | `OPENAGENTEMAIL_API_KEY` | ✓ (child env) | ✓ | Identity token for MCP/REST |
 | `HEADLESS_CMD` | ✓ | — | Default `kimi -p`; set `claude -p` to swap |
 | `PORT` | ✓ (default 8787) | — | Local listen port |
 | `HOST` | ✓ (default `0.0.0.0`) | — | Bind address; use `127.0.0.1` for local-only |
+| `CHILD_TIMEOUT_MS` | ✓ (default `300000`) | — | Kill hung child after this many ms (template-level) |
+| `MAX_QUEUE` | ✓ (default `32`) | — | Wait-queue cap; excess POSTs get `503` (template-level) |
 | `LLM_API_URL` / `LLM_API_KEY` | — | ✓ | OpenAI-compatible chat endpoint |
 | `LLM_MODEL` | — | optional | Default `gpt-4o-mini` |
 | `DEDUPE_KV` | — | optional KV | **best-effort** dedupe (KV has no atomic claim; overlapping redeliveries may still double-send). For atomic dedupe use Durable Objects / [`webhook-wake`](../webhook-wake/). **Unbound = no dedupe.** |
-| Concurrency | in-process cap **1** (queue) | Worker isolate | **Before production, add concurrency limits / dedupe / rate limits — see [`examples/webhook-wake`](../webhook-wake/)** |
+| Concurrency | in-process cap **1** + queue **32** (excess → `503`) | Worker isolate | **Before production, add concurrency limits / dedupe / rate limits — see [`examples/webhook-wake`](../webhook-wake/)** |
 
 Secrets stay in env / wrangler secrets — never commit them.
 
@@ -27,7 +29,14 @@ fetch the message itself via MCP. There is also a **generation TOCTOU** between
 the receiver's `uidValidity` pre-check and the agent's later MCP read (MCP has
 no generation parameter); a mailbox rebuild in that window can mis-read — fix
 requires a product MCP change or [`webhook-wake`](../webhook-wake/) owning the
-read path. Tracked upstream as issue #362.
+read path. Tracked upstream as issue #362. Default `HOST=0.0.0.0` exposes the
+receiver on all interfaces — bind `127.0.0.1` (or put a reverse proxy in front)
+unless you intend LAN/public reachability. The self-address guard only blocks
+replying to yourself; two auto-responders (A↔B) can still loop and burn LLM
+quota on both sides — mitigate with a human-approval gate and/or a per-thread
+reply budget. Standard suppression (RFC 3834 `Auto-Submitted`) needs product
+support; current webhook events and message-read details do not expose that
+field.
 
 ## MCP one-time registration
 

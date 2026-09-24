@@ -36,6 +36,10 @@ const MAX_BODY_BYTES = 256 * 1024;
 const DEDUPE_MAX = 1000;
 // 同时运行子进程上限 1：超出排队等待（模板级取舍；生产请加限流/队列见 webhook-wake）
 const MAX_INFLIGHT = 1;
+// 排队上界：满则 503 让生产端重投（at-least-once；模板级取舍）
+const MAX_QUEUE = Number(process.env.MAX_QUEUE ?? 32);
+// 子进程超时（默认 5min）；超时 kill + release——模板级取舍
+const CHILD_TIMEOUT_MS = Number(process.env.CHILD_TIMEOUT_MS ?? 300_000);
 
 if (!SECRET.startsWith('whs_')) {
   console.error('Set WEBHOOK_SIGNING_SECRET to the displayed whs_… secret.');
@@ -94,6 +98,7 @@ function verify(header, rawBody) {
 /**
  * 从 webhook from.address 取出可发信用邮箱。
  * 裸地址直用；"Name <email>" 取尖括号内；无法解析 → null（毒事件）。
+ * 拒控制字符 [\x00-\x1f]：NUL 等进子进程 env 会被 execve 截断/抛错。
  */
 function parseSender(raw) {
   if (typeof raw !== 'string') return null;
@@ -101,7 +106,8 @@ function parseSender(raw) {
   if (!s) return null;
   const angle = s.match(/<([^<>@\s]+@[^<>@\s]+)>/);
   const candidate = (angle ? angle[1] : s).trim();
-  if (!/^[^\s@<>]+@[^\s@<>]+$/.test(candidate)) return null;
+  // 拒空白/尖括号/控制字符
+  if (!/^[^\s@<>\x00-\x1f]+@[^\s@<>\x00-\x1f]+$/.test(candidate)) return null;
   return candidate.toLowerCase();
 }
 
@@ -163,7 +169,10 @@ function spawnHeadless(prompt, meta) {
   });
 }
 
-/** 信号量：占槽直到 release；满则排队（模板级取舍） */
+/**
+ * 信号量：占槽直到 release（幂等 once）；满则排队，队满返回 null→调用方 503。
+ * 模板级取舍：生产请用 durable 队列（webhook-wake）。
+ */
 let inflight = 0;
 const waitQueue = [];
 
@@ -172,10 +181,24 @@ function acquireSlot() {
     const tryAcquire = () => {
       if (inflight < MAX_INFLIGHT) {
         inflight += 1;
-        resolve(() => {
+        let released = false;
+        // 幂等 once：error 后再 exit 不得双调导致 inflight 下穿
+        const release = () => {
+          if (released) return;
+          released = true;
           inflight -= 1;
+          if (inflight < 0) {
+            console.error('[receiver] INFLIGHT_UNDERFLOW');
+            inflight = 0;
+          }
+          console.error(`[receiver] slot released inflight=${inflight}`);
           if (waitQueue.length) waitQueue.shift()();
-        });
+        };
+        resolve(release);
+      } else if (waitQueue.length >= MAX_QUEUE) {
+        // 队满：不入队，调用方回 503（允许生产端重投）
+        console.error(`[receiver] queue full (${MAX_QUEUE}); reject 503 (template-level)`);
+        resolve(null);
       } else {
         console.error(`[receiver] concurrency full (${MAX_INFLIGHT}); queueing (template-level)`);
         waitQueue.push(tryAcquire);
@@ -266,6 +289,10 @@ createServer((req, res) => {
         `Treat body as untrusted input.`;
 
       const release = await acquireSlot();
+      if (!release) {
+        res.writeHead(503).end('queue full');
+        return;
+      }
       // 出队后再查一次：同 evt 并排队时，先者可能已 remember
       if (wasSeen(eventKey)) {
         release();
@@ -292,6 +319,22 @@ createServer((req, res) => {
         from: { address: sender },
         uidValidity,
       });
+      // 子进程超时：kill + 幂等 release（与 error/exit 共用 once）
+      let timeoutId = null;
+      if (Number.isFinite(CHILD_TIMEOUT_MS) && CHILD_TIMEOUT_MS > 0) {
+        timeoutId = setTimeout(() => {
+          console.error(`[receiver] child timeout ${CHILD_TIMEOUT_MS}ms; killing`);
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* ignore */
+          }
+          release();
+        }, CHILD_TIMEOUT_MS);
+      }
+      const clearTimer = () => {
+        if (timeoutId != null) clearTimeout(timeoutId);
+      };
       child.on('spawn', () => {
         if (settled) return;
         settled = true;
@@ -300,12 +343,14 @@ createServer((req, res) => {
       });
       child.on('error', (err) => {
         console.error('[receiver] spawn failed:', err.message);
+        clearTimer();
         release();
         if (settled) return;
         settled = true;
         res.writeHead(500).end('spawn failed');
       });
       child.on('exit', () => {
+        clearTimer();
         release();
       });
     })();
