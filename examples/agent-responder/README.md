@@ -44,23 +44,30 @@ Passing `OPENAGENTEMAIL_API_KEY` alone does **not** give `kimi` / `claude` the
 `mail_*` tools. Register the HTTP MCP endpoint once ([docs](../../docs/mcp-clients.md)):
 
 **kimi** — user `~/.kimi-code/mcp.json` or project `.kimi-code/mcp.json`
-(use the same base as CHANGE-ME 2 / `OPENAGENTEMAIL_API_URL`):
+(use the same base as CHANGE-ME 2 / `OPENAGENTEMAIL_API_URL`).
+This matches the product Connect page shape (token in headers). The file is
+user-level — prefer mode `600`:
 
 ```json
 {
   "mcpServers": {
     "openagentemail": {
       "url": "<你的 OPENAGENTEMAIL_API_URL>/mcp",
-      "bearerTokenEnvVar": "OPENAGENTEMAIL_API_KEY"
+      "headers": {
+        "Authorization": "Bearer <your identity token>"
+      }
     }
   }
 }
 ```
 
+Equivalent alternative: `"bearerTokenEnvVar": "OPENAGENTEMAIL_API_KEY"` (env
+reference form — token stays out of the file).
+
 **claude** (CLI):
 
 ```bash
-claude mcp add --transport http openagentemail \
+claude mcp add --transport http --scope user openagentemail \
   "<你的 OPENAGENTEMAIL_API_URL>/mcp" \
   --header "Authorization: Bearer ${OPENAGENTEMAIL_API_KEY}"
 ```
@@ -85,7 +92,8 @@ POST to `http://127.0.0.1:$PORT/`, expect `200` / bad sig → `401` / body >256K
 1. `npx wrangler secret put WEBHOOK_SIGNING_SECRET` (and the other secrets above).
 2. Point `[vars]` / secrets at your OpenAgent.email base URL and LLM endpoint.
    Optionally bind a KV namespace as `DEDUPE_KV` for **best-effort**
-   `X-OAE-Delivery` idempotency (24h TTL; not atomic across isolates).
+   `X-OAE-Delivery` / event-id idempotency (96h TTL to cover RFC-0001 §8.3's
+   72h retry window; not atomic across isolates).
    Without it, redeliveries may send duplicate replies.
 3. `npx wrangler deploy worker.js` — then create a `mail.received` subscription whose
    `url` is the Worker HTTPS URL (`contentScope: metadata`).

@@ -14,7 +14,8 @@
  */
 const TOLERANCE_SEC = 300;
 const BODY_PROMPT_CHARS = 4000;
-const DEDUPE_TTL_SEC = 86400;
+const DEDUPE_TTL_SEC = 345600; // 96h：覆盖 RFC-0001 §8.3 重试窗（11 次跨 72h）+ 余量
+
 // 与 receiver 同规格：未认证方可打满内存；256KiB 盖住 metadata 档 webhook 体
 const MAX_BODY_BYTES = 256 * 1024;
 

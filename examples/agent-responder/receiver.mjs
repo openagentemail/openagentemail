@@ -168,12 +168,14 @@ function childEnv(meta) {
   return env;
 }
 
-/** 返回 child；stdio 仅继承 stderr（stdout 含邮件正文时不进 receiver 日志） */
+/** 返回 child；stdio 仅继承 stderr（stdout 含邮件正文时不进 receiver 日志）。
+ * detached:true → 新 POSIX 进程组，超时可杀整组（含 shell 派生的孙进程）。 */
 function spawnHeadless(prompt, meta) {
   const quoted = `'${String(prompt).replace(/'/g, `'\\''`)}'`;
   return spawn(`${HEADLESS_CMD} ${quoted}`, {
     env: childEnv(meta),
     shell: true,
+    detached: true, // 自为进程组组长，便于 timeout 时 kill(-pid)
     stdio: ['ignore', 'ignore', 'inherit'],
   });
 }
@@ -328,15 +330,20 @@ createServer((req, res) => {
         from: { address: sender },
         uidValidity,
       });
-      // 子进程超时：kill + 幂等 release（与 error/exit 共用 once）
+      // 子进程超时：杀整进程组 + 幂等 release（与 error/exit 共用 once）
+      // POSIX：detached 子进程为组长；kill(-pid) 扫掉 shell 派生的孙进程
       let timeoutId = null;
       if (Number.isFinite(CHILD_TIMEOUT_MS) && CHILD_TIMEOUT_MS > 0) {
         timeoutId = setTimeout(() => {
-          console.error(`[receiver] child timeout ${CHILD_TIMEOUT_MS}ms; killing`);
+          console.error(`[receiver] child timeout ${CHILD_TIMEOUT_MS}ms; killing process group`);
           try {
-            child.kill('SIGKILL');
+            if (child.pid) process.kill(-child.pid, 'SIGKILL');
           } catch {
-            /* ignore */
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              /* ignore */
+            }
           }
           release();
         }, CHILD_TIMEOUT_MS);
