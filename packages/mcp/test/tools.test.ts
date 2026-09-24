@@ -11,9 +11,9 @@ type SchemaMap = Record<string, { safeParse(value: unknown): { success: boolean;
 type ToolConfig = {
   title?: string;
   description?: string;
-  // raw shape 或完整 z.object(...).strict()（#324 mail_send）均可能
+  // raw shape 或完整 z.object（#324 mail_send input/output）均可能
   inputSchema?: SchemaMap | z.ZodObject<z.ZodRawShape>;
-  outputSchema?: SchemaMap;
+  outputSchema?: SchemaMap | z.ZodObject<z.ZodRawShape>;
   annotations?: {
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
@@ -327,11 +327,13 @@ test("identity 输出 schema 覆盖 REST 的 token / pushContentTier", () => {
 });
 
 test("mail_send 输出含可选审计 id，缺省仍通过", () => {
-  const sendOut = toolConfigs.get("mail_send")!.outputSchema!;
+  // #324 R2：生产侧 outputSchema 已是 z.object(...)；桩里按 ZodObject/.shape 与 raw 双形态取字段
+  const raw = toolConfigs.get("mail_send")!.outputSchema!;
+  const sendOut = (raw instanceof z.ZodObject ? raw.shape : raw) as SchemaMap;
   expect(sendOut.queued!.safeParse(true).success).toBe(true);
   expect(sendOut.messageId!.safeParse("<m@test.example>").success).toBe(true);
   expect(sendOut.id!.safeParse("snd_abc").success).toBe(true);
-  const sendSchema = z.object(sendOut as z.ZodRawShape);
+  const sendSchema = raw instanceof z.ZodObject ? raw : z.object(sendOut as z.ZodRawShape);
   expect(sendSchema.safeParse({ queued: true, messageId: "<m@test.example>" }).success).toBe(true);
   expect(
     sendSchema.safeParse({ queued: true, messageId: "<m@test.example>", id: "snd_1" }).success,

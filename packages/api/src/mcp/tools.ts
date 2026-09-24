@@ -541,7 +541,8 @@ export function registerOpenAgentEmailTools(
         text: z.string().max(1_000_000).describe("Plain-text body"),
         html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
       }).strict(),
-      outputSchema: sendOutputSchema,
+      // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
+      outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
     ({ from, to, subject, text, html }) =>
