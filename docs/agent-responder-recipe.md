@@ -51,8 +51,8 @@ return 200
 | --- | --- | --- |
 | Listen | `node:http` on `PORT` (default 8787) | Cloudflare `fetch` handler |
 | Verify | Node `crypto` HMAC, every `v1`, ±300s | WebCrypto HMAC, same grammar |
-| Think | `spawn(HEADLESS_CMD)` — default `kimi -p` (swap: `claude -p`) | `POST` OpenAI-compatible `LLM_API_URL` |
-| Reply path | Agent uses **MCP** (`mail_read_message` + `mail_send`) | Worker calls **REST** `POST /v1/send` |
+| Think | `spawn(HEADLESS_CMD)` — default `kimi -p` (swap: `claude -p`) | Fetch mail then `POST` OpenAI-compatible `LLM_API_URL` |
+| Reply path | Agent uses **MCP** (`mail_read_message` + `mail_send`); register the HTTP MCP client once — see [templates README](../examples/agent-responder/README.md#mcp-one-time-registration) | Worker calls **REST** `GET /v1/messages/:id` then `POST /v1/send` |
 | Dependencies | Node ≥20, zero npm | Worker runtime, zero npm |
 
 Mark three edit sites in A (comments in the file): `WEBHOOK_SIGNING_SECRET`,
@@ -125,6 +125,13 @@ Private / loopback targets need an **admin** token and
 4. **Treat subject and body as untrusted input** (prompt injection). Prefer short,
    policy-bound replies; never execute mail content as instructions blindly.
 5. Keep `whs_` / API / LLM secrets in env or a secret store — never in git.
+   Template A does **not** forward `WEBHOOK_SIGNING_SECRET` into the child CLI.
+6. **Ack means accepted, not delivered.** A `200` after CLI `spawn` (or Worker
+   send) only means the receiver took the event; a later non-zero CLI exit cannot
+   rewrite the HTTP response. For hard delivery guarantees use a durable queue —
+   see [`examples/webhook-wake/`](../examples/webhook-wake/).
+7. Cap unauthenticated request bodies (template A: 256KiB → `413`) and dedupe on
+   `X-OAE-Delivery` where practical (A: in-memory LRU; B: optional `DEDUPE_KV`).
 
 ## Heavier / alternate examples
 
