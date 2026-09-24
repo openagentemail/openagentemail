@@ -16,7 +16,10 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-mcp-http-'));
 process.env.UI_ENABLED = 'false';
 process.env.TASK_LEASES_ENABLED = 'true';
 
-const { describe, expect, test: bunTest } = await import('bun:test');
+const { describe, expect, test: bunTest, mock } = await import('bun:test');
+// #357 R1：合法大件 mail_send 须 SMTP 成功才能断到 queued（与 send.test 同款 mock）
+const sendMailMock = mock(async () => ({ messageId: '<sdk21-r1@test.example>' }));
+mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 const { createApp } = await import('../src/app.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { setTaskNowForTests } = await import('./support/task-test-seams.ts');
@@ -1097,7 +1100,7 @@ describe('MCP SDK 2.1.0 边界（#357）', () => {
       body,
     });
 
-  test('a: body >4MiB → 413；~3.5MiB mail_send → 200', async () => {
+  test('a: body >4MiB → 413；schema 合法最大件 mail_send → queued', async () => {
     const overBody = JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'tools/list',
       params: { pad: 'x'.repeat(4 * MiB + 1) },
@@ -1109,6 +1112,8 @@ describe('MCP SDK 2.1.0 边界（#357）', () => {
     expect(overJson.error?.code).toBe(-32000);
     expect(overJson.error?.message).toMatch(/Payload Too Large|4194304/);
 
+    // R1：text/html 各 ≤1M（schema 合法），合计 ~2.2MB < 4MiB；断到 RPC 成功层（非仅 HTTP 200）
+    sendMailMock.mockImplementation(async () => ({ messageId: '<sdk21-r1@test.example>' }));
     const { token, identity } = createIdentity({ localpart: 'sdk21-big' })!;
     const underBody = JSON.stringify({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
@@ -1116,13 +1121,23 @@ describe('MCP SDK 2.1.0 边界（#357）', () => {
         name: 'mail_send',
         arguments: {
           from: identity.address, to: 'sink@example.net', subject: 'big',
-          text: 'y'.repeat(Math.floor(3.5 * MiB) - 500),
+          text: 't'.repeat(999_999),
+          html: 'h'.repeat(999_999),
         },
       },
     });
     expect(Buffer.byteLength(underBody)).toBeLessThan(4 * MiB);
-    expect(Buffer.byteLength(underBody)).toBeGreaterThan(3 * MiB);
-    expect((await post(token, underBody)).status).toBe(200);
+    // text+html 各 ~1M ASCII ≈ 2.0MB 体（无 JSON 转义膨胀）；须明显大于小件
+    expect(Buffer.byteLength(underBody)).toBeGreaterThan(1.9 * MiB);
+    const under = await post(token, underBody);
+    expect(under.status).toBe(200);
+    const underJson = (await readMcpJson(under)) as {
+      error?: unknown;
+      result?: { isError?: boolean; structuredContent?: { queued?: boolean } };
+    };
+    expect(underJson.error).toBeUndefined();
+    expect(underJson.result?.isError).toBeFalsy();
+    expect(underJson.result?.structuredContent?.queued).toBe(true);
   });
 
   test('b: modern-envelope 缺头/不一致头 → 400（实测 -32020）', async () => {
