@@ -146,9 +146,10 @@ async function checkGeneration(address, messageId, uidValidity) {
  * 白名单子进程 env：不传 WEBHOOK_SIGNING_SECRET——签名钥留在接收端，
  * 避免不可信邮件提示注入经 CLI 外泄后伪造 webhook。
  * 不传 OAE_SUBJECT：subject 不进 CLI 参数/环境，缩小注入面。
+ * Provider 凭证：按你的 provider 扩展；只转发存在的，不造空值。
  */
 function childEnv(meta) {
-  return {
+  const env = {
     PATH: process.env.PATH ?? '',
     HOME: process.env.HOME ?? '',
     LANG: process.env.LANG ?? '',
@@ -160,6 +161,11 @@ function childEnv(meta) {
     OAE_UID_VALIDITY: meta.uidValidity != null ? String(meta.uidValidity) : '',
     OAE_FROM_ADDRESS: String(meta.from?.address ?? ''),
   };
+  // 按你的 provider 扩展；只转发存在的，不造空值（签名钥仍绝不进）
+  for (const k of ['ANTHROPIC_API_KEY', 'KIMI_API_KEY', 'OPENAI_API_KEY']) {
+    if (process.env[k]) env[k] = process.env[k];
+  }
+  return env;
 }
 
 /** 返回 child；stdio 仅继承 stderr（stdout 含邮件正文时不进 receiver 日志） */

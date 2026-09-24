@@ -87,11 +87,13 @@ POST to `http://127.0.0.1:$PORT/`, expect `200` / bad sig → `401` / body >256K
    Optionally bind a KV namespace as `DEDUPE_KV` for **best-effort**
    `X-OAE-Delivery` idempotency (24h TTL; not atomic across isolates).
    Without it, redeliveries may send duplicate replies.
-3. `npx wrangler deploy` — then create a `mail.received` subscription whose `url`
-   is the Worker HTTPS URL (`contentScope: metadata`).
+3. `npx wrangler deploy worker.js` — then create a `mail.received` subscription whose
+   `url` is the Worker HTTPS URL (`contentScope: metadata`).
+   Or create your own `wrangler.toml` with `main = "worker.js"` and run
+   `npx wrangler deploy` from that directory.
 
-`npx wrangler dev` is enough for a local smoke: stub the LLM, POST a signed
-`mail.received` event, assert `/v1/send` lands a reply.
+`npx wrangler dev worker.js` is enough for a local smoke: stub the LLM, POST a
+signed `mail.received` event, assert `/v1/send` lands a reply.
 
 ## See also
 
