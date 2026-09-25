@@ -4,6 +4,10 @@ All notable changes to this project are documented here, one section per release
 
 ## Unreleased
 
+### Added
+
+- **API: 外部转发耐久基座（默认关，不可转发）** (#106 A1)：新增实例总闸 `FORWARDING_ENABLED`（默认 `false`，两份 Compose 与 `.env.example` 同缺省）。显式 `true` 时要求**显式** `TASK_SIGNING_SECRET`≥32，禁止回退 SMTP 密码。新增 `forward-store` 逐身份一条外部目的地址的原子落盘（`DATA_DIR/forwarding.json`，0700/0600，损坏/未知版本 fail-closed）。本片无发送路径、不接路由/watcher/SMTP/UI、未部署；合并 ≠ 生效。
+
 ### Fixed
 
 - **API/MCP: `POST /v1/send` 与 `mail_send` 未知键静默剥离止血** (#324)：`sendSchema` / `mail_send` inputSchema 补 `.strict()`；未知键（含 `attachments`、拼错字段）→ 400 `invalid_request`（`unrecognized_keys` 点名键）／MCP 工具调用报错且不发信。五键契约与既有 400 形态不变；不实现附件能力。**合并 ≠ 生效，生效于下次部署窗**。

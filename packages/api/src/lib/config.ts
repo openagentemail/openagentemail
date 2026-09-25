@@ -183,6 +183,12 @@ const envSchema = z.object({
   // Notification transport. Docker Compose enables ntfy by default; keeping
   // the bare-process default off preserves the lightweight API test/runtime.
   NTFY_ENABLED: z.enum(['true', 'false']).default('false'),
+  // #106 A1：转发总闸默认关；true 须显式 TASK_SIGNING_SECRET≥32；无发送路径。
+  FORWARDING_ENABLED: z.preprocess(
+    emptyAsUndefined,
+    z.enum(['true', 'false']).default('false'),
+  ),
+
   // Outbound webhooks (§10.1).
   WEBHOOKS_ENABLED: z.enum(['true', 'false']).default('false'),
   WEBHOOK_SIGNING_SECRET: z.string().min(32).optional(),
@@ -425,6 +431,19 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     }
   }
 
+  // 转发总闸：必须用显式 TASK_SIGNING_SECRET，禁止回退 SMTP_PASS。
+  if (raw.FORWARDING_ENABLED === 'true') {
+    const explicitTaskSecret = raw.TASK_SIGNING_SECRET;
+    if (!explicitTaskSecret) {
+      throw new Error('TASK_SIGNING_SECRET is required when FORWARDING_ENABLED is true');
+    }
+    if (explicitTaskSecret.length < 32) {
+      throw new Error(
+        'TASK_SIGNING_SECRET must be at least 32 characters when FORWARDING_ENABLED is true',
+      );
+    }
+  }
+
   if (raw.WEBHOOK_PAYLOAD_MAX_BYTES > JSON_BODY_LIMIT_BYTES) {
     throw new Error('WEBHOOK_PAYLOAD_MAX_BYTES must be <= JSON_BODY_LIMIT_BYTES');
   }
@@ -461,6 +480,8 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     // a bare-process config yet. Both Compose variants require the dedicated
     // secret, which is the supported v0.4 deployment path.
     taskSigningSecret,
+    // 显式 TASK_SIGNING_SECRET；未配置则为 undefined，禁止转发 HMAC 回退 SMTP_PASS。
+    taskSigningSecretExplicit: raw.TASK_SIGNING_SECRET,
     taskLeasesEnabled: raw.TASK_LEASES_ENABLED === 'true',
     // M3 与 leases 总闸独立；默认关，灰度后再开。
     taskLeasesExpiryAuditM3: raw.TASK_LEASES_EXPIRY_AUDIT_M3 === 'true',
@@ -487,6 +508,10 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
       configPath: join(raw.DATA_DIR, 'ntfy', 'server.yml'),
       pushPolicy: raw.PUSH_POLICY,
       notifyRateLimit: raw.NOTIFY_RATE_LIMIT,
+    },
+    // A1 仅暴露开关；无发送器、无 relay、无 scanner。
+    forwarding: {
+      enabled: raw.FORWARDING_ENABLED === 'true',
     },
     webhooks: {
       enabled: raw.WEBHOOKS_ENABLED === 'true',

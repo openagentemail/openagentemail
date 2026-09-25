@@ -301,6 +301,8 @@ services:
       OAE_PUBLIC_EDGE: ${OAE_PUBLIC_EDGE:-false}
       # 出站 webhook：默认关闭，插值默认与 parseConfig 一致
       WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-false}
+      # #106 A1：外部转发总闸，默认关；true 仍无发送路径，且要求显式 TASK_SIGNING_SECRET≥32
+      FORWARDING_ENABLED: ${FORWARDING_ENABLED:-false}
       # 可选签名根：YAML null 透传宿主值；未设置则缺席，避免 ${VAR:-} 注入空串
       WEBHOOK_SIGNING_SECRET:
       WEBHOOK_SIGNING_SECRET_PREVIOUS:

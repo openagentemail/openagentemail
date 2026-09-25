@@ -743,3 +743,62 @@ describe('WEBHOOKS_ENABLED configuration (#128 PR2)', () => {
   });
 });
 
+describe('FORWARDING_ENABLED configuration (#106 A1)', () => {
+  test('defaults to false and exposes no send path', () => {
+    const config = parseConfig(requiredEnv);
+    expect(config.forwarding.enabled).toBe(false);
+    expect(config.taskSigningSecret).toBe('smtp-secret');
+    expect(config.taskSigningSecretExplicit).toBeUndefined();
+    expect(Object.keys(config.forwarding)).toEqual(['enabled']);
+    expect(config.forwarding).not.toHaveProperty('send');
+    expect(config.forwarding).not.toHaveProperty('smtp');
+  });
+
+  test('blank interpolation stays disabled', () => {
+    expect(parseConfig({ ...requiredEnv, FORWARDING_ENABLED: '' }).forwarding.enabled).toBe(false);
+    expect(parseConfig({ ...requiredEnv, FORWARDING_ENABLED: '   ' }).forwarding.enabled).toBe(false);
+  });
+
+  test('refuses enable without explicit TASK_SIGNING_SECRET ≥32; never uses SMTP_PASS', () => {
+    expect(() => parseConfig({ ...requiredEnv, FORWARDING_ENABLED: 'true' })).toThrow(
+      'TASK_SIGNING_SECRET is required when FORWARDING_ENABLED is true',
+    );
+    expect(() =>
+      parseConfig({ ...requiredEnv, FORWARDING_ENABLED: 'true', TASK_SIGNING_SECRET: 'a'.repeat(16) }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters when FORWARDING_ENABLED is true');
+    expect(() =>
+      parseConfig({ ...requiredEnv, FORWARDING_ENABLED: 'true', TASK_SIGNING_SECRET: 'a'.repeat(31) }),
+    ).toThrow('TASK_SIGNING_SECRET must be at least 32 characters when FORWARDING_ENABLED is true');
+
+    const smtpPassword = 'smtp-password-must-not-unlock-forwarding';
+    try {
+      parseConfig({
+        ...requiredEnv,
+        SMTP_PASS: smtpPassword,
+        FORWARDING_ENABLED: 'true',
+      });
+      throw new Error('expected reject');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      expect(message).toContain('TASK_SIGNING_SECRET is required when FORWARDING_ENABLED is true');
+      expect(message).not.toContain(smtpPassword);
+    }
+  });
+
+  test('explicit 32-char secret enables the switch only; still no send fields', () => {
+    const config = parseConfig({
+      ...requiredEnv,
+      FORWARDING_ENABLED: 'true',
+      TASK_SIGNING_SECRET: 'a'.repeat(32),
+    });
+    expect(config.forwarding.enabled).toBe(true);
+    expect(config.taskSigningSecret).toBe('a'.repeat(32));
+    expect(Object.keys(config.forwarding)).toEqual(['enabled']);
+  });
+
+  test('rejects non-boolean string values', () => {
+    expect(() => parseConfig({ ...requiredEnv, FORWARDING_ENABLED: '1' })).toThrow();
+    expect(() => parseConfig({ ...requiredEnv, FORWARDING_ENABLED: 'yes' })).toThrow();
+  });
+});
+
