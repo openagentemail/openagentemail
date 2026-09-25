@@ -197,7 +197,9 @@ function isValidMailbox(address: string): boolean {
   if (!local || !domain) return false;
   if (Buffer.byteLength(local, 'utf8') > SMTP_LOCAL_PART_MAX_OCTETS) return false;
   if (!SMTP_LOCAL_PART_PATTERN.test(local)) return false;
-  const labels = domain.replace(/\.+$/, '').split('.');
+  // 多尾点非法；单尾点按 DNS 绝对域名兼容，本域目的仍由 isInstanceDomain 拒绝。
+  if (domain.endsWith('..')) return false;
+  const labels = domain.replace(/\.$/, '').split('.');
   if (labels.length < 2) return false;
   return labels.every(
     (label) =>
@@ -215,22 +217,35 @@ function normalizeDestination(destination: string): string {
   return `${trimmed.slice(0, at)}@${trimmed.slice(at + 1).toLowerCase()}`;
 }
 
-function assertDestination(destination: string): string {
+function assertDestinationShape(destination: string): string {
   const dest = normalizeDestination(destination);
   if (!isValidMailbox(dest) || CONTROL_CHAR_PATTERN.test(destination)) {
     throw new ForwardStoreError('invalid_destination', 'forwarding destination is invalid');
   }
+  return dest;
+}
+
+function assertDestination(destination: string): string {
+  const dest = assertDestinationShape(destination);
   if (isInstanceDomain(mailboxDomain(dest))) {
     throw new ForwardStoreError('instance_destination', 'forwarding destination is invalid');
   }
   return dest;
 }
 
-function assertIdentityAddress(address: string): string {
+function assertIdentityShape(address: string): string {
   const addr = address.trim().toLowerCase();
+  if (addr.endsWith('.')) {
+    throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
+  }
   if (!isValidMailbox(addr) || CONTROL_CHAR_PATTERN.test(address)) {
     throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
   }
+  return addr;
+}
+
+function assertIdentityAddress(address: string): string {
+  const addr = assertIdentityShape(address);
   if (!isInstanceDomain(mailboxDomain(addr))) {
     throw new ForwardStoreError('foreign_identity', 'forwarding identity address is invalid');
   }
@@ -241,6 +256,15 @@ function assertVerification(
   value: ForwardingVerificationMeta | null | undefined,
 ): ForwardingVerificationMeta | null {
   if (value == null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new ForwardStoreError('invalid_verification', 'verification metadata rejected');
+  }
+  // 只许 digest/expiresAt；额外键（含 verification_code）拒读写，错误不带回显。
+  for (const key of Object.keys(value)) {
+    if (key !== 'digest' && key !== 'expiresAt') {
+      throw new ForwardStoreError('invalid_verification', 'verification metadata rejected');
+    }
+  }
   if (hasForbiddenPlaintextKey(value)) {
     throw new ForwardStoreError('plaintext_forbidden', 'verification metadata rejected');
   }
@@ -263,16 +287,36 @@ function assertVerifiedAt(value: string | null): void {
   }
 }
 
-/** 读盘失败 fail-closed；写入前失败拒写。active 必须带 verifiedAt。 */
-function assertStoreInvariants(rules: ForwardingRule[]): void {
+/** 与读盘同等字段形态；未知 state / 无效 id 写前拒绝。 */
+function assertRuleFields(rule: unknown): asserts rule is ForwardingRule {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+    throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
+  }
+  const r = rule as Record<string, unknown>;
+  if (
+    typeof r.id !== 'string' ||
+    !r.id.startsWith('fwd_') ||
+    typeof r.address !== 'string' ||
+    typeof r.destination !== 'string' ||
+    typeof r.state !== 'string' ||
+    !RULE_STATES.has(r.state as ForwardingRuleState) ||
+    typeof r.createdAt !== 'string' ||
+    typeof r.updatedAt !== 'string' ||
+    (r.verifiedAt !== null && typeof r.verifiedAt !== 'string')
+  ) {
+    throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
+  }
+}
+
+function assertStoreStructure(rules: ForwardingRule[]): void {
   const ids = new Set<string>();
   const addresses = new Set<string>();
   for (const rule of rules) {
-    const address = assertIdentityAddress(rule.address);
+    const address = assertIdentityShape(rule.address);
     if (rule.address !== address) {
       throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
     }
-    assertDestination(rule.destination);
+    assertDestinationShape(rule.destination);
     assertVerification(rule.verification);
     assertVerifiedAt(rule.verifiedAt);
     if (rule.state === 'active' && !rule.verifiedAt) {
@@ -284,6 +328,22 @@ function assertStoreInvariants(rules: ForwardingRule[]): void {
     ids.add(rule.id);
     addresses.add(address);
   }
+}
+
+function assertStoreDomainPolicy(rules: ForwardingRule[]): void {
+  for (const rule of rules) {
+    if (!isInstanceDomain(mailboxDomain(rule.address))) {
+      throw new ForwardStoreError('foreign_identity', 'forwarding identity address is invalid');
+    }
+    if (isInstanceDomain(mailboxDomain(rule.destination))) {
+      throw new ForwardStoreError('instance_destination', 'forwarding destination is invalid');
+    }
+  }
+}
+
+function assertStoreInvariants(rules: ForwardingRule[]): void {
+  assertStoreStructure(rules);
+  assertStoreDomainPolicy(rules);
 }
 
 function parseFile(content: string): ForwardingStoreFile {
@@ -319,34 +379,35 @@ function parseFile(content: string): ForwardingStoreFile {
       markStoreFailClosed('invalid_rule_item');
       throw new ForwardStoreCorruptError('forwarding.json item is not an object');
     }
-    const r = item as Record<string, unknown>;
-    if (
-      typeof r.id !== 'string' ||
-      !r.id.startsWith('fwd_') ||
-      typeof r.address !== 'string' ||
-      typeof r.destination !== 'string' ||
-      typeof r.state !== 'string' ||
-      !RULE_STATES.has(r.state as ForwardingRuleState) ||
-      typeof r.createdAt !== 'string' ||
-      typeof r.updatedAt !== 'string' ||
-      (r.verifiedAt !== null && typeof r.verifiedAt !== 'string')
-    ) {
+    try {
+      assertRuleFields(item);
+    } catch {
       markStoreFailClosed('invalid_rule_fields');
       throw new ForwardStoreCorruptError('forwarding.json invalid record fields');
     }
     try {
-      assertVerification(r.verification as ForwardingVerificationMeta | null | undefined);
+      assertVerification(
+        (item as ForwardingRule).verification as ForwardingVerificationMeta | null | undefined,
+      );
     } catch {
       markStoreFailClosed('invalid_verification');
       throw new ForwardStoreCorruptError('forwarding.json invalid verification');
     }
   }
 
+  // 先全表静态结构，再本域策略；仅策略冲突不写永久 marker。
   try {
-    assertStoreInvariants(root.rules as ForwardingRule[]);
+    assertStoreStructure(root.rules as ForwardingRule[]);
   } catch {
     markStoreFailClosed('invariant_violation');
     throw new ForwardStoreCorruptError('forwarding.json invariant violation');
+  }
+  try {
+    assertStoreDomainPolicy(root.rules as ForwardingRule[]);
+  } catch (err) {
+    const code = err instanceof ForwardStoreError ? err.code : '';
+    console.error(`[forward-store] HIGH: fail-closed due to ${code || 'policy_conflict'}`);
+    throw new ForwardStoreCorruptError('forwarding store rejected by current domain policy');
   }
 
   return root as ForwardingStoreFile;
@@ -374,6 +435,9 @@ export function writeForwardingStore(data: ForwardingStoreFile): void {
   }
   if (hasForbiddenPlaintextKey(data)) {
     throw new ForwardStoreError('plaintext_forbidden', 'verification metadata rejected');
+  }
+  for (const rule of data.rules) {
+    assertRuleFields(rule);
   }
   assertStoreInvariants(data.rules);
 
@@ -555,14 +619,14 @@ export function deleteForwardingRulesForAddress(address: string): ForwardingRule
   return removed;
 }
 
-/** 非 bun test 拒绝；且 DATA_DIR 必须在 tmpdir scratch，防 /tmp 生产目录。 */
+/** 非 bun test 拒绝；DATA_DIR 必须是 tmpdir 下 scratch 子目录，禁止等于 tmp 根。 */
 function assertTestOnlyHelper(): void {
   if (process.env.BUN_TEST !== '1') {
     throw new ForwardStoreError('test_helper_refused', 'test helper refused');
   }
   const dir = resolve(config.dataDir);
   const tmp = resolve(tmpdir());
-  if (dir !== tmp && !dir.startsWith(`${tmp}/`)) {
+  if (dir === tmp || !dir.startsWith(`${tmp}/`)) {
     throw new ForwardStoreError('test_helper_refused', 'test helper refused');
   }
 }

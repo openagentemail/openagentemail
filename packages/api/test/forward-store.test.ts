@@ -345,6 +345,13 @@ describe('#106 A1 forwarding store', () => {
     }
     expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
     expect(getForwardingRuleByAddress('alice@test.example')?.destination).toBe('user@gmail.com');
+    (config as { dataDir: string }).dataDir = tmpdir();
+    try {
+      expect(() => resetForwardingStoreForTests()).toThrow(ForwardStoreError);
+    } finally {
+      (config as { dataDir: string }).dataDir = prev;
+    }
+    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
   });
 
   test('R2: case-folded identity dup, schemaVersion write reject, test-only seams', () => {
@@ -376,5 +383,113 @@ describe('#106 A1 forwarding store', () => {
       process.env.BUN_TEST = prevBun;
     }
     expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+  });
+
+  test('R3: raw write state/id, multi-dot dest, verification extras', () => {
+    const good = createRule('alice@test.example', 'user@gmail.com');
+    const before = readFileSync(storeFile());
+    expect(() =>
+      writeForwardingStore({ schemaVersion: 1, rules: [{ ...good, state: 'forwarding' }] } as never),
+    ).toThrow(ForwardStoreError);
+    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    expect(() =>
+      writeForwardingStore({ schemaVersion: 1, rules: [{ ...good, id: 'not-fwd' }] } as never),
+    ).toThrow(ForwardStoreError);
+    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    expect(() => createRule('bob@test.example', 'user@gmail.com..')).toThrow(ForwardStoreError);
+    expect(() => createRule('bob@test.example', 'other@test.example.')).toThrow(ForwardStoreError);
+    expect(() => createRule('alice@test.example.', 'user@gmail.com')).toThrow(ForwardStoreError);
+    expect(() =>
+      writeForwardingStore({
+        schemaVersion: 1,
+        rules: [{ ...good, address: 'alice@test.example.' }],
+      }),
+    ).toThrow(ForwardStoreError);
+    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    const extras = {
+      digest: digestForwardingVerificationCode('alice@test.example', '123456'),
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      verification_code: '123456',
+    };
+    try {
+      writeForwardingStore({
+        schemaVersion: 1,
+        rules: [{ ...good, verification: extras }] as never,
+      } as never);
+      throw new Error('expected reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ForwardStoreError);
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain('user@gmail.com');
+      expect(message).not.toContain('123456');
+    }
+    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    seedStore({ schemaVersion: 1, rules: [fixtureRule({ verification: extras })] });
+    try {
+      readForwardingStore();
+      throw new Error('expected reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain('user@gmail.com');
+      expect(message).not.toContain('123456');
+    }
+    seedStore({ schemaVersion: 1, rules: [fixtureRule({ address: 'alice@test.example.' })] });
+    expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
+  });
+
+  test('R3: domain policy conflict is not a permanent fail-closed', () => {
+    known.add('cara@extra.test');
+    const extra = createRule('cara@extra.test', 'cara@gmail.com');
+    const domains = (config as { allDomains: Set<string> }).allDomains;
+    domains.delete('extra.test');
+    try {
+      readForwardingStore();
+      throw new Error('expected reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain('cara@gmail.com');
+    } finally {
+      domains.add('extra.test');
+    }
+    expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+    expect(getForwardingRule(extra.id)?.address).toBe('cara@extra.test');
+
+    resetScratch();
+    const alice = createRule('alice@test.example', 'user@gmail.com');
+    domains.add('gmail.com');
+    try {
+      readForwardingStore();
+      throw new Error('expected reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
+      const message = error instanceof Error ? error.message : '';
+      expect(message).not.toContain('user@gmail.com');
+    } finally {
+      domains.delete('gmail.com');
+    }
+    expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+    expect(getForwardingRule(alice.id)?.destination).toBe('user@gmail.com');
+
+    seedStore('NOT JSON');
+    expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
+    expect(existsSync(`${storeFile()}.failclosed`)).toBe(true);
+
+    resetScratch();
+    domains.delete('extra.test');
+    try {
+      seedStore({
+        schemaVersion: 1,
+        rules: [
+          fixtureRule({ id: 'fwd_a', address: 'cara@extra.test', destination: 'cara@gmail.com' }),
+          fixtureRule({ id: 'fwd_b', address: 'not-a-mailbox', destination: 'user@gmail.com' }),
+        ],
+      });
+      expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
+      expect(existsSync(`${storeFile()}.failclosed`)).toBe(true);
+    } finally {
+      domains.add('extra.test');
+    }
   });
 });
