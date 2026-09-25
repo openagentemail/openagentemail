@@ -40,6 +40,7 @@ const {
   ForwardStoreCorruptError,
   ForwardStoreError,
 } = await import('../src/lib/forward-store.ts');
+const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 
 const TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-forward-store-'));
 const originalDataDir = config.dataDir;
@@ -522,5 +523,40 @@ describe('#106 A1 forwarding store', () => {
     } finally {
       domains.add('extra.test');
     }
+  });
+
+  test('A′ identity local-part aligns with createIdentity', () => {
+    // 真实建身份+findIdentity；外域身份/不存在仍拒
+    for (const lp of ['foo_', 'foo-', 'a..b', 'first_last']) {
+      resetScratch();
+      const addr = createIdentity({ localpart: lp, issueToken: false })!.identity.address;
+      const created = createForwardingRule({
+        address: addr,
+        destination: 'user@gmail.com',
+        identityExists: (a) => Boolean(findIdentity(a)),
+      });
+      expect(created.address).toBe(`${lp}@test.example`);
+      writeForwardingStore({ schemaVersion: 1, rules: [created] });
+      expect(readForwardingStore().rules[0]?.address).toBe(`${lp}@test.example`);
+    }
+    expect(() =>
+      createForwardingRule({
+        address: 'foo_@gmail.com',
+        destination: 'user@outlook.com',
+        identityExists: () => true,
+      }),
+    ).toThrow(
+      new ForwardStoreError('foreign_identity', 'forwarding identity address is invalid'),
+    );
+    // 本域身份 identityExists=false 仍拒 identity_not_found
+    expect(() =>
+      createForwardingRule({
+        address: 'foo_@test.example',
+        destination: 'user@gmail.com',
+        identityExists: () => false,
+      }),
+    ).toThrow(
+      new ForwardStoreError('identity_not_found', 'identity not found'),
+    );
   });
 });

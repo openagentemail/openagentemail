@@ -8,6 +8,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { config } from './config.ts';
+import { LOCALPART_RE } from './identities.ts'; // 身份 local-part 与 createIdentity 同源
 
 export const FORWARD_STORE_SCHEMA_VERSION = 1;
 export const FORWARD_STORE_FILE = 'forwarding.json';
@@ -157,7 +158,7 @@ function hasForbiddenPlaintextKey(value: unknown): boolean {
   return false;
 }
 
-function isValidMailbox(address: string): boolean {
+function isValidMailbox(address: string, localPartRe = SMTP_LOCAL_PART_PATTERN): boolean {
   if (typeof address !== 'string' || CONTROL_CHAR_PATTERN.test(address)) return false;
   if (address.length > SMTP_MAILBOX_MAX_LENGTH || address.includes(' ')) return false;
   const at = address.lastIndexOf('@');
@@ -166,7 +167,7 @@ function isValidMailbox(address: string): boolean {
   const domain = address.slice(at + 1);
   if (!local || !domain) return false;
   if (Buffer.byteLength(local, 'utf8') > SMTP_LOCAL_PART_MAX_OCTETS) return false;
-  if (!SMTP_LOCAL_PART_PATTERN.test(local)) return false;
+  if (!localPartRe.test(local)) return false; // 缺省严 SMTP；身份调用方传入 LOCALPART_RE
   // 多尾点非法；单尾点按 DNS 绝对域名兼容，本域目的仍由 isInstanceDomain 拒绝。
   if (domain.endsWith('..')) return false;
   const labels = domain.replace(/\.$/, '').split('.');
@@ -201,9 +202,9 @@ function assertDestination(destination: string): string {
 }
 
 function assertIdentityShape(address: string): string {
-  // 静态只验单尾点语法与 trim/小写规范形；不读 allDomains。
+  // 静态只验单尾点语法与 trim/小写规范形；身份 local-part 用 LOCALPART_RE。
   const addr = address.trim().toLowerCase();
-  if (!isValidMailbox(addr) || CONTROL_CHAR_PATTERN.test(address)) {
+  if (!isValidMailbox(addr, LOCALPART_RE) || CONTROL_CHAR_PATTERN.test(address)) {
     throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
   }
   return addr;
