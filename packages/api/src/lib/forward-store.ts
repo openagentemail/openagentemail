@@ -400,6 +400,8 @@ export function readForwardingStore(): ForwardingStoreFile {
 export function writeForwardingStore(data: ForwardingStoreFile): void {
   checkFailClosed();
   ensureDataDir();
+  // 覆盖前复用读路径校验旧正本；缺失则允许首次新建
+  readForwardingStore();
   if (data.schemaVersion !== FORWARD_STORE_SCHEMA_VERSION) {
     throw new ForwardStoreError('unsupported_schema_version', 'unsupported schemaVersion');
   }

@@ -581,4 +581,20 @@ describe('#106 A1 forwarding store', () => {
     expect(existsSync(`${storeFile()}.failclosed`)).toBe(true);
     expect(readFileSync(`${storeFile()}.failclosed`, 'utf8')).toBe('invalid_rule_fields\n');
   });
+
+  test('P1: raw write refuses corrupt/unknown original; first/valid ok', () => {
+    const next = { schemaVersion: 1 as const, rules: [fixtureRule()] } as never;
+    // 负控：损坏 JSON / 未知版本各自拒写、原件字节不变、对应 marker
+    for (const [payload, marker] of [['NOT JSON', 'json_parse_error'], [{ schemaVersion: 99, rules: [] }, 'unsupported_schema_version']] as [unknown, string][]) {
+      seedStore(payload);
+      expect(() => writeForwardingStore(next)).toThrow(ForwardStoreCorruptError);
+      expect(readFileSync(storeFile(), 'utf8')).toBe(typeof payload === 'string' ? payload : JSON.stringify(payload));
+      expect(readFileSync(`${storeFile()}.failclosed`, 'utf8')).toBe(`${marker}\n`);
+    }
+    // 正控：无正本可首次新建；有效旧正本仍可 raw write
+    resetScratch();
+    writeForwardingStore(next);
+    writeForwardingStore({ schemaVersion: 1, rules: [fixtureRule({ destination: 'keep@outlook.com' })] } as never);
+    expect(readForwardingStore().rules[0]?.destination).toBe('keep@outlook.com');
+  });
 });
