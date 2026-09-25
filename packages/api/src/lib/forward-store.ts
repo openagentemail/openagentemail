@@ -255,7 +255,7 @@ function assertVerifiedAt(value: string | null): void {
   }
 }
 
-/** 与读盘同等字段形态；未知 state / 无效 id 写前拒绝。 */
+/** 与读盘同等字段形态；未知 state / 无效 id / 缺 verification 自有键或值为 undefined 写前拒绝。 */
 function assertRuleFields(rule: unknown): asserts rule is ForwardingRule {
   if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
     throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
@@ -264,7 +264,9 @@ function assertRuleFields(rule: unknown): asserts rule is ForwardingRule {
   if (hasUnknownKeys(r, RULE_KEYS) || typeof r.id !== 'string' || !r.id.startsWith('fwd_') ||
       typeof r.address !== 'string' || typeof r.destination !== 'string' || typeof r.state !== 'string' ||
       !RULE_STATES.has(r.state as ForwardingRuleState) || typeof r.createdAt !== 'string' ||
-      typeof r.updatedAt !== 'string' || (r.verifiedAt !== null && typeof r.verifiedAt !== 'string')) {
+      typeof r.updatedAt !== 'string' || (r.verifiedAt !== null && typeof r.verifiedAt !== 'string') ||
+      // verification 须为自有键；值可为 null，缺键或 undefined 不可接受
+      !Object.hasOwn(r, 'verification') || r.verification === undefined) {
     throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
   }
 }

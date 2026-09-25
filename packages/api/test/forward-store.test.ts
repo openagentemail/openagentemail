@@ -559,4 +559,26 @@ describe('#106 A1 forwarding store', () => {
       new ForwardStoreError('identity_not_found', 'identity not found'),
     );
   });
+
+  test('P1: missing verification own-key rejects write and fail-closes read', () => {
+    // 正控：verification:null 可读写；缺自有键或值为 undefined 才拒。
+    const good = createRule('alice@test.example', 'user@gmail.com');
+    expect(good.verification).toBeNull();
+    const { verification: _omit, ...noKey } = good;
+    expect(() =>
+      writeForwardingStore({ schemaVersion: 1, rules: [noKey] } as never),
+    ).toThrow(
+      new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields'),
+    );
+    rejectWrite({ schemaVersion: 1, rules: [noKey] });
+    expect(getForwardingRule(good.id)?.verification).toBeNull();
+    // 自有 verification:undefined 亦拒；stringify 会省键，不得落盘。
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, verification: undefined }] });
+    // 盘面缺键：fail-closed 拒读，marker 归 invalid_rule_fields 族。
+    const { verification: _drop, ...disk } = fixtureRule();
+    seedStore({ schemaVersion: 1, rules: [disk] });
+    rejectRead();
+    expect(existsSync(`${storeFile()}.failclosed`)).toBe(true);
+    expect(readFileSync(`${storeFile()}.failclosed`, 'utf8')).toBe('invalid_rule_fields\n');
+  });
 });
