@@ -597,4 +597,38 @@ describe('#106 A1 forwarding store', () => {
     writeForwardingStore({ schemaVersion: 1, rules: [fixtureRule({ destination: 'keep@outlook.com' })] } as never);
     expect(readForwardingStore().rules[0]?.destination).toBe('keep@outlook.com');
   });
+
+  test('R4b P1: configured single-label identity is stored', () => {
+    const env = { API_KEYS: 'k', IMAP_USER: 'a@h', IMAP_PASS: 'p', SMTP_USER: 'a@h', SMTP_PASS: 'p' };
+    expect(parseConfig({ ...env, DOMAIN: 'localhost' }).domain).toBe('localhost');
+    expect(parseConfig({ ...env, DOMAIN: 'example.com', EXTRA_DOMAINS: 'intranet' }).extraDomains).toEqual(['intranet']);
+    const domains = (config as { allDomains: Set<string> }).allDomains;
+    domains.add('localhost');
+    domains.add('intranet');
+    try {
+      for (const domain of ['localhost', 'intranet'] as const) {
+        resetScratch();
+        const addr = createIdentity({ localpart: 'alice', domain, issueToken: false })!.identity.address;
+        const rule = createForwardingRule({
+          address: addr,
+          destination: 'user@gmail.com',
+          identityExists: (a) => Boolean(findIdentity(a)),
+        });
+        expect(rule.address).toBe(`alice@${domain}`);
+        expect(readForwardingStore().rules[0]?.address).toBe(`alice@${domain}`);
+      }
+    } finally {
+      domains.delete('localhost');
+      domains.delete('intranet');
+    }
+  });
+
+  test('R4b P2: dot-atom destination accepts apostrophe and trailing plus', () => {
+    for (const dest of ["o'brien@example.net", 'user+@example.net'] as const) {
+      resetScratch();
+      const rule = createRule('alice@test.example', dest);
+      expect(rule.destination).toBe(dest);
+      expect(readForwardingStore().rules[0]?.destination).toBe(dest);
+    }
+  });
 });

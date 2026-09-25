@@ -41,8 +41,8 @@ const SMTP_MAILBOX_MAX_LENGTH = 254;
 const SMTP_LOCAL_PART_MAX_OCTETS = 64;
 const SMTP_DOMAIN_LABEL_MAX_OCTETS = 63;
 const SMTP_DOMAIN_LABEL_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
-/** 未加引号 local-part：dot-atom，拒连续点/逗号/空格/尖括号。 */
-const SMTP_LOCAL_PART_PATTERN = /^(?!.*\.\.)[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$/;
+/** 未引号 dot-atom：RFC 5322 atext 非空分段（含 ' 与尾随 +）；拒连续点、首尾点、逗号、空格、尖括号、控制符。 */
+const SMTP_LOCAL_PART_PATTERN = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*$/;
 const CONTROL_CHAR_PATTERN = /[\u0000-\u001F\u007F]/;
 const DIGEST_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const ISO_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -158,7 +158,7 @@ function hasForbiddenPlaintextKey(value: unknown): boolean {
   return false;
 }
 
-function isValidMailbox(address: string, localPartRe = SMTP_LOCAL_PART_PATTERN): boolean {
+function isValidMailbox(address: string, localPartRe = SMTP_LOCAL_PART_PATTERN, minDomainLabels = 2): boolean {
   if (typeof address !== 'string' || CONTROL_CHAR_PATTERN.test(address)) return false;
   if (address.length > SMTP_MAILBOX_MAX_LENGTH || address.includes(' ')) return false;
   const at = address.lastIndexOf('@');
@@ -168,10 +168,10 @@ function isValidMailbox(address: string, localPartRe = SMTP_LOCAL_PART_PATTERN):
   if (!local || !domain) return false;
   if (Buffer.byteLength(local, 'utf8') > SMTP_LOCAL_PART_MAX_OCTETS) return false;
   if (!localPartRe.test(local)) return false; // 缺省严 SMTP；身份调用方传入 LOCALPART_RE
-  // 多尾点非法；单尾点按 DNS 绝对域名兼容，本域目的仍由 isInstanceDomain 拒绝。
+  // 目的缺省至少两段；身份传 1。多尾点非法，单尾点兼容；本域目的仍由 isInstanceDomain 拒绝。
   if (domain.endsWith('..')) return false;
   const labels = domain.replace(/\.$/, '').split('.');
-  if (labels.length < 2) return false;
+  if (labels.length < minDomainLabels) return false;
   return labels.every((label) =>
     label.length > 0 && Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS && SMTP_DOMAIN_LABEL_PATTERN.test(label),
   );
@@ -202,9 +202,9 @@ function assertDestination(destination: string): string {
 }
 
 function assertIdentityShape(address: string): string {
-  // 静态只验单尾点语法与 trim/小写规范形；身份 local-part 用 LOCALPART_RE。
+  // 身份允许单段域标签；是否属于 allDomains 由策略判定。local-part 仍用 LOCALPART_RE。
   const addr = address.trim().toLowerCase();
-  if (!isValidMailbox(addr, LOCALPART_RE) || CONTROL_CHAR_PATTERN.test(address)) {
+  if (!isValidMailbox(addr, LOCALPART_RE, 1) || CONTROL_CHAR_PATTERN.test(address)) {
     throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
   }
   return addr;
