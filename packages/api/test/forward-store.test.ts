@@ -80,16 +80,25 @@ function seedStore(payload: unknown): void {
 
 function fixtureRule(over: Record<string, unknown> = {}) {
   return {
-    id: 'fwd_ok',
-    address: 'alice@test.example',
-    destination: 'user@gmail.com',
-    state: 'pending_verification',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    verifiedAt: null,
-    verification: null,
-    ...over,
+    id: 'fwd_ok', address: 'alice@test.example', destination: 'user@gmail.com',
+    state: 'pending_verification', createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z', verifiedAt: null, verification: null, ...over,
   };
+}
+
+/** 负控：拒写且正本不变；错误不含 leak。 */
+function rejectWrite(data: unknown, leaks: string[] = []) {
+  const before = readFileSync(storeFile());
+  const err = (() => { try { writeForwardingStore(data as never); } catch (e) { return e; } })();
+  expect(err).toBeInstanceOf(ForwardStoreError);
+  for (const s of leaks) expect((err as Error).message).not.toContain(s);
+  expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+}
+/** 负控：拒读 fail-closed；错误不含 leak。 */
+function rejectRead(leaks: string[] = []) {
+  const err = (() => { try { readForwardingStore(); } catch (e) { return e; } })();
+  expect(err).toBeInstanceOf(ForwardStoreCorruptError);
+  for (const s of leaks) expect((err as Error).message).not.toContain(s);
 }
 
 describe('#106 A1 forwarding store', () => {
@@ -284,11 +293,7 @@ describe('#106 A1 forwarding store', () => {
     expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
     resetScratch();
     const good = createRule('alice@test.example', 'user@gmail.com');
-    const before = readFileSync(storeFile());
-    expect(() =>
-      writeForwardingStore({ schemaVersion: 1, rules: [{ ...good, destination: 'loop@test.example' }] }),
-    ).toThrow(ForwardStoreError);
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, destination: 'loop@test.example' }] });
     expect(getForwardingRule(good.id)?.destination).toBe('user@gmail.com');
   });
 
@@ -325,7 +330,7 @@ describe('#106 A1 forwarding store', () => {
   });
 
   test('R1 destination keeps local-part case and rejects illegal local-part', () => {
-    const created = createRule('alice@test.example', 'User.Name+Tag@Gmail.COM');
+    const created = createRule('alice@test.example', ' User.Name+Tag@Gmail.COM ');
     expect(created.destination).toBe('User.Name+Tag@gmail.com');
     expect(getForwardingRuleByAddress('alice@test.example')?.destination).toBe('User.Name+Tag@gmail.com');
     expect(() => createRule('bob@test.example', 'user,name@gmail.com')).toThrow(ForwardStoreError);
@@ -360,19 +365,13 @@ describe('#106 A1 forwarding store', () => {
     expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
     resetScratch();
     const good = createRule('alice@test.example', 'user@gmail.com');
-    const before = readFileSync(storeFile());
     // 运行时拒未知版本；类型面上 schemaVersion 已钉死为 1，故 as never 模拟 raw write。
-    expect(() => writeForwardingStore({ schemaVersion: 99, rules: [good] } as never)).toThrow(
-      ForwardStoreError,
-    );
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
-    expect(() =>
-      writeForwardingStore({
-        schemaVersion: 1,
-        rules: [good, { ...good, id: 'fwd_x', address: 'Alice@test.example' }],
-      }),
-    ).toThrow(ForwardStoreError);
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    rejectWrite({ schemaVersion: 99, rules: [good] });
+    rejectWrite({
+      schemaVersion: 1,
+      rules: [good, { ...good, id: 'fwd_x', address: 'Alice@test.example' }],
+    });
+    const before = readFileSync(storeFile());
     const prevBun = process.env.BUN_TEST;
     delete process.env.BUN_TEST;
     try {
@@ -387,55 +386,43 @@ describe('#106 A1 forwarding store', () => {
 
   test('R3: raw write state/id, multi-dot dest, verification extras', () => {
     const good = createRule('alice@test.example', 'user@gmail.com');
-    const before = readFileSync(storeFile());
-    expect(() =>
-      writeForwardingStore({ schemaVersion: 1, rules: [{ ...good, state: 'forwarding' }] } as never),
-    ).toThrow(ForwardStoreError);
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
-    expect(() =>
-      writeForwardingStore({ schemaVersion: 1, rules: [{ ...good, id: 'not-fwd' }] } as never),
-    ).toThrow(ForwardStoreError);
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    const leak = ['user@gmail.com', '123456'];
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, state: 'forwarding' }] });
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, id: 'not-fwd' }] });
     expect(() => createRule('bob@test.example', 'user@gmail.com..')).toThrow(ForwardStoreError);
     expect(() => createRule('bob@test.example', 'other@test.example.')).toThrow(ForwardStoreError);
     expect(() => createRule('alice@test.example.', 'user@gmail.com')).toThrow(ForwardStoreError);
-    expect(() =>
-      writeForwardingStore({
-        schemaVersion: 1,
-        rules: [{ ...good, address: 'alice@test.example.' }],
-      }),
-    ).toThrow(ForwardStoreError);
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    expect(() => createRule('alice@test.example..', 'user@gmail.com')).toThrow(ForwardStoreError);
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, address: 'alice@test.example.' }] });
     const extras = {
       digest: digestForwardingVerificationCode('alice@test.example', '123456'),
       expiresAt: '2030-01-01T00:00:00.000Z',
       verification_code: '123456',
     };
-    try {
-      writeForwardingStore({
-        schemaVersion: 1,
-        rules: [{ ...good, verification: extras }] as never,
-      } as never);
-      throw new Error('expected reject');
-    } catch (error) {
-      expect(error).toBeInstanceOf(ForwardStoreError);
-      const message = error instanceof Error ? error.message : '';
-      expect(message).not.toContain('user@gmail.com');
-      expect(message).not.toContain('123456');
-    }
-    expect(Buffer.compare(readFileSync(storeFile()), before)).toBe(0);
+    rejectWrite({ schemaVersion: 1, rules: [{ ...good, verification: extras }] }, leak);
     seedStore({ schemaVersion: 1, rules: [fixtureRule({ verification: extras })] });
-    try {
-      readForwardingStore();
-      throw new Error('expected reject');
-    } catch (error) {
-      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
-      const message = error instanceof Error ? error.message : '';
-      expect(message).not.toContain('user@gmail.com');
-      expect(message).not.toContain('123456');
-    }
+    rejectRead(leak);
     seedStore({ schemaVersion: 1, rules: [fixtureRule({ address: 'alice@test.example.' })] });
-    expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);
+    rejectRead();
+    expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+    // R4 P1：根/规则未知字段（含 verification_code）读写皆拒，错误不回显。
+    resetScratch();
+    const keep = createRule('alice@test.example', 'user@gmail.com');
+    rejectWrite({ schemaVersion: 1, rules: [keep], verification_code: '123456' }, leak);
+    rejectWrite({ schemaVersion: 1, rules: [{ ...keep, verification_code: '123456' }] }, leak);
+    seedStore({ schemaVersion: 1, verification_code: '123456', rules: [fixtureRule()] });
+    rejectRead(leak);
+    seedStore({ schemaVersion: 1, rules: [fixtureRule({ verification_code: '123456' })] });
+    rejectRead(leak);
+    // R4 P1：尾空白本域目的不得落盘/可读。
+    resetScratch();
+    const ext = createRule('alice@test.example', 'user@gmail.com');
+    rejectWrite({ schemaVersion: 1, rules: [{ ...ext, destination: 'user@test.example ' }] }, [
+      'user@test.example',
+    ]);
+    expect(getForwardingRule(ext.id)?.destination).toBe('user@gmail.com');
+    seedStore({ schemaVersion: 1, rules: [fixtureRule({ destination: 'user@test.example ' })] });
+    rejectRead(['user@test.example']);
   });
 
   test('R3: domain policy conflict is not a permanent fail-closed', () => {
@@ -444,33 +431,77 @@ describe('#106 A1 forwarding store', () => {
     const domains = (config as { allDomains: Set<string> }).allDomains;
     domains.delete('extra.test');
     try {
-      readForwardingStore();
-      throw new Error('expected reject');
-    } catch (error) {
-      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
-      const message = error instanceof Error ? error.message : '';
-      expect(message).not.toContain('cara@gmail.com');
+      rejectRead(['cara@gmail.com']);
     } finally {
       domains.add('extra.test');
     }
     expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+    expect(getForwardingRule(extra.id)?.address).toBe('cara@extra.test');
+    // EXTRA 无点：点别名不是本配置身份；无点→点配变拒读无 marker，恢复可读。
+    rejectWrite({ schemaVersion: 1, rules: [{ ...extra, address: 'cara@extra.test.' }] });
+    domains.delete('extra.test');
+    domains.add('extra.test.');
+    try {
+      rejectRead();
+      expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+    } finally {
+      domains.delete('extra.test.');
+      domains.add('extra.test');
+    }
     expect(getForwardingRule(extra.id)?.address).toBe('cara@extra.test');
 
     resetScratch();
     const alice = createRule('alice@test.example', 'user@gmail.com');
     domains.add('gmail.com');
     try {
-      readForwardingStore();
-      throw new Error('expected reject');
-    } catch (error) {
-      expect(error).toBeInstanceOf(ForwardStoreCorruptError);
-      const message = error instanceof Error ? error.message : '';
-      expect(message).not.toContain('user@gmail.com');
+      rejectRead(['user@gmail.com']);
     } finally {
       domains.delete('gmail.com');
     }
     expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
     expect(getForwardingRule(alice.id)?.destination).toBe('user@gmail.com');
+
+    // R4 P2：DOMAIN=example.com. 真实点域身份可创建/读写；未配置点别名/多尾点仍拒。
+    resetScratch();
+    expect(parseConfig({
+      DOMAIN: 'example.com.', API_KEYS: 'admin-key', IMAP_USER: 'a@example.com', IMAP_PASS: 'p',
+      SMTP_USER: 'a@example.com', SMTP_PASS: 'p',
+    }).domain).toBe('example.com.');
+    domains.add('example.com.');
+    known.add('alice@example.com.');
+    try {
+      const dotted = createRule('alice@example.com.', 'user@gmail.com');
+      expect(dotted.address).toBe('alice@example.com.');
+      writeForwardingStore({ schemaVersion: 1, rules: [dotted] });
+      expect(readForwardingStore().rules[0]?.address).toBe('alice@example.com.');
+      rejectWrite({ schemaVersion: 1, rules: [dotted, { ...dotted, id: 'fwd_x', address: 'alice@example.com' }] });
+      rejectWrite({ schemaVersion: 1, rules: [{ ...dotted, address: 'alice@example.com' }] });
+      expect(() => createRule('bob@example.com..', 'user@gmail.com')).toThrow(ForwardStoreError);
+      resetScratch();
+      known.add('alice@example.com');
+      expect(() => createRule('alice@example.com', 'user@gmail.com')).toThrow(ForwardStoreError);
+      known.delete('alice@example.com');
+      seedStore({ schemaVersion: 1, rules: [fixtureRule({ address: 'alice@example.com' })] });
+      rejectRead();
+      expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+      resetScratch();
+      const again = createRule('alice@example.com.', 'user@gmail.com');
+      // 配置点→无点：规范域仍是本域，精确形式变更；拒读、无 marker；恢复点域后可读。
+      domains.delete('example.com.');
+      domains.add('example.com');
+      try {
+        rejectRead();
+        expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+      } finally {
+        domains.delete('example.com');
+        domains.add('example.com.');
+      }
+      expect(existsSync(`${storeFile()}.failclosed`)).toBe(false);
+      expect(readForwardingStore().rules[0]?.address).toBe(again.address);
+    } finally {
+      domains.delete('example.com.');
+      known.delete('alice@example.com.');
+    }
 
     seedStore('NOT JSON');
     expect(() => readForwardingStore()).toThrow(ForwardStoreCorruptError);

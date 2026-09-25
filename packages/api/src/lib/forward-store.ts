@@ -1,17 +1,8 @@
 /** #106 A1：DATA_DIR/forwarding.json 存储层；无发送路径，级联删留给 A2。 */
 
 import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-  writeSync,
+  chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync,
+  readFileSync, renameSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { createHmac, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -22,11 +13,7 @@ export const FORWARD_STORE_SCHEMA_VERSION = 1;
 export const FORWARD_STORE_FILE = 'forwarding.json';
 
 /** 规则状态；A1 只持久化，不发送/不核验验证码。 */
-export type ForwardingRuleState =
-  | 'pending_verification'
-  | 'active'
-  | 'paused'
-  | 'disabled';
+export type ForwardingRuleState = 'pending_verification' | 'active' | 'paused' | 'disabled';
 
 /** 有界验证元数据：仅不可逆摘要 + 过期时间，禁止明码。 */
 export type ForwardingVerificationMeta = {
@@ -35,14 +22,8 @@ export type ForwardingVerificationMeta = {
 };
 
 export type ForwardingRule = {
-  id: string;
-  address: string;
-  destination: string;
-  state: ForwardingRuleState;
-  createdAt: string;
-  updatedAt: string;
-  verifiedAt: string | null;
-  verification: ForwardingVerificationMeta | null;
+  id: string; address: string; destination: string; state: ForwardingRuleState;
+  createdAt: string; updatedAt: string; verifiedAt: string | null; verification: ForwardingVerificationMeta | null;
 };
 
 export type ForwardingStoreFile = {
@@ -53,12 +34,7 @@ export type ForwardingStoreFile = {
 /** 调用方证明身份存在；抛错或返回 false 均 fail-closed。 */
 export type ForwardingIdentityExists = (address: string) => boolean;
 
-const RULE_STATES = new Set<ForwardingRuleState>([
-  'pending_verification',
-  'active',
-  'paused',
-  'disabled',
-]);
+const RULE_STATES = new Set<ForwardingRuleState>(['pending_verification', 'active', 'paused', 'disabled']);
 
 const SMTP_MAILBOX_MAX_LENGTH = 254;
 const SMTP_LOCAL_PART_MAX_OCTETS = 64;
@@ -70,15 +46,14 @@ const CONTROL_CHAR_PATTERN = /[\u0000-\u001F\u007F]/;
 const DIGEST_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const ISO_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
-/** 禁止落盘的明码/密钥键（只看 key）。 */
-const FORBIDDEN_PLAINTEXT_KEYS = new Set([
-  'code',
-  'otp',
-  'secret',
-  'token',
-  'password',
-  'verificationcode',
-]);
+/** 禁止落盘的明码/密钥键（只看 key）；未知根/规则字段另走白名单。 */
+const FORBIDDEN_PLAINTEXT_KEYS = new Set(['code', 'otp', 'secret', 'token', 'password', 'verificationcode']);
+const STORE_KEYS = new Set(['schemaVersion', 'rules']);
+const RULE_KEYS = new Set(['id', 'address', 'destination', 'state', 'createdAt', 'updatedAt', 'verifiedAt', 'verification']);
+/** 根/规则只许白名单键，避免 verification_code 等漏网拼写。 */
+function hasUnknownKeys(value: object, allowed: Set<string>): boolean {
+  return Object.keys(value).some((key) => !allowed.has(key));
+}
 
 export class ForwardStoreCorruptError extends Error {
   readonly code = 'store_corrupt';
@@ -107,19 +82,15 @@ let writeHookForTests: ((phase: ForwardingWritePhase) => void) | undefined;
 function storePath(): string {
   return join(config.dataDir, FORWARD_STORE_FILE);
 }
-
 function tmpPath(): string {
   return `${storePath()}.tmp`;
 }
-
 function failClosedPath(): string {
   return `${storePath()}.failclosed`;
 }
-
 function emptyStore(): ForwardingStoreFile {
   return { schemaVersion: FORWARD_STORE_SCHEMA_VERSION, rules: [] };
 }
-
 function persistFailed(kind: string): never {
   throw new ForwardStoreError('persist_failed', kind);
 }
@@ -164,7 +135,6 @@ function checkFailClosed(): void {
 function canonicalDomain(raw: string): string {
   return raw.toLowerCase().replace(/\.+$/, '');
 }
-
 function mailboxDomain(address: string): string {
   return canonicalDomain(address.slice(address.lastIndexOf('@') + 1));
 }
@@ -201,11 +171,8 @@ function isValidMailbox(address: string): boolean {
   if (domain.endsWith('..')) return false;
   const labels = domain.replace(/\.$/, '').split('.');
   if (labels.length < 2) return false;
-  return labels.every(
-    (label) =>
-      label.length > 0 &&
-      Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS &&
-      SMTP_DOMAIN_LABEL_PATTERN.test(label),
+  return labels.every((label) =>
+    label.length > 0 && Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS && SMTP_DOMAIN_LABEL_PATTERN.test(label),
   );
 }
 
@@ -234,10 +201,8 @@ function assertDestination(destination: string): string {
 }
 
 function assertIdentityShape(address: string): string {
+  // 静态只验单尾点语法与 trim/小写规范形；不读 allDomains。
   const addr = address.trim().toLowerCase();
-  if (addr.endsWith('.')) {
-    throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
-  }
   if (!isValidMailbox(addr) || CONTROL_CHAR_PATTERN.test(address)) {
     throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
   }
@@ -246,10 +211,16 @@ function assertIdentityShape(address: string): string {
 
 function assertIdentityAddress(address: string): string {
   const addr = assertIdentityShape(address);
-  if (!isInstanceDomain(mailboxDomain(addr))) {
+  const domain = addr.slice(addr.lastIndexOf('@') + 1);
+  if (!config.allDomains.has(domain)) {
     throw new ForwardStoreError('foreign_identity', 'forwarding identity address is invalid');
   }
   return addr;
+}
+
+/** 点/无点身份共用规范重复键（去尾点），与配置无关。 */
+function identityKey(address: string): string {
+  return `${address.slice(0, address.lastIndexOf('@'))}@${mailboxDomain(address)}`;
 }
 
 function assertVerification(
@@ -268,13 +239,9 @@ function assertVerification(
   if (hasForbiddenPlaintextKey(value)) {
     throw new ForwardStoreError('plaintext_forbidden', 'verification metadata rejected');
   }
-  if (
-    typeof value.digest !== 'string' ||
-    !DIGEST_HEX_PATTERN.test(value.digest) ||
-    typeof value.expiresAt !== 'string' ||
-    !ISO_TIME_PATTERN.test(value.expiresAt) ||
-    !Number.isFinite(Date.parse(value.expiresAt))
-  ) {
+  if (typeof value.digest !== 'string' || !DIGEST_HEX_PATTERN.test(value.digest) ||
+      typeof value.expiresAt !== 'string' || !ISO_TIME_PATTERN.test(value.expiresAt) ||
+      !Number.isFinite(Date.parse(value.expiresAt))) {
     throw new ForwardStoreError('invalid_verification', 'verification metadata rejected');
   }
   return { digest: value.digest, expiresAt: value.expiresAt };
@@ -293,17 +260,10 @@ function assertRuleFields(rule: unknown): asserts rule is ForwardingRule {
     throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
   }
   const r = rule as Record<string, unknown>;
-  if (
-    typeof r.id !== 'string' ||
-    !r.id.startsWith('fwd_') ||
-    typeof r.address !== 'string' ||
-    typeof r.destination !== 'string' ||
-    typeof r.state !== 'string' ||
-    !RULE_STATES.has(r.state as ForwardingRuleState) ||
-    typeof r.createdAt !== 'string' ||
-    typeof r.updatedAt !== 'string' ||
-    (r.verifiedAt !== null && typeof r.verifiedAt !== 'string')
-  ) {
+  if (hasUnknownKeys(r, RULE_KEYS) || typeof r.id !== 'string' || !r.id.startsWith('fwd_') ||
+      typeof r.address !== 'string' || typeof r.destination !== 'string' || typeof r.state !== 'string' ||
+      !RULE_STATES.has(r.state as ForwardingRuleState) || typeof r.createdAt !== 'string' ||
+      typeof r.updatedAt !== 'string' || (r.verifiedAt !== null && typeof r.verifiedAt !== 'string')) {
     throw new ForwardStoreError('invalid_rule_fields', 'forwarding.json invalid record fields');
   }
 }
@@ -313,26 +273,32 @@ function assertStoreStructure(rules: ForwardingRule[]): void {
   const addresses = new Set<string>();
   for (const rule of rules) {
     const address = assertIdentityShape(rule.address);
-    if (rule.address !== address) {
-      throw new ForwardStoreError('invalid_address', 'forwarding identity address is invalid');
+    const dest = assertDestinationShape(rule.destination);
+    if (rule.address !== address || rule.destination !== dest) {
+      throw new ForwardStoreError(
+        rule.address !== address ? 'invalid_address' : 'invalid_destination',
+        rule.address !== address ? 'forwarding identity address is invalid' : 'forwarding destination is invalid',
+      );
     }
-    assertDestinationShape(rule.destination);
     assertVerification(rule.verification);
     assertVerifiedAt(rule.verifiedAt);
     if (rule.state === 'active' && !rule.verifiedAt) {
       throw new ForwardStoreError('unverified_active', 'active rule requires verifiedAt');
     }
-    if (ids.has(rule.id) || addresses.has(address)) {
+    const key = identityKey(address);
+    if (ids.has(rule.id) || addresses.has(key)) {
       throw new ForwardStoreError('duplicate_rule', 'forwarding rule already exists');
     }
     ids.add(rule.id);
-    addresses.add(address);
+    addresses.add(key);
   }
 }
 
 function assertStoreDomainPolicy(rules: ForwardingRule[]): void {
   for (const rule of rules) {
-    if (!isInstanceDomain(mailboxDomain(rule.address))) {
+    const domain = rule.address.slice(rule.address.lastIndexOf('@') + 1);
+    // 身份域须原样在 allDomains；点/无点互换属策略，拒读不写 marker。
+    if (!config.allDomains.has(domain)) {
       throw new ForwardStoreError('foreign_identity', 'forwarding identity address is invalid');
     }
     if (isInstanceDomain(mailboxDomain(rule.destination))) {
@@ -340,7 +306,6 @@ function assertStoreDomainPolicy(rules: ForwardingRule[]): void {
     }
   }
 }
-
 function assertStoreInvariants(rules: ForwardingRule[]): void {
   assertStoreStructure(rules);
   assertStoreDomainPolicy(rules);
@@ -369,6 +334,10 @@ function parseFile(content: string): ForwardingStoreFile {
     markStoreFailClosed('rules_not_array');
     throw new ForwardStoreCorruptError('forwarding.json rules must be an array');
   }
+  if (hasUnknownKeys(root, STORE_KEYS)) {
+    markStoreFailClosed('unknown_root_field');
+    throw new ForwardStoreCorruptError('forwarding.json rejected unknown field');
+  }
   if (hasForbiddenPlaintextKey(root)) {
     markStoreFailClosed('plaintext_key');
     throw new ForwardStoreCorruptError('forwarding.json rejected plaintext key');
@@ -386,9 +355,7 @@ function parseFile(content: string): ForwardingStoreFile {
       throw new ForwardStoreCorruptError('forwarding.json invalid record fields');
     }
     try {
-      assertVerification(
-        (item as ForwardingRule).verification as ForwardingVerificationMeta | null | undefined,
-      );
+      assertVerification((item as ForwardingRule).verification as ForwardingVerificationMeta | null | undefined);
     } catch {
       markStoreFailClosed('invalid_verification');
       throw new ForwardStoreCorruptError('forwarding.json invalid verification');
@@ -432,6 +399,9 @@ export function writeForwardingStore(data: ForwardingStoreFile): void {
   ensureDataDir();
   if (data.schemaVersion !== FORWARD_STORE_SCHEMA_VERSION) {
     throw new ForwardStoreError('unsupported_schema_version', 'unsupported schemaVersion');
+  }
+  if (hasUnknownKeys(data, STORE_KEYS)) {
+    throw new ForwardStoreError('invalid_store_fields', 'forwarding.json invalid record fields');
   }
   if (hasForbiddenPlaintextKey(data)) {
     throw new ForwardStoreError('plaintext_forbidden', 'verification metadata rejected');
@@ -520,11 +490,9 @@ export function listForwardingRules(address?: string): ForwardingRule[] {
   const needle = address.toLowerCase();
   return file.rules.filter((r) => r.address === needle);
 }
-
 export function getForwardingRule(id: string): ForwardingRule | undefined {
   return readForwardingStore().rules.find((r) => r.id === id);
 }
-
 export function getForwardingRuleByAddress(address: string): ForwardingRule | undefined {
   const needle = address.toLowerCase();
   return readForwardingStore().rules.find((r) => r.address === needle);
@@ -550,20 +518,14 @@ export function createForwardingRule(params: {
   }
 
   const file = readForwardingStore();
-  if (file.rules.some((r) => r.address === address)) {
+  if (file.rules.some((r) => identityKey(r.address) === identityKey(address))) {
     throw new ForwardStoreError('duplicate_rule', 'forwarding rule already exists');
   }
 
   const now = new Date().toISOString();
   const record: ForwardingRule = {
-    id: `fwd_${randomUUID()}`,
-    address,
-    destination,
-    state: 'pending_verification',
-    createdAt: now,
-    updatedAt: now,
-    verifiedAt: null,
-    verification: assertVerification(params.verification),
+    id: `fwd_${randomUUID()}`, address, destination, state: 'pending_verification',
+    createdAt: now, updatedAt: now, verifiedAt: null, verification: assertVerification(params.verification),
   };
   file.rules.push(record);
   writeForwardingStore(file);
@@ -586,13 +548,9 @@ export function updateForwardingRule(
     throw new ForwardStoreError('invalid_state', 'forwarding state rejected');
   }
   file.rules[idx] = {
-    ...current,
-    state: patch.state ?? current.state,
+    ...current, state: patch.state ?? current.state,
     verifiedAt: patch.verifiedAt !== undefined ? patch.verifiedAt : current.verifiedAt,
-    verification:
-      patch.verification !== undefined
-        ? assertVerification(patch.verification)
-        : current.verification,
+    verification: patch.verification !== undefined ? assertVerification(patch.verification) : current.verification,
     updatedAt: new Date().toISOString(),
   };
   writeForwardingStore(file);
@@ -643,12 +601,10 @@ export function resetForwardingStoreForTests(): void {
     }
   }
 }
-
 export function setForwardingFailClosedForTests(value: boolean): void {
   assertTestOnlyHelper();
   failClosed = value;
 }
-
 export function setForwardingWriteHookForTests(
   hook: ((phase: ForwardingWritePhase) => void) | undefined,
 ): void {
