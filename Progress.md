@@ -1417,3 +1417,29 @@ N/A。
 
 ### 证据
 - focused/full-fc-r10 与 `evidence/fc-r10-measured.json`
+
+## 2026-09-25 · #106 A1-core 转发规则存储基座（PR #365）
+
+### 我们实现了哪些功能？
+1. `FORWARDING_ENABLED` 默认关；显式开启须显式 `TASK_SIGNING_SECRET`≥32。两份 Compose 和 `.env.example` 同为默认关，A1 没有发送路径。
+2. `DATA_DIR/forwarding.json` 每个身份最多一条外部目的，持久化 `pending_verification/active/paused/disabled`；提供域隔离 HMAC 摘要函数及可空的 `digest`/`expiresAt` 元数据，A1 不执行签发、核验或过期/尝试次数控制。
+3. 身份 local-part 与 `createIdentity` 共用 `LOCALPART_RE`，允许已配置的单段身份域；目的地址按未引号 SMTP atext/dot-atom 校验并拒本实例域，禁止连续点与多尾点。
+4. 存储采用 0700 目录、0600 文件、临时文件+rename+fsync；结构损坏/未知版本持久 fail-closed，单纯域策略冲突拒读但不写永久损坏标记，配置恢复可再读。
+5. 导出规则 CRUD/HMAC 与删除原语；未接路由、watcher、SMTP、UI 或 `deleteIdentity`，也未部署。A2 才接入口总闸、验证生命周期、身份删除与发信链。
+
+### 我们遇到了哪些错误？
+1. R2 留存 1070/1071 行、58 测，未达终态；按 #5065 裁定收在 1350/1360 行。
+2. 审查发现 raw writer 可覆损坏正本、`verification` 键可缺失，以及地址形态和单段域身份边界遗漏。
+3. 动态 `allDomains` 策略冲突与结构损坏若同判永久 marker，会使配置恢复后仍不可读。
+4. CI 首轮命中未改的 #206 IDLE 并发断言；CodeRabbit 当前头摘要与旧头 formal review 分离，full review 请求受限流。
+
+### 我们是如何解决这些错误的？
+1. 按 #4964 将 `Progress.md` 从 core 拆为本后卡；core 经多轮定点修复，最终变更八文件 +1350/−0。
+2. 写前校验旧正本、根/规则字段白名单及必需自有键，补 raw write、地址形态与身份域负控。
+3. 读盘先验全表静态结构，再验当前域策略；只有结构损坏留永久 fail-closed 标记。
+4. 同 SHA 复跑 CI 四格绿；CodeRabbit 按 #5077 仅本头 B 例外留证，终审由总指挥 #5079 亲核亲合。
+
+### 证据
+- PR #365：base `2f155d82`，末头 `4b1596e`，squash main `5ce4ae2`；A1-core 默认关且合并不等于部署。
+- FC 聚焦 65 pass/0 fail；全量 2395 pass/9 skip/0 fail；CI test/guard/capacity/docker-smoke 同头绿。
+- ZCode P2 入口总闸与 P3 验证、身份、运维/文档余项已分归后卡，详见 `/home/ops/materials/106/a1-core-r4c-terminal-report.md`。
