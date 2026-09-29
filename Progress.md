@@ -1488,3 +1488,22 @@ N/A。
 
 ### 证据
 - 主仓 squash `a713c720`；PNG SHA-256 `aff3929fe47e33d3cba643c7d4776f94fd11a36160924f293a2071a69eca6c32`。四角 alpha=0，半透明边缘 569 像素灰白污染=0，CRC/IEND 无尾随；深浅底实看无白角灰线。CI 四格同头绿、Codex 旧 P2 清零；ZCode 越界 API 扫描候选另记 P3 债，CodeRabbit PNG 路径过滤缺席仅本头按总指挥 #5186 明认。合并随下次部署窗生效。
+
+## 2026-09-29 · #360 admin PATCH canNotifyUser（PR #378）
+
+### 我们实现了哪些功能？
+1. Admin 可用严格的 `PATCH /v1/identities/:address` 更改既有身份的 `canNotifyUser`，不轮换 token；先鉴权再解析请求体，响应与 GET 的公开身份形状一致。
+2. 无 scopes 身份可授予或撤销；scoped 身份的 true（含同值）返回 400 且零写入零审计，false 可撤销。允许的同值请求不写盘；实际变化仅审计固定字段名，不记值、body、token。
+
+### 我们遇到了哪些错误？
+1. 实现前 PATCH 为 404、`changedFields` 不存在；初稿 439 行超过原硬线 320，按令停手后获一次性 ≤500 扩线。
+2. 审查先后发现 scoped true 虚假 200、store setter 缺最后防线、MCP/API README 与新行为不一致；每次定点修正后重绑同头闸证。
+3. 本地 R1 全量有一则未改 `#350 A1-period-n` 五秒计时超时，clean main 隔离复跑通过；最终头 CI test 通过，此差异未隐去。
+
+### 我们是如何解决这些错误的？
+1. PATCH 与 store 双层拒绝 scoped true，并补直调负控；保留 false 撤销、同值免写、审计最小化与原 token 即时生效的正负控。
+2. fox #5312 将 Progress 19 行拆后卡，避免压行；#5315 准两处 README 同卡修正。R3 终头七文件 +488/−1≤500，未改 scope-policy 或创建路径。
+
+### 证据
+- PR #378 已由 fox 亲合至 main `169243227bc51bb6f4d2202a5ecbb309410e569f`，Closes #360；终头 `428f660`，CI 四格全绿，Codex/Muse 同头零，CodeRabbit 本头已审且无 actionable，未解决线程 0。
+- FC 聚焦 7 pass / 0 fail / 143 expect；初始独立自审 PASS_WITH_NOTES 的 5 条触及测试类型备注已修。ZCode 存量 scoped 创建路径 P2 已转 #379，通知 scope 启用前须另定语义。
