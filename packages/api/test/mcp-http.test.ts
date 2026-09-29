@@ -1354,17 +1354,58 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
     return { body, text: JSON.stringify(body) };
   }
 
-  /** spy 记录原型方法；finally 还原，避免后续用例吃到同一只 spy。 */
+  /**
+   * #355-B R1：替换原型方法，只记参数，不透传真实通知。
+   * fake 对齐 client 返回值与 outputSchema；finally 还原。
+   */
   async function withNotifySpy(
     method: 'notifyUser' | 'notifyAgent' | 'notificationCheck' | 'verifyNotifications',
     work: (calls: () => unknown[][]) => Promise<void>,
   ): Promise<void> {
     const spy = spyOn(OpenAgentEmailClient.prototype, method);
+    // 绑在 spy 上替换实现；拆出函数再调用会丢掉 this。
+    const install = spy.mockImplementation.bind(spy) as (
+      fn: (...args: unknown[]) => Promise<unknown>,
+    ) => void;
+    install((...args: unknown[]) => {
+      if (method === 'notifyUser') {
+        const title = args[0] as string;
+        const level = args[2] as 'urgent' | 'normal' | 'low';
+        return Promise.resolve({ target: 'user', title, level });
+      }
+      if (method === 'notifyAgent') {
+        const name = args[0] as string;
+        const title = args[1] as string;
+        const level = args[3] as 'urgent' | 'normal' | 'low';
+        return Promise.resolve({ target: `agent:${name}`, title, level });
+      }
+      if (method === 'notificationCheck') {
+        return Promise.resolve([{
+          id: 'ntf-355b',
+          time: 1,
+          title: 'wake',
+          message: 'body',
+          priority: 3,
+          tags: ['ops'],
+        }]);
+      }
+      return Promise.resolve({ ok: true });
+    });
     try {
       await work(() => spy.mock.calls as unknown[][]);
     } finally {
       spy.mockRestore();
     }
+  }
+
+  /** 正控：非工具错误，且 structuredContent 就是 fake 流经 handler 的结果。 */
+  function expectFake(
+    body: { error?: unknown; result?: { isError?: boolean; structuredContent?: Record<string, unknown> } },
+    expected: Record<string, unknown>,
+  ) {
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    expect(body.result?.structuredContent).toEqual(expected);
   }
 
   test('#355-B tools/list 四工具逐一广告 additionalProperties:false', async () => {
@@ -1443,6 +1484,7 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
     await withNotifySpy('notifyUser', async (calls) => {
       const plain = await callTool(adminKey, 'notify_user', { title: 'wake', message: 'body' }, 41);
       expect(isInputRejection(plain.text), plain.text).toBe(false);
+      expectFake(plain.body, { target: 'user', title: 'wake', level: 'normal' });
       const tagged = await callTool(adminKey, 'notify_user', {
         title: 'wake',
         message: 'body',
@@ -1450,6 +1492,7 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
         tags: ['ops'],
       }, 42);
       expect(isInputRejection(tagged.text), tagged.text).toBe(false);
+      expectFake(tagged.body, { target: 'user', title: 'wake', level: 'urgent' });
       expect(calls()).toEqual([
         ['wake', 'body', 'normal', undefined],
         ['wake', 'body', 'urgent', ['ops']],
@@ -1466,12 +1509,14 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
         message: 'body',
       }, 43);
       expect(isInputRejection(full.text), full.text).toBe(false);
+      expectFake(full.body, { target: `agent:${identity.address}`, title: 'wake', level: 'normal' });
       const bare = await callTool(adminKey, 'notify_agent', {
         name: 'mcp355b-agent-ok',
         title: 'wake',
         message: 'body',
       }, 44);
       expect(isInputRejection(bare.text), bare.text).toBe(false);
+      expectFake(bare.body, { target: 'agent:mcp355b-agent-ok', title: 'wake', level: 'normal' });
       expect(calls()).toEqual([
         [identity.address, 'wake', 'body', 'normal', undefined],
         ['mcp355b-agent-ok', 'wake', 'body', 'normal', undefined],
@@ -1481,18 +1526,24 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
 
   test('#355-B notify_check 合法 since 调用 notificationCheck', async () => {
     await withNotifySpy('notificationCheck', async (calls) => {
+      const checkOut = {
+        messages: [{ id: 'ntf-355b', time: 1, title: 'wake', message: 'body', priority: 3, tags: ['ops'] }],
+      };
       const filtered = await callTool(adminKey, 'notify_check', { since: '1h' }, 45);
       expect(isInputRejection(filtered.text), filtered.text).toBe(false);
+      expectFake(filtered.body, checkOut);
       const empty = await callTool(adminKey, 'notify_check', {}, 46);
       expect(isInputRejection(empty.text), empty.text).toBe(false);
+      expectFake(empty.body, checkOut);
       expect(calls()).toEqual([['1h'], [undefined]]);
     });
   });
 
   test('#355-B notify_verify 空对象调用 verifyNotifications', async () => {
     await withNotifySpy('verifyNotifications', async (calls) => {
-      const { text } = await callTool(adminKey, 'notify_verify', {}, 47);
-      expect(isInputRejection(text), text).toBe(false);
+      const verified = await callTool(adminKey, 'notify_verify', {}, 47);
+      expect(isInputRejection(verified.text), verified.text).toBe(false);
+      expectFake(verified.body, { ok: true });
       expect(calls()).toEqual([[]]);
     });
   });
