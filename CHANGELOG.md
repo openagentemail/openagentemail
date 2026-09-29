@@ -19,7 +19,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Changed
 
-- **API/MCP: 未知输入键一律拒绝** (#355/#324/#354): REST `POST /v1/send` 未知键（含 `attachments`）从 200 静默剥离改为 400 `invalid_request`；`POST /v1/delegations` 未知 body 键从 201 静默剥离改为 400 `invalid_request`，避免拼错 scope 落到默认 `read:messages` 授权。24 个 MCP 工具（mail 6、notify 4、task 9、webhook 5）对未知键报工具校验错误且不执行副作用。旧客户端须移除多余字段；合法调用不变。
+- **API/MCP: 未知输入键一律拒绝** (#355/#324/#354): REST `POST /v1/send` 未知键（含 `attachments`）从 200 静默剥离改为 400 `invalid_request`；`POST /v1/delegations` 未知 body 键从 201 静默剥离改为 400 `invalid_request`，避免拼错 scope 落到默认 `read:messages` 授权。#355 涵盖的 24 个 MCP 工具（mail 6、notify 4、task 9、webhook 5）对未知键报工具校验错误且不执行副作用；`mail_send` 已由 #324 单独收紧，现有 MCP 工具共 25 个。旧客户端须移除多余字段；合法调用不变。
 
 ## v0.9.0 — 2026-09-22
 
