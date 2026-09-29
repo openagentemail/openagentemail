@@ -21,6 +21,16 @@ import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
 
 /**
+ * #355-A：运行时返回 strict ZodObject，类型上仍表现为原 raw shape。
+ * registerTool 重载要求 input 与 output 同为 ZodObject 或同为 raw shape。
+ * 这些工具的 output 是共享 raw shape（read/wait 同一引用，字段测试直接读键），不能改成 ZodObject。
+ * 断言只满足重载；instanceof ZodObject 与 .strict() 都发生在运行时。
+ */
+function asStrictInput<T extends Record<string, z.ZodType>>(shape: T): T {
+  return z.object(shape).strict() as unknown as T;
+}
+
+/**
  * 在给定 McpServer 上注册全部 openagentemail 工具；client 携带调用方 Bearer。
  */
 export function registerOpenAgentEmailTools(
@@ -346,7 +356,8 @@ export function registerOpenAgentEmailTools(
       title: "Create Email Identity",
       description:
         "Create a new email identity (mailbox address) on this openagent.email server. Admin keys create top-level identities (omit scopes for legacy full permissions). Non-admin tokens need identities:create and mint a child identity owned by the caller (parentIdentity set server-side; default child scopes = [read:messages] when the parent holds that scope, else []; child scopes must be ⊆ parent and cannot include identities:create). Pass 'localpart' for a custom address (e.g. 'qa-bot' gives qa-bot@domain), or omit it for a random one. Returns the full address and a one-time API token.",
-      inputSchema: {
+      // #355-A：未知键就地拒绝。output 仍用共享 raw shape，避免改到其他注册。
+      inputSchema: asStrictInput({
         // 约束与 REST API 的 zod 对齐：本地就能拒掉的输入不必往服务端跑一趟。
         name: z
           .string()
@@ -382,7 +393,7 @@ export function registerOpenAgentEmailTools(
           .refine((items) => new Set(items).size === items.length, "duplicate scopes are not allowed")
           .optional()
           .describe("Optional token scopes. Supported: read:messages, identities:create, messages:send. Use [] for no API operation permissions; omit for admin = legacy full identity permissions, for scoped parent = default child scopes ([read:messages] if parent has it, else []). Child creates cannot grant identities:create."),
-      },
+      }),
       outputSchema: identitySchema,
       annotations: mutatingAnnotations,
     },
@@ -396,6 +407,8 @@ export function registerOpenAgentEmailTools(
     {
       title: "List Email Identities",
       description: "List all email identities (addresses) on this server.",
+      // #355-A：无参工具也拒绝未知键。
+      inputSchema: asStrictInput({}),
       outputSchema: identityListOutputSchema,
       annotations: readOnlyAnnotations,
     },
@@ -411,7 +424,8 @@ export function registerOpenAgentEmailTools(
         "List messages received by an identity address (newest first), with id/from/to/subject/date/seen/snippet/hasOtp/source." +
         UNTRUSTED_CONTENT_DESCRIPTION +
         " Non-internal snippets are fenced with the same UNTRUSTED EXTERNAL EMAIL markers as full bodies.",
-      inputSchema: {
+      // #355-A：未知键拒绝，避免剥掉后仍去拉列表。
+      inputSchema: asStrictInput({
         address: identityAddressSchema.describe("Full email address of the identity"),
         limit: z
           .number()
@@ -422,7 +436,7 @@ export function registerOpenAgentEmailTools(
           .max(200)
           .optional()
           .describe("Max messages to return (1-200, server default 50)"),
-      },
+      }),
       outputSchema: messageListOutputSchema,
       annotations: mailReadAnnotations,
     },
@@ -442,7 +456,8 @@ export function registerOpenAgentEmailTools(
       description:
         "Read a full message: text, html (if any), and extracted OTP verification codes and links." +
         UNTRUSTED_CONTENT_DESCRIPTION,
-      inputSchema: receivedMessageInputSchema,
+      // #355-A：包一层 strict，不改共享 shape 本身。
+      inputSchema: asStrictInput(receivedMessageInputSchema),
       outputSchema: messageOutputSchema,
       annotations: mailReadAnnotations,
     },
@@ -461,13 +476,14 @@ export function registerOpenAgentEmailTools(
       title: "Mark Email Seen",
       description:
         "Mark a message as read (seen=true) or unread (seen=false). This flag is shared across all consumers of the mailbox — agents that only need new-mail detection should prefer GET /v1/messages?since= or mail_wait_for. Reading a message never changes this flag by itself.",
-      inputSchema: {
+      // #355-A：在副本上 strict，共享的 receivedMessageInputSchema 保持 raw shape。
+      inputSchema: asStrictInput({
         ...receivedMessageInputSchema,
         seen: z
           .boolean()
           .optional()
           .describe("true = mark as read (default), false = mark as unread"),
-      },
+      }),
       outputSchema: seenOutputSchema,
       annotations: {
         ...mutatingAnnotations,
@@ -486,7 +502,8 @@ export function registerOpenAgentEmailTools(
       description:
         "Wait for an incoming message matching optional from/subject filters; skips already-seen matches in the newest-20 window and keeps waiting until a true timeout or a new unread match. Returns the full message (with OTP codes/links) or a timeout error." +
         UNTRUSTED_CONTENT_DESCRIPTION,
-      inputSchema: {
+      // #355-A：未知键拒绝，避免剥掉后仍占用等待槽。
+      inputSchema: asStrictInput({
         address: identityAddressSchema.describe("Full email address of the identity to watch"),
         fromContains: z
           .string()
@@ -508,7 +525,7 @@ export function registerOpenAgentEmailTools(
           .describe(
             "Seconds to wait (default 120, schema max 600; server clamps to MCP_MAX_WAIT_SECONDS)",
           ),
-      },
+      }),
       outputSchema: messageOutputSchema,
       annotations: { ...mailReadAnnotations, idempotentHint: false },
     },

@@ -16,12 +16,20 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-mcp-http-'));
 process.env.UI_ENABLED = 'false';
 process.env.TASK_LEASES_ENABLED = 'true';
 
-const { describe, expect, test: bunTest, mock } = await import('bun:test');
+const { describe, expect, test: bunTest, mock, spyOn } = await import('bun:test');
 // #357 R1：合法大件 mail_send 须 SMTP 成功才能断到 queued（与 send.test 同款 mock）
 const sendMailMock = mock(async () => ({ messageId: '<sdk21-r1@test.example>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 const { createApp } = await import('../src/app.ts');
-const { createIdentity } = await import('../src/lib/identities.ts');
+const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
+const {
+  acquireWaitSlot,
+  releaseWaitSlot,
+  listMessagesCallerKey,
+  listMessagesHasBucketForTests,
+  markSeenHasBucketForTests,
+} = await import('../src/lib/ratelimit.ts');
 const { setTaskNowForTests } = await import('./support/task-test-seams.ts');
 const { withTaskLeasesEnabledForTests } = await import('./support/task-lease-seams.ts');
 const test = (name: string, work: () => void | Promise<void>) => bunTest(name, () => withTaskLeasesEnabledForTests(true, work));
@@ -1080,6 +1088,235 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
     // 须为输入校验失败，而非静默剥键后走到 SMTP
     expect(text).not.toMatch(/smtp_error/i);
     expect(/unrecognized|invalid (input|argument)|-32602|attachments/i.test(text)).toBe(true);
+  });
+});
+
+/**
+ * #355-A：六个邮件工具拒绝未知键。负控必须是输入校验失败，
+ * 并用身份库 / 列表限速桶 / 标已读限速桶 / 等待槽占满后的响应证明确实没进 API。
+ */
+describe('MCP 邮件六工具未知键拒绝（#355-A）', () => {
+  const MAIL_TOOL_NAMES = [
+    'mail_new_identity',
+    'mail_list_identities',
+    'mail_list_messages',
+    'mail_read_message',
+    'mail_mark_seen',
+    'mail_wait_for',
+  ] as const;
+
+  function isInputRejection(text: string): boolean {
+    return /unrecognized|invalid (input|argument)|-32602/i.test(text);
+  }
+
+  async function callTool(token: string, name: string, args: Record<string, unknown>, id = 1) {
+    const res = await mcpRequest(token, 'tools/call', { name, arguments: args }, id);
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: {
+        isError?: boolean;
+        content?: Array<{ text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+    };
+    return { body, text: JSON.stringify(body) };
+  }
+
+  /**
+   * #355-A R1：监听原型上的 readMessage。finally 还原，避免后续用例吃到同一只 spy。
+   * 调用记录不含 this，只有 (address, id)。
+   */
+  async function withReadSpy(work: (calls: () => unknown[][]) => Promise<void>): Promise<void> {
+    const spy = spyOn(OpenAgentEmailClient.prototype, 'readMessage');
+    try {
+      await work(() => spy.mock.calls as unknown[][]);
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  /**
+   * 占满该身份自己的等待槽。caller 与信箱相同时槽键相同，
+   * 先撞上每槽 3 个的上限；释放时只还这 3 个。
+   */
+  function fillOwnWaitSlots(address: string): () => void {
+    for (let i = 0; i < 3; i++) {
+      expect(acquireWaitSlot(address, address)).toBe(true);
+    }
+    return () => {
+      for (let i = 0; i < 3; i++) releaseWaitSlot(address, address);
+    };
+  }
+
+  test('#355-A tools/list 六工具逐一广告 additionalProperties:false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: { tools?: Array<{ name: string; inputSchema?: { additionalProperties?: boolean } }> };
+    };
+    for (const name of MAIL_TOOL_NAMES) {
+      const tool = body.result?.tools?.find((item) => item.name === name);
+      expect(tool, `missing ${name}`).toBeTruthy();
+      expect(tool?.inputSchema?.additionalProperties, name).toBe(false);
+    }
+  });
+
+  test('#355-A mail_new_identity 未知键 local_part 不创建身份', async () => {
+    const localpart = 'mcp355-new-reject';
+    const address = `${localpart}@test.example`;
+    const { body, text } = await callTool(adminKey, 'mail_new_identity', {
+      localpart,
+      local_part: 'should-not-apply',
+    });
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(text).not.toMatch(/API error|forbidden|insufficient_scope/i);
+    expect(body.result?.structuredContent?.address).toBeUndefined();
+    expect(body.result?.structuredContent?.token).toBeUndefined();
+    // 若静默剥键，admin 会把这个 localpart 写进身份库。
+    expect(findIdentity(address)).toBeUndefined();
+  });
+
+  test('#355-A mail_list_identities 仅未知键时不返回身份列表', async () => {
+    const sentinel = createIdentity({ localpart: 'mcp355-list-id-sentinel' })!;
+    const { body, text } = await callTool(adminKey, 'mail_list_identities', { verbose: true });
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(body.result?.structuredContent?.identities).toBeUndefined();
+    // 工具若真的列出了身份，响应里一定带有刚创建的地址。
+    expect(text).not.toContain(sentinel.identity.address);
+  });
+
+  test('#355-A mail_list_messages 未知键 limt 不进入列表 API', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-list-msg' })!;
+    const bucket = listMessagesCallerKey({ kind: 'identity', address: identity.address });
+    expect(listMessagesHasBucketForTests(bucket)).toBe(false);
+    const { body, text } = await callTool(token, 'mail_list_messages', {
+      address: identity.address,
+      limit: 1,
+      limt: 5,
+    });
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(body.result?.structuredContent?.messages).toBeUndefined();
+    expect(text).not.toMatch(/API error|not_found|ECONNREFUSED|rate_limited/i);
+    expect(listMessagesHasBucketForTests(bucket)).toBe(false);
+  });
+
+  test('#355-A R1 mail_read_message 未知键不调用 readMessage', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-read' })!;
+    await withReadSpy(async (calls) => {
+      const { body, text } = await callTool(token, 'mail_read_message', {
+        address: identity.address,
+        id: '1',
+        messageId: '1',
+      });
+      // 未知键若被剥掉，会以合法 address/id 进入 client.readMessage。
+      expect(calls()).toEqual([]);
+      expect(body.error || body.result?.isError, text).toBeTruthy();
+      expect(isInputRejection(text), text).toBe(true);
+      expect(body.result?.structuredContent?.text).toBeUndefined();
+    });
+  });
+
+  test('#355-A mail_mark_seen 未知键 flag 不标已读', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-seen' })!;
+    expect(markSeenHasBucketForTests(identity.address)).toBe(false);
+    const { body, text } = await callTool(token, 'mail_mark_seen', {
+      address: identity.address,
+      id: '1',
+      seen: true,
+      flag: 'seen',
+    });
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(body.result?.structuredContent?.seen).toBeUndefined();
+    expect(text).not.toMatch(/API error|not_found|ECONNREFUSED|rate_limited/i);
+    expect(markSeenHasBucketForTests(identity.address)).toBe(false);
+  });
+
+  test('#355-A mail_wait_for 未知键 from 不占用等待', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-wait' })!;
+    const release = fillOwnWaitSlots(identity.address);
+    try {
+      const { body, text } = await callTool(token, 'mail_wait_for', {
+        address: identity.address,
+        timeoutSec: 1,
+        from: 'nobody@example.net',
+      });
+      expect(body.error || body.result?.isError, text).toBeTruthy();
+      expect(isInputRejection(text), text).toBe(true);
+      expect(body.result?.structuredContent?.text).toBeUndefined();
+      // 槽已满：若工具真的去等，路由会立刻 429，而不是输入校验错误。
+      expect(text).not.toMatch(/too_many_waits|timeout|API error|ECONNREFUSED/i);
+    } finally {
+      release();
+    }
+  });
+
+  test('#355-A mail_new_identity 与 mail_list_identities 合法调用仍成功', async () => {
+    const created = await callTool(adminKey, 'mail_new_identity', { localpart: 'mcp355-new-ok' }, 21);
+    expect(created.body.error).toBeUndefined();
+    expect(created.body.result?.isError).toBeFalsy();
+    expect(created.body.result?.structuredContent?.address).toBe('mcp355-new-ok@test.example');
+    expect(findIdentity('mcp355-new-ok@test.example')).toBeDefined();
+
+    const listed = await callTool(adminKey, 'mail_list_identities', {}, 22);
+    expect(listed.body.error).toBeUndefined();
+    expect(listed.body.result?.isError).toBeFalsy();
+    const identities = listed.body.result?.structuredContent?.identities as Array<{ address?: string }> | undefined;
+    expect(identities?.some((item) => item.address === 'mcp355-new-ok@test.example')).toBe(true);
+  });
+
+  test('#355-A mail_list_messages 合法入参通过校验并进入列表 API', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-list-ok' })!;
+    const bucket = listMessagesCallerKey({ kind: 'identity', address: identity.address });
+    const { text } = await callTool(token, 'mail_list_messages', {
+      address: identity.address,
+      limit: 1,
+    }, 23);
+    expect(isInputRejection(text)).toBe(false);
+    // 列表路由在碰 IMAP 之前写 caller 桶；桶出现即表示合法入参已执行。
+    expect(listMessagesHasBucketForTests(bucket)).toBe(true);
+  });
+
+  test('#355-A R1 mail_read_message 合法入参会调用 readMessage', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-read-ok' })!;
+    await withReadSpy(async (calls) => {
+      const { text } = await callTool(token, 'mail_read_message', {
+        address: identity.address,
+        id: '1',
+      }, 24);
+      expect(isInputRejection(text)).toBe(false);
+      expect(calls()).toEqual([[identity.address, '1']]);
+    });
+  });
+
+  test('#355-A mail_mark_seen 合法入参通过校验并进入标已读 API', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-seen-ok' })!;
+    const { text } = await callTool(token, 'mail_mark_seen', {
+      address: identity.address,
+      id: '1',
+      seen: false,
+    }, 25);
+    expect(isInputRejection(text)).toBe(false);
+    expect(markSeenHasBucketForTests(identity.address)).toBe(true);
+  });
+
+  test('#355-A mail_wait_for 合法入参通过校验并进入等待 API', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp355-wait-ok' })!;
+    const release = fillOwnWaitSlots(identity.address);
+    try {
+      const { text } = await callTool(token, 'mail_wait_for', {
+        address: identity.address,
+        timeoutSec: 1,
+      }, 26);
+      expect(isInputRejection(text)).toBe(false);
+      expect(text).toMatch(/too_many_waits/);
+    } finally {
+      release();
+    }
   });
 });
 
