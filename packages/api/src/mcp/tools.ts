@@ -25,8 +25,13 @@ import { prepareMailToolMessage } from "./fence.ts";
  * registerTool 重载要求 input 与 output 同为 ZodObject 或同为 raw shape。
  * 这些工具的 output 是共享 raw shape（read/wait 同一引用，字段测试直接读键），不能改成 ZodObject。
  * 断言只满足重载；instanceof ZodObject 与 .strict() 都发生在运行时。
+ * #355-B：导出仅供误包守卫单测。其他工具仍只传 raw shape。
  */
-function asStrictInput<T extends Record<string, z.ZodType>>(shape: T): T {
+export function asStrictInput<T extends Record<string, z.ZodType>>(shape: T): T {
+  // 已是 ZodObject 时立刻抛错，禁止再包一层或静默放过。
+  if (shape instanceof z.ZodObject) {
+    throw new Error("asStrictInput: refusing ZodObject; pass a raw shape");
+  }
   return z.object(shape).strict() as unknown as T;
 }
 
@@ -580,7 +585,8 @@ export function registerOpenAgentEmailTools(
       title: "Notify User",
       description:
         "Send a human-alert notification. Identity tokens need the server-side can_notify_user grant; this tool never needs a topic or ntfy credential.",
-      inputSchema: notificationInputSchema,
+      // #355-B：未知键拒绝。output 仍是 raw shape；level 默认仍由 handler 填 normal。
+      inputSchema: asStrictInput(notificationInputSchema),
       outputSchema: notifyOutputSchema,
       annotations: mutatingAnnotations,
     },
@@ -595,7 +601,8 @@ export function registerOpenAgentEmailTools(
       title: "Notify Agent",
       description:
         "Wake a named agent through the server-side notification route. Prefer the target agent's full identity address (localpart@domain); bare localpart remains compatible for legacy single-domain deployments. The server owns topics and credentials.",
-      inputSchema: {
+      // #355-B：未知键拒绝。全地址与裸 localpart 字段不变。
+      inputSchema: asStrictInput({
         name: z
           .string()
           .regex(
@@ -605,7 +612,7 @@ export function registerOpenAgentEmailTools(
             "Target agent full address preferred (e.g. qa-bot@example.com); bare localpart (e.g. qa-bot) for legacy single-domain",
           ),
         ...notificationInputSchema,
-      },
+      }),
       outputSchema: notifyOutputSchema,
       annotations: mutatingAnnotations,
     },
@@ -620,9 +627,10 @@ export function registerOpenAgentEmailTools(
       title: "Check Agent Notifications",
       description:
         "Read recent notifications for this identity only. The server maps the token to its own topic, so no topic name or ntfy credential is exposed.",
-      inputSchema: {
+      // #355-B：无必填；未知键拒绝。since 仍可选。
+      inputSchema: asStrictInput({
         since: z.string().min(1).max(64).optional().describe("Optional ntfy duration or timestamp filter"),
-      },
+      }),
       outputSchema: notifyCheckOutputSchema,
       annotations: readOnlyAnnotations,
     },
@@ -636,6 +644,8 @@ export function registerOpenAgentEmailTools(
       title: "Verify Notification Delivery",
       description:
         "Send a harmless server-side notification check and poll it back. Requires the same human-alert permission as notify_user.",
+      // #355-B：无参工具显式 strict 空对象，未知键拒绝。
+      inputSchema: asStrictInput({}),
       outputSchema: notifyVerifyOutputSchema,
       annotations: mutatingAnnotations,
     },
