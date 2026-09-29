@@ -865,9 +865,10 @@ export function registerOpenAgentEmailTools(
     {
       title: "List Webhook Subscriptions",
       description: "List outbound webhook subscriptions. Identity callers see only their own subscriptions; admin callers may see all or filter by address.",
-      inputSchema: {
+      // #355-D：外层未知键拒绝。可选 address 过滤不变。
+      inputSchema: asStrictInput({
         address: z.string().regex(IDENTITY_ADDRESS_PATTERN).optional().describe("Optional identity email address to filter by (admin only)"),
-      },
+      }),
       outputSchema: webhookListOutputSchema,
       annotations: readOnlyAnnotations,
     },
@@ -880,7 +881,8 @@ export function registerOpenAgentEmailTools(
     {
       title: "Create Webhook Subscription",
       description: "Create an outbound webhook subscription. Returns subscription metadata and the displayed signing secret (whs_...). Deny-by-default for OAuth tokens.",
-      inputSchema: {
+      // #355-D：只收紧外层未知键。2048 上限、无 .url() 预验、events 与可选字段保持原样。
+      inputSchema: asStrictInput({
         // #312 P3-1：去 .url()、保留 .max(2048)，坏 URL 透传 REST invalid_webhook_url/malformed_url
         url: z.string().max(2048).describe("Webhook target URL (https:// required unless private target granted)"),
         address: z.string().regex(IDENTITY_ADDRESS_PATTERN).describe("Identity email address to receive events for"),
@@ -900,7 +902,7 @@ export function registerOpenAgentEmailTools(
           .max(1000)
           .optional()
           .describe("Optional human-readable description (max 1000 characters)"),
-      },
+      }),
       outputSchema: webhookCreateOutputSchema,
       annotations: mutatingAnnotations,
     },
@@ -924,9 +926,10 @@ export function registerOpenAgentEmailTools(
     {
       title: "Delete Webhook Subscription",
       description: "Permanently delete an outbound webhook subscription and cancel any pending retries.",
-      inputSchema: {
+      // #355-D：外层未知键拒绝。id 字段不变。
+      inputSchema: asStrictInput({
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
-      },
+      }),
       outputSchema: webhookDeleteOutputSchema,
       annotations: { ...mutatingAnnotations, destructiveHint: true },
     },
@@ -939,9 +942,10 @@ export function registerOpenAgentEmailTools(
     {
       title: "Test Webhook Subscription",
       description: "Send an immediate probe ping to test webhook connectivity.",
-      inputSchema: {
+      // #355-D：外层未知键拒绝。探测仍只传 id，不改投递。
+      inputSchema: asStrictInput({
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
-      },
+      }),
       outputSchema: webhookTestOutputSchema,
       annotations: mutatingAnnotations,
     },
@@ -954,9 +958,10 @@ export function registerOpenAgentEmailTools(
     {
       title: "Disable Webhook Subscription",
       description: "Pause an active webhook subscription by marking it disabled.",
-      inputSchema: {
+      // #355-D：外层未知键拒绝。id 字段不变。
+      inputSchema: asStrictInput({
         id: z.string().min(1).describe("Webhook subscription ID (whk_...)"),
-      },
+      }),
       outputSchema: webhookDisableOutputSchema,
       annotations: mutatingAnnotations,
     },

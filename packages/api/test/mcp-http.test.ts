@@ -2107,6 +2107,354 @@ describe('MCP task 九工具未知键拒绝（#355-C）', () => {
 });
 
 /**
+ * #355-D：webhook 五工具拒绝未知键。负控必须是输入校验失败，
+ * 并用 client spy 证明未进入 list/create/delete/test/disable。
+ * 不能用权限拒绝、无效 URL、无效身份或无效订阅 ID 代替 strict 负控。
+ * 正控只打原型 fake，不透传真实 webhook 后端、不发网络 ping；finally 还原。
+ * 创建返回里的签名材料只用非 whs_ 夹具，禁止写入日志。
+ */
+describe('MCP webhook 五工具未知键拒绝（#355-D）', () => {
+  const WEBHOOK_TOOL_NAMES = [
+    'mail_webhook_list',
+    'mail_webhook_create',
+    'mail_webhook_delete',
+    'mail_webhook_test',
+    'mail_webhook_disable',
+  ] as const;
+  const ADDRESS = 'fox-k7d2@test.example';
+  const HOOK_ID = 'whk_fixture_d';
+  const HOOK_URL = 'https://consumer.example/hook';
+  // 只示一次原则：夹具不是真实签名 secret，不得使用 whs_ 前缀。
+  const SHOWN_ONCE_FIXTURE = 'fixture-shown-once';
+  const WEBHOOK_METHODS = [
+    'listWebhooks',
+    'createWebhook',
+    'deleteWebhook',
+    'testWebhook',
+    'disableWebhook',
+  ] as const;
+  type WebhookMethod = typeof WEBHOOK_METHODS[number];
+
+  const CREATE_REQUIRED = {
+    url: HOOK_URL,
+    address: ADDRESS,
+    events: ['mail.received'] as Array<'mail.received' | 'approval.requested'>,
+  };
+
+  function listItem() {
+    return {
+      id: HOOK_ID,
+      url: HOOK_URL,
+      address: ADDRESS,
+      events: ['mail.received'],
+      state: 'enabled',
+    };
+  }
+
+  /** fake 对齐 handler 包装后的 outputSchema，不访问网络。 */
+  function fakeFor(method: WebhookMethod): unknown {
+    if (method === 'listWebhooks') return [listItem()];
+    if (method === 'createWebhook') return { ...listItem(), secret: SHOWN_ONCE_FIXTURE };
+    if (method === 'deleteWebhook') return { ok: true };
+    if (method === 'testWebhook') {
+      return { deliveryId: 'del_fixture_d', outcome: 'delivered', status: 204, reason: null };
+    }
+    return { ok: true, state: 'disabled', disabledReason: 'manual' };
+  }
+
+  function structuredFor(method: WebhookMethod): Record<string, unknown> {
+    if (method === 'listWebhooks') return { webhooks: fakeFor('listWebhooks') as unknown[] };
+    return fakeFor(method) as Record<string, unknown>;
+  }
+
+  function isInputRejection(text: string): boolean {
+    return /unrecognized|invalid (input|argument)|-32602/i.test(text);
+  }
+
+  async function callTool(token: string, name: string, args: Record<string, unknown>, id = 1) {
+    const res = await mcpRequest(token, 'tools/call', { name, arguments: args }, id);
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: {
+        isError?: boolean;
+        content?: Array<{ text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+    };
+    return { body, text: JSON.stringify(body) };
+  }
+
+  /**
+   * 替换五个 webhook client 方法。实现不调用原函数，因此不会打到真实订阅后端或发 ping。
+   * finally 逐个 mockRestore。
+   */
+  async function withWebhookFakes(
+    work: (calls: (method: WebhookMethod) => unknown[][]) => Promise<void>,
+    overrides?: Partial<Record<WebhookMethod, (...args: unknown[]) => Promise<unknown>>>,
+  ): Promise<void> {
+    const spies = WEBHOOK_METHODS.map((method) => {
+      const spy = spyOn(OpenAgentEmailClient.prototype, method);
+      const install = spy.mockImplementation.bind(spy) as (
+        fn: (...args: unknown[]) => Promise<unknown>,
+      ) => void;
+      install((...args: unknown[]) => {
+        const custom = overrides?.[method];
+        if (custom) return custom(...args);
+        return Promise.resolve(fakeFor(method));
+      });
+      return [method, spy] as const;
+    });
+    try {
+      await work((method) => {
+        const found = spies.find(([name]) => name === method);
+        return (found?.[1].mock.calls ?? []) as unknown[][];
+      });
+    } finally {
+      for (const [, spy] of spies) spy.mockRestore();
+    }
+  }
+
+  function expectFake(
+    body: { error?: unknown; result?: { isError?: boolean; structuredContent?: Record<string, unknown> } },
+    expected: Record<string, unknown>,
+  ) {
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    expect(body.result?.structuredContent).toEqual(expected);
+  }
+
+  async function expectUnknownKeyRejected(
+    calls: (method: WebhookMethod) => unknown[][],
+    method: WebhookMethod,
+    name: string,
+    args: Record<string, unknown>,
+    id: number,
+  ) {
+    const { body, text } = await callTool(adminKey, name, args, id);
+    expect(calls(method), text).toEqual([]);
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(text, text).toMatch(/unexpected/);
+    expect(text).not.toMatch(/API error|forbidden|invalid_webhook_url|malformed_url|ECONNREFUSED/i);
+    expect(body.result?.structuredContent).toBeUndefined();
+  }
+
+  test('#355-D tools/list 五工具逐一广告 additionalProperties:false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: {
+        tools?: Array<{
+          name: string;
+          inputSchema?: {
+            additionalProperties?: boolean;
+            required?: string[];
+            properties?: Record<string, { maxLength?: number; format?: string; description?: string }>;
+          };
+          outputSchema?: { properties?: Record<string, unknown> };
+        }>;
+      };
+    };
+    const advertised: Array<{ name: string; required: string[]; properties: string[]; output: string[] }> = [
+      { name: 'mail_webhook_list', required: [], properties: ['address'], output: ['webhooks'] },
+      {
+        name: 'mail_webhook_create',
+        required: ['url', 'address', 'events'],
+        properties: ['url', 'address', 'events', 'contentScope', 'description'],
+        output: ['id', 'url', 'address', 'events', 'contentScope', 'description', 'state', 'secret', 'secretPrefix', 'signatureScheme', 'timestampToleranceSec', 'createdAt'],
+      },
+      { name: 'mail_webhook_delete', required: ['id'], properties: ['id'], output: ['ok'] },
+      { name: 'mail_webhook_test', required: ['id'], properties: ['id'], output: ['deliveryId', 'outcome', 'status', 'reason'] },
+      { name: 'mail_webhook_disable', required: ['id'], properties: ['id'], output: ['ok', 'state', 'disabledReason'] },
+    ];
+    for (const item of advertised) {
+      const tool = body.result?.tools?.find((entry) => entry.name === item.name);
+      expect(tool, `missing ${item.name}`).toBeTruthy();
+      expect(tool?.inputSchema?.additionalProperties, item.name).toBe(false);
+      expect(tool?.inputSchema?.required ?? [], item.name).toEqual(item.required);
+      expect(Object.keys(tool?.inputSchema?.properties ?? {}).sort(), item.name).toEqual([...item.properties].sort());
+      expect(Object.keys(tool?.outputSchema?.properties ?? {}).sort(), item.name).toEqual([...item.output].sort());
+    }
+    const createTool = body.result?.tools?.find((entry) => entry.name === 'mail_webhook_create');
+    const urlField = createTool?.inputSchema?.properties?.url;
+    // 保持 2048 上限，且不预加 URL format。
+    expect(urlField?.maxLength).toBe(2048);
+    expect(urlField?.format).toBeUndefined();
+    expect(WEBHOOK_TOOL_NAMES).toHaveLength(advertised.length);
+  });
+
+  test('#355-D mail_webhook_list 仅未知键不调用 listWebhooks', async () => {
+    await withWebhookFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'listWebhooks', 'mail_webhook_list', {
+        unexpectedList: true,
+      }, 601);
+    });
+  });
+
+  test('#355-D mail_webhook_create 未知键不调用 createWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'createWebhook', 'mail_webhook_create', {
+        ...CREATE_REQUIRED,
+        unexpectedCreate: true,
+      }, 602);
+    });
+  });
+
+  test('#355-D mail_webhook_delete 未知键不调用 deleteWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'deleteWebhook', 'mail_webhook_delete', {
+        id: HOOK_ID,
+        unexpectedDelete: true,
+      }, 603);
+    });
+  });
+
+  test('#355-D mail_webhook_test 未知键不调用 testWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'testWebhook', 'mail_webhook_test', {
+        id: HOOK_ID,
+        unexpectedTest: true,
+      }, 604);
+    });
+  });
+
+  test('#355-D mail_webhook_disable 未知键不调用 disableWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'disableWebhook', 'mail_webhook_disable', {
+        id: HOOK_ID,
+        unexpectedDisable: true,
+      }, 605);
+    });
+  });
+
+  test('#355-D mail_webhook_list 空对象与 address 筛选都进入 listWebhooks', async () => {
+    await withWebhookFakes(async (calls) => {
+      const all = await callTool(adminKey, 'mail_webhook_list', {}, 611);
+      expect(isInputRejection(all.text), all.text).toBe(false);
+      expectFake(all.body, structuredFor('listWebhooks'));
+      const filtered = await callTool(adminKey, 'mail_webhook_list', { address: ADDRESS }, 612);
+      expect(isInputRejection(filtered.text), filtered.text).toBe(false);
+      expectFake(filtered.body, structuredFor('listWebhooks'));
+      expect(calls('listWebhooks')).toEqual([[undefined], [ADDRESS]]);
+    });
+  });
+
+  test('#355-D mail_webhook_create 保留 URL、events 与可选 contentScope/description', async () => {
+    await withWebhookFakes(async (calls) => {
+      const full = await callTool(adminKey, 'mail_webhook_create', {
+        ...CREATE_REQUIRED,
+        events: ['mail.received', 'approval.requested'],
+        contentScope: 'preview',
+        description: 'desk hook',
+      }, 621);
+      expect(isInputRejection(full.text), full.text).toBe(false);
+      expectFake(full.body, structuredFor('createWebhook'));
+      const omitted = await callTool(adminKey, 'mail_webhook_create', { ...CREATE_REQUIRED }, 622);
+      expect(isInputRejection(omitted.text), omitted.text).toBe(false);
+      expectFake(omitted.body, structuredFor('createWebhook'));
+      expect(calls('createWebhook')).toEqual([
+        [{
+          url: HOOK_URL,
+          address: ADDRESS,
+          events: ['mail.received', 'approval.requested'],
+          contentScope: 'preview',
+          description: 'desk hook',
+        }],
+        [{ url: HOOK_URL, address: ADDRESS, events: ['mail.received'] }],
+      ]);
+    });
+  });
+
+  test('#355-D mail_webhook_create 坏 URL 透传 REST 错误体，超长与重复 events 不进 client', async () => {
+    const prefix = 'https://consumer.example/';
+    const url2048 = `${prefix}${'a'.repeat(2048 - prefix.length)}`;
+    const url2049 = `${url2048}b`;
+    expect(url2048.length).toBe(2048);
+    expect(url2049.length).toBe(2049);
+    await withWebhookFakes(async (calls) => {
+      const atCap = await callTool(adminKey, 'mail_webhook_create', {
+        url: url2048, address: ADDRESS, events: ['mail.received'],
+      }, 623);
+      expect(isInputRejection(atCap.text), atCap.text).toBe(false);
+      expectFake(atCap.body, structuredFor('createWebhook'));
+      const tooLong = await callTool(adminKey, 'mail_webhook_create', {
+        url: url2049, address: ADDRESS, events: ['mail.received'],
+      }, 624);
+      const duplicate = await callTool(adminKey, 'mail_webhook_create', {
+        url: HOOK_URL, address: ADDRESS, events: ['mail.received', 'mail.received'],
+      }, 625);
+      const emptyEvents = await callTool(adminKey, 'mail_webhook_create', {
+        url: HOOK_URL, address: ADDRESS, events: [],
+      }, 626);
+      expect(calls('createWebhook'), tooLong.text).toEqual([[{
+        url: url2048, address: ADDRESS, events: ['mail.received'],
+      }]]);
+      for (const item of [tooLong, duplicate, emptyEvents]) {
+        expect(item.body.result?.isError, item.text).toBe(true);
+        expect(item.text).not.toMatch(/invalid_webhook_url|malformed_url/);
+        // #355-D R1：超长 URL、空 events、重复 events 必须来自输入校验层。
+        expect(isInputRejection(item.text), item.text).toBe(true);
+      }
+      expect(duplicate.text).toContain('events must be unique');
+    }, undefined);
+  });
+
+  test('#355-D mail_webhook_create 坏 URL 仍进 client 并透传 invalid_webhook_url', async () => {
+    await withWebhookFakes(async (calls) => {
+      const rejected = await callTool(adminKey, 'mail_webhook_create', {
+        url: 'not-a-url', address: ADDRESS, events: ['mail.received'],
+      }, 627);
+      expect(calls('createWebhook')).toEqual([[{
+        url: 'not-a-url', address: ADDRESS, events: ['mail.received'],
+      }]]);
+      expect(rejected.body.result?.isError, rejected.text).toBe(true);
+      expect(isInputRejection(rejected.text)).toBe(false);
+      expect(rejected.text).not.toMatch(/Invalid url/i);
+      const parsed = JSON.parse(rejected.body.result?.content?.[0]?.text ?? '') as {
+        error: string;
+        details?: string;
+      };
+      expect(parsed).toEqual({ error: 'invalid_webhook_url', details: 'malformed_url' });
+    }, {
+      createWebhook: () => Promise.reject(new ApiError(400, 'invalid_webhook_url', {
+        errorBody: { error: 'invalid_webhook_url', details: 'malformed_url' },
+      })),
+    });
+  });
+
+  test('#355-D mail_webhook_delete 合法 id 进入 deleteWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      const deleted = await callTool(adminKey, 'mail_webhook_delete', { id: HOOK_ID }, 631);
+      expect(isInputRejection(deleted.text), deleted.text).toBe(false);
+      expectFake(deleted.body, structuredFor('deleteWebhook'));
+      expect(calls('deleteWebhook')).toEqual([[HOOK_ID]]);
+    });
+  });
+
+  test('#355-D mail_webhook_test 合法 id 进入 testWebhook 且不发网络 ping', async () => {
+    await withWebhookFakes(async (calls) => {
+      const probed = await callTool(adminKey, 'mail_webhook_test', { id: HOOK_ID }, 632);
+      expect(isInputRejection(probed.text), probed.text).toBe(false);
+      expectFake(probed.body, structuredFor('testWebhook'));
+      expect(calls('testWebhook')).toEqual([[HOOK_ID]]);
+      expect(calls('createWebhook')).toEqual([]);
+      expect(calls('deleteWebhook')).toEqual([]);
+      expect(calls('disableWebhook')).toEqual([]);
+    });
+  });
+
+  test('#355-D mail_webhook_disable 合法 id 进入 disableWebhook', async () => {
+    await withWebhookFakes(async (calls) => {
+      const disabled = await callTool(adminKey, 'mail_webhook_disable', { id: HOOK_ID }, 633);
+      expect(isInputRejection(disabled.text), disabled.text).toBe(false);
+      expectFake(disabled.body, structuredFor('disableWebhook'));
+      expect(calls('disableWebhook')).toEqual([[HOOK_ID]]);
+    });
+  });
+});
+
+/**
  * #357：MCP SDK 2.1.0 边界钉版（断言以实测落）。未采用 scopeChallenge（tier 等价）；DPoP 未验证·未启用。
  */
 describe('MCP SDK 2.1.0 边界（#357）', () => {
