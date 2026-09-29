@@ -2,27 +2,24 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
-## Unreleased
+## v0.10.0 — 2026-09-29
 
 ### Added
 
-- **API: 外部转发耐久基座（默认关，不可转发）** (#106 A1)：新增实例总闸 `FORWARDING_ENABLED`（默认 `false`，两份 Compose 与 `.env.example` 同缺省）。显式 `true` 时要求**显式** `TASK_SIGNING_SECRET`≥32，禁止回退 SMTP 密码。新增 `forward-store` 逐身份一条外部目的地址的原子落盘（`DATA_DIR/forwarding.json`，0700/0600，损坏/未知版本 fail-closed）。本片无发送路径、不接路由/watcher/SMTP/UI、未部署；合并 ≠ 生效。
+- **API: 邮件转发规则 A1-core** (#106): 为托管身份增加逐身份外部目的地址的规则存储基座，原子落盘、损坏状态 fail-closed，并校验单段域身份及 RFC atext。默认关闭；本片尚无配置路由或转发发送路径，正常收件路径不变。
+- **Docs: agent 自动回信食谱** (#105): 用户侧收到邮件 → webhook 唤醒 headless agent → 自动回复的完整示例与模板。
+- **API: 身份删除审计与已读限速** (#244/#245): 身份删除本体审计；`/:id/seen` 按 caller 限速。
 
 ### Fixed
 
-- **API/MCP: `POST /v1/send` 与 `mail_send` 未知键静默剥离止血** (#324)：`sendSchema` / `mail_send` inputSchema 补 `.strict()`；未知键（含 `attachments`、拼错字段）→ 400 `invalid_request`（`unrecognized_keys` 点名键）／MCP 工具调用报错且不发信。五键契约与既有 400 形态不变；不实现附件能力。**合并 ≠ 生效，生效于下次部署窗**。
-- **API: 日志面发射路径收敛为唯一原语 `scrubPayload`（R1–R10）** (#348)：新增导出 `scrubPayload`（显式 `mode ∈ {line,block}`）及薄封装。串面/对象面/盘文本三入口共用。**R10**：`redactField` 携带 trie 节点增量转移（总 O(n+Σ|s|)，禁每码元重走 pending）；block 在 `limit < |MARK|` 时**省略标记、输出恒 ≤ limit**；性能断言改**伸缩性**（禁绝对 50ms 墙钟）。R9 及更早收敛保留。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**。设计件见 PR #349 描述 / 见 #348。**合并 ≠ 生效，生效于下次部署窗**。
-- **API: scrubPayload 余债收口（失败链线性化 / 单码元转义钥 / 测试卫生 / join 终检）** (#350)：`redactField` AC 失败链 + **周期共振快路径**（extras 根上无出边则字面产出并保留 fail 后缀，禁 rem 整段回灌）；fail 链落到已完成节点时立即消化匹配；尾退失配仅在后缀对齐时收束（禁错误 len=i 跳跃）；`prepareSecretEscapePreps` 收录单码元转义；`describeFailure` join 后终检；测试临时目录改 `mkdtempSync(tmpdir)`。**D 与 ZCode P3-3/4/5/6 记档不修**。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**。**合并 ≠ 生效，生效于下次部署窗**。
-- **API: 日志/告警载荷面统一为 `describeFailure`（B 形态：逐字段独立域）** (#342)：`errorDetail` 并入并删除；每字段 **取串 → 有界200 → `redactField`（域内最长优先 + 域尾丢弃）→ `escapeLine`**，**然后** `join(' ')`（**禁止跨字段匹配**）。转义段＝C0/**DEL+C1(U+007F–U+009F)**/U+2028/U+2029/**bidi U+202A–U+202E·U+2066–U+2069**；输出可证 ≤6002；永不抛。调用点含原 `errorDetail` 11 处、`send.ts`、`sent-registry` 字符串告警、**`tasks` claim/claim-lost 兜底 warn**。**已声明行为差异**：字段尾恰为密钥真前缀时有意丢弃（J4）。**`errorCode` 一字不动；对外错误码/状态码/body 形状零变更**（本卡只动日志与告警载荷面）。对象面 6 处由 #348 收口（原记债 #344）。设计：`design-b.md`；旧跨字段形态头 `3872b0b` 留作反例素材、不予合并。**合并 ≠ 生效，生效于下次部署窗**。
-- **API: 非 Error rejection 不再因裸读 `.message` 逸出/打断日志路径** (#332)：全仓其余 31 处 `(err as Error).message` 统一改走 `errorCode(err)`（#333 已落地）。**对外错误码/状态码/body 形状零变更**；日志/告警与路由 catch 在 `undefined`/`null`/非 Error rejection 上不再因读取本身抛 TypeError。**合并 ≠ 生效，生效于下次部署窗**。
+- **API: 错误处理族收敛** (#240/#241/#242/#330/#332/#333–#337/#339/#343): post-create wait 失败使用独立 `wait_failed` 错误码，补 `journalUnavailable` 守卫及非 Error rejection 归一；lease/state 失败改用中性 fallback 码；`task_leases_disabled` 与 `invalid_approval_decision_event` 归位为 409，`lease_service_unavailable` 归位为 503。
+- **API: 日志与告警统一清洗管道** (#342/#345/#349/#351): streaming `describeFailure` 与 `scrubPayload` 收敛，日志与告警中的已识别敏感值统一清洗；相关底层硬化见 #348/#350。
+- **Assets: logo-400.png 白角透明化** (#251)。
+- **MCP: SDK 2.0.0 → 2.1.0 受控升级** (#357): 显式保持 MCP request body 16MiB 上限，与 REST 边界一致。
 
 ### Changed
 
-- **API/MCP: `@modelcontextprotocol/server` 2.0.0→2.1.0 受控兼容评估** (#357)：两包锁 `^2.1.0`（bun.lock 钉 2.1.0）；**显式 `maxRequestBodySize=JSON_BODY_LIMIT_BYTES`**：/mcp 与 /v1 同一边界 16MiB——不接受上游 4MiB 默认收窄造成「schema 合法、传输 413」两门分裂；合法多字节大件（~6MB）可发。**DPoP 未验证、未启用**（我方不实现 client）。**scopeChallenge 未采用**（critical 工具对 OAuth 403 仍由自有 tier 层等价覆盖）。订阅/listen 面未使用。合并 ≠ 生效，生效于下次部署窗。
-- **Tasks: `claim` 遇 `lease_service_unavailable` 由 502 归位为 503 同码** (#340 C3)：`POST /v1/tasks/:id/claim` 在 catch 命中 `lease_service_unavailable` 时，由 **`502 {error:"task_operation_failed"}` → `503 {error:"lease_service_unavailable"}`**（**仅此一码、仅此一条路由**；与 `lease`/`release`/`claim-lost` 兄弟路由既有映射对齐；其它码与其它路由不动）。**合并 ≠ 生效，生效于下次部署窗**。
-- **Tasks: 两条被吞域码由兜底归位为 409 同码** (#336)：`task_leases_disabled`（`POST /v1/tasks/:id/{claim,lease,release,claim-lost}` 服务层路径）与 `invalid_approval_decision_event`（`POST /v1/tasks/:id/decision`）由 `502 {error:"task_operation_failed"}` 归位为 **`409` 且 body 回显同码**（与入口守卫 / decision 冲突族对齐）。**中性兜底 `task_operation_failed` 本身保留**，仍收纳未映射失败。**合并 ≠ 生效，生效于下次部署窗**。
-- **Tasks: 租约/状态突变兜底码改为 `task_operation_failed`** (#330)：`POST /v1/tasks/:id/{claim,lease,release,claim-lost,decision,state}` 六处与 UI task 突变（`taskMutationError`）在未命中已映射域码时，对外码由 `502 {error:"smtp_error"}` 改为 `502 {error:"task_operation_failed"}`（状态码与 body 形状不变；**已映射域码与状态码一律不变**；`POST /v1/tasks` create 段 pre-create `502 {error:"smtp_error"}` 不变）。这些路径在写入阶段**会投递邮件**（lease journal 投递 / 审批终态投递 / remind / update 通知），**SMTP 投递失败是落入该兜底的成因之一**；该兜底同时收纳未映射/未分类失败，旧码把它**单一归因 SMTP**、客户端据码判因必错，故改为中性码。客户端若按错误码判因需改判。**合并 ≠ 生效，生效于下次部署窗**。
-- **Tasks: post-create wait 失败对外码改为 `wait_failed`** (#240)：`POST /v1/tasks` 在 SMTP/创建已成功后，wait 段非 journal 异常由 `502 {error:"smtp_error", taskId, created:true}` 改为 `502 {error:"wait_failed", taskId, created:true}`（状态码与 body 形状不变）。**仅限**该 post-create wait 失败面；pre-create `502 {error:"smtp_error"}`（无 id）与 journal `503 lease_journal_*` 不变。客户端若按错误码判因需改判；`taskId`/`created` 判据不变。
+- **API/MCP: 未知输入键一律拒绝** (#355/#324/#354): REST `POST /v1/send` 未知键（含 `attachments`）从 200 静默剥离改为 400 `invalid_request`；`POST /v1/delegations` 未知 body 键从 201 静默剥离改为 400 `invalid_request`，避免拼错 scope 落到默认 `read:messages` 授权。#355 涵盖的 24 个 MCP 工具（mail 6、notify 4、task 9、webhook 5）对未知键报工具校验错误且不执行副作用；`mail_send` 已由 #324 单独收紧，现有 MCP 工具共 25 个。旧客户端须移除多余字段；合法调用不变。
 
 ## v0.9.0 — 2026-09-22
 
