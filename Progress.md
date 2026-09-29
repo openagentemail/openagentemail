@@ -1443,3 +1443,48 @@ N/A。
 - PR #365：base `2f155d82`，末头 `4b1596e`，squash main `5ce4ae2`；A1-core 默认关且合并不等于部署。
 - FC 聚焦 65 pass/0 fail；全量 2395 pass/9 skip/0 fail；CI test/guard/capacity/docker-smoke 同头绿。
 - ZCode P2 入口总闸与 P3 验证、身份、运维/文档余项已分归后卡，详见 `/home/ops/materials/106/a1-core-r4c-terminal-report.md`。
+
+## 2026-09-29 · #355-A MCP mail 六工具与 delegation POST strict（PR #369）
+
+### 我们实现了哪些功能？
+1. MCP 六个 mail 工具的输入改为 strict；无参 `mail_list_identities` 显式使用 strict 空对象。REST `POST /v1/delegations` 的 body schema 也改为 strict。
+2. 共用 `asStrictInput()` 在运行时拒绝未知键，类型面保持原 raw shape；输出 schema、合法调用和省略 `scopes` 时默认 `read:messages` 的契约不变。
+
+### 我们遇到了哪些错误？
+1. 未知 delegation body 键原会被静默剥离并返回 201；把 `scopes` 拼成 `scope` 可能落入默认授权。六个 MCP 工具同样静默忽略未知参数。
+
+### 我们是如何解决这些错误的？
+1. delegation 未知 body 键现返回 400 `invalid_request`，拼错 `scope` 不再创建默认授权；MCP 未知键在工具校验层拒绝，API 与副作用不执行。旧客户端若多带键须删去；合法字段保持原语义。
+2. 六工具逐项验证 `tools/list` 的 `additionalProperties:false`、未知键零调用与合法正控；delegation 验证无 grant 及默认 scopes 正控。
+
+### 证据
+- 主仓 squash `0a2ae2e9`；四文件 +316/−14（≤350）。FC 全量 API 2409 pass/9 skip/0 fail、MCP 49/0；CI test/guard/capacity/docker-smoke 同头绿，CodeRabbit 本头真审无 actionable。docstring coverage 57.14% 建议级警告留档；#355 保持 OPEN，合并随下次部署窗生效。
+
+## 2026-09-29 · #355-B MCP notify 四工具 strict（PR #370）
+
+### 我们实现了哪些功能？
+1. `notify_user/notify_agent/notify_check/notify_verify` 输入改 strict，`notify_verify` 用 strict 空对象；`asStrictInput` 对误传 ZodObject 显式抛错。未知键由静默忽略改为工具校验错误，合法路由、权限与返回契约不变。
+
+### 我们遇到了哪些错误？
+1. CodeRabbit 旧头真审指出合法正控 spy 会透传真实通知路径；新头审查又持续 `Review rate limited` ≥34 分钟，不能记作本头真审。初头两次未改的 #348/#149 计时红亦保留原证。
+
+### 我们是如何解决这些错误的？
+1. R1 将四方法正控改为 fake，断言入参与 `structuredContent`，负控仍断言零调用，测试不发真实通知。
+2. 按 06 号文仅对本头制度化降链：旧头真审唯一 actionable 已在 R1 修复、bot 新头确认且 thread 解决；新头限流超 34 分钟；本头 CI/Codex/ZCode 齐绿；delta 仅测试 +54/−3 可核。不把 status success 当真审，也不将例外遗传后续 PR。
+
+### 证据
+- 主仓 squash `097d19b1`；两文件 +245/−6（≤300）。FC 全量 API 2419 pass/9 skip/0 fail、MCP 49/0；CI 四格同头绿，Codex/Muse 零意见、ZCode MERGE=yes、review threads 未解 0。#355 保持 OPEN，合并随下次部署窗生效。
+
+## 2026-09-29 · #251 logo 白角透明化（PR #367）
+
+### 我们实现了哪些功能？
+1. `logo-400.png` 四角由不透明白改为透明；README 引用路径不变。
+
+### 我们遇到了哪些错误？
+1. 旧图四角 `(255,255,255,255)` 在 GitHub 深色底露白角。v1–v3 位图阈值法虽去掉角白，半透明边缘仍带灰白残色。
+
+### 我们是如何解决这些错误的？
+1. 从官网 `public/logo.svg` 以 Chromium 渲染白/黑双底，逐像素反推 alpha，再把不透明内容归位到两种品牌色；避免阈值去背留下淡边。
+
+### 证据
+- 主仓 squash `a713c720`；PNG SHA-256 `aff3929fe47e33d3cba643c7d4776f94fd11a36160924f293a2071a69eca6c32`。四角 alpha=0，半透明边缘 569 像素灰白污染=0，CRC/IEND 无尾随；深浅底实看无白角灰线。CI 四格同头绿、Codex 旧 P2 清零；ZCode 越界 API 扫描候选另记 P3 债，CodeRabbit PNG 路径过滤缺席仅本头按总指挥 #5186 明认。合并随下次部署窗生效。
