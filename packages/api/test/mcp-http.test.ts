@@ -2393,6 +2393,8 @@ describe('MCP webhook 五工具未知键拒绝（#355-D）', () => {
       for (const item of [tooLong, duplicate, emptyEvents]) {
         expect(item.body.result?.isError, item.text).toBe(true);
         expect(item.text).not.toMatch(/invalid_webhook_url|malformed_url/);
+        // #355-D R1：超长 URL、空 events、重复 events 必须来自输入校验层。
+        expect(isInputRejection(item.text), item.text).toBe(true);
       }
       expect(duplicate.text).toContain('events must be unique');
     }, undefined);
