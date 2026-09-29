@@ -1321,6 +1321,62 @@ describe('MCP 邮件六工具未知键拒绝（#355-A）', () => {
       release();
     }
   });
+
+  // #362：畸形值与未知键必须停在工具边界。withReadSpy 若记到调用，说明校验被绕过。
+  test('#362 畸形 uidValidity 与未知键不调用 readMessage', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp362-bad' })!;
+    await withReadSpy(async (calls) => {
+      const cases: Record<string, unknown>[] = [
+        { uidValidity: '0' },
+        { uidValidity: '-1' },
+        { uidValidity: '1.5' },
+        { uidValidity: 'abc' },
+        { uidValidity: '' },
+        { uidValidity: 17 },
+        { uidValidity: '17', extra: true },
+      ];
+      for (const extra of cases) {
+        const { body, text } = await callTool(token, 'mail_read_message', {
+          address: identity.address,
+          id: '1',
+          ...extra,
+        });
+        expect(body.error || body.result?.isError, text).toBeTruthy();
+        expect(isInputRejection(text), text).toBe(true);
+        expect(body.result?.structuredContent?.text).toBeUndefined();
+      }
+      expect(calls()).toEqual([]);
+    });
+  });
+
+  // 标已读桶在进入路由时才出现；拒绝后仍为空即没有写已读。
+  test('#362 mail_mark_seen 拒绝 uidValidity 且不写已读', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp362-seen' })!;
+    expect(markSeenHasBucketForTests(identity.address)).toBe(false);
+    const { body, text } = await callTool(token, 'mail_mark_seen', {
+      address: identity.address,
+      id: '1',
+      seen: false,
+      uidValidity: '17',
+    });
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(body.result?.structuredContent?.seen).toBeUndefined();
+    expect(markSeenHasBucketForTests(identity.address)).toBe(false);
+  });
+
+  test('#362 合法 uidValidity 作为第三参到达 readMessage', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp362-fwd' })!;
+    await withReadSpy(async (calls) => {
+      const { text } = await callTool(token, 'mail_read_message', {
+        address: identity.address,
+        id: '1',
+        uidValidity: '17',
+      }, 362);
+      expect(isInputRejection(text)).toBe(false);
+      expect(calls()).toEqual([[identity.address, '1', '17']]);
+    });
+  });
 });
 
 /**

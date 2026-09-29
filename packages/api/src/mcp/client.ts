@@ -6,7 +6,7 @@
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt,scopes?}]}
  *   POST /v1/identities/:address/token {scopes?} -> 200 {address, token, scopes?}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
- *   GET  /v1/messages/:id?address  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
+ *   GET  /v1/messages/:id?address&uidValidity?  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
    *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId, id?}
@@ -507,8 +507,13 @@ export class OpenAgentEmailClient {
     return data.messages;
   }
 
-  readMessage(address: string, id: string): Promise<Message> {
+  /**
+   * 读取一封信。仅当调用方传入 uidValidity 时写入查询，编码交给 URLSearchParams。
+   * 不改 REST 路由；代际不符仍由服务端 404 stale_message_generation 表示。
+   */
+  readMessage(address: string, id: string, uidValidity?: string): Promise<Message> {
     const params = new URLSearchParams({ address });
+    if (uidValidity !== undefined) params.set("uidValidity", uidValidity);
     return this.request("GET", `/v1/messages/${encodeURIComponent(id)}?${params.toString()}`);
   }
 

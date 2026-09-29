@@ -209,6 +209,28 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(markSeen, "seen", false)).toBe(true);
   expect(ok(markSeen, "seen", "yes")).toBe(false); // API: z.boolean()
 
+  // #362：对象级 strict。字段 safeParse 看不出未知键，也不能证明 mark_seen 没被一起放宽。
+  const addr = "fox-k7d2@test.example";
+  const readInput = toolConfigs.get("mail_read_message")!.inputSchema!;
+  expect(readInput).toBeInstanceOf(z.ZodObject);
+  const readObject = readInput as z.ZodObject<z.ZodRawShape>;
+  expect(readObject.safeParse({ address: addr, id: "7" }).success).toBe(true);
+  expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "17" }).success).toBe(true);
+  expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "9007199254740993" }).success).toBe(true);
+  expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "01" }).success).toBe(true);
+  for (const uidValidity of ["0", "-1", "1.5", "nope", "", "17 "]) {
+    expect(readObject.safeParse({ address: addr, id: "7", uidValidity }).success, String(uidValidity)).toBe(false);
+  }
+  expect(readObject.safeParse({ address: addr, id: "7", uidValidity: 17 }).success).toBe(false);
+  expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "17", extra: 1 }).success).toBe(false);
+  const seenInput = toolConfigs.get("mail_mark_seen")!.inputSchema!;
+  expect(seenInput).toBeInstanceOf(z.ZodObject);
+  const seenObject = seenInput as z.ZodObject<z.ZodRawShape>;
+  expect(seenObject.shape.uidValidity).toBeUndefined();
+  expect(readObject.shape.uidValidity).toBeDefined();
+  expect(seenObject.safeParse({ address: addr, id: "7", seen: false }).success).toBe(true);
+  expect(seenObject.safeParse({ address: addr, id: "7", seen: false, uidValidity: "17" }).success).toBe(false);
+
   const waitFor = toolSchemas.get("mail_wait_for")!;
   expect(ok(waitFor, "address", "not-an-email")).toBe(false);
   expect(ok(waitFor, "fromContains", "x".repeat(200))).toBe(true);

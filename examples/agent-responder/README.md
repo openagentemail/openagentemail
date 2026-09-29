@@ -25,11 +25,12 @@ Secrets stay in env / wrangler secrets — never commit them.
 prompt-injection against that agent can send mail as the identity. Harden with
 a human-approval gate if that risk is unacceptable. Template A deliberately
 does **not** put `subject` into the CLI prompt or child env — the agent must
-fetch the message itself via MCP. There is also a **generation TOCTOU** between
-the receiver's `uidValidity` pre-check and the agent's later MCP read (MCP has
-no generation parameter); a mailbox rebuild in that window can mis-read — fix
-requires a product MCP change or [`webhook-wake`](../webhook-wake/) owning the
-read path. Tracked upstream as issue #362. Default `HOST=0.0.0.0` exposes the
+fetch the message itself via MCP. When the webhook includes `uidValidity`, the
+child prompt passes it to `mail_read_message` and must not reply on
+`stale_message_generation`. When the event has no generation, template A still
+replies as before and the prompt warns that this event has no generation
+guarantee. Template B's REST fetch already passes generation;
+[`webhook-wake`](../webhook-wake/) is unchanged. Default `HOST=0.0.0.0` exposes the
 receiver on all interfaces — bind `127.0.0.1` (or put a reverse proxy in front)
 unless you intend LAN/public reachability. The self-address guard only blocks
 replying to yourself; two auto-responders (A↔B) can still loop and burn LLM
