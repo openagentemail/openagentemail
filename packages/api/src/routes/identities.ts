@@ -8,6 +8,7 @@ import {
   listIdentities,
   rotateIdentityTokenDetailed,
   resolvePushContentTier,
+  setIdentityCanNotifyUser,
   setIdentityPushContentTier,
   validateScopesInput,
   countChildren,
@@ -73,6 +74,13 @@ const pushTierSchema = z
 const rotateTokenSchema = z
   .object({
     scopes: z.unknown(),
+  })
+  .strict();
+
+// #360：只接受必填布尔 canNotifyUser，未知键（含 name）由 strict 拒绝。
+const patchCanNotifyUserSchema = z
+  .object({
+    canNotifyUser: z.boolean(),
   })
   .strict();
 
@@ -610,6 +618,44 @@ export const identitiesRoute = new Hono()
       token,
       ...(updatedScopes !== undefined ? { scopes: updatedScopes } : {}),
     });
+  })
+  .patch('/:address', async (c) => {
+    // 先鉴权再读 body：身份 token 不能靠畸形 JSON 换 400 来探测字段。
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    const text = await c.req.text();
+    if (text.trim().length === 0) {
+      return c.json({ error: 'invalid_request' }, 400);
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    const parsed = patchCanNotifyUserSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
+    }
+    const result = setIdentityCanNotifyUser(c.req.param('address'), parsed.data.canNotifyUser);
+    if (!result.ok && result.error === 'scoped') {
+      return c.json(
+        { error: 'invalid_request', details: 'scoped identity cannot be granted canNotifyUser' },
+        400,
+      );
+    }
+    if (!result.ok) return c.json({ error: 'not_found' }, 404);
+    if (result.changed) {
+      // 只记字段名。recordAuditEvent 失败不抛，不回滚已落盘的 flag。
+      recordAuditEvent({
+        event: 'identity.flags.update',
+        address: result.identity.address,
+        changedFields: ['canNotifyUser'],
+        outcome: 'ok',
+        ip: clientIp(c),
+      });
+    }
+    return c.json(publicIdentity(result.identity));
   })
   .delete('/:address', (c) => {
     const denied = requireAdmin(c);

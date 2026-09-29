@@ -112,7 +112,7 @@ this table is the human reference rather than a second protocol implementation.
 
 | Tool | Description |
 | --- | --- |
-| `notify_user(title, message, level?, tags?)` | Human alert; requires the identity's human-notification grant (`canNotifyUser` at creation) |
+| `notify_user(title, message, level?, tags?)` | Human alert; requires the identity's human-notification grant (`canNotifyUser`; set at creation or later by admin PATCH) |
 | `notify_agent(name, title, message, level?, tags?)` | Notify a managed agent route; this alone does not prove the model woke or consumed work |
 | `notify_check(since?)` | Recent notifications for the calling identity |
 | `notify_verify()` | Operator notification publish/poll self-check, not an IMAP/SMTP round-trip test |

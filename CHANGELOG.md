@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## Unreleased
+
+### Added
+
+- **API: admin 更新既有身份 `canNotifyUser`** (#360): `PATCH /v1/identities/:address` 仅 admin 可改该布尔值，先鉴权再解析 body，body 必须是 `{ "canNotifyUser": boolean }`。false 与缺省的响应省略该键（与 `GET /v1/identities` 相同）。未设 scopes 的同值返回 200 且不写盘、不记审计；scoped true（含同值）拒绝且不写盘、不记审计；实际变化只记 `identity.flags.update`（`changedFields:["canNotifyUser"]`、address、outcome、ip），不记布尔值、请求体或 token。同一原 token 的人级通知权限随存储即时变化，不轮换 token。仅 `scopes` 缺省的既有身份会因此获得人级通知授权；`scopes` 已设置时 `PATCH canNotifyUser:true` 被拒绝且不写盘，scoped 通知能力须另定 scope 语义。
+
 ## v0.10.0 — 2026-09-29
 
 ### Added
