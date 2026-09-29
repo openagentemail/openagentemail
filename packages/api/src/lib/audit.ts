@@ -80,6 +80,10 @@ export type AuditEvent = {
    * 仅 identity.create / identity.scopes.create 在非 admin 创建时可选带上。
    */
   parentIdentity?: string;
+  /**
+   * 变更字段名（#360）。落盘只允许固定字面量 `canNotifyUser`，不记字段值、body、token。
+   */
+  changedFields?: string[];
 };
 
 function auditPath(): string {
@@ -97,6 +101,18 @@ function auditRotatedPath(): string {
 export function scrubAuditField(value: string, maxLen = 256): string {
   // eslint-disable-next-line no-control-regex
   return value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, maxLen);
+}
+
+/**
+ * #360：changedFields 只接受固定字段名 canNotifyUser。
+ * 经 scrub 后非精确匹配的项丢弃；命中则落盘常量，不回写调用方原文。
+ */
+function changedFieldsForAudit(
+  fields: string[] | undefined,
+): { changedFields: ['canNotifyUser'] } | Record<string, never> {
+  if (!fields || fields.length === 0) return {};
+  const allowed = fields.some((field) => scrubAuditField(field, 64) === 'canNotifyUser');
+  return allowed ? { changedFields: ['canNotifyUser'] } : {};
 }
 
 /** 确保 DATA_DIR 0700；单写者约定与 identities 相同。 */
@@ -197,6 +213,8 @@ export function recordAuditEvent(
     ...(partial.parentIdentity !== undefined
       ? { parentIdentity: scrubAuditField(partial.parentIdentity, 320) }
       : {}),
+    // #360：只落固定字段名，best-effort 路径不变（写入失败仍只打日志）
+    ...changedFieldsForAudit(partial.changedFields),
   };
 
   try {

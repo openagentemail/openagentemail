@@ -761,6 +761,30 @@ export function deleteIdentity(address: string): boolean {
 }
 
 /**
+ * 更新既有身份的 canNotifyUser（#360）。单次 load→定位→仅有效值变化时 save。
+ * true 显式落盘；false 删键（与创建时缺省同形）。同值不写盘。
+ * 不改 tokenHash、scopes、name、parentIdentity、pushContentTier、createdAt。
+ */
+export function setIdentityCanNotifyUser(
+  address: string,
+  canNotifyUser: boolean,
+): { ok: true; changed: boolean; identity: Identity } | { ok: false; error: 'not_found' } {
+  if (typeof canNotifyUser !== 'boolean') throw new Error('invalid_can_notify_user');
+  const identities = load();
+  const identity = identities.find((i) => i.address === address.toLowerCase());
+  if (!identity) return { ok: false, error: 'not_found' };
+  // 缺省与显式 false 都视为未授权，同值不改盘
+  const enabled = identity.canNotifyUser === true;
+  if (enabled === canNotifyUser) {
+    return { ok: true, changed: false, identity };
+  }
+  if (canNotifyUser) identity.canNotifyUser = true;
+  else delete identity.canNotifyUser;
+  save(identities);
+  return { ok: true, changed: true, identity };
+}
+
+/**
  * Set the mail-arrival push content tier for an identity (admin-only at the
  * route layer). Returns the updated public identity fields, or null if missing.
  * Tier 1 is stored explicitly so list/read stay stable after a deliberate set.

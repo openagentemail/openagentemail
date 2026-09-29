@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
+## Unreleased
+
+### Added
+
+- **API: admin 更新既有身份 `canNotifyUser`** (#360): `PATCH /v1/identities/:address` 仅 admin 可改该布尔值，先鉴权再解析 body，body 必须是 `{ "canNotifyUser": boolean }`。false 与缺省的响应省略该键（与 `GET /v1/identities` 相同）。同值返回 200 且不写盘、不记审计；实际变化只记 `identity.flags.update`（`changedFields:["canNotifyUser"]`、address、outcome、ip），不记布尔值、请求体或 token。同一原 token 的人级通知权限随存储即时变化，不轮换 token。
+
 ## v0.10.0 — 2026-09-29
 
 ### Added
