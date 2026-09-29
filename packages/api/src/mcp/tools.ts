@@ -158,13 +158,13 @@ export function registerOpenAgentEmailTools(
   };
 
   // #362：只挂在 mail_read_message。写回上面的共享 shape 会把 mail_mark_seen 一起放宽。
-  // 口径与 GET /v1/messages/:id 的 uidValidity 相同：正十进制串；0、负数、小数、非数字在工具边界拒绝。
+  // 口径与 GET 的正十进制串相同，但先限 32 位再 BigInt；0、负数、小数、非数字在工具边界拒绝。
   const mailReadMessageInputSchema = {
     ...receivedMessageInputSchema,
     uidValidity: z
       .string()
       .refine((value) => {
-        if (!/^\d+$/.test(value)) return false;
+        if (value.length > 32 || !/^\d+$/.test(value)) return false;
         try {
           return BigInt(value) > 0n;
         } catch {
@@ -173,7 +173,7 @@ export function registerOpenAgentEmailTools(
       }, "uidValidity must be a positive decimal string")
       .optional()
       .describe(
-        "Optional mailbox generation (positive decimal string). Omit for the legacy address+id read.",
+        "Optional mailbox generation (positive decimal string, at most 32 digits). Omit for the legacy address+id read.",
       ),
   };
 

@@ -218,7 +218,7 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "17" }).success).toBe(true);
   expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "9007199254740993" }).success).toBe(true);
   expect(readObject.safeParse({ address: addr, id: "7", uidValidity: "01" }).success).toBe(true);
-  for (const uidValidity of ["0", "-1", "1.5", "nope", "", "17 "]) {
+  for (const uidValidity of ["0", "-1", "1.5", "nope", "", "17 ", "9".repeat(33)]) {
     expect(readObject.safeParse({ address: addr, id: "7", uidValidity }).success, String(uidValidity)).toBe(false);
   }
   expect(readObject.safeParse({ address: addr, id: "7", uidValidity: 17 }).success).toBe(false);
