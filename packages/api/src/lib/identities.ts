@@ -762,18 +762,19 @@ export function deleteIdentity(address: string): boolean {
 
 /**
  * 更新既有身份的 canNotifyUser（#360）。单次 load→定位→仅有效值变化时 save。
- * true 显式落盘；false 删键（与创建时缺省同形）。同值不写盘。
+ * true 显式落盘；false 删键。scoped true（含同值）拒绝；未设 scopes 的同值不写盘。
  * 不改 tokenHash、scopes、name、parentIdentity、pushContentTier、createdAt。
  */
 export function setIdentityCanNotifyUser(
   address: string,
   canNotifyUser: boolean,
-): { ok: true; changed: boolean; identity: Identity } | { ok: false; error: 'not_found' } {
+): { ok: true; changed: boolean; identity: Identity } | { ok: false; error: 'not_found' | 'scoped' } {
   if (typeof canNotifyUser !== 'boolean') throw new Error('invalid_can_notify_user');
   const identities = load();
   const identity = identities.find((i) => i.address === address.toLowerCase());
   if (!identity) return { ok: false, error: 'not_found' };
-  // 缺省与显式 false 都视为未授权，同值不改盘
+  // #5308：scoped true（含同值）在同值早退前拒绝，不写盘、不改内存。
+  if (canNotifyUser === true && identity.scopes !== undefined) return { ok: false, error: 'scoped' };
   const enabled = identity.canNotifyUser === true;
   if (enabled === canNotifyUser) {
     return { ok: true, changed: false, identity };

@@ -637,17 +637,13 @@ export const identitiesRoute = new Hono()
     if (!parsed.success) {
       return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
     }
-    const address = c.req.param('address');
-    const existing = findIdentity(address);
-    if (!existing) return c.json({ error: 'not_found' }, 404);
-    // #5308：scopes 已设置时不得授予 canNotifyUser。同值 true 也在写盘前拒绝。
-    if (existing.scopes !== undefined && parsed.data.canNotifyUser === true) {
+    const result = setIdentityCanNotifyUser(c.req.param('address'), parsed.data.canNotifyUser);
+    if (!result.ok && result.error === 'scoped') {
       return c.json(
         { error: 'invalid_request', details: 'scoped identity cannot be granted canNotifyUser' },
         400,
       );
     }
-    const result = setIdentityCanNotifyUser(address, parsed.data.canNotifyUser);
     if (!result.ok) return c.json({ error: 'not_found' }, 404);
     if (result.changed) {
       // 只记字段名。recordAuditEvent 失败不抛，不回滚已落盘的 flag。

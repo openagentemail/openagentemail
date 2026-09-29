@@ -23,6 +23,7 @@ const {
   createIdentity,
   findIdentity,
   findIdentityByToken,
+  setIdentityCanNotifyUser,
   setIdentityPushContentTier,
 } = await import('../src/lib/identities.ts');
 const { readAuditEvents, recordAuditEvent, resetAuditForTests } = await import('../src/lib/audit.ts');
@@ -260,6 +261,10 @@ describe('#360 PATCH canNotifyUser', () => {
 
     const childHash = findIdentity(child.identity.address)!.tokenHash;
     const childScopes = findIdentity(child.identity.address)!.scopes;
+    const direct = setIdentityCanNotifyUser(child.identity.address, true);
+    expect(direct).toEqual({ ok: false, error: 'scoped' });
+    expect(snapStore()).toEqual(before);
+    expect(readAuditEvents({ limit: 20 })).toEqual([]);
     const turned = await patch(adminKey, 'Gate-Child@TEST.example', '{"canNotifyUser":true}');
     expect(turned.status).toBe(400);
     expect(await turned.json()).toEqual({
@@ -287,6 +292,10 @@ describe('#360 PATCH canNotifyUser', () => {
     const address = created.identity.address;
     const hash = findIdentity(address)!.tokenHash;
     const before = snapStore();
+    const directSame = setIdentityCanNotifyUser(address.toUpperCase(), true);
+    expect(directSame).toEqual({ ok: false, error: 'scoped' });
+    expect(snapStore()).toEqual(before);
+    expect(flagAudits()).toEqual([]);
     const same = await patch(adminKey, address.toUpperCase(), '{"canNotifyUser":true}');
     expect(same.status).toBe(400);
     expect(snapStore()).toEqual(before);
