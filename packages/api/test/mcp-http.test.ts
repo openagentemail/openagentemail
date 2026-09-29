@@ -21,7 +21,7 @@ const { describe, expect, test: bunTest, mock, spyOn } = await import('bun:test'
 const sendMailMock = mock(async () => ({ messageId: '<sdk21-r1@test.example>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 const { createApp } = await import('../src/app.ts');
-const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+const { ApiError, OpenAgentEmailClient } = await import('../src/mcp/client.ts');
 // #355-B：直测误包守卫。导出仅供该测试，生产调用点仍传 raw shape。
 const { asStrictInput } = await import('../src/mcp/tools.ts');
 const { z } = await import('zod');
@@ -1545,6 +1545,563 @@ describe('MCP notify 四工具未知键拒绝（#355-B）', () => {
       expect(isInputRejection(verified.text), verified.text).toBe(false);
       expectFake(verified.body, { ok: true });
       expect(calls()).toEqual([[]]);
+    });
+  });
+});
+
+/**
+ * #355-C：task 九工具外层拒绝未知键。
+ * 负控是输入校验失败，且对应 client 方法零调用。
+ * 正控只打原型 fake，不透传真实 task 后端；finally 还原，避免套件泄漏。
+ * 内层 approval 原有 strict 不算外层证据。leaseToken 省略仍是合法可选字段。
+ */
+describe('MCP task 九工具未知键拒绝（#355-C）', () => {
+  const TASK_ID = 'f0c4a8e6-1e22-4c66-8c2f-0955a20d81bf';
+  const PARENT_ID = 'a1b2c3d4-e5f6-4780-8bcd-ef1234567890';
+  const FROM = 'alpha@test.example';
+  const TO = 'bravo@test.example';
+  const EXPIRES = '2030-08-25T00:00:00.000Z';
+  const ACTION = { type: 'deployment', name: 'publish-preview', arguments: { dryRun: true } };
+  const TASK_METHODS = [
+    'createTask',
+    'createApprovalTask',
+    'listTaskChildren',
+    'listTasks',
+    'getTask',
+    'updateTask',
+    'decideTask',
+    'claimTask',
+    'renewTask',
+    'releaseTask',
+  ] as const;
+  type TaskMethod = typeof TASK_METHODS[number];
+
+  const TASK_OUTPUT_KEYS = [
+    'id', 'from', 'to', 'subject', 'state', 'createdAt', 'updatedAt', 'parentTaskId',
+    'messages', 'result', 'kind', 'approval', 'claimedUntil', 'leaseGeneration',
+    'leaseStatus', 'expiryProjection',
+  ];
+
+  function fakeTask(patch: Record<string, unknown> = {}) {
+    return {
+      id: TASK_ID,
+      from: FROM,
+      to: TO,
+      subject: 'wake',
+      state: 'submitted',
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      messages: [],
+      ...patch,
+    };
+  }
+
+  const approvalTask = () => fakeTask({
+    state: 'input-required',
+    kind: 'approval',
+    approval: {
+      action: ACTION,
+      reviewer: FROM,
+      expiresAt: EXPIRES,
+      digest: 'a'.repeat(64),
+    },
+  });
+
+  /** fake 返回值对齐 handler 入参后的 outputSchema，不访问网络。 */
+  function fakeFor(method: TaskMethod): unknown {
+    if (method === 'listTasks') return [fakeTask()];
+    if (method === 'listTaskChildren') return { children: [fakeTask()], nextCursor: null };
+    if (method === 'claimTask') {
+      return {
+        task: fakeTask({ state: 'working' }),
+        leaseToken: 'opaque-lease',
+        claimedUntil: '2026-08-24T00:05:00.000Z',
+        leaseGeneration: 1,
+      };
+    }
+    if (method === 'createApprovalTask') return approvalTask();
+    if (method === 'decideTask') return fakeTask({ state: 'completed', result: { decision: 'approved' } });
+    return fakeTask();
+  }
+
+  /** handler 包装后的 structuredContent。listTasks 在工具层收成 { tasks }。 */
+  function structuredFor(method: TaskMethod): Record<string, unknown> {
+    if (method === 'listTasks') return { tasks: fakeFor('listTasks') as unknown[] };
+    return fakeFor(method) as Record<string, unknown>;
+  }
+
+  function isInputRejection(text: string): boolean {
+    return /unrecognized|invalid (input|argument)|-32602/i.test(text);
+  }
+
+  async function callTool(token: string, name: string, args: Record<string, unknown>, id = 1) {
+    const res = await mcpRequest(token, 'tools/call', { name, arguments: args }, id);
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      error?: { code?: number; message?: string };
+      result?: {
+        isError?: boolean;
+        content?: Array<{ text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+    };
+    return { body, text: JSON.stringify(body) };
+  }
+
+  /**
+   * 替换九个 task client 方法。实现不调用原函数，因此不会打到 dogfood 任务后端。
+   * finally 逐个 mockRestore。
+   */
+  async function withTaskFakes(
+    work: (calls: (method: TaskMethod) => unknown[][]) => Promise<void>,
+    overrides?: Partial<Record<TaskMethod, (...args: unknown[]) => Promise<unknown>>>,
+  ): Promise<void> {
+    const spies = TASK_METHODS.map((method) => {
+      const spy = spyOn(OpenAgentEmailClient.prototype, method);
+      const install = spy.mockImplementation.bind(spy) as (
+        fn: (...args: unknown[]) => Promise<unknown>,
+      ) => void;
+      install((...args: unknown[]) => {
+        const custom = overrides?.[method];
+        if (custom) return custom(...args);
+        return Promise.resolve(fakeFor(method));
+      });
+      return [method, spy] as const;
+    });
+    try {
+      await work((method) => {
+        const found = spies.find(([name]) => name === method);
+        return (found?.[1].mock.calls ?? []) as unknown[][];
+      });
+    } finally {
+      for (const [, spy] of spies) spy.mockRestore();
+    }
+  }
+
+  function expectFake(
+    body: { error?: unknown; result?: { isError?: boolean; structuredContent?: Record<string, unknown> } },
+    expected: Record<string, unknown>,
+  ) {
+    expect(body.error).toBeUndefined();
+    expect(body.result?.isError).toBeFalsy();
+    expect(body.result?.structuredContent).toEqual(expected);
+  }
+
+  async function expectUnknownKeyRejected(
+    calls: (method: TaskMethod) => unknown[][],
+    method: TaskMethod,
+    name: string,
+    args: Record<string, unknown>,
+    id: number,
+  ) {
+    const { body, text } = await callTool(adminKey, name, args, id);
+    expect(calls(method), text).toEqual([]);
+    expect(body.error || body.result?.isError, text).toBeTruthy();
+    expect(isInputRejection(text), text).toBe(true);
+    expect(text, text).toMatch(/unexpected/);
+    expect(text).not.toMatch(/API error|forbidden|task_lease_required|ECONNREFUSED|task_already_terminal/i);
+    expect(body.result?.structuredContent).toBeUndefined();
+  }
+
+  test('#355-C tools/list 九工具逐一广告 additionalProperties:false', async () => {
+    const res = await mcpRequest(adminKey, 'tools/list');
+    expect(res.status).toBe(200);
+    const body = (await readMcpJson(res)) as {
+      result?: {
+        tools?: Array<{
+          name: string;
+          inputSchema?: {
+            additionalProperties?: boolean;
+            required?: string[];
+            properties?: Record<string, { description?: string }>;
+          };
+          outputSchema?: { properties?: Record<string, { properties?: Record<string, unknown>; items?: { properties?: Record<string, unknown> } }> };
+        }>;
+      };
+    };
+    const advertised: Array<{
+      name: string;
+      required: string[];
+      properties: string[];
+      output: string[];
+      description?: [string, string];
+    }> = [
+      {
+        name: 'task_create',
+        required: ['to', 'subject'],
+        properties: ['to', 'subject', 'body', 'kind', 'approval', 'wait', 'parentTaskId'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['to', 'Managed recipient identity address'],
+      },
+      {
+        name: 'task_list_children',
+        required: ['parentTaskId'],
+        properties: ['parentTaskId', 'limit', 'cursor'],
+        output: ['children', 'nextCursor'],
+        description: ['parentTaskId', 'Readable parent task UUID'],
+      },
+      {
+        name: 'task_list',
+        required: [],
+        properties: ['state'],
+        output: ['tasks'],
+        description: ['state', 'Optional current state filter'],
+      },
+      {
+        name: 'task_get',
+        required: ['id'],
+        properties: ['id', 'wait'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['id', 'Task UUID from task_create or task_list'],
+      },
+      {
+        name: 'task_update',
+        required: ['id', 'state'],
+        properties: ['id', 'state', 'body', 'result', 'leaseToken'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['leaseToken', 'Optional opaque current lease token'],
+      },
+      {
+        name: 'task_decide',
+        required: ['id', 'decision'],
+        properties: ['id', 'decision'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['id', 'Approval task UUID'],
+      },
+      {
+        name: 'task_claim',
+        required: ['id'],
+        properties: ['id', 'leaseSec'],
+        output: ['task', 'leaseToken', 'claimedUntil', 'leaseGeneration'],
+        description: ['leaseSec', 'Lease duration in seconds (30..3600; default 300)'],
+      },
+      {
+        name: 'task_renew',
+        required: ['id', 'leaseToken'],
+        properties: ['id', 'leaseToken', 'leaseSec'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['leaseToken', 'Opaque current lease token'],
+      },
+      {
+        name: 'task_release',
+        required: ['id', 'leaseToken'],
+        properties: ['id', 'leaseToken', 'reason'],
+        output: TASK_OUTPUT_KEYS,
+        description: ['reason', 'Optional release reason'],
+      },
+    ];
+    for (const item of advertised) {
+      const tool = body.result?.tools?.find((entry) => entry.name === item.name);
+      expect(tool, `missing ${item.name}`).toBeTruthy();
+      expect(tool?.inputSchema?.additionalProperties, item.name).toBe(false);
+      expect(tool?.inputSchema?.required ?? [], item.name).toEqual(item.required);
+      expect(Object.keys(tool?.inputSchema?.properties ?? {}).sort(), item.name).toEqual([...item.properties].sort());
+      expect(Object.keys(tool?.outputSchema?.properties ?? {}).sort(), item.name).toEqual([...item.output].sort());
+      if (item.description) {
+        const [field, text] = item.description;
+        expect(tool?.inputSchema?.properties?.[field]?.description, `${item.name}.${field}`).toBe(text);
+      }
+      if (item.name === 'task_list') {
+        const nested = tool?.outputSchema?.properties?.tasks?.items?.properties;
+        expect(Object.keys(nested ?? {}).sort()).toEqual([...TASK_OUTPUT_KEYS].sort());
+      }
+    }
+  });
+
+  test('#355-C task_create 普通分支外层未知键不调用 createTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'createTask', 'task_create', {
+        to: TO, subject: 'wake', body: 'do the work', unexpected: true,
+      }, 501);
+      expect(calls('createApprovalTask')).toEqual([]);
+    });
+  });
+
+  test('#355-C task_create approval 分支外层未知键不调用 createApprovalTask', async () => {
+    await withTaskFakes(async (calls) => {
+      // 未知键在外层。approval 内层保持合法，避免把内层 strict 当成外层证据。
+      await expectUnknownKeyRejected(calls, 'createApprovalTask', 'task_create', {
+        to: TO,
+        subject: 'wake',
+        kind: 'approval',
+        approval: { action: ACTION, expiresAt: EXPIRES },
+        unexpected: true,
+      }, 502);
+      expect(calls('createTask')).toEqual([]);
+    });
+  });
+
+  test('#355-C task_list_children 未知键不调用 listTaskChildren', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'listTaskChildren', 'task_list_children', {
+        parentTaskId: PARENT_ID, limit: 20, unexpected: true,
+      }, 503);
+    });
+  });
+
+  test('#355-C task_list 仅未知键不调用 listTasks', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'listTasks', 'task_list', { unexpected: true }, 504);
+    });
+  });
+
+  test('#355-C task_get 未知键不调用 getTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'getTask', 'task_get', {
+        id: TASK_ID, unexpected: true,
+      }, 505);
+    });
+  });
+
+  test('#355-C task_update 未知键不调用 updateTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'updateTask', 'task_update', {
+        id: TASK_ID, state: 'working', unexpected: true,
+      }, 506);
+    });
+  });
+
+  test('#355-C task_decide 未知键不调用 decideTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'decideTask', 'task_decide', {
+        id: TASK_ID, decision: 'approved', unexpected: true,
+      }, 507);
+    });
+  });
+
+  test('#355-C task_claim 未知键不调用 claimTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'claimTask', 'task_claim', {
+        id: TASK_ID, unexpected: true,
+      }, 508);
+    });
+  });
+
+  test('#355-C task_renew 未知键不调用 renewTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'renewTask', 'task_renew', {
+        id: TASK_ID, leaseToken: 'opaque-lease', unexpected: true,
+      }, 509);
+    });
+  });
+
+  test('#355-C task_release 未知键不调用 releaseTask', async () => {
+    await withTaskFakes(async (calls) => {
+      await expectUnknownKeyRejected(calls, 'releaseTask', 'task_release', {
+        id: TASK_ID, leaseToken: 'opaque-lease', unexpected: true,
+      }, 510);
+    });
+  });
+
+  test('#355-C task_create 普通调用保留 wait 缺省与 parentTaskId 省略/传递', async () => {
+    await withTaskFakes(async (calls) => {
+      const plain = await callTool(adminKey, 'task_create', {
+        to: TO, subject: 'wake', body: 'do the work',
+      }, 521);
+      expect(isInputRejection(plain.text), plain.text).toBe(false);
+      expectFake(plain.body, structuredFor('createTask'));
+      const waited = await callTool(adminKey, 'task_create', {
+        to: TO, subject: 'wake', body: 'do the work', wait: true, parentTaskId: PARENT_ID,
+      }, 522);
+      expect(isInputRejection(waited.text), waited.text).toBe(false);
+      expectFake(waited.body, structuredFor('createTask'));
+      expect(calls('createTask')).toEqual([
+        [TO, 'wake', 'do the work', false, undefined],
+        [TO, 'wake', 'do the work', true, PARENT_ID],
+      ]);
+      expect(calls('createApprovalTask')).toEqual([]);
+    });
+  });
+
+  test('#355-C task_create approval 有/无 body，且 expiresAt 原样传递；缺 offset 不调用', async () => {
+    await withTaskFakes(async (calls) => {
+      const withBody = await callTool(adminKey, 'task_create', {
+        to: TO,
+        subject: 'wake',
+        body: 'record only',
+        kind: 'approval',
+        approval: { action: ACTION, expiresAt: EXPIRES },
+      }, 523);
+      expect(isInputRejection(withBody.text), withBody.text).toBe(false);
+      expectFake(withBody.body, structuredFor('createApprovalTask'));
+      const noBody = await callTool(adminKey, 'task_create', {
+        to: TO,
+        subject: 'wake',
+        kind: 'approval',
+        wait: true,
+        parentTaskId: PARENT_ID,
+        approval: { action: ACTION, expiresAt: '2030-08-25T00:00:00.000+00:00' },
+      }, 524);
+      expect(isInputRejection(noBody.text), noBody.text).toBe(false);
+      expectFake(noBody.body, structuredFor('createApprovalTask'));
+      const missingOffset = await callTool(adminKey, 'task_create', {
+        to: TO,
+        subject: 'wake',
+        kind: 'approval',
+        approval: { action: ACTION, expiresAt: '2030-08-25T00:00:00' },
+      }, 525);
+      expect(calls('createApprovalTask'), missingOffset.text).toEqual([
+        [TO, 'wake', ACTION, EXPIRES, 'record only', false, undefined],
+        [TO, 'wake', ACTION, '2030-08-25T00:00:00.000+00:00', undefined, true, PARENT_ID],
+      ]);
+      expect(isInputRejection(missingOffset.text), missingOffset.text).toBe(true);
+      expect(calls('createTask')).toEqual([]);
+    });
+  });
+
+  test('#355-C task_create 非法分支不调用 client', async () => {
+    await withTaskFakes(async (calls) => {
+      const kindOnly = await callTool(adminKey, 'task_create', {
+        to: TO, subject: 'wake', kind: 'approval',
+      }, 526);
+      const approvalOnly = await callTool(adminKey, 'task_create', {
+        to: TO,
+        subject: 'wake',
+        body: 'do the work',
+        approval: { action: ACTION, expiresAt: EXPIRES },
+      }, 527);
+      const noBody = await callTool(adminKey, 'task_create', {
+        to: TO, subject: 'wake',
+      }, 528);
+      for (const item of [kindOnly, approvalOnly, noBody]) {
+        expect(item.body.result?.isError, item.text).toBe(true);
+        expect(item.text).toContain('approval task_create requires approval; ordinary task_create requires body');
+        expect(isInputRejection(item.text)).toBe(false);
+      }
+      expect(calls('createTask')).toEqual([]);
+      expect(calls('createApprovalTask')).toEqual([]);
+    });
+  });
+
+  test('#355-C task_create 已创建后 ApiError 仍附带安全重试提示', async () => {
+    await withTaskFakes(async (calls) => {
+      const failed = await callTool(adminKey, 'task_create', {
+        to: TO, subject: 'wake', body: 'do the work',
+      }, 529);
+      expect(calls('createTask')).toEqual([[TO, 'wake', 'do the work', false, undefined]]);
+      expect(calls('createApprovalTask')).toEqual([]);
+      expect(failed.body.result?.isError, failed.text).toBe(true);
+      expect(failed.text).toContain(
+        `wait_failed taskId=${TASK_ID}. Task already created — use task_get or task_list to check status; do not call task_create again.`,
+      );
+      expect(isInputRejection(failed.text)).toBe(false);
+    }, {
+      createTask: () => Promise.reject(new ApiError(502, 'wait_failed', { taskId: TASK_ID, kind: 'wait_failed' })),
+    });
+  });
+
+  test('#355-C task_list_children 合法入参传给 listTaskChildren', async () => {
+    await withTaskFakes(async (calls) => {
+      const listed = await callTool(adminKey, 'task_list_children', {
+        parentTaskId: PARENT_ID, limit: 50, cursor: 'opaque-input',
+      }, 530);
+      expect(isInputRejection(listed.text), listed.text).toBe(false);
+      expectFake(listed.body, structuredFor('listTaskChildren'));
+      expect(calls('listTaskChildren')).toEqual([[PARENT_ID, 50, 'opaque-input']]);
+    });
+  });
+
+  test('#355-C task_list 空对象与 state 筛选都进入 listTasks', async () => {
+    await withTaskFakes(async (calls) => {
+      const all = await callTool(adminKey, 'task_list', {}, 531);
+      expect(isInputRejection(all.text), all.text).toBe(false);
+      expectFake(all.body, structuredFor('listTasks'));
+      const filtered = await callTool(adminKey, 'task_list', { state: 'working' }, 532);
+      expect(isInputRejection(filtered.text), filtered.text).toBe(false);
+      expectFake(filtered.body, structuredFor('listTasks'));
+      expect(calls('listTasks')).toEqual([[undefined], ['working']]);
+    });
+  });
+
+  test('#355-C task_get 保留 wait 缺省 false 与显式 true', async () => {
+    await withTaskFakes(async (calls) => {
+      const plain = await callTool(adminKey, 'task_get', { id: TASK_ID }, 533);
+      expect(isInputRejection(plain.text), plain.text).toBe(false);
+      expectFake(plain.body, structuredFor('getTask'));
+      const waited = await callTool(adminKey, 'task_get', { id: TASK_ID, wait: true }, 534);
+      expect(isInputRejection(waited.text), waited.text).toBe(false);
+      expectFake(waited.body, structuredFor('getTask'));
+      expect(calls('getTask')).toEqual([[TASK_ID, false], [TASK_ID, true]]);
+    });
+  });
+
+  test('#355-C task_update 传递 leaseToken，省略时不是未知键', async () => {
+    await withTaskFakes(async (calls) => {
+      const withToken = await callTool(adminKey, 'task_update', {
+        id: TASK_ID, state: 'input-required', body: 'note', result: { ok: true }, leaseToken: 'opaque-lease',
+      }, 535);
+      expect(isInputRejection(withToken.text), withToken.text).toBe(false);
+      expectFake(withToken.body, structuredFor('updateTask'));
+      const omitted = await callTool(adminKey, 'task_update', {
+        id: TASK_ID, state: 'working',
+      }, 536);
+      expect(isInputRejection(omitted.text), omitted.text).toBe(false);
+      expectFake(omitted.body, structuredFor('updateTask'));
+      expect(calls('updateTask')).toEqual([
+        [TASK_ID, 'input-required', 'note', { ok: true }, 'opaque-lease'],
+        [TASK_ID, 'working', undefined, undefined, undefined],
+      ]);
+    });
+  });
+
+  test('#355-C task_decide 合法决定进入 decideTask', async () => {
+    await withTaskFakes(async (calls) => {
+      const decided = await callTool(adminKey, 'task_decide', {
+        id: TASK_ID, decision: 'rejected',
+      }, 537);
+      expect(isInputRejection(decided.text), decided.text).toBe(false);
+      expectFake(decided.body, structuredFor('decideTask'));
+      expect(calls('decideTask')).toEqual([[TASK_ID, 'rejected']]);
+    });
+  });
+
+  test('#355-C task_claim 传递与省略 leaseSec', async () => {
+    await withTaskFakes(async (calls) => {
+      const claimed = await callTool(adminKey, 'task_claim', { id: TASK_ID, leaseSec: 120 }, 538);
+      expect(isInputRejection(claimed.text), claimed.text).toBe(false);
+      expectFake(claimed.body, structuredFor('claimTask'));
+      const omitted = await callTool(adminKey, 'task_claim', { id: TASK_ID }, 539);
+      expect(isInputRejection(omitted.text), omitted.text).toBe(false);
+      expectFake(omitted.body, structuredFor('claimTask'));
+      expect(calls('claimTask')).toEqual([[TASK_ID, 120], [TASK_ID, undefined]]);
+    });
+  });
+
+  test('#355-C task_renew 必填 leaseToken，leaseSec 可省略', async () => {
+    await withTaskFakes(async (calls) => {
+      const renewed = await callTool(adminKey, 'task_renew', {
+        id: TASK_ID, leaseToken: 'opaque-lease', leaseSec: 180,
+      }, 540);
+      expect(isInputRejection(renewed.text), renewed.text).toBe(false);
+      expectFake(renewed.body, structuredFor('renewTask'));
+      const omitted = await callTool(adminKey, 'task_renew', {
+        id: TASK_ID, leaseToken: 'opaque-lease',
+      }, 541);
+      expect(isInputRejection(omitted.text), omitted.text).toBe(false);
+      expectFake(omitted.body, structuredFor('renewTask'));
+      expect(calls('renewTask')).toEqual([
+        [TASK_ID, 'opaque-lease', 180],
+        [TASK_ID, 'opaque-lease', undefined],
+      ]);
+    });
+  });
+
+  test('#355-C task_release 必填 leaseToken，reason 可省略', async () => {
+    await withTaskFakes(async (calls) => {
+      const released = await callTool(adminKey, 'task_release', {
+        id: TASK_ID, leaseToken: 'opaque-lease', reason: 'handoff',
+      }, 542);
+      expect(isInputRejection(released.text), released.text).toBe(false);
+      expectFake(released.body, structuredFor('releaseTask'));
+      const omitted = await callTool(adminKey, 'task_release', {
+        id: TASK_ID, leaseToken: 'opaque-lease',
+      }, 543);
+      expect(isInputRejection(omitted.text), omitted.text).toBe(false);
+      expectFake(omitted.body, structuredFor('releaseTask'));
+      expect(calls('releaseTask')).toEqual([
+        [TASK_ID, 'opaque-lease', 'handoff'],
+        [TASK_ID, 'opaque-lease', undefined],
+      ]);
     });
   });
 });
