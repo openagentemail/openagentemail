@@ -21,11 +21,12 @@ function scopesEqual(a: string[], b: string[]): boolean {
   return b.every((s) => setA.has(s));
 }
 
+// #355-A：未知 body 键拒绝。省略 scopes 仍走下方默认 ['read:messages']。
 const postDelegationSchema = z.object({
   mailbox: z.string().email().max(320),
   grantee: z.string().email().max(320),
   scopes: z.unknown().optional(),
-});
+}).strict();
 
 const listQuerySchema = z.object({
   mailbox: z.string().email().max(320).optional(),

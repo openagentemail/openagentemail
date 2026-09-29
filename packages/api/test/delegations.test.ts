@@ -323,7 +323,31 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       expect(Math.abs(Date.now() - new Date(deniedAudit?.ts!).getTime())).toBeLessThan(10000);
     });
 
-    test('Item A: POST /v1/delegations enforces server-generated ts and ignores client x-audit-ts and body ts', async () => {
+    test('#355-A Item A: POST body 未知键 ts 返回 400，且无授权、无成功审计', async () => {
+      // 旧契约把 body.ts 静默剥掉后仍 201。#355 收紧后必须在写库前拒绝。
+      const spoofedTs = '1999-01-01T00:00:00.000Z';
+      const res = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+          ts: spoofedTs,
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string; details?: unknown };
+      expect(body.error).toBe('invalid_request');
+      expect(JSON.stringify(body.details)).toMatch(/unrecognized|ts/i);
+      expect(listDelegations({ mailbox: 'alice@test.example', grantee: 'bob@test.example' })).toEqual([]);
+      expect(readAuditEvents().filter((e) => e.event === 'delegation.grant')).toEqual([]);
+    });
+
+    test('#355-A Item A: 正常 body 加 x-audit-ts 仍由服务端生成时间戳', async () => {
+      // 头里的伪造时间不得进入 createdAt 或成功审计；body 不再携带未知键。
       const spoofedTs = '1999-01-01T00:00:00.000Z';
       const res = await app.request('/v1/delegations', {
         method: 'POST',
@@ -335,19 +359,42 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
         body: JSON.stringify({
           mailbox: 'alice@test.example',
           grantee: 'bob@test.example',
-          ts: spoofedTs,
         }),
       });
       expect(res.status).toBe(201);
       const data = (await res.json()) as any;
       expect(data.createdAt).not.toBe(spoofedTs);
       expect(Math.abs(Date.now() - new Date(data.createdAt).getTime())).toBeLessThan(10000);
+      expect(data.scopes).toEqual(['read:messages']);
 
       const audits = readAuditEvents();
       const audit = audits.find((e) => e.event === 'delegation.grant' && e.grantId === data.id);
       expect(audit).toBeDefined();
+      expect(audit?.outcome).toBe('ok');
       expect(audit?.ts).not.toBe(spoofedTs);
       expect(Math.abs(Date.now() - new Date(audit?.ts!).getTime())).toBeLessThan(10000);
+    });
+
+    test('#355-A: 合法 owner 的 body 键 scope 拼错返回 400，且无授权、无成功审计', async () => {
+      // scope 不是 scopes。剥掉后会按默认 read:messages 创建授权，必须改成拒绝。
+      const res = await app.request('/v1/delegations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${aliceToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mailbox: 'alice@test.example',
+          grantee: 'bob@test.example',
+          scope: ['read:messages'],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string; details?: unknown };
+      expect(body.error).toBe('invalid_request');
+      expect(JSON.stringify(body.details)).toMatch(/unrecognized|scope/i);
+      expect(listDelegations({ mailbox: 'alice@test.example', grantee: 'bob@test.example' })).toEqual([]);
+      expect(readAuditEvents().filter((e) => e.event === 'delegation.grant')).toEqual([]);
     });
 
     test('Item C: POST /v1/delegations rejects explicit empty scopes [] with 400 and defaults omitted scopes', async () => {
