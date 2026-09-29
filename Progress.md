@@ -1493,7 +1493,7 @@ N/A。
 
 ### 我们实现了哪些功能？
 1. `PATCH /v1/identities/:address` 仅 admin 可改既有身份的 `canNotifyUser`。先鉴权再解析 body，body 只能是必填布尔。false 与缺省的响应省略该键，与 GET 列表相同。
-2. 同值返回 200，不写盘、不记审计。实际变化单次读改写，只记 `identity.flags.update` 和固定 `changedFields:['canNotifyUser']`，不记布尔值、body、token。同一原 token 的 notify_user 随存储变化，不轮换 token。
+2. 允许的同值请求返回 200，不写盘、不记审计；scoped 身份的 true（含同值）返回 400、零写入零审计，false 可撤销。实际变化只记 `identity.flags.update` 和固定 `changedFields:['canNotifyUser']`，不记布尔值、body、token。仅未设 scopes 的既有身份可凭原 token 获人级通知授权。
 
 ### 我们遇到了哪些错误？
 1. 实现前聚焦红：PATCH 为 404，`changedFields` 未落盘（1 pass / 5 fail）。
@@ -1505,5 +1505,5 @@ N/A。
 2. FC 亲核后准在 ≤500 内续工。5 条类型错误就地收窄断言，不改断言语义，插入数仍是 439。触及文件复验零诊断。基线 tsc 红不在本卡修。
 
 ### 证据
-- 基线 `2ca41db`。相对 origin/main 插入 458（测试 351、路由 40、身份库 24、审计 18、CHANGELOG 6、Progress 19）。硬线 500。未 push、未建 PR。
+- 基线 `2ca41db`。R0 快照插入 458；Codex P1 R1 后插入 499（测试 382、路由 50、身份库 24、审计 18、CHANGELOG 6、Progress 19），仍守硬线 500；PR #378 新头候闸。
 - 实现前红证 `/home/ops/materials/360/red-evidence.log`。R1 全量 2461 pass / 9 skip / 0 fail。自审 `f190bc58-c469-4998-83d2-2487c6184669` 为 PASS_WITH_NOTES。

@@ -260,15 +260,46 @@ describe('#360 PATCH canNotifyUser', () => {
 
     const childHash = findIdentity(child.identity.address)!.tokenHash;
     const childScopes = findIdentity(child.identity.address)!.scopes;
-    const turned = await patch(adminKey, child.identity.address, '{"canNotifyUser":true}');
-    expect(turned.status).toBe(200);
+    const turned = await patch(adminKey, 'Gate-Child@TEST.example', '{"canNotifyUser":true}');
+    expect(turned.status).toBe(400);
+    expect(await turned.json()).toEqual({
+      error: 'invalid_request',
+      details: 'scoped identity cannot be granted canNotifyUser',
+    });
+    expect(snapStore()).toEqual(before);
+    expect(readAuditEvents({ limit: 20 })).toEqual([]);
     const live = findIdentity(child.identity.address)!;
-    expect(live.canNotifyUser).toBe(true);
+    expect(live.canNotifyUser).toBeUndefined();
     expect(live.tokenHash).toBe(childHash);
     expect(live.scopes).toEqual(childScopes);
     expect(live.parentIdentity).toBe(parent.identity.address);
     expect(live.name).toBe('Child');
     expect(findIdentityByToken(child.token)?.address).toBe(child.identity.address);
+  });
+
+  test('scoped 已有 true 时同值仍 4xx，false 可撤销且原 token 不变', async () => {
+    const created = createIdentity({
+      localpart: 'scoped-on',
+      name: 'Scoped On',
+      scopes: ['read:messages'],
+      canNotifyUser: true,
+    })!;
+    const address = created.identity.address;
+    const hash = findIdentity(address)!.tokenHash;
+    const before = snapStore();
+    const same = await patch(adminKey, address.toUpperCase(), '{"canNotifyUser":true}');
+    expect(same.status).toBe(400);
+    expect(snapStore()).toEqual(before);
+    expect(flagAudits()).toEqual([]);
+    expect(findIdentityByToken(created.token)?.tokenHash).toBe(hash);
+    const cleared = await patch(adminKey, address, '{"canNotifyUser":false}');
+    expect(cleared.status).toBe(200);
+    const live = findIdentity(address)!;
+    expect(live.canNotifyUser).toBeUndefined();
+    expect(live.tokenHash).toBe(hash);
+    expect(live.scopes).toEqual(['read:messages']);
+    expect(diskRecord(address)).not.toHaveProperty('canNotifyUser');
+    expect(flagAudits()).toHaveLength(1);
   });
 
   test('② 非法 JSON、未知键、空体、非布尔、name 为 400，缺失身份 404，零写入零审计', async () => {
