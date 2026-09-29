@@ -1488,3 +1488,22 @@ N/A。
 
 ### 证据
 - 主仓 squash `a713c720`；PNG SHA-256 `aff3929fe47e33d3cba643c7d4776f94fd11a36160924f293a2071a69eca6c32`。四角 alpha=0，半透明边缘 569 像素灰白污染=0，CRC/IEND 无尾随；深浅底实看无白角灰线。CI 四格同头绿、Codex 旧 P2 清零；ZCode 越界 API 扫描候选另记 P3 债，CodeRabbit PNG 路径过滤缺席仅本头按总指挥 #5186 明认。合并随下次部署窗生效。
+
+## 2026-09-29 · #360 admin PATCH canNotifyUser
+
+### 我们实现了哪些功能？
+1. `PATCH /v1/identities/:address` 仅 admin 可改既有身份的 `canNotifyUser`。先鉴权再解析 body，body 只能是必填布尔。false 与缺省的响应省略该键，与 GET 列表相同。
+2. 同值返回 200，不写盘、不记审计。实际变化单次读改写，只记 `identity.flags.update` 和固定 `changedFields:['canNotifyUser']`，不记布尔值、body、token。同一原 token 的 notify_user 随存储变化，不轮换 token。
+
+### 我们遇到了哪些错误？
+1. 实现前聚焦红：PATCH 为 404，`changedFields` 未落盘（1 pass / 5 fail）。
+2. 新测 351 行，合计 439，超过原硬线 320。按停手令冻结，未压行、未删负控。
+3. fox #5304 扩到 ≤500 后，新测有 5 条 tsc 错误（fetch 断言与 `Response.json()` 的 unknown）。全包 tsc 另有 179 条在未改文件。
+
+### 我们是如何解决这些错误的？
+1. 补上路由、存储 setter 和审计白名单后，聚焦与 API 全量转绿。
+2. FC 亲核后准在 ≤500 内续工。5 条类型错误就地收窄断言，不改断言语义，插入数仍是 439。触及文件复验零诊断。基线 tsc 红不在本卡修。
+
+### 证据
+- 基线 `2ca41db`。相对 origin/main 插入 458（测试 351、路由 40、身份库 24、审计 18、CHANGELOG 6、Progress 19）。硬线 500。未 push、未建 PR。
+- 实现前红证 `/home/ops/materials/360/red-evidence.log`。R1 全量 2461 pass / 9 skip / 0 fail。自审 `f190bc58-c469-4998-83d2-2487c6184669` 为 PASS_WITH_NOTES。
