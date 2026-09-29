@@ -97,3 +97,39 @@ describe("网络故障诊断", () => {
     expect(nested.message).toContain("ENOTFOUND");
   });
 });
+
+describe("#362 readMessage 的 uidValidity 查询", () => {
+  function jsonFetch(onUrl: (url: string) => void) {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      onUrl(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+  }
+
+  test("省略 uidValidity 时 URL 与旧调用一致", async () => {
+    let seen = "";
+    jsonFetch((url) => {
+      seen = url;
+    });
+    await new OpenAgentEmailClient("http://127.0.0.1:3100", "oa_token").readMessage(
+      "fox@test.example",
+      "7",
+    );
+    expect(seen).toBe("http://127.0.0.1:3100/v1/messages/7?address=fox%40test.example");
+  });
+
+  test("传入的正十进制串进入编码后的查询，且不改成数字", async () => {
+    let seen = "";
+    jsonFetch((url) => {
+      seen = url;
+    });
+    await new OpenAgentEmailClient("http://127.0.0.1:3100", "oa_token").readMessage(
+      "a+b@test.example",
+      "7",
+      "9007199254740993",
+    );
+    expect(seen).toBe(
+      "http://127.0.0.1:3100/v1/messages/7?address=a%2Bb%40test.example&uidValidity=9007199254740993",
+    );
+  });
+});

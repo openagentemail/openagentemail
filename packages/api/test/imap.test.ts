@@ -2,6 +2,9 @@
 // 别人的邮件不会被返回，而不只是内部匹配函数的单测。
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -9,6 +12,8 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+// #362：身份 ACL 要落盘。须在 config 导入前改到临时目录，避免写入 ./data。
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-362-'));
 
 type FakeMessage = {
   uid: number;
@@ -1333,5 +1338,119 @@ describe('2269 ordinary list/wait missing generation → 400 invalid_cursor', ()
     expect(res.status).toBe(400);
     const json = (await res.json()) as { error: string };
     expect(json.error).toBe('invalid_request');
+  });
+});
+
+/**
+ * #362：复用本文件假 IMAP（代际 17），经 MCP mail_read_message 走真实读路径。
+ * R63 只打到 REST；这里证明工具 isError、围栏和他人信箱 ACL。
+ */
+describe('#362 MCP mail_read_message 代际', () => {
+  const subject = 'GENERATION-SUBJECT-9f3c2a';
+  const marker = 'GENERATION-BODY-9f3c2a';
+  const box = 'victim@test.example';
+  let mcpApp: { request: (input: string, init?: RequestInit) => Response | Promise<Response> } | undefined;
+
+  function plant() {
+    const msg = inboxMessage(100, box, box);
+    msg.envelope.subject = subject;
+    msg.source = Buffer.from(
+      `From: sender@example.net\r\nTo: ${box}\r\nSubject: ${subject}\r\n\r\n${marker}\r\n`,
+    );
+    fakeMessages = [msg];
+    fakeUidValidity = 17n;
+    failMailboxLock = false;
+  }
+
+  async function mcpCall(token: string, args: Record<string, unknown>) {
+    const { createApp } = await import('../src/app.ts');
+    mcpApp ??= createApp({ uiEnabled: false });
+    const res = await mcpApp.request('/mcp', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'mail_read_message', arguments: args },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    const line = raw.split('\n').find((item) => item.startsWith('data: '));
+    const body = JSON.parse(line ? line.slice('data: '.length) : raw) as {
+      result?: {
+        isError?: boolean;
+        structuredContent?: { text?: string; source?: string };
+      };
+    };
+    return { body, text: JSON.stringify(body) };
+  }
+
+  test('错代际是 isError，且不含箱内另一封信', async () => {
+    plant();
+    const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+      address: box,
+      id: '100',
+      uidValidity: '16',
+    });
+    expect(body.result?.isError).toBe(true);
+    expect(text).toContain('stale_message_generation');
+    expect(text).not.toContain(marker);
+    expect(text).not.toContain(subject);
+    expect(body.result?.structuredContent).toBeUndefined();
+  });
+
+  test('对上的代际读出原文，外部正文仍围栏', async () => {
+    plant();
+    const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+      address: box,
+      id: '100',
+      uidValidity: '17',
+    });
+    expect(body.result?.isError).toBeFalsy();
+    expect(body.result?.structuredContent?.source).toBe('external');
+    expect(body.result?.structuredContent?.text).toContain(marker);
+    expect(body.result?.structuredContent?.text).toContain('UNTRUSTED EXTERNAL EMAIL');
+    expect(text).not.toContain('stale_message_generation');
+  });
+
+  test('省略 uidValidity 仍以两参读取并返回原信', async () => {
+    plant();
+    const seen: unknown[][] = [];
+    const { OpenAgentEmailClient } = await import('../src/mcp/client.ts');
+    const orig = OpenAgentEmailClient.prototype.readMessage;
+    OpenAgentEmailClient.prototype.readMessage = function (...args: unknown[]) {
+      seen.push(args);
+      return orig.apply(this, args as [string, string]);
+    };
+    try {
+      const { body } = await mcpCall([...config.apiKeys][0]!, { address: box, id: '100' });
+      expect(seen).toEqual([[box, '100']]);
+      expect(body.result?.isError).toBeFalsy();
+      expect(body.result?.structuredContent?.text).toContain(marker);
+    } finally {
+      OpenAgentEmailClient.prototype.readMessage = orig;
+    }
+  });
+
+  test('他人 token 代际对上也不返回正文', async () => {
+    plant();
+    const { createIdentity } = await import('../src/lib/identities.ts');
+    const created = createIdentity({ localpart: 'mcp362acl' });
+    expect(created).not.toBeNull();
+    const { body, text } = await mcpCall(created!.token, {
+      address: box,
+      id: '100',
+      uidValidity: '17',
+    });
+    expect(body.result?.isError).toBe(true);
+    expect(text).toContain('forbidden');
+    expect(text).not.toContain(marker);
+    expect(text).not.toContain(subject);
   });
 });

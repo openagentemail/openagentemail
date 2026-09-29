@@ -1507,3 +1507,27 @@ N/A。
 ### 证据
 - PR #378 已由 fox 亲合至 main `169243227bc51bb6f4d2202a5ecbb309410e569f`，Closes #360；终头 `428f660`，CI 四格全绿，Codex/Muse 同头零，CodeRabbit 本头已审且无 actionable，未解决线程 0。
 - FC 聚焦 7 pass / 0 fail / 143 expect；初始独立自审 PASS_WITH_NOTES 的 5 条触及测试类型备注已修。ZCode 存量 scoped 创建路径 P2 已转 #379，通知 scope 启用前须另定语义。
+
+## 2026-09-29 · #362 MCP mail_read_message 可选 uidValidity
+
+### 我们实现了哪些功能？
+1. `mail_read_message` 单独增加可选正十进制串 `uidValidity`，经 `readMessage` 编码进 REST 查询。共享入参与 `mail_mark_seen` 不放宽。省略时仍是 `(address, id)`。
+2. 代际不符时工具 `isError` 且含 `stale_message_generation`，不返回另一封信。对上的代际仍围栏外部正文。他人信箱仍拒绝。
+3. 模板 A：有 webhook 代际则传入并在 stale 时不回；缺代际仍按原句回复，并写明该事件无代际保证。模板 B 与 webhook-wake 未改。
+
+### 我们遇到了哪些错误？
+1. 初估与分项加总不一致；独立假 IMAP 草稿 225 行，复用后整卡仍约 +356，超过当时 +300。fox #5331 一次性扩到 ≤400，无二次扩线。
+2. 开工时 5 次只读 OAE 工具调用（3×list_identities 为 403，1×list_messages，1×read #5328），无写、发送或标已读。FC 纠正后未再调用。
+3. 第三参正控与既有合法 `mail_read_message` 会打到真 IMAP，日志为 `servername argument must be an string`。断言仍通过。
+
+### 我们是如何解决这些错误的？
+1. 停在 +96 候裁；获准后只在 `imap.test.ts` 复用假 IMAP，再在 `mcp-http.test.ts` 复用 `callTool`/`withReadSpy`。+250 经明令后才跨过。
+2. 身份越界记入完成件，不因此改产品范围。
+3. 真 IMAP 连接错误原样保留，不把它写成套件失败，也不另改连接参数。
+
+### 证据
+- 未提交、未推送、未建 PR。全量套件未跑。
+- 聚焦：`imap.test.ts` 与 `mcp-http.test.ts` 147 pass / 0 fail / 953 expect；MCP `client`、`tools`、`template-a-prompt` 21 pass / 0 fail / 323 expect。终树复跑计数不变。
+- `imap.test.ts` 的 `tsc` 仍有原 R63/since 四处 `c, next` 隐式 any，不是本卡新段。`client.ts`、`tools.ts`、`mcp-http.test.ts` 无新增类型错误。
+- 终计插入 371（跟踪 348 + 未跟踪 prompt 测 23），删除 32。`git diff --check` 干净。低于 400。
+- 独立只读自审 PASS。转录 `/home/ops/.cursor/projects/home-ops-orca-workspaces-openagentemail-w362/agent-transcripts/279a6512-c410-4ba7-b326-2489f775b39a/279a6512-c410-4ba7-b326-2489f775b39a.jsonl`。

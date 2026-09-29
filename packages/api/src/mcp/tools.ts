@@ -157,6 +157,26 @@ export function registerOpenAgentEmailTools(
       .describe("Message id from mail_list_messages / mail_wait_for"),
   };
 
+  // #362：只挂在 mail_read_message。写回上面的共享 shape 会把 mail_mark_seen 一起放宽。
+  // 口径与 GET 的正十进制串相同，但先限 32 位再 BigInt；0、负数、小数、非数字在工具边界拒绝。
+  const mailReadMessageInputSchema = {
+    ...receivedMessageInputSchema,
+    uidValidity: z
+      .string()
+      .refine((value) => {
+        if (value.length > 32 || !/^\d+$/.test(value)) return false;
+        try {
+          return BigInt(value) > 0n;
+        } catch {
+          return false;
+        }
+      }, "uidValidity must be a positive decimal string")
+      .optional()
+      .describe(
+        "Optional mailbox generation (positive decimal string, at most 32 digits). Omit for the legacy address+id read.",
+      ),
+  };
+
   const seenOutputSchema = {
     id: z.string(),
     seen: z.boolean(),
@@ -461,17 +481,20 @@ export function registerOpenAgentEmailTools(
       description:
         "Read a full message: text, html (if any), and extracted OTP verification codes and links." +
         UNTRUSTED_CONTENT_DESCRIPTION,
-      // #355-A：包一层 strict，不改共享 shape 本身。
-      inputSchema: asStrictInput(receivedMessageInputSchema),
+      // #355-A / #362：读信专属 strict shape，不改共享 receivedMessageInputSchema。
+      inputSchema: asStrictInput(mailReadMessageInputSchema),
       outputSchema: messageOutputSchema,
       annotations: mailReadAnnotations,
     },
-    ({ address, id }) =>
-      callApi(async () =>
-        prepareMailToolMessage(
-          (await client.readMessage(address, id)) as unknown as Record<string, unknown>,
-        ),
-      ),
+    ({ address, id, uidValidity }) =>
+      callApi(async () => {
+        // 省略代际时不传第三参，旧调用仍是 (address, id)，查询里也不出现 uidValidity。
+        const message =
+          uidValidity === undefined
+            ? await client.readMessage(address, id)
+            : await client.readMessage(address, id, uidValidity);
+        return prepareMailToolMessage(message as unknown as Record<string, unknown>);
+      }),
   );
 
   tier("mail_mark_seen", "minimal");

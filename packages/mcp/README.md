@@ -89,7 +89,7 @@ this table is the human reference rather than a second protocol implementation.
 | `mail_new_identity(name?, localpart?, domain?, canNotifyUser?, scopes?)` | Admin only: create a managed identity and return its token once; see permission choices above |
 | `mail_list_identities()` | Admin only: list identities; not a self-discovery call for an ordinary identity |
 | `mail_list_messages(address, limit?)` | Received messages, newest first; 1–200, default 50; summaries include seen/snippet/hasOtp/source |
-| `mail_read_message(address, id)` | Message body, OTP codes/links and source classification; `id` is the message UID, not a task UUID |
+| `mail_read_message(address, id, uidValidity?)` | Message body, OTP codes/links and source classification; `id` is the message UID, not a task UUID. Optional `uidValidity` is a positive decimal string forwarded as a REST query; a mismatch returns a tool error containing `stale_message_generation` and no message body. Omit it for the legacy read. mail_mark_seen does not accept this field |
 | `mail_mark_seen(address, id, seen?)` | Mark read/unread for all mailbox consumers; prefer consumer-specific REST `?since=` cursors for independent progress; reading itself never changes Seen |
 | `mail_wait_for(address, fromContains?, subjectContains?, timeoutSec?)` | Wait for a matching unread message; requested total defaults to 120s, schema max 600s; see server-segment limits below |
 | `mail_send(from, to, subject, text, html?)` | Send as a permitted existing identity; SMTP queued/accepted does not mean delivered. REST `POST /v1/send` unknown keys → 400 `invalid_request` (`unrecognized_keys` naming the key); MCP `mail_send` unknown keys → tool call error (JSON-RPC -32602 / isError) and the message is not sent |
