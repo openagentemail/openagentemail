@@ -35,9 +35,14 @@ receiver on all interfaces — bind `127.0.0.1` (or put a reverse proxy in front
 unless you intend LAN/public reachability. The self-address guard only blocks
 replying to yourself; two auto-responders (A↔B) can still loop and burn LLM
 quota on both sides — mitigate with a human-approval gate and/or a per-thread
-reply budget. Standard suppression (RFC 3834 `Auto-Submitted`) needs product
-support; current webhook events and message-read details do not expose that
-field. Tracked upstream as issue #363.
+reply budget. `mail.received` now includes bounded `autoSubmitted`
+(`null`, `no`, `auto-generated`, `auto-replied`, or `other`) on both scopes.
+Templates A and B skip when that value is present and not `no`, on the event
+and again when the current read succeeds. A failed template B read, or one
+without `uidValidity`, still drafts from metadata and is not fail-closed.
+Missing or `no` does not prove a human sender. Self-address and generation
+checks stay independent, and `source:internal` does not replace this field.
+Outbound replies stay unmarked until card A. Issue #363 remains OPEN.
 
 ## MCP one-time registration
 

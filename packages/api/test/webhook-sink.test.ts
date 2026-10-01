@@ -215,6 +215,52 @@ describe('webhook-sink: Dispatcher Sink Wiring (§11.4, §6.2, §6.3, Item 9)', 
     expect(row.rfc822MessageId).toBeNull();
   });
 
+  test('#363-B metadata 直播载荷使用同一分类，不回传原始头', async () => {
+    const sub = createWebhookSubscription({
+      url: 'https://consumer.example/hook',
+      events: ['mail.received'],
+      contentScope: 'metadata',
+      address: 'agent@test.example',
+    });
+    const sink = createWebhookSink();
+    const raw =
+      'From: Bot <bot@example.net>\r\n' +
+      'To: agent@test.example\r\n' +
+      'Subject: auto\r\n' +
+      'Auto-Submitted: auto-replied;\r\n' +
+      '\towner=SECRETVALUE\r\n' +
+      'Auto-Submitted: no\r\n' +
+      '\r\n' +
+      'do not echo\r\n';
+    await sink.handleMail!({
+      type: 'mail.received',
+      message: {
+        uid: 363,
+        internalDate: new Date('2026-10-01T03:00:00.000Z'),
+        flags: new Set(),
+        envelope: {
+          from: [{ address: 'bot@example.net' }],
+          to: [{ address: 'agent@test.example' }],
+          subject: 'auto',
+        },
+        source: Buffer.from(raw, 'utf8'),
+      },
+      uidValidity: 17n,
+    });
+    const row = readAllDeliveryLogRows().find((item) => item.messageId === '363');
+    expect(row).toBeDefined();
+    const job = deliveryQueue.peekJobForTests(row!.webhookId, row!.eventId, row!.runId);
+    expect(job?.type).toBe('mail.received');
+    const body = JSON.parse(job!.payloadBuilder(sub).body);
+    expect(body.payloadVersion).toBe('v1');
+    expect(body.type).toBe('mail.received');
+    expect(body.data.autoSubmitted).toBe('other');
+    expect(body.data.textPreview).toBeUndefined();
+    expect(body.data.headers).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('SECRETVALUE');
+    expect(sub.id).toBe(row!.webhookId);
+  });
+
   afterAll(async () => {
     resetWebhooksStoreForTests();
     (config as any).dataDir = originalDataDir;

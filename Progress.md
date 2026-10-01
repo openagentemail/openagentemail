@@ -1546,3 +1546,23 @@ N/A。
 ### 证据
 - 静态谓词（非端到端，不是真实危险分支的 GitHub 红跑）：`push`+`refs/tags/guard-check-*` 假；`push`+`refs/heads/main` 真；`push`+`refs/heads/feature/x` 真；`pull_request`+`refs/pull/1/merge` 假。分支失败步骤仍含 `exit 1`。PyYAML `BaseLoader` 保留键 `on`；`git diff --check` 干净。
 - 状态：未提交、未推送。远程 `guard-check-*` 标签冒烟待 PR 审查后由 FC 在已审头执行。
+
+## 2026-10-01 · #363-B2 webhook 有界 autoSubmitted 与模板抑制
+
+### 我们实现了哪些功能？
+1. `mail.received` 的 metadata 与 preview 写入 B1 有界 `autoSubmitted`。直播与重投、启动重建共用分类器，缺省为 `null`，`payloadVersion` 仍为 `v1`，不回传原始头。
+2. 模板 A 在 spawn 前跳过非 `no`，提示词要求发送前重读。模板 B 在 LLM 前看事件；成功的当前读若为非 `no` 则不调用 LLM、不发送。
+3. 缺省与 `no` 保持旧路径，且不是人工来源证明。自地址与代际守卫独立。`source:internal` 不代替该字段。出站仍不打标。#363 保持 OPEN。
+
+### 我们遇到了哪些错误？
+1. 仓库没有 `AGENTS.md`。API 测试初跑缺依赖，因为工作区尚未安装。
+2. 候选实现加模板测试为 +322。补回放与守卫后到 +427，按 +430 预警停手。无代际负控曾把显式 `undefined` 当成默认代际 17。
+3. 模板 B 读失败或无代际仍按元数据起草并可能发送。这是既有降级，不是 fail-closed。
+
+### 我们是如何解决这些错误的？
+1. 按任务卡、R0 和拆分清单开工，不调用 OAE。`bun install --frozen-lockfile` 只装 API 依赖。
+2. FC 核准后才越过 +430。无代际用例改为传 `null`，避免默认参数把 `undefined` 填成 17。
+3. 保持该降级，并用 404、抛错和无代际三条用例锁住。文档写明它不是 fail-closed。
+
+### 证据
+- 基线 `b22ba838`。未提交、未推送、未建 PR。#363 保持 OPEN。

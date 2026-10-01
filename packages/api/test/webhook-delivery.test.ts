@@ -1014,6 +1014,8 @@ describe('webhook-delivery: Payload Bounding & Drop Order (§6.6, §14 item 8)',
 
     const parsed = JSON.parse(formatted.body);
     // cc and to should have been dropped to empty arrays to fit
+    // autoSubmitted 不参与溢出丢弃，缺省仍是 null。
+    expect(parsed.data.autoSubmitted).toBe(null);
     expect(parsed.data.cc).toEqual([]);
     expect(parsed.data.to).toEqual([]);
     expect(Buffer.byteLength(formatted.body, 'utf8')).toBeLessThanOrEqual(740);

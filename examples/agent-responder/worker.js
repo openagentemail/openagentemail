@@ -126,6 +126,11 @@ function parseSender(raw) {
   return candidate.toLowerCase();
 }
 
+/** 缺省与 no 走旧路径，且都不是人工来源证明。其余值在 LLM 与发送前跳过。 */
+export function shouldSuppressAutoSubmitted(value) {
+  return value != null && value !== 'no';
+}
+
 /**
  * 先验签后取全文；404/失败不致命——降级回元数据起草。
  * 无代际守卫则不以裸 UID 取信（邮箱重建 UID 复用会读到无关邮件）。
@@ -140,7 +145,11 @@ async function fetchMailBody(api, key, address, messageId, uidValidity) {
     if (!res.ok) return null; // 降级：仅用 webhook 元数据
     const msg = await res.json();
     const text = typeof msg.text === 'string' ? msg.text : '';
-    return text.slice(0, BODY_PROMPT_CHARS);
+    return {
+      text: text.slice(0, BODY_PROMPT_CHARS),
+      // 重读当前详情。source 即使是 internal 也不代替本字段。
+      autoSubmitted: msg.autoSubmitted ?? null,
+    };
   } catch {
     return null;
   }
@@ -150,13 +159,19 @@ async function fetchMailBody(api, key, address, messageId, uidValidity) {
 async function processMail(env, data, eventKey, sender) {
   const { address, messageId, subject, uidValidity } = data;
   const api = String(env.OPENAGENTEMAIL_API_URL ?? '').replace(/\/+$/, '');
-  const mailText = await fetchMailBody(
+  const detail = await fetchMailBody(
     api,
     env.OPENAGENTEMAIL_API_KEY,
     address,
     messageId,
     uidValidity,
   );
+  // 事件档已放过缺省/no；发送前再看当前 REST 值，非 no 则不调用 LLM。
+  if (detail && shouldSuppressAutoSubmitted(detail.autoSubmitted)) {
+    console.error('[worker] auto-submitted on read: skip LLM and send');
+    return;
+  }
+  const mailText = detail?.text || null;
   // 正文/主题一律按不可信输入处理
   const contentParts = [
     `Draft a short plain-text reply (≤80 words).`,
@@ -251,6 +266,11 @@ export default {
     // self-addressed: 防回信环
     if (sender === String(address).toLowerCase()) {
       console.error('[worker] self-addressed: skip send (loop guard)');
+      return new Response('ok');
+    }
+    // 事件上非 no 则不进入 LLM。缺省与 no 保持旧路径。
+    if (shouldSuppressAutoSubmitted(data.autoSubmitted)) {
+      console.error('[worker] auto-submitted: skip LLM');
       return new Response('ok');
     }
 
