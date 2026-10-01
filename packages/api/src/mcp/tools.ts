@@ -138,6 +138,13 @@ export function registerOpenAgentEmailTools(
     links: z.array(z.string()),
     taskId: z.string().optional(),
     taskState: z.string().optional(),
+    // #5588 A：出现时仅 null/no/auto-generated/auto-replied/other。
+    // 缺字段 missing = older API version skew，不是普遍豁免；不合成值。
+    // 缺省/no 不是人工来源证明；source=internal 不能代替本字段。
+    autoSubmitted: z.union([
+      z.null(),
+      z.enum(["no", "auto-generated", "auto-replied", "other"]),
+    ]).optional(),
   };
 
   const identityListOutputSchema = {
@@ -479,7 +486,10 @@ export function registerOpenAgentEmailTools(
     {
       title: "Read Email Message",
       description:
-        "Read a full message: text, html (if any), and extracted OTP verification codes and links." +
+        "Read a full message: text, html (if any), and extracted OTP verification codes and links. " +
+        "autoSubmitted is null, no, auto-generated, auto-replied, or other; " +
+        "missing = older API version skew, not a general exemption; " +
+        "missing or no is not proof of human origin, and source=internal is not this signal." +
         UNTRUSTED_CONTENT_DESCRIPTION,
       // #355-A / #362：读信专属 strict shape，不改共享 receivedMessageInputSchema。
       inputSchema: asStrictInput(mailReadMessageInputSchema),

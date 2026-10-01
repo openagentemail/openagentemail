@@ -1453,4 +1453,131 @@ describe('#362 MCP mail_read_message 代际', () => {
     expect(text).not.toContain(marker);
     expect(text).not.toContain(subject);
   });
+
+  // #363-B1：真实工具路径要带回有界信号，扩展参数不得进入输出。
+  test('有界 autoSubmitted 从真实读路径返回，扩展原文不进输出', async () => {
+    const msg = inboxMessage(100, box, box);
+    msg.envelope.subject = subject;
+    msg.source = Buffer.from(
+      `From: sender@example.net\r\nTo: ${box}\r\nSubject: ${subject}\r\n` +
+        `Auto-Submitted: auto-replied; owner=SECRETVALUE\r\n\r\n${marker}\r\n`,
+    );
+    fakeMessages = [msg];
+    fakeUidValidity = 17n;
+    failMailboxLock = false;
+    const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+      address: box,
+      id: '100',
+      uidValidity: '17',
+    });
+    expect(body.result?.isError).toBeFalsy();
+    const content = body.result?.structuredContent as { autoSubmitted?: string; text?: string };
+    expect(content.autoSubmitted).toBe('other');
+    expect(content.text).toContain(marker);
+    expect(content.text).toContain('UNTRUSTED EXTERNAL EMAIL');
+    expect(text).not.toContain('SECRETVALUE');
+  });
+});
+
+/**
+ * #363-B1：REST 详情带有界信号；ACL、错代际、列表和 mark_seen 形状不变。
+ * 复用本文件假 IMAP，不连真实信箱。
+ */
+describe('#363-B1 REST autoSubmitted', () => {
+  const box = 'victim@test.example';
+  const secret = 'SECRETVALUE';
+  let app: any;
+  let auth: { kind: 'admin' } | { kind: 'identity'; address: string };
+
+  function plant(auto: string) {
+    const msg = inboxMessage(100, box, box);
+    msg.envelope.subject = 'auto-subject';
+    msg.source = Buffer.from(
+      `From: sender@example.net\r\nTo: ${box}\r\nSubject: auto-subject\r\n` +
+        `Auto-Submitted: ${auto}\r\n\r\nbody-marker\r\n`,
+    );
+    fakeMessages = [msg];
+    fakeUidValidity = 17n;
+    failMailboxLock = false;
+  }
+
+  beforeEach(async () => {
+    auth = { kind: 'admin' };
+    fakeMessages = [];
+    const { Hono } = await import('hono');
+    const { messagesRoute } = await import('../src/routes/messages.ts');
+    app = new Hono();
+    app.use('*', async (c: { set: (key: string, value: unknown) => void }, next: () => Promise<void>) => {
+      c.set('auth', auth);
+      await next();
+    });
+    app.route('/v1/messages', messagesRoute);
+  });
+
+  test('详情返回有界信号，扩展原文不进 JSON', async () => {
+    plant('auto-replied');
+    const clean = await app.request(`/v1/messages/100?address=${box}&uidValidity=17`);
+    expect(clean.status).toBe(200);
+    expect(((await clean.json()) as { autoSubmitted: string }).autoSubmitted).toBe('auto-replied');
+
+    plant(`auto-replied; owner=${secret}`);
+    const dirty = await app.request(`/v1/messages/100?address=${box}`);
+    expect(dirty.status).toBe(200);
+    const json = (await dirty.json()) as { autoSubmitted: string; text: string };
+    expect(json.autoSubmitted).toBe('other');
+    expect(json.text).toContain('body-marker');
+    expect(JSON.stringify(json)).not.toContain(secret);
+  });
+
+  test('错代际仍 404，不泄漏头或正文', async () => {
+    plant(`no; note=${secret}`);
+    const res = await app.request(`/v1/messages/100?address=${box}&uidValidity=16`);
+    expect(res.status).toBe(404);
+    const json = await res.json();
+    expect(json).toEqual({ error: 'stale_message_generation' });
+    expect(JSON.stringify(json)).not.toContain(secret);
+    expect(JSON.stringify(json)).not.toContain('body-marker');
+  });
+
+  test('他人身份 403，不返回信号或正文', async () => {
+    plant('auto-generated');
+    auth = { kind: 'identity', address: 'other@test.example' };
+    const res = await app.request(`/v1/messages/100?address=${box}&uidValidity=17`);
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).toContain('forbidden');
+    expect(text).not.toContain('auto-generated');
+    expect(text).not.toContain('body-marker');
+  });
+
+  test('列表不含 autoSubmitted，mark_seen 拒绝该字段', async () => {
+    plant('no');
+    const listed = await app.request(`/v1/messages?address=${box}`);
+    expect(listed.status).toBe(200);
+    const page = (await listed.json()) as { messages: Record<string, unknown>[] };
+    expect(page.messages[0]?.id).toBe('100');
+    expect(page.messages[0]?.autoSubmitted).toBeUndefined();
+    expect(JSON.stringify(page)).not.toContain('autoSubmitted');
+    const seen = await app.request('/v1/messages/100/seen', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: box, seen: true, autoSubmitted: 'no' }),
+    });
+    expect(seen.status).toBe(400);
+    expect(((await seen.json()) as { error: string }).error).toBe('invalid_request');
+  });
+
+  // wait 直接 c.json(message)；钉住有界值到达，且不改列表/mark-seen 形状。
+  test('wait 返回有界 autoSubmitted', async () => {
+    plant('auto-replied');
+    const waited = await app.request('/v1/messages/wait', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: box, timeoutSec: 2 }),
+    });
+    expect(waited.status).toBe(200);
+    const json = (await waited.json()) as { autoSubmitted: string; id: string };
+    expect(json.id).toBe('100');
+    expect(json.autoSubmitted).toBe('auto-replied');
+  });
 });

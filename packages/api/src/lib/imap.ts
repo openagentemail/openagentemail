@@ -47,6 +47,7 @@ import {
   type WaitMonotonicMs,
 } from './wait-clock.ts';
 import { describeFailure } from './redact.ts';
+import { classifyAutoSubmitted, type AutoSubmitted } from './auto-submitted.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -76,8 +77,16 @@ export interface MessageDetail {
   html?: string;
   otp: OtpExtraction;
   links: string[];
-  /** HMAC 自签 stamp 判定：通过为 internal，否则一律 external（fail-closed）。 */
+  /**
+   * HMAC 自签来源戳：通过为 internal，否则 external（fail-closed）。
+   * source:internal 只证明本服务签过这封信，不是自动回复证明；自动回复看 autoSubmitted。
+   */
   source: MailSource;
+  /**
+   * 有界入站 Auto-Submitted。null 与 no 保持旧回复路径，且都不是人工来源证明。
+   * 其余值（含 other）供自动回复方跳过。
+   */
+  autoSubmitted: AutoSubmitted;
   /** Present only for server-stamped task mail. */
   taskId?: string;
   /** Present only for server-stamped task mail. */
@@ -804,7 +813,7 @@ function sourceFromParsed(parsed: Awaited<ReturnType<typeof parseSource>>): Mail
   return classifyMailSource(stamp, fields, config.taskSigningSecret);
 }
 
-function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>): MessageDetail {
+export function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>): MessageDetail {
   const text = (parsed.text ?? '').trim() || (parsed.html ? htmlToText(parsed.html) : '');
   const html = typeof parsed.html === 'string' ? parsed.html : undefined;
   const extractableHtml =
@@ -827,6 +836,8 @@ function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSource>>):
     otp,
     links: extractHttpLinks(text, extractableHtml),
     source: sourceFromParsed(parsed),
+    // 与 stamp 分开算：internal 不能填进 autoSubmitted。
+    autoSubmitted: classifyAutoSubmitted(parsed.headerLines),
     ...(typeof taskId === 'string' ? { taskId } : {}),
     ...(typeof taskState === 'string' ? { taskState } : {}),
   };

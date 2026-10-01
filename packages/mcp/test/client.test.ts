@@ -132,4 +132,32 @@ describe("#362 readMessage 的 uidValidity 查询", () => {
       "http://127.0.0.1:3100/v1/messages/7?address=a%2Bb%40test.example&uidValidity=9007199254740993",
     );
   });
+
+  // #363-B1：客户端原样带回有界信号，不改查询形状。
+  test("readMessage 返回有界 autoSubmitted", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: "7", text: "hi", autoSubmitted: "auto-generated" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const msg = await new OpenAgentEmailClient("http://127.0.0.1:3100", "oa_token").readMessage(
+      "fox@test.example",
+      "7",
+    );
+    expect(msg.autoSubmitted).toBe("auto-generated");
+  });
+
+  // #5597：旧 API 响应省略 autoSubmitted。原样为 undefined，不合成 null 或 no。
+  test("readMessage 旧 API 缺 autoSubmitted 时返回 undefined", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: "7", text: "hi" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const msg = await new OpenAgentEmailClient("http://127.0.0.1:3100", "oa_token").readMessage(
+      "fox@test.example",
+      "7",
+    );
+    expect(msg.autoSubmitted).toBeUndefined();
+  });
 });

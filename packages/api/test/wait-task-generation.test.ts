@@ -234,6 +234,7 @@ describe('#198 wait 进行中 uidValidity 变化', () => {
       otp: { codes: [], links: [] },
       links: [],
       source: 'external', // MailSource = internal|external（对照 ui-frame fixture）
+      autoSubmitted: null,
       taskId: TASK_ID,
       taskState: 'failed',
     };
