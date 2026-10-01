@@ -63,7 +63,8 @@ export function truncateUtf8String(str: string, maxBytes: number): string {
   return truncateUtf8Bytes(buf, maxBytes).toString('utf8');
 }
 
-import { getMessage, withInbox, StaleMessageGenerationError } from './imap.ts';
+import { getMessage, withInbox, StaleMessageGenerationError, type MessageDetail } from './imap.ts';
+import type { AutoSubmitted } from './auto-submitted.ts';
 import { getTaskSnapshot } from './tasks-internal.ts';
 import { registerWebhookCancelCallback } from './identities.ts';
 import { simpleParser } from 'mailparser';
@@ -140,6 +141,8 @@ export type MailEventInput = {
   textPreview?: string;
   securityCodes?: string[];
   links?: string[];
+  /** 有界分类。缺省按 null 写入载荷，不放原始头。 */
+  autoSubmitted?: AutoSubmitted;
 };
 
 export type ApprovalEventInput = {
@@ -1496,6 +1499,40 @@ function getJsonDepth(val: unknown, current = 1): number {
   return max;
 }
 
+/** 重投与启动重建共用：autoSubmitted 只取详情上的分类，不用 source 代替。 */
+export function mailEventInputFromDetail(
+  detail: MessageDetail,
+  fields: {
+    address: string;
+    messageId: string;
+    uidValidity: number | null;
+    sizeBytes: number;
+    hasAttachments: boolean;
+    unread: boolean;
+  },
+): MailEventInput {
+  return {
+    address: fields.address,
+    messageId: fields.messageId,
+    uid: Number(fields.messageId),
+    uidValidity: fields.uidValidity,
+    receivedAt: detail.date,
+    from: { address: detail.from },
+    to: [detail.to],
+    cc: [],
+    subject: detail.subject,
+    sizeBytes: fields.sizeBytes,
+    hasAttachments: fields.hasAttachments,
+    unread: fields.unread,
+    containsSecurityCode: detail.otp.codes.length > 0,
+    containsLink: detail.otp.links.length > 0,
+    textPreview: detail.text,
+    securityCodes: detail.otp.codes,
+    links: detail.otp.links,
+    autoSubmitted: detail.autoSubmitted ?? null,
+  };
+}
+
 export function formatMailPayload(
   sub: WebhookSubscription,
   envelope: WebhookEnvelopeBase,
@@ -1557,6 +1594,8 @@ export function formatMailPayload(
     unread: input.unread,
     containsSecurityCode: input.containsSecurityCode,
     containsLink: input.containsLink,
+    // 元数据档与预览档都带有界值；不进入溢出丢弃顺序，也不附原始头。
+    autoSubmitted: input.autoSubmitted ?? null,
   };
 
   if (isPreview) {
@@ -3120,25 +3159,18 @@ export async function redeliverWebhookDelivery(deliveryId: string): Promise<{
       domain: config.domain,
     };
     payloadBuilder = (currentSub) =>
-      formatMailPayload(currentSub, envelope, {
-        address: original.address!,
-        messageId: detail.id,
-        uid: Number(detail.id),
-        uidValidity: original.uidValidity ?? null,
-        receivedAt: detail.date,
-        from: { address: detail.from },
-        to: [detail.to],
-        cc: [],
-        subject: detail.subject,
-        sizeBytes,
-        hasAttachments,
-        unread,
-        containsSecurityCode: detail.otp.codes.length > 0,
-        containsLink: detail.otp.links.length > 0,
-        textPreview: detail.text,
-        securityCodes: detail.otp.codes,
-        links: detail.otp.links,
-      });
+      formatMailPayload(
+        currentSub,
+        envelope,
+        mailEventInputFromDetail(detail, {
+          address: original.address!,
+          messageId: detail.id,
+          uidValidity: original.uidValidity ?? null,
+          sizeBytes,
+          hasAttachments,
+          unread,
+        }),
+      );
   } else {
     throw new Error('unsupported_event_type');
   }
@@ -3513,25 +3545,18 @@ export async function reconstructPendingDeliveriesAtBoot(
         };
 
         payloadBuilder = (currentSub) =>
-          formatMailPayload(currentSub, envelope, {
-            address: latest.address!,
-            messageId: activeUid,
-            uid: Number(activeUid),
-            uidValidity: activeUidValidity ?? null,
-            receivedAt: mailDetail.date,
-            from: { address: mailDetail.from },
-            to: [mailDetail.to],
-            cc: [],
-            subject: mailDetail.subject,
-            sizeBytes,
-            hasAttachments,
-            unread,
-            containsSecurityCode: mailDetail.otp.codes.length > 0,
-            containsLink: mailDetail.otp.links.length > 0,
-            textPreview: mailDetail.text,
-            securityCodes: mailDetail.otp.codes,
-            links: mailDetail.otp.links,
-          });
+          formatMailPayload(
+            currentSub,
+            envelope,
+            mailEventInputFromDetail(mailDetail, {
+              address: latest.address!,
+              messageId: activeUid,
+              uidValidity: activeUidValidity ?? null,
+              sizeBytes,
+              hasAttachments,
+              unread,
+            }),
+          );
       } else {
         throw Object.assign(new Error('unsupported_type'), {
           reason: 'unsupported_type',

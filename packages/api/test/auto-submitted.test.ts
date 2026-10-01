@@ -20,6 +20,8 @@ const {
   normalizeToList,
   stampDate,
 } = await import('../src/lib/mail-stamp.ts');
+const { formatMailPayload, mailEventInputFromDetail } = await import('../src/lib/webhook-delivery.ts');
+import type { WebhookSubscription } from '../src/lib/webhook-store.ts';
 
 const ALLOWED = new Set([null, 'no', 'auto-generated', 'auto-replied', 'other']);
 
@@ -142,6 +144,83 @@ describe('#363-B1 toDetail', () => {
     const detail = toDetail(2, parsed);
     expect(detail.source).toBe('internal');
     expect(detail.autoSubmitted).toBe('auto-replied');
+  });
+
+  test('回放 metadata/preview 与详情分类一致，原文不进载荷', async () => {
+    // 重投与启动重建都走 mailEventInputFromDetail。source 不能改写本字段。
+    const cases: Array<{
+      autos: string[];
+      want: null | 'no' | 'auto-generated' | 'auto-replied' | 'other';
+      stamp: boolean;
+    }> = [
+      { autos: [], want: null, stamp: true },
+      { autos: ['no'], want: 'no', stamp: false },
+      { autos: ['auto-generated'], want: 'auto-generated', stamp: false },
+      { autos: ['AUTO-REPLIED'], want: 'auto-replied', stamp: true },
+      { autos: ['auto-notified'], want: 'other', stamp: false },
+      { autos: ['auto-replied; owner=SECRETVALUE', 'no'], want: 'other', stamp: false },
+    ];
+    const envelope = {
+      id: 'evt_363b2',
+      type: 'mail.received' as const,
+      payloadVersion: 'v1' as const,
+      createdAt: '2026-10-01T02:00:00.000Z',
+      domain: 'test.example',
+    };
+    let uid = 20;
+    for (const row of cases) {
+      uid += 1;
+      const date = stampDate(new Date('2026-10-01T02:00:00Z'));
+      const from = 'alice@test.example';
+      const to = 'victim@test.example';
+      const subject = 'loop';
+      const body = 'hello';
+      const parsed = await simpleParser(
+        mime({
+          from: row.stamp ? from : 'bot@example.net',
+          to,
+          subject,
+          date,
+          body,
+          stamp: row.stamp ? stampFor(date, from, to, subject, body) : undefined,
+          autos: row.autos,
+        }),
+      );
+      const detail = toDetail(uid, parsed);
+      if (row.stamp) expect(detail.source).toBe('internal');
+      expect(detail.autoSubmitted).toBe(row.want);
+      const input = mailEventInputFromDetail(detail, {
+        address: to,
+        messageId: detail.id,
+        uidValidity: 17,
+        sizeBytes: 40,
+        hasAttachments: false,
+        unread: true,
+      });
+      expect(input.autoSubmitted).toBe(row.want);
+      const meta = JSON.parse(
+        formatMailPayload(
+          { contentScope: 'metadata', id: 'whk_m' } as WebhookSubscription,
+          envelope,
+          input,
+        ).body,
+      );
+      expect(meta.payloadVersion).toBe('v1');
+      expect(meta.data.autoSubmitted).toBe(row.want);
+      expect(meta.data.textPreview).toBeUndefined();
+      expect(meta.data.headers).toBeUndefined();
+      expect(JSON.stringify(meta)).not.toContain('SECRETVALUE');
+      const preview = JSON.parse(
+        formatMailPayload(
+          { contentScope: 'preview', id: 'whk_p' } as WebhookSubscription,
+          envelope,
+          input,
+        ).body,
+      );
+      expect(preview.data.autoSubmitted).toBe(row.want);
+      expect(preview.data.textPreview).toBe('hello');
+      expect(JSON.stringify(preview)).not.toContain('SECRETVALUE');
+    }
   });
 
 });

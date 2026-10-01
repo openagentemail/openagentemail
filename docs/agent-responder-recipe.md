@@ -139,6 +139,12 @@ Private / loopback targets need an **admin** token and
    template A keeps the previous reply behavior and the prompt warns that this
    event has no generation guarantee. Template B already sends `uidValidity` on
    its REST fetch. [`examples/webhook-wake/`](../examples/webhook-wake/) is unchanged.
+9. **`Auto-Submitted` is only a skip hint.** A present value other than `no` means
+   templates A and B do not reply. Missing or `no` does not prove a human sender
+   and does not bypass signature, generation, or self-address checks. Template B
+   still drafts from metadata when the REST read fails or `uidValidity` is absent;
+   that path is not fail-closed. `source:internal` does not replace the field.
+   Product replies stay unmarked until card A, and #363 remains open.
 
 ## Heavier / alternate examples
 

@@ -18,6 +18,7 @@ import type {
   SinkWatermark,
 } from './event-dispatcher.ts';
 import { messageRecipients } from './imap.ts';
+import { classifyAutoSubmitted, type AutoSubmitted } from './auto-submitted.ts';
 import { extractOtp, htmlToText } from './otp.ts';
 import {
   enqueueWebhookDelivery,
@@ -193,6 +194,8 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
       let securityCodes: string[] = [];
       let links: string[] = [];
       let hasAttachments = false;
+      // 解析失败视为缺头（null），不把未知原文写进载荷。
+      let autoSubmitted: AutoSubmitted = null;
 
       if (message.source) {
         try {
@@ -225,6 +228,7 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
           links = otp.links;
 
           hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+          autoSubmitted = classifyAutoSubmitted(parsed.headerLines);
         } catch {
           // Parsing failure: proceed with envelope metadata
         }
@@ -263,6 +267,7 @@ export function createWebhookSink(watermark: SinkWatermark = {}): EventSink {
           textPreview: text,
           securityCodes,
           links,
+          autoSubmitted,
         };
 
         const eventId = `evt_${randomUUID()}`;
