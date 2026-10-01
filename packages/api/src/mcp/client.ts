@@ -105,6 +105,11 @@ export interface Message extends MessageSummary {
   text: string;
   html?: string;
   otp: { codes: string[]; links: string[] };
+  /**
+   * 有界入站 Auto-Submitted。null 与 "no" 不是人工来源证明。
+   * source 仍是 HMAC 来源戳，不能代替本字段。
+   */
+  autoSubmitted: null | "no" | "auto-generated" | "auto-replied" | "other";
 }
 
 export interface NotificationMessage {

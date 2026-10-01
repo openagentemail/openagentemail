@@ -61,6 +61,7 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
       otp: { codes: ['123456'], links: ['https://example.net/verify'] },
       links: ['https://example.net/news', 'https://example.net/verify'],
       source: 'external' as const,
+      autoSubmitted: null,
     })),
     setPushContentTier: mock(() => null),
     ...overrides,
@@ -135,6 +136,7 @@ describe('UI message JSON contract', () => {
         otp: { codes: [], links: [] },
         links: [],
         source: 'external' as const,
+        autoSubmitted: null,
       })),
     });
     const response = await app.request(

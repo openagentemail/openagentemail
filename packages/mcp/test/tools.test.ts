@@ -227,6 +227,9 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(seenInput).toBeInstanceOf(z.ZodObject);
   const seenObject = seenInput as z.ZodObject<z.ZodRawShape>;
   expect(seenObject.shape.uidValidity).toBeUndefined();
+  // #363-B：不放宽 mail_mark_seen 入参，也不在本卡加入 autoReply。
+  expect(seenObject.shape.autoSubmitted).toBeUndefined();
+  expect(seenObject.safeParse({ address: addr, id: "7", autoSubmitted: "no" }).success).toBe(false);
   expect(readObject.shape.uidValidity).toBeDefined();
   expect(seenObject.safeParse({ address: addr, id: "7", seen: false }).success).toBe(true);
   expect(seenObject.safeParse({ address: addr, id: "7", seen: false, uidValidity: "17" }).success).toBe(false);
@@ -404,6 +407,7 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
     subject: "hi",
     date: "2026-08-09T00:00:00.000Z",
     source: "external",
+    autoSubmitted: null,
     text: "plain",
     html: "<p>plain</p>",
     otp: { codes: ["123456"], links: ["https://example.com/otp"] },
@@ -433,6 +437,17 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   expect(readOut.hasOtp).toBeUndefined();
   expect(readOut.seen).toBeUndefined();
   expect(readOut.snippet).toBeUndefined();
+  // #363-B：详情输出有界；列表 schema 不含该字段；原始攻击串不能过 schema。
+  expect(readOut.autoSubmitted!.safeParse(null).success).toBe(true);
+  expect(readOut.autoSubmitted!.safeParse("no").success).toBe(true);
+  expect(readOut.autoSubmitted!.safeParse("auto-generated").success).toBe(true);
+  expect(readOut.autoSubmitted!.safeParse("auto-replied").success).toBe(true);
+  expect(readOut.autoSubmitted!.safeParse("other").success).toBe(true);
+  expect(readOut.autoSubmitted!.safeParse("SECRETVALUE").success).toBe(false);
+  expect(readOut.autoSubmitted!.safeParse("auto-replied; owner=SECRETVALUE").success).toBe(false);
+  const { autoSubmitted: _auto, ...detailWithoutAuto } = detail;
+  expect(detailSchema.safeParse(detailWithoutAuto).success).toBe(false);
+  expect(listMessages.element.shape.autoSubmitted).toBeUndefined();
 
   // 展开后的多收件人 To 可超 998：无界 string，不得再按物理行限拒。
   const longTo = Array.from({ length: 40 }, (_, i) => `User${i} <u${i}@example.com>`).join(", ");

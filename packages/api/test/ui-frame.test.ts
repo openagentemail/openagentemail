@@ -25,6 +25,7 @@ const detail: MessageDetail = {
   otp: { codes: [], links: [] },
   links: [],
   source: 'external',
+  autoSubmitted: null,
 };
 
 function frameApp(
