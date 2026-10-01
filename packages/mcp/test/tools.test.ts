@@ -446,7 +446,9 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   expect(readOut.autoSubmitted!.safeParse("SECRETVALUE").success).toBe(false);
   expect(readOut.autoSubmitted!.safeParse("auto-replied; owner=SECRETVALUE").success).toBe(false);
   const { autoSubmitted: _auto, ...detailWithoutAuto } = detail;
-  expect(detailSchema.safeParse(detailWithoutAuto).success).toBe(false);
+  const missingAuto = detailSchema.safeParse(detailWithoutAuto);
+  expect(missingAuto.success).toBe(true);
+  if (missingAuto.success) expect("autoSubmitted" in missingAuto.data).toBe(false);
   expect(listMessages.element.shape.autoSubmitted).toBeUndefined();
 
   // 展开后的多收件人 To 可超 998：无界 string，不得再按物理行限拒。
@@ -459,4 +461,45 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   const taskCreate = toolSchemas.get("task_create")!;
   expect(taskCreate.to!.safeParse("Alice <alice@example.com>").success).toBe(false);
   expect(taskCreate.to!.safeParse("alice@example.com").success).toBe(true);
+});
+
+// #5588 A：桩 server 不跑 SDK validateToolOutput，这里用真实 McpServer。
+test("#5588 A 旧 API 缺字段工具成功，新值原样通过，畸形拒绝", async () => {
+  const { McpServer } = await import("../../api/node_modules/@modelcontextprotocol/server/dist/index.mjs");
+  const { registerOpenAgentEmailTools } = await import("../../api/src/mcp/tools.ts");
+  let body: Record<string, unknown> = {};
+  const mcp = new McpServer({ name: "t", version: "0" });
+  registerOpenAgentEmailTools(mcp, { readMessage: async () => body } as never);
+  const host = mcp as any;
+  const tool = host._registeredTools.mail_read_message;
+  const args = await host.validateToolInput(tool, { address: "d@e.f", id: "7" }, "mail_read_message");
+  const call = async () => {
+    try {
+      const result = await host.executeToolHandler(tool, args, {});
+      await host.validateToolOutput(tool, result, "mail_read_message");
+      return result;
+    } catch (error) {
+      return host.createToolError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  body = {
+    id: "7",
+    from: "a@b.c",
+    to: "d@e.f",
+    subject: "s",
+    date: "2026-01-01T00:00:00.000Z",
+    text: "t",
+    source: "external",
+    otp: { codes: [], links: [] },
+    links: [],
+  };
+  const oldApi = await call();
+  expect(oldApi.isError ?? false).toBe(false);
+  expect(oldApi.structuredContent).not.toHaveProperty("autoSubmitted");
+  body = { ...body, autoSubmitted: "auto-replied" };
+  const passed = await call();
+  expect(passed.isError ?? false).toBe(false);
+  expect(passed.structuredContent.autoSubmitted).toBe("auto-replied");
+  body = { ...body, autoSubmitted: "SECRETVALUE" };
+  expect((await call()).isError).toBe(true);
 });
