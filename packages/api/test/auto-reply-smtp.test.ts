@@ -33,7 +33,8 @@ mock.module('nodemailer', () => ({
   },
 }));
 
-const { sendMail } = await import('../src/lib/smtp.ts');
+// 全套件里其他文件会先 mock.module(smtp)。查询串绕过该 mock，仍用上方流式替身序列化真实 sendMail。
+const { sendMail } = await import('../src/lib/smtp.ts?363a-real-send' as unknown as '../src/lib/smtp.ts');
 
 function headerLines(mime: string, name: string): string[] {
   const needle = `${name.toLowerCase()}:`;

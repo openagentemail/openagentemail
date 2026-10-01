@@ -1126,11 +1126,15 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
     const omittedArg = (sendMailMock.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>).at(-1)?.[0];
     expect(omittedArg?.autoReply).toBeUndefined();
     sendMailMock.mockClear();
-    const rejected = await call({ headers: { 'Auto-Submitted': 'auto-replied' } });
+    // 共享 mock 的额外调用与本身份相同，禁止按 from 过滤。独有 subject 才证明这次 headers 拒绝没进 send。
+    const rejectedSubject = 'mcp-headers-rejected-363a';
+    const rejected = await call({ headers: { 'Auto-Submitted': 'auto-replied' }, subject: rejectedSubject });
     const rejectedText = JSON.stringify(await readMcpJson(rejected));
     expect(rejectedText).not.toContain('"queued":true');
     expect(/unrecognized|invalid (input|argument)|-32602|headers/i.test(rejectedText)).toBe(true);
-    expect(sendMailMock).not.toHaveBeenCalled();
+    const reached = (sendMailMock.mock.calls as unknown as Array<[{ subject?: string }]>)
+      .filter((entry) => entry[0]?.subject === rejectedSubject);
+    expect(reached).toEqual([]);
   });
 });
 
