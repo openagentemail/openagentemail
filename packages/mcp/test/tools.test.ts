@@ -227,8 +227,10 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(seenInput).toBeInstanceOf(z.ZodObject);
   const seenObject = seenInput as z.ZodObject<z.ZodRawShape>;
   expect(seenObject.shape.uidValidity).toBeUndefined();
-  // #363-B：不放宽 mail_mark_seen 入参，也不在本卡加入 autoReply。
+  // #363-A：autoReply 只属于 mail_send。mail_mark_seen 仍拒绝该键。
   expect(seenObject.shape.autoSubmitted).toBeUndefined();
+  expect(seenObject.shape.autoReply).toBeUndefined();
+  expect(seenObject.safeParse({ address: addr, id: "7", autoReply: true }).success).toBe(false);
   expect(seenObject.safeParse({ address: addr, id: "7", autoSubmitted: "no" }).success).toBe(false);
   expect(readObject.shape.uidValidity).toBeDefined();
   expect(seenObject.safeParse({ address: addr, id: "7", seen: false }).success).toBe(true);
@@ -241,6 +243,21 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(ok(waitFor, "subjectContains", "x".repeat(201))).toBe(false);
 
   const send = toolSchemas.get("mail_send")!;
+  const sendInput = toolConfigs.get("mail_send")!.inputSchema!;
+  expect(sendInput).toBeInstanceOf(z.ZodObject);
+  const sendObject = sendInput as z.ZodObject<z.ZodRawShape>;
+  const sendBase = {
+    from: "a@test.example",
+    to: "b@example.net",
+    subject: "s",
+    text: "t",
+  };
+  expect(sendObject.safeParse(sendBase).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, autoReply: true }).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, autoReply: false }).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, autoReply: "true" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, headers: { "Auto-Submitted": "auto-replied" } }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, autoSubmitted: "no" }).success).toBe(false);
   expect(ok(send, "from", "not-an-email")).toBe(false);
   expect(ok(send, "to", "not-an-email")).toBe(false);
   expect(ok(send, "subject", "x".repeat(998))).toBe(true);

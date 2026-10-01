@@ -71,6 +71,8 @@ test("模板 A：非 no 不 spawn；缺省与 no 仍 spawn 且提示要求重读
     expect(prompt).toContain("Before any mail_send");
     expect(prompt).toContain('not "no"');
     expect(prompt).toContain("not proof of human origin");
+    expect(prompt).toContain("autoReply:true");
+    expect(prompt).toContain("do not pass headers");
   }
   // 伪造 no / 省略不能绕过代际预检或自地址守卫。
   const guarded = spawned.length;
@@ -161,7 +163,8 @@ test("模板 B：事件非 no 不调 LLM；读回非 no 不发送；no 与 inter
     expect(calls.some((call) => call.href.includes("/llm"))).toBe(true);
     expect(send).toBeDefined();
     const payload = JSON.parse(send!.body ?? "{}") as Record<string, unknown>;
-    expect(payload.autoReply).toBeUndefined();
+    expect(payload.autoReply).toBe(true);
+    expect(payload.headers).toBeUndefined();
     expect(JSON.stringify(payload)).not.toContain("Auto-Submitted");
     expect(payload.text).toBe("Thanks");
     // 事件缺省，当前读变成 auto-generated：不调用 LLM、不发送。source 不抵消。
@@ -180,14 +183,17 @@ test("模板 B：事件非 no 不调 LLM；读回非 no 不发送；no 与 inter
     expect(calls.some((call) => call.href.includes("/v1/messages/"))).toBe(true);
     expect(calls.some((call) => call.href.includes("/llm"))).toBe(true);
     expect(calls.some((call) => call.href.includes("/v1/send"))).toBe(true);
+    expect(JSON.parse(calls.find((call) => call.href.includes("/v1/send"))!.body ?? "{}").autoReply).toBe(true);
     readFailure = "throw";
     await run(undefined, { text: "hidden", autoSubmitted: "auto-replied" });
     expect(calls.some((call) => call.href.includes("/v1/send"))).toBe(true);
     expect(calls.some((call) => call.href.includes("/llm"))).toBe(true);
+    expect(JSON.parse(calls.find((call) => call.href.includes("/v1/send"))!.body ?? "{}").autoReply).toBe(true);
     readFailure = "none";
     await run("no", { text: "hidden", autoSubmitted: "auto-replied" }, "human@example.net", null);
     expect(calls.some((call) => call.href.includes("/v1/messages/"))).toBe(false);
     expect(calls.some((call) => call.href.includes("/v1/send"))).toBe(true);
+    expect(JSON.parse(calls.find((call) => call.href.includes("/v1/send"))!.body ?? "{}").autoReply).toBe(true);
   } finally {
     globalThis.fetch = original;
   }

@@ -47,6 +47,8 @@ const sendSchema = z.object({
   subject: z.string().max(998),
   text: z.string().max(1_000_000),
   html: z.string().max(1_000_000).optional(),
+  // #363-A：可选布尔。仅 true 由 SMTP 写固定 Auto-Submitted；未知键仍拒绝。
+  autoReply: z.boolean().optional(),
 }).strict();
 
 const historyQuerySchema = z.object({
@@ -156,7 +158,7 @@ sendRoute.post('/', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
   }
-  const { from, to, subject, text, html } = parsed.data;
+  const { from, to, subject, text, html, autoReply } = parsed.data;
   const toList = recipientsOf(to);
   const source = sendSource(c);
 
@@ -206,6 +208,8 @@ sendRoute.post('/', async (c) => {
       subject,
       text,
       ...(html ? { html } : {}),
+      // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
+      ...(autoReply === true ? { autoReply: true } : {}),
     });
     // /v1/send 出站登记：sendMail 已 best-effort 写入；此处再记一次以覆盖测试里 mock 掉 smtp 的路径。
     // 登记失败不 502：SMTP 已接受时失败会让调用方重试、重复外发。

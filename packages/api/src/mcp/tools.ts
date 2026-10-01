@@ -588,20 +588,24 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
         subject: z.string().max(998).describe("Subject line"),
         text: z.string().max(1_000_000).describe("Plain-text body"),
         html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
+        autoReply: z
+          .boolean()
+          .optional()
+          .describe("True only: server adds Auto-Submitted: auto-replied. False or omitted adds nothing."),
       }).strict(),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
-    ({ from, to, subject, text, html }) =>
-      callApi(() => client.send(from, to, subject, text, html)),
+    ({ from, to, subject, text, html, autoReply }) =>
+      callApi(() => client.send(from, to, subject, text, html, autoReply)),
   );
 
   const notificationInputSchema = {

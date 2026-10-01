@@ -9,7 +9,7 @@
  *   GET  /v1/messages/:id?address&uidValidity?  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
-   *   POST /v1/send                  {from,to,subject,text,html?} -> 200 {queued:true, messageId, id?}
+   *   POST /v1/send                  {from,to,subject,text,html?,autoReply?} -> 200 {queued:true, messageId, id?}
  *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
  *   GET  /v1/tasks?state=          -> {tasks:[task]}
  *   GET  /v1/tasks/:id             -> task
@@ -650,8 +650,15 @@ export class OpenAgentEmailClient {
     subject: string,
     text: string,
     html?: string,
+    autoReply?: boolean,
   ): Promise<{ queued: boolean; messageId: string; id?: string }> {
-    return this.request("POST", "/v1/send", { from, to, subject, text, html }, { sendSource: "mcp" });
+    // JSON.stringify 会丢掉 undefined，因此省略不进 body；显式 false 会进 body。
+    return this.request(
+      "POST",
+      "/v1/send",
+      { from, to, subject, text, html, autoReply },
+      { sendSource: "mcp" },
+    );
   }
 
   notifyUser(
