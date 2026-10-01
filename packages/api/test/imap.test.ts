@@ -1566,4 +1566,18 @@ describe('#363-B1 REST autoSubmitted', () => {
     expect(seen.status).toBe(400);
     expect(((await seen.json()) as { error: string }).error).toBe('invalid_request');
   });
+
+  // wait 直接 c.json(message)；钉住有界值到达，且不改列表/mark-seen 形状。
+  test('wait 返回有界 autoSubmitted', async () => {
+    plant('auto-replied');
+    const waited = await app.request('/v1/messages/wait', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: box, timeoutSec: 2 }),
+    });
+    expect(waited.status).toBe(200);
+    const json = (await waited.json()) as { autoSubmitted: string; id: string };
+    expect(json.id).toBe('100');
+    expect(json.autoSubmitted).toBe('auto-replied');
+  });
 });

@@ -61,7 +61,8 @@ function makeApp(overrides: Partial<UiApiDependencies> = {}) {
       otp: { codes: ['123456'], links: ['https://example.net/verify'] },
       links: ['https://example.net/news', 'https://example.net/verify'],
       source: 'external' as const,
-      autoSubmitted: null,
+      // #363-B1：详情契约用非空有界值，证明 spread 会把它带进已认证 JSON。
+      autoSubmitted: 'auto-replied' as const,
     })),
     setPushContentTier: mock(() => null),
     ...overrides,
@@ -94,6 +95,8 @@ describe('UI message JSON contract', () => {
       false,
     ]);
     expect(body.nextCursor).toBeNull();
+    // 列表摘要不因详情信号而变宽。
+    expect(JSON.stringify(body)).not.toContain('autoSubmitted');
   });
 
   test('detail omits raw html but preserves OTP and validated body links', async () => {
@@ -109,8 +112,10 @@ describe('UI message JSON contract', () => {
       htmlTooLarge?: boolean;
       otp: { codes: string[]; links: string[] };
       links: string[];
+      autoSubmitted: string;
     };
     expect(body.html).toBeUndefined();
+    expect(body.autoSubmitted).toBe('auto-replied');
     expect(body.hasHtml).toBe(true);
     expect(body.htmlTooLarge).toBe(false);
     expect(body.otp).toEqual({
