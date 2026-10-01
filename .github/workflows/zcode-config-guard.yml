@@ -1,7 +1,7 @@
 # 危险路径守卫 (tizerluo/zcode-open-bridge#49 洞三的 GitHub 侧防线)
 # .zcode/config.json / zcode.json 会被 zcode 在启动时直接执行其中定义的
 # 命令 (进程 spawn, 不经过模型也不受工具黑名单约束), 禁止入库。
-# pull_request: 全量跑 (供必需检查), 干净=绿; push: 仅在该路径变更时触发=必红。
+# pull_request: 全量跑 (供必需检查), 干净=绿; 分支 push 触碰禁止路径则失败; tag push 跳过该失败步骤。
 name: zcode-config-guard
 
 on:
@@ -40,7 +40,7 @@ jobs:
           echo "变更未触碰危险路径, 通过"
 
       - name: push 触发即危险 (paths 已过滤)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
         run: |
           echo "::error::push 直接修改了 .zcode/config.json / zcode.json — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
           exit 1

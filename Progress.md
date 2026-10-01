@@ -1531,3 +1531,18 @@ N/A。
 - `imap.test.ts` 的 `tsc` 仍有原 R63/since 四处 `c, next` 隐式 any，不是本卡新段。`client.ts`、`tools.ts`、`mcp-http.test.ts` 无新增类型错误。
 - 终计插入 371（跟踪 348 + 未跟踪 prompt 测 23），删除 32。`git diff --check` 干净。低于 400。
 - 独立只读自审 PASS。转录 `/home/ops/.cursor/projects/home-ops-orca-workspaces-openagentemail-w362/agent-transcripts/279a6512-c410-4ba7-b326-2489f775b39a/279a6512-c410-4ba7-b326-2489f775b39a.jsonl`。
+
+## 2026-10-01 · #376+#327 工作流守卫：标签 push 不再误红
+
+### 我们实现了哪些功能？
+1. `zcode-config-guard`：分支 push（`refs/heads/`）触碰 `.zcode/config.json` / `zcode.json` 仍失败；tag push 跳过该失败步骤。PR 全量扫描与失败评论未改。这是工作流守卫修复。
+
+### 我们遇到了哪些错误？
+1. GitHub 不对 tag push 评估 `paths`，原条件对一切 `push` 都 `exit 1`。v0.10.0 run 36531727040 因此误红（零文件比较，标签树无禁止文件）。这是守卫误报，不是发布工作流故障。
+
+### 我们是如何解决这些错误的？
+1. 失败条件改为 `github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')`。两条 `on.push.paths` 与 PR 扫描保留。未推危险文件，也未把静态负控写成真实红跑。
+
+### 证据
+- 静态谓词（非端到端，不是真实危险分支的 GitHub 红跑）：`push`+`refs/tags/guard-check-*` 假；`push`+`refs/heads/main` 真；`push`+`refs/heads/feature/x` 真；`pull_request`+`refs/pull/1/merge` 假。分支失败步骤仍含 `exit 1`。PyYAML `BaseLoader` 保留键 `on`；`git diff --check` 干净。
+- 状态：未提交、未推送。远程 `guard-check-*` 标签冒烟待 PR 审查后由 FC 在已审头执行。
