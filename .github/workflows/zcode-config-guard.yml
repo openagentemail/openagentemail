@@ -45,6 +45,17 @@ jobs:
           echo "::error::push 直接修改了 .zcode/config.json / zcode.json — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
           exit 1
 
+      - name: 检出被标记提交
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: 标签树根路径 ZCode 配置
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: bash .github/scripts/zcode-config-tag-tree.sh
+
       - name: PR 留痕评论
         if: failure() && github.event_name == 'pull_request'
         env:

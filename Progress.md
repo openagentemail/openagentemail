@@ -1584,3 +1584,18 @@ N/A。
 
 ### 证据
 - 基线 `f4bca5a5`。聚焦 API 122 pass / 0 fail / 920 expect；MCP 28 pass / 0 fail / 439 expect。全量 API 2497 pass / 9 skip / 0 fail；MCP 60 pass / 0 fail。假 SMTP/IMAP/LLM/spawn，无实发信。
+
+## 2026-10-02 · #384 标签树根路径 ZCode 配置守卫
+
+### 我们实现了哪些功能？
+1. 标签 push（`refs/tags/`）用 `actions/checkout@v4` 检出 `${{ github.sha }}` 且 `persist-credentials: false`，再执行 `.github/scripts/zcode-config-tag-tree.sh`。检查器要求对象是提交、HEAD 等于 `GITHUB_SHA`，并对根路径 `.zcode/config.json` 与 `zcode.json` 做 `git cat-file -e`；任一存在即失败。不执行配置，不递归扫描 vendor。
+2. PR 全量扫描、失败评论、`refs/heads/` 失败步骤和 `on.push.paths` 保持原样。`ci.yml` 增加 `bash deploy/test-zcode-config-tag-tree.sh`，权限仍是 `contents: read`。隔离临时仓库覆盖干净绿、两根路径红、vendor 与 `node_modules` 同名绿、轻量与附注标签、错误 SHA、缺失对象、附注标签对象失败关闭。这是推送后的顾问检查，不阻止建标签或发版；指向旧提交或被改过的工作流版本仍可能没有这次检查。
+
+### 我们遇到了哪些错误？
+1. 永久测试为 107 行，超过当时硬顶 100；合计 151，超过 +145 预警。+80 预警没有事先报告，过程失误已记录。没有删除负控，没有把用例压成超长行，也没有为了凑行数去改产品文件。
+
+### 我们是如何解决这些错误的？
+1. 停在冻结树，计数写入 `/home/ops/materials/384/scale-stop.md`。fox #5687 只把同一张卡的永久测试硬顶放宽到 ≤110 一次；生产 ≤60、合计 ≤175 不变，没有第二次扩张。其后产品树只追加本段。
+
+### 证据
+- 基线 `e6bf507e79eb0811c2d67161edf6e1638be17b5b`。D2 生产 +44、永久测试 +107、总 +166/−0，均在 #5687 书面硬线内；隔离测试与独立只读审查均通过。验证明细见 `/home/ops/materials/384/completion.md`。
