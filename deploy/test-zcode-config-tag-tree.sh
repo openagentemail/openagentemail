@@ -104,4 +104,6 @@ set -e
 [ "$WRONG" -ne 0 ] || { echo "wrong checkout sha must fail" >&2; cat "$TMP/wrong.err" >&2; exit 1; }
 [ "$MISS" -ne 0 ] || { echo "missing object must fail" >&2; cat "$TMP/miss.err" >&2; exit 1; }
 [ "$TAGOBJ" -ne 0 ] || { echo "annotated tag object must fail" >&2; cat "$TMP/tag.err" >&2; exit 1; }
+# Also prove the failure was caused by rejecting the tag object.
+grep -Fq '::error::目标不是提交 (tag)' "$TMP/tag.err"
 printf '%s\n' "zcode tag-tree guard ok"
