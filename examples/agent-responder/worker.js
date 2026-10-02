@@ -219,6 +219,8 @@ async function processMail(env, data, eventKey, sender) {
       to: sender,
       subject: subject?.startsWith('Re:') ? subject : `Re: ${subject ?? ''}`,
       text: replyText,
+      // #363-A：只在既有发送路径显式选择。抑制路径到不了这里。
+      autoReply: true,
     }),
   });
   if (!sendRes.ok) {

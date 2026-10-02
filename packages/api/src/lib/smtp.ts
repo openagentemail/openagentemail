@@ -27,8 +27,30 @@ export interface SendInput {
   subject: string;
   text: string;
   html?: string;
+  /** 仅 true 写入固定 Auto-Submitted: auto-replied。false 与省略不新增该头。 */
+  autoReply?: boolean;
   /** Server-stamped protocol metadata, for example X-OA-Task headers. */
   headers?: Record<string, string>;
+}
+
+const AUTO_SUBMITTED_HEADER = 'Auto-Submitted';
+const AUTO_REPLIED_VALUE = 'auto-replied';
+
+/**
+ * autoReply===true 时覆盖为唯一的 Auto-Submitted: auto-replied。
+ * 其他取值保持原头，不把 API 调用本身当成自动回复。
+ */
+function headersForAutoReply(
+  headers: Record<string, string> | undefined,
+  autoReply: boolean | undefined,
+): Record<string, string> | undefined {
+  if (autoReply !== true) return headers;
+  const kept: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (name.toLowerCase() !== 'auto-submitted') kept[name] = value;
+  }
+  kept[AUTO_SUBMITTED_HEADER] = AUTO_REPLIED_VALUE;
+  return kept;
 }
 
 /**
@@ -69,7 +91,11 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
   // 显式 Date + 毫秒归零：发读两侧 stamp 载荷用同一 ISO 字符串。
   const date = stampDate();
   const text = coerceOutboundText(input.text, input.html);
-  const outbound = { ...input, text };
+  const outbound = {
+    ...input,
+    text,
+    headers: headersForAutoReply(input.headers, input.autoReply),
+  };
   // 仅当全部 To 均在配置的域内时写 stamp（防 HMAC 预言机随外发信泄漏）。
   const headers = stripBccHeaders(
     buildOutboundStampHeaders(outbound, date, config.taskSigningSecret, config.allDomains),

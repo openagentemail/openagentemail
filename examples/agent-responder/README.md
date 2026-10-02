@@ -42,7 +42,11 @@ and again when the current read succeeds. A failed template B read, or one
 without `uidValidity`, still drafts from metadata and is not fail-closed.
 Missing or `no` does not prove a human sender. Self-address and generation
 checks stay independent, and `source:internal` does not replace this field.
-Outbound replies stay unmarked until card A. Issue #363 remains OPEN.
+Template A tells the agent to pass `autoReply:true` only after those checks
+allow a reply, and not to pass `headers`. Template B adds `autoReply:true`
+only on its existing send, including the metadata-draft fallback. That
+fallback is still not fail-closed. The server writes
+`Auto-Submitted: auto-replied` only for explicit `true`.
 
 ## MCP one-time registration
 

@@ -304,3 +304,100 @@ describe('POST /v1/send 未知键拒绝（#324）', () => {
     });
   });
 });
+
+/** #363-A：可选 autoReply。仅 true 进入 sendMail；不开放 headers。 */
+describe('POST /v1/send autoReply（#363-A）', () => {
+  function send(from: string, extra: Record<string, unknown> = {}) {
+    return app.request('/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from,
+        to: 'recipient@example.net',
+        subject: 'hello',
+        text: 'body',
+        ...extra,
+      }),
+    });
+  }
+
+  test('省略与 false 不带标记；true 只传 autoReply 且响应仍含审计 id', async () => {
+    createIdentity({ localpart: 'ar-ok' });
+    sendMail.mockImplementation(async () => ({ messageId: '<ar-ok@test.example>' }) as never);
+    for (const extra of [{}, { autoReply: false }]) {
+      resetRateLimits();
+      sendMail.mockClear();
+      const response = await send('ar-ok@test.example', extra);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { id?: string };
+      expect(body).toMatchObject({ queued: true, messageId: '<ar-ok@test.example>' });
+      expect(body.id).toMatch(/^snd_/);
+      expect(body).not.toHaveProperty('autoReply');
+      const arg = (sendMail.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>)[0]?.[0];
+      expect(arg?.autoReply).toBeUndefined();
+      expect(arg?.headers).toBeUndefined();
+    }
+    resetRateLimits();
+    sendMail.mockClear();
+    const marked = await send('ar-ok@test.example', { autoReply: true });
+    expect(marked.status).toBe(200);
+    const markedBody = (await marked.json()) as { id?: string };
+    expect(markedBody).toMatchObject({ queued: true, messageId: '<ar-ok@test.example>' });
+    expect(markedBody.id).toMatch(/^snd_/);
+    const arg = (sendMail.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>)[0]?.[0];
+    expect(arg).toMatchObject({ autoReply: true });
+    expect(arg?.headers).toBeUndefined();
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
+  });
+
+  test('autoReply 不绕过限速或未知身份：超额 429 且不再发信', async () => {
+    expect(config.sendRateLimit).toBeGreaterThan(0);
+    createIdentity({ localpart: 'ar-limit' });
+    resetRateLimits();
+    sendMail.mockClear();
+    sendMail.mockImplementation(async () => ({ messageId: '<ar-limit@test.example>' }) as never);
+    for (let i = 0; i < config.sendRateLimit; i++) {
+      expect((await send('ar-limit@test.example', { autoReply: true })).status).toBe(200);
+    }
+    const limited = await send('ar-limit@test.example', { autoReply: true });
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error?: string }).error).toBe('rate_limited');
+    expect(sendMail).toHaveBeenCalledTimes(config.sendRateLimit);
+    sendMail.mockClear();
+    const missing = await send('missing-ar@test.example', { autoReply: true });
+    expect(missing.status).toBe(403);
+    expect(sendMail).not.toHaveBeenCalled();
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
+  });
+
+  test('字符串、headers 与未知键 400 且不发信', async () => {
+    createIdentity({ localpart: 'ar-bad' });
+    resetRateLimits();
+    sendMail.mockClear();
+    const cases: Array<{ extra: Record<string, unknown>; key: string }> = [
+      { extra: { autoReply: 'true' }, key: 'autoReply' },
+      { extra: { autoReply: 1 }, key: 'autoReply' },
+      { extra: { headers: { 'Auto-Submitted': 'auto-replied' } }, key: 'headers' },
+      { extra: { autoSubmitted: 'no' }, key: 'autoSubmitted' },
+    ];
+    for (const { extra, key } of cases) {
+      const response = await send('ar-bad@test.example', extra);
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as {
+        error?: string;
+        details?: Array<{ code?: string; keys?: string[]; path?: string[] }>;
+      };
+      expect(body.error).toBe('invalid_request');
+      const issue = body.details?.find(
+        (item: { code?: string; keys?: string[]; path?: string[] }) =>
+          item.keys?.includes(key) || item.path?.includes(key),
+      );
+      expect(issue).toBeTruthy();
+    }
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+});

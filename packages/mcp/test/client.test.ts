@@ -161,3 +161,25 @@ describe("#362 readMessage 的 uidValidity 查询", () => {
     expect(msg.autoSubmitted).toBeUndefined();
   });
 });
+
+describe("mail_send autoReply 传到 REST（#363-A）", () => {
+  test("省略不进 body；false 与 true 原样进入且不含 headers", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ queued: true, messageId: "<m@test>" }), { status: 200 });
+    }) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
+    await client.send("a@test.example", "b@example.net", "s", "t");
+    await client.send("a@test.example", "b@example.net", "s", "t", undefined, false);
+    await client.send("a@test.example", "b@example.net", "s", "t", "<p>h</p>", true);
+    expect(bodies[0]).not.toHaveProperty("autoReply");
+    expect(bodies[0]).not.toHaveProperty("headers");
+    expect(bodies[1]).toMatchObject({ autoReply: false });
+    expect(bodies[1]).not.toHaveProperty("headers");
+    expect(JSON.stringify(bodies[1])).not.toContain("Auto-Submitted");
+    expect(bodies[2]).toMatchObject({ autoReply: true, html: "<p>h</p>" });
+    expect(bodies[2]).not.toHaveProperty("headers");
+    expect(JSON.stringify(bodies[2])).not.toContain("Auto-Submitted");
+  });
+});

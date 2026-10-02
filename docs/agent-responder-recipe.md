@@ -144,7 +144,9 @@ Private / loopback targets need an **admin** token and
    and does not bypass signature, generation, or self-address checks. Template B
    still drafts from metadata when the REST read fails or `uidValidity` is absent;
    that path is not fail-closed. `source:internal` does not replace the field.
-   Product replies stay unmarked until card A, and #363 remains open.
+   Template A asks for `mail_send` `autoReply:true` only after the checks allow
+   a reply. Template B sends `autoReply:true` only on that existing reply path.
+   The server adds `Auto-Submitted: auto-replied` only for explicit `true`.
 
 ## Heavier / alternate examples
 

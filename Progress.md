@@ -1566,3 +1566,21 @@ N/A。
 
 ### 证据
 - 基线 `b22ba838`。未提交、未推送、未建 PR。#363 保持 OPEN。
+
+## 2026-10-01 · #363-A 出站显式 Auto-Submitted
+
+### 我们实现了哪些功能？
+1. REST `POST /v1/send`、MCP `mail_send` 与客户端增加可选布尔 `autoReply`。只有显式 `true` 由服务端写入固定头 `Auto-Submitted: auto-replied`；`false` 与省略不写。未知键、非法类型和调用方 `headers` 仍被 strict 拒绝。不因走 API/MCP 就自动标记。鉴权、限速、发送审计与 `X-OA-Mail-Stamp` 不变。
+2. 模板 A 在既有读/重读门通过后才要求 `mail_send` 带 `autoReply:true` 且不传 headers。模板 B 只在既有发送路径的 POST 体带 `autoReply:true`。入站 `autoSubmitted` 仍只是发件人可控的循环抑制提示，缺省和 `no` 不是人工来源或授权证明。
+3. 假 SMTP stream transport 解析序列化 MIME：`true` 恰好一条 `auto-replied`，可与 stamp 并存；省略与 `false` 无该头。外部收件人不带 stamp。调用方传入的 `Auto-Submitted` 会被该固定值覆盖，其他服务端头保留。
+
+### 我们遇到了哪些错误？
+1. 冻结树相对 `f4bca5a5` 为 +354/−15，已越过原 +280/≤350。fox #5641 只准一次扩到预警 +400、硬顶 ≤430，且只准补 Progress 与新测试行的类型诊断。
+2. 新增 `send.test.ts` 与 `mcp-http.test.ts` 段把空元组 `mock.calls` 和 `response.json()` 的 unknown 直接当已解析对象，API `tsc` 在这些新行上报错。同文件改动前已有 `Promise<never>` 与 `expectUnrecognizedKeys(unknown)`。`send.ts` 的 `ReturnType<Context['json']>` 过深实例化也不在本卡新行。
+
+### 我们是如何解决这些错误的？
+1. 未改产品、未删负控、未压行。类型修正只落在新增测试行：`mock.calls` 经 `unknown` 收窄，JSON 体补局部类型，成功桩返回值用 `as never` 对齐既有抛错 mock。
+2. 模板 B 读失败或无代际仍按元数据起草，不是 fail-closed。收件侧与 w344/PR #346 未改。未提交、未推送、未建 PR。#363 保持 OPEN。
+
+### 证据
+- 基线 `f4bca5a5`。聚焦 API 122 pass / 0 fail / 920 expect；MCP 28 pass / 0 fail / 439 expect。全量 API 2497 pass / 9 skip / 0 fail；MCP 60 pass / 0 fail。假 SMTP/IMAP/LLM/spawn，无实发信。

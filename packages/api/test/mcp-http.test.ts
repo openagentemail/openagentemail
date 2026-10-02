@@ -1092,6 +1092,50 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
     expect(text).not.toMatch(/smtp_error/i);
     expect(/unrecognized|invalid (input|argument)|-32602|attachments/i.test(text)).toBe(true);
   });
+
+  test('autoReply true 经 MCP 到达 sendMail；false 省略与 headers 不发标记头', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp-autoreply' })!;
+    sendMailMock.mockClear();
+    const call = (args: Record<string, unknown>) =>
+      mcpRequest(token, 'tools/call', {
+        name: 'mail_send',
+        arguments: {
+          from: identity.address,
+          to: 'recipient@example.net',
+          subject: 'hello',
+          text: 'body',
+          ...args,
+        },
+      });
+    const marked = await call({ autoReply: true });
+    expect(marked.status).toBe(200);
+    const markedBody = await readMcpJson(marked);
+    expect(JSON.stringify(markedBody)).toContain('"queued":true');
+    const markedArg = (sendMailMock.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>).at(-1)?.[0];
+    expect(markedArg?.autoReply).toBe(true);
+    expect(markedArg?.headers).toBeUndefined();
+    sendMailMock.mockClear();
+    const plain = await call({ autoReply: false });
+    expect(plain.status).toBe(200);
+    const plainArg = (sendMailMock.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>).at(-1)?.[0];
+    expect(plainArg?.autoReply).toBeUndefined();
+    expect(plainArg?.headers).toBeUndefined();
+    sendMailMock.mockClear();
+    const omitted = await call({});
+    expect(omitted.status).toBe(200);
+    const omittedArg = (sendMailMock.mock.calls as unknown as Array<[{ autoReply?: boolean; headers?: unknown }]>).at(-1)?.[0];
+    expect(omittedArg?.autoReply).toBeUndefined();
+    sendMailMock.mockClear();
+    // 共享 mock 的额外调用与本身份相同，禁止按 from 过滤。独有 subject 才证明这次 headers 拒绝没进 send。
+    const rejectedSubject = 'mcp-headers-rejected-363a';
+    const rejected = await call({ headers: { 'Auto-Submitted': 'auto-replied' }, subject: rejectedSubject });
+    const rejectedText = JSON.stringify(await readMcpJson(rejected));
+    expect(rejectedText).not.toContain('"queued":true');
+    expect(/unrecognized|invalid (input|argument)|-32602|headers/i.test(rejectedText)).toBe(true);
+    const reached = (sendMailMock.mock.calls as unknown as Array<[{ subject?: string }]>)
+      .filter((entry) => entry[0]?.subject === rejectedSubject);
+    expect(reached).toEqual([]);
+  });
 });
 
 /**
