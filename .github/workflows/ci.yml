@@ -30,6 +30,9 @@ jobs:
       - name: Test mail-security scripts
         run: bash deploy/test-mail-security.sh
 
+      - name: Test zcode tag-tree guard
+        run: bash deploy/test-zcode-config-tag-tree.sh
+
       - name: Test packages/api
         working-directory: packages/api
         run: |
