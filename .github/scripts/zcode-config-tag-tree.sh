@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 标签树根路径守卫：拒绝根 .zcode mode 120000，并查 .zcode/config.json 与 zcode.json，不执行内容。
+# 标签树根路径守卫：拒绝根 .zcode mode 120000 与 160000，并查 .zcode/config.json 与 zcode.json，不执行内容。
 set -euo pipefail
 
 # 缺少 SHA、对象缺失或不是提交，一律失败关闭。
@@ -23,6 +23,11 @@ fi
 zmode="$(git ls-tree "$GITHUB_SHA" .zcode | awk '{print $1; exit}')"
 if [ "$zmode" = "120000" ]; then
   echo "::error::根路径 .zcode 符号链接禁止入库" >&2
+  exit 1
+fi
+# 根 gitlink 160000：只看父树 mode，不读目标，不初始化子模块。
+if [ "$zmode" = "160000" ]; then
+  echo "::error::根路径 .zcode gitlink 禁止入库" >&2
   exit 1
 fi
 # git cat-file -e 精确根路径；存在即红。vendor 与 node_modules 同名不会命中。

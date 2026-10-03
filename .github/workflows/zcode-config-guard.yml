@@ -116,6 +116,7 @@ jobs:
             elif ([.tree[].path]|unique|length)!=(.tree|length) then "dup"
             elif any(.tree[]; .path=="zcode.json") then "rootjson"
             elif any(.tree[]; .path==".zcode" and .mode=="120000") then "symlink"
+            elif any(.tree[]; .path==".zcode" and .mode=="160000") then "gitlink"
             elif any(.tree[]; .path==".zcode" and .mode=="040000") then "child:\([.tree[]|select(.path==".zcode").sha][0])"
             else "ok" end')" || die "根树畸形"
           case "$tk" in
@@ -125,6 +126,7 @@ jobs:
             dup) die "根树路径重复" ;;
             rootjson) die "根路径 zcode.json 禁止入库" ;;
             symlink) die "根路径 .zcode 符号链接禁止入库" ;;
+            gitlink) die "根路径 .zcode gitlink 禁止入库" ;;
             child:*) ;;
             *) die "根树畸形" ;;
           esac
