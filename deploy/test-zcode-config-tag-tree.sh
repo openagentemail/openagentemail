@@ -197,6 +197,7 @@ HOMGL="$(git -C "$TMP" rev-parse HEAD)"
 [ "$(git -C "$TMP" ls-tree "$HOMGL" libs | awk '{print $1}')" = "160000" ]
 [ -z "$(git -C "$TMP" ls-tree "$HOMGL" .zcode | awk '{print $1}')" ]
 expect_green "$HOMGL"
+# red.err 会随 git add -A 进入临时提交；先还原这份跟踪文件，后面的 checkout 才不会被脏副本拦住。清理顺序不变。
 git -C "$TMP" checkout -q -- red.err
 git -C "$TMP" checkout -q "$CLEAN"
 rm -rf "$TMP/.zcode"
@@ -319,6 +320,10 @@ gh() {
     esac
   done
   printf '%s\n' "$url" >> "$REQ"
+  # 测试桩可追加一条请求日志。未设置时不写、不访问网络。
+  if [ -n "${GH_EXTRA_URL:-}" ]; then
+    printf '%s\n' "$GH_EXTRA_URL" >> "$REQ"
+  fi
   local phase="" body="" rc=0
   case "$url" in
     http:*|https:*|*recursive=*) return 9 ;;
@@ -403,8 +408,37 @@ gitlink_red
 ESHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 use 1 "$(page .zcode)" "$(T "$(E .zcode 160000 commit "$ESHA")")"
 gitlink_red
-! grep -Fq "$ESHA" "$REQ"
-! grep -Fq gitmodules "$REQ"
+# 干净请求绿控：本条日志不含目标 SHA，也不含 gitmodules。
+if grep -Fq "$ESHA" "$REQ"; then
+  printf 'request named target %s\n' "$ESHA" >&2
+  exit 1
+fi
+if grep -Fq gitmodules "$REQ"; then
+  printf 'request named gitmodules\n' >&2
+  exit 1
+fi
+# 永久反向红控：匹配目标 SHA、匹配 gitmodules 必须点名失败。嵌套 mutation 副本跳过，避免重复整套。
+if [ "${W397_SKIP_REQ_RED:-}" != 1 ] && [ "${W394_SKIP_MUTATION:-}" != 1 ]; then
+  req_red() {
+    local name="$1" extra="$2" needle="$3"
+    local dir="$TMP/req-$name" out rc
+    mkdir -p "$dir/.github/workflows" "$dir/.github/scripts" "$dir/deploy"
+    cp "$CHECKER" "$dir/.github/scripts/zcode-config-tag-tree.sh"
+    cp "$WF" "$dir/.github/workflows/zcode-config-guard.yml"
+    cp "$0" "$dir/deploy/test-zcode-config-tag-tree.sh"
+    set +e
+    out="$(W397_SKIP_REQ_RED=1 GH_EXTRA_URL="$extra" bash "$dir/deploy/test-zcode-config-tag-tree.sh" 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || { printf 'req %s stayed green\n' "$name" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "$needle" || {
+      printf 'req %s missed %s\n' "$name" "$needle" >&2
+      exit 1
+    }
+  }
+  req_red target 'repos/$REPO/commits/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'request named target'
+  req_red gitmodules 'repos/$REPO/contents/.gitmodules' 'request named gitmodules'
+fi
 use 1 "$(jq -nc '[[{filename:".zcode",status:"modified"}]]')" "$(T "$(E .zcode 160000 commit "$BSHA")")"
 gitlink_red
 use 1 "$(page README)" "$(T "$(E libs 160000 commit "$BSHA")")"
