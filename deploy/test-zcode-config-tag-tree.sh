@@ -145,12 +145,53 @@ if grep -Eq '^  pull_request:' "$WF"; then
   echo "must not run the PR workflow file" >&2
   exit 1
 fi
-grep -Fq 'contents: read' "$WF"
-grep -Fq 'pull-requests: read' "$WF"
-if grep -Eq ': write|secrets\.' "$WF"; then
-  echo "permissions must stay read-only and secret-free" >&2
-  exit 1
-fi
+# 有效权限：注释不算。顶层或 job 块必须恰好两行只读；job 级标量 permissions 失败。
+perm_ok() {
+  awk '
+    { s = $0
+      sub(/#.*/, "", s); sub(/[[:space:]]+$/, "", s)
+      if (s == "") next
+      if (index(s, "secrets.") > 0) secret = 1
+      if (s == "permissions:") { lvl = "wf"; next }
+      if (s == "jobs:") { lvl = "jobs"; next }
+      if (s ~ /^[^[:space:]]/) { lvl = ""; next }
+      if (lvl == "wf" && s ~ /^  [^[:space:]][^:]*:[[:space:]]/) { sub(/^  /, "", s); wf[++wn] = s; next }
+      if (lvl == "jobs" && s ~ /^  [^[:space:]][^:]*:$/) { job = s; sub(/^  /, "", job); sub(/:$/, "", job); next }
+      if (s ~ /^    permissions:[[:space:]]*[^[:space:]]/) bad_scalar = 1
+      if (lvl == "jobs" && s == "    permissions:") { lvl = "jp"; has[job] = 1; next }
+      if (lvl == "jp" && s ~ /^      [^[:space:]][^:]*:[[:space:]]/) { sub(/^      /, "", s); jp[job, ++jn[job]] = s; next }
+      if (lvl == "jp" && s !~ /^      /) lvl = "jobs"
+      if (s ~ /event_name == .pull_request_target./) pr = job
+    }
+    END {
+      n = has[pr] ? jn[pr] : wn
+      for (i = 1; i <= n; i++) seen[has[pr] ? jp[pr, i] : wf[i]] = 1
+      if (secret || bad_scalar || pr == "" || n != 2 || seen["contents: read"] != 1 || seen["pull-requests: read"] != 1) exit 1
+    }
+  ' "$1"
+}
+expect_nonzero() {
+  if "$@"; then
+    return 1
+  fi
+}
+perm_ok "$WF"
+sed 's/^  contents: read$/#&/; s/^  pull-requests: read$/#&/' "$WF" > "$TMP/perm-comment.yml"
+sed 's/^  guard:$/&\n    permissions: write-all/' "$WF" > "$TMP/perm-write-all.yml"
+awk '
+  $0 == "  guard:" {
+    print
+    print "    permissions:"
+    print "      contents: read"
+    print "      pull-requests: read"
+    print "      actions: read"
+    next
+  }
+  { print }
+' "$WF" > "$TMP/perm-actions.yml"
+for bad in "$TMP/perm-comment.yml" "$TMP/perm-actions.yml" "$TMP/perm-write-all.yml"; do
+  expect_nonzero perm_ok "$bad"
+done
 if grep -Fq 'gh pr comment' "$WF"; then
   echo "comment step must be gone" >&2
   exit 1
@@ -264,6 +305,22 @@ for skip in vendor/.zcode vendor/.zcode/config.json node_modules/.zcode/config.j
     exit 1
   fi
 done
-grep -Fq 'refs/heads/' "$WF"
-grep -Fq 'exit 1' "$WF"
+# 执行受保护分支 push step。if 必须同时是 event_name == push 与 refs/heads/，run 必须非 0。echo bypass 必须失败。
+assert_branch_push() {
+  local step_if step_run
+  step_if="$(awk '/name: push 触发即危险/ {p = 1} p && /^        if:/ {print; exit}' "$1")"
+  printf '%s\n' "$step_if" | grep -Fq "event_name == 'push'" && printf '%s\n' "$step_if" | grep -Fq 'refs/heads/' || return 1
+  step_run="$(awk '/name: push 触发即危险/ {p = 1} p && /^        run: \|/ {r = 1; next} r && /^          / {sub(/^          /, ""); print; next} r {exit}' "$1")"
+  printf '%s\n' "$step_run" > "$TMP/push-body.sh"
+  bash "$TMP/push-body.sh" >/dev/null 2>&1 && return 1
+  return 0
+}
+assert_branch_push "$WF"
+awk '
+  /name: push 触发即危险/ {p = 1}
+  p && /^        run: \|/ {print; print "          echo bypass"; skip = 1; next}
+  skip && /^          / {next}
+  { if (skip) skip = 0; print }
+' "$WF" > "$TMP/push-bypass.yml"
+expect_nonzero assert_branch_push "$TMP/push-bypass.yml"
 printf '%s\n' "zcode tag-tree guard ok"
