@@ -222,75 +222,305 @@ awk '
 grep -Fq 'git/trees/' "$PR_RUN"
 grep -Fq '120000' "$PR_RUN"
 # 导出函数桩。子 bash 会继承，不再往 PATH 放假可执行文件。
+# PR 全 schema 夹具走真实 jq。请求日志只允许 repos 路径。
+[ "$(grep -c 'timeout 20' "$PR_RUN")" -eq 1 ] && [ "$(grep -Ec 'call (元数据|文件列表|根树|子树) ' "$PR_RUN")" -eq 4 ]
+grep -Fq -- '--paginate' "$PR_RUN"
+grep -Fq -- '--slurp' "$PR_RUN"
+grep -Fq 'per_page=100' "$PR_RUN"
+if grep -Fq 'recursive' "$PR_RUN"; then echo "must not recurse trees" >&2; exit 1; fi
+SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CSHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BSHA=cccccccccccccccccccccccccccccccccccccccc
+DSHA=dddddddddddddddddddddddddddddddddddddddd
+REQ="${TMP:-/tmp}/gh-requests.log"
+ET='{"truncated":false,"tree":[]}'
 gh() {
-  local expr="" url=""
+  local url=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --jq) expr="$2"; shift 2 ;;
-      --paginate) shift ;;
-      api) shift ;;
+      api|--paginate|--slurp) shift ;;
+      --jq) shift 2 ;;
+      -*) shift ;;
       *) url="$1"; shift ;;
     esac
   done
-  (
-    set -o pipefail
-    if [[ "$url" == *"/git/trees/"* ]] && [ "${GH_TREE_RC:-0}" -ne 0 ]; then
-      exit "${GH_TREE_RC}"
-    fi
-    if [[ "$url" == *"/git/trees/"* ]]; then
-      printf '%s' "${GH_TREE_JSON-}"
-    else
-      printf '%s' "${GH_FILES_JSON-[]}"
-    fi | if [ -n "$expr" ]; then jq -r "$expr"; else cat; fi
-  )
+  printf '%s\n' "$url" >> "$REQ"
+  local phase="" body="" rc=0
+  case "$url" in
+    http:*|https:*|*recursive=*) return 9 ;;
+    */files*) phase=files; body="${GH_FILES_JSON-}"; rc="${GH_FILES_RC:-0}" ;;
+    */pulls/*) phase=meta; body="${GH_META_JSON-}"; rc="${GH_META_RC:-0}" ;;
+    */git/trees/"$HEAD_SHA") phase=root; body="${GH_TREE_JSON-}"; rc="${GH_TREE_RC:-0}" ;;
+    */git/trees/*) phase=child; body="${GH_CHILD_JSON-}"; rc="${GH_CHILD_RC:-0}" ;;
+    *) return 9 ;;
+  esac
+  if [ "${GH_TIMEOUT_PHASE:-}" = "$phase" ]; then return 124; fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "$body"
 }
-timeout() {
-  if [ "${GH_TIMEOUT_STUB:-}" = "1" ]; then
-    return 124
-  fi
-  shift
-  "$@"
-}
-export -f gh
-export -f timeout
-run_pr() {
-  local rc
+timeout() { shift; if [ "${GH_TIMEOUT_STUB:-}" = 1 ]; then return 124; fi; "$@"; }
+export -f gh timeout
+export REQ SHA
+clr() { : > "$REQ"; unset GH_META_RC GH_FILES_RC GH_TREE_RC GH_CHILD_RC GH_TIMEOUT_STUB GH_TIMEOUT_PHASE; }
+pr_run() {
+  local expect="$1" diag="${2:-}" out rc
   set +e
-  REPO=example/repo PR=1 HEAD_SHA=abc bash "$PR_RUN" >/dev/null 2>&1
+  out="$(REPO=example/repo PR=1 HEAD_SHA="$SHA" bash "$PR_RUN" 2>&1)"
   rc=$?
   set -e
-  printf '%s' "$rc"
-}
-while IFS='|' read -r files tree tree_rc timeout_stub expect_zero; do
-  [ -n "${files}" ] || continue
-  export GH_FILES_JSON="$files"
-  export GH_TREE_JSON="$tree"
-  if [ "$tree_rc" = 0 ]; then unset GH_TREE_RC; else export GH_TREE_RC="$tree_rc"; fi
-  if [ "$timeout_stub" = 1 ]; then export GH_TIMEOUT_STUB=1; else unset GH_TIMEOUT_STUB; fi
-  rc="$(run_pr)"
-  if [ "$expect_zero" = 1 ]; then
-    [ "$rc" -eq 0 ]
+  if [ "$expect" = 0 ]; then
+    [ "$rc" -eq 0 ] || { printf 'green fail\n%s\n' "$out" >&2; exit 1; }
   else
-    [ "$rc" -ne 0 ]
+    [ "$rc" -ne 0 ] || { printf 'red fail %s\n%s\n' "$diag" "$out" >&2; exit 1; }
+    [ -z "$diag" ] || printf '%s\n' "$out" | grep -Fq "$diag" || { printf 'diag %s\n%s\n' "$diag" "$out" >&2; exit 1; }
   fi
-done << 'CASES'
-[]|{"truncated":false,"tree":[]}|0|0|1
-[{"filename":".zcode"}]|{"truncated":false,"tree":[]}|0|0|1
-[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"internal"}]}|0|0|0
-[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"external"}]}|0|0|0
-[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"broken"}]}|0|0|0
-[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"040000"}]}|0|0|1
-[{"filename":"vendor/.zcode/config.json"},{"filename":"vendor/zcode.json"}]|{"truncated":false,"tree":[]}|0|0|1
-[{"filename":".zcode/config.json"}]|{"truncated":false,"tree":[]}|0|0|0
-[{"filename":"zcode.json"}]|{"truncated":false,"tree":[]}|0|0|0
-[]|{"truncated":false,"tree":[]}|1|0|0
-[]|{"message":"bad"}|0|0|0
-[]|{"truncated":true,"tree":[]}|0|0|0
-[]|{"tree":[]}|0|0|0
-[]|{"truncated":"yes","tree":[]}|0|0|0
-[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"bogus"}]}|0|0|0
-[]|{"truncated":false,"tree":[]}|0|1|0
-CASES
+}
+use() {
+  GH_META_JSON="$(jq -nc --argjson n "$1" --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:$n}')"
+  GH_FILES_JSON="$2"
+  GH_TREE_JSON="$3"
+  GH_CHILD_JSON="${4:-}"
+  clr
+  export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_CHILD_JSON
+}
+files_n() { jq -n --argjson n "$1" '[range(0;$n)|{filename:("f"+tostring)}] | if $n==0 then [[]] else [range(0;length;100) as $i | .[$i:$i+100]] end'; }
+E() { printf '{"path":"%s","mode":"%s","type":"%s","sha":"%s"}' "$1" "$2" "$3" "$4"; }
+T() { printf '{"truncated":false,"tree":[%s]}' "$1"; }
+page() { jq -nc --args '[[ $ARGS.positional[] | {filename:.} ]]' "$@"; }
+for n in 0 1 100 101 3000; do
+  use "$n" "$(files_n "$n")" "$ET"
+  pr_run 0
+done
+use 1 "$(page README)" "$ET"
+pr_run 0
+use 1 "$(page .zcode)" "$ET"
+pr_run 0
+use 2 "$(page vendor/.zcode/config.json vendor/zcode.json)" "$ET"
+pr_run 0
+use 2 "$(page node_modules/.zcode/config.json node_modules/zcode.json)" "$ET"
+pr_run 0
+use 3 "$(page .zcode/config.json.bak .zcode/nested/config.json vendor/zcode.json)" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{"filename":"ok.txt\nzcode.json"}]]')" "$ET"
+pr_run 0
+use 1 "$(page .zcode/readme)" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{"filename":".zcode/readme","status":"removed"}]]')" "$ET"
+pr_run 0
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E readme 100644 blob "$BSHA")")"
+pr_run 0
+grep -Fq "git/trees/$CSHA" "$REQ"
+! grep -Eq 'https?://' "$REQ"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 100644 blob "$BSHA")")"
+pr_run 0
+use 1 "$(page .zcode)" "$(T "$(E .zcode 100755 blob "$BSHA")")"
+pr_run 0
+use 1 "$(page .zcode)" "$(T "$(E .zcode 160000 commit "$BSHA")")"
+pr_run 0
+for s in "$BSHA" "$CSHA" "$DSHA"; do
+  use 1 "$(page .zcode)" "$(T "$(E .zcode 120000 blob "$s")")"
+  pr_run 1 "根路径 .zcode 符号链接禁止入库"
+  [ "$(grep -c '/git/trees/' "$REQ")" -eq 1 ]
+done
+use 1 "$(page .zcode/config.json)" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{"filename":".zcode/config.json","status":"removed"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(page zcode.json)" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{"filename":"zcode.json","status":"removed"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 2 "$(jq -nc '[[{"filename":"ok.txt\nzcode.json"},{"filename":"zcode.json"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(page README)" "$(T "$(E zcode.json 100644 blob "$BSHA")")"
+pr_run 1 "根路径 zcode.json 禁止入库"
+use 1 "$(page README)" "$(T "$(E zcode.json 120000 blob "$BSHA")")"
+pr_run 1 "根路径 zcode.json 禁止入库"
+use 1 "$(page README)" "$(T "$(E zcode.json 040000 tree "$DSHA")")"
+pr_run 1 "根路径 zcode.json 禁止入库"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E config.json 100644 blob "$BSHA"),$(E readme 100644 blob "$DSHA")")"
+pr_run 1 "子路径 .zcode/config.json 禁止入库"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E config.json 120000 blob "$BSHA")")"
+pr_run 1 "子路径 .zcode/config.json 禁止入库"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E config.json 040000 tree "$DSHA")")"
+pr_run 1 "子路径 .zcode/config.json 禁止入库"
+GH_META_JSON='{"head":{"sha":"'"$SHA"'"},"changed_files":1}'
+GH_FILES_JSON="$(page README)"
+GH_TREE_JSON="$ET"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "元数据畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:1.5}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "changed_files 畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:-1}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "changed_files 畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{},changed_files:1}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "HEAD SHA 畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:"abc"},changed_files:1}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "HEAD SHA 畸形"
+GH_META_JSON="$(jq -nc --arg sha "$CSHA" '{number:1,head:{sha:$sha},changed_files:1}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "HEAD 与事件不一致"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:2,head:{sha:$sha},changed_files:1}')"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "PR 号与事件不一致"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:3001}')"
+GH_FILES_JSON="$(files_n 3000)"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "changed_files 超过 3000"
+! grep -Fq '/files' "$REQ"
+use 0 '[]' "$ET"
+pr_run 1 "文件响应缺失"
+use 200 "$(files_n 100)" "$ET"
+pr_run 1 "文件数量与 changed_files 不一致"
+use 2 '[[{"filename":"a"},{"filename":"a"}]]' "$ET"
+pr_run 1 "文件名重复"
+use 1 '[{"filename":"a"}]' "$ET"
+pr_run 1 "文件页类型畸形"
+use 101 "$(jq -n '[[range(0;101)|{filename:("f"+tostring)}]]')" "$ET"
+pr_run 1 "文件页过大"
+use 2 '[[{"filename":"a"}],[{"filename":"b"}]]' "$ET"
+pr_run 1 "文件页序畸形"
+use 1 '[[{"filename":"BAD"}]]' "$ET"
+pr_run 0
+use 1 '[[{"filename":""}]]' "$ET"
+pr_run 1 "文件名畸形"
+use 1 '[[{"filename":1}]]' "$ET"
+pr_run 1 "文件名畸形"
+use 1 '[[{"no":1}]]' "$ET"
+pr_run 1 "文件名畸形"
+use 0 '[[]]' '{"truncated":true,"tree":[]}'
+pr_run 1 "根树畸形或被截断"
+use 0 '[[]]' '{"tree":[]}'
+pr_run 1 "根树畸形或被截断"
+use 0 '[[]]' '{"truncated":"yes","tree":[]}'
+pr_run 1 "根树畸形或被截断"
+use 0 '[[]]' '{"message":"bad"}'
+pr_run 1 "根树畸形或被截断"
+use 0 '[[]]' "$(T "$(jq -nc --arg s "$BSHA" '{path:"a",mode:"bogus",type:"blob",sha:$s}')")"
+pr_run 1 "根树条目畸形"
+use 0 '[[]]' "$(T "$(E a 100644 blob abc)")"
+pr_run 1 "根树条目畸形"
+use 0 '[[]]' "$(T "$(E a 040000 blob "$BSHA")")"
+pr_run 1 "根树条目畸形"
+use 0 '[[]]' "$(T "$(E a 100644 blob "$BSHA"),$(E a 100644 blob "$DSHA")")"
+pr_run 1 "根树路径重复"
+use 0 '[[]]' "$(T "$(E a/b 100644 blob "$BSHA")")"
+pr_run 1 "根树条目畸形"
+use 0 'not-json' "$ET"
+pr_run 1 "文件列表畸形"
+use 0 '[[]]' 'not-json'
+pr_run 1 "根树畸形"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"truncated":true,"tree":[]}'
+pr_run 1 "子树畸形或被截断"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"tree":[]}'
+pr_run 1 "子树畸形或被截断"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E a 100644 blob "$BSHA"),$(E a 100755 blob "$DSHA")")"
+pr_run 1 "子树路径重复"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" 'not-json'
+pr_run 1 "子树畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:1}')"
+GH_FILES_JSON="$(page README)"
+GH_TREE_JSON="$ET"
+GH_CHILD_JSON=""
+GH_META_RC=22
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_META_RC=22
+pr_run 1 "元数据失败"
+GH_FILES_RC=22
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_FILES_RC=22
+pr_run 1 "文件列表失败"
+GH_TREE_RC=22
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_TREE_RC=22
+pr_run 1 "根树失败"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E readme 100644 blob "$BSHA")")"
+GH_CHILD_RC=22
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_CHILD_JSON GH_CHILD_RC=22
+pr_run 1 "子树失败"
+for spec in meta:元数据超时 files:文件列表超时 root:根树超时; do
+  phase="${spec%%:*}"
+  diag="${spec#*:}"
+  use 1 "$(page README)" "$ET"
+  clr; export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_TIMEOUT_PHASE="$phase"
+  pr_run 1 "$diag"
+done
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E readme 100644 blob "$BSHA")")"
+clr
+export GH_META_JSON GH_FILES_JSON GH_TREE_JSON GH_CHILD_JSON GH_TIMEOUT_PHASE=child
+pr_run 1 "子树超时"
+use 0 '[[]]' "$ET"
+export GH_TIMEOUT_STUB=1
+pr_run 1 "元数据超时"
+use 0 '[[]]' "$(jq -nc --arg s "$BSHA" '{truncated:false,tree:[],url:"https://evil.example/git/trees/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}')"
+pr_run 0
+! grep -Eq 'https?://|recursive=' "$REQ"
+# 换行与回车用 jq 编码进完整文件列表和树，不用空树绕过路径检查。
+use 2 "$(jq -nc --arg n "$(printf 'notes\nreadme.txt')" --arg c "$(printf 'notes\rreadme.txt')" '[[{filename:$n},{filename:$c}]]')" "$(jq -nc --arg n "$(printf 'notes\nreadme.txt')" --arg c "$(printf 'notes\rreadme.txt')" --arg s "$BSHA" --arg d "$DSHA" '{truncated:false,tree:[{path:$n,mode:"100644",type:"blob",sha:$s},{path:$c,mode:"100644",type:"blob",sha:$d}]}')"
+pr_run 0
+use 2 "$(jq -nc --arg n "$(printf 'notes\nreadme.txt')" --arg c "$(printf 'notes\rreadme.txt')" '[[{filename:$n},{filename:$c}]]')" "$(jq -nc --arg n "$(printf 'notes\nreadme.txt')" --arg c "$(printf 'notes\rreadme.txt')" --arg s "$BSHA" --arg d "$DSHA" --arg z "$CSHA" '{truncated:false,tree:[{path:$n,mode:"100644",type:"blob",sha:$s},{path:$c,mode:"100644",type:"blob",sha:$d},{path:"zcode.json",mode:"100644",type:"blob",sha:$z}]}')"
+pr_run 1 "根路径 zcode.json 禁止入库"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(jq -nc --arg p "$(printf 'notes\nreadme.txt')" --arg s "$BSHA" '{truncated:false,tree:[{path:$p,mode:"100644",type:"blob",sha:$s}]}')"
+pr_run 0
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(jq -nc --arg p "$(printf 'notes\nreadme.txt')" --arg s "$BSHA" --arg c "$DSHA" '{truncated:false,tree:[{path:$p,mode:"100644",type:"blob",sha:$s},{path:"config.json",mode:"100644",type:"blob",sha:$c}]}')"
+pr_run 1 "子路径 .zcode/config.json 禁止入库"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha}}')"; GH_FILES_JSON="$(page README)"; GH_TREE_JSON="$ET"; clr; export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "changed_files 畸形"
+GH_META_JSON="$(jq -nc --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:null}')"; GH_FILES_JSON="$(page README)"; GH_TREE_JSON="$ET"; clr; export GH_META_JSON GH_FILES_JSON GH_TREE_JSON
+pr_run 1 "changed_files 畸形"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(jq -nc --arg s "$BSHA" '{path:"a",mode:"bogus",type:"blob",sha:$s}')")"
+pr_run 1 "子树条目畸形"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"truncated":"yes","tree":[]}'
+pr_run 1 "子树畸形或被截断"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"truncated":false,"tree":[]}'
+pr_run 0
+# 先前路径：出现则必须是非空字符串；renamed 缺字段失败关闭；精确旧路径拒绝。
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:".zcode/config.json"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:"zcode.json"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:"README"}]]')" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:""}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:1}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed"}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:null}]]')" "$ET"
+pr_run 1 "文件名畸形"
+# 隔离整份工作流、标签检查和本脚本。只改副本；嵌套跳过只跳过本块。
+if [ "${W394_SKIP_MUTATION:-}" != 1 ]; then
+  suite_fail() {
+    local name="$1" expr="$2" needle="$3"
+    local dir="$TMP/suite-$name" out rc
+    mkdir -p "$dir/.github/workflows" "$dir/.github/scripts" "$dir/deploy"
+    cp "$CHECKER" "$dir/.github/scripts/zcode-config-tag-tree.sh"
+    cp "$0" "$dir/deploy/test-zcode-config-tag-tree.sh"
+    sed "$expr" "$WF" > "$dir/.github/workflows/zcode-config-guard.yml"
+    set +e
+    out="$(W394_SKIP_MUTATION=1 bash "$dir/deploy/test-zcode-config-tag-tree.sh" 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || { printf 'suite %s stayed green\n' "$name" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "$needle" || { printf 'suite %s missed %s\n' "$name" "$needle" >&2; exit 1; }
+  }
+  suite_fail child 's|die "子路径 .zcode/config.json 禁止入库"|printf "%s\\n" "变更未触碰危险路径, 通过"|' 'red fail 子路径 .zcode/config.json 禁止入库'
+  suite_fail count '/(\$f|length)!=\$n then "count"/d' 'red fail 文件数量与 changed_files 不一致'
+fi
 paths="$(awk '
   $0 ~ /^    paths:$/ {p=1; next}
   p && $0 ~ /^      - / {gsub(/"/, "", $2); print $2; next}
