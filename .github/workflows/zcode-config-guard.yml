@@ -1,19 +1,24 @@
 # 危险路径守卫 (tizerluo/zcode-open-bridge#49 洞三的 GitHub 侧防线)
 # .zcode/config.json / zcode.json 会被 zcode 在启动时直接执行其中定义的
 # 命令 (进程 spawn, 不经过模型也不受工具黑名单约束), 禁止入库。
-# pull_request: 全量跑 (供必需检查), 干净=绿; 分支 push 触碰禁止路径则失败; tag push 跳过该失败步骤。
+# 主防线是受保护基线分支的 push 与受控标签。任意 PR 分支 push 不可信。
+# PR 用 pull_request_target，工作流来自基线分支，是合并前的可信检查。
+# 权限只有 contents: read 与 pull-requests: read。没有写入权限、没有密钥、不留评论。
+# 不检出、不执行 PR 或合并树上的文件。只把 head SHA 当 Git Trees API 的数据。
+# 组织或企业的事件策略由所有者跟进。公开的强制日是 2026-11-02。
 name: zcode-config-guard
 
 on:
-  pull_request:
+  pull_request_target:
   push:
     paths:
       - ".zcode/config.json"
       - "zcode.json"
+      - ".zcode"
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: zcode-config-guard-${{ github.event.pull_request.number || github.sha }}
@@ -24,11 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检查变更是否触碰 ZCode 项目配置
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
           FILES="$(gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[].filename')"
@@ -37,12 +43,24 @@ jobs:
             echo "::error::检测到 ZCode 项目配置文件变更: $BAD — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
             exit 1
           fi
+          set +e
+          TREE="$(timeout 20 gh api "repos/$REPO/git/trees/$HEAD_SHA" --jq 'if type!="object" or (.tree|type)!="array" or .truncated!=false then "malformed" elif ([.tree[]|select(.path==".zcode")]|length)==0 then "absent" elif ([.tree[]|select(.path==".zcode" and .mode=="120000")]|length)>0 then "120000" elif ([.tree[]|select(.path==".zcode" and (.mode=="040000" or .mode=="100644" or .mode=="100755" or .mode=="160000"))]|length)>0 then "other" else "malformed" end')"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] || [ -z "${TREE:-}" ] || [ "$TREE" = "malformed" ]; then
+            echo "::error::Git Trees API 读取失败或响应畸形"
+            exit 1
+          fi
+          if [ "$TREE" = "120000" ]; then
+            echo "::error::根路径 .zcode 符号链接禁止入库"
+            exit 1
+          fi
           echo "变更未触碰危险路径, 通过"
 
       - name: push 触发即危险 (paths 已过滤)
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
         run: |
-          echo "::error::push 直接修改了 .zcode/config.json / zcode.json — 该文件会被 zcode 启动时直接执行, 禁止入库 (zcode-open-bridge#49)"
+          echo "::error::push 触碰根 .zcode 符号链接或 .zcode/config.json / zcode.json，禁止入库"
           exit 1
 
       - name: 检出被标记提交
@@ -55,12 +73,3 @@ jobs:
       - name: 标签树根路径 ZCode 配置
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: bash .github/scripts/zcode-config-tag-tree.sh
-
-      - name: PR 留痕评论
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          gh pr comment "$PR" --repo "$REPO" --body "🚫 **该 PR 修改了 ZCode 项目配置文件（\`.zcode/config.json\` / \`zcode.json\`）**，已被 zcode-config-guard 拦截。该文件在 zcode 启动时会被直接执行（进程 spawn，不经模型、不受工具黑名单约束），属于危险路径，禁止入库（详见 tizerluo/zcode-open-bridge#49）。请从提交中移除后重推。"

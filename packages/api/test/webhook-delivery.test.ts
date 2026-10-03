@@ -1021,6 +1021,49 @@ describe('webhook-delivery: Payload Bounding & Drop Order (§6.6, §14 item 8)',
     expect(Buffer.byteLength(formatted.body, 'utf8')).toBeLessThanOrEqual(740);
   });
 
+  test('#388 autoSubmitted stays on v1 and a tighter cap still fails closed', () => {
+    const prev = (config.webhooks as any).payloadMaxBytes;
+    const envelope = {
+      id: 'evt_388',
+      type: 'mail.received' as const,
+      payloadVersion: 'v1' as const,
+      createdAt: '2026-10-02T00:00:00.000Z',
+      domain: 'openagent.email',
+    };
+    const input = {
+      address: 'postmaster@openagent.email',
+      messageId: '100',
+      uid: 100,
+      uidValidity: 1,
+      receivedAt: '2026-10-02T00:00:00.000Z',
+      from: { address: 'sender@example.com', name: 'Long Name' },
+      to: ['a@example.com'],
+      cc: ['b@example.com'],
+      subject: 'subject',
+      sizeBytes: 100,
+      hasAttachments: false,
+      unread: true,
+      containsSecurityCode: false,
+      containsLink: false,
+      autoSubmitted: 'auto-replied' as const,
+    };
+    (config.webhooks as any).payloadMaxBytes = 4096;
+    const parsed = JSON.parse(formatMailPayload(dummySub, envelope, input).body);
+    expect(parsed.payloadVersion).toBe('v1');
+    expect(parsed.data.autoSubmitted).toBe('auto-replied');
+    // 713 字节全量；700 只丢掉可选 cc（剩 698），autoSubmitted 仍在。
+    (config.webhooks as any).payloadMaxBytes = 700;
+    const shed = JSON.parse(formatMailPayload(dummySub, envelope, input).body);
+    expect(shed.data.cc).toEqual([]);
+    expect(shed.data.to).toEqual(['a@example.com']);
+    expect(shed.data.subject).toBe('subject');
+    expect(shed.data.from.name).toBe('Long Name');
+    expect(shed.data.autoSubmitted).toBe('auto-replied');
+    (config.webhooks as any).payloadMaxBytes = 32;
+    expect(() => formatMailPayload(dummySub, envelope, input)).toThrow('payload_too_large');
+    (config.webhooks as any).payloadMaxBytes = prev;
+  });
+
   test('approval.requested overflow drop order: actionArguments dropped first whole', () => {
     (config.webhooks as any).payloadMaxBytes = 700;
     const subPreview: WebhookSubscription = { ...dummySub, contentScope: 'preview' };

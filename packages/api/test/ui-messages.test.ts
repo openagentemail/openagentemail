@@ -128,6 +128,36 @@ describe('UI message JSON contract', () => {
     ]);
   });
 
+  test('detail projection drops a field that is not on the public list', async () => {
+    const hidden = {
+      id: '9',
+      from: 'a@b.c',
+      to: 'fox@test.example',
+      subject: 's',
+      date: '2026-07-27T02:00:00.000Z',
+      text: 't',
+      html: '<p>x</p>',
+      otp: { codes: [] as string[], links: [] as string[] },
+      links: [] as string[],
+      source: 'external' as const,
+      autoSubmitted: 'no' as const,
+      leak: 'SECRETVALUE',
+    };
+    const { app, cookie } = makeApp({
+      getMessage: mock(async () => hidden),
+    });
+    const response = await app.request('/ui/api/messages/9?address=fox%40test.example', {
+      headers: { cookie },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.autoSubmitted).toBe('no');
+    expect(body.html).toBeUndefined();
+    expect(body.hasHtml).toBe(true);
+    expect(JSON.stringify(body)).not.toContain('SECRETVALUE');
+    expect(body).not.toHaveProperty('leak');
+  });
+
   test('oversized HTML is disclosed without returning the HTML itself', async () => {
     const { app, cookie } = makeApp({
       getMessage: mock(async () => ({

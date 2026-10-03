@@ -9,7 +9,9 @@ function classifyOne(line: string): Exclude<AutoSubmitted, null> {
   // 展开折叠空白后再取冒号后的值；扩展参数、注释、空白或未知 token 一律 other。
   const unfolded = line.replace(/\r?\n[ \t]+/g, ' ');
   const colon = unfolded.indexOf(':');
-  const raw = (colon < 0 ? unfolded : unfolded.slice(colon + 1)).trim();
+  // mailparser 的 line 含头名与冒号。无冒号不把整行当值，结果仍只在五个枚举里。
+  if (colon < 0) return 'other';
+  const raw = unfolded.slice(colon + 1).trim();
   if (!/^[A-Za-z-]+$/.test(raw)) return 'other';
   const token = raw.toLowerCase();
   if (token === 'no' || token === 'auto-generated' || token === 'auto-replied') return token;
