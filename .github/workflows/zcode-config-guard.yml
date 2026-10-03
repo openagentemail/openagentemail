@@ -78,9 +78,12 @@ jobs:
             elif any(.[]; length>100) then "oversize"
             elif any(.[0:length-1][]; length!=100) then "sequence"
             elif any(.[][]; type!="object" or (.filename|type)!="string" or .filename=="") then "name"
+            elif any(.[][]; has("previous_filename") and ((.previous_filename|type)!="string" or .previous_filename=="")) then "name"
+            elif any(.[][]; .status=="renamed" and (has("previous_filename")|not)) then "name"
             else [ .[][].filename ] as $f | if ($f|length)!=($f|unique|length) then "dup"
             elif ($f|length)!=$n then "count"
             elif any($f[]; .==".zcode/config.json" or .=="zcode.json") then "forbid"
+            elif any(.[][]; .previous_filename==".zcode/config.json" or .previous_filename=="zcode.json") then "forbid"
             else "ok" end end')" || die "文件列表畸形"
           case "$fk" in
             ok) ;;

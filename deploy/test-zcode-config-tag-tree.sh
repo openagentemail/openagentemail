@@ -487,6 +487,21 @@ use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"truncated":"y
 pr_run 1 "子树畸形或被截断"
 use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" '{"truncated":false,"tree":[]}'
 pr_run 0
+# 先前路径：出现则必须是非空字符串；renamed 缺字段失败关闭；精确旧路径拒绝。
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:".zcode/config.json"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:"zcode.json"}]]')" "$ET"
+pr_run 1 "检测到 ZCode 项目配置文件变更"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:"README"}]]')" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:""}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:1}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed"}]]')" "$ET"
+pr_run 1 "文件名畸形"
+use 1 "$(jq -nc '[[{filename:"notes.txt",previous_filename:null}]]')" "$ET"
+pr_run 1 "文件名畸形"
 # 隔离整份工作流、标签检查和本脚本。只改副本；嵌套跳过只跳过本块。
 if [ "${W394_SKIP_MUTATION:-}" != 1 ]; then
   suite_fail() {
