@@ -139,6 +139,80 @@ if git -C "$TMP" cat-file -e "$GONE:.zcode" 2>/dev/null; then
   exit 1
 fi
 expect_green "$GONE"
+# 根 .zcode gitlink：目标对象不在父库，无映射文件，只凭 mode 160000 拒绝。
+MISSING=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+git -C "$TMP" update-index --add --cacheinfo "160000,$MISSING,.zcode"
+git -C "$TMP" commit -q -m "root-gitlink"
+GL="$(git -C "$TMP" rev-parse HEAD)"
+[ "$(git -C "$TMP" ls-tree "$GL" .zcode | awk '{print $1}')" = "160000" ]
+if git -C "$TMP" cat-file -e "$MISSING" 2>/dev/null; then
+  echo "gitlink target must be absent" >&2
+  exit 1
+fi
+if git -C "$TMP" cat-file -e "$GL:.zcode/config.json" 2>/dev/null; then
+  echo "gitlink parent config must be absent" >&2
+  exit 1
+fi
+if git -C "$TMP" cat-file -e "$GL:.gitmodules" 2>/dev/null; then
+  echo "gitlink fixture must not add mapping" >&2
+  exit 1
+fi
+tag_both rootgitlink "$GL"
+# 只服务根 gitlink 夹具：失败文案点名该夹具，不改既有 expect_red。
+tag_rootgitlink_red() {
+  local form="$1" sha="$2" err="$TMP/red.err" status
+  git -C "$TMP" checkout -q "$sha"
+  set +e
+  (cd "$TMP" && GITHUB_SHA="$sha" bash "$CHECKER") >"$err" 2>&1
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    printf 'tag rootgitlink fixture stayed green %s\n' "$form" >&2
+    exit 1
+  fi
+  grep -Fq '根路径 .zcode gitlink 禁止入库' "$err" || {
+    printf 'tag rootgitlink fixture missed gitlink diag %s\n' "$form" >&2
+    exit 1
+  }
+}
+tag_rootgitlink_red lightweight "$(git -C "$TMP" rev-parse lw-rootgitlink)"
+tag_rootgitlink_red peeled "$(git -C "$TMP" rev-parse 'ann-rootgitlink^{}')"
+git -C "$TMP" update-index --force-remove .zcode
+rm -rf "$TMP/.zcode"
+git -C "$TMP" commit -q -m "root-gitlink-deleted"
+GLDEL="$(git -C "$TMP" rev-parse HEAD)"
+if git -C "$TMP" ls-tree "$GLDEL" .zcode | grep -q .; then
+  echo "deleted root gitlink must be absent" >&2
+  exit 1
+fi
+expect_green "$GLDEL"
+git -C "$TMP" checkout -q "$GLDEL"
+git -C "$TMP" rm -r -q --cached --ignore-unmatch vendor node_modules
+rm -rf "$TMP/vendor" "$TMP/node_modules" "$TMP/.zcode"
+git -C "$TMP" update-index --add --cacheinfo "160000,$MISSING,vendor/.zcode"
+git -C "$TMP" update-index --add --cacheinfo "160000,$MISSING,libs"
+git -C "$TMP" commit -q -m "homonym-gitlinks"
+HOMGL="$(git -C "$TMP" rev-parse HEAD)"
+[ "$(git -C "$TMP" ls-tree -r "$HOMGL" vendor/.zcode | awk '{print $1}')" = "160000" ]
+[ "$(git -C "$TMP" ls-tree "$HOMGL" libs | awk '{print $1}')" = "160000" ]
+[ -z "$(git -C "$TMP" ls-tree "$HOMGL" .zcode | awk '{print $1}')" ]
+expect_green "$HOMGL"
+git -C "$TMP" checkout -q -- red.err
+git -C "$TMP" checkout -q "$CLEAN"
+rm -rf "$TMP/.zcode"
+printf '%s\n' 'inert' > "$TMP/.zcode"
+git -C "$TMP" add -A -f
+git -C "$TMP" commit -q -m "plain-blob"
+BLOB="$(git -C "$TMP" rev-parse HEAD)"
+[ "$(git -C "$TMP" ls-tree "$BLOB" .zcode | awk '{print $1}')" = "100644" ]
+expect_green "$BLOB"
+chmod 755 "$TMP/.zcode"
+git -C "$TMP" add -A -f
+git -C "$TMP" commit -q -m "plain-exec"
+EXEC="$(git -C "$TMP" rev-parse HEAD)"
+[ "$(git -C "$TMP" ls-tree "$EXEC" .zcode | awk '{print $1}')" = "100755" ]
+expect_green "$EXEC"
+expect_green "$PLAIN"
 WF="$ROOT/.github/workflows/zcode-config-guard.yml"
 grep -Eq '^  pull_request_target:' "$WF"
 if grep -Eq '^  pull_request:' "$WF"; then
@@ -275,6 +349,11 @@ pr_run() {
     [ -z "$diag" ] || printf '%s\n' "$out" | grep -Fq "$diag" || { printf 'diag %s\n%s\n' "$diag" "$out" >&2; exit 1; }
   fi
 }
+gitlink_red() {
+  pr_run 1 "根路径 .zcode gitlink 禁止入库"
+  [ "$(grep -c '/git/trees/' "$REQ")" -eq 1 ]
+  ! grep -Eq 'https?://|recursive=' "$REQ"
+}
 use() {
   GH_META_JSON="$(jq -nc --argjson n "$1" --arg sha "$SHA" '{number:1,head:{sha:$sha},changed_files:$n}')"
   GH_FILES_JSON="$2"
@@ -316,6 +395,31 @@ pr_run 0
 use 1 "$(page .zcode)" "$(T "$(E .zcode 100755 blob "$BSHA")")"
 pr_run 0
 use 1 "$(page .zcode)" "$(T "$(E .zcode 160000 commit "$BSHA")")"
+gitlink_red
+use 1 "$(page README)" "$(T "$(E .zcode 160000 commit "$BSHA")")"
+gitlink_red
+use 0 '[[]]' "$(T "$(E .zcode 160000 commit "$BSHA")")"
+gitlink_red
+ESHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+use 1 "$(page .zcode)" "$(T "$(E .zcode 160000 commit "$ESHA")")"
+gitlink_red
+! grep -Fq "$ESHA" "$REQ"
+! grep -Fq gitmodules "$REQ"
+use 1 "$(jq -nc '[[{filename:".zcode",status:"modified"}]]')" "$(T "$(E .zcode 160000 commit "$BSHA")")"
+gitlink_red
+use 1 "$(page README)" "$(T "$(E libs 160000 commit "$BSHA")")"
+pr_run 0
+use 1 "$(page vendor/.zcode)" "$(T "$(E libs 160000 commit "$BSHA"),$(E vendor 040000 tree "$CSHA")")"
+pr_run 0
+use 1 "$(jq -nc '[[{filename:".zcode",status:"removed"}]]')" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{filename:"notes.txt",status:"renamed",previous_filename:".zcode"}]]')" "$ET"
+pr_run 0
+use 1 "$(jq -nc '[[{filename:".zcode",status:"modified"}]]')" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E readme 100644 blob "$BSHA")")"
+pr_run 0
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E config.json 160000 commit "$BSHA"),$(E readme 100644 blob "$DSHA")")"
+pr_run 1 "子路径 .zcode/config.json 禁止入库"
+use 1 "$(page .zcode)" "$(T "$(E .zcode 040000 tree "$CSHA")")" "$(T "$(E deps 160000 commit "$BSHA")")"
 pr_run 0
 for s in "$BSHA" "$CSHA" "$DSHA"; do
   use 1 "$(page .zcode)" "$(T "$(E .zcode 120000 blob "$s")")"
@@ -520,6 +624,22 @@ if [ "${W394_SKIP_MUTATION:-}" != 1 ]; then
   }
   suite_fail child 's|die "子路径 .zcode/config.json 禁止入库"|printf "%s\\n" "变更未触碰危险路径, 通过"|' 'red fail 子路径 .zcode/config.json 禁止入库'
   suite_fail count '/(\$f|length)!=\$n then "count"/d' 'red fail 文件数量与 changed_files 不一致'
+  suite_fail prgitlink 's|gitlink) die "根路径 .zcode gitlink 禁止入库"|gitlink) printf "%s" "变更未触碰危险路径, 通过"; exit 0|' 'red fail 根路径 .zcode gitlink 禁止入库'
+  tag_suite_fail() {
+    local name="$1" expr="$2" needle="$3"
+    local dir="$TMP/suite-$name" out rc
+    mkdir -p "$dir/.github/workflows" "$dir/.github/scripts" "$dir/deploy"
+    sed "$expr" "$CHECKER" > "$dir/.github/scripts/zcode-config-tag-tree.sh"
+    cp "$WF" "$dir/.github/workflows/zcode-config-guard.yml"
+    cp "$0" "$dir/deploy/test-zcode-config-tag-tree.sh"
+    set +e
+    out="$(W394_SKIP_MUTATION=1 bash "$dir/deploy/test-zcode-config-tag-tree.sh" 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || { printf 'suite %s stayed green\n' "$name" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "$needle" || { printf 'suite %s missed %s\n' "$name" "$needle" >&2; exit 1; }
+  }
+  tag_suite_fail taggitlink '/# 根 gitlink 160000/,/^fi$/s/exit 1/true/' 'tag rootgitlink fixture stayed green'
 fi
 paths="$(awk '
   $0 ~ /^    paths:$/ {p=1; next}
