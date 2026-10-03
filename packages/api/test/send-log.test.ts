@@ -76,6 +76,55 @@ describe('send-log store', () => {
     expect(statSync(sendLogPathForTests()).mode & 0o777).toBe(0o600);
   });
 
+  test('#390 只落显式 autoReply true，旧行和 false 没有该字段', async () => {
+    setSendLogNowForTests(() => Date.parse('2026-08-14T12:00:00.000Z'));
+    const yes = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'yes',
+      result: 'queued',
+      source: 'api',
+      autoReply: true,
+    });
+    const no = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'no',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      autoReply: false,
+    });
+    const omit = await seed({ subject: 'omit' });
+    expect(yes.autoReply).toBe(true);
+    expect(no).not.toHaveProperty('autoReply');
+    expect(omit).not.toHaveProperty('autoReply');
+    const text = readFileSync(sendLogPathForTests(), 'utf8');
+    expect(text).not.toContain('"text"');
+    expect(text).not.toContain('"html"');
+    expect(text).not.toContain('"token"');
+    expect(text).not.toContain('"headers"');
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.find((row) => row.subject === 'yes')?.autoReply).toBe(true);
+    expect(page.items.find((row) => row.subject === 'no')).not.toHaveProperty('autoReply');
+    const base = {
+      schemaVersion: 1,
+      sentAt: '2026-08-14T00:00:00.000Z',
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      messageId: null,
+      result: 'queued',
+      source: 'api',
+    };
+    writeFileSync(
+      sendLogPathForTests(),
+      `${JSON.stringify({ ...base, id: 'snd_histfalse00000000000000', subject: 'old-false', autoReply: false })}\n${JSON.stringify({ ...base, id: 'snd_histomit000000000000000', subject: 'old-omit' })}\n`,
+      { mode: 0o600 },
+    );
+    const old = await querySendLog({ limit: 20 });
+    expect(old.items.find((row) => row.subject === 'old-false')).not.toHaveProperty('autoReply');
+    expect(old.items.find((row) => row.subject === 'old-omit')).not.toHaveProperty('autoReply');
+  });
   test('failed row stores stable error code only', async () => {
     const row = await seed({ result: 'failed', error: 'smtp_error', messageId: null });
     expect(row.result).toBe('failed');

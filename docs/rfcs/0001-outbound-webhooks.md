@@ -805,6 +805,7 @@ from the event id and not from the opaque cursor. Whether to move to UUIDv7/ULID
 | `textPreview` | string | `preview` | Body preview, ≤ `WEBHOOK_BODY_PREVIEW_CHARS`. |
 | `securityCodes` | `string[]` | `preview` | ≤ `WEBHOOK_MAX_CODE_ITEMS` entries, each ≤ `WEBHOOK_CODE_ENTRY_CHARS`. |
 | `links` | `string[]` | `preview` | ≤ `WEBHOOK_MAX_CODE_ITEMS` entries. **An over-long link is dropped whole, never truncated** — see the note below. |
+| `autoSubmitted` | `null` \| `"no"` \| `"auto-generated"` \| `"auto-replied"` \| `"other"` | metadata, preview | Bounded class on both scopes. Never the raw header. Never dropped (§6.6). Additive on `payloadVersion` `"v1"`. Consumers tolerate later `data` fields (§5.3 rule 4). |
 
 **Links are dropped whole, never truncated.** `securityCodes` are truncated at
 `WEBHOOK_CODE_ENTRY_CHARS` because a partial code is at worst useless, but a URL truncated at
@@ -1097,11 +1098,17 @@ usable degradation path at all, so a 4 KiB `actionArguments` under a lower confi
 - both scopes: `cc` → `to` → `subject` → **`from.name`**.
 - **never dropped:** `id`, `type`, `payloadVersion`, `createdAt`, `domain`, `data.object`,
   `data.address`, `data.messageId`, `data.cursor`, `data.uid`, `data.uidValidity`,
-  `data.receivedAt`, `data.from.address`, the two `contains…` booleans, and the three
-  fixed-size scalars `data.sizeBytes`, `data.hasAttachments`, `data.unread`. Every field in
+  `data.receivedAt`, `data.from.address`, the two `contains…` booleans, and four
+  fixed-size scalars: `data.sizeBytes`, `data.hasAttachments`, `data.unread`, and
+  `data.autoSubmitted`. Every field in
   §6.2 is now accounted for: it is either in a drop order or in this set, with none left
-  undefined. The three scalars are never dropped because they cost at most a few dozen bytes
-  and `unread` in particular is what a postmaster agent routes on.
+  undefined. These four scalars are never dropped because they cost at most a few dozen bytes
+  and `unread` in particular is what a postmaster agent routes on. `data.autoSubmitted` is
+  only `null`, `no`, `auto-generated`, `auto-replied`, or `other`, on both scopes, never the
+  raw header, and never dropped. It stays on `payloadVersion` `"v1"` (§5.3 rule 4, §7.6).
+  Consumers must tolerate future `data` fields. The value is fixed-size and still consumes
+  `WEBHOOK_PAYLOAD_MAX_BYTES`; if nothing left can be shed, delivery fails closed with
+  `payload_too_large`.
 
 **Every field in a never-dropped set is itself byte-capped**, because "never dropped" and
 "unbounded" together are a self-inflicted denial of service. `data.from` is attacker-controlled
@@ -2056,7 +2063,7 @@ URLs, defaults inline in the schema.
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | int ≥ 1000 | `10000` | Matches `CIMD_FETCH_TIMEOUT_MS` and GitHub's published 10 s. |
 | `WEBHOOK_MAX_CONCURRENT` | int ≥ 1 | `8` | Mirrors `MAX_WAITS_TOTAL`, separate pool. |
 | `WEBHOOK_POOL_RETRY_MS` | int ≥ 1000 | `5000` | Reschedule delay when the concurrency pool is full, which yields no `retryAfterSec` (§8.2). Floored so it cannot be configured into a spin. |
-| `WEBHOOK_PAYLOAD_MAX_BYTES` | int ≥ 2048 | `16384` | **Cannot be disabled** (§8.7). |
+| `WEBHOOK_PAYLOAD_MAX_BYTES` | int ≥ 2048 | `16384` | **Cannot be disabled** (§8.7). Fixed fields such as `data.autoSubmitted` consume this budget and are not shed; a tight cap still fails closed as `payload_too_large` (§6.6). |
 | `WEBHOOK_APPROVAL_ARGS_MAX_BYTES` | int ≥ 0 | `4096` | `preview` scope only (§6.3). `0` omits `actionArguments` entirely. |
 | `WEBHOOK_APPROVAL_ARGS_MAX_DEPTH` | int ≥ 1 | `4` | Below the task API's own depth 10 (§6.6). |
 | `WEBHOOK_RESPONSE_MAX_BYTES` | int ≥ 1 | `4096` | **Cannot be disabled** (§8.7) — `0` would mean an unlimited read. |

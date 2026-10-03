@@ -2,8 +2,11 @@
 // 输入，只会让 agent 拿到一个 400，而不是它要的数据。
 //
 // 这里把 SDK 换成假的，好把 registerTool() 的配置抓出来直接断言。
+import { createRequire } from "node:module";
 import { expect, mock, test } from "bun:test";
 import { z } from "zod";
+// 在 mock 之前解析本包自己的 SDK 入口，避免深依赖 api/node_modules。
+const mcpServerEntry = createRequire(import.meta.url).resolve("@modelcontextprotocol/server");
 // 用 API 真实返回类型约束夹具：形状漂移在编译期就红，杜绝手写自证。
 import type { MessageDetail, MessageSummary } from "../../api/src/lib/imap.ts";
 
@@ -482,7 +485,7 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
 
 // #5588 A：桩 server 不跑 SDK validateToolOutput，这里用真实 McpServer。
 test("#5588 A 旧 API 缺字段工具成功，新值原样通过，畸形拒绝", async () => {
-  const { McpServer } = await import("../../api/node_modules/@modelcontextprotocol/server/dist/index.mjs");
+  const { McpServer } = await import(mcpServerEntry);
   const { registerOpenAgentEmailTools } = await import("../../api/src/mcp/tools.ts");
   let body: Record<string, unknown> = {};
   const mcp = new McpServer({ name: "t", version: "0" });

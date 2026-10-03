@@ -79,6 +79,7 @@ async function recordSend(input: {
   result: 'queued' | 'failed';
   error?: string;
   source: SendLogSource;
+  autoReply?: boolean;
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -188,6 +189,7 @@ sendRoute.post('/', async (c) => {
           result: 'failed',
           error: 'rate_limited',
           source,
+          autoReply,
         })
       : null;
     return c.json(
@@ -227,6 +229,7 @@ sendRoute.post('/', async (c) => {
       messageId,
       result: 'queued',
       source,
+      autoReply,
     });
     return c.json({ queued: true, messageId, ...(logged ? { id: logged.id } : {}) }, 200);
   } catch (err) {
@@ -244,6 +247,7 @@ sendRoute.post('/', async (c) => {
       result: 'failed',
       error: 'smtp_error',
       source,
+      autoReply,
     });
     return c.json({ error: 'smtp_error', ...(logged ? { id: logged.id } : {}) }, 502);
   }

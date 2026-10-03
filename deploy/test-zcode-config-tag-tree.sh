@@ -106,4 +106,221 @@ set -e
 [ "$TAGOBJ" -ne 0 ] || { echo "annotated tag object must fail" >&2; cat "$TMP/tag.err" >&2; exit 1; }
 # Also prove the failure was caused by rejecting the tag object.
 grep -Fq '::error::目标不是提交 (tag)' "$TMP/tag.err"
+# #392 三入口。夹具是静态的，未跑线上事件。恶意 PR 留到指挥官合并之后。
+rm -rf "$TMP/.zcode" "$TMP/zcode.json" "$TMP/README"
+mkdir -p "$TMP/.zcode"
+printf '%s\n' 'inert' > "$TMP/.zcode/readme"
+PLAIN="$(commit plain-dot)"
+expect_green "$PLAIN"
+if git -C "$TMP" cat-file -e "$PLAIN:.zcode/config.json" 2>/dev/null; then
+  echo "plain .zcode dir must not contain config" >&2
+  exit 1
+fi
+[ "$(git -C "$TMP" ls-tree "$PLAIN" .zcode | awk '{print $1}')" = "040000" ]
+sym_red() {
+  local name="$1" target="$2" sha mode
+  rm -rf "$TMP/.zcode"
+  ln -s "$target" "$TMP/.zcode"
+  git -C "$TMP" add -A -f
+  git -C "$TMP" commit -q -m "$name"
+  sha="$(git -C "$TMP" rev-parse HEAD)"
+  mode="$(git -C "$TMP" ls-tree "$sha" .zcode | awk '{print $1}')"
+  [ "$mode" = "120000" ]
+  [ "$(git -C "$TMP" cat-file -p "$sha:.zcode")" = "$target" ]
+  expect_red "$sha"
+}
+sym_red internal "vendor/inert-target"
+sym_red external "/tmp/oae-zcode-outside"
+sym_red broken "$TMP/missing-zcode-target"
+rm -f "$TMP/.zcode"
+GONE="$(commit symlink-deleted)"
+if git -C "$TMP" cat-file -e "$GONE:.zcode" 2>/dev/null; then
+  echo "deleted symlink must be absent" >&2
+  exit 1
+fi
+expect_green "$GONE"
+WF="$ROOT/.github/workflows/zcode-config-guard.yml"
+grep -Eq '^  pull_request_target:' "$WF"
+if grep -Eq '^  pull_request:' "$WF"; then
+  echo "must not run the PR workflow file" >&2
+  exit 1
+fi
+# 有效权限：注释不算。顶层或 job 块必须恰好两行只读；job 级标量 permissions 失败。
+perm_ok() {
+  awk '
+    { s = $0
+      sub(/#.*/, "", s); sub(/[[:space:]]+$/, "", s)
+      if (s == "") next
+      if (index(s, "secrets.") > 0) secret = 1
+      if (s == "permissions:") { lvl = "wf"; next }
+      if (s == "jobs:") { lvl = "jobs"; next }
+      if (s ~ /^[^[:space:]]/) { lvl = ""; next }
+      if (lvl == "wf" && s ~ /^  [^[:space:]][^:]*:[[:space:]]/) { sub(/^  /, "", s); wf[++wn] = s; next }
+      if (lvl == "jobs" && s ~ /^  [^[:space:]][^:]*:$/) { job = s; sub(/^  /, "", job); sub(/:$/, "", job); next }
+      if (s ~ /^    permissions:[[:space:]]*[^[:space:]]/) bad_scalar = 1
+      if (lvl == "jobs" && s == "    permissions:") { lvl = "jp"; has[job] = 1; next }
+      if (lvl == "jp" && s ~ /^      [^[:space:]][^:]*:[[:space:]]/) { sub(/^      /, "", s); jp[job, ++jn[job]] = s; next }
+      if (lvl == "jp" && s !~ /^      /) lvl = "jobs"
+      if (s ~ /event_name == .pull_request_target./) pr = job
+    }
+    END {
+      n = has[pr] ? jn[pr] : wn
+      for (i = 1; i <= n; i++) seen[has[pr] ? jp[pr, i] : wf[i]] = 1
+      if (secret || bad_scalar || pr == "" || n != 2 || seen["contents: read"] != 1 || seen["pull-requests: read"] != 1) exit 1
+    }
+  ' "$1"
+}
+expect_nonzero() {
+  if "$@"; then
+    return 1
+  fi
+}
+perm_ok "$WF"
+sed 's/^  contents: read$/#&/; s/^  pull-requests: read$/#&/' "$WF" > "$TMP/perm-comment.yml"
+sed 's/^  guard:$/&\n    permissions: write-all/' "$WF" > "$TMP/perm-write-all.yml"
+awk '
+  $0 == "  guard:" {
+    print
+    print "    permissions:"
+    print "      contents: read"
+    print "      pull-requests: read"
+    print "      actions: read"
+    next
+  }
+  { print }
+' "$WF" > "$TMP/perm-actions.yml"
+for bad in "$TMP/perm-comment.yml" "$TMP/perm-actions.yml" "$TMP/perm-write-all.yml"; do
+  expect_nonzero perm_ok "$bad"
+done
+if grep -Fq 'gh pr comment' "$WF"; then
+  echo "comment step must be gone" >&2
+  exit 1
+fi
+if grep -Fq 'zcode-config-pr-files.sh' "$WF"; then
+  echo "workflow must not call a PR-head helper" >&2
+  exit 1
+fi
+if grep -Fq 'pull_request.head.sha' "$WF" && grep -Fq 'actions/checkout' "$WF"; then
+  if awk '
+    $0 ~ /if: github.event_name == '\''pull_request_target'\''/ {pr=1}
+    pr && $0 ~ /actions\/checkout/ {found=1}
+    pr && $0 ~ /if: github.event_name == '\''push'\''/ {exit}
+    END {exit !found}
+  ' "$WF"; then
+    echo "PR job must not checkout head" >&2
+    exit 1
+  fi
+fi
+[ ! -e "$ROOT/.github/scripts/zcode-config-pr-files.sh" ]
+PR_RUN="$TMP/pr-run.sh"
+awk '
+  $0 ~ /name: 检查变更是否触碰 ZCode 项目配置/ {p=1}
+  p && $0 ~ /^        run: \|/ {r=1; next}
+  r && /^          / {sub(/^          /, ""); print; next}
+  r {exit}
+' "$WF" > "$PR_RUN"
+grep -Fq 'git/trees/' "$PR_RUN"
+grep -Fq '120000' "$PR_RUN"
+# 导出函数桩。子 bash 会继承，不再往 PATH 放假可执行文件。
+gh() {
+  local expr="" url=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --jq) expr="$2"; shift 2 ;;
+      --paginate) shift ;;
+      api) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  (
+    set -o pipefail
+    if [[ "$url" == *"/git/trees/"* ]] && [ "${GH_TREE_RC:-0}" -ne 0 ]; then
+      exit "${GH_TREE_RC}"
+    fi
+    if [[ "$url" == *"/git/trees/"* ]]; then
+      printf '%s' "${GH_TREE_JSON-}"
+    else
+      printf '%s' "${GH_FILES_JSON-[]}"
+    fi | if [ -n "$expr" ]; then jq -r "$expr"; else cat; fi
+  )
+}
+timeout() {
+  if [ "${GH_TIMEOUT_STUB:-}" = "1" ]; then
+    return 124
+  fi
+  shift
+  "$@"
+}
+export -f gh
+export -f timeout
+run_pr() {
+  local rc
+  set +e
+  REPO=example/repo PR=1 HEAD_SHA=abc bash "$PR_RUN" >/dev/null 2>&1
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+while IFS='|' read -r files tree tree_rc timeout_stub expect_zero; do
+  [ -n "${files}" ] || continue
+  export GH_FILES_JSON="$files"
+  export GH_TREE_JSON="$tree"
+  if [ "$tree_rc" = 0 ]; then unset GH_TREE_RC; else export GH_TREE_RC="$tree_rc"; fi
+  if [ "$timeout_stub" = 1 ]; then export GH_TIMEOUT_STUB=1; else unset GH_TIMEOUT_STUB; fi
+  rc="$(run_pr)"
+  if [ "$expect_zero" = 1 ]; then
+    [ "$rc" -eq 0 ]
+  else
+    [ "$rc" -ne 0 ]
+  fi
+done << 'CASES'
+[]|{"truncated":false,"tree":[]}|0|0|1
+[{"filename":".zcode"}]|{"truncated":false,"tree":[]}|0|0|1
+[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"internal"}]}|0|0|0
+[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"external"}]}|0|0|0
+[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"120000","sha":"broken"}]}|0|0|0
+[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"040000"}]}|0|0|1
+[{"filename":"vendor/.zcode/config.json"},{"filename":"vendor/zcode.json"}]|{"truncated":false,"tree":[]}|0|0|1
+[{"filename":".zcode/config.json"}]|{"truncated":false,"tree":[]}|0|0|0
+[{"filename":"zcode.json"}]|{"truncated":false,"tree":[]}|0|0|0
+[]|{"truncated":false,"tree":[]}|1|0|0
+[]|{"message":"bad"}|0|0|0
+[]|{"truncated":true,"tree":[]}|0|0|0
+[]|{"tree":[]}|0|0|0
+[]|{"truncated":"yes","tree":[]}|0|0|0
+[{"filename":".zcode"}]|{"truncated":false,"tree":[{"path":".zcode","mode":"bogus"}]}|0|0|0
+[]|{"truncated":false,"tree":[]}|0|1|0
+CASES
+paths="$(awk '
+  $0 ~ /^    paths:$/ {p=1; next}
+  p && $0 ~ /^      - / {gsub(/"/, "", $2); print $2; next}
+  p {exit}
+' "$WF")"
+for need in .zcode .zcode/config.json zcode.json; do
+  printf '%s\n' "$paths" | grep -Fxq "$need"
+done
+for skip in vendor/.zcode vendor/.zcode/config.json node_modules/.zcode/config.json .zcode/readme; do
+  if printf '%s\n' "$paths" | grep -Fxq "$skip"; then
+    echo "push path must stay green: $skip" >&2
+    exit 1
+  fi
+done
+# 执行受保护分支 push step。if 必须同时是 event_name == push 与 refs/heads/，run 必须非 0。echo bypass 必须失败。
+assert_branch_push() {
+  local step_if step_run
+  step_if="$(awk '/name: push 触发即危险/ {p = 1} p && /^        if:/ {print; exit}' "$1")"
+  printf '%s\n' "$step_if" | grep -Fq "event_name == 'push'" && printf '%s\n' "$step_if" | grep -Fq 'refs/heads/' || return 1
+  step_run="$(awk '/name: push 触发即危险/ {p = 1} p && /^        run: \|/ {r = 1; next} r && /^          / {sub(/^          /, ""); print; next} r {exit}' "$1")"
+  printf '%s\n' "$step_run" > "$TMP/push-body.sh"
+  bash "$TMP/push-body.sh" >/dev/null 2>&1 && return 1
+  return 0
+}
+assert_branch_push "$WF"
+awk '
+  /name: push 触发即危险/ {p = 1}
+  p && /^        run: \|/ {print; print "          echo bypass"; skip = 1; next}
+  skip && /^          / {next}
+  { if (skip) skip = 0; print }
+' "$WF" > "$TMP/push-bypass.yml"
+expect_nonzero assert_branch_push "$TMP/push-bypass.yml"
 printf '%s\n' "zcode tag-tree guard ok"

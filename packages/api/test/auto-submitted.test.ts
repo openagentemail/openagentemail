@@ -76,6 +76,24 @@ describe('#363-B classifyAutoSubmitted', () => {
     expect(got).toBe('other');
     expect(JSON.stringify(got)).not.toContain('SECRETVALUE');
   });
+
+  test('mailparser headerLines[].line 都含冒号；无冒号仍是 other', async () => {
+    const samples = [
+      'From: a@b.test\r\nTo: c@d.test\r\nSubject: s\r\n\r\nbody\r\n',
+      'From: a@b.test\r\nSubject: folded\r\n subject\r\nAuto-Submitted: no\r\n\r\nbody\r\n',
+      'From: a@b.test\r\nAuto-Submitted: auto-replied;\r\n\towner=SECRETVALUE\r\n\r\nbody\r\n',
+    ];
+    for (const raw of samples) {
+      const parsed = await simpleParser(raw);
+      expect(parsed.headerLines.length).toBeGreaterThan(0);
+      for (const header of parsed.headerLines) {
+        expect(header.line.includes(':')).toBe(true);
+      }
+    }
+    const got = classifyAutoSubmitted([{ key: 'auto-submitted', line: 'Auto-Submitted no colon' }]);
+    expect(got).toBe('other');
+    expect(ALLOWED.has(got)).toBe(true);
+  });
 });
 
 describe('#363-B1 toDetail', () => {

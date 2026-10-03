@@ -59,6 +59,8 @@ export type SendLogRecord = {
   result: SendLogResult;
   error?: string;
   source: SendLogSource;
+  /** 只有显式 autoReply true 才出现。false、省略和旧行都没有该字段。 */
+  autoReply?: true;
 };
 
 export type SendLogQuery = {
@@ -221,6 +223,7 @@ function parseRecord(raw: unknown): SendLogRecord | null {
     source: row.source as SendLogSource,
   };
   if (typeof row.error === 'string' && row.error) record.error = row.error;
+  if (row.autoReply === true) record.autoReply = true;
   return record;
 }
 
@@ -708,6 +711,7 @@ export type AppendSendLogInput = {
   result: SendLogResult;
   error?: string;
   source: SendLogSource;
+  autoReply?: boolean;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -755,6 +759,7 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     if (input.result === 'failed' && input.error) {
       record.error = input.error.slice(0, 64);
     }
+    if (input.autoReply === true) record.autoReply = true;
     const line = `${JSON.stringify(record)}\n`;
     try {
       prepareAppendHotPath(line);

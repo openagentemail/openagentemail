@@ -374,6 +374,42 @@ describe('POST /v1/send autoReply（#363-A）', () => {
     });
   });
 
+  test('#390 成功、限速和 SMTP 失败的历史只在 true 时带 autoReply', async () => {
+    createIdentity({ localpart: 'ar-hist' });
+    resetRateLimits();
+    for (let i = 0; i < config.sendRateLimit - 1; i++) {
+      const slot = checkSendLimit('ar-hist@test.example', config.sendRateLimit);
+      expect(slot).toMatchObject({ allowed: true, count: i + 1 });
+    }
+    sendMail.mockImplementation(async () => ({ messageId: '<ar-hist@test.example>' }) as never);
+    expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(200);
+    expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(429);
+    resetRateLimits();
+    expect((await send('ar-hist@test.example', {})).status).toBe(200);
+    resetRateLimits();
+    expect((await send('ar-hist@test.example', { autoReply: false })).status).toBe(200);
+    resetRateLimits();
+    sendMail.mockImplementation(async () => {
+      throw smtpFailure;
+    });
+    expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(502);
+    const page = await app.request('/v1/send/history?address=ar-hist@test.example&limit=20');
+    expect(page.status).toBe(200);
+    const items = ((await page.json()) as { items: Array<Record<string, unknown>> }).items;
+    const marked = items.filter((row) => row.autoReply === true);
+    expect(marked).toHaveLength(3);
+    expect(marked.filter((row) => row.result === 'queued')).toHaveLength(1);
+    expect(marked.map((row) => row.error).filter(Boolean).sort()).toEqual(['rate_limited', 'smtp_error']);
+    expect(items.filter((row) => row.result === 'queued' && !('autoReply' in row))).toHaveLength(2);
+    const raw = JSON.stringify(items);
+    expect(raw).not.toContain('"text"');
+    expect(raw).not.toContain('"html"');
+    expect(raw).not.toContain('"token"');
+    expect(raw).not.toContain('headers');
+    const detail = await app.request(`/v1/send/history/${String(marked[0]?.id)}`);
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { autoReply?: boolean }).autoReply).toBe(true);
+  });
   test('字符串、headers 与未知键 400 且不发信', async () => {
     createIdentity({ localpart: 'ar-bad' });
     resetRateLimits();

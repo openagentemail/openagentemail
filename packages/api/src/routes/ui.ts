@@ -953,9 +953,20 @@ export function createUiApiRoutes(
 
     const detail = await dependencies.getMessage(address, id);
     if (!detail) return c.json({ error: 'not_found' }, 404);
-    const { html: _html, ...safeDetail } = detail;
+    // 公开投影只列既有字段。html 仍剥离；未列出的内部字段不会被展开带出。
     return c.json({
-      ...safeDetail,
+      id: detail.id,
+      from: detail.from,
+      to: detail.to,
+      subject: detail.subject,
+      date: detail.date,
+      text: detail.text,
+      otp: detail.otp,
+      links: detail.links,
+      source: detail.source,
+      autoSubmitted: detail.autoSubmitted,
+      taskId: detail.taskId,
+      taskState: detail.taskState,
       hasHtml: Boolean(detail.html),
       htmlTooLarge:
         typeof detail.html === 'string' &&
