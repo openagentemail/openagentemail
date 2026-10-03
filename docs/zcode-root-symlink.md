@@ -7,8 +7,11 @@
 
 PR 使用 `pull_request_target`。工作流文件来自基线分支，是合并前的可信检查。权限只有 `contents: read` 和 `pull-requests: read`。没有写入权限，没有密钥，不留评论。不检出，也不执行 PR 或合并树上的文件。
 
-PR 只把 head SHA 交给 Git Trees API 当数据，只看根树一层。mode `120000` 失败。`040000`、`100644`、`100755`、`160000` 通过。其他 mode，包括空和 `bogus`，算畸形。最终没有根 `.zcode`（含删除）通过。
-`truncated` 必须是布尔 `false`。缺失、`true` 或非布尔都失败关闭。API 错误、超时或畸形响应同样失败关闭。`.zcode/config.json` 与 `zcode.json` 仍按精确路径拒绝。
+PR 先核对元数据：事件 PR 号、40 位 head SHA，以及不超过 3000 的非负整数 changed_files。文件列表必须分页读完，条数与 changed_files 一致。
+根树必须完整。根上任意模式的 zcode.json，以及根 .zcode 的符号链接 mode 120000，都拒绝。
+根 .zcode 若是普通目录，再读一层子树；子路径恰好 config.json 则拒绝。不读 blob，不执行也不解析目标。
+超过 3000、缺页或不完整、截断、畸形、API 失败或超时都失败关闭。
+删除 .zcode/config.json 或 zcode.json 仍按精确路径拒绝。
 
 组织或企业的事件策略由所有者跟进。公开的强制日是 2026-11-02。
 
