@@ -1668,3 +1668,11 @@ N/A。
 ### 我们是如何解决这些错误的？
 1. 只改该期望并补六组矩阵与两处全量 mutation。工人交付时未提交。issue #397 与 PR #399 的核对记录在仓库外，不使用仓库内相对路径。
 2. 改为点名 target 与 gitmodules 的失败分支，并永久保留匹配红控和干净绿控。未再声称消费端自动初始化或生产利用。
+
+## 2026-10-04 · #6038 示例适配器 MCP 依赖卫生
+### 我们实现了哪些功能？
+1. `examples/adapters` 只增加 overrides，把可选的 `@modelcontextprotocol/client` 与 `core` 收到 2.3.0（Apache-2.0）。这是示例闭包，不是服务端漏洞修复，也不声称客户端可达或泄漏。根直接依赖仍是 5、devDependencies 仍是 3、包键仍是 115、eventsource-parser 仍是 3.1.1，optional 与公共 registry integrity 保持不变。
+### 我们遇到了哪些错误？
+1. npm 生成的 lock 只把根对象的 `engines` 移到 `devDependencies` 之后，值相同。其余 112 个原始节点字节相同，113 个规范对象相同。按 #6067 接受这次序列化例外，没有手改 lock。
+### 我们是如何解决这些错误的？
+1. 旧基线与首次候选都是 ci 0、typecheck 0、full 131 pass / 0 fail / 0 skip。新席启动 ci 也是 0。本卡不重跑这些套件。FC 将在交付后独立复跑最终候选的 clean ci、typecheck 与 full。未提交。
