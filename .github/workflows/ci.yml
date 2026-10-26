@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 钉 24.04：ubuntu-latest 已切到 26.04，setup-python 清单在 26.04 上没有 3.12.3；Playwright --with-deps 也在 24.04 上验证过。
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
