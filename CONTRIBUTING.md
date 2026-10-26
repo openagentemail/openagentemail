@@ -25,7 +25,9 @@ All tests must pass before a PR is considered:
 
 Python 3.12.3 (or a compatible Python 3 exposing `python3`) is an API-test
 prerequisite: it runs the independent approval canonical-vector corpus check.
-CI installs Python 3.12.3 explicitly; local contributors must install it before
+CI installs Python 3.12.3 explicitly on the `ubuntu-24.04` runner (the
+actions/setup-python manifest does not offer 3.12.3 for ubuntu-26.04, which
+`ubuntu-latest` now points to); local contributors must install it before
 running the API suite.
 
 Decision (#101): local API `bun test` stays **fail-closed** when `python3` is
