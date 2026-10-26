@@ -142,6 +142,10 @@ describe('发信失败后的配额处理', () => {
     for (const code of ['ENOTFOUND', 'ENODATA', 'EAI_AGAIN']) {
       expect(isLocalSendFailure(Object.assign(new Error('dns'), { code }))).toBe(true);
     }
+    // 路由不可达：还没连上 SMTP，对端没有应答。
+    for (const code of ['ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'EHOSTDOWN', 'EADDRNOTAVAIL']) {
+      expect(isLocalSendFailure(Object.assign(new Error('unreachable'), { code }))).toBe(true);
+    }
   });
 
   test('认不出来的错误按"已消耗"处理（宁可严，不给绕过面）', () => {

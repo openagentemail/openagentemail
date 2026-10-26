@@ -283,6 +283,34 @@ describe('POST /v1/send 自动回复冷却', () => {
     });
   });
 
+  test('网络不可达算本机故障：退还额度、不冷却、failureKind 为 local', async () => {
+    await withConfig({ sendRateLimit: 1, autoReplyCooldownSec: 300 }, async () => {
+      for (const code of ['ENETUNREACH', 'EHOSTUNREACH'] as const) {
+        const from = nid('cdnet');
+        sendMail.mockClear();
+        sendMail.mockImplementation(async () => {
+          throw Object.assign(new Error(`connect ${code}`), { code });
+        });
+        const failed = await post(from, `${code.toLowerCase()}@example.net`, { autoReply: true });
+        expect(failed.status).toBe(502);
+        expect(sendLimitCountForTests(from)).toBe(0);
+        const id = ((await failed.json()) as { id?: string }).id;
+        expect(id).toMatch(/^snd_/);
+        const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+          failureKind?: string;
+          error?: string;
+        };
+        expect(row).toMatchObject({ error: 'smtp_error', failureKind: 'local' });
+        // 同一对可以再发：没有冷却，额度也已退还。
+        const again = await post(from, `${code.toLowerCase()}@example.net`, { autoReply: true });
+        expect(again.status).toBe(502);
+        expect(((await again.json()) as { error?: string }).error).toBe('smtp_error');
+        expect(sendMail).toHaveBeenCalledTimes(2);
+        expect(sendLimitCountForTests(from)).toBe(0);
+      }
+    });
+  });
+
   test('邮件服务器 DNS 查找失败算本机故障：退还额度、不冷却、failureKind 为 local', async () => {
     const from = nid('cddns');
     await withConfig({ sendRateLimit: 1, autoReplyCooldownSec: 300 }, async () => {
@@ -409,6 +437,43 @@ describe('POST /v1/send 自动回复冷却', () => {
     expect(autoReplyCooldownSizeForTests()).toBe(0);
     const again = checkAndReserveAutoReplyCooldown('s@x.com', ['c@e.com'], 10);
     expect(again.reserved).toBe(true);
+  });
+
+  test('表满时的 retryAfterSec 只看未过期的正式冷却', () => {
+    const start = 1_800_000_000_000;
+    freezeAt(start);
+    setAutoReplyCooldownCapForTests(2);
+    const pending = checkAndReserveAutoReplyCooldown('hold@x.com', ['inflight@e.com'], 10);
+    expect(pending.reserved).toBe(true);
+    recordAutoReplyCooldownForTests('hold@x.com', ['final@e.com'], 100);
+    // 占位预留窗口已过去，正式冷却还剩 70 秒。不能拿占位的 until 算出 1。
+    freezeAt(start + 30_000);
+    const withFinal = checkAndReserveAutoReplyCooldown('hold@x.com', ['new@e.com'], 300);
+    expect(withFinal.reserved).toBe(false);
+    if (!withFinal.reserved) expect(withFinal.retryAfterSec).toBe(70);
+    expect(autoReplyCooldownSizeForTests()).toBe(2);
+
+    resetAutoReplyCooldownForTests();
+    freezeAt(start);
+    setAutoReplyCooldownCapForTests(1);
+    const onlyPending = checkAndReserveAutoReplyCooldown('only@x.com', ['inflight@e.com'], 10);
+    expect(onlyPending.reserved).toBe(true);
+    freezeAt(start + 30_000);
+    const onlyReservation = checkAndReserveAutoReplyCooldown('only@x.com', ['new@e.com'], 300);
+    expect(onlyReservation.reserved).toBe(false);
+    if (!onlyReservation.reserved) expect(onlyReservation.retryAfterSec).toBe(300);
+    expect(autoReplyCooldownSizeForTests()).toBe(1);
+
+    // 占位的 until 还在未来、并且更早，也不能拿它当重试提示。
+    resetAutoReplyCooldownForTests();
+    freezeAt(start);
+    setAutoReplyCooldownCapForTests(2);
+    const sooner = checkAndReserveAutoReplyCooldown('soon@x.com', ['inflight@e.com'], 5);
+    expect(sooner.reserved).toBe(true);
+    recordAutoReplyCooldownForTests('soon@x.com', ['final@e.com'], 100);
+    const ignoreSooner = checkAndReserveAutoReplyCooldown('soon@x.com', ['new@e.com'], 300);
+    expect(ignoreSooner.reserved).toBe(false);
+    if (!ignoreSooner.reserved) expect(ignoreSooner.retryAfterSec).toBe(100);
   });
 
   test('进行中的占位占满上限时不会被另一对挤掉', () => {

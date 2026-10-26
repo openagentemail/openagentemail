@@ -1690,3 +1690,18 @@ N/A。
 ### 我们是如何解决这些错误的？
 1. 不需要改生产代码。`bun build` 后的入口仍保留 `import.meta.main`，容器启动路径会回放。
 2. 改用 Python 比较改动前后的 `tsc` 输出。仍是 179 条，按文件计数没有变化。`bun test test/auto-reply-cooldown.test.ts test/dist-bundle.test.ts test/send.test.ts test/ratelimit.test.ts` 为 77 pass / 0 fail。`bun run lint:ui` 退出码 0。没有跑全量 `bun test`。
+
+## 2026-10-26 · 网络不可达算本地失败，满表重试提示
+
+### 我们实现了哪些功能？
+1. `isLocalSendFailure` 的 `LOCAL_FAILURE_CODES` 增加 `ENETUNREACH`、`EHOSTUNREACH`、`ENETDOWN`、`EHOSTDOWN`、`EADDRNOTAVAIL`。数字 `responseCode` 仍然优先，有应答码就不算本地失败。`mailserver-reconnect.ts` 的 `RETRYABLE_NETWORK_CODES` 里除此之外只有已经在表里的 `ECONNREFUSED`。`EPIPE` 不在该集合里，而且可以出现在 SMTP 事务中途，没有加。
+2. `ENETUNREACH` 与 `EHOSTUNREACH` 走 `POST /v1/send` 时退还每小时额度、不开始自动回复冷却、`failureKind` 为 `local`。五个新错误码都有表驱动的单元检查。CHANGELOG 未发布条目里原来的 DNS 错误码从句扩进了这五个码。`docs/api.md` 没有列出这些码，所以没在那里重复名单。
+3. `earliestExpiryRetryAfterSec` 只看已经完成、且 `until` 仍在未来的冷却。进行中的占位（含预留窗口已过的）不参与。没有这样的格子时仍回落 `Math.max(1, cooldownSec)`。函数注释和 `docs/api.md` 里表满时的 `retryAfterSec` 说明改成同一口径。
+
+### 我们遇到了哪些错误？
+1. 没有新的测试失败，也没有新增类型错误。
+2. 只按 `until > now` 过滤会漏掉「占位的 until 还在未来、但比正式冷却更早」的情况，重试秒数仍会被不能逐出的占位拉短。
+
+### 我们是如何解决这些错误的？
+1. `packages/api` 下 `bun run typecheck` 仍是 179 条。`bun test test/send.test.ts test/auto-reply-cooldown.test.ts test/ratelimit.test.ts test/send-log.test.ts` 为 105 pass / 0 fail。`bun run lint:ui` 退出码 0。没有跑全量 `bun test`。
+2. 过滤条件同时要求 `reservationId === undefined`。测试里除了「占位 until 已过期 + 有/无正式冷却」，还加了一条占位 until 更早但仍在未来的情况，期望秒数取正式冷却的剩余时间。

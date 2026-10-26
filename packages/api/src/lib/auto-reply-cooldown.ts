@@ -86,10 +86,16 @@ function blockingRemainMs(entry: CooldownEntry, now: number): number | undefined
   return entry.until - now;
 }
 
-/** 表满时告诉调用方最早一格什么时候空出来。没有可等的格子时用配置的冷却秒数。 */
+/**
+ * 表满时告诉调用方最早一格什么时候空出来。
+ * 只看已经完成的冷却（没有 reservationId）且 until 仍在未来的格子。
+ * 进行中的占位不能逐出，预留窗口过了也还占着，不拿它的 until 当重试提示。
+ * 没有可等的正式冷却时用配置的冷却秒数。
+ */
 function earliestExpiryRetryAfterSec(now: number, cooldownSec: number): number {
   let earliest = Number.POSITIVE_INFINITY;
   for (const entry of pairs.values()) {
+    if (entry.reservationId !== undefined || entry.until <= now) continue;
     if (entry.until < earliest) earliest = entry.until;
   }
   if (!Number.isFinite(earliest)) return Math.max(1, cooldownSec);
