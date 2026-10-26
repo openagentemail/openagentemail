@@ -130,6 +130,227 @@ describe('send-log store', () => {
     expect(row.result).toBe('failed');
     expect(row.error).toBe('smtp_error');
     expect(row.messageId).toBeNull();
+    expect(row).not.toHaveProperty('failureKind');
+  });
+
+  test('failureKind 往返并在压缩后保留，非法值丢掉且不拒行', async () => {
+    const smtp = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'smtp',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'smtp_response',
+    });
+    const local = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'local',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'local',
+    });
+    const queued = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'queued',
+      result: 'queued',
+      source: 'api',
+      failureKind: 'smtp_response',
+    });
+    const limited = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'limited',
+      result: 'failed',
+      error: 'rate_limited',
+      source: 'api',
+    });
+    expect(smtp.failureKind).toBe('smtp_response');
+    expect(local.failureKind).toBe('local');
+    expect(queued).not.toHaveProperty('failureKind');
+    expect(limited).not.toHaveProperty('failureKind');
+    await compactSendLog();
+    const kept = await querySendLog({ limit: 20 });
+    expect(kept.items.find((row) => row.subject === 'smtp')?.failureKind).toBe('smtp_response');
+    expect(kept.items.find((row) => row.subject === 'local')?.failureKind).toBe('local');
+    expect(kept.items.find((row) => row.subject === 'queued')).not.toHaveProperty('failureKind');
+    expect(kept.items.find((row) => row.subject === 'limited')).not.toHaveProperty('failureKind');
+
+    const sentAt = new Date().toISOString();
+    const oldSentAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+    const base = {
+      schemaVersion: 1,
+      sentAt,
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      messageId: null,
+      source: 'api',
+    };
+    writeFileSync(
+      sendLogPathForTests(),
+      [
+        {
+          ...base,
+          id: 'snd_fk_old000000000000000001',
+          subject: 'old',
+          sentAt: oldSentAt,
+          result: 'queued',
+        },
+        {
+          ...base,
+          id: 'snd_fk_bogus0000000000000001',
+          subject: 'bogus',
+          result: 'failed',
+          error: 'smtp_error',
+          failureKind: 'nope',
+        },
+        {
+          ...base,
+          id: 'snd_fk_kept00000000000000002',
+          subject: 'kept',
+          result: 'failed',
+          error: 'smtp_error',
+          failureKind: 'smtp_response',
+        },
+        {
+          ...base,
+          id: 'snd_fk_queued000000000000003',
+          subject: 'queued-kind',
+          result: 'queued',
+          failureKind: 'local',
+        },
+        {
+          ...base,
+          id: 'snd_fk_num000000000000000004',
+          subject: 'numeric-kind',
+          result: 'failed',
+          error: 'smtp_error',
+          failureKind: 1,
+        },
+      ].map((row) => `${JSON.stringify(row)}\n`).join(''),
+      { mode: 0o600 },
+    );
+    const parsed = await querySendLog({ limit: 20 });
+    expect(parsed.items).toHaveLength(4);
+    expect(parsed.items.find((row) => row.subject === 'bogus')).not.toHaveProperty('failureKind');
+    expect(parsed.items.find((row) => row.subject === 'kept')?.failureKind).toBe('smtp_response');
+    expect(parsed.items.find((row) => row.subject === 'queued-kind')).not.toHaveProperty('failureKind');
+    expect(parsed.items.find((row) => row.subject === 'numeric-kind')).not.toHaveProperty('failureKind');
+    // 没东西可丢时压缩不重写。放一行过期记录，迫使按解析结果落盘。
+    const compacted = await compactSendLog();
+    expect(compacted.dropped).toBe(1);
+    const text = readFileSync(sendLogPathForTests(), 'utf8');
+    expect(text).toContain('"failureKind":"smtp_response"');
+    expect(text).not.toContain('nope');
+    expect(text).not.toContain('"failureKind":"local"');
+    expect(text).not.toContain('"failureKind":1');
+    const again = await querySendLog({ limit: 20 });
+    expect(again.items.find((row) => row.subject === 'kept')?.failureKind).toBe('smtp_response');
+    expect(again.items.find((row) => row.subject === 'bogus')?.result).toBe('failed');
+  });
+
+  test('rateLimitAt 往返，非法值丢掉且不拒行', async () => {
+    const admitted = '2026-10-26T05:00:00.000Z';
+    const queued = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'slot',
+      result: 'queued',
+      source: 'api',
+      rateLimitAt: admitted,
+    });
+    const smtp = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'smtp-slot',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'smtp_response',
+      rateLimitAt: admitted,
+    });
+    const local = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'local-slot',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'local',
+      rateLimitAt: admitted,
+    });
+    const limited = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'limited-slot',
+      result: 'failed',
+      error: 'rate_limited',
+      source: 'api',
+      rateLimitAt: admitted,
+    });
+    expect(queued.rateLimitAt).toBe(admitted);
+    expect(queued.sentAt).not.toBe(admitted);
+    expect(smtp.rateLimitAt).toBe(admitted);
+    expect(local).not.toHaveProperty('rateLimitAt');
+    expect(limited).not.toHaveProperty('rateLimitAt');
+    const written = await querySendLog({ limit: 20 });
+    expect(written.items.find((row) => row.subject === 'slot')?.rateLimitAt).toBe(admitted);
+    expect(written.items.find((row) => row.subject === 'slot')?.sentAt).toBe(queued.sentAt);
+
+    const sentAt = new Date().toISOString();
+    const base = {
+      schemaVersion: 1,
+      sentAt,
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      messageId: null,
+      source: 'api',
+    };
+    writeFileSync(
+      sendLogPathForTests(),
+      [
+        {
+          ...base,
+          id: 'snd_rl_ok000000000000000001',
+          subject: 'ok',
+          result: 'queued',
+          rateLimitAt: admitted,
+        },
+        {
+          ...base,
+          id: 'snd_rl_bad00000000000000002',
+          subject: 'bad',
+          result: 'queued',
+          rateLimitAt: 'not-a-time',
+        },
+        {
+          ...base,
+          id: 'snd_rl_long0000000000000003',
+          subject: 'long',
+          result: 'queued',
+          rateLimitAt: `${admitted}${'x'.repeat(64)}`,
+        },
+        {
+          ...base,
+          id: 'snd_rl_num00000000000000004',
+          subject: 'num',
+          result: 'queued',
+          rateLimitAt: 1,
+        },
+      ].map((row) => `${JSON.stringify(row)}\n`).join(''),
+      { mode: 0o600 },
+    );
+    const parsed = await querySendLog({ limit: 20 });
+    expect(parsed.items).toHaveLength(4);
+    expect(parsed.items.find((row) => row.subject === 'ok')?.rateLimitAt).toBe(admitted);
+    expect(parsed.items.find((row) => row.subject === 'ok')?.sentAt).toBe(sentAt);
+    expect(parsed.items.find((row) => row.subject === 'bad')).not.toHaveProperty('rateLimitAt');
+    expect(parsed.items.find((row) => row.subject === 'bad')?.sentAt).toBe(sentAt);
+    expect(parsed.items.find((row) => row.subject === 'long')).not.toHaveProperty('rateLimitAt');
+    expect(parsed.items.find((row) => row.subject === 'num')).not.toHaveProperty('rateLimitAt');
   });
 
   test('query hard-clamps to 30 days', async () => {

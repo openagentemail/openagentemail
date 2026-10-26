@@ -128,11 +128,24 @@ describe('发信失败后的配额处理', () => {
       responseCode: 550,
     }))).toBe(false);
     expect(isLocalSendFailure(Object.assign(new Error('greylisted'), { responseCode: 450 }))).toBe(false);
+    // 数字 responseCode 优先：哪怕 code 是 DNS 失败，也算对端已应答。
+    expect(isLocalSendFailure(Object.assign(new Error('dns after reply'), {
+      code: 'ENOTFOUND',
+      responseCode: 450,
+    }))).toBe(false);
   });
 
   test('连不上/认证失败这类本机故障才退还', () => {
     expect(isLocalSendFailure(Object.assign(new Error('no route'), { code: 'ECONNECTION' }))).toBe(true);
     expect(isLocalSendFailure(Object.assign(new Error('bad creds'), { code: 'EAUTH' }))).toBe(true);
+    // 重连时 DNS 查找失败：信没离开本机。
+    for (const code of ['ENOTFOUND', 'ENODATA', 'EAI_AGAIN']) {
+      expect(isLocalSendFailure(Object.assign(new Error('dns'), { code }))).toBe(true);
+    }
+    // 路由不可达：还没连上 SMTP，对端没有应答。
+    for (const code of ['ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'EHOSTDOWN', 'EADDRNOTAVAIL']) {
+      expect(isLocalSendFailure(Object.assign(new Error('unreachable'), { code }))).toBe(true);
+    }
   });
 
   test('认不出来的错误按"已消耗"处理（宁可严，不给绕过面）', () => {
@@ -164,6 +177,145 @@ describe('发信失败后的配额处理', () => {
     expect((await post('quota-local@test.example')).status).toBe(502);
     // 桶应该是空的：limit=1 的探测仍然放行。
     expect(checkSendLimit('quota-local@test.example', 1).allowed).toBe(true);
+  });
+
+  test('SMTP 应答写成 smtp_response，连接失败写成 local，额度拒绝不写', async () => {
+    createIdentity({ localpart: 'fail-kind' });
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('550 recipient rejected'), {
+      code: 'EENVELOPE',
+      responseCode: 550,
+    });
+    const rejected = await post('fail-kind@test.example');
+    expect(rejected.status).toBe(502);
+    const rejectedId = ((await rejected.json()) as { id?: string }).id;
+    expect(rejectedId).toMatch(/^snd_/);
+    const rejectedRow = (await (await app.request(`/v1/send/history/${rejectedId}`)).json()) as {
+      failureKind?: string;
+      error?: string;
+    };
+    expect(rejectedRow).toMatchObject({ error: 'smtp_error', failureKind: 'smtp_response' });
+
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
+    const local = await post('fail-kind@test.example');
+    expect(local.status).toBe(502);
+    const localId = ((await local.json()) as { id?: string }).id;
+    const localRow = (await (await app.request(`/v1/send/history/${localId}`)).json()) as {
+      failureKind?: string;
+    };
+    expect(localRow.failureKind).toBe('local');
+    expect(localRow).not.toHaveProperty('rateLimitAt');
+
+    resetRateLimits();
+    // 配置单例可能已被别的测试文件先加载，按实际限额填满再探 429。
+    for (let i = 0; i < config.sendRateLimit - 1; i++) {
+      expect(checkSendLimit('fail-kind@test.example', config.sendRateLimit).allowed).toBe(true);
+    }
+    smtpFailure = Object.assign(new Error('550 recipient rejected'), { responseCode: 550 });
+    expect((await post('fail-kind@test.example')).status).toBe(502);
+    const limited = await post('fail-kind@test.example');
+    expect(limited.status).toBe(429);
+    const page = await app.request('/v1/send/history?address=fail-kind@test.example&limit=20');
+    const items = ((await page.json()) as { items: Array<Record<string, unknown>> }).items;
+    const rateLimited = items.find((row) => row.error === 'rate_limited');
+    expect(rateLimited).toBeTruthy();
+    expect(rateLimited).not.toHaveProperty('failureKind');
+    expect(rateLimited).not.toHaveProperty('rateLimitAt');
+    expect(items.find((row) => row.failureKind === 'smtp_response')?.error).toBe('smtp_error');
+    expect(items.some((row) => row.failureKind === 'local')).toBe(true);
+  });
+
+  test('queued 行的 rateLimitAt 等于准入时刻，本机故障不写', async () => {
+    createIdentity({ localpart: 'admit-at' });
+    resetRateLimits();
+    expect(config.sendRateLimit).toBeGreaterThan(0);
+    const admitted = 1_700_000_000_000;
+    let now = admitted;
+    const originalNow = Date.now;
+    Date.now = () => now;
+    try {
+      sendMail.mockImplementation(async () => {
+        now = admitted + 60_000;
+        // 初始 mock 推断为 Promise<never>；断言保持成功返回，不新增类型错误。
+        return { messageId: '<admit@test.example>' } as never;
+      });
+      const response = await post('admit-at@test.example');
+      expect(response.status).toBe(200);
+      const id = ((await response.json()) as { id?: string }).id;
+      expect(id).toMatch(/^snd_/);
+      const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+        rateLimitAt?: string;
+        sentAt?: string;
+      };
+      expect(row.rateLimitAt).toBe(new Date(admitted).toISOString());
+      expect(row.sentAt).toBe(new Date(admitted + 60_000).toISOString());
+
+      resetRateLimits();
+      smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
+      sendMail.mockImplementation(async () => {
+        now += 5_000;
+        throw smtpFailure;
+      });
+      const local = await post('admit-at@test.example');
+      expect(local.status).toBe(502);
+      const localId = ((await local.json()) as { id?: string }).id;
+      const localRow = (await (await app.request(`/v1/send/history/${localId}`)).json()) as {
+        failureKind?: string;
+        rateLimitAt?: string;
+      };
+      expect(localRow.failureKind).toBe('local');
+      expect(localRow).not.toHaveProperty('rateLimitAt');
+
+      resetRateLimits();
+      const remoteAt = now;
+      smtpFailure = Object.assign(new Error('550 recipient rejected'), { responseCode: 550 });
+      sendMail.mockImplementation(async () => {
+        now += 5_000;
+        throw smtpFailure;
+      });
+      const remote = await post('admit-at@test.example');
+      expect(remote.status).toBe(502);
+      const remoteId = ((await remote.json()) as { id?: string }).id;
+      const remoteRow = (await (await app.request(`/v1/send/history/${remoteId}`)).json()) as {
+        failureKind?: string;
+        rateLimitAt?: string;
+        sentAt?: string;
+      };
+      expect(remoteRow.failureKind).toBe('smtp_response');
+      expect(remoteRow.rateLimitAt).toBe(new Date(remoteAt).toISOString());
+      expect(remoteRow.sentAt).toBe(new Date(remoteAt + 5_000).toISOString());
+    } finally {
+      Date.now = originalNow;
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    }
+  });
+
+  test('SEND_RATE_LIMIT=0 的成功行不写 rateLimitAt', async () => {
+    const prev = config.sendRateLimit;
+    Object.assign(config, { sendRateLimit: 0 });
+    try {
+      createIdentity({ localpart: 'no-quota' });
+      resetRateLimits();
+      sendMail.mockImplementation(async () => ({ messageId: '<noquota@test.example>' } as never));
+      const response = await post('no-quota@test.example');
+      expect(response.status).toBe(200);
+      const id = ((await response.json()) as { id?: string }).id;
+      expect(id).toMatch(/^snd_/);
+      const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+        result?: string;
+        rateLimitAt?: string;
+      };
+      expect(row.result).toBe('queued');
+      expect(row).not.toHaveProperty('rateLimitAt');
+    } finally {
+      Object.assign(config, { sendRateLimit: prev });
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    }
   });
 });
 
@@ -354,34 +506,45 @@ describe('POST /v1/send autoReply（#363-A）', () => {
 
   test('autoReply 不绕过限速或未知身份：超额 429 且不再发信', async () => {
     expect(config.sendRateLimit).toBeGreaterThan(0);
-    createIdentity({ localpart: 'ar-limit' });
-    resetRateLimits();
-    sendMail.mockClear();
-    sendMail.mockImplementation(async () => ({ messageId: '<ar-limit@test.example>' }) as never);
-    for (let i = 0; i < config.sendRateLimit; i++) {
-      expect((await send('ar-limit@test.example', { autoReply: true })).status).toBe(200);
+    // 本例只钉每小时额度。一对一冷却另测；这里关掉，避免同收件人第二封变成 auto_reply_cooldown。
+    const prevCooldown = config.autoReplyCooldownSec;
+    Object.assign(config, { autoReplyCooldownSec: 0 });
+    try {
+      createIdentity({ localpart: 'ar-limit' });
+      resetRateLimits();
+      sendMail.mockClear();
+      sendMail.mockImplementation(async () => ({ messageId: '<ar-limit@test.example>' }) as never);
+      for (let i = 0; i < config.sendRateLimit; i++) {
+        expect((await send('ar-limit@test.example', { autoReply: true })).status).toBe(200);
+      }
+      const limited = await send('ar-limit@test.example', { autoReply: true });
+      expect(limited.status).toBe(429);
+      expect(((await limited.json()) as { error?: string }).error).toBe('rate_limited');
+      expect(sendMail).toHaveBeenCalledTimes(config.sendRateLimit);
+      sendMail.mockClear();
+      const missing = await send('missing-ar@test.example', { autoReply: true });
+      expect(missing.status).toBe(403);
+      expect(sendMail).not.toHaveBeenCalled();
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    } finally {
+      Object.assign(config, { autoReplyCooldownSec: prevCooldown });
     }
-    const limited = await send('ar-limit@test.example', { autoReply: true });
-    expect(limited.status).toBe(429);
-    expect(((await limited.json()) as { error?: string }).error).toBe('rate_limited');
-    expect(sendMail).toHaveBeenCalledTimes(config.sendRateLimit);
-    sendMail.mockClear();
-    const missing = await send('missing-ar@test.example', { autoReply: true });
-    expect(missing.status).toBe(403);
-    expect(sendMail).not.toHaveBeenCalled();
-    sendMail.mockImplementation(async () => {
-      throw smtpFailure;
-    });
   });
 
   test('#390 成功、限速和 SMTP 失败的历史只在 true 时带 autoReply', async () => {
     createIdentity({ localpart: 'ar-hist' });
     resetRateLimits();
+    // 第二封要打到 rate_limited 并落盘。冷却开着的话同收件人会先 429，且不写日志。
+    const prevCooldown = config.autoReplyCooldownSec;
+    Object.assign(config, { autoReplyCooldownSec: 0 });
     for (let i = 0; i < config.sendRateLimit - 1; i++) {
       const slot = checkSendLimit('ar-hist@test.example', config.sendRateLimit);
       expect(slot).toMatchObject({ allowed: true, count: i + 1 });
     }
     sendMail.mockImplementation(async () => ({ messageId: '<ar-hist@test.example>' }) as never);
+    try {
     expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(200);
     expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(429);
     resetRateLimits();
@@ -409,6 +572,9 @@ describe('POST /v1/send autoReply（#363-A）', () => {
     const detail = await app.request(`/v1/send/history/${String(marked[0]?.id)}`);
     expect(detail.status).toBe(200);
     expect(((await detail.json()) as { autoReply?: boolean }).autoReply).toBe(true);
+    } finally {
+      Object.assign(config, { autoReplyCooldownSec: prevCooldown });
+    }
   });
   test('字符串、headers 与未知键 400 且不发信', async () => {
     createIdentity({ localpart: 'ar-bad' });

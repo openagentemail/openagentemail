@@ -6,6 +6,12 @@ import { findIdentity } from '../lib/identities.ts';
 import { notifyTrustedAgentDelivery } from '../lib/notify.ts';
 import { sendMail } from '../lib/smtp.ts';
 import { forbidUnlessAddress, getAuth, type Auth } from '../lib/auth.ts';
+import {
+  checkAndReserveAutoReplyCooldown,
+  finalizeAutoReplyCooldownReservation,
+  releaseAutoReplyCooldownReservation,
+  type AutoReplyCooldownReservation,
+} from '../lib/auto-reply-cooldown.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
 import { isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
@@ -70,6 +76,12 @@ function recipientsOf(to: string | string[]): string[] {
   return Array.isArray(to) ? to : [to];
 }
 
+/** 每小时额度的准入时刻。限额关闭时没有 reservation，不写 rateLimitAt。 */
+function hourlySlotAt(reservation: number | undefined): string | undefined {
+  if (typeof reservation !== 'number' || !Number.isFinite(reservation)) return undefined;
+  return new Date(reservation).toISOString();
+}
+
 /** 记审计失败不得改 SMTP 结果；调用方仍可没有 id。 */
 async function recordSend(input: {
   from: string;
@@ -80,6 +92,10 @@ async function recordSend(input: {
   error?: string;
   source: SendLogSource;
   autoReply?: boolean;
+  /** 只给 SMTP catch。分类必须和下面的 isLocalSendFailure 是同一次判断。 */
+  failureKind?: 'smtp_response' | 'local';
+  /** 准入时刻。只传给真正占住每小时额度的行。 */
+  rateLimitAt?: string;
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -177,9 +193,28 @@ sendRoute.post('/', async (c) => {
     return c.json({ error: 'forbidden: from is not a known identity' }, 403);
   }
 
+  // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
+  // 检查和占位同步完成，后面的 await（额度日志、SMTP）插不进第二封。
+  // 任一收件人仍在冷却或占位中就整封拒绝：不打 SMTP、不占每小时额度、不写 send-log
+  // （信没交到 SMTP，不落盘，避免 429 刷审计；重建也看不到它）。
+  // 与 rate_limited 一样只在 JSON 里给 retryAfterSec，不另加 Retry-After 头。
+  let autoReplyReservation: AutoReplyCooldownReservation | undefined;
+  if (autoReply === true && config.autoReplyCooldownSec > 0) {
+    const cooled = checkAndReserveAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
+    if (!cooled.reserved) {
+      return c.json(
+        { error: 'auto_reply_cooldown', retryAfterSec: cooled.retryAfterSec },
+        429,
+      );
+    }
+    autoReplyReservation = cooled.reservation;
+  }
+
   // Per-identity rate limit (rolling hour; 0 disables in config).
   const limit = checkSendLimit(from, config.sendRateLimit);
   if (!limit.allowed) {
+    // 额度没扣成。占位要在记审计之前放开，且只删这张票自己的格子。
+    releaseAutoReplyCooldownReservation(autoReplyReservation);
     // 每身份每窗口最多 1 条 rate_limited，避免 429 刷盘。
     const logged = claimRateLimitedLog(from)
       ? await recordSend({
@@ -203,6 +238,9 @@ sendRoute.post('/', async (c) => {
     );
   }
 
+  // 槽在准入时占上。sentAt 要等 SMTP 返回才写，回放必须用这一刻，否则慢请求重启后槽会晚过期。
+  const rateLimitAt = hourlySlotAt(limit.reservation);
+
   try {
     const { messageId } = await sendMail({
       from,
@@ -213,6 +251,8 @@ sendRoute.post('/', async (c) => {
       // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
       ...(autoReply === true ? { autoReply: true } : {}),
     });
+    // SMTP 已接受。截止时间从这一刻起算，不依赖后面的审计追加。
+    finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
     // /v1/send 出站登记：sendMail 已 best-effort 写入；此处再记一次以覆盖测试里 mock 掉 smtp 的路径。
     // 登记失败不 502：SMTP 已接受时失败会让调用方重试、重复外发。
     recordSentMessageIdAfterSend(messageId, from);
@@ -230,12 +270,21 @@ sendRoute.post('/', async (c) => {
       result: 'queued',
       source,
       autoReply,
+      rateLimitAt,
     });
     return c.json({ queued: true, messageId, ...(logged ? { id: logged.id } : {}) }, 200);
   } catch (err) {
     // Our own mail server being unreachable shouldn't cost the user a slot;
     // anything the server actually answered to stays counted.
-    if (isLocalSendFailure(err)) releaseSendLimit(from, limit.reservation);
+    // 冷却与额度同一口径：连接类失败放开占位；对端已经应答则从这一刻起算。
+    // failureKind 用同一次判断，重启回放才能把 SMTP 已应答的失败算回去。
+    const localFailure = isLocalSendFailure(err);
+    if (localFailure) {
+      releaseSendLimit(from, limit.reservation);
+      releaseAutoReplyCooldownReservation(autoReplyReservation);
+    } else {
+      finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
+    }
     // SMTP errors carry server responses, relay hostnames and adapter context
     // (some adapters even echo the configured password). The operator needs
     // that in the log; the caller only gets a stable code.
@@ -246,8 +295,11 @@ sendRoute.post('/', async (c) => {
       subject,
       result: 'failed',
       error: 'smtp_error',
+      failureKind: localFailure ? 'local' : 'smtp_response',
       source,
       autoReply,
+      // 连接类失败已经退还额度，不留准入时刻。对端应答过的失败仍占着那一枚。
+      rateLimitAt: localFailure ? undefined : rateLimitAt,
     });
     return c.json({ error: 'smtp_error', ...(logged ? { id: logged.id } : {}) }, 502);
   }

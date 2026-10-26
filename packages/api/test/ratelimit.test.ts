@@ -7,6 +7,8 @@ import {
   checkMcpRateLimit,
   checkNotifyUserLimit,
   checkSendLimit,
+  rebuildSendLimitFromRecords,
+  sendLimitCountForTests,
   releaseNotifyUserLimit,
   releaseWaitSlot,
   checkMcpPreauthIpRateLimit,
@@ -69,6 +71,121 @@ describe('checkSendLimit', () => {
     for (let i = 0; i < 50; i++) {
       expect(checkSendLimit('a@x.com', 0, 60_000).allowed).toBe(true);
     }
+  });
+});
+
+describe('rebuildSendLimitFromRecords', () => {
+  test('回放最近一小时的 queued，沿用原时间戳，0 限额仍然放行', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'A@X.com', result: 'queued', sentAt: new Date(t).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t + 1_000).toISOString() },
+        { from: 'a@x.com', result: 'failed', sentAt: new Date(t + 2_000).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t - 3_600_000).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t + 3_600_000).toISOString() },
+        { from: 'b@x.com', result: 'queued', sentAt: new Date(t).toISOString() },
+      ],
+      t + 30 * 60 * 1000,
+    );
+    // 窗口内只剩 t 与 t+1s 两枚；窗口外、没有 failureKind 的失败、未来时间戳都不计。
+    expect(sendLimitCountForTests('a@x.com', t + 30 * 60 * 1000)).toBe(2);
+    const blocked = checkSendLimit('a@x.com', 2, 3_600_000, t + 30 * 60 * 1000);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBe(1800);
+    expect(checkSendLimit('b@x.com', 1, 3_600_000, t + 30 * 60 * 1000).allowed).toBe(false);
+    // 最老一枚在 t+1h 整点滑出（边界是 t > cutoff），只剩 t+1s。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(1);
+    expect(checkSendLimit('a@x.com', 1, 3_600_000, t + 3_600_000).allowed).toBe(false);
+    expect(checkSendLimit('a@x.com', 1, 3_600_000, t + 3_600_000 + 1_000).allowed).toBe(true);
+    resetRateLimits();
+    rebuildSendLimitFromRecords(
+      Array.from({ length: 5 }, () => ({
+        from: 'a@x.com',
+        result: 'queued',
+        sentAt: new Date(t).toISOString(),
+      })),
+      t,
+    );
+    expect(checkSendLimit('a@x.com', 0, 3_600_000, t).allowed).toBe(true);
+    expect(checkSendLimit('a@x.com', 0, 3_600_000, t).count).toBe(0);
+    // 0 不擦掉已回放的戳，只是不拿它们拒绝。
+    expect(sendLimitCountForTests('a@x.com', t)).toBe(5);
+    resetRateLimits();
+  });
+
+  test('回放计入 SMTP 已应答的失败，连接失败、旧失败和 rate_limited 不计', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    const sentAt = new Date(t).toISOString();
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt },
+        { from: 'a@x.com', result: 'failed', failureKind: 'smtp_response', sentAt },
+        { from: 'a@x.com', result: 'failed', failureKind: 'local', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'smtp_error', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'rate_limited', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'auto_reply_cooldown', sentAt },
+        { from: 'b@x.com', result: 'failed', failureKind: 'local', sentAt },
+      ],
+      t + 1_000,
+    );
+    expect(sendLimitCountForTests('a@x.com', t + 1_000)).toBe(2);
+    expect(sendLimitCountForTests('b@x.com', t + 1_000)).toBe(0);
+    resetRateLimits();
+  });
+
+  test('回放优先用 rateLimitAt，过期按准入时刻；没有或非法则回落 sentAt', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    const admission = new Date(t).toISOString();
+    const later = new Date(t + 50 * 60 * 1000).toISOString();
+    const midway = t + 30 * 60 * 1000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt: later, rateLimitAt: admission },
+        {
+          from: 'b@x.com',
+          result: 'failed',
+          failureKind: 'smtp_response',
+          sentAt: later,
+          rateLimitAt: admission,
+        },
+      ],
+      midway,
+    );
+    // 准入时刻还在窗口里。更晚的 sentAt 此刻是未来时间，若误用它这两枚都不会留下。
+    expect(sendLimitCountForTests('a@x.com', midway)).toBe(1);
+    expect(sendLimitCountForTests('b@x.com', midway)).toBe(1);
+    // t+1h 时准入戳滑出。更晚的 sentAt 仍在窗口内，额度必须已经空。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(0);
+    expect(sendLimitCountForTests('b@x.com', t + 3_600_000)).toBe(0);
+
+    resetRateLimits();
+    rebuildSendLimitFromRecords(
+      [{ from: 'a@x.com', result: 'queued', sentAt: admission }],
+      midway,
+    );
+    expect(sendLimitCountForTests('a@x.com', midway)).toBe(1);
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(0);
+
+    resetRateLimits();
+    const afterLater = t + 55 * 60 * 1000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt: later, rateLimitAt: 'not-a-time' },
+        { from: 'c@x.com', result: 'queued', sentAt: later, rateLimitAt: 'x'.repeat(80) },
+      ],
+      afterLater,
+    );
+    expect(sendLimitCountForTests('a@x.com', afterLater)).toBe(1);
+    expect(sendLimitCountForTests('c@x.com', afterLater)).toBe(1);
+    // 非法准入时刻不占位：过期跟 sentAt 走，t+1h 时那一枚还在。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(1);
+    expect(sendLimitCountForTests('c@x.com', t + 3_600_000)).toBe(1);
+    expect(sendLimitCountForTests('a@x.com', t + 50 * 60 * 1000 + 3_600_000)).toBe(0);
+    resetRateLimits();
   });
 });
 

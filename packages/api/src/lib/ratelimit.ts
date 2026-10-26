@@ -1,13 +1,24 @@
 /**
- * Per-address / per-grant rate limiting. In-memory sliding window — resets on
- * process restart, which is acceptable for a guard whose job is to stop a
- * runaway agent or a leaked token from turning the box into a spam cannon,
- * not to enforce billing-grade quotas.
+ * Per-address / per-grant rate limiting. In-memory sliding window. Most buckets
+ * still reset on process restart: the guard stops a runaway agent or a leaked
+ * token from turning the box into a spam cannon, it is not a billing quota.
+ *
+ * The per-identity hourly send window is the exception. API startup replays
+ * `send-log.jsonl` rows from the last hour back into this same map: queued
+ * rows, plus failed rows the SMTP server answered
+ * (`failureKind === "smtp_response"`). Local failures, older failed rows
+ * without that field, and rate_limited rows are not counted. Replay uses
+ * `rateLimitAt` when that admission timestamp is present and valid, otherwise
+ * `sentAt`. A send whose log line was lost is not counted.
+ * `SEND_RATE_LIMIT=0` still disables the check.
  *
  * Identities each get their own window, so one misbehaving agent can't
  * starve the others. MCP 读写分桶与 send/notifyUser 共用下方 slidingWindow*
  * helper——禁止再复制第三份窗口逻辑。
  */
+
+/** 发信额度滑动窗口。checkSendLimit 与启动回放必须用同一个长度。 */
+export const SEND_RATE_WINDOW_MS = 3_600_000;
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -75,10 +86,74 @@ const mcpPreauthIpBuckets = new Map<string, number[]>();
 export function checkSendLimit(
   address: string,
   limit: number,
-  windowMs = 3_600_000,
+  windowMs = SEND_RATE_WINDOW_MS,
   now = Date.now(),
 ): RateLimitResult {
   return slidingWindowCheck(buckets, address.toLowerCase(), limit, windowMs, now);
+}
+
+/**
+ * 启动时把发送日志回放进现有每小时额度桶（不另开限额）。
+ * 最近一个窗口内：result === "queued"，或 result === "failed" 且 failureKind === "smtp_response"。
+ * 没有 failureKind 的旧失败行、local、rate_limited 都不计。
+ * 键与 checkSendLimit 相同（整段地址小写，不 trim）。
+ * 有合法 rateLimitAt 时用准入时刻，否则回落 sentAt（旧行）。窗口和未来时间的边界作用在选中的那个时间上。
+ * SEND_RATE_LIMIT=0 时检查直接放行，桶里有戳也无害。
+ */
+/** 与发送日志解析同一上限：更长的准入时刻当无效，回落 sentAt。 */
+const HOURLY_REPLAY_AT_MAX_LEN = 64;
+
+function hourlyReplayAt(rateLimitAt: string | undefined, sentAt: string): number {
+  if (typeof rateLimitAt === 'string' && rateLimitAt.length <= HOURLY_REPLAY_AT_MAX_LEN) {
+    const admitted = Date.parse(rateLimitAt);
+    if (Number.isFinite(admitted)) return admitted;
+  }
+  return Date.parse(sentAt);
+}
+
+export function rebuildSendLimitFromRecords(
+  rows: readonly {
+    from: string;
+    result: string;
+    sentAt: string;
+    failureKind?: string;
+    error?: string;
+    rateLimitAt?: string;
+  }[],
+  now = Date.now(),
+  windowMs = SEND_RATE_WINDOW_MS,
+): void {
+  const cutoff = now - windowMs;
+  const grouped = new Map<string, number[]>();
+  for (const row of rows) {
+    // 对端已经应答过的失败，重启前占过额度，不能因为 result 不是 queued 就放掉。
+    const counts =
+      row.result === 'queued' ||
+      (row.result === 'failed' && row.failureKind === 'smtp_response');
+    if (!counts) continue;
+    const at = hourlyReplayAt(row.rateLimitAt, row.sentAt);
+    // 与 slidingWindowCheck 同一边界：t > cutoff；未来时间戳不占额度。边界套在选中的时间上。
+    if (!Number.isFinite(at) || at <= cutoff || at > now) continue;
+    const key = row.from.toLowerCase();
+    const list = grouped.get(key);
+    if (list) list.push(at);
+    else grouped.set(key, [at]);
+  }
+  buckets.clear();
+  for (const [key, stamps] of grouped) {
+    stamps.sort((a, b) => a - b);
+    buckets.set(key, stamps);
+  }
+}
+
+/** 测试辅助：当前窗口内已占用的发信额度，不额外占位。 */
+export function sendLimitCountForTests(
+  address: string,
+  now = Date.now(),
+  windowMs = SEND_RATE_WINDOW_MS,
+): number {
+  const cutoff = now - windowMs;
+  return (buckets.get(address.toLowerCase()) ?? []).filter((t) => t > cutoff).length;
 }
 
 /**

@@ -14,6 +14,16 @@ const LOCAL_FAILURE_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
   'EDNS',
+  // DNS lookup failed; the message never left this host.
+  'ENOTFOUND',
+  'ENODATA',
+  'EAI_AGAIN',
+  // No route to the SMTP host; the message never left this host.
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'EHOSTDOWN',
+  'EADDRNOTAVAIL',
   'ESOCKET',
   'ETIMEDOUT',
   'EAUTH',

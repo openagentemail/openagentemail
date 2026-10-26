@@ -6,10 +6,10 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { withDistBuildLockAsync } from './support/dist-build-lock.ts';
+import { apiDistDir, apiPackageDir, freePort, waitForServer } from './support/dist-server.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -21,36 +21,9 @@ process.env.SMTP_PASS = 'smtp-secret';
 const { UI_JS, UI_CSS } = await import('../src/ui/assets.ts');
 const sha256 = (s: string) => new Bun.CryptoHasher('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
 
-const pkgDir = join(import.meta.dir, '..');
-const dist = join(pkgDir, 'dist');
+const pkgDir = apiPackageDir;
+const dist = apiDistDir;
 /** #272：与同包其余 dist 写入测共用端口锁。 */
-
-async function waitForServer(port: number, deadlineMs: number, getBootLog: () => string): Promise<void> {
-  const started = Date.now();
-  for (;;) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/healthz`);
-      if (res.ok) return;
-    } catch {
-      /* not up yet */
-    }
-    if (Date.now() - started > deadlineMs) throw new Error(`dist server did not come up; boot log:\n${getBootLog()}`);
-    await Bun.sleep(200);
-  }
-}
-
-async function freePort(): Promise<number> {
-  // 探测一个当下空闲的端口（绑定后立即释放，交给 dist 进程使用）；
-  // 免并行 CI 下硬编码端口碰撞。
-  for (let candidate = 24_000 + Math.floor(Math.random() * 20_000); ; candidate++) {
-    const ok = await new Promise<boolean>((resolve) => {
-      const probe = createServer();
-      probe.once('error', () => resolve(false));
-      probe.listen(candidate, '127.0.0.1', () => probe.close(() => resolve(true)));
-    });
-    if (ok) return candidate;
-  }
-}
 
 describe('dist bundle is self-contained (#520-A)', () => {
   test('built dist/main.js serves byte-gold /ui/app.js, /ui/styles.css and fonts', async () => {
@@ -108,5 +81,6 @@ describe('dist bundle is self-contained (#520-A)', () => {
         rmSync(join(pkgDir, 'test', '.tmp-dist-data'), { recursive: true, force: true });
       }
     });
-  }, 60000);
+    // 启动回放测试会占用同一把锁并再构建一次。超时要盖住等锁加自身构建。
+  }, 180_000);
 });

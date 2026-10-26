@@ -36,7 +36,7 @@ Cross-domain reuse of the same localpart is allowed. Each identity's ntfy agent 
 
 `DATA_DIR/send-log.jsonl` 是 API/MCP `POST /v1/send` 的 30 天发送审计（不是 IMAP Sent 文件夹）。
 
-- **覆盖：** 每次 `/v1/send`（成功 queued + 失败 failed+稳定原因）。字段：time / from / to / subject / message-id / result / source(`api|mcp`)。**不写正文、不写 token。**
+- **覆盖：** `/v1/send` 交到 SMTP 的成功（`queued`）和失败（`failed` + 稳定原因），以及每小时额度拒绝时每个身份每窗口最多一条 `rate_limited`。`auto_reply_cooldown` 在发信前拒绝，不落盘。字段：time / from / to / subject / message-id / result / source(`api|mcp`) / `failureKind?` / `rateLimitAt?`。`failureKind` 只出现在 SMTP 失败行，取值为 `smtp_response`（对端已应答）或 `local`（连接类失败）。`rate_limited` 和旧行没有 `failureKind`。`rateLimitAt` 是每小时额度的准入时刻，只写在占住额度的 `queued` 行和 `smtp_response` 失败行上（限额为 0 时不写）；发送历史仍显示 `sentAt`。回放有该字段时用它，否则用 `sentAt`。**不写正文、不写 token。**
 - **不覆盖：** SMTP 直发（docker-mailserver 本机投递、外部客户端）。`ALWAYS_BCC` 只覆盖 API/MCP/task 经 `sendMail` 的应用出站，不改变其他 Postfix 收件路径。
 - **来源：** 不信任公共 `X-OAE-Send-Source`。MCP→API 用 `taskSigningSecret` 域分离（`send-source-v1`）HMAC 头 `X-OAE-Send-Source-Mac`；验签通过才记 `mcp`，其余一律 `api`。
 - **有界：** 每身份每限流窗口最多 1 条 `rate_limited`；from/to 单项 ≤254；硬上限 **10_000 行或 8MB**（先到先限，append/compact drop-oldest）。追加热路径不全量解析。

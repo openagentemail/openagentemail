@@ -47,6 +47,8 @@ export type SendLogLimit = (typeof SEND_LOG_LIMITS)[number];
 
 export type SendLogSource = 'api' | 'mcp';
 export type SendLogResult = 'queued' | 'failed';
+/** SMTP catch 失败行的分类。与 isLocalSendFailure 同一口径。 */
+export type SendLogFailureKind = 'smtp_response' | 'local';
 
 export type SendLogRecord = {
   schemaVersion: typeof SEND_LOG_SCHEMA_VERSION;
@@ -61,6 +63,18 @@ export type SendLogRecord = {
   source: SendLogSource;
   /** 只有显式 autoReply true 才出现。false、省略和旧行都没有该字段。 */
   autoReply?: true;
+  /**
+   * 只出现在 SMTP catch 写下的失败行。
+   * smtp_response：对端已应答，重启回放要计入额度和冷却。
+   * local：连接类失败，不计入。rate_limited 和旧行没有该字段。
+   */
+  failureKind?: SendLogFailureKind;
+  /**
+   * 每小时额度的准入时刻（checkSendLimit 推进窗口的那一枚）。
+   * 只出现在真正占住额度的 queued 行，以及 failureKind 为 smtp_response 的失败行。
+   * 限额关闭（没有 reservation）时不写。发送历史仍看 sentAt。
+   */
+  rateLimitAt?: string;
 };
 
 export type SendLogQuery = {
@@ -191,6 +205,15 @@ function isLoggedEmail(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= SEND_LOG_EMAIL_MAX_LEN;
 }
 
+/** 准入时刻只接受短 ISO 字符串。更长或解析不了的丢掉该字段，不拒整行。 */
+const RATE_LIMIT_AT_MAX_LEN = 64;
+
+function acceptedRateLimitAt(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > RATE_LIMIT_AT_MAX_LEN) return undefined;
+  if (!Number.isFinite(Date.parse(value))) return undefined;
+  return value;
+}
+
 function parseRecord(raw: unknown): SendLogRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const row = raw as Record<string, unknown>;
@@ -224,6 +247,16 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   };
   if (typeof row.error === 'string' && row.error) record.error = row.error;
   if (row.autoReply === true) record.autoReply = true;
+  // 只认两种分类。别的值丢掉该字段，不因此拒掉整行。成功行和额度拒绝行也不留。
+  if (
+    record.result === 'failed' &&
+    (row.failureKind === 'smtp_response' || row.failureKind === 'local')
+  ) {
+    record.failureKind = row.failureKind;
+  }
+  // 只认短且能解析的时间。别的值丢掉该字段，不因此拒掉整行。
+  const rateLimitAt = acceptedRateLimitAt(row.rateLimitAt);
+  if (rateLimitAt) record.rateLimitAt = rateLimitAt;
   return record;
 }
 
@@ -640,6 +673,14 @@ function loadRecordsOrThrow(): SendLogRecord[] {
   return inspectAndRepairSync();
 }
 
+/**
+ * 启动回放读盘。复用 inspect 解析（缺文件为 []，中间损坏抛 SendLogCorruptError）。
+ * 调用方必须自己接住错误并只告警，不得让回放失败拖垮进程。
+ */
+export function readSendLogRecordsForReplay(): SendLogRecord[] {
+  return loadRecordsOrThrow();
+}
+
 const cursorKey = createHmac('sha256', config.taskSigningSecret)
   .update(CURSOR_PREFIX)
   .digest();
@@ -712,6 +753,13 @@ export type AppendSendLogInput = {
   error?: string;
   source: SendLogSource;
   autoReply?: boolean;
+  /** 仅 SMTP 失败行。其它结果即使传入也不落盘。 */
+  failureKind?: SendLogFailureKind;
+  /**
+   * 准入时刻的 ISO 时间。只在 queued，或 failed 且 failureKind 为 smtp_response 时落盘。
+   * 不是短的可解析时间就丢掉。限额为 0 时调用方不传。
+   */
+  rateLimitAt?: string;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -759,6 +807,18 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     if (input.result === 'failed' && input.error) {
       record.error = input.error.slice(0, 64);
     }
+    if (
+      input.result === 'failed' &&
+      (input.failureKind === 'smtp_response' || input.failureKind === 'local')
+    ) {
+      record.failureKind = input.failureKind;
+    }
+    // 额度槽在准入时占上。只写真正占住槽的行：成功，以及 SMTP 已应答的失败。
+    const holdsHourlySlot =
+      input.result === 'queued' ||
+      (input.result === 'failed' && input.failureKind === 'smtp_response');
+    const rateLimitAt = holdsHourlySlot ? acceptedRateLimitAt(input.rateLimitAt) : undefined;
+    if (rateLimitAt) record.rateLimitAt = rateLimitAt;
     if (input.autoReply === true) record.autoReply = true;
     const line = `${JSON.stringify(record)}\n`;
     try {

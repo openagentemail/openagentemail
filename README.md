@@ -349,7 +349,7 @@ before exposing credentials or message content.
 
 **Capacity and limits are operational choices.** There is no per-identity software
 licensing charge. Mailbox capacity, provider policy, disk, memory and configurable
-rate limits still apply (sending defaults to 20 messages/hour per identity).
+rate limits still apply (sending defaults to 20 messages/hour per identity; the API rebuilds that hourly window from `send-log.jsonl` on startup — queued rows plus failed rows the SMTP server answered — and a send whose log line was lost is not counted).
 Ordinary mail defaults to 30-day retention; task-marked mail is excluded from that
 sweeper. Back up the mail store, `DATA_DIR` and stable signing secrets together.
 
