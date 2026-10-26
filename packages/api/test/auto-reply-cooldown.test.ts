@@ -21,8 +21,11 @@ const { createIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
+  checkAndReserveAutoReplyCooldown,
   checkAutoReplyCooldown,
+  finalizeAutoReplyCooldownReservation,
   recordAutoReplyCooldown,
+  releaseAutoReplyCooldownReservation,
   resetAutoReplyCooldownForTests,
   setAutoReplyCooldownCapForTests,
   setAutoReplyCooldownNowForTests,
@@ -30,6 +33,7 @@ const {
   rebuildAutoReplyCooldownFromRecords,
 } = await import('../src/lib/auto-reply-cooldown.ts');
 const {
+  checkSendLimit,
   rebuildSendLimitFromRecords,
   resetRateLimits,
   sendLimitCountForTests,
@@ -86,6 +90,51 @@ async function withConfig(
 function freezeAt(ms: number): void {
   clock = ms;
   setAutoReplyCooldownNowForTests(() => clock);
+}
+
+/**
+ * SMTP 停在第一次 await 上，用来把两封请求叠在占位之后、完成之前。
+ * succeed / fail 只结算一次，测试收尾再调也不会把已经失败的那封改成成功。
+ */
+function holdSmtp() {
+  let calls = 0;
+  const callWaiters: Array<() => void> = [];
+  let settled = false;
+  let settle!: (value: { messageId: string } | Error) => void;
+  const gate = new Promise<{ messageId: string } | Error>((resolve) => {
+    settle = resolve;
+  });
+  const finish = (value: { messageId: string } | Error) => {
+    if (settled) return;
+    settled = true;
+    settle(value);
+  };
+  sendMail.mockImplementation(async () => {
+    calls += 1;
+    for (const wake of callWaiters.splice(0)) wake();
+    const outcome = await gate;
+    if (outcome instanceof Error) throw outcome;
+    return outcome;
+  });
+  const whenCalled = (n: number) =>
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`SMTP 没有进入第 ${n} 次调用`)), 1_000);
+      const arm = () => {
+        if (calls < n) {
+          callWaiters.push(arm);
+          return;
+        }
+        clearTimeout(timer);
+        resolve();
+      };
+      arm();
+    });
+  return {
+    entered: whenCalled(1),
+    whenCalled,
+    succeed: () => finish({ messageId: '<held@test>' }),
+    fail: (err: Error) => finish(err),
+  };
 }
 
 beforeEach(() => {
@@ -308,17 +357,183 @@ describe('POST /v1/send 自动回复冷却', () => {
     expect(checkAutoReplyCooldown('agent@x.com', ['b+tag@y.com'], 0).blocked).toBe(false);
   });
 
-  test('过期项会丢掉，表有上限', () => {
+  test('过期项会丢掉；未过期项和占位在触顶时都不逐出', () => {
     const start = 1_800_000_000_000;
     freezeAt(start);
     setAutoReplyCooldownCapForTests(2);
-    recordAutoReplyCooldown('s@x.com', ['a@e.com', 'b@e.com', 'c@e.com'], 10);
+    const first = checkAndReserveAutoReplyCooldown('s@x.com', ['a@e.com'], 10);
+    const second = checkAndReserveAutoReplyCooldown('s@x.com', ['b@e.com'], 10);
+    expect(first.reserved).toBe(true);
+    expect(second.reserved).toBe(true);
+    if (!first.reserved || !second.reserved) return;
+    finalizeAutoReplyCooldownReservation(first.reservation, 10);
+    finalizeAutoReplyCooldownReservation(second.reservation, 10);
+    const third = checkAndReserveAutoReplyCooldown('s@x.com', ['c@e.com'], 10);
+    expect(third.reserved).toBe(false);
+    if (!third.reserved) expect(third.retryAfterSec).toBe(10);
     expect(autoReplyCooldownSizeForTests()).toBe(2);
-    expect(checkAutoReplyCooldown('s@x.com', ['a@e.com'], 10).blocked).toBe(false);
+    expect(checkAutoReplyCooldown('s@x.com', ['a@e.com'], 10).blocked).toBe(true);
     expect(checkAutoReplyCooldown('s@x.com', ['b@e.com'], 10).blocked).toBe(true);
     freezeAt(start + 10_000);
-    expect(checkAutoReplyCooldown('s@x.com', ['b@e.com', 'c@e.com'], 10).blocked).toBe(false);
+    expect(checkAutoReplyCooldown('s@x.com', ['a@e.com', 'b@e.com'], 10).blocked).toBe(false);
     expect(autoReplyCooldownSizeForTests()).toBe(0);
+    const again = checkAndReserveAutoReplyCooldown('s@x.com', ['c@e.com'], 10);
+    expect(again.reserved).toBe(true);
+  });
+
+  test('进行中的占位占满上限时不会被另一对挤掉', () => {
+    const start = 1_800_000_000_000;
+    freezeAt(start);
+    setAutoReplyCooldownCapForTests(1);
+    const pending = checkAndReserveAutoReplyCooldown('v@x.com', ['a@e.com'], 300);
+    expect(pending.reserved).toBe(true);
+    const extra = checkAndReserveAutoReplyCooldown('n@x.com', ['b@e.com'], 300);
+    expect(extra.reserved).toBe(false);
+    if (!extra.reserved) expect(extra.retryAfterSec).toBe(300);
+    expect(checkAutoReplyCooldown('v@x.com', ['a@e.com'], 300).blocked).toBe(true);
+    expect(autoReplyCooldownSizeForTests()).toBe(1);
+    if (pending.reserved) releaseAutoReplyCooldownReservation(pending.reservation);
+    expect(checkAutoReplyCooldown('v@x.com', ['a@e.com'], 300).blocked).toBe(false);
+    expect(autoReplyCooldownSizeForTests()).toBe(0);
+  });
+
+  test('释放只删掉这张票，不碰之后写上的更长冷却', () => {
+    const start = 1_800_000_000_000;
+    freezeAt(start);
+    const first = checkAndReserveAutoReplyCooldown('s@x.com', ['r@e.com'], 300);
+    expect(first.reserved).toBe(true);
+    if (!first.reserved) return;
+    releaseAutoReplyCooldownReservation(first.reservation);
+    const second = checkAndReserveAutoReplyCooldown('s@x.com', ['r@e.com'], 600);
+    expect(second.reserved).toBe(true);
+    if (!second.reserved) return;
+    // 旧票晚到，不能把新占位清掉。
+    releaseAutoReplyCooldownReservation(first.reservation);
+    expect(checkAutoReplyCooldown('s@x.com', ['r@e.com'], 600).blocked).toBe(true);
+    finalizeAutoReplyCooldownReservation(second.reservation, 600);
+    releaseAutoReplyCooldownReservation(first.reservation);
+    releaseAutoReplyCooldownReservation(second.reservation);
+    const hit = checkAutoReplyCooldown('s@x.com', ['r@e.com'], 600);
+    expect(hit.blocked).toBe(true);
+    expect(hit.retryAfterSec).toBe(600);
+  });
+
+  test('两封并发打到同一对时只进一次 SMTP，另一封 429', async () => {
+    const from = nid('cdcon');
+    await withConfig({ sendRateLimit: 50, autoReplyCooldownSec: 300 }, async () => {
+      freezeAt(1_800_000_000_000);
+      const hold = holdSmtp();
+      const first = post(from, 'pair@example.net', { autoReply: true });
+      try {
+        await hold.entered;
+        const second = await post(from, 'pair@example.net', { autoReply: true });
+        expect(second.status).toBe(429);
+        expect(second.headers.get('Retry-After')).toBeNull();
+        expect(await second.json()).toEqual({ error: 'auto_reply_cooldown', retryAfterSec: 300 });
+        expect(sendMail).toHaveBeenCalledTimes(1);
+        hold.succeed();
+        expect((await first).status).toBe(200);
+        expect(sendMail).toHaveBeenCalledTimes(1);
+      } finally {
+        hold.succeed();
+        await Promise.resolve(first).catch(() => undefined);
+      }
+    });
+  });
+
+  test('收件人列表重叠时，没被占住的那个地址仍可发送', async () => {
+    const from = nid('cdov');
+    await withConfig({ sendRateLimit: 50, autoReplyCooldownSec: 300 }, async () => {
+      const hold = holdSmtp();
+      const first = post(from, ['a@example.net', 'b@example.net'], { autoReply: true });
+      let onlyC: ReturnType<typeof post> | undefined;
+      try {
+        await hold.entered;
+        const overlap = await post(from, ['b@example.net', 'c@example.net'], { autoReply: true });
+        expect(overlap.status).toBe(429);
+        expect(((await overlap.json()) as { error: string }).error).toBe('auto_reply_cooldown');
+        expect(sendMail).toHaveBeenCalledTimes(1);
+        onlyC = post(from, 'c@example.net', { autoReply: true });
+        await hold.whenCalled(2);
+        expect(sendMail).toHaveBeenCalledTimes(2);
+        hold.succeed();
+        expect((await first).status).toBe(200);
+        expect((await onlyC).status).toBe(200);
+      } finally {
+        hold.succeed();
+        await Promise.resolve(first).catch(() => undefined);
+        await Promise.resolve(onlyC).catch(() => undefined);
+      }
+    });
+  });
+
+  test('连接失败会放开占位；进行中的那封仍挡住同一对', async () => {
+    const from = nid('cdhold');
+    await withConfig({ sendRateLimit: 50, autoReplyCooldownSec: 300 }, async () => {
+      const hold = holdSmtp();
+      const first = post(from, 'down@example.net', { autoReply: true });
+      try {
+        await hold.entered;
+        const second = await post(from, 'down@example.net', { autoReply: true });
+        expect(second.status).toBe(429);
+        expect(((await second.json()) as { retryAfterSec: number }).retryAfterSec).toBeGreaterThanOrEqual(1);
+        expect(sendMail).toHaveBeenCalledTimes(1);
+        hold.fail(Object.assign(new Error('connection refused'), { code: 'ECONNECTION' }));
+        expect((await first).status).toBe(502);
+        expect(autoReplyCooldownSizeForTests()).toBe(0);
+        sendMail.mockImplementation(async () => ({ messageId: '<cd@test>' }));
+        expect((await post(from, 'down@example.net', { autoReply: true })).status).toBe(200);
+        expect(sendMail).toHaveBeenCalledTimes(2);
+      } finally {
+        hold.succeed();
+        await Promise.resolve(first).catch(() => undefined);
+      }
+    });
+  });
+
+  test('每小时额度拒绝会放开占位，额度恢复后同一对可以发', async () => {
+    const from = nid('cdrel');
+    await withConfig({ sendRateLimit: 1, autoReplyCooldownSec: 300 }, async () => {
+      expect((await post(from, 'used@example.net')).status).toBe(200);
+      sendMail.mockClear();
+      const limited = await post(from, 'pair@example.net', { autoReply: true });
+      expect(limited.status).toBe(429);
+      expect(((await limited.json()) as { error: string }).error).toBe('rate_limited');
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(autoReplyCooldownSizeForTests()).toBe(0);
+      resetRateLimits();
+      expect((await post(from, 'pair@example.net', { autoReply: true })).status).toBe(200);
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('别的身份把表打满时，不会清掉已有冷却，也不占额度', async () => {
+    const victim = nid('cdvic');
+    const noisy = nid('cdnoisy');
+    await withConfig({ sendRateLimit: 50, autoReplyCooldownSec: 300 }, async () => {
+      const start = 1_800_000_000_000;
+      setAutoReplyCooldownCapForTests(2);
+      freezeAt(start);
+      expect((await post(victim, 'keep@example.net', { autoReply: true })).status).toBe(200);
+      freezeAt(start + 1_000);
+      expect((await post(noisy, 'n1@example.net', { autoReply: true })).status).toBe(200);
+      freezeAt(start + 2_000);
+      const before = sendLimitCountForTests(noisy);
+      sendMail.mockClear();
+      const rejected = await post(noisy, 'n2@example.net', { autoReply: true });
+      expect(rejected.status).toBe(429);
+      expect(rejected.headers.get('Retry-After')).toBeNull();
+      // keep 还剩 298 秒，比 n1 更早到期。
+      expect(await rejected.json()).toEqual({ error: 'auto_reply_cooldown', retryAfterSec: 298 });
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(sendLimitCountForTests(noisy)).toBe(before);
+      const still = await post(victim, 'keep@example.net', { autoReply: true });
+      expect(still.status).toBe(429);
+      expect(((await still.json()) as { error: string }).error).toBe('auto_reply_cooldown');
+      const noisyStill = await post(noisy, 'n1@example.net', { autoReply: true });
+      expect(noisyStill.status).toBe(429);
+      expect(sendMail).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -480,11 +695,20 @@ describe('启动回放', () => {
     });
   });
 
-  test('读日志失败只告警', () => {
+  test('读日志失败只告警，不清掉已经在内存里的冷却和额度', () => {
+    recordAutoReplyCooldown('keep@x.com', ['keep@e.com'], 300);
+    checkSendLimit('keep@x.com', 20);
+    expect(checkAutoReplyCooldown('keep@x.com', ['keep@e.com'], 300).blocked).toBe(true);
+    expect(sendLimitCountForTests('keep@x.com')).toBe(1);
     const seen: string[] = [];
-    const orig = console.warn;
+    const errors: string[] = [];
+    const origWarn = console.warn;
+    const origError = console.error;
     console.warn = (...args: unknown[]) => {
       seen.push(args.map((item) => String(item)).join(' '));
+    };
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map((item) => String(item)).join(' '));
     };
     try {
       expect(() =>
@@ -493,10 +717,128 @@ describe('启动回放', () => {
         }),
       ).not.toThrow();
     } finally {
-      console.warn = orig;
+      console.warn = origWarn;
+      console.error = origError;
     }
     expect(seen.some((line) => line.includes('send-log replay skipped'))).toBe(true);
+    expect(errors).toEqual([]);
+    expect(checkAutoReplyCooldown('keep@x.com', ['keep@e.com'], 300).blocked).toBe(true);
+    expect(sendLimitCountForTests('keep@x.com')).toBe(1);
     expect(() => replaySendGuardsFromLog(Date.now(), () => [])).not.toThrow();
+  });
+
+  test('回放忽略未来的 sentAt，窗口边界恰好到期的不留', () => {
+    const now = 1_800_000_000_000;
+    freezeAt(now);
+    rebuildAutoReplyCooldownFromRecords(
+      [
+        {
+          from: 's@x.com',
+          to: ['edge@e.com'],
+          result: 'queued',
+          sentAt: new Date(now - 300_000).toISOString(),
+          autoReply: true,
+        },
+        {
+          from: 's@x.com',
+          to: ['in@e.com'],
+          result: 'queued',
+          sentAt: new Date(now - 300_000 + 1).toISOString(),
+          autoReply: true,
+        },
+        {
+          from: 's@x.com',
+          to: ['now@e.com'],
+          result: 'queued',
+          sentAt: new Date(now).toISOString(),
+          autoReply: true,
+        },
+        {
+          from: 's@x.com',
+          to: ['future@e.com'],
+          result: 'queued',
+          sentAt: new Date(now + 1).toISOString(),
+          autoReply: true,
+        },
+      ],
+      300,
+      now,
+    );
+    expect(checkAutoReplyCooldown('s@x.com', ['edge@e.com'], 300).blocked).toBe(false);
+    expect(checkAutoReplyCooldown('s@x.com', ['in@e.com'], 300).blocked).toBe(true);
+    expect(checkAutoReplyCooldown('s@x.com', ['now@e.com'], 300).blocked).toBe(true);
+    expect(checkAutoReplyCooldown('s@x.com', ['future@e.com'], 300).blocked).toBe(false);
+    expect(autoReplyCooldownSizeForTests()).toBe(2);
+  });
+
+  test('回放超过上限时保留最晚到期的对', () => {
+    const now = 1_800_000_000_000;
+    freezeAt(now);
+    setAutoReplyCooldownCapForTests(2);
+    rebuildAutoReplyCooldownFromRecords(
+      [
+        {
+          from: 's@x.com',
+          to: ['early@e.com'],
+          result: 'queued',
+          sentAt: new Date(now - 250_000).toISOString(),
+          autoReply: true,
+        },
+        {
+          from: 's@x.com',
+          to: ['mid@e.com'],
+          result: 'queued',
+          sentAt: new Date(now - 100_000).toISOString(),
+          autoReply: true,
+        },
+        {
+          from: 'other@x.com',
+          to: ['late@e.com'],
+          result: 'queued',
+          sentAt: new Date(now - 10_000).toISOString(),
+          autoReply: true,
+        },
+      ],
+      300,
+      now,
+    );
+    expect(autoReplyCooldownSizeForTests()).toBe(2);
+    expect(checkAutoReplyCooldown('s@x.com', ['early@e.com'], 300).blocked).toBe(false);
+    expect(checkAutoReplyCooldown('s@x.com', ['mid@e.com'], 300).blocked).toBe(true);
+    expect(checkAutoReplyCooldown('other@x.com', ['late@e.com'], 300).blocked).toBe(true);
+  });
+
+  test('replaySendGuardsFromLog 从发送日志灌冷却和每小时额度', async () => {
+    resetSendLogForTests();
+    const from = nid('cdexec');
+    const now = Date.now();
+    try {
+      setSendLogNowForTests(() => now - 30_000);
+      await appendSendLog({
+        from,
+        to: ['replay@example.net'],
+        subject: 'replay',
+        result: 'queued',
+        source: 'api',
+        autoReply: true,
+      });
+    } finally {
+      setSendLogNowForTests(null);
+    }
+    await withConfig({ sendRateLimit: 1, autoReplyCooldownSec: 300 }, async () => {
+      resetRateLimits();
+      resetAutoReplyCooldownForTests();
+      replaySendGuardsFromLog(now);
+      expect(sendLimitCountForTests(from, now)).toBe(1);
+      sendMail.mockClear();
+      const blocked = await post(from, 'replay@example.net', { autoReply: true });
+      expect(blocked.status).toBe(429);
+      expect(((await blocked.json()) as { error: string }).error).toBe('auto_reply_cooldown');
+      const limited = await post(from, 'other-replay@example.net', { autoReply: true });
+      expect(limited.status).toBe(429);
+      expect(((await limited.json()) as { error: string }).error).toBe('rate_limited');
+      expect(sendMail).not.toHaveBeenCalled();
+    });
   });
 
   test('冷却关闭时回放不灌表', async () => {

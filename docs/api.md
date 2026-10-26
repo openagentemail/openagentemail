@@ -74,9 +74,10 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 身份和发件域通过之后、每小时额度之前：
 
 - **一对一冷却**（仅 `autoReply: true`）：键是发件身份 × 每一个收件人。地址只做 trim + 小写，不剥 `+tag`，不合并点号。父代子发信时键用子地址（与每小时额度同一个发件身份）。`AUTO_REPLY_COOLDOWN_SEC` 默认 300；`0` 关闭；非整数、负数、NaN 回落 300。
-- 任一收件人仍在冷却则整封 **HTTP 429** `{error:"auto_reply_cooldown", retryAfterSec}`。`retryAfterSec` 是被挡住的那些对里剩余秒数的最大值（向上取整，至少 1）。不部分投递，不打 SMTP，不占每小时额度，不写 `send-log.jsonl`。响应不带 `Retry-After` 头（与本路由的 `rate_limited` 一样，只在 JSON 里给秒数）。
-- 冷却从 SMTP 接受，或 SMTP 对端已经返回错误应答时起算。连接被拒、超时、认证失败这类还没得到应答的失败不开始冷却（与每小时额度退还同一分类）。记在进程内存里，不依赖审计行追加成功。
-- API 启动时从 `DATA_DIR/send-log.jsonl` 重建：冷却窗口内、`autoReply: true` 且 `result: "queued"` 的行，按发件人 × 每个收件人放回内存。失败行和 `rate_limited` 不算。日志没写上的那一封，重启后补不回来。
+- 检查通过时，同一步同步占住全部归一化后的发件身份 × 收件人对，然后才进入每小时额度和 SMTP。占位还没结束（SMTP 尚未返回）时，别的 `autoReply: true` 碰到同一对也会被拒绝。任一收件人仍在冷却或占位中，则整封 **HTTP 429** `{error:"auto_reply_cooldown", retryAfterSec}`。`retryAfterSec` 是被挡住的那些对里剩余秒数的最大值（向上取整，至少 1）；进行中的占位按剩余预留窗口计，至少 1 秒。不部分投递，不打 SMTP，不占每小时额度，不写 `send-log.jsonl`。响应不带 `Retry-After` 头（与本路由的 `rate_limited` 一样，只在 JSON 里给秒数）。
+- 每小时额度若拒绝，会在写审计之前放开这次占位。连接被拒、超时、认证失败这类还没得到应答的失败同样放开占位（与每小时额度退还同一分类）。释放只删掉仍属于这次占位的格子，不会清掉已经记下的更长冷却。SMTP 接受，或对端已经返回错误应答时，截止时间改为完成时刻 + 冷却秒数。记在进程内存里，不依赖审计行追加成功。
+- 内存里最多 10_000 对。只丢掉已经到期的正式冷却；未过期项和进行中的占位都不逐出。丢掉过期项之后仍放不下这次要新增的对，则整封 429 `auto_reply_cooldown`，`retryAfterSec` 为最早到期的那一项还剩的秒数（向上取整，至少 1）。不打 SMTP，不占每小时额度。
+- API 启动时从 `DATA_DIR/send-log.jsonl` 重建：冷却窗口内、`autoReply: true` 且 `result: "queued"` 的行，按发件人 × 每个收件人放回内存。`sentAt` 在未来的行忽略（与每小时额度回放相同）。窗口边界恰好到期（`sentAt + 冷却 <= now`）不算。失败行和 `rate_limited` 不算。超过 10_000 对时保留最晚到期的那些对。日志没写上的那一封，重启后补不回来。
 
 每小时额度仍然包住该身份的全部 `/v1/send`，包括自动回复。先过冷却，再扣额度。`SEND_RATE_LIMIT` 默认 20，`0` 关闭。超限 **429** `{error:"rate_limited", limit, retryAfterSec}`（同样没有 `Retry-After` 头）。进程启动把最近一小时 `result: "queued"` 的行按原时间戳回放进同一个滑动窗口，所以重启不会把额度清零；日志没写上的那一封不会被计入。任务、审批、催办、租约邮件不走这条路由。
 
