@@ -13,7 +13,7 @@ All notable changes to this project are documented here, one section per release
 
 ### Fixed
 
-- **CI: 钉 ubuntu-24.04 runner 恢复 Python 3.12.3** : ubuntu-latest 切到 26.04 后 actions/setup-python 找不到 3.12.3，导致 ci `test` 与 release `publish` 在装 Python 一步失败；仅这两个 job 改为 `runs-on: ubuntu-24.04`，Python 版本与 action SHA 不变。
+- **CI: 钉 ubuntu-24.04 runner 恢复 Python 3.12.3** (#403): ubuntu-latest 切到 26.04 后 actions/setup-python 找不到 3.12.3，导致 ci `test` 与 release `publish` 在装 Python 一步失败；仅这两个 job 改为 `runs-on: ubuntu-24.04`，Python 版本与 action SHA 不变。
 
 ## v0.10.0 — 2026-09-29
 
