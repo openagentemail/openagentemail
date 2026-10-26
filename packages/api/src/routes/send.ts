@@ -86,6 +86,8 @@ async function recordSend(input: {
   error?: string;
   source: SendLogSource;
   autoReply?: boolean;
+  /** 只给 SMTP catch。分类必须和下面的 isLocalSendFailure 是同一次判断。 */
+  failureKind?: 'smtp_response' | 'local';
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -186,7 +188,7 @@ sendRoute.post('/', async (c) => {
   // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
   // 检查和占位同步完成，后面的 await（额度日志、SMTP）插不进第二封。
   // 任一收件人仍在冷却或占位中就整封拒绝：不打 SMTP、不占每小时额度、不写 send-log
-  // （拒绝行不是 queued，重建时也会忽略；这里干脆不落盘，避免 429 刷审计）。
+  // （信没交到 SMTP，不落盘，避免 429 刷审计；重建也看不到它）。
   // 与 rate_limited 一样只在 JSON 里给 retryAfterSec，不另加 Retry-After 头。
   let autoReplyReservation: AutoReplyCooldownReservation | undefined;
   if (autoReply === true && config.autoReplyCooldownSec > 0) {
@@ -263,7 +265,9 @@ sendRoute.post('/', async (c) => {
     // Our own mail server being unreachable shouldn't cost the user a slot;
     // anything the server actually answered to stays counted.
     // 冷却与额度同一口径：连接类失败放开占位；对端已经应答则从这一刻起算。
-    if (isLocalSendFailure(err)) {
+    // failureKind 用同一次判断，重启回放才能把 SMTP 已应答的失败算回去。
+    const localFailure = isLocalSendFailure(err);
+    if (localFailure) {
       releaseSendLimit(from, limit.reservation);
       releaseAutoReplyCooldownReservation(autoReplyReservation);
     } else {
@@ -279,6 +283,7 @@ sendRoute.post('/', async (c) => {
       subject,
       result: 'failed',
       error: 'smtp_error',
+      failureKind: localFailure ? 'local' : 'smtp_response',
       source,
       autoReply,
     });

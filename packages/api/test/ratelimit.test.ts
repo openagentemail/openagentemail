@@ -89,7 +89,7 @@ describe('rebuildSendLimitFromRecords', () => {
       ],
       t + 30 * 60 * 1000,
     );
-    // 窗口内只剩 t 与 t+1s 两枚；窗口外、失败、未来时间戳都不计。
+    // 窗口内只剩 t 与 t+1s 两枚；窗口外、没有 failureKind 的失败、未来时间戳都不计。
     expect(sendLimitCountForTests('a@x.com', t + 30 * 60 * 1000)).toBe(2);
     const blocked = checkSendLimit('a@x.com', 2, 3_600_000, t + 30 * 60 * 1000);
     expect(blocked.allowed).toBe(false);
@@ -112,6 +112,27 @@ describe('rebuildSendLimitFromRecords', () => {
     expect(checkSendLimit('a@x.com', 0, 3_600_000, t).count).toBe(0);
     // 0 不擦掉已回放的戳，只是不拿它们拒绝。
     expect(sendLimitCountForTests('a@x.com', t)).toBe(5);
+    resetRateLimits();
+  });
+
+  test('回放计入 SMTP 已应答的失败，连接失败、旧失败和 rate_limited 不计', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    const sentAt = new Date(t).toISOString();
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt },
+        { from: 'a@x.com', result: 'failed', failureKind: 'smtp_response', sentAt },
+        { from: 'a@x.com', result: 'failed', failureKind: 'local', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'smtp_error', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'rate_limited', sentAt },
+        { from: 'a@x.com', result: 'failed', error: 'auto_reply_cooldown', sentAt },
+        { from: 'b@x.com', result: 'failed', failureKind: 'local', sentAt },
+      ],
+      t + 1_000,
+    );
+    expect(sendLimitCountForTests('a@x.com', t + 1_000)).toBe(2);
+    expect(sendLimitCountForTests('b@x.com', t + 1_000)).toBe(0);
     resetRateLimits();
   });
 });

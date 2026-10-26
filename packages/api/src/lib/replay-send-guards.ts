@@ -1,6 +1,8 @@
 /**
  * 进程启动时从 send-log.jsonl 回放两张内存表：
  * 每小时发信额度，以及自动回复一对一冷却。
+ * 两张表都认 queued，再加上 SMTP 已应答的失败行（failureKind === "smtp_response"）。
+ * 冷却还要求 autoReply === true。没有该字段的旧失败行不计入。
  * 读盘失败只告警，不抛出，避免坏日志挡住 API 启动。
  */
 

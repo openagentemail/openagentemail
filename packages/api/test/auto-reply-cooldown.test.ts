@@ -620,6 +620,31 @@ describe('启动回放', () => {
     });
   });
 
+  test('回放计入 SMTP 已应答的自动回复失败，连接失败、旧行和非自动回复不计', () => {
+    const from = 'Cool@Example.net';
+    const now = Date.now();
+    const sentAt = new Date(now - 1_000).toISOString();
+    rebuildAutoReplyCooldownFromRecords(
+      [
+        { from, to: ['smtp@example.net'], result: 'failed', failureKind: 'smtp_response', autoReply: true, sentAt },
+        { from, to: ['local@example.net'], result: 'failed', failureKind: 'local', autoReply: true, sentAt },
+        { from, to: ['legacy@example.net'], result: 'failed', error: 'smtp_error', autoReply: true, sentAt },
+        { from, to: ['limited@example.net'], result: 'failed', error: 'rate_limited', autoReply: true, sentAt },
+        { from, to: ['plain@example.net'], result: 'failed', failureKind: 'smtp_response', sentAt },
+        { from, to: ['off@example.net'], result: 'failed', failureKind: 'smtp_response', autoReply: false, sentAt },
+        { from, to: ['queued@example.net'], result: 'queued', autoReply: true, sentAt },
+      ],
+      300,
+      now,
+    );
+    expect(autoReplyCooldownSizeForTests()).toBe(2);
+    expect(checkAutoReplyCooldown(from, ['SMTP@example.net'], 300).blocked).toBe(true);
+    expect(checkAutoReplyCooldown(from, ['queued@example.net'], 300).blocked).toBe(true);
+    for (const to of ['local@example.net', 'legacy@example.net', 'limited@example.net', 'plain@example.net', 'off@example.net']) {
+      expect(checkAutoReplyCooldown(from, [to], 300).blocked).toBe(false);
+    }
+  });
+
   test('每小时额度按日志里的 queued 回放，下一封是 rate_limited', async () => {
     resetSendLogForTests();
     const from = nid('cdhr');

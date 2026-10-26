@@ -5,7 +5,9 @@
  *
  * 检查和占位在同一次同步调用里完成，SMTP 之前就挡住同一对。
  * 内存表有上限。只丢掉已经到期的正式冷却；未过期项和进行中的占位都不逐出。
- * 放不下新对时拒绝这次发送。拒绝不写 send-log：信没有交到 SMTP，重建只认 result === "queued"。
+ * 放不下新对时拒绝这次发送。拒绝不写 send-log：信没有交到 SMTP。
+ * 重建认 result === "queued"，以及 failed 且 failureKind === "smtp_response"，并且 autoReply === true。
+ * 没有 failureKind 的旧失败行、local、rate_limited 都不认。
  */
 
 /** 冷却表上限。发送日志本身最多一万行，一对一窗口只有几分钟。 */
@@ -224,10 +226,14 @@ export type AutoReplyCooldownReplayRow = {
   result: string;
   sentAt: string;
   autoReply?: boolean;
+  failureKind?: string;
+  error?: string;
 };
 
 /**
- * 用发送日志重建冷却表。只留窗口内 autoReply === true 且 result === "queued" 的行。
+ * 用发送日志重建冷却表。窗口内 autoReply === true，且
+ * result === "queued"，或 result === "failed" 且 failureKind === "smtp_response"。
+ * 没有 failureKind 的旧失败行、local、rate_limited、非自动回复都不留。
  * sentAt 在未来的行忽略（与每小时额度同一边界：sentAt > now）。
  * 恰好到期（sentAt + 冷却 <= now）不留。同一对保留更晚的截止时间。
  * 超过上限时留最晚到期的那些对，不按到达顺序挤掉更长的冷却。
@@ -243,7 +249,10 @@ export function rebuildAutoReplyCooldownFromRecords(
   const windowMs = cooldownSec * 1000;
   const fresh = new Map<string, number>();
   for (const row of records) {
-    if (row.autoReply !== true || row.result !== 'queued') continue;
+    const answered =
+      row.result === 'queued' ||
+      (row.result === 'failed' && row.failureKind === 'smtp_response');
+    if (row.autoReply !== true || !answered) continue;
     const sentAt = Date.parse(row.sentAt);
     // 与 rebuildSendLimitFromRecords 一样：未来时间戳不占冷却。
     if (!Number.isFinite(sentAt) || sentAt > now) continue;

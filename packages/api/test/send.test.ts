@@ -165,6 +165,51 @@ describe('发信失败后的配额处理', () => {
     // 桶应该是空的：limit=1 的探测仍然放行。
     expect(checkSendLimit('quota-local@test.example', 1).allowed).toBe(true);
   });
+
+  test('SMTP 应答写成 smtp_response，连接失败写成 local，额度拒绝不写', async () => {
+    createIdentity({ localpart: 'fail-kind' });
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('550 recipient rejected'), {
+      code: 'EENVELOPE',
+      responseCode: 550,
+    });
+    const rejected = await post('fail-kind@test.example');
+    expect(rejected.status).toBe(502);
+    const rejectedId = ((await rejected.json()) as { id?: string }).id;
+    expect(rejectedId).toMatch(/^snd_/);
+    const rejectedRow = (await (await app.request(`/v1/send/history/${rejectedId}`)).json()) as {
+      failureKind?: string;
+      error?: string;
+    };
+    expect(rejectedRow).toMatchObject({ error: 'smtp_error', failureKind: 'smtp_response' });
+
+    resetRateLimits();
+    smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
+    const local = await post('fail-kind@test.example');
+    expect(local.status).toBe(502);
+    const localId = ((await local.json()) as { id?: string }).id;
+    const localRow = (await (await app.request(`/v1/send/history/${localId}`)).json()) as {
+      failureKind?: string;
+    };
+    expect(localRow.failureKind).toBe('local');
+
+    resetRateLimits();
+    // 配置单例可能已被别的测试文件先加载，按实际限额填满再探 429。
+    for (let i = 0; i < config.sendRateLimit - 1; i++) {
+      expect(checkSendLimit('fail-kind@test.example', config.sendRateLimit).allowed).toBe(true);
+    }
+    smtpFailure = Object.assign(new Error('550 recipient rejected'), { responseCode: 550 });
+    expect((await post('fail-kind@test.example')).status).toBe(502);
+    const limited = await post('fail-kind@test.example');
+    expect(limited.status).toBe(429);
+    const page = await app.request('/v1/send/history?address=fail-kind@test.example&limit=20');
+    const items = ((await page.json()) as { items: Array<Record<string, unknown>> }).items;
+    const rateLimited = items.find((row) => row.error === 'rate_limited');
+    expect(rateLimited).toBeTruthy();
+    expect(rateLimited).not.toHaveProperty('failureKind');
+    expect(items.find((row) => row.failureKind === 'smtp_response')?.error).toBe('smtp_error');
+    expect(items.some((row) => row.failureKind === 'local')).toBe(true);
+  });
 });
 
 describe('出站登记 sent registry', () => {

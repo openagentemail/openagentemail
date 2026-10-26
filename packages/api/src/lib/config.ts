@@ -272,7 +272,7 @@ const envSchema = z.object({
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
   // 自动回复一对一冷却（秒）。缺失或空串留给 parseAutoReplyCooldownSec 回落 300。
-  // 非法数字不在 zod 层拒启：非整数、负数、NaN 同样回落 300，0 表示关闭。
+  // 非法数字不在 zod 层拒启：非整数、负数、NaN，以及大于上限的值，同样回落 300。0 表示关闭。
   AUTO_REPLY_COOLDOWN_SEC: z.preprocess(emptyAsUndefined, z.string().optional()),
 
   // Delete messages older than this many days from the catch-all mailbox.
@@ -365,8 +365,16 @@ function isValidDomain(domain: string): boolean {
 export const DEFAULT_AUTO_REPLY_COOLDOWN_SEC = 300;
 
 /**
+ * 自动回复冷却上限（秒），一天。
+ * 再大的整数（含 1e307 这类指数写法）乘 1000 会变成 Infinity，一对会被永久挡住。
+ */
+export const MAX_AUTO_REPLY_COOLDOWN_SEC = 86_400;
+
+/**
  * 解析 AUTO_REPLY_COOLDOWN_SEC。
- * 非负整数原样采用（含 0 = 关闭）。缺失、空串、非整数、负数、NaN 回落 300。
+ * 0 到上限的整数原样采用（0 = 关闭）。
+ * 缺失、空串、非整数、负数、NaN 回落 300。
+ * 大于上限的整数（含指数形式）也回落 300，并打一条警告。
  */
 export function parseAutoReplyCooldownSec(value: unknown): number {
   if (value === undefined || value === null) return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
@@ -374,6 +382,14 @@ export function parseAutoReplyCooldownSec(value: unknown): number {
   if (raw === '') return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
   const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
+  if (n > MAX_AUTO_REPLY_COOLDOWN_SEC) {
+    // 警告里保留调用方写下的文本，方便认出 1e307 这种写法。
+    const shown = typeof raw === 'string' ? raw : String(n);
+    console.warn(
+      `[config] AUTO_REPLY_COOLDOWN_SEC=${shown} exceeds ${MAX_AUTO_REPLY_COOLDOWN_SEC}; using ${DEFAULT_AUTO_REPLY_COOLDOWN_SEC}`,
+    );
+    return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
+  }
   return n;
 }
 

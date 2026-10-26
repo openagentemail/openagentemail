@@ -9,7 +9,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 
 import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-const { normalizeUrl, parseConfig } = await import('../src/lib/config.ts');
+const { MAX_AUTO_REPLY_COOLDOWN_SEC, normalizeUrl, parseConfig } = await import('../src/lib/config.ts');
 
 const requiredEnv: NodeJS.ProcessEnv = {
   DOMAIN: 'example.com',
@@ -814,6 +814,33 @@ describe('AUTO_REPLY_COOLDOWN_SEC', () => {
     expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '1e2' }).autoReplyCooldownSec).toBe(100);
     for (const bad of ['1.5', '-1', 'NaN', 'nope', '1.0.0']) {
       expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: bad }).autoReplyCooldownSec).toBe(300);
+    }
+  });
+
+  test('大于 86400 的整数回落 300，并警告一次', () => {
+    expect(MAX_AUTO_REPLY_COOLDOWN_SEC).toBe(86400);
+    const seen: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => {
+      seen.push(args.map((part) => String(part)).join(' '));
+      orig.apply(console, args);
+    };
+    try {
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '86400' }).autoReplyCooldownSec).toBe(86400);
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '86401' }).autoReplyCooldownSec).toBe(300);
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '1e307' }).autoReplyCooldownSec).toBe(300);
+      // 指数和非整数写法，解析后仍是大于上限的整数。
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '1e5' }).autoReplyCooldownSec).toBe(300);
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '86401.0' }).autoReplyCooldownSec).toBe(300);
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '180' }).autoReplyCooldownSec).toBe(180);
+      expect(seen.filter((line) => line.startsWith('[config] AUTO_REPLY_COOLDOWN_SEC='))).toEqual([
+        '[config] AUTO_REPLY_COOLDOWN_SEC=86401 exceeds 86400; using 300',
+        '[config] AUTO_REPLY_COOLDOWN_SEC=1e307 exceeds 86400; using 300',
+        '[config] AUTO_REPLY_COOLDOWN_SEC=1e5 exceeds 86400; using 300',
+        '[config] AUTO_REPLY_COOLDOWN_SEC=86401.0 exceeds 86400; using 300',
+      ]);
+    } finally {
+      console.warn = orig;
     }
   });
 });

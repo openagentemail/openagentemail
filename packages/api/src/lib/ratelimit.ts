@@ -4,9 +4,12 @@
  * token from turning the box into a spam cannon, it is not a billing quota.
  *
  * The per-identity hourly send window is the exception. API startup replays
- * `send-log.jsonl` rows from the last hour (`result === "queued"`) back into
- * this same map, using the original timestamps. A send whose log line was lost
- * is not counted. `SEND_RATE_LIMIT=0` still disables the check.
+ * `send-log.jsonl` rows from the last hour back into this same map: queued
+ * rows, plus failed rows the SMTP server answered
+ * (`failureKind === "smtp_response"`). Local failures, older failed rows
+ * without that field, and rate_limited rows are not counted. Timestamps stay
+ * original. A send whose log line was lost is not counted.
+ * `SEND_RATE_LIMIT=0` still disables the check.
  *
  * Identities each get their own window, so one misbehaving agent can't
  * starve the others. MCP 读写分桶与 send/notifyUser 共用下方 slidingWindow*
@@ -90,18 +93,30 @@ export function checkSendLimit(
 
 /**
  * 启动时把发送日志回放进现有每小时额度桶（不另开限额）。
- * 只收最近一个窗口内 result === "queued" 的行；键与 checkSendLimit 相同（整段地址小写，不 trim）。
+ * 最近一个窗口内：result === "queued"，或 result === "failed" 且 failureKind === "smtp_response"。
+ * 没有 failureKind 的旧失败行、local、rate_limited 都不计。
+ * 键与 checkSendLimit 相同（整段地址小写，不 trim）。
  * 时间戳保持原值，滑动窗口才会按原发送时刻过期。SEND_RATE_LIMIT=0 时检查直接放行，桶里有戳也无害。
  */
 export function rebuildSendLimitFromRecords(
-  rows: readonly { from: string; result: string; sentAt: string }[],
+  rows: readonly {
+    from: string;
+    result: string;
+    sentAt: string;
+    failureKind?: string;
+    error?: string;
+  }[],
   now = Date.now(),
   windowMs = SEND_RATE_WINDOW_MS,
 ): void {
   const cutoff = now - windowMs;
   const grouped = new Map<string, number[]>();
   for (const row of rows) {
-    if (row.result !== 'queued') continue;
+    // 对端已经应答过的失败，重启前占过额度，不能因为 result 不是 queued 就放掉。
+    const counts =
+      row.result === 'queued' ||
+      (row.result === 'failed' && row.failureKind === 'smtp_response');
+    if (!counts) continue;
     const sentAt = Date.parse(row.sentAt);
     // 与 slidingWindowCheck 同一边界：t > cutoff；未来时间戳不占额度。
     if (!Number.isFinite(sentAt) || sentAt <= cutoff || sentAt > now) continue;

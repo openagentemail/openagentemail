@@ -47,6 +47,8 @@ export type SendLogLimit = (typeof SEND_LOG_LIMITS)[number];
 
 export type SendLogSource = 'api' | 'mcp';
 export type SendLogResult = 'queued' | 'failed';
+/** SMTP catch 失败行的分类。与 isLocalSendFailure 同一口径。 */
+export type SendLogFailureKind = 'smtp_response' | 'local';
 
 export type SendLogRecord = {
   schemaVersion: typeof SEND_LOG_SCHEMA_VERSION;
@@ -61,6 +63,12 @@ export type SendLogRecord = {
   source: SendLogSource;
   /** 只有显式 autoReply true 才出现。false、省略和旧行都没有该字段。 */
   autoReply?: true;
+  /**
+   * 只出现在 SMTP catch 写下的失败行。
+   * smtp_response：对端已应答，重启回放要计入额度和冷却。
+   * local：连接类失败，不计入。rate_limited 和旧行没有该字段。
+   */
+  failureKind?: SendLogFailureKind;
 };
 
 export type SendLogQuery = {
@@ -224,6 +232,13 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   };
   if (typeof row.error === 'string' && row.error) record.error = row.error;
   if (row.autoReply === true) record.autoReply = true;
+  // 只认两种分类。别的值丢掉该字段，不因此拒掉整行。成功行和额度拒绝行也不留。
+  if (
+    record.result === 'failed' &&
+    (row.failureKind === 'smtp_response' || row.failureKind === 'local')
+  ) {
+    record.failureKind = row.failureKind;
+  }
   return record;
 }
 
@@ -720,6 +735,8 @@ export type AppendSendLogInput = {
   error?: string;
   source: SendLogSource;
   autoReply?: boolean;
+  /** 仅 SMTP 失败行。其它结果即使传入也不落盘。 */
+  failureKind?: SendLogFailureKind;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -766,6 +783,12 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     };
     if (input.result === 'failed' && input.error) {
       record.error = input.error.slice(0, 64);
+    }
+    if (
+      input.result === 'failed' &&
+      (input.failureKind === 'smtp_response' || input.failureKind === 'local')
+    ) {
+      record.failureKind = input.failureKind;
     }
     if (input.autoReply === true) record.autoReply = true;
     const line = `${JSON.stringify(record)}\n`;
