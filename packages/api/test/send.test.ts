@@ -201,6 +201,7 @@ describe('发信失败后的配额处理', () => {
       failureKind?: string;
     };
     expect(localRow.failureKind).toBe('local');
+    expect(localRow).not.toHaveProperty('rateLimitAt');
 
     resetRateLimits();
     // 配置单例可能已被别的测试文件先加载，按实际限额填满再探 429。
@@ -216,8 +217,101 @@ describe('发信失败后的配额处理', () => {
     const rateLimited = items.find((row) => row.error === 'rate_limited');
     expect(rateLimited).toBeTruthy();
     expect(rateLimited).not.toHaveProperty('failureKind');
+    expect(rateLimited).not.toHaveProperty('rateLimitAt');
     expect(items.find((row) => row.failureKind === 'smtp_response')?.error).toBe('smtp_error');
     expect(items.some((row) => row.failureKind === 'local')).toBe(true);
+  });
+
+  test('queued 行的 rateLimitAt 等于准入时刻，本机故障不写', async () => {
+    createIdentity({ localpart: 'admit-at' });
+    resetRateLimits();
+    expect(config.sendRateLimit).toBeGreaterThan(0);
+    const admitted = 1_700_000_000_000;
+    let now = admitted;
+    const originalNow = Date.now;
+    Date.now = () => now;
+    try {
+      sendMail.mockImplementation(async () => {
+        now = admitted + 60_000;
+        // 初始 mock 推断为 Promise<never>；断言保持成功返回，不新增类型错误。
+        return { messageId: '<admit@test.example>' } as never;
+      });
+      const response = await post('admit-at@test.example');
+      expect(response.status).toBe(200);
+      const id = ((await response.json()) as { id?: string }).id;
+      expect(id).toMatch(/^snd_/);
+      const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+        rateLimitAt?: string;
+        sentAt?: string;
+      };
+      expect(row.rateLimitAt).toBe(new Date(admitted).toISOString());
+      expect(row.sentAt).toBe(new Date(admitted + 60_000).toISOString());
+
+      resetRateLimits();
+      smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
+      sendMail.mockImplementation(async () => {
+        now += 5_000;
+        throw smtpFailure;
+      });
+      const local = await post('admit-at@test.example');
+      expect(local.status).toBe(502);
+      const localId = ((await local.json()) as { id?: string }).id;
+      const localRow = (await (await app.request(`/v1/send/history/${localId}`)).json()) as {
+        failureKind?: string;
+        rateLimitAt?: string;
+      };
+      expect(localRow.failureKind).toBe('local');
+      expect(localRow).not.toHaveProperty('rateLimitAt');
+
+      resetRateLimits();
+      const remoteAt = now;
+      smtpFailure = Object.assign(new Error('550 recipient rejected'), { responseCode: 550 });
+      sendMail.mockImplementation(async () => {
+        now += 5_000;
+        throw smtpFailure;
+      });
+      const remote = await post('admit-at@test.example');
+      expect(remote.status).toBe(502);
+      const remoteId = ((await remote.json()) as { id?: string }).id;
+      const remoteRow = (await (await app.request(`/v1/send/history/${remoteId}`)).json()) as {
+        failureKind?: string;
+        rateLimitAt?: string;
+        sentAt?: string;
+      };
+      expect(remoteRow.failureKind).toBe('smtp_response');
+      expect(remoteRow.rateLimitAt).toBe(new Date(remoteAt).toISOString());
+      expect(remoteRow.sentAt).toBe(new Date(remoteAt + 5_000).toISOString());
+    } finally {
+      Date.now = originalNow;
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    }
+  });
+
+  test('SEND_RATE_LIMIT=0 的成功行不写 rateLimitAt', async () => {
+    const prev = config.sendRateLimit;
+    Object.assign(config, { sendRateLimit: 0 });
+    try {
+      createIdentity({ localpart: 'no-quota' });
+      resetRateLimits();
+      sendMail.mockImplementation(async () => ({ messageId: '<noquota@test.example>' } as never));
+      const response = await post('no-quota@test.example');
+      expect(response.status).toBe(200);
+      const id = ((await response.json()) as { id?: string }).id;
+      expect(id).toMatch(/^snd_/);
+      const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+        result?: string;
+        rateLimitAt?: string;
+      };
+      expect(row.result).toBe('queued');
+      expect(row).not.toHaveProperty('rateLimitAt');
+    } finally {
+      Object.assign(config, { sendRateLimit: prev });
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    }
   });
 });
 

@@ -7,8 +7,9 @@
  * `send-log.jsonl` rows from the last hour back into this same map: queued
  * rows, plus failed rows the SMTP server answered
  * (`failureKind === "smtp_response"`). Local failures, older failed rows
- * without that field, and rate_limited rows are not counted. Timestamps stay
- * original. A send whose log line was lost is not counted.
+ * without that field, and rate_limited rows are not counted. Replay uses
+ * `rateLimitAt` when that admission timestamp is present and valid, otherwise
+ * `sentAt`. A send whose log line was lost is not counted.
  * `SEND_RATE_LIMIT=0` still disables the check.
  *
  * Identities each get their own window, so one misbehaving agent can't
@@ -96,8 +97,20 @@ export function checkSendLimit(
  * 最近一个窗口内：result === "queued"，或 result === "failed" 且 failureKind === "smtp_response"。
  * 没有 failureKind 的旧失败行、local、rate_limited 都不计。
  * 键与 checkSendLimit 相同（整段地址小写，不 trim）。
- * 时间戳保持原值，滑动窗口才会按原发送时刻过期。SEND_RATE_LIMIT=0 时检查直接放行，桶里有戳也无害。
+ * 有合法 rateLimitAt 时用准入时刻，否则回落 sentAt（旧行）。窗口和未来时间的边界作用在选中的那个时间上。
+ * SEND_RATE_LIMIT=0 时检查直接放行，桶里有戳也无害。
  */
+/** 与发送日志解析同一上限：更长的准入时刻当无效，回落 sentAt。 */
+const HOURLY_REPLAY_AT_MAX_LEN = 64;
+
+function hourlyReplayAt(rateLimitAt: string | undefined, sentAt: string): number {
+  if (typeof rateLimitAt === 'string' && rateLimitAt.length <= HOURLY_REPLAY_AT_MAX_LEN) {
+    const admitted = Date.parse(rateLimitAt);
+    if (Number.isFinite(admitted)) return admitted;
+  }
+  return Date.parse(sentAt);
+}
+
 export function rebuildSendLimitFromRecords(
   rows: readonly {
     from: string;
@@ -105,6 +118,7 @@ export function rebuildSendLimitFromRecords(
     sentAt: string;
     failureKind?: string;
     error?: string;
+    rateLimitAt?: string;
   }[],
   now = Date.now(),
   windowMs = SEND_RATE_WINDOW_MS,
@@ -117,13 +131,13 @@ export function rebuildSendLimitFromRecords(
       row.result === 'queued' ||
       (row.result === 'failed' && row.failureKind === 'smtp_response');
     if (!counts) continue;
-    const sentAt = Date.parse(row.sentAt);
-    // 与 slidingWindowCheck 同一边界：t > cutoff；未来时间戳不占额度。
-    if (!Number.isFinite(sentAt) || sentAt <= cutoff || sentAt > now) continue;
+    const at = hourlyReplayAt(row.rateLimitAt, row.sentAt);
+    // 与 slidingWindowCheck 同一边界：t > cutoff；未来时间戳不占额度。边界套在选中的时间上。
+    if (!Number.isFinite(at) || at <= cutoff || at > now) continue;
     const key = row.from.toLowerCase();
     const list = grouped.get(key);
-    if (list) list.push(sentAt);
-    else grouped.set(key, [sentAt]);
+    if (list) list.push(at);
+    else grouped.set(key, [at]);
   }
   buckets.clear();
   for (const [key, stamps] of grouped) {

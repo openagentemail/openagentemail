@@ -252,6 +252,107 @@ describe('send-log store', () => {
     expect(again.items.find((row) => row.subject === 'bogus')?.result).toBe('failed');
   });
 
+  test('rateLimitAt 往返，非法值丢掉且不拒行', async () => {
+    const admitted = '2026-10-26T05:00:00.000Z';
+    const queued = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'slot',
+      result: 'queued',
+      source: 'api',
+      rateLimitAt: admitted,
+    });
+    const smtp = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'smtp-slot',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'smtp_response',
+      rateLimitAt: admitted,
+    });
+    const local = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'local-slot',
+      result: 'failed',
+      error: 'smtp_error',
+      source: 'api',
+      failureKind: 'local',
+      rateLimitAt: admitted,
+    });
+    const limited = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'limited-slot',
+      result: 'failed',
+      error: 'rate_limited',
+      source: 'api',
+      rateLimitAt: admitted,
+    });
+    expect(queued.rateLimitAt).toBe(admitted);
+    expect(queued.sentAt).not.toBe(admitted);
+    expect(smtp.rateLimitAt).toBe(admitted);
+    expect(local).not.toHaveProperty('rateLimitAt');
+    expect(limited).not.toHaveProperty('rateLimitAt');
+    const written = await querySendLog({ limit: 20 });
+    expect(written.items.find((row) => row.subject === 'slot')?.rateLimitAt).toBe(admitted);
+    expect(written.items.find((row) => row.subject === 'slot')?.sentAt).toBe(queued.sentAt);
+
+    const sentAt = new Date().toISOString();
+    const base = {
+      schemaVersion: 1,
+      sentAt,
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      messageId: null,
+      source: 'api',
+    };
+    writeFileSync(
+      sendLogPathForTests(),
+      [
+        {
+          ...base,
+          id: 'snd_rl_ok000000000000000001',
+          subject: 'ok',
+          result: 'queued',
+          rateLimitAt: admitted,
+        },
+        {
+          ...base,
+          id: 'snd_rl_bad00000000000000002',
+          subject: 'bad',
+          result: 'queued',
+          rateLimitAt: 'not-a-time',
+        },
+        {
+          ...base,
+          id: 'snd_rl_long0000000000000003',
+          subject: 'long',
+          result: 'queued',
+          rateLimitAt: `${admitted}${'x'.repeat(64)}`,
+        },
+        {
+          ...base,
+          id: 'snd_rl_num00000000000000004',
+          subject: 'num',
+          result: 'queued',
+          rateLimitAt: 1,
+        },
+      ].map((row) => `${JSON.stringify(row)}\n`).join(''),
+      { mode: 0o600 },
+    );
+    const parsed = await querySendLog({ limit: 20 });
+    expect(parsed.items).toHaveLength(4);
+    expect(parsed.items.find((row) => row.subject === 'ok')?.rateLimitAt).toBe(admitted);
+    expect(parsed.items.find((row) => row.subject === 'ok')?.sentAt).toBe(sentAt);
+    expect(parsed.items.find((row) => row.subject === 'bad')).not.toHaveProperty('rateLimitAt');
+    expect(parsed.items.find((row) => row.subject === 'bad')?.sentAt).toBe(sentAt);
+    expect(parsed.items.find((row) => row.subject === 'long')).not.toHaveProperty('rateLimitAt');
+    expect(parsed.items.find((row) => row.subject === 'num')).not.toHaveProperty('rateLimitAt');
+  });
+
   test('query hard-clamps to 30 days', async () => {
     const now = Date.parse('2026-08-14T12:00:00.000Z');
     setSendLogNowForTests(() => now - SEND_LOG_RETENTION_MS - 60_000);

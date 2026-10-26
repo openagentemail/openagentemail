@@ -3,6 +3,7 @@
  * 每小时发信额度，以及自动回复一对一冷却。
  * 两张表都认 queued，再加上 SMTP 已应答的失败行（failureKind === "smtp_response"）。
  * 冷却还要求 autoReply === true。没有该字段的旧失败行不计入。
+ * 额度用准入时刻 rateLimitAt（没有或非法则 sentAt）。冷却仍用 sentAt。
  * 读盘失败只告警，不抛出，避免坏日志挡住 API 启动。
  */
 

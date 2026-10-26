@@ -195,7 +195,7 @@ export function finalizeAutoReplyCooldownReservation(
  * 新增的对放不下时整批不写，避免挤掉还在生效的格子。
  * cooldownSec <= 0 时不写表。
  */
-export function recordAutoReplyCooldown(
+export function recordAutoReplyCooldownForTests(
   from: string,
   recipients: readonly string[],
   cooldownSec: number,
@@ -254,7 +254,7 @@ export function rebuildAutoReplyCooldownFromRecords(
       (row.result === 'failed' && row.failureKind === 'smtp_response');
     if (row.autoReply !== true || !answered) continue;
     const sentAt = Date.parse(row.sentAt);
-    // 与 rebuildSendLimitFromRecords 一样：未来时间戳不占冷却。
+    // 冷却从 SMTP 应答起算，仍用 sentAt，不用额度准入时刻。未来时间戳不占冷却。
     if (!Number.isFinite(sentAt) || sentAt > now) continue;
     const until = sentAt + windowMs;
     if (until <= now) continue;

@@ -28,7 +28,7 @@ const {
   checkAndReserveAutoReplyCooldown,
   checkAutoReplyCooldown,
   finalizeAutoReplyCooldownReservation,
-  recordAutoReplyCooldown,
+  recordAutoReplyCooldownForTests,
   releaseAutoReplyCooldownReservation,
   resetAutoReplyCooldownForTests,
   setAutoReplyCooldownCapForTests,
@@ -381,7 +381,7 @@ describe('POST /v1/send 自动回复冷却', () => {
   });
 
   test('地址归一只做 trim 和小写', () => {
-    recordAutoReplyCooldown(' Agent@X.com ', [' B+Tag@Y.com '], 300);
+    recordAutoReplyCooldownForTests(' Agent@X.com ', [' B+Tag@Y.com '], 300);
     expect(checkAutoReplyCooldown('agent@x.com', ['b+tag@y.com'], 300).blocked).toBe(true);
     expect(checkAutoReplyCooldown('agent@x.com', ['b@y.com'], 300).blocked).toBe(false);
     expect(checkAutoReplyCooldown('agent@x.com', ['b+tag@y.com'], 0).blocked).toBe(false);
@@ -751,7 +751,7 @@ describe('启动回放', () => {
   });
 
   test('读日志失败只告警，不清掉已经在内存里的冷却和额度', () => {
-    recordAutoReplyCooldown('keep@x.com', ['keep@e.com'], 300);
+    recordAutoReplyCooldownForTests('keep@x.com', ['keep@e.com'], 300);
     checkSendLimit('keep@x.com', 20);
     expect(checkAutoReplyCooldown('keep@x.com', ['keep@e.com'], 300).blocked).toBe(true);
     expect(sendLimitCountForTests('keep@x.com')).toBe(1);

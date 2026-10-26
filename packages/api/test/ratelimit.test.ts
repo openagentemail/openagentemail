@@ -135,6 +135,58 @@ describe('rebuildSendLimitFromRecords', () => {
     expect(sendLimitCountForTests('b@x.com', t + 1_000)).toBe(0);
     resetRateLimits();
   });
+
+  test('回放优先用 rateLimitAt，过期按准入时刻；没有或非法则回落 sentAt', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    const admission = new Date(t).toISOString();
+    const later = new Date(t + 50 * 60 * 1000).toISOString();
+    const midway = t + 30 * 60 * 1000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt: later, rateLimitAt: admission },
+        {
+          from: 'b@x.com',
+          result: 'failed',
+          failureKind: 'smtp_response',
+          sentAt: later,
+          rateLimitAt: admission,
+        },
+      ],
+      midway,
+    );
+    // 准入时刻还在窗口里。更晚的 sentAt 此刻是未来时间，若误用它这两枚都不会留下。
+    expect(sendLimitCountForTests('a@x.com', midway)).toBe(1);
+    expect(sendLimitCountForTests('b@x.com', midway)).toBe(1);
+    // t+1h 时准入戳滑出。更晚的 sentAt 仍在窗口内，额度必须已经空。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(0);
+    expect(sendLimitCountForTests('b@x.com', t + 3_600_000)).toBe(0);
+
+    resetRateLimits();
+    rebuildSendLimitFromRecords(
+      [{ from: 'a@x.com', result: 'queued', sentAt: admission }],
+      midway,
+    );
+    expect(sendLimitCountForTests('a@x.com', midway)).toBe(1);
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(0);
+
+    resetRateLimits();
+    const afterLater = t + 55 * 60 * 1000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'a@x.com', result: 'queued', sentAt: later, rateLimitAt: 'not-a-time' },
+        { from: 'c@x.com', result: 'queued', sentAt: later, rateLimitAt: 'x'.repeat(80) },
+      ],
+      afterLater,
+    );
+    expect(sendLimitCountForTests('a@x.com', afterLater)).toBe(1);
+    expect(sendLimitCountForTests('c@x.com', afterLater)).toBe(1);
+    // 非法准入时刻不占位：过期跟 sentAt 走，t+1h 时那一枚还在。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(1);
+    expect(sendLimitCountForTests('c@x.com', t + 3_600_000)).toBe(1);
+    expect(sendLimitCountForTests('a@x.com', t + 50 * 60 * 1000 + 3_600_000)).toBe(0);
+    resetRateLimits();
+  });
 });
 
 describe('checkNotifyUserLimit', () => {

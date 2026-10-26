@@ -76,6 +76,12 @@ function recipientsOf(to: string | string[]): string[] {
   return Array.isArray(to) ? to : [to];
 }
 
+/** 每小时额度的准入时刻。限额关闭时没有 reservation，不写 rateLimitAt。 */
+function hourlySlotAt(reservation: number | undefined): string | undefined {
+  if (typeof reservation !== 'number' || !Number.isFinite(reservation)) return undefined;
+  return new Date(reservation).toISOString();
+}
+
 /** 记审计失败不得改 SMTP 结果；调用方仍可没有 id。 */
 async function recordSend(input: {
   from: string;
@@ -88,6 +94,8 @@ async function recordSend(input: {
   autoReply?: boolean;
   /** 只给 SMTP catch。分类必须和下面的 isLocalSendFailure 是同一次判断。 */
   failureKind?: 'smtp_response' | 'local';
+  /** 准入时刻。只传给真正占住每小时额度的行。 */
+  rateLimitAt?: string;
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -230,6 +238,9 @@ sendRoute.post('/', async (c) => {
     );
   }
 
+  // 槽在准入时占上。sentAt 要等 SMTP 返回才写，回放必须用这一刻，否则慢请求重启后槽会晚过期。
+  const rateLimitAt = hourlySlotAt(limit.reservation);
+
   try {
     const { messageId } = await sendMail({
       from,
@@ -259,6 +270,7 @@ sendRoute.post('/', async (c) => {
       result: 'queued',
       source,
       autoReply,
+      rateLimitAt,
     });
     return c.json({ queued: true, messageId, ...(logged ? { id: logged.id } : {}) }, 200);
   } catch (err) {
@@ -286,6 +298,8 @@ sendRoute.post('/', async (c) => {
       failureKind: localFailure ? 'local' : 'smtp_response',
       source,
       autoReply,
+      // 连接类失败已经退还额度，不留准入时刻。对端应答过的失败仍占着那一枚。
+      rateLimitAt: localFailure ? undefined : rateLimitAt,
     });
     return c.json({ error: 'smtp_error', ...(logged ? { id: logged.id } : {}) }, 502);
   }

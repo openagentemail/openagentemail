@@ -69,6 +69,12 @@ export type SendLogRecord = {
    * local：连接类失败，不计入。rate_limited 和旧行没有该字段。
    */
   failureKind?: SendLogFailureKind;
+  /**
+   * 每小时额度的准入时刻（checkSendLimit 推进窗口的那一枚）。
+   * 只出现在真正占住额度的 queued 行，以及 failureKind 为 smtp_response 的失败行。
+   * 限额关闭（没有 reservation）时不写。发送历史仍看 sentAt。
+   */
+  rateLimitAt?: string;
 };
 
 export type SendLogQuery = {
@@ -199,6 +205,15 @@ function isLoggedEmail(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= SEND_LOG_EMAIL_MAX_LEN;
 }
 
+/** 准入时刻只接受短 ISO 字符串。更长或解析不了的丢掉该字段，不拒整行。 */
+const RATE_LIMIT_AT_MAX_LEN = 64;
+
+function acceptedRateLimitAt(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > RATE_LIMIT_AT_MAX_LEN) return undefined;
+  if (!Number.isFinite(Date.parse(value))) return undefined;
+  return value;
+}
+
 function parseRecord(raw: unknown): SendLogRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const row = raw as Record<string, unknown>;
@@ -239,6 +254,9 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   ) {
     record.failureKind = row.failureKind;
   }
+  // 只认短且能解析的时间。别的值丢掉该字段，不因此拒掉整行。
+  const rateLimitAt = acceptedRateLimitAt(row.rateLimitAt);
+  if (rateLimitAt) record.rateLimitAt = rateLimitAt;
   return record;
 }
 
@@ -737,6 +755,11 @@ export type AppendSendLogInput = {
   autoReply?: boolean;
   /** 仅 SMTP 失败行。其它结果即使传入也不落盘。 */
   failureKind?: SendLogFailureKind;
+  /**
+   * 准入时刻的 ISO 时间。只在 queued，或 failed 且 failureKind 为 smtp_response 时落盘。
+   * 不是短的可解析时间就丢掉。限额为 0 时调用方不传。
+   */
+  rateLimitAt?: string;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -790,6 +813,12 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     ) {
       record.failureKind = input.failureKind;
     }
+    // 额度槽在准入时占上。只写真正占住槽的行：成功，以及 SMTP 已应答的失败。
+    const holdsHourlySlot =
+      input.result === 'queued' ||
+      (input.result === 'failed' && input.failureKind === 'smtp_response');
+    const rateLimitAt = holdsHourlySlot ? acceptedRateLimitAt(input.rateLimitAt) : undefined;
+    if (rateLimitAt) record.rateLimitAt = rateLimitAt;
     if (input.autoReply === true) record.autoReply = true;
     const line = `${JSON.stringify(record)}\n`;
     try {

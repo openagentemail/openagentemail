@@ -35,7 +35,7 @@ bun run typecheck
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
 | `DATA_DIR` | `./data` | 全部 store 单写者，不支持多容器共享（identities / oauth / audit / ui-sessions / sent-registry / notification-log / notification-devices / send-log；0600）。 |
-| `SEND_RATE_LIMIT` | `20` | 每个发件身份每小时 `/v1/send` 封数，`0` 关闭。启动时从 `send-log.jsonl` 回放最近一小时的 `queued` 行，加上 SMTP 服务器已应答的失败行；日志没写上的那一封不计。 |
+| `SEND_RATE_LIMIT` | `20` | 每个发件身份每小时 `/v1/send` 封数，`0` 关闭。启动时从 `send-log.jsonl` 回放最近一小时的 `queued` 行，加上 SMTP 服务器已应答的失败行；有 `rateLimitAt` 用准入时刻，否则用 `sentAt`。`0` 不写 `rateLimitAt`。日志没写上的那一封不计。 |
 | `AUTO_REPLY_COOLDOWN_SEC` | `300` | `autoReply:true` 的发件身份 × 收件人冷却秒数，`0` 关闭。非整数、负数、NaN 或大于 86400 回落 300。普通邮件不读不写。表满（10000 对）时新的自动回复被拒绝，不逐出未过期项。启动回放窗口内的 `queued` 行，加上 SMTP 服务器已应答且 `autoReply:true` 的失败行。 |
 
 ## Endpoints
