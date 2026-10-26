@@ -1676,3 +1676,17 @@ N/A。
 1. npm 生成的 lock 只把根对象的 `engines` 移到 `devDependencies` 之后，值相同。其余 112 个原始节点字节相同，113 个规范对象相同。按 #6067 接受这次序列化例外，没有手改 lock。
 ### 我们是如何解决这些错误的？
 1. 旧基线与首次候选都是 ci 0、typecheck 0、full 131 pass / 0 fail / 0 skip。新席启动 ci 也是 0。本卡不重跑这些套件。FC 将在交付后独立复跑最终候选的 clean ci、typecheck 与 full。未提交。
+
+## 2026-10-25 · 启动回放进程测试
+
+### 我们实现了哪些功能？
+1. `packages/api/test/auto-reply-cooldown.test.ts` 增加进程级用例：先构建 `dist/main.js`，在启动前把 `DATA_DIR/send-log.jsonl` 写成两条最近一小时的 `queued` 行（其中一条 `autoReply: true`），再 `bun dist/main.js`。`POST /v1/send` 对已种下的那一对返回 429 `auto_reply_cooldown`，另一封超过 `SEND_RATE_LIMIT=2` 的发信返回 429 `rate_limited`。SMTP 指向已关闭的本机端口。原有的源码字符串断言和进程内回放测试没改。
+2. `freePort` / `waitForServer` 抽到 `packages/api/test/support/dist-server.ts`，和 `dist-bundle.test.ts` 共用。构建互斥仍用原来的端口锁。`dist-bundle` 的超时改成 180 秒，盖住等锁再构建的时间。
+
+### 我们遇到了哪些错误？
+1. 没有新的测试失败。第一次跑这条进程测试就是通过。
+2. 用 mawk 按文件汇总 `tsc` 报错时，`asorti` 不存在，基线数字没打出来。
+
+### 我们是如何解决这些错误的？
+1. 不需要改生产代码。`bun build` 后的入口仍保留 `import.meta.main`，容器启动路径会回放。
+2. 改用 Python 比较改动前后的 `tsc` 输出。仍是 179 条，按文件计数没有变化。`bun test test/auto-reply-cooldown.test.ts test/dist-bundle.test.ts test/send.test.ts test/ratelimit.test.ts` 为 77 pass / 0 fail。`bun run lint:ui` 退出码 0。没有跑全量 `bun test`。

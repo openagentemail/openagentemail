@@ -1,10 +1,14 @@
 // 自动回复一对一冷却，以及从 send-log.jsonl 回放每小时额度。
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { mkdtempSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
+import { withDistBuildLockAsync } from './support/dist-build-lock.ts';
+import { apiDistDir, apiPackageDir, freePort, waitForServer } from './support/dist-server.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -39,6 +43,7 @@ const {
   sendLimitCountForTests,
 } = await import('../src/lib/ratelimit.ts');
 const {
+  SEND_LOG_SCHEMA_VERSION,
   appendSendLog,
   readSendLogRecordsForReplay,
   resetSendLogForTests,
@@ -864,7 +869,232 @@ describe('启动回放', () => {
     expect(src).toContain('if (import.meta.main)');
     expect(src).toContain('replaySendGuardsFromLog()');
   });
+
+  // 构建后的 dist/main.js 才是容器入口。进程起来之前把 send-log 写进 DATA_DIR，
+  // 确认 import.meta.main 那次回放真的灌进了冷却表和每小时额度。
+  test('已构建进程启动前种下的 send-log 会挡自动回复和超额发信', async () => {
+    const sendRateLimit = 2;
+    const cooldownSec = 300;
+    const domain = 'test.example';
+    const localpart = `boot${randomBytes(4).toString('hex')}`;
+    const from = `${localpart}@${domain}`;
+    const cooledTo = 'pair@example.net';
+    const otherTo = 'other-seed@example.net';
+    const freshTo = 'fresh@example.net';
+    const adminKey = `boot-admin-${randomBytes(16).toString('hex')}`;
+    const imapPass = `boot-imap-${randomBytes(16).toString('hex')}`;
+    const smtpPass = `boot-smtp-${randomBytes(16).toString('hex')}`;
+    // 三十秒前：既在冷却窗口内，也在滑动小时窗口内。
+    const seededAtMs = Date.now() - 30_000;
+    const seededAt = new Date(seededAtMs).toISOString();
+
+    await withDistBuildLockAsync({}, async () => {
+      rmSync(apiDistDir, { recursive: true, force: true });
+      const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: apiPackageDir });
+      if (build.exitCode !== 0) {
+        throw new Error(`bun run build failed:\n${build.stdout}\n${build.stderr}`);
+      }
+
+      const dataDir = mkdtempSync(join(tmpdir(), 'oae-boot-replay-'));
+      chmodSync(dataDir, 0o700);
+      const logPath = join(dataDir, 'send-log.jsonl');
+      // 恰好 SEND_RATE_LIMIT 条 queued。其中一条是自动回复，用来挡同一对。
+      const lines = [cooledTo, otherTo].map((recipient, index) => {
+        const row: Record<string, unknown> = {
+          schemaVersion: SEND_LOG_SCHEMA_VERSION,
+          id: `snd_${randomBytes(12).toString('hex')}`,
+          sentAt: seededAt,
+          from,
+          to: [recipient],
+          subject: 'seed',
+          messageId: null,
+          result: 'queued',
+          source: 'api',
+        };
+        if (index === 0) row.autoReply = true;
+        return `${JSON.stringify(row)}\n`;
+      });
+      writeFileSync(logPath, lines.join(''), { encoding: 'utf8', mode: 0o600 });
+
+      const httpPort = await freePort();
+      let smtpPort = await freePort();
+      while (smtpPort === httpPort) smtpPort = await freePort();
+      // 关掉的本地端口：真打到 SMTP 会马上 ECONNREFUSED，而不是挂在问候上。
+      await expectClosedPort(smtpPort);
+
+      const child = spawn('bun', ['dist/main.js'], {
+        cwd: apiPackageDir,
+        env: bootEnv({
+          DOMAIN: domain,
+          API_KEYS: adminKey,
+          IMAP_HOST: '127.0.0.1',
+          IMAP_PORT: String(smtpPort),
+          IMAP_USER: `agent@${domain}`,
+          IMAP_PASS: imapPass,
+          IMAP_TLS: 'false',
+          SMTP_HOST: '127.0.0.1',
+          SMTP_PORT: String(smtpPort),
+          SMTP_USER: `agent@${domain}`,
+          SMTP_PASS: smtpPass,
+          DATA_DIR: dataDir,
+          PORT: String(httpPort),
+          NTFY_ENABLED: 'false',
+          UI_ENABLED: 'false',
+          WEBHOOKS_ENABLED: 'false',
+          FORWARDING_ENABLED: 'false',
+          TASK_LEASES_ENABLED: 'false',
+          RETENTION_DAYS: '0',
+          SEND_RATE_LIMIT: String(sendRateLimit),
+          AUTO_REPLY_COOLDOWN_SEC: String(cooldownSec),
+        }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let bootLog = '';
+      // 子进程吐出的是 Buffer。直接拼接会变成逗号数字，断言就看不出 SMTP 有没有被打到。
+      const onOut = (chunk: Buffer | string) => {
+        bootLog += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      };
+      child.stdout?.on('data', onOut);
+      child.stderr?.on('data', onOut);
+      const spawnFailed = new Promise<never>((_, reject) => {
+        child.once('error', reject);
+      });
+
+      try {
+        await Promise.race([
+          waitForServer(httpPort, 20_000, () => bootLog),
+          spawnFailed,
+        ]);
+
+        const origin = `http://127.0.0.1:${httpPort}`;
+        const auth = { authorization: `Bearer ${adminKey}` };
+        const created = await postJson(`${origin}/v1/identities`, { localpart }, auth);
+        if (created.status !== 201) {
+          throw new Error(`创建身份失败 ${created.status} ${created.text}\n${bootLog}`);
+        }
+        const createdBody = JSON.parse(created.text) as { address?: string };
+        expect(createdBody.address).toBe(from);
+
+        const cooled = await postJson(
+          `${origin}/v1/send`,
+          {
+            from,
+            to: cooledTo,
+            subject: 'hello',
+            text: 'body',
+            autoReply: true,
+          },
+          auth,
+        );
+        if (cooled.status !== 429) {
+          throw new Error(`自动回复应被回放挡下，实际 ${cooled.status} ${cooled.text}\n${bootLog}`);
+        }
+        const cooledBody = JSON.parse(cooled.text) as { error: string; retryAfterSec: number };
+        expect(Object.keys(cooledBody).sort()).toEqual(['error', 'retryAfterSec']);
+        expect(cooledBody.error).toBe('auto_reply_cooldown');
+        expect(cooled.headers.get('Retry-After')).toBeNull();
+        const cooldownRemain = Math.ceil((seededAtMs + cooldownSec * 1000 - Date.now()) / 1000);
+        expect(Number.isInteger(cooledBody.retryAfterSec)).toBe(true);
+        expect(cooledBody.retryAfterSec).toBeGreaterThanOrEqual(Math.max(1, cooldownRemain - 1));
+        expect(cooledBody.retryAfterSec).toBeLessThanOrEqual(cooldownRemain + 2);
+        expect(bootLog).not.toContain('[smtp] send failed');
+        expect(bootLog).not.toContain('ECONNREFUSED');
+
+        const limited = await postJson(
+          `${origin}/v1/send`,
+          {
+            from,
+            to: freshTo,
+            subject: 'hello',
+            text: 'body',
+          },
+          auth,
+        );
+        if (limited.status !== 429) {
+          throw new Error(`超额发信应被回放挡下，实际 ${limited.status} ${limited.text}\n${bootLog}`);
+        }
+        const limitedBody = JSON.parse(limited.text) as {
+          error: string;
+          limit: number;
+          retryAfterSec: number;
+          id: string;
+        };
+        expect(Object.keys(limitedBody).sort()).toEqual(['error', 'id', 'limit', 'retryAfterSec']);
+        expect(limitedBody.error).toBe('rate_limited');
+        expect(limitedBody.limit).toBe(sendRateLimit);
+        expect(limitedBody.id).toMatch(/^snd_[0-9a-f]{24}$/);
+        expect(limited.headers.get('Retry-After')).toBeNull();
+        const hourRemain = Math.ceil((seededAtMs + 3_600_000 - Date.now()) / 1000);
+        expect(Number.isInteger(limitedBody.retryAfterSec)).toBe(true);
+        expect(limitedBody.retryAfterSec).toBeGreaterThanOrEqual(Math.max(1, hourRemain - 1));
+        expect(limitedBody.retryAfterSec).toBeLessThanOrEqual(hourRemain + 2);
+        expect(bootLog).not.toContain('[smtp] send failed');
+        expect(bootLog).not.toContain('ECONNREFUSED');
+      } finally {
+        await stopChild(child);
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+  }, 180_000);
 });
+
+/** 只放行子进程自己需要的假凭据，不继承当前进程环境。 */
+function bootEnv(extra: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {
+    HOME: tmpdir(),
+    TMPDIR: tmpdir(),
+    ...extra,
+  };
+  if (process.env.PATH) env.PATH = process.env.PATH;
+  return env;
+}
+
+function postJson(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+): Promise<{ status: number; headers: Headers; text: string }> {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  }).then(async (res) => ({
+    status: res.status,
+    headers: res.headers,
+    text: await res.text(),
+  }));
+}
+
+/** 端口上没有监听。连上了就说明后面的发信可能挂住。 */
+function expectClosedPort(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: '127.0.0.1', port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`探测端口 ${port} 超时`));
+    }, 1_000);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      socket.destroy();
+      reject(new Error(`端口 ${port} 已有监听`));
+    });
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      if (err.code === 'ECONNREFUSED') resolve();
+      else reject(err);
+    });
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => {
+    child.once('exit', resolve);
+  });
+  child.kill('SIGKILL');
+  await Promise.race([exited, Bun.sleep(5_000)]);
+}
 
 describe('文档与 compose 透传', () => {
   test('AUTO_REPLY_COOLDOWN_SEC 跟在 SEND_RATE_LIMIT 旁边', () => {
