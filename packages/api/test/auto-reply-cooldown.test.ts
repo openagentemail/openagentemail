@@ -283,6 +283,31 @@ describe('POST /v1/send 自动回复冷却', () => {
     });
   });
 
+  test('邮件服务器 DNS 查找失败算本机故障：退还额度、不冷却、failureKind 为 local', async () => {
+    const from = nid('cddns');
+    await withConfig({ sendRateLimit: 1, autoReplyCooldownSec: 300 }, async () => {
+      sendMail.mockImplementation(async () => {
+        throw Object.assign(new Error('getaddrinfo ENOTFOUND mail'), { code: 'ENOTFOUND' });
+      });
+      const failed = await post(from, 'dns@example.net', { autoReply: true });
+      expect(failed.status).toBe(502);
+      expect(sendLimitCountForTests(from)).toBe(0);
+      const id = ((await failed.json()) as { id?: string }).id;
+      expect(id).toMatch(/^snd_/);
+      const row = (await (await app.request(`/v1/send/history/${id}`)).json()) as {
+        failureKind?: string;
+        error?: string;
+      };
+      expect(row).toMatchObject({ error: 'smtp_error', failureKind: 'local' });
+      // 同一对可以再发：没有冷却，额度也已退还。
+      const again = await post(from, 'dns@example.net', { autoReply: true });
+      expect(again.status).toBe(502);
+      expect(((await again.json()) as { error?: string }).error).toBe('smtp_error');
+      expect(sendMail).toHaveBeenCalledTimes(2);
+      expect(sendLimitCountForTests(from)).toBe(0);
+    });
+  });
+
   test('审计追加失败时冷却仍然生效', async () => {
     const from = nid('cdlog');
     await withConfig({ sendRateLimit: 50, autoReplyCooldownSec: 300 }, async () => {

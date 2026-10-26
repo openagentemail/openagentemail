@@ -128,11 +128,20 @@ describe('发信失败后的配额处理', () => {
       responseCode: 550,
     }))).toBe(false);
     expect(isLocalSendFailure(Object.assign(new Error('greylisted'), { responseCode: 450 }))).toBe(false);
+    // 数字 responseCode 优先：哪怕 code 是 DNS 失败，也算对端已应答。
+    expect(isLocalSendFailure(Object.assign(new Error('dns after reply'), {
+      code: 'ENOTFOUND',
+      responseCode: 450,
+    }))).toBe(false);
   });
 
   test('连不上/认证失败这类本机故障才退还', () => {
     expect(isLocalSendFailure(Object.assign(new Error('no route'), { code: 'ECONNECTION' }))).toBe(true);
     expect(isLocalSendFailure(Object.assign(new Error('bad creds'), { code: 'EAUTH' }))).toBe(true);
+    // 重连时 DNS 查找失败：信没离开本机。
+    for (const code of ['ENOTFOUND', 'ENODATA', 'EAI_AGAIN']) {
+      expect(isLocalSendFailure(Object.assign(new Error('dns'), { code }))).toBe(true);
+    }
   });
 
   test('认不出来的错误按"已消耗"处理（宁可严，不给绕过面）', () => {
