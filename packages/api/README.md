@@ -35,6 +35,8 @@ bun run typecheck
 | `SMTP_HOST/PORT/USER/PASS` | `127.0.0.1:587` | catch-all account; From is rewritten to the identity |
 | `ALLOWED_SEND_DOMAINS` | `DOMAIN` | comma list of allowed `from` domains |
 | `DATA_DIR` | `./data` | 全部 store 单写者，不支持多容器共享（identities / oauth / audit / ui-sessions / sent-registry / notification-log / notification-devices / send-log；0600）。 |
+| `SEND_RATE_LIMIT` | `20` | 每个发件身份每小时 `/v1/send` 封数，`0` 关闭。启动时从 `send-log.jsonl` 回放最近一小时 `queued` 行；日志没写上的那一封不计。 |
+| `AUTO_REPLY_COOLDOWN_SEC` | `300` | `autoReply:true` 的发件身份 × 收件人冷却秒数，`0` 关闭。非整数、负数、NaN 回落 300。普通邮件不读不写。 |
 
 ## Endpoints
 
@@ -70,7 +72,7 @@ Task REST creation accepts optional `parentTaskId` for ordinary and approval roo
 - `GET /v1/messages/:id?address=` → `{id,from,to,subject,date,text,html?,otp:{codes,links}}`
 - `POST /v1/messages/:id/seen` `{address, seen}` → `{id, seen}` (404 unless the message is TO `address` **or** a server-trusted Sent item (From match **and** Message-ID in the outbound registry) — #26 PR 2 / 返工第2轮；reading never sets `\Seen` by itself — agents mark messages processed through here)
 - `POST /v1/messages/wait` `{address, fromContains?, subjectContains?, timeoutSec?≤600}` → message or `408 {error:"timeout", timeoutSec}` (IMAP IDLE + 3 s polling hybrid). Schema max 仍 600；服务端按 `MCP_MAX_WAIT_SECONDS` 静默钳制（头 `X-OAE-Wait-Timeout-Sec`，与 408 体 `timeoutSec` 同为实际等待的整数秒 `N>=1`）。**REST 每段钳制**只约束这一次 wait；**MCP `mail_wait_for` 另有调用方总截止**，仅当 408 身份完整且单调 elapsed ≥ `N*1000-250ms` 才再武装下一段。缺头/坏体/过早 408 在 MCP 客户端 fail-fast（`upstream_408_malformed` / `upstream_timeout_early`），不是最终总超时文案。调用方断开 → `499 {error:"client_disconnected"}`（同样带 `X-OAE-Wait-Timeout-Sec`），与委托撤销 403 / 超时 408 可区分；槽位仍由路由 `finally` 释放一次。并发：3/地址、8 全局 → `429 {error:"too_many_waits"}`。
-- `POST /v1/send` `{from,to,subject,text,html?,autoReply?}` → `{queued:true, messageId, id?}`（`id` 为发送审计条目；失败 502 也可带 `id`）。`autoReply` 只能是布尔；仅 `true` 让服务端写 `Auto-Submitted: auto-replied`，`false` 与省略不写。`headers` 及其他未知键 400 `invalid_request`。本期只审计 API/MCP 发送，SMTP 直发不在此列。`from`/`to` 单项 ≤254。MCP 来源靠内部 HMAC 签头，不信任 `X-OAE-Send-Source`。
+- `POST /v1/send` `{from,to,subject,text,html?,autoReply?}` → `{queued:true, messageId, id?}`（`id` 为发送审计条目；失败 502 也可带 `id`）。`autoReply` 只能是布尔；仅 `true` 让服务端写 `Auto-Submitted: auto-replied`，`false` 与省略不写，也不读不写冷却表。`autoReply:true` 在身份校验之后、每小时额度之前按发件身份 × 收件人冷却（`AUTO_REPLY_COOLDOWN_SEC`，默认 300，`0` 关）。任一收件人仍在冷却则整封 `429 {error:"auto_reply_cooldown", retryAfterSec}`，不打 SMTP、不占每小时额度、不写发送日志。冷却从 SMTP 接受或对端错误应答起算。每小时额度（`SEND_RATE_LIMIT`）仍计算自动回复；超限 `429 {error:"rate_limited", limit, retryAfterSec}`。两条 429 都不带 `Retry-After` 头。启动时从 `send-log.jsonl` 回放这两张表；日志没写上的那一封不计。`headers` 及其他未知键 400 `invalid_request`。本期只审计 API/MCP 发送，SMTP 直发不在此列。`from`/`to` 单项 ≤254。MCP 来源靠内部 HMAC 签头，不信任 `X-OAE-Send-Source`。
 - `GET /v1/send/history?address=&limit=20|50|100&cursor=` → `{items,nextCursor,queryNow}`（admin 全量或按 from 筛；identity 只能看自己，看他人 403）
 - `POST /v1/notify/devices` `{publicUrl, displayName?}` → `201` 一次性 ntfy 凭据（password / `qrPayload` / `qr` 只此一次；`Cache-Control: no-store`）。旧 client 只传 `publicUrl` 仍可用，缺省 displayName=`Phone`。**admin only**
 - `GET /v1/notify/devices` → `{devices:[{id,displayName,topicLabels,pairedAt,revokeStatus,…}]}`（默认隐藏 `revoked`；不含 password/token）。**admin only**

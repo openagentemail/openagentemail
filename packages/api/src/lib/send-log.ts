@@ -640,6 +640,14 @@ function loadRecordsOrThrow(): SendLogRecord[] {
   return inspectAndRepairSync();
 }
 
+/**
+ * 启动回放读盘。复用 inspect 解析（缺文件为 []，中间损坏抛 SendLogCorruptError）。
+ * 调用方必须自己接住错误并只告警，不得让回放失败拖垮进程。
+ */
+export function readSendLogRecordsForReplay(): SendLogRecord[] {
+  return loadRecordsOrThrow();
+}
+
 const cursorKey = createHmac('sha256', config.taskSigningSecret)
   .update(CURSOR_PREFIX)
   .digest();

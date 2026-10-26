@@ -271,6 +271,10 @@ const envSchema = z.object({
   // Per-identity send rate limit (messages per rolling hour). 0 disables.
   SEND_RATE_LIMIT: z.coerce.number().int().min(0).default(20),
 
+  // 自动回复一对一冷却（秒）。缺失或空串留给 parseAutoReplyCooldownSec 回落 300。
+  // 非法数字不在 zod 层拒启：非整数、负数、NaN 同样回落 300，0 表示关闭。
+  AUTO_REPLY_COOLDOWN_SEC: z.preprocess(emptyAsUndefined, z.string().optional()),
+
   // Delete messages older than this many days from the catch-all mailbox.
   // 0 disables the retention sweeper.
   RETENTION_DAYS: z.coerce.number().int().min(0).default(30),
@@ -355,6 +359,22 @@ function isValidDomain(domain: string): boolean {
       Buffer.byteLength(label, 'utf8') <= SMTP_DOMAIN_LABEL_MAX_OCTETS &&
       SMTP_DOMAIN_LABEL_PATTERN.test(label),
   );
+}
+
+/** 自动回复冷却默认秒数。非法配置回落这里，避免配错变成没有冷却。 */
+export const DEFAULT_AUTO_REPLY_COOLDOWN_SEC = 300;
+
+/**
+ * 解析 AUTO_REPLY_COOLDOWN_SEC。
+ * 非负整数原样采用（含 0 = 关闭）。缺失、空串、非整数、负数、NaN 回落 300。
+ */
+export function parseAutoReplyCooldownSec(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
+  const raw = typeof value === 'string' ? value.trim() : value;
+  if (raw === '') return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return DEFAULT_AUTO_REPLY_COOLDOWN_SEC;
+  return n;
 }
 
 /** Parse an environment object so TLS defaults and validation stay testable. */
@@ -550,6 +570,7 @@ export function parseConfig(env: NodeJS.ProcessEnv) {
     oauthRatePerMin: raw.OAUTH_RATE_PER_MIN,
     mcpPreauthRatePerMin: raw.MCP_PREAUTH_RATE_PER_MIN,
     sendRateLimit: raw.SEND_RATE_LIMIT,
+    autoReplyCooldownSec: parseAutoReplyCooldownSec(raw.AUTO_REPLY_COOLDOWN_SEC),
     retentionDays: raw.RETENTION_DAYS,
     retentionCheckHours: raw.RETENTION_CHECK_HOURS,
     // X-Agent 自证（可选；未配置时 /healthz 与 well-known 保持历史行为）

@@ -6,6 +6,7 @@ import { findIdentity } from '../lib/identities.ts';
 import { notifyTrustedAgentDelivery } from '../lib/notify.ts';
 import { sendMail } from '../lib/smtp.ts';
 import { forbidUnlessAddress, getAuth, type Auth } from '../lib/auth.ts';
+import { checkAutoReplyCooldown, recordAutoReplyCooldown } from '../lib/auto-reply-cooldown.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
 import { isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
@@ -177,6 +178,20 @@ sendRoute.post('/', async (c) => {
     return c.json({ error: 'forbidden: from is not a known identity' }, 403);
   }
 
+  // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
+  // 任一收件人仍在冷却就整封拒绝：不打 SMTP、不占每小时额度、不写 send-log
+  // （拒绝行不是 queued，重建时也会忽略；这里干脆不落盘，避免 429 刷审计）。
+  // 与 rate_limited 一样只在 JSON 里给 retryAfterSec，不另加 Retry-After 头。
+  if (autoReply === true && config.autoReplyCooldownSec > 0) {
+    const cooled = checkAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
+    if (cooled.blocked) {
+      return c.json(
+        { error: 'auto_reply_cooldown', retryAfterSec: cooled.retryAfterSec },
+        429,
+      );
+    }
+  }
+
   // Per-identity rate limit (rolling hour; 0 disables in config).
   const limit = checkSendLimit(from, config.sendRateLimit);
   if (!limit.allowed) {
@@ -213,6 +228,10 @@ sendRoute.post('/', async (c) => {
       // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
       ...(autoReply === true ? { autoReply: true } : {}),
     });
+    // SMTP 已接受就先记冷却。审计追加失败时调用方仍是成功，冷却不能靠那一行。
+    if (autoReply === true && config.autoReplyCooldownSec > 0) {
+      recordAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
+    }
     // /v1/send 出站登记：sendMail 已 best-effort 写入；此处再记一次以覆盖测试里 mock 掉 smtp 的路径。
     // 登记失败不 502：SMTP 已接受时失败会让调用方重试、重复外发。
     recordSentMessageIdAfterSend(messageId, from);
@@ -235,7 +254,11 @@ sendRoute.post('/', async (c) => {
   } catch (err) {
     // Our own mail server being unreachable shouldn't cost the user a slot;
     // anything the server actually answered to stays counted.
+    // 冷却与额度同一口径：连接类失败不开始；对端已经应答则开始。
     if (isLocalSendFailure(err)) releaseSendLimit(from, limit.reservation);
+    else if (autoReply === true && config.autoReplyCooldownSec > 0) {
+      recordAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
+    }
     // SMTP errors carry server responses, relay hostnames and adapter context
     // (some adapters even echo the configured password). The operator needs
     // that in the log; the caller only gets a stable code.

@@ -300,7 +300,10 @@ external party that may be mid-deploy — but not orders of magnitude longer (§
   (`oa_…` token scoped to one address, stored as a SHA-256 hash), or `oauth` (always
   identity-scoped). `requireAdmin` (`routes/audit.ts:9`) is the admin-gate precedent.
 - Rate limiting is an in-memory **sliding window** (`slidingWindowCheck()`,
-  `ratelimit.ts:26`), reset on restart by design, with `limit <= 0` disabling. Wait slots
+  `ratelimit.ts:26`), with `limit <= 0` disabling. Most windows reset on process
+  restart. The per-identity hourly send limit does not: API startup rebuilds it
+  from `send-log.jsonl` (`result: queued` in the last hour). A send whose log
+  line was lost is not counted. Wait slots
   are capped at `MAX_WAITS_PER_ADDRESS = 3` and `MAX_WAITS_TOTAL = 8` (`ratelimit.ts:205-206`)
   → `429 {error:'too_many_waits', retryAfterSec:5}`.
 - Audit is append-only `DATA_DIR/audit.jsonl`, rotated at 10 MiB, with a **field
@@ -1834,9 +1837,11 @@ hold delivery capacity. A limit whose "off" setting removes a security boundary 
 convention worth honoring, so these two floors are enforced in the zod schema (§10.1) rather
 than left to operator care.
 
-Because limits are in-memory sliding windows they reset on restart — consistent with
-every other limit in the codebase, and acceptable here because the consequence of a reset
-is a brief over-delivery, not a correctness failure.
+Because these webhook limits are in-memory sliding windows they reset on restart —
+the same as wait slots and the non-send buckets, and acceptable here because the
+consequence of a reset is a brief over-delivery, not a correctness failure. The
+per-identity hourly send limit is rebuilt from `send-log.jsonl` instead; a send
+whose log line was lost is not counted.
 
 ---
 

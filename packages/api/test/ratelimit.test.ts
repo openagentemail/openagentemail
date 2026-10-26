@@ -7,6 +7,8 @@ import {
   checkMcpRateLimit,
   checkNotifyUserLimit,
   checkSendLimit,
+  rebuildSendLimitFromRecords,
+  sendLimitCountForTests,
   releaseNotifyUserLimit,
   releaseWaitSlot,
   checkMcpPreauthIpRateLimit,
@@ -69,6 +71,48 @@ describe('checkSendLimit', () => {
     for (let i = 0; i < 50; i++) {
       expect(checkSendLimit('a@x.com', 0, 60_000).allowed).toBe(true);
     }
+  });
+});
+
+describe('rebuildSendLimitFromRecords', () => {
+  test('回放最近一小时的 queued，沿用原时间戳，0 限额仍然放行', () => {
+    resetRateLimits();
+    const t = 1_700_000_000_000;
+    rebuildSendLimitFromRecords(
+      [
+        { from: 'A@X.com', result: 'queued', sentAt: new Date(t).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t + 1_000).toISOString() },
+        { from: 'a@x.com', result: 'failed', sentAt: new Date(t + 2_000).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t - 3_600_000).toISOString() },
+        { from: 'a@x.com', result: 'queued', sentAt: new Date(t + 3_600_000).toISOString() },
+        { from: 'b@x.com', result: 'queued', sentAt: new Date(t).toISOString() },
+      ],
+      t + 30 * 60 * 1000,
+    );
+    // 窗口内只剩 t 与 t+1s 两枚；窗口外、失败、未来时间戳都不计。
+    expect(sendLimitCountForTests('a@x.com', t + 30 * 60 * 1000)).toBe(2);
+    const blocked = checkSendLimit('a@x.com', 2, 3_600_000, t + 30 * 60 * 1000);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBe(1800);
+    expect(checkSendLimit('b@x.com', 1, 3_600_000, t + 30 * 60 * 1000).allowed).toBe(false);
+    // 最老一枚在 t+1h 整点滑出（边界是 t > cutoff），只剩 t+1s。
+    expect(sendLimitCountForTests('a@x.com', t + 3_600_000)).toBe(1);
+    expect(checkSendLimit('a@x.com', 1, 3_600_000, t + 3_600_000).allowed).toBe(false);
+    expect(checkSendLimit('a@x.com', 1, 3_600_000, t + 3_600_000 + 1_000).allowed).toBe(true);
+    resetRateLimits();
+    rebuildSendLimitFromRecords(
+      Array.from({ length: 5 }, () => ({
+        from: 'a@x.com',
+        result: 'queued',
+        sentAt: new Date(t).toISOString(),
+      })),
+      t,
+    );
+    expect(checkSendLimit('a@x.com', 0, 3_600_000, t).allowed).toBe(true);
+    expect(checkSendLimit('a@x.com', 0, 3_600_000, t).count).toBe(0);
+    // 0 不擦掉已回放的戳，只是不拿它们拒绝。
+    expect(sendLimitCountForTests('a@x.com', t)).toBe(5);
+    resetRateLimits();
   });
 });
 

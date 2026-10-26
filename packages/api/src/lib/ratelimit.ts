@@ -1,13 +1,20 @@
 /**
- * Per-address / per-grant rate limiting. In-memory sliding window — resets on
- * process restart, which is acceptable for a guard whose job is to stop a
- * runaway agent or a leaked token from turning the box into a spam cannon,
- * not to enforce billing-grade quotas.
+ * Per-address / per-grant rate limiting. In-memory sliding window. Most buckets
+ * still reset on process restart: the guard stops a runaway agent or a leaked
+ * token from turning the box into a spam cannon, it is not a billing quota.
+ *
+ * The per-identity hourly send window is the exception. API startup replays
+ * `send-log.jsonl` rows from the last hour (`result === "queued"`) back into
+ * this same map, using the original timestamps. A send whose log line was lost
+ * is not counted. `SEND_RATE_LIMIT=0` still disables the check.
  *
  * Identities each get their own window, so one misbehaving agent can't
  * starve the others. MCP 读写分桶与 send/notifyUser 共用下方 slidingWindow*
  * helper——禁止再复制第三份窗口逻辑。
  */
+
+/** 发信额度滑动窗口。checkSendLimit 与启动回放必须用同一个长度。 */
+export const SEND_RATE_WINDOW_MS = 3_600_000;
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -75,10 +82,49 @@ const mcpPreauthIpBuckets = new Map<string, number[]>();
 export function checkSendLimit(
   address: string,
   limit: number,
-  windowMs = 3_600_000,
+  windowMs = SEND_RATE_WINDOW_MS,
   now = Date.now(),
 ): RateLimitResult {
   return slidingWindowCheck(buckets, address.toLowerCase(), limit, windowMs, now);
+}
+
+/**
+ * 启动时把发送日志回放进现有每小时额度桶（不另开限额）。
+ * 只收最近一个窗口内 result === "queued" 的行；键与 checkSendLimit 相同（整段地址小写，不 trim）。
+ * 时间戳保持原值，滑动窗口才会按原发送时刻过期。SEND_RATE_LIMIT=0 时检查直接放行，桶里有戳也无害。
+ */
+export function rebuildSendLimitFromRecords(
+  rows: readonly { from: string; result: string; sentAt: string }[],
+  now = Date.now(),
+  windowMs = SEND_RATE_WINDOW_MS,
+): void {
+  const cutoff = now - windowMs;
+  const grouped = new Map<string, number[]>();
+  for (const row of rows) {
+    if (row.result !== 'queued') continue;
+    const sentAt = Date.parse(row.sentAt);
+    // 与 slidingWindowCheck 同一边界：t > cutoff；未来时间戳不占额度。
+    if (!Number.isFinite(sentAt) || sentAt <= cutoff || sentAt > now) continue;
+    const key = row.from.toLowerCase();
+    const list = grouped.get(key);
+    if (list) list.push(sentAt);
+    else grouped.set(key, [sentAt]);
+  }
+  buckets.clear();
+  for (const [key, stamps] of grouped) {
+    stamps.sort((a, b) => a - b);
+    buckets.set(key, stamps);
+  }
+}
+
+/** 测试辅助：当前窗口内已占用的发信额度，不额外占位。 */
+export function sendLimitCountForTests(
+  address: string,
+  now = Date.now(),
+  windowMs = SEND_RATE_WINDOW_MS,
+): number {
+  const cutoff = now - windowMs;
+  return (buckets.get(address.toLowerCase()) ?? []).filter((t) => t > cutoff).length;
 }
 
 /**

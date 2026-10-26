@@ -354,34 +354,45 @@ describe('POST /v1/send autoReply（#363-A）', () => {
 
   test('autoReply 不绕过限速或未知身份：超额 429 且不再发信', async () => {
     expect(config.sendRateLimit).toBeGreaterThan(0);
-    createIdentity({ localpart: 'ar-limit' });
-    resetRateLimits();
-    sendMail.mockClear();
-    sendMail.mockImplementation(async () => ({ messageId: '<ar-limit@test.example>' }) as never);
-    for (let i = 0; i < config.sendRateLimit; i++) {
-      expect((await send('ar-limit@test.example', { autoReply: true })).status).toBe(200);
+    // 本例只钉每小时额度。一对一冷却另测；这里关掉，避免同收件人第二封变成 auto_reply_cooldown。
+    const prevCooldown = config.autoReplyCooldownSec;
+    Object.assign(config, { autoReplyCooldownSec: 0 });
+    try {
+      createIdentity({ localpart: 'ar-limit' });
+      resetRateLimits();
+      sendMail.mockClear();
+      sendMail.mockImplementation(async () => ({ messageId: '<ar-limit@test.example>' }) as never);
+      for (let i = 0; i < config.sendRateLimit; i++) {
+        expect((await send('ar-limit@test.example', { autoReply: true })).status).toBe(200);
+      }
+      const limited = await send('ar-limit@test.example', { autoReply: true });
+      expect(limited.status).toBe(429);
+      expect(((await limited.json()) as { error?: string }).error).toBe('rate_limited');
+      expect(sendMail).toHaveBeenCalledTimes(config.sendRateLimit);
+      sendMail.mockClear();
+      const missing = await send('missing-ar@test.example', { autoReply: true });
+      expect(missing.status).toBe(403);
+      expect(sendMail).not.toHaveBeenCalled();
+      sendMail.mockImplementation(async () => {
+        throw smtpFailure;
+      });
+    } finally {
+      Object.assign(config, { autoReplyCooldownSec: prevCooldown });
     }
-    const limited = await send('ar-limit@test.example', { autoReply: true });
-    expect(limited.status).toBe(429);
-    expect(((await limited.json()) as { error?: string }).error).toBe('rate_limited');
-    expect(sendMail).toHaveBeenCalledTimes(config.sendRateLimit);
-    sendMail.mockClear();
-    const missing = await send('missing-ar@test.example', { autoReply: true });
-    expect(missing.status).toBe(403);
-    expect(sendMail).not.toHaveBeenCalled();
-    sendMail.mockImplementation(async () => {
-      throw smtpFailure;
-    });
   });
 
   test('#390 成功、限速和 SMTP 失败的历史只在 true 时带 autoReply', async () => {
     createIdentity({ localpart: 'ar-hist' });
     resetRateLimits();
+    // 第二封要打到 rate_limited 并落盘。冷却开着的话同收件人会先 429，且不写日志。
+    const prevCooldown = config.autoReplyCooldownSec;
+    Object.assign(config, { autoReplyCooldownSec: 0 });
     for (let i = 0; i < config.sendRateLimit - 1; i++) {
       const slot = checkSendLimit('ar-hist@test.example', config.sendRateLimit);
       expect(slot).toMatchObject({ allowed: true, count: i + 1 });
     }
     sendMail.mockImplementation(async () => ({ messageId: '<ar-hist@test.example>' }) as never);
+    try {
     expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(200);
     expect((await send('ar-hist@test.example', { autoReply: true })).status).toBe(429);
     resetRateLimits();
@@ -409,6 +420,9 @@ describe('POST /v1/send autoReply（#363-A）', () => {
     const detail = await app.request(`/v1/send/history/${String(marked[0]?.id)}`);
     expect(detail.status).toBe(200);
     expect(((await detail.json()) as { autoReply?: boolean }).autoReply).toBe(true);
+    } finally {
+      Object.assign(config, { autoReplyCooldownSec: prevCooldown });
+    }
   });
   test('字符串、headers 与未知键 400 且不发信', async () => {
     createIdentity({ localpart: 'ar-bad' });

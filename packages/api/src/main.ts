@@ -26,6 +26,7 @@ import { initializeNotifications } from './lib/notify.ts';
 import { inspectDeviceRegistryAtBoot } from './lib/notification-devices.ts';
 import { startNotificationWatcher } from './lib/notification-watcher.ts';
 import { startNotificationLogMaintenance } from './lib/notification-log.ts';
+import { replaySendGuardsFromLog } from './lib/replay-send-guards.ts';
 import { startSendLogMaintenance } from './lib/send-log.ts';
 import { startRetentionLoop } from './lib/retention.ts';
 import { startTaskLeaseReaper } from './lib/task-lease-reaper.ts';
@@ -40,6 +41,11 @@ const app = createApp();
 startRetentionLoop();
 startTaskLeaseReaper();
 startNotificationLogMaintenance();
+// 仅真正启动 API 时回放。测试 import 本模块时 import.meta.main 为 false，
+// 避免把别的用例已经占上的内存额度清掉。读日志失败只告警。
+if (import.meta.main) {
+  replaySendGuardsFromLog();
+}
 startSendLogMaintenance();
 await inspectDeviceRegistryAtBoot();
 if (config.ntfy.enabled) {

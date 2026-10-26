@@ -802,3 +802,19 @@ describe('FORWARDING_ENABLED configuration (#106 A1)', () => {
   });
 });
 
+describe('AUTO_REPLY_COOLDOWN_SEC', () => {
+  test('缺省 300，0 关闭，非法值回落 300 且不拒启', () => {
+    expect(parseConfig(requiredEnv).autoReplyCooldownSec).toBe(300);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '' }).autoReplyCooldownSec).toBe(300);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '   ' }).autoReplyCooldownSec).toBe(300);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '0' }).autoReplyCooldownSec).toBe(0);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '180' }).autoReplyCooldownSec).toBe(180);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: ' 180 ' }).autoReplyCooldownSec).toBe(180);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '300.0' }).autoReplyCooldownSec).toBe(300);
+    expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: '1e2' }).autoReplyCooldownSec).toBe(100);
+    for (const bad of ['1.5', '-1', 'NaN', 'nope', '1.0.0']) {
+      expect(parseConfig({ ...requiredEnv, AUTO_REPLY_COOLDOWN_SEC: bad }).autoReplyCooldownSec).toBe(300);
+    }
+  });
+});
+

@@ -147,6 +147,9 @@ Private / loopback targets need an **admin** token and
    Template A asks for `mail_send` `autoReply:true` only after the checks allow
    a reply. Template B sends `autoReply:true` only on that existing reply path.
    The server adds `Auto-Submitted: auto-replied` only for explicit `true`.
+   The same `autoReply:true` send is also cooled down per sender and recipient
+   (`429 auto_reply_cooldown`, default 300 seconds). Plain mail does not start
+   or extend that cooldown.
 
 ## Heavier / alternate examples
 
