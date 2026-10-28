@@ -13,7 +13,17 @@ import {
   type AutoReplyCooldownReservation,
 } from '../lib/auto-reply-cooldown.ts';
 import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
-import { isLocalSendFailure } from '../lib/sendfailure.ts';
+import {
+  beginSendIdempotency,
+  completeSendIdempotency,
+  isSendIdempotencyReplayUnavailable,
+  parseSendIdempotencyKey,
+  queuedSendResponse,
+  releaseSendIdempotency,
+  smtpErrorSendResponse,
+  type SendIdempotencyReservation,
+} from '../lib/send-idempotency.ts';
+import { isAmbiguousPostDataSendFailure, isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
 import { recordSentMessageIdAfterSend } from '../lib/sent-registry.ts';
 import {
@@ -96,6 +106,14 @@ async function recordSend(input: {
   failureKind?: 'smtp_response' | 'local';
   /** 准入时刻。只传给真正占住每小时额度的行。 */
   rateLimitAt?: string;
+  /**
+   * 只在缓存幂等结果时传入：200，以及对端已应答的 502。
+   * 都是哈希，不是原始键。额度拒绝和连接类失败不传。
+   */
+  idempotencyKeyHash?: string;
+  requestHash?: string;
+  /** 与 sentAt 同一刻再确认身份。返回 false 则不写两个哈希。 */
+  keepIdempotencyHashes?: () => boolean;
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -165,6 +183,10 @@ sendRoute.get('/history/:id', async (c) => {
 });
 
 sendRoute.post('/', async (c) => {
+  // 与 webhook 同一套 trim / 空键 / 128 上限，另外拒绝控制字符。坏键在读 body 之前就 400。
+  const idempotencyKey = parseSendIdempotencyKey(c.req.header('idempotency-key'));
+  if (!idempotencyKey.ok) return c.json({ error: 'invalid_request' }, 400);
+
   let body: unknown;
   try {
     body = await c.req.json();
@@ -189,118 +211,214 @@ sendRoute.post('/', async (c) => {
 
   // `from` must be an existing identity on an allowed domain.
   const fromDomain = from.split('@')[1]?.toLowerCase() ?? '';
-  if (!config.allowedSendDomains.includes(fromDomain) || !findIdentity(from)) {
+  const sender = findIdentity(from);
+  if (!config.allowedSendDomains.includes(fromDomain) || !sender) {
     return c.json({ error: 'forbidden: from is not a known identity' }, 403);
   }
 
-  // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
-  // 检查和占位同步完成，后面的 await（额度日志、SMTP）插不进第二封。
-  // 任一收件人仍在冷却或占位中就整封拒绝：不打 SMTP、不占每小时额度、不写 send-log
-  // （信没交到 SMTP，不落盘，避免 429 刷审计；重建也看不到它）。
-  // 与 rate_limited 一样只在 JSON 里给 retryAfterSec，不另加 Retry-After 头。
-  let autoReplyReservation: AutoReplyCooldownReservation | undefined;
-  if (autoReply === true && config.autoReplyCooldownSec > 0) {
-    const cooled = checkAndReserveAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
-    if (!cooled.reserved) {
+  // 幂等键在身份校验之后、冷却和每小时额度之前。
+  // 启动回放失败时带键请求直接 503，不占位、不碰冷却、不占额度、不打 SMTP。
+  // 不带键的请求照常。下一次回放成功后恢复。
+  if (idempotencyKey.key && isSendIdempotencyReplayUnavailable()) {
+    return c.json({ error: 'idempotency_unavailable' }, 503);
+  }
+  // 检查和占位同步完成，后面的 await 插不进第二封 SMTP。
+  // 已完成且指纹相同：原样返回，不发信、不占额度、不碰冷却、不新写日志。
+  // 指纹不同：422。同一指纹仍在发送：409。
+  // 4xx/429 和连接类失败放开键。200 和对端已应答的 502 记成已完成。
+  // 占位时记下这一任身份。完成时身份没了或 createdAt 变了，就不记回放。
+  const begun = beginSendIdempotency(from, idempotencyKey.key, parsed.data, sender.createdAt);
+  if (begun.outcome === 'replay') {
+    c.header('Idempotent-Replayed', 'true');
+    if (begun.status === 200) return c.json(begun.body, 200);
+    return c.json(begun.body, 502);
+  }
+  if (begun.outcome === 'reused') return c.json({ error: 'idempotency_key_reused' }, 422);
+  if (begun.outcome === 'in_flight') {
+    return c.json({ error: 'idempotency_in_flight', retryAfterSec: 1 }, 409);
+  }
+  if (begun.outcome === 'table_full') {
+    return c.json({ error: 'idempotency_table_full', retryAfterSec: 1 }, 429);
+  }
+  const reservation: SendIdempotencyReservation | undefined =
+    begun.outcome === 'reserved' ? begun.reservation : undefined;
+  // 没有键时一开始就算处理完，finally 不会去放开一张不存在的票。
+  let idempotencySettled = reservation === undefined;
+  // 落盘回调里置位。true 才把结果放进内存；身份已换则保持 false，finally 放开占位。
+  let bindIdempotency = false;
+  /** 这一任身份还在。删掉或同址新建（createdAt 不同）都不是。 */
+  const identityStillReserved = (): boolean => {
+    const createdAt = reservation?.identityCreatedAt;
+    if (!createdAt) return false;
+    const current = findIdentity(from);
+    return current !== undefined && current.createdAt === createdAt;
+  };
+  // 哈希在生成 sentAt 的那一刻才决定写不写。回调顺手记下能不能进内存表。
+  const idemLog = (): {
+    idempotencyKeyHash?: string;
+    requestHash?: string;
+    keepIdempotencyHashes?: () => boolean;
+  } => {
+    if (!reservation) return {};
+    return {
+      idempotencyKeyHash: reservation.keyHash,
+      requestHash: reservation.requestHash,
+      keepIdempotencyHashes: () => {
+        try {
+          bindIdempotency = identityStillReserved();
+          return bindIdempotency;
+        } catch (err) {
+          // SMTP 已接受之后身份库读失败。先标成终态再抛出：
+          // 发送日志会接住并照写哈希，finishIdempotency 记下实际返回的响应。
+          // finally 看到已结算，不会放开占位。
+          bindIdempotency = true;
+          throw err;
+        }
+      },
+    };
+  };
+  const finishIdempotency = (status: 200 | 502, body: Record<string, unknown>) => {
+    if (bindIdempotency && completeSendIdempotency(reservation, status, body)) {
+      idempotencySettled = true;
+    }
+  };
+
+  try {
+    // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
+    // 检查和占位同步完成，后面的 await（额度日志、SMTP）插不进第二封。
+    // 任一收件人仍在冷却或占位中就整封拒绝：不打 SMTP、不占每小时额度、不写 send-log
+    // （信没交到 SMTP，不落盘，避免 429 刷审计；重建也看不到它）。
+    // 与 rate_limited 一样只在 JSON 里给 retryAfterSec，不另加 Retry-After 头。
+    let autoReplyReservation: AutoReplyCooldownReservation | undefined;
+    if (autoReply === true && config.autoReplyCooldownSec > 0) {
+      const cooled = checkAndReserveAutoReplyCooldown(from, toList, config.autoReplyCooldownSec);
+      if (!cooled.reserved) {
+        // 冷却拒绝不缓存。放开幂等键，同一 body 在冷却结束后还能发。
+        releaseSendIdempotency(reservation);
+        idempotencySettled = true;
+        return c.json(
+          { error: 'auto_reply_cooldown', retryAfterSec: cooled.retryAfterSec },
+          429,
+        );
+      }
+      autoReplyReservation = cooled.reservation;
+    }
+
+    // Per-identity rate limit (rolling hour; 0 disables in config).
+    const limit = checkSendLimit(from, config.sendRateLimit);
+    if (!limit.allowed) {
+      // 额度没扣成。占位要在记审计之前放开，且只删这张票自己的格子。
+      releaseAutoReplyCooldownReservation(autoReplyReservation);
+      // 429 不缓存。在写审计的 await 之前放开，避免这段时间把重试挡成 409。
+      releaseSendIdempotency(reservation);
+      idempotencySettled = true;
+      // 每身份每窗口最多 1 条 rate_limited，避免 429 刷盘。
+      const logged = claimRateLimitedLog(from)
+        ? await recordSend({
+            from,
+            to: toList,
+            subject,
+            result: 'failed',
+            error: 'rate_limited',
+            source,
+            autoReply,
+          })
+        : null;
       return c.json(
-        { error: 'auto_reply_cooldown', retryAfterSec: cooled.retryAfterSec },
+        {
+          error: 'rate_limited',
+          limit: config.sendRateLimit,
+          retryAfterSec: limit.retryAfterSec,
+          ...(logged ? { id: logged.id } : {}),
+        },
         429,
       );
     }
-    autoReplyReservation = cooled.reservation;
-  }
 
-  // Per-identity rate limit (rolling hour; 0 disables in config).
-  const limit = checkSendLimit(from, config.sendRateLimit);
-  if (!limit.allowed) {
-    // 额度没扣成。占位要在记审计之前放开，且只删这张票自己的格子。
-    releaseAutoReplyCooldownReservation(autoReplyReservation);
-    // 每身份每窗口最多 1 条 rate_limited，避免 429 刷盘。
-    const logged = claimRateLimitedLog(from)
-      ? await recordSend({
-          from,
-          to: toList,
-          subject,
-          result: 'failed',
-          error: 'rate_limited',
-          source,
-          autoReply,
-        })
-      : null;
-    return c.json(
-      {
-        error: 'rate_limited',
-        limit: config.sendRateLimit,
-        retryAfterSec: limit.retryAfterSec,
-        ...(logged ? { id: logged.id } : {}),
-      },
-      429,
-    );
-  }
+    // 槽在准入时占上。sentAt 要等 SMTP 返回才写，回放必须用这一刻，否则慢请求重启后槽会晚过期。
+    const rateLimitAt = hourlySlotAt(limit.reservation);
 
-  // 槽在准入时占上。sentAt 要等 SMTP 返回才写，回放必须用这一刻，否则慢请求重启后槽会晚过期。
-  const rateLimitAt = hourlySlotAt(limit.reservation);
-
-  try {
-    const { messageId } = await sendMail({
-      from,
-      to: toList,
-      subject,
-      text,
-      ...(html ? { html } : {}),
-      // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
-      ...(autoReply === true ? { autoReply: true } : {}),
-    });
-    // SMTP 已接受。截止时间从这一刻起算，不依赖后面的审计追加。
-    finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
-    // /v1/send 出站登记：sendMail 已 best-effort 写入；此处再记一次以覆盖测试里 mock 掉 smtp 的路径。
-    // 登记失败不 502：SMTP 已接受时失败会让调用方重试、重复外发。
-    recordSentMessageIdAfterSend(messageId, from);
-    // This is the only path that wakes an agent topic: it is a successful,
-    // authenticated server-side send to another managed address. Inbound mail
-    // never gets this capability because any sender header can be forged.
-    for (const recipient of toList) {
-      void notifyTrustedAgentDelivery(recipient);
-    }
-    const logged = await recordSend({
-      from,
-      to: toList,
-      subject,
-      messageId,
-      result: 'queued',
-      source,
-      autoReply,
-      rateLimitAt,
-    });
-    return c.json({ queued: true, messageId, ...(logged ? { id: logged.id } : {}) }, 200);
-  } catch (err) {
-    // Our own mail server being unreachable shouldn't cost the user a slot;
-    // anything the server actually answered to stays counted.
-    // 冷却与额度同一口径：连接类失败放开占位；对端已经应答则从这一刻起算。
-    // failureKind 用同一次判断，重启回放才能把 SMTP 已应答的失败算回去。
-    const localFailure = isLocalSendFailure(err);
-    if (localFailure) {
-      releaseSendLimit(from, limit.reservation);
-      releaseAutoReplyCooldownReservation(autoReplyReservation);
-    } else {
+    try {
+      const { messageId } = await sendMail({
+        from,
+        to: toList,
+        subject,
+        text,
+        ...(html ? { html } : {}),
+        // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
+        ...(autoReply === true ? { autoReply: true } : {}),
+      });
+      // SMTP 已接受。截止时间从这一刻起算，不依赖后面的审计追加。
       finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
+      // /v1/send 出站登记：sendMail 已 best-effort 写入；此处再记一次以覆盖测试里 mock 掉 smtp 的路径。
+      // 登记失败不 502：SMTP 已接受时失败会让调用方重试、重复外发。
+      recordSentMessageIdAfterSend(messageId, from);
+      // This is the only path that wakes an agent topic: it is a successful,
+      // authenticated server-side send to another managed address. Inbound mail
+      // never gets this capability because any sender header can be forged.
+      for (const recipient of toList) {
+        void notifyTrustedAgentDelivery(recipient);
+      }
+      const logged = await recordSend({
+        from,
+        to: toList,
+        subject,
+        messageId,
+        result: 'queued',
+        source,
+        autoReply,
+        rateLimitAt,
+        ...idemLog(),
+      });
+      const payload = queuedSendResponse(messageId, logged?.id);
+      finishIdempotency(200, payload);
+      return c.json(payload, 200);
+    } catch (err) {
+      // Our own mail server being unreachable shouldn't cost the user a slot;
+      // anything the server actually answered to stays counted.
+      // 冷却与额度同一口径：连接类失败放开占位；对端已经应答则从这一刻起算。
+      // failureKind 仍用 isLocalSendFailure，重启后的额度/冷却回放不把 DATA 断线算进去。
+      // 幂等单独看 command：DATA 及更晚表示正文可能已经写出，按 502 缓存，不放开键。
+      const localFailure = isLocalSendFailure(err);
+      const ambiguousDelivery = localFailure && isAmbiguousPostDataSendFailure(err);
+      if (localFailure) {
+        releaseSendLimit(from, limit.reservation);
+        releaseAutoReplyCooldownReservation(autoReplyReservation);
+        if (!ambiguousDelivery) {
+          // 信还没进入 DATA。放开键，重试可以再发。这行日志不带幂等哈希。
+          releaseSendIdempotency(reservation);
+          idempotencySettled = true;
+        }
+      } else {
+        finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
+      }
+      // SMTP errors carry server responses, relay hostnames and adapter context
+      // (some adapters even echo the configured password). The operator needs
+      // that in the log; the caller only gets a stable code.
+      console.warn('[smtp] send failed:', describeFailure(err));
+      const logged = await recordSend({
+        from,
+        to: toList,
+        subject,
+        result: 'failed',
+        error: 'smtp_error',
+        failureKind: localFailure ? 'local' : 'smtp_response',
+        source,
+        autoReply,
+        // 连接类失败（含 DATA 阶段不确定失败）已经退还额度，不留准入时刻。
+        // 对端应答过的失败仍占着那一枚。
+        rateLimitAt: localFailure ? undefined : rateLimitAt,
+        // 对端应答，或 DATA 及更晚的断线，都留下哈希供幂等回放。
+        // 更早的连接类失败上面已经放开键，不写哈希。
+        // 身份已换时 idemLog 的回调也会把哈希拿掉。
+        ...(localFailure && !ambiguousDelivery ? {} : idemLog()),
+      });
+      const payload = smtpErrorSendResponse(logged?.id);
+      if (!localFailure || ambiguousDelivery) finishIdempotency(502, payload);
+      return c.json(payload, 502);
     }
-    // SMTP errors carry server responses, relay hostnames and adapter context
-    // (some adapters even echo the configured password). The operator needs
-    // that in the log; the caller only gets a stable code.
-    console.warn('[smtp] send failed:', describeFailure(err));
-    const logged = await recordSend({
-      from,
-      to: toList,
-      subject,
-      result: 'failed',
-      error: 'smtp_error',
-      failureKind: localFailure ? 'local' : 'smtp_response',
-      source,
-      autoReply,
-      // 连接类失败已经退还额度，不留准入时刻。对端应答过的失败仍占着那一枚。
-      rateLimitAt: localFailure ? undefined : rateLimitAt,
-    });
-    return c.json({ error: 'smtp_error', ...(logged ? { id: logged.id } : {}) }, 502);
+  } finally {
+    // 还没记成已完成、也没显式放开的（意外抛出）在离开前放开，避免键永远停在占位。
+    if (!idempotencySettled) releaseSendIdempotency(reservation);
   }
 });

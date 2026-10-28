@@ -27,6 +27,7 @@ const {
   setSendLogNowForTests,
   setSendLogPersistHookForTests,
 } = await import('../src/lib/send-log.ts');
+const { setSendIdempotencyCapForTests } = await import('../src/lib/send-idempotency.ts');
 
 function seed(partial: {
   from?: string;
@@ -54,6 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetSendLogForTests();
+  setSendIdempotencyCapForTests(null);
 });
 
 describe('send-log store', () => {
@@ -353,6 +355,46 @@ describe('send-log store', () => {
     expect(parsed.items.find((row) => row.subject === 'num')).not.toHaveProperty('rateLimitAt');
   });
 
+  test('幂等哈希往返，非法值丢掉，原始键不落盘', async () => {
+    const keyHash = 'a'.repeat(64);
+    const requestHash = 'b'.repeat(64);
+    const rawKey = 'Idem-Key/Not-Hex!';
+    const queued = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'idem-ok',
+      result: 'queued',
+      source: 'api',
+      messageId: '<idem@test.example>',
+      idempotencyKeyHash: keyHash,
+      requestHash,
+    });
+    expect(queued.idempotencyKeyHash).toBe(keyHash);
+    expect(queued.requestHash).toBe(requestHash);
+    const bogus = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'idem-bad',
+      result: 'queued',
+      source: 'api',
+      idempotencyKeyHash: rawKey,
+      requestHash: 'B'.repeat(64),
+    });
+    expect(bogus).not.toHaveProperty('idempotencyKeyHash');
+    expect(bogus).not.toHaveProperty('requestHash');
+    const text = readFileSync(sendLogPathForTests(), 'utf8');
+    expect(text).toContain(`"idempotencyKeyHash":"${keyHash}"`);
+    expect(text).toContain(`"requestHash":"${requestHash}"`);
+    expect(text).not.toContain(rawKey);
+    expect(text).not.toContain('"idempotencyKey"');
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.find((row) => row.subject === 'idem-ok')).toMatchObject({
+      idempotencyKeyHash: keyHash,
+      requestHash,
+    });
+    expect(page.items.find((row) => row.subject === 'idem-bad')).not.toHaveProperty('idempotencyKeyHash');
+  });
+
   test('query hard-clamps to 30 days', async () => {
     const now = Date.parse('2026-08-14T12:00:00.000Z');
     setSendLogNowForTests(() => now - SEND_LOG_RETENTION_MS - 60_000);
@@ -501,6 +543,179 @@ describe('send-log store', () => {
     const compact = await compactSendLog();
     expect(compact.kept).toBeLessThan(3);
     expect(compact.dropped).toBeGreaterThan(0);
+  });
+
+  test('trim keeps in-window keyed rows and drops other old rows first', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    const keyHash = 'ab'.repeat(32);
+    const requestHash = 'cd'.repeat(32);
+    const line = (
+      subject: string,
+      messageId: string,
+      hashes?: { idempotencyKeyHash: string; requestHash: string },
+    ) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+        ...hashes,
+      });
+    setSendLogNowForTests(() => now - 25 * 60 * 60 * 1000);
+    await line('expired-key', '<old@test>', { idempotencyKeyHash: keyHash, requestHash });
+    setSendLogNowForTests(() => now);
+    await line('keyed-keep', '<keep@test>', { idempotencyKeyHash: keyHash, requestHash });
+    await line('plain-old', '<plain@test>');
+    setSendLogCapsForTests({ rows: 2 });
+    await line('plain-new', '<new@test>');
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-keep');
+    expect(subjects).toContain('plain-new');
+    expect(subjects).not.toContain('plain-old');
+    expect(subjects).not.toContain('expired-key');
+  });
+
+  test('idempotency trim keeps only the newest rows up to the table cap', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    setSendIdempotencyCapForTests(1);
+    setSendLogNowForTests(() => now);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-old',
+      result: 'queued',
+      source: 'api',
+      messageId: '<old@test>',
+      idempotencyKeyHash: 'ab'.repeat(32),
+      requestHash: 'cd'.repeat(32),
+    });
+    setSendLogNowForTests(() => now + 1000);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<new-key@test>',
+      idempotencyKeyHash: 'ef'.repeat(32),
+      requestHash: '12'.repeat(32),
+    });
+    setSendLogCapsForTests({ rows: 2 });
+    setSendLogNowForTests(() => now + 2000);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'plain-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<plain@test>',
+    });
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-new');
+    expect(subjects).toContain('plain-new');
+    expect(subjects).not.toContain('keyed-old');
+  });
+
+  test('byte cap drops unkeyed rows before in-window keyed rows', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    setSendLogNowForTests(() => now);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-keep',
+      result: 'queued',
+      source: 'api',
+      messageId: '<keep@test>',
+      idempotencyKeyHash: 'ab'.repeat(32),
+      requestHash: 'cd'.repeat(32),
+    });
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'x'.repeat(400),
+      result: 'queued',
+      source: 'api',
+      messageId: '<fat@test>',
+    });
+    const lines = readFileSync(sendLogPathForTests(), 'utf8').split('\n').filter(Boolean);
+    const keyedLine = lines.find((line) => line.includes('keyed-keep'));
+    const fatLine = lines.find((line) => line.includes('x'.repeat(40)));
+    expect(keyedLine).toBeTruthy();
+    expect(fatLine).toBeTruthy();
+    const keyedBytes = Buffer.byteLength(`${keyedLine}\n`);
+    const fatBytes = Buffer.byteLength(`${fatLine}\n`);
+    setSendLogCapsForTests({ rows: 100, bytes: keyedBytes + fatBytes - 1 });
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'plain-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<new@test>',
+    });
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-keep');
+    expect(subjects).toContain('plain-new');
+    expect(subjects.some((subject) => subject.startsWith('xxx'))).toBe(false);
+  });
+
+  test('byte cap still drops unkeyed rows before protected rows, then the oldest protected row', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    const keyed = (subject: string, messageId: string, keyHex: string) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+        idempotencyKeyHash: keyHex,
+        requestHash: 'cd'.repeat(32),
+      });
+    const plain = (subject: string, messageId: string) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+      });
+    setSendLogNowForTests(() => now);
+    await keyed('p1', '<p1@test>', 'ab'.repeat(32));
+    setSendLogNowForTests(() => now + 1000);
+    await plain('u1', '<u1@test>');
+    setSendLogNowForTests(() => now + 2000);
+    await keyed('p2', '<p2@test>', 'ef'.repeat(32));
+    setSendLogNowForTests(() => now + 3000);
+    await plain('u2', '<u2@test>');
+    const lines = readFileSync(sendLogPathForTests(), 'utf8').split('\n').filter(Boolean);
+    const wire = (subject: string) => {
+      const line = lines.find((row) => row.includes(`"subject":"${subject}"`));
+      if (!line) throw new Error(`missing ${subject}`);
+      return Buffer.byteLength(`${line}\n`);
+    };
+    // 新行的 id 长度固定，其余字段也固定，字节数可以事先算准。
+    const appendedAt = now + 4000;
+    const newLine = `${JSON.stringify({
+      schemaVersion: 1,
+      id: 'snd_0123456789abcdef01234567',
+      sentAt: new Date(appendedAt).toISOString(),
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'n',
+      messageId: '<n@test>',
+      result: 'queued',
+      source: 'api',
+    })}\n`;
+    const newBytes = Buffer.byteLength(newLine);
+    // 刚好放下 p2 和即将追加的新行。两条无键行先被丢掉；仍超限时再丢最旧的受保护行 p1。
+    setSendLogCapsForTests({ rows: 100, bytes: wire('p2') + newBytes });
+    setSendLogNowForTests(() => appendedAt);
+    await plain('n', '<n@test>');
+    expect((await querySendLog({ limit: 20 })).items.map((row) => row.subject)).toEqual(['n', 'p2']);
   });
 
   test('torn trailing line is isolated without fail-closing the log', async () => {

@@ -16,6 +16,7 @@ import {
 } from "../lib/tool-tiers.ts";
 // 只拉无 config 依赖的叶子常量，避免 stdio bundle 加载期 parse 服务端 env。
 import { MAX_SCOPES_COUNT, SUPPORTED_SCOPES } from "../lib/identity-scopes.ts";
+import { isSendIdempotencyKey } from "../lib/send-idempotency.ts";
 import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
@@ -588,7 +589,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. There is no headers field.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional idempotencyKey is sent as the Idempotency-Key header and is not part of the JSON body. After trim it must be 1 to 128 printable ASCII characters (0x20-0x7E); whitespace-only is rejected. If send-log replay failed at startup, a request with idempotencyKey is REST 503 {error:\"idempotency_unavailable\"} and does not send; requests without a key are unchanged. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
@@ -599,13 +600,25 @@ export function registerOpenAgentEmailTools(
           .boolean()
           .optional()
           .describe("True only: server adds Auto-Submitted: auto-replied. False or omitted adds nothing."),
+        // 与 REST parseSendIdempotencyKey 同一条规则：trim 后 1–128 个可打印 ASCII。
+        // 空白串在这里校验失败，不会当成“没带键”。通过后交给客户端的是 trim 过的键。
+        idempotencyKey: z
+          .string()
+          .trim()
+          .refine(isSendIdempotencyKey, {
+            message: "idempotencyKey must be 1 to 128 printable ASCII characters (0x20-0x7E) after trim",
+          })
+          .optional()
+          .describe(
+            "Optional idempotency key. After trim, 1 to 128 printable ASCII characters (0x20-0x7E). Whitespace-only is rejected. Sent as the Idempotency-Key header, not in the body.",
+          ),
       }).strict(),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
-    ({ from, to, subject, text, html, autoReply }) =>
-      callApi(() => client.send(from, to, subject, text, html, autoReply)),
+    ({ from, to, subject, text, html, autoReply, idempotencyKey }) =>
+      callApi(() => client.send(from, to, subject, text, html, autoReply, idempotencyKey)),
   );
 
   const notificationInputSchema = {

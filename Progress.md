@@ -1,5 +1,35 @@
 # Progress · #137 B1 控制台 i18n 基建
 
+## 2026-10-28 · POST /v1/send 与 mail_send 可选幂等键
+
+### 我们实现了哪些功能？
+1. `POST /v1/send` 接受可选请求头 `Idempotency-Key`。缺省、空白与 trim 后为空保持旧行为。trim 之后必须是 1–128 个可打印 ASCII（0x20–0x7E）；控制字符、DEL 和非 ASCII 返回 400 `invalid_request`。键不进 JSON body。键按发件身份分开，身份是 `from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。MCP `mail_send` 用同一条规则；只有空白在 MCP 校验失败，不会当成没带键。
+2. 指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，对象键排序，地址大小写不改。以后新增的可选字段会自动算进去。身份校验之后、冷却和每小时额度之前同步占位：相同指纹在 24 小时内回放原状态码和 JSON，响应头 `Idempotent-Replayed: true`，不再发信、不占额度、不碰冷却、不新写日志；指纹不同 422 `idempotency_key_reused`；同一指纹仍在发送 409 `idempotency_in_flight`。缓存 200、对端已应答的 502，以及 `error.command` 为 DATA/BDAT 或更晚且没有应答码的 502。后一类额度与冷却仍按本地失败退还，日志 `failureKind` 仍是 `local`。4xx/429 与更早的连接类失败放开键。表满 10000 时先丢过期，再暂时逐出最老的已完成项；请求被拒绝或放开键时放回。全是进行中则 429 `idempotency_table_full`。删除身份会清掉该地址的内存项。占位时记下这一任身份的 `createdAt`。完成时身份已不在，或已换成另一任，不把结果放进内存表，也不把两个哈希写进发送日志；信本身仍照常落日志。
+3. `send-log.jsonl` 在已完成的行上增加 `idempotencyKeyHash`（原始键的 sha256）和 `requestHash`。不写原始键。超过 10000 行或 8MB 时优先丢掉其它旧行；24 小时窗口内成对带哈希的行最多保留幂等表上限那么多条（最新优先）。启动时由 `replaySendGuardsFromLog` 回放 24 小时内的 `queued` 行、`smtp_response` 失败行，以及带这两个哈希的 `local` 行，忽略未来的 `sentAt`，也忽略早于该地址当前身份 `createdAt` 的行。没有这两个字段的旧行忽略。身份库读失败时不重建幂等行（额度与冷却仍回放）。发送日志读失败或回放抛错时，带键请求在恢复前返回 503 `idempotency_unavailable`，不带键照常。SMTP 已接受之后身份库读取抛错，则把实际响应记成终态，不放开占位。
+
+### 我们遇到了哪些错误？
+1. 新测试里 `expect((await json()) as T).error)` 多了一个括号，文件没法解析。
+2. 路由用例用 NUL 当控制字符。Fetch 的 `Request` 在进 Hono 之前就拒绝这个头，测不到路由返回的 400。
+3. 表满逐出用例把幂等时钟拨回 2023，表里还留着一条真实时间的已完成项，最老项被判错。第一次 `tsc` 比基线多 1 条：`mockImplementation` 写了参数，和声明的无参函数不一致。
+4. 评审：日志修剪会丢掉仍在 24 小时窗口内的带哈希行；MCP 键比 REST 松，空白和非 ASCII 能进 schema，fetch 却放不进头；同址新建身份会吃到上一任的回放；表满时在冷却/额度之前逐出别人的已完成项，拒绝后不放回；DATA 之后 ECONNECTION/ETIMEDOUT 且没有应答码会放开键，重试可能再发一封。
+5. 评审：飞行中的请求在同址身份删掉并重建之后才完成，日志 `sentAt` 晚于新身份 `createdAt`，重启回放把旧信算到新身份，内存里也可能留下已完成项。8MB 修剪每跳过一条受保护行都把整份日志重新序列化。
+6. 评审：身份库读失败时回放不按 `createdAt` 过滤，同址新建可能拿到上一任的 200。发送日志回放失败后空幂等表仍接受带键请求，重试会再打 SMTP。SMTP 已接受后 `findIdentity` 抛错会放开占位，同一键能再发一封。
+
+### 我们是如何解决这些错误的？
+1. 补上括号后，幂等测试 20 条通过。
+2. 路由用例改用仍能进 `Headers` 的 `\u0001`。解析函数另外直接拒绝 NUL、换行、DEL 和 C1。后来收成一条共享规则：trim 后 1–128 个可打印 ASCII，REST 和 MCP 都用它。
+3. 逐出前先清空幂等表再设时钟。mock 函数按无参类型断言，运行时仍能读到 `from`。`bun run typecheck` 回到 179，与 main 相同。`send.ts` 的 `TS2589` 仍是原来的 `ReturnType<Context['json']>`。`send.test.ts` 6 条、`send-log.test.ts` 3 条也是原有错误，只是行号随新增测试下移。
+4. 修剪时先丢不在保留集里的旧行。保留集是窗口内两个哈希都在的行，最多当前幂等表上限，最新优先。MCP schema `trim` 后用 `isSendIdempotencyKey`。`deleteIdentity` 成功后清该地址的内存项；回放若读得到身份，就跳过 `sentAt` 早于 `createdAt` 的行。逐出记在这张票上，`releaseSendIdempotency` 放回。DATA 及更晚的断线调用 `completeSendIdempotency` 记 502，并写下两个哈希、`failureKind: local`、不写 `rateLimitAt`，所以额度/冷却回放仍不计数。
+5. 占位时把 `createdAt` 放进 reservation。写发送日志、生成 `sentAt` 的同一刻再查身份：没了或不是这一任，就不写两个哈希，也不 `completeSendIdempotency`。信本身仍落盘。字节上限先算好每行大小，丢掉时从累计值里减，留下哪些行和原来一样。既有「重启回放不把早于 createdAt 的行还给新身份」用例会在同一毫秒里新建，`sentAt` 与新 `createdAt` 相等时回放会留下；删除和重建之间等 5 毫秒。
+6. 身份库读失败则跳过幂等重建，额度与冷却照常，也不因此 503。回放失败则带键请求 503 `idempotency_unavailable`（冷却、额度、SMTP 之前），不带键照常，直到下一次回放成功。SMTP 已接受后身份库抛错：发送日志仍写入两个哈希，路由把实际返回的响应 `completeSendIdempotency`，`finally` 不再放开占位。
+
+### 基线与证据
+- 基线 `b2d4d9c`。未推送、未合并、未打标签。
+- `packages/api`：`send-idempotency.test.ts` 30 pass；`send-log.test.ts` 25 pass；`send.test.ts` 25 pass；`identities.test.ts` 首次 28 pass / F56 ctime 失败，单独重跑仍是同一条 ctime 断言（本环境 in-place 改写 ctime 不变），未改该文件；`identity-delete-audit.test.ts` 上次 11 pass；`auto-reply-cooldown.test.ts` 35 pass；`ratelimit.test.ts` 上次 25 pass；`mcp-http.test.ts` 102 pass；`oauth-as.test.ts` 15 pass；`webhook-delivery.test.ts` 74 pass。都是 `bun test <file> --timeout 180000`，一次一个文件。
+- `packages/mcp`：`client.test.ts` 13 pass，`tools.test.ts` 11 pass，一次一个文件，0 fail。
+- `packages/api` 下 `bun run typecheck` 179 条，与 main 相同。`send.ts` 的 `TS2589` 仍是原来的 `ReturnType<Context['json']>`。`send.test.ts` 6 条、`send-log.test.ts` 3 条也是原有错误。
+- afacd65 全量 CI 的 7 条失败不在本 PR 改过的测试文件里。对照 `1e74311..afacd65`，新增用例只多了已等待的 `setTimeout`、会在断言前 `release` 的 SMTP 门闩，以及 `send-log` 里由 `afterEach` → `resetSendLogForTests` 收回的字节上限和时钟。这四个文件都没有写 `MCP_PUBLIC_URL`。模块级 `DATA_DIR` / `SEND_RATE_LIMIT` / `mock.module(smtp)` 在绿灯的 `1e74311` 就已经在。oauth 的「无 MCP_PUBLIC_URL」和 mcp-http 的 insecure issuer，单独跑都通过；全量失败更像别的文件把 `MCP_PUBLIC_URL=http://localhost` 留在进程里。webhook 死信、playwright 连不上、EBADF、wait-cancel 栈落在 consent 用例的定时器上，也不是这四个文件留下的。所以没有改它们。
+
 ## 2026-09-20 · w137b1
 
 ### 我们实现了哪些功能？
