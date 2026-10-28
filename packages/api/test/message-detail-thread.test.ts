@@ -119,13 +119,43 @@ describe('toDetail 线程字段', () => {
     expect(detail).not.toHaveProperty('references');
   });
 
-  test('998 字符的 Message-ID 保留，999 省略', async () => {
-    const ok = msgIdOfLength(998);
-    const tooLong = msgIdOfLength(999);
-    expect(ok).toHaveLength(998);
-    expect(tooLong).toHaveLength(999);
+  test('250 字符的 Message-ID 保留，251 省略', async () => {
+    const ok = msgIdOfLength(250);
+    const tooLong = msgIdOfLength(251);
+    expect(ok).toHaveLength(250);
+    expect(tooLong).toHaveLength(251);
     expect((await detailFrom(`Message-ID: ${ok}\r\n`)).messageId).toBe(ok);
     expect(await detailFrom(`Message-ID: ${tooLong}\r\n`)).not.toHaveProperty('messageId');
+  });
+
+  test('收下典型 id 和字面量右侧，丢掉逗号引号反斜杠空格点号和超长', () => {
+    expect(detailThreadFields({ messageId: '<typical@example.com>' }).messageId).toBe(
+      '<typical@example.com>',
+    );
+    expect(detailThreadFields({ messageId: '<a.b+tag@ex-ample.com>' }).messageId).toBe(
+      '<a.b+tag@ex-ample.com>',
+    );
+    expect(detailThreadFields({ messageId: '<left@[127.0.0.1]>' }).messageId).toBe(
+      '<left@[127.0.0.1]>',
+    );
+    const bad = [
+      '<a,b@example.com>',
+      '<"ab"@example.com>',
+      '<a\\b@example.com>',
+      '<a b@example.com>',
+      '<a..b@example.com>',
+      '<.a@example.com>',
+      '<a.@example.com>',
+      '<a@.example.com>',
+      '<a@example.com.>',
+      msgIdOfLength(251),
+    ];
+    for (const messageId of bad) {
+      expect(
+        detailThreadFields({ messageId, references: [messageId, '<ok@example.com>'] }),
+        messageId,
+      ).toEqual({ references: ['<ok@example.com>'] });
+    }
   });
 
   test('恰好 50 条全保留，51 条合法 id 丢掉最旧的一条', async () => {

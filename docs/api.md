@@ -73,7 +73,7 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 | 字段 | 说明 |
 | --- | --- |
-| `messageId` | 可选。这封信自己的 Message-ID，尖括号形式，例如 `<id-left@id-right>`。最长 998，可打印 ASCII，恰好一个 `@`，内部不能再有尖括号、空白或控制字符 |
+| `messageId` | 可选。这封信自己的 Message-ID，尖括号形式，例如 `<id-left@id-right>`。含尖括号最长 250。左侧是 dot-atom-text；右侧是 dot-atom-text，或方括号里的字面量。不接受引号、反斜杠、逗号、空白 |
 | `references` | 可选。这封信自己的 `References` 头里通过同一校验的 id。按原顺序去重（保留第一次）。超过 50 条时保留最后 50 条。没有合法 id 则省略。不会把本信的 `messageId` 或 `In-Reply-To` 自动补进这个数组 |
 
 ## Send API (`POST /v1/send`)
@@ -88,7 +88,7 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 | `text` | 是 | 纯文本正文 |
 | `html` | 否 | HTML 正文 |
 | `autoReply` | 否 | 布尔。仅 `true` 写 `Auto-Submitted: auto-replied` |
-| `inReplyTo` | 否 | 一个尖括号形式的 RFC 5322 Message-ID，例如 `<id-left@id-right>`。最长 998，可打印 ASCII，恰好一个 `@`，内部不能再有尖括号、空白或控制字符。设置后写 `In-Reply-To`，并写 `References` |
+| `inReplyTo` | 否 | 一个尖括号形式的 RFC 5322 Message-ID，例如 `<id-left@id-right>`。含尖括号最长 250。左侧是 dot-atom-text；右侧是 dot-atom-text，或方括号里的字面量。不接受引号、反斜杠、逗号、空白。设置后写 `In-Reply-To`，并写 `References` |
 | `references` | 否 | 1–50 个同样形式的 Message-ID。必须和 `inReplyTo` 一起给。用单个空格拼起来最长 8000。服务端按原顺序去重；若 `inReplyTo` 不是最后一项，再追加到末尾。没给这个字段时，`References` 只有 `inReplyTo` |
 
 ### 在线程里回复
@@ -97,7 +97,7 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 `inReplyTo` 必须是尖括号里的 RFC 5322 Message-ID，不是 IMAP UID。`GET /v1/messages/:id` 的 `id` 仍是 IMAP UID，不能拿去填 `inReplyTo`。
 
-回一封收到的信：把该详情里的 `messageId` 当作 `inReplyTo`，把它的 `references`（如果有）当作 `references`。服务端按原顺序去重，并把 `inReplyTo` 追加到 `References` 末尾。详情里的 `references` 不再按发送接口的 8000 字符拼接上限裁剪；交给 `POST /v1/send` 时仍受那条限制。回本服务发出的信时，用 `POST /v1/send` 响应（或 `GET /v1/send/history` 同一行）里的 `messageId`，它已经是尖括号形式。
+回一封收到的信：把该详情里的 `messageId` 当作 `inReplyTo`，把它的 `references`（如果有）当作 `references`。服务端按原顺序去重，并把 `inReplyTo` 追加到 `References` 末尾。详情里的 `references` 不再按发送接口的 8000 字符拼接上限裁剪；交给 `POST /v1/send` 时仍受那条限制。如果 `references` 太长，保留能放进这条限制的最后几条。回本服务发出的信时，用 `POST /v1/send` 响应（或 `GET /v1/send/history` 同一行）里的 `messageId`，它已经是尖括号形式。
 
 身份和发件域通过之后、每小时额度之前：
 

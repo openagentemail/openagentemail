@@ -627,7 +627,10 @@ export function registerOpenAgentEmailTools(
           .describe("Optional RFC 5322 Message-ID in angle brackets, e.g. <id@domain>. Sets In-Reply-To and References."),
         references: replyReferencesSchema
           .optional()
-          .describe("Optional earlier Message-IDs (1-50, same form). Requires inReplyTo. Deduped; inReplyTo is placed last."),
+          // 详情最多回 50 条，拼起来可能超过发送侧 8000。太长时让调用方留最后几条。
+          .describe(
+            "Optional earlier Message-IDs (1-50, same form). Requires inReplyTo. Deduped; inReplyTo is placed last. If references is too long, keep the last entries that fit.",
+          ),
       }).strict().superRefine(rejectReferencesWithoutInReplyTo),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),

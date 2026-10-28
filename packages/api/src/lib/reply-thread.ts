@@ -5,8 +5,12 @@
  */
 import { z } from 'zod';
 
-/** 单个 msg-id 的最大长度（含尖括号），与主题上限同为 998。 */
-export const RFC5322_MSG_ID_MAX = 998;
+/**
+ * 单个 msg-id 的最大长度（含尖括号）。
+ * RFC 5322 的 998 是物理行上限。msg-id 中间没有空白，折不进续行，
+ * 所以一条 id 收到 250，避免单条就把 In-Reply-To / References 撑过一行。
+ */
+export const RFC5322_MSG_ID_MAX = 250;
 
 /** references 条数上限。 */
 export const REFERENCES_MAX_COUNT = 50;
@@ -18,15 +22,21 @@ export const REFERENCES_MAX_COUNT = 50;
 export const REFERENCES_JOINED_MAX = 8000;
 
 /**
- * 尖括号形式的一个 msg-id：<id-left@id-right>。
- * 字符类是可打印 ASCII，但去掉空白、控制字符，以及尖括号内部的 < > @。
- * `!`–`;`、`=`、`?`、`A`–`~` 合在一起恰好跳过 `<` `>` `@`。
- * 两侧都至少有一个字符，因此恰好一个 @。
+ * 不含过时写法的 RFC 5322 msg-id：`<` id-left `@` id-right `>`。
+ * id-left 只能是 dot-atom-text。id-right 是 dot-atom-text，或 no-fold-literal（`[` dtext* `]`）。
+ * atext 不含逗号、引号、反斜杠、空白和尖括号。dot-atom-text 不允许空段、首尾点或连续点。
+ * dtext 是可打印 ASCII，去掉空格、`[`、`\`、`]`。
  */
-const RFC5322_MSG_ID_RE = /^<[!-;=?A-~]+@[!-;=?A-~]+>$/;
+const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]";
+const DOT_ATOM_TEXT = `${ATEXT}+(?:\\.${ATEXT}+)*`;
+const DTEXT = '[\\x21-\\x5A\\x5E-\\x7E]';
+const NO_FOLD_LITERAL = `\\[${DTEXT}*\\]`;
+const RFC5322_MSG_ID_RE = new RegExp(
+  `^<${DOT_ATOM_TEXT}@(?:${DOT_ATOM_TEXT}|${NO_FOLD_LITERAL})>$`,
+);
 
 /**
- * 与下面的 zod schema 同一条规则：长度不超过 998，且匹配尖括号 msg-id。
+ * 与下面的 zod schema 同一条规则：长度不超过 250，且匹配上面的 msg-id。
  * 读信详情用它过滤，避免再抄一份正则。非字符串由调用方先丢掉。
  */
 export function isRfc5322MsgId(value: string): boolean {
