@@ -69,9 +69,26 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 ## Send API (`POST /v1/send`)
 
-`{from,to,subject,text,html?,autoReply?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。
+`{from,to,subject,text,html?,autoReply?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。body 仍是 strict，幂等键不进 JSON。
 
-身份和发件域通过之后、每小时额度之前：
+可选请求头 `Idempotency-Key`。缺省、只有空白，或 trim 之后为空，与不带这个头完全相同。trim 之后超过 128 个字符，或含有 ASCII 控制字符（含 DEL）或 C1 控制字符，**400** `{error:"invalid_request"}`。键按发件身份分开：`from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。不同身份用同一个键互不影响。
+
+指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，不排序。对象的键按字典序。地址大小写保持客户端传入的值，因为发送路径不改写已经校验过的字段。以后新增的可选 body 字段会自动算进指纹。同一身份若只改了 `from` 的大小写，指纹不同，得到 422。调用方重试时应原样重放 body。
+
+在 body 校验和身份 / From 检查之后、自动回复冷却和每小时额度之前处理。占位在任何 await 之前同步完成：
+
+- 24 小时内已完成、指纹相同：原样返回当时的状态码和 JSON，并加响应头 `Idempotent-Replayed: true`。不再发信，不占 `SEND_RATE_LIMIT`，不碰冷却，不新写 `send-log.jsonl`。
+- 同一键、指纹不同（已完成或仍在发送）：**422** `{error:"idempotency_key_reused"}`。
+- 同一键、同一指纹仍在发送：**409** `{error:"idempotency_in_flight", retryAfterSec:1}`。同一键不会发出两封 SMTP。
+- 记为已完成并缓存的结果：200 成功，以及 SMTP 对端已经应答的 502（`isLocalSendFailure` 为 false，日志 `failureKind` 为 `smtp_response`）。200 体是 `{queued:true, messageId, id?}`，502 体是 `{error:"smtp_error", id?}`。
+- 放开键、允许原样重试的结果：冷却、每小时额度，以及占位之后的其它 4xx/429；还有从未到达 SMTP 的连接类失败（`failureKind` 为 `local`）。这些响应不缓存。
+- 内存最多 10_000 条（`SEND_IDEMPOTENCY_TTL_SEC = 86400`）。先丢掉已过期的已完成项；仍满则逐出最老的已完成项，不逐出进行中的占位。若全是进行中，**429** `{error:"idempotency_table_full", retryAfterSec:1}`。这几条响应都不带 `Retry-After` 头。
+
+启动时和冷却、额度一起从 `DATA_DIR/send-log.jsonl` 重建已完成项。只认 24 小时窗口内同时带 `idempotencyKeyHash` 与 `requestHash` 的 `queued` 行，以及 `failureKind: "smtp_response"` 的失败行。`sentAt` 在未来的行忽略。恰好到期（`sentAt + 86400 秒 <= now`）不算。没有这两个字段的旧行忽略。日志只存键的 sha256 十六进制（`idempotencyKeyHash`），不存原始键。`requestHash` 是上面的指纹。200 由行内 `messageId` 与 `id` 还原；`messageId` 不是字符串时这行不还原。502 还原为 `{error:"smtp_error", id}`。连接类失败和额度拒绝不写这两个字段，重启后也不会挡住重试。日志没写上的那一封，重启后补不回来。进程死掉时还在飞的占位不会恢复。
+
+MCP `mail_send` 增加可选字符串 `idempotencyKey`（1 到 128）。客户端把它放进同一个请求头，不放进 body。
+
+身份和发件域通过之后、上面的幂等键处理之后、每小时额度之前：
 
 - **一对一冷却**（仅 `autoReply: true`）：键是发件身份 × 每一个收件人。地址只做 trim + 小写，不剥 `+tag`，不合并点号。父代子发信时键用子地址（与每小时额度同一个发件身份）。`AUTO_REPLY_COOLDOWN_SEC` 默认 300；`0` 关闭；非整数、负数、NaN 或大于 86400 回落 300（超过 86400 时打一条配置警告）。
 - 检查通过时，同一步同步占住全部归一化后的发件身份 × 收件人对，然后才进入每小时额度和 SMTP。占位还没结束（SMTP 尚未返回）时，别的 `autoReply: true` 碰到同一对也会被拒绝。任一收件人仍在冷却或占位中，则整封 **HTTP 429** `{error:"auto_reply_cooldown", retryAfterSec}`。`retryAfterSec` 是被挡住的那些对里剩余秒数的最大值（向上取整，至少 1）；进行中的占位按剩余预留窗口计，至少 1 秒。不部分投递，不打 SMTP，不占每小时额度，不写 `send-log.jsonl`。响应不带 `Retry-After` 头（与本路由的 `rate_limited` 一样，只在 JSON 里给秒数）。
@@ -79,5 +96,5 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 - 内存里最多 10_000 对。只丢掉已经到期的正式冷却；未过期项和进行中的占位都不逐出。丢掉过期项之后仍放不下这次要新增的对，则整封 429 `auto_reply_cooldown`。`retryAfterSec` 只看未过期的正式冷却里最早到期的那一项还剩的秒数（向上取整，至少 1）；进行中的占位不参与。没有这样的正式冷却时，用配置的冷却秒数（至少 1）。不打 SMTP，不占每小时额度。
 - API 启动时从 `DATA_DIR/send-log.jsonl` 重建：冷却窗口内、`autoReply: true`，且为 `queued` 行或 SMTP 服务器已应答的失败行（`result: "failed"` 且 `failureKind: "smtp_response"`），按发件人 × 每个收件人放回内存。`sentAt` 在未来的行忽略（与每小时额度回放相同）。窗口边界恰好到期（`sentAt + 冷却 <= now`）不算。连接类失败（`failureKind: "local"`）、没有 `failureKind` 的旧失败行，以及 `rate_limited` 不算。超过 10_000 对时保留最晚到期的那些对。日志没写上的那一封，重启后补不回来。SMTP 失败行才会带 `failureKind`（`smtp_response` 或 `local`）。占住每小时额度的 `queued` 行和 `failureKind` 为 `smtp_response` 的失败行还可带 `rateLimitAt`（准入时刻的 ISO 时间）；`SEND_RATE_LIMIT=0`、`rate_limited` 和连接类失败不写。发送历史仍显示 `sentAt`。冷却回放继续用 `sentAt`。
 
-每小时额度仍然包住该身份的全部 `/v1/send`，包括自动回复。先过冷却，再扣额度。`SEND_RATE_LIMIT` 默认 20，`0` 关闭。超限 **429** `{error:"rate_limited", limit, retryAfterSec}`（同样没有 `Retry-After` 头）。进程启动把最近一小时的 `queued` 行，加上 SMTP 服务器已应答的失败行，回放进同一个滑动窗口，所以重启不会把额度清零。回放有准入时刻 `rateLimitAt` 时用它，否则用 `sentAt`；日志没写上的那一封不会被计入。连接类失败和没有 `failureKind` 的旧失败行不计。任务、审批、催办、租约邮件不走这条路由。
+每小时额度仍然包住该身份的全部 `/v1/send`，包括自动回复。先处理幂等键，再过冷却，再扣额度。幂等回放不扣额度。`SEND_RATE_LIMIT` 默认 20，`0` 关闭。超限 **429** `{error:"rate_limited", limit, retryAfterSec}`（同样没有 `Retry-After` 头）。进程启动把最近一小时的 `queued` 行，加上 SMTP 服务器已应答的失败行，回放进同一个滑动窗口，所以重启不会把额度清零。回放有准入时刻 `rateLimitAt` 时用它，否则用 `sentAt`；日志没写上的那一封不会被计入。连接类失败和没有 `failureKind` 的旧失败行不计。任务、审批、催办、租约邮件不走这条路由。
 

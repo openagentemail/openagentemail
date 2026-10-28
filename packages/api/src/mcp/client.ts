@@ -9,7 +9,8 @@
  *   GET  /v1/messages/:id?address&uidValidity?  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
-   *   POST /v1/send                  {from,to,subject,text,html?,autoReply?} -> 200 {queued:true, messageId, id?}
+ *   POST /v1/send                  {from,to,subject,text,html?,autoReply?} -> 200 {queued:true, messageId, id?}
+ *                                  可选头 Idempotency-Key，不进 JSON body
  *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
  *   GET  /v1/tasks?state=          -> {tasks:[task]}
  *   GET  /v1/tasks/:id             -> task
@@ -350,7 +351,7 @@ export class OpenAgentEmailClient {
     method: string,
     path: string,
     body?: unknown,
-    opts?: { sendSource?: "mcp"; signal?: AbortSignal },
+    opts?: { sendSource?: "mcp"; signal?: AbortSignal; idempotencyKey?: string },
   ): Promise<T> {
     let res: Response;
     try {
@@ -360,6 +361,8 @@ export class OpenAgentEmailClient {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
           ...(opts?.sendSource === "mcp" ? this.mcpSourceHeaders() : {}),
+          // 只在 mail_send 传入时带上。空串不当键，避免 trim 后变成“无键”却又占着头。
+          ...(opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: opts?.signal,
@@ -651,13 +654,15 @@ export class OpenAgentEmailClient {
     text: string,
     html?: string,
     autoReply?: boolean,
+    idempotencyKey?: string,
   ): Promise<{ queued: boolean; messageId: string; id?: string }> {
     // JSON.stringify 会丢掉 undefined，因此省略不进 body；显式 false 会进 body。
+    // 幂等键只走请求头，不进 strict body。
     return this.request(
       "POST",
       "/v1/send",
       { from, to, subject, text, html, autoReply },
-      { sendSource: "mcp" },
+      { sendSource: "mcp", idempotencyKey },
     );
   }
 

@@ -259,6 +259,12 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(sendObject.safeParse({ ...sendBase, autoReply: true }).success).toBe(true);
   expect(sendObject.safeParse({ ...sendBase, autoReply: false }).success).toBe(true);
   expect(sendObject.safeParse({ ...sendBase, autoReply: "true" }).success).toBe(false);
+  // 幂等键是可选字符串，1 到 128。不进 REST body，空串和超长都拒绝。
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "k" }).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "k".repeat(128) }).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "k".repeat(129) }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: 1 }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, headers: { "Auto-Submitted": "auto-replied" } }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, autoSubmitted: "no" }).success).toBe(false);
   expect(ok(send, "from", "not-an-email")).toBe(false);

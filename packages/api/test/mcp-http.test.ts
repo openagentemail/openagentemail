@@ -1136,6 +1136,28 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
       .filter((entry) => entry[0]?.subject === rejectedSubject);
     expect(reached).toEqual([]);
   });
+
+  test('idempotencyKey 经请求头让第二次 mail_send 不再打 SMTP', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp-idem' })!;
+    sendMailMock.mockClear();
+    const args = {
+      from: identity.address,
+      to: 'recipient@example.net',
+      subject: 'mcp-idem-subject',
+      text: 'body',
+      idempotencyKey: 'mcp-idem-key-1',
+    };
+    const call = () => mcpRequest(token, 'tools/call', { name: 'mail_send', arguments: args });
+    const first = await call();
+    expect(first.status).toBe(200);
+    expect(JSON.stringify(await readMcpJson(first))).toContain('"queued":true');
+    const second = await call();
+    expect(second.status).toBe(200);
+    expect(JSON.stringify(await readMcpJson(second))).toContain('"queued":true');
+    const reached = (sendMailMock.mock.calls as unknown as Array<[{ subject?: string }]>)
+      .filter((entry) => entry[0]?.subject === 'mcp-idem-subject');
+    expect(reached).toHaveLength(1);
+  });
 });
 
 /**

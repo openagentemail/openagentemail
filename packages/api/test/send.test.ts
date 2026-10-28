@@ -195,6 +195,8 @@ describe('发信失败后的配额处理', () => {
       error?: string;
     };
     expect(rejectedRow).toMatchObject({ error: 'smtp_error', failureKind: 'smtp_response' });
+    expect(rejectedRow).not.toHaveProperty('idempotencyKeyHash');
+    expect(rejectedRow).not.toHaveProperty('requestHash');
 
     resetRateLimits();
     smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
@@ -446,6 +448,7 @@ describe('POST /v1/send 未知键拒绝（#324）', () => {
       }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get('Idempotent-Replayed')).toBeNull();
     expect(await response.json()).toMatchObject({
       queued: true,
       messageId: '<strict-ok@test.example>',

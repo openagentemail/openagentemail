@@ -353,6 +353,46 @@ describe('send-log store', () => {
     expect(parsed.items.find((row) => row.subject === 'num')).not.toHaveProperty('rateLimitAt');
   });
 
+  test('幂等哈希往返，非法值丢掉，原始键不落盘', async () => {
+    const keyHash = 'a'.repeat(64);
+    const requestHash = 'b'.repeat(64);
+    const rawKey = 'Idem-Key/Not-Hex!';
+    const queued = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'idem-ok',
+      result: 'queued',
+      source: 'api',
+      messageId: '<idem@test.example>',
+      idempotencyKeyHash: keyHash,
+      requestHash,
+    });
+    expect(queued.idempotencyKeyHash).toBe(keyHash);
+    expect(queued.requestHash).toBe(requestHash);
+    const bogus = await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'idem-bad',
+      result: 'queued',
+      source: 'api',
+      idempotencyKeyHash: rawKey,
+      requestHash: 'B'.repeat(64),
+    });
+    expect(bogus).not.toHaveProperty('idempotencyKeyHash');
+    expect(bogus).not.toHaveProperty('requestHash');
+    const text = readFileSync(sendLogPathForTests(), 'utf8');
+    expect(text).toContain(`"idempotencyKeyHash":"${keyHash}"`);
+    expect(text).toContain(`"requestHash":"${requestHash}"`);
+    expect(text).not.toContain(rawKey);
+    expect(text).not.toContain('"idempotencyKey"');
+    const page = await querySendLog({ limit: 20 });
+    expect(page.items.find((row) => row.subject === 'idem-ok')).toMatchObject({
+      idempotencyKeyHash: keyHash,
+      requestHash,
+    });
+    expect(page.items.find((row) => row.subject === 'idem-bad')).not.toHaveProperty('idempotencyKeyHash');
+  });
+
   test('query hard-clamps to 30 days', async () => {
     const now = Date.parse('2026-08-14T12:00:00.000Z');
     setSendLogNowForTests(() => now - SEND_LOG_RETENTION_MS - 60_000);

@@ -75,6 +75,13 @@ export type SendLogRecord = {
    * 限额关闭（没有 reservation）时不写。发送历史仍看 sentAt。
    */
   rateLimitAt?: string;
+  /**
+   * 幂等键的 sha256（十六进制）。只在已完成的发送上出现：queued，
+   * 以及对端已应答的失败。不存原始键。连接类失败和额度拒绝不写。
+   */
+  idempotencyKeyHash?: string;
+  /** 校验后发信 body 的指纹（sha256）。与 idempotencyKeyHash 成对出现。 */
+  requestHash?: string;
 };
 
 export type SendLogQuery = {
@@ -207,6 +214,13 @@ function isLoggedEmail(value: unknown): value is string {
 
 /** 准入时刻只接受短 ISO 字符串。更长或解析不了的丢掉该字段，不拒整行。 */
 const RATE_LIMIT_AT_MAX_LEN = 64;
+/** 幂等哈希只接受小写 sha256。别的值丢掉该字段，不拒整行，也不把原始键抄进来。 */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function acceptedSha256Hex(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !SHA256_HEX.test(value)) return undefined;
+  return value;
+}
 
 function acceptedRateLimitAt(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length > RATE_LIMIT_AT_MAX_LEN) return undefined;
@@ -257,6 +271,11 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   // 只认短且能解析的时间。别的值丢掉该字段，不因此拒掉整行。
   const rateLimitAt = acceptedRateLimitAt(row.rateLimitAt);
   if (rateLimitAt) record.rateLimitAt = rateLimitAt;
+  // 只认成对的小写 sha256。原始键不是本结构的字段，解析时不会留下。
+  const idempotencyKeyHash = acceptedSha256Hex(row.idempotencyKeyHash);
+  const requestHash = acceptedSha256Hex(row.requestHash);
+  if (idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
+  if (requestHash) record.requestHash = requestHash;
   return record;
 }
 
@@ -760,6 +779,10 @@ export type AppendSendLogInput = {
    * 不是短的可解析时间就丢掉。限额为 0 时调用方不传。
    */
   rateLimitAt?: string;
+  /** 幂等键 sha256。不是 64 位小写十六进制就丢掉。不要传原始键。 */
+  idempotencyKeyHash?: string;
+  /** 发信 body 指纹。规则与 idempotencyKeyHash 相同。 */
+  requestHash?: string;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -820,6 +843,11 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     const rateLimitAt = holdsHourlySlot ? acceptedRateLimitAt(input.rateLimitAt) : undefined;
     if (rateLimitAt) record.rateLimitAt = rateLimitAt;
     if (input.autoReply === true) record.autoReply = true;
+    // 只落哈希。调用方在连接类失败和额度拒绝时不传，避免重启把已放开的键当成已完成。
+    const idempotencyKeyHash = acceptedSha256Hex(input.idempotencyKeyHash);
+    const requestHash = acceptedSha256Hex(input.requestHash);
+    if (idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
+    if (requestHash) record.requestHash = requestHash;
     const line = `${JSON.stringify(record)}\n`;
     try {
       prepareAppendHotPath(line);

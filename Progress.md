@@ -1,5 +1,28 @@
 # Progress · #137 B1 控制台 i18n 基建
 
+## 2026-10-28 · POST /v1/send 与 mail_send 可选幂等键
+
+### 我们实现了哪些功能？
+1. `POST /v1/send` 接受可选请求头 `Idempotency-Key`。缺省、空白与 trim 后为空保持旧行为。超过 128 或含控制字符返回 400 `invalid_request`。键不进 JSON body。键按发件身份分开，身份是 `from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。
+2. 指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，对象键排序，地址大小写不改。以后新增的可选字段会自动算进去。身份校验之后、冷却和每小时额度之前同步占位：相同指纹在 24 小时内回放原状态码和 JSON，响应头 `Idempotent-Replayed: true`，不再发信、不占额度、不碰冷却、不新写日志；指纹不同 422 `idempotency_key_reused`；同一指纹仍在发送 409 `idempotency_in_flight`。缓存 200 和对端已应答的 502。4xx/429 与连接类失败放开键。表满 10000 时先丢过期，再逐出最老的已完成项；全是进行中则 429 `idempotency_table_full`。
+3. `send-log.jsonl` 在已完成的行上增加 `idempotencyKeyHash`（原始键的 sha256）和 `requestHash`。不写原始键。启动时由 `replaySendGuardsFromLog` 回放 24 小时内的 `queued` 行和 `smtp_response` 失败行，忽略未来的 `sentAt`。没有这两个字段的旧行忽略。MCP `mail_send` 增加可选 `idempotencyKey`（1–128），客户端放进同一个请求头。
+
+### 我们遇到了哪些错误？
+1. 新测试里 `expect((await json()) as T).error)` 多了一个括号，文件没法解析。
+2. 路由用例用 NUL 当控制字符。Fetch 的 `Request` 在进 Hono 之前就拒绝这个头，测不到路由返回的 400。
+3. 表满逐出用例把幂等时钟拨回 2023，表里还留着一条真实时间的已完成项，最老项被判错。第一次 `tsc` 比基线多 1 条：`mockImplementation` 写了参数，和声明的无参函数不一致。
+
+### 我们是如何解决这些错误的？
+1. 补上括号后，幂等测试 20 条通过。
+2. 路由用例改用仍能进 `Headers` 的 `\u0001`。解析函数另外直接拒绝 NUL、换行、DEL 和 C1。
+3. 逐出前先清空幂等表再设时钟。mock 函数按无参类型断言，运行时仍能读到 `from`。`bun run typecheck` 回到 179，与 main 相同。`send.ts` 的 `TS2589` 仍是原来的 `ReturnType<Context['json']>`。`send.test.ts` 6 条、`send-log.test.ts` 3 条也是原有错误，只是行号随新增测试下移。
+
+### 基线与证据
+- 基线 `b2d4d9c`。未推送、未合并、未打标签。
+- `packages/api`：`send-idempotency.test.ts` 20 pass；`send.test.ts` 25 pass；`send-log.test.ts` 21 pass；`auto-reply-cooldown.test.ts` 35 pass；`ratelimit.test.ts` 25 pass；`mcp-http.test.ts` 101 pass。都是 `bun test <file> --timeout 180000`，一次一个文件。
+- `packages/mcp`：`client.test.ts` 与 `tools.test.ts` 一次跑完，24 pass / 0 fail。
+- `packages/api` 下 `bun run typecheck` 179 条。新文件和改过的 `client.ts`、`tools.ts`、`send-idempotency.ts`、`replay-send-guards.ts`、`main.ts`、`send-log.ts` 没有新增错误。
+
 ## 2026-09-20 · w137b1
 
 ### 我们实现了哪些功能？

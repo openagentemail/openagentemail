@@ -588,7 +588,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. There is no headers field.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional idempotencyKey (1 to 128 characters) is sent as the Idempotency-Key header and is not part of the JSON body. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
@@ -599,13 +599,20 @@ export function registerOpenAgentEmailTools(
           .boolean()
           .optional()
           .describe("True only: server adds Auto-Submitted: auto-replied. False or omitted adds nothing."),
+        // 可选幂等键。只经 HTTP 头 Idempotency-Key 传给 POST /v1/send，不进 JSON body。
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe("Optional idempotency key, 1 to 128 characters. Sent as the Idempotency-Key header, not in the body."),
       }).strict(),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
-    ({ from, to, subject, text, html, autoReply }) =>
-      callApi(() => client.send(from, to, subject, text, html, autoReply)),
+    ({ from, to, subject, text, html, autoReply, idempotencyKey }) =>
+      callApi(() => client.send(from, to, subject, text, html, autoReply, idempotencyKey)),
   );
 
   const notificationInputSchema = {
