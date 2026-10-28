@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 import { simpleParser, type ParsedMail } from 'mailparser';
 
 process.env.DOMAIN = 'test.example';
@@ -13,7 +14,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-scan-diagnostics-'));
 
-const { afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 type FakeMailMessage = {
   uid: number;
@@ -259,4 +260,9 @@ describe('#94: durable scan single-pass MIME parsing and integrity regressions',
     expect(snapshot.hadMatchingRowsIds.has(id2)).toBe(true);
     expect(snapshot.hadMatchingRowsIds.size).toBe(2);
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

@@ -4,6 +4,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-contract';
@@ -14,7 +15,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-wait-contract-'));
 process.env.UI_ENABLED = 'false';
 
-const { describe, expect, mock, test } = await import('bun:test');
+const { afterAll, describe, expect, mock, test } = await import('bun:test');
 const { EventEmitter } = await import('node:events');
 
 class QuietImap extends EventEmitter {
@@ -80,4 +81,9 @@ describe('#206 R8 wait timeout contract', () => {
     const testJob = yml.split('\n  test:')[1]?.split('\n  capacity:')[0] ?? '';
     expect(testJob).not.toContain('persist-credentials: false');
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

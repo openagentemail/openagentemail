@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 import type { RawTaskMessage, Task, TaskState, SendInput } from '../src/lib/tasks.ts';
 
 process.env.DOMAIN = 'test.example';
@@ -13,7 +14,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-board-'));
 
-const { afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 type FakeMailMessage = {
   uid: number;
@@ -1334,4 +1335,9 @@ describe('issue #95: newly created tasks readable during IMAP indexing lag', () 
     expect(await getTask(created.id)).toBeNull();
     expect(await taskService.getForAuthorization?.(created.id)).toBeNull();
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

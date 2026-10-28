@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pinMcpPublicUrl, restoreMcpPublicUrl, restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-seen-rate-key';
@@ -14,6 +15,8 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-seen-rate-'));
+// 进入本文件前的值；afterAll 还原，避免烘焙进后续文件的 config。
+const mcpPublicUrlBefore = process.env.MCP_PUBLIC_URL;
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 
 const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
@@ -65,6 +68,8 @@ class FakeImapFlow extends EventEmitter {
 mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 
 const { createApp } = await import('../src/app.ts');
+const { config } = await import('../src/lib/config.ts');
+pinMcpPublicUrl(config, 'http://localhost');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const {
@@ -117,6 +122,9 @@ beforeEach(() => {
 afterAll(() => {
   setMarkSeenNowForTests(null);
   resetMarkSeenLimits();
+  // 交还 imapflow，并按进入本文件前的 MCP_PUBLIC_URL 还原 config。
+  restoreRealImapFlow();
+  restoreMcpPublicUrl(config, mcpPublicUrlBefore);
 });
 
 describe('#244 mark-seen env fail-safe', () => {

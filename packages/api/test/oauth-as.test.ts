@@ -775,8 +775,15 @@ describe('resolveToken / OAuth 永为 identity', () => {
     const badAud = resolveAccessToken(tok, { resource: 'http://other/mcp' });
     expect(badAud.status).toBe('forbidden_audience');
 
-    // 无 MCP_PUBLIC_URL 且未传 resource：完整 resolve 拒 OAuth
-    expect(resolveToken(tok)).toBeNull();
+    // 无 MCP_PUBLIC_URL 且未传 resource：完整 resolve 拒 OAuth。
+    // 显式清掉单例上可能被更早文件烘焙的 mcpPublicUrl，本断言不依赖文件顺序。
+    const mcpPublicUrlBefore = config.mcpPublicUrl;
+    (config as { mcpPublicUrl?: string }).mcpPublicUrl = undefined;
+    try {
+      expect(resolveToken(tok)).toBeNull();
+    } finally {
+      (config as { mcpPublicUrl?: string }).mcpPublicUrl = mcpPublicUrlBefore;
+    }
     // UI 会话 resolver 显式永不认 OAuth（与 MCP_PUBLIC_URL 无关）
     expect(resolveUiSessionToken(tok)).toBeNull();
   });

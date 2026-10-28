@@ -10,6 +10,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-1';
@@ -19,7 +20,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'x';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-imap-'));
 
-const { describe, expect, mock, test } = await import('bun:test');
+const { afterAll, describe, expect, mock, test } = await import('bun:test');
 
 // 授权路径的回归需要跑真的 listMessages，所以在导入 imap.ts 之前先替掉 imapflow。
 let fakeMessages: any[] = [];
@@ -665,4 +666,9 @@ describe('getMessageSource — ACL 与截断', () => {
     expect(Buffer.byteLength(payload!.source, 'utf8')).toBe(MAX_EMAIL_SOURCE_LENGTH - 1);
     fakeMessages = [];
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

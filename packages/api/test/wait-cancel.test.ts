@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-cancel';
@@ -16,7 +17,7 @@ process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-wait-cancel-'));
 process.env.UI_ENABLED = 'false';
 
-const { beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 type FakeMessage = {
   uid: number;
@@ -681,4 +682,9 @@ describe('#206 R8 IDLE 收尾与 499 头', () => {
       process.off('unhandledRejection', onRej);
     }
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

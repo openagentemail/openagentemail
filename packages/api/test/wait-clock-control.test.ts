@@ -5,6 +5,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-clock';
@@ -59,6 +60,8 @@ afterEach(() => {
 afterAll(() => {
   // 回收本文件自建 DATA_DIR，避免全量跑留下 oae-wait-clock-*。
   rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
+  // 假 IMAP 不得留给后续测试文件。
+  restoreRealImapFlow();
 });
 
 describe('#208 wait 单调钟不受墙钟快进误伤', () => {

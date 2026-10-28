@@ -4,6 +4,7 @@
  * taskId 分支不在本面覆盖（批准 #3250：刻意不跳过 seen）。
  */
 import { EventEmitter } from 'node:events';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-skip-seen';
@@ -12,7 +13,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
-const { beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 type FakeMessage = {
   uid: number;
@@ -186,4 +187,9 @@ describe('#230 wait 跳过已读（邮件族负控）', () => {
     expect(found).not.toBeNull();
     expect(found!.id).toBe('19');
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });
