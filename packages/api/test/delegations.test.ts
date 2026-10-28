@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConfigurableFakeMailbox } from './helpers/imap-fake-mailbox.ts';
+import { pinMcpPublicUrl, restoreMcpPublicUrl, restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-delg-test';
@@ -10,10 +11,12 @@ process.env.IMAP_USER = 'agent@test.example';
 process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
+// 进入本文件前的值；afterAll 还原，避免烘焙进后续文件的 config。
+const mcpPublicUrlBefore = process.env.MCP_PUBLIC_URL;
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-delg-test-'));
 
-const { beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 let fakeMessages: any[] = [
   {
@@ -72,6 +75,7 @@ const sendMailMock = mock(async () => ({ messageId: '<test-send@test.example>' }
 mock.module('../src/lib/smtp.ts', () => ({ sendMail: sendMailMock }));
 
 const { config } = await import('../src/lib/config.ts');
+pinMcpPublicUrl(config, 'http://localhost');
 const { createApp } = await import('../src/app.ts');
 const {
   createIdentity,
@@ -1541,4 +1545,10 @@ describe('Issue #125: Revocable mailbox delegation ACLs', () => {
       expect((await res.json() as any).error).toContain('delegation management requires direct identity credentials');
     });
   });
+});
+
+// 本文件的假 IMAP / MCP_PUBLIC_URL 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
+  restoreMcpPublicUrl(config, mcpPublicUrlBefore);
 });

@@ -1,6 +1,7 @@
 // 端到端（假 IMAP 服务器）的身份隔离测试：验证 listMessages 这条真实路径上
 // 别人的邮件不会被返回，而不只是内部匹配函数的单测。
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1580,4 +1581,9 @@ describe('#363-B1 REST autoSubmitted', () => {
     expect(json.id).toBe('100');
     expect(json.autoSubmitted).toBe('auto-replied');
   });
+});
+
+// 假 IMAP 不得留给后续测试文件（例如 webhook 启动重建要看到真实连接失败）。
+afterAll(() => {
+  restoreRealImapFlow();
 });

@@ -177,34 +177,40 @@ describe('playwright consent Approve origin regression (#234)', () => {
     const page = await context.newPage();
 
     // click 前注册：服务端命中后 resolve（有类型 Promise，非回调赋值收窄）
+    // goto 抛错时必须清掉定时器，否则 15s 后的拒绝会落到后面的测试文件（#204 曾被误伤）。
+    let approveTimer: ReturnType<typeof setTimeout> | undefined;
     const approveHitPromise: Promise<ApproveCapture> = new Promise((resolve, reject) => {
-      const timer = setTimeout(
+      approveTimer = setTimeout(
         () => reject(new Error('timed out waiting for Approve POST at server')),
         15_000,
       );
       resolveApproveHit = (value) => {
-        clearTimeout(timer);
+        if (approveTimer) clearTimeout(approveTimer);
         resolve(value);
       };
     });
 
-    await page.goto(consentUrl, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('button[value="approve"]');
-    await page.selectOption('select[name="address"]', address).catch(() => {});
+    let postResult: ApproveCapture;
+    try {
+      await page.goto(consentUrl, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('button[value="approve"]');
+      await page.selectOption('select[name="address"]', address).catch(() => {});
 
-    // POST 导航到同意页响应；随后 meta refresh 外跳属预期
-    const postNav = page.waitForURL(
-      (url) => url.pathname === '/ui/oauth/authorize',
-      { timeout: 15_000 },
-    );
+      // POST 导航到同意页响应；随后 meta refresh 外跳属预期
+      const postNav = page.waitForURL(
+        (url) => url.pathname === '/ui/oauth/authorize',
+        { timeout: 15_000 },
+      );
 
-    await page.click('button[value="approve"]');
+      await page.click('button[value="approve"]');
 
-    const postResult: ApproveCapture = await approveHitPromise;
-    await postNav.catch(() => null);
-    await page.waitForLoadState('domcontentloaded').catch(() => null);
-
-    await browser.close();
+      postResult = await approveHitPromise;
+      await postNav.catch(() => null);
+      await page.waitForLoadState('domcontentloaded').catch(() => null);
+    } finally {
+      if (approveTimer) clearTimeout(approveTimer);
+      await browser.close();
+    }
 
     // 浏览器实发头（服务端实收 = 真值）+ 成功正文（响应体，非 DOM 竞态）
     expect(postResult.origin).toBe('null');

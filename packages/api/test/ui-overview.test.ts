@@ -7,7 +7,8 @@
 //
 // 状态机全部走注入的假时钟与可控 promise：真时间只用来做"多久之内跑完"这类
 // 上界断言，绝不用来推进 TTL 或冷却。
-import { describe, expect, mock, test } from 'bun:test';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 import { EventEmitter } from 'node:events';
 import { Hono } from 'hono';
 import type { ImapFlow } from 'imapflow';
@@ -1611,4 +1612,9 @@ describe('#201 IMAP fake UIDVALIDITY 可注入复用示范', () => {
     fakeMailbox.resetUidValidity();
     expect(client.mailbox.uidValidity).toBe(DEFAULT_FAKE_UID_VALIDITY);
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });
