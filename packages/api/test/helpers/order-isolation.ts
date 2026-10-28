@@ -6,6 +6,7 @@
  */
 import { ImapFlow } from 'imapflow';
 import { mock } from 'bun:test';
+import { normalizeUrl } from '../../src/lib/normalize-url.ts';
 
 // 必须在任何 mock.module('imapflow') 之前首次求值；const 拍下真实构造器，避免活绑定被 mock 改写。
 const realImapFlow = ImapFlow;
@@ -33,8 +34,8 @@ export function restoreMcpPublicUrl(config: object, envBefore: string | undefine
   }
   process.env.MCP_PUBLIC_URL = envBefore;
   try {
-    // 与 config.normalizeUrl 对「无 path」origin 的结果一致：去掉尾斜杠。
-    cfg.mcpPublicUrl = new URL(envBefore).href.replace(/\/+$/, '');
+    // 与 parseConfig 写入 mcpPublicUrl 走同一个 normalizeUrl。
+    cfg.mcpPublicUrl = normalizeUrl(envBefore);
   } catch {
     cfg.mcpPublicUrl = undefined;
     delete process.env.MCP_PUBLIC_URL;

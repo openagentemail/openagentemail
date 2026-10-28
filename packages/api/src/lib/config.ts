@@ -8,6 +8,10 @@ import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { JSON_BODY_LIMIT_BYTES } from './limits.ts';
+import { normalizeUrl } from './normalize-url.ts';
+
+// 再导出：notify 配对与测试仍从 config 取同一函数，生产行为不变。
+export { normalizeUrl };
 
 /**
  * Compose `${VAR:-}` injects "" when the var is unset. Treat empty/whitespace
@@ -326,26 +330,6 @@ function parseAllowedPorts(rawPorts: string): number[] {
     ports.push(port);
   }
   return ports;
-}
-
-/**
- * Canonical form keeps configured and request URLs comparable as origins.
- * Only drops a redundant trailing slash on the pathname — never rewrites
- * query values or fragments (e.g. `?next=/` and `#/` must survive).
- * Exported so notify device pairing uses the same normalizer as config.
- */
-export function normalizeUrl(value: string): string {
-  const url = new URL(value);
-  if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
-    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
-  }
-  // Root path serializes as "https://host/" (or with userinfo). Prefer href so
-  // publisher:secret@host credentials survive; origin alone drops userinfo.
-  // Only apply when search/hash are empty so those branches keep full href.
-  if (url.pathname === '/' && url.search === '' && url.hash === '') {
-    return url.href.replace(/\/+$/, '');
-  }
-  return url.href;
 }
 
 const DOMAIN_MAX_LENGTH = 253;
