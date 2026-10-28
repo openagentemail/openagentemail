@@ -67,6 +67,15 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 - **明确不是：** 全局 IMAP 并发/耗尽保护。多身份与未纳入的路由（detail / wait / UI / MCP-direct）仍可叠加负载。多实例不共享内存桶，部署合同按单实例前提；水平扩展不会自动协调这份预算。
 - **独立：** 不改 send / MCP / wait 槽位的既有桶。上面的「重启清零」只指这份列表预算。发信每小时额度在 API 启动时从 `send-log.jsonl` 回放，见下方 Send。
 
+## 读一封信（`GET /v1/messages/:id`）
+
+`id` 是 IMAP UID 字符串，不是 RFC 5322 Message-ID。详情只在字段通过与 `POST /v1/send` 的 `inReplyTo` 相同的校验时带上下面两项；缺失或非法就省略该键。列表摘要和 webhook 不带这两项。`POST /v1/messages/wait` 返回的是同一份详情，因此也会带上。MCP `mail_read_message` 读的就是这条详情。
+
+| 字段 | 说明 |
+| --- | --- |
+| `messageId` | 可选。这封信自己的 Message-ID，尖括号形式，例如 `<id-left@id-right>`。最长 998，可打印 ASCII，恰好一个 `@`，内部不能再有尖括号、空白或控制字符 |
+| `references` | 可选。这封信自己的 `References` 头里通过同一校验的 id。按原顺序去重（保留第一次）。超过 50 条时保留最后 50 条。没有合法 id 则省略。不会把本信的 `messageId` 或 `In-Reply-To` 自动补进这个数组 |
+
 ## Send API (`POST /v1/send`)
 
 `{from,to,subject,text,html?,autoReply?,inReplyTo?,references?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。
@@ -86,7 +95,9 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 调用方自己决定主题要不要写成 `Re:`。省略 `inReplyTo` 和 `references` 时不增加这两条头。这两项不读、不写自动回复冷却，也不改变每小时额度。
 
-`inReplyTo` 必须是尖括号里的 RFC 5322 Message-ID，不是 IMAP UID。`GET /v1/messages/:id` 返回的 `id` 是 IMAP UID 字符串；这条响应没有 `messageId`，也没有原始头，不能拿 `id` 去填 `inReplyTo`。本服务经 `POST /v1/send` 发出的信，用当时响应里的 `messageId`（`GET /v1/send/history` 同一行上也有），它已经是尖括号形式。
+`inReplyTo` 必须是尖括号里的 RFC 5322 Message-ID，不是 IMAP UID。`GET /v1/messages/:id` 的 `id` 仍是 IMAP UID，不能拿去填 `inReplyTo`。
+
+回一封收到的信：把该详情里的 `messageId` 当作 `inReplyTo`，把它的 `references`（如果有）当作 `references`。服务端按原顺序去重，并把 `inReplyTo` 追加到 `References` 末尾。详情里的 `references` 不再按发送接口的 8000 字符拼接上限裁剪；交给 `POST /v1/send` 时仍受那条限制。回本服务发出的信时，用 `POST /v1/send` 响应（或 `GET /v1/send/history` 同一行）里的 `messageId`，它已经是尖括号形式。
 
 身份和发件域通过之后、每小时额度之前：
 

@@ -7,21 +7,24 @@
 2. 带了 `inReplyTo` 时，`sendMail` 用 nodemailer 的 `inReplyTo` / `references` 选项写 `In-Reply-To` 和 `References`。`references` 按原顺序去重；`inReplyTo` 如果不是最后一项就再追加一次。没给 `references` 时，`References` 只有这一条。值本身已经有尖括号，nodemailer 不会再包一层。长 `References` 由 nodemailer 按空白折行（约 76 列），这里不预先插入换行，因为它的编码器会把换行变成空格。
 3. 主题原样发出，不自动加 `Re:`。这两项不读、不写自动回复冷却，也不改变每小时额度。`inReplyTo` 不写入 send-log，避免改审计行形状。
 4. MCP `mail_send` 增加可选 `inReplyTo`（string）和 `references`（string[]），原样传给 `/v1/send`。省略时请求体里没有这两个键。工具说明补了一句：主题不会被改写。
-5. 文档：`docs/api.md` 的字段表和「在线程里回复」；`packages/api/README.md`、`packages/mcp/README.md`、`CHANGELOG.md`。`GET /v1/messages/:id` 的 `id` 是 IMAP UID，响应里没有 `messageId`，也没有原始头。回本服务发出的信时，用 `POST /v1/send` 响应（或发送历史同一行）里的 `messageId`。
+5. 文档：`docs/api.md` 的字段表和「在线程里回复」；`packages/api/README.md`、`packages/mcp/README.md`、`CHANGELOG.md`。`GET /v1/messages/:id` 的 `id` 仍是 IMAP UID。回本服务发出的信时，用 `POST /v1/send` 响应（或发送历史同一行）里的 `messageId`。
+6. `GET /v1/messages/:id` 的详情增加可选 `messageId` 和 `references`。两者都走 `reply-thread.ts` 里那一条 msg-id 校验，正则没有复制第二份。`messageId` 是解析后的尖括号 Message-ID，非法或缺失就省略。`references` 只取这封信自己的 References：丢掉非法项，按原顺序去重（留第一次），超过 50 保留最后 50，一条都没有则省略。不把本信的 Message-ID 或单独的 In-Reply-To 补进这个数组。列表摘要和 webhook 不带这两项。`POST /v1/messages/wait` 返回的是同一份 `MessageDetail`，所以也会带上。MCP `mail_read_message` 与 `mail_wait_for` 共用详情输出 schema，因此工具出口认这两个可选字段；列表 schema 没有。回一封收到的信时，把详情里的 `messageId` 当作 `inReplyTo`，把 `references`（如果有）当作 `references`，服务端仍会把 `inReplyTo` 追加到末尾。
 
 ### 我们遇到了哪些错误？
 1. 这个 git worktree 里没有 `node_modules`，测试无法解析 zod / nodemailer。
 2. `packages/api` 的 `tsc --noEmit` 在 `src/routes/send.ts` 报 `TS2589`（`ReturnType<Context['json']>` 实例化过深）。加了字段之后行号从 122 变成 130。
 3. `test/mcp-http.test.ts` 里有几条 IMAP TLS 日志：`servername argument must be an string`。对应用例仍然通过。
+4. 详情测试里写了 `<bad id@example.com>`，期望它被丢掉。mailparser 按空白把 References 切开，后半段变成 `<id@example.com>`，校验通过，结果里多了这一条。
 
 ### 我们是如何解决这些错误的？
 1. 主检出 `/workspace/oae-dev/openagentemail` 的 lockfile 与本分支一致。把那边的 `packages/api/node_modules` 和 `packages/mcp/node_modules` 符号链接过来。没有改依赖，也不提交这个链接。
-2. 把 `send.ts` 临时换成 `origin/main` 再跑 tsc，同一条 `TS2589` 已经在 main 的第 122 行。本次改过的 `smtp.ts`、`reply-thread.ts`、`client.ts`、`tools.ts` 和线程测试没有新增 tsc 错误。`packages/mcp` 的 tsc 没有错误。
+2. 把 `send.ts` 临时换成 `origin/main` 再跑 tsc，同一条 `TS2589` 已经在 main 的第 122 行。发信那次改过的 `smtp.ts`、`reply-thread.ts`、`client.ts`、`tools.ts` 和线程测试没有新增 tsc 错误。这次详情改动之后，`reply-thread.ts`、`imap.ts`、`src/mcp/tools.ts`、`message-detail-thread.test.ts` 仍然没有 tsc 错误。`send.ts` 的 `TS2589` 还在第 130 行。`packages/mcp` 的 tsc 没有错误。
 3. 没有改 IMAP。那几条日志出在既有的读信路径，和线程头无关，断言是绿的。
+4. 夹具改成解析后仍然是一整段、并且过不了校验的 id（`<not-an-id>`、`<a@b@example.com>`、`<nope0>`）。过滤逻辑没改。
 
 ### 验证
-- `packages/api`：`send-threading.test.ts` 9 pass；`send.test.ts` 25 pass；`send-history.test.ts` 11 pass；`send-log.test.ts` 20 pass；`auto-reply-smtp.test.ts` 1 pass；`mcp-http.test.ts` 100 pass。
-- `packages/mcp`：`client.test.ts` 13 pass；`tools.test.ts` 11 pass；`shared-module.test.ts` 3 pass。
+- 发信线程：`packages/api` 的 `send-threading.test.ts` 9 pass；`send.test.ts` 25 pass；`send-history.test.ts` 11 pass；`send-log.test.ts` 20 pass；`auto-reply-smtp.test.ts` 1 pass；`mcp-http.test.ts` 100 pass。`packages/mcp`：`client.test.ts` 13 pass；`tools.test.ts` 11 pass；`shared-module.test.ts` 3 pass。
+- 详情字段：`message-detail-thread.test.ts` 15 pass；`send-threading.test.ts` 9 pass；`auto-submitted.test.ts` 17 pass；`imap-match.test.ts` 39 pass；`imap-error-boundary.test.ts` 8 pass；`messages-list-rate.test.ts` 5 pass；`ui-messages.test.ts` 15 pass；`imap.test.ts` 54 pass；`mcp-http.test.ts` 100 pass；`webhook-mcp.test.ts` 5 pass。`packages/mcp`：`tools.test.ts` 11 pass；`client.test.ts` 13 pass；`shared-module.test.ts` 3 pass；`fence.test.ts` 8 pass；`template-a-prompt.test.ts` 3 pass；`template-auto-submitted.test.ts` 2 pass；`wait-for-rearm.test.ts` 16 pass；`wait-for-signal.test.ts` 2 pass；`stdio-eof.test.ts` 1 pass；`clean-boot.test.ts` 1 pass；`wait-clock-mutator-dist.test.ts` 1 pass。以上都是单文件、`--timeout 180000`。
 
 # Progress · #137 B1 控制台 i18n 基建
 

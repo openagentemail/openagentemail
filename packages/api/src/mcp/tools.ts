@@ -20,6 +20,7 @@ import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
 import {
+  REFERENCES_MAX_COUNT,
   rejectReferencesWithoutInReplyTo,
   replyReferencesSchema,
   rfc5322MsgIdSchema,
@@ -131,7 +132,9 @@ export function registerOpenAgentEmailTools(
     hasOtp: z.boolean(),
   };
 
-  // API MessageDetail：base + 正文/OTP/links/task*；不得含 seen/snippet/hasOtp。
+  // API MessageDetail：base + 正文/OTP/links/task* + 可选线程 id；不得含 seen/snippet/hasOtp。
+  // messageId / references 与 mail_wait_for 共用这一份 schema（读和等返回的是同一详情）。
+  // 列表 schema 不放这两项。这里不套发送侧的 8000 拼接上限，避免合法长 id 在工具出口被拒。
   const messageOutputSchema = {
     ...messageBaseSchema,
     text: z.string(),
@@ -150,6 +153,19 @@ export function registerOpenAgentEmailTools(
       z.null(),
       z.enum(["no", "auto-generated", "auto-replied", "other"]),
     ]).optional(),
+    messageId: rfc5322MsgIdSchema
+      .optional()
+      .describe(
+        "This message's Message-ID in angle brackets, when it passes the same check as inReplyTo. Omitted if missing or invalid.",
+      ),
+    references: z
+      .array(rfc5322MsgIdSchema)
+      .min(1)
+      .max(REFERENCES_MAX_COUNT)
+      .optional()
+      .describe(
+        "This message's own References ids that pass the same check. Order kept, deduped, at most the last 50. Omitted when none.",
+      ),
   };
 
   const identityListOutputSchema = {
@@ -492,6 +508,8 @@ export function registerOpenAgentEmailTools(
       title: "Read Email Message",
       description:
         "Read a full message: text, html (if any), and extracted OTP verification codes and links. " +
+        "Optional messageId is this message's angle-bracket Message-ID when valid; optional references are its References ids (order kept, deduped, at most the last 50). " +
+        "To reply, pass messageId as inReplyTo and references, if any, as references. Both are omitted when missing or invalid. id is the IMAP UID. " +
         "autoSubmitted is null, no, auto-generated, auto-replied, or other; " +
         "missing = older API version skew, not a general exemption; " +
         "missing or no is not proof of human origin, and source=internal is not this signal." +

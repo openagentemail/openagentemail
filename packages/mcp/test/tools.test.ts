@@ -484,6 +484,25 @@ test("message summary/detail 输出 schema 按 API 真实形状校验并保留�
   expect(missingAuto.success).toBe(true);
   if (missingAuto.success) expect("autoSubmitted" in missingAuto.data).toBe(false);
   expect(listMessages.element.shape.autoSubmitted).toBeUndefined();
+  // 线程 id 只在详情。列表 schema 没有这两项，避免摘要被当成可回复的 Message-ID。
+  expect(readOut.messageId!.safeParse("<parent@example.com>").success).toBe(true);
+  expect(readOut.messageId!.safeParse("parent@example.com").success).toBe(false);
+  expect(readOut.messageId!.safeParse("<a@b@example.com>").success).toBe(false);
+  expect(readOut.references!.safeParse(["<a@example.com>", "<b@example.com>"]).success).toBe(true);
+  expect(readOut.references!.safeParse(["parent@example.com"]).success).toBe(false);
+  expect(readOut.references!.safeParse([]).success).toBe(false);
+  const fiftyOne = Array.from({ length: 51 }, (_, i) => `<n${i}@example.com>`);
+  expect(readOut.references!.safeParse(fiftyOne).success).toBe(false);
+  expect(readOut.references!.safeParse(fiftyOne.slice(1)).success).toBe(true);
+  const withThread: MessageDetail = {
+    ...detail,
+    messageId: "<parent@example.com>",
+    references: ["<grand@example.com>", "<parent@example.com>"],
+  };
+  expect(detailSchema.safeParse(withThread).success).toBe(true);
+  expect(listMessages.element.shape.messageId).toBeUndefined();
+  expect(listMessages.element.shape.references).toBeUndefined();
+  expect(toolConfigs.get("mail_read_message")?.description).toContain("messageId");
 
   // 展开后的多收件人 To 可超 998：无界 string，不得再按物理行限拒。
   const longTo = Array.from({ length: 40 }, (_, i) => `User${i} <u${i}@example.com>`).join(", ");
@@ -534,6 +553,17 @@ test("#5588 A 旧 API 缺字段工具成功，新值原样通过，畸形拒绝"
   const passed = await call();
   expect(passed.isError ?? false).toBe(false);
   expect(passed.structuredContent.autoSubmitted).toBe("auto-replied");
-  body = { ...body, autoSubmitted: "SECRETVALUE" };
+  body = {
+    ...body,
+    messageId: "<parent@example.com>",
+    references: ["<grand@example.com>"],
+  };
+  const threaded = await call();
+  expect(threaded.isError ?? false).toBe(false);
+  expect(threaded.structuredContent.messageId).toBe("<parent@example.com>");
+  expect(threaded.structuredContent.references).toEqual(["<grand@example.com>"]);
+  body = { ...body, messageId: "parent@example.com" };
+  expect((await call()).isError).toBe(true);
+  body = { ...body, messageId: "<parent@example.com>", autoSubmitted: "SECRETVALUE" };
   expect((await call()).isError).toBe(true);
 });
