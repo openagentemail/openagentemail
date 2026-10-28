@@ -67,6 +67,15 @@ describe('toDetail 线程字段', () => {
     expect(detail.references).toEqual(['<only@example.com>']);
   });
 
+  // 单独的 In-Reply-To：合法 Message-ID 仍返回，且不会冒出 references。
+  test('只有 In-Reply-To、没有 References 时不产生 references', async () => {
+    const detail = await detailFrom(
+      'Message-ID: <self@example.com>\r\n' + 'In-Reply-To: <parent@example.com>\r\n',
+    );
+    expect(detail.messageId).toBe('<self@example.com>');
+    expect(detail).not.toHaveProperty('references');
+  });
+
   test('多条 References 头按出现顺序拼接', async () => {
     const detail = await detailFrom(
       'References: <first@example.com>\r\n' + 'References: <second@example.com>\r\n',
