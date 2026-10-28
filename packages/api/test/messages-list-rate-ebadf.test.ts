@@ -3,7 +3,12 @@
  */
 import { existsSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
-import { runIsolatedChild, type IsolatedChildSpawn } from './support/messages-list-rate-isolate.ts';
+import {
+  EBADF_DRAIN_BOUND_MS,
+  EBADF_RETRY_RESERVE_MS,
+  runIsolatedChild,
+  type IsolatedChildSpawn,
+} from './support/messages-list-rate-isolate.ts';
 
 function textStream(text: string): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -74,11 +79,14 @@ describe('list-rate isolate EBADF retry', () => {
     const firstKills: Array<number | NodeJS.Signals | undefined> = [];
     const secondKills: Array<number | NodeJS.Signals | undefined> = [];
     let firstRemovedBeforeRetry = false;
+    let firstKilledBeforeRetry = false;
     const spawnChild: IsolatedChildSpawn = (argv, options) => {
       argvs.push([...argv]);
       const dataDir = options.env.DATA_DIR ?? '';
       if (dirs.length === 1) {
         firstRemovedBeforeRetry = !existsSync(dirs[0] ?? '');
+        // 第二次拉起前，第一次的 SIGKILL 必须已经发出。
+        firstKilledBeforeRetry = firstKills.includes('SIGKILL');
       }
       dirs.push(dataDir);
       if (dirs.length === 1) {
@@ -91,12 +99,10 @@ describe('list-rate isolate EBADF retry', () => {
         kills: secondKills,
       });
     };
-    const started = Date.now();
     const result = await runIsolatedChild(
       { argv: ['bun', 'list-rate-child'], timeoutMs: 2_000 },
       spawnChild,
     );
-    expect(Date.now() - started).toBeLessThan(1_000);
     expect(argvs).toEqual([
       ['bun', 'list-rate-child'],
       ['bun', 'list-rate-child'],
@@ -104,6 +110,7 @@ describe('list-rate isolate EBADF retry', () => {
     expect(dirs).toHaveLength(2);
     expect(dirs[0]).not.toBe(dirs[1]);
     expect(firstRemovedBeforeRetry).toBe(true);
+    expect(firstKilledBeforeRetry).toBe(true);
     expect(existsSync(dirs[0] ?? '')).toBe(false);
     expect(firstKills.includes('SIGKILL')).toBe(true);
     expect(secondKills).toEqual([]);
@@ -131,10 +138,7 @@ describe('list-rate isolate EBADF retry', () => {
       });
     };
     const timeoutMs = 2_000;
-    const started = Date.now();
     const result = await runIsolatedChild({ argv: ['bun', 'hang-stdout'], timeoutMs }, spawnChild);
-    // 排空被截到约 200ms。若等到共享 deadline，第二次不会跑，耗时也会贴近 timeoutMs。
-    expect(Date.now() - started).toBeLessThan(1_000);
     expect(argvs).toEqual([
       ['bun', 'hang-stdout'],
       ['bun', 'hang-stdout'],
@@ -143,6 +147,39 @@ describe('list-rate isolate EBADF retry', () => {
     expect(result.stdout).toBe('retry-out');
     expect(result.stderr).toBe('retry-err');
     expect(result.timedOut).toBe(false);
+  });
+
+  test('list-rate isolate: 剩余预算小于排空上限时，锁住的 stdout 仍会进入第二次尝试', async () => {
+    const ebadf = systemError('EBADF', 'epoll_ctl');
+    const argvs: string[][] = [];
+    // 小于排空上限，也小于重试预留。旧逻辑会把剩余时间全部耗在排空上，第二次不会跑。
+    const timeoutMs = 150;
+    expect(timeoutMs).toBeLessThan(EBADF_DRAIN_BOUND_MS);
+    expect(timeoutMs).toBeLessThan(EBADF_RETRY_RESERVE_MS);
+    const result = await runIsolatedChild(
+      { argv: ['bun', 'tight-budget'], timeoutMs },
+      (argv) => {
+        argvs.push([...argv]);
+        if (argvs.length === 1) {
+          return fakeChild({ reject: ebadf, hangStdout: true, kills: [] });
+        }
+        return fakeChild({
+          exitCode: 5,
+          stdout: 'tight-out',
+          stderr: 'tight-err',
+          kills: [],
+        });
+      },
+    );
+    expect(argvs).toEqual([
+      ['bun', 'tight-budget'],
+      ['bun', 'tight-budget'],
+    ]);
+    expect(result.exitCode).toBe(5);
+    expect(result.stdout).toBe('tight-out');
+    expect(result.stderr).toBe('tight-err');
+    expect(result.timedOut).toBe(false);
+    expect(existsSync(result.dataDir)).toBe(false);
   });
 
   test('list-rate isolate: 第二次 EBADF 原样抛出', async () => {

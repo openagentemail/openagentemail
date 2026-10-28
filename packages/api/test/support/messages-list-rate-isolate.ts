@@ -24,7 +24,12 @@ export const VERBOSE_BYTES_PER_STREAM = 128 * 1024;
  * `drainText()` 已用 `Response.text()` 锁住管道，`cancelStream()` 取消不了。
  * 若一直等到共享 deadline，剩余预算耗尽，`runIsolatedChild()` 会跳过唯一一次重试。
  */
-const EBADF_DRAIN_BOUND_MS = 200;
+export const EBADF_DRAIN_BOUND_MS = 200;
+/**
+ * 同一次重试必须留下的时间。排空最多等到 max(0, 剩余 - 本值)，且不超过排空上限。
+ * 剩余时间留不住这份预留时完全不等待，避免把共享截止时间耗尽。
+ */
+export const EBADF_RETRY_RESERVE_MS = 200;
 
 export type IsolatedChildResult = {
   exitCode: number;
@@ -154,8 +159,9 @@ function pollChildExit(
 }
 
 /**
- * 排空不超过 min(剩余预算, maxWaitMs)。
- * 到点就返回，不再 await 仍挂起的流；`allSettled` 接住后续拒绝，避免未处理拒绝。
+ * EBADF 排空等待不超过 min(上限, max(0, 剩余 - 重试预留))。
+ * 预留留不住就完全不等。到点就返回，不再 await 仍挂起的流。
+ * `allSettled` 在任何提前返回之前接住双管道，避免未处理拒绝。
  */
 async function drainWithinBudget(
   stdoutP: Promise<string>,
@@ -163,10 +169,18 @@ async function drainWithinBudget(
   deadline: number,
   maxWaitMs: number,
 ): Promise<void> {
-  const budgetMs = Math.min(Math.max(0, deadline - Date.now()), Math.max(0, maxWaitMs));
+  const remainingMs = deadline - Date.now();
+  // 同时受排空上限和重试预留约束。剩余不足预留时为 0，后面直接返回。
+  const budgetMs = Math.min(
+    Math.max(0, maxWaitMs),
+    Math.max(0, remainingMs - EBADF_RETRY_RESERVE_MS),
+  );
   // 先接住，再决定等不等。锁死的流可以一直 pending，调用方不再等待它。
   const drained = Promise.allSettled([stdoutP, stderrP]);
-  if (budgetMs === 0) return;
+  if (budgetMs === 0) {
+    void drained;
+    return;
+  }
   await new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, budgetMs);
     // allSettled 不会拒绝。回调若抛错，catch 掉，避免未处理拒绝。
@@ -256,7 +270,7 @@ async function runOneIsolatedAttempt(
       }
       cancelStream(child.stdout);
       cancelStream(child.stderr);
-      // 流已被 Response.text() 锁住，cancel 无效。只等短上限，把同一 deadline 留给重试。
+      // 流已被 Response.text() 锁住，cancel 无效。只等短上限，并留下重试预留。同一 deadline。
       try {
         await drainWithinBudget(stdoutP, stderrP, deadline, EBADF_DRAIN_BOUND_MS);
       } catch {
@@ -284,7 +298,7 @@ async function runOneIsolatedAttempt(
  * Bun 1.2.21 的 ubuntu CI 偶发（前面几文件跑过 Playwright/Chromium 之后）：
  * `child.exited` 在约 2–7ms 以 EBADF、syscall epoll_ctl（errno -9）拒绝。
  * 这是退出监视器注册失败，不是列表限速逻辑。丢掉该子进程，在同一截止时间内用新 dataDir 只再拉起一次。
- * EBADF 路径上的排空最多 `EBADF_DRAIN_BOUND_MS`，不把共享截止时间耗尽。
+ * EBADF 路径上的排空最多 `EBADF_DRAIN_BOUND_MS`，并留下 `EBADF_RETRY_RESERVE_MS`，不把共享截止时间耗尽。
  */
 export async function runIsolatedChild(
   opts: {
