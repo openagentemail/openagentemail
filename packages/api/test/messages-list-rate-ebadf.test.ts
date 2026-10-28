@@ -14,6 +14,15 @@ function textStream(text: string): ReadableStream<Uint8Array> {
   });
 }
 
+/** 有字节但永不 close。Response.text() 锁住后，cancel 取消不了，排空会一直挂起。 */
+function hungStdout(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('hung'));
+    },
+  });
+}
+
 /** 仿 Node SystemError：message 里带 syscall，字段给判定用。 */
 function systemError(code: string, syscall?: string): Error {
   const err = new Error(
@@ -29,6 +38,8 @@ function fakeChild(spec: {
   exitCode?: number;
   stdout?: string;
   stderr?: string;
+  /** stdout 永不结束，用来卡住被锁住的 drain。 */
+  hangStdout?: boolean;
   kills: Array<number | NodeJS.Signals | undefined>;
 }): ReturnType<IsolatedChildSpawn> {
   let exitCode: number | null = null;
@@ -43,7 +54,7 @@ function fakeChild(spec: {
     });
   });
   return {
-    stdout: textStream(spec.stdout ?? ''),
+    stdout: spec.hangStdout ? hungStdout() : textStream(spec.stdout ?? ''),
     stderr: textStream(spec.stderr ?? ''),
     exited,
     get exitCode() {
@@ -102,6 +113,36 @@ describe('list-rate isolate EBADF retry', () => {
     expect(result.timedOut).toBe(false);
     expect(result.dataDir).toBe(dirs[1]);
     expect(existsSync(result.dataDir)).toBe(false);
+  });
+
+  test('list-rate isolate: stdout 永不关闭且 exited 为 EBADF 时，仍重试且结果来自第二个子进程', async () => {
+    const ebadf = systemError('EBADF', 'epoll_ctl');
+    const argvs: string[][] = [];
+    const spawnChild: IsolatedChildSpawn = (argv) => {
+      argvs.push([...argv]);
+      if (argvs.length === 1) {
+        return fakeChild({ reject: ebadf, hangStdout: true, kills: [] });
+      }
+      return fakeChild({
+        exitCode: 7,
+        stdout: 'retry-out',
+        stderr: 'retry-err',
+        kills: [],
+      });
+    };
+    const timeoutMs = 2_000;
+    const started = Date.now();
+    const result = await runIsolatedChild({ argv: ['bun', 'hang-stdout'], timeoutMs }, spawnChild);
+    // 排空被截到约 200ms。若等到共享 deadline，第二次不会跑，耗时也会贴近 timeoutMs。
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(argvs).toEqual([
+      ['bun', 'hang-stdout'],
+      ['bun', 'hang-stdout'],
+    ]);
+    expect(result.exitCode).toBe(7);
+    expect(result.stdout).toBe('retry-out');
+    expect(result.stderr).toBe('retry-err');
+    expect(result.timedOut).toBe(false);
   });
 
   test('list-rate isolate: 第二次 EBADF 原样抛出', async () => {
