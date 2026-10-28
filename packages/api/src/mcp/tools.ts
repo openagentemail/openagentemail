@@ -19,6 +19,11 @@ import { MAX_SCOPES_COUNT, SUPPORTED_SCOPES } from "../lib/identity-scopes.ts";
 import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
+import {
+  rejectReferencesWithoutInReplyTo,
+  replyReferencesSchema,
+  rfc5322MsgIdSchema,
+} from "../lib/reply-thread.ts";
 
 /**
  * #355-A：运行时返回 strict ZodObject，类型上仍表现为原 raw shape。
@@ -588,24 +593,30 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. There is no headers field.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional inReplyTo (one angle-bracket Message-ID) and references thread the message; omit both and those headers are not added. Subject is not rewritten. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
-        subject: z.string().max(998).describe("Subject line"),
+        subject: z.string().max(998).describe("Subject line. Not rewritten; set Re: yourself if you want it."),
         text: z.string().max(1_000_000).describe("Plain-text body"),
         html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
         autoReply: z
           .boolean()
           .optional()
           .describe("True only: server adds Auto-Submitted: auto-replied. False or omitted adds nothing."),
-      }).strict(),
+        inReplyTo: rfc5322MsgIdSchema
+          .optional()
+          .describe("Optional RFC 5322 Message-ID in angle brackets, e.g. <id@domain>. Sets In-Reply-To and References."),
+        references: replyReferencesSchema
+          .optional()
+          .describe("Optional earlier Message-IDs (1-50, same form). Requires inReplyTo. Deduped; inReplyTo is placed last."),
+      }).strict().superRefine(rejectReferencesWithoutInReplyTo),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
-    ({ from, to, subject, text, html, autoReply }) =>
-      callApi(() => client.send(from, to, subject, text, html, autoReply)),
+    ({ from, to, subject, text, html, autoReply, inReplyTo, references }) =>
+      callApi(() => client.send(from, to, subject, text, html, autoReply, inReplyTo, references)),
   );
 
   const notificationInputSchema = {

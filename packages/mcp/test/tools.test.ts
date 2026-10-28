@@ -261,6 +261,20 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(sendObject.safeParse({ ...sendBase, autoReply: "true" }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, headers: { "Auto-Submitted": "auto-replied" } }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, autoSubmitted: "no" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, inReplyTo: "<parent@example.com>" }).success).toBe(true);
+  expect(
+    sendObject.safeParse({
+      ...sendBase,
+      inReplyTo: "<parent@example.com>",
+      references: ["<prev@example.com>", "<parent@example.com>"],
+    }).success,
+  ).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, references: ["<prev@example.com>"] }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, inReplyTo: "parent@example.com" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, inReplyTo: "<a@b@example.com>" }).success).toBe(false);
+  expect(toolConfigs.get("mail_send")?.description).toContain("inReplyTo");
+  expect(toolConfigs.get("mail_send")?.description).toContain("references");
+  expect(toolConfigs.get("mail_send")?.description).toContain("Subject is not rewritten");
   expect(ok(send, "from", "not-an-email")).toBe(false);
   expect(ok(send, "to", "not-an-email")).toBe(false);
   expect(ok(send, "subject", "x".repeat(998))).toBe(true);

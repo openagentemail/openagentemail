@@ -181,5 +181,36 @@ describe("mail_send autoReply 传到 REST（#363-A）", () => {
     expect(bodies[2]).toMatchObject({ autoReply: true, html: "<p>h</p>" });
     expect(bodies[2]).not.toHaveProperty("headers");
     expect(JSON.stringify(bodies[2])).not.toContain("Auto-Submitted");
+    expect(bodies[0]).not.toHaveProperty("inReplyTo");
+    expect(bodies[0]).not.toHaveProperty("references");
+    expect(bodies[2]).not.toHaveProperty("inReplyTo");
+    expect(bodies[2]).not.toHaveProperty("references");
+  });
+
+  test("inReplyTo 与 references 原样进入 body，省略则不出现", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ queued: true, messageId: "<m@test>" }), { status: 200 });
+    }) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
+    const references = ["<prev@example.com>", "<parent@example.com>"];
+    await client.send(
+      "a@test.example",
+      "b@example.net",
+      "s",
+      "t",
+      undefined,
+      undefined,
+      "<parent@example.com>",
+      references,
+    );
+    expect(bodies[0]).toMatchObject({
+      inReplyTo: "<parent@example.com>",
+      references,
+    });
+    expect(bodies[0]).not.toHaveProperty("html");
+    expect(bodies[0]).not.toHaveProperty("autoReply");
+    expect(bodies[0]).not.toHaveProperty("headers");
   });
 });

@@ -9,6 +9,7 @@ import nodemailer from 'nodemailer';
 import { config } from './config.ts';
 import { buildOutboundStampHeaders, stampDate } from './mail-stamp.ts';
 import { htmlToText } from './otp.ts';
+import { referencesForReply } from './reply-thread.ts';
 import { recordSentMessageIdAfterSend } from './sent-registry.ts';
 import {
   applyArchiveRecipientPolicy,
@@ -29,6 +30,13 @@ export interface SendInput {
   html?: string;
   /** 仅 true 写入固定 Auto-Submitted: auto-replied。false 与省略不新增该头。 */
   autoReply?: boolean;
+  /**
+   * 已是尖括号 msg-id。省略则不写 In-Reply-To / References。
+   * 不改 subject，也不参与自动回复冷却。
+   */
+  inReplyTo?: string;
+  /** 与 inReplyTo 一起用。sendMail 会去重，并把 inReplyTo 补到末尾。 */
+  references?: readonly string[];
   /** Server-stamped protocol metadata, for example X-OA-Task headers. */
   headers?: Record<string, string>;
 }
@@ -69,6 +77,19 @@ export {
   buildSmtpEnvelopePlan,
   stripBccHeaders,
 } from './smtp-envelope.ts';
+
+/**
+ * 只有带了 inReplyTo 才写线程头。
+ * 走 nodemailer 的 inReplyTo / references 选项：值本身已有尖括号时它不会再包一层。
+ * References 里的换行会被它先折成空格，再按空白折行（约 76 列），所以这里不预折。
+ */
+function replyOptions(input: SendInput): { inReplyTo?: string; references?: string[] } {
+  if (!input.inReplyTo) return {};
+  return {
+    inReplyTo: input.inReplyTo,
+    references: referencesForReply(input.inReplyTo, input.references),
+  };
+}
 
 function createSmtpTransport(endpoint: MailserverEndpoint) {
   return nodemailer.createTransport({
@@ -112,10 +133,12 @@ export async function sendMail(input: SendInput): Promise<{ messageId: string }>
       const info = await transporter.sendMail({
         from: input.from,
         to: input.to,
+        // 主题原样交给 nodemailer，不自动加 Re:。
         subject: input.subject,
         text,
         date,
         ...(input.html ? { html: input.html } : {}),
+        ...replyOptions(input),
         headers,
         envelope,
       });

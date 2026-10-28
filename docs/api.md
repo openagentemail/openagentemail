@@ -69,7 +69,24 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 ## Send API (`POST /v1/send`)
 
-`{from,to,subject,text,html?,autoReply?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。
+`{from,to,subject,text,html?,autoReply?,inReplyTo?,references?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `from` | 是 | 已有身份地址 |
+| `to` | 是 | 一个邮箱，或 1–50 个邮箱 |
+| `subject` | 是 | 主题，最长 998。服务端不会自动加 `Re:` |
+| `text` | 是 | 纯文本正文 |
+| `html` | 否 | HTML 正文 |
+| `autoReply` | 否 | 布尔。仅 `true` 写 `Auto-Submitted: auto-replied` |
+| `inReplyTo` | 否 | 一个尖括号形式的 RFC 5322 Message-ID，例如 `<id-left@id-right>`。最长 998，可打印 ASCII，恰好一个 `@`，内部不能再有尖括号、空白或控制字符。设置后写 `In-Reply-To`，并写 `References` |
+| `references` | 否 | 1–50 个同样形式的 Message-ID。必须和 `inReplyTo` 一起给。用单个空格拼起来最长 8000。服务端按原顺序去重；若 `inReplyTo` 不是最后一项，再追加到末尾。没给这个字段时，`References` 只有 `inReplyTo` |
+
+### 在线程里回复
+
+调用方自己决定主题要不要写成 `Re:`。省略 `inReplyTo` 和 `references` 时不增加这两条头。这两项不读、不写自动回复冷却，也不改变每小时额度。
+
+`inReplyTo` 必须是尖括号里的 RFC 5322 Message-ID，不是 IMAP UID。`GET /v1/messages/:id` 返回的 `id` 是 IMAP UID 字符串；这条响应没有 `messageId`，也没有原始头，不能拿 `id` 去填 `inReplyTo`。本服务经 `POST /v1/send` 发出的信，用当时响应里的 `messageId`（`GET /v1/send/history` 同一行上也有），它已经是尖括号形式。
 
 身份和发件域通过之后、每小时额度之前：
 
