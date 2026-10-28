@@ -1,3 +1,22 @@
+# Progress · 客户端 Message 补上 messageId / references
+
+## 2026-10-28 · fix(mcp) 详情类型
+
+### 我们实现了哪些功能？
+1. `packages/api/src/mcp/client.ts` 的 `Message`（`readMessage` / `waitFor` 的返回类型）增加可选 `messageId?: string` 与 `references?: string[]`。注释与服务端 `MessageDetail` 相同：尖括号 Message-ID，校验不过或缺失就省略；`references` 保序去重，超过 50 条留最后 50 条。
+2. `MessageSummary` 没有这两项。列表和 webhook 仍不带它们。
+3. `packages/mcp/test/client.test.ts` 断言读信和等待都会原样带回这两个字段，旧响应缺字段时保持 undefined。`packages/api/test/mcp-client-message-type.test.ts` 把字段是否存在、类型是否为 `string | undefined` / `string[] | undefined`，以及摘要类型没有这两项，交给 `tsc`。
+
+### 我们遇到了哪些错误？
+1. 没有。`packages/mcp` 的测试不在它自己的 `tsconfig` `include` 里，只改那边的测试，`packages/api` 的 `tsc` 看不到类型断言。
+
+### 我们是如何解决这些错误的？
+1. 类型断言单独放在 `packages/api/test`，这样 `bun run typecheck` 会编译它。字段拿掉或类型写错时，错误数会高于 179。
+
+### 验证
+- `packages/api`：`mcp-client-message-type` 1 pass；`message-detail-thread` 16 pass；`send-threading` 10 pass。`tsc --noEmit --pretty false --incremental false` 仍是 179 条。
+- `packages/mcp`：`tsc --noEmit` 无错误，`bun run build` 成功，`bun test` 66 pass / 0 fail。
+
 # Progress · 合并 origin/main 的幂等键与线程头
 
 ## 2026-10-28 · feat/send-in-reply-to 合入 #404
