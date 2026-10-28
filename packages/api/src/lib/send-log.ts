@@ -620,8 +620,9 @@ function repairTrailingTailHotPath(): void {
   truncateLogTo(tailStart);
 }
 
-function serializedBytes(records: SendLogRecord[]): number {
-  return Buffer.byteLength(records.map((row) => `${JSON.stringify(row)}\n`).join(''));
+/** 一行落盘后的字节数，含结尾换行。各行之和等于整段日志的字节数。 */
+function rowWireBytes(row: SendLogRecord): number {
+  return Buffer.byteLength(`${JSON.stringify(row)}\n`);
 }
 
 function oldestFirst(records: SendLogRecord[]): SendLogRecord[] {
@@ -664,22 +665,45 @@ function idempotencyRowIdsToKeep(records: SendLogRecord[]): Set<string> {
  * 先到先限：超过行数或字节则先丢掉不在幂等保留集里的最旧行。
  * 保留集本身仍放不下即将追加的新行时，才从最旧的保留行开始丢。
  * extra* 为即将追加的新行留空。
+ * 每行字节只算一次，丢掉时从累计值里减。跳过受保护行不再整份重序列化。
  */
 function trimToCap(records: SendLogRecord[], extraBytes = 0, extraRows = 0): SendLogRecord[] {
   const protectedIds = idempotencyRowIdsToKeep(records);
-  const kept = oldestFirst(records);
-  const over = () =>
-    kept.length + extraRows > maxRowsCap || serializedBytes(kept) + extraBytes > maxBytesCap;
+  const ordered = oldestFirst(records);
+  const sizes = ordered.map(rowWireBytes);
+  let totalBytes = 0;
+  for (const size of sizes) totalBytes += size;
+  let totalRows = ordered.length;
+  const over = () => totalRows + extraRows > maxRowsCap || totalBytes + extraBytes > maxBytesCap;
+  // 与原先 splice / shift 同一顺序：先跳过受保护行，只丢其它旧行；仍超限再从最旧的留下行丢。
+  const dropped = new Array<boolean>(ordered.length).fill(false);
   let index = 0;
-  while (index < kept.length && over()) {
-    const row = kept[index];
+  while (index < ordered.length && over()) {
+    const row = ordered[index];
     if (row && protectedIds.has(row.id)) {
       index += 1;
       continue;
     }
-    kept.splice(index, 1);
+    dropped[index] = true;
+    totalRows -= 1;
+    totalBytes -= sizes[index] ?? 0;
+    index += 1;
   }
-  while (kept.length > 0 && over()) kept.shift();
+  index = 0;
+  while (totalRows > 0 && over()) {
+    while (index < ordered.length && dropped[index]) index += 1;
+    if (index >= ordered.length) break;
+    dropped[index] = true;
+    totalRows -= 1;
+    totalBytes -= sizes[index] ?? 0;
+    index += 1;
+  }
+  const kept: SendLogRecord[] = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (dropped[i]) continue;
+    const row = ordered[i];
+    if (row) kept.push(row);
+  }
   return kept;
 }
 
@@ -824,6 +848,11 @@ export type AppendSendLogInput = {
   idempotencyKeyHash?: string;
   /** 发信 body 指纹。规则与 idempotencyKeyHash 相同。 */
   requestHash?: string;
+  /**
+   * 生成 sentAt 的同一刻调用。返回 false 则两个哈希都不写。
+   * 飞行中的身份被删或换成另一任时，发送本身仍落盘。
+   */
+  keepIdempotencyHashes?: () => boolean;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -885,10 +914,12 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     if (rateLimitAt) record.rateLimitAt = rateLimitAt;
     if (input.autoReply === true) record.autoReply = true;
     // 只落哈希。调用方在连接类失败和额度拒绝时不传，避免重启把已放开的键当成已完成。
+    // 身份是否仍是占位时那一任，和 sentAt 在同一次同步里决定，避免落盘前被换掉。
     const idempotencyKeyHash = acceptedSha256Hex(input.idempotencyKeyHash);
     const requestHash = acceptedSha256Hex(input.requestHash);
-    if (idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
-    if (requestHash) record.requestHash = requestHash;
+    const keepHashes = input.keepIdempotencyHashes ? input.keepIdempotencyHashes() : true;
+    if (keepHashes && idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
+    if (keepHashes && requestHash) record.requestHash = requestHash;
     const line = `${JSON.stringify(record)}\n`;
     try {
       prepareAppendHotPath(line);

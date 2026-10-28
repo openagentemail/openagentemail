@@ -111,6 +111,8 @@ async function recordSend(input: {
    */
   idempotencyKeyHash?: string;
   requestHash?: string;
+  /** 与 sentAt 同一刻再确认身份。返回 false 则不写两个哈希。 */
+  keepIdempotencyHashes?: () => boolean;
 }): Promise<SendLogRecord | null> {
   try {
     return await appendSendLog(input);
@@ -208,7 +210,8 @@ sendRoute.post('/', async (c) => {
 
   // `from` must be an existing identity on an allowed domain.
   const fromDomain = from.split('@')[1]?.toLowerCase() ?? '';
-  if (!config.allowedSendDomains.includes(fromDomain) || !findIdentity(from)) {
+  const sender = findIdentity(from);
+  if (!config.allowedSendDomains.includes(fromDomain) || !sender) {
     return c.json({ error: 'forbidden: from is not a known identity' }, 403);
   }
 
@@ -217,7 +220,8 @@ sendRoute.post('/', async (c) => {
   // 已完成且指纹相同：原样返回，不发信、不占额度、不碰冷却、不新写日志。
   // 指纹不同：422。同一指纹仍在发送：409。
   // 4xx/429 和连接类失败放开键。200 和对端已应答的 502 记成已完成。
-  const begun = beginSendIdempotency(from, idempotencyKey.key, parsed.data);
+  // 占位时记下这一任身份。完成时身份没了或 createdAt 变了，就不记回放。
+  const begun = beginSendIdempotency(from, idempotencyKey.key, parsed.data, sender.createdAt);
   if (begun.outcome === 'replay') {
     c.header('Idempotent-Replayed', 'true');
     if (begun.status === 200) return c.json(begun.body, 200);
@@ -234,9 +238,36 @@ sendRoute.post('/', async (c) => {
     begun.outcome === 'reserved' ? begun.reservation : undefined;
   // 没有键时一开始就算处理完，finally 不会去放开一张不存在的票。
   let idempotencySettled = reservation === undefined;
-  const idemLog = reservation
-    ? { idempotencyKeyHash: reservation.keyHash, requestHash: reservation.requestHash }
-    : {};
+  // 落盘回调里置位。true 才把结果放进内存；身份已换则保持 false，finally 放开占位。
+  let bindIdempotency = false;
+  /** 这一任身份还在。删掉或同址新建（createdAt 不同）都不是。 */
+  const identityStillReserved = (): boolean => {
+    const createdAt = reservation?.identityCreatedAt;
+    if (!createdAt) return false;
+    const current = findIdentity(from);
+    return current !== undefined && current.createdAt === createdAt;
+  };
+  // 哈希在生成 sentAt 的那一刻才决定写不写。回调顺手记下能不能进内存表。
+  const idemLog = (): {
+    idempotencyKeyHash?: string;
+    requestHash?: string;
+    keepIdempotencyHashes?: () => boolean;
+  } => {
+    if (!reservation) return {};
+    return {
+      idempotencyKeyHash: reservation.keyHash,
+      requestHash: reservation.requestHash,
+      keepIdempotencyHashes: () => {
+        bindIdempotency = identityStillReserved();
+        return bindIdempotency;
+      },
+    };
+  };
+  const finishIdempotency = (status: 200 | 502, body: Record<string, unknown>) => {
+    if (bindIdempotency && completeSendIdempotency(reservation, status, body)) {
+      idempotencySettled = true;
+    }
+  };
 
   try {
     // 自动回复冷却在每小时额度之前。false / 省略不进这里，因此不读也不写冷却表。
@@ -323,10 +354,10 @@ sendRoute.post('/', async (c) => {
         source,
         autoReply,
         rateLimitAt,
-        ...idemLog,
+        ...idemLog(),
       });
       const payload = queuedSendResponse(messageId, logged?.id);
-      if (completeSendIdempotency(reservation, 200, payload)) idempotencySettled = true;
+      finishIdempotency(200, payload);
       return c.json(payload, 200);
     } catch (err) {
       // Our own mail server being unreachable shouldn't cost the user a slot;
@@ -365,12 +396,11 @@ sendRoute.post('/', async (c) => {
         rateLimitAt: localFailure ? undefined : rateLimitAt,
         // 对端应答，或 DATA 及更晚的断线，都留下哈希供幂等回放。
         // 更早的连接类失败上面已经放开键，不写哈希。
-        ...(localFailure && !ambiguousDelivery ? {} : idemLog),
+        // 身份已换时 idemLog 的回调也会把哈希拿掉。
+        ...(localFailure && !ambiguousDelivery ? {} : idemLog()),
       });
       const payload = smtpErrorSendResponse(logged?.id);
-      if ((!localFailure || ambiguousDelivery) && completeSendIdempotency(reservation, 502, payload)) {
-        idempotencySettled = true;
-      }
+      if (!localFailure || ambiguousDelivery) finishIdempotency(502, payload);
       return c.json(payload, 502);
     }
   } finally {

@@ -19,6 +19,8 @@
  * 以及同样带两个哈希的 local 行（DATA 阶段不确定失败）。
  * sentAt 在未来的行忽略。早于该地址当前身份 createdAt 的行忽略。
  * 没有哈希字段的旧行忽略。删除身份会清掉该地址的内存项。
+ * 占位时记下这一任身份的 createdAt。完成时身份没了或已换成另一任，
+ * 调用方不把结果放进内存，也不把两个哈希写进发送日志。
  */
 
 import { createHash } from 'node:crypto';
@@ -39,6 +41,11 @@ export type SendIdempotencyReservation = {
   keyHash: string;
   /** 校验后 body 的指纹。 */
   requestHash: string;
+  /**
+   * 占位当时这一任身份的 createdAt。
+   * 完成时对不上（身份已删，或同址新建）就不能记成已完成。
+   */
+  identityCreatedAt?: string;
 };
 
 export type CachedSendStatus = 200 | 502;
@@ -235,6 +242,7 @@ export function beginSendIdempotency(
   from: string,
   key: string | undefined,
   parsedBody: object,
+  identityCreatedAt?: string,
 ): SendIdempotencyBegin {
   if (!key) return { outcome: 'skip' };
   const now = nowFn();
@@ -275,7 +283,14 @@ export function beginSendIdempotency(
   if (parked) parkedEvictions.set(reservationId, parked);
   return {
     outcome: 'reserved',
-    reservation: { id: reservationId, scopeId, keyHash, requestHash },
+    reservation: {
+      id: reservationId,
+      scopeId,
+      keyHash,
+      requestHash,
+      // 只在调用方交出创建时间时带上。完成时用它认出是不是同一任身份。
+      ...(identityCreatedAt ? { identityCreatedAt } : {}),
+    },
   };
 }
 

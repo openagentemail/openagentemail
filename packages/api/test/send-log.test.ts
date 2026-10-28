@@ -661,6 +661,63 @@ describe('send-log store', () => {
     expect(subjects.some((subject) => subject.startsWith('xxx'))).toBe(false);
   });
 
+  test('byte cap still drops unkeyed rows before protected rows, then the oldest protected row', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    const keyed = (subject: string, messageId: string, keyHex: string) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+        idempotencyKeyHash: keyHex,
+        requestHash: 'cd'.repeat(32),
+      });
+    const plain = (subject: string, messageId: string) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+      });
+    setSendLogNowForTests(() => now);
+    await keyed('p1', '<p1@test>', 'ab'.repeat(32));
+    setSendLogNowForTests(() => now + 1000);
+    await plain('u1', '<u1@test>');
+    setSendLogNowForTests(() => now + 2000);
+    await keyed('p2', '<p2@test>', 'ef'.repeat(32));
+    setSendLogNowForTests(() => now + 3000);
+    await plain('u2', '<u2@test>');
+    const lines = readFileSync(sendLogPathForTests(), 'utf8').split('\n').filter(Boolean);
+    const wire = (subject: string) => {
+      const line = lines.find((row) => row.includes(`"subject":"${subject}"`));
+      if (!line) throw new Error(`missing ${subject}`);
+      return Buffer.byteLength(`${line}\n`);
+    };
+    // 新行的 id 长度固定，其余字段也固定，字节数可以事先算准。
+    const appendedAt = now + 4000;
+    const newLine = `${JSON.stringify({
+      schemaVersion: 1,
+      id: 'snd_0123456789abcdef01234567',
+      sentAt: new Date(appendedAt).toISOString(),
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'n',
+      messageId: '<n@test>',
+      result: 'queued',
+      source: 'api',
+    })}\n`;
+    const newBytes = Buffer.byteLength(newLine);
+    // 刚好放下 p2 和即将追加的新行。两条无键行先被丢掉；仍超限时再丢最旧的受保护行 p1。
+    setSendLogCapsForTests({ rows: 100, bytes: wire('p2') + newBytes });
+    setSendLogNowForTests(() => appendedAt);
+    await plain('n', '<n@test>');
+    expect((await querySendLog({ limit: 20 })).items.map((row) => row.subject)).toEqual(['n', 'p2']);
+  });
+
   test('torn trailing line is isolated without fail-closing the log', async () => {
     // 夹具行 sentAt 固定 2026-08-14T00:00:00Z；钉测试时钟，使该行落在 30 天保留窗内后再 seed/query。
     const now = Date.parse('2026-08-14T12:00:00.000Z');

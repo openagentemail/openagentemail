@@ -18,7 +18,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-idem-'));
 const sendMail = mock(async () => ({ messageId: '<m@test>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail }));
 
-const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
@@ -635,6 +635,8 @@ describe('POST /v1/send Idempotency-Key', () => {
     const firstBody = await first.json();
     expect(deleteIdentity(from)).toBe(true);
     const localpart = from.split('@')[0] ?? '';
+    // 同一毫秒内新建会和刚写上的 sentAt 相等，回放会把这一行留给新身份。
+    await new Promise((resolve) => setTimeout(resolve, 5));
     expect(createIdentity({ localpart })).toBeTruthy();
     resetSendIdempotencyForTests();
     replaySendGuardsFromLog();
@@ -644,6 +646,76 @@ describe('POST /v1/send Idempotency-Key', () => {
     expect(retry.headers.get('Idempotent-Replayed')).toBeNull();
     expect(await retry.json()).not.toEqual(firstBody);
     expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  test('飞行中删掉并重建身份后，完成的旧请求不把幂等记到新身份上', async () => {
+    const from = nid('swap');
+    const localpart = from.split('@')[0] ?? '';
+    const key = 'swap-key';
+    const bornAt = findIdentity(from)?.createdAt;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = 0;
+    sendMail.mockImplementation(async () => {
+      started += 1;
+      await gate;
+      return { messageId: '<swap@test>' };
+    });
+    const first = post(from, { key, subject: 'inflight' });
+    await waitUntil(() => started === 1);
+    expect(deleteIdentity(from)).toBe(true);
+    // 同一毫秒内新建会撞上同一个 createdAt，回放过滤看不出来。
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const created = createIdentity({ localpart });
+    expect(created?.identity.createdAt).toBeTruthy();
+    expect(created?.identity.createdAt).not.toBe(bornAt);
+    release();
+    const res = await first;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ queued: true, messageId: '<swap@test>' });
+    const text = logText();
+    expect(text).toContain('"subject":"inflight"');
+    expect(text).not.toContain('idempotencyKeyHash');
+    expect(text).not.toContain('requestHash');
+    expect(text).not.toContain(hashIdempotencyKey(key));
+    // 内存里也不留已完成项，否则不用重启就能回放给新身份。
+    expect(sendIdempotencySizeForTests()).toBe(0);
+
+    resetSendIdempotencyForTests();
+    replaySendGuardsFromLog();
+    expect(sendIdempotencySizeForTests()).toBe(0);
+    sendMail.mockImplementation(async () => ({ messageId: '<swap2@test>' }));
+    sendMail.mockClear();
+    const again = await post(from, { key, subject: 'inflight' });
+    expect(again.status).toBe(200);
+    expect(again.headers.get('Idempotent-Replayed')).toBeNull();
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  test('飞行中只删身份、完成时身份已不在，也不写幂等哈希', async () => {
+    const from = nid('gone');
+    const key = 'gone-key';
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = 0;
+    sendMail.mockImplementation(async () => {
+      started += 1;
+      await gate;
+      return { messageId: '<gone@test>' };
+    });
+    const first = post(from, { key, subject: 'orphan' });
+    await waitUntil(() => started === 1);
+    expect(deleteIdentity(from)).toBe(true);
+    release();
+    const res = await first;
+    expect(res.status).toBe(200);
+    expect(logText()).toContain('"subject":"orphan"');
+    expect(logText()).not.toContain('idempotencyKeyHash');
+    expect(sendIdempotencySizeForTests()).toBe(0);
   });
 
   test('回放跳过早于当前身份 createdAt 的行，没有身份表时仍认窗口内的行', () => {
