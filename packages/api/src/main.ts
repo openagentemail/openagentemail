@@ -43,6 +43,7 @@ startTaskLeaseReaper();
 startNotificationLogMaintenance();
 // 仅真正启动 API 时回放。测试 import 本模块时 import.meta.main 为 false，
 // 避免把别的用例已经占上的内存额度清掉。读日志失败只告警。
+// 回放每小时额度、自动回复冷却，以及 24 小时内已完成的发信幂等记录。
 if (import.meta.main) {
   replaySendGuardsFromLog();
 }

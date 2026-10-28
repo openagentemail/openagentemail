@@ -214,3 +214,25 @@ describe("mail_send autoReply 传到 REST（#363-A）", () => {
     expect(bodies[0]).not.toHaveProperty("headers");
   });
 });
+
+describe("mail_send idempotencyKey 只进请求头", () => {
+  test("省略不带头；传入时为 Idempotency-Key，且 body 没有该字段", async () => {
+    const seen: Array<{ body: Record<string, unknown>; key?: string }> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push({
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        key: headers.get("Idempotency-Key") ?? undefined,
+      });
+      return new Response(JSON.stringify({ queued: true, messageId: "<m@test>" }), { status: 200 });
+    }) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
+    await client.send("a@test.example", "b@example.net", "s", "t");
+    await client.send("a@test.example", "b@example.net", "s", "t", undefined, undefined, "idem-key-1");
+    expect(seen[0]?.key).toBeUndefined();
+    expect(seen[0]?.body).not.toHaveProperty("idempotencyKey");
+    expect(seen[1]?.key).toBe("idem-key-1");
+    expect(seen[1]?.body).not.toHaveProperty("idempotencyKey");
+    expect(seen[1]?.body).toMatchObject({ from: "a@test.example", to: "b@example.net", subject: "s", text: "t" });
+  });
+});

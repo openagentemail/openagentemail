@@ -9,7 +9,8 @@
  * 同目录 .tmp + 文件 fsync + dest→.bak + rename + 目录 fsync；
  * 目录 fsync 失败则 .bak 换回（不 truncate 活文件）；
  * 末尾半行隔离、中间损坏 fail-closed、30 天 sweeper。
- * 硬上限 10_000 行或 8MB（先到先限），append 超限 drop-oldest。
+ * 硬上限 10_000 行或 8MB（先到先限），append 超限时先丢其它旧行。
+ * 24 小时幂等窗口内成对带哈希的行优先保留（最多内存表上限那么多，最新优先）。
  * 追加热路径不全量解析；inspectAndRepairSync 只在 query/compact/启动。
  */
 
@@ -33,6 +34,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import { describeFailure } from './redact.ts';
+import { SEND_IDEMPOTENCY_TTL_SEC, sendIdempotencyMaxEntries } from './send-idempotency.ts';
 
 export const SEND_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const SEND_LOG_SCHEMA_VERSION = 1;
@@ -75,6 +77,13 @@ export type SendLogRecord = {
    * 限额关闭（没有 reservation）时不写。发送历史仍看 sentAt。
    */
   rateLimitAt?: string;
+  /**
+   * 幂等键的 sha256（十六进制）。只在已完成的发送上出现：queued，
+   * 以及对端已应答的失败。不存原始键。连接类失败和额度拒绝不写。
+   */
+  idempotencyKeyHash?: string;
+  /** 校验后发信 body 的指纹（sha256）。与 idempotencyKeyHash 成对出现。 */
+  requestHash?: string;
 };
 
 export type SendLogQuery = {
@@ -207,6 +216,13 @@ function isLoggedEmail(value: unknown): value is string {
 
 /** 准入时刻只接受短 ISO 字符串。更长或解析不了的丢掉该字段，不拒整行。 */
 const RATE_LIMIT_AT_MAX_LEN = 64;
+/** 幂等哈希只接受小写 sha256。别的值丢掉该字段，不拒整行，也不把原始键抄进来。 */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function acceptedSha256Hex(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !SHA256_HEX.test(value)) return undefined;
+  return value;
+}
 
 function acceptedRateLimitAt(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length > RATE_LIMIT_AT_MAX_LEN) return undefined;
@@ -257,6 +273,11 @@ function parseRecord(raw: unknown): SendLogRecord | null {
   // 只认短且能解析的时间。别的值丢掉该字段，不因此拒掉整行。
   const rateLimitAt = acceptedRateLimitAt(row.rateLimitAt);
   if (rateLimitAt) record.rateLimitAt = rateLimitAt;
+  // 只认成对的小写 sha256。原始键不是本结构的字段，解析时不会留下。
+  const idempotencyKeyHash = acceptedSha256Hex(row.idempotencyKeyHash);
+  const requestHash = acceptedSha256Hex(row.requestHash);
+  if (idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
+  if (requestHash) record.requestHash = requestHash;
   return record;
 }
 
@@ -599,8 +620,9 @@ function repairTrailingTailHotPath(): void {
   truncateLogTo(tailStart);
 }
 
-function serializedBytes(records: SendLogRecord[]): number {
-  return Buffer.byteLength(records.map((row) => `${JSON.stringify(row)}\n`).join(''));
+/** 一行落盘后的字节数，含结尾换行。各行之和等于整段日志的字节数。 */
+function rowWireBytes(row: SendLogRecord): number {
+  return Buffer.byteLength(`${JSON.stringify(row)}\n`);
 }
 
 function oldestFirst(records: SendLogRecord[]): SendLogRecord[] {
@@ -611,14 +633,76 @@ function oldestFirst(records: SendLogRecord[]): SendLogRecord[] {
   });
 }
 
-/** 先到先限：超过行数或字节则丢掉最旧行。extra* 为即将追加的新行留空。 */
+/**
+ * 仍在幂等窗口内、并且两个哈希都在的行。最多留当前幂等表上限那么多，最新优先。
+ * 窗口外、未来时间、或哈希不成对的行不在这里。
+ */
+function idempotencyRowIdsToKeep(records: SendLogRecord[]): Set<string> {
+  const now = nowMs();
+  const ttlMs = SEND_IDEMPOTENCY_TTL_SEC * 1000;
+  const eligible: SendLogRecord[] = [];
+  for (const row of records) {
+    if (!acceptedSha256Hex(row.idempotencyKeyHash) || !acceptedSha256Hex(row.requestHash)) continue;
+    const sentAt = Date.parse(row.sentAt);
+    if (!Number.isFinite(sentAt) || sentAt > now || sentAt + ttlMs <= now) continue;
+    eligible.push(row);
+  }
+  eligible.sort((a, b) => {
+    const dt = Date.parse(b.sentAt) - Date.parse(a.sentAt);
+    if (dt !== 0) return dt;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+  const cap = sendIdempotencyMaxEntries();
+  const ids = new Set<string>();
+  for (const row of eligible) {
+    if (ids.size >= cap) break;
+    ids.add(row.id);
+  }
+  return ids;
+}
+
+/**
+ * 先到先限：超过行数或字节则先丢掉不在幂等保留集里的最旧行。
+ * 保留集本身仍放不下即将追加的新行时，才从最旧的保留行开始丢。
+ * extra* 为即将追加的新行留空。
+ * 每行字节只算一次，丢掉时从累计值里减。跳过受保护行不再整份重序列化。
+ */
 function trimToCap(records: SendLogRecord[], extraBytes = 0, extraRows = 0): SendLogRecord[] {
-  const kept = oldestFirst(records);
-  while (
-    kept.length > 0 &&
-    (kept.length + extraRows > maxRowsCap || serializedBytes(kept) + extraBytes > maxBytesCap)
-  ) {
-    kept.shift();
+  const protectedIds = idempotencyRowIdsToKeep(records);
+  const ordered = oldestFirst(records);
+  const sizes = ordered.map(rowWireBytes);
+  let totalBytes = 0;
+  for (const size of sizes) totalBytes += size;
+  let totalRows = ordered.length;
+  const over = () => totalRows + extraRows > maxRowsCap || totalBytes + extraBytes > maxBytesCap;
+  // 与原先 splice / shift 同一顺序：先跳过受保护行，只丢其它旧行；仍超限再从最旧的留下行丢。
+  const dropped = new Array<boolean>(ordered.length).fill(false);
+  let index = 0;
+  while (index < ordered.length && over()) {
+    const row = ordered[index];
+    if (row && protectedIds.has(row.id)) {
+      index += 1;
+      continue;
+    }
+    dropped[index] = true;
+    totalRows -= 1;
+    totalBytes -= sizes[index] ?? 0;
+    index += 1;
+  }
+  index = 0;
+  while (totalRows > 0 && over()) {
+    while (index < ordered.length && dropped[index]) index += 1;
+    if (index >= ordered.length) break;
+    dropped[index] = true;
+    totalRows -= 1;
+    totalBytes -= sizes[index] ?? 0;
+    index += 1;
+  }
+  const kept: SendLogRecord[] = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (dropped[i]) continue;
+    const row = ordered[i];
+    if (row) kept.push(row);
   }
   return kept;
 }
@@ -760,6 +844,15 @@ export type AppendSendLogInput = {
    * 不是短的可解析时间就丢掉。限额为 0 时调用方不传。
    */
   rateLimitAt?: string;
+  /** 幂等键 sha256。不是 64 位小写十六进制就丢掉。不要传原始键。 */
+  idempotencyKeyHash?: string;
+  /** 发信 body 指纹。规则与 idempotencyKeyHash 相同。 */
+  requestHash?: string;
+  /**
+   * 生成 sentAt 的同一刻调用。返回 false 则两个哈希都不写。
+   * 飞行中的身份被删或换成另一任时，发送本身仍落盘。
+   */
+  keepIdempotencyHashes?: () => boolean;
 };
 
 /** 每身份每限流窗口最多落 1 条 rate_limited；窗口内后续 429 不落盘。 */
@@ -820,6 +913,27 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     const rateLimitAt = holdsHourlySlot ? acceptedRateLimitAt(input.rateLimitAt) : undefined;
     if (rateLimitAt) record.rateLimitAt = rateLimitAt;
     if (input.autoReply === true) record.autoReply = true;
+    // 只落哈希。调用方在连接类失败和额度拒绝时不传，避免重启把已放开的键当成已完成。
+    // 身份是否仍是占位时那一任，和 sentAt 在同一次同步里决定，避免落盘前被换掉。
+    const idempotencyKeyHash = acceptedSha256Hex(input.idempotencyKeyHash);
+    const requestHash = acceptedSha256Hex(input.requestHash);
+    // 回调抛错说明身份库在 SMTP 已接受之后读失败，不是“身份已换”。
+    // 不能让这次追加失败：调用方会放开占位，同一键重试会再发一封。
+    // 哈希照写。调用方应已把这次响应当成终态。
+    let keepHashes = true;
+    if (input.keepIdempotencyHashes) {
+      try {
+        keepHashes = input.keepIdempotencyHashes();
+      } catch (err) {
+        console.warn(
+          '[send-log] identity check failed after send; keeping idempotency hashes:',
+          describeFailure(err),
+        );
+        keepHashes = true;
+      }
+    }
+    if (keepHashes && idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
+    if (keepHashes && requestHash) record.requestHash = requestHash;
     const line = `${JSON.stringify(record)}\n`;
     try {
       prepareAppendHotPath(line);

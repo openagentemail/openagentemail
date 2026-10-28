@@ -137,6 +137,11 @@ describe('发信失败后的配额处理', () => {
 
   test('连不上/认证失败这类本机故障才退还', () => {
     expect(isLocalSendFailure(Object.assign(new Error('no route'), { code: 'ECONNECTION' }))).toBe(true);
+    // DATA 阶段断线仍算本机故障：额度照退。幂等另按 command 缓存，不改这里。
+    expect(isLocalSendFailure(Object.assign(new Error('timeout after data'), {
+      code: 'ETIMEDOUT',
+      command: 'DATA',
+    }))).toBe(true);
     expect(isLocalSendFailure(Object.assign(new Error('bad creds'), { code: 'EAUTH' }))).toBe(true);
     // 重连时 DNS 查找失败：信没离开本机。
     for (const code of ['ENOTFOUND', 'ENODATA', 'EAI_AGAIN']) {
@@ -195,6 +200,8 @@ describe('发信失败后的配额处理', () => {
       error?: string;
     };
     expect(rejectedRow).toMatchObject({ error: 'smtp_error', failureKind: 'smtp_response' });
+    expect(rejectedRow).not.toHaveProperty('idempotencyKeyHash');
+    expect(rejectedRow).not.toHaveProperty('requestHash');
 
     resetRateLimits();
     smtpFailure = Object.assign(new Error('connection refused'), { code: 'ECONNECTION' });
@@ -446,6 +453,7 @@ describe('POST /v1/send 未知键拒绝（#324）', () => {
       }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get('Idempotent-Replayed')).toBeNull();
     expect(await response.json()).toMatchObject({
       queued: true,
       messageId: '<strict-ok@test.example>',
