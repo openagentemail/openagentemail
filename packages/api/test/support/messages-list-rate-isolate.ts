@@ -29,6 +29,32 @@ export type IsolatedChildResult = {
   dataDir: string;
 };
 
+/**
+ * 仅测试注入。缺省是 Bun.spawn。
+ * 句柄只保留本运输会碰到的字段，方便模拟 `exited` 拒绝。
+ */
+export type IsolatedChildSpawn = (
+  argv: string[],
+  options: {
+    cwd: string;
+    env: Record<string, string>;
+    stdout: 'pipe';
+    stderr: 'pipe';
+  },
+) => IsolatedChildHandle;
+
+type IsolatedChildHandle = {
+  stdout: unknown;
+  stderr: unknown;
+  readonly exited: Promise<number>;
+  readonly exitCode: number | null;
+  kill(signal?: number | NodeJS.Signals): void;
+};
+
+type IsolatedAttempt =
+  | { ok: true; result: IsolatedChildResult }
+  | { ok: false; error: unknown; exitWatch: boolean };
+
 function childEnv(dataDir: string, extra?: Record<string, string | undefined>): Record<string, string> {
   const merged: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -51,39 +77,133 @@ function childEnv(dataDir: string, extra?: Record<string, string | undefined>): 
   return merged;
 }
 
-function drainText(stream: ReadableStream<Uint8Array> | number | undefined): Promise<string> {
+function drainText(stream: unknown): Promise<string> {
   if (stream && typeof stream === 'object' && 'getReader' in stream) {
-    return new Response(stream).text();
+    return new Response(stream as ReadableStream<Uint8Array>).text();
   }
   return Promise.resolve('');
 }
 
-/** 有界 spawn：spawn 后立即并发 drain 双管道；超时 SIGKILL+reap 后先收齐流再返回。 */
-export async function runIsolatedChild(opts: {
-  argv: string[];
-  timeoutMs: number;
-  env?: Record<string, string | undefined>;
-}): Promise<IsolatedChildResult> {
+/** 流已锁或已关闭时取消会抛，调用方忽略。 */
+function cancelStream(stream: unknown): void {
+  if (!stream || typeof stream !== 'object' || !('cancel' in stream)) return;
+  const cancel = (stream as { cancel?: unknown }).cancel;
+  if (typeof cancel !== 'function') return;
+  try {
+    const pending = cancel.call(stream) as unknown;
+    if (
+      pending &&
+      typeof pending === 'object' &&
+      'catch' in pending &&
+      typeof (pending as { catch?: unknown }).catch === 'function'
+    ) {
+      void (pending as Promise<unknown>).catch(() => undefined);
+    }
+  } catch {
+    /* 尽力取消 */
+  }
+}
+
+/**
+ * Bun 1.2.21 CI 的形态：`code === 'EBADF'`。
+ * `syscall` 缺省时视为同一次监视器失败；带了则必须是 `epoll_ctl`。
+ */
+function isBunEbadfEpollCtl(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const rec = err as { code?: unknown; syscall?: unknown };
+  if (rec.code !== 'EBADF') return false;
+  if (rec.syscall !== undefined && rec.syscall !== 'epoll_ctl') return false;
+  return true;
+}
+
+function defaultIsolatedSpawn(
+  argv: string[],
+  options: {
+    cwd: string;
+    env: Record<string, string>;
+    stdout: 'pipe';
+    stderr: 'pipe';
+  },
+): IsolatedChildHandle {
+  return Bun.spawn(argv, options);
+}
+
+/** 与原先 50ms 轮询相同；退出或拒绝时清掉定时器，拒绝不会变成未处理拒绝。 */
+function pollChildExit(
+  child: IsolatedChildHandle,
+): Promise<{ done: true; code: number } | { done: false }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ done: false }), 50);
+    child.exited.then(
+      (code) => {
+        clearTimeout(timer);
+        resolve({ done: true, code });
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** 排空不超过剩余预算；流先结束就清掉定时器。 */
+async function drainWithinBudget(
+  stdoutP: Promise<string>,
+  stderrP: Promise<string>,
+  deadline: number,
+): Promise<void> {
+  const budgetMs = Math.max(0, deadline - Date.now());
+  const drained = Promise.allSettled([stdoutP, stderrP]);
+  if (budgetMs === 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, budgetMs);
+    void drained.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function runOneIsolatedAttempt(
+  opts: {
+    argv: string[];
+    env?: Record<string, string | undefined>;
+  },
+  spawnChild: IsolatedChildSpawn,
+  deadline: number,
+): Promise<IsolatedAttempt> {
   const dataDir = mkdtempSync(join(tmpdir(), 'oae-list-rate-child-'));
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const child = Bun.spawn(opts.argv, {
-    cwd: PKG_DIR,
-    env: childEnv(dataDir, opts.env),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const stdoutP = drainText(child.stdout);
-  const stderrP = drainText(child.stderr);
-  const deadline = Date.now() + opts.timeoutMs;
+  let child: IsolatedChildHandle | undefined;
+  let stdoutP = Promise.resolve('');
+  let stderrP = Promise.resolve('');
   let timedOut = false;
   let reaped = false;
   let exitCode = -1;
+  let infrastructureError: unknown;
+  let attempt: IsolatedAttempt = {
+    ok: false,
+    error: new Error('isolate attempt did not finish'),
+    exitWatch: false,
+  };
   try {
+    child = spawnChild(opts.argv, {
+      cwd: PKG_DIR,
+      env: childEnv(dataDir, opts.env),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    stdoutP = drainText(child.stdout);
+    stderrP = drainText(child.stderr);
     for (;;) {
-      const outcome = await Promise.race([
-        child.exited.then((code) => ({ done: true as const, code })),
-        new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), 50)),
-      ]);
+      let outcome: { done: true; code: number } | { done: false };
+      try {
+        outcome = await pollChildExit(child);
+      } catch (err) {
+        infrastructureError = err;
+        throw err;
+      }
       if (outcome.done) {
         exitCode = outcome.code;
         break;
@@ -101,16 +221,38 @@ export async function runIsolatedChild(opts: {
       }
     }
     const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
-    return {
-      exitCode,
-      stdout,
-      stderr,
-      timedOut,
-      reaped,
-      dataDir,
+    attempt = {
+      ok: true,
+      result: {
+        exitCode,
+        stdout,
+        stderr,
+        timedOut,
+        reaped,
+        dataDir,
+      },
     };
+  } catch (err) {
+    // 监视器注册失败时先杀掉仍活着的子进程，再尽力排空/取消管道。dataDir 在 finally 里删。
+    if (child && err === infrastructureError && isBunEbadfEpollCtl(err)) {
+      if (child.exitCode === null) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* 已退出 */
+        }
+      }
+      cancelStream(child.stdout);
+      cancelStream(child.stderr);
+      try {
+        await drainWithinBudget(stdoutP, stderrP, deadline);
+      } catch {
+        /* 尽力排空 */
+      }
+    }
+    attempt = { ok: false, error: err, exitWatch: err === infrastructureError };
   } finally {
-    if (child.exitCode === null) {
+    if (child && child.exitCode === null) {
       try {
         child.kill('SIGKILL');
       } catch {
@@ -121,4 +263,31 @@ export async function runIsolatedChild(opts: {
     }
     rmSync(dataDir, { recursive: true, force: true });
   }
+  return attempt;
+}
+
+/**
+ * 有界 spawn：spawn 后立即并发 drain 双管道；超时 SIGKILL+reap 后先收齐流再返回。
+ * Bun 1.2.21 的 ubuntu CI 偶发（前面几文件跑过 Playwright/Chromium 之后）：
+ * `child.exited` 在约 2–7ms 以 EBADF、syscall epoll_ctl（errno -9）拒绝。
+ * 这是退出监视器注册失败，不是列表限速逻辑。丢掉该子进程，在同一截止时间内用新 dataDir 只再拉起一次。
+ */
+export async function runIsolatedChild(
+  opts: {
+    argv: string[];
+    timeoutMs: number;
+    env?: Record<string, string | undefined>;
+  },
+  spawnChild: IsolatedChildSpawn = defaultIsolatedSpawn,
+): Promise<IsolatedChildResult> {
+  const deadline = Date.now() + opts.timeoutMs;
+  const first = await runOneIsolatedAttempt(opts, spawnChild, deadline);
+  if (first.ok) return first.result;
+  // 第二次 EBADF、其它错误，或剩余预算已用尽：原样抛出，不包一层。
+  if (!first.exitWatch || !isBunEbadfEpollCtl(first.error) || Date.now() >= deadline) {
+    throw first.error;
+  }
+  const second = await runOneIsolatedAttempt(opts, spawnChild, deadline);
+  if (second.ok) return second.result;
+  throw second.error;
 }
