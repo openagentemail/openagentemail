@@ -71,7 +71,7 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 
 `{from,to,subject,text,html?,autoReply?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。body 仍是 strict，幂等键不进 JSON。
 
-可选请求头 `Idempotency-Key`。缺省、只有空白，或 trim 之后为空，与不带这个头完全相同。trim 之后超过 128 个字符，或含有 ASCII 控制字符（含 DEL）或 C1 控制字符，**400** `{error:"invalid_request"}`。键按发件身份分开：`from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。不同身份用同一个键互不影响。
+可选请求头 `Idempotency-Key`。缺省、只有空白，或 trim 之后为空，与不带这个头完全相同。trim 之后必须是 1–128 个可打印 ASCII（码位 0x20–0x7E，空格可以出现在中间）。控制字符、DEL、非 ASCII（含 emoji）都是 **400** `{error:"invalid_request"}`。键按发件身份分开：`from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。不同身份用同一个键互不影响。删除身份会清掉该地址在内存里的幂等项；同址新建不会继承上一任的回放。
 
 指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，不排序。对象的键按字典序。地址大小写保持客户端传入的值，因为发送路径不改写已经校验过的字段。以后新增的可选 body 字段会自动算进指纹。同一身份若只改了 `from` 的大小写，指纹不同，得到 422。调用方重试时应原样重放 body。
 
@@ -80,13 +80,15 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 - 24 小时内已完成、指纹相同：原样返回当时的状态码和 JSON，并加响应头 `Idempotent-Replayed: true`。不再发信，不占 `SEND_RATE_LIMIT`，不碰冷却，不新写 `send-log.jsonl`。
 - 同一键、指纹不同（已完成或仍在发送）：**422** `{error:"idempotency_key_reused"}`。
 - 同一键、同一指纹仍在发送：**409** `{error:"idempotency_in_flight", retryAfterSec:1}`。同一键不会发出两封 SMTP。
-- 记为已完成并缓存的结果：200 成功，以及 SMTP 对端已经应答的 502（`isLocalSendFailure` 为 false，日志 `failureKind` 为 `smtp_response`）。200 体是 `{queued:true, messageId, id?}`，502 体是 `{error:"smtp_error", id?}`。
-- 放开键、允许原样重试的结果：冷却、每小时额度，以及占位之后的其它 4xx/429；还有从未到达 SMTP 的连接类失败（`failureKind` 为 `local`）。这些响应不缓存。
-- 内存最多 10_000 条（`SEND_IDEMPOTENCY_TTL_SEC = 86400`）。先丢掉已过期的已完成项；仍满则逐出最老的已完成项，不逐出进行中的占位。若全是进行中，**429** `{error:"idempotency_table_full", retryAfterSec:1}`。这几条响应都不带 `Retry-After` 头。
+- 记为已完成并缓存的结果：200 成功，以及 SMTP 对端已经应答的 502（`isLocalSendFailure` 为 false，日志 `failureKind` 为 `smtp_response`）。另外，Nodemailer 的 `error.command` 已是 `DATA`、`BDAT` 或更晚（正文可能已经写出）且没有 SMTP 应答码时，幂等也缓存 502。这条仍算本地失败：每小时额度和自动回复冷却照旧退还，日志 `failureKind` 仍是 `local`，不写 `rateLimitAt`。200 体是 `{queued:true, messageId, id?}`，502 体是 `{error:"smtp_error", id?}`。
+- 放开键、允许原样重试的结果：冷却、每小时额度，以及占位之后的其它 4xx/429；还有还没进入 DATA 的连接类失败（`failureKind` 为 `local`，且不写两个哈希）。这些响应不缓存。
+- 内存最多 10_000 条（`SEND_IDEMPOTENCY_TTL_SEC = 86400`）。先丢掉已过期的已完成项；仍满则暂时逐出最老的已完成项，不逐出进行中的占位。若这次请求随后被冷却、额度或连接类失败放开，被逐出的项会放回；只有记成已完成，逐出才留下。若全是进行中，**429** `{error:"idempotency_table_full", retryAfterSec:1}`。这几条响应都不带 `Retry-After` 头。
 
-启动时和冷却、额度一起从 `DATA_DIR/send-log.jsonl` 重建已完成项。只认 24 小时窗口内同时带 `idempotencyKeyHash` 与 `requestHash` 的 `queued` 行，以及 `failureKind: "smtp_response"` 的失败行。`sentAt` 在未来的行忽略。恰好到期（`sentAt + 86400 秒 <= now`）不算。没有这两个字段的旧行忽略。日志只存键的 sha256 十六进制（`idempotencyKeyHash`），不存原始键。`requestHash` 是上面的指纹。200 由行内 `messageId` 与 `id` 还原；`messageId` 不是字符串时这行不还原。502 还原为 `{error:"smtp_error", id}`。连接类失败和额度拒绝不写这两个字段，重启后也不会挡住重试。日志没写上的那一封，重启后补不回来。进程死掉时还在飞的占位不会恢复。
+启动时和冷却、额度一起从 `DATA_DIR/send-log.jsonl` 重建已完成项。只认 24 小时窗口内同时带 `idempotencyKeyHash` 与 `requestHash` 的 `queued` 行、`failureKind: "smtp_response"` 的失败行，以及同样带这两个哈希的 `failureKind: "local"` 行（DATA 阶段不确定失败）。`sentAt` 在未来的行忽略。恰好到期（`sentAt + 86400 秒 <= now`）不算。早于该地址当前身份 `createdAt` 的行也不算；身份库读不上时不做这道过滤。没有这两个字段的旧行忽略。日志只存键的 sha256 十六进制（`idempotencyKeyHash`），不存原始键。`requestHash` 是上面的指纹。200 由行内 `messageId` 与 `id` 还原；`messageId` 不是字符串时这行不还原。502 还原为 `{error:"smtp_error", id}`。还没进入 DATA 的连接类失败和额度拒绝不写这两个字段，重启后也不会挡住重试。日志没写上的那一封，重启后补不回来。进程死掉时还在飞的占位不会恢复。
 
-MCP `mail_send` 增加可选字符串 `idempotencyKey`（1 到 128）。客户端把它放进同一个请求头，不放进 body。
+`send-log.jsonl` 超过 10_000 行或 8MB 时，先丢掉其它旧行。仍在 24 小时窗口内、并且两个哈希都在的行优先保留，最多留幂等表上限那么多条（最新优先）。窗口外的带哈希行不特殊保留。这些行本身仍超过字节上限时，才从最旧的开始丢。
+
+MCP `mail_send` 的可选字符串 `idempotencyKey` 与 REST 用同一条规则：trim 之后 1–128 个可打印 ASCII（0x20–0x7E）。只有空白在 MCP 校验失败，不会当成没带键；REST 的空白头仍视为没带键。客户端把通过校验的键放进同一个请求头，不放进 body。
 
 身份和发件域通过之后、上面的幂等键处理之后、每小时额度之前：
 

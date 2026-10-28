@@ -37,3 +37,19 @@ export function isLocalSendFailure(err: unknown): boolean {
   // to send without spending quota.
   return typeof e.code === 'string' && LOCAL_FAILURE_CODES.has(e.code);
 }
+
+/**
+ * 幂等专用，不改变额度/冷却退还。
+ * Nodemailer 的 error.command 已是 DATA、BDAT，或更晚的正文结束（单独的 "."），
+ * 说明载荷可能已经写出，中继可能收下了这封信。
+ * 没有应答码时 isLocalSendFailure 仍为 true：额度与冷却照旧退还。
+ * 调用方应把幂等键记成 502，而不是放开后让重试再发一封。
+ */
+export function isAmbiguousPostDataSendFailure(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const command = (err as { command?: unknown }).command;
+  if (typeof command !== 'string') return false;
+  const word = command.trim().split(/\s+/)[0]?.toUpperCase();
+  if (!word) return false;
+  return word === 'DATA' || word === 'BDAT' || word === '.';
+}

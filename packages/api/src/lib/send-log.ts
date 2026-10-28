@@ -9,7 +9,8 @@
  * 同目录 .tmp + 文件 fsync + dest→.bak + rename + 目录 fsync；
  * 目录 fsync 失败则 .bak 换回（不 truncate 活文件）；
  * 末尾半行隔离、中间损坏 fail-closed、30 天 sweeper。
- * 硬上限 10_000 行或 8MB（先到先限），append 超限 drop-oldest。
+ * 硬上限 10_000 行或 8MB（先到先限），append 超限时先丢其它旧行。
+ * 24 小时幂等窗口内成对带哈希的行优先保留（最多内存表上限那么多，最新优先）。
  * 追加热路径不全量解析；inspectAndRepairSync 只在 query/compact/启动。
  */
 
@@ -33,6 +34,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import { describeFailure } from './redact.ts';
+import { SEND_IDEMPOTENCY_TTL_SEC, sendIdempotencyMaxEntries } from './send-idempotency.ts';
 
 export const SEND_LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const SEND_LOG_SCHEMA_VERSION = 1;
@@ -630,15 +632,54 @@ function oldestFirst(records: SendLogRecord[]): SendLogRecord[] {
   });
 }
 
-/** 先到先限：超过行数或字节则丢掉最旧行。extra* 为即将追加的新行留空。 */
-function trimToCap(records: SendLogRecord[], extraBytes = 0, extraRows = 0): SendLogRecord[] {
-  const kept = oldestFirst(records);
-  while (
-    kept.length > 0 &&
-    (kept.length + extraRows > maxRowsCap || serializedBytes(kept) + extraBytes > maxBytesCap)
-  ) {
-    kept.shift();
+/**
+ * 仍在幂等窗口内、并且两个哈希都在的行。最多留当前幂等表上限那么多，最新优先。
+ * 窗口外、未来时间、或哈希不成对的行不在这里。
+ */
+function idempotencyRowIdsToKeep(records: SendLogRecord[]): Set<string> {
+  const now = nowMs();
+  const ttlMs = SEND_IDEMPOTENCY_TTL_SEC * 1000;
+  const eligible: SendLogRecord[] = [];
+  for (const row of records) {
+    if (!acceptedSha256Hex(row.idempotencyKeyHash) || !acceptedSha256Hex(row.requestHash)) continue;
+    const sentAt = Date.parse(row.sentAt);
+    if (!Number.isFinite(sentAt) || sentAt > now || sentAt + ttlMs <= now) continue;
+    eligible.push(row);
   }
+  eligible.sort((a, b) => {
+    const dt = Date.parse(b.sentAt) - Date.parse(a.sentAt);
+    if (dt !== 0) return dt;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+  const cap = sendIdempotencyMaxEntries();
+  const ids = new Set<string>();
+  for (const row of eligible) {
+    if (ids.size >= cap) break;
+    ids.add(row.id);
+  }
+  return ids;
+}
+
+/**
+ * 先到先限：超过行数或字节则先丢掉不在幂等保留集里的最旧行。
+ * 保留集本身仍放不下即将追加的新行时，才从最旧的保留行开始丢。
+ * extra* 为即将追加的新行留空。
+ */
+function trimToCap(records: SendLogRecord[], extraBytes = 0, extraRows = 0): SendLogRecord[] {
+  const protectedIds = idempotencyRowIdsToKeep(records);
+  const kept = oldestFirst(records);
+  const over = () =>
+    kept.length + extraRows > maxRowsCap || serializedBytes(kept) + extraBytes > maxBytesCap;
+  let index = 0;
+  while (index < kept.length && over()) {
+    const row = kept[index];
+    if (row && protectedIds.has(row.id)) {
+      index += 1;
+      continue;
+    }
+    kept.splice(index, 1);
+  }
+  while (kept.length > 0 && over()) kept.shift();
   return kept;
 }
 

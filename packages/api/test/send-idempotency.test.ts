@@ -18,7 +18,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-idem-'));
 const sendMail = mock(async () => ({ messageId: '<m@test>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail }));
 
-const { createIdentity } = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity } = await import('../src/lib/identities.ts');
 const { sendRoute } = await import('../src/routes/send.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
@@ -37,9 +37,11 @@ const {
 } = await import('../src/lib/send-log.ts');
 const { replaySendGuardsFromLog } = await import('../src/lib/replay-send-guards.ts');
 const {
+  beginSendIdempotency,
   fingerprintSendBody,
   hashIdempotencyKey,
   parseSendIdempotencyKey,
+  rebuildSendIdempotencyFromRecords,
   resetSendIdempotencyForTests,
   sendIdempotencySizeForTests,
   setSendIdempotencyCapForTests,
@@ -167,6 +169,10 @@ describe('指纹与请求头', () => {
     expect(parseSendIdempotencyKey('bad\u0001key').ok).toBe(false);
     expect(parseSendIdempotencyKey('bad\u007fkey').ok).toBe(false);
     expect(parseSendIdempotencyKey('bad\u0085key').ok).toBe(false);
+    expect(parseSendIdempotencyKey('a b')).toEqual({ ok: true, key: 'a b' });
+    expect(parseSendIdempotencyKey('café').ok).toBe(false);
+    expect(parseSendIdempotencyKey('key😀').ok).toBe(false);
+    expect(parseSendIdempotencyKey('bad\tkey').ok).toBe(false);
   });
 });
 
@@ -507,7 +513,13 @@ describe('POST /v1/send Idempotency-Key', () => {
     expect(sendMail).not.toHaveBeenCalled();
     const ok = await post(from, { key: 'k'.repeat(128) });
     expect(ok.status).toBe(200);
-    expect(sendMail).toHaveBeenCalledTimes(1);
+    // emoji 进不了 Headers。能进头的非 ASCII（é 在 Latin-1 内）仍要 400。
+    const latin = await post(from, { key: 'café' });
+    expect(latin.status).toBe(400);
+    expect(await latin.json()).toEqual({ error: 'invalid_request' });
+    const spaced = await post(from, { key: 'a b', subject: 'spaced-key' });
+    expect(spaced.status).toBe(200);
+    expect(sendMail).toHaveBeenCalledTimes(2);
   });
 
   test('未知身份不占位', async () => {
@@ -560,5 +572,178 @@ describe('POST /v1/send Idempotency-Key', () => {
     const old = await post(from, { key: 'old', subject: 'old' });
     expect(old.status).toBe(200);
     expect(old.headers.get('Idempotent-Replayed')).toBeNull();
+  });
+
+  test('额度或冷却拒绝会把暂时逐出的已完成项放回', async () => {
+    const owner = nid('owner');
+    const other = nid('other');
+    setSendIdempotencyCapForTests(1);
+    expect((await post(owner, { key: 'keep', subject: 'keep' })).status).toBe(200);
+    const limit = config.sendRateLimit;
+    while (sendLimitCountForTests(other) < limit) {
+      expect(checkSendLimit(other, limit).allowed).toBe(true);
+    }
+    const blocked = await post(other, { key: 'nope', subject: 'nope' });
+    expect(blocked.status).toBe(429);
+    expect(((await blocked.json()) as { error: string }).error).toBe('rate_limited');
+    const replay = await post(owner, { key: 'keep', subject: 'keep' });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(sendMail).toHaveBeenCalledTimes(1);
+
+    resetRateLimits();
+    resetAutoReplyCooldownForTests();
+    resetSendIdempotencyForTests();
+    setSendIdempotencyCapForTests(1);
+    const from = nid('coolcap');
+    const to = 'evict-cool@example.net';
+    expect((await post(from, { key: 'kept', to, autoReply: true, subject: 'first' })).status).toBe(200);
+    const cooled = await post(from, { key: 'other', to, autoReply: true, subject: 'second' });
+    expect(cooled.status).toBe(429);
+    expect(((await cooled.json()) as { error: string }).error).toBe('auto_reply_cooldown');
+    const cooledReplay = await post(from, { key: 'kept', to, autoReply: true, subject: 'first' });
+    expect(cooledReplay.status).toBe(200);
+    expect(cooledReplay.headers.get('Idempotent-Replayed')).toBe('true');
+  });
+
+  test('删除身份清掉该地址的幂等记录，其它地址的回放还在', async () => {
+    const from = nid('reuse');
+    const keeper = nid('keeper');
+    const key = 'reuse-key';
+    expect((await post(from, { key, subject: 'pred' })).status).toBe(200);
+    expect((await post(keeper, { key: 'keep-key', subject: 'keep' })).status).toBe(200);
+    expect(deleteIdentity(from)).toBe(true);
+    sendMail.mockClear();
+    const keeperReplay = await post(keeper, { key: 'keep-key', subject: 'keep' });
+    expect(keeperReplay.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(sendMail).not.toHaveBeenCalled();
+
+    const localpart = from.split('@')[0] ?? '';
+    expect(createIdentity({ localpart })).toBeTruthy();
+    sendMail.mockClear();
+    const again = await post(from, { key, subject: 'pred' });
+    expect(again.status).toBe(200);
+    expect(again.headers.get('Idempotent-Replayed')).toBeNull();
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  test('重启回放不把早于当前身份 createdAt 的幂等行还给同址新身份', async () => {
+    const from = nid('born');
+    const key = 'born-key';
+    const first = await post(from, { key, subject: 'pred' });
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(deleteIdentity(from)).toBe(true);
+    const localpart = from.split('@')[0] ?? '';
+    expect(createIdentity({ localpart })).toBeTruthy();
+    resetSendIdempotencyForTests();
+    replaySendGuardsFromLog();
+    sendMail.mockClear();
+    const retry = await post(from, { key, subject: 'pred' });
+    expect(retry.status).toBe(200);
+    expect(retry.headers.get('Idempotent-Replayed')).toBeNull();
+    expect(await retry.json()).not.toEqual(firstBody);
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  test('回放跳过早于当前身份 createdAt 的行，没有身份表时仍认窗口内的行', () => {
+    const from = 'born@test.example';
+    const key = 'born-key';
+    const body = { from, to: 'b@example.net', subject: 's', text: 't' };
+    const requestHash = fingerprintSendBody(body);
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    const created = now - 60_000;
+    const row = (sentAt: string, id: string) => ({
+      id,
+      from,
+      sentAt,
+      result: 'queued' as const,
+      messageId: '<m@test>',
+      idempotencyKeyHash: hashIdempotencyKey(key),
+      requestHash,
+    });
+    const map = new Map([[from, created]]);
+    rebuildSendIdempotencyFromRecords(
+      [row(new Date(created - 1).toISOString(), 'snd_old')],
+      now,
+      map,
+    );
+    expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
+
+    resetSendIdempotencyForTests();
+    rebuildSendIdempotencyFromRecords(
+      [row(new Date(created).toISOString(), 'snd_eq')],
+      now,
+      map,
+    );
+    expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
+
+    resetSendIdempotencyForTests();
+    rebuildSendIdempotencyFromRecords(
+      [row(new Date(created).toISOString(), 'snd_missing')],
+      now,
+      new Map(),
+    );
+    expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
+
+    resetSendIdempotencyForTests();
+    rebuildSendIdempotencyFromRecords([row(new Date(created).toISOString(), 'snd_nolist')], now);
+    expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
+  });
+
+  test('DATA 及更晚的断线缓存 502，更早的命令仍放开键，额度不计入', async () => {
+    const from = nid('ambig');
+    sendMail.mockImplementation(async () => {
+      throw Object.assign(new Error('timeout after data'), { code: 'ETIMEDOUT', command: 'DATA' });
+    });
+    const first = await post(from, { key: 'data-key', subject: 'ambig' });
+    expect(first.status).toBe(502);
+    const body = await first.json();
+    expect(body).toMatchObject({ error: 'smtp_error' });
+    const text = logText();
+    expect(text).toContain(hashIdempotencyKey('data-key'));
+    expect(text).toContain('"failureKind":"local"');
+    expect(text).not.toContain('"rateLimitAt"');
+    expect(sendLimitCountForTests(from)).toBe(0);
+    sendMail.mockClear();
+    sendMail.mockImplementation(async () => ({ messageId: '<should-not@test>' }));
+    const replay = await post(from, { key: 'data-key', subject: 'ambig' });
+    expect(replay.status).toBe(502);
+    expect(replay.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(await replay.json()).toEqual(body);
+    expect(sendMail).not.toHaveBeenCalled();
+
+    resetRateLimits();
+    resetSendIdempotencyForTests();
+    replaySendGuardsFromLog();
+    expect(sendLimitCountForTests(from)).toBe(0);
+    const afterBoot = await post(from, { key: 'data-key', subject: 'ambig' });
+    expect(afterBoot.status).toBe(502);
+    expect(afterBoot.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(sendLimitCountForTests(from)).toBe(0);
+
+    sendMail.mockImplementation(async () => {
+      throw Object.assign(new Error('write failed'), { code: 'ECONNECTION', command: 'DATA' });
+    });
+    const piped = await post(from, { key: 'pipe-key', subject: 'pipe' });
+    expect(piped.status).toBe(502);
+    expect(logText()).toContain(hashIdempotencyKey('pipe-key'));
+    sendMail.mockImplementation(async () => ({ messageId: '<pipe@test>' }));
+    const pipedReplay = await post(from, { key: 'pipe-key', subject: 'pipe' });
+    expect(pipedReplay.status).toBe(502);
+    expect(pipedReplay.headers.get('Idempotent-Replayed')).toBe('true');
+
+    sendMail.mockImplementation(async () => {
+      throw Object.assign(new Error('timeout before data'), { code: 'ETIMEDOUT', command: 'MAIL FROM' });
+    });
+    const early = await post(from, { key: 'early-key', subject: 'early' });
+    expect(early.status).toBe(502);
+    expect(logText()).not.toContain(hashIdempotencyKey('early-key'));
+    sendMail.mockClear();
+    sendMail.mockImplementation(async () => ({ messageId: '<early@test>' }));
+    const earlyRetry = await post(from, { key: 'early-key', subject: 'early' });
+    expect(earlyRetry.status).toBe(200);
+    expect(earlyRetry.headers.get('Idempotent-Replayed')).toBeNull();
+    expect(sendMail).toHaveBeenCalledTimes(1);
   });
 });

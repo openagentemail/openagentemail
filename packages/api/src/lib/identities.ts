@@ -38,6 +38,7 @@ import {
 import { cascadeDeleteWebhooksForAddress } from './webhook-store.ts';
 import { recordAuditEvent } from './audit.ts';
 import { errorCode } from './errors.ts';
+import { purgeSendIdempotencyForAddress } from './send-idempotency.ts';
 
 export type WebhookCancelCallback = (webhookId: string, reason: string) => void;
 let webhookCancelCallback: WebhookCancelCallback | undefined;
@@ -749,6 +750,8 @@ export function deleteIdentity(address: string): boolean {
       return rest as Identity;
     });
   save(kept);
+  // 同址新建不应在 24 小时内拿到上一任的幂等回放。身份已经落盘再清内存。
+  purgeSendIdempotencyForAddress(needle);
   // 归属断开审计：纯标识（被删父地址）；子地址不落载荷
   if (orphaned > 0) {
     recordAuditEvent({

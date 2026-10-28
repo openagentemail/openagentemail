@@ -265,6 +265,16 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
   expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "" }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "k".repeat(129) }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, idempotencyKey: 1 }).success).toBe(false);
+  // 与 REST 同一条规则：trim 后 1–128 个可打印 ASCII。空白在 MCP 必须失败。
+  const trimmed = sendObject.safeParse({ ...sendBase, idempotencyKey: "  k  " });
+  expect(trimmed.success).toBe(true);
+  if (trimmed.success) expect((trimmed.data as { idempotencyKey?: string }).idempotencyKey).toBe("k");
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "   " }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "a b" }).success).toBe(true);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "café" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "key😀" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "ok\u0001" }).success).toBe(false);
+  expect(sendObject.safeParse({ ...sendBase, idempotencyKey: "bad\u007f" }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, headers: { "Auto-Submitted": "auto-replied" } }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, autoSubmitted: "no" }).success).toBe(false);
   expect(ok(send, "from", "not-an-email")).toBe(false);

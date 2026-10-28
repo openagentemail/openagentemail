@@ -27,6 +27,7 @@ const {
   setSendLogNowForTests,
   setSendLogPersistHookForTests,
 } = await import('../src/lib/send-log.ts');
+const { setSendIdempotencyCapForTests } = await import('../src/lib/send-idempotency.ts');
 
 function seed(partial: {
   from?: string;
@@ -54,6 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetSendLogForTests();
+  setSendIdempotencyCapForTests(null);
 });
 
 describe('send-log store', () => {
@@ -541,6 +543,122 @@ describe('send-log store', () => {
     const compact = await compactSendLog();
     expect(compact.kept).toBeLessThan(3);
     expect(compact.dropped).toBeGreaterThan(0);
+  });
+
+  test('trim keeps in-window keyed rows and drops other old rows first', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    const keyHash = 'ab'.repeat(32);
+    const requestHash = 'cd'.repeat(32);
+    const line = (
+      subject: string,
+      messageId: string,
+      hashes?: { idempotencyKeyHash: string; requestHash: string },
+    ) =>
+      appendSendLog({
+        from: 'fox@test.example',
+        to: ['owl@example.net'],
+        subject,
+        result: 'queued',
+        source: 'api',
+        messageId,
+        ...hashes,
+      });
+    setSendLogNowForTests(() => now - 25 * 60 * 60 * 1000);
+    await line('expired-key', '<old@test>', { idempotencyKeyHash: keyHash, requestHash });
+    setSendLogNowForTests(() => now);
+    await line('keyed-keep', '<keep@test>', { idempotencyKeyHash: keyHash, requestHash });
+    await line('plain-old', '<plain@test>');
+    setSendLogCapsForTests({ rows: 2 });
+    await line('plain-new', '<new@test>');
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-keep');
+    expect(subjects).toContain('plain-new');
+    expect(subjects).not.toContain('plain-old');
+    expect(subjects).not.toContain('expired-key');
+  });
+
+  test('idempotency trim keeps only the newest rows up to the table cap', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    setSendIdempotencyCapForTests(1);
+    setSendLogNowForTests(() => now);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-old',
+      result: 'queued',
+      source: 'api',
+      messageId: '<old@test>',
+      idempotencyKeyHash: 'ab'.repeat(32),
+      requestHash: 'cd'.repeat(32),
+    });
+    setSendLogNowForTests(() => now + 1000);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<new-key@test>',
+      idempotencyKeyHash: 'ef'.repeat(32),
+      requestHash: '12'.repeat(32),
+    });
+    setSendLogCapsForTests({ rows: 2 });
+    setSendLogNowForTests(() => now + 2000);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'plain-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<plain@test>',
+    });
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-new');
+    expect(subjects).toContain('plain-new');
+    expect(subjects).not.toContain('keyed-old');
+  });
+
+  test('byte cap drops unkeyed rows before in-window keyed rows', async () => {
+    const now = Date.parse('2026-10-28T12:00:00.000Z');
+    setSendLogNowForTests(() => now);
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'keyed-keep',
+      result: 'queued',
+      source: 'api',
+      messageId: '<keep@test>',
+      idempotencyKeyHash: 'ab'.repeat(32),
+      requestHash: 'cd'.repeat(32),
+    });
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'x'.repeat(400),
+      result: 'queued',
+      source: 'api',
+      messageId: '<fat@test>',
+    });
+    const lines = readFileSync(sendLogPathForTests(), 'utf8').split('\n').filter(Boolean);
+    const keyedLine = lines.find((line) => line.includes('keyed-keep'));
+    const fatLine = lines.find((line) => line.includes('x'.repeat(40)));
+    expect(keyedLine).toBeTruthy();
+    expect(fatLine).toBeTruthy();
+    const keyedBytes = Buffer.byteLength(`${keyedLine}\n`);
+    const fatBytes = Buffer.byteLength(`${fatLine}\n`);
+    setSendLogCapsForTests({ rows: 100, bytes: keyedBytes + fatBytes - 1 });
+    await appendSendLog({
+      from: 'fox@test.example',
+      to: ['owl@example.net'],
+      subject: 'plain-new',
+      result: 'queued',
+      source: 'api',
+      messageId: '<new@test>',
+    });
+    const subjects = (await querySendLog({ limit: 20 })).items.map((row) => row.subject);
+    expect(subjects).toContain('keyed-keep');
+    expect(subjects).toContain('plain-new');
+    expect(subjects.some((subject) => subject.startsWith('xxx'))).toBe(false);
   });
 
   test('torn trailing line is isolated without fail-closing the log', async () => {

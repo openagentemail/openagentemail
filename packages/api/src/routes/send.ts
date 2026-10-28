@@ -22,7 +22,7 @@ import {
   smtpErrorSendResponse,
   type SendIdempotencyReservation,
 } from '../lib/send-idempotency.ts';
-import { isLocalSendFailure } from '../lib/sendfailure.ts';
+import { isAmbiguousPostDataSendFailure, isLocalSendFailure } from '../lib/sendfailure.ts';
 import { describeFailure } from '../lib/redact.ts';
 import { recordSentMessageIdAfterSend } from '../lib/sent-registry.ts';
 import {
@@ -332,14 +332,18 @@ sendRoute.post('/', async (c) => {
       // Our own mail server being unreachable shouldn't cost the user a slot;
       // anything the server actually answered to stays counted.
       // 冷却与额度同一口径：连接类失败放开占位；对端已经应答则从这一刻起算。
-      // failureKind 用同一次判断，重启回放才能把 SMTP 已应答的失败算回去。
+      // failureKind 仍用 isLocalSendFailure，重启后的额度/冷却回放不把 DATA 断线算进去。
+      // 幂等单独看 command：DATA 及更晚表示正文可能已经写出，按 502 缓存，不放开键。
       const localFailure = isLocalSendFailure(err);
+      const ambiguousDelivery = localFailure && isAmbiguousPostDataSendFailure(err);
       if (localFailure) {
         releaseSendLimit(from, limit.reservation);
         releaseAutoReplyCooldownReservation(autoReplyReservation);
-        // 信没到 SMTP。放开键，重试可以再发。这行日志不带幂等哈希。
-        releaseSendIdempotency(reservation);
-        idempotencySettled = true;
+        if (!ambiguousDelivery) {
+          // 信还没进入 DATA。放开键，重试可以再发。这行日志不带幂等哈希。
+          releaseSendIdempotency(reservation);
+          idempotencySettled = true;
+        }
       } else {
         finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
       }
@@ -356,13 +360,15 @@ sendRoute.post('/', async (c) => {
         failureKind: localFailure ? 'local' : 'smtp_response',
         source,
         autoReply,
-        // 连接类失败已经退还额度，不留准入时刻。对端应答过的失败仍占着那一枚。
+        // 连接类失败（含 DATA 阶段不确定失败）已经退还额度，不留准入时刻。
+        // 对端应答过的失败仍占着那一枚。
         rateLimitAt: localFailure ? undefined : rateLimitAt,
-        // 只有对端应答过的失败才缓存。连接类失败上面已经放开键。
-        ...(localFailure ? {} : idemLog),
+        // 对端应答，或 DATA 及更晚的断线，都留下哈希供幂等回放。
+        // 更早的连接类失败上面已经放开键，不写哈希。
+        ...(localFailure && !ambiguousDelivery ? {} : idemLog),
       });
       const payload = smtpErrorSendResponse(logged?.id);
-      if (!localFailure && completeSendIdempotency(reservation, 502, payload)) {
+      if ((!localFailure || ambiguousDelivery) && completeSendIdempotency(reservation, 502, payload)) {
         idempotencySettled = true;
       }
       return c.json(payload, 502);

@@ -1158,6 +1158,30 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
       .filter((entry) => entry[0]?.subject === 'mcp-idem-subject');
     expect(reached).toHaveLength(1);
   });
+
+  test('mail_send 拒绝空白、控制字符和非 ASCII 的 idempotencyKey', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp-idem-bad' })!;
+    sendMailMock.mockClear();
+    const rejectedSubject = 'mcp-idem-rejected';
+    for (const idempotencyKey of ['   ', 'k'.repeat(129), 'ok\u0001', 'café', 'key😀']) {
+      const res = await mcpRequest(token, 'tools/call', {
+        name: 'mail_send',
+        arguments: {
+          from: identity.address,
+          to: 'recipient@example.net',
+          subject: rejectedSubject,
+          text: 'body',
+          idempotencyKey,
+        },
+      });
+      const text = JSON.stringify(await readMcpJson(res));
+      expect(text, idempotencyKey).not.toContain('"queued":true');
+      expect(/invalid|unrecognized|-32602/i.test(text), text).toBe(true);
+    }
+    const reached = (sendMailMock.mock.calls as unknown as Array<[{ subject?: string }]>)
+      .filter((entry) => entry[0]?.subject === rejectedSubject);
+    expect(reached).toEqual([]);
+  });
 });
 
 /**
