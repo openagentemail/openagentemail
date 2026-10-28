@@ -83,6 +83,26 @@ let nowFn: () => number = () => Date.now();
 let maxEntries = SEND_IDEMPOTENCY_MAX_ENTRIES;
 let nextReservationId = 1;
 let nextSeq = 1;
+/**
+ * 启动时发送日志没能把幂等表重建出来。
+ * 带键请求在下一次回放成功之前必须失败关闭，不能拿空表再发一封。
+ */
+let replayUnavailable = false;
+
+/** 发送日志回放失败，带 Idempotency-Key 的请求应返回 503。 */
+export function isSendIdempotencyReplayUnavailable(): boolean {
+  return replayUnavailable;
+}
+
+/** 这次启动回放没有装上幂等表。 */
+export function markSendIdempotencyReplayFailed(): void {
+  replayUnavailable = true;
+}
+
+/** 幂等表已按当前身份重建。带键请求可以恢复。 */
+export function markSendIdempotencyReplaySucceeded(): void {
+  replayUnavailable = false;
+}
 
 /** 测试和发送日志修剪用的当前表上限。 */
 export function sendIdempotencyMaxEntries(): number {
@@ -361,7 +381,7 @@ export type SendIdempotencyReplayRow = {
  * 以及带两个哈希的 local 行（DATA 阶段不确定失败，额度回放仍不认 local）。
  * sentAt 在未来，或恰好到期（sentAt + 24h <= now）的行不留。
  * identityCreatedAtMs 给出时：地址不在表里，或 sentAt 早于该身份的创建时间，都不留。
- * 读不到身份库时调用方不传这张表，只靠删除时的内存清理。
+ * 生产路径在身份库读失败时不调用本函数。省略这张表表示不做 createdAt 过滤。
  * 同一身份同一键留 sentAt 更晚的那条。超过上限时留最晚完成的那些，不留占位。
  */
 export function rebuildSendIdempotencyFromRecords(
@@ -449,4 +469,5 @@ export function resetSendIdempotencyForTests(): void {
   parkedEvictions.clear();
   nowFn = () => Date.now();
   maxEntries = SEND_IDEMPOTENCY_MAX_ENTRIES;
+  replayUnavailable = false;
 }

@@ -917,7 +917,21 @@ export function appendSendLog(input: AppendSendLogInput): Promise<SendLogRecord>
     // 身份是否仍是占位时那一任，和 sentAt 在同一次同步里决定，避免落盘前被换掉。
     const idempotencyKeyHash = acceptedSha256Hex(input.idempotencyKeyHash);
     const requestHash = acceptedSha256Hex(input.requestHash);
-    const keepHashes = input.keepIdempotencyHashes ? input.keepIdempotencyHashes() : true;
+    // 回调抛错说明身份库在 SMTP 已接受之后读失败，不是“身份已换”。
+    // 不能让这次追加失败：调用方会放开占位，同一键重试会再发一封。
+    // 哈希照写。调用方应已把这次响应当成终态。
+    let keepHashes = true;
+    if (input.keepIdempotencyHashes) {
+      try {
+        keepHashes = input.keepIdempotencyHashes();
+      } catch (err) {
+        console.warn(
+          '[send-log] identity check failed after send; keeping idempotency hashes:',
+          describeFailure(err),
+        );
+        keepHashes = true;
+      }
+    }
     if (keepHashes && idempotencyKeyHash) record.idempotencyKeyHash = idempotencyKeyHash;
     if (keepHashes && requestHash) record.requestHash = requestHash;
     const line = `${JSON.stringify(record)}\n`;

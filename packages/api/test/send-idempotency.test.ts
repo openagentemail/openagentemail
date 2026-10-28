@@ -1,5 +1,5 @@
 // POST /v1/send 的可选 Idempotency-Key。没有键时不占表、不写哈希。
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,7 +18,8 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-idem-'));
 const sendMail = mock(async () => ({ messageId: '<m@test>' }));
 mock.module('../src/lib/smtp.ts', () => ({ sendMail }));
 
-const { createIdentity, deleteIdentity, findIdentity } = await import('../src/lib/identities.ts');
+const identitiesMod = await import('../src/lib/identities.ts');
+const { createIdentity, deleteIdentity, findIdentity } = identitiesMod;
 const { sendRoute } = await import('../src/routes/send.ts');
 const { config } = await import('../src/lib/config.ts');
 const {
@@ -41,6 +42,7 @@ const {
   fingerprintSendBody,
   hashIdempotencyKey,
   parseSendIdempotencyKey,
+  isSendIdempotencyReplayUnavailable,
   rebuildSendIdempotencyFromRecords,
   resetSendIdempotencyForTests,
   sendIdempotencySizeForTests,
@@ -817,5 +819,109 @@ describe('POST /v1/send Idempotency-Key', () => {
     expect(earlyRetry.status).toBe(200);
     expect(earlyRetry.headers.get('Idempotent-Replayed')).toBeNull();
     expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  test('启动时身份库读失败则跳过幂等重建，额度与冷却照常回放', async () => {
+    const from = nid('idread');
+    const to = 'cool-idread@example.net';
+    const key = 'idread-key';
+    expect((await post(from, { key, to, autoReply: true, subject: 'pred' })).status).toBe(200);
+    expect(sendLimitCountForTests(from)).toBe(1);
+    expect(autoReplyCooldownSizeForTests()).toBe(1);
+    resetSendIdempotencyForTests();
+    resetRateLimits();
+    resetAutoReplyCooldownForTests();
+    const spy = spyOn(identitiesMod, 'listIdentities').mockImplementation(() => {
+      throw new Error('identity store unreadable');
+    });
+    try {
+      replaySendGuardsFromLog();
+      expect(sendIdempotencySizeForTests()).toBe(0);
+      expect(isSendIdempotencyReplayUnavailable()).toBe(false);
+      expect(sendLimitCountForTests(from)).toBe(1);
+      expect(autoReplyCooldownSizeForTests()).toBe(1);
+      // 冷却已经证明回放过了。清掉它，同指纹的探测请求才能走到 SMTP，而不是 429。
+      resetAutoReplyCooldownForTests();
+      sendMail.mockClear();
+      const during = await post(from, { key, to, autoReply: true, subject: 'pred' });
+      expect(during.status).toBe(200);
+      expect(during.headers.get('Idempotent-Replayed')).toBeNull();
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+    // 身份库恢复后，带 createdAt 过滤的回放仍装入当前身份的行。
+    resetSendIdempotencyForTests();
+    resetRateLimits();
+    resetAutoReplyCooldownForTests();
+    replaySendGuardsFromLog();
+    expect(sendIdempotencySizeForTests()).toBe(1);
+    sendMail.mockClear();
+    const replay = await post(from, { key, to, autoReply: true, subject: 'pred' });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  test('发送日志回放失败时带键请求 503，不带键仍 200', async () => {
+    const from = nid('replaydown');
+    resetSendIdempotencyForTests();
+    resetRateLimits();
+    resetAutoReplyCooldownForTests();
+    try {
+      replaySendGuardsFromLog(Date.now(), () => {
+        throw new Error('send-log unreadable');
+      });
+      expect(isSendIdempotencyReplayUnavailable()).toBe(true);
+      sendMail.mockClear();
+      const keyed = await post(from, { key: 'again', subject: 'nope', autoReply: true });
+      expect(keyed.status).toBe(503);
+      expect(await keyed.json()).toEqual({ error: 'idempotency_unavailable' });
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(sendIdempotencySizeForTests()).toBe(0);
+      expect(sendLimitCountForTests(from)).toBe(0);
+      expect(autoReplyCooldownSizeForTests()).toBe(0);
+      const plain = await post(from, { subject: 'plain' });
+      expect(plain.status).toBe(200);
+      expect(sendMail).toHaveBeenCalledTimes(1);
+    } finally {
+      resetSendIdempotencyForTests();
+    }
+  });
+
+  test('SMTP 接受后身份库抛错仍完成幂等，同一键重试不再发信', async () => {
+    const from = nid('postthrow');
+    const key = 'post-throw';
+    let smtpDone = false;
+    sendMail.mockImplementation(async () => {
+      smtpDone = true;
+      return { messageId: '<post@test>' };
+    });
+    const spy = spyOn(identitiesMod, 'findIdentity').mockImplementation((address: string) => {
+      // 只在 SMTP 返回后让发件身份的查找失败。收件人通知等其它查找仍走原函数。
+      if (smtpDone && address.toLowerCase() === from.toLowerCase()) {
+        throw new Error('identity store unreadable');
+      }
+      return findIdentity(address);
+    });
+    try {
+      const first = await post(from, { key, subject: 'once' });
+      expect(first.status).toBe(200);
+      const body = await first.json();
+      expect(body).toMatchObject({ queued: true, messageId: '<post@test>' });
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(sendIdempotencySizeForTests()).toBe(1);
+      expect(logText()).toContain(hashIdempotencyKey(key));
+      spy.mockRestore();
+      sendMail.mockClear();
+      const second = await post(from, { key, subject: 'once' });
+      expect(second.status).toBe(200);
+      expect(second.headers.get('Idempotent-Replayed')).toBe('true');
+      expect(await second.json()).toEqual(body);
+      expect(sendMail).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      sendMail.mockImplementation(async () => ({ messageId: '<m@test>' }));
+    }
   });
 });

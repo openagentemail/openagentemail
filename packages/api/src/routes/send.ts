@@ -16,6 +16,7 @@ import { checkSendLimit, releaseSendLimit } from '../lib/ratelimit.ts';
 import {
   beginSendIdempotency,
   completeSendIdempotency,
+  isSendIdempotencyReplayUnavailable,
   parseSendIdempotencyKey,
   queuedSendResponse,
   releaseSendIdempotency,
@@ -216,6 +217,11 @@ sendRoute.post('/', async (c) => {
   }
 
   // 幂等键在身份校验之后、冷却和每小时额度之前。
+  // 启动回放失败时带键请求直接 503，不占位、不碰冷却、不占额度、不打 SMTP。
+  // 不带键的请求照常。下一次回放成功后恢复。
+  if (idempotencyKey.key && isSendIdempotencyReplayUnavailable()) {
+    return c.json({ error: 'idempotency_unavailable' }, 503);
+  }
   // 检查和占位同步完成，后面的 await 插不进第二封 SMTP。
   // 已完成且指纹相同：原样返回，不发信、不占额度、不碰冷却、不新写日志。
   // 指纹不同：422。同一指纹仍在发送：409。
@@ -258,8 +264,16 @@ sendRoute.post('/', async (c) => {
       idempotencyKeyHash: reservation.keyHash,
       requestHash: reservation.requestHash,
       keepIdempotencyHashes: () => {
-        bindIdempotency = identityStillReserved();
-        return bindIdempotency;
+        try {
+          bindIdempotency = identityStillReserved();
+          return bindIdempotency;
+        } catch (err) {
+          // SMTP 已接受之后身份库读失败。先标成终态再抛出：
+          // 发送日志会接住并照写哈希，finishIdempotency 记下实际返回的响应。
+          // finally 看到已结算，不会放开占位。
+          bindIdempotency = true;
+          throw err;
+        }
       },
     };
   };

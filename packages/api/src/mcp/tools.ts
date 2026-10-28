@@ -589,7 +589,7 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional idempotencyKey is sent as the Idempotency-Key header and is not part of the JSON body. After trim it must be 1 to 128 printable ASCII characters (0x20-0x7E); whitespace-only is rejected. There is no headers field.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional idempotencyKey is sent as the Idempotency-Key header and is not part of the JSON body. After trim it must be 1 to 128 printable ASCII characters (0x20-0x7E); whitespace-only is rejected. If send-log replay failed at startup, a request with idempotencyKey is REST 503 {error:\"idempotency_unavailable\"} and does not send; requests without a key are unchanged. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
