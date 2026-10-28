@@ -149,11 +149,18 @@ describe('MCP HTTP 鉴权与 RFC 9728', () => {
 
 describe('MCP 元数据 origin / insecure issuer', () => {
   test('公网 http origin 不放行 insecure issuer', () => {
-    expect(allowInsecureIssuerUrl('http://example.com')).toBe(false);
-    expect(allowInsecureIssuerUrl('http://1.2.3.4:3100')).toBe(false);
-    expect(mcpAuthMetadataOptions('http://example.com').dangerouslyAllowInsecureIssuerUrl).toBe(
-      false,
-    );
+    // 公网 origin 的判定必须忽略更早文件烘焙进 config 的 loopback MCP_PUBLIC_URL。
+    const mcpPublicUrlBefore = config.mcpPublicUrl;
+    (config as { mcpPublicUrl?: string }).mcpPublicUrl = undefined;
+    try {
+      expect(allowInsecureIssuerUrl('http://example.com')).toBe(false);
+      expect(allowInsecureIssuerUrl('http://1.2.3.4:3100')).toBe(false);
+      expect(mcpAuthMetadataOptions('http://example.com').dangerouslyAllowInsecureIssuerUrl).toBe(
+        false,
+      );
+    } finally {
+      (config as { mcpPublicUrl?: string }).mcpPublicUrl = mcpPublicUrlBefore;
+    }
   });
 
   test('loopback / 私网 http 放行 insecure issuer（与 lib/net 同源）', () => {

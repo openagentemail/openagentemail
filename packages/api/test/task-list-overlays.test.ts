@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key';
@@ -12,7 +13,7 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-task-list-overlays-'));
 
-const { afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, mock, test } = await import('bun:test');
 
 type FakeMailMessage = {
   uid: number;
@@ -357,4 +358,9 @@ describe('issue #96: queued overlays and collection fallback in listTasks', () =
     const listB = await listTasks();
     expect(listB.filter((t) => t.id === taskPoison.id)).toHaveLength(0);
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

@@ -11,6 +11,7 @@
  * 零运行时变更：仅本测试文件 + docs；src/ 零触碰。
  */
 import { EventEmitter } from 'node:events';
+import { restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-key-wait-task-gen';
@@ -19,7 +20,7 @@ process.env.IMAP_PASS = 'imap-secret';
 process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 
-const { afterEach, beforeEach, describe, expect, mock, spyOn, test } = await import('bun:test');
+const { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } = await import('bun:test');
 const {
   createConfigurableFakeMailbox,
   DEFAULT_FAKE_UID_VALIDITY,
@@ -355,4 +356,9 @@ describe('#198 wait 进行中 uidValidity 变化', () => {
     expect(fakeMailbox.getUidValidity()).toBe(99n);
     expect(DEFAULT_FAKE_UID_VALIDITY).toBe(17n);
   });
+});
+
+// 假 IMAP 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
 });

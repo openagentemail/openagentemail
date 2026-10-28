@@ -7,6 +7,7 @@
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pinMcpPublicUrl, restoreMcpPublicUrl } from './helpers/order-isolation.ts';
 import { randomBytes } from 'node:crypto';
 
 process.env.DOMAIN = 'test.example';
@@ -19,6 +20,8 @@ process.env.TASK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.WEBHOOK_SIGNING_SECRET = '01234567890123456789012345678901';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-id-del-audit-'));
 process.env.UI_ENABLED = 'true';
+// 进入本文件前的值；afterAll 还原，避免烘焙进后续文件的 config。
+const mcpPublicUrlBefore = process.env.MCP_PUBLIC_URL;
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 
 const { afterAll, afterEach, beforeEach, describe, expect, test } = await import('bun:test');
@@ -27,6 +30,7 @@ const { createApp } = await import('../src/app.ts');
 const { readAuditEvents, resetAuditForTests, recordAuditEvent, scrubAuditField, AUDIT_ADDRESS_MAX_LEN } =
   await import('../src/lib/audit.ts');
 const { config } = await import('../src/lib/config.ts');
+pinMcpPublicUrl(config, 'http://localhost');
 const { createIdentity, findIdentity } = await import('../src/lib/identities.ts');
 const { createWebhookSubscription } = await import('../src/lib/webhook-store.ts');
 const {
@@ -90,6 +94,8 @@ afterEach(() => {
 // #244 R4：文件级清理 provision 注入缝，避免合跑泄漏
 afterAll(() => {
   setProvisionIdentityNotificationsForTests(null);
+  // 按进入本文件前的 MCP_PUBLIC_URL 还原，避免单例 config 带给后续文件。
+  restoreMcpPublicUrl(config, mcpPublicUrlBefore);
 });
 
 describe('#245 identity.delete 审计（有意删除入口）', () => {

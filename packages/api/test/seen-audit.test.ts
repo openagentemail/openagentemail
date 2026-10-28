@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pinMcpPublicUrl, restoreMcpPublicUrl, restoreRealImapFlow } from './helpers/order-isolation.ts';
 
 process.env.DOMAIN = 'test.example';
 process.env.API_KEYS = 'admin-seen-audit-key';
@@ -17,9 +18,11 @@ process.env.SMTP_USER = 'agent@test.example';
 process.env.SMTP_PASS = 'smtp-secret';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'oae-seen-audit-'));
 process.env.UI_ENABLED = 'true';
+// 进入本文件前的值；afterAll 还原，避免烘焙进后续文件的 config。
+const mcpPublicUrlBefore = process.env.MCP_PUBLIC_URL;
 process.env.MCP_PUBLIC_URL = 'http://localhost';
 
-const { beforeEach, describe, expect, mock, test } = await import('bun:test');
+const { afterAll, beforeEach, describe, expect, mock, test } = await import('bun:test');
 const { Hono } = await import('hono');
 
 /** FakeImapFlow 上 flags 写调用记录（金测零写 + 写路径对照）。 */
@@ -93,6 +96,7 @@ mock.module('imapflow', () => ({ ImapFlow: FakeImapFlow }));
 const { createApp } = await import('../src/app.ts');
 const { readAuditEvents, resetAuditForTests } = await import('../src/lib/audit.ts');
 const { config } = await import('../src/lib/config.ts');
+pinMcpPublicUrl(config, 'http://localhost');
 const { createIdentity } = await import('../src/lib/identities.ts');
 const { setMessageSeen } = await import('../src/lib/imap.ts');
 const { encodeMailForwardCursor } = await import('../src/lib/mail-cursor.ts');
@@ -466,4 +470,10 @@ describe('#152 MCP 文案软化', () => {
     expect(line!).toMatch(/all mailbox consumers|all consumers/i);
     expect(line!).toMatch(/since=|mail_wait_for/);
   });
+});
+
+// 本文件的假 IMAP / MCP_PUBLIC_URL 不得留给后续测试文件。
+afterAll(() => {
+  restoreRealImapFlow();
+  restoreMcpPublicUrl(config, mcpPublicUrlBefore);
 });
