@@ -1,3 +1,22 @@
+# Progress · 合并 origin/main 的幂等键与线程头
+
+## 2026-10-28 · feat/send-in-reply-to 合入 #404
+
+### 我们实现了哪些功能？
+1. 解完 `origin/main`（PR #404 可选 `Idempotency-Key`）与本分支（可选 `inReplyTo` / `references`）的冲突。`POST /v1/send`、MCP `mail_send`、文档和变更记录两边的行为都留着。
+2. 幂等占位仍在 body 校验和身份检查之后、冷却与每小时额度之前。非法 `inReplyTo` / 单独的 `references` 是 400，不占键。指纹用校验后的整份 body，所以 `inReplyTo` 和 `references` 在里面：相同参数回放，换了其中之一是 422 `idempotency_key_reused`。写头时的去重和补尾不改指纹。
+3. `mail_send` 同时接受 `idempotencyKey` 与 `inReplyTo` / `references`。客户端把键放进 `Idempotency-Key`，线程字段放进同一请求的 JSON。
+
+### 我们遇到了哪些错误？
+1. `send.ts` 的冲突把额度时刻和 `try` 写了两遍，线程头那一支丢掉了幂等完成和 DATA 阶段的 502 缓存。
+2. MCP `client.send` 两边都把新参数放在第 7 位：一边是 `inReplyTo`，一边是 `idempotencyKey`。合在一起之后，旧的幂等单测会把键当成 `inReplyTo`。
+3. 新的 400 断言直接读 `json().error`，`tsc` 多了 2 条 `TS2571`，总数从 179 变成 181。
+
+### 我们是如何解决这些错误的？
+1. 发送路径只留一层 `try`：`sendMail` 带上线程字段，成功和失败都走原来的幂等记账。
+2. `send` 的参数顺序是 `inReplyTo`、`references`、`idempotencyKey`。幂等单测把键挪到第 9 个参数。工具 handler 一次把三样都传下去。
+3. 400 断言先收成 `{ error?: string }`。`bunx tsc --noEmit` 回到 179。单文件：`send-threading` 10、`send-idempotency` 33、`send` 25、`send-log` 25、`mcp-http` 103，`packages/mcp` 全套 63，都是 0 fail。`packages/api` 全量 2577 pass、9 skip、3 fail、1 error：webhook-delivery 的 P2-6 与 R5（`deadLettered` 为 1），以及 `compose-webhooks` 因本机没有 Docker Compose 在加载时抛错。identities F56 这次是通过的。
+
 # Progress · 发信线程头 inReplyTo / references
 
 ## 2026-10-28 · feat/send-in-reply-to

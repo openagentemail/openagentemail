@@ -74,6 +74,8 @@ function post(
     text?: string;
     html?: string;
     autoReply?: boolean;
+    inReplyTo?: string;
+    references?: string[];
     key?: string;
     extra?: Record<string, unknown>;
   } = {},
@@ -89,6 +91,8 @@ function post(
   };
   if (opts.html !== undefined) payload.html = opts.html;
   if (opts.autoReply !== undefined) payload.autoReply = opts.autoReply;
+  if (opts.inReplyTo !== undefined) payload.inReplyTo = opts.inReplyTo;
+  if (opts.references !== undefined) payload.references = opts.references;
   return app.request('/v1/send', {
     method: 'POST',
     headers,
@@ -158,6 +162,39 @@ describe('指纹与请求头', () => {
       text: 't',
     });
     expect(lower).not.toBe(a);
+  });
+
+  test('inReplyTo 与 references 进入指纹，换了其中之一就不是同一份请求', () => {
+    const base = {
+      from: 'A@test.example',
+      to: ['b@example.net'],
+      subject: 's',
+      text: 't',
+      inReplyTo: '<parent@example.com>',
+      references: ['<prev@example.com>', '<parent@example.com>'],
+    };
+    const same = fingerprintSendBody({
+      references: ['<prev@example.com>', '<parent@example.com>'],
+      text: 't',
+      inReplyTo: '<parent@example.com>',
+      subject: 's',
+      to: 'b@example.net',
+      from: 'A@test.example',
+    });
+    expect(fingerprintSendBody(base)).toBe(same);
+    expect(fingerprintSendBody({ ...base, inReplyTo: '<other@example.com>' })).not.toBe(same);
+    expect(
+      fingerprintSendBody({ ...base, references: ['<other@example.com>'] }),
+    ).not.toBe(same);
+    // 没给线程字段的旧 body 与带了 inReplyTo 的不是同一份。
+    expect(
+      fingerprintSendBody({
+        from: 'A@test.example',
+        to: ['b@example.net'],
+        subject: 's',
+        text: 't',
+      }),
+    ).not.toBe(same);
   });
 
   test('空头与超长、控制字符', () => {
@@ -233,6 +270,61 @@ describe('POST /v1/send Idempotency-Key', () => {
     expect(reversed.status).toBe(422);
     expect(await reversed.json()).toEqual({ error: 'idempotency_key_reused' });
     expect(sendMail).toHaveBeenCalledTimes(2);
+  });
+
+  test('带 inReplyTo 的相同参数回放，换 inReplyTo 或 references 则 422', async () => {
+    const from = nid('thread');
+    const parent = '<parent@example.com>';
+    const references = ['<prev@example.com>', parent];
+    const first = await post(from, { key: 'thread-key', inReplyTo: parent, references });
+    expect(first.status).toBe(200);
+    const body = await first.json();
+    const mailed = sendMail.mock.calls.length;
+    expect(mailed).toBe(1);
+    const arg = (sendMail.mock.calls as unknown as Array<[{ inReplyTo?: string; references?: string[] }]>)[0]?.[0];
+    expect(arg?.inReplyTo).toBe(parent);
+    expect(arg?.references).toEqual(references);
+    sendMail.mockClear();
+    const replay = await post(from, { key: 'thread-key', inReplyTo: parent, references });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get('Idempotent-Replayed')).toBe('true');
+    expect(await replay.json()).toEqual(body);
+    expect(sendMail).not.toHaveBeenCalled();
+    const otherParent = await post(from, {
+      key: 'thread-key',
+      inReplyTo: '<other@example.com>',
+      references,
+    });
+    expect(otherParent.status).toBe(422);
+    expect(await otherParent.json()).toEqual({ error: 'idempotency_key_reused' });
+    const otherRefs = await post(from, {
+      key: 'thread-key',
+      inReplyTo: parent,
+      references: ['<other@example.com>'],
+    });
+    expect(otherRefs.status).toBe(422);
+    expect(await otherRefs.json()).toEqual({ error: 'idempotency_key_reused' });
+    expect(sendMail).not.toHaveBeenCalled();
+    // 原来的参数仍然回放，不因为中间的 422 把键弄丢。
+    const again = await post(from, { key: 'thread-key', inReplyTo: parent, references });
+    expect(again.headers.get('Idempotent-Replayed')).toBe('true');
+  });
+
+  test('非法 inReplyTo 或单独的 references 是 400，不占幂等键', async () => {
+    const from = nid('badthread');
+    const badId = await post(from, { key: 'no-reserve', inReplyTo: 'not-a-msg-id' });
+    expect(badId.status).toBe(400);
+    expect(((await badId.json()) as { error?: string }).error).toBe('invalid_request');
+    const refsOnly = await post(from, { key: 'no-reserve', references: ['<prev@example.com>'] });
+    expect(refsOnly.status).toBe(400);
+    expect(((await refsOnly.json()) as { error?: string }).error).toBe('invalid_request');
+    expect(sendIdempotencySizeForTests()).toBe(0);
+    expect(sendMail).not.toHaveBeenCalled();
+    // 同一键在校验失败之后仍可用于一次合法发送。
+    const ok = await post(from, { key: 'no-reserve', inReplyTo: '<parent@example.com>' });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('Idempotent-Replayed')).toBeNull();
+    expect(sendMail).toHaveBeenCalledTimes(1);
   });
 
   test('同一键换正文返回 422，且不再发信', async () => {

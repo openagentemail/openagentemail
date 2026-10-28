@@ -286,6 +286,15 @@ test("工具入参约束要和 REST API 对齐，别把服务端必拒的值放�
     }).success,
   ).toBe(true);
   expect(sendObject.safeParse({ ...sendBase, references: ["<prev@example.com>"] }).success).toBe(false);
+  // 幂等键和线程字段可以同时出现。键仍不进 REST body，由 handler 放进请求头。
+  expect(
+    sendObject.safeParse({
+      ...sendBase,
+      inReplyTo: "<parent@example.com>",
+      references: ["<prev@example.com>"],
+      idempotencyKey: "k",
+    }).success,
+  ).toBe(true);
   expect(sendObject.safeParse({ ...sendBase, inReplyTo: "parent@example.com" }).success).toBe(false);
   expect(sendObject.safeParse({ ...sendBase, inReplyTo: "<a@b@example.com>" }).success).toBe(false);
   expect(toolConfigs.get("mail_send")?.description).toContain("inReplyTo");

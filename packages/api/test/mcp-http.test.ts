@@ -1159,6 +1159,36 @@ describe('MCP mail_send 未知键拒绝（#324）', () => {
     expect(reached).toHaveLength(1);
   });
 
+  test('idempotencyKey 与 inReplyTo 同一次 mail_send 都传到发送', async () => {
+    const { token, identity } = createIdentity({ localpart: 'mcp-idem-thread' })!;
+    sendMailMock.mockClear();
+    const args = {
+      from: identity.address,
+      to: 'recipient@example.net',
+      subject: 'mcp-idem-thread',
+      text: 'body',
+      idempotencyKey: 'mcp-idem-thread-1',
+      inReplyTo: '<parent@example.com>',
+      references: ['<prev@example.com>'],
+    };
+    const call = () => mcpRequest(token, 'tools/call', { name: 'mail_send', arguments: args });
+    const first = await call();
+    expect(first.status).toBe(200);
+    expect(JSON.stringify(await readMcpJson(first))).toContain('"queued":true');
+    const reached = (
+      sendMailMock.mock.calls as unknown as Array<[{ subject?: string; inReplyTo?: string; references?: string[] }]>
+    ).filter((entry) => entry[0]?.subject === 'mcp-idem-thread');
+    expect(reached).toHaveLength(1);
+    expect(reached[0]?.[0]?.inReplyTo).toBe('<parent@example.com>');
+    expect(reached[0]?.[0]?.references).toEqual(['<prev@example.com>']);
+    const second = await call();
+    expect(second.status).toBe(200);
+    expect(JSON.stringify(await readMcpJson(second))).toContain('"queued":true');
+    const after = (sendMailMock.mock.calls as unknown as Array<[{ subject?: string }]>)
+      .filter((entry) => entry[0]?.subject === 'mcp-idem-thread');
+    expect(after).toHaveLength(1);
+  });
+
   test('mail_send 拒绝空白、控制字符和非 ASCII 的 idempotencyKey', async () => {
     const { token, identity } = createIdentity({ localpart: 'mcp-idem-bad' })!;
     sendMailMock.mockClear();

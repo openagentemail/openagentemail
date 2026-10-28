@@ -142,7 +142,12 @@ function sortKeysDeep(value: unknown): unknown {
   return value;
 }
 
-/** 校验后整个 body 的 sha256。没有幂等键时不要调用，避免白哈希大正文。 */
+/**
+ * 校验后整个 body 的 sha256。没有幂等键时不要调用，避免白哈希大正文。
+ * inReplyTo 与 references 若在校验结果里，和其他字段一样进入指纹。
+ * 这里不去做重、也不把 inReplyTo 补进 references：写头时才做。
+ * 调用方重放的必须是同一份 JSON，换了线程参数就是另一份请求。
+ */
 export function fingerprintSendBody(parsed: object): string {
   const src = parsed as Record<string, unknown>;
   const normalized: Record<string, unknown> = {};
@@ -152,6 +157,15 @@ export function fingerprintSendBody(parsed: object): string {
     if (key === 'to') {
       const list = Array.isArray(value) ? value : [value];
       normalized.to = list.slice();
+      continue;
+    }
+    // 线程字段单独拷一份，避免调用方事后改数组影响到已算好的指纹。
+    if (key === 'references' && Array.isArray(value)) {
+      normalized.references = value.slice();
+      continue;
+    }
+    if (key === 'inReplyTo') {
+      normalized.inReplyTo = value;
       continue;
     }
     normalized[key] = value;
