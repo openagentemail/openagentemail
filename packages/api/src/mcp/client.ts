@@ -6,10 +6,10 @@
  *   GET  /v1/identities            -> {identities:[{address,name?,createdAt,scopes?}]}
  *   POST /v1/identities/:address/token {scopes?} -> 200 {address, token, scopes?}
  *   GET  /v1/messages?address&limit -> {messages:[{id,from,to,subject,date,seen,snippet}]}
- *   GET  /v1/messages/:id?address&uidValidity?  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]}}
+ *   GET  /v1/messages/:id?address&uidValidity?  -> {id,from,to,subject,date,text,html?,otp:{codes:[],links:[]},messageId?,references?}
  *   POST /v1/messages/:id/seen     {address, seen} -> 200 {id, seen}
  *   POST /v1/messages/wait         {address, fromContains?, subjectContains?, timeoutSec?} -> message | 408 {error:"timeout"}
- *   POST /v1/send                  {from,to,subject,text,html?,autoReply?} -> 200 {queued:true, messageId, id?}
+ *   POST /v1/send                  {from,to,subject,text,html?,autoReply?,inReplyTo?,references?} -> 200 {queued:true, messageId, id?}
  *                                  可选头 Idempotency-Key，不进 JSON body
  *   POST /v1/tasks                 {to,subject,body,wait?} -> 201 task
  *   GET  /v1/tasks?state=          -> {tasks:[task]}
@@ -112,6 +112,16 @@ export interface Message extends MessageSummary {
    * 缺省是旧 API 版本偏差，调用方得到 undefined，不合成 null 或 no。
    */
   autoSubmitted?: null | "no" | "auto-generated" | "auto-replied" | "other";
+  /**
+   * 这封信自己的 Message-ID，尖括号形式。
+   * 只有通过与 inReplyTo 相同的校验才出现；缺失或非法则省略。
+   */
+  messageId?: string;
+  /**
+   * 这封信自己的 References 里通过同一校验的 id。
+   * 保序去重，超过 50 条保留最后 50 条。没有合法项则省略。
+   */
+  references?: string[];
 }
 
 export interface NotificationMessage {
@@ -654,14 +664,17 @@ export class OpenAgentEmailClient {
     text: string,
     html?: string,
     autoReply?: boolean,
+    inReplyTo?: string,
+    references?: string[],
     idempotencyKey?: string,
   ): Promise<{ queued: boolean; messageId: string; id?: string }> {
     // JSON.stringify 会丢掉 undefined，因此省略不进 body；显式 false 会进 body。
-    // 幂等键只走请求头，不进 strict body。
+    // inReplyTo / references 同样：不传就不出现，旧调用的 JSON 不变。
+    // 幂等键只走请求头，不进 strict body。与线程字段可以同一次请求一起带上。
     return this.request(
       "POST",
       "/v1/send",
-      { from, to, subject, text, html, autoReply },
+      { from, to, subject, text, html, autoReply, inReplyTo, references },
       { sendSource: "mcp", idempotencyKey },
     );
   }

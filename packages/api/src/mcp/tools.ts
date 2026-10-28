@@ -20,6 +20,12 @@ import { isSendIdempotencyKey } from "../lib/send-idempotency.ts";
 import { isTaskId } from "../lib/task-id.ts";
 import { ApiError, OpenAgentEmailClient } from "./client.ts";
 import { prepareMailToolMessage } from "./fence.ts";
+import {
+  REFERENCES_MAX_COUNT,
+  rejectReferencesWithoutInReplyTo,
+  replyReferencesSchema,
+  rfc5322MsgIdSchema,
+} from "../lib/reply-thread.ts";
 
 /**
  * #355-A：运行时返回 strict ZodObject，类型上仍表现为原 raw shape。
@@ -127,7 +133,9 @@ export function registerOpenAgentEmailTools(
     hasOtp: z.boolean(),
   };
 
-  // API MessageDetail：base + 正文/OTP/links/task*；不得含 seen/snippet/hasOtp。
+  // API MessageDetail：base + 正文/OTP/links/task* + 可选线程 id；不得含 seen/snippet/hasOtp。
+  // messageId / references 与 mail_wait_for 共用这一份 schema（读和等返回的是同一详情）。
+  // 列表 schema 不放这两项。这里不套发送侧的 8000 拼接上限，避免合法长 id 在工具出口被拒。
   const messageOutputSchema = {
     ...messageBaseSchema,
     text: z.string(),
@@ -146,6 +154,19 @@ export function registerOpenAgentEmailTools(
       z.null(),
       z.enum(["no", "auto-generated", "auto-replied", "other"]),
     ]).optional(),
+    messageId: rfc5322MsgIdSchema
+      .optional()
+      .describe(
+        "This message's Message-ID in angle brackets, when it passes the same check as inReplyTo. Omitted if missing or invalid.",
+      ),
+    references: z
+      .array(rfc5322MsgIdSchema)
+      .min(1)
+      .max(REFERENCES_MAX_COUNT)
+      .optional()
+      .describe(
+        "This message's own References ids that pass the same check. Order kept, deduped, at most the last 50. Omitted when none.",
+      ),
   };
 
   const identityListOutputSchema = {
@@ -488,6 +509,8 @@ export function registerOpenAgentEmailTools(
       title: "Read Email Message",
       description:
         "Read a full message: text, html (if any), and extracted OTP verification codes and links. " +
+        "Optional messageId is this message's angle-bracket Message-ID when valid; optional references are its References ids (order kept, deduped, at most the last 50). " +
+        "To reply, pass messageId as inReplyTo and references, if any, as references. Both are omitted when missing or invalid. id is the IMAP UID. " +
         "autoSubmitted is null, no, auto-generated, auto-replied, or other; " +
         "missing = older API version skew, not a general exemption; " +
         "missing or no is not proof of human origin, and source=internal is not this signal." +
@@ -589,17 +612,26 @@ export function registerOpenAgentEmailTools(
     {
       title: "Send Email",
       description:
-        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional idempotencyKey is sent as the Idempotency-Key header and is not part of the JSON body. After trim it must be 1 to 128 printable ASCII characters (0x20-0x7E); whitespace-only is rejected. If send-log replay failed at startup, a request with idempotencyKey is REST 503 {error:\"idempotency_unavailable\"} and does not send; requests without a key are unchanged. There is no headers field.",
+        "Send an email from an existing identity address. 'from' must be an identity created with mail_new_identity. Optional autoReply true asks the server to add Auto-Submitted: auto-replied; false or omission adds no such header. Optional inReplyTo (one angle-bracket Message-ID) and references thread the message; omit both and those headers are not added. Subject is not rewritten. Optional idempotencyKey is sent as the Idempotency-Key header and is not part of the JSON body; it may be combined with inReplyTo and references on the same call. After trim it must be 1 to 128 printable ASCII characters (0x20-0x7E); whitespace-only is rejected. If send-log replay failed at startup, a request with idempotencyKey is REST 503 {error:\"idempotency_unavailable\"} and does not send; requests without a key are unchanged. There is no headers field.",
       inputSchema: z.object({
         from: identityAddressSchema.describe("Sender address (must be an existing identity)"),
         to: identityAddressSchema.describe("Recipient address"),
-        subject: z.string().max(998).describe("Subject line"),
+        subject: z.string().max(998).describe("Subject line. Not rewritten; set Re: yourself if you want it."),
         text: z.string().max(1_000_000).describe("Plain-text body"),
         html: z.string().max(1_000_000).optional().describe("Optional HTML body"),
         autoReply: z
           .boolean()
           .optional()
           .describe("True only: server adds Auto-Submitted: auto-replied. False or omitted adds nothing."),
+        inReplyTo: rfc5322MsgIdSchema
+          .optional()
+          .describe("Optional RFC 5322 Message-ID in angle brackets, e.g. <id@domain>. Sets In-Reply-To and References."),
+        references: replyReferencesSchema
+          .optional()
+          // 详情最多回 50 条，拼起来可能超过发送侧 8000。太长时让调用方留最后几条。
+          .describe(
+            "Optional earlier Message-IDs (1-50, same form). Requires inReplyTo. Deduped; inReplyTo is placed last. If references is too long, keep the last entries that fit.",
+          ),
         // 与 REST parseSendIdempotencyKey 同一条规则：trim 后 1–128 个可打印 ASCII。
         // 空白串在这里校验失败，不会当成“没带键”。通过后交给客户端的是 trim 过的键。
         idempotencyKey: z
@@ -612,13 +644,15 @@ export function registerOpenAgentEmailTools(
           .describe(
             "Optional idempotency key. After trim, 1 to 128 printable ASCII characters (0x20-0x7E). Whitespace-only is rejected. Sent as the Idempotency-Key header, not in the body.",
           ),
-      }).strict(),
+      }).strict().superRefine(rejectReferencesWithoutInReplyTo),
       // #324 R2：input 已是 ZodObject，output 须同为 ZodObject 才能命中 SDK registerTool overload 1
       outputSchema: z.object(sendOutputSchema),
       annotations: mutatingAnnotations,
     },
-    ({ from, to, subject, text, html, autoReply, idempotencyKey }) =>
-      callApi(() => client.send(from, to, subject, text, html, autoReply, idempotencyKey)),
+    ({ from, to, subject, text, html, autoReply, inReplyTo, references, idempotencyKey }) =>
+      callApi(() =>
+        client.send(from, to, subject, text, html, autoReply, inReplyTo, references, idempotencyKey),
+      ),
   );
 
   const notificationInputSchema = {

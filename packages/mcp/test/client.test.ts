@@ -1,7 +1,12 @@
 // 诊断信息不能把配置里的凭据带出去 —— 它会进 agent 的上下文和客户端日志。
 // 但也不能把故障原因抹干净，否则"连不上"这类最常见的问题没法排查。
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiError, OpenAgentEmailClient, apiUrlForDisplay } from "../../api/src/mcp/client.ts";
+import {
+  ApiError,
+  OpenAgentEmailClient,
+  apiUrlForDisplay,
+  type Message,
+} from "../../api/src/mcp/client.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -160,6 +165,69 @@ describe("#362 readMessage 的 uidValidity 查询", () => {
     );
     expect(msg.autoSubmitted).toBeUndefined();
   });
+
+  // 详情原样带回线程字段。客户端不校验、不补全；缺字段保持 undefined。
+  test("readMessage 原样带回 messageId 与 references", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "7",
+          text: "hi",
+          messageId: "<self@example.com>",
+          references: ["<grand@example.com>", "<parent@example.com>"],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    const msg: Message = await new OpenAgentEmailClient(
+      "http://127.0.0.1:3100",
+      "oa_token",
+    ).readMessage("fox@test.example", "7");
+    expect(msg.messageId).toBe("<self@example.com>");
+    expect(msg.references).toEqual(["<grand@example.com>", "<parent@example.com>"]);
+  });
+
+  test("readMessage 旧响应没有线程字段时保持 undefined", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: "7", text: "hi" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const msg: Message = await new OpenAgentEmailClient(
+      "http://127.0.0.1:3100",
+      "oa_token",
+    ).readMessage("fox@test.example", "7");
+    expect(msg.messageId).toBeUndefined();
+    expect(msg.references).toBeUndefined();
+    expect(msg).not.toHaveProperty("messageId");
+    expect(msg).not.toHaveProperty("references");
+  });
+});
+
+describe("waitFor 详情上的线程字段", () => {
+  test("200 原样带回 messageId 与 references，省略则没有这两项", async () => {
+    const bodies = [
+      {
+        id: "7",
+        text: "hi",
+        messageId: "<self@example.com>",
+        references: ["<only@example.com>"],
+      },
+      { id: "8", text: "plain" },
+    ];
+    let n = 0;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(bodies[n++]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:3100", "oa_token");
+    const threaded: Message = await client.waitFor("fox@test.example", { timeoutSec: 5 });
+    expect(threaded.messageId).toBe("<self@example.com>");
+    expect(threaded.references).toEqual(["<only@example.com>"]);
+    const plain: Message = await client.waitFor("fox@test.example", { timeoutSec: 5 });
+    expect(plain.messageId).toBeUndefined();
+    expect(plain.references).toBeUndefined();
+  });
 });
 
 describe("mail_send autoReply 传到 REST（#363-A）", () => {
@@ -181,6 +249,37 @@ describe("mail_send autoReply 传到 REST（#363-A）", () => {
     expect(bodies[2]).toMatchObject({ autoReply: true, html: "<p>h</p>" });
     expect(bodies[2]).not.toHaveProperty("headers");
     expect(JSON.stringify(bodies[2])).not.toContain("Auto-Submitted");
+    expect(bodies[0]).not.toHaveProperty("inReplyTo");
+    expect(bodies[0]).not.toHaveProperty("references");
+    expect(bodies[2]).not.toHaveProperty("inReplyTo");
+    expect(bodies[2]).not.toHaveProperty("references");
+  });
+
+  test("inReplyTo 与 references 原样进入 body，省略则不出现", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ queued: true, messageId: "<m@test>" }), { status: 200 });
+    }) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
+    const references = ["<prev@example.com>", "<parent@example.com>"];
+    await client.send(
+      "a@test.example",
+      "b@example.net",
+      "s",
+      "t",
+      undefined,
+      undefined,
+      "<parent@example.com>",
+      references,
+    );
+    expect(bodies[0]).toMatchObject({
+      inReplyTo: "<parent@example.com>",
+      references,
+    });
+    expect(bodies[0]).not.toHaveProperty("html");
+    expect(bodies[0]).not.toHaveProperty("autoReply");
+    expect(bodies[0]).not.toHaveProperty("headers");
   });
 });
 
@@ -197,11 +296,54 @@ describe("mail_send idempotencyKey 只进请求头", () => {
     }) as typeof fetch;
     const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
     await client.send("a@test.example", "b@example.net", "s", "t");
-    await client.send("a@test.example", "b@example.net", "s", "t", undefined, undefined, "idem-key-1");
+    // 第 7、8 个参数是 inReplyTo / references。幂等键在它们后面。
+    await client.send(
+      "a@test.example",
+      "b@example.net",
+      "s",
+      "t",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "idem-key-1",
+    );
     expect(seen[0]?.key).toBeUndefined();
     expect(seen[0]?.body).not.toHaveProperty("idempotencyKey");
     expect(seen[1]?.key).toBe("idem-key-1");
     expect(seen[1]?.body).not.toHaveProperty("idempotencyKey");
     expect(seen[1]?.body).toMatchObject({ from: "a@test.example", to: "b@example.net", subject: "s", text: "t" });
+    expect(seen[1]?.body).not.toHaveProperty("inReplyTo");
+  });
+
+  test("idempotencyKey 与 inReplyTo 同一次请求：头和 body 都带上", async () => {
+    const seen: Array<{ body: Record<string, unknown>; key?: string }> = [];
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push({
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        key: headers.get("Idempotency-Key") ?? undefined,
+      });
+      return new Response(JSON.stringify({ queued: true, messageId: "<m@test>" }), { status: 200 });
+    }) as typeof fetch;
+    const client = new OpenAgentEmailClient("http://127.0.0.1:9", "oa_test", fetchImpl);
+    const references = ["<prev@example.com>"];
+    await client.send(
+      "a@test.example",
+      "b@example.net",
+      "s",
+      "t",
+      undefined,
+      undefined,
+      "<parent@example.com>",
+      references,
+      "idem-and-thread",
+    );
+    expect(seen[0]?.key).toBe("idem-and-thread");
+    expect(seen[0]?.body).toMatchObject({
+      inReplyTo: "<parent@example.com>",
+      references,
+    });
+    expect(seen[0]?.body).not.toHaveProperty("idempotencyKey");
   });
 });

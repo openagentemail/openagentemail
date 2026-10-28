@@ -48,6 +48,7 @@ import {
 } from './wait-clock.ts';
 import { describeFailure } from './redact.ts';
 import { classifyAutoSubmitted, type AutoSubmitted } from './auto-submitted.ts';
+import { detailThreadFields } from './reply-thread.ts';
 
 export type { MailFolder };
 export { InvalidMailCursorError } from './mail-cursor.ts';
@@ -91,6 +92,16 @@ export interface MessageDetail {
   taskId?: string;
   /** Present only for server-stamped task mail. */
   taskState?: string;
+  /**
+   * 这封信自己的 Message-ID，尖括号形式。
+   * 只有通过与 inReplyTo 相同的校验才出现；缺失或非法则省略。
+   */
+  messageId?: string;
+  /**
+   * 这封信自己的 References 里通过同一校验的 id。
+   * 保序去重，超过 50 条保留最后 50 条。没有合法项则省略。
+   */
+  references?: string[];
 }
 
 export interface WaitFilters {
@@ -840,6 +851,11 @@ export function toDetail(uid: number, parsed: Awaited<ReturnType<typeof parseSou
     autoSubmitted: classifyAutoSubmitted(parsed.headerLines),
     ...(typeof taskId === 'string' ? { taskId } : {}),
     ...(typeof taskState === 'string' ? { taskState } : {}),
+    // 列表摘要不走这里。webhook 另行挑字段，不会把这两项带出去。
+    ...detailThreadFields({
+      messageId: parsed.messageId,
+      references: parsed.references,
+    }),
   };
 }
 

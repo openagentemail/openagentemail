@@ -67,13 +67,43 @@ Same localpart may exist on different configured domains (no cross-domain `409 l
 - **明确不是：** 全局 IMAP 并发/耗尽保护。多身份与未纳入的路由（detail / wait / UI / MCP-direct）仍可叠加负载。多实例不共享内存桶，部署合同按单实例前提；水平扩展不会自动协调这份预算。
 - **独立：** 不改 send / MCP / wait 槽位的既有桶。上面的「重启清零」只指这份列表预算。发信每小时额度在 API 启动时从 `send-log.jsonl` 回放，见下方 Send。
 
+## 读一封信（`GET /v1/messages/:id`）
+
+`id` 是 IMAP UID 字符串，不是 RFC 5322 Message-ID。详情只在字段通过与 `POST /v1/send` 的 `inReplyTo` 相同的校验时带上下面两项；缺失或非法就省略该键。列表摘要和 webhook 不带这两项。`POST /v1/messages/wait` 返回的是同一份详情，因此也会带上。MCP `mail_read_message` 读的就是这条详情。
+
+| 字段 | 说明 |
+| --- | --- |
+| `messageId` | 可选。这封信自己的 Message-ID，尖括号形式，例如 `<id-left@id-right>`。含尖括号最长 250。左侧是 dot-atom-text；右侧是 dot-atom-text，或方括号里的字面量。不接受引号、反斜杠、逗号、空白 |
+| `references` | 可选。这封信自己的 `References` 头里通过同一校验的 id。按原顺序去重（保留第一次）。超过 50 条时保留最后 50 条。没有合法 id 则省略。不会把本信的 `messageId` 或 `In-Reply-To` 自动补进这个数组 |
+
 ## Send API (`POST /v1/send`)
 
-`{from,to,subject,text,html?,autoReply?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。body 仍是 strict，幂等键不进 JSON。
+`{from,to,subject,text,html?,autoReply?,inReplyTo?,references?}`。`autoReply` 只能是布尔。仅 `true` 让服务端写 `Auto-Submitted: auto-replied`；`false` 与省略不写该头，也不读、不写下面的冷却表。body 仍是 strict，幂等键不进 JSON。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `from` | 是 | 已有身份地址 |
+| `to` | 是 | 一个邮箱，或 1–50 个邮箱 |
+| `subject` | 是 | 主题，最长 998。服务端不会自动加 `Re:` |
+| `text` | 是 | 纯文本正文 |
+| `html` | 否 | HTML 正文 |
+| `autoReply` | 否 | 布尔。仅 `true` 写 `Auto-Submitted: auto-replied` |
+| `inReplyTo` | 否 | 一个尖括号形式的 RFC 5322 Message-ID，例如 `<id-left@id-right>`。含尖括号最长 250。左侧是 dot-atom-text；右侧是 dot-atom-text，或方括号里的字面量。不接受引号、反斜杠、逗号、空白。设置后写 `In-Reply-To`，并写 `References` |
+| `references` | 否 | 1–50 个同样形式的 Message-ID。必须和 `inReplyTo` 一起给。用单个空格拼起来最长 8000。服务端按原顺序去重；若 `inReplyTo` 不是最后一项，再追加到末尾。没给这个字段时，`References` 只有 `inReplyTo` |
+
+### 在线程里回复
+
+调用方自己决定主题要不要写成 `Re:`。省略 `inReplyTo` 和 `references` 时不增加这两条头。这两项不读、不写自动回复冷却，也不改变每小时额度。
+
+`inReplyTo` 必须是尖括号里的 RFC 5322 Message-ID，不是 IMAP UID。`GET /v1/messages/:id` 的 `id` 仍是 IMAP UID，不能拿去填 `inReplyTo`。
+
+回一封收到的信：把该详情里的 `messageId` 当作 `inReplyTo`，把它的 `references`（如果有）当作 `references`。服务端按原顺序去重，并把 `inReplyTo` 追加到 `References` 末尾。详情里的 `references` 不再按发送接口的 8000 字符拼接上限裁剪；交给 `POST /v1/send` 时仍受那条限制。如果 `references` 太长，保留能放进这条限制的最后几条。回本服务发出的信时，用 `POST /v1/send` 响应（或 `GET /v1/send/history` 同一行）里的 `messageId`，它已经是尖括号形式。
+
+格式不合法（包括只给 `references`、不给 `inReplyTo`）是 **400** `{error:"invalid_request"}`。这发生在幂等占位之前，不占键。
 
 可选请求头 `Idempotency-Key`。缺省、只有空白，或 trim 之后为空，与不带这个头完全相同。trim 之后必须是 1–128 个可打印 ASCII（码位 0x20–0x7E，空格可以出现在中间）。控制字符、DEL、非 ASCII（含 emoji）都是 **400** `{error:"invalid_request"}`。键按发件身份分开：`from` 整段小写，与 `checkSendLimit` / `findIdentity` 相同。不同身份用同一个键互不影响。删除身份会清掉该地址在内存里的幂等项；同址新建不会继承上一任的回放。
 
-指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，不排序。对象的键按字典序。地址大小写保持客户端传入的值，因为发送路径不改写已经校验过的字段。以后新增的可选 body 字段会自动算进指纹。同一身份若只改了 `from` 的大小写，指纹不同，得到 422。调用方重试时应原样重放 body。
+指纹是校验后整个 body 的规范 JSON 的 sha256。`to` 收成数组并保留顺序，不排序。对象的键按字典序。地址大小写保持客户端传入的值，因为发送路径不改写已经校验过的字段。通过校验的 `inReplyTo` 与 `references` 原样留在这份 body 里（`references` 的去重和把 `inReplyTo` 补到末尾发生在写头时，不改指纹所依据的数组），因此进入 `requestHash`：同一键、相同线程参数在保留期内回放；只改了 `inReplyTo` 或 `references` 是 422。以后新增的可选 body 字段会自动算进指纹。同一身份若只改了 `from` 的大小写，指纹不同，得到 422。调用方重试时应原样重放 body。
 
 在 body 校验和身份 / From 检查之后、自动回复冷却和每小时额度之前处理。占位在任何 await 之前同步完成：
 

@@ -1,3 +1,75 @@
+# Progress · 客户端 Message 补上 messageId / references
+
+## 2026-10-28 · fix(mcp) 详情类型
+
+### 我们实现了哪些功能？
+1. `packages/api/src/mcp/client.ts` 的 `Message`（`readMessage` / `waitFor` 的返回类型）增加可选 `messageId?: string` 与 `references?: string[]`。注释与服务端 `MessageDetail` 相同：尖括号 Message-ID，校验不过或缺失就省略；`references` 保序去重，超过 50 条留最后 50 条。
+2. `MessageSummary` 没有这两项。列表和 webhook 仍不带它们。
+3. `packages/mcp/test/client.test.ts` 断言读信和等待都会原样带回这两个字段，旧响应缺字段时保持 undefined。`packages/api/test/mcp-client-message-type.test.ts` 把字段是否存在、类型是否为 `string | undefined` / `string[] | undefined`，以及摘要类型没有这两项，交给 `tsc`。
+
+### 我们遇到了哪些错误？
+1. 没有。`packages/mcp` 的测试不在它自己的 `tsconfig` `include` 里，只改那边的测试，`packages/api` 的 `tsc` 看不到类型断言。
+
+### 我们是如何解决这些错误的？
+1. 类型断言单独放在 `packages/api/test`，这样 `bun run typecheck` 会编译它。字段拿掉或类型写错时，错误数会高于 179。
+
+### 验证
+- `packages/api`：`mcp-client-message-type` 1 pass；`message-detail-thread` 16 pass；`send-threading` 10 pass。`tsc --noEmit --pretty false --incremental false` 仍是 179 条。
+- `packages/mcp`：`tsc --noEmit` 无错误，`bun run build` 成功，`bun test` 66 pass / 0 fail。
+
+# Progress · 合并 origin/main 的幂等键与线程头
+
+## 2026-10-28 · feat/send-in-reply-to 合入 #404
+
+### 我们实现了哪些功能？
+1. 解完 `origin/main`（PR #404 可选 `Idempotency-Key`）与本分支（可选 `inReplyTo` / `references`）的冲突。`POST /v1/send`、MCP `mail_send`、文档和变更记录两边的行为都留着。
+2. 幂等占位仍在 body 校验和身份检查之后、冷却与每小时额度之前。非法 `inReplyTo` / 单独的 `references` 是 400，不占键。指纹用校验后的整份 body，所以 `inReplyTo` 和 `references` 在里面：相同参数回放，换了其中之一是 422 `idempotency_key_reused`。写头时的去重和补尾不改指纹。
+3. `mail_send` 同时接受 `idempotencyKey` 与 `inReplyTo` / `references`。客户端把键放进 `Idempotency-Key`，线程字段放进同一请求的 JSON。
+
+### 我们遇到了哪些错误？
+1. `send.ts` 的冲突把额度时刻和 `try` 写了两遍，线程头那一支丢掉了幂等完成和 DATA 阶段的 502 缓存。
+2. MCP `client.send` 两边都把新参数放在第 7 位：一边是 `inReplyTo`，一边是 `idempotencyKey`。合在一起之后，旧的幂等单测会把键当成 `inReplyTo`。
+3. 新的 400 断言直接读 `json().error`，`tsc` 多了 2 条 `TS2571`，总数从 179 变成 181。
+
+### 我们是如何解决这些错误的？
+1. 发送路径只留一层 `try`：`sendMail` 带上线程字段，成功和失败都走原来的幂等记账。
+2. `send` 的参数顺序是 `inReplyTo`、`references`、`idempotencyKey`。幂等单测把键挪到第 9 个参数。工具 handler 一次把三样都传下去。
+3. 400 断言先收成 `{ error?: string }`。`bunx tsc --noEmit` 回到 179。单文件：`send-threading` 10、`send-idempotency` 33、`send` 25、`send-log` 25、`mcp-http` 103，`packages/mcp` 全套 63，都是 0 fail。`packages/api` 全量 2577 pass、9 skip、3 fail、1 error：webhook-delivery 的 P2-6 与 R5（`deadLettered` 为 1），以及 `compose-webhooks` 因本机没有 Docker Compose 在加载时抛错。identities F56 这次是通过的。
+
+# Progress · 发信线程头 inReplyTo / references
+
+## 2026-10-28 · feat/send-in-reply-to
+
+### 我们实现了哪些功能？
+1. `POST /v1/send` 增加可选 `inReplyTo` 和 `references`。schema 仍是 strict。`inReplyTo` 必须是尖括号形式的一个 RFC 5322 msg-id，不含过时写法：`<` dot-atom-text `@` dot-atom-text 或 no-fold-literal `>`。含尖括号最长 250。`references` 是 1 到 50 个同样的 id，用单个空格拼起来不超过 8000。只给 `references`、不给 `inReplyTo` 返回 400 `{error:"invalid_request", details}`。详情里的 `references` 不按 8000 裁剪；太长时调用方保留最后能放下的几条。
+2. 带了 `inReplyTo` 时，`sendMail` 用 nodemailer 的 `inReplyTo` / `references` 选项写 `In-Reply-To` 和 `References`。`references` 按原顺序去重；`inReplyTo` 如果不是最后一项就再追加一次。没给 `references` 时，`References` 只有这一条。值本身已经有尖括号，nodemailer 不会再包一层。长 `References` 由 nodemailer 按空白折行（约 76 列），这里不预先插入换行，因为它的编码器会把换行变成空格。
+3. 主题原样发出，不自动加 `Re:`。这两项不读、不写自动回复冷却，也不改变每小时额度。`inReplyTo` 不写入 send-log，避免改审计行形状。
+4. MCP `mail_send` 增加可选 `inReplyTo`（string）和 `references`（string[]），原样传给 `/v1/send`。省略时请求体里没有这两个键。工具说明写明主题不会被改写；`references` 太长时保留最后能放下的几条。
+5. 文档：`docs/api.md` 的字段表和「在线程里回复」；`packages/api/README.md`、`packages/mcp/README.md`、`CHANGELOG.md`。`GET /v1/messages/:id` 的 `id` 仍是 IMAP UID。回本服务发出的信时，用 `POST /v1/send` 响应（或发送历史同一行）里的 `messageId`。
+6. `GET /v1/messages/:id` 的详情增加可选 `messageId` 和 `references`。两者都走 `reply-thread.ts` 里那一条 msg-id 校验，正则没有复制第二份。`messageId` 是解析后的尖括号 Message-ID，非法或缺失就省略。`references` 只取这封信自己的 References：丢掉非法项，按原顺序去重（留第一次），超过 50 保留最后 50，一条都没有则省略。不把本信的 Message-ID 或单独的 In-Reply-To 补进这个数组。列表摘要和 webhook 不带这两项。`POST /v1/messages/wait` 返回的是同一份 `MessageDetail`，所以也会带上。MCP `mail_read_message` 与 `mail_wait_for` 共用详情输出 schema，因此工具出口认这两个可选字段；列表 schema 没有。回一封收到的信时，把详情里的 `messageId` 当作 `inReplyTo`，把 `references`（如果有）当作 `references`，服务端仍会把 `inReplyTo` 追加到末尾。
+
+### 我们遇到了哪些错误？
+1. 这个 git worktree 里没有 `node_modules`，测试无法解析 zod / nodemailer。
+2. `packages/api` 的 `tsc --noEmit` 在 `src/routes/send.ts` 报 `TS2589`（`ReturnType<Context['json']>` 实例化过深）。加了字段之后行号从 122 变成 130。
+3. `test/mcp-http.test.ts` 里有几条 IMAP TLS 日志：`servername argument must be an string`。对应用例仍然通过。
+4. 详情测试里写了 `<bad id@example.com>`，期望它被丢掉。mailparser 按空白把 References 切开，后半段变成 `<id@example.com>`，校验通过，结果里多了这一条。
+5. 全套件里 `send-threading.test.ts` 只 mock 了 nodemailer。别的文件先 `mock.module` 了 `smtp.ts` 之后，路由不再走到这个替身，`smtpCalls` 停在 0，`lastOpts.references` 是 undefined。单文件跑是绿的。
+6. 共用的 msg-id 正则比 RFC 5322 宽，`<a,b@example.com>`、引号和反斜杠也能过。单条接近 998 时中间没有空白，折不进续行。
+7. 详情最多返回 50 条 `references`，拼起来可以超过发送侧 8000。限值本身不改。
+
+### 我们是如何解决这些错误的？
+1. 主检出 `/workspace/oae-dev/openagentemail` 的 lockfile 与本分支一致。把那边的 `packages/api/node_modules` 和 `packages/mcp/node_modules` 符号链接过来。没有改依赖，也不提交这个链接。
+2. 把 `send.ts` 临时换成 `origin/main` 再跑 tsc，同一条 `TS2589` 已经在 main 的第 122 行。发信那次改过的 `smtp.ts`、`reply-thread.ts`、`client.ts`、`tools.ts` 和线程测试没有新增 tsc 错误。这次详情改动之后，`reply-thread.ts`、`imap.ts`、`src/mcp/tools.ts`、`message-detail-thread.test.ts` 仍然没有 tsc 错误。`send.ts` 的 `TS2589` 还在第 130 行。`packages/mcp` 的 tsc 没有错误。
+3. 没有改 IMAP。那几条日志出在既有的读信路径，和线程头无关，断言是绿的。
+4. 夹具改成解析后仍然是一整段、并且过不了校验的 id（`<not-an-id>`、`<a@b@example.com>`、`<nope0>`）。过滤逻辑没改。
+5. `send-threading.test.ts` 改成和 `send.test.ts` 一样 mock `../src/lib/smtp.ts`。查询串加载真实 `sendMail` 和 nodemailer，头仍用流式传输序列化。本文件把 `sendRateLimit` 临时设成 100，结束时还原，避免全套件里额度已经被冻成 1。
+6. `reply-thread.ts` 的同一条校验收成 RFC 5322 的 dot-atom-text，右侧还可以是 `[` dtext* `]`。单条上限改成 250。发信不合法是 400，详情直接省略。50 条和 8000 拼接上限没动。
+7. `docs/api.md` 的回复说明，以及 MCP `mail_send` 的 `references` 描述，各加一句：太长就保留最后能放下的几条。
+
+### 验证
+- 单文件（`timeout 180`）：`send-threading.test.ts` 10 pass；`message-detail-thread.test.ts` 16 pass；`send.test.ts` 25 pass；`imap.test.ts` 通过；`mcp-http.test.ts` 100 pass。`packages/mcp`：`client.test.ts` 13 pass；`tools.test.ts` 11 pass。
+- `packages/api` 全量 `bun test`：`send-threading.test.ts` 10 pass。同一次还有与这次改动无关的失败：`compose-webhooks.test.ts` 因本机没有 Docker Compose 在加载时抛错；`webhook-delivery.test.ts` 的 P2-6 与 R5 在全量里 `deadLettered` 为 1（单文件为 0）；`task-lease` 的 “late queued commit after deadline cannot delete” 在第二次全量里超时。`bun run typecheck` 仍是 179 条。
+
 # Progress · #137 B1 控制台 i18n 基建
 
 ## 2026-10-28 · POST /v1/send 与 mail_send 可选幂等键

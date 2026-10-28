@@ -41,6 +41,11 @@ import {
 } from '../lib/send-log.ts';
 import { resolveSendLogSource } from '../lib/send-source.ts';
 import { logInvalidCursorRejectionFor } from '../lib/invalid-cursor-observability.ts';
+import {
+  rejectReferencesWithoutInReplyTo,
+  replyReferencesSchema,
+  rfc5322MsgIdSchema,
+} from '../lib/reply-thread.ts';
 
 const emailField = z.string().email().max(SEND_LOG_EMAIL_MAX_LEN);
 
@@ -65,7 +70,10 @@ const sendSchema = z.object({
   html: z.string().max(1_000_000).optional(),
   // #363-A：可选布尔。仅 true 由 SMTP 写固定 Auto-Submitted；未知键仍拒绝。
   autoReply: z.boolean().optional(),
-}).strict();
+  // 可选线程头。省略两个字段时不写 In-Reply-To / References。
+  inReplyTo: rfc5322MsgIdSchema.optional(),
+  references: replyReferencesSchema.optional(),
+}).strict().superRefine(rejectReferencesWithoutInReplyTo);
 
 const historyQuerySchema = z.object({
   address: emailField.optional(),
@@ -197,7 +205,7 @@ sendRoute.post('/', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid_request', details: parsed.error.issues }, 400);
   }
-  const { from, to, subject, text, html, autoReply } = parsed.data;
+  const { from, to, subject, text, html, autoReply, inReplyTo, references } = parsed.data;
   const toList = recipientsOf(to);
   const source = sendSource(c);
 
@@ -227,6 +235,8 @@ sendRoute.post('/', async (c) => {
   // 指纹不同：422。同一指纹仍在发送：409。
   // 4xx/429 和连接类失败放开键。200 和对端已应答的 502 记成已完成。
   // 占位时记下这一任身份。完成时身份没了或 createdAt 变了，就不记回放。
+  // sendSchema 已拒绝非法 inReplyTo / references。400 走不到这里，不会占键。
+  // parsed.data 带着通过校验的线程字段，指纹把它们算进去。
   const begun = beginSendIdempotency(from, idempotencyKey.key, parsed.data, sender.createdAt);
   if (begun.outcome === 'replay') {
     c.header('Idempotent-Replayed', 'true');
@@ -347,6 +357,8 @@ sendRoute.post('/', async (c) => {
         ...(html ? { html } : {}),
         // false 与省略都不传，避免服务端把普通 API 发信标成自动回复。
         ...(autoReply === true ? { autoReply: true } : {}),
+        // 不进冷却、不改额度。inReplyTo 不写 send-log：回放不读它，省略以免改审计行。
+        ...(inReplyTo ? { inReplyTo, ...(references ? { references } : {}) } : {}),
       });
       // SMTP 已接受。截止时间从这一刻起算，不依赖后面的审计追加。
       finalizeAutoReplyCooldownReservation(autoReplyReservation, config.autoReplyCooldownSec);
