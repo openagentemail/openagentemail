@@ -40,6 +40,12 @@ bun run typecheck
 
 ## Endpoints
 
+`GET /v1/messages/:id?address=...&uidValidity=...` accepts an optional positive
+decimal generation string. Leading zeros are allowed and compared numerically
+without loss of integer precision. A different generation returns
+`404 {error:"stale_message_generation"}` without a message body. Omitting
+`uidValidity` keeps the legacy read behavior; mailbox access checks still apply.
+
 All `/v1/*` require `Authorization: Bearer <key>`.
 
 - `POST /mcp` — 无状态 MCP（SDK v2 / 2026-07-28）；**需** `Authorization: Bearer`（admin / `oa_` / OAuth access）；无/坏 token → 401 + `WWW-Authenticate`；OAuth aud 不符 → 403；critical 工具对 OAuth 票 403；超限 429 + `Retry-After`（见 `MCP_RATE_*`）；JSON-RPC **batch 数组** → `400 {error:"batch_not_supported"}`（计写桶并审计 `mcp.batch_rejected`）
