@@ -1160,12 +1160,15 @@ async function getMessageWith(
 ): Promise<MessageDetail | null> {
   const currentUidValidity = client.mailbox ? client.mailbox.uidValidity : undefined;
   if (opts?.uidValidity !== undefined) {
-    if (
-      currentUidValidity === undefined ||
-      String(opts.uidValidity) !== String(currentUidValidity)
-    ) {
-      throw new StaleMessageGenerationError();
+    let sameGeneration = false;
+    try {
+      sameGeneration =
+        canonicalizeMailUidValidity(opts.uidValidity) ===
+        canonicalizeMailUidValidity(currentUidValidity);
+    } catch (err) {
+      if (!(err instanceof InvalidMailCursorError)) throw err;
     }
+    if (!sameGeneration) throw new StaleMessageGenerationError();
   }
   const uid = Number(id);
   if (!Number.isInteger(uid) || uid <= 0) return null;
