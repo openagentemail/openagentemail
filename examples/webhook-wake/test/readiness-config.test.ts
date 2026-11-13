@@ -36,6 +36,13 @@ function fileBase(dir: string): FileConfig {
 }
 
 describe('readiness and config load', () => {
+  test('message dedup is opt-in and rejects non-boolean settings', () => {
+    const base = fileBase(tempDir());
+    expect(parseFileConfig(base).dedup.byMessage).toBe(false);
+    expect(parseFileConfig({ ...base, dedup: { byMessage: true } }).dedup.byMessage).toBe(true);
+    expect(() => parseFileConfig({ ...base, dedup: { byMessage: 'true' } })).toThrow('config_invalid:dedup.byMessage');
+  });
+
   test('absent mode defaults to observe; invalid present mode fails load', () => {
     const dir = tempDir();
     const absent = parseFileConfig(fileBase(dir));

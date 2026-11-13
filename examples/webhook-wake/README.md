@@ -41,6 +41,19 @@ tree.
   id suppresses a later canary send of that id. Switching to canary
   requires a **new** event id (or a new test send). This is not a live
   catch-up/replay feature.
+- Optional `dedup.byMessage: true` hardens the receiver against signed redeliveries
+  that assign a new event ID to the same mail. The key hashes the configured
+  subscription, domain and mailbox with the signed `data.uidValidity` and
+  `data.messageId` (the IMAP UID, not the RFC 822 Message-ID). Both identifiers
+  must be positive decimal integers; unsafe numbers, missing or invalid fields
+  fall back to event-ID dedup. Decimal strings are canonicalized without a
+  floating-point conversion. A different generation or UID can still wake.
+  This is **off by default**: enabling it changes the new-event replay behavior
+  above. An observed message also suppresses a canary send for the same mail,
+  even with a new event ID; use genuinely different mail to test canary mode.
+  Choose the setting before starting: existing event-key records are not
+  migrated, and switching it in either direction can permit one repeat wake.
+  It does not fix every source of duplicate mail or provide exactly-once delivery.
 - Semantics are **at-least-once**. A crash after `orca terminal send` exits 0
   and before the dedup commit can duplicate the neutral wake. A zero send
   exit is **submitted**, never **consumed**.

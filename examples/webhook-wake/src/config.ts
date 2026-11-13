@@ -76,7 +76,7 @@ export type FileConfig = {
   outputCapBytes?: number;
   wakeHistoryLimit?: number;
   /** Absent keeps defaults. A present non-object (string/array/null/scalar) fails load. */
-  dedup?: { path?: unknown; retentionMs?: number; maxRecords?: number };
+  dedup?: { path?: unknown; retentionMs?: number; maxRecords?: number; byMessage?: boolean };
   alertHook?: { url?: string | null; timeoutMs?: number };
   /** Named object only. Arrays become index keys and are rejected at load. */
   routes?: Record<string, FileRouteSpec>;
@@ -238,12 +238,12 @@ function requireAlertHookObject(value: unknown): { url?: unknown; timeoutMs?: un
 
 function requireDedupObject(
   value: unknown,
-): { path?: unknown; retentionMs?: number; maxRecords?: number } | undefined {
+): { path?: unknown; retentionMs?: number; maxRecords?: number; byMessage?: boolean } | undefined {
   if (value === undefined) return undefined;
   if (value == null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('config_invalid:dedup');
   }
-  return value as { path?: unknown; retentionMs?: number; maxRecords?: number };
+  return value as { path?: unknown; retentionMs?: number; maxRecords?: number; byMessage?: boolean };
 }
 
 function requireListenObject(value: unknown): { host?: unknown; port?: unknown; allowNonLoopback?: unknown } | undefined {
@@ -427,6 +427,7 @@ export function parseFileConfig(raw: unknown, options?: { loadSecrets?: boolean 
       path: optionalAbsoluteFilePath(dedup?.path, 'dedup.path', '/var/lib/webhook-wake/dedup.json'),
       retentionMs: optionalRetentionMs(dedup?.retentionMs, DEFAULT_RETENTION_MS),
       maxRecords: optionalPositiveInt(dedup?.maxRecords, 'dedup.maxRecords', DEFAULT_MAX_RECORDS),
+      byMessage: optionalBool(dedup?.byMessage, 'dedup.byMessage', false),
     },
     alertHook: {
       url: alertUrl,
