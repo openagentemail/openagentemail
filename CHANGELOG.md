@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here, one section per release, newest first.
 
-## Unreleased
+## v0.11.0 — 2026-11-16
 
 ### Added
 
@@ -13,9 +13,12 @@ All notable changes to this project are documented here, one section per release
 - **Webhooks: `mail.received` 有界 `autoSubmitted`** (#363-B2): metadata 与 preview 都写入 B1 分类，直播、重投和启动重建共用该分类，`payloadVersion` 仍为 `v1`，不回传原始头。模板 A/B 在事件与成功的当前读上跳过非 `no`。模板 B 读失败或缺少代际时仍按元数据起草，不是 fail-closed。缺省和 `no` 不是人工来源证明。出站回信仍不标记，#363 保持 OPEN。
 - **MCP: `mail_read_message` 可选代际 `uidValidity`** (#362): 仅该工具的 strict 入参接受可选正十进制字符串，并作为 REST 查询透传。代际不匹配时工具 `isError` 且正文含 `stale_message_generation`，不返回另一封信。省略时与旧 `{address,id}` 调用相同。`mail_mark_seen` 不接受该字段。webhook 缺代际时模板 A 仍按原提示回复，并写明该事件无代际保证。
 - **API: admin 更新既有身份 `canNotifyUser`** (#360): `PATCH /v1/identities/:address` 仅 admin 可改该布尔值，先鉴权再解析 body，body 必须是 `{ "canNotifyUser": boolean }`。false 与缺省的响应省略该键（与 `GET /v1/identities` 相同）。未设 scopes 的同值返回 200 且不写盘、不记审计；scoped true（含同值）拒绝且不写盘、不记审计；实际变化只记 `identity.flags.update`（`changedFields:["canNotifyUser"]`、address、outcome、ip），不记布尔值、请求体或 token。同一原 token 的人级通知权限随存储即时变化，不轮换 token。仅 `scopes` 缺省的既有身份会因此获得人级通知授权；`scopes` 已设置时 `PATCH canNotifyUser:true` 被拒绝且不写盘，scoped 通知能力须另定 scope 语义。
+- **API/MCP: 入站 Auto-Submitted 有界读信信号** (#363-B1): 按 RFC 3834 将入站 Auto-Submitted 收成五值枚举（null / no / auto-generated / auto-replied / other）；重复或畸形头归为 other，不回传原始头。IMAP 消息详情必填透出该字段；MCP 输出为可选以兼容旧 API，取值仍限这五类。
+- **Examples: webhook-wake 可选按邮件去重** (#409): `examples/webhook-wake` 增加可选 `dedup.byMessage`（默认 `false`，仍按事件 ID 去重）。开启后按订阅、邮箱、UIDValidity 与邮件 UID 去重，同一封邮件换了新事件 ID 也不再重复唤醒；不同代际或不同 UID 仍会唤醒。身份不完整或非法时回退到事件 ID 去重。
 
 ### Fixed
 
+- **API/MCP: 代际 `uidValidity` 按数值比较** (#408): 修复像 `01` 与 `1` 这种前导零被当成不同代际、合法读取被误判 stale 的问题。REST 与 MCP 在共用的读取检查里对两侧做数值规范化，不改变校验规则或邮箱访问检查。Fixes #382.
 - **CI: 钉 ubuntu-24.04 runner 恢复 Python 3.12.3** (#403): ubuntu-latest 切到 26.04 后 actions/setup-python 找不到 3.12.3，导致 ci `test` 与 release `publish` 在装 Python 一步失败；仅这两个 job 改为 `runs-on: ubuntu-24.04`，Python 版本与 action SHA 不变。
 
 ## v0.10.0 — 2026-09-29
