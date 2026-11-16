@@ -1,5 +1,6 @@
 /** HTTP receiver: verify raw bytes, then maybe send a fixed Orca argv wake. */
 
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHttpAlert } from './alert.ts';
 import { canaryTerminalBound, findRoute, HTTP_HEADER_OVERHEAD_BYTES } from './config.ts';
@@ -32,6 +33,27 @@ export type Receiver = {
   close: () => Promise<void>;
   url: () => string;
 };
+
+/** Only complete, positive, losslessly represented IMAP identities may suppress a new event ID. */
+function positiveDecimal(value: unknown): string | null {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  }
+  if (typeof value !== 'string' || !/^[0-9]{1,128}$/.test(value)) return null;
+  const canonical = value.replace(/^0+/, '');
+  return canonical || null;
+}
+
+export function mailDedupKey(route: RouteBinding, envelope: EnvelopeBase, byMessage = false): string {
+  const eventKey = dedupKey(route.subscriptionId, envelope.id);
+  if (!byMessage) return eventKey;
+  const uid = positiveDecimal(envelope.data.messageId);
+  const generation = positiveDecimal(envelope.data.uidValidity);
+  // Legacy / incomplete payloads retain event dedup instead of risking legitimate mail loss.
+  if (!uid || !generation) return eventKey;
+  const identity = JSON.stringify([route.subscriptionId, route.domain, normalizeMailbox(route.mailbox), generation, uid]);
+  return `mail:v1:${createHash('sha256').update(identity).digest('hex')}`;
+}
 
 function emptyMetrics(): Metrics {
   return {
@@ -210,7 +232,7 @@ export function createReceiver(config: ReceiverConfig, hooks: ReceiverHooks = {}
       return { status: 503, disposition: 'rejected', reason: 'canary_terminal_unbound' };
     }
 
-    const key = dedupKey(route.subscriptionId, envelope.id);
+    const key = mailDedupKey(route, envelope, config.dedup.byMessage);
     // 注册本请求 hookSignal；seats.run 只看聚合 signal（避免首 waiter 连坐后来者）
     const shared = shareWaiters.join(key, hookSignal);
     try {

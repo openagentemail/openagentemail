@@ -18,6 +18,8 @@ export type DedupConfig = {
   path: string;
   retentionMs: number;
   maxRecords: number;
+  /** Opt-in: suppress new event IDs for the same generation-scoped mail. */
+  byMessage?: boolean;
 };
 
 export type AlertHookConfig = {
