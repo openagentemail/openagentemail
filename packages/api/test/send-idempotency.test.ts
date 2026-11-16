@@ -829,32 +829,42 @@ describe('POST /v1/send Idempotency-Key', () => {
       requestHash,
     });
     const map = new Map([[from, created]]);
-    rebuildSendIdempotencyFromRecords(
-      [row(new Date(created - 1).toISOString(), 'snd_old')],
-      now,
-      map,
-    );
-    expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
+    // beginSendIdempotency 读 nowFn。钉在重建用的 now 上，否则 24h 过后窗口内的行会被当成过期。
+    // reset 会把时钟恢复成 Date.now，所以每次清表后都要重新钉上。
+    try {
+      setSendIdempotencyNowForTests(() => now);
+      rebuildSendIdempotencyFromRecords(
+        [row(new Date(created - 1).toISOString(), 'snd_old')],
+        now,
+        map,
+      );
+      expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
 
-    resetSendIdempotencyForTests();
-    rebuildSendIdempotencyFromRecords(
-      [row(new Date(created).toISOString(), 'snd_eq')],
-      now,
-      map,
-    );
-    expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
+      resetSendIdempotencyForTests();
+      setSendIdempotencyNowForTests(() => now);
+      rebuildSendIdempotencyFromRecords(
+        [row(new Date(created).toISOString(), 'snd_eq')],
+        now,
+        map,
+      );
+      expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
 
-    resetSendIdempotencyForTests();
-    rebuildSendIdempotencyFromRecords(
-      [row(new Date(created).toISOString(), 'snd_missing')],
-      now,
-      new Map(),
-    );
-    expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
+      resetSendIdempotencyForTests();
+      setSendIdempotencyNowForTests(() => now);
+      rebuildSendIdempotencyFromRecords(
+        [row(new Date(created).toISOString(), 'snd_missing')],
+        now,
+        new Map(),
+      );
+      expect(beginSendIdempotency(from, key, body).outcome).toBe('reserved');
 
-    resetSendIdempotencyForTests();
-    rebuildSendIdempotencyFromRecords([row(new Date(created).toISOString(), 'snd_nolist')], now);
-    expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
+      resetSendIdempotencyForTests();
+      setSendIdempotencyNowForTests(() => now);
+      rebuildSendIdempotencyFromRecords([row(new Date(created).toISOString(), 'snd_nolist')], now);
+      expect(beginSendIdempotency(from, key, body).outcome).toBe('replay');
+    } finally {
+      resetSendIdempotencyForTests();
+    }
   });
 
   test('DATA 及更晚的断线缓存 502，更早的命令仍放开键，额度不计入', async () => {
