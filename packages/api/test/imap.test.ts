@@ -488,6 +488,47 @@ describe('GET /v1/messages/:id 代际前置条件 (R63)', () => {
     expect(json.subject).toBe('Expected generation message');
   });
 
+  for (const [generation, supplied] of [
+    [1n, '01'],
+    [17n, '00017'],
+    [9007199254740993n, '09007199254740993'],
+  ] as const) {
+    test(`#382 REST accepts numerically matching generation ${supplied}`, async () => {
+      fakeUidValidity = generation;
+      fakeMessages = [inboxMessage(100, 'victim@test.example', 'victim@test.example')];
+      const res = await app.request(`/v1/messages/100?address=victim@test.example&uidValidity=${supplied}`);
+      expect(res.status).toBe(200);
+      expect((await res.json() as { id: string }).id).toBe('100');
+    });
+  }
+
+  test('#382 REST still rejects a leading-zero generation mismatch without a body', async () => {
+    fakeUidValidity = 17n;
+    fakeMessages = [inboxMessage(100, 'victim@test.example', 'victim@test.example')];
+    const res = await app.request('/v1/messages/100?address=victim@test.example&uidValidity=016');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'stale_message_generation' });
+  });
+
+  for (const supplied of ['0', '000']) {
+    test(`#382 REST rejects zero generation ${supplied} before reading`, async () => {
+      fakeUidValidity = 17n;
+      fakeMessages = [inboxMessage(100, 'victim@test.example', 'victim@test.example')];
+      const res = await app.request(`/v1/messages/100?address=victim@test.example&uidValidity=${supplied}`);
+      expect(res.status).toBe(400);
+      expect((await res.json() as { error: string }).error).toBe('invalid_request');
+      expect(createdClients).toHaveLength(0);
+    });
+  }
+
+  test('#382 REST distinguishes adjacent generations above the safe-integer limit', async () => {
+    fakeUidValidity = 9007199254740993n;
+    fakeMessages = [inboxMessage(100, 'victim@test.example', 'victim@test.example')];
+    const res = await app.request('/v1/messages/100?address=victim@test.example&uidValidity=09007199254740992');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'stale_message_generation' });
+  });
+
   test('代际匹配但邮件不存在 → 404 not_found', async () => {
     fakeMessages = [];
 
@@ -1418,6 +1459,63 @@ describe('#362 MCP mail_read_message 代际', () => {
     expect(body.result?.structuredContent?.text).toContain(marker);
     expect(body.result?.structuredContent?.text).toContain('UNTRUSTED EXTERNAL EMAIL');
     expect(text).not.toContain('stale_message_generation');
+  });
+
+  for (const [generation, supplied] of [
+    [1n, '01'],
+    [17n, '00017'],
+    [9007199254740993n, '09007199254740993'],
+  ] as const) {
+    test(`#382 MCP accepts numerically matching generation ${supplied}`, async () => {
+      plant();
+      fakeUidValidity = generation;
+      const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+        address: box, id: '100', uidValidity: supplied,
+      });
+      expect(body.result?.isError).toBeFalsy();
+      expect(body.result?.structuredContent?.text).toContain(marker);
+      expect(body.result?.structuredContent?.text).toContain('UNTRUSTED EXTERNAL EMAIL');
+      expect(text).not.toContain('stale_message_generation');
+    });
+  }
+
+  test('#382 MCP still rejects a leading-zero generation mismatch without a body', async () => {
+    plant();
+    fakeUidValidity = 17n;
+    const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+      address: box, id: '100', uidValidity: '016',
+    });
+    expect(body.result?.isError).toBe(true);
+    expect(text).toContain('stale_message_generation');
+    expect(text).not.toContain(marker);
+    expect(text).not.toContain(subject);
+    expect(body.result?.structuredContent).toBeUndefined();
+  });
+
+  for (const supplied of ['0', '000']) {
+    test(`#382 MCP rejects zero generation ${supplied} before reading`, async () => {
+      plant();
+      createdClients.length = 0;
+      const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+        address: box, id: '100', uidValidity: supplied,
+      });
+      expect(body.result?.isError).toBe(true);
+      expect(text).not.toContain(marker);
+      expect(body.result?.structuredContent).toBeUndefined();
+      expect(createdClients).toHaveLength(0);
+    });
+  }
+
+  test('#382 MCP distinguishes adjacent generations above the safe-integer limit', async () => {
+    plant();
+    fakeUidValidity = 9007199254740993n;
+    const { body, text } = await mcpCall([...config.apiKeys][0]!, {
+      address: box, id: '100', uidValidity: '09007199254740992',
+    });
+    expect(body.result?.isError).toBe(true);
+    expect(text).toContain('stale_message_generation');
+    expect(text).not.toContain(marker);
+    expect(body.result?.structuredContent).toBeUndefined();
   });
 
   test('省略 uidValidity 仍以两参读取并返回原信', async () => {
